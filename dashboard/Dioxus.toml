@@ -1,0 +1,16 @@
+[application]
+name = "opencrab-dashboard"
+default_platform = "fullstack"
+
+[web.app]
+title = "OpenCrab Dashboard"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "public"]
+
+[web.resource]
+style = ["public/tailwind.css"]
+
+[server]
+port = 3000

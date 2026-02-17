@@ -1,0 +1,21 @@
+[package]
+name = "opencrab-dashboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack", "router"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = ["server"]
+server = ["dioxus/server"]
+web = ["dioxus/web"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
+opencrab-db = { path = "../crates/db" }
+opencrab-core = { path = "../crates/core" }
+tokio = { version = "1", features = ["full"] }
