@@ -1,0 +1,17 @@
+[package]
+name = "opencrab-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opencrab-core = { workspace = true }
+opencrab-llm = { workspace = true }
+opencrab-gateway = { workspace = true }
+opencrab-actions = { workspace = true }
+opencrab-db = { workspace = true }

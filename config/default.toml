@@ -1,0 +1,86 @@
+[agent]
+heartbeat_interval_secs = 29  # 素数
+workspace_path = "data/agents/{agent_id}/workspace"
+max_workspace_size_mb = 100
+
+# デフォルトLLM設定
+[llm]
+default_provider = "openai"
+default_model = "gpt-4o"
+
+# 用途別モデル設定（オプション）
+[llm.models]
+thinking = { provider = "anthropic", model = "claude-opus-4.6" }
+conversation = { provider = "openai", model = "gpt-4o" }
+analysis = { provider = "openai", model = "gpt-4o-mini" }
+tool_calling = { provider = "openai", model = "gpt-4o" }
+creative = { provider = "anthropic", model = "claude-sonnet-4.5" }
+embedding = { provider = "openai", model = "text-embedding-3-large" }
+
+# エージェント自身によるLLM選択
+[llm.self_selection]
+enabled = true
+allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
+
+# フォールバックチェーン
+[llm.fallback]
+chain = ["openai", "anthropic", "openrouter", "ollama"]
+
+# OpenAI設定
+[llm.providers.openai]
+api_key = "${OPENAI_API_KEY}"
+base_url = "https://api.openai.com/v1"
+organization = ""
+
+# Anthropic設定
+[llm.providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+
+# Google設定
+[llm.providers.google]
+api_key = "${GOOGLE_API_KEY}"
+
+# OpenRouter設定
+[llm.providers.openrouter]
+api_key = "${OPENROUTER_API_KEY}"
+base_url = "https://openrouter.ai/api/v1"
+site_url = ""
+app_name = "OpenCrab"
+
+# Ollama設定（ローカル）
+[llm.providers.ollama]
+base_url = "http://localhost:11434"
+default_model = "llama3.1:8b"
+
+# llama.cpp設定（ローカル）
+[llm.providers.llamacpp]
+base_url = "http://localhost:8080"
+
+# モデルエイリアス
+[llm.aliases]
+fast = { provider = "openai", model = "gpt-4o-mini" }
+smart = { provider = "openai", model = "gpt-4o" }
+reasoning = { provider = "openai", model = "o1" }
+creative = { provider = "anthropic", model = "claude-sonnet-4.5" }
+local = { provider = "ollama", model = "llama3.1:8b" }
+cheap = { provider = "openai", model = "gpt-4o-mini" }
+deepseek = { provider = "openrouter", model = "deepseek/deepseek-chat" }
+
+[gateway.rest]
+enabled = true
+port = 8080
+
+[gateway.discord]
+enabled = false
+token = "${DISCORD_TOKEN}"
+guild_ids = []
+
+[gateway.cli]
+enabled = true
+
+[dashboard]
+enabled = true
+port = 3000
+
+[database]
+path = "data/opencrab.db"
