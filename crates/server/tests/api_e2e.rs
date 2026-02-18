@@ -18,6 +18,7 @@ fn create_test_app() -> Router {
         db: Arc::new(Mutex::new(conn)),
         llm_router: Arc::new(LlmRouter::new()),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        default_model: "mock:test".to_string(),
     };
     create_router(state)
 }
@@ -742,6 +743,7 @@ fn create_test_app_with_llm() -> (Router, Arc<Mutex<rusqlite::Connection>>, Arc<
             .join("opencrab_test")
             .to_string_lossy()
             .to_string(),
+        default_model: "mock:gpt-4o".to_string(),
     };
     let app = create_router(state);
     (app, db, mock)
@@ -920,6 +922,149 @@ async fn test_agents_discuss_and_generate_skill() {
     let skill = skill.unwrap();
     assert_eq!(skill.source_type, "experience");
     assert!(skill.is_active);
+}
+
+/// Test: Full LLM cost optimization cycle.
+/// Agent A sends → Agent B responds (metrics recorded) →
+/// Agent A sends again → Agent B calls analyze_llm_usage → optimize_model_selection → select_llm.
+#[tokio::test]
+async fn test_llm_optimization_cycle() {
+    let (app, db, mock) = create_test_app_with_llm();
+
+    let (agent_a, app) = create_test_agent_named(app, "User", "Curious").await;
+    let (agent_b, app) = create_test_agent_named(app, "Optimizer", "Cost-conscious").await;
+
+    let (_, resp) = send_request(
+        app.clone(),
+        "POST",
+        "/api/sessions",
+        Some(serde_json::json!({
+            "theme": "Cost optimization",
+            "participant_ids": [&agent_a, &agent_b]
+        })),
+    )
+    .await;
+    let session_id = resp["id"].as_str().unwrap().to_string();
+
+    // Round 1: Simple conversation. Agent B just responds with text.
+    // This records metrics to DB via LlmRouterAdapter.
+    mock.push_text_response("Hello! Let me think about this topic.");
+
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/sessions/{session_id}/messages"),
+        Some(serde_json::json!({
+            "agent_id": agent_a,
+            "content": "Let's discuss cost optimization."
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Verify metrics were recorded in DB after round 1.
+    {
+        let conn = db.lock().unwrap();
+        let summary = opencrab_db::queries::get_llm_metrics_summary(
+            &conn,
+            &agent_b,
+            "1970-01-01",
+        )
+        .unwrap();
+        assert_eq!(summary.count, 1, "Should have 1 metrics record after round 1");
+    }
+
+    // Round 2: Agent B uses the optimization tools.
+    // Step 1: analyze_llm_usage
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-analyze".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "analyze_llm_usage".to_string(),
+            arguments: serde_json::json!({"period": "all"}).to_string(),
+        },
+    }]);
+    // Step 2: recall_model_experiences
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-recall".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "recall_model_experiences".to_string(),
+            arguments: serde_json::json!({}).to_string(),
+        },
+    }]);
+    // Step 3: select_llm to switch model (using mock provider's model)
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-select".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "select_llm".to_string(),
+            arguments: serde_json::json!({
+                "model_alias": "mock:fast-model",
+                "reason": "Cheaper model is sufficient for this conversation",
+                "purpose": "conversation",
+            })
+            .to_string(),
+        },
+    }]);
+    // Step 4: evaluate_response
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-eval".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "evaluate_response".to_string(),
+            arguments: serde_json::json!({
+                "quality_score": 0.85,
+                "task_success": true,
+                "evaluation": "Model selection was effective, switching to cheaper model",
+            })
+            .to_string(),
+        },
+    }]);
+    // Final text response after all tool calls.
+    mock.push_text_response(
+        "I've analyzed my usage and switched to a more cost-effective model. The cheaper model should work well for our conversation.",
+    );
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/sessions/{session_id}/messages"),
+        Some(serde_json::json!({
+            "agent_id": agent_a,
+            "content": "Can you optimize your model usage?"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let responses = resp["responses"].as_array().unwrap();
+    assert_eq!(responses.len(), 1);
+    let tool_calls_made = responses[0]["tool_calls_made"].as_i64().unwrap();
+    assert_eq!(tool_calls_made, 4, "Expected 4 tool calls: analyze + optimize + select + evaluate");
+    assert!(
+        responses[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("cost-effective"),
+    );
+
+    // Verify metrics were recorded for both rounds.
+    {
+        let conn = db.lock().unwrap();
+        let summary = opencrab_db::queries::get_llm_metrics_summary(
+            &conn,
+            &agent_b,
+            "1970-01-01",
+        )
+        .unwrap();
+        // Round 1 = 1 call, Round 2 = 5 calls (analyze→optimize→select→evaluate→final).
+        assert!(
+            summary.count >= 2,
+            "Should have at least 2 metrics records, got {}",
+            summary.count
+        );
+    }
 }
 
 /// Test: When no LLM providers are registered, send_message falls back to

@@ -10,6 +10,10 @@ use tower_http::trace::TraceLayer;
 pub mod api;
 pub mod config;
 pub mod llm_adapter;
+pub mod process;
+
+#[cfg(feature = "discord")]
+pub mod discord;
 
 use opencrab_llm::router::LlmRouter;
 
@@ -18,6 +22,7 @@ pub struct AppState {
     pub db: Arc<Mutex<rusqlite::Connection>>,
     pub llm_router: Arc<LlmRouter>,
     pub workspace_base: String,
+    pub default_model: String,
 }
 
 pub fn create_router(state: AppState) -> Router {

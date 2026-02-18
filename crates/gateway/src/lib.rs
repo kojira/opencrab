@@ -12,4 +12,6 @@ pub use message::{
 pub use adapters::rest::RestGateway;
 pub use adapters::cli::CliGateway;
 pub use adapters::websocket::WebSocketGateway;
+
+#[cfg(feature = "discord")]
 pub use adapters::discord::DiscordGateway;

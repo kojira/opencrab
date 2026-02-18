@@ -225,6 +225,41 @@ impl Action for UpdateImpressionAction {
     }
 }
 
+/// システム情報取得アクション
+pub struct GetSystemInfoAction;
+
+#[async_trait]
+impl Action for GetSystemInfoAction {
+    fn name(&self) -> &str {
+        "get_system_info"
+    }
+
+    fn description(&self) -> &str {
+        "自分のシステム情報（使用中のLLMモデル、プロバイダー、ゲートウェイなど）を確認する"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(&self, _args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let info = ctx.runtime_info.lock().unwrap().clone();
+        let active = info.active_model.unwrap_or_else(|| info.default_model.clone());
+
+        ActionResult::success(json!({
+            "agent_id": ctx.agent_id,
+            "agent_name": ctx.agent_name,
+            "default_model": info.default_model,
+            "active_model": active,
+            "available_providers": info.available_providers,
+            "gateway": info.gateway,
+        }))
+    }
+}
+
 /// 議論終了宣言
 pub struct DeclareDoneAction;
 
@@ -275,6 +310,15 @@ mod tests {
             session_id: Some("session-1".to_string()),
             db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
             workspace: std::sync::Arc::new(ws),
+            last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test-model".to_string(),
+                active_model: None,
+                available_providers: vec!["mock".to_string()],
+                gateway: "test".to_string(),
+            })),
         };
         (dir, ctx)
     }

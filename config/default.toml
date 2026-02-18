@@ -71,9 +71,10 @@ enabled = true
 port = 8080
 
 [gateway.discord]
-enabled = false
+enabled = true
 token = "${DISCORD_TOKEN}"
 guild_ids = []
+agent_ids = ["crab"]  # Discordメッセージに応答するエージェントID（例: ["crab", "philosopher"]）
 
 [gateway.cli]
 enabled = true

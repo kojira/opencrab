@@ -86,6 +86,21 @@ pub struct AliasConfig {
 pub struct GatewayConfig {
     #[serde(default)]
     pub rest: RestGatewayConfig,
+    #[serde(default)]
+    pub discord: DiscordGatewayConfig,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct DiscordGatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub guild_ids: Vec<u64>,
+    /// Discordメッセージに応答するエージェントのIDリスト
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

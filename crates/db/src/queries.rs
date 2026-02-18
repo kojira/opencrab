@@ -579,6 +579,141 @@ pub fn update_llm_metrics_evaluation(
     Ok(())
 }
 
+pub fn update_llm_metrics_tags(
+    conn: &Connection,
+    metrics_id: &str,
+    tags_json: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE llm_usage_metrics SET tags = ?1 WHERE id = ?2",
+        params![tags_json, metrics_id],
+    )?;
+    Ok(())
+}
+
+// ============================================
+// Model Experience Notes
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelExperienceNote {
+    pub id: String,
+    pub agent_id: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub situation: String,
+    pub observation: String,
+    pub recommendation: Option<String>,
+    pub tags: Option<String>,
+    pub created_at: Option<String>,
+}
+
+pub fn insert_model_experience_note(conn: &Connection, note: &ModelExperienceNote) -> Result<()> {
+    conn.execute(
+        "INSERT INTO model_experience_notes (id, agent_id, provider, model, situation, observation, recommendation, tags, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            note.id,
+            note.agent_id,
+            note.provider,
+            note.model,
+            note.situation,
+            note.observation,
+            note.recommendation,
+            note.tags,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_model_experience_notes(
+    conn: &Connection,
+    agent_id: &str,
+    model_filter: Option<&str>,
+) -> Result<Vec<ModelExperienceNote>> {
+    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) = model_filter {
+        (
+            "SELECT id, agent_id, provider, model, situation, observation, recommendation, tags, created_at
+             FROM model_experience_notes WHERE agent_id = ?1 AND model = ?2 ORDER BY created_at DESC",
+            vec![Box::new(agent_id.to_string()), Box::new(model.to_string())],
+        )
+    } else {
+        (
+            "SELECT id, agent_id, provider, model, situation, observation, recommendation, tags, created_at
+             FROM model_experience_notes WHERE agent_id = ?1 ORDER BY created_at DESC",
+            vec![Box::new(agent_id.to_string())],
+        )
+    };
+
+    let mut stmt = conn.prepare(sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(ModelExperienceNote {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            provider: row.get(2)?,
+            model: row.get(3)?,
+            situation: row.get(4)?,
+            observation: row.get(5)?,
+            recommendation: row.get(6)?,
+            tags: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Get recent evaluations with free-text feedback (self_evaluation) for a model.
+pub fn get_recent_evaluations(
+    conn: &Connection,
+    agent_id: &str,
+    model_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(String, String, String, f64, Option<String>, Option<String>)>> {
+    // Returns: (model, purpose, self_evaluation, quality_score, tags, timestamp)
+    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) = model_filter {
+        (
+            "SELECT model, purpose, COALESCE(self_evaluation, ''), COALESCE(quality_score, 0.0), tags, timestamp
+             FROM llm_usage_metrics
+             WHERE agent_id = ?1 AND model = ?2 AND self_evaluation IS NOT NULL
+             ORDER BY timestamp DESC LIMIT ?3",
+            vec![
+                Box::new(agent_id.to_string()),
+                Box::new(model.to_string()),
+                Box::new(limit as i64),
+            ],
+        )
+    } else {
+        (
+            "SELECT model, purpose, COALESCE(self_evaluation, ''), COALESCE(quality_score, 0.0), tags, timestamp
+             FROM llm_usage_metrics
+             WHERE agent_id = ?1 AND self_evaluation IS NOT NULL
+             ORDER BY timestamp DESC LIMIT ?2",
+            vec![
+                Box::new(agent_id.to_string()),
+                Box::new(limit as i64),
+            ],
+        )
+    };
+
+    let mut stmt = conn.prepare(sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, f64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmMetricsSummary {
     pub count: i64,
@@ -615,6 +750,120 @@ pub fn get_llm_metrics_summary(
     )?;
 
     Ok(row)
+}
+
+/// Per-model aggregated metrics for optimization analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmModelStats {
+    pub provider: String,
+    pub model: String,
+    pub count: i64,
+    pub total_tokens: i64,
+    pub total_cost: f64,
+    pub avg_latency_ms: f64,
+    pub avg_quality: Option<f64>,
+    pub success_count: i64,
+}
+
+/// Get per-model aggregated metrics for an agent since a given timestamp.
+pub fn get_llm_metrics_by_model(
+    conn: &Connection,
+    agent_id: &str,
+    since: &str,
+) -> Result<Vec<LlmModelStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            provider,
+            model,
+            COUNT(*) as count,
+            COALESCE(SUM(total_tokens), 0) as total_tokens,
+            COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost,
+            COALESCE(AVG(latency_ms), 0.0) as avg_latency_ms,
+            AVG(quality_score) as avg_quality,
+            COALESCE(SUM(CASE WHEN task_success = 1 THEN 1 ELSE 0 END), 0) as success_count
+         FROM llm_usage_metrics
+         WHERE agent_id = ?1 AND timestamp >= ?2
+         GROUP BY provider, model
+         ORDER BY count DESC",
+    )?;
+
+    let rows = stmt.query_map(params![agent_id, since], |row| {
+        Ok(LlmModelStats {
+            provider: row.get(0)?,
+            model: row.get(1)?,
+            count: row.get(2)?,
+            total_tokens: row.get(3)?,
+            total_cost: row.get(4)?,
+            avg_latency_ms: row.get(5)?,
+            avg_quality: row.get(6)?,
+            success_count: row.get(7)?,
+        })
+    })?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// Per-model per-purpose aggregated stats for scenario-based optimization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmModelPurposeStats {
+    pub provider: String,
+    pub model: String,
+    pub purpose: String,
+    pub count: i64,
+    pub total_tokens: i64,
+    pub total_cost: f64,
+    pub avg_latency_ms: f64,
+    pub avg_quality: Option<f64>,
+    pub success_count: i64,
+}
+
+/// Get per-model per-purpose aggregated metrics for scenario-based optimization.
+/// Groups by (provider, model, purpose) to enable "use model X for analysis, model Y for chat".
+pub fn get_llm_metrics_by_model_and_purpose(
+    conn: &Connection,
+    agent_id: &str,
+    since: &str,
+) -> Result<Vec<LlmModelPurposeStats>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            provider,
+            model,
+            purpose,
+            COUNT(*) as count,
+            COALESCE(SUM(total_tokens), 0) as total_tokens,
+            COALESCE(SUM(estimated_cost_usd), 0.0) as total_cost,
+            COALESCE(AVG(latency_ms), 0.0) as avg_latency_ms,
+            AVG(quality_score) as avg_quality,
+            COALESCE(SUM(CASE WHEN task_success = 1 THEN 1 ELSE 0 END), 0) as success_count
+         FROM llm_usage_metrics
+         WHERE agent_id = ?1 AND timestamp >= ?2
+         GROUP BY provider, model, purpose
+         ORDER BY purpose, count DESC",
+    )?;
+
+    let rows = stmt.query_map(params![agent_id, since], |row| {
+        Ok(LlmModelPurposeStats {
+            provider: row.get(0)?,
+            model: row.get(1)?,
+            purpose: row.get(2)?,
+            count: row.get(3)?,
+            total_tokens: row.get(4)?,
+            total_cost: row.get(5)?,
+            avg_latency_ms: row.get(6)?,
+            avg_quality: row.get(7)?,
+            success_count: row.get(8)?,
+        })
+    })?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
 }
 
 // ============================================
@@ -1247,6 +1496,151 @@ mod tests {
         assert!((quality_score - 0.95).abs() < 1e-9);
         assert_eq!(task_success, 1);
         assert_eq!(self_evaluation, "excellent response");
+    }
+
+    // 14b. test_llm_metrics_by_model
+    #[test]
+    fn test_llm_metrics_by_model() {
+        let conn = setup();
+
+        let m1 = LlmMetricsRow {
+            id: "m-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("s-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            purpose: "conversation".to_string(),
+            task_type: Some("chat".to_string()),
+            complexity: Some("medium".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            estimated_cost_usd: 0.005,
+            latency_ms: 1200,
+            time_to_first_token_ms: Some(200),
+        };
+        let m2 = LlmMetricsRow {
+            id: "m-2".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("s-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            purpose: "conversation".to_string(),
+            task_type: Some("chat".to_string()),
+            complexity: Some("low".to_string()),
+            input_tokens: 80,
+            output_tokens: 40,
+            total_tokens: 120,
+            estimated_cost_usd: 0.001,
+            latency_ms: 400,
+            time_to_first_token_ms: Some(100),
+        };
+        let m3 = LlmMetricsRow {
+            id: "m-3".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("s-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            purpose: "analysis".to_string(),
+            task_type: Some("summary".to_string()),
+            complexity: Some("low".to_string()),
+            input_tokens: 60,
+            output_tokens: 30,
+            total_tokens: 90,
+            estimated_cost_usd: 0.0008,
+            latency_ms: 300,
+            time_to_first_token_ms: Some(80),
+        };
+
+        insert_llm_metrics(&conn, &m1).unwrap();
+        insert_llm_metrics(&conn, &m2).unwrap();
+        insert_llm_metrics(&conn, &m3).unwrap();
+
+        let stats = get_llm_metrics_by_model(&conn, "agent-1", "2020-01-01").unwrap();
+        assert_eq!(stats.len(), 2);
+
+        // gpt-4o-mini has 2 records, gpt-4o has 1 → sorted by count DESC
+        assert_eq!(stats[0].model, "gpt-4o-mini");
+        assert_eq!(stats[0].count, 2);
+        assert_eq!(stats[0].total_tokens, 210);
+        assert!((stats[0].total_cost - 0.0018).abs() < 1e-9);
+
+        assert_eq!(stats[1].model, "gpt-4o");
+        assert_eq!(stats[1].count, 1);
+    }
+
+    // 14c. test_llm_metrics_by_model_and_purpose
+    #[test]
+    fn test_llm_metrics_by_model_and_purpose() {
+        let conn = setup();
+
+        // gpt-4o for conversation
+        let m1 = LlmMetricsRow {
+            id: "mp-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("s-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            purpose: "conversation".to_string(),
+            task_type: Some("chat".to_string()),
+            complexity: None,
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            estimated_cost_usd: 0.005,
+            latency_ms: 2000,
+            time_to_first_token_ms: None,
+        };
+        // gpt-4o for analysis
+        let m2 = LlmMetricsRow {
+            id: "mp-2".to_string(),
+            purpose: "analysis".to_string(),
+            estimated_cost_usd: 0.008,
+            latency_ms: 3000,
+            ..m1.clone()
+        };
+        // gpt-4o-mini for conversation
+        let m3 = LlmMetricsRow {
+            id: "mp-3".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            purpose: "conversation".to_string(),
+            estimated_cost_usd: 0.001,
+            latency_ms: 400,
+            ..m1.clone()
+        };
+        // gpt-4o-mini for analysis
+        let m4 = LlmMetricsRow {
+            id: "mp-4".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            purpose: "analysis".to_string(),
+            estimated_cost_usd: 0.0015,
+            latency_ms: 500,
+            ..m1.clone()
+        };
+
+        insert_llm_metrics(&conn, &m1).unwrap();
+        insert_llm_metrics(&conn, &m2).unwrap();
+        insert_llm_metrics(&conn, &m3).unwrap();
+        insert_llm_metrics(&conn, &m4).unwrap();
+
+        let stats = get_llm_metrics_by_model_and_purpose(&conn, "agent-1", "2020-01-01").unwrap();
+        // Should have 4 entries: (gpt-4o, analysis), (gpt-4o, conversation), (gpt-4o-mini, analysis), (gpt-4o-mini, conversation)
+        assert_eq!(stats.len(), 4);
+
+        // Verify each entry has correct purpose.
+        let purposes: Vec<&str> = stats.iter().map(|s| s.purpose.as_str()).collect();
+        assert!(purposes.contains(&"conversation"));
+        assert!(purposes.contains(&"analysis"));
+
+        // Verify we can distinguish same model in different purposes.
+        let gpt4o_conv = stats.iter().find(|s| s.model == "gpt-4o" && s.purpose == "conversation").unwrap();
+        let gpt4o_anl = stats.iter().find(|s| s.model == "gpt-4o" && s.purpose == "analysis").unwrap();
+        assert!((gpt4o_conv.total_cost - 0.005).abs() < 1e-9);
+        assert!((gpt4o_anl.total_cost - 0.008).abs() < 1e-9);
     }
 
     // 15. test_model_pricing_upsert_and_get

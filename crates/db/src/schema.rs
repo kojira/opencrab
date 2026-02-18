@@ -147,11 +147,30 @@ CREATE TABLE IF NOT EXISTS llm_usage_metrics (
     would_use_again INTEGER,
     better_model_suggestion TEXT,
 
+    tags TEXT,
+
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_metrics_agent ON llm_usage_metrics(agent_id);
 CREATE INDEX IF NOT EXISTS idx_llm_metrics_model ON llm_usage_metrics(model);
 CREATE INDEX IF NOT EXISTS idx_llm_metrics_timestamp ON llm_usage_metrics(timestamp);
+
+-- ============================================
+-- モデル経験ノート: エージェントが自由に書く定性的な知見
+-- ============================================
+CREATE TABLE IF NOT EXISTS model_experience_notes (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    situation TEXT NOT NULL,
+    observation TEXT NOT NULL,
+    recommendation TEXT,
+    tags TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_exp_agent ON model_experience_notes(agent_id);
+CREATE INDEX IF NOT EXISTS idx_model_exp_model ON model_experience_notes(agent_id, provider, model);
 
 -- ============================================
 -- モデル価格情報

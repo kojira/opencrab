@@ -51,6 +51,24 @@ pub struct ActionContext {
     pub session_id: Option<String>,
     pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     pub workspace: Arc<opencrab_core::workspace::Workspace>,
+    /// Shared last metrics ID, updated by LlmRouterAdapter after each LLM call.
+    /// Used by evaluate_response to auto-link evaluations.
+    pub last_metrics_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared model override: when set by select_llm, SkillEngine uses this model.
+    pub model_override: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared current purpose: select_llm can set this to tag subsequent LLM calls.
+    pub current_purpose: Arc<std::sync::Mutex<String>>,
+    /// Runtime system information (model name, provider, etc.)
+    pub runtime_info: Arc<std::sync::Mutex<RuntimeInfo>>,
+}
+
+/// エージェントの実行環境情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInfo {
+    pub default_model: String,
+    pub active_model: Option<String>,
+    pub available_providers: Vec<String>,
+    pub gateway: String,
 }
 
 /// アクション定義（Function Calling用）

@@ -243,6 +243,15 @@ mod tests {
             session_id: Some("session-1".to_string()),
             db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
             workspace: std::sync::Arc::new(ws),
+            last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test-model".to_string(),
+                active_model: None,
+                available_providers: vec!["mock".to_string()],
+                gateway: "test".to_string(),
+            })),
         };
         (dir, ctx)
     }

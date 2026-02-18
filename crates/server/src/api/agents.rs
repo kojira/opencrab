@@ -46,6 +46,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
 
 #[derive(Debug, Deserialize)]
 pub struct CreateAgentRequest {
+    pub id: Option<String>,
     pub name: String,
     pub persona_name: String,
     pub role: Option<String>,
@@ -55,7 +56,7 @@ pub async fn create_agent(
     State(state): State<AppState>,
     Json(req): Json<CreateAgentRequest>,
 ) -> Json<serde_json::Value> {
-    let agent_id = uuid::Uuid::new_v4().to_string();
+    let agent_id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let conn = state.db.lock().unwrap();
 
     let identity = opencrab_db::queries::IdentityRow {

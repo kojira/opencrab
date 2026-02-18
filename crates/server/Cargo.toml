@@ -3,6 +3,10 @@ name = "opencrab-server"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+discord = ["opencrab-gateway/discord"]
+
 [dependencies]
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -15,6 +19,7 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
 rusqlite = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-llm = { workspace = true }

@@ -46,6 +46,7 @@ fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
         db: db.clone(),
         llm_router: Arc::new(router),
         workspace_base,
+        default_model: "openrouter:openai/gpt-4o".to_string(),
     };
     let app = create_router(state);
     (app, db)

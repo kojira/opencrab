@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
 
 use opencrab_core::{
     ChatMessage, ChatRequestSimple, ChatResponseSimple, LlmClient, ToolCall as CoreToolCall,
@@ -11,26 +12,109 @@ use opencrab_llm::message::{
     ChatRequest, Choice, FinishReason, FunctionCall, FunctionDefinition, Message,
     MessageContent, Role, ToolCall as LlmToolCall, Usage,
 };
+use opencrab_llm::pricing::PricingRegistry;
 use opencrab_llm::router::LlmRouter;
+
+/// Configuration for metrics recording.
+pub struct MetricsContext {
+    pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub pricing: PricingRegistry,
+    /// Shared state: updated after each LLM call so actions can reference it.
+    pub last_metrics_id: Arc<Mutex<Option<String>>>,
+    /// Shared current purpose: actions (e.g. select_llm) can update this
+    /// to tag subsequent LLM calls with the correct purpose.
+    pub current_purpose: Arc<Mutex<String>>,
+}
 
 /// Adapter that wraps an `LlmRouter` and implements `LlmClient`
 /// so that `SkillEngine` can use it directly.
+///
+/// Optionally records usage metrics to the DB after each call.
 pub struct LlmRouterAdapter {
     router: Arc<LlmRouter>,
+    metrics_ctx: Option<MetricsContext>,
 }
 
 impl LlmRouterAdapter {
     pub fn new(router: Arc<LlmRouter>) -> Self {
-        Self { router }
+        Self {
+            router,
+            metrics_ctx: None,
+        }
+    }
+
+    pub fn with_metrics(mut self, ctx: MetricsContext) -> Self {
+        self.metrics_ctx = Some(ctx);
+        self
     }
 }
 
 #[async_trait]
 impl LlmClient for LlmRouterAdapter {
     async fn chat(&self, request: ChatRequestSimple) -> Result<ChatResponseSimple> {
+        let model_requested = request.model.clone();
         let llm_request = to_llm_request(request);
+
+        let start = std::time::Instant::now();
         let llm_response = self.router.chat_completion(llm_request).await?;
-        Ok(from_llm_response(llm_response))
+        let latency_ms = start.elapsed().as_millis() as i64;
+
+        let response = from_llm_response(llm_response);
+
+        // Record metrics to DB if context is available.
+        if let Some(ref ctx) = self.metrics_ctx {
+            let metrics_id = uuid::Uuid::new_v4().to_string();
+
+            // Resolve provider and model from the alias.
+            let (provider, model) = self
+                .router
+                .resolve_model(&model_requested)
+                .unwrap_or_else(|_| ("unknown".to_string(), model_requested.clone()));
+
+            let (input_tokens, output_tokens, total_tokens) = response
+                .usage
+                .as_ref()
+                .map(|u| (u.prompt_tokens as i32, u.completion_tokens as i32, u.total_tokens as i32))
+                .unwrap_or((0, 0, 0));
+
+            let estimated_cost = ctx
+                .pricing
+                .calculate_cost(&provider, &model, input_tokens as u32, output_tokens as u32)
+                .unwrap_or(0.0);
+
+            let row = opencrab_db::queries::LlmMetricsRow {
+                id: metrics_id.clone(),
+                agent_id: ctx.agent_id.clone(),
+                session_id: ctx.session_id.clone(),
+                timestamp: Utc::now().to_rfc3339(),
+                provider,
+                model,
+                purpose: ctx.current_purpose.lock().map(|p| p.clone()).unwrap_or_else(|_| "conversation".to_string()),
+                task_type: None,
+                complexity: None,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                estimated_cost_usd: estimated_cost,
+                latency_ms,
+                time_to_first_token_ms: None,
+            };
+
+            if let Ok(conn) = ctx.db.lock() {
+                if let Err(e) = opencrab_db::queries::insert_llm_metrics(&conn, &row) {
+                    tracing::warn!(error = %e, "Failed to record LLM metrics");
+                }
+            }
+
+            // Update shared last_metrics_id so actions can reference it.
+            if let Ok(mut id) = ctx.last_metrics_id.lock() {
+                *id = Some(metrics_id);
+            }
+        }
+
+        Ok(response)
     }
 }
 

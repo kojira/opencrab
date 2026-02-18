@@ -56,6 +56,15 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
         session_id: Some("session-1".to_string()),
         db: Arc::new(Mutex::new(conn)),
         workspace: Arc::new(ws),
+        last_metrics_id: Arc::new(Mutex::new(None)),
+        model_override: Arc::new(Mutex::new(None)),
+        current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+        runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
+            default_model: "mock:test-model".to_string(),
+            active_model: None,
+            available_providers: vec!["mock".to_string()],
+            gateway: "test".to_string(),
+        })),
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
@@ -88,6 +97,15 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
         session_id: Some("session-1".to_string()),
         db: Arc::clone(&db),
         workspace: Arc::new(ws),
+        last_metrics_id: Arc::new(Mutex::new(None)),
+        model_override: Arc::new(Mutex::new(None)),
+        current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+        runtime_info: Arc::new(Mutex::new(opencrab_actions::RuntimeInfo {
+            default_model: "mock:test-model".to_string(),
+            active_model: None,
+            available_providers: vec!["mock".to_string()],
+            gateway: "test".to_string(),
+        })),
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);

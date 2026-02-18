@@ -3,6 +3,10 @@ name = "opencrab-gateway"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+discord = ["serenity"]
+
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -14,3 +18,4 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+serenity = { workspace = true, optional = true }
