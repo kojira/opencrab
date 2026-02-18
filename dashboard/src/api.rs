@@ -120,9 +120,17 @@ pub struct LlmMetricsDetailDto {
 // Server Functions
 // ============================================
 
+#[cfg(feature = "server")]
+fn db_path() -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let project_root = std::path::Path::new(manifest_dir).parent().unwrap();
+    project_root.join("data/opencrab.db").to_string_lossy().into_owned()
+}
+
+
 #[server]
 pub async fn get_agents() -> Result<Vec<AgentSummary>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut stmt = conn
@@ -156,7 +164,7 @@ pub async fn get_agents() -> Result<Vec<AgentSummary>, ServerFnError> {
 
 #[server]
 pub async fn get_agent(id: String) -> Result<AgentDetail, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let identity = opencrab_db::queries::get_identity(&conn, &id)
@@ -183,7 +191,7 @@ pub async fn get_agent(id: String) -> Result<AgentDetail, ServerFnError> {
 
 #[server]
 pub async fn update_soul(agent_id: String, soul: SoulDto) -> Result<(), ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let personality_json = serde_json::to_string(&soul.personality)
@@ -216,7 +224,7 @@ pub async fn create_agent(
     role: String,
     persona_name: String,
 ) -> Result<AgentSummary, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let agent_id = uuid::Uuid::new_v4().to_string();
@@ -265,7 +273,7 @@ pub async fn update_identity(
     job_title: Option<String>,
     organization: Option<String>,
 ) -> Result<(), ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let existing = opencrab_db::queries::get_identity(&conn, &agent_id)
@@ -289,7 +297,7 @@ pub async fn update_identity(
 
 #[server]
 pub async fn delete_agent(agent_id: String) -> Result<bool, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let deleted = opencrab_db::queries::delete_agent(&conn, &agent_id)
@@ -300,7 +308,7 @@ pub async fn delete_agent(agent_id: String) -> Result<bool, ServerFnError> {
 
 #[server]
 pub async fn get_skills(agent_id: String) -> Result<Vec<SkillDto>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let skills = opencrab_db::queries::list_skills(&conn, &agent_id, false)
@@ -322,7 +330,7 @@ pub async fn get_skills(agent_id: String) -> Result<Vec<SkillDto>, ServerFnError
 
 #[server]
 pub async fn toggle_skill(skill_id: String, active: bool) -> Result<(), ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     opencrab_db::queries::set_skill_active(&conn, &skill_id, active)
@@ -333,7 +341,7 @@ pub async fn toggle_skill(skill_id: String, active: bool) -> Result<(), ServerFn
 
 #[server]
 pub async fn get_curated_memories(agent_id: String) -> Result<Vec<CuratedMemoryDto>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let memories = opencrab_db::queries::list_curated_memories(&conn, &agent_id)
@@ -354,7 +362,7 @@ pub async fn search_session_logs(
     agent_id: String,
     query: String,
 ) -> Result<Vec<SessionLogDto>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let results = opencrab_db::queries::search_session_logs(&conn, &agent_id, &query, 50)
@@ -375,7 +383,7 @@ pub async fn search_session_logs(
 
 #[server]
 pub async fn get_sessions() -> Result<Vec<SessionDto>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let sessions = opencrab_db::queries::list_sessions(&conn)
@@ -402,7 +410,7 @@ pub async fn get_sessions() -> Result<Vec<SessionDto>, ServerFnError> {
 
 #[server]
 pub async fn get_session(id: String) -> Result<SessionDto, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let s = opencrab_db::queries::get_session(&conn, &id)
@@ -426,7 +434,7 @@ pub async fn get_session(id: String) -> Result<SessionDto, ServerFnError> {
 
 #[server]
 pub async fn get_session_logs(session_id: String) -> Result<Vec<SessionLogDto>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let mut stmt = conn
@@ -459,7 +467,7 @@ pub async fn send_mentor_instruction(
     session_id: String,
     content: String,
 ) -> Result<(), ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let log = opencrab_db::queries::SessionLogRow {
@@ -483,7 +491,7 @@ pub async fn get_llm_metrics(
     agent_id: String,
     period: String,
 ) -> Result<LlmMetricsSummaryDto, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let since = match period.as_str() {
@@ -510,7 +518,7 @@ pub async fn get_llm_metrics_detail(
     agent_id: String,
     period: String,
 ) -> Result<Vec<LlmMetricsDetailDto>, ServerFnError> {
-    let conn = opencrab_db::init_connection("data/opencrab.db")
+    let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let since = match period.as_str() {

@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use crate::api::WorkspaceEntryDto;
+use crate::app::Route;
 
 #[server]
 pub async fn list_workspace(agent_id: String, path: String) -> Result<Vec<WorkspaceEntryDto>, ServerFnError> {
@@ -58,40 +59,52 @@ pub fn Workspace(agent_id: String) -> Element {
 
     rsx! {
         div { class: "max-w-7xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-2",
-                "Workspace"
+            div { class: "flex items-center gap-3 mb-2",
+                Link {
+                    to: Route::AgentDetail { id: agent_id.clone() },
+                    class: "btn-text p-2",
+                    span { class: "material-symbols-outlined", "arrow_back" }
+                }
+                h1 { class: "page-title", "Workspace" }
             }
-            p { class: "text-gray-500 dark:text-gray-400 mb-6",
-                "Agent: {agent_id}"
+            div { class: "flex items-center gap-2 text-body-md text-on-surface-variant mb-6",
+                span { class: "material-symbols-outlined text-lg", "smart_toy" }
+                span { "Agent: " }
+                span { class: "font-mono text-on-surface", "{agent_id}" }
             }
 
             div { class: "grid grid-cols-1 lg:grid-cols-2 gap-6",
-                // File tree
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow",
-                    div { class: "p-4 border-b border-gray-200 dark:border-gray-700",
-                        div { class: "flex items-center space-x-2",
+                // File tree panel
+                div { class: "card-outlined overflow-hidden",
+                    div { class: "px-4 py-3 border-b border-outline-variant bg-surface-container-high",
+                        div { class: "flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-lg text-primary", "folder" }
                             if !current_path.read().is_empty() {
                                 button {
-                                    class: "text-blue-600 hover:text-blue-800 text-sm",
+                                    class: "btn-text text-body-sm p-1",
                                     onclick: move |_| {
                                         let path = current_path.read().clone();
                                         let parent = path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
                                         current_path.set(parent);
                                     },
-                                    ".. (up)"
+                                    span { class: "material-symbols-outlined text-lg", "arrow_upward" }
+                                    "Up"
                                 }
                             }
-                            span { class: "text-sm text-gray-500",
+                            span { class: "text-label-lg text-on-surface-variant",
                                 "/{current_path}"
                             }
                         }
                     }
 
-                    div { class: "p-2",
+                    div { class: "p-1",
                         match &*entries.read() {
                             Some(Ok(entry_list)) => rsx! {
                                 if entry_list.is_empty() {
-                                    p { class: "p-4 text-gray-500 text-sm", "Empty directory" }
+                                    div { class: "p-8 text-center",
+                                        span { class: "material-symbols-outlined text-3xl text-on-surface-variant/40 mb-2", "folder_off" }
+                                        p { class: "text-body-md text-on-surface-variant", "Empty directory" }
+                                    }
                                 } else {
                                     for entry in entry_list.iter() {
                                         FileEntry {
@@ -135,32 +148,47 @@ pub fn Workspace(agent_id: String) -> Element {
                                 }
                             },
                             Some(Err(e)) => rsx! {
-                                p { class: "p-4 text-red-500 text-sm", "Error: {e}" }
+                                div { class: "p-4",
+                                    div { class: "flex items-center gap-2",
+                                        span { class: "material-symbols-outlined text-error", "error" }
+                                        p { class: "text-body-md text-error", "Error: {e}" }
+                                    }
+                                }
                             },
                             None => rsx! {
-                                p { class: "p-4 text-gray-500 text-sm", "Loading..." }
+                                div { class: "p-8 text-center",
+                                    p { class: "text-body-md text-on-surface-variant", "Loading..." }
+                                }
                             },
                         }
                     }
                 }
 
-                // File viewer/editor
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow",
-                    div { class: "p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between",
-                        span { class: "text-sm font-medium text-gray-700 dark:text-gray-300",
-                            if let Some(ref name) = *selected_file.read() {
-                                "{name}"
-                            } else {
-                                "No file selected"
+                // File viewer / editor panel
+                div { class: "card-outlined overflow-hidden",
+                    div { class: "px-4 py-3 border-b border-outline-variant bg-surface-container-high flex items-center justify-between",
+                        div { class: "flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-lg text-primary",
+                                if selected_file.read().is_some() { "description" } else { "draft" }
+                            }
+                            span { class: "text-label-lg text-on-surface",
+                                if let Some(ref name) = *selected_file.read() {
+                                    "{name}"
+                                } else {
+                                    "No file selected"
+                                }
                             }
                         }
                         if selected_file.read().is_some() {
                             button {
-                                class: "text-sm text-blue-600 hover:text-blue-800",
+                                class: if *editing.read() { "btn-outlined text-body-sm py-1.5 px-3" } else { "btn-tonal text-body-sm py-1.5 px-3" },
                                 onclick: move |_| {
                                     let current = *editing.read();
                                     editing.set(!current);
                                 },
+                                span { class: "material-symbols-outlined text-lg",
+                                    if *editing.read() { "close" } else { "edit" }
+                                }
                                 if *editing.read() { "Cancel" } else { "Edit" }
                             }
                         }
@@ -170,12 +198,13 @@ pub fn Workspace(agent_id: String) -> Element {
                         if let Some(ref content) = *file_content.read() {
                             if *editing.read() {
                                 textarea {
-                                    class: "w-full h-96 px-3 py-2 font-mono text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white",
+                                    class: "w-full h-96 px-3 py-2 font-mono text-body-sm border border-outline rounded-md
+                                            bg-surface text-on-surface focus:border-primary focus:ring-2 focus:ring-primary/20 focus:outline-none",
                                     value: "{edit_content}",
                                     oninput: move |e| edit_content.set(e.value())
                                 }
                                 button {
-                                    class: "mt-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700",
+                                    class: "btn-filled mt-3",
                                     onclick: {
                                         let agent_id = agent_id.clone();
                                         move |_| {
@@ -193,16 +222,18 @@ pub fn Workspace(agent_id: String) -> Element {
                                             });
                                         }
                                     },
+                                    span { class: "material-symbols-outlined text-xl", "save" }
                                     "Save"
                                 }
                             } else {
-                                pre { class: "h-96 overflow-auto font-mono text-sm text-gray-900 dark:text-white whitespace-pre-wrap",
+                                pre { class: "h-96 overflow-auto font-mono text-body-sm text-on-surface whitespace-pre-wrap p-2 rounded-md bg-surface-container-high",
                                     "{content}"
                                 }
                             }
                         } else {
-                            p { class: "text-gray-400 text-center py-12",
-                                "Select a file to view"
+                            div { class: "text-center py-16",
+                                span { class: "material-symbols-outlined text-5xl text-on-surface-variant/30 mb-3", "description" }
+                                p { class: "text-body-lg text-on-surface-variant", "Select a file to view" }
                             }
                         }
                     }
@@ -214,29 +245,33 @@ pub fn Workspace(agent_id: String) -> Element {
 
 #[component]
 fn FileEntry(entry: WorkspaceEntryDto, on_click: EventHandler<(String, bool)>) -> Element {
-    let icon = if entry.is_dir { "D" } else { "F" };
-    let icon_bg = if entry.is_dir {
-        "bg-yellow-100 text-yellow-800"
+    let (icon, icon_color) = if entry.is_dir {
+        ("folder", "text-warning")
     } else {
-        "bg-gray-100 text-gray-800"
+        let ext = entry.name.rsplit('.').next().unwrap_or("");
+        match ext {
+            "rs" => ("code", "text-primary"),
+            "toml" | "json" | "yaml" | "yml" => ("settings", "text-tertiary"),
+            "md" | "txt" => ("article", "text-secondary"),
+            _ => ("draft", "text-on-surface-variant"),
+        }
     };
+
     let name = entry.name.clone();
     let is_dir = entry.is_dir;
 
     rsx! {
         button {
-            class: "w-full flex items-center space-x-3 px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-left",
+            class: "w-full flex items-center gap-3 px-3 py-2.5 rounded-md
+                    hover:bg-secondary-container/40 active:bg-secondary-container/60
+                    text-left transition-colors duration-150",
             onclick: move |_| {
                 on_click.call((name.clone(), is_dir));
             },
-            span { class: "w-6 h-6 rounded text-xs font-bold flex items-center justify-center {icon_bg}",
-                "{icon}"
-            }
-            span { class: "flex-1 text-sm text-gray-900 dark:text-white",
-                "{entry.name}"
-            }
+            span { class: "material-symbols-outlined text-xl {icon_color}", "{icon}" }
+            span { class: "flex-1 text-body-md text-on-surface", "{entry.name}" }
             if !entry.is_dir {
-                span { class: "text-xs text-gray-400",
+                span { class: "text-label-sm text-on-surface-variant",
                     "{entry.size} B"
                 }
             }

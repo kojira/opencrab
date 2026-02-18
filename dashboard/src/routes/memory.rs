@@ -24,19 +24,20 @@ pub fn Memory() -> Element {
 
     rsx! {
         div { class: "max-w-7xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6",
-                "Memory Explorer"
-            }
+            h1 { class: "page-title mb-6", "Memory Explorer" }
 
             // Agent selector
-            div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-6",
-                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2",
-                    "Select Agent"
+            div { class: "card-elevated mb-6",
+                label { class: "block text-label-lg text-on-surface mb-2",
+                    span { class: "flex items-center gap-1.5",
+                        span { class: "material-symbols-outlined text-lg", "smart_toy" }
+                        "Select Agent"
+                    }
                 }
                 match &*agents.read() {
                     Some(Ok(agent_list)) => rsx! {
                         select {
-                            class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                            class: "select-outlined",
                             onchange: move |e| {
                                 let val = e.value();
                                 if val.is_empty() {
@@ -52,31 +53,27 @@ pub fn Memory() -> Element {
                         }
                     },
                     _ => rsx! {
-                        p { class: "text-gray-500", "Loading agents..." }
+                        p { class: "text-body-md text-on-surface-variant", "Loading agents..." }
                     },
                 }
             }
 
             if selected_agent.read().is_some() {
-                // Tab switcher
-                div { class: "flex space-x-1 mb-6",
-                    button {
-                        class: if *active_tab.read() == "curated" {
-                            "px-4 py-2 rounded-lg bg-blue-600 text-white font-medium"
-                        } else {
-                            "px-4 py-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 font-medium"
-                        },
-                        onclick: move |_| active_tab.set("curated".to_string()),
-                        "Curated Memory"
-                    }
-                    button {
-                        class: if *active_tab.read() == "search" {
-                            "px-4 py-2 rounded-lg bg-blue-600 text-white font-medium"
-                        } else {
-                            "px-4 py-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 font-medium"
-                        },
-                        onclick: move |_| active_tab.set("search".to_string()),
-                        "Search Logs"
+                // Segmented tab switcher
+                div { class: "flex justify-center mb-6",
+                    div { class: "segmented-group",
+                        button {
+                            class: if *active_tab.read() == "curated" { "segmented-btn-active" } else { "segmented-btn" },
+                            onclick: move |_| active_tab.set("curated".to_string()),
+                            span { class: "material-symbols-outlined text-lg mr-1.5", "auto_awesome" }
+                            "Curated Memory"
+                        }
+                        button {
+                            class: if *active_tab.read() == "search" { "segmented-btn-active" } else { "segmented-btn" },
+                            onclick: move |_| active_tab.set("search".to_string()),
+                            span { class: "material-symbols-outlined text-lg mr-1.5", "search" }
+                            "Search Logs"
+                        }
                     }
                 }
 
@@ -85,20 +82,22 @@ pub fn Memory() -> Element {
                     match &*curated.read() {
                         Some(Ok(memories)) => rsx! {
                             if memories.is_empty() {
-                                div { class: "text-center py-12",
-                                    p { class: "text-gray-500", "No curated memories found." }
+                                div { class: "empty-state",
+                                    span { class: "material-symbols-outlined empty-state-icon", "memory" }
+                                    p { class: "empty-state-text", "No curated memories found." }
                                 }
                             } else {
-                                div { class: "space-y-4",
+                                div { class: "space-y-3",
                                     for memory in memories.iter() {
-                                        div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4",
-                                            div { class: "flex items-center justify-between mb-2",
-                                                span { class: "px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800 font-medium",
+                                        div { class: "card-outlined",
+                                            div { class: "flex items-center justify-between mb-3",
+                                                span { class: "badge-info",
+                                                    span { class: "material-symbols-outlined text-sm mr-0.5", "label" }
                                                     "{memory.category}"
                                                 }
-                                                span { class: "text-xs text-gray-400", "{memory.id}" }
+                                                span { class: "text-label-sm text-on-surface-variant font-mono", "{memory.id}" }
                                             }
-                                            p { class: "text-gray-900 dark:text-white whitespace-pre-wrap",
+                                            p { class: "text-body-lg text-on-surface whitespace-pre-wrap",
                                                 "{memory.content}"
                                             }
                                         }
@@ -107,29 +106,37 @@ pub fn Memory() -> Element {
                             }
                         },
                         Some(Err(e)) => rsx! {
-                            div { class: "bg-red-50 border border-red-200 rounded-lg p-4",
-                                p { class: "text-red-800", "Error: {e}" }
+                            div { class: "card-outlined border-error bg-error-container/30 p-4",
+                                div { class: "flex items-center gap-2",
+                                    span { class: "material-symbols-outlined text-error", "error" }
+                                    p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                                }
                             }
                         },
                         None => rsx! {
-                            div { class: "text-center py-12",
-                                p { class: "text-gray-500", "Loading..." }
+                            div { class: "empty-state",
+                                p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                             }
                         },
                     }
                 } else {
                     // Search interface
-                    div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-6",
-                        div { class: "flex space-x-2",
-                            input {
-                                r#type: "text",
-                                class: "flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
-                                placeholder: "Search session logs...",
-                                value: "{search_query}",
-                                oninput: move |e| search_query.set(e.value())
+                    div { class: "card-elevated mb-6",
+                        div { class: "flex gap-3",
+                            div { class: "relative flex-1",
+                                span { class: "material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant",
+                                    "search"
+                                }
+                                input {
+                                    r#type: "text",
+                                    class: "input-outlined pl-11",
+                                    placeholder: "Search session logs...",
+                                    value: "{search_query}",
+                                    oninput: move |e| search_query.set(e.value())
+                                }
                             }
                             button {
-                                class: "px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700",
+                                class: "btn-filled",
                                 onclick: move |_| {
                                     let agent_id = selected_agent.read().clone().unwrap_or_default();
                                     let query = search_query.read().clone();
@@ -140,6 +147,7 @@ pub fn Memory() -> Element {
                                         });
                                     }
                                 },
+                                span { class: "material-symbols-outlined text-xl", "search" }
                                 "Search"
                             }
                         }
@@ -149,28 +157,31 @@ pub fn Memory() -> Element {
                     match &*search_results.read() {
                         Some(Ok(results)) => rsx! {
                             if results.is_empty() {
-                                div { class: "text-center py-8",
-                                    p { class: "text-gray-500 dark:text-gray-400", "No results found." }
+                                div { class: "empty-state",
+                                    span { class: "material-symbols-outlined empty-state-icon", "search_off" }
+                                    p { class: "empty-state-text", "No results found." }
                                 }
                             } else {
-                                div { class: "space-y-3 mt-4",
-                                    p { class: "text-sm text-gray-500 dark:text-gray-400 mb-2",
+                                div { class: "space-y-3",
+                                    p { class: "text-label-lg text-on-surface-variant mb-2",
+                                        span { class: "material-symbols-outlined text-lg mr-1 align-middle", "info" }
                                         "{results.len()} result(s) found"
                                     }
                                     for log in results.iter() {
-                                        div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700",
-                                            div { class: "flex justify-between text-sm text-gray-500 dark:text-gray-400 mb-2",
-                                                span { class: "font-medium",
-                                                    "{log.speaker_id.as_deref().unwrap_or(\"unknown\")}"
-                                                }
-                                                div { class: "flex items-center space-x-2",
-                                                    span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-600",
-                                                        "{log.log_type}"
+                                        div { class: "card-outlined",
+                                            div { class: "flex justify-between mb-2",
+                                                div { class: "flex items-center gap-2",
+                                                    span { class: "material-symbols-outlined text-lg text-primary", "person" }
+                                                    span { class: "text-label-lg text-on-surface",
+                                                        "{log.speaker_id.as_deref().unwrap_or(\"unknown\")}"
                                                     }
-                                                    span { "{log.created_at}" }
+                                                }
+                                                div { class: "flex items-center gap-2",
+                                                    span { class: "badge-neutral text-label-sm", "{log.log_type}" }
+                                                    span { class: "text-body-sm text-on-surface-variant", "{log.created_at}" }
                                                 }
                                             }
-                                            p { class: "text-gray-900 dark:text-white whitespace-pre-wrap",
+                                            p { class: "text-body-lg text-on-surface whitespace-pre-wrap pl-8",
                                                 "{log.content}"
                                             }
                                         }
@@ -179,12 +190,20 @@ pub fn Memory() -> Element {
                             }
                         },
                         Some(Err(e)) => rsx! {
-                            div { class: "bg-red-50 border border-red-200 rounded-lg p-4 mt-4",
-                                p { class: "text-red-800", "Error: {e}" }
+                            div { class: "card-outlined border-error bg-error-container/30 p-4",
+                                div { class: "flex items-center gap-2",
+                                    span { class: "material-symbols-outlined text-error", "error" }
+                                    p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                                }
                             }
                         },
                         None => rsx! {},
                     }
+                }
+            } else {
+                div { class: "empty-state",
+                    span { class: "material-symbols-outlined empty-state-icon", "memory" }
+                    p { class: "empty-state-text", "Select an agent to explore memories" }
                 }
             }
         }

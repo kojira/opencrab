@@ -3,23 +3,30 @@ use dioxus::prelude::*;
 #[component]
 pub fn Header() -> Element {
     rsx! {
-        header { class: "bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700 px-6 py-4",
+        header { class: "bg-surface-container border-b border-outline-variant px-6 py-3",
             div { class: "flex items-center justify-between",
-                // Search
+                // Search bar
                 div { class: "flex-1 max-w-lg",
-                    input {
-                        r#type: "text",
-                        class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent",
-                        placeholder: "Search agents, sessions, memories..."
+                    div { class: "relative",
+                        span { class: "material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-xl",
+                            "search"
+                        }
+                        input {
+                            r#type: "text",
+                            class: "w-full pl-11 pr-4 py-2.5 rounded-full bg-surface-container-high
+                                    text-on-surface text-body-lg placeholder:text-on-surface-variant
+                                    border-none focus:ring-2 focus:ring-primary/30 focus:outline-none
+                                    transition-all duration-200",
+                            placeholder: "Search agents, sessions, memories..."
+                        }
                     }
                 }
 
                 // Status indicators
-                div { class: "flex items-center space-x-4",
-                    // DB status
-                    div { class: "flex items-center space-x-2",
-                        span { class: "w-2 h-2 rounded-full bg-green-500" }
-                        span { class: "text-sm text-gray-500 dark:text-gray-400", "DB Connected" }
+                div { class: "flex items-center gap-4",
+                    div { class: "flex items-center gap-2 px-3 py-1.5 rounded-full bg-success-container",
+                        span { class: "w-2 h-2 rounded-full bg-success animate-pulse" }
+                        span { class: "text-label-md text-success-on-container", "DB Connected" }
                     }
                 }
             }

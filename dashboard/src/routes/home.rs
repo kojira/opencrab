@@ -30,93 +30,97 @@ pub fn Home() -> Element {
 
     rsx! {
         div { class: "max-w-7xl mx-auto",
-            h1 { class: "text-3xl font-bold text-gray-900 dark:text-white mb-8",
-                "Dashboard"
-            }
+            h1 { class: "page-title mb-8", "Dashboard" }
 
-            // Stats cards
+            // Stat cards
             div { class: "grid grid-cols-1 md:grid-cols-3 gap-6 mb-8",
-                // Agents
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6",
-                    div { class: "flex items-center space-x-4",
-                        div { class: "w-12 h-12 rounded-lg bg-blue-100 dark:bg-blue-900 flex items-center justify-center",
-                            span { class: "text-2xl font-bold text-blue-600 dark:text-blue-400", "A" }
-                        }
-                        div {
-                            p { class: "text-sm text-gray-500 dark:text-gray-400", "Total Agents" }
-                            p { class: "text-2xl font-bold text-gray-900 dark:text-white", "{agent_count}" }
-                        }
-                    }
+                StatCard {
+                    icon: "smart_toy",
+                    icon_bg: "bg-primary-container",
+                    icon_color: "text-primary",
+                    label: "Total Agents",
+                    value: format!("{agent_count}")
                 }
-
-                // Sessions
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6",
-                    div { class: "flex items-center space-x-4",
-                        div { class: "w-12 h-12 rounded-lg bg-green-100 dark:bg-green-900 flex items-center justify-center",
-                            span { class: "text-2xl font-bold text-green-600 dark:text-green-400", "S" }
-                        }
-                        div {
-                            p { class: "text-sm text-gray-500 dark:text-gray-400", "Total Sessions" }
-                            p { class: "text-2xl font-bold text-gray-900 dark:text-white", "{session_count}" }
-                        }
-                    }
+                StatCard {
+                    icon: "forum",
+                    icon_bg: "bg-tertiary-container",
+                    icon_color: "text-tertiary",
+                    label: "Total Sessions",
+                    value: format!("{session_count}")
                 }
-
-                // Active sessions
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6",
-                    div { class: "flex items-center space-x-4",
-                        div { class: "w-12 h-12 rounded-lg bg-purple-100 dark:bg-purple-900 flex items-center justify-center",
-                            span { class: "text-2xl font-bold text-purple-600 dark:text-purple-400", "L" }
-                        }
-                        div {
-                            p { class: "text-sm text-gray-500 dark:text-gray-400", "Active Sessions" }
-                            p { class: "text-2xl font-bold text-gray-900 dark:text-white", "{active_sessions}" }
-                        }
-                    }
+                StatCard {
+                    icon: "stream",
+                    icon_bg: "bg-success-container",
+                    icon_color: "text-success",
+                    label: "Active Sessions",
+                    value: format!("{active_sessions}")
                 }
             }
 
             // Quick links
-            div { class: "grid grid-cols-1 md:grid-cols-2 gap-6",
-                Link {
+            h2 { class: "section-title", "Quick Actions" }
+            div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                QuickLink {
                     to: Route::Agents {},
-                    class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition-shadow block",
-                    h2 { class: "text-lg font-semibold text-gray-900 dark:text-white mb-2",
-                        "Agent Management"
-                    }
-                    p { class: "text-gray-500 dark:text-gray-400",
-                        "Create, configure, and manage autonomous agents"
-                    }
+                    icon: "smart_toy",
+                    title: "Agent Management",
+                    description: "Create, configure, and manage autonomous agents"
                 }
-                Link {
+                QuickLink {
                     to: Route::Sessions {},
-                    class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition-shadow block",
-                    h2 { class: "text-lg font-semibold text-gray-900 dark:text-white mb-2",
-                        "Session Monitor"
-                    }
-                    p { class: "text-gray-500 dark:text-gray-400",
-                        "Watch real-time conversations and agent interactions"
-                    }
+                    icon: "forum",
+                    title: "Session Monitor",
+                    description: "Watch real-time conversations and agent interactions"
                 }
-                Link {
+                QuickLink {
                     to: Route::Memory {},
-                    class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition-shadow block",
-                    h2 { class: "text-lg font-semibold text-gray-900 dark:text-white mb-2",
-                        "Memory Explorer"
-                    }
-                    p { class: "text-gray-500 dark:text-gray-400",
-                        "Browse and search agent memories and session logs"
-                    }
+                    icon: "memory",
+                    title: "Memory Explorer",
+                    description: "Browse and search agent memories and session logs"
                 }
-                Link {
+                QuickLink {
                     to: Route::Analytics {},
-                    class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition-shadow block",
-                    h2 { class: "text-lg font-semibold text-gray-900 dark:text-white mb-2",
-                        "Analytics & Metrics"
-                    }
-                    p { class: "text-gray-500 dark:text-gray-400",
-                        "LLM costs, quality scores, and usage analytics"
-                    }
+                    icon: "analytics",
+                    title: "Analytics & Metrics",
+                    description: "LLM costs, quality scores, and usage analytics"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn StatCard(icon: &'static str, icon_bg: &'static str, icon_color: &'static str, label: &'static str, value: String) -> Element {
+    rsx! {
+        div { class: "card-elevated",
+            div { class: "flex items-center gap-4",
+                div { class: "w-12 h-12 rounded-lg {icon_bg} flex items-center justify-center",
+                    span { class: "material-symbols-outlined text-2xl {icon_color}", "{icon}" }
+                }
+                div {
+                    p { class: "text-body-md text-on-surface-variant", "{label}" }
+                    p { class: "text-headline-md text-on-surface font-semibold", "{value}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn QuickLink(to: Route, icon: &'static str, title: &'static str, description: &'static str) -> Element {
+    rsx! {
+        Link {
+            to: to,
+            class: "card-elevated flex items-start gap-4 group",
+            div { class: "w-10 h-10 rounded-lg bg-primary-container flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:text-primary-on transition-colors",
+                span { class: "material-symbols-outlined text-xl text-primary group-hover:text-primary-on transition-colors", "{icon}" }
+            }
+            div {
+                h3 { class: "text-title-md text-on-surface group-hover:text-primary transition-colors mb-1",
+                    "{title}"
+                }
+                p { class: "text-body-md text-on-surface-variant",
+                    "{description}"
                 }
             }
         }

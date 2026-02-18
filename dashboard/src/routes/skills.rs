@@ -25,19 +25,20 @@ pub fn Skills() -> Element {
 
     rsx! {
         div { class: "max-w-7xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6",
-                "Skills Management"
-            }
+            h1 { class: "page-title mb-6", "Skills Management" }
 
             // Agent selector
-            div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-6",
-                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2",
-                    "Select Agent"
+            div { class: "card-elevated mb-6",
+                label { class: "block text-label-lg text-on-surface mb-2",
+                    span { class: "flex items-center gap-1.5",
+                        span { class: "material-symbols-outlined text-lg", "smart_toy" }
+                        "Select Agent"
+                    }
                 }
                 match &*agents.read() {
                     Some(Ok(agent_list)) => rsx! {
                         select {
-                            class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                            class: "select-outlined",
                             onchange: move |e| {
                                 let val = e.value();
                                 if val.is_empty() {
@@ -53,7 +54,7 @@ pub fn Skills() -> Element {
                         }
                     },
                     _ => rsx! {
-                        p { class: "text-gray-500", "Loading agents..." }
+                        p { class: "text-body-md text-on-surface-variant", "Loading agents..." }
                     },
                 }
             }
@@ -63,13 +64,12 @@ pub fn Skills() -> Element {
                 match &*skills.read() {
                     Some(Ok(skill_list)) => rsx! {
                         if skill_list.is_empty() {
-                            div { class: "text-center py-12",
-                                p { class: "text-gray-500 dark:text-gray-400",
-                                    "No skills found for this agent."
-                                }
+                            div { class: "empty-state",
+                                span { class: "material-symbols-outlined empty-state-icon", "psychology" }
+                                p { class: "empty-state-text", "No skills found for this agent." }
                             }
                         } else {
-                            div { class: "space-y-4",
+                            div { class: "space-y-3",
                                 for skill in skill_list.iter() {
                                     SkillEditor {
                                         key: "{skill.id}",
@@ -86,15 +86,23 @@ pub fn Skills() -> Element {
                         }
                     },
                     Some(Err(e)) => rsx! {
-                        div { class: "bg-red-50 border border-red-200 rounded-lg p-4",
-                            p { class: "text-red-800", "Error: {e}" }
+                        div { class: "card-outlined border-error bg-error-container/30 p-4",
+                            div { class: "flex items-center gap-2",
+                                span { class: "material-symbols-outlined text-error", "error" }
+                                p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                            }
                         }
                     },
                     None => rsx! {
-                        div { class: "text-center py-12",
-                            p { class: "text-gray-500", "Loading skills..." }
+                        div { class: "empty-state",
+                            p { class: "text-body-lg text-on-surface-variant", "Loading skills..." }
                         }
                     },
+                }
+            } else {
+                div { class: "empty-state",
+                    span { class: "material-symbols-outlined empty-state-icon", "psychology" }
+                    p { class: "empty-state-text", "Select an agent to manage skills" }
                 }
             }
         }

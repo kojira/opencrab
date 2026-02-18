@@ -31,15 +31,14 @@ pub enum Route {
     Analytics {},
 }
 
-/// ルーター内のレイアウトコンポーネント。SidebarとHeaderはRouter内部で描画される。
 #[component]
 fn AppLayout() -> Element {
     rsx! {
-        div { class: "flex h-screen bg-gray-100 dark:bg-gray-900",
+        div { class: "flex h-screen bg-surface font-sans",
             Sidebar {}
             div { class: "flex-1 flex flex-col overflow-hidden",
                 Header {}
-                main { class: "flex-1 overflow-y-auto p-6",
+                main { class: "flex-1 overflow-y-auto bg-surface p-6",
                     Outlet::<Route> {}
                 }
             }
@@ -50,6 +49,21 @@ fn AppLayout() -> Element {
 #[component]
 pub fn App() -> Element {
     rsx! {
+        // Tailwind CSS (built by dx serve's integrated Tailwind v3 watcher)
+        document::Link {
+            rel: "stylesheet",
+            href: asset!("/assets/tailwind.css"),
+        }
+        // Google Fonts: Inter (UI text) + JetBrains Mono (code)
+        document::Link {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap",
+        }
+        // Material Symbols Outlined (icons)
+        document::Link {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0",
+        }
         Router::<Route> {}
     }
 }

@@ -4,57 +4,58 @@ use crate::app::Route;
 
 #[component]
 pub fn AgentCard(agent: AgentSummary) -> Element {
-    let status_class = match agent.status.as_str() {
-        "active" => "bg-green-100 text-green-800",
-        "idle" => "bg-gray-100 text-gray-800",
-        "error" => "bg-red-100 text-red-800",
-        _ => "bg-gray-100 text-gray-800",
+    let (badge_class, status_icon) = match agent.status.as_str() {
+        "active" => ("badge-success", "check_circle"),
+        "idle" => ("badge-neutral", "schedule"),
+        "error" => ("badge-error", "error"),
+        _ => ("badge-neutral", "help"),
     };
 
     let first_char = agent.name.chars().next().unwrap_or('?');
 
     rsx! {
-        div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition-shadow",
-            div { class: "flex items-center space-x-4",
+        Link {
+            to: Route::AgentDetail { id: agent.id.clone() },
+            class: "card-elevated block group",
+            div { class: "flex items-center gap-4 mb-4",
                 // Avatar
                 if let Some(ref image) = agent.image_url {
                     img {
-                        class: "w-12 h-12 rounded-full",
+                        class: "w-12 h-12 rounded-full object-cover",
                         src: "{image}",
                         alt: "{agent.name}"
                     }
                 } else {
-                    div { class: "w-12 h-12 rounded-full bg-blue-500 flex items-center justify-center text-white font-bold",
-                        "{first_char}"
+                    div { class: "w-12 h-12 rounded-full bg-primary-container flex items-center justify-center",
+                        span { class: "text-title-md text-primary-on-container font-semibold", "{first_char}" }
                     }
                 }
 
-                div { class: "flex-1",
-                    h3 { class: "text-lg font-semibold text-gray-900 dark:text-white",
+                div { class: "flex-1 min-w-0",
+                    h3 { class: "text-title-md text-on-surface group-hover:text-primary transition-colors truncate",
                         "{agent.name}"
                     }
-                    p { class: "text-sm text-gray-500 dark:text-gray-400",
+                    p { class: "text-body-sm text-on-surface-variant truncate",
                         "{agent.persona_name}"
                     }
                 }
 
-                // Status badge
-                span { class: "px-2 py-1 text-xs rounded-full {status_class}",
+                span { class: "{badge_class}",
+                    span { class: "material-symbols-outlined text-sm mr-0.5", "{status_icon}" }
                     "{agent.status}"
                 }
             }
 
-            // Skill count / Session count
-            div { class: "mt-4 flex justify-between text-sm text-gray-500",
-                span { "Skills: {agent.skill_count}" }
-                span { "Sessions: {agent.session_count}" }
-            }
-
-            // Detail link
-            Link {
-                to: Route::AgentDetail { id: agent.id.clone() },
-                class: "mt-4 block text-center text-blue-600 hover:text-blue-800",
-                "View Details →"
+            // Stats
+            div { class: "flex items-center gap-4 pt-3 border-t border-outline-variant/50",
+                div { class: "flex items-center gap-1.5 text-body-sm text-on-surface-variant",
+                    span { class: "material-symbols-outlined text-base", "psychology" }
+                    span { "{agent.skill_count} skills" }
+                }
+                div { class: "flex items-center gap-1.5 text-body-sm text-on-surface-variant",
+                    span { class: "material-symbols-outlined text-base", "forum" }
+                    span { "{agent.session_count} sessions" }
+                }
             }
         }
     }

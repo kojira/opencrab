@@ -1,0 +1,244 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+}
+
+@layer components {
+  /* ── M3 Buttons ── */
+  .btn-filled {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-full
+           bg-primary text-primary-on font-medium text-label-lg cursor-pointer
+           hover:shadow-elevation-1 active:shadow-none
+           transition-all duration-200 disabled:opacity-[0.38] disabled:shadow-none;
+  }
+
+  .btn-outlined {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-full
+           border border-outline bg-transparent text-primary font-medium text-label-lg cursor-pointer
+           hover:bg-primary/[0.08] active:bg-primary/[0.12]
+           transition-all duration-200 disabled:opacity-[0.38];
+  }
+
+  .btn-text {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2.5 rounded-full
+           bg-transparent text-primary font-medium text-label-lg cursor-pointer
+           hover:bg-primary/[0.08] active:bg-primary/[0.12]
+           transition-all duration-200 disabled:opacity-[0.38];
+  }
+
+  .btn-tonal {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-full
+           bg-secondary-container text-secondary-on-container font-medium text-label-lg cursor-pointer
+           hover:shadow-elevation-1 active:shadow-none
+           transition-all duration-200 disabled:opacity-[0.38];
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-full
+           bg-error text-white font-medium text-label-lg cursor-pointer
+           hover:shadow-elevation-1 active:shadow-none
+           transition-all duration-200;
+  }
+
+  /* ── M3 Cards ── */
+  .card-filled {
+    @apply rounded-lg bg-surface-container-high p-6;
+  }
+
+  .card-elevated {
+    @apply rounded-lg bg-surface-container p-6 shadow-elevation-1
+           hover:shadow-elevation-2 transition-shadow duration-200;
+  }
+
+  .card-outlined {
+    @apply rounded-lg bg-surface-container p-6 border border-outline-variant;
+  }
+
+  /* ── M3 Navigation ── */
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-full
+           text-on-surface-variant text-label-lg
+           hover:bg-secondary-container/50 transition-colors duration-200;
+  }
+
+  .nav-item-active {
+    @apply flex items-center gap-3 px-4 py-3 rounded-full
+           bg-secondary-container text-secondary-on-container font-semibold text-label-lg
+           transition-colors duration-200;
+  }
+
+  /* ── M3 Inputs ── */
+  .input-outlined {
+    @apply w-full px-4 py-3 rounded-md border border-outline bg-transparent
+           text-on-surface text-body-lg placeholder:text-on-surface-variant
+           focus:border-primary focus:ring-2 focus:ring-primary/20 focus:outline-none
+           transition-all duration-200;
+  }
+
+  .select-outlined {
+    @apply w-full px-4 py-3 rounded-md border border-outline bg-surface-container
+           text-on-surface text-body-lg
+           focus:border-primary focus:ring-2 focus:ring-primary/20 focus:outline-none
+           transition-all duration-200;
+  }
+
+  /* ── M3 Chips ── */
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+           border border-outline text-on-surface text-label-lg;
+  }
+
+  .chip-filled {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full
+           bg-secondary-container text-secondary-on-container text-label-md;
+  }
+
+  /* ── M3 Badge ── */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-label-sm font-medium;
+  }
+
+  .badge-success {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-label-sm font-medium
+           bg-success-container text-success-on-container;
+  }
+
+  .badge-error {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-label-sm font-medium
+           bg-error-container text-error-on-container;
+  }
+
+  .badge-warning {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-label-sm font-medium
+           bg-warning-container text-warning-on-container;
+  }
+
+  .badge-info {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-label-sm font-medium
+           bg-primary-container text-primary-on-container;
+  }
+
+  .badge-neutral {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-label-sm font-medium
+           bg-secondary-container text-secondary-on-container;
+  }
+
+  /* ── M3 Data Table ── */
+  .data-table {
+    @apply w-full text-body-md;
+  }
+
+  .data-table thead {
+    @apply border-b border-outline-variant;
+  }
+
+  .data-table th {
+    @apply px-4 py-3 text-left text-title-sm text-on-surface-variant font-medium;
+  }
+
+  .data-table td {
+    @apply px-4 py-3 text-on-surface;
+  }
+
+  .data-table tbody tr {
+    @apply border-b border-outline-variant/50 hover:bg-surface-container-high/60 transition-colors;
+  }
+
+  /* ── State Layer ── */
+  .state-layer {
+    @apply relative overflow-hidden;
+  }
+
+  /* ── M3 Dialog / Modal ── */
+  .scrim {
+    @apply fixed inset-0 bg-black/[0.32] flex items-center justify-center z-50;
+  }
+
+  .dialog {
+    @apply bg-surface-container rounded-xl shadow-elevation-3 p-6 max-w-md w-full mx-4;
+  }
+
+  /* ── M3 Switch ── */
+  .switch {
+    @apply relative inline-flex h-8 w-[52px] items-center rounded-full
+           border-2 border-outline bg-surface-variant cursor-pointer
+           transition-colors duration-200;
+  }
+
+  .switch-active {
+    @apply relative inline-flex h-8 w-[52px] items-center rounded-full
+           border-2 border-primary bg-primary cursor-pointer
+           transition-colors duration-200;
+  }
+
+  .switch-thumb {
+    @apply inline-block h-6 w-6 rounded-full bg-outline transition-transform duration-200 translate-x-0;
+  }
+
+  .switch-thumb-active {
+    @apply inline-block h-6 w-6 rounded-full bg-primary-on transition-transform duration-200 translate-x-5;
+  }
+
+  /* ── M3 Segmented Button ── */
+  .segmented-group {
+    @apply inline-flex rounded-full border border-outline overflow-hidden;
+  }
+
+  .segmented-btn {
+    @apply px-5 py-2.5 text-label-lg text-on-surface font-medium cursor-pointer
+           border-r border-outline last:border-r-0
+           hover:bg-secondary-container/40 transition-colors duration-200;
+  }
+
+  .segmented-btn-active {
+    @apply px-5 py-2.5 text-label-lg font-medium cursor-pointer
+           bg-secondary-container text-secondary-on-container
+           border-r border-outline last:border-r-0
+           transition-colors duration-200;
+  }
+
+  /* ── M3 Slider ── */
+  .m3-slider {
+    @apply w-full h-1 bg-primary-container rounded-full appearance-none cursor-pointer;
+    accent-color: #4F46E5;
+  }
+
+  .m3-slider::-webkit-slider-thumb {
+    @apply appearance-none w-5 h-5 bg-primary rounded-full shadow-elevation-1 cursor-pointer;
+  }
+
+  /* ── Utility ── */
+  .section-title {
+    @apply text-title-lg text-on-surface mb-4;
+  }
+
+  .page-title {
+    @apply text-headline-md text-on-surface font-medium;
+  }
+
+  .empty-state {
+    @apply text-center py-16;
+  }
+
+  .empty-state-icon {
+    @apply text-5xl text-on-surface-variant/40 mb-4;
+  }
+
+  .empty-state-text {
+    @apply text-body-lg text-on-surface-variant;
+  }
+}

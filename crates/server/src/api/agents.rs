@@ -12,7 +12,10 @@ pub struct AgentSummary {
     pub name: String,
     pub persona_name: String,
     pub role: String,
+    pub image_url: Option<String>,
     pub status: String,
+    pub skill_count: i32,
+    pub session_count: i32,
 }
 
 pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary>> {
@@ -20,7 +23,9 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
     // JOIN soul and identity to get agent summaries
     let mut stmt = conn
         .prepare(
-            "SELECT i.agent_id, i.name, COALESCE(s.persona_name, ''), i.role
+            "SELECT i.agent_id, i.name, COALESCE(s.persona_name, ''), i.role, i.image_url,
+                    (SELECT COUNT(*) FROM skills WHERE agent_id = i.agent_id) as skill_count,
+                    (SELECT COUNT(*) FROM agent_sessions WHERE agent_id = i.agent_id) as session_count
              FROM identity i
              LEFT JOIN soul s ON i.agent_id = s.agent_id
              ORDER BY i.name",
@@ -34,7 +39,10 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
                 name: row.get(1)?,
                 persona_name: row.get(2)?,
                 role: row.get(3)?,
+                image_url: row.get(4)?,
                 status: "idle".to_string(),
+                skill_count: row.get(5)?,
+                session_count: row.get(6)?,
             })
         })
         .unwrap()

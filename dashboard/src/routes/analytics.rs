@@ -39,21 +39,22 @@ pub fn Analytics() -> Element {
 
     rsx! {
         div { class: "max-w-7xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6",
-                "Analytics & Metrics"
-            }
+            h1 { class: "page-title mb-6", "Analytics & Metrics" }
 
             // Controls
-            div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-6",
-                div { class: "flex space-x-4",
+            div { class: "card-elevated mb-6",
+                div { class: "flex gap-4",
                     div { class: "flex-1",
-                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                            "Agent"
+                        label { class: "block text-label-lg text-on-surface mb-2",
+                            span { class: "flex items-center gap-1.5",
+                                span { class: "material-symbols-outlined text-lg", "smart_toy" }
+                                "Agent"
+                            }
                         }
                         match &*agents.read() {
                             Some(Ok(agent_list)) => rsx! {
                                 select {
-                                    class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                                    class: "select-outlined",
                                     onchange: move |e| {
                                         let val = e.value();
                                         if val.is_empty() {
@@ -68,41 +69,54 @@ pub fn Analytics() -> Element {
                                     }
                                 }
                             },
-                            _ => rsx! { p { class: "text-gray-500", "Loading..." } },
+                            _ => rsx! { p { class: "text-body-md text-on-surface-variant", "Loading..." } },
                         }
                     }
                     div {
-                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                            "Period"
+                        label { class: "block text-label-lg text-on-surface mb-2",
+                            span { class: "flex items-center gap-1.5",
+                                span { class: "material-symbols-outlined text-lg", "calendar_today" }
+                                "Period"
+                            }
                         }
-                        select {
-                            class: "px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
-                            value: "{selected_period}",
-                            onchange: move |e| selected_period.set(e.value()),
-                            option { value: "day", "Last 24h" }
-                            option { value: "week", "Last 7 days" }
-                            option { value: "month", "Last 30 days" }
+                        div { class: "segmented-group",
+                            button {
+                                class: if *selected_period.read() == "day" { "segmented-btn-active" } else { "segmented-btn" },
+                                onclick: move |_| selected_period.set("day".to_string()),
+                                "24h"
+                            }
+                            button {
+                                class: if *selected_period.read() == "week" { "segmented-btn-active" } else { "segmented-btn" },
+                                onclick: move |_| selected_period.set("week".to_string()),
+                                "7 days"
+                            }
+                            button {
+                                class: if *selected_period.read() == "month" { "segmented-btn-active" } else { "segmented-btn" },
+                                onclick: move |_| selected_period.set("month".to_string()),
+                                "30 days"
+                            }
                         }
                     }
                 }
             }
 
             if selected_agent.read().is_some() {
-                // Summary cards
+                // Summary metric cards
                 if let Some(Some(s)) = summary.read().as_ref() {
-                    div { class: "grid grid-cols-1 md:grid-cols-5 gap-4 mb-6",
-                        MetricCard { label: "API Calls", value: format!("{}", s.count) }
-                        MetricCard { label: "Total Tokens", value: format_number(s.total_tokens) }
-                        MetricCard { label: "Total Cost", value: format!("${:.4}", s.total_cost) }
-                        MetricCard { label: "Avg Latency", value: format!("{:.0}ms", s.avg_latency) }
-                        MetricCard { label: "Avg Quality", value: format!("{:.2}", s.avg_quality) }
+                    div { class: "grid grid-cols-2 md:grid-cols-5 gap-4 mb-6",
+                        MetricCard { icon: "api", label: "API Calls", value: format!("{}", s.count) }
+                        MetricCard { icon: "token", label: "Total Tokens", value: format_number(s.total_tokens) }
+                        MetricCard { icon: "payments", label: "Total Cost", value: format!("${:.4}", s.total_cost) }
+                        MetricCard { icon: "speed", label: "Avg Latency", value: format!("{:.0}ms", s.avg_latency) }
+                        MetricCard { icon: "grade", label: "Avg Quality", value: format!("{:.2}", s.avg_quality) }
                     }
                 }
 
                 // Detail table
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow",
-                    div { class: "p-4 border-b border-gray-200 dark:border-gray-700",
-                        h2 { class: "text-lg font-semibold text-gray-900 dark:text-white",
+                div { class: "card-outlined overflow-hidden",
+                    div { class: "px-6 py-4 border-b border-outline-variant",
+                        h2 { class: "section-title mb-0 flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-xl text-primary", "table_chart" }
                             "Usage by Model"
                         }
                     }
@@ -110,30 +124,33 @@ pub fn Analytics() -> Element {
                     match detail.read().as_ref() {
                         Some(Some(models)) => rsx! {
                             if models.is_empty() {
-                                div { class: "p-8 text-center",
-                                    p { class: "text-gray-500", "No usage data for this period." }
+                                div { class: "empty-state",
+                                    span { class: "material-symbols-outlined empty-state-icon", "table_rows" }
+                                    p { class: "empty-state-text", "No usage data for this period." }
                                 }
                             } else {
-                                table { class: "w-full",
-                                    thead {
-                                        tr { class: "border-b border-gray-200 dark:border-gray-700",
-                                            th { class: "px-4 py-3 text-left text-sm font-medium text-gray-500", "Provider" }
-                                            th { class: "px-4 py-3 text-left text-sm font-medium text-gray-500", "Model" }
-                                            th { class: "px-4 py-3 text-right text-sm font-medium text-gray-500", "Requests" }
-                                            th { class: "px-4 py-3 text-right text-sm font-medium text-gray-500", "Tokens" }
-                                            th { class: "px-4 py-3 text-right text-sm font-medium text-gray-500", "Cost" }
-                                            th { class: "px-4 py-3 text-right text-sm font-medium text-gray-500", "Avg Latency" }
+                                div { class: "overflow-x-auto",
+                                    table { class: "data-table",
+                                        thead {
+                                            tr {
+                                                th { "Provider" }
+                                                th { "Model" }
+                                                th { class: "text-right", "Requests" }
+                                                th { class: "text-right", "Tokens" }
+                                                th { class: "text-right", "Cost" }
+                                                th { class: "text-right", "Avg Latency" }
+                                            }
                                         }
-                                    }
-                                    tbody {
-                                        for model in models.iter() {
-                                            tr { class: "border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750",
-                                                td { class: "px-4 py-3 text-sm text-gray-900 dark:text-white", "{model.provider}" }
-                                                td { class: "px-4 py-3 text-sm text-gray-900 dark:text-white font-mono", "{model.model}" }
-                                                td { class: "px-4 py-3 text-sm text-gray-900 dark:text-white text-right", "{model.request_count}" }
-                                                td { class: "px-4 py-3 text-sm text-gray-900 dark:text-white text-right", "{format_number(model.total_tokens)}" }
-                                                td { class: "px-4 py-3 text-sm text-gray-900 dark:text-white text-right", "${model.total_cost:.4}" }
-                                                td { class: "px-4 py-3 text-sm text-gray-900 dark:text-white text-right", "{model.avg_latency:.0}ms" }
+                                        tbody {
+                                            for model in models.iter() {
+                                                tr {
+                                                    td { "{model.provider}" }
+                                                    td { class: "font-mono", "{model.model}" }
+                                                    td { class: "text-right", "{model.request_count}" }
+                                                    td { class: "text-right", "{format_number(model.total_tokens)}" }
+                                                    td { class: "text-right", "${model.total_cost:.4}" }
+                                                    td { class: "text-right", "{model.avg_latency:.0}ms" }
+                                                }
                                             }
                                         }
                                     }
@@ -141,11 +158,16 @@ pub fn Analytics() -> Element {
                             }
                         },
                         _ => rsx! {
-                            div { class: "p-8 text-center",
-                                p { class: "text-gray-500", "Loading..." }
+                            div { class: "empty-state",
+                                p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                             }
                         },
                     }
+                }
+            } else {
+                div { class: "empty-state",
+                    span { class: "material-symbols-outlined empty-state-icon", "analytics" }
+                    p { class: "empty-state-text", "Select an agent to view metrics" }
                 }
             }
         }
@@ -153,11 +175,14 @@ pub fn Analytics() -> Element {
 }
 
 #[component]
-fn MetricCard(label: &'static str, value: String) -> Element {
+fn MetricCard(icon: &'static str, label: &'static str, value: String) -> Element {
     rsx! {
-        div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700",
-            p { class: "text-sm text-gray-500 dark:text-gray-400 mb-1", "{label}" }
-            p { class: "text-xl font-bold text-gray-900 dark:text-white", "{value}" }
+        div { class: "card-elevated",
+            div { class: "flex items-center gap-2 mb-2",
+                span { class: "material-symbols-outlined text-lg text-primary", "{icon}" }
+                p { class: "text-label-lg text-on-surface-variant", "{label}" }
+            }
+            p { class: "text-headline-sm text-on-surface font-semibold", "{value}" }
         }
     }
 }

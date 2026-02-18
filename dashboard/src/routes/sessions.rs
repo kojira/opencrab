@@ -8,20 +8,17 @@ pub fn Sessions() -> Element {
 
     rsx! {
         div { class: "max-w-7xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6",
-                "Sessions"
-            }
+            h1 { class: "page-title mb-6", "Sessions" }
 
             match &*sessions.read() {
                 Some(Ok(session_list)) => rsx! {
                     if session_list.is_empty() {
-                        div { class: "text-center py-12",
-                            p { class: "text-gray-500 dark:text-gray-400",
-                                "No sessions found."
-                            }
+                        div { class: "empty-state",
+                            span { class: "material-symbols-outlined empty-state-icon", "forum" }
+                            p { class: "empty-state-text", "No sessions found." }
                         }
                     } else {
-                        div { class: "space-y-4",
+                        div { class: "space-y-3",
                             for session in session_list.iter() {
                                 SessionCard { session: session.clone() }
                             }
@@ -29,13 +26,16 @@ pub fn Sessions() -> Element {
                     }
                 },
                 Some(Err(e)) => rsx! {
-                    div { class: "bg-red-50 border border-red-200 rounded-lg p-4",
-                        p { class: "text-red-800", "Error: {e}" }
+                    div { class: "card-outlined border-error bg-error-container/30 p-4",
+                        div { class: "flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-error", "error" }
+                            p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                        }
                     }
                 },
                 None => rsx! {
-                    div { class: "text-center py-12",
-                        p { class: "text-gray-500", "Loading..." }
+                    div { class: "empty-state",
+                        p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                     }
                 },
             }
@@ -45,31 +45,49 @@ pub fn Sessions() -> Element {
 
 #[component]
 fn SessionCard(session: crate::api::SessionDto) -> Element {
-    let status_class = match session.status.as_str() {
-        "active" => "bg-green-100 text-green-800",
-        "completed" => "bg-blue-100 text-blue-800",
-        "paused" => "bg-yellow-100 text-yellow-800",
-        _ => "bg-gray-100 text-gray-800",
+    let (badge_class, status_icon) = match session.status.as_str() {
+        "active" => ("badge-success", "play_circle"),
+        "completed" => ("badge-info", "check_circle"),
+        "paused" => ("badge-warning", "pause_circle"),
+        _ => ("badge-neutral", "help"),
     };
 
     rsx! {
         Link {
             to: Route::SessionDetail { id: session.id.clone() },
-            class: "block bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition-shadow",
+            class: "card-elevated block group",
             div { class: "flex items-center justify-between",
-                div { class: "flex-1",
-                    h3 { class: "text-lg font-semibold text-gray-900 dark:text-white",
-                        "{session.theme}"
+                div { class: "flex items-center gap-4 flex-1 min-w-0",
+                    div { class: "w-10 h-10 rounded-lg bg-tertiary-container flex items-center justify-center shrink-0",
+                        span { class: "material-symbols-outlined text-xl text-tertiary", "forum" }
                     }
-                    p { class: "text-sm text-gray-500 dark:text-gray-400 mt-1",
-                        "Mode: {session.mode} | Phase: {session.phase} | Turn: {session.turn_number}"
+                    div { class: "min-w-0",
+                        h3 { class: "text-title-md text-on-surface group-hover:text-primary transition-colors truncate",
+                            "{session.theme}"
+                        }
+                        div { class: "flex items-center gap-3 text-body-sm text-on-surface-variant mt-0.5",
+                            span { class: "flex items-center gap-1",
+                                span { class: "material-symbols-outlined text-sm", "settings" }
+                                "{session.mode}"
+                            }
+                            span { class: "flex items-center gap-1",
+                                span { class: "material-symbols-outlined text-sm", "flag" }
+                                "{session.phase}"
+                            }
+                            span { class: "flex items-center gap-1",
+                                span { class: "material-symbols-outlined text-sm", "replay" }
+                                "Turn {session.turn_number}"
+                            }
+                        }
                     }
                 }
-                div { class: "flex items-center space-x-3",
-                    span { class: "text-sm text-gray-500",
-                        "{session.participant_count} participants"
+                div { class: "flex items-center gap-3 shrink-0",
+                    span { class: "chip text-body-sm",
+                        span { class: "material-symbols-outlined text-sm", "group" }
+                        "{session.participant_count}"
                     }
-                    span { class: "px-2 py-1 text-xs rounded-full {status_class}",
+                    span { class: "{badge_class}",
+                        span { class: "material-symbols-outlined text-sm mr-0.5", "{status_icon}" }
                         "{session.status}"
                     }
                 }
@@ -100,23 +118,42 @@ pub fn SessionDetail(id: String) -> Element {
         div { class: "max-w-4xl mx-auto h-full flex flex-col",
             // Session header
             match &*session.read() {
-                Some(Ok(s)) => rsx! {
-                    div { class: "bg-white dark:bg-gray-800 shadow rounded-lg p-4 mb-4",
-                        div { class: "flex items-center justify-between",
-                            div {
-                                h1 { class: "text-xl font-bold text-gray-900 dark:text-white",
-                                    "{s.theme}"
+                Some(Ok(s)) => {
+                    let (badge_class, status_icon) = match s.status.as_str() {
+                        "active" => ("badge-success", "play_circle"),
+                        "completed" => ("badge-info", "check_circle"),
+                        "paused" => ("badge-warning", "pause_circle"),
+                        _ => ("badge-neutral", "help"),
+                    };
+                    rsx! {
+                        div { class: "card-elevated mb-4",
+                            div { class: "flex items-center justify-between",
+                                div { class: "flex items-center gap-4",
+                                    Link {
+                                        to: Route::Sessions {},
+                                        class: "btn-text p-1",
+                                        span { class: "material-symbols-outlined", "arrow_back" }
+                                    }
+                                    div {
+                                        h1 { class: "text-title-lg text-on-surface", "{s.theme}" }
+                                        div { class: "flex items-center gap-3 text-body-sm text-on-surface-variant mt-0.5",
+                                            span { "Mode: {s.mode}" }
+                                            span { "Phase: {s.phase}" }
+                                            span { "Turn: {s.turn_number}" }
+                                        }
+                                    }
                                 }
-                                p { class: "text-sm text-gray-500",
-                                    "Mode: {s.mode} | Phase: {s.phase} | Turn: {s.turn_number} | Status: {s.status}"
+                                span { class: "{badge_class}",
+                                    span { class: "material-symbols-outlined text-sm mr-0.5", "{status_icon}" }
+                                    "{s.status}"
                                 }
                             }
                         }
                     }
                 },
                 _ => rsx! {
-                    div { class: "bg-white dark:bg-gray-800 shadow rounded-lg p-4 mb-4",
-                        p { class: "text-gray-500", "Loading session..." }
+                    div { class: "card-elevated mb-4",
+                        p { class: "text-body-lg text-on-surface-variant", "Loading session..." }
                     }
                 },
             }
@@ -126,8 +163,9 @@ pub fn SessionDetail(id: String) -> Element {
                 match &*logs.read() {
                     Some(Ok(log_list)) => rsx! {
                         if log_list.is_empty() {
-                            div { class: "text-center py-12",
-                                p { class: "text-gray-500", "No logs yet." }
+                            div { class: "empty-state",
+                                span { class: "material-symbols-outlined empty-state-icon", "chat" }
+                                p { class: "empty-state-text", "No logs yet." }
                             }
                         } else {
                             for log in log_list.iter() {
@@ -141,22 +179,25 @@ pub fn SessionDetail(id: String) -> Element {
                         }
                     },
                     Some(Err(e)) => rsx! {
-                        div { class: "bg-red-50 border border-red-200 rounded-lg p-4",
-                            p { class: "text-red-800", "Error: {e}" }
+                        div { class: "card-outlined border-error bg-error-container/30 p-4",
+                            div { class: "flex items-center gap-2",
+                                span { class: "material-symbols-outlined text-error", "error" }
+                                p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                            }
                         }
                     },
                     None => rsx! {
-                        div { class: "text-center py-12",
-                            p { class: "text-gray-500", "Loading logs..." }
+                        div { class: "empty-state",
+                            p { class: "text-body-lg text-on-surface-variant", "Loading logs..." }
                         }
                     },
                 }
             }
 
             // Mentor input
-            div { class: "bg-white dark:bg-gray-800 shadow rounded-lg p-4",
+            div { class: "card-elevated",
                 form {
-                    class: "flex space-x-2",
+                    class: "flex gap-3",
                     onsubmit: move |e| {
                         e.prevent_default();
                         let session_id = id_for_send.clone();
@@ -172,14 +213,15 @@ pub fn SessionDetail(id: String) -> Element {
                     },
                     input {
                         r#type: "text",
-                        class: "flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                        class: "input-outlined flex-1",
                         placeholder: "Type mentor instruction...",
                         value: "{mentor_input}",
                         oninput: move |e| mentor_input.set(e.value())
                     }
                     button {
                         r#type: "submit",
-                        class: "px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium",
+                        class: "btn-filled",
+                        span { class: "material-symbols-outlined text-xl", "send" }
                         "Send"
                     }
                 }
@@ -195,28 +237,29 @@ fn SessionLogItem(
     speaker_id: Option<String>,
     created_at: String,
 ) -> Element {
-    let bg_class = match log_type.as_str() {
-        "speech" => "bg-blue-50 border-blue-200 dark:bg-blue-900/20 dark:border-blue-800",
-        "inner_voice" => "bg-purple-50 border-purple-200 dark:bg-purple-900/20 dark:border-purple-800",
-        "action" => "bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800",
-        "system" => "bg-gray-50 border-gray-200 dark:bg-gray-900/20 dark:border-gray-700",
-        _ => "bg-white border-gray-200 dark:bg-gray-800 dark:border-gray-700",
+    let (border_color, icon, icon_color) = match log_type.as_str() {
+        "speech" => ("border-l-primary", "chat_bubble", "text-primary"),
+        "inner_voice" => ("border-l-purple-500", "psychology", "text-purple-500"),
+        "action" => ("border-l-tertiary", "bolt", "text-tertiary"),
+        "system" => ("border-l-secondary", "settings", "text-secondary"),
+        _ => ("border-l-outline", "help", "text-on-surface-variant"),
     };
 
     let speaker = speaker_id.unwrap_or_default();
 
     rsx! {
-        div { class: "p-3 rounded-lg border {bg_class}",
-            div { class: "flex justify-between text-sm text-gray-500 dark:text-gray-400 mb-1",
-                span { class: "font-medium", "{speaker}" }
-                div { class: "flex items-center space-x-2",
-                    span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-600",
-                        "{log_type}"
-                    }
-                    span { "{created_at}" }
+        div { class: "bg-surface-container rounded-lg border-l-4 {border_color} p-4",
+            div { class: "flex items-center justify-between mb-2",
+                div { class: "flex items-center gap-2",
+                    span { class: "material-symbols-outlined text-lg {icon_color}", "{icon}" }
+                    span { class: "text-label-lg text-on-surface", "{speaker}" }
+                }
+                div { class: "flex items-center gap-2",
+                    span { class: "badge-neutral text-label-sm", "{log_type}" }
+                    span { class: "text-body-sm text-on-surface-variant", "{created_at}" }
                 }
             }
-            p { class: "text-gray-900 dark:text-white whitespace-pre-wrap",
+            p { class: "text-body-lg text-on-surface whitespace-pre-wrap pl-8",
                 "{content}"
             }
         }

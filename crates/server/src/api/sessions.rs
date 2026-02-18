@@ -7,6 +7,40 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::process;
 
+pub async fn list_session_logs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Vec<opencrab_db::queries::SessionLogRow>> {
+    let conn = state.db.lock().unwrap();
+    let logs = opencrab_db::queries::list_session_logs_by_session(&conn, &id).unwrap_or_default();
+    Json(logs)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MentorInstructionRequest {
+    pub content: String,
+}
+
+pub async fn send_mentor_instruction(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<MentorInstructionRequest>,
+) -> Json<serde_json::Value> {
+    let log = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: "mentor".to_string(),
+        session_id: id,
+        log_type: "system".to_string(),
+        content: req.content,
+        speaker_id: Some("mentor".to_string()),
+        turn_number: None,
+        metadata_json: None,
+    };
+    let conn = state.db.lock().unwrap();
+    let log_id = opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
+    Json(serde_json::json!({"id": log_id}))
+}
+
 pub async fn list_sessions(
     State(state): State<AppState>,
 ) -> Json<Vec<opencrab_db::queries::SessionRow>> {

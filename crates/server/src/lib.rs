@@ -46,6 +46,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sessions", get(api::sessions::list_sessions).post(api::sessions::create_session))
         .route("/api/sessions/{id}", get(api::sessions::get_session))
         .route("/api/sessions/{id}/messages", post(api::sessions::send_message))
+        .route("/api/sessions/{id}/logs", get(api::sessions::list_session_logs))
+        .route("/api/sessions/{id}/mentor", post(api::sessions::send_mentor_instruction))
+        // アナリティクス
+        .route("/api/agents/{id}/analytics", get(api::analytics::get_metrics_summary))
+        .route("/api/agents/{id}/analytics/detail", get(api::analytics::get_metrics_detail))
         // ワークスペース管理
         .route("/api/agents/{id}/workspace", get(api::workspace::list_workspace))
         .route("/api/agents/{id}/workspace/{*path}", get(api::workspace::read_file).put(api::workspace::write_file))

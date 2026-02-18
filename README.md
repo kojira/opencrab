@@ -1,6 +1,12 @@
-# OpenCrab
+<p align="center">
+  <img src="docs/icon.png" alt="OpenCrab" width="128" />
+</p>
 
-An autonomous AI agent framework built in Rust. Create, manage, and run AI agents with rich personality systems, skill management, multi-provider LLM routing, and multi-channel communication.
+<h1 align="center">OpenCrab</h1>
+
+<p align="center">
+  An autonomous AI agent framework built in Rust. Create, manage, and run AI agents with rich personality systems, skill management, multi-provider LLM routing, and multi-channel communication.
+</p>
 
 ## Features
 

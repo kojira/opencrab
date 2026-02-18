@@ -12,12 +12,11 @@ pub fn Agents() -> Element {
     rsx! {
         div { class: "max-w-7xl mx-auto",
             div { class: "flex items-center justify-between mb-6",
-                h1 { class: "text-2xl font-bold text-gray-900 dark:text-white",
-                    "Agents"
-                }
+                h1 { class: "page-title", "Agents" }
                 Link {
                     to: Route::AgentCreate {},
-                    class: "px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium",
+                    class: "btn-filled",
+                    span { class: "material-symbols-outlined text-xl", "add" }
                     "New Agent"
                 }
             }
@@ -25,11 +24,10 @@ pub fn Agents() -> Element {
             match &*agents.read() {
                 Some(Ok(agent_list)) => rsx! {
                     if agent_list.is_empty() {
-                        div { class: "text-center py-12",
-                            p { class: "text-gray-500 dark:text-gray-400 text-lg",
-                                "No agents found."
-                            }
-                            p { class: "text-gray-400 dark:text-gray-500 mt-2",
+                        div { class: "empty-state",
+                            span { class: "material-symbols-outlined empty-state-icon", "smart_toy" }
+                            p { class: "empty-state-text", "No agents found." }
+                            p { class: "text-body-sm text-on-surface-variant mt-2",
                                 "Create your first agent to get started."
                             }
                         }
@@ -42,13 +40,16 @@ pub fn Agents() -> Element {
                     }
                 },
                 Some(Err(e)) => rsx! {
-                    div { class: "bg-red-50 border border-red-200 rounded-lg p-4",
-                        p { class: "text-red-800", "Error: {e}" }
+                    div { class: "card-outlined border-error bg-error-container/30 p-4",
+                        div { class: "flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-error", "error" }
+                            p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                        }
                     }
                 },
                 None => rsx! {
-                    div { class: "text-center py-12",
-                        p { class: "text-gray-500", "Loading..." }
+                    div { class: "empty-state",
+                        p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                     }
                 },
             }
@@ -69,19 +70,22 @@ pub fn AgentCreate() -> Element {
 
     rsx! {
         div { class: "max-w-2xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6",
-                "Create New Agent"
+            div { class: "flex items-center gap-3 mb-6",
+                Link {
+                    to: Route::Agents {},
+                    class: "btn-text p-2",
+                    span { class: "material-symbols-outlined", "arrow_back" }
+                }
+                h1 { class: "page-title", "Create New Agent" }
             }
 
-            div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-6",
+            div { class: "card-elevated space-y-6",
                 // Name
                 div {
-                    label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                        "Name *"
-                    }
+                    label { class: "block text-label-lg text-on-surface mb-2", "Name *" }
                     input {
                         r#type: "text",
-                        class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                        class: "input-outlined",
                         placeholder: "e.g. Kai",
                         value: "{name}",
                         oninput: move |e| name.set(e.value())
@@ -90,11 +94,9 @@ pub fn AgentCreate() -> Element {
 
                 // Role
                 div {
-                    label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                        "Role"
-                    }
+                    label { class: "block text-label-lg text-on-surface mb-2", "Role" }
                     select {
-                        class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                        class: "select-outlined",
                         value: "{role}",
                         onchange: move |e| role.set(e.value()),
                         option { value: "discussant", "Discussant" }
@@ -106,12 +108,10 @@ pub fn AgentCreate() -> Element {
 
                 // Persona name
                 div {
-                    label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                        "Persona Name"
-                    }
+                    label { class: "block text-label-lg text-on-surface mb-2", "Persona Name" }
                     input {
                         r#type: "text",
-                        class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                        class: "input-outlined",
                         placeholder: "e.g. Pragmatic Engineer (defaults to name)",
                         value: "{persona_name}",
                         oninput: move |e| persona_name.set(e.value())
@@ -120,15 +120,16 @@ pub fn AgentCreate() -> Element {
 
                 // Error message
                 if let Some(ref err) = *error_msg.read() {
-                    div { class: "p-3 rounded-lg bg-red-50 border border-red-200 text-red-800",
-                        "{err}"
+                    div { class: "flex items-center gap-2 p-4 rounded-md bg-error-container",
+                        span { class: "material-symbols-outlined text-error", "error" }
+                        p { class: "text-body-md text-error-on-container", "{err}" }
                     }
                 }
 
                 // Buttons
-                div { class: "flex space-x-3",
+                div { class: "flex gap-3 pt-2",
                     button {
-                        class: "flex-1 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50",
+                        class: "btn-filled flex-1",
                         disabled: *saving.read(),
                         onclick: move |_| {
                             let n = name.read().clone();
@@ -151,11 +152,17 @@ pub fn AgentCreate() -> Element {
                                 }
                             });
                         },
-                        if *saving.read() { "Creating..." } else { "Create" }
+                        if *saving.read() {
+                            span { class: "material-symbols-outlined animate-spin text-xl", "progress_activity" }
+                            "Creating..."
+                        } else {
+                            span { class: "material-symbols-outlined text-xl", "add" }
+                            "Create"
+                        }
                     }
                     Link {
                         to: Route::Agents {},
-                        class: "px-6 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 font-medium text-center",
+                        class: "btn-outlined",
                         "Cancel"
                     }
                 }
@@ -181,52 +188,61 @@ pub fn AgentDetail(id: String) -> Element {
         div { class: "max-w-4xl mx-auto",
             match &*agent.read() {
                 Some(Ok(detail)) => rsx! {
-                    // Header
-                    div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-6",
-                        div { class: "flex items-center space-x-4",
-                            div { class: "w-16 h-16 rounded-full bg-blue-500 flex items-center justify-center text-white text-2xl font-bold",
-                                "{detail.name.chars().next().unwrap_or('?')}"
+                    // Agent header card
+                    div { class: "card-elevated mb-6",
+                        div { class: "flex items-center gap-5",
+                            div { class: "w-16 h-16 rounded-full bg-primary-container flex items-center justify-center",
+                                span { class: "text-headline-sm text-primary-on-container font-semibold",
+                                    "{detail.name.chars().next().unwrap_or('?')}"
+                                }
                             }
-                            div { class: "flex-1",
-                                h1 { class: "text-2xl font-bold text-gray-900 dark:text-white",
+                            div { class: "flex-1 min-w-0",
+                                h1 { class: "text-headline-sm text-on-surface font-medium truncate",
                                     "{detail.name}"
                                 }
-                                p { class: "text-gray-500 dark:text-gray-400",
+                                p { class: "text-body-lg text-on-surface-variant",
                                     "{detail.persona_name} / {detail.role}"
                                 }
                                 if let Some(ref org) = detail.organization {
-                                    p { class: "text-sm text-gray-400", "{org}" }
+                                    p { class: "text-body-sm text-on-surface-variant", "{org}" }
                                 }
                             }
-                            // Edit / Delete buttons
-                            div { class: "flex space-x-2",
+                            div { class: "flex items-center gap-2",
                                 Link {
                                     to: Route::AgentIdentityEdit { id: id.clone() },
-                                    class: "px-3 py-1.5 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300",
+                                    class: "btn-tonal",
+                                    span { class: "material-symbols-outlined text-xl", "edit" }
                                     "Edit"
                                 }
                                 button {
-                                    class: "px-3 py-1.5 text-sm bg-red-100 text-red-700 rounded-lg hover:bg-red-200",
+                                    class: "btn-outlined border-error text-error hover:bg-error-container/30",
                                     onclick: move |_| show_delete_confirm.set(true),
+                                    span { class: "material-symbols-outlined text-xl", "delete" }
                                     "Delete"
                                 }
                             }
                         }
                     }
 
-                    // Delete confirmation modal
+                    // Delete confirmation dialog
                     if *show_delete_confirm.read() {
-                        div { class: "fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50",
-                            div { class: "bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 max-w-sm mx-4",
-                                h3 { class: "text-lg font-semibold text-gray-900 dark:text-white mb-2",
-                                    "Delete Agent?"
+                        div { class: "scrim",
+                            div { class: "dialog",
+                                div { class: "flex items-center gap-3 mb-4",
+                                    span { class: "material-symbols-outlined text-2xl text-error", "warning" }
+                                    h3 { class: "text-title-lg text-on-surface", "Delete Agent?" }
                                 }
-                                p { class: "text-gray-600 dark:text-gray-400 mb-4",
+                                p { class: "text-body-lg text-on-surface-variant mb-6",
                                     "This will permanently delete the agent and all associated data (soul, skills, memories)."
                                 }
-                                div { class: "flex space-x-3",
+                                div { class: "flex gap-3 justify-end",
                                     button {
-                                        class: "flex-1 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium",
+                                        class: "btn-outlined",
+                                        onclick: move |_| show_delete_confirm.set(false),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "btn-danger",
                                         onclick: move |_| {
                                             let agent_id = id_for_delete.clone();
                                             spawn(async move {
@@ -235,12 +251,8 @@ pub fn AgentDetail(id: String) -> Element {
                                                 }
                                             });
                                         },
+                                        span { class: "material-symbols-outlined text-xl", "delete" }
                                         "Delete"
-                                    }
-                                    button {
-                                        class: "flex-1 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 font-medium",
-                                        onclick: move |_| show_delete_confirm.set(false),
-                                        "Cancel"
                                     }
                                 }
                             }
@@ -249,29 +261,30 @@ pub fn AgentDetail(id: String) -> Element {
 
                     // Action cards
                     div { class: "grid grid-cols-1 md:grid-cols-3 gap-4 mb-6",
-                        Link {
+                        ActionCard {
                             to: Route::PersonaEdit { id: id.clone() },
-                            class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 hover:shadow-lg transition-shadow text-center block",
-                            h3 { class: "font-semibold text-gray-900 dark:text-white", "Edit Persona" }
-                            p { class: "text-sm text-gray-500", "Personality & thinking style" }
+                            icon: "face",
+                            title: "Edit Persona",
+                            description: "Personality & thinking style"
                         }
-                        Link {
+                        ActionCard {
                             to: Route::Skills {},
-                            class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 hover:shadow-lg transition-shadow text-center block",
-                            h3 { class: "font-semibold text-gray-900 dark:text-white", "Manage Skills" }
-                            p { class: "text-sm text-gray-500", "Enable/disable skills" }
+                            icon: "psychology",
+                            title: "Manage Skills",
+                            description: "Enable/disable skills"
                         }
-                        Link {
+                        ActionCard {
                             to: Route::Workspace { agent_id: id.clone() },
-                            class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 hover:shadow-lg transition-shadow text-center block",
-                            h3 { class: "font-semibold text-gray-900 dark:text-white", "Workspace" }
-                            p { class: "text-sm text-gray-500", "Browse agent files" }
+                            icon: "folder_open",
+                            title: "Workspace",
+                            description: "Browse agent files"
                         }
                     }
 
                     // Identity details
-                    div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6",
-                        h2 { class: "text-lg font-semibold text-gray-900 dark:text-white mb-4",
+                    div { class: "card-outlined",
+                        h2 { class: "section-title flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-xl text-primary", "badge" }
                             "Identity"
                         }
                         div { class: "space-y-3",
@@ -288,16 +301,32 @@ pub fn AgentDetail(id: String) -> Element {
                     }
                 },
                 Some(Err(e)) => rsx! {
-                    div { class: "bg-red-50 border border-red-200 rounded-lg p-4",
-                        p { class: "text-red-800", "Error: {e}" }
+                    div { class: "card-outlined border-error bg-error-container/30 p-4",
+                        div { class: "flex items-center gap-2",
+                            span { class: "material-symbols-outlined text-error", "error" }
+                            p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                        }
                     }
                 },
                 None => rsx! {
-                    div { class: "text-center py-12",
-                        p { class: "text-gray-500", "Loading..." }
+                    div { class: "empty-state",
+                        p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                     }
                 },
             }
+        }
+    }
+}
+
+#[component]
+fn ActionCard(to: Route, icon: &'static str, title: &'static str, description: &'static str) -> Element {
+    rsx! {
+        Link {
+            to: to,
+            class: "card-elevated text-center group",
+            span { class: "material-symbols-outlined text-3xl text-primary mb-2 group-hover:scale-110 transition-transform", "{icon}" }
+            h3 { class: "text-title-md text-on-surface mb-1", "{title}" }
+            p { class: "text-body-sm text-on-surface-variant", "{description}" }
         }
     }
 }
@@ -335,34 +364,35 @@ pub fn AgentIdentityEdit(id: String) -> Element {
 
     rsx! {
         div { class: "max-w-2xl mx-auto",
-            h1 { class: "text-2xl font-bold text-gray-900 dark:text-white mb-6",
-                "Edit Identity"
+            div { class: "flex items-center gap-3 mb-6",
+                Link {
+                    to: Route::AgentDetail { id: id.clone() },
+                    class: "btn-text p-2",
+                    span { class: "material-symbols-outlined", "arrow_back" }
+                }
+                h1 { class: "page-title", "Edit Identity" }
             }
 
             if !*initialized.read() {
-                div { class: "text-center py-12",
-                    p { class: "text-gray-500", "Loading..." }
+                div { class: "empty-state",
+                    p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                 }
             } else {
-                div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-6",
+                div { class: "card-elevated space-y-6",
                     div {
-                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                            "Name"
-                        }
+                        label { class: "block text-label-lg text-on-surface mb-2", "Name" }
                         input {
                             r#type: "text",
-                            class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                            class: "input-outlined",
                             value: "{name}",
                             oninput: move |e| name.set(e.value())
                         }
                     }
 
                     div {
-                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                            "Role"
-                        }
+                        label { class: "block text-label-lg text-on-surface mb-2", "Role" }
                         select {
-                            class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                            class: "select-outlined",
                             value: "{role}",
                             onchange: move |e| role.set(e.value()),
                             option { value: "discussant", "Discussant" }
@@ -373,12 +403,10 @@ pub fn AgentIdentityEdit(id: String) -> Element {
                     }
 
                     div {
-                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                            "Job Title"
-                        }
+                        label { class: "block text-label-lg text-on-surface mb-2", "Job Title" }
                         input {
                             r#type: "text",
-                            class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                            class: "input-outlined",
                             placeholder: "Optional",
                             value: "{job_title}",
                             oninput: move |e| job_title.set(e.value())
@@ -386,12 +414,10 @@ pub fn AgentIdentityEdit(id: String) -> Element {
                     }
 
                     div {
-                        label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-                            "Organization"
-                        }
+                        label { class: "block text-label-lg text-on-surface mb-2", "Organization" }
                         input {
                             r#type: "text",
-                            class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                            class: "input-outlined",
                             placeholder: "Optional",
                             value: "{organization}",
                             oninput: move |e| organization.set(e.value())
@@ -400,15 +426,16 @@ pub fn AgentIdentityEdit(id: String) -> Element {
 
                     // Status message
                     if let Some(ref status) = *save_status.read() {
-                        div { class: "p-3 rounded-lg bg-green-50 border border-green-200 text-green-800",
-                            "{status}"
+                        div { class: "flex items-center gap-2 p-4 rounded-md bg-success-container",
+                            span { class: "material-symbols-outlined text-success", "check_circle" }
+                            p { class: "text-body-md text-success-on-container", "{status}" }
                         }
                     }
 
                     // Buttons
-                    div { class: "flex space-x-3",
+                    div { class: "flex gap-3 pt-2",
                         button {
-                            class: "flex-1 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50",
+                            class: "btn-filled flex-1",
                             disabled: *saving.read(),
                             onclick: move |_| {
                                 let agent_id = id_for_save.clone();
@@ -431,11 +458,17 @@ pub fn AgentIdentityEdit(id: String) -> Element {
                                     }
                                 });
                             },
-                            if *saving.read() { "Saving..." } else { "Save" }
+                            if *saving.read() {
+                                span { class: "material-symbols-outlined animate-spin text-xl", "progress_activity" }
+                                "Saving..."
+                            } else {
+                                span { class: "material-symbols-outlined text-xl", "save" }
+                                "Save"
+                            }
                         }
                         Link {
                             to: Route::AgentDetail { id: id.clone() },
-                            class: "px-6 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 font-medium text-center",
+                            class: "btn-outlined",
                             "Cancel"
                         }
                     }
@@ -448,9 +481,9 @@ pub fn AgentIdentityEdit(id: String) -> Element {
 #[component]
 fn DetailRow(label: &'static str, value: String) -> Element {
     rsx! {
-        div { class: "flex items-center",
-            span { class: "w-32 text-sm font-medium text-gray-500 dark:text-gray-400", "{label}" }
-            span { class: "text-gray-900 dark:text-white", "{value}" }
+        div { class: "flex items-center py-2",
+            span { class: "w-36 text-label-lg text-on-surface-variant", "{label}" }
+            span { class: "text-body-lg text-on-surface font-mono", "{value}" }
         }
     }
 }

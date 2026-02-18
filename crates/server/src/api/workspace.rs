@@ -1,14 +1,20 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use serde::Deserialize;
 
 use crate::AppState;
 
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceQuery {
+    pub path: Option<String>,
+}
+
 pub async fn list_workspace(
     State(_state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
 ) -> Json<serde_json::Value> {
     let workspace = match opencrab_core::workspace::Workspace::new(&id, "data") {
         Ok(ws) => ws,
@@ -17,7 +23,7 @@ pub async fn list_workspace(
         }
     };
 
-    match workspace.list("").await {
+    match workspace.list(query.path.as_deref().unwrap_or("")).await {
         Ok(entries) => {
             let entries_json: Vec<serde_json::Value> = entries
                 .iter()
