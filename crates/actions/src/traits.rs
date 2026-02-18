@@ -44,6 +44,34 @@ pub enum SideEffect {
     LlmSwitched { purpose: String, model: String },
 }
 
+/// Discord/ゲートウェイ管理トレイト
+///
+/// サーバー一覧・チャンネル一覧の取得など、ゲートウェイ管理操作を抽象化する。
+/// 実装はserverクレート側で行う（serenity依存を分離）。
+#[async_trait]
+pub trait GatewayAdmin: Send + Sync {
+    /// Botが参加しているサーバー一覧を取得
+    async fn list_guilds(&self) -> anyhow::Result<Vec<GuildInfo>>;
+    /// 指定サーバーのチャンネル一覧を取得
+    async fn list_channels(&self, guild_id: &str) -> anyhow::Result<Vec<ChannelInfo>>;
+}
+
+/// サーバー情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuildInfo {
+    pub id: String,
+    pub name: String,
+    pub member_count: Option<u64>,
+}
+
+/// チャンネル情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
 /// アクション実行コンテキスト
 pub struct ActionContext {
     pub agent_id: String,
@@ -60,6 +88,9 @@ pub struct ActionContext {
     pub current_purpose: Arc<std::sync::Mutex<String>>,
     /// Runtime system information (model name, provider, etc.)
     pub runtime_info: Arc<std::sync::Mutex<RuntimeInfo>>,
+    /// Gateway admin operations (Discord guild/channel management).
+    /// None when running via REST API or in tests.
+    pub gateway_admin: Option<Arc<dyn GatewayAdmin>>,
 }
 
 /// エージェントの実行環境情報

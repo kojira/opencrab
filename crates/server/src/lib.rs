@@ -15,6 +15,9 @@ pub mod process;
 #[cfg(feature = "discord")]
 pub mod discord;
 
+#[cfg(feature = "discord")]
+pub mod discord_admin_impl;
+
 use opencrab_llm::router::LlmRouter;
 
 #[derive(Clone)]

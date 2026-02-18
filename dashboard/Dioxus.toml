@@ -9,8 +9,9 @@ title = "OpenCrab Dashboard"
 reload_html = true
 watch_path = ["src", "public"]
 
-[web.resource]
+[web.resource.dev]
 style = ["public/tailwind.css"]
+script = []
 
 [server]
 port = 3000

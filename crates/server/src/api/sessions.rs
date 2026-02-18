@@ -134,6 +134,7 @@ pub async fn send_message(
             &system_prompt,
             &conversation,
             "rest",
+            None,
         )
         .await;
 

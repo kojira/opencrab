@@ -1037,6 +1037,107 @@ pub fn get_model_pricing(
     }
 }
 
+// ============================================
+// Discord Channel Config
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelConfigRow {
+    pub channel_id: String,
+    pub guild_id: String,
+    pub channel_name: String,
+    pub readable: bool,
+    pub writable: bool,
+}
+
+pub fn get_channel_config(
+    conn: &Connection,
+    channel_id: &str,
+) -> Result<Option<ChannelConfigRow>> {
+    let result = conn.query_row(
+        "SELECT channel_id, guild_id, channel_name, readable, writable
+         FROM discord_channel_config WHERE channel_id = ?1",
+        params![channel_id],
+        |row| {
+            Ok(ChannelConfigRow {
+                channel_id: row.get(0)?,
+                guild_id: row.get(1)?,
+                channel_name: row.get(2)?,
+                readable: row.get(3)?,
+                writable: row.get(4)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(cfg) => Ok(Some(cfg)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO discord_channel_config (channel_id, guild_id, channel_name, readable, writable, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(channel_id) DO UPDATE SET
+            guild_id = excluded.guild_id,
+            channel_name = excluded.channel_name,
+            readable = excluded.readable,
+            writable = excluded.writable,
+            updated_at = excluded.updated_at",
+        params![
+            cfg.channel_id,
+            cfg.guild_id,
+            cfg.channel_name,
+            cfg.readable,
+            cfg.writable,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_channel_configs_by_guild(
+    conn: &Connection,
+    guild_id: &str,
+) -> Result<Vec<ChannelConfigRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, guild_id, channel_name, readable, writable
+         FROM discord_channel_config WHERE guild_id = ?1 ORDER BY channel_name",
+    )?;
+
+    let rows = stmt.query_map(params![guild_id], |row| {
+        Ok(ChannelConfigRow {
+            channel_id: row.get(0)?,
+            guild_id: row.get(1)?,
+            channel_name: row.get(2)?,
+            readable: row.get(3)?,
+            writable: row.get(4)?,
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// チャンネルが読み取り可能か判定する。設定なし=true（デフォルト許可）。
+pub fn is_channel_readable(conn: &Connection, channel_id: &str) -> bool {
+    get_channel_config(conn, channel_id)
+        .ok()
+        .flatten()
+        .map(|c| c.readable)
+        .unwrap_or(true)
+}
+
+/// チャンネルが書き込み可能か判定する。設定なし=true（デフォルト許可）。
+pub fn is_channel_writable(conn: &Connection, channel_id: &str) -> bool {
+    get_channel_config(conn, channel_id)
+        .ok()
+        .flatten()
+        .map(|c| c.writable)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1906,5 +2007,115 @@ mod tests {
         // Find after delete
         let results = find_agents(&conn, "Updated").unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── Discord Channel Config ──
+
+    #[test]
+    fn test_channel_config_upsert_and_get() {
+        let conn = setup();
+
+        let cfg = ChannelConfigRow {
+            channel_id: "123456".to_string(),
+            guild_id: "guild-1".to_string(),
+            channel_name: "general".to_string(),
+            readable: true,
+            writable: false,
+        };
+
+        upsert_channel_config(&conn, &cfg).unwrap();
+
+        let fetched = get_channel_config(&conn, "123456").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.channel_id, "123456");
+        assert_eq!(fetched.guild_id, "guild-1");
+        assert_eq!(fetched.channel_name, "general");
+        assert!(fetched.readable);
+        assert!(!fetched.writable);
+    }
+
+    #[test]
+    fn test_channel_config_upsert_update() {
+        let conn = setup();
+
+        let cfg = ChannelConfigRow {
+            channel_id: "123456".to_string(),
+            guild_id: "guild-1".to_string(),
+            channel_name: "general".to_string(),
+            readable: true,
+            writable: true,
+        };
+        upsert_channel_config(&conn, &cfg).unwrap();
+
+        // Update writable to false
+        let cfg2 = ChannelConfigRow {
+            writable: false,
+            ..cfg
+        };
+        upsert_channel_config(&conn, &cfg2).unwrap();
+
+        let fetched = get_channel_config(&conn, "123456").unwrap().unwrap();
+        assert!(fetched.readable);
+        assert!(!fetched.writable);
+    }
+
+    #[test]
+    fn test_channel_config_list_by_guild() {
+        let conn = setup();
+
+        let cfg1 = ChannelConfigRow {
+            channel_id: "ch-1".to_string(),
+            guild_id: "guild-1".to_string(),
+            channel_name: "general".to_string(),
+            readable: true,
+            writable: true,
+        };
+        let cfg2 = ChannelConfigRow {
+            channel_id: "ch-2".to_string(),
+            guild_id: "guild-1".to_string(),
+            channel_name: "random".to_string(),
+            readable: false,
+            writable: true,
+        };
+        let cfg3 = ChannelConfigRow {
+            channel_id: "ch-3".to_string(),
+            guild_id: "guild-2".to_string(),
+            channel_name: "other".to_string(),
+            readable: true,
+            writable: true,
+        };
+
+        upsert_channel_config(&conn, &cfg1).unwrap();
+        upsert_channel_config(&conn, &cfg2).unwrap();
+        upsert_channel_config(&conn, &cfg3).unwrap();
+
+        let results = list_channel_configs_by_guild(&conn, "guild-1").unwrap();
+        assert_eq!(results.len(), 2);
+
+        let results2 = list_channel_configs_by_guild(&conn, "guild-2").unwrap();
+        assert_eq!(results2.len(), 1);
+    }
+
+    #[test]
+    fn test_is_channel_readable_writable_defaults() {
+        let conn = setup();
+
+        // No config → defaults to true
+        assert!(is_channel_readable(&conn, "unknown-ch"));
+        assert!(is_channel_writable(&conn, "unknown-ch"));
+
+        // Set readable=false
+        let cfg = ChannelConfigRow {
+            channel_id: "ch-blocked".to_string(),
+            guild_id: "guild-1".to_string(),
+            channel_name: "blocked".to_string(),
+            readable: false,
+            writable: false,
+        };
+        upsert_channel_config(&conn, &cfg).unwrap();
+
+        assert!(!is_channel_readable(&conn, "ch-blocked"));
+        assert!(!is_channel_writable(&conn, "ch-blocked"));
     }
 }

@@ -65,6 +65,7 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
             available_providers: vec!["mock".to_string()],
             gateway: "test".to_string(),
         })),
+        gateway_admin: None,
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
@@ -106,6 +107,7 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
             available_providers: vec!["mock".to_string()],
             gateway: "test".to_string(),
         })),
+        gateway_admin: None,
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);

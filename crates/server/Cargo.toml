@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-discord = ["opencrab-gateway/discord"]
+discord = ["opencrab-gateway/discord", "serenity"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -28,6 +28,7 @@ opencrab-actions = { workspace = true }
 opencrab-db = { workspace = true }
 dotenvy = { workspace = true }
 toml = { workspace = true }
+serenity = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

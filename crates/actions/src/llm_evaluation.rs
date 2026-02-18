@@ -158,6 +158,7 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
+            gateway_admin: None,
         };
         (dir, ctx, metrics_id)
     }

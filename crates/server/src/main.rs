@@ -46,14 +46,29 @@ async fn main() -> anyhow::Result<()> {
             let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
             gateway.start().await?;
 
+            let gateway_admin: Arc<dyn opencrab_actions::GatewayAdmin> = Arc::new(
+                opencrab_server::discord_admin_impl::SerenityGatewayAdmin::new(
+                    gateway.http().clone(),
+                ),
+            );
+
             let discord_state = state.clone();
             let agent_ids = discord_cfg.agent_ids.clone();
+            let owner_discord_id = discord_cfg.owner_discord_id.clone();
             tokio::spawn(async move {
-                opencrab_server::discord::run_discord_loop(gateway, discord_state, agent_ids).await;
+                opencrab_server::discord::run_discord_loop(
+                    gateway,
+                    discord_state,
+                    agent_ids,
+                    gateway_admin,
+                    owner_discord_id,
+                )
+                .await;
             });
 
             tracing::info!(
                 agents = ?discord_cfg.agent_ids,
+                owner = %discord_cfg.owner_discord_id,
                 "Discord gateway started"
             );
         }

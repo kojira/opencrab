@@ -75,6 +75,7 @@ enabled = true
 token = "${DISCORD_TOKEN}"
 guild_ids = []
 agent_ids = ["crab"]  # Discordメッセージに応答するエージェントID（例: ["crab", "philosopher"]）
+owner_discord_id = "390732846236434452"  # DMに応答するオーナーのDiscord User ID
 
 [gateway.cli]
 enabled = true

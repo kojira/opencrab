@@ -110,6 +110,7 @@ pub async fn run_agent_response(
     system_prompt: &str,
     conversation: &str,
     gateway: &str,
+    gateway_admin: Option<Arc<dyn opencrab_actions::GatewayAdmin>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = format!("{}/{}", state.workspace_base, agent_id);
@@ -140,6 +141,7 @@ pub async fn run_agent_response(
         model_override: model_override.clone(),
         current_purpose: current_purpose.clone(),
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
+        gateway_admin,
     };
     let dispatcher = opencrab_actions::ActionDispatcher::new();
     let executor = opencrab_actions::BridgedExecutor::new(dispatcher, ctx);

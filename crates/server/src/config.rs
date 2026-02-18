@@ -101,6 +101,9 @@ pub struct DiscordGatewayConfig {
     /// Discordメッセージに応答するエージェントのIDリスト
     #[serde(default)]
     pub agent_ids: Vec<String>,
+    /// DMに応答するオーナーのDiscord User ID（設定時、このID以外からのDMは無視）
+    #[serde(default)]
+    pub owner_discord_id: String,
 }
 
 #[derive(Debug, Deserialize)]

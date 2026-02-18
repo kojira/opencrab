@@ -62,6 +62,11 @@ impl DiscordGateway {
         }
     }
 
+    /// serenityのHTTPクライアントへの参照を返す（管理API用）
+    pub fn http(&self) -> &Arc<Http> {
+        &self.http
+    }
+
     /// Bot接続を開始する（バックグラウンドタスクとして起動）
     pub async fn start(&self) -> Result<()> {
         let intents = GatewayIntents::GUILD_MESSAGES

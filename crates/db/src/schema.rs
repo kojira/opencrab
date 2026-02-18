@@ -225,4 +225,18 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     done_declared INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent_id, session_id)
 );
+
+-- ============================================
+-- Discordチャンネル設定
+-- ============================================
+CREATE TABLE IF NOT EXISTS discord_channel_config (
+    channel_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    channel_name TEXT NOT NULL DEFAULT '',
+    readable INTEGER NOT NULL DEFAULT 1,
+    writable INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
 "#;

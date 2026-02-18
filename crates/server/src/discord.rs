@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use opencrab_gateway::DiscordGateway;
 
@@ -19,6 +19,8 @@ pub async fn run_discord_loop(
     gateway: Arc<DiscordGateway>,
     state: AppState,
     agent_ids: Vec<String>,
+    gateway_admin: Arc<dyn opencrab_actions::GatewayAdmin>,
+    owner_discord_id: String,
 ) {
     info!(
         agents = ?agent_ids,
@@ -52,6 +54,33 @@ pub async fn run_discord_loop(
             Ok(id) => id,
             Err(_) => continue,
         };
+
+        let is_dm = guild_id.is_empty();
+
+        // DM owner check: DMの場合、設定されたオーナー以外からのメッセージは無視
+        if is_dm && !owner_discord_id.is_empty() && incoming.sender.id != owner_discord_id {
+            debug!(
+                sender = %incoming.sender.id,
+                owner = %owner_discord_id,
+                "Ignoring DM from non-owner user"
+            );
+            continue;
+        }
+
+        // Channel readable check: DMはフィルタリング対象外
+        if !is_dm {
+            let readable = {
+                let conn = state.db.lock().unwrap();
+                opencrab_db::queries::is_channel_readable(&conn, &channel_id_str)
+            };
+            if !readable {
+                debug!(
+                    channel = %channel_id_str,
+                    "Ignoring message from non-readable channel"
+                );
+                continue;
+            }
+        }
 
         debug!(
             user = %incoming.sender.name,
@@ -113,11 +142,28 @@ pub async fn run_discord_loop(
                 &system_prompt,
                 &conversation,
                 "discord",
+                Some(gateway_admin.clone()),
             )
             .await;
 
             match result {
                 Ok(engine_result) if !engine_result.response.is_empty() => {
+                    // Writable check: DMはフィルタリング対象外
+                    if !is_dm {
+                        let writable = {
+                            let conn = state.db.lock().unwrap();
+                            opencrab_db::queries::is_channel_writable(&conn, &channel_id_str)
+                        };
+                        if !writable {
+                            warn!(
+                                agent_id = %agent_id,
+                                channel = %channel_id_str,
+                                "Skipping response to non-writable channel"
+                            );
+                            continue;
+                        }
+                    }
+
                     // Send response to Discord.
                     if let Err(e) = gateway
                         .send_to_channel(channel_id, &engine_result.response)
