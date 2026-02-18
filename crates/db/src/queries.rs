@@ -131,6 +131,33 @@ pub fn get_identity(conn: &Connection, agent_id: &str) -> Result<Option<Identity
     }
 }
 
+/// Delete an agent and all related data (identity, soul, skills, curated memory).
+pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
+    let deleted = conn.execute("DELETE FROM identity WHERE agent_id = ?1", params![agent_id])?;
+    conn.execute("DELETE FROM soul WHERE agent_id = ?1", params![agent_id])?;
+    conn.execute("DELETE FROM skills WHERE agent_id = ?1", params![agent_id])?;
+    conn.execute(
+        "DELETE FROM memory_curated WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
+    Ok(deleted > 0)
+}
+
+/// Find agents by partial ID prefix or name (case-insensitive).
+pub fn find_agents(
+    conn: &Connection,
+    query: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, name FROM identity WHERE agent_id LIKE ?1 OR LOWER(name) LIKE LOWER(?2)",
+    )?;
+    let rows = stmt.query_map(
+        params![format!("{}%", query), format!("%{}%", query)],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 // ============================================
 // MEMORY: Curated
 // ============================================
@@ -287,6 +314,33 @@ pub fn search_session_logs(
             content: row.get(3)?,
             created_at: row.get(4)?,
             score: row.get(5)?,
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// List all session logs for a given session, ordered by creation time.
+/// Used for building conversation history in send_message.
+pub fn list_session_logs_by_session(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+         FROM memory_sessions WHERE session_id = ?1 ORDER BY id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
         })
     })?;
 
@@ -731,5 +785,732 @@ pub fn get_model_pricing(
         Ok(p) => Ok(Some(p)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> Connection {
+        crate::init_memory().expect("failed to init in-memory DB")
+    }
+
+    // 1. test_soul_upsert_and_get
+    #[test]
+    fn test_soul_upsert_and_get() {
+        let conn = setup();
+        let soul = SoulRow {
+            agent_id: "agent-1".to_string(),
+            persona_name: "Crab".to_string(),
+            social_style_json: r#"{"style":"friendly"}"#.to_string(),
+            personality_json: r#"{"trait":"curious"}"#.to_string(),
+            thinking_style_json: r#"{"approach":"analytical"}"#.to_string(),
+            custom_traits_json: Some(r#"{"hobby":"coding"}"#.to_string()),
+        };
+
+        upsert_soul(&conn, &soul).unwrap();
+
+        let fetched = get_soul(&conn, "agent-1").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.agent_id, "agent-1");
+        assert_eq!(fetched.persona_name, "Crab");
+        assert_eq!(fetched.social_style_json, r#"{"style":"friendly"}"#);
+        assert_eq!(fetched.personality_json, r#"{"trait":"curious"}"#);
+        assert_eq!(fetched.thinking_style_json, r#"{"approach":"analytical"}"#);
+        assert_eq!(
+            fetched.custom_traits_json,
+            Some(r#"{"hobby":"coding"}"#.to_string())
+        );
+    }
+
+    // 2. test_soul_get_nonexistent
+    #[test]
+    fn test_soul_get_nonexistent() {
+        let conn = setup();
+        let result = get_soul(&conn, "nonexistent-agent").unwrap();
+        assert!(result.is_none());
+    }
+
+    // 3. test_identity_upsert_and_get
+    #[test]
+    fn test_identity_upsert_and_get() {
+        let conn = setup();
+        let identity = IdentityRow {
+            agent_id: "agent-1".to_string(),
+            name: "Alice".to_string(),
+            role: "facilitator".to_string(),
+            job_title: Some("Engineer".to_string()),
+            organization: Some("OpenCrab Inc.".to_string()),
+            image_url: Some("https://example.com/avatar.png".to_string()),
+            metadata_json: Some(r#"{"lang":"en"}"#.to_string()),
+        };
+
+        upsert_identity(&conn, &identity).unwrap();
+
+        let fetched = get_identity(&conn, "agent-1").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.agent_id, "agent-1");
+        assert_eq!(fetched.name, "Alice");
+        assert_eq!(fetched.role, "facilitator");
+        assert_eq!(fetched.job_title, Some("Engineer".to_string()));
+        assert_eq!(fetched.organization, Some("OpenCrab Inc.".to_string()));
+        assert_eq!(
+            fetched.image_url,
+            Some("https://example.com/avatar.png".to_string())
+        );
+        assert_eq!(
+            fetched.metadata_json,
+            Some(r#"{"lang":"en"}"#.to_string())
+        );
+    }
+
+    // 4. test_curated_memory_crud
+    #[test]
+    fn test_curated_memory_crud() {
+        let conn = setup();
+
+        let mem1 = CuratedMemoryRow {
+            id: "mem-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            category: "facts".to_string(),
+            content: "Rust is a systems programming language.".to_string(),
+        };
+        let mem2 = CuratedMemoryRow {
+            id: "mem-2".to_string(),
+            agent_id: "agent-1".to_string(),
+            category: "facts".to_string(),
+            content: "Crabs have ten legs.".to_string(),
+        };
+
+        upsert_curated_memory(&conn, &mem1).unwrap();
+        upsert_curated_memory(&conn, &mem2).unwrap();
+
+        let results = get_curated_memories(&conn, "agent-1", "facts").unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    // 5. test_curated_memory_list_all
+    #[test]
+    fn test_curated_memory_list_all() {
+        let conn = setup();
+
+        let mem1 = CuratedMemoryRow {
+            id: "mem-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            category: "facts".to_string(),
+            content: "The sky is blue.".to_string(),
+        };
+        let mem2 = CuratedMemoryRow {
+            id: "mem-2".to_string(),
+            agent_id: "agent-1".to_string(),
+            category: "opinions".to_string(),
+            content: "Rust is great.".to_string(),
+        };
+
+        upsert_curated_memory(&conn, &mem1).unwrap();
+        upsert_curated_memory(&conn, &mem2).unwrap();
+
+        let all = list_curated_memories(&conn, "agent-1").unwrap();
+        assert_eq!(all.len(), 2);
+
+        let categories: Vec<&str> = all.iter().map(|m| m.category.as_str()).collect();
+        assert!(categories.contains(&"facts"));
+        assert!(categories.contains(&"opinions"));
+    }
+
+    // 6. test_session_log_insert_and_fts
+    #[test]
+    fn test_session_log_insert_and_fts() {
+        let conn = setup();
+
+        let log1 = SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "The weather is sunny today.".to_string(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+        };
+        let log2 = SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "I enjoy programming in Rust.".to_string(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: Some(2),
+            metadata_json: None,
+        };
+        let log3 = SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Crabs live near the ocean.".to_string(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: Some(3),
+            metadata_json: None,
+        };
+
+        insert_session_log(&conn, &log1).unwrap();
+        insert_session_log(&conn, &log2).unwrap();
+        insert_session_log(&conn, &log3).unwrap();
+
+        let results = search_session_logs(&conn, "agent-1", "sunny", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("sunny"));
+    }
+
+    // 7. test_fts_multi_word_search
+    #[test]
+    fn test_fts_multi_word_search() {
+        let conn = setup();
+
+        let log1 = SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Quantum computing will revolutionize cryptography.".to_string(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+        };
+        let log2 = SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Classical computing is still dominant.".to_string(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: Some(2),
+            metadata_json: None,
+        };
+
+        insert_session_log(&conn, &log1).unwrap();
+        insert_session_log(&conn, &log2).unwrap();
+
+        let results =
+            search_session_logs(&conn, "agent-1", "quantum cryptography", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("Quantum"));
+    }
+
+    // 8. test_fts_no_results
+    #[test]
+    fn test_fts_no_results() {
+        let conn = setup();
+
+        let log = SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Hello world from the test.".to_string(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+        };
+        insert_session_log(&conn, &log).unwrap();
+
+        let results =
+            search_session_logs(&conn, "agent-1", "nonexistenttermxyz", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    // 9. test_skills_crud
+    #[test]
+    fn test_skills_crud() {
+        let conn = setup();
+
+        let skill = SkillRow {
+            id: "skill-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            name: "Summarization".to_string(),
+            description: "Summarize long texts concisely.".to_string(),
+            situation_pattern: "when asked to summarize".to_string(),
+            guidance: "Extract key points and present them briefly.".to_string(),
+            source_type: "acquired".to_string(),
+            source_context: Some("learned from session-1".to_string()),
+            file_path: None,
+            effectiveness: None,
+            usage_count: 0,
+            is_active: true,
+        };
+
+        insert_skill(&conn, &skill).unwrap();
+
+        let skills = list_skills(&conn, "agent-1", true).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].id, "skill-1");
+        assert_eq!(skills[0].name, "Summarization");
+        assert!(skills[0].is_active);
+        assert_eq!(skills[0].usage_count, 0);
+        assert_eq!(skills[0].source_type, "acquired");
+    }
+
+    // 10. test_skill_usage_increment
+    #[test]
+    fn test_skill_usage_increment() {
+        let conn = setup();
+
+        let skill = SkillRow {
+            id: "skill-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            name: "Translation".to_string(),
+            description: "Translate between languages.".to_string(),
+            situation_pattern: "when translation is needed".to_string(),
+            guidance: "Use context-aware translation.".to_string(),
+            source_type: "acquired".to_string(),
+            source_context: None,
+            file_path: None,
+            effectiveness: None,
+            usage_count: 0,
+            is_active: true,
+        };
+
+        insert_skill(&conn, &skill).unwrap();
+        increment_skill_usage(&conn, "skill-1").unwrap();
+
+        let skills = list_skills(&conn, "agent-1", true).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].usage_count, 1);
+    }
+
+    // 11. test_impressions_upsert_and_get
+    #[test]
+    fn test_impressions_upsert_and_get() {
+        let conn = setup();
+
+        let impression = ImpressionRow {
+            id: "imp-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            target_id: "agent-2".to_string(),
+            target_name: "Bob".to_string(),
+            personality: "thoughtful and calm".to_string(),
+            communication_style: "concise".to_string(),
+            recent_behavior: "asked good questions".to_string(),
+            agreement: "mostly agree".to_string(),
+            notes: "potential collaborator".to_string(),
+            last_updated_turn: 5,
+        };
+
+        upsert_impression(&conn, &impression).unwrap();
+
+        let results = get_impressions(&conn, "agent-1", "session-1").unwrap();
+        assert_eq!(results.len(), 1);
+        let fetched = &results[0];
+        assert_eq!(fetched.id, "imp-1");
+        assert_eq!(fetched.target_id, "agent-2");
+        assert_eq!(fetched.target_name, "Bob");
+        assert_eq!(fetched.personality, "thoughtful and calm");
+        assert_eq!(fetched.communication_style, "concise");
+        assert_eq!(fetched.recent_behavior, "asked good questions");
+        assert_eq!(fetched.agreement, "mostly agree");
+        assert_eq!(fetched.notes, "potential collaborator");
+        assert_eq!(fetched.last_updated_turn, 5);
+    }
+
+    // 12. test_session_crud
+    #[test]
+    fn test_session_crud() {
+        let conn = setup();
+
+        let session = SessionRow {
+            id: "session-1".to_string(),
+            mode: "facilitated".to_string(),
+            theme: "AI Ethics Discussion".to_string(),
+            phase: "divergent".to_string(),
+            turn_number: 0,
+            status: "active".to_string(),
+            participant_ids_json: r#"["agent-1","agent-2"]"#.to_string(),
+            facilitator_id: Some("agent-1".to_string()),
+            done_count: 0,
+            max_turns: Some(10),
+        };
+
+        insert_session(&conn, &session).unwrap();
+
+        let fetched = get_session(&conn, "session-1").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, "session-1");
+        assert_eq!(fetched.mode, "facilitated");
+        assert_eq!(fetched.theme, "AI Ethics Discussion");
+        assert_eq!(fetched.phase, "divergent");
+        assert_eq!(fetched.turn_number, 0);
+        assert_eq!(fetched.status, "active");
+        assert_eq!(fetched.facilitator_id, Some("agent-1".to_string()));
+        assert_eq!(fetched.max_turns, Some(10));
+
+        let all = list_sessions(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "session-1");
+    }
+
+    // 13. test_llm_metrics_insert_and_summary
+    #[test]
+    fn test_llm_metrics_insert_and_summary() {
+        let conn = setup();
+
+        let metrics1 = LlmMetricsRow {
+            id: "metrics-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            purpose: "discussion".to_string(),
+            task_type: Some("chat".to_string()),
+            complexity: Some("medium".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            estimated_cost_usd: 0.005,
+            latency_ms: 1200,
+            time_to_first_token_ms: Some(200),
+        };
+
+        let metrics2 = LlmMetricsRow {
+            id: "metrics-2".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            purpose: "summarization".to_string(),
+            task_type: Some("summary".to_string()),
+            complexity: Some("low".to_string()),
+            input_tokens: 200,
+            output_tokens: 80,
+            total_tokens: 280,
+            estimated_cost_usd: 0.008,
+            latency_ms: 800,
+            time_to_first_token_ms: Some(150),
+        };
+
+        insert_llm_metrics(&conn, &metrics1).unwrap();
+        insert_llm_metrics(&conn, &metrics2).unwrap();
+
+        let summary =
+            get_llm_metrics_summary(&conn, "agent-1", "2020-01-01").unwrap();
+        assert_eq!(summary.count, 2);
+        assert_eq!(summary.total_tokens, Some(430));
+        let total_cost = summary.total_cost.unwrap();
+        assert!((total_cost - 0.013).abs() < 1e-9);
+        let avg_latency = summary.avg_latency.unwrap();
+        assert!((avg_latency - 1000.0).abs() < 1e-9);
+    }
+
+    // 14. test_llm_metrics_evaluation_update
+    #[test]
+    fn test_llm_metrics_evaluation_update() {
+        let conn = setup();
+
+        let metrics = LlmMetricsRow {
+            id: "metrics-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            purpose: "discussion".to_string(),
+            task_type: Some("chat".to_string()),
+            complexity: Some("medium".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            estimated_cost_usd: 0.005,
+            latency_ms: 1200,
+            time_to_first_token_ms: Some(200),
+        };
+
+        insert_llm_metrics(&conn, &metrics).unwrap();
+        update_llm_metrics_evaluation(&conn, "metrics-1", 0.95, true, "excellent response")
+            .unwrap();
+
+        // Read back via raw SQL to verify the evaluation columns
+        let (quality_score, task_success, self_evaluation): (f64, i32, String) = conn
+            .query_row(
+                "SELECT quality_score, task_success, self_evaluation FROM llm_usage_metrics WHERE id = ?1",
+                params!["metrics-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert!((quality_score - 0.95).abs() < 1e-9);
+        assert_eq!(task_success, 1);
+        assert_eq!(self_evaluation, "excellent response");
+    }
+
+    // 15. test_model_pricing_upsert_and_get
+    #[test]
+    fn test_model_pricing_upsert_and_get() {
+        let conn = setup();
+
+        let pricing = ModelPricingRow {
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            input_price_per_1m: 30.0,
+            output_price_per_1m: 60.0,
+            context_window: Some(128000),
+        };
+
+        upsert_model_pricing(&conn, &pricing).unwrap();
+
+        let fetched = get_model_pricing(&conn, "openai", "gpt-4").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.provider, "openai");
+        assert_eq!(fetched.model, "gpt-4");
+        assert!((fetched.input_price_per_1m - 30.0).abs() < 1e-9);
+        assert!((fetched.output_price_per_1m - 60.0).abs() < 1e-9);
+        assert_eq!(fetched.context_window, Some(128000));
+    }
+
+    // 16. test_heartbeat_log_insert
+    #[test]
+    fn test_heartbeat_log_insert() {
+        let conn = setup();
+
+        let result = insert_heartbeat_log(
+            &conn,
+            "agent-1",
+            "idle",
+            Some(r#"{"action":"none"}"#),
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── delete_agent ──
+
+    #[test]
+    fn test_delete_agent() {
+        let conn = setup();
+
+        // Create agent with identity, soul, skill, and curated memory
+        upsert_identity(
+            &conn,
+            &IdentityRow {
+                agent_id: "del-1".into(),
+                name: "DeleteMe".into(),
+                role: "test".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        upsert_soul(
+            &conn,
+            &SoulRow {
+                agent_id: "del-1".into(),
+                persona_name: "Doomed".into(),
+                social_style_json: "{}".into(),
+                personality_json: "{}".into(),
+                thinking_style_json: "{}".into(),
+                custom_traits_json: None,
+            },
+        )
+        .unwrap();
+        upsert_curated_memory(
+            &conn,
+            &CuratedMemoryRow {
+                id: "cm-del-1".into(),
+                agent_id: "del-1".into(),
+                category: "fact".into(),
+                content: "will be deleted".into(),
+            },
+        )
+        .unwrap();
+
+        // Verify data exists
+        assert!(get_identity(&conn, "del-1").unwrap().is_some());
+        assert!(get_soul(&conn, "del-1").unwrap().is_some());
+
+        // Delete
+        let deleted = delete_agent(&conn, "del-1").unwrap();
+        assert!(deleted);
+
+        // Verify everything is gone
+        assert!(get_identity(&conn, "del-1").unwrap().is_none());
+        assert!(get_soul(&conn, "del-1").unwrap().is_none());
+        assert!(list_curated_memories(&conn, "del-1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_delete_agent_nonexistent() {
+        let conn = setup();
+        let deleted = delete_agent(&conn, "no-such-agent").unwrap();
+        assert!(!deleted);
+    }
+
+    // ── find_agents ──
+
+    #[test]
+    fn test_find_agents_by_id_prefix() {
+        let conn = setup();
+        upsert_identity(
+            &conn,
+            &IdentityRow {
+                agent_id: "abc-12345".into(),
+                name: "Alice".into(),
+                role: "test".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        upsert_identity(
+            &conn,
+            &IdentityRow {
+                agent_id: "xyz-99999".into(),
+                name: "Bob".into(),
+                role: "test".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+
+        // Search by ID prefix
+        let results = find_agents(&conn, "abc").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "Alice");
+
+        // Search by name
+        let results = find_agents(&conn, "bob").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "Bob");
+
+        // No match
+        let results = find_agents(&conn, "zzz").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_agents_partial_name() {
+        let conn = setup();
+        upsert_identity(
+            &conn,
+            &IdentityRow {
+                agent_id: "agent-find-1".into(),
+                name: "Creative Researcher".into(),
+                role: "discussant".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+
+        let results = find_agents(&conn, "creative").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, "Creative Researcher");
+
+        let results = find_agents(&conn, "researcher").unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    // ── Agent CRUD full cycle ──
+
+    #[test]
+    fn test_agent_crud_full_cycle() {
+        let conn = setup();
+
+        // Create
+        let agent_id = "crud-agent-1";
+        upsert_identity(
+            &conn,
+            &IdentityRow {
+                agent_id: agent_id.into(),
+                name: "TestAgent".into(),
+                role: "discussant".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        upsert_soul(
+            &conn,
+            &SoulRow {
+                agent_id: agent_id.into(),
+                persona_name: "Original Persona".into(),
+                social_style_json: "{}".into(),
+                personality_json: "{}".into(),
+                thinking_style_json: "{}".into(),
+                custom_traits_json: None,
+            },
+        )
+        .unwrap();
+
+        // Read
+        let identity = get_identity(&conn, agent_id).unwrap().unwrap();
+        assert_eq!(identity.name, "TestAgent");
+        assert_eq!(identity.role, "discussant");
+        let soul = get_soul(&conn, agent_id).unwrap().unwrap();
+        assert_eq!(soul.persona_name, "Original Persona");
+
+        // Update
+        upsert_identity(
+            &conn,
+            &IdentityRow {
+                agent_id: agent_id.into(),
+                name: "UpdatedAgent".into(),
+                role: "facilitator".into(),
+                job_title: Some("Lead".into()),
+                organization: None,
+                image_url: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        upsert_soul(
+            &conn,
+            &SoulRow {
+                agent_id: agent_id.into(),
+                persona_name: "Updated Persona".into(),
+                social_style_json: r#"{"style":"analytical"}"#.into(),
+                personality_json: "{}".into(),
+                thinking_style_json: "{}".into(),
+                custom_traits_json: None,
+            },
+        )
+        .unwrap();
+
+        let identity = get_identity(&conn, agent_id).unwrap().unwrap();
+        assert_eq!(identity.name, "UpdatedAgent");
+        assert_eq!(identity.role, "facilitator");
+        assert_eq!(identity.job_title, Some("Lead".to_string()));
+        let soul = get_soul(&conn, agent_id).unwrap().unwrap();
+        assert_eq!(soul.persona_name, "Updated Persona");
+
+        // Find
+        let results = find_agents(&conn, "Updated").unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Delete
+        let deleted = delete_agent(&conn, agent_id).unwrap();
+        assert!(deleted);
+        assert!(get_identity(&conn, agent_id).unwrap().is_none());
+        assert!(get_soul(&conn, agent_id).unwrap().is_none());
+
+        // Find after delete
+        let results = find_agents(&conn, "Updated").unwrap();
+        assert!(results.is_empty());
     }
 }

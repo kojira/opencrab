@@ -191,3 +191,102 @@ impl Default for MetricsCollector {
         Self::new(PricingRegistry::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collector() -> MetricsCollector {
+        MetricsCollector::default()
+    }
+
+    #[test]
+    fn test_record_success() {
+        let mc = collector();
+        mc.record_success("openai", "gpt-4o", 100, 50, 200);
+        let records = mc.records();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].success);
+        assert_eq!(records[0].provider, "openai");
+        assert_eq!(records[0].model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_record_failure() {
+        let mc = collector();
+        mc.record_failure("openai", "gpt-4o", 150, "timeout");
+        let records = mc.records();
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].success);
+        assert_eq!(records[0].error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn test_stats_by_provider() {
+        let mc = collector();
+        mc.record_success("openai", "gpt-4o", 100, 50, 200);
+        mc.record_success("openai", "gpt-4o", 200, 100, 300);
+        mc.record_success("anthropic", "claude-sonnet-4-20250514", 50, 25, 100);
+
+        let stats = mc.stats_by_provider();
+        assert_eq!(stats.len(), 2);
+        assert!(stats.contains_key("openai"));
+        assert!(stats.contains_key("anthropic"));
+        assert_eq!(stats["openai"].total_requests, 2);
+        assert_eq!(stats["anthropic"].total_requests, 1);
+    }
+
+    #[test]
+    fn test_stats_by_model() {
+        let mc = collector();
+        mc.record_success("openai", "gpt-4o", 100, 50, 200);
+        mc.record_success("openai", "gpt-4o-mini", 50, 25, 100);
+
+        let stats = mc.stats_by_model();
+        assert!(stats.contains_key("openai:gpt-4o"));
+        assert!(stats.contains_key("openai:gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_total_stats() {
+        let mc = collector();
+        mc.record_success("openai", "gpt-4o", 100, 50, 200);
+        mc.record_success("openai", "gpt-4o", 200, 100, 300);
+        mc.record_failure("anthropic", "claude-sonnet-4-20250514", 50, "error");
+
+        let stats = mc.total_stats();
+        assert_eq!(stats.total_requests, 3);
+        assert_eq!(stats.successful_requests, 2);
+        assert_eq!(stats.failed_requests, 1);
+    }
+
+    #[test]
+    fn test_success_rate() {
+        let stats = AggregatedStats {
+            total_requests: 4,
+            successful_requests: 3,
+            failed_requests: 1,
+            ..Default::default()
+        };
+        assert!((stats.success_rate() - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_avg_latency() {
+        let stats = AggregatedStats {
+            total_requests: 4,
+            total_latency_ms: 1000,
+            ..Default::default()
+        };
+        assert!((stats.avg_latency_ms() - 250.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mc = collector();
+        mc.record_success("openai", "gpt-4o", 100, 50, 200);
+        assert_eq!(mc.records().len(), 1);
+        mc.clear();
+        assert!(mc.records().is_empty());
+    }
+}

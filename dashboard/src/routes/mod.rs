@@ -8,7 +8,7 @@ mod workspace;
 mod analytics;
 
 pub use home::Home;
-pub use agents::{Agents, AgentDetail};
+pub use agents::{Agents, AgentCreate, AgentDetail, AgentIdentityEdit};
 pub use personas::PersonaEdit;
 pub use skills::Skills;
 pub use memory::Memory;

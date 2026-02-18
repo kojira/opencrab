@@ -200,3 +200,62 @@ impl SkillManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_sm() -> SkillManager {
+        let conn = opencrab_db::init_memory().unwrap();
+        SkillManager::new("agent-test", Arc::new(Mutex::new(conn)))
+    }
+
+    #[test]
+    fn test_acquire_skill() {
+        let sm = test_sm();
+        let skill = sm
+            .acquire_skill("coding", "Write code", "Use best practices", "training", "initial setup")
+            .unwrap();
+        assert_eq!(skill.name, "coding");
+        assert_eq!(skill.description, "Write code");
+        assert_eq!(skill.usage_count, 0);
+    }
+
+    #[test]
+    fn test_get_active_empty() {
+        let sm = test_sm();
+        let skills = sm.get_active_skills().unwrap();
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn test_get_active_with_skills() {
+        let sm = test_sm();
+        sm.acquire_skill("skill-a", "desc a", "guide a", "training", "ctx").unwrap();
+        sm.acquire_skill("skill-b", "desc b", "guide b", "training", "ctx").unwrap();
+        let skills = sm.get_active_skills().unwrap();
+        assert_eq!(skills.len(), 2);
+    }
+
+    #[test]
+    fn test_increment_usage() {
+        let sm = test_sm();
+        let skill = sm
+            .acquire_skill("coding", "Write code", "guide", "training", "ctx")
+            .unwrap();
+        sm.increment_usage(&skill.id).unwrap();
+        let skills = sm.get_active_skills().unwrap();
+        let found = skills.iter().find(|s| s.id == skill.id).unwrap();
+        assert_eq!(found.usage_count, 1);
+    }
+
+    #[test]
+    fn test_build_context() {
+        let sm = test_sm();
+        sm.acquire_skill("my-skill", "does things", "do it well", "training", "ctx")
+            .unwrap();
+        let ctx = sm.build_context().unwrap();
+        assert!(ctx.contains("Available Skills"));
+        assert!(ctx.contains("my-skill"));
+    }
+}

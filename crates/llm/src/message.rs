@@ -284,3 +284,63 @@ pub struct DeltaMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constructors() {
+        let sys = Message::system("x");
+        assert_eq!(sys.role, Role::System);
+
+        let usr = Message::user("y");
+        assert_eq!(usr.role, Role::User);
+
+        let asst = Message::assistant("z");
+        assert_eq!(asst.role, Role::Assistant);
+
+        let tool = Message::tool("id", "r");
+        assert_eq!(tool.role, Role::Tool);
+        assert_eq!(tool.tool_call_id.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn test_text_content() {
+        let msg = Message::user("hello");
+        assert_eq!(msg.text_content(), Some("hello"));
+    }
+
+    #[test]
+    fn test_first_text() {
+        let response = ChatResponse {
+            id: "resp-1".to_string(),
+            model: "test-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant("the answer"),
+                finish_reason: Some(FinishReason::Stop),
+            }],
+            usage: Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            },
+            created: 0,
+        };
+        assert_eq!(response.first_text(), Some("the answer"));
+    }
+
+    #[test]
+    fn test_builder() {
+        let msgs = vec![Message::user("hi")];
+        let req = ChatRequest::new("model", msgs)
+            .with_temperature(0.5)
+            .with_max_tokens(100);
+
+        assert_eq!(req.model, "model");
+        assert_eq!(req.temperature, Some(0.5));
+        assert_eq!(req.max_tokens, Some(100));
+        assert_eq!(req.messages.len(), 1);
+    }
+}

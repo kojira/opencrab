@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use crate::api::WorkspaceEntryDto;
 
-#[server(ListWorkspace)]
+#[server]
 pub async fn list_workspace(agent_id: String, path: String) -> Result<Vec<WorkspaceEntryDto>, ServerFnError> {
     let ws = opencrab_core::workspace::Workspace::new(&agent_id, "data")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -18,7 +18,7 @@ pub async fn list_workspace(agent_id: String, path: String) -> Result<Vec<Worksp
         .collect())
 }
 
-#[server(ReadWorkspaceFile)]
+#[server]
 pub async fn read_workspace_file(agent_id: String, path: String) -> Result<String, ServerFnError> {
     let ws = opencrab_core::workspace::Workspace::new(&agent_id, "data")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -26,7 +26,7 @@ pub async fn read_workspace_file(agent_id: String, path: String) -> Result<Strin
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
-#[server(WriteWorkspaceFile)]
+#[server]
 pub async fn write_workspace_file(
     agent_id: String,
     path: String,

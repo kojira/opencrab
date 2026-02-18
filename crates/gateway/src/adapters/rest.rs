@@ -188,3 +188,84 @@ impl Gateway for RestGateway {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::message::*;
+    use crate::traits::Gateway;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_submit_and_receive() {
+        let mut gateway = RestGateway::new(32);
+        let msg = IncomingMessage::new(
+            MessageSource::Rest {
+                request_id: "req-1".to_string(),
+            },
+            MessageContent::text("test message"),
+            Sender::user("user-1", "User One"),
+        );
+        let msg_id = gateway.submit_message(msg).await.unwrap();
+        assert!(!msg_id.is_empty());
+
+        let received = gateway.receive().await.unwrap();
+        assert_eq!(received.content.as_text(), Some("test message"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_and_wait() {
+        let gateway = RestGateway::new(32);
+        let msg = IncomingMessage::new(
+            MessageSource::Rest {
+                request_id: "req-1".to_string(),
+            },
+            MessageContent::text("request text"),
+            Sender::user("user-1", "User One"),
+        );
+        let msg_id = msg.id.clone();
+
+        // Spawn a task that sends the response through the pending oneshot
+        let pending = Arc::clone(&gateway.pending_responses);
+        let handle = tokio::spawn(async move {
+            // Brief yield to let submit_and_wait register the oneshot
+            tokio::task::yield_now().await;
+            let mut map = pending.lock().await;
+            if let Some(sender) = map.remove(&msg_id) {
+                let reply = OutgoingMessage::text_reply("response text", &msg_id);
+                sender.send(reply).ok();
+            }
+        });
+
+        let response = gateway.submit_and_wait(msg).await.unwrap();
+        assert_eq!(response.content.as_text(), Some("response text"));
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_without_reply_to() {
+        let gateway = RestGateway::new(32);
+        let msg = OutgoingMessage {
+            content: MessageContent::text("orphan message"),
+            target: MessageTarget::Broadcast,
+            reply_to: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        // Should not error; message is simply dropped
+        let result = gateway.send(msg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_submit_text_helper() {
+        let mut gateway = RestGateway::new(32);
+        let msg_id = gateway.submit_text("hello", "user-1", "User").await.unwrap();
+        assert!(!msg_id.is_empty());
+
+        let received = gateway.receive().await.unwrap();
+        assert_eq!(received.content.as_text(), Some("hello"));
+        assert_eq!(received.sender.id, "user-1");
+        assert_eq!(received.sender.name, "User");
+    }
+}

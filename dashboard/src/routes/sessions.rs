@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::api::{get_sessions, get_session, get_session_logs};
+use crate::api::{get_sessions, get_session, get_session_logs, send_mentor_instruction};
 use crate::app::Route;
 
 #[component]
@@ -82,6 +82,7 @@ fn SessionCard(session: crate::api::SessionDto) -> Element {
 pub fn SessionDetail(id: String) -> Element {
     let id_for_session = id.clone();
     let id_for_logs = id.clone();
+    let id_for_send = id.clone();
 
     let session = use_resource(move || {
         let id = id_for_session.clone();
@@ -92,6 +93,8 @@ pub fn SessionDetail(id: String) -> Element {
         let id = id_for_logs.clone();
         async move { get_session_logs(id).await }
     });
+
+    let mut mentor_input = use_signal(|| String::new());
 
     rsx! {
         div { class: "max-w-4xl mx-auto h-full flex flex-col",
@@ -152,10 +155,33 @@ pub fn SessionDetail(id: String) -> Element {
 
             // Mentor input
             div { class: "bg-white dark:bg-gray-800 shadow rounded-lg p-4",
-                input {
-                    r#type: "text",
-                    class: "w-full px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
-                    placeholder: "Type mentor instruction..."
+                form {
+                    class: "flex space-x-2",
+                    onsubmit: move |e| {
+                        e.prevent_default();
+                        let session_id = id_for_send.clone();
+                        let content = mentor_input.read().clone();
+                        if !content.is_empty() {
+                            mentor_input.set(String::new());
+                            let mut logs = logs.clone();
+                            spawn(async move {
+                                let _ = send_mentor_instruction(session_id, content).await;
+                                logs.restart();
+                            });
+                        }
+                    },
+                    input {
+                        r#type: "text",
+                        class: "flex-1 px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white",
+                        placeholder: "Type mentor instruction...",
+                        value: "{mentor_input}",
+                        oninput: move |e| mentor_input.set(e.value())
+                    }
+                    button {
+                        r#type: "submit",
+                        class: "px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium",
+                        "Send"
+                    }
                 }
             }
         }

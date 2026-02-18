@@ -46,6 +46,9 @@ pub struct ChatMessage {
     pub content: String,
     /// Tool call results (only for role = "tool").
     pub tool_call_id: Option<String>,
+    /// Tool calls requested by the assistant (only for role = "assistant").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// A tool/function definition for LLM function calling.
@@ -171,11 +174,13 @@ impl SkillEngine {
                 role: "system".to_string(),
                 content: system_context.to_string(),
                 tool_call_id: None,
+                tool_calls: vec![],
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: user_message.to_string(),
                 tool_call_id: None,
+                tool_calls: vec![],
             },
         ];
 
@@ -218,6 +223,7 @@ impl SkillEngine {
                     role: "assistant".to_string(),
                     content: response.content.clone().unwrap_or_default(),
                     tool_call_id: None,
+                    tool_calls: response.tool_calls.clone(),
                 });
 
                 for tool_call in &response.tool_calls {
@@ -238,6 +244,7 @@ impl SkillEngine {
                         role: "tool".to_string(),
                         content: result_json,
                         tool_call_id: Some(tool_call.id.clone()),
+                        tool_calls: vec![],
                     });
                 }
 
@@ -270,4 +277,214 @@ pub struct EngineResult {
     pub tool_calls_made: usize,
     /// Whether the engine stopped due to hitting the iteration limit.
     pub stopped_by_limit: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockLlm {
+        responses: std::sync::Mutex<Vec<ChatResponseSimple>>,
+    }
+
+    impl MockLlm {
+        fn new(responses: Vec<ChatResponseSimple>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for MockLlm {
+        async fn chat(&self, _request: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                anyhow::bail!("no more mock responses");
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    struct MockExecutor {
+        results: std::collections::HashMap<String, ActionResult>,
+    }
+
+    impl MockExecutor {
+        fn new() -> Self {
+            Self {
+                results: std::collections::HashMap::new(),
+            }
+        }
+        fn add_result(mut self, name: &str, result: ActionResult) -> Self {
+            self.results.insert(name.to_string(), result);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl ActionExecutor for MockExecutor {
+        async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+            self.results
+                .get(name)
+                .cloned()
+                .unwrap_or(ActionResult {
+                    success: false,
+                    data: serde_json::json!(null),
+                    error: Some(format!("Unknown action: {name}")),
+                })
+        }
+        fn list_tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: "test_tool".to_string(),
+                description: "A test tool".to_string(),
+                parameters: serde_json::json!({}),
+            }]
+        }
+    }
+
+    fn text_response(text: &str) -> ChatResponseSimple {
+        ChatResponseSimple {
+            content: Some(text.to_string()),
+            tool_calls: vec![],
+            finish_reason: "stop".to_string(),
+            usage: None,
+        }
+    }
+
+    fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponseSimple {
+        ChatResponseSimple {
+            content: None,
+            tool_calls: calls,
+            finish_reason: "tool_calls".to_string(),
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct_response() {
+        let llm = MockLlm::new(vec![text_response("Hello, world!")]);
+        let executor = MockExecutor::new();
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+
+        let result = engine.run("system", "hi", "test-model").await.unwrap();
+        assert_eq!(result.response, "Hello, world!");
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.tool_calls_made, 0);
+        assert!(!result.stopped_by_limit);
+    }
+
+    #[tokio::test]
+    async fn test_single_tool_call() {
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![ToolCall {
+                id: "tc-1".to_string(),
+                name: "test_tool".to_string(),
+                arguments: serde_json::json!({}),
+            }]),
+            text_response("Done with tool call"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"result": "ok"}),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+
+        let result = engine.run("system", "do something", "test-model").await.unwrap();
+        assert_eq!(result.iterations, 2);
+        assert_eq!(result.tool_calls_made, 1);
+        assert!(!result.stopped_by_limit);
+    }
+
+    #[tokio::test]
+    async fn test_max_iterations() {
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![ToolCall {
+                id: "tc-1".to_string(),
+                name: "test_tool".to_string(),
+                arguments: serde_json::json!({}),
+            }]),
+            tool_call_response(vec![ToolCall {
+                id: "tc-2".to_string(),
+                name: "test_tool".to_string(),
+                arguments: serde_json::json!({}),
+            }]),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!(null),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 1);
+
+        let result = engine.run("system", "loop forever", "test-model").await.unwrap();
+        assert!(result.stopped_by_limit);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_tool_calls() {
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                ToolCall {
+                    id: "tc-1".to_string(),
+                    name: "test_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+                ToolCall {
+                    id: "tc-2".to_string(),
+                    name: "test_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            ]),
+            text_response("Both tools done"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!(null),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+
+        let result = engine.run("system", "do two things", "test-model").await.unwrap();
+        assert_eq!(result.tool_calls_made, 2);
+        assert_eq!(result.iterations, 2);
+        assert!(!result.stopped_by_limit);
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_feedback() {
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![ToolCall {
+                id: "tc-1".to_string(),
+                name: "test_tool".to_string(),
+                arguments: serde_json::json!({"query": "test"}),
+            }]),
+            text_response("Received tool feedback"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"answer": 42}),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+
+        let result = engine.run("system", "query something", "test-model").await.unwrap();
+        assert_eq!(result.response, "Received tool feedback");
+        assert_eq!(result.iterations, 2);
+        assert_eq!(result.tool_calls_made, 1);
+        assert!(!result.stopped_by_limit);
+    }
 }

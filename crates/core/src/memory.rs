@@ -149,3 +149,51 @@ pub struct SearchResult {
     pub created_at: String,
     pub score: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_mm() -> MemoryManager {
+        let conn = opencrab_db::init_memory().unwrap();
+        MemoryManager::new("agent-test", Arc::new(Mutex::new(conn)))
+    }
+
+    #[test]
+    fn test_save_and_get_curated() {
+        let mm = test_mm();
+        mm.save_curated("m1", "facts", "The sky is blue").unwrap();
+        let memories = mm.get_curated(Some("facts")).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].content, "The sky is blue");
+        assert_eq!(memories[0].category, "facts");
+    }
+
+    #[test]
+    fn test_append_and_search_session_log() {
+        let mm = test_mm();
+        mm.append_session_log("s1", "message", "Rust is great", None, Some(1), None).unwrap();
+        mm.append_session_log("s1", "message", "Python is fine", None, Some(2), None).unwrap();
+        mm.append_session_log("s1", "message", "Java is verbose", None, Some(3), None).unwrap();
+
+        let results = mm.search("Rust", 10).unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.content.contains("Rust")));
+    }
+
+    #[test]
+    fn test_build_context_empty() {
+        let mm = test_mm();
+        let ctx = mm.build_context().unwrap();
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_build_context_with_data() {
+        let mm = test_mm();
+        mm.save_curated("m1", "facts", "Water is wet").unwrap();
+        let ctx = mm.build_context().unwrap();
+        assert!(ctx.contains("Curated Memories"));
+        assert!(ctx.contains("Water is wet"));
+    }
+}

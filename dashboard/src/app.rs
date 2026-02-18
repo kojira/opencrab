@@ -8,8 +8,12 @@ pub enum Route {
     Home {},
     #[route("/agents")]
     Agents {},
+    #[route("/agents/new")]
+    AgentCreate {},
     #[route("/agents/:id")]
     AgentDetail { id: String },
+    #[route("/agents/:id/edit")]
+    AgentIdentityEdit { id: String },
     #[route("/agents/:id/persona")]
     PersonaEdit { id: String },
     #[route("/skills")]

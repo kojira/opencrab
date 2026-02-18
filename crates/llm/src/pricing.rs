@@ -111,3 +111,55 @@ impl Default for PricingRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_cost() {
+        let pricing = ModelPricing::new("openai", "gpt-4o", 2.5, 10.0);
+        let cost = pricing.calculate_cost(1000, 500);
+        let expected = (1000.0 / 1_000_000.0) * 2.5 + (500.0 / 1_000_000.0) * 10.0;
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "expected {expected}, got {cost}"
+        );
+        assert!((cost - 0.0075).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_registry_defaults() {
+        let registry = PricingRegistry::new();
+        assert!(
+            registry.get("openai", "gpt-4o").is_some(),
+            "gpt-4o should be in default registry"
+        );
+    }
+
+    #[test]
+    fn test_registry_custom() {
+        let mut registry = PricingRegistry::new();
+        registry.register(ModelPricing::new("custom", "my-model", 1.0, 2.0));
+        let pricing = registry.get("custom", "my-model");
+        assert!(pricing.is_some());
+        let pricing = pricing.unwrap();
+        assert_eq!(pricing.provider, "custom");
+        assert_eq!(pricing.model, "my-model");
+        assert!((pricing.input_per_million - 1.0).abs() < f64::EPSILON);
+        assert!((pricing.output_per_million - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_registry_calculate_cost() {
+        let registry = PricingRegistry::new();
+        let cost = registry.calculate_cost("openai", "gpt-4o", 1000, 500);
+        assert!(cost.is_some());
+        let cost = cost.unwrap();
+        let expected = (1000.0 / 1_000_000.0) * 2.5 + (500.0 / 1_000_000.0) * 10.0;
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "expected {expected}, got {cost}"
+        );
+    }
+}

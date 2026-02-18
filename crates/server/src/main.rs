@@ -1,66 +1,41 @@
-use std::sync::{Arc, Mutex};
-
-use axum::{
-    extract::{Path, State},
-    routing::{get, post, put, delete},
-    Json, Router,
-};
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use std::sync::Arc;
+use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-mod api;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub db: Arc<Mutex<rusqlite::Connection>>,
-}
+use opencrab_server::{config, create_router, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file if present
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("opencrab=info".parse()?))
         .init();
 
     tracing::info!("Starting OpenCrab server...");
 
+    // Load config from TOML (with env var expansion)
+    let cfg = config::load_config("config/default.toml")?;
+
     // DB初期化
-    let conn = opencrab_db::init_connection("data/opencrab.db")?;
+    let conn = opencrab_db::init_connection(&cfg.database.path)?;
+
+    // Build LLM router from config
+    let llm_router = config::build_llm_router(&cfg.llm)?;
+
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
+        llm_router: Arc::new(llm_router),
+        workspace_base: "data".to_string(),
     };
 
-    let app = Router::new()
-        .route("/health", get(health_check))
-        // エージェント管理
-        .route("/api/agents", get(api::agents::list_agents).post(api::agents::create_agent))
-        .route("/api/agents/{id}", get(api::agents::get_agent).delete(api::agents::delete_agent))
-        .route("/api/agents/{id}/soul", get(api::agents::get_soul).put(api::agents::update_soul))
-        .route("/api/agents/{id}/identity", get(api::agents::get_identity).put(api::agents::update_identity))
-        // スキル管理
-        .route("/api/agents/{id}/skills", get(api::skills::list_skills).post(api::skills::add_skill))
-        .route("/api/agents/{id}/skills/{skill_id}/toggle", post(api::skills::toggle_skill))
-        // 記憶管理
-        .route("/api/agents/{id}/memory/curated", get(api::memory::list_curated_memory))
-        .route("/api/agents/{id}/memory/search", post(api::memory::search_memory))
-        // セッション管理
-        .route("/api/sessions", get(api::sessions::list_sessions).post(api::sessions::create_session))
-        .route("/api/sessions/{id}", get(api::sessions::get_session))
-        .route("/api/sessions/{id}/messages", post(api::sessions::send_message))
-        // ワークスペース管理
-        .route("/api/agents/{id}/workspace", get(api::workspace::list_workspace))
-        .route("/api/agents/{id}/workspace/*path", get(api::workspace::read_file).put(api::workspace::write_file))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = create_router(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-    tracing::info!("Server listening on 0.0.0.0:8080");
+    let addr = format!("0.0.0.0:{}", cfg.gateway.rest.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("Server listening on {}", addr);
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn health_check() -> &'static str {
-    "ok"
 }

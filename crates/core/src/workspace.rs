@@ -280,3 +280,125 @@ impl Workspace {
             .map_err(|e| anyhow::anyhow!("Blocking task failed: {e}"))?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_workspace() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = Workspace::from_root(dir.path()).unwrap();
+        (dir, ws)
+    }
+
+    #[test]
+    fn test_new() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = Workspace::new("agent-1", dir.path().to_str().unwrap()).unwrap();
+        let expected = dir.path().join("workspaces").join("agent-1");
+        assert!(expected.exists());
+        assert!(ws.root().ends_with("workspaces/agent-1"));
+    }
+
+    #[test]
+    fn test_from_root() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = Workspace::from_root(dir.path()).unwrap();
+        assert!(ws.root().exists());
+        assert_eq!(ws.root(), dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_write_and_read() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("test.txt", "hello").unwrap();
+        let content = ws.read_file("test.txt").unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_parent_auto_create() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("a/b/c.txt", "x").unwrap();
+        let content = ws.read_file("a/b/c.txt").unwrap();
+        assert_eq!(content, "x");
+    }
+
+    #[test]
+    fn test_edit() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("f.txt", "hello old world").unwrap();
+        let count = ws.edit_file("f.txt", "old", "new").unwrap();
+        assert_eq!(count, 1);
+        let content = ws.read_file("f.txt").unwrap();
+        assert_eq!(content, "hello new world");
+    }
+
+    #[test]
+    fn test_list() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("aaa.txt", "a").unwrap();
+        ws.write_file("bbb.txt", "b").unwrap();
+        let entries = ws.list_dir("").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "aaa.txt");
+        assert_eq!(entries[1].name, "bbb.txt");
+    }
+
+    #[test]
+    fn test_delete() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("del.txt", "bye").unwrap();
+        ws.delete_file("del.txt").unwrap();
+        assert!(ws.read_file("del.txt").is_err());
+    }
+
+    #[test]
+    fn test_mkdir() {
+        let (_dir, ws) = temp_workspace();
+        ws.mkdir_sync("newdir").unwrap();
+        let entries = ws.list_dir("").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[0].name, "newdir");
+    }
+
+    #[test]
+    fn test_traversal_dotdot() {
+        let (_dir, ws) = temp_workspace();
+        assert!(ws.resolve_path("../escape").is_err());
+    }
+
+    #[test]
+    fn test_absolute_path() {
+        let (_dir, ws) = temp_workspace();
+        assert!(ws.resolve_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_complex_traversal() {
+        let (_dir, ws) = temp_workspace();
+        assert!(ws.resolve_path("a/../../escape").is_err());
+    }
+
+    #[test]
+    fn test_safe_dot_path() {
+        let (_dir, ws) = temp_workspace();
+        let result = ws.resolve_path("./valid.txt");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_empty_path() {
+        let (_dir, ws) = temp_workspace();
+        let result = ws.resolve_path("").unwrap();
+        assert_eq!(result, ws.root());
+    }
+
+    #[test]
+    fn test_delete_dir_fails() {
+        let (_dir, ws) = temp_workspace();
+        ws.mkdir_sync("dir").unwrap();
+        assert!(ws.delete_file("dir").is_err());
+    }
+}

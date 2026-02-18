@@ -208,3 +208,106 @@ impl Agent {
         Ok(ctx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Arc<Mutex<Connection>> {
+        let conn = opencrab_db::init_memory().unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    #[test]
+    fn test_agent_new() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = test_conn();
+        let soul = Soul::new("TestPersona");
+        let identity = Identity::new("agent-1", "TestAgent", AgentRole::Discussant);
+        let agent = Agent::new(
+            "agent-1",
+            soul,
+            identity,
+            conn,
+            dir.path(),
+            AgentLlmConfig::default(),
+            HeartbeatConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(agent.id, "agent-1");
+        assert_eq!(agent.soul.persona_name, "TestPersona");
+        assert_eq!(agent.identity.name, "TestAgent");
+        assert_eq!(agent.identity.role, AgentRole::Discussant);
+    }
+
+    #[test]
+    fn test_agent_load_from_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = test_conn();
+
+        // Upsert soul and identity to the database.
+        {
+            let db = conn.lock().unwrap();
+            queries::upsert_soul(
+                &db,
+                &queries::SoulRow {
+                    agent_id: "agent-1".to_string(),
+                    persona_name: "LoadedPersona".to_string(),
+                    social_style_json: serde_json::to_string(&crate::soul::SocialStyle::default()).unwrap(),
+                    personality_json: serde_json::to_string(&crate::soul::Personality::default()).unwrap(),
+                    thinking_style_json: serde_json::to_string(&crate::soul::ThinkingStyle::default()).unwrap(),
+                    custom_traits_json: None,
+                },
+            )
+            .unwrap();
+            queries::upsert_identity(
+                &db,
+                &queries::IdentityRow {
+                    agent_id: "agent-1".to_string(),
+                    name: "LoadedAgent".to_string(),
+                    role: "discussant".to_string(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let agent = Agent::load(
+            "agent-1",
+            conn,
+            dir.path(),
+            AgentLlmConfig::default(),
+            HeartbeatConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(agent.identity.name, "LoadedAgent");
+        assert_eq!(agent.soul.persona_name, "LoadedPersona");
+    }
+
+    #[test]
+    fn test_agent_build_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = test_conn();
+        let soul = Soul::new("TestPersona");
+        let identity = Identity::new("agent-1", "TestAgent", AgentRole::Discussant);
+        let agent = Agent::new(
+            "agent-1",
+            soul,
+            identity,
+            conn,
+            dir.path(),
+            AgentLlmConfig::default(),
+            HeartbeatConfig::default(),
+        )
+        .unwrap();
+
+        let ctx = agent.build_context().unwrap();
+        assert!(ctx.contains("TestPersona"));
+        assert!(ctx.contains("TestAgent"));
+    }
+}

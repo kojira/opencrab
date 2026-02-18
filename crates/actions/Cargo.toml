@@ -18,3 +18,7 @@ opencrab-core = { workspace = true }
 opencrab-llm = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-db = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

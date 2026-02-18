@@ -51,6 +51,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Utils
 uuid = { version = "1", features = ["v4", "serde"] }
 toml = "0.8"
+tempfile = "3"
+dotenvy = "0.15"
 
 # Internal crates
 opencrab-core = { path = "crates/core" }

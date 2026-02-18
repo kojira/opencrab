@@ -15,3 +15,7 @@ opencrab-llm = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-actions = { workspace = true }
 opencrab-db = { workspace = true }
+rusqlite = { workspace = true }
+opencrab-server = { path = "../server" }
+dotenvy = { workspace = true }
+uuid = { workspace = true }

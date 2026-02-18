@@ -19,3 +19,4 @@ rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 opencrab-db = { path = "../crates/db" }
 opencrab-core = { path = "../crates/core" }
 tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }

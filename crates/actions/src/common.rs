@@ -29,7 +29,7 @@ impl Action for SendSpeechAction {
         })
     }
 
-    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
         let content = match args["content"].as_str() {
             Some(c) => c.to_string(),
             None => return ActionResult::error("content is required"),
@@ -256,5 +256,58 @@ impl Action for DeclareDoneAction {
             "done": true,
             "reason": reason,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::*;
+    use serde_json::json;
+
+    fn test_context() -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            workspace: std::sync::Arc::new(ws),
+        };
+        (dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn test_send_speech_success() {
+        let (_dir, ctx) = test_context();
+        let result = SendSpeechAction.execute(&json!({"content": "hello"}), &ctx).await;
+        assert!(result.success);
+        assert!(
+            result.side_effects.iter().any(|e| matches!(e, SideEffect::MessageSent { .. })),
+            "Expected MessageSent side effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_speech_missing_content() {
+        let (_dir, ctx) = test_context();
+        let result = SendSpeechAction.execute(&json!({}), &ctx).await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_send_noreact() {
+        let (_dir, ctx) = test_context();
+        let result = SendNoreactAction.execute(&json!({"reason": "thinking"}), &ctx).await;
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_declare_done() {
+        let (_dir, ctx) = test_context();
+        let result = DeclareDoneAction.execute(&json!({"reason": "done"}), &ctx).await;
+        assert!(result.success);
     }
 }

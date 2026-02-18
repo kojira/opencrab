@@ -1,5 +1,3 @@
-use dioxus::prelude::*;
-
 mod app;
 mod api;
 mod routes;

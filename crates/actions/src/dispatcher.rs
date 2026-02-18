@@ -96,3 +96,60 @@ impl Default for ActionDispatcher {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_context() -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            workspace: std::sync::Arc::new(ws),
+        };
+        (dir, ctx)
+    }
+
+    #[test]
+    fn test_all_actions_registered() {
+        let dispatcher = ActionDispatcher::new();
+        let names = dispatcher.action_names();
+        assert!(
+            names.len() >= 18,
+            "Expected at least 18 actions, got {}",
+            names.len()
+        );
+        assert!(names.contains(&"send_speech".to_string()));
+        assert!(names.contains(&"ws_read".to_string()));
+        assert!(names.contains(&"ws_write".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_action() {
+        let dispatcher = ActionDispatcher::new();
+        let (_dir, ctx) = test_context();
+        let result = dispatcher.execute("nonexistent", &json!({}), &ctx).await;
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn test_get_definitions_all() {
+        let dispatcher = ActionDispatcher::new();
+        let defs = dispatcher.get_definitions(&[]);
+        assert_eq!(defs.len(), dispatcher.action_names().len());
+    }
+
+    #[test]
+    fn test_get_definitions_filtered() {
+        let dispatcher = ActionDispatcher::new();
+        let defs = dispatcher.get_definitions(&["send_speech".to_string()]);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "send_speech");
+    }
+}

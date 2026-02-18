@@ -120,7 +120,7 @@ pub struct LlmMetricsDetailDto {
 // Server Functions
 // ============================================
 
-#[server(GetAgents)]
+#[server]
 pub async fn get_agents() -> Result<Vec<AgentSummary>, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -154,7 +154,7 @@ pub async fn get_agents() -> Result<Vec<AgentSummary>, ServerFnError> {
     Ok(agents)
 }
 
-#[server(GetAgent)]
+#[server]
 pub async fn get_agent(id: String) -> Result<AgentDetail, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -181,7 +181,7 @@ pub async fn get_agent(id: String) -> Result<AgentDetail, ServerFnError> {
     })
 }
 
-#[server(UpdateSoul)]
+#[server]
 pub async fn update_soul(agent_id: String, soul: SoulDto) -> Result<(), ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -210,7 +210,95 @@ pub async fn update_soul(agent_id: String, soul: SoulDto) -> Result<(), ServerFn
     Ok(())
 }
 
-#[server(GetSkills)]
+#[server]
+pub async fn create_agent(
+    name: String,
+    role: String,
+    persona_name: String,
+) -> Result<AgentSummary, ServerFnError> {
+    let conn = opencrab_db::init_connection("data/opencrab.db")
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let identity = opencrab_db::queries::IdentityRow {
+        agent_id: agent_id.clone(),
+        name: name.clone(),
+        role: if role.is_empty() { "discussant".to_string() } else { role.clone() },
+        job_title: None,
+        organization: None,
+        image_url: None,
+        metadata_json: None,
+    };
+    opencrab_db::queries::upsert_identity(&conn, &identity)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let pname = if persona_name.is_empty() { name.clone() } else { persona_name };
+    let soul = opencrab_db::queries::SoulRow {
+        agent_id: agent_id.clone(),
+        persona_name: pname.clone(),
+        social_style_json: "{}".to_string(),
+        personality_json: r#"{"openness":0.5,"conscientiousness":0.5,"extraversion":0.5,"agreeableness":0.5,"neuroticism":0.0}"#.to_string(),
+        thinking_style_json: r#"{"primary":"Analytical","secondary":"Practical","description":""}"#.to_string(),
+        custom_traits_json: None,
+    };
+    opencrab_db::queries::upsert_soul(&conn, &soul)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(AgentSummary {
+        id: agent_id,
+        name,
+        persona_name: pname,
+        role: identity.role,
+        image_url: None,
+        status: "idle".to_string(),
+        skill_count: 0,
+        session_count: 0,
+    })
+}
+
+#[server]
+pub async fn update_identity(
+    agent_id: String,
+    name: String,
+    role: String,
+    job_title: Option<String>,
+    organization: Option<String>,
+) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection("data/opencrab.db")
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let existing = opencrab_db::queries::get_identity(&conn, &agent_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Agent not found"))?;
+
+    let identity = opencrab_db::queries::IdentityRow {
+        agent_id,
+        name,
+        role,
+        job_title,
+        organization,
+        image_url: existing.image_url,
+        metadata_json: existing.metadata_json,
+    };
+    opencrab_db::queries::upsert_identity(&conn, &identity)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
+pub async fn delete_agent(agent_id: String) -> Result<bool, ServerFnError> {
+    let conn = opencrab_db::init_connection("data/opencrab.db")
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let deleted = opencrab_db::queries::delete_agent(&conn, &agent_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(deleted)
+}
+
+#[server]
 pub async fn get_skills(agent_id: String) -> Result<Vec<SkillDto>, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -232,7 +320,7 @@ pub async fn get_skills(agent_id: String) -> Result<Vec<SkillDto>, ServerFnError
         .collect())
 }
 
-#[server(ToggleSkill)]
+#[server]
 pub async fn toggle_skill(skill_id: String, active: bool) -> Result<(), ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -243,7 +331,7 @@ pub async fn toggle_skill(skill_id: String, active: bool) -> Result<(), ServerFn
     Ok(())
 }
 
-#[server(GetCuratedMemories)]
+#[server]
 pub async fn get_curated_memories(agent_id: String) -> Result<Vec<CuratedMemoryDto>, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -261,7 +349,7 @@ pub async fn get_curated_memories(agent_id: String) -> Result<Vec<CuratedMemoryD
         .collect())
 }
 
-#[server(SearchSessionLogs)]
+#[server]
 pub async fn search_session_logs(
     agent_id: String,
     query: String,
@@ -285,7 +373,7 @@ pub async fn search_session_logs(
         .collect())
 }
 
-#[server(GetSessions)]
+#[server]
 pub async fn get_sessions() -> Result<Vec<SessionDto>, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -312,7 +400,7 @@ pub async fn get_sessions() -> Result<Vec<SessionDto>, ServerFnError> {
         .collect())
 }
 
-#[server(GetSession)]
+#[server]
 pub async fn get_session(id: String) -> Result<SessionDto, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -336,7 +424,7 @@ pub async fn get_session(id: String) -> Result<SessionDto, ServerFnError> {
     })
 }
 
-#[server(GetSessionLogs)]
+#[server]
 pub async fn get_session_logs(session_id: String) -> Result<Vec<SessionLogDto>, ServerFnError> {
     let conn = opencrab_db::init_connection("data/opencrab.db")
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -366,7 +454,31 @@ pub async fn get_session_logs(session_id: String) -> Result<Vec<SessionLogDto>, 
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-#[server(GetLlmMetrics)]
+#[server]
+pub async fn send_mentor_instruction(
+    session_id: String,
+    content: String,
+) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection("data/opencrab.db")
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let log = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: "mentor".to_string(),
+        session_id,
+        log_type: "system".to_string(),
+        content,
+        speaker_id: Some("mentor".to_string()),
+        turn_number: None,
+        metadata_json: None,
+    };
+    opencrab_db::queries::insert_session_log(&conn, &log)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
 pub async fn get_llm_metrics(
     agent_id: String,
     period: String,
@@ -393,7 +505,7 @@ pub async fn get_llm_metrics(
     })
 }
 
-#[server(GetLlmMetricsDetail)]
+#[server]
 pub async fn get_llm_metrics_detail(
     agent_id: String,
     period: String,

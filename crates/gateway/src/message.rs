@@ -208,3 +208,38 @@ impl GatewayConfig {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_incoming_message_new() {
+        let msg = IncomingMessage::new(
+            MessageSource::Rest {
+                request_id: "req-1".to_string(),
+            },
+            MessageContent::text("test message"),
+            Sender::user("user-1", "User One"),
+        );
+        assert!(!msg.id.is_empty());
+        assert_eq!(msg.content.as_text(), Some("test message"));
+    }
+
+    #[test]
+    fn test_text_reply() {
+        let reply = OutgoingMessage::text_reply("hi", "msg-1");
+        assert_eq!(reply.reply_to, Some("msg-1".to_string()));
+        assert_eq!(reply.content.as_text(), Some("hi"));
+    }
+
+    #[test]
+    fn test_message_content_as_text() {
+        assert_eq!(MessageContent::Text("hello".to_string()).as_text(), Some("hello"));
+        let image = MessageContent::Image {
+            url: "http://example.com/img.png".to_string(),
+            alt: Some("an image".to_string()),
+        };
+        assert_eq!(image.as_text(), None);
+    }
+}

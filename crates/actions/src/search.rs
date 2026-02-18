@@ -226,3 +226,145 @@ impl Action for CreateMySkillAction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::*;
+    use serde_json::json;
+
+    fn test_context() -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            workspace: std::sync::Arc::new(ws),
+        };
+        (dir, ctx)
+    }
+
+    // ---- SearchMyHistoryAction ----
+
+    #[tokio::test]
+    async fn test_search_my_history_missing_query() {
+        let (_dir, ctx) = test_context();
+        let result = SearchMyHistoryAction.execute(&json!({}), &ctx).await;
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("query is required"));
+    }
+
+    #[tokio::test]
+    async fn test_search_my_history_empty_results() {
+        let (_dir, ctx) = test_context();
+        let result = SearchMyHistoryAction
+            .execute(&json!({"query": "nonexistent"}), &ctx)
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert_eq!(data["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_search_my_history_with_data() {
+        let (_dir, ctx) = test_context();
+        {
+            let conn = ctx.db.lock().unwrap();
+            let log = opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: "agent-1".to_string(),
+                session_id: "session-1".to_string(),
+                log_type: "message".to_string(),
+                content: "Rust programming is wonderful".to_string(),
+                speaker_id: Some("agent-1".to_string()),
+                turn_number: Some(1),
+                metadata_json: None,
+            };
+            opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
+        }
+        let result = SearchMyHistoryAction
+            .execute(&json!({"query": "Rust", "limit": 5}), &ctx)
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert!(data["count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_my_history_custom_limit() {
+        let (_dir, ctx) = test_context();
+        let result = SearchMyHistoryAction
+            .execute(&json!({"query": "anything", "limit": 3}), &ctx)
+            .await;
+        assert!(result.success);
+        assert_eq!(result.data.unwrap()["count"], 0);
+    }
+
+    // ---- CreateMySkillAction ----
+
+    #[tokio::test]
+    async fn test_create_my_skill_success() {
+        let (_dir, ctx) = test_context();
+        let result = CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": "Test Skill",
+                    "description": "A test skill",
+                    "situation_pattern": "when testing",
+                    "guidance": "Be thorough",
+                    "actions": ["ws_read", "ws_write"]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert!(data["created"].as_bool().unwrap());
+        assert!(data["skill_id"].as_str().is_some());
+        assert!(data["file_path"].as_str().unwrap().contains("skills/"));
+
+        // Verify side effects
+        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
+        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::FileWritten { .. })));
+
+        // Verify DB insertion
+        let conn = ctx.db.lock().unwrap();
+        let skills = opencrab_db::queries::list_skills(&conn, "agent-1", true).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "Test Skill");
+        assert_eq!(skills[0].source_type, "self_created");
+    }
+
+    #[tokio::test]
+    async fn test_create_my_skill_missing_name() {
+        let (_dir, ctx) = test_context();
+        let result = CreateMySkillAction
+            .execute(&json!({"description": "no name"}), &ctx)
+            .await;
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("name is required"));
+    }
+
+    #[tokio::test]
+    async fn test_create_my_skill_file_content() {
+        let (_dir, ctx) = test_context();
+        CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": "File Check",
+                    "description": "desc",
+                    "situation_pattern": "pattern",
+                    "guidance": "guide"
+                }),
+                &ctx,
+            )
+            .await;
+        let content = ctx.workspace.read("skills/file-check.skill.md").await.unwrap();
+        assert!(content.contains("File Check"));
+        assert!(content.contains("guide"));
+        assert!(content.contains("pattern"));
+    }
+}

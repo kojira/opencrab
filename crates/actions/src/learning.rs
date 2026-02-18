@@ -236,3 +236,135 @@ impl Action for ReflectAndLearnAction {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::*;
+    use serde_json::json;
+
+    fn test_context() -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            workspace: std::sync::Arc::new(ws),
+        };
+        (dir, ctx)
+    }
+
+    // ---- LearnFromExperienceAction ----
+
+    #[tokio::test]
+    async fn test_learn_from_experience_success() {
+        let (_dir, ctx) = test_context();
+        let result = LearnFromExperienceAction
+            .execute(
+                &json!({
+                    "experience": "Helped user debug code",
+                    "outcome": "success",
+                    "lesson": "Ask clarifying questions first",
+                    "skill_name": "debugging_help",
+                    "situation_pattern": "when user has a bug",
+                    "guidance": "Ask for error messages before suggesting fixes"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert_eq!(data["skill_name"], "debugging_help");
+        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
+
+        // Verify DB
+        let conn = ctx.db.lock().unwrap();
+        let skills = opencrab_db::queries::list_skills(&conn, "agent-1", true).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].source_type, "experience");
+        assert!(skills[0].source_context.as_ref().unwrap().contains("debug"));
+    }
+
+    #[tokio::test]
+    async fn test_learn_from_experience_defaults() {
+        let (_dir, ctx) = test_context();
+        let result = LearnFromExperienceAction
+            .execute(
+                &json!({
+                    "experience": "Something happened",
+                    "outcome": "partial",
+                    "lesson": "Learned something"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert_eq!(data["skill_name"], "unnamed");
+    }
+
+    // ---- LearnFromPeerAction ----
+
+    #[tokio::test]
+    async fn test_learn_from_peer_success() {
+        let (_dir, ctx) = test_context();
+        let result = LearnFromPeerAction
+            .execute(
+                &json!({
+                    "peer_name": "Alice",
+                    "observed_pattern": "Always summarizes before responding",
+                    "lesson": "Summarizing improves clarity",
+                    "skill_name": "summarize_first",
+                    "guidance": "Summarize the user's question before answering"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert_eq!(data["skill_name"], "summarize_first");
+
+        let conn = ctx.db.lock().unwrap();
+        let skills = opencrab_db::queries::list_skills(&conn, "agent-1", true).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].source_type, "peer");
+        assert!(skills[0].source_context.as_ref().unwrap().contains("Alice"));
+    }
+
+    // ---- ReflectAndLearnAction ----
+
+    #[tokio::test]
+    async fn test_reflect_and_learn_success() {
+        let (_dir, ctx) = test_context();
+        let result = ReflectAndLearnAction
+            .execute(
+                &json!({
+                    "reflection": "I tend to give overly long responses",
+                    "insights": ["Brevity is valued", "Users want actionable advice"],
+                    "action_items": ["Keep responses under 200 words"]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert!(data["reflected"].as_bool().unwrap());
+
+        // Verify curated memory was saved
+        let conn = ctx.db.lock().unwrap();
+        let memories =
+            opencrab_db::queries::get_curated_memories(&conn, "agent-1", "reflection").unwrap();
+        assert_eq!(memories.len(), 1);
+        assert!(memories[0].content.contains("overly long responses"));
+    }
+
+    #[tokio::test]
+    async fn test_reflect_and_learn_empty() {
+        let (_dir, ctx) = test_context();
+        let result = ReflectAndLearnAction.execute(&json!({}), &ctx).await;
+        assert!(result.success);
+    }
+}

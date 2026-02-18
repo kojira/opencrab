@@ -105,14 +105,15 @@ pub async fn delete_agent(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
-    conn.execute("DELETE FROM identity WHERE agent_id = ?1", [&id])
+    let rows = conn
+        .execute("DELETE FROM identity WHERE agent_id = ?1", [&id])
         .unwrap();
     conn.execute("DELETE FROM soul WHERE agent_id = ?1", [&id])
         .unwrap();
     conn.execute("DELETE FROM skills WHERE agent_id = ?1", [&id])
         .unwrap();
 
-    Json(serde_json::json!({"deleted": true}))
+    Json(serde_json::json!({"deleted": rows > 0}))
 }
 
 pub async fn get_soul(

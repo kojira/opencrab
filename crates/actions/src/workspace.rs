@@ -284,3 +284,127 @@ impl Action for WsMkdirAction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::*;
+    use serde_json::json;
+
+    fn test_context() -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            workspace: std::sync::Arc::new(ws),
+        };
+        (dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn test_ws_write_and_read() {
+        let (_dir, ctx) = test_context();
+        let write_result = WsWriteAction
+            .execute(&json!({"path": "test.txt", "content": "hello"}), &ctx)
+            .await;
+        assert!(write_result.success);
+
+        let read_result = WsReadAction
+            .execute(&json!({"path": "test.txt"}), &ctx)
+            .await;
+        assert!(read_result.success);
+        let data = read_result.data.unwrap();
+        assert_eq!(data["content"].as_str(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_ws_read_missing() {
+        let (_dir, ctx) = test_context();
+        let result = WsReadAction
+            .execute(&json!({"path": "nonexistent.txt"}), &ctx)
+            .await;
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_ws_list() {
+        let (_dir, ctx) = test_context();
+        WsWriteAction
+            .execute(&json!({"path": "listed.txt", "content": "data"}), &ctx)
+            .await;
+
+        let result = WsListAction.execute(&json!({"path": ""}), &ctx).await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(names.contains(&"listed.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_ws_edit() {
+        let (_dir, ctx) = test_context();
+        WsWriteAction
+            .execute(&json!({"path": "edit.txt", "content": "old content"}), &ctx)
+            .await;
+
+        let edit_result = WsEditAction
+            .execute(
+                &json!({"path": "edit.txt", "old_string": "old", "new_string": "new"}),
+                &ctx,
+            )
+            .await;
+        assert!(edit_result.success);
+
+        let read_result = WsReadAction
+            .execute(&json!({"path": "edit.txt"}), &ctx)
+            .await;
+        assert!(read_result.success);
+        let data = read_result.data.unwrap();
+        assert_eq!(data["content"].as_str(), Some("new content"));
+    }
+
+    #[tokio::test]
+    async fn test_ws_delete() {
+        let (_dir, ctx) = test_context();
+        WsWriteAction
+            .execute(&json!({"path": "todelete.txt", "content": "bye"}), &ctx)
+            .await;
+
+        let del_result = WsDeleteAction
+            .execute(&json!({"path": "todelete.txt"}), &ctx)
+            .await;
+        assert!(del_result.success);
+
+        let read_result = WsReadAction
+            .execute(&json!({"path": "todelete.txt"}), &ctx)
+            .await;
+        assert!(!read_result.success);
+    }
+
+    #[tokio::test]
+    async fn test_ws_mkdir() {
+        let (_dir, ctx) = test_context();
+        let mkdir_result = WsMkdirAction
+            .execute(&json!({"path": "newdir"}), &ctx)
+            .await;
+        assert!(mkdir_result.success);
+
+        let list_result = WsListAction.execute(&json!({"path": ""}), &ctx).await;
+        assert!(list_result.success);
+        let data = list_result.data.unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert!(names.contains(&"newdir"));
+    }
+}

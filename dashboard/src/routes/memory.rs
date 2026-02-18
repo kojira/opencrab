@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::api::{get_agents, get_curated_memories, search_session_logs};
+use crate::api::{get_agents, get_curated_memories, search_session_logs, SessionLogDto};
 
 #[component]
 pub fn Memory() -> Element {
@@ -7,6 +7,7 @@ pub fn Memory() -> Element {
     let mut selected_agent = use_signal(|| Option::<String>::None);
     let mut search_query = use_signal(|| String::new());
     let mut active_tab = use_signal(|| "curated".to_string());
+    let mut search_results = use_signal(|| Option::<Result<Vec<SessionLogDto>, String>>::None);
 
     let agent_id = selected_agent.read().clone();
 
@@ -134,13 +135,55 @@ pub fn Memory() -> Element {
                                     let query = search_query.read().clone();
                                     if !query.is_empty() {
                                         spawn(async move {
-                                            let _result = search_session_logs(agent_id, query).await;
+                                            let result = search_session_logs(agent_id, query).await;
+                                            search_results.set(Some(result.map_err(|e| e.to_string())));
                                         });
                                     }
                                 },
                                 "Search"
                             }
                         }
+                    }
+
+                    // Search results
+                    match &*search_results.read() {
+                        Some(Ok(results)) => rsx! {
+                            if results.is_empty() {
+                                div { class: "text-center py-8",
+                                    p { class: "text-gray-500 dark:text-gray-400", "No results found." }
+                                }
+                            } else {
+                                div { class: "space-y-3 mt-4",
+                                    p { class: "text-sm text-gray-500 dark:text-gray-400 mb-2",
+                                        "{results.len()} result(s) found"
+                                    }
+                                    for log in results.iter() {
+                                        div { class: "bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700",
+                                            div { class: "flex justify-between text-sm text-gray-500 dark:text-gray-400 mb-2",
+                                                span { class: "font-medium",
+                                                    "{log.speaker_id.as_deref().unwrap_or(\"unknown\")}"
+                                                }
+                                                div { class: "flex items-center space-x-2",
+                                                    span { class: "px-1.5 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-600",
+                                                        "{log.log_type}"
+                                                    }
+                                                    span { "{log.created_at}" }
+                                                }
+                                            }
+                                            p { class: "text-gray-900 dark:text-white whitespace-pre-wrap",
+                                                "{log.content}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Some(Err(e)) => rsx! {
+                            div { class: "bg-red-50 border border-red-200 rounded-lg p-4 mt-4",
+                                p { class: "text-red-800", "Error: {e}" }
+                            }
+                        },
+                        None => rsx! {},
                     }
                 }
             }

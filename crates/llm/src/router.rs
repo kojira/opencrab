@@ -296,3 +296,153 @@ impl std::fmt::Debug for LlmRouter {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::*;
+    use crate::traits::LlmProvider;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct MockProvider {
+        provider_name: String,
+        should_fail: AtomicBool,
+    }
+
+    impl MockProvider {
+        fn new(name: &str, should_fail: bool) -> Self {
+            Self {
+                provider_name: name.to_string(),
+                should_fail: AtomicBool::new(should_fail),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            &self.provider_name
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<crate::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            if self.should_fail.load(Ordering::SeqCst) {
+                anyhow::bail!("mock failure");
+            }
+            Ok(ChatResponse {
+                id: "resp-1".to_string(),
+                model: request.model,
+                choices: vec![Choice {
+                    index: 0,
+                    message: Message::assistant("mock response"),
+                    finish_reason: Some(FinishReason::Stop),
+                }],
+                usage: Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                },
+                created: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn test_resolve_model_default() {
+        let mut router = LlmRouter::new();
+        router.set_default_provider("openai");
+        let (provider, model) = router.resolve_model("gpt-4o").unwrap();
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_resolve_model_explicit() {
+        let router = LlmRouter::new();
+        let (provider, model) = router.resolve_model("anthropic:claude").unwrap();
+        assert_eq!(provider, "anthropic");
+        assert_eq!(model, "claude");
+    }
+
+    #[test]
+    fn test_resolve_model_alias() {
+        let mut router = LlmRouter::new();
+        router.add_model_mapping("best", "openai:gpt-4o");
+        let (provider, model) = router.resolve_model("best").unwrap();
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_resolve_model_no_default_error() {
+        let router = LlmRouter::new();
+        let result = router.resolve_model("gpt-4o");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_provider_success() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("openai", false)));
+        router.set_default_provider("openai");
+
+        let request = ChatRequest::new("gpt-4o", vec![Message::user("hello")]);
+        let response = router.chat_completion(request).await;
+        assert!(response.is_ok());
+        let response = response.unwrap();
+        assert_eq!(response.first_text(), Some("mock response"));
+    }
+
+    #[tokio::test]
+    async fn test_provider_fallback() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("primary", true)));
+        router.add_provider(Arc::new(MockProvider::new("fallback", false)));
+        router.set_default_provider("primary");
+        router.set_fallback_chain(vec!["fallback".to_string()]);
+
+        let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
+        let response = router.chat_completion(request).await;
+        assert!(response.is_ok());
+        assert_eq!(response.unwrap().first_text(), Some("mock response"));
+    }
+
+    #[tokio::test]
+    async fn test_all_providers_fail() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("primary", true)));
+        router.add_provider(Arc::new(MockProvider::new("fallback", true)));
+        router.set_default_provider("primary");
+        router.set_fallback_chain(vec!["fallback".to_string()]);
+
+        let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
+        let response = router.chat_completion(request).await;
+        assert!(response.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_skip_already_tried() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("primary", true)));
+        router.set_default_provider("primary");
+        // Include the primary in the fallback chain; it should be skipped
+        router.set_fallback_chain(vec!["primary".to_string()]);
+
+        let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
+        let response = router.chat_completion(request).await;
+        assert!(response.is_err());
+    }
+
+    #[test]
+    fn test_provider_names() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("openai", false)));
+        router.add_provider(Arc::new(MockProvider::new("anthropic", false)));
+
+        let names = router.provider_names();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"openai"));
+        assert!(names.contains(&"anthropic"));
+    }
+}
