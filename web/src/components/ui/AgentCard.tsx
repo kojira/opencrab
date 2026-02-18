@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { AgentSummary } from '../../api/types';
 
 interface Props {
@@ -6,6 +7,8 @@ interface Props {
 }
 
 export default function AgentCard({ agent }: Props) {
+  const { t } = useTranslation();
+
   const badgeClass =
     agent.status === 'active'
       ? 'badge-success'
@@ -61,11 +64,11 @@ export default function AgentCard({ agent }: Props) {
           <span className="material-symbols-outlined text-base">
             psychology
           </span>
-          <span>{agent.skill_count} skills</span>
+          <span>{t('agentCard.skills', { count: agent.skill_count })}</span>
         </div>
         <div className="flex items-center gap-1.5 text-body-sm text-on-surface-variant">
           <span className="material-symbols-outlined text-base">forum</span>
-          <span>{agent.session_count} sessions</span>
+          <span>{t('agentCard.sessions', { count: agent.session_count })}</span>
         </div>
       </div>
     </Link>

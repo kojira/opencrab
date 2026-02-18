@@ -51,7 +51,7 @@ describe('Agents', () => {
   it('shows loading state initially', () => {
     mockedGetAgents.mockReturnValue(new Promise(() => {}));
     renderAgents();
-    expect(screen.getByText('Loading...')).toBeInTheDocument();
+    expect(screen.getByText('common.loading')).toBeInTheDocument();
   });
 
   it('renders agent cards after loading', async () => {
@@ -69,10 +69,10 @@ describe('Agents', () => {
     renderAgents();
 
     await waitFor(() => {
-      expect(screen.getByText('No agents found.')).toBeInTheDocument();
+      expect(screen.getByText('agents.noAgents')).toBeInTheDocument();
     });
     expect(
-      screen.getByText('Create your first agent to get started.'),
+      screen.getByText('agents.createFirstAgent'),
     ).toBeInTheDocument();
   });
 
@@ -81,19 +81,19 @@ describe('Agents', () => {
     renderAgents();
 
     await waitFor(() => {
-      expect(screen.getByText('Error: Server unreachable')).toBeInTheDocument();
+      expect(screen.getByText('common.error')).toBeInTheDocument();
     });
   });
 
   it('renders the New Agent button', () => {
     mockedGetAgents.mockReturnValue(new Promise(() => {}));
     renderAgents();
-    expect(screen.getByText('New Agent')).toBeInTheDocument();
+    expect(screen.getByText('agents.newAgent')).toBeInTheDocument();
   });
 
   it('renders the page title', () => {
     mockedGetAgents.mockReturnValue(new Promise(() => {}));
     renderAgents();
-    expect(screen.getByText('Agents')).toBeInTheDocument();
+    expect(screen.getByText('agents.title')).toBeInTheDocument();
   });
 });

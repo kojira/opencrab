@@ -34,9 +34,9 @@ export function getSessionLogs(id: string): Promise<SessionLogRow[]> {
   return api.get<SessionLogRow[]>(`/sessions/${id}/logs`);
 }
 
-export function sendMentorInstruction(
+export function sendOwnerInstruction(
   sessionId: string,
   content: string,
 ): Promise<{ id: number }> {
-  return api.post(`/sessions/${sessionId}/mentor`, { content });
+  return api.post(`/sessions/${sessionId}/owner`, { content });
 }

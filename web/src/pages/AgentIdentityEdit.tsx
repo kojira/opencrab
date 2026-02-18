@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { getAgent, updateIdentity } from '../api/agents';
 
 export default function AgentIdentityEdit() {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
-  const [jobTitle, setJobTitle] = useState('');
-  const [organization, setOrganization] = useState('');
   const [initialized, setInitialized] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
@@ -18,8 +18,6 @@ export default function AgentIdentityEdit() {
     getAgent(id).then((detail) => {
       setName(detail.name);
       setRole(detail.role);
-      setJobTitle(detail.job_title ?? '');
-      setOrganization(detail.organization ?? '');
       setInitialized(true);
     });
   }, [id]);
@@ -31,8 +29,8 @@ export default function AgentIdentityEdit() {
       await updateIdentity(id, {
         name,
         role,
-        job_title: jobTitle || null,
-        organization: organization || null,
+        job_title: null,
+        organization: null,
         image_url: null,
         metadata_json: null,
       });
@@ -46,7 +44,7 @@ export default function AgentIdentityEdit() {
   if (!initialized) {
     return (
       <div className="empty-state">
-        <p className="text-body-lg text-on-surface-variant">Loading...</p>
+        <p className="text-body-lg text-on-surface-variant">{t('common.loading')}</p>
       </div>
     );
   }
@@ -57,13 +55,13 @@ export default function AgentIdentityEdit() {
         <Link to={`/agents/${id}`} className="btn-text p-2">
           <span className="material-symbols-outlined">arrow_back</span>
         </Link>
-        <h1 className="page-title">Edit Identity</h1>
+        <h1 className="page-title">{t('identityEdit.title')}</h1>
       </div>
 
       <div className="card-elevated space-y-6">
         <div>
           <label className="block text-label-lg text-on-surface mb-2">
-            Name
+            {t('identityEdit.nameLabel')}
           </label>
           <input
             type="text"
@@ -75,44 +73,21 @@ export default function AgentIdentityEdit() {
 
         <div>
           <label className="block text-label-lg text-on-surface mb-2">
-            Role
+            {t('identityEdit.roleLabel')}
           </label>
-          <select
-            className="select-outlined"
+          <input
+            type="text"
+            className="input-outlined"
+            list="role-options"
+            placeholder={t('agentCreate.rolePlaceholder')}
             value={role}
             onChange={(e) => setRole(e.target.value)}
-          >
-            <option value="discussant">Discussant</option>
-            <option value="facilitator">Facilitator</option>
-            <option value="observer">Observer</option>
-            <option value="mentor">Mentor</option>
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-label-lg text-on-surface mb-2">
-            Job Title
-          </label>
-          <input
-            type="text"
-            className="input-outlined"
-            placeholder="Optional"
-            value={jobTitle}
-            onChange={(e) => setJobTitle(e.target.value)}
           />
-        </div>
-
-        <div>
-          <label className="block text-label-lg text-on-surface mb-2">
-            Organization
-          </label>
-          <input
-            type="text"
-            className="input-outlined"
-            placeholder="Optional"
-            value={organization}
-            onChange={(e) => setOrganization(e.target.value)}
-          />
+          <datalist id="role-options">
+            <option value={t('roles.discussant')} />
+            <option value={t('roles.facilitator')} />
+            <option value={t('roles.observer')} />
+          </datalist>
         </div>
 
         {saveStatus && (
@@ -137,17 +112,17 @@ export default function AgentIdentityEdit() {
                 <span className="material-symbols-outlined animate-spin text-xl">
                   progress_activity
                 </span>
-                Saving...
+                {t('common.saving')}
               </>
             ) : (
               <>
                 <span className="material-symbols-outlined text-xl">save</span>
-                Save
+                {t('common.save')}
               </>
             )}
           </button>
           <Link to={`/agents/${id}`} className="btn-outlined">
-            Cancel
+            {t('common.cancel')}
           </Link>
         </div>
       </div>

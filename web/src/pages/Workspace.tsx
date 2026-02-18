@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   listWorkspace,
   readWorkspaceFile,
@@ -63,6 +64,7 @@ function FileEntry({
 }
 
 export default function Workspace() {
+  const { t } = useTranslation();
   const { agentId } = useParams<{ agentId: string }>();
   const [currentPath, setCurrentPath] = useState('');
   const [entries, setEntries] = useState<WorkspaceEntryDto[] | null>(null);
@@ -128,11 +130,11 @@ export default function Workspace() {
         <Link to={`/agents/${agentId}`} className="btn-text p-2">
           <span className="material-symbols-outlined">arrow_back</span>
         </Link>
-        <h1 className="page-title">Workspace</h1>
+        <h1 className="page-title">{t('workspace.title')}</h1>
       </div>
       <div className="flex items-center gap-2 text-body-md text-on-surface-variant mb-6">
         <span className="material-symbols-outlined text-lg">smart_toy</span>
-        <span>Agent: </span>
+        <span>{t('workspace.agent')} </span>
         <span className="font-mono text-on-surface">{agentId}</span>
       </div>
 
@@ -152,7 +154,7 @@ export default function Workspace() {
                   <span className="material-symbols-outlined text-lg">
                     arrow_upward
                   </span>
-                  Up
+                  {t('common.up')}
                 </button>
               )}
               <span className="text-label-lg text-on-surface-variant">
@@ -169,14 +171,14 @@ export default function Workspace() {
                     error
                   </span>
                   <p className="text-body-md text-error">
-                    Error: {entriesError}
+                    {t('common.error', { message: entriesError })}
                   </p>
                 </div>
               </div>
             ) : entries === null ? (
               <div className="p-8 text-center">
                 <p className="text-body-md text-on-surface-variant">
-                  Loading...
+                  {t('common.loading')}
                 </p>
               </div>
             ) : entries.length === 0 ? (
@@ -185,7 +187,7 @@ export default function Workspace() {
                   folder_off
                 </span>
                 <p className="text-body-md text-on-surface-variant">
-                  Empty directory
+                  {t('workspace.emptyDirectory')}
                 </p>
               </div>
             ) : (
@@ -208,7 +210,7 @@ export default function Workspace() {
                 {selectedFile ? 'description' : 'draft'}
               </span>
               <span className="text-label-lg text-on-surface">
-                {selectedFile ?? 'No file selected'}
+                {selectedFile ?? t('workspace.noFileSelected')}
               </span>
             </div>
             {selectedFile && (
@@ -223,7 +225,7 @@ export default function Workspace() {
                 <span className="material-symbols-outlined text-lg">
                   {editing ? 'close' : 'edit'}
                 </span>
-                {editing ? 'Cancel' : 'Edit'}
+                {editing ? t('common.cancel') : t('common.edit')}
               </button>
             )}
           </div>
@@ -241,7 +243,7 @@ export default function Workspace() {
                     <span className="material-symbols-outlined text-xl">
                       save
                     </span>
-                    Save
+                    {t('common.save')}
                   </button>
                 </>
               ) : (
@@ -255,7 +257,7 @@ export default function Workspace() {
                   description
                 </span>
                 <p className="text-body-lg text-on-surface-variant">
-                  Select a file to view
+                  {t('workspace.selectFile')}
                 </p>
               </div>
             )}

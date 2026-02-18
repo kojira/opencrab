@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getAgents } from '../api/agents';
 import { getMetricsSummary, getMetricsDetail } from '../api/analytics';
 import type {
@@ -36,6 +37,7 @@ function MetricCard({
 }
 
 export default function Analytics() {
+  const { t } = useTranslation();
   const [agents, setAgents] = useState<AgentSummary[] | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedPeriod, setSelectedPeriod] = useState('week');
@@ -62,7 +64,7 @@ export default function Analytics() {
 
   return (
     <div className="max-w-7xl mx-auto">
-      <h1 className="page-title mb-6">Analytics & Metrics</h1>
+      <h1 className="page-title mb-6">{t('analytics.title')}</h1>
 
       {/* Controls */}
       <div className="card-elevated mb-6">
@@ -73,7 +75,7 @@ export default function Analytics() {
                 <span className="material-symbols-outlined text-lg">
                   smart_toy
                 </span>
-                Agent
+                {t('analytics.agent')}
               </span>
             </label>
             {agents ? (
@@ -83,7 +85,7 @@ export default function Analytics() {
                   setSelectedAgent(e.target.value || null)
                 }
               >
-                <option value="">-- Select an agent --</option>
+                <option value="">{t('common.selectAgentPlaceholder')}</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name}
@@ -92,7 +94,7 @@ export default function Analytics() {
               </select>
             ) : (
               <p className="text-body-md text-on-surface-variant">
-                Loading...
+                {t('common.loading')}
               </p>
             )}
           </div>
@@ -102,14 +104,14 @@ export default function Analytics() {
                 <span className="material-symbols-outlined text-lg">
                   calendar_today
                 </span>
-                Period
+                {t('analytics.period')}
               </span>
             </label>
             <div className="segmented-group">
               {[
-                { value: 'day', label: '24h' },
-                { value: 'week', label: '7 days' },
-                { value: 'month', label: '30 days' },
+                { value: 'day', label: t('analytics.24h') },
+                { value: 'week', label: t('analytics.7days') },
+                { value: 'month', label: t('analytics.30days') },
               ].map((p) => (
                 <button
                   key={p.value}
@@ -134,27 +136,27 @@ export default function Analytics() {
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
               <MetricCard
                 icon="api"
-                label="API Calls"
+                label={t('analytics.apiCalls')}
                 value={String(summary.count)}
               />
               <MetricCard
                 icon="token"
-                label="Total Tokens"
+                label={t('analytics.totalTokens')}
                 value={formatNumber(summary.total_tokens)}
               />
               <MetricCard
                 icon="payments"
-                label="Total Cost"
+                label={t('analytics.totalCost')}
                 value={`$${summary.total_cost.toFixed(4)}`}
               />
               <MetricCard
                 icon="speed"
-                label="Avg Latency"
+                label={t('analytics.avgLatency')}
                 value={`${summary.avg_latency.toFixed(0)}ms`}
               />
               <MetricCard
                 icon="grade"
-                label="Avg Quality"
+                label={t('analytics.avgQuality')}
                 value={summary.avg_quality.toFixed(2)}
               />
             </div>
@@ -166,14 +168,14 @@ export default function Analytics() {
                 <span className="material-symbols-outlined text-xl text-primary">
                   table_chart
                 </span>
-                Usage by Model
+                {t('analytics.usageByModel')}
               </h2>
             </div>
 
             {detail === null ? (
               <div className="empty-state">
                 <p className="text-body-lg text-on-surface-variant">
-                  Loading...
+                  {t('common.loading')}
                 </p>
               </div>
             ) : detail.length === 0 ? (
@@ -182,7 +184,7 @@ export default function Analytics() {
                   table_rows
                 </span>
                 <p className="empty-state-text">
-                  No usage data for this period.
+                  {t('analytics.noUsageData')}
                 </p>
               </div>
             ) : (
@@ -190,12 +192,12 @@ export default function Analytics() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Provider</th>
-                      <th>Model</th>
-                      <th className="text-right">Requests</th>
-                      <th className="text-right">Tokens</th>
-                      <th className="text-right">Cost</th>
-                      <th className="text-right">Avg Latency</th>
+                      <th>{t('analytics.provider')}</th>
+                      <th>{t('analytics.model')}</th>
+                      <th className="text-right">{t('analytics.requests')}</th>
+                      <th className="text-right">{t('analytics.tokens')}</th>
+                      <th className="text-right">{t('analytics.cost')}</th>
+                      <th className="text-right">{t('analytics.avgLatency')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -227,7 +229,7 @@ export default function Analytics() {
             analytics
           </span>
           <p className="empty-state-text">
-            Select an agent to view metrics
+            {t('analytics.selectAgent')}
           </p>
         </div>
       )}

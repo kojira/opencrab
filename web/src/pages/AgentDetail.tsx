@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { getAgent, deleteAgent } from '../api/agents';
 import type { AgentDetail as AgentDetailType } from '../api/types';
 import ConfirmDialog from '../components/ui/ConfirmDialog';
@@ -38,6 +39,7 @@ function ActionCard({
 }
 
 export default function AgentDetail() {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [agent, setAgent] = useState<AgentDetailType | null>(null);
@@ -65,7 +67,7 @@ export default function AgentDetail() {
         <div className="flex items-center gap-2">
           <span className="material-symbols-outlined text-error">error</span>
           <p className="text-body-lg text-error-on-container">
-            Error: {error}
+            {t('common.error', { message: error })}
           </p>
         </div>
       </div>
@@ -75,7 +77,7 @@ export default function AgentDetail() {
   if (!agent) {
     return (
       <div className="empty-state">
-        <p className="text-body-lg text-on-surface-variant">Loading...</p>
+        <p className="text-body-lg text-on-surface-variant">{t('common.loading')}</p>
       </div>
     );
   }
@@ -97,23 +99,18 @@ export default function AgentDetail() {
             <p className="text-body-lg text-on-surface-variant">
               {agent.persona_name} / {agent.role}
             </p>
-            {agent.organization && (
-              <p className="text-body-sm text-on-surface-variant">
-                {agent.organization}
-              </p>
-            )}
           </div>
           <div className="flex items-center gap-2">
             <Link to={`/agents/${id}/edit`} className="btn-tonal">
               <span className="material-symbols-outlined text-xl">edit</span>
-              Edit
+              {t('common.edit')}
             </Link>
             <button
               className="btn-outlined border-error text-error hover:bg-error-container/30"
               onClick={() => setShowDeleteConfirm(true)}
             >
               <span className="material-symbols-outlined text-xl">delete</span>
-              Delete
+              {t('common.delete')}
             </button>
           </div>
         </div>
@@ -121,8 +118,8 @@ export default function AgentDetail() {
 
       {showDeleteConfirm && (
         <ConfirmDialog
-          title="Delete Agent?"
-          message="This will permanently delete the agent and all associated data (soul, skills, memories)."
+          title={t('agentDetail.deleteTitle')}
+          message={t('agentDetail.deleteMessage')}
           onConfirm={handleDelete}
           onCancel={() => setShowDeleteConfirm(false)}
         />
@@ -133,20 +130,20 @@ export default function AgentDetail() {
         <ActionCard
           to={`/agents/${id}/persona`}
           icon="face"
-          title="Edit Persona"
-          description="Personality & thinking style"
+          title={t('agentDetail.editPersona')}
+          description={t('agentDetail.editPersonaDesc')}
         />
         <ActionCard
           to="/skills"
           icon="psychology"
-          title="Manage Skills"
-          description="Enable/disable skills"
+          title={t('agentDetail.manageSkills')}
+          description={t('agentDetail.manageSkillsDesc')}
         />
         <ActionCard
           to={`/workspace/${id}`}
           icon="folder_open"
-          title="Workspace"
-          description="Browse agent files"
+          title={t('agentDetail.workspace')}
+          description={t('agentDetail.workspaceDesc')}
         />
       </div>
 
@@ -156,18 +153,12 @@ export default function AgentDetail() {
           <span className="material-symbols-outlined text-xl text-primary">
             badge
           </span>
-          Identity
+          {t('agentDetail.identity')}
         </h2>
         <div className="space-y-3">
-          <DetailRow label="Agent ID" value={agent.id} />
-          <DetailRow label="Name" value={agent.name} />
-          <DetailRow label="Role" value={agent.role} />
-          {agent.job_title && (
-            <DetailRow label="Job Title" value={agent.job_title} />
-          )}
-          {agent.organization && (
-            <DetailRow label="Organization" value={agent.organization} />
-          )}
+          <DetailRow label={t('agentDetail.agentId')} value={agent.id} />
+          <DetailRow label={t('agentDetail.name')} value={agent.name} />
+          <DetailRow label={t('agentDetail.role')} value={agent.role} />
         </div>
       </div>
     </div>

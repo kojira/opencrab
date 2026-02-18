@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { createAgent } from '../api/agents';
 
 export default function AgentCreate() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [role, setRole] = useState('discussant');
@@ -12,7 +14,7 @@ export default function AgentCreate() {
 
   const handleSubmit = async () => {
     if (!name.trim()) {
-      setErrorMsg('Name is required.');
+      setErrorMsg(t('agentCreate.nameRequired'));
       return;
     }
     setSaving(true);
@@ -35,18 +37,18 @@ export default function AgentCreate() {
         <Link to="/agents" className="btn-text p-2">
           <span className="material-symbols-outlined">arrow_back</span>
         </Link>
-        <h1 className="page-title">Create New Agent</h1>
+        <h1 className="page-title">{t('agentCreate.title')}</h1>
       </div>
 
       <div className="card-elevated space-y-6">
         <div>
           <label className="block text-label-lg text-on-surface mb-2">
-            Name *
+            {t('agentCreate.nameLabel')}
           </label>
           <input
             type="text"
             className="input-outlined"
-            placeholder="e.g. Kai"
+            placeholder={t('agentCreate.namePlaceholder')}
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -54,28 +56,31 @@ export default function AgentCreate() {
 
         <div>
           <label className="block text-label-lg text-on-surface mb-2">
-            Role
-          </label>
-          <select
-            className="select-outlined"
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-          >
-            <option value="discussant">Discussant</option>
-            <option value="facilitator">Facilitator</option>
-            <option value="observer">Observer</option>
-            <option value="mentor">Mentor</option>
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-label-lg text-on-surface mb-2">
-            Persona Name
+            {t('agentCreate.roleLabel')}
           </label>
           <input
             type="text"
             className="input-outlined"
-            placeholder="e.g. Pragmatic Engineer (defaults to name)"
+            list="role-options"
+            placeholder={t('agentCreate.rolePlaceholder')}
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+          />
+          <datalist id="role-options">
+            <option value={t('roles.discussant')} />
+            <option value={t('roles.facilitator')} />
+            <option value={t('roles.observer')} />
+          </datalist>
+        </div>
+
+        <div>
+          <label className="block text-label-lg text-on-surface mb-2">
+            {t('agentCreate.personaNameLabel')}
+          </label>
+          <input
+            type="text"
+            className="input-outlined"
+            placeholder={t('agentCreate.personaNamePlaceholder')}
             value={personaName}
             onChange={(e) => setPersonaName(e.target.value)}
           />
@@ -99,17 +104,17 @@ export default function AgentCreate() {
                 <span className="material-symbols-outlined animate-spin text-xl">
                   progress_activity
                 </span>
-                Creating...
+                {t('common.creating')}
               </>
             ) : (
               <>
                 <span className="material-symbols-outlined text-xl">add</span>
-                Create
+                {t('common.create')}
               </>
             )}
           </button>
           <Link to="/agents" className="btn-outlined">
-            Cancel
+            {t('common.cancel')}
           </Link>
         </div>
       </div>

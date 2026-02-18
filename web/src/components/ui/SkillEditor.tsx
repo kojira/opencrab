@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { SkillDto } from '../../api/types';
 
 interface Props {
@@ -6,6 +7,8 @@ interface Props {
 }
 
 export default function SkillEditor({ skill, onToggle }: Props) {
+  const { t } = useTranslation();
+
   const effectivenessPct = skill.effectiveness
     ? Math.round(skill.effectiveness * 100)
     : 0;
@@ -50,12 +53,12 @@ export default function SkillEditor({ skill, onToggle }: Props) {
       <div className="mt-3 pt-3 border-t border-outline-variant/50 flex items-center gap-6 ml-8">
         <div className="flex items-center gap-1.5 text-body-sm text-on-surface-variant">
           <span className="material-symbols-outlined text-base">repeat</span>
-          <span>Used {skill.usage_count} times</span>
+          <span>{t('skillEditor.usedTimes', { count: skill.usage_count })}</span>
         </div>
         {skill.effectiveness != null && (
           <div className="flex items-center gap-1.5 text-body-sm text-on-surface-variant">
             <span className="material-symbols-outlined text-base">speed</span>
-            <span>Effectiveness: {effectivenessPct}%</span>
+            <span>{t('skillEditor.effectiveness', { pct: effectivenessPct })}</span>
           </div>
         )}
       </div>

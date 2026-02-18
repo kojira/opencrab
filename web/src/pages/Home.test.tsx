@@ -88,7 +88,7 @@ describe('Home', () => {
     mockedGetAgents.mockResolvedValue([]);
     mockedGetSessions.mockResolvedValue([]);
     renderHome();
-    expect(screen.getByText('Dashboard')).toBeInTheDocument();
+    expect(screen.getByText('home.title')).toBeInTheDocument();
   });
 
   it('displays agent and session counts after loading', async () => {
@@ -97,10 +97,10 @@ describe('Home', () => {
     renderHome();
 
     await waitFor(() => {
-      expect(screen.getByText('Total Agents').parentElement).toHaveTextContent('2');
+      expect(screen.getByText('home.totalAgents').parentElement).toHaveTextContent('2');
     });
-    expect(screen.getByText('Total Sessions').parentElement).toHaveTextContent('3');
-    expect(screen.getByText('Active Sessions').parentElement).toHaveTextContent('2');
+    expect(screen.getByText('home.totalSessions').parentElement).toHaveTextContent('3');
+    expect(screen.getByText('home.activeSessions').parentElement).toHaveTextContent('2');
   });
 
   it('renders 4 quick action links', () => {
@@ -108,10 +108,10 @@ describe('Home', () => {
     mockedGetSessions.mockResolvedValue([]);
     renderHome();
 
-    expect(screen.getByText('Agent Management')).toBeInTheDocument();
-    expect(screen.getByText('Session Monitor')).toBeInTheDocument();
-    expect(screen.getByText('Memory Explorer')).toBeInTheDocument();
-    expect(screen.getByText('Analytics & Metrics')).toBeInTheDocument();
+    expect(screen.getByText('home.agentManagement')).toBeInTheDocument();
+    expect(screen.getByText('home.sessionMonitor')).toBeInTheDocument();
+    expect(screen.getByText('home.memoryExplorer')).toBeInTheDocument();
+    expect(screen.getByText('home.analyticsMetrics')).toBeInTheDocument();
   });
 
   it('renders stat labels', () => {
@@ -119,8 +119,8 @@ describe('Home', () => {
     mockedGetSessions.mockResolvedValue([]);
     renderHome();
 
-    expect(screen.getByText('Total Agents')).toBeInTheDocument();
-    expect(screen.getByText('Total Sessions')).toBeInTheDocument();
-    expect(screen.getByText('Active Sessions')).toBeInTheDocument();
+    expect(screen.getByText('home.totalAgents')).toBeInTheDocument();
+    expect(screen.getByText('home.totalSessions')).toBeInTheDocument();
+    expect(screen.getByText('home.activeSessions')).toBeInTheDocument();
   });
 });

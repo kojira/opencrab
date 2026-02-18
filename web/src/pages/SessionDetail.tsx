@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { getSession, getSessionLogs, sendMentorInstruction } from '../api/sessions';
+import { useTranslation } from 'react-i18next';
+import { getSession, getSessionLogs, sendOwnerInstruction } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
 
 function SessionLogItem({
@@ -52,11 +53,12 @@ function SessionLogItem({
 }
 
 export default function SessionDetail() {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const [session, setSession] = useState<SessionDto | null>(null);
   const [logs, setLogs] = useState<SessionLogRow[] | null>(null);
   const [logsError, setLogsError] = useState<string | null>(null);
-  const [mentorInput, setMentorInput] = useState('');
+  const [ownerInput, setOwnerInput] = useState('');
 
   const loadLogs = () => {
     if (!id) return;
@@ -73,10 +75,10 @@ export default function SessionDetail() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!id || !mentorInput.trim()) return;
-    const content = mentorInput.trim();
-    setMentorInput('');
-    await sendMentorInstruction(id, content);
+    if (!id || !ownerInput.trim()) return;
+    const content = ownerInput.trim();
+    setOwnerInput('');
+    await sendOwnerInstruction(id, content);
     loadLogs();
   };
 
@@ -115,9 +117,9 @@ export default function SessionDetail() {
                   {session.theme}
                 </h1>
                 <div className="flex items-center gap-3 text-body-sm text-on-surface-variant mt-0.5">
-                  <span>Mode: {session.mode}</span>
-                  <span>Phase: {session.phase}</span>
-                  <span>Turn: {session.turn_number}</span>
+                  <span>{t('sessionDetail.mode', { value: session.mode })}</span>
+                  <span>{t('sessionDetail.phase', { value: session.phase })}</span>
+                  <span>{t('sessionDetail.turn', { value: session.turn_number })}</span>
                 </div>
               </div>
             </div>
@@ -132,7 +134,7 @@ export default function SessionDetail() {
       ) : (
         <div className="card-elevated mb-4">
           <p className="text-body-lg text-on-surface-variant">
-            Loading session...
+            {t('sessionDetail.loadingSession')}
           </p>
         </div>
       )}
@@ -146,14 +148,14 @@ export default function SessionDetail() {
                 error
               </span>
               <p className="text-body-lg text-error-on-container">
-                Error: {logsError}
+                {t('common.error', { message: logsError })}
               </p>
             </div>
           </div>
         ) : logs === null ? (
           <div className="empty-state">
             <p className="text-body-lg text-on-surface-variant">
-              Loading logs...
+              {t('sessionDetail.loadingLogs')}
             </p>
           </div>
         ) : logs.length === 0 ? (
@@ -161,7 +163,7 @@ export default function SessionDetail() {
             <span className="material-symbols-outlined empty-state-icon">
               chat
             </span>
-            <p className="empty-state-text">No logs yet.</p>
+            <p className="empty-state-text">{t('sessionDetail.noLogs')}</p>
           </div>
         ) : (
           logs.map((log) => (
@@ -175,19 +177,19 @@ export default function SessionDetail() {
         )}
       </div>
 
-      {/* Mentor input */}
+      {/* Owner input */}
       <div className="card-elevated">
         <form className="flex gap-3" onSubmit={handleSubmit}>
           <input
             type="text"
             className="input-outlined flex-1"
-            placeholder="Type mentor instruction..."
-            value={mentorInput}
-            onChange={(e) => setMentorInput(e.target.value)}
+            placeholder={t('sessionDetail.ownerPlaceholder')}
+            value={ownerInput}
+            onChange={(e) => setOwnerInput(e.target.value)}
           />
           <button type="submit" className="btn-filled">
             <span className="material-symbols-outlined text-xl">send</span>
-            Send
+            {t('common.send')}
           </button>
         </form>
       </div>

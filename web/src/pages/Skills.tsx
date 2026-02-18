@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getAgents } from '../api/agents';
 import { getSkills, toggleSkill } from '../api/skills';
 import type { AgentSummary, SkillDto } from '../api/types';
 import SkillEditor from '../components/ui/SkillEditor';
 
 export default function Skills() {
+  const { t } = useTranslation();
   const [agents, setAgents] = useState<AgentSummary[] | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillDto[] | null>(null);
@@ -34,7 +36,7 @@ export default function Skills() {
 
   return (
     <div className="max-w-7xl mx-auto">
-      <h1 className="page-title mb-6">Skills Management</h1>
+      <h1 className="page-title mb-6">{t('skills.title')}</h1>
 
       <div className="card-elevated mb-6">
         <label className="block text-label-lg text-on-surface mb-2">
@@ -42,7 +44,7 @@ export default function Skills() {
             <span className="material-symbols-outlined text-lg">
               smart_toy
             </span>
-            Select Agent
+            {t('common.selectAgent')}
           </span>
         </label>
         {agents ? (
@@ -52,7 +54,7 @@ export default function Skills() {
               setSelectedAgent(e.target.value || null)
             }
           >
-            <option value="">-- Select an agent --</option>
+            <option value="">{t('common.selectAgentPlaceholder')}</option>
             {agents.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
@@ -61,7 +63,7 @@ export default function Skills() {
           </select>
         ) : (
           <p className="text-body-md text-on-surface-variant">
-            Loading agents...
+            {t('common.loadingAgents')}
           </p>
         )}
       </div>
@@ -74,14 +76,14 @@ export default function Skills() {
                 error
               </span>
               <p className="text-body-lg text-error-on-container">
-                Error: {skillsError}
+                {t('common.error', { message: skillsError })}
               </p>
             </div>
           </div>
         ) : skills === null ? (
           <div className="empty-state">
             <p className="text-body-lg text-on-surface-variant">
-              Loading skills...
+              {t('skills.loadingSkills')}
             </p>
           </div>
         ) : skills.length === 0 ? (
@@ -90,7 +92,7 @@ export default function Skills() {
               psychology
             </span>
             <p className="empty-state-text">
-              No skills found for this agent.
+              {t('skills.noSkills')}
             </p>
           </div>
         ) : (
@@ -110,7 +112,7 @@ export default function Skills() {
             psychology
           </span>
           <p className="empty-state-text">
-            Select an agent to manage skills
+            {t('skills.selectAgent')}
           </p>
         </div>
       )}

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getAgents } from '../api/agents';
 import { getCuratedMemories, searchMemory } from '../api/memory';
 import type {
@@ -8,6 +9,7 @@ import type {
 } from '../api/types';
 
 export default function Memory() {
+  const { t } = useTranslation();
   const [agents, setAgents] = useState<AgentSummary[] | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'curated' | 'search'>('curated');
@@ -45,7 +47,7 @@ export default function Memory() {
 
   return (
     <div className="max-w-7xl mx-auto">
-      <h1 className="page-title mb-6">Memory Explorer</h1>
+      <h1 className="page-title mb-6">{t('memory.title')}</h1>
 
       {/* Agent selector */}
       <div className="card-elevated mb-6">
@@ -54,7 +56,7 @@ export default function Memory() {
             <span className="material-symbols-outlined text-lg">
               smart_toy
             </span>
-            Select Agent
+            {t('common.selectAgent')}
           </span>
         </label>
         {agents ? (
@@ -64,7 +66,7 @@ export default function Memory() {
               setSelectedAgent(e.target.value || null)
             }
           >
-            <option value="">-- Select an agent --</option>
+            <option value="">{t('common.selectAgentPlaceholder')}</option>
             {agents.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
@@ -73,7 +75,7 @@ export default function Memory() {
           </select>
         ) : (
           <p className="text-body-md text-on-surface-variant">
-            Loading agents...
+            {t('common.loadingAgents')}
           </p>
         )}
       </div>
@@ -94,7 +96,7 @@ export default function Memory() {
                 <span className="material-symbols-outlined text-lg mr-1.5">
                   auto_awesome
                 </span>
-                Curated Memory
+                {t('memory.curatedMemory')}
               </button>
               <button
                 className={
@@ -107,7 +109,7 @@ export default function Memory() {
                 <span className="material-symbols-outlined text-lg mr-1.5">
                   search
                 </span>
-                Search Logs
+                {t('memory.searchLogs')}
               </button>
             </div>
           </div>
@@ -120,14 +122,14 @@ export default function Memory() {
                     error
                   </span>
                   <p className="text-body-lg text-error-on-container">
-                    Error: {curatedError}
+                    {t('common.error', { message: curatedError })}
                   </p>
                 </div>
               </div>
             ) : curated === null ? (
               <div className="empty-state">
                 <p className="text-body-lg text-on-surface-variant">
-                  Loading...
+                  {t('common.loading')}
                 </p>
               </div>
             ) : curated.length === 0 ? (
@@ -136,7 +138,7 @@ export default function Memory() {
                   memory
                 </span>
                 <p className="empty-state-text">
-                  No curated memories found.
+                  {t('memory.noCurated')}
                 </p>
               </div>
             ) : (
@@ -173,7 +175,7 @@ export default function Memory() {
                     <input
                       type="text"
                       className="input-outlined pl-11"
-                      placeholder="Search session logs..."
+                      placeholder={t('memory.searchPlaceholder')}
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -183,7 +185,7 @@ export default function Memory() {
                     <span className="material-symbols-outlined text-xl">
                       search
                     </span>
-                    Search
+                    {t('common.search')}
                   </button>
                 </div>
               </div>
@@ -195,7 +197,7 @@ export default function Memory() {
                       error
                     </span>
                     <p className="text-body-lg text-error-on-container">
-                      Error: {searchError}
+                      {t('common.error', { message: searchError })}
                     </p>
                   </div>
                 </div>
@@ -205,7 +207,7 @@ export default function Memory() {
                     <span className="material-symbols-outlined empty-state-icon">
                       search_off
                     </span>
-                    <p className="empty-state-text">No results found.</p>
+                    <p className="empty-state-text">{t('memory.noResults')}</p>
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -213,7 +215,7 @@ export default function Memory() {
                       <span className="material-symbols-outlined text-lg mr-1 align-middle">
                         info
                       </span>
-                      {searchResults.length} result(s) found
+                      {t('memory.resultCount', { count: searchResults.length })}
                     </p>
                     {searchResults.map((log) => (
                       <div key={log.id} className="card-outlined">
@@ -252,7 +254,7 @@ export default function Memory() {
             memory
           </span>
           <p className="empty-state-text">
-            Select an agent to explore memories
+            {t('memory.selectAgent')}
           </p>
         </div>
       )}

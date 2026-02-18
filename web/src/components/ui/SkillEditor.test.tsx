@@ -31,12 +31,12 @@ describe('SkillEditor', () => {
 
   it('displays usage count', () => {
     render(<SkillEditor skill={makeSkill({ usage_count: 10 })} onToggle={vi.fn()} />);
-    expect(screen.getByText('Used 10 times')).toBeInTheDocument();
+    expect(screen.getByText('skillEditor.usedTimes')).toBeInTheDocument();
   });
 
   it('displays effectiveness percentage', () => {
     render(<SkillEditor skill={makeSkill({ effectiveness: 0.75 })} onToggle={vi.fn()} />);
-    expect(screen.getByText('Effectiveness: 75%')).toBeInTheDocument();
+    expect(screen.getByText('skillEditor.effectiveness')).toBeInTheDocument();
   });
 
   it('calls onToggle with skill id and toggled state on click', async () => {

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { getAgents } from '../api/agents';
 import { getSessions } from '../api/sessions';
 import type { AgentSummary, SessionDto } from '../api/types';
@@ -67,6 +68,7 @@ function QuickLink({
 }
 
 export default function Home() {
+  const { t } = useTranslation();
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [sessions, setSessions] = useState<SessionDto[]>([]);
 
@@ -79,57 +81,57 @@ export default function Home() {
 
   return (
     <div className="max-w-7xl mx-auto">
-      <h1 className="page-title mb-8">Dashboard</h1>
+      <h1 className="page-title mb-8">{t('home.title')}</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
         <StatCard
           icon="smart_toy"
           iconBg="bg-primary-container"
           iconColor="text-primary"
-          label="Total Agents"
+          label={t('home.totalAgents')}
           value={String(agents.length)}
         />
         <StatCard
           icon="forum"
           iconBg="bg-tertiary-container"
           iconColor="text-tertiary"
-          label="Total Sessions"
+          label={t('home.totalSessions')}
           value={String(sessions.length)}
         />
         <StatCard
           icon="stream"
           iconBg="bg-success-container"
           iconColor="text-success"
-          label="Active Sessions"
+          label={t('home.activeSessions')}
           value={String(activeSessions)}
         />
       </div>
 
-      <h2 className="section-title">Quick Actions</h2>
+      <h2 className="section-title">{t('home.quickActions')}</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <QuickLink
           to="/agents"
           icon="smart_toy"
-          title="Agent Management"
-          description="Create, configure, and manage autonomous agents"
+          title={t('home.agentManagement')}
+          description={t('home.agentManagementDesc')}
         />
         <QuickLink
           to="/sessions"
           icon="forum"
-          title="Session Monitor"
-          description="Watch real-time conversations and agent interactions"
+          title={t('home.sessionMonitor')}
+          description={t('home.sessionMonitorDesc')}
         />
         <QuickLink
           to="/memory"
           icon="memory"
-          title="Memory Explorer"
-          description="Browse and search agent memories and session logs"
+          title={t('home.memoryExplorer')}
+          description={t('home.memoryExplorerDesc')}
         />
         <QuickLink
           to="/analytics"
           icon="analytics"
-          title="Analytics & Metrics"
-          description="LLM costs, quality scores, and usage analytics"
+          title={t('home.analyticsMetrics')}
+          description={t('home.analyticsMetricsDesc')}
         />
       </div>
     </div>

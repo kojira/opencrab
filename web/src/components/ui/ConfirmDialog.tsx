@@ -1,3 +1,5 @@
+import { useTranslation } from 'react-i18next';
+
 interface Props {
   title: string;
   message: string;
@@ -9,10 +11,12 @@ interface Props {
 export default function ConfirmDialog({
   title,
   message,
-  confirmLabel = 'Delete',
+  confirmLabel,
   onConfirm,
   onCancel,
 }: Props) {
+  const { t } = useTranslation();
+
   return (
     <div className="scrim" onClick={onCancel}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
@@ -25,11 +29,11 @@ export default function ConfirmDialog({
         <p className="text-body-lg text-on-surface-variant mb-6">{message}</p>
         <div className="flex gap-3 justify-end">
           <button className="btn-outlined" onClick={onCancel}>
-            Cancel
+            {t('common.cancel')}
           </button>
           <button className="btn-danger" onClick={onConfirm}>
             <span className="material-symbols-outlined text-xl">delete</span>
-            {confirmLabel}
+            {confirmLabel ?? t('common.delete')}
           </button>
         </div>
       </div>

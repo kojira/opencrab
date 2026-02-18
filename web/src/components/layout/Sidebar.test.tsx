@@ -12,12 +12,12 @@ function renderSidebar(initialPath = '/') {
 }
 
 const navLabels = [
-  'Dashboard',
-  'Agents',
-  'Skills',
-  'Memory',
-  'Sessions',
-  'Analytics',
+  'nav.dashboard',
+  'nav.agents',
+  'nav.skills',
+  'nav.memory',
+  'nav.sessions',
+  'nav.analytics',
 ];
 
 describe('Sidebar', () => {
@@ -30,43 +30,43 @@ describe('Sidebar', () => {
 
   it('renders the OpenCrab branding', () => {
     renderSidebar();
-    expect(screen.getByText('OpenCrab')).toBeInTheDocument();
-    expect(screen.getByText('Agent Framework')).toBeInTheDocument();
+    expect(screen.getByText('brand.name')).toBeInTheDocument();
+    expect(screen.getByText('brand.subtitle')).toBeInTheDocument();
   });
 
   it('marks Dashboard as active on "/"', () => {
     renderSidebar('/');
-    const dashboardLink = screen.getByText('Dashboard').closest('a');
+    const dashboardLink = screen.getByText('nav.dashboard').closest('a');
     expect(dashboardLink).toHaveClass('nav-item-active');
   });
 
   it('marks Agents as active on "/agents"', () => {
     renderSidebar('/agents');
-    const agentsLink = screen.getByText('Agents').closest('a');
+    const agentsLink = screen.getByText('nav.agents').closest('a');
     expect(agentsLink).toHaveClass('nav-item-active');
   });
 
   it('marks Agents as active on "/agents/a1"', () => {
     renderSidebar('/agents/a1');
-    const agentsLink = screen.getByText('Agents').closest('a');
+    const agentsLink = screen.getByText('nav.agents').closest('a');
     expect(agentsLink).toHaveClass('nav-item-active');
   });
 
   it('marks Sessions as active on "/sessions"', () => {
     renderSidebar('/sessions');
-    const sessionsLink = screen.getByText('Sessions').closest('a');
+    const sessionsLink = screen.getByText('nav.sessions').closest('a');
     expect(sessionsLink).toHaveClass('nav-item-active');
   });
 
   it('does not mark Dashboard as active on "/agents"', () => {
     renderSidebar('/agents');
-    const dashboardLink = screen.getByText('Dashboard').closest('a');
+    const dashboardLink = screen.getByText('nav.dashboard').closest('a');
     expect(dashboardLink).toHaveClass('nav-item');
     expect(dashboardLink).not.toHaveClass('nav-item-active');
   });
 
   it('renders version info', () => {
     renderSidebar();
-    expect(screen.getByText('OpenCrab v0.1.0')).toBeInTheDocument();
+    expect(screen.getByText('brand.version')).toBeInTheDocument();
   });
 });

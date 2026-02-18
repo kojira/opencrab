@@ -35,8 +35,8 @@ describe('AgentCard', () => {
 
   it('displays skill and session counts', () => {
     renderCard(makeAgent({ skill_count: 7, session_count: 12 }));
-    expect(screen.getByText('7 skills')).toBeInTheDocument();
-    expect(screen.getByText('12 sessions')).toBeInTheDocument();
+    expect(screen.getByText('agentCard.skills')).toBeInTheDocument();
+    expect(screen.getByText('agentCard.sessions')).toBeInTheDocument();
   });
 
   it('shows status badge with text', () => {

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { getAgent, updateSoul } from '../api/agents';
 import type { PersonalityDto } from '../api/types';
 
@@ -42,6 +43,7 @@ function PersonalitySlider({
 }
 
 export default function PersonaEdit() {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const [personaName, setPersonaName] = useState('');
   const [personality, setPersonality] = useState<PersonalityDto>({
@@ -94,7 +96,7 @@ export default function PersonaEdit() {
         thinking_style_json: thinkingStyleJson,
         custom_traits_json: null,
       });
-      setSaveStatus('Saved successfully!');
+      setSaveStatus(t('personaEdit.savedSuccess'));
     } catch (e) {
       setSaveStatus(`Error: ${e instanceof Error ? e.message : e}`);
     }
@@ -107,7 +109,7 @@ export default function PersonaEdit() {
   if (!initialized) {
     return (
       <div className="empty-state">
-        <p className="text-body-lg text-on-surface-variant">Loading...</p>
+        <p className="text-body-lg text-on-surface-variant">{t('common.loading')}</p>
       </div>
     );
   }
@@ -118,7 +120,7 @@ export default function PersonaEdit() {
         <Link to={`/agents/${id}`} className="btn-text p-2">
           <span className="material-symbols-outlined">arrow_back</span>
         </Link>
-        <h1 className="page-title">Edit Persona</h1>
+        <h1 className="page-title">{t('personaEdit.title')}</h1>
       </div>
 
       {/* Persona name section */}
@@ -127,7 +129,7 @@ export default function PersonaEdit() {
           <span className="material-symbols-outlined text-xl text-primary">
             face
           </span>
-          Persona Name
+          {t('personaEdit.personaName')}
         </h2>
         <input
           type="text"
@@ -143,31 +145,31 @@ export default function PersonaEdit() {
           <span className="material-symbols-outlined text-xl text-primary">
             psychology
           </span>
-          Personality (Big Five)
+          {t('personaEdit.personality')}
         </h2>
         <div className="space-y-5">
           <PersonalitySlider
-            label="Openness"
+            label={t('personaEdit.openness')}
             value={personality.openness}
             onChange={(v) => updatePersonality('openness', v)}
           />
           <PersonalitySlider
-            label="Conscientiousness"
+            label={t('personaEdit.conscientiousness')}
             value={personality.conscientiousness}
             onChange={(v) => updatePersonality('conscientiousness', v)}
           />
           <PersonalitySlider
-            label="Extraversion"
+            label={t('personaEdit.extraversion')}
             value={personality.extraversion}
             onChange={(v) => updatePersonality('extraversion', v)}
           />
           <PersonalitySlider
-            label="Agreeableness"
+            label={t('personaEdit.agreeableness')}
             value={personality.agreeableness}
             onChange={(v) => updatePersonality('agreeableness', v)}
           />
           <PersonalitySlider
-            label="Neuroticism"
+            label={t('personaEdit.neuroticism')}
             value={personality.neuroticism}
             onChange={(v) => updatePersonality('neuroticism', v)}
           />
@@ -180,42 +182,42 @@ export default function PersonaEdit() {
           <span className="material-symbols-outlined text-xl text-primary">
             lightbulb
           </span>
-          Thinking Style
+          {t('personaEdit.thinkingStyle')}
         </h2>
         <div className="space-y-5">
           <div>
             <label className="block text-label-lg text-on-surface mb-2">
-              Primary
+              {t('personaEdit.primary')}
             </label>
             <select
               className="select-outlined"
               value={thinkingPrimary}
               onChange={(e) => setThinkingPrimary(e.target.value)}
             >
-              <option value="Analytical">Analytical</option>
-              <option value="Intuitive">Intuitive</option>
-              <option value="Practical">Practical</option>
-              <option value="Creative">Creative</option>
+              <option value="Analytical">{t('thinkingStyles.analytical')}</option>
+              <option value="Intuitive">{t('thinkingStyles.intuitive')}</option>
+              <option value="Practical">{t('thinkingStyles.practical')}</option>
+              <option value="Creative">{t('thinkingStyles.creative')}</option>
             </select>
           </div>
           <div>
             <label className="block text-label-lg text-on-surface mb-2">
-              Secondary
+              {t('personaEdit.secondary')}
             </label>
             <select
               className="select-outlined"
               value={thinkingSecondary}
               onChange={(e) => setThinkingSecondary(e.target.value)}
             >
-              <option value="Analytical">Analytical</option>
-              <option value="Intuitive">Intuitive</option>
-              <option value="Practical">Practical</option>
-              <option value="Creative">Creative</option>
+              <option value="Analytical">{t('thinkingStyles.analytical')}</option>
+              <option value="Intuitive">{t('thinkingStyles.intuitive')}</option>
+              <option value="Practical">{t('thinkingStyles.practical')}</option>
+              <option value="Creative">{t('thinkingStyles.creative')}</option>
             </select>
           </div>
           <div>
             <label className="block text-label-lg text-on-surface mb-2">
-              Description
+              {t('personaEdit.description')}
             </label>
             <textarea
               className="input-outlined min-h-[80px]"
@@ -238,7 +240,7 @@ export default function PersonaEdit() {
 
       <button className="btn-filled w-full py-3" onClick={handleSave}>
         <span className="material-symbols-outlined text-xl">save</span>
-        Save
+        {t('common.save')}
       </button>
     </div>
   );

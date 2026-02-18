@@ -19,9 +19,9 @@ describe('ConfirmDialog', () => {
     ).toBeInTheDocument();
   });
 
-  it('renders default confirm label "Delete"', () => {
+  it('renders default confirm label from translation key', () => {
     render(<ConfirmDialog {...defaultProps} />);
-    expect(screen.getByText('Delete')).toBeInTheDocument();
+    expect(screen.getByText('common.delete')).toBeInTheDocument();
   });
 
   it('renders custom confirm label', () => {
@@ -34,7 +34,7 @@ describe('ConfirmDialog', () => {
     const user = userEvent.setup();
 
     render(<ConfirmDialog {...defaultProps} onConfirm={onConfirm} />);
-    await user.click(screen.getByText('Delete'));
+    await user.click(screen.getByText('common.delete'));
 
     expect(onConfirm).toHaveBeenCalledOnce();
   });
@@ -44,7 +44,7 @@ describe('ConfirmDialog', () => {
     const user = userEvent.setup();
 
     render(<ConfirmDialog {...defaultProps} onCancel={onCancel} />);
-    await user.click(screen.getByText('Cancel'));
+    await user.click(screen.getByText('common.cancel'));
 
     expect(onCancel).toHaveBeenCalledOnce();
   });

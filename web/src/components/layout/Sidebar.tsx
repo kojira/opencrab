@@ -1,8 +1,9 @@
 import { Link, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 
 interface NavItem {
   to: string;
-  label: string;
+  labelKey: string;
   icon: string;
   match: (path: string) => boolean;
 }
@@ -10,13 +11,13 @@ interface NavItem {
 const navItems: NavItem[] = [
   {
     to: '/',
-    label: 'Dashboard',
+    labelKey: 'nav.dashboard',
     icon: 'dashboard',
     match: (p) => p === '/',
   },
   {
     to: '/agents',
-    label: 'Agents',
+    labelKey: 'nav.agents',
     icon: 'smart_toy',
     match: (p) =>
       p === '/agents' ||
@@ -25,25 +26,25 @@ const navItems: NavItem[] = [
   },
   {
     to: '/skills',
-    label: 'Skills',
+    labelKey: 'nav.skills',
     icon: 'psychology',
     match: (p) => p === '/skills',
   },
   {
     to: '/memory',
-    label: 'Memory',
+    labelKey: 'nav.memory',
     icon: 'memory',
     match: (p) => p === '/memory',
   },
   {
     to: '/sessions',
-    label: 'Sessions',
+    labelKey: 'nav.sessions',
     icon: 'forum',
     match: (p) => p === '/sessions' || p.startsWith('/sessions/'),
   },
   {
     to: '/analytics',
-    label: 'Analytics',
+    labelKey: 'nav.analytics',
     icon: 'analytics',
     match: (p) => p === '/analytics',
   },
@@ -51,6 +52,7 @@ const navItems: NavItem[] = [
 
 export default function Sidebar() {
   const location = useLocation();
+  const { t } = useTranslation();
 
   return (
     <nav className="w-72 bg-surface-container flex flex-col border-r border-outline-variant">
@@ -60,10 +62,10 @@ export default function Sidebar() {
           <img src="/icon.png" alt="OpenCrab" className="w-10 h-10 rounded-lg" />
           <div>
             <h1 className="text-title-lg text-on-surface font-semibold">
-              OpenCrab
+              {t('brand.name')}
             </h1>
             <p className="text-label-sm text-on-surface-variant">
-              Agent Framework
+              {t('brand.subtitle')}
             </p>
           </div>
         </div>
@@ -85,7 +87,7 @@ export default function Sidebar() {
               <span className="material-symbols-outlined text-xl">
                 {item.icon}
               </span>
-              <span>{item.label}</span>
+              <span>{t(item.labelKey)}</span>
             </Link>
           );
         })}
@@ -94,7 +96,7 @@ export default function Sidebar() {
       {/* Footer */}
       <div className="px-7 py-4 border-t border-outline-variant">
         <p className="text-label-sm text-on-surface-variant">
-          OpenCrab v0.1.0
+          {t('brand.version')}
         </p>
       </div>
     </nav>

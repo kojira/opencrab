@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { SessionDto } from '../../api/types';
 
 interface Props {
@@ -6,6 +7,8 @@ interface Props {
 }
 
 export default function SessionCard({ session }: Props) {
+  const { t } = useTranslation();
+
   const badgeClass = session.status === 'active' ? 'badge-success' : session.status === 'completed' ? 'badge-info' : session.status === 'paused' ? 'badge-warning' : 'badge-neutral';
   const statusIcon = session.status === 'active' ? 'play_circle' : session.status === 'completed' ? 'check_circle' : session.status === 'paused' ? 'pause_circle' : 'help';
 
@@ -29,7 +32,7 @@ export default function SessionCard({ session }: Props) {
               </span>
               <span className="flex items-center gap-1">
                 <span className="material-symbols-outlined text-sm">replay</span>
-                Turn {session.turn_number}
+                {t('sessionCard.turn', { number: session.turn_number })}
               </span>
             </div>
           </div>
