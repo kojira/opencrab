@@ -8,3 +8,7 @@ data/
 .env
 web/node_modules/
 web/dist/
+.server.pid
+.web.pid
+.server.log
+.web.log

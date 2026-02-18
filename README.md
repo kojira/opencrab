@@ -32,8 +32,9 @@ opencrab/
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── server/     # Axum REST API server
 │   └── cli/        # Interactive REPL CLI
-├── dashboard/      # Dioxus web UI
+├── web/            # React frontend (Vite + Tailwind CSS + i18n)
 ├── config/         # Configuration files
+├── docs/           # Design docs and assets
 └── skills/         # Skill definition files
 ```
 
@@ -63,24 +64,32 @@ export OPENROUTER_API_KEY="..."
 export DISCORD_TOKEN="..."
 ```
 
-### 3. Run the server
+### 3. Development (recommended)
 
 ```bash
-cargo run -p opencrab-server
-# Listening on 0.0.0.0:8080
+./dev.sh start     # Build + start backend & frontend → http://localhost:3000
+./dev.sh stop      # Stop all
+./dev.sh restart   # Rebuild & restart backend only (frontend stays)
+./dev.sh status    # Show running processes
+./dev.sh logs      # Tail server log
 ```
 
-### 4. Or use the CLI
+### 4. Manual startup
+
+```bash
+# Backend (with Discord support)
+cargo run -p opencrab-server --features discord
+# Listening on 0.0.0.0:8080
+
+# Frontend dev server (separate terminal)
+cd web && ./dev.sh
+# Proxies /api to :8080 → http://localhost:3000
+```
+
+### 5. CLI
 
 ```bash
 cargo run -p opencrab-cli
-```
-
-### 5. Run the dashboard
-
-```bash
-dx serve --project dashboard
-# Listening on localhost:3000
 ```
 
 ## API Endpoints
@@ -101,6 +110,9 @@ dx serve --project dashboard
 | POST | `/api/sessions/{id}/messages` | Send message |
 | GET | `/api/agents/{id}/workspace` | List workspace files |
 | GET / PUT | `/api/agents/{id}/workspace/*path` | Read / write file |
+| GET / PUT / DELETE | `/api/agents/{id}/discord` | Get / save / remove Discord bot config |
+| POST | `/api/agents/{id}/discord/start` | Start Discord gateway |
+| POST | `/api/agents/{id}/discord/stop` | Stop Discord gateway |
 
 ## Configuration
 
@@ -136,7 +148,7 @@ cargo test -p opencrab-server
 | Web Framework | Axum |
 | Database | SQLite (rusqlite) with FTS5 |
 | HTTP Client | reqwest |
-| Frontend | Dioxus + Tailwind CSS |
+| Frontend | React + Vite + Tailwind CSS |
 | Serialization | serde / serde_json |
 | Error Handling | anyhow / thiserror |
 | Logging | tracing / tracing-subscriber |

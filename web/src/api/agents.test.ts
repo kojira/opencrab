@@ -10,7 +10,15 @@ vi.mock('./client', () => ({
 }));
 
 import { api } from './client';
-import { getAgent, getAgents } from './agents';
+import {
+  getAgent,
+  getAgents,
+  getDiscordConfig,
+  updateDiscordConfig,
+  deleteDiscordConfig,
+  startDiscordGateway,
+  stopDiscordGateway,
+} from './agents';
 import type { IdentityRow, SoulRow } from './types';
 
 const mockedApi = vi.mocked(api);
@@ -83,5 +91,76 @@ describe('getAgent', () => {
       thinking_style_json: '{}',
       custom_traits_json: null,
     });
+  });
+});
+
+describe('getDiscordConfig', () => {
+  it('calls GET /agents/:id/discord', async () => {
+    const config = {
+      configured: true,
+      enabled: true,
+      token_masked: 'OTk1MTYx...',
+      owner_discord_id: '390123',
+      running: true,
+    };
+    mockedApi.get.mockResolvedValue(config);
+
+    const result = await getDiscordConfig('a1');
+    expect(mockedApi.get).toHaveBeenCalledWith('/agents/a1/discord');
+    expect(result).toEqual(config);
+  });
+
+  it('returns configured: false when not set up', async () => {
+    mockedApi.get.mockResolvedValue({ configured: false });
+
+    const result = await getDiscordConfig('a2');
+    expect(result.configured).toBe(false);
+  });
+});
+
+describe('updateDiscordConfig', () => {
+  it('calls PUT /agents/:id/discord with token and owner', async () => {
+    mockedApi.put.mockResolvedValue({ ok: true, message: 'Discord bot started.' });
+
+    const result = await updateDiscordConfig('a1', {
+      bot_token: 'BOT_TOKEN_123',
+      owner_discord_id: '390123',
+    });
+
+    expect(mockedApi.put).toHaveBeenCalledWith('/agents/a1/discord', {
+      bot_token: 'BOT_TOKEN_123',
+      owner_discord_id: '390123',
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('deleteDiscordConfig', () => {
+  it('calls DELETE /agents/:id/discord', async () => {
+    mockedApi.del.mockResolvedValue({ deleted: true });
+
+    const result = await deleteDiscordConfig('a1');
+    expect(mockedApi.del).toHaveBeenCalledWith('/agents/a1/discord');
+    expect(result.deleted).toBe(true);
+  });
+});
+
+describe('startDiscordGateway', () => {
+  it('calls POST /agents/:id/discord/start', async () => {
+    mockedApi.post.mockResolvedValue({ ok: true });
+
+    const result = await startDiscordGateway('a1');
+    expect(mockedApi.post).toHaveBeenCalledWith('/agents/a1/discord/start', {});
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('stopDiscordGateway', () => {
+  it('calls POST /agents/:id/discord/stop', async () => {
+    mockedApi.post.mockResolvedValue({ ok: true });
+
+    const result = await stopDiscordGateway('a1');
+    expect(mockedApi.post).toHaveBeenCalledWith('/agents/a1/discord/stop', {});
+    expect(result.ok).toBe(true);
   });
 });

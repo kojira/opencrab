@@ -4,6 +4,7 @@ import type {
   AgentDetail,
   IdentityRow,
   SoulRow,
+  DiscordConfigDto,
 } from './types';
 
 export function getAgents(): Promise<AgentSummary[]> {
@@ -58,4 +59,34 @@ export function updateSoul(
   soul: Omit<SoulRow, 'agent_id'>,
 ): Promise<{ updated: boolean }> {
   return api.put(`/agents/${id}/soul`, { agent_id: id, ...soul });
+}
+
+// Discord per-agent config
+export function getDiscordConfig(id: string): Promise<DiscordConfigDto> {
+  return api.get<DiscordConfigDto>(`/agents/${id}/discord`);
+}
+
+export function updateDiscordConfig(
+  id: string,
+  body: { bot_token: string; owner_discord_id?: string },
+): Promise<{ ok: boolean; message?: string; error?: string }> {
+  return api.put(`/agents/${id}/discord`, body);
+}
+
+export function deleteDiscordConfig(
+  id: string,
+): Promise<{ deleted: boolean }> {
+  return api.del(`/agents/${id}/discord`);
+}
+
+export function startDiscordGateway(
+  id: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return api.post(`/agents/${id}/discord/start`, {});
+}
+
+export function stopDiscordGateway(
+  id: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return api.post(`/agents/${id}/discord/stop`, {});
 }

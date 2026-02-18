@@ -239,4 +239,15 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     PRIMARY KEY (channel_id)
 );
 CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
+
+-- ============================================
+-- エージェント別Discord Bot設定
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_discord_config (
+    agent_id TEXT PRIMARY KEY,
+    bot_token TEXT NOT NULL,
+    owner_discord_id TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
 "#;

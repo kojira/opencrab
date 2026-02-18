@@ -135,6 +135,15 @@ export interface LlmMetricsSummaryDto {
   avg_quality: number;
 }
 
+// Discord per-agent config
+export interface DiscordConfigDto {
+  configured: boolean;
+  enabled?: boolean;
+  token_masked?: string;
+  owner_discord_id?: string;
+  running?: boolean;
+}
+
 export interface LlmMetricsDetailDto {
   provider: string;
   model: string;

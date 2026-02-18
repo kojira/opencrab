@@ -8,7 +8,6 @@ members = [
     "crates/db",
     "crates/server",
     "crates/cli",
-    "dashboard",
 ]
 
 [workspace.package]

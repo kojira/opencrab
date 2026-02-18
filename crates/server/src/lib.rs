@@ -18,6 +18,9 @@ pub mod discord;
 #[cfg(feature = "discord")]
 pub mod discord_admin_impl;
 
+#[cfg(feature = "discord")]
+pub mod discord_manager;
+
 use opencrab_llm::router::LlmRouter;
 
 #[derive(Clone)]
@@ -26,6 +29,8 @@ pub struct AppState {
     pub llm_router: Arc<LlmRouter>,
     pub workspace_base: String,
     pub default_model: String,
+    #[cfg(feature = "discord")]
+    pub discord_manager: Option<Arc<discord_manager::DiscordGatewayManager>>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -54,6 +59,15 @@ pub fn create_router(state: AppState) -> Router {
         // ワークスペース管理
         .route("/api/agents/{id}/workspace", get(api::workspace::list_workspace))
         .route("/api/agents/{id}/workspace/{*path}", get(api::workspace::read_file).put(api::workspace::write_file))
+        // Discord per-agent config (always available; gateway ops require discord feature)
+        .route(
+            "/api/agents/{id}/discord",
+            get(api::agents::get_discord_config)
+                .put(api::agents::update_discord_config)
+                .delete(api::agents::delete_discord_config),
+        )
+        .route("/api/agents/{id}/discord/start", post(api::agents::start_discord_gateway))
+        .route("/api/agents/{id}/discord/stop", post(api::agents::stop_discord_gateway))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

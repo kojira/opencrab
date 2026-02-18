@@ -113,16 +113,16 @@ pub async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    let rows = conn
-        .execute("DELETE FROM identity WHERE agent_id = ?1", [&id])
-        .unwrap();
-    conn.execute("DELETE FROM soul WHERE agent_id = ?1", [&id])
-        .unwrap();
-    conn.execute("DELETE FROM skills WHERE agent_id = ?1", [&id])
-        .unwrap();
+    // Stop per-agent Discord gateway if running.
+    #[cfg(feature = "discord")]
+    if let Some(ref manager) = state.discord_manager {
+        manager.stop_agent_gateway(&id).await;
+    }
 
-    Json(serde_json::json!({"deleted": rows > 0}))
+    let conn = state.db.lock().unwrap();
+    let deleted = opencrab_db::queries::delete_agent(&conn, &id).unwrap();
+
+    Json(serde_json::json!({"deleted": deleted}))
 }
 
 pub async fn get_soul(
@@ -165,4 +165,175 @@ pub async fn update_identity(
     identity.agent_id = id;
     opencrab_db::queries::upsert_identity(&conn, &identity).unwrap();
     Json(serde_json::json!({"updated": true}))
+}
+
+// ============================================
+// Discord per-agent config
+// ============================================
+
+pub async fn get_discord_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let cfg = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_discord_config(&conn, &id).unwrap()
+    };
+
+    match cfg {
+        Some(cfg) => {
+            // Mask the token: show first 10 chars + "..."
+            let token_masked = if cfg.bot_token.len() > 10 {
+                format!("{}...", &cfg.bot_token[..10])
+            } else {
+                "***".to_string()
+            };
+
+            #[allow(unused_mut)]
+            let mut running = false;
+            #[cfg(feature = "discord")]
+            if let Some(ref manager) = state.discord_manager {
+                running = manager.is_running(&id).await;
+            }
+
+            Json(serde_json::json!({
+                "configured": true,
+                "enabled": cfg.enabled,
+                "token_masked": token_masked,
+                "owner_discord_id": cfg.owner_discord_id,
+                "running": running,
+            }))
+        }
+        None => Json(serde_json::json!({
+            "configured": false,
+        })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateDiscordConfigRequest {
+    pub bot_token: String,
+    pub owner_discord_id: Option<String>,
+}
+
+pub async fn update_discord_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateDiscordConfigRequest>,
+) -> Json<serde_json::Value> {
+    let owner_discord_id = req.owner_discord_id.unwrap_or_default();
+
+    // Save to DB.
+    {
+        let conn = state.db.lock().unwrap();
+        let cfg = opencrab_db::queries::AgentDiscordConfigRow {
+            agent_id: id.clone(),
+            bot_token: req.bot_token.clone(),
+            owner_discord_id: owner_discord_id.clone(),
+            enabled: true,
+        };
+        opencrab_db::queries::upsert_agent_discord_config(&conn, &cfg).unwrap();
+    }
+
+    // Start the gateway (only when discord feature is enabled).
+    #[cfg(feature = "discord")]
+    if let Some(ref manager) = state.discord_manager {
+        match manager
+            .start_agent_gateway(&id, &req.bot_token, &owner_discord_id)
+            .await
+        {
+            Ok(()) => {
+                return Json(serde_json::json!({
+                    "ok": true,
+                    "message": "Discord bot started.",
+                }));
+            }
+            Err(e) => {
+                tracing::error!(agent_id = %id, error = %e, "Failed to start per-agent Discord gateway");
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    // Config saved but gateway not started (discord feature disabled or manager not initialized).
+    Json(serde_json::json!({
+        "ok": true,
+        "message": "Config saved. Gateway not started (discord feature not active).",
+    }))
+}
+
+pub async fn start_discord_gateway(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let cfg = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_discord_config(&conn, &id).unwrap()
+    };
+
+    let Some(_cfg) = cfg else {
+        return Json(serde_json::json!({ "ok": false, "error": "No Discord config found." }));
+    };
+
+    // Set enabled=1 in DB.
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_agent_discord_config_enabled(&conn, &id, true).unwrap();
+    }
+
+    #[cfg(feature = "discord")]
+    if let Some(ref manager) = state.discord_manager {
+        match manager
+            .start_agent_gateway(&id, &_cfg.bot_token, &_cfg.owner_discord_id)
+            .await
+        {
+            Ok(()) => return Json(serde_json::json!({ "ok": true })),
+            Err(e) => {
+                tracing::error!(agent_id = %id, error = %e, "Failed to start Discord gateway");
+                return Json(serde_json::json!({ "ok": false, "error": e.to_string() }));
+            }
+        }
+    }
+
+    Json(serde_json::json!({ "ok": false, "error": "Discord feature not active." }))
+}
+
+pub async fn stop_discord_gateway(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    // Set enabled=0 in DB.
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_agent_discord_config_enabled(&conn, &id, false).unwrap();
+    }
+
+    #[cfg(feature = "discord")]
+    if let Some(ref manager) = state.discord_manager {
+        manager.stop_agent_gateway(&id).await;
+    }
+
+    Json(serde_json::json!({ "ok": true }))
+}
+
+pub async fn delete_discord_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    // Stop the gateway.
+    #[cfg(feature = "discord")]
+    if let Some(ref manager) = state.discord_manager {
+        manager.stop_agent_gateway(&id).await;
+    }
+
+    // Delete from DB.
+    let deleted = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::delete_agent_discord_config(&conn, &id).unwrap()
+    };
+
+    Json(serde_json::json!({"deleted": deleted}))
 }
