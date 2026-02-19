@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Link, useParams, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getAgent, deleteAgent, getDiscordConfig, updateDiscordConfig, deleteDiscordConfig, startDiscordGateway, stopDiscordGateway } from '../api/agents';
-import type { AgentDetail as AgentDetailType, DiscordConfigDto } from '../api/types';
-import ConfirmDialog from '../components/ui/ConfirmDialog';
+import { getDiscordConfig, updateDiscordConfig, deleteDiscordConfig, startDiscordGateway, stopDiscordGateway } from '../api/agents';
+import type { DiscordConfigDto } from '../api/types';
+import { useAgentContext } from '../hooks/useAgentContext';
 
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
@@ -228,112 +228,51 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
   );
 }
 
-export default function AgentDetail() {
+export default function AgentOverview() {
   const { t } = useTranslation();
-  const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const [agent, setAgent] = useState<AgentDetailType | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const { agent, agentId } = useAgentContext();
 
-  useEffect(() => {
-    if (!id) return;
-    getAgent(id)
-      .then(setAgent)
-      .catch((e: Error) => setError(e.message));
-  }, [id]);
-
-  const handleDelete = async () => {
-    if (!id) return;
-    const res = await deleteAgent(id);
-    if (res.deleted) {
-      navigate('/agents');
-    }
-  };
-
-  if (error) {
-    return (
-      <div className="card-outlined border-error bg-error-container/30 p-4">
-        <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-error">error</span>
-          <p className="text-body-lg text-error-on-container">
-            {t('common.error', { message: error })}
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!agent) {
-    return (
-      <div className="empty-state">
-        <p className="text-body-lg text-on-surface-variant">{t('common.loading')}</p>
-      </div>
-    );
-  }
+  if (!agent) return null;
 
   return (
-    <div className="max-w-4xl mx-auto">
-      {/* Agent header card */}
-      <div className="card-elevated mb-6">
-        <div className="flex items-center gap-5">
-          <div className="w-16 h-16 rounded-full bg-primary-container flex items-center justify-center">
-            <span className="text-headline-sm text-primary-on-container font-semibold">
-              {agent.name.charAt(0) || '?'}
-            </span>
-          </div>
-          <div className="flex-1 min-w-0">
-            <h1 className="text-headline-sm text-on-surface font-medium truncate">
-              {agent.name}
-            </h1>
-            <p className="text-body-lg text-on-surface-variant">
-              {agent.persona_name} / {agent.role}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Link to={`/agents/${id}/edit`} className="btn-tonal">
-              <span className="material-symbols-outlined text-xl">edit</span>
-              {t('common.edit')}
-            </Link>
-            <button
-              className="btn-outlined border-error text-error hover:bg-error-container/30"
-              onClick={() => setShowDeleteConfirm(true)}
-            >
-              <span className="material-symbols-outlined text-xl">delete</span>
-              {t('common.delete')}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {showDeleteConfirm && (
-        <ConfirmDialog
-          title={t('agentDetail.deleteTitle')}
-          message={t('agentDetail.deleteMessage')}
-          onConfirm={handleDelete}
-          onCancel={() => setShowDeleteConfirm(false)}
-        />
-      )}
-
+    <>
       {/* Action cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <ActionCard
-          to={`/agents/${id}/persona`}
+          to={`/agents/${agentId}/persona`}
           icon="face"
           title={t('agentDetail.editPersona')}
           description={t('agentDetail.editPersonaDesc')}
         />
         <ActionCard
-          to="/skills"
+          to={`/agents/${agentId}/skills`}
           icon="psychology"
           title={t('agentDetail.manageSkills')}
           description={t('agentDetail.manageSkillsDesc')}
         />
         <ActionCard
-          to={`/workspace/${id}`}
+          to={`/workspace/${agentId}`}
           icon="folder_open"
           title={t('agentDetail.workspace')}
           description={t('agentDetail.workspaceDesc')}
+        />
+        <ActionCard
+          to={`/agents/${agentId}/memory`}
+          icon="memory"
+          title={t('agentDetail.manageMemory')}
+          description={t('agentDetail.manageMemoryDesc')}
+        />
+        <ActionCard
+          to={`/agents/${agentId}/sessions`}
+          icon="forum"
+          title={t('agentDetail.manageSessions')}
+          description={t('agentDetail.manageSessionsDesc')}
+        />
+        <ActionCard
+          to={`/agents/${agentId}/analytics`}
+          icon="analytics"
+          title={t('agentDetail.manageAnalytics')}
+          description={t('agentDetail.manageAnalyticsDesc')}
         />
       </div>
 
@@ -353,7 +292,7 @@ export default function AgentDetail() {
       </div>
 
       {/* Discord Bot */}
-      {id && <DiscordBotSection agentId={id} />}
-    </div>
+      <DiscordBotSection agentId={agentId} />
+    </>
   );
 }

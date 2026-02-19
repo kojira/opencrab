@@ -2,10 +2,9 @@ import { api } from './client';
 import type { SessionRow, SessionDto, SessionLogRow } from './types';
 
 function toSessionDto(s: SessionRow): SessionDto {
-  let participantCount = 0;
+  let agentIds: string[] = [];
   try {
-    const ids: string[] = JSON.parse(s.participant_ids_json);
-    participantCount = ids.length;
+    agentIds = JSON.parse(s.participant_ids_json);
   } catch {
     // ignore
   }
@@ -16,7 +15,9 @@ function toSessionDto(s: SessionRow): SessionDto {
     phase: s.phase,
     turn_number: s.turn_number,
     status: s.status,
-    participant_count: participantCount,
+    participant_count: agentIds.length,
+    agent_ids: agentIds,
+    metadata_json: s.metadata_json,
   };
 }
 

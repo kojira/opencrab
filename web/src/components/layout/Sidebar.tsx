@@ -25,28 +25,10 @@ const navItems: NavItem[] = [
       p.startsWith('/workspace/'),
   },
   {
-    to: '/skills',
-    labelKey: 'nav.skills',
-    icon: 'psychology',
-    match: (p) => p === '/skills',
-  },
-  {
-    to: '/memory',
-    labelKey: 'nav.memory',
-    icon: 'memory',
-    match: (p) => p === '/memory',
-  },
-  {
     to: '/sessions',
     labelKey: 'nav.sessions',
     icon: 'forum',
     match: (p) => p === '/sessions' || p.startsWith('/sessions/'),
-  },
-  {
-    to: '/analytics',
-    labelKey: 'nav.analytics',
-    icon: 'analytics',
-    match: (p) => p === '/analytics',
   },
 ];
 

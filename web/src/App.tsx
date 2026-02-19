@@ -3,15 +3,17 @@ import { AppLayout } from './components/layout/AppLayout';
 import Home from './pages/Home';
 import Agents from './pages/Agents';
 import AgentCreate from './pages/AgentCreate';
-import AgentDetail from './pages/AgentDetail';
+import AgentLayout from './components/layout/AgentLayout';
+import AgentOverview from './pages/AgentOverview';
 import AgentIdentityEdit from './pages/AgentIdentityEdit';
 import PersonaEdit from './pages/PersonaEdit';
-import Skills from './pages/Skills';
-import Memory from './pages/Memory';
+import AgentSkills from './pages/AgentSkills';
+import AgentMemory from './pages/AgentMemory';
+import AgentSessions from './pages/AgentSessions';
+import AgentAnalytics from './pages/AgentAnalytics';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 import Workspace from './pages/Workspace';
-import Analytics from './pages/Analytics';
 
 export default function App() {
   return (
@@ -21,15 +23,18 @@ export default function App() {
           <Route path="/" element={<Home />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/agents/new" element={<AgentCreate />} />
-          <Route path="/agents/:id" element={<AgentDetail />} />
-          <Route path="/agents/:id/edit" element={<AgentIdentityEdit />} />
-          <Route path="/agents/:id/persona" element={<PersonaEdit />} />
-          <Route path="/skills" element={<Skills />} />
-          <Route path="/memory" element={<Memory />} />
+          <Route path="/agents/:id" element={<AgentLayout />}>
+            <Route index element={<AgentOverview />} />
+            <Route path="edit" element={<AgentIdentityEdit />} />
+            <Route path="persona" element={<PersonaEdit />} />
+            <Route path="skills" element={<AgentSkills />} />
+            <Route path="memory" element={<AgentMemory />} />
+            <Route path="sessions" element={<AgentSessions />} />
+            <Route path="analytics" element={<AgentAnalytics />} />
+          </Route>
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />
           <Route path="/workspace/:agentId" element={<Workspace />} />
-          <Route path="/analytics" element={<Analytics />} />
         </Route>
       </Routes>
     </BrowserRouter>

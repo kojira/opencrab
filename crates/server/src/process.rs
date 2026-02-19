@@ -39,10 +39,10 @@ pub fn build_agent_context(
         .map(|s| s.persona_name.clone())
         .unwrap_or_default();
 
-    let personality = soul
+    let custom_traits = soul
         .as_ref()
-        .map(|s| s.personality_json.clone())
-        .unwrap_or_else(|| "{}".to_string());
+        .and_then(|s| s.custom_traits_json.clone())
+        .unwrap_or_default();
 
     let skills_text = if skills.is_empty() {
         String::new()
@@ -56,9 +56,14 @@ pub fn build_agent_context(
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
+    let character_section = if custom_traits.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{custom_traits}")
+    };
+
     let prompt = format!(
         "You are {agent_name} ({persona}), role: {role}.\n\
-         Personality: {personality}\n\
          Current date and time: {now}\n\
          Current discussion topic: {session_theme}\n\
          \n\
@@ -69,7 +74,7 @@ pub fn build_agent_context(
          \n\
          The conversation history uses the format \"[speaker]: message\" for context, \
          but you must NOT include your own name prefix in your response. \
-         Just reply with the message content directly.{skills_text}"
+         Just reply with the message content directly.{skills_text}{character_section}"
     );
 
     (prompt, agent_name)

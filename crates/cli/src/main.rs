@@ -356,6 +356,7 @@ async fn main() -> anyhow::Result<()> {
                         facilitator_id: None,
                         done_count: 0,
                         max_turns: Some(max_turns),
+                        metadata_json: None,
                     },
                 )?;
 

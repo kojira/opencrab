@@ -49,6 +49,8 @@ const fakeSessions: SessionDto[] = [
     turn_number: 3,
     status: 'active',
     participant_count: 2,
+    agent_ids: ['a1', 'a2'],
+    metadata_json: null,
   },
   {
     id: 's2',
@@ -58,6 +60,8 @@ const fakeSessions: SessionDto[] = [
     turn_number: 10,
     status: 'completed',
     participant_count: 3,
+    agent_ids: ['a1', 'a2', 'a3'],
+    metadata_json: null,
   },
   {
     id: 's3',
@@ -67,6 +71,8 @@ const fakeSessions: SessionDto[] = [
     turn_number: 1,
     status: 'active',
     participant_count: 2,
+    agent_ids: ['a1', 'a3'],
+    metadata_json: null,
   },
 ];
 

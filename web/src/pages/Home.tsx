@@ -122,13 +122,13 @@ export default function Home() {
           description={t('home.sessionMonitorDesc')}
         />
         <QuickLink
-          to="/memory"
+          to="/agents"
           icon="memory"
           title={t('home.memoryExplorer')}
           description={t('home.memoryExplorerDesc')}
         />
         <QuickLink
-          to="/analytics"
+          to="/agents"
           icon="analytics"
           title={t('home.analyticsMetrics')}
           description={t('home.analyticsMetricsDesc')}

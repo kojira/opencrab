@@ -71,7 +71,8 @@ impl DiscordGateway {
     pub async fn start(&self) -> Result<()> {
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
-            | GatewayIntents::MESSAGE_CONTENT;
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILDS;
 
         let handler = DiscordHandler {
             tx: self.tx.clone(),
@@ -178,7 +179,7 @@ struct DiscordHandler {
 
 #[async_trait]
 impl EventHandler for DiscordHandler {
-    async fn message(&self, _ctx: Context, msg: SerenityMessage) {
+    async fn message(&self, ctx: Context, msg: SerenityMessage) {
         info!(
             author = %msg.author.name,
             bot = msg.author.bot,
@@ -197,13 +198,16 @@ impl EventHandler for DiscordHandler {
             .unwrap_or_default();
         let channel_id = msg.channel_id.to_string();
 
-        let incoming = IncomingMessage::new(
+        let sender = Sender::user(msg.author.id.to_string(), &msg.author.name)
+            .with_avatar(msg.author.face());
+
+        let mut incoming = IncomingMessage::new(
             MessageSource::Discord {
                 guild_id,
                 channel_id: channel_id.clone(),
             },
             MessageContent::text(&msg.content),
-            Sender::user(msg.author.id.to_string(), &msg.author.name),
+            sender,
         )
         .with_channel(Channel {
             id: channel_id,
@@ -213,6 +217,22 @@ impl EventHandler for DiscordHandler {
             "discord_message_id",
             serde_json::json!(msg.id.to_string()),
         );
+
+        // ギルド情報（チャンネルの場合のみ）
+        if let Some(gid) = msg.guild_id {
+            if let Some(guild) = ctx.cache.guild(gid) {
+                incoming = incoming
+                    .with_metadata("guild_name", serde_json::json!(guild.name.clone()))
+                    .with_metadata(
+                        "guild_icon_url",
+                        serde_json::json!(guild.icon_url().unwrap_or_default()),
+                    );
+                if let Some(channel) = guild.channels.get(&msg.channel_id) {
+                    incoming = incoming
+                        .with_metadata("channel_name", serde_json::json!(channel.name.clone()));
+                }
+            }
+        }
 
         if let Err(e) = self.tx.send(incoming).await {
             warn!("Failed to forward Discord message to gateway: {e}");

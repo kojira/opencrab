@@ -313,6 +313,7 @@ async fn test_three_agent_with_db_and_session() {
             facilitator_id: Some(agent_ids[2].clone()),
             done_count: 0,
             max_turns: Some(6),
+            metadata_json: None,
         },
     )
     .unwrap();

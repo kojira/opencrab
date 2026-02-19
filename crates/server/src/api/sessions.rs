@@ -73,6 +73,7 @@ pub async fn create_session(
         facilitator_id: None,
         done_count: 0,
         max_turns: req.max_turns,
+        metadata_json: None,
     };
 
     let conn = state.db.lock().unwrap();

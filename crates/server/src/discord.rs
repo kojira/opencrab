@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use opencrab_gateway::DiscordGateway;
+use opencrab_gateway::IncomingMessage;
 
 use crate::process;
 use crate::AppState;
@@ -91,11 +92,19 @@ pub async fn run_discord_loop(
 
         // Session per Discord channel (auto-create if needed).
         let session_id = format!("discord-{}-{}", guild_id, channel_id);
-        ensure_discord_session(&state, &session_id, &agent_ids);
+        ensure_discord_session(&state, &session_id, &agent_ids, &incoming);
 
         // Log the user's message.
         {
             let conn = state.db.lock().unwrap();
+            let mut log_meta = serde_json::json!({
+                "source": "discord",
+                "channel_id": channel_id_str,
+                "user_name": incoming.sender.name,
+            });
+            if let Some(ref avatar_url) = incoming.sender.avatar_url {
+                log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
+            }
             let log = opencrab_db::queries::SessionLogRow {
                 id: None,
                 agent_id: incoming.sender.id.clone(),
@@ -104,14 +113,7 @@ pub async fn run_discord_loop(
                 content: text.clone(),
                 speaker_id: Some(incoming.sender.id.clone()),
                 turn_number: None,
-                metadata_json: Some(
-                    serde_json::json!({
-                        "source": "discord",
-                        "channel_id": channel_id_str,
-                        "user_name": incoming.sender.name,
-                    })
-                    .to_string(),
-                ),
+                metadata_json: Some(log_meta.to_string()),
             };
             opencrab_db::queries::insert_session_log(&conn, &log).ok();
         }
@@ -202,21 +204,102 @@ pub async fn run_discord_loop(
     info!("Discord message processing loop ended");
 }
 
+/// IncomingMessage からセッション用のリッチメタデータとテーマを構築する。
+fn build_discord_session_metadata(incoming: &IncomingMessage) -> (String, String) {
+    let (guild_id, channel_id) = match &incoming.source {
+        opencrab_gateway::MessageSource::Discord {
+            guild_id,
+            channel_id,
+        } => (guild_id.clone(), channel_id.clone()),
+        _ => (String::new(), String::new()),
+    };
+
+    let is_dm = guild_id.is_empty();
+
+    if is_dm {
+        let dm_user_name = incoming.sender.name.clone();
+        let theme = format!("DM with {}", dm_user_name);
+        let mut meta = serde_json::json!({
+            "source": "discord",
+            "is_dm": true,
+            "channel_id": channel_id,
+            "dm_user_name": dm_user_name,
+            "dm_user_id": incoming.sender.id,
+        });
+        if let Some(ref avatar_url) = incoming.sender.avatar_url {
+            meta["dm_user_avatar_url"] = serde_json::json!(avatar_url);
+        }
+        (theme, meta.to_string())
+    } else {
+        let guild_name = incoming
+            .metadata
+            .get("guild_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let guild_icon_url = incoming
+            .metadata
+            .get("guild_icon_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let channel_name = incoming
+            .metadata
+            .get("channel_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let theme = if !channel_name.is_empty() && !guild_name.is_empty() {
+            format!("#{} in {}", channel_name, guild_name)
+        } else {
+            "Discord conversation".to_string()
+        };
+
+        let meta = serde_json::json!({
+            "source": "discord",
+            "is_dm": false,
+            "guild_id": guild_id,
+            "guild_name": guild_name,
+            "guild_icon_url": guild_icon_url,
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+        });
+        (theme, meta.to_string())
+    }
+}
+
 /// Discordチャンネル用のセッションが存在しなければ作成する。
-fn ensure_discord_session(state: &AppState, session_id: &str, agent_ids: &[String]) {
+/// 既存セッションで metadata_json が未設定の場合は更新する。
+fn ensure_discord_session(
+    state: &AppState,
+    session_id: &str,
+    agent_ids: &[String],
+    incoming: &IncomingMessage,
+) {
     let conn = state.db.lock().unwrap();
-    if opencrab_db::queries::get_session(&conn, session_id)
+
+    if let Some(existing) = opencrab_db::queries::get_session(&conn, session_id)
         .ok()
         .flatten()
-        .is_some()
     {
+        // 既存セッションで metadata_json が未設定なら更新
+        if existing.metadata_json.is_none() {
+            let (theme, metadata_json) = build_discord_session_metadata(incoming);
+            opencrab_db::queries::update_session_metadata(
+                &conn, session_id, &metadata_json, &theme,
+            )
+            .ok();
+        }
         return;
     }
+
+    let (theme, metadata_json) = build_discord_session_metadata(incoming);
 
     let session = opencrab_db::queries::SessionRow {
         id: session_id.to_string(),
         mode: "discord".to_string(),
-        theme: "Discord conversation".to_string(),
+        theme,
         phase: "active".to_string(),
         turn_number: 0,
         status: "active".to_string(),
@@ -224,6 +307,7 @@ fn ensure_discord_session(state: &AppState, session_id: &str, agent_ids: &[Strin
         facilitator_id: None,
         done_count: 0,
         max_turns: None,
+        metadata_json: Some(metadata_json),
     };
     opencrab_db::queries::insert_session(&conn, &session).ok();
 }

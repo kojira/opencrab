@@ -14,14 +14,11 @@ function renderSidebar(initialPath = '/') {
 const navLabels = [
   'nav.dashboard',
   'nav.agents',
-  'nav.skills',
-  'nav.memory',
   'nav.sessions',
-  'nav.analytics',
 ];
 
 describe('Sidebar', () => {
-  it('renders all 6 navigation links', () => {
+  it('renders all 3 navigation links', () => {
     renderSidebar();
     for (const label of navLabels) {
       expect(screen.getByText(label)).toBeInTheDocument();

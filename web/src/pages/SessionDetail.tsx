@@ -4,14 +4,32 @@ import { useTranslation } from 'react-i18next';
 import { getSession, getSessionLogs, sendOwnerInstruction } from '../api/sessions';
 import type { SessionDto, SessionLogRow } from '../api/types';
 
+interface LogMetadata {
+  source?: string;
+  user_name?: string;
+  user_avatar_url?: string;
+  [key: string]: unknown;
+}
+
+function parseLogMetadata(metadataJson: string | null): LogMetadata | null {
+  if (!metadataJson) return null;
+  try {
+    return JSON.parse(metadataJson) as LogMetadata;
+  } catch {
+    return null;
+  }
+}
+
 function SessionLogItem({
   logType,
   content,
   speakerId,
+  metadataJson,
 }: {
   logType: string;
   content: string;
   speakerId: string | null;
+  metadataJson: string | null;
 }) {
   const [borderColor, icon, iconColor] = (() => {
     switch (logType) {
@@ -28,19 +46,57 @@ function SessionLogItem({
     }
   })();
 
+  const meta = parseLogMetadata(metadataJson);
+  const isDiscordUser = meta?.source === 'discord';
+  const isDiscordResponse = meta?.source === 'discord_response';
+
+  // Determine speaker display
+  let speakerDisplay: React.ReactNode;
+  if (isDiscordUser && meta) {
+    speakerDisplay = (
+      <div className="flex items-center gap-2">
+        {meta.user_avatar_url ? (
+          <img
+            src={meta.user_avatar_url}
+            alt={meta.user_name || ''}
+            className="w-6 h-6 rounded-full"
+          />
+        ) : (
+          <span className={`material-symbols-outlined text-lg ${iconColor}`}>{icon}</span>
+        )}
+        <span className="text-label-lg text-on-surface">
+          {meta.user_name || speakerId || ''}
+        </span>
+        {speakerId && meta.user_name && (
+          <span className="text-body-sm text-on-surface-variant">({speakerId})</span>
+        )}
+      </div>
+    );
+  } else if (isDiscordResponse && speakerId) {
+    const initial = speakerId.charAt(0).toUpperCase();
+    speakerDisplay = (
+      <div className="flex items-center gap-2">
+        <div className="w-6 h-6 rounded-full bg-primary-container flex items-center justify-center">
+          <span className="text-xs text-primary font-medium">{initial}</span>
+        </div>
+        <span className="text-label-lg text-on-surface">{speakerId}</span>
+      </div>
+    );
+  } else {
+    speakerDisplay = (
+      <div className="flex items-center gap-2">
+        <span className={`material-symbols-outlined text-lg ${iconColor}`}>{icon}</span>
+        <span className="text-label-lg text-on-surface">{speakerId || ''}</span>
+      </div>
+    );
+  }
+
   return (
     <div
       className={`bg-surface-container rounded-lg border-l-4 ${borderColor} p-4`}
     >
       <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <span className={`material-symbols-outlined text-lg ${iconColor}`}>
-            {icon}
-          </span>
-          <span className="text-label-lg text-on-surface">
-            {speakerId || ''}
-          </span>
-        </div>
+        {speakerDisplay}
         <div className="flex items-center gap-2">
           <span className="badge-neutral text-label-sm">{logType}</span>
         </div>
@@ -172,6 +228,7 @@ export default function SessionDetail() {
               logType={log.log_type}
               content={log.content}
               speakerId={log.speaker_id}
+              metadataJson={log.metadata_json}
             />
           ))
         )}

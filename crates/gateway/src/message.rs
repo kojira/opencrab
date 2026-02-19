@@ -66,6 +66,7 @@ pub struct Sender {
     pub id: String,
     pub name: String,
     pub is_bot: bool,
+    pub avatar_url: Option<String>,
 }
 
 impl Sender {
@@ -74,6 +75,7 @@ impl Sender {
             id: id.into(),
             name: name.into(),
             is_bot: false,
+            avatar_url: None,
         }
     }
 
@@ -82,7 +84,13 @@ impl Sender {
             id: id.into(),
             name: name.into(),
             is_bot: true,
+            avatar_url: None,
         }
+    }
+
+    pub fn with_avatar(mut self, url: impl Into<String>) -> Self {
+        self.avatar_url = Some(url.into());
+        self
     }
 }
 

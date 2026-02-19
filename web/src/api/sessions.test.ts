@@ -25,6 +25,7 @@ function makeRow(overrides: Partial<SessionRow> = {}): SessionRow {
     facilitator_id: 'a1',
     done_count: 1,
     max_turns: 10,
+    metadata_json: null,
     ...overrides,
   };
 }
@@ -71,6 +72,8 @@ describe('getSession', () => {
       turn_number: 3,
       status: 'active',
       participant_count: 4,
+      agent_ids: ['a1', 'a2', 'a3', 'a4'],
+      metadata_json: null,
     });
   });
 });
