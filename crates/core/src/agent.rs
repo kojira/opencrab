@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 use crate::heartbeat::HeartbeatConfig;
-use crate::identity::{AgentRole, Identity};
+use crate::identity::Identity;
 use crate::memory::MemoryManager;
 use crate::skill::SkillManager;
 use crate::soul::Soul;
@@ -163,7 +163,6 @@ impl Agent {
             let identity = Identity {
                 agent_id: identity_row.agent_id,
                 name: identity_row.name,
-                role: AgentRole::from_str_value(&identity_row.role),
                 job_title: identity_row.job_title,
                 organization: identity_row.organization,
                 image_url: identity_row.image_url,
@@ -223,7 +222,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let conn = test_conn();
         let soul = Soul::new("TestPersona");
-        let identity = Identity::new("agent-1", "TestAgent", AgentRole::Discussant);
+        let identity = Identity::new("agent-1", "TestAgent");
         let agent = Agent::new(
             "agent-1",
             soul,
@@ -238,7 +237,6 @@ mod tests {
         assert_eq!(agent.id, "agent-1");
         assert_eq!(agent.soul.persona_name, "TestPersona");
         assert_eq!(agent.identity.name, "TestAgent");
-        assert_eq!(agent.identity.role, AgentRole::Discussant);
     }
 
     #[test]
@@ -266,7 +264,6 @@ mod tests {
                 &queries::IdentityRow {
                     agent_id: "agent-1".to_string(),
                     name: "LoadedAgent".to_string(),
-                    role: "discussant".to_string(),
                     job_title: None,
                     organization: None,
                     image_url: None,
@@ -294,7 +291,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let conn = test_conn();
         let soul = Soul::new("TestPersona");
-        let identity = Identity::new("agent-1", "TestAgent", AgentRole::Discussant);
+        let identity = Identity::new("agent-1", "TestAgent");
         let agent = Agent::new(
             "agent-1",
             soul,

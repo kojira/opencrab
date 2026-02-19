@@ -62,13 +62,8 @@
   "agentCreate.title": "Create New Agent",
   "agentCreate.nameLabel": "Name *",
   "agentCreate.namePlaceholder": "e.g. Kai",
-  "agentCreate.roleLabel": "Role",
   "agentCreate.personaNameLabel": "Persona Name",
   "agentCreate.personaNamePlaceholder": "e.g. Pragmatic Engineer (defaults to name)",
-  "agentCreate.rolePlaceholder": "e.g. discussant, facilitator, observer",
-  "roles.discussant": "discussant",
-  "roles.facilitator": "facilitator",
-  "roles.observer": "observer",
   "agentCreate.nameRequired": "Name is required.",
 
 
@@ -84,7 +79,6 @@
   "agentDetail.identity": "Identity",
   "agentDetail.agentId": "Agent ID",
   "agentDetail.name": "Name",
-  "agentDetail.role": "Role",
   "agentDetail.discordBot": "Discord Bot",
   "agentDetail.botToken": "Bot Token",
   "agentDetail.ownerDiscordId": "Owner Discord ID",
@@ -110,7 +104,6 @@
   "agentDetail.manageAnalyticsDesc": "View usage metrics",
   "identityEdit.title": "Edit Identity",
   "identityEdit.nameLabel": "Name",
-  "identityEdit.roleLabel": "Role",
 
   "agentNav.overview": "Overview",
   "agentNav.skills": "Skills",

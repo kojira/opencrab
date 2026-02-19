@@ -23,7 +23,7 @@ pub mod engine;
 
 // Re-export primary types for convenience.
 pub use soul::{Soul, SocialStyle, Personality, ThinkingStyle};
-pub use identity::{Identity, AgentRole};
+pub use identity::Identity;
 pub use memory::MemoryManager;
 pub use skill::{SkillManager, Skill, SkillSource};
 pub use workspace::{Workspace, FileEntry};

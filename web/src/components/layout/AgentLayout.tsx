@@ -88,7 +88,7 @@ export default function AgentLayout() {
               {agent.name}
             </h1>
             <p className="text-body-lg text-on-surface-variant">
-              {agent.persona_name} / {agent.role}
+              {agent.persona_name}
             </p>
           </div>
           <div className="flex items-center gap-2">

@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
                     .prepare(
-                        "SELECT i.agent_id, i.name, i.role, COALESCE(s.persona_name, '') \
+                        "SELECT i.agent_id, i.name, COALESCE(s.persona_name, '') \
                          FROM identity i LEFT JOIN soul s ON i.agent_id = s.agent_id",
                     )
                     .unwrap();
@@ -102,14 +102,13 @@ async fn main() -> anyhow::Result<()> {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
                         ))
                     })
                     .unwrap();
                 let mut count = 0;
                 for row in rows {
-                    if let Ok((id, name, role, persona)) = row {
-                        println!("  {} - {} [{}] ({})", &id[..8], name, role, persona);
+                    if let Ok((id, name, persona)) = row {
+                        println!("  {} - {} ({})", &id[..8], name, persona);
                         count += 1;
                     }
                 }
@@ -125,7 +124,6 @@ async fn main() -> anyhow::Result<()> {
                     println!("Cancelled.");
                     continue;
                 }
-                let role = prompt_default("Role", "discussant");
                 let persona = prompt("Persona name (e.g. Creative Researcher)");
 
                 let agent_id = uuid::Uuid::new_v4().to_string();
@@ -136,7 +134,6 @@ async fn main() -> anyhow::Result<()> {
                     &opencrab_db::queries::IdentityRow {
                         agent_id: agent_id.clone(),
                         name: name.clone(),
-                        role,
                         job_title: None,
                         organization: None,
                         image_url: None,
@@ -170,7 +167,6 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(id) = identity {
                         println!("Agent: {}", id.name);
                         println!("  ID:           {}", id.agent_id);
-                        println!("  Role:         {}", id.role);
                         if let Some(ref jt) = id.job_title {
                             println!("  Job title:    {}", jt);
                         }
@@ -205,13 +201,12 @@ async fn main() -> anyhow::Result<()> {
 
                 if let Some(agent_id) = agent_id {
                     // Read current values
-                    let (cur_name, cur_role, cur_persona) = {
+                    let (cur_name, cur_persona) = {
                         let conn = db.lock().unwrap();
                         let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
                         let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
                         (
                             identity.as_ref().map(|i| i.name.clone()).unwrap_or_default(),
-                            identity.as_ref().map(|i| i.role.clone()).unwrap_or_default(),
                             soul.as_ref().map(|s| s.persona_name.clone()).unwrap_or_default(),
                         )
                     };
@@ -220,7 +215,6 @@ async fn main() -> anyhow::Result<()> {
                     println!("Press Enter to keep current value.\n");
 
                     let name = prompt_default("Name", &cur_name);
-                    let role = prompt_default("Role", &cur_role);
                     let persona = prompt_default("Persona", &cur_persona);
 
                     let conn = db.lock().unwrap();
@@ -229,7 +223,6 @@ async fn main() -> anyhow::Result<()> {
                     let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
                     if let Some(mut id) = identity {
                         id.name = name.clone();
-                        id.role = role;
                         opencrab_db::queries::upsert_identity(&conn, &id)?;
                     }
 

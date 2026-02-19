@@ -151,7 +151,6 @@ pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
 pub struct IdentityRow {
     pub agent_id: String,
     pub name: String,
-    pub role: String,
     pub job_title: Option<String>,
     pub organization: Option<String>,
     pub image_url: Option<String>,
@@ -160,11 +159,10 @@ pub struct IdentityRow {
 
 pub fn upsert_identity(conn: &Connection, identity: &IdentityRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO identity (agent_id, name, role, job_title, organization, image_url, metadata_json, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO identity (agent_id, name, job_title, organization, image_url, metadata_json, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name,
-            role = excluded.role,
             job_title = excluded.job_title,
             organization = excluded.organization,
             image_url = excluded.image_url,
@@ -173,7 +171,6 @@ pub fn upsert_identity(conn: &Connection, identity: &IdentityRow) -> Result<()> 
         params![
             identity.agent_id,
             identity.name,
-            identity.role,
             identity.job_title,
             identity.organization,
             identity.image_url,
@@ -186,18 +183,17 @@ pub fn upsert_identity(conn: &Connection, identity: &IdentityRow) -> Result<()> 
 
 pub fn get_identity(conn: &Connection, agent_id: &str) -> Result<Option<IdentityRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, name, role, job_title, organization, image_url, metadata_json
+        "SELECT agent_id, name, job_title, organization, image_url, metadata_json
          FROM identity WHERE agent_id = ?1",
         params![agent_id],
         |row| {
             Ok(IdentityRow {
                 agent_id: row.get(0)?,
                 name: row.get(1)?,
-                role: row.get(2)?,
-                job_title: row.get(3)?,
-                organization: row.get(4)?,
-                image_url: row.get(5)?,
-                metadata_json: row.get(6)?,
+                job_title: row.get(2)?,
+                organization: row.get(3)?,
+                image_url: row.get(4)?,
+                metadata_json: row.get(5)?,
             })
         },
     );
@@ -1385,7 +1381,6 @@ mod tests {
         let identity = IdentityRow {
             agent_id: "agent-1".to_string(),
             name: "Alice".to_string(),
-            role: "facilitator".to_string(),
             job_title: Some("Engineer".to_string()),
             organization: Some("OpenCrab Inc.".to_string()),
             image_url: Some("https://example.com/avatar.png".to_string()),
@@ -1399,7 +1394,6 @@ mod tests {
         let fetched = fetched.unwrap();
         assert_eq!(fetched.agent_id, "agent-1");
         assert_eq!(fetched.name, "Alice");
-        assert_eq!(fetched.role, "facilitator");
         assert_eq!(fetched.job_title, Some("Engineer".to_string()));
         assert_eq!(fetched.organization, Some("OpenCrab Inc.".to_string()));
         assert_eq!(
@@ -1991,7 +1985,6 @@ mod tests {
             &IdentityRow {
                 agent_id: "del-1".into(),
                 name: "DeleteMe".into(),
-                role: "test".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
@@ -2053,7 +2046,6 @@ mod tests {
             &IdentityRow {
                 agent_id: "abc-12345".into(),
                 name: "Alice".into(),
-                role: "test".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
@@ -2066,7 +2058,6 @@ mod tests {
             &IdentityRow {
                 agent_id: "xyz-99999".into(),
                 name: "Bob".into(),
-                role: "test".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
@@ -2098,7 +2089,6 @@ mod tests {
             &IdentityRow {
                 agent_id: "agent-find-1".into(),
                 name: "Creative Researcher".into(),
-                role: "discussant".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
@@ -2128,7 +2118,6 @@ mod tests {
             &IdentityRow {
                 agent_id: agent_id.into(),
                 name: "TestAgent".into(),
-                role: "discussant".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
@@ -2152,7 +2141,6 @@ mod tests {
         // Read
         let identity = get_identity(&conn, agent_id).unwrap().unwrap();
         assert_eq!(identity.name, "TestAgent");
-        assert_eq!(identity.role, "discussant");
         let soul = get_soul(&conn, agent_id).unwrap().unwrap();
         assert_eq!(soul.persona_name, "Original Persona");
 
@@ -2162,7 +2150,6 @@ mod tests {
             &IdentityRow {
                 agent_id: agent_id.into(),
                 name: "UpdatedAgent".into(),
-                role: "facilitator".into(),
                 job_title: Some("Lead".into()),
                 organization: None,
                 image_url: None,
@@ -2185,7 +2172,6 @@ mod tests {
 
         let identity = get_identity(&conn, agent_id).unwrap().unwrap();
         assert_eq!(identity.name, "UpdatedAgent");
-        assert_eq!(identity.role, "facilitator");
         assert_eq!(identity.job_title, Some("Lead".to_string()));
         let soul = get_soul(&conn, agent_id).unwrap().unwrap();
         assert_eq!(soul.persona_name, "Updated Persona");
@@ -2474,7 +2460,6 @@ mod tests {
             &IdentityRow {
                 agent_id: agent_id.into(),
                 name: "DiscordAgent".into(),
-                role: "test".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,

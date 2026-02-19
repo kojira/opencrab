@@ -20,7 +20,6 @@ const fakeAgents: AgentSummary[] = [
     id: 'a1',
     name: 'Alice',
     persona_name: 'Curious',
-    role: 'discussant',
     image_url: null,
     status: 'active',
     skill_count: 3,

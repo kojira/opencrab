@@ -3,7 +3,6 @@ export interface AgentSummary {
   id: string;
   name: string;
   persona_name: string;
-  role: string;
   image_url: string | null;
   status: string;
   skill_count: number;
@@ -13,7 +12,6 @@ export interface AgentSummary {
 export interface AgentDetail {
   id: string;
   name: string;
-  role: string;
   job_title: string | null;
   organization: string | null;
   image_url: string | null;
@@ -27,7 +25,6 @@ export interface AgentDetail {
 export interface IdentityRow {
   agent_id: string;
   name: string;
-  role: string;
   job_title: string | null;
   organization: string | null;
   image_url: string | null;

@@ -287,7 +287,6 @@ export default function AgentOverview() {
         <div className="space-y-3">
           <DetailRow label={t('agentDetail.agentId')} value={agent.id} />
           <DetailRow label={t('agentDetail.name')} value={agent.name} />
-          <DetailRow label={t('agentDetail.role')} value={agent.role} />
         </div>
       </div>
 

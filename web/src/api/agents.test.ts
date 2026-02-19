@@ -25,7 +25,7 @@ const mockedApi = vi.mocked(api);
 
 describe('getAgents', () => {
   it('returns agent summaries from API', async () => {
-    const agents = [{ id: '1', name: 'Alice', role: 'discussant' }];
+    const agents = [{ id: '1', name: 'Alice' }];
     mockedApi.get.mockResolvedValue(agents);
 
     const result = await getAgents();
@@ -39,7 +39,6 @@ describe('getAgent', () => {
     const identity: IdentityRow = {
       agent_id: 'a1',
       name: 'Alice',
-      role: 'discussant',
       job_title: 'Engineer',
       organization: 'Acme',
       image_url: 'https://example.com/alice.png',
@@ -61,7 +60,6 @@ describe('getAgent', () => {
     expect(result).toEqual({
       id: 'a1',
       name: 'Alice',
-      role: 'discussant',
       job_title: 'Engineer',
       organization: 'Acme',
       image_url: 'https://example.com/alice.png',
@@ -81,7 +79,6 @@ describe('getAgent', () => {
     expect(result).toEqual({
       id: 'x1',
       name: '',
-      role: '',
       job_title: null,
       organization: null,
       image_url: null,

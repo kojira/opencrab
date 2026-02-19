@@ -268,14 +268,13 @@ async fn test_three_agent_with_db_and_session() {
     ];
 
     let mut agent_ids = Vec::new();
-    for (name, persona, role) in &agent_configs {
+    for (name, persona, _role) in &agent_configs {
         let id = uuid::Uuid::new_v4().to_string();
         opencrab_db::queries::upsert_identity(
             &conn,
             &opencrab_db::queries::IdentityRow {
                 agent_id: id.clone(),
                 name: name.to_string(),
-                role: role.to_string(),
                 job_title: None,
                 organization: None,
                 image_url: None,

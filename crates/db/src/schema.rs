@@ -41,7 +41,6 @@ CREATE TABLE IF NOT EXISTS soul (
 CREATE TABLE IF NOT EXISTS identity (
     agent_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'discussant',
     job_title TEXT,
     organization TEXT,
     image_url TEXT,

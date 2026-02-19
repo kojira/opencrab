@@ -29,11 +29,6 @@ pub fn build_agent_context(
         .map(|i| i.name.clone())
         .unwrap_or_else(|| agent_id.to_string());
 
-    let role = identity
-        .as_ref()
-        .map(|i| i.role.clone())
-        .unwrap_or_else(|| "discussant".to_string());
-
     let persona = soul
         .as_ref()
         .map(|s| s.persona_name.clone())
@@ -63,7 +58,7 @@ pub fn build_agent_context(
     };
 
     let prompt = format!(
-        "You are {agent_name} ({persona}), role: {role}.\n\
+        "You are {agent_name} ({persona}).\n\
          Current date and time: {now}\n\
          Current discussion topic: {session_theme}\n\
          \n\

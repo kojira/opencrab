@@ -66,8 +66,7 @@ async fn create_test_agent(app: Router) -> (String, Router) {
         "/api/agents",
         Some(serde_json::json!({
             "name": "Test Agent",
-            "persona_name": "TestPersona",
-            "role": "discussant"
+            "persona_name": "TestPersona"
         })),
     )
     .await;
@@ -175,7 +174,6 @@ async fn test_update_identity() {
     let identity_update = serde_json::json!({
         "agent_id": agent_id,
         "name": "Updated Name",
-        "role": "facilitator",
         "job_title": "Lead",
         "organization": "OpenCrab Inc",
         "image_url": null,
@@ -199,7 +197,6 @@ async fn test_update_identity() {
     )
     .await;
     assert_eq!(resp["name"], "Updated Name");
-    assert_eq!(resp["role"], "facilitator");
 }
 
 #[tokio::test]
@@ -517,8 +514,7 @@ async fn test_agent_crud_full_cycle() {
         "/api/agents",
         Some(serde_json::json!({
             "name": "CRUD Agent",
-            "persona_name": "CRUD Persona",
-            "role": "discussant"
+            "persona_name": "CRUD Persona"
         })),
     )
     .await;
@@ -529,7 +525,6 @@ async fn test_agent_crud_full_cycle() {
     let (_, resp) =
         send_request(app.clone(), "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(resp["identity"]["name"], "CRUD Agent");
-    assert_eq!(resp["identity"]["role"], "discussant");
     assert_eq!(resp["soul"]["persona_name"], "CRUD Persona");
 
     // 3. Update identity
@@ -540,7 +535,6 @@ async fn test_agent_crud_full_cycle() {
         Some(serde_json::json!({
             "agent_id": agent_id,
             "name": "Updated CRUD Agent",
-            "role": "facilitator",
             "job_title": "Team Lead",
             "organization": "OpenCrab Labs",
             "image_url": null,
@@ -571,7 +565,6 @@ async fn test_agent_crud_full_cycle() {
     let (_, resp) =
         send_request(app.clone(), "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(resp["identity"]["name"], "Updated CRUD Agent");
-    assert_eq!(resp["identity"]["role"], "facilitator");
     assert_eq!(resp["identity"]["job_title"], "Team Lead");
     assert_eq!(resp["identity"]["organization"], "OpenCrab Labs");
     assert_eq!(resp["soul"]["persona_name"], "Updated CRUD Persona");
@@ -609,7 +602,7 @@ async fn test_agent_crud_full_cycle() {
 async fn test_create_agent_minimal_fields() {
     let app = create_test_app();
 
-    // Create with only name (no role)
+    // Create with only name and persona_name
     let (status, resp) = send_request(
         app.clone(),
         "POST",
@@ -623,10 +616,9 @@ async fn test_create_agent_minimal_fields() {
     assert_eq!(status, StatusCode::OK);
     let agent_id = resp["id"].as_str().unwrap().to_string();
 
-    // Should default to "discussant"
     let (_, resp) =
         send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert_eq!(resp["identity"]["role"], "discussant");
+    assert_eq!(resp["identity"]["name"], "Minimal Agent");
 }
 
 #[tokio::test]
@@ -761,8 +753,7 @@ async fn create_test_agent_named(
         "/api/agents",
         Some(serde_json::json!({
             "name": name,
-            "persona_name": persona,
-            "role": "discussant"
+            "persona_name": persona
         })),
     )
     .await;

@@ -24,7 +24,6 @@ export async function getAgent(id: string): Promise<AgentDetail> {
   return {
     id: i?.agent_id ?? id,
     name: i?.name ?? '',
-    role: i?.role ?? '',
     job_title: i?.job_title ?? null,
     organization: i?.organization ?? null,
     image_url: i?.image_url ?? null,
@@ -39,7 +38,6 @@ export async function getAgent(id: string): Promise<AgentDetail> {
 export function createAgent(body: {
   name: string;
   persona_name: string;
-  role?: string;
 }): Promise<{ id: string; name: string }> {
   return api.post('/agents', body);
 }

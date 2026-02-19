@@ -8,7 +8,6 @@ export default function AgentIdentityEdit() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [name, setName] = useState('');
-  const [role, setRole] = useState('');
   const [initialized, setInitialized] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
@@ -17,7 +16,6 @@ export default function AgentIdentityEdit() {
     if (!id) return;
     getAgent(id).then((detail) => {
       setName(detail.name);
-      setRole(detail.role);
       setInitialized(true);
     });
   }, [id]);
@@ -28,7 +26,6 @@ export default function AgentIdentityEdit() {
     try {
       await updateIdentity(id, {
         name,
-        role,
         job_title: null,
         organization: null,
         image_url: null,
@@ -69,25 +66,6 @@ export default function AgentIdentityEdit() {
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-        </div>
-
-        <div>
-          <label className="block text-label-lg text-on-surface mb-2">
-            {t('identityEdit.roleLabel')}
-          </label>
-          <input
-            type="text"
-            className="input-outlined"
-            list="role-options"
-            placeholder={t('agentCreate.rolePlaceholder')}
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-          />
-          <datalist id="role-options">
-            <option value={t('roles.discussant')} />
-            <option value={t('roles.facilitator')} />
-            <option value={t('roles.observer')} />
-          </datalist>
         </div>
 
         {saveStatus && (

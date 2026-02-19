@@ -7,7 +7,6 @@ export default function AgentCreate() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [name, setName] = useState('');
-  const [role, setRole] = useState('discussant');
   const [personaName, setPersonaName] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -22,7 +21,6 @@ export default function AgentCreate() {
       const agent = await createAgent({
         name: name.trim(),
         persona_name: personaName.trim() || name.trim(),
-        role,
       });
       navigate(`/agents/${agent.id}`);
     } catch (e) {
@@ -52,25 +50,6 @@ export default function AgentCreate() {
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-        </div>
-
-        <div>
-          <label className="block text-label-lg text-on-surface mb-2">
-            {t('agentCreate.roleLabel')}
-          </label>
-          <input
-            type="text"
-            className="input-outlined"
-            list="role-options"
-            placeholder={t('agentCreate.rolePlaceholder')}
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-          />
-          <datalist id="role-options">
-            <option value={t('roles.discussant')} />
-            <option value={t('roles.facilitator')} />
-            <option value={t('roles.observer')} />
-          </datalist>
         </div>
 
         <div>

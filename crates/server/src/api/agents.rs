@@ -11,7 +11,6 @@ pub struct AgentSummary {
     pub id: String,
     pub name: String,
     pub persona_name: String,
-    pub role: String,
     pub image_url: Option<String>,
     pub status: String,
     pub skill_count: i32,
@@ -23,7 +22,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
     // JOIN soul and identity to get agent summaries
     let mut stmt = conn
         .prepare(
-            "SELECT i.agent_id, i.name, COALESCE(s.persona_name, ''), i.role, i.image_url,
+            "SELECT i.agent_id, i.name, COALESCE(s.persona_name, ''), i.image_url,
                     (SELECT COUNT(*) FROM skills WHERE agent_id = i.agent_id) as skill_count,
                     (SELECT COUNT(*) FROM agent_sessions WHERE agent_id = i.agent_id) as session_count
              FROM identity i
@@ -38,11 +37,10 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
                 id: row.get(0)?,
                 name: row.get(1)?,
                 persona_name: row.get(2)?,
-                role: row.get(3)?,
-                image_url: row.get(4)?,
+                image_url: row.get(3)?,
                 status: "idle".to_string(),
-                skill_count: row.get(5)?,
-                session_count: row.get(6)?,
+                skill_count: row.get(4)?,
+                session_count: row.get(5)?,
             })
         })
         .unwrap()
@@ -57,7 +55,6 @@ pub struct CreateAgentRequest {
     pub id: Option<String>,
     pub name: String,
     pub persona_name: String,
-    pub role: Option<String>,
 }
 
 pub async fn create_agent(
@@ -70,7 +67,6 @@ pub async fn create_agent(
     let identity = opencrab_db::queries::IdentityRow {
         agent_id: agent_id.clone(),
         name: req.name.clone(),
-        role: req.role.unwrap_or_else(|| "discussant".to_string()),
         job_title: None,
         organization: None,
         image_url: None,

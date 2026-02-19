@@ -62,13 +62,8 @@
   "agentCreate.title": "新規エージェント作成",
   "agentCreate.nameLabel": "名前 *",
   "agentCreate.namePlaceholder": "例: カイ",
-  "agentCreate.roleLabel": "ロール",
   "agentCreate.personaNameLabel": "ペルソナ名",
   "agentCreate.personaNamePlaceholder": "例: 実用的なエンジニア（デフォルトは名前）",
-  "agentCreate.rolePlaceholder": "例: 議論者, ファシリテーター, オブザーバー",
-  "roles.discussant": "議論者",
-  "roles.facilitator": "ファシリテーター",
-  "roles.observer": "オブザーバー",
   "agentCreate.nameRequired": "名前は必須です。",
 
 
@@ -84,7 +79,6 @@
   "agentDetail.identity": "アイデンティティ",
   "agentDetail.agentId": "エージェントID",
   "agentDetail.name": "名前",
-  "agentDetail.role": "ロール",
   "agentDetail.discordBot": "Discord Bot",
   "agentDetail.botToken": "Bot トークン",
   "agentDetail.ownerDiscordId": "オーナー Discord ID",
@@ -110,7 +104,6 @@
   "agentDetail.manageAnalyticsDesc": "使用メトリクスを表示",
   "identityEdit.title": "アイデンティティ編集",
   "identityEdit.nameLabel": "名前",
-  "identityEdit.roleLabel": "ロール",
 
   "agentNav.overview": "概要",
   "agentNav.skills": "スキル",
