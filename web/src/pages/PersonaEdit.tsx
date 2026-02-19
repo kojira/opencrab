@@ -1,109 +1,108 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getAgent, updateSoul } from '../api/agents';
-import type { PersonalityDto } from '../api/types';
-
-function PersonalitySlider({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  const pct = Math.round(value * 100);
-
-  return (
-    <div>
-      <div className="flex justify-between mb-2">
-        <span className="text-label-lg text-on-surface">{label}</span>
-        <span className="text-label-md text-primary font-mono">
-          {value.toFixed(2)}
-        </span>
-      </div>
-      <div className="relative">
-        <input
-          type="range"
-          className="m3-slider"
-          min="0"
-          max="1"
-          step="0.05"
-          value={value}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
-        />
-        <div
-          className="absolute top-1/2 left-0 h-1 bg-primary rounded-full pointer-events-none -translate-y-1/2"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-    </div>
-  );
-}
+import { getAgent, updateSoul, listSoulPresets, createSoulPreset, deleteSoulPreset, applySoulPreset } from '../api/agents';
+import type { SoulPresetDto } from '../api/types';
 
 export default function PersonaEdit() {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const [personaName, setPersonaName] = useState('');
-  const [personality, setPersonality] = useState<PersonalityDto>({
-    openness: 0.5,
-    conscientiousness: 0.5,
-    extraversion: 0.5,
-    agreeableness: 0.5,
-    neuroticism: 0.5,
-  });
-  const [thinkingPrimary, setThinkingPrimary] = useState('Analytical');
-  const [thinkingSecondary, setThinkingSecondary] = useState('Practical');
-  const [thinkingDesc, setThinkingDesc] = useState('');
+  const [customTraits, setCustomTraits] = useState('');
   const [initialized, setInitialized] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  // Toast
+  const [toast, setToast] = useState<{ message: string; isError?: boolean; key: number } | null>(null);
+  const toastKey = useRef(0);
+
+  // Preset state
+  const [presets, setPresets] = useState<SoulPresetDto[]>([]);
+  const [showPresetInput, setShowPresetInput] = useState(false);
+  const [presetNameInput, setPresetNameInput] = useState('');
+  const [confirmApplyId, setConfirmApplyId] = useState<string | null>(null);
+  const [savingPreset, setSavingPreset] = useState(false);
+  const composingRef = useRef(false);
+
+  const showToast = useCallback((message: string, isError = false) => {
+    toastKey.current += 1;
+    setToast({ message, isError, key: toastKey.current });
+  }, []);
+
+  // Auto-dismiss toast
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(timer);
+  }, [toast?.key]);
+
+  const loadPresets = useCallback(async () => {
+    if (!id) return;
+    const list = await listSoulPresets(id);
+    setPresets(list);
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;
     getAgent(id).then((detail) => {
       setPersonaName(detail.persona_name);
-      try {
-        const p: PersonalityDto = JSON.parse(detail.personality_json);
-        setPersonality(p);
-      } catch {
-        // keep defaults
-      }
-      try {
-        const ts = JSON.parse(detail.thinking_style_json);
-        if (ts.primary) setThinkingPrimary(ts.primary);
-        if (ts.secondary) setThinkingSecondary(ts.secondary);
-        if (ts.description) setThinkingDesc(ts.description);
-      } catch {
-        // keep defaults
-      }
+      setCustomTraits(detail.custom_traits_json || '');
       setInitialized(true);
     });
-  }, [id]);
+    loadPresets();
+  }, [id, loadPresets]);
 
   const handleSave = async () => {
     if (!id) return;
-    const thinkingStyleJson = JSON.stringify({
-      primary: thinkingPrimary,
-      secondary: thinkingSecondary,
-      description: thinkingDesc,
-    });
     try {
       await updateSoul(id, {
         persona_name: personaName,
         social_style_json: '{}',
-        personality_json: JSON.stringify(personality),
-        thinking_style_json: thinkingStyleJson,
-        custom_traits_json: null,
+        personality_json: '{}',
+        thinking_style_json: '{}',
+        custom_traits_json: customTraits || null,
       });
-      setSaveStatus(t('personaEdit.savedSuccess'));
+      showToast(t('personaEdit.savedSuccess'));
     } catch (e) {
-      setSaveStatus(`Error: ${e instanceof Error ? e.message : e}`);
+      showToast(`Error: ${e instanceof Error ? e.message : e}`, true);
     }
   };
 
-  const updatePersonality = (key: keyof PersonalityDto, v: number) => {
-    setPersonality((prev) => ({ ...prev, [key]: v }));
+  const handleSavePreset = async () => {
+    if (!id || !presetNameInput.trim()) return;
+    setSavingPreset(true);
+    try {
+      await updateSoul(id, {
+        persona_name: personaName,
+        social_style_json: '{}',
+        personality_json: '{}',
+        thinking_style_json: '{}',
+        custom_traits_json: customTraits || null,
+      });
+      await createSoulPreset(id, presetNameInput.trim());
+      setPresetNameInput('');
+      setShowPresetInput(false);
+      showToast(t('personaEdit.presetSaved'));
+      await loadPresets();
+    } finally {
+      setSavingPreset(false);
+    }
+  };
+
+  const handleDeletePreset = async (presetId: string) => {
+    if (!id) return;
+    await deleteSoulPreset(id, presetId);
+    showToast(t('personaEdit.presetDeleted'));
+    await loadPresets();
+  };
+
+  const handleApplyPreset = async (presetId: string) => {
+    if (!id) return;
+    await applySoulPreset(id, presetId);
+    const detail = await getAgent(id);
+    setPersonaName(detail.persona_name);
+    setCustomTraits(detail.custom_traits_json || '');
+    setConfirmApplyId(null);
+    showToast(t('personaEdit.presetApplied'));
   };
 
   if (!initialized) {
@@ -116,11 +115,146 @@ export default function PersonaEdit() {
 
   return (
     <div className="max-w-4xl mx-auto">
+      {/* Toast notification */}
+      {toast && (
+        <div
+          className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-5 py-3 rounded-lg shadow-lg ${
+            toast.isError
+              ? 'bg-error-container text-on-error-container'
+              : 'bg-success-container text-success-on-container'
+          }`}
+          style={{ minWidth: '200px' }}
+        >
+          <span className={`material-symbols-outlined ${toast.isError ? 'text-error' : 'text-success'}`}>
+            {toast.isError ? 'error' : 'check_circle'}
+          </span>
+          <p className="text-body-md">{toast.message}</p>
+        </div>
+      )}
+
       <div className="flex items-center gap-3 mb-6">
         <Link to={`/agents/${id}`} className="btn-text p-2">
           <span className="material-symbols-outlined">arrow_back</span>
         </Link>
         <h1 className="page-title">{t('personaEdit.title')}</h1>
+      </div>
+
+      {/* Presets section */}
+      <div className="card-outlined mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="section-title flex items-center gap-2 mb-0">
+            <span className="material-symbols-outlined text-xl text-primary">
+              bookmarks
+            </span>
+            {t('personaEdit.presets')}
+          </h2>
+          {!showPresetInput && (
+            <button
+              className="btn-filled-tonal px-3 py-1.5 text-sm flex items-center gap-1"
+              onClick={() => setShowPresetInput(true)}
+            >
+              <span className="material-symbols-outlined text-base">add</span>
+              {t('personaEdit.saveAsPreset')}
+            </button>
+          )}
+        </div>
+
+        {/* Save preset input */}
+        {showPresetInput && (
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              type="text"
+              className="input-outlined text-sm px-3 py-1.5 flex-1"
+              placeholder={t('personaEdit.presetNamePrompt')}
+              value={presetNameInput}
+              onChange={(e) => setPresetNameInput(e.target.value)}
+              onCompositionStart={() => { composingRef.current = true; }}
+              onCompositionEnd={() => { composingRef.current = false; }}
+              onKeyDown={(e) => {
+                if (composingRef.current) return;
+                if (e.key === 'Enter') handleSavePreset();
+                if (e.key === 'Escape') { setShowPresetInput(false); setPresetNameInput(''); }
+              }}
+              disabled={savingPreset}
+              autoFocus
+            />
+            <button
+              className="btn-filled-tonal px-3 py-1.5 text-sm"
+              onClick={handleSavePreset}
+              disabled={savingPreset}
+            >
+              {savingPreset ? t('common.saving') : t('common.save')}
+            </button>
+            <button
+              className="btn-text px-2 py-1.5 text-sm"
+              onClick={() => { setShowPresetInput(false); setPresetNameInput(''); }}
+              disabled={savingPreset}
+            >
+              {t('common.cancel')}
+            </button>
+          </div>
+        )}
+
+        {/* Preset list */}
+        {presets.length === 0 ? (
+          <p className="text-body-sm text-on-surface-variant">
+            {t('personaEdit.noPresets')}
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1">
+            {presets.map((preset) => (
+              <div
+                key={preset.id}
+                className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-surface-container-high transition-colors"
+              >
+                {confirmApplyId === preset.id ? (
+                  <div className="flex items-center gap-2 w-full">
+                    <span className="text-body-sm text-on-surface-variant flex-1">
+                      {t('personaEdit.applyConfirm')}
+                    </span>
+                    <button
+                      className="btn-filled px-3 py-1 text-sm"
+                      onClick={() => handleApplyPreset(preset.id)}
+                    >
+                      OK
+                    </button>
+                    <button
+                      className="btn-text px-2 py-1 text-sm"
+                      onClick={() => setConfirmApplyId(null)}
+                    >
+                      {t('common.cancel')}
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="material-symbols-outlined text-base text-on-surface-variant">person</span>
+                      <span className="text-body-md font-medium truncate">{preset.preset_name}</span>
+                      <span className="text-body-sm text-on-surface-variant truncate">
+                        — {preset.persona_name}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 ml-2 flex-shrink-0">
+                      <button
+                        className="btn-filled-tonal px-3 py-1 text-sm flex items-center gap-1"
+                        onClick={() => setConfirmApplyId(preset.id)}
+                      >
+                        <span className="material-symbols-outlined text-base">swap_horiz</span>
+                        {t('personaEdit.apply')}
+                      </button>
+                      <button
+                        className="btn-text px-2 py-1 text-sm text-error"
+                        onClick={() => handleDeletePreset(preset.id)}
+                      >
+                        <span className="material-symbols-outlined text-base">delete</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Persona name section */}
@@ -139,104 +273,25 @@ export default function PersonaEdit() {
         />
       </div>
 
-      {/* Big Five personality section */}
+      {/* Custom traits (Markdown) section */}
       <div className="card-outlined mb-6">
         <h2 className="section-title flex items-center gap-2">
           <span className="material-symbols-outlined text-xl text-primary">
-            psychology
+            edit_note
           </span>
-          {t('personaEdit.personality')}
+          {t('personaEdit.customTraits')}
         </h2>
-        <div className="space-y-5">
-          <PersonalitySlider
-            label={t('personaEdit.openness')}
-            value={personality.openness}
-            onChange={(v) => updatePersonality('openness', v)}
-          />
-          <PersonalitySlider
-            label={t('personaEdit.conscientiousness')}
-            value={personality.conscientiousness}
-            onChange={(v) => updatePersonality('conscientiousness', v)}
-          />
-          <PersonalitySlider
-            label={t('personaEdit.extraversion')}
-            value={personality.extraversion}
-            onChange={(v) => updatePersonality('extraversion', v)}
-          />
-          <PersonalitySlider
-            label={t('personaEdit.agreeableness')}
-            value={personality.agreeableness}
-            onChange={(v) => updatePersonality('agreeableness', v)}
-          />
-          <PersonalitySlider
-            label={t('personaEdit.neuroticism')}
-            value={personality.neuroticism}
-            onChange={(v) => updatePersonality('neuroticism', v)}
-          />
-        </div>
+        <p className="text-body-sm text-on-surface-variant mb-3">
+          {t('personaEdit.customTraitsDesc')}
+        </p>
+        <textarea
+          className="input-outlined w-full font-mono text-sm"
+          rows={16}
+          placeholder={t('personaEdit.customTraitsPlaceholder')}
+          value={customTraits}
+          onChange={(e) => setCustomTraits(e.target.value)}
+        />
       </div>
-
-      {/* Thinking style section */}
-      <div className="card-outlined mb-6">
-        <h2 className="section-title flex items-center gap-2">
-          <span className="material-symbols-outlined text-xl text-primary">
-            lightbulb
-          </span>
-          {t('personaEdit.thinkingStyle')}
-        </h2>
-        <div className="space-y-5">
-          <div>
-            <label className="block text-label-lg text-on-surface mb-2">
-              {t('personaEdit.primary')}
-            </label>
-            <select
-              className="select-outlined"
-              value={thinkingPrimary}
-              onChange={(e) => setThinkingPrimary(e.target.value)}
-            >
-              <option value="Analytical">{t('thinkingStyles.analytical')}</option>
-              <option value="Intuitive">{t('thinkingStyles.intuitive')}</option>
-              <option value="Practical">{t('thinkingStyles.practical')}</option>
-              <option value="Creative">{t('thinkingStyles.creative')}</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-label-lg text-on-surface mb-2">
-              {t('personaEdit.secondary')}
-            </label>
-            <select
-              className="select-outlined"
-              value={thinkingSecondary}
-              onChange={(e) => setThinkingSecondary(e.target.value)}
-            >
-              <option value="Analytical">{t('thinkingStyles.analytical')}</option>
-              <option value="Intuitive">{t('thinkingStyles.intuitive')}</option>
-              <option value="Practical">{t('thinkingStyles.practical')}</option>
-              <option value="Creative">{t('thinkingStyles.creative')}</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-label-lg text-on-surface mb-2">
-              {t('personaEdit.description')}
-            </label>
-            <textarea
-              className="input-outlined min-h-[80px]"
-              rows={3}
-              value={thinkingDesc}
-              onChange={(e) => setThinkingDesc(e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
-
-      {saveStatus && (
-        <div className="flex items-center gap-2 p-4 rounded-md bg-success-container mb-6">
-          <span className="material-symbols-outlined text-success">
-            check_circle
-          </span>
-          <p className="text-body-md text-success-on-container">{saveStatus}</p>
-        </div>
-      )}
 
       <button className="btn-filled w-full py-3" onClick={handleSave}>
         <span className="material-symbols-outlined text-xl">save</span>

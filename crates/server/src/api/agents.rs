@@ -168,6 +168,79 @@ pub async fn update_identity(
 }
 
 // ============================================
+// Soul Presets
+// ============================================
+
+pub async fn list_soul_presets(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Vec<opencrab_db::queries::SoulPresetRow>> {
+    let conn = state.db.lock().unwrap();
+    let presets = opencrab_db::queries::list_soul_presets(&conn, &id).unwrap();
+    Json(presets)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSoulPresetRequest {
+    pub preset_name: String,
+}
+
+pub async fn create_soul_preset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateSoulPresetRequest>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    let soul = opencrab_db::queries::get_soul(&conn, &id).unwrap();
+    let Some(soul) = soul else {
+        return Json(serde_json::json!({ "ok": false, "error": "Soul not found." }));
+    };
+
+    let preset = opencrab_db::queries::SoulPresetRow {
+        id: uuid::Uuid::new_v4().to_string(),
+        agent_id: id,
+        preset_name: req.preset_name,
+        persona_name: soul.persona_name,
+        custom_traits_json: soul.custom_traits_json,
+    };
+    opencrab_db::queries::insert_soul_preset(&conn, &preset).unwrap();
+
+    Json(serde_json::json!({ "ok": true, "id": preset.id }))
+}
+
+pub async fn delete_soul_preset(
+    State(state): State<AppState>,
+    Path((_id, preset_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    let deleted = opencrab_db::queries::delete_soul_preset(&conn, &preset_id).unwrap();
+    Json(serde_json::json!({ "deleted": deleted }))
+}
+
+pub async fn apply_soul_preset(
+    State(state): State<AppState>,
+    Path((id, preset_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    let preset = opencrab_db::queries::get_soul_preset(&conn, &preset_id).unwrap();
+    let Some(preset) = preset else {
+        return Json(serde_json::json!({ "ok": false, "error": "Preset not found." }));
+    };
+
+    let soul = opencrab_db::queries::SoulRow {
+        agent_id: id,
+        persona_name: preset.persona_name,
+        social_style_json: "{}".to_string(),
+        personality_json: "{}".to_string(),
+        thinking_style_json: "{}".to_string(),
+        custom_traits_json: preset.custom_traits_json,
+    };
+    opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
+
+    Json(serde_json::json!({ "ok": true }))
+}
+
+// ============================================
 // Discord per-agent config
 // ============================================
 

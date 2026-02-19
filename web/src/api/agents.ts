@@ -4,6 +4,7 @@ import type {
   AgentDetail,
   IdentityRow,
   SoulRow,
+  SoulPresetDto,
   DiscordConfigDto,
 } from './types';
 
@@ -59,6 +60,32 @@ export function updateSoul(
   soul: Omit<SoulRow, 'agent_id'>,
 ): Promise<{ updated: boolean }> {
   return api.put(`/agents/${id}/soul`, { agent_id: id, ...soul });
+}
+
+// Soul Presets
+export function listSoulPresets(agentId: string): Promise<SoulPresetDto[]> {
+  return api.get<SoulPresetDto[]>(`/agents/${agentId}/soul/presets`);
+}
+
+export function createSoulPreset(
+  agentId: string,
+  presetName: string,
+): Promise<{ ok: boolean; id?: string; error?: string }> {
+  return api.post(`/agents/${agentId}/soul/presets`, { preset_name: presetName });
+}
+
+export function deleteSoulPreset(
+  agentId: string,
+  presetId: string,
+): Promise<{ deleted: boolean }> {
+  return api.del(`/agents/${agentId}/soul/presets/${presetId}`);
+}
+
+export function applySoulPreset(
+  agentId: string,
+  presetId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return api.post(`/agents/${agentId}/soul/presets/${presetId}/apply`, {});
 }
 
 // Discord per-agent config

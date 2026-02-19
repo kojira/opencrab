@@ -41,6 +41,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents/{id}", get(api::agents::get_agent).delete(api::agents::delete_agent))
         .route("/api/agents/{id}/soul", get(api::agents::get_soul).put(api::agents::update_soul))
         .route("/api/agents/{id}/identity", get(api::agents::get_identity).put(api::agents::update_identity))
+        // ペルソナプリセット
+        .route("/api/agents/{id}/soul/presets", get(api::agents::list_soul_presets).post(api::agents::create_soul_preset))
+        .route("/api/agents/{id}/soul/presets/{preset_id}", axum::routing::delete(api::agents::delete_soul_preset))
+        .route("/api/agents/{id}/soul/presets/{preset_id}/apply", post(api::agents::apply_soul_preset))
         // スキル管理
         .route("/api/agents/{id}/skills", get(api::skills::list_skills).post(api::skills::add_skill))
         .route("/api/agents/{id}/skills/{skill_id}/toggle", post(api::skills::toggle_skill))

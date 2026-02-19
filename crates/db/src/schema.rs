@@ -3,6 +3,21 @@ use rusqlite::Connection;
 /// スキーマ初期化
 pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_SQL)?;
+    migrate(conn)?;
+    Ok(())
+}
+
+/// 既存テーブルへのマイグレーション（カラム追加など）
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    // sessions.metadata_json カラム追加（既存DBへの対応）
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='metadata_json'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE sessions ADD COLUMN metadata_json TEXT")?;
+    }
     Ok(())
 }
 
@@ -211,6 +226,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     facilitator_id TEXT,
     done_count INTEGER NOT NULL DEFAULT 0,
     max_turns INTEGER,
+    metadata_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -239,6 +255,20 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     PRIMARY KEY (channel_id)
 );
 CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
+
+-- ============================================
+-- ペルソナプリセット
+-- ============================================
+CREATE TABLE IF NOT EXISTS soul_presets (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    preset_name TEXT NOT NULL,
+    persona_name TEXT NOT NULL,
+    custom_traits_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_soul_presets_agent ON soul_presets(agent_id);
 
 -- ============================================
 -- エージェント別Discord Bot設定

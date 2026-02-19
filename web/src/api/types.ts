@@ -96,6 +96,7 @@ export interface SessionRow {
   facilitator_id: string | null;
   done_count: number;
   max_turns: number | null;
+  metadata_json: string | null;
 }
 
 export interface SessionDto {
@@ -106,6 +107,8 @@ export interface SessionDto {
   turn_number: number;
   status: string;
   participant_count: number;
+  agent_ids: string[];
+  metadata_json: string | null;
 }
 
 export interface SessionLogRow {
@@ -133,6 +136,15 @@ export interface LlmMetricsSummaryDto {
   total_cost: number;
   avg_latency: number;
   avg_quality: number;
+}
+
+// Soul Preset
+export interface SoulPresetDto {
+  id: string;
+  agent_id: string;
+  preset_name: string;
+  persona_name: string;
+  custom_traits_json: string | null;
 }
 
 // Discord per-agent config

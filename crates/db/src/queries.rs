@@ -66,6 +66,84 @@ pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
 }
 
 // ============================================
+// SOUL PRESETS
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoulPresetRow {
+    pub id: String,
+    pub agent_id: String,
+    pub preset_name: String,
+    pub persona_name: String,
+    pub custom_traits_json: Option<String>,
+}
+
+pub fn list_soul_presets(conn: &Connection, agent_id: &str) -> Result<Vec<SoulPresetRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, preset_name, persona_name, custom_traits_json
+         FROM soul_presets WHERE agent_id = ?1 ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok(SoulPresetRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            preset_name: row.get(2)?,
+            persona_name: row.get(3)?,
+            custom_traits_json: row.get(4)?,
+        })
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn get_soul_preset(conn: &Connection, preset_id: &str) -> Result<Option<SoulPresetRow>> {
+    let result = conn.query_row(
+        "SELECT id, agent_id, preset_name, persona_name, custom_traits_json
+         FROM soul_presets WHERE id = ?1",
+        params![preset_id],
+        |row| {
+            Ok(SoulPresetRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                preset_name: row.get(2)?,
+                persona_name: row.get(3)?,
+                custom_traits_json: row.get(4)?,
+            })
+        },
+    );
+    match result {
+        Ok(preset) => Ok(Some(preset)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn insert_soul_preset(conn: &Connection, preset: &SoulPresetRow) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO soul_presets (id, agent_id, preset_name, persona_name, custom_traits_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            preset.id,
+            preset.agent_id,
+            preset.preset_name,
+            preset.persona_name,
+            preset.custom_traits_json,
+            now,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM soul_presets WHERE id = ?1",
+        params![preset_id],
+    )?;
+    Ok(deleted > 0)
+}
+
+// ============================================
 // IDENTITY
 // ============================================
 
@@ -135,6 +213,7 @@ pub fn get_identity(conn: &Connection, agent_id: &str) -> Result<Option<Identity
 pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
     let deleted = conn.execute("DELETE FROM identity WHERE agent_id = ?1", params![agent_id])?;
     conn.execute("DELETE FROM soul WHERE agent_id = ?1", params![agent_id])?;
+    conn.execute("DELETE FROM soul_presets WHERE agent_id = ?1", params![agent_id])?;
     conn.execute("DELETE FROM skills WHERE agent_id = ?1", params![agent_id])?;
     conn.execute(
         "DELETE FROM memory_curated WHERE agent_id = ?1",
@@ -886,12 +965,13 @@ pub struct SessionRow {
     pub facilitator_id: Option<String>,
     pub done_count: i32,
     pub max_turns: Option<i32>,
+    pub metadata_json: Option<String>,
 }
 
 pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO sessions (id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO sessions (id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             session.id,
             session.mode,
@@ -903,6 +983,7 @@ pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
             session.facilitator_id,
             session.done_count,
             session.max_turns,
+            session.metadata_json,
             Utc::now().to_rfc3339(),
             Utc::now().to_rfc3339(),
         ],
@@ -912,7 +993,7 @@ pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
 
 pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<SessionRow>> {
     let result = conn.query_row(
-        "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns
+        "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json
          FROM sessions WHERE id = ?1",
         params![session_id],
         |row| {
@@ -927,6 +1008,7 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
                 facilitator_id: row.get(7)?,
                 done_count: row.get(8)?,
                 max_turns: row.get(9)?,
+                metadata_json: row.get(10)?,
             })
         },
     );
@@ -940,7 +1022,7 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<Session
 
 pub fn list_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns
+        "SELECT id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json
          FROM sessions ORDER BY created_at DESC",
     )?;
 
@@ -956,10 +1038,24 @@ pub fn list_sessions(conn: &Connection) -> Result<Vec<SessionRow>> {
             facilitator_id: row.get(7)?,
             done_count: row.get(8)?,
             max_turns: row.get(9)?,
+            metadata_json: row.get(10)?,
         })
     })?;
 
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn update_session_metadata(
+    conn: &Connection,
+    session_id: &str,
+    metadata_json: &str,
+    theme: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET metadata_json = ?1, theme = ?2, updated_at = ?3 WHERE id = ?4",
+        params![metadata_json, theme, Utc::now().to_rfc3339(), session_id],
+    )?;
+    Ok(())
 }
 
 // ============================================
@@ -1582,6 +1678,7 @@ mod tests {
             facilitator_id: Some("agent-1".to_string()),
             done_count: 0,
             max_turns: Some(10),
+            metadata_json: None,
         };
 
         insert_session(&conn, &session).unwrap();
