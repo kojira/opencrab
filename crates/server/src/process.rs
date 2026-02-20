@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use opencrab_gateway::GatewayActions;
 use opencrab_llm::pricing::PricingRegistry;
 
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};
@@ -110,7 +111,7 @@ pub async fn run_agent_response(
     system_prompt: &str,
     conversation: &str,
     gateway: &str,
-    gateway_admin: Option<Arc<dyn opencrab_actions::GatewayAdmin>>,
+    gateway_actions: Option<Arc<dyn GatewayActions>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = format!("{}/{}", state.workspace_base, agent_id);
@@ -141,10 +142,15 @@ pub async fn run_agent_response(
         model_override: model_override.clone(),
         current_purpose: current_purpose.clone(),
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
-        gateway_admin,
     };
     let dispatcher = opencrab_actions::ActionDispatcher::new();
-    let executor = opencrab_actions::BridgedExecutor::new(dispatcher, ctx);
+    let executor = {
+        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx);
+        match gateway_actions {
+            Some(ga) => bridged.with_gateway_actions(ga),
+            None => bridged,
+        }
+    };
 
     // Create LlmRouterAdapter with metrics recording.
     let metrics_ctx = MetricsContext {

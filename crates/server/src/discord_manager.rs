@@ -45,8 +45,11 @@ impl DiscordGatewayManager {
         let gateway = Arc::new(DiscordGateway::new(token));
         gateway.start().await?;
 
-        let gateway_admin: Arc<dyn opencrab_actions::GatewayAdmin> = Arc::new(
-            crate::discord_admin_impl::SerenityGatewayAdmin::new(gateway.http().clone()),
+        let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+            crate::discord_admin_impl::DiscordGatewayActions::new(
+                gateway.http().clone(),
+                self.state.db.clone(),
+            ),
         );
 
         let loop_state = self.state.clone();
@@ -59,7 +62,7 @@ impl DiscordGatewayManager {
                 loop_gateway,
                 loop_state,
                 agent_ids,
-                gateway_admin,
+                gateway_actions,
                 owner,
             )
             .await;

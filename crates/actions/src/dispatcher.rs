@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::*;
-use crate::discord_admin::*;
 use crate::learning::*;
 use crate::llm_analysis::*;
 use crate::llm_evaluation::*;
@@ -54,11 +53,6 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(AnalyzeLlmUsageAction));
         dispatcher.register(Arc::new(RecallModelExperiencesAction));
         dispatcher.register(Arc::new(SaveModelInsightAction));
-
-        // Discord管理アクション登録
-        dispatcher.register(Arc::new(DiscordListGuildsAction));
-        dispatcher.register(Arc::new(DiscordListChannelsAction));
-        dispatcher.register(Arc::new(DiscordChannelConfigAction));
 
         dispatcher
     }
@@ -129,7 +123,6 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-            gateway_admin: None,
         };
         (dir, ctx)
     }
@@ -139,8 +132,8 @@ mod tests {
         let dispatcher = ActionDispatcher::new();
         let names = dispatcher.action_names();
         assert!(
-            names.len() >= 21,
-            "Expected at least 21 actions, got {}",
+            names.len() >= 18,
+            "Expected at least 18 actions, got {}",
             names.len()
         );
         assert!(names.contains(&"send_speech".to_string()));

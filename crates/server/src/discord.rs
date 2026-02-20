@@ -20,7 +20,7 @@ pub async fn run_discord_loop(
     gateway: Arc<DiscordGateway>,
     state: AppState,
     agent_ids: Vec<String>,
-    gateway_admin: Arc<dyn opencrab_actions::GatewayAdmin>,
+    gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
 ) {
     info!(
@@ -144,7 +144,7 @@ pub async fn run_discord_loop(
                 &system_prompt,
                 &conversation,
                 "discord",
-                Some(gateway_admin.clone()),
+                Some(gateway_actions.clone()),
             )
             .await;
 

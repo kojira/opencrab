@@ -3,6 +3,7 @@ pub mod message;
 pub mod adapters;
 
 pub use traits::Gateway;
+pub use traits::{GatewayActions, GatewayActionDef, GatewayActionResult};
 pub use message::{
     IncomingMessage, OutgoingMessage,
     MessageSource, MessageContent, ContentPart,

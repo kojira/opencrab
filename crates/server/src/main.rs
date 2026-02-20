@@ -51,9 +51,10 @@ async fn main() -> anyhow::Result<()> {
             let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
             gateway.start().await?;
 
-            let gateway_admin: Arc<dyn opencrab_actions::GatewayAdmin> = Arc::new(
-                opencrab_server::discord_admin_impl::SerenityGatewayAdmin::new(
+            let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+                opencrab_server::discord_admin_impl::DiscordGatewayActions::new(
                     gateway.http().clone(),
+                    state.db.clone(),
                 ),
             );
 
@@ -65,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
                     gateway,
                     discord_state,
                     agent_ids,
-                    gateway_admin,
+                    gateway_actions,
                     owner_discord_id,
                 )
                 .await;
