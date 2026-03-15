@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
             gateway.start().await?;
 
             let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-                opencrab_server::discord_admin_impl::DiscordGatewayActions::new(
+                opencrab_discord::DiscordGatewayActions::new(
                     gateway.http().clone(),
                     state.db.clone(),
                 ),
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             let agent_ids = discord_cfg.agent_ids.clone();
             let owner_discord_id = discord_cfg.owner_discord_id.clone();
             tokio::spawn(async move {
-                opencrab_server::discord::run_discord_loop(
+                opencrab_discord::run_discord_loop(
                     gateway,
                     discord_state,
                     agent_ids,
@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Per-agent Discord gateway manager.
-        let manager = opencrab_server::discord_manager::DiscordGatewayManager::new(state.clone());
+        let manager = opencrab_discord::DiscordGatewayManager::new(state.clone());
         manager.restore_from_db().await;
         state.discord_manager = Some(Arc::new(manager));
 

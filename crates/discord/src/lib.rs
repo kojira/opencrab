@@ -1,0 +1,51 @@
+//! Discord integration crate for OpenCrab.
+//!
+//! Provides Discord gateway actions, message processing loop, and per-agent bot management.
+//! All Discord-specific logic lives here, keeping the server crate Discord-free.
+
+pub mod gateway_actions;
+pub mod manager;
+pub mod message_loop;
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use opencrab_gateway::GatewayActions;
+
+pub use gateway_actions::DiscordGatewayActions;
+pub use manager::DiscordGatewayManager;
+pub use message_loop::run_discord_loop;
+
+/// Trait abstracting the server-side agent processing pipeline.
+///
+/// Defined here (in the discord crate) to break the circular dependency:
+/// discord needs to invoke agent processing, but server depends on discord.
+/// Server implements this trait for its `AppState`.
+#[async_trait]
+pub trait AgentRunner: Send + Sync + Clone + 'static {
+    /// Access the shared database connection.
+    fn db(&self) -> &Arc<Mutex<rusqlite::Connection>>;
+
+    /// Whether any LLM providers are configured.
+    fn has_llm_providers(&self) -> bool;
+
+    /// Build the agent's system prompt and name from DB.
+    ///
+    /// Returns `(system_prompt, agent_name)`.
+    fn build_agent_context(&self, agent_id: &str, theme: &str) -> (String, String);
+
+    /// Build the conversation history string for a session.
+    fn build_conversation_string(&self, session_id: &str) -> String;
+
+    /// Run the full agent response pipeline (SkillEngine + LLM).
+    async fn run_agent_response(
+        &self,
+        agent_id: &str,
+        agent_name: &str,
+        session_id: &str,
+        system_prompt: &str,
+        conversation: &str,
+        gateway_name: &str,
+        gateway_actions: Option<Arc<dyn GatewayActions>>,
+    ) -> anyhow::Result<opencrab_core::EngineResult>;
+}

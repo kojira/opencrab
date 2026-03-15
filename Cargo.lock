@@ -1151,6 +1151,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-discord"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "opencrab-core",
+ "opencrab-db",
+ "opencrab-gateway",
+ "rusqlite",
+ "serde_json",
+ "serenity",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "opencrab-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1199,12 +1216,12 @@ dependencies = [
  "opencrab-actions",
  "opencrab-core",
  "opencrab-db",
+ "opencrab-discord",
  "opencrab-gateway",
  "opencrab-llm",
  "rusqlite",
  "serde",
  "serde_json",
- "serenity",
  "tempfile",
  "tokio",
  "toml",

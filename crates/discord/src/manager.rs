@@ -12,20 +12,20 @@ use tracing::{error, info, warn};
 
 use opencrab_gateway::DiscordGateway;
 
-use crate::AppState;
+use crate::AgentRunner;
 
 struct AgentGatewayEntry {
     gateway: Arc<DiscordGateway>,
     handle: JoinHandle<()>,
 }
 
-pub struct DiscordGatewayManager {
+pub struct DiscordGatewayManager<T: AgentRunner> {
     gateways: RwLock<HashMap<String, AgentGatewayEntry>>,
-    state: AppState,
+    state: T,
 }
 
-impl DiscordGatewayManager {
-    pub fn new(state: AppState) -> Self {
+impl<T: AgentRunner> DiscordGatewayManager<T> {
+    pub fn new(state: T) -> Self {
         Self {
             gateways: RwLock::new(HashMap::new()),
             state,
@@ -46,9 +46,9 @@ impl DiscordGatewayManager {
         gateway.start().await?;
 
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-            crate::discord_admin_impl::DiscordGatewayActions::new(
+            crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
-                self.state.db.clone(),
+                self.state.db().clone(),
             ),
         );
 
@@ -58,7 +58,7 @@ impl DiscordGatewayManager {
         let owner = owner_discord_id.to_string();
 
         let handle = tokio::spawn(async move {
-            crate::discord::run_discord_loop(
+            crate::run_discord_loop(
                 loop_gateway,
                 loop_state,
                 agent_ids,
@@ -104,7 +104,7 @@ impl DiscordGatewayManager {
     /// Restore all enabled agent Discord configs from DB and start their gateways.
     pub async fn restore_from_db(&self) {
         let configs = {
-            let conn = self.state.db.lock().unwrap();
+            let conn = self.state.db().lock().unwrap();
             opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
         };
 

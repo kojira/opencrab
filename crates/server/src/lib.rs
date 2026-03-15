@@ -13,13 +13,7 @@ pub mod llm_adapter;
 pub mod process;
 
 #[cfg(feature = "discord")]
-pub mod discord;
-
-#[cfg(feature = "discord")]
-pub mod discord_admin_impl;
-
-#[cfg(feature = "discord")]
-pub mod discord_manager;
+mod agent_runner_impl;
 
 use opencrab_llm::router::LlmRouter;
 
@@ -30,7 +24,7 @@ pub struct AppState {
     pub workspace_base: String,
     pub default_model: String,
     #[cfg(feature = "discord")]
-    pub discord_manager: Option<Arc<discord_manager::DiscordGatewayManager>>,
+    pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
 }
 
 pub fn create_router(state: AppState) -> Router {

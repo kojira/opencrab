@@ -1,7 +1,6 @@
 //! Discordゲートウェイのメッセージ処理ループ。
 //!
 //! Discordからメッセージを受信し、設定されたエージェントの応答を返す。
-//! `discord` featureが有効な場合のみコンパイルされる。
 
 use std::sync::Arc;
 
@@ -10,15 +9,14 @@ use tracing::{debug, error, info, warn};
 use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
 
-use crate::process;
-use crate::AppState;
+use crate::AgentRunner;
 
 /// Discordメッセージの受信→エージェント処理→応答送信のメインループ。
 ///
 /// バックグラウンドタスクとして`tokio::spawn`から呼ばれることを想定。
-pub async fn run_discord_loop(
+pub async fn run_discord_loop<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
-    state: AppState,
+    state: T,
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
@@ -71,7 +69,7 @@ pub async fn run_discord_loop(
         // Channel readable check: DMはフィルタリング対象外
         if !is_dm {
             let readable = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.db().lock().unwrap();
                 opencrab_db::queries::is_channel_readable(&conn, &channel_id_str)
             };
             if !readable {
@@ -96,7 +94,7 @@ pub async fn run_discord_loop(
 
         // Log the user's message.
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.db().lock().unwrap();
             let mut log_meta = serde_json::json!({
                 "source": "discord",
                 "channel_id": channel_id_str,
@@ -119,41 +117,35 @@ pub async fn run_discord_loop(
         }
 
         // Skip agent processing if no LLM providers are configured.
-        if state.llm_router.provider_names().is_empty() {
+        if !state.has_llm_providers() {
             debug!("No LLM providers configured, skipping agent response");
             continue;
         }
 
         // Process with each configured agent.
         for agent_id in &agent_ids {
-            let (system_prompt, agent_name) = {
-                let conn = state.db.lock().unwrap();
-                process::build_agent_context(&conn, agent_id, "Discord conversation")
-            };
+            let (system_prompt, agent_name) = state.build_agent_context(agent_id, "Discord conversation");
 
-            let conversation = {
-                let conn = state.db.lock().unwrap();
-                process::build_conversation_string(&conn, &session_id)
-            };
+            let conversation = state.build_conversation_string(&session_id);
 
-            let result = process::run_agent_response(
-                &state,
-                agent_id,
-                &agent_name,
-                &session_id,
-                &system_prompt,
-                &conversation,
-                "discord",
-                Some(gateway_actions.clone()),
-            )
-            .await;
+            let result = state
+                .run_agent_response(
+                    agent_id,
+                    &agent_name,
+                    &session_id,
+                    &system_prompt,
+                    &conversation,
+                    "discord",
+                    Some(gateway_actions.clone()),
+                )
+                .await;
 
             match result {
                 Ok(engine_result) if !engine_result.response.is_empty() => {
                     // Writable check: DMはフィルタリング対象外
                     if !is_dm {
                         let writable = {
-                            let conn = state.db.lock().unwrap();
+                            let conn = state.db().lock().unwrap();
                             opencrab_db::queries::is_channel_writable(&conn, &channel_id_str)
                         };
                         if !writable {
@@ -175,7 +167,7 @@ pub async fn run_discord_loop(
                     }
 
                     // Log agent response to DB.
-                    let conn = state.db.lock().unwrap();
+                    let conn = state.db().lock().unwrap();
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: agent_id.clone(),
@@ -271,13 +263,13 @@ fn build_discord_session_metadata(incoming: &IncomingMessage) -> (String, String
 
 /// Discordチャンネル用のセッションが存在しなければ作成する。
 /// 既存セッションで metadata_json が未設定の場合は更新する。
-fn ensure_discord_session(
-    state: &AppState,
+fn ensure_discord_session<T: AgentRunner>(
+    state: &T,
     session_id: &str,
     agent_ids: &[String],
     incoming: &IncomingMessage,
 ) {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db().lock().unwrap();
 
     if let Some(existing) = opencrab_db::queries::get_session(&conn, session_id)
         .ok()

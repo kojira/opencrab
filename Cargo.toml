@@ -6,6 +6,7 @@ members = [
     "crates/gateway",
     "crates/actions",
     "crates/db",
+    "crates/discord",
     "crates/server",
     "crates/cli",
 ]
@@ -60,3 +61,4 @@ opencrab-llm = { path = "crates/llm" }
 opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
+opencrab-discord = { path = "crates/discord" }
