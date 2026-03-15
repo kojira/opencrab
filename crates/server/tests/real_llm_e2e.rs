@@ -47,6 +47,8 @@ fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
         llm_router: Arc::new(router),
         workspace_base,
         default_model: "openrouter:openai/gpt-4o".to_string(),
+        #[cfg(feature = "discord")]
+        discord_manager: None,
     };
     let app = create_router(state);
     (app, db)

@@ -36,6 +36,7 @@ opencrab/
 │   ├── gateway/    I/Oアダプタ層。REST, CLI, Discord, WebSocket
 │   ├── actions/    エージェントが実行できる行動の定義と実装
 │   ├── db/         SQLiteスキーマとクエリ関数
+│   ├── discord/    Discord統合。メッセージループ、管理アクション、per-agent Bot管理
 │   ├── server/     Axum HTTPサーバー。REST API + ゲートウェイ統合
 │   └── cli/        対話型REPLクライアント
 ├── dashboard/      Dioxus製Web UI（エージェント管理、セッション監視、分析）
@@ -51,6 +52,7 @@ server ──→ core ──→ db
   ├──→ llm ──┘ (トレイト経由、直接依存なし)
   ├──→ gateway
   ├──→ actions ──→ core, db
+  ├──→ discord (optional) ──→ gateway, db, core
   └──→ db
 
 cli ──→ core, db
@@ -59,6 +61,8 @@ dashboard ──→ (HTTP経由でserverと通信)
 ```
 
 `core`は`llm`や`actions`に直接依存しない。代わりに`LlmClient`トレイトと`ActionExecutor`トレイトを定義し、サーバー層で実装を結合する（依存性逆転）。
+
+`discord`クレートは`AgentRunner`トレイトを定義し、`server`が`AppState`に対してこれを実装することで循環依存を回避している。
 
 ### 2.3 データの流れ
 
@@ -274,16 +278,16 @@ SkillEngine
 
 ### 7.4 Discord統合のプラグイン分離
 
-Discordゲートウェイは以下の仕組みで本体から分離されている：
+Discord固有のロジックは専用の`opencrab-discord`クレートに分離されている：
 
-- `serenity`クレートは`optional = true`で宣言
-- `discord` Cargo featureを有効にしない限り、serenityはコンパイルされない
-- `#[cfg(feature = "discord")]` で関連コード全体を条件付きコンパイル
-- feature転送: `server`の`discord` feature → `gateway`の`discord` feature
+- **`opencrab-discord`クレート**: メッセージループ、Discord管理アクション（サーバー/チャンネル一覧、チャンネル設定）、per-agent Botライフサイクル管理を提供
+- **`AgentRunner`トレイト**: `discord`クレートで定義。エージェント処理パイプライン（LLM呼び出し等）を抽象化し、`server`が`AppState`に対して実装する。これにより`discord → server`の循環依存を回避
+- **`opencrab-gateway`のDiscordアダプタ**: serenity Botの接続・メッセージ受信・送信を担当（feature flag `discord`で条件付きコンパイル）
+- **`server`の`discord` feature**: `opencrab-discord`をoptional依存として有効化。`serenity`への直接依存はない
 
 ```
 cargo build                    → Discord関連コード・依存なし
-cargo build --features discord → serenityコンパイル、Discord統合有効
+cargo build --features discord → opencrab-discord + serenityコンパイル、Discord統合有効
 ```
 
 ---
