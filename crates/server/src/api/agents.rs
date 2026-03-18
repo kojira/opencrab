@@ -406,3 +406,66 @@ pub async fn delete_discord_config(
 
     Json(serde_json::json!({"deleted": deleted}))
 }
+
+// ============================================
+// Memory Index API
+// ============================================
+
+/// GET /api/agents/{id}/memory/index — インデックス状態取得
+pub async fn get_memory_index_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    let watermark = opencrab_db::queries::get_index_watermark(&conn, &id)
+        .ok()
+        .flatten();
+    let unindexed = opencrab_db::queries::get_unindexed_log_count(&conn, &id).unwrap_or(0);
+    let tree = opencrab_db::queries::get_index_tree(&conn, &id).unwrap_or_default();
+
+    Json(serde_json::json!({
+        "agent_id": id,
+        "total_nodes": tree.len(),
+        "unindexed_logs": unindexed,
+        "watermark": watermark,
+        "node_type_counts": {
+            "root": tree.iter().filter(|n| n.node_type == "root").count(),
+            "period": tree.iter().filter(|n| n.node_type == "period").count(),
+            "session": tree.iter().filter(|n| n.node_type == "session").count(),
+            "topic": tree.iter().filter(|n| n.node_type == "topic").count(),
+        },
+    }))
+}
+
+/// POST /api/agents/{id}/memory/index — 手動インデックス構築トリガー
+pub async fn trigger_memory_index_build(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let db = state.db.clone();
+    let agent_id = id.clone();
+    let llm_router = state.llm_router.clone();
+    let model = state.default_model.clone();
+
+    let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
+
+    match opencrab_core::memory_index::IndexBuilder::build_incremental(
+        &db,
+        &agent_id,
+        &llm_adapter,
+        &model,
+        50,
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "ok": true,
+            "nodes_created": result.nodes_created,
+            "logs_indexed": result.logs_indexed,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
+    }
+}

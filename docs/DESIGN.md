@@ -114,10 +114,11 @@ Soulは`build_context()`メソッドで自然言語テキストに変換され�
 
 ### 3.4 記憶システム
 
-2種類の記憶を管理する：
+3種類の記憶を管理する：
 
 - **Curated Memory**: カテゴリ付きの永続知識。事実、観察、学習結果を分類して保存
 - **Session Log**: 会話の時系列ログ。話者ID、ターン番号付き。FTS5で全文検索可能（BM25スコアリング）
+- **Memory Index**: セッションログの階層ツリーインデックス。LLMで要約を生成し、root → period → session → topic の4階層に構造化。Agentic RAGにより、エージェントが`browse_memory_index`でツリーを閲覧→推論→`retrieve_memory_nodes`で全文取得の2ステップで文脈依存の記憶検索を実現
 
 ---
 
@@ -227,6 +228,8 @@ SkillEngine
 | **検索** | `search_my_history` | 過去の会話ログをFTS検索 |
 | | `summarize_and_save` | 会話を要約してキュレーション記憶に保存 |
 | | `create_my_skill` | 新しいスキルを自ら作成 |
+| | `browse_memory_index` | 記憶インデックスのツリー構造を閲覧（タイトル+要約のコンパクト表示） |
+| | `retrieve_memory_nodes` | インデックスノードの全文テキストを取得（1-5ノード指定） |
 | **LLM管理** | `select_llm` | 用途に応じてモデルを動的切り替え |
 | | `evaluate_response` | 直前のLLM応答を自己評価 |
 | | `analyze_llm_usage` | LLM使用状況を分析 |
@@ -365,6 +368,8 @@ RESTとDiscordは共通の処理関数（`process.rs`）を使い、入出力部
 | `model_experience_notes` | モデル体験メモ (situation, observation, recommendation) |
 | `model_pricing` | モデル価格情報 |
 | `heartbeat_log` | ハートビート記録 |
+| `memory_index_nodes` | 記憶インデックスの階層ツリーノード (node_type, title, summary, log_id range) |
+| `memory_index_watermark` | インデックス構築の進捗管理 (last_indexed_log_id) |
 
 ### 9.2 設計方針
 
@@ -373,6 +378,7 @@ RESTとDiscordは共通の処理関数（`process.rs`）を使い、入出力部
 - タイムスタンプはUTC RFC3339形式
 - JSONフィールドでスキーマの柔軟性を確保（性格特性、メタデータ等）
 - FTS5はセッションログの全文検索に使用。BM25でランキング
+- Memory Indexはウォーターマーク方式の増分構築。LLMで要約を生成し、閾値超過時にバックグラウンドで自動実行
 
 ---
 
@@ -399,7 +405,7 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 
 | 種類 | 件数 | 対象 |
 |------|------|------|
-| ユニットテスト | ~130件 | 各クレート内のモジュール単位 |
+| ユニットテスト | ~160件 | 各クレート内のモジュール単位 |
 | 統合テスト | ~30件 | クレート間の連携 (engine_integration, api_e2e) |
 | 実LLMテスト | ~20件 (`#[ignore]`) | OpenRouter経由の実API呼び出し |
 

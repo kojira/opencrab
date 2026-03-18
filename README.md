@@ -12,7 +12,7 @@
 
 - **Multi-Provider LLM Support** -- OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, llama.cpp with intelligent routing and automatic fallback
 - **Agent Personality System** -- Big Five traits, social styles, and thinking preferences via the Soul/Identity model
-- **Memory Management** -- Curated memories and session logs with SQLite FTS5 full-text search
+- **Memory Management** -- Curated memories, session logs with FTS5 search, and hierarchical memory index with LLM-powered Agentic RAG
 - **Skill System** -- Standard and acquired skills with effectiveness tracking and usage metrics
 - **Multi-Channel Communication** -- REST API, CLI, WebSocket, and Discord gateway adapters
 - **Sandboxed Workspace** -- Per-agent file operations with path traversal protection
@@ -105,6 +105,7 @@ cargo run -p opencrab-cli
 | POST | `/api/agents/{id}/skills/{skill_id}/toggle` | Toggle skill |
 | GET | `/api/agents/{id}/memory/curated` | List curated memories |
 | POST | `/api/agents/{id}/memory/search` | Search memory |
+| GET / POST | `/api/agents/{id}/memory/index` | Get index status / trigger index build |
 | GET / POST | `/api/sessions` | List / create sessions |
 | GET | `/api/sessions/{id}` | Get session |
 | POST | `/api/sessions/{id}/messages` | Send message |
@@ -125,7 +126,7 @@ Configuration is loaded from `config/default.toml`:
 ## Testing
 
 ```bash
-# Run all tests (~107 tests)
+# Run all tests (~212 tests)
 cargo test --workspace
 
 # Run tests for a specific crate

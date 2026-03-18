@@ -170,12 +170,46 @@ pub async fn run_agent_response(
         5, // max iterations
     );
 
-    engine
+    let result = engine
         .run_with_model_override(
             system_prompt,
             conversation,
             &state.default_model,
             Some(model_override),
         )
-        .await
+        .await;
+
+    // インデックス自動構築チェック（バックグラウンド）
+    {
+        let index_db = state.db.clone();
+        let index_agent_id = agent_id.to_string();
+        let index_llm_router = state.llm_router.clone();
+        let index_model = state.default_model.clone();
+        tokio::spawn(async move {
+            let unindexed = {
+                let Ok(conn) = index_db.lock() else { return };
+                opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
+                    .unwrap_or(0)
+            };
+            if unindexed < 20 {
+                return;
+            }
+            tracing::info!(
+                agent_id = %index_agent_id,
+                unindexed = unindexed,
+                "Starting background memory index build"
+            );
+            let llm_adapter = LlmRouterAdapter::new(index_llm_router);
+            let _ = opencrab_core::memory_index::IndexBuilder::build_incremental(
+                &index_db,
+                &index_agent_id,
+                &llm_adapter,
+                &index_model,
+                50,
+            )
+            .await;
+        });
+    }
+
+    result
 }

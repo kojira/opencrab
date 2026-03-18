@@ -46,6 +46,8 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(SearchMyHistoryAction));
         dispatcher.register(Arc::new(SummarizeAndSaveAction));
         dispatcher.register(Arc::new(CreateMySkillAction));
+        dispatcher.register(Arc::new(BrowseMemoryIndexAction));
+        dispatcher.register(Arc::new(RetrieveMemoryNodesAction));
 
         // LLM関連アクション登録
         dispatcher.register(Arc::new(SelectLlmAction));
@@ -132,8 +134,8 @@ mod tests {
         let dispatcher = ActionDispatcher::new();
         let names = dispatcher.action_names();
         assert!(
-            names.len() >= 18,
-            "Expected at least 18 actions, got {}",
+            names.len() >= 20,
+            "Expected at least 20 actions, got {}",
             names.len()
         );
         assert!(names.contains(&"send_speech".to_string()));

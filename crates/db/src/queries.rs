@@ -1329,6 +1329,221 @@ pub fn is_channel_writable(conn: &Connection, channel_id: &str) -> bool {
         .unwrap_or(true)
 }
 
+// ============================================
+// MEMORY INDEX: 階層ツリーノード
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexNodeRow {
+    pub id: String,
+    pub agent_id: String,
+    pub parent_id: Option<String>,
+    pub node_type: String,
+    pub title: String,
+    pub summary: String,
+    pub start_log_id: Option<i64>,
+    pub end_log_id: Option<i64>,
+    pub source_session_id: Option<String>,
+    pub depth: i32,
+    pub child_count: i32,
+    pub token_count: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatermarkRow {
+    pub agent_id: String,
+    pub last_indexed_log_id: i64,
+    pub last_indexed_at: String,
+    pub total_nodes: i64,
+}
+
+pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            node.id,
+            node.agent_id,
+            node.parent_id,
+            node.node_type,
+            node.title,
+            node.summary,
+            node.start_log_id,
+            node.end_log_id,
+            node.source_session_id,
+            node.depth,
+            node.child_count,
+            node.token_count,
+            node.created_at,
+            node.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_index_node_child_count(conn: &Connection, node_id: &str, count: i32) -> Result<()> {
+    conn.execute(
+        "UPDATE memory_index_nodes SET child_count = ?1, updated_at = ?2 WHERE id = ?3",
+        params![count, Utc::now().to_rfc3339(), node_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at
+         FROM memory_index_nodes WHERE agent_id = ?1 ORDER BY depth ASC, created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok(IndexNodeRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            parent_id: row.get(2)?,
+            node_type: row.get(3)?,
+            title: row.get(4)?,
+            summary: row.get(5)?,
+            start_log_id: row.get(6)?,
+            end_log_id: row.get(7)?,
+            source_session_id: row.get(8)?,
+            depth: row.get(9)?,
+            child_count: row.get(10)?,
+            token_count: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn get_index_node(conn: &Connection, node_id: &str) -> Result<Option<IndexNodeRow>> {
+    let result = conn.query_row(
+        "SELECT id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at
+         FROM memory_index_nodes WHERE id = ?1",
+        params![node_id],
+        |row| {
+            Ok(IndexNodeRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                node_type: row.get(3)?,
+                title: row.get(4)?,
+                summary: row.get(5)?,
+                start_log_id: row.get(6)?,
+                end_log_id: row.get(7)?,
+                source_session_id: row.get(8)?,
+                depth: row.get(9)?,
+                child_count: row.get(10)?,
+                token_count: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+            })
+        },
+    );
+    match result {
+        Ok(node) => Ok(Some(node)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn get_session_logs_by_id_range(
+    conn: &Connection,
+    agent_id: &str,
+    from_id: i64,
+    to_id: i64,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+         FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![agent_id, from_id, to_id], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn get_index_watermark(conn: &Connection, agent_id: &str) -> Result<Option<WatermarkRow>> {
+    let result = conn.query_row(
+        "SELECT agent_id, last_indexed_log_id, last_indexed_at, total_nodes
+         FROM memory_index_watermark WHERE agent_id = ?1",
+        params![agent_id],
+        |row| {
+            Ok(WatermarkRow {
+                agent_id: row.get(0)?,
+                last_indexed_log_id: row.get(1)?,
+                last_indexed_at: row.get(2)?,
+                total_nodes: row.get(3)?,
+            })
+        },
+    );
+    match result {
+        Ok(wm) => Ok(Some(wm)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_index_watermark(conn: &Connection, wm: &WatermarkRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_index_watermark (agent_id, last_indexed_log_id, last_indexed_at, total_nodes)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(agent_id) DO UPDATE SET
+            last_indexed_log_id = excluded.last_indexed_log_id,
+            last_indexed_at = excluded.last_indexed_at,
+            total_nodes = excluded.total_nodes",
+        params![wm.agent_id, wm.last_indexed_log_id, wm.last_indexed_at, wm.total_nodes],
+    )?;
+    Ok(())
+}
+
+pub fn get_unindexed_log_count(conn: &Connection, agent_id: &str) -> Result<i64> {
+    let last_id = get_index_watermark(conn, agent_id)?
+        .map(|wm| wm.last_indexed_log_id)
+        .unwrap_or(0);
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        params![agent_id, last_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+pub fn get_unindexed_session_logs(
+    conn: &Connection,
+    agent_id: &str,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+         FROM memory_sessions WHERE agent_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![agent_id, after_id, limit as i64], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

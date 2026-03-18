@@ -279,4 +279,37 @@ CREATE TABLE IF NOT EXISTS agent_discord_config (
     enabled INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL
 );
+
+-- ============================================
+-- 記憶インデックス: 階層ツリーノード
+-- ============================================
+CREATE TABLE IF NOT EXISTS memory_index_nodes (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    parent_id TEXT,
+    node_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    start_log_id INTEGER,
+    end_log_id INTEGER,
+    source_session_id TEXT,
+    depth INTEGER NOT NULL DEFAULT 0,
+    child_count INTEGER NOT NULL DEFAULT 0,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
+CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
+CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
+
+-- ============================================
+-- 記憶インデックス: ウォーターマーク（進捗管理）
+-- ============================================
+CREATE TABLE IF NOT EXISTS memory_index_watermark (
+    agent_id TEXT PRIMARY KEY,
+    last_indexed_log_id INTEGER NOT NULL DEFAULT 0,
+    last_indexed_at TEXT NOT NULL,
+    total_nodes INTEGER NOT NULL DEFAULT 0
+);
 "#;
