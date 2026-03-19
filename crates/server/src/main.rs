@@ -48,35 +48,57 @@ async fn main() -> anyhow::Result<()> {
         if discord_cfg.enabled && !discord_cfg.token.is_empty() {
             tracing::info!("Starting Discord gateway (config-based fallback)...");
 
-            let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
-            gateway.start().await?;
+            // Validate agent IDs against the database
+            let valid_agent_ids: Vec<String> = {
+                let conn = state.db.lock().unwrap();
+                discord_cfg
+                    .agent_ids
+                    .iter()
+                    .filter(|agent_id| {
+                        match opencrab_db::queries::get_identity(&conn, agent_id) {
+                            Ok(Some(_)) => true,
+                            _ => {
+                                tracing::warn!("Agent '{}' not found in database, skipping", agent_id);
+                                false
+                            }
+                        }
+                    })
+                    .cloned()
+                    .collect()
+            };
 
-            let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-                opencrab_discord::DiscordGatewayActions::new(
-                    gateway.http().clone(),
-                    state.db.clone(),
-                ),
-            );
+            if valid_agent_ids.is_empty() {
+                tracing::error!("No valid agents found for Discord gateway, not starting");
+            } else {
+                let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
+                gateway.start().await?;
 
-            let discord_state = state.clone();
-            let agent_ids = discord_cfg.agent_ids.clone();
-            let owner_discord_id = discord_cfg.owner_discord_id.clone();
-            tokio::spawn(async move {
-                opencrab_discord::run_discord_loop(
-                    gateway,
-                    discord_state,
-                    agent_ids,
-                    gateway_actions,
-                    owner_discord_id,
-                )
-                .await;
-            });
+                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+                    opencrab_discord::DiscordGatewayActions::new(
+                        gateway.http().clone(),
+                        state.db.clone(),
+                    ),
+                );
 
-            tracing::info!(
-                agents = ?discord_cfg.agent_ids,
-                owner = %discord_cfg.owner_discord_id,
-                "Discord gateway started (config-based)"
-            );
+                let discord_state = state.clone();
+                let owner_discord_id = discord_cfg.owner_discord_id.clone();
+                tokio::spawn(async move {
+                    opencrab_discord::run_discord_loop(
+                        gateway,
+                        discord_state,
+                        valid_agent_ids,
+                        gateway_actions,
+                        owner_discord_id,
+                    )
+                    .await;
+                });
+
+                tracing::info!(
+                    agents = ?discord_cfg.agent_ids,
+                    owner = %discord_cfg.owner_discord_id,
+                    "Discord gateway started (config-based)"
+                );
+            }
         }
 
         // Per-agent Discord gateway manager.
