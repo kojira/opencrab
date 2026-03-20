@@ -76,6 +76,7 @@ impl DiscordGateway {
 
         let handler = DiscordHandler {
             tx: self.tx.clone(),
+            self_user_id: tokio::sync::OnceCell::new(),
         };
 
         let mut client = Client::builder(&self.token, intents)
@@ -184,11 +185,22 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 struct DiscordHandler {
     tx: mpsc::Sender<IncomingMessage>,
+    self_user_id: tokio::sync::OnceCell<u64>,
 }
 
 #[async_trait]
 impl EventHandler for DiscordHandler {
     async fn message(&self, ctx: Context, msg: SerenityMessage) {
+        // 自分自身のメッセージは無視（無限ループ防止）
+        if let Some(self_id) = self.self_user_id.get() {
+            if msg.author.id.get() == *self_id {
+                return;
+            }
+        } else if msg.author.bot {
+            // ready前の安全策：Botメッセージは全て無視
+            return;
+        }
+
         info!(
             author = %msg.author.name,
             bot = msg.author.bot,
@@ -244,6 +256,8 @@ impl EventHandler for DiscordHandler {
     }
 
     async fn ready(&self, _ctx: Context, ready: Ready) {
+        let self_id = ready.user.id.get();
+        let _ = self.self_user_id.set(self_id);
         info!(
             "Discord bot connected as {} (id: {})",
             ready.user.name, ready.user.id,
