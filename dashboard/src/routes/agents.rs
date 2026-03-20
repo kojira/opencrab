@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::api::{get_agents, get_agent, create_agent, update_identity, delete_agent};
+use crate::api::{get_agents, get_agent, create_agent, update_identity, delete_agent, get_co_agents, add_co_agent, remove_co_agent, CoAgentDto};
 use crate::app::Route;
 use crate::components::AgentCard;
 
@@ -279,6 +279,12 @@ pub fn AgentDetail(id: String) -> Element {
                             title: "Workspace",
                             description: "Browse agent files"
                         }
+                        ActionCard {
+                            to: Route::AgentCoAgents { id: id.clone() },
+                            icon: "group",
+                            title: "Co-Agents",
+                            description: "Trusted co-agent management"
+                        }
                     }
 
                     // Identity details
@@ -484,6 +490,237 @@ fn DetailRow(label: &'static str, value: String) -> Element {
         div { class: "flex items-center py-2",
             span { class: "w-36 text-label-lg text-on-surface-variant", "{label}" }
             span { class: "text-body-lg text-on-surface font-mono", "{value}" }
+        }
+    }
+}
+
+// ── Agent Co-Agents ──
+
+#[component]
+pub fn AgentCoAgents(id: String) -> Element {
+    let id_for_load = id.clone();
+    let id_for_add = id.clone();
+    let mut co_agents = use_resource(move || {
+        let id = id_for_load.clone();
+        async move { get_co_agents(id).await }
+    });
+    let mut show_add_modal = use_signal(|| false);
+    let mut new_co_agent_id = use_signal(|| String::new());
+    let mut new_allowed_actions = use_signal(|| String::new());
+    let mut adding = use_signal(|| false);
+    let mut add_error = use_signal(|| Option::<String>::None);
+    let mut confirm_remove = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        div { class: "max-w-4xl mx-auto",
+            div { class: "flex items-center gap-3 mb-6",
+                Link {
+                    to: Route::AgentDetail { id: id.clone() },
+                    class: "btn-text p-2",
+                    span { class: "material-symbols-outlined", "arrow_back" }
+                }
+                h1 { class: "page-title", "Co-Agents" }
+                div { class: "flex-1" }
+                button {
+                    class: "btn-filled",
+                    onclick: move |_| {
+                        show_add_modal.set(true);
+                        add_error.set(None);
+                        new_co_agent_id.set(String::new());
+                        new_allowed_actions.set(String::new());
+                    },
+                    span { class: "material-symbols-outlined text-xl", "add" }
+                    "Add Co-Agent"
+                }
+            }
+
+            p { class: "text-body-md text-on-surface-variant mb-6",
+                "Manage trusted co-agents for this agent. Co-agents listed here can perform actions on behalf of this agent. If allowed actions is empty, all actions are permitted."
+            }
+
+            match &*co_agents.read() {
+                Some(Ok(list)) => rsx! {
+                    if list.is_empty() {
+                        div { class: "empty-state",
+                            span { class: "material-symbols-outlined empty-state-icon", "group" }
+                            p { class: "empty-state-text", "No trusted co-agents." }
+                            p { class: "text-body-sm text-on-surface-variant mt-2",
+                                "Add co-agents to allow them to act on behalf of this agent."
+                            }
+                        }
+                    } else {
+                        div { class: "card-outlined overflow-hidden",
+                            table { class: "w-full",
+                                thead {
+                                    tr { class: "border-b border-outline-variant",
+                                        th { class: "text-left text-label-lg text-on-surface-variant px-4 py-3", "Co-Agent ID" }
+                                        th { class: "text-left text-label-lg text-on-surface-variant px-4 py-3", "Allowed Actions" }
+                                        th { class: "text-left text-label-lg text-on-surface-variant px-4 py-3", "Added" }
+                                        th { class: "px-4 py-3", "" }
+                                    }
+                                }
+                                tbody {
+                                    for ca in list.iter() {
+                                        {
+                                            let ca_id = ca.co_agent_id.clone();
+                                            let ca_id_for_confirm = ca_id.clone();
+                                            let actions_display = match &ca.allowed_actions {
+                                                None => "All actions".to_string(),
+                                                Some(v) if v.is_empty() => "All actions".to_string(),
+                                                Some(v) => v.join(", "),
+                                            };
+                                            rsx! {
+                                                tr { key: "{ca.id}", class: "border-b border-outline-variant last:border-0 hover:bg-surface-variant/30",
+                                                    td { class: "px-4 py-3 text-body-lg text-on-surface font-mono", "{ca_id}" }
+                                                    td { class: "px-4 py-3 text-body-md text-on-surface-variant", "{actions_display}" }
+                                                    td { class: "px-4 py-3 text-body-sm text-on-surface-variant", "{ca.created_at}" }
+                                                    td { class: "px-4 py-3",
+                                                        button {
+                                                            class: "btn-text text-error text-sm",
+                                                            onclick: move |_| confirm_remove.set(Some(ca_id_for_confirm.clone())),
+                                                            span { class: "material-symbols-outlined text-base", "delete" }
+                                                            "Remove"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                Some(Err(e)) => rsx! {
+                    div { class: "card-outlined border-error bg-error-container/30 p-4",
+                        p { class: "text-body-lg text-error-on-container", "Error: {e}" }
+                    }
+                },
+                None => rsx! {
+                    div { class: "empty-state",
+                        p { class: "text-body-lg text-on-surface-variant", "Loading..." }
+                    }
+                },
+            }
+
+            // Add Co-Agent Modal
+            if *show_add_modal.read() {
+                div { class: "scrim",
+                    div { class: "dialog",
+                        h3 { class: "text-title-lg text-on-surface mb-4", "Add Co-Agent" }
+                        div { class: "space-y-4 mb-6",
+                            div {
+                                label { class: "block text-label-lg text-on-surface mb-2", "Co-Agent ID *" }
+                                input {
+                                    r#type: "text",
+                                    class: "input-outlined",
+                                    placeholder: "e.g. helper-agent-1",
+                                    value: "{new_co_agent_id}",
+                                    oninput: move |e| new_co_agent_id.set(e.value())
+                                }
+                            }
+                            div {
+                                label { class: "block text-label-lg text-on-surface mb-2", "Allowed Actions (comma-separated, empty = all)" }
+                                input {
+                                    r#type: "text",
+                                    class: "input-outlined",
+                                    placeholder: "e.g. execute_shell, ws_read",
+                                    value: "{new_allowed_actions}",
+                                    oninput: move |e| new_allowed_actions.set(e.value())
+                                }
+                            }
+                            if let Some(ref err) = *add_error.read() {
+                                p { class: "text-body-md text-error", "{err}" }
+                            }
+                        }
+                        div { class: "flex gap-3 justify-end",
+                            button {
+                                class: "btn-outlined",
+                                onclick: move |_| show_add_modal.set(false),
+                                "Cancel"
+                            }
+                            button {
+                                class: "btn-filled",
+                                disabled: *adding.read(),
+                                onclick: {
+                                    let agent_id = id_for_add.clone();
+                                    move |_| {
+                                        let cid = new_co_agent_id.read().trim().to_string();
+                                        if cid.is_empty() {
+                                            add_error.set(Some("Co-Agent ID is required.".to_string()));
+                                            return;
+                                        }
+                                        let actions_str = new_allowed_actions.read().clone();
+                                        let allowed: Option<Vec<String>> = if actions_str.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(actions_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                                        };
+                                        adding.set(true);
+                                        let aid = agent_id.clone();
+                                        spawn(async move {
+                                            match add_co_agent(aid, cid, allowed).await {
+                                                Ok(_) => {
+                                                    show_add_modal.set(false);
+                                                    adding.set(false);
+                                                    co_agents.restart();
+                                                }
+                                                Err(e) => {
+                                                    add_error.set(Some(format!("Error: {e}")));
+                                                    adding.set(false);
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                if *adding.read() { "Adding..." } else { "Add" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Remove Confirmation Dialog
+            if let Some(ref cid) = *confirm_remove.read() {
+                {
+                    let cid_display = cid.clone();
+                    let cid_for_remove = cid.clone();
+                    let agent_id_for_remove = id.clone();
+                    rsx! {
+                        div { class: "scrim",
+                            div { class: "dialog",
+                                div { class: "flex items-center gap-3 mb-4",
+                                    span { class: "material-symbols-outlined text-2xl text-error", "warning" }
+                                    h3 { class: "text-title-lg text-on-surface", "Remove Co-Agent?" }
+                                }
+                                p { class: "text-body-lg text-on-surface-variant mb-6",
+                                    "Remove \"{cid_display}\" from trusted co-agents?"
+                                }
+                                div { class: "flex gap-3 justify-end",
+                                    button {
+                                        class: "btn-outlined",
+                                        onclick: move |_| confirm_remove.set(None),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "btn-danger",
+                                        onclick: move |_| {
+                                            let aid = agent_id_for_remove.clone();
+                                            let cid = cid_for_remove.clone();
+                                            spawn(async move {
+                                                let _ = remove_co_agent(aid, cid).await;
+                                                confirm_remove.set(None);
+                                                co_agents.restart();
+                                            });
+                                        },
+                                        "Remove"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

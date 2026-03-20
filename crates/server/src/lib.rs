@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
     routing::{get, post},
@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 
 pub mod api;
 pub mod config;
+pub mod hot_reload;
 pub mod llm_adapter;
 pub mod process;
 
@@ -23,7 +24,7 @@ pub struct AppState {
     pub llm_router: Arc<LlmRouter>,
     pub workspace_base: String,
     pub default_model: String,
-    pub tools_config: opencrab_actions::tools::ToolsConfig,
+    pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
 }
@@ -68,6 +69,11 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/agents/{id}/discord/start", post(api::agents::start_discord_gateway))
         .route("/api/agents/{id}/discord/stop", post(api::agents::stop_discord_gateway))
+        // Co-Agent管理
+        .route("/api/agents/{id}/co-agents", get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent))
+        .route("/api/agents/{id}/co-agents/{co_agent_id}", axum::routing::patch(api::co_agents::update_co_agent).delete(api::co_agents::delete_co_agent))
+        .route("/api/agents/{id}/trusted-users", get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user))
+        .route("/api/agents/{id}/trusted-users/{user_id}", axum::routing::patch(api::trusted_users::update_trusted_user).delete(api::trusted_users::delete_trusted_user))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

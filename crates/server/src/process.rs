@@ -145,7 +145,8 @@ pub async fn run_agent_response(
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
     let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    opencrab_actions::register_tools_from_config(&state.tools_config, &mut dispatcher);
+    let tools_cfg = state.tools_config.read().unwrap().clone();
+    opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx);
         match gateway_actions {

@@ -28,7 +28,7 @@ pub use identity::Identity;
 pub use memory::MemoryManager;
 pub use skill::{SkillManager, Skill, SkillSource};
 pub use workspace::{Workspace, FileEntry};
-pub use heartbeat::{HeartbeatConfig, HeartbeatDecision};
+pub use heartbeat::{HeartbeatConfig, HeartbeatDecision, HeartbeatCallback, heartbeat_loop};
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use engine::{
     SkillEngine, ActionExecutor, ActionResult, LlmClient,

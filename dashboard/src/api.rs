@@ -116,6 +116,16 @@ pub struct LlmMetricsDetailDto {
     pub avg_latency: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoAgentDto {
+    pub id: String,
+    pub agent_id: String,
+    pub co_agent_id: String,
+    pub allowed_actions: Option<Vec<String>>,
+    pub created_by: String,
+    pub created_at: String,
+}
+
 // ============================================
 // Server Functions
 // ============================================
@@ -552,4 +562,83 @@ pub async fn get_llm_metrics_detail(
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[server]
+pub async fn get_co_agents(agent_id: String) -> Result<Vec<CoAgentDto>, ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let rows = opencrab_db::queries::list_trusted_co_agents(&conn, &agent_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(rows.into_iter().map(|r| {
+        let allowed_actions = r.allowed_actions.as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
+        CoAgentDto {
+            id: r.id,
+            agent_id: r.agent_id,
+            co_agent_id: r.co_agent_id,
+            allowed_actions,
+            created_by: r.created_by,
+            created_at: r.created_at,
+        }
+    }).collect())
+}
+
+#[server]
+pub async fn add_co_agent(agent_id: String, co_agent_id: String, allowed_actions: Option<Vec<String>>) -> Result<CoAgentDto, ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let actions_json = allowed_actions.as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+
+    let row = opencrab_db::queries::TrustedCoAgentRow {
+        id: id.clone(),
+        agent_id: agent_id.clone(),
+        co_agent_id: co_agent_id.clone(),
+        allowed_actions: actions_json.clone(),
+        created_by: "owner".to_string(),
+        created_at: now.clone(),
+    };
+
+    opencrab_db::queries::insert_trusted_co_agent(&conn, &row)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(CoAgentDto {
+        id,
+        agent_id,
+        co_agent_id,
+        allowed_actions,
+        created_by: "owner".to_string(),
+        created_at: now,
+    })
+}
+
+#[server]
+pub async fn update_co_agent(agent_id: String, co_agent_id: String, allowed_actions: Option<Vec<String>>) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let actions_json = allowed_actions.as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+
+    opencrab_db::queries::update_trusted_co_agent_actions(&conn, &agent_id, &co_agent_id, actions_json.as_deref())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
+pub async fn remove_co_agent(agent_id: String, co_agent_id: String) -> Result<bool, ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let deleted = opencrab_db::queries::delete_trusted_co_agent(&conn, &agent_id, &co_agent_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(deleted)
 }

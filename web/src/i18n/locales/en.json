@@ -109,7 +109,13 @@
   "agentNav.skills": "Skills",
   "agentNav.memory": "Memory",
   "agentNav.sessions": "Sessions",
+  "agentNav.coAgents": "Co-Agents",
+  "agentNav.trustedUsers": "Trusted Users",
   "agentNav.analytics": "Analytics",
+  "coAgents.title": "Co-Agents",
+  "coAgents.description": "Trusted co-agents that can act on behalf of this agent.",
+  "trustedUsers.title": "Trusted Users",
+  "trustedUsers.description": "Discord users who can interact with this agent via DM.",
 
   "agentSessions.noSessions": "No sessions found for this agent.",
 

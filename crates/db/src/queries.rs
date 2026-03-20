@@ -444,14 +444,15 @@ pub struct SkillRow {
     pub effectiveness: Option<f64>,
     pub usage_count: i32,
     pub is_active: bool,
+    pub permission: String,
 }
 
 pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Result<Vec<SkillRow>> {
     let sql = if active_only {
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission
          FROM skills WHERE agent_id = ?1 AND is_active = 1 ORDER BY usage_count DESC"
     } else {
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission
          FROM skills WHERE agent_id = ?1 ORDER BY usage_count DESC"
     };
 
@@ -470,6 +471,7 @@ pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Resu
             effectiveness: row.get(9)?,
             usage_count: row.get(10)?,
             is_active: row.get(11)?,
+            permission: row.get(12)?,
         })
     })?;
 
@@ -478,8 +480,8 @@ pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Resu
 
 pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             skill.id,
             skill.agent_id,
@@ -493,6 +495,7 @@ pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
             skill.effectiveness,
             skill.usage_count,
             skill.is_active,
+            skill.permission,
             Utc::now().to_rfc3339(),
             Utc::now().to_rfc3339(),
         ],
@@ -1795,6 +1798,7 @@ mod tests {
             effectiveness: None,
             usage_count: 0,
             is_active: true,
+            permission: "\"agent\"".to_string(),
         };
 
         insert_skill(&conn, &skill).unwrap();
@@ -1826,6 +1830,7 @@ mod tests {
             effectiveness: None,
             usage_count: 0,
             is_active: true,
+            permission: "\"agent\"".to_string(),
         };
 
         insert_skill(&conn, &skill).unwrap();
@@ -2703,4 +2708,175 @@ mod tests {
         // Discord config should also be gone
         assert!(get_agent_discord_config(&conn, agent_id).unwrap().is_none());
     }
+}
+
+// ============================================
+// TRUSTED CO-AGENTS
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedCoAgentRow {
+    pub id: String,
+    pub agent_id: String,
+    pub co_agent_id: String,
+    pub allowed_actions: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+pub fn list_trusted_co_agents(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedCoAgentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, co_agent_id, allowed_actions, created_by, created_at
+         FROM trusted_co_agents WHERE agent_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok(TrustedCoAgentRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            co_agent_id: row.get(2)?,
+            allowed_actions: row.get(3)?,
+            created_by: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn insert_trusted_co_agent(conn: &Connection, row: &TrustedCoAgentRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO trusted_co_agents (id, agent_id, co_agent_id, allowed_actions, created_by, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(agent_id, co_agent_id) DO UPDATE SET
+            allowed_actions = excluded.allowed_actions,
+            created_by = excluded.created_by",
+        params![
+            row.id,
+            row.agent_id,
+            row.co_agent_id,
+            row.allowed_actions,
+            row.created_by,
+            row.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_trusted_co_agent_actions(conn: &Connection, agent_id: &str, co_agent_id: &str, allowed_actions: Option<&str>) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE trusted_co_agents SET allowed_actions = ?3 WHERE agent_id = ?1 AND co_agent_id = ?2",
+        params![agent_id, co_agent_id, allowed_actions],
+    )?;
+    Ok(updated > 0)
+}
+
+pub fn delete_trusted_co_agent(conn: &Connection, agent_id: &str, co_agent_id: &str) -> Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM trusted_co_agents WHERE agent_id = ?1 AND co_agent_id = ?2",
+        params![agent_id, co_agent_id],
+    )?;
+    Ok(deleted > 0)
+}
+
+// ============================================
+// TrustedDiscordUser
+// ============================================
+
+#[derive(Debug, Clone)]
+pub struct TrustedDiscordUserRow {
+    pub id: String,
+    pub discord_user_id: String,
+    pub agent_id: String,
+    pub permission: String,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+pub fn get_trusted_user(
+    conn: &Connection,
+    discord_user_id: &str,
+    agent_id: &str,
+) -> Option<TrustedDiscordUserRow> {
+    conn.query_row(
+        "SELECT id, discord_user_id, agent_id, permission, created_by, created_at \
+         FROM trusted_discord_users WHERE discord_user_id = ?1 AND agent_id = ?2",
+        [discord_user_id, agent_id],
+        |row| {
+            Ok(TrustedDiscordUserRow {
+                id: row.get(0)?,
+                discord_user_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                permission: row.get(3)?,
+                created_by: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        },
+    )
+    .ok()
+}
+
+pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedDiscordUserRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, discord_user_id, agent_id, permission, created_by, created_at \
+         FROM trusted_discord_users WHERE agent_id = ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([agent_id], |row| {
+        Ok(TrustedDiscordUserRow {
+            id: row.get(0)?,
+            discord_user_id: row.get(1)?,
+            agent_id: row.get(2)?,
+            permission: row.get(3)?,
+            created_by: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn add_trusted_user(
+    conn: &Connection,
+    id: &str,
+    agent_id: &str,
+    discord_user_id: &str,
+    permission: &str,
+    created_by: &str,
+    created_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        [id, discord_user_id, agent_id, permission, created_by, created_at],
+    )?;
+    Ok(())
+}
+
+pub fn update_trusted_user_permission(conn: &Connection, id: &str, permission: &str) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE trusted_discord_users SET permission = ?2 WHERE id = ?1",
+        [id, permission],
+    )?;
+    Ok(n > 0)
+}
+
+pub fn remove_trusted_user(conn: &Connection, id: &str) -> Result<bool> {
+    let n = conn.execute("DELETE FROM trusted_discord_users WHERE id = ?1", [id])?;
+    Ok(n > 0)
+}
+
+pub fn is_trusted_user(conn: &Connection, discord_user_id: &str, agent_id: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM trusted_discord_users WHERE discord_user_id = ?1 AND agent_id = ?2",
+        [discord_user_id, agent_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|c| c > 0)
+    .unwrap_or(false)
+}
+
+pub fn trusted_user_count(conn: &Connection, agent_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM trusted_discord_users WHERE agent_id = ?1",
+        [agent_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
 }

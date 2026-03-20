@@ -29,6 +29,8 @@ opencrab-db = { workspace = true }
 dotenvy = { workspace = true }
 toml = { workspace = true }
 opencrab-discord = { workspace = true, optional = true }
+notify = "6"
+notify-debouncer-mini = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }

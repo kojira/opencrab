@@ -2,6 +2,7 @@
 name: llm-selection
 description: "LLM選択スキル - タスクに応じて最適なLLMを自分で選ぶ"
 version: 1
+permission: agent
 actions:
   - select_llm
   - get_available_models

@@ -11,6 +11,8 @@ import AgentSkills from './pages/AgentSkills';
 import AgentMemory from './pages/AgentMemory';
 import AgentSessions from './pages/AgentSessions';
 import AgentAnalytics from './pages/AgentAnalytics';
+import AgentCoAgents from './pages/AgentCoAgents';
+import AgentTrustedUsers from './pages/AgentTrustedUsers';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 import Workspace from './pages/Workspace';
@@ -30,6 +32,8 @@ export default function App() {
             <Route path="skills" element={<AgentSkills />} />
             <Route path="memory" element={<AgentMemory />} />
             <Route path="sessions" element={<AgentSessions />} />
+            <Route path="co-agents" element={<AgentCoAgents />} />
+            <Route path="trusted-users" element={<AgentTrustedUsers />} />
             <Route path="analytics" element={<AgentAnalytics />} />
           </Route>
           <Route path="/sessions" element={<Sessions />} />

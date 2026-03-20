@@ -2,6 +2,7 @@
 name: llm-meta-analysis
 description: "LLMメタ分析スキル - 自分のLLM利用をメタ視点で分析・最適化する"
 version: 1
+permission: agent
 actions:
   - analyze_llm_usage
   - evaluate_response

@@ -2,6 +2,7 @@
 name: workspace-management
 description: "ワークスペース管理スキル - 自分専用のファイル空間を管理する"
 version: 1
+permission: agent
 actions:
   - ws_read
   - ws_write

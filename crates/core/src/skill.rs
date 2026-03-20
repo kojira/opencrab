@@ -25,6 +25,39 @@ pub enum SkillSource {
     },
 }
 
+/// Permission level required to use this skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillPermission {
+    CoAgent,
+    Agent,
+    Owner,
+}
+
+impl Default for SkillPermission {
+    fn default() -> Self {
+        SkillPermission::Agent
+    }
+}
+
+impl SkillPermission {
+    pub fn from_db_str(s: &str) -> Self {
+        match s.trim_matches('"') {
+            "owner" => SkillPermission::Owner,
+            "co_agent" | "co-agent" | "coagent" => SkillPermission::CoAgent,
+            _ => SkillPermission::Agent,
+        }
+    }
+
+    pub fn as_db_str(&self) -> &str {
+        match self {
+            SkillPermission::Owner => "\"owner\"",
+            SkillPermission::CoAgent => "\"co_agent\"",
+            SkillPermission::Agent => "\"agent\"",
+        }
+    }
+}
+
 /// A skill that an agent can use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
@@ -46,6 +79,8 @@ pub struct Skill {
     pub usage_count: i32,
     /// Effectiveness score (0.0 to 1.0), if evaluated.
     pub effectiveness: Option<f64>,
+    /// Permission level required to use this skill.
+    pub permission: SkillPermission,
 }
 
 /// Manages skills for an agent.
@@ -99,6 +134,7 @@ impl SkillManager {
             effectiveness: None,
             usage_count: 0,
             is_active: true,
+            permission: SkillPermission::Agent.as_db_str().to_string(),
         };
 
         queries::insert_skill(&conn, &row)?;
@@ -123,6 +159,7 @@ impl SkillManager {
             },
             usage_count: 0,
             effectiveness: None,
+            permission: SkillPermission::Agent,
         })
     }
 
@@ -197,6 +234,7 @@ impl SkillManager {
             source,
             usage_count: row.usage_count,
             effectiveness: row.effectiveness,
+            permission: SkillPermission::from_db_str(&row.permission),
         }
     }
 }

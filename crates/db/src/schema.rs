@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS skills (
     effectiveness REAL,
     usage_count INTEGER NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,
+    permission TEXT NOT NULL DEFAULT '"agent"',
     last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -312,4 +313,32 @@ CREATE TABLE IF NOT EXISTS memory_index_watermark (
     last_indexed_at TEXT NOT NULL,
     total_nodes INTEGER NOT NULL DEFAULT 0
 );
+
+-- ============================================
+-- Co-Agent信頼関係
+-- ============================================
+CREATE TABLE IF NOT EXISTS trusted_co_agents (
+    id           TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    co_agent_id  TEXT NOT NULL,
+    allowed_actions TEXT,
+    created_by   TEXT NOT NULL,
+    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (agent_id, co_agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trusted_co_agents_agent ON trusted_co_agents(agent_id);
+
+-- ============================================
+-- 信頼済みDiscordユーザー
+-- ============================================
+CREATE TABLE IF NOT EXISTS trusted_discord_users (
+  id TEXT PRIMARY KEY,
+  discord_user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  permission TEXT NOT NULL DEFAULT 'user',
+  created_by TEXT NOT NULL DEFAULT 'owner',
+  created_at TEXT NOT NULL,
+  UNIQUE (discord_user_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
 "#;

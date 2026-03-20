@@ -21,6 +21,7 @@ pub struct AddSkillRequest {
     pub description: String,
     pub situation_pattern: String,
     pub guidance: String,
+    pub permission: Option<String>,
 }
 
 pub async fn add_skill(
@@ -42,6 +43,7 @@ pub async fn add_skill(
         effectiveness: None,
         usage_count: 0,
         is_active: true,
+        permission: req.permission.unwrap_or_else(|| "\"agent\"".to_string()),
     };
 
     let conn = state.db.lock().unwrap();
