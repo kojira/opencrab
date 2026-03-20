@@ -1291,6 +1291,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "opencrab-actions",
  "opencrab-core",
  "opencrab-db",
  "opencrab-gateway",

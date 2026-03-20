@@ -170,6 +170,7 @@ pub async fn send_message(
             &conversation,
             "rest",
             None,
+            opencrab_actions::CallerIdentity::Owner,
         )
         .await;
 
