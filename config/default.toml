@@ -86,3 +86,15 @@ port = 3000
 
 [database]
 path = "data/opencrab.db"
+
+# ===== ツール設定 =====
+[tools]
+enabled = true
+
+[tools.shell]
+enabled = true
+allowed_commands = ["curl", "echo", "date", "jq"]
+timeout_secs = 30
+inherit_env = false
+allowed_env_vars = ["PATH", "HOME", "LANG"]
+max_output_bytes = 65536

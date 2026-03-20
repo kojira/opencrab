@@ -23,6 +23,7 @@ pub struct AppState {
     pub llm_router: Arc<LlmRouter>,
     pub workspace_base: String,
     pub default_model: String,
+    pub tools_config: opencrab_actions::tools::ToolsConfig,
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
 }

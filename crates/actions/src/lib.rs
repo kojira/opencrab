@@ -8,7 +8,9 @@ pub mod llm_selection;
 pub mod llm_evaluation;
 pub mod llm_analysis;
 pub mod bridge;
+pub mod tools;
 
 pub use traits::*;
 pub use dispatcher::ActionDispatcher;
 pub use bridge::BridgedExecutor;
+pub use tools::{ToolsConfig, ShellToolConfig, register_tools_from_config};
