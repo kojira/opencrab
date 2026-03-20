@@ -33,7 +33,8 @@ async fn main() -> anyhow::Result<()> {
     let mut state = AppState {
         db: Arc::new(Mutex::new(conn)),
         llm_router: Arc::new(llm_router),
-        workspace_base: "data".to_string(),
+        workspace_base: cfg.agent.workspace_path.clone(),
+        tools_config: cfg.tools.clone(),
         default_model,
         #[cfg(feature = "discord")]
         discord_manager: None,

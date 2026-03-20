@@ -14,11 +14,45 @@ use opencrab_llm::traits::LlmProvider;
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
+    pub agent: AgentConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
     pub gateway: GatewayConfig,
     #[serde(default)]
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub tools: opencrab_actions::tools::ToolsConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default = "default_workspace_path")]
+    pub workspace_path: String,
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_max_workspace_size")]
+    pub max_workspace_size_mb: u64,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            workspace_path: default_workspace_path(),
+            heartbeat_interval_secs: default_heartbeat_interval(),
+            max_workspace_size_mb: default_max_workspace_size(),
+        }
+    }
+}
+
+fn default_workspace_path() -> String {
+    "data/agents/{agent_id}/workspace".to_string()
+}
+fn default_heartbeat_interval() -> u64 {
+    29
+}
+fn default_max_workspace_size() -> u64 {
+    100
 }
 
 #[derive(Debug, Deserialize)]

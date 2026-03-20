@@ -114,7 +114,7 @@ pub async fn run_agent_response(
     gateway_actions: Option<Arc<dyn GatewayActions>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
-    let ws_path = format!("{}/{}", state.workspace_base, agent_id);
+    let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
     std::fs::create_dir_all(&ws_path).ok();
     let workspace =
         opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
@@ -143,7 +143,8 @@ pub async fn run_agent_response(
         current_purpose: current_purpose.clone(),
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
-    let dispatcher = opencrab_actions::ActionDispatcher::new();
+    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
+    opencrab_actions::register_tools_from_config(&state.tools_config, &mut dispatcher);
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx);
         match gateway_actions {
