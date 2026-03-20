@@ -273,9 +273,13 @@ impl SkillEngine {
             }
 
             // No tool calls: this is the final response.
-            let final_text = response
-                .content
-                .unwrap_or_else(|| "(No response generated)".to_string());
+            let final_text = response.content.unwrap_or_default();
+
+            if final_text.is_empty() {
+                tracing::debug!(
+                    "LLM returned empty content (no tool calls), using empty response"
+                );
+            }
 
             return Ok(EngineResult {
                 response: final_text,
