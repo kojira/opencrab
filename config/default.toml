@@ -116,3 +116,11 @@ permission = "agent"
 [[tools.shell.commands]]
 name = "jq"
 permission = "agent"
+
+[[tools.shell.commands]]
+name = "ls"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "whoami"
+permission = "owner"

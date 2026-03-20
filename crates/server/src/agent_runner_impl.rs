@@ -40,6 +40,7 @@ impl opencrab_discord::AgentRunner for AppState {
         conversation: &str,
         gateway_name: &str,
         gateway_actions: Option<Arc<dyn GatewayActions>>,
+        caller: opencrab_actions::CallerIdentity,
     ) -> anyhow::Result<opencrab_core::EngineResult> {
         process::run_agent_response(
             self,
@@ -50,6 +51,7 @@ impl opencrab_discord::AgentRunner for AppState {
             conversation,
             gateway_name,
             gateway_actions,
+            caller,
         )
         .await
     }

@@ -12,6 +12,7 @@ anyhow = { workspace = true }
 rusqlite = { workspace = true }
 serenity = { workspace = true }
 opencrab-core = { workspace = true }
+opencrab-actions = { workspace = true }
 opencrab-gateway = { workspace = true, features = ["discord"] }
 opencrab-db = { workspace = true }
 

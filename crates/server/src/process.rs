@@ -112,6 +112,7 @@ pub async fn run_agent_response(
     conversation: &str,
     gateway: &str,
     gateway_actions: Option<Arc<dyn GatewayActions>>,
+    caller: opencrab_actions::CallerIdentity,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
@@ -133,7 +134,7 @@ pub async fn run_agent_response(
     };
 
     let ctx = opencrab_actions::ActionContext {
-        caller: opencrab_actions::CallerIdentity::Owner,
+        caller,
         agent_id: agent_id.to_string(),
         agent_name: agent_name.to_string(),
         session_id: Some(session_id.to_string()),

@@ -47,5 +47,6 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         conversation: &str,
         gateway_name: &str,
         gateway_actions: Option<Arc<dyn GatewayActions>>,
+        caller: opencrab_actions::CallerIdentity,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 }

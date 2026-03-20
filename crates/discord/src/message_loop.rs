@@ -153,9 +153,45 @@ pub async fn run_discord_loop<T: AgentRunner>(
             continue;
         }
 
+        // Determine caller identity for permission checks.
+        let caller = {
+            let sender_id = &incoming.sender.id;
+            if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
+                opencrab_actions::CallerIdentity::Owner
+            } else {
+                let conn = state.db().lock().unwrap();
+                let trust_info = agent_ids.iter().find_map(|aid| {
+                    opencrab_db::queries::get_trusted_user(&conn, sender_id, aid)
+                });
+                drop(conn);
+                match trust_info {
+                    Some(u) if u.permission == "co_agent" => {
+                        opencrab_actions::CallerIdentity::CoAgent { agent_id: sender_id.clone() }
+                    }
+                    Some(u) if u.permission == "owner" => {
+                        opencrab_actions::CallerIdentity::Owner
+                    }
+                    _ => opencrab_actions::CallerIdentity::Agent,
+                }
+            }
+        };
+
+        // Extract discord_message_id for context injection.
+        let discord_message_id = incoming
+            .metadata
+            .get("discord_message_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
         // Process with each configured agent.
         for agent_id in &agent_ids {
-            let (system_prompt, agent_name) = state.build_agent_context(agent_id, "Discord conversation");
+            let (base_prompt, agent_name) = state.build_agent_context(agent_id, "Discord conversation");
+
+            // Bug 1 fix: inject Discord channel/message context so LLM can use reactions.
+            let system_prompt = format!(
+                "{}\n\n[Discord context: channel_id={}, message_id={}]",
+                base_prompt, channel_id_str, discord_message_id
+            );
 
             let conversation = state.build_conversation_string(&session_id);
 
@@ -168,6 +204,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     &conversation,
                     "discord",
                     Some(gateway_actions.clone()),
+                    caller.clone(),
                 )
                 .await;
 
