@@ -114,6 +114,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
             "Discord message received"
         );
 
+        // タイピングインジケーターを送信（エンジン処理開始前）
+        if let Err(e) = gateway.start_typing(channel_id).await {
+            warn!("Failed to start typing indicator: {e}");
+        }
+
         // Session per Discord channel (auto-create if needed).
         let session_id = format!("discord-{}-{}", guild_id, channel_id);
         ensure_discord_session(&state, &session_id, &agent_ids, &incoming);

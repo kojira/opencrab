@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serenity::http::Http;
 use serenity::model::prelude::ChannelType;
+use serenity::model::id::MessageId;
+use serenity::model::channel::ReactionType;
 use serde_json::json;
 use tracing::{debug, error};
 
@@ -231,6 +233,100 @@ impl DiscordGatewayActions {
             },
         }
     }
+    async fn execute_add_reaction(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let channel_id_str = match args.get("channel_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("channel_idパラメータが必要です".to_string()),
+                }
+            }
+        };
+        let message_id_str = match args.get("message_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("message_idパラメータが必要です".to_string()),
+                }
+            }
+        };
+        let emoji_str = match args.get("emoji").and_then(|v| v.as_str()) {
+            Some(e) => e,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("emojiパラメータが必要です".to_string()),
+                }
+            }
+        };
+
+        let channel_id: u64 = match channel_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("無効なchannel_id: {channel_id_str}")),
+                }
+            }
+        };
+        let message_id: u64 = match message_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("無効なmessage_id: {message_id_str}")),
+                }
+            }
+        };
+
+        // 絵文字の解析: "name:id" 形式ならカスタム絵文字、それ以外はUnicode
+        let reaction = if let Some(colon_pos) = emoji_str.find(':') {
+            let name = &emoji_str[..colon_pos];
+            let id_str = &emoji_str[colon_pos + 1..];
+            match id_str.parse::<u64>() {
+                Ok(emoji_id) => ReactionType::Custom {
+                    animated: false,
+                    id: serenity::model::id::EmojiId::new(emoji_id),
+                    name: Some(name.to_string()),
+                },
+                Err(_) => ReactionType::Unicode(emoji_str.to_string()),
+            }
+        } else {
+            ReactionType::Unicode(emoji_str.to_string())
+        };
+
+        match self.http.create_reaction(
+            serenity::model::id::ChannelId::new(channel_id),
+            MessageId::new(message_id),
+            &reaction,
+        ).await {
+            Ok(()) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "channel_id": channel_id_str,
+                    "message_id": message_id_str,
+                    "emoji": emoji_str,
+                    "message": format!("リアクション {} を追加しました", emoji_str),
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("Discord create_reaction failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("リアクションの追加に失敗: {e}")),
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -290,6 +386,28 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["channel_id", "guild_id", "readable", "writable"]
                 }),
             },
+            GatewayActionDef {
+                name: "discord_add_reaction".to_string(),
+                description: "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "channel_id": {
+                            "type": "string",
+                            "description": "メッセージが存在するチャンネルのID"
+                        },
+                        "message_id": {
+                            "type": "string",
+                            "description": "リアクションを付けるメッセージのID"
+                        },
+                        "emoji": {
+                            "type": "string",
+                            "description": "Unicode絵文字（例: ⚡、👍）またはカスタム絵文字のname:id形式"
+                        }
+                    },
+                    "required": ["channel_id", "message_id", "emoji"]
+                }),
+            },
         ]
     }
 
@@ -298,6 +416,7 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_list_guilds" => self.execute_list_guilds().await,
             "discord_list_channels" => self.execute_list_channels(args).await,
             "discord_channel_config" => self.execute_channel_config(args),
+            "discord_add_reaction" => self.execute_add_reaction(args).await,
             _ => GatewayActionResult {
                 success: false,
                 data: None,
