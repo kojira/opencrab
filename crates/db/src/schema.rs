@@ -18,6 +18,17 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_col {
         conn.execute_batch("ALTER TABLE sessions ADD COLUMN metadata_json TEXT")?;
     }
+
+    // skills.permission カラム追加（既存DBへの対応）
+    let has_permission_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='permission'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_permission_col {
+        conn.execute_batch("ALTER TABLE skills ADD COLUMN permission TEXT NOT NULL DEFAULT '\"agent\"'")?;
+    }
+
     Ok(())
 }
 

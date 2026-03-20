@@ -36,3 +36,5 @@ tail -f .server.log
 - `config/default.toml` の `token = "${DISCORD_TOKEN}"` は環境変数から読む（Per-agentはDBから）
 - エージェントはダッシュボード（`http://localhost:3000`）から登録する
 - `agent_ids = ["crab"]` の "crab" はDBに存在するIDと一致させる
+
+

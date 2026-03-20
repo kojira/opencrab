@@ -196,11 +196,6 @@ impl EventHandler for DiscordHandler {
             "Discord message event received"
         );
 
-        // Bot自身のメッセージは無視（無限ループ防止）
-        if msg.author.bot {
-            return;
-        }
-
         let guild_id = msg
             .guild_id
             .map(|id| id.to_string())
