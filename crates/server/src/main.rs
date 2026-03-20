@@ -112,51 +112,144 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Per-agent Discord gateway manager initialized");
     }
 
-    // ハートビートループを起動（設定で enabled=true の場合のみ）
-    let (shutdown_tx, shutdown_rx_template) = watch::channel(false);
-    let _heartbeat_handles = if cfg.agent.heartbeat_enabled {
-        let agent_ids: Vec<String> = {
-            #[cfg(feature = "discord")]
-            { cfg.gateway.discord.agent_ids.clone() }
-            #[cfg(not(feature = "discord"))]
-            { vec!["default".to_string()] }
-        };
-
-        let hb_config = HeartbeatConfig {
-            interval_secs: cfg.agent.heartbeat_interval_secs,
-            enabled: true,
-        };
-
-        tracing::info!(
-            agent_ids = ?agent_ids,
-            interval_secs = hb_config.interval_secs,
-            "Starting heartbeat loops"
-        );
-
-        agent_ids
-            .into_iter()
-            .map(|agent_id| {
-                let config_clone = hb_config.clone();
-                let shutdown_rx = shutdown_rx_template.clone();
-                let callback: HeartbeatCallback = Box::new(|agent_id: &str, tick: u64| {
-                    tracing::debug!(agent_id = %agent_id, tick, "Heartbeat tick (idle)");
-                    HeartbeatDecision::Idle
-                });
-                tokio::spawn(async move {
-                    heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        tracing::info!("Heartbeat disabled (heartbeat_enabled = false in config)");
-        vec![]
+    // ハートビートの初期設定
+    let initial_hb_config = HeartbeatConfig {
+        interval_secs: cfg.agent.heartbeat_interval_secs,
+        enabled: cfg.agent.heartbeat_enabled,
     };
-    // shutdown_tx を drop すると全ハートビートループが終了するが、
-    // サーバー終了まで保持するために変数をバインドしておく
-    let _shutdown_tx = shutdown_tx;
 
-    let _watcher_handle =
-        opencrab_server::hot_reload::start_config_watcher("config", state.tools_config.clone());
+    let (heartbeat_config_tx, mut heartbeat_config_rx) =
+        watch::channel(initial_hb_config.clone());
+
+    let agent_ids: Vec<String> = {
+        #[cfg(feature = "discord")]
+        { cfg.gateway.discord.agent_ids.clone() }
+        #[cfg(not(feature = "discord"))]
+        { vec!["default".to_string()] }
+    };
+
+    // heartbeat設定変更を監視してループを再起動するタスク
+    let heartbeat_agent_ids = agent_ids.clone();
+    let heartbeat_db = state.db.clone();
+    tokio::spawn(async move {
+        let mut prev_config = initial_hb_config.clone();
+        let mut current_shutdown_tx: Option<watch::Sender<bool>> = None;
+        let mut _handles: Vec<tokio::task::JoinHandle<()>> = vec![];
+
+        // ハートビートループを起動するヘルパークロージャ的ブロック
+        // 初期起動
+        if prev_config.enabled {
+            tracing::info!(
+                agent_ids = ?heartbeat_agent_ids,
+                interval_secs = prev_config.interval_secs,
+                "Starting heartbeat loops"
+            );
+            let (tx, rx_tmpl) = watch::channel(false);
+            for agent_id in &heartbeat_agent_ids {
+                let config_clone = prev_config.clone();
+                let shutdown_rx = rx_tmpl.clone();
+                let db = heartbeat_db.clone();
+                let agent_id = agent_id.clone();
+                _handles.push(tokio::spawn(async move {
+                    let callback: HeartbeatCallback = Box::new({
+                        let db = db.clone();
+                        let agent_id_owned = agent_id.clone();
+                        move |_agent_id: &str, tick: u64| {
+                            let decision = HeartbeatDecision::Idle;
+                            tracing::debug!(agent_id = %_agent_id, tick, "Heartbeat tick (idle)");
+                            if let Ok(conn) = db.lock() {
+                                let decision_str = match &decision {
+                                    HeartbeatDecision::Idle => "idle",
+                                    HeartbeatDecision::Speak(_) => "speak",
+                                    HeartbeatDecision::Learn => "learn",
+                                };
+                                if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
+                                    &conn,
+                                    &agent_id_owned,
+                                    decision_str,
+                                    None,
+                                ) {
+                                    tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
+                                }
+                            }
+                            decision
+                        }
+                    });
+                    heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
+                }));
+            }
+            current_shutdown_tx = Some(tx);
+        } else {
+            tracing::info!("Heartbeat disabled (heartbeat_enabled = false in config)");
+        }
+
+        loop {
+            if heartbeat_config_rx.changed().await.is_err() {
+                break; // sender dropped
+            }
+            let new_config = heartbeat_config_rx.borrow().clone();
+            if new_config.enabled != prev_config.enabled
+                || new_config.interval_secs != prev_config.interval_secs
+            {
+                tracing::info!(
+                    enabled = new_config.enabled,
+                    interval_secs = new_config.interval_secs,
+                    "Heartbeat config changed, restarting loops"
+                );
+                // 既存ループを停止
+                if let Some(tx) = current_shutdown_tx.take() {
+                    let _ = tx.send(true);
+                }
+                _handles.clear();
+
+                // 新設定で起動
+                if new_config.enabled {
+                    let (tx, rx_tmpl) = watch::channel(false);
+                    for agent_id in &heartbeat_agent_ids {
+                        let config_clone = new_config.clone();
+                        let shutdown_rx = rx_tmpl.clone();
+                        let db = heartbeat_db.clone();
+                        let agent_id = agent_id.clone();
+                        _handles.push(tokio::spawn(async move {
+                            let callback: HeartbeatCallback = Box::new({
+                                let db = db.clone();
+                                let agent_id_owned = agent_id.clone();
+                                move |_agent_id: &str, tick: u64| {
+                                    let decision = HeartbeatDecision::Idle;
+                                    tracing::debug!(agent_id = %_agent_id, tick, "Heartbeat tick (idle)");
+                                    if let Ok(conn) = db.lock() {
+                                        let decision_str = match &decision {
+                                            HeartbeatDecision::Idle => "idle",
+                                            HeartbeatDecision::Speak(_) => "speak",
+                                            HeartbeatDecision::Learn => "learn",
+                                        };
+                                        if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
+                                            &conn,
+                                            &agent_id_owned,
+                                            decision_str,
+                                            None,
+                                        ) {
+                                            tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
+                                        }
+                                    }
+                                    decision
+                                }
+                            });
+                            heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
+                        }));
+                    }
+                    current_shutdown_tx = Some(tx);
+                }
+                prev_config = new_config;
+            }
+        }
+    });
+
+    let _watcher_handle = opencrab_server::hot_reload::start_config_watcher(
+        "config",
+        state.tools_config.clone(),
+        heartbeat_config_tx,
+    );
 
     let app = create_router(state);
 

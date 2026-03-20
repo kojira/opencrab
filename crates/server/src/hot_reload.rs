@@ -11,6 +11,7 @@ use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 pub fn start_config_watcher(
     config_dir: impl AsRef<Path>,
     tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
+    heartbeat_config_tx: tokio::sync::watch::Sender<opencrab_core::heartbeat::HeartbeatConfig>,
 ) -> JoinHandle<()> {
     let config_dir = config_dir.as_ref().to_path_buf();
 
@@ -92,6 +93,13 @@ pub fn start_config_watcher(
                         tracing::error!("Failed to acquire write lock for tools_config: {}", e);
                     }
                 }
+
+                // Heartbeat設定もホットリロード
+                let hb_config = opencrab_core::heartbeat::HeartbeatConfig {
+                    interval_secs: cfg.agent.heartbeat_interval_secs,
+                    enabled: cfg.agent.heartbeat_enabled,
+                };
+                let _ = heartbeat_config_tx.send(hb_config);
             }
         }
     })
