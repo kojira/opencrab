@@ -128,6 +128,15 @@ impl DiscordGateway {
         Ok(())
     }
 
+    /// 指定チャンネルに「入力中...」インジケーターを送信する
+    pub async fn start_typing(&self, channel_id: u64) -> Result<()> {
+        ChannelId::new(channel_id)
+            .broadcast_typing(&self.http)
+            .await
+            .context("Failed to broadcast typing indicator")?;
+        Ok(())
+    }
+
     /// Botをシャットダウンする
     pub async fn shutdown(&self) {
         let sm = self.shard_manager.lock().await;
