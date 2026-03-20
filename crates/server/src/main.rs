@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 use opencrab_server::{config, create_router, AppState};
+use opencrab_core::heartbeat::{HeartbeatCallback, HeartbeatConfig, HeartbeatDecision, heartbeat_loop};
+use tokio::sync::watch;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         db: Arc::new(Mutex::new(conn)),
         llm_router: Arc::new(llm_router),
         workspace_base: cfg.agent.workspace_path.clone(),
-        tools_config: cfg.tools.clone(),
+        tools_config: Arc::new(std::sync::RwLock::new(cfg.tools.clone())),
         default_model,
         #[cfg(feature = "discord")]
         discord_manager: None,
@@ -109,6 +111,52 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("Per-agent Discord gateway manager initialized");
     }
+
+    // ハートビートループを起動（設定で enabled=true の場合のみ）
+    let (shutdown_tx, shutdown_rx_template) = watch::channel(false);
+    let _heartbeat_handles = if cfg.agent.heartbeat_enabled {
+        let agent_ids: Vec<String> = {
+            #[cfg(feature = "discord")]
+            { cfg.gateway.discord.agent_ids.clone() }
+            #[cfg(not(feature = "discord"))]
+            { vec!["default".to_string()] }
+        };
+
+        let hb_config = HeartbeatConfig {
+            interval_secs: cfg.agent.heartbeat_interval_secs,
+            enabled: true,
+        };
+
+        tracing::info!(
+            agent_ids = ?agent_ids,
+            interval_secs = hb_config.interval_secs,
+            "Starting heartbeat loops"
+        );
+
+        agent_ids
+            .into_iter()
+            .map(|agent_id| {
+                let config_clone = hb_config.clone();
+                let shutdown_rx = shutdown_rx_template.clone();
+                let callback: HeartbeatCallback = Box::new(|agent_id: &str, tick: u64| {
+                    tracing::debug!(agent_id = %agent_id, tick, "Heartbeat tick (idle)");
+                    HeartbeatDecision::Idle
+                });
+                tokio::spawn(async move {
+                    heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        tracing::info!("Heartbeat disabled (heartbeat_enabled = false in config)");
+        vec![]
+    };
+    // shutdown_tx を drop すると全ハートビートループが終了するが、
+    // サーバー終了まで保持するために変数をバインドしておく
+    let _shutdown_tx = shutdown_tx;
+
+    let _watcher_handle =
+        opencrab_server::hot_reload::start_config_watcher("config", state.tools_config.clone());
 
     let app = create_router(state);
 

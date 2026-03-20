@@ -10,6 +10,8 @@ const tabs = [
   { key: 'skills', path: '/skills', icon: 'psychology', labelKey: 'agentNav.skills' },
   { key: 'memory', path: '/memory', icon: 'memory', labelKey: 'agentNav.memory' },
   { key: 'sessions', path: '/sessions', icon: 'forum', labelKey: 'agentNav.sessions' },
+  { key: 'co-agents', path: '/co-agents', icon: 'group', labelKey: 'agentNav.coAgents' },
+  { key: 'trusted-users', path: '/trusted-users', icon: 'shield_person', labelKey: 'agentNav.trustedUsers' },
   { key: 'analytics', path: '/analytics', icon: 'analytics', labelKey: 'agentNav.analytics' },
 ];
 

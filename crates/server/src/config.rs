@@ -31,6 +31,8 @@ pub struct AgentConfig {
     pub workspace_path: String,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_heartbeat_enabled")]
+    pub heartbeat_enabled: bool,
     #[serde(default = "default_max_workspace_size")]
     pub max_workspace_size_mb: u64,
 }
@@ -40,6 +42,7 @@ impl Default for AgentConfig {
         Self {
             workspace_path: default_workspace_path(),
             heartbeat_interval_secs: default_heartbeat_interval(),
+            heartbeat_enabled: default_heartbeat_enabled(),
             max_workspace_size_mb: default_max_workspace_size(),
         }
     }
@@ -53,6 +56,9 @@ fn default_heartbeat_interval() -> u64 {
 }
 fn default_max_workspace_size() -> u64 {
     100
+}
+fn default_heartbeat_enabled() -> bool {
+    false
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,7 +197,7 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
 
 /// Replace `${VAR_NAME}` patterns with corresponding environment variable values.
 /// Unknown variables are replaced with empty strings.
-fn expand_env_vars(input: &str) -> String {
+pub(crate) fn expand_env_vars(input: &str) -> String {
     let mut result = input.to_string();
     // Find all ${...} patterns and replace them
     loop {

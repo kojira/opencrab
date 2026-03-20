@@ -141,6 +141,8 @@ pub struct SkillEngine {
     executor: Box<dyn ActionExecutor>,
     /// Maximum number of LLM call iterations before stopping.
     pub max_iterations: usize,
+    /// Set of actions declared by active skills. If Some, only declared actions are allowed.
+    pub allowed_actions: Option<std::collections::HashSet<String>>,
 }
 
 impl SkillEngine {
@@ -154,6 +156,32 @@ impl SkillEngine {
             llm,
             executor,
             max_iterations,
+            allowed_actions: None,
+        }
+    }
+
+    /// Set the allowed actions from active skill declarations.
+    pub fn set_allowed_actions(&mut self, actions: impl IntoIterator<Item = String>) {
+        self.allowed_actions = Some(actions.into_iter().collect());
+    }
+
+    /// Check if an action is allowed by the active skill declarations.
+    fn is_action_allowed(&self, action_name: &str) -> bool {
+        match &self.allowed_actions {
+            None => true,
+            Some(allowed) => allowed.contains(action_name),
+        }
+    }
+
+    /// Build an ActionResult for a permission denied error.
+    fn permission_denied(action_name: &str) -> ActionResult {
+        ActionResult {
+            success: false,
+            data: serde_json::json!(null),
+            error: Some(format!(
+                "Action '{}' is not authorized. Add '{}' to the skill's actions frontmatter to enable this capability.",
+                action_name, action_name
+            )),
         }
     }
 
@@ -255,6 +283,20 @@ impl SkillEngine {
                         id = %tool_call.id,
                         "Executing tool call"
                     );
+
+                    // Check if the action is declared by active skills.
+                    if !self.is_action_allowed(&tool_call.name) {
+                        let denied = Self::permission_denied(&tool_call.name);
+                        let result_json = serde_json::to_string(&denied)
+                            .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: result_json,
+                            tool_call_id: Some(tool_call.id.clone()),
+                            tool_calls: vec![],
+                        });
+                        continue;
+                    }
 
                     let result = self.executor.execute(&tool_call.name, &tool_call.arguments).await;
 

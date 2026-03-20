@@ -56,14 +56,40 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         let is_dm = guild_id.is_empty();
 
-        // DM owner check: DMの場合、設定されたオーナー以外からのメッセージは無視
-        if is_dm && !owner_discord_id.is_empty() && incoming.sender.id != owner_discord_id {
-            debug!(
-                sender = %incoming.sender.id,
-                owner = %owner_discord_id,
-                "Ignoring DM from non-owner user"
-            );
-            continue;
+        // DM whitelist check: ownerは常に許可。ホワイトリストが空なら既存動作（ownerのみ）。
+        // ホワイトリストに登録があれば、登録ユーザーのみ許可。
+        if is_dm {
+            let sender_id = &incoming.sender.id;
+            // ownerは常に許可
+            if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
+                // allow
+            } else {
+                // ホワイトリストを確認（最初にマッチしたagentのDBを使う）
+                let allowed = {
+                    let conn = state.db().lock().unwrap();
+                    // 全agent_idのホワイトリストをチェック
+                    let any_trusted = agent_ids.iter().any(|aid| {
+                        opencrab_db::queries::is_trusted_user(&conn, sender_id, aid)
+                    });
+                    // ホワイトリストが空かどうかも確認（空なら既存動作=ownerのみ）
+                    let any_registered = agent_ids.iter().any(|aid| {
+                        opencrab_db::queries::trusted_user_count(&conn, aid) > 0
+                    });
+                    if any_registered {
+                        any_trusted
+                    } else {
+                        // ホワイトリスト未設定: ownerのみ許可（ownerでなければ拒否）
+                        owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                    }
+                };
+                if !allowed {
+                    debug!(
+                        sender = %incoming.sender.id,
+                        "Ignoring DM from non-whitelisted user"
+                    );
+                    continue;
+                }
+            }
         }
 
         // Channel readable check: DMはフィルタリング対象外

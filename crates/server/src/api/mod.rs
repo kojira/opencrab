@@ -1,6 +1,8 @@
 pub mod agents;
 pub mod analytics;
+pub mod co_agents;
 pub mod sessions;
 pub mod skills;
 pub mod memory;
+pub mod trusted_users;
 pub mod workspace;

@@ -2,6 +2,7 @@
 name: autonomous
 description: "自律モードスキル - ファシリテーターなしで自発的に議論に参加する"
 version: 1
+permission: agent
 actions:
   - send_speech
   - send_noreact

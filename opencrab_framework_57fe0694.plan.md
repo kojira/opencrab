@@ -58,16 +58,16 @@ todos:
     status: pending
   - id: heartbeat
     content: ハートビート（素数間隔）実装
-    status: pending
+    status: done
   - id: workspace-impl
     content: ワークスペース操作実装（ws_read, ws_write, ws_edit等）
-    status: pending
+    status: done
   - id: learning-actions
     content: 学習アクション実装
-    status: pending
+    status: done
   - id: standard-skills
     content: 標準スキル作成（autonomous, self-learning, workspace-management）
-    status: pending
+    status: done
   - id: discord-gateway
     content: Discord Gateway実装
     status: pending

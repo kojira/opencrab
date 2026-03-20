@@ -109,7 +109,13 @@
   "agentNav.skills": "スキル",
   "agentNav.memory": "メモリ",
   "agentNav.sessions": "セッション",
+  "agentNav.coAgents": "Co-エージェント",
+  "agentNav.trustedUsers": "信頼ユーザー",
   "agentNav.analytics": "分析",
+  "coAgents.title": "Co-エージェント",
+  "coAgents.description": "このエージェントの代わりに操作できる信頼済みco-agentの管理。",
+  "trustedUsers.title": "信頼ユーザー",
+  "trustedUsers.description": "このエージェントにDMで話しかけられるDiscordユーザーの管理。",
 
   "agentSessions.noSessions": "このエージェントのセッションはありません。",
 

@@ -17,6 +17,8 @@ pub enum Route {
     AgentIdentityEdit { id: String },
     #[route("/agents/:id/persona")]
     PersonaEdit { id: String },
+    #[route("/agents/:id/co-agents")]
+    AgentCoAgents { id: String },
     #[route("/skills")]
     Skills {},
     #[route("/memory")]

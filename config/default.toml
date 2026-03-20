@@ -1,5 +1,6 @@
 [agent]
-heartbeat_interval_secs = 29  # 素数
+heartbeat_interval_secs = 29  # 素数（素数インターバルで同期パターンを回避）
+heartbeat_enabled = false
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 

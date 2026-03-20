@@ -2,6 +2,7 @@
 name: self-learning
 description: "自己学習スキル - 経験から学び、新しいスキルを獲得する"
 version: 1
+permission: agent
 actions:
   - learn_from_experience
   - learn_from_peer
