@@ -64,14 +64,45 @@ impl AnthropicProvider {
                     }));
                 }
                 Role::Assistant => {
-                    let content = self.convert_content_to_anthropic(msg);
-                    messages.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": content,
-                    }));
+                    let has_tool_calls = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+                    if has_tool_calls {
+                        // Build content array with text parts + tool_use blocks
+                        let mut content_blocks: Vec<Value> = Vec::new();
+                        // Add text content if present
+                        if let Some(text) = msg.text_content() {
+                            if !text.is_empty() {
+                                content_blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text,
+                                }));
+                            }
+                        }
+                        // Add tool_use blocks
+                        for tc in msg.tool_calls.as_ref().unwrap() {
+                            let input: Value = serde_json::from_str(&tc.function.arguments)
+                                .unwrap_or(serde_json::json!({}));
+                            content_blocks.push(serde_json::json!({
+                                "type": "tool_use",
+                                "id": tc.id,
+                                "name": tc.function.name,
+                                "input": input,
+                            }));
+                        }
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content_blocks,
+                        }));
+                    } else {
+                        let content = self.convert_content_to_anthropic(msg);
+                        messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content,
+                        }));
+                    }
                 }
                 Role::Tool => {
-                    // Anthropic uses tool_result blocks
+                    // Anthropic uses tool_result blocks inside a user message.
+                    // Multiple consecutive tool results will be merged in post-processing.
                     let tool_call_id = msg.tool_call_id.as_deref().unwrap_or("");
                     let text = msg.text_content().unwrap_or("");
                     messages.push(serde_json::json!({
@@ -85,6 +116,36 @@ impl AnthropicProvider {
                 }
             }
         }
+
+        // Post-process: merge consecutive user messages that contain only tool_result blocks
+        let mut merged: Vec<Value> = Vec::new();
+        for msg in messages {
+            let is_tool_result_user = msg["role"] == "user"
+                && msg["content"].as_array().map_or(false, |arr| {
+                    !arr.is_empty() && arr.iter().all(|b| b["type"] == "tool_result")
+                });
+            if is_tool_result_user {
+                // Check if the previous message is also a tool_result user message
+                let should_merge = merged.last().map_or(false, |prev: &Value| {
+                    prev["role"] == "user"
+                        && prev["content"].as_array().map_or(false, |arr| {
+                            !arr.is_empty() && arr.iter().all(|b| b["type"] == "tool_result")
+                        })
+                });
+                if should_merge {
+                    // Append tool_result blocks to previous message
+                    let prev = merged.last_mut().unwrap();
+                    let new_blocks = msg["content"].as_array().unwrap().clone();
+                    let prev_content = prev["content"].as_array_mut().unwrap();
+                    prev_content.extend(new_blocks);
+                } else {
+                    merged.push(msg);
+                }
+            } else {
+                merged.push(msg);
+            }
+        }
+        let messages = merged;
 
         let max_tokens = request.max_tokens.unwrap_or(4096);
 

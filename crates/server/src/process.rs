@@ -167,7 +167,7 @@ pub async fn run_agent_response(
     let engine = opencrab_core::SkillEngine::new(
         Box::new(llm_client),
         Box::new(executor),
-        5, // max iterations
+        20, // max iterations
     );
 
     let result = engine
