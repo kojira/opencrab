@@ -382,6 +382,7 @@ fn period_to_since(period: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use std::sync::Arc;
 
     fn seed_diverse_metrics(conn: &rusqlite::Connection) {
@@ -459,6 +460,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
         let ctx = ActionContext {
+            caller: CallerIdentity::Owner,
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
@@ -483,6 +485,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
         let ctx = ActionContext {
+            caller: CallerIdentity::Owner,
             agent_id: "agent-empty".to_string(),
             agent_name: "Empty".to_string(),
             session_id: None,

@@ -104,6 +104,7 @@ impl Default for ActionDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use serde_json::json;
 
     fn test_context() -> (tempfile::TempDir, ActionContext) {
@@ -119,6 +120,7 @@ mod tests {
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            caller: CallerIdentity::Owner,
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test-model".to_string(),
                 active_model: None,

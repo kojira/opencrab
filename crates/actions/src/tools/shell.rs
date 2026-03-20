@@ -4,8 +4,8 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tracing;
 
-use crate::traits::{Action, ActionContext, ActionResult};
-use super::config::ShellToolConfig;
+use crate::traits::{Action, ActionContext, ActionResult, CallerIdentity};
+use super::config::{ShellToolConfig, CommandPermission};
 
 pub struct ShellToolAction {
     pub config: ShellToolConfig,
@@ -28,13 +28,14 @@ impl Action for ShellToolAction {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        let allowed = self.config.allowed_commands.join(", ");
+        let allowed: Vec<String> = self.config.effective_commands().iter().map(|c| c.name.clone()).collect();
+        let allowed_str = allowed.join(", ");
         json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": format!("Command to execute. Allowed: {}", allowed)
+                    "description": format!("Command to execute. Allowed: {}", allowed_str)
                 },
                 "args": {
                     "type": "array",
@@ -53,18 +54,44 @@ impl Action for ShellToolAction {
     async fn execute(
         &self,
         args: &serde_json::Value,
-        _ctx: &ActionContext,
+        ctx: &ActionContext,
     ) -> ActionResult {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => return ActionResult::error("Missing required field: command"),
         };
 
-        // Whitelist check
-        if !self.config.allowed_commands.contains(&command) {
+        // Permission-based check
+        let effective = self.config.effective_commands();
+        let cmd_config = match effective.iter().find(|c| c.name == command) {
+            Some(c) => c,
+            None => {
+                let allowed: Vec<&str> = effective.iter().map(|c| c.name.as_str()).collect();
+                return ActionResult::error(&format!(
+                    "Command '{}' is not in the allowed list. Allowed: {:?}",
+                    command, allowed
+                ));
+            }
+        };
+
+        // Check caller permission against command permission
+        let permitted = match &ctx.caller {
+            CallerIdentity::Owner => true, // Owner can run everything
+            CallerIdentity::Agent => {
+                // Agent can run Agent and CoAgent level commands
+                cmd_config.permission == CommandPermission::Agent
+                    || cmd_config.permission == CommandPermission::CoAgent
+            }
+            CallerIdentity::CoAgent { .. } => {
+                // CoAgent can only run CoAgent level commands
+                cmd_config.permission == CommandPermission::CoAgent
+            }
+        };
+
+        if !permitted {
             return ActionResult::error(&format!(
-                "Command {} is not in the allowed list. Allowed: {:?}",
-                command, self.config.allowed_commands
+                "Permission denied: '{}' requires {:?} permission, caller is {:?}",
+                command, cmd_config.permission, ctx.caller
             ));
         }
 
@@ -154,5 +181,101 @@ fn truncate_bytes(bytes: &[u8], max: usize) -> (String, bool) {
         (String::from_utf8_lossy(bytes).into_owned(), false)
     } else {
         (String::from_utf8_lossy(&bytes[..max]).into_owned(), true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::{ActionContext, CallerIdentity, RuntimeInfo};
+    use crate::tools::config::{CommandConfig, CommandPermission, ShellToolConfig};
+    use std::sync::{Arc, Mutex};
+
+    fn make_ctx(caller: CallerIdentity) -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            agent_id: "test-agent".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: None,
+            db: Arc::new(Mutex::new(conn)),
+            workspace: Arc::new(ws),
+            last_metrics_id: Arc::new(Mutex::new(None)),
+            model_override: Arc::new(Mutex::new(None)),
+            current_purpose: Arc::new(Mutex::new("test".to_string())),
+            runtime_info: Arc::new(Mutex::new(RuntimeInfo {
+                default_model: "test".to_string(),
+                active_model: None,
+                available_providers: vec![],
+                gateway: "test".to_string(),
+            })),
+            caller,
+        };
+        (dir, ctx)
+    }
+
+    #[tokio::test]
+    async fn test_agent_cannot_run_owner_command() {
+        let config = ShellToolConfig {
+            commands: vec![
+                CommandConfig {
+                    name: "rm".to_string(),
+                    permission: CommandPermission::Owner,
+                    timeout_secs: None,
+                    description: Some("Dangerous".to_string()),
+                },
+            ],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Agent);
+        let args = serde_json::json!({"command": "rm", "args": ["-f", "/tmp/nonexistent_test_file_xyz"]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(!result.success, "Agent should not be able to run owner-only command");
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("ermission"),
+            "Error should mention permission: {:?}", result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owner_can_run_owner_command() {
+        let config = ShellToolConfig {
+            commands: vec![
+                CommandConfig {
+                    name: "echo".to_string(),
+                    permission: CommandPermission::Owner,
+                    timeout_secs: None,
+                    description: None,
+                },
+            ],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "echo", "args": ["hello"]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "Owner should be able to run owner-level command");
+    }
+
+    #[tokio::test]
+    async fn test_coagent_cannot_run_agent_command() {
+        let config = ShellToolConfig {
+            commands: vec![
+                CommandConfig {
+                    name: "echo".to_string(),
+                    permission: CommandPermission::Agent,
+                    timeout_secs: None,
+                    description: None,
+                },
+            ],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::CoAgent { agent_id: "helper-bot".to_string() });
+        let args = serde_json::json!({"command": "echo", "args": ["hello"]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(!result.success, "CoAgent should not be able to run agent-level command");
     }
 }

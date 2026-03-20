@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommandPermission {
+    Owner,
+    Agent,
+    CoAgent,
+}
+
+impl Default for CommandPermission {
+    fn default() -> Self {
+        CommandPermission::Agent
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandConfig {
+    pub name: String,
+    #[serde(default)]
+    pub permission: CommandPermission,
+    pub timeout_secs: Option<u64>,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolsConfig {
     #[serde(default)]
@@ -24,6 +47,27 @@ pub struct ShellToolConfig {
     pub allowed_env_vars: Vec<String>,
     #[serde(default = "default_max_output")]
     pub max_output_bytes: usize,
+    // NEW: structured command list with permissions
+    #[serde(default)]
+    pub commands: Vec<CommandConfig>,
+}
+
+impl ShellToolConfig {
+    /// Returns all effective commands (merging allowed_commands as Agent-level)
+    pub fn effective_commands(&self) -> Vec<CommandConfig> {
+        let mut cmds: Vec<CommandConfig> = self.commands.clone();
+        for name in &self.allowed_commands {
+            if !cmds.iter().any(|c| &c.name == name) {
+                cmds.push(CommandConfig {
+                    name: name.clone(),
+                    permission: CommandPermission::Agent,
+                    timeout_secs: None,
+                    description: None,
+                });
+            }
+        }
+        cmds
+    }
 }
 
 impl Default for ShellToolConfig {
@@ -36,6 +80,7 @@ impl Default for ShellToolConfig {
             inherit_env: false,
             allowed_env_vars: vec!["PATH".to_string(), "HOME".to_string(), "LANG".to_string()],
             max_output_bytes: 65536,
+            commands: vec![],
         }
     }
 }

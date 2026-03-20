@@ -93,8 +93,25 @@ enabled = true
 
 [tools.shell]
 enabled = true
-allowed_commands = ["curl", "echo", "date", "jq"]
+allowed_commands = []
 timeout_secs = 30
 inherit_env = false
 allowed_env_vars = ["PATH", "HOME", "LANG"]
 max_output_bytes = 65536
+
+[[tools.shell.commands]]
+name = "curl"
+permission = "agent"
+timeout_secs = 30
+
+[[tools.shell.commands]]
+name = "echo"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "date"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "jq"
+permission = "agent"

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use opencrab_actions::bridge::BridgedExecutor;
 use opencrab_actions::dispatcher::ActionDispatcher;
-use opencrab_actions::traits::ActionContext;
+use opencrab_actions::traits::{ActionContext, CallerIdentity};
 use opencrab_core::{
     ChatRequestSimple, ChatResponseSimple, LlmClient, SkillEngine, ToolCall,
 };
@@ -51,6 +51,7 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
     let ctx = ActionContext {
+        caller: CallerIdentity::Owner,
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
@@ -93,6 +94,7 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
     let ctx = ActionContext {
+        caller: CallerIdentity::Owner,
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
@@ -347,6 +349,7 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
     let ctx = ActionContext {
+        caller: CallerIdentity::Owner,
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
