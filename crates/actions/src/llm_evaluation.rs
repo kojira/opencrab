@@ -115,6 +115,7 @@ impl Action for EvaluateResponseAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use std::sync::Arc;
 
     fn test_context_with_metrics() -> (tempfile::TempDir, ActionContext, String) {
@@ -144,6 +145,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
         let ctx = ActionContext {
+            caller: CallerIdentity::Owner,
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),

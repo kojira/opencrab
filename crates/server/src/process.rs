@@ -133,6 +133,7 @@ pub async fn run_agent_response(
     };
 
     let ctx = opencrab_actions::ActionContext {
+        caller: opencrab_actions::CallerIdentity::Owner,
         agent_id: agent_id.to_string(),
         agent_name: agent_name.to_string(),
         session_id: Some(session_id.to_string()),

@@ -310,7 +310,7 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
+            caller: CallerIdentity::Owner,
         };
         (dir, ctx)
     }

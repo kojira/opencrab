@@ -74,6 +74,7 @@ impl Action for SelectLlmAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use std::sync::Arc;
 
     fn test_context() -> (tempfile::TempDir, ActionContext) {
@@ -95,7 +96,7 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
+            caller: CallerIdentity::Owner,
         };
         (dir, ctx)
     }

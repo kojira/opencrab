@@ -14,3 +14,4 @@ pub use traits::*;
 pub use dispatcher::ActionDispatcher;
 pub use bridge::BridgedExecutor;
 pub use tools::{ToolsConfig, ShellToolConfig, register_tools_from_config};
+pub use traits::CallerIdentity;

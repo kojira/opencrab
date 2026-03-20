@@ -105,6 +105,7 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::CallerIdentity;
     use opencrab_gateway::{GatewayActionDef, GatewayActionResult};
     use serde_json::json;
 
@@ -149,6 +150,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
         let ctx = ActionContext {
+            caller: CallerIdentity::Owner,
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),

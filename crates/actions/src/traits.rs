@@ -44,8 +44,17 @@ pub enum SideEffect {
     LlmSwitched { purpose: String, model: String },
 }
 
+/// 呼び出し元の識別子
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallerIdentity {
+    Owner,
+    Agent,
+    CoAgent { agent_id: String },
+}
+
 /// アクション実行コンテキスト
 pub struct ActionContext {
+    pub caller: CallerIdentity,
     pub agent_id: String,
     pub agent_name: String,
     pub session_id: Option<String>,
