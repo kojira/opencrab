@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod agents_messages;
 pub mod analytics;
 pub mod co_agents;
 pub mod sessions;

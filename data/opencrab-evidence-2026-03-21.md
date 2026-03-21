@@ -87,3 +87,70 @@ Dashboard UI redesign with mobile-first responsive layout.
 3. **execute_skill bypasses allowed_commands check**
    - Runs `sh -c <code>` directly without checking `agent_allowed_commands` table
    - Security consideration: executable skills can run any shell command regardless of restrictions
+
+---
+
+## trusted_user スキル E2E テスト（2026-03-21 夜）
+
+### 概要
+新エンドポイント `/api/agents/{id}/messages` を実装し、trusted_userスキルのE2Eテストを実施した。
+
+### 実装内容
+- **commit**: `feat: add /api/agents/{id}/messages endpoint for trusted_user E2E test`
+- **新規ファイル**: `crates/server/src/api/agents_messages.rs`
+  - `POST /api/agents/{id}/messages` ← `{ content, user_id }` を受け取る
+  - `get_trusted_user(db, user_id, agent_id)` でCallerIdentity決定
+  - `discord_manager.get_http_for_agent()` からDiscordGatewayActionsを取得
+  - `run_agent_response(state, ..., gateway_actions, caller)` 実行
+
+### CallerIdentity変換ロジック
+```
+trusted_user.permission == "co_agent" → CallerIdentity::CoAgent { agent_id: user_id }
+trusted_user exists (other)           → CallerIdentity::TrustedUser
+trusted_user not found                → CallerIdentity::Agent
+```
+
+### テスト結果
+
+#### Step 1: trusted_user からスキル作成リクエスト
+- user_id: 1157167346817958009（のすたろう、permission=co-agent）
+- **caller_type: "trusted_user"** ✅
+- セッションID: `agent-msg-54fab4ec-fad2-45d9-92dd-e62e50e2b36b-1157167346817958009`
+
+#### Step 2: create_skill(executable) 実行確認
+- リクエスト: "create_skillというゲートウェイアクションを使って、skill_type=executableで「東京天気v2」というスキルを作って。codeは curl https://wttr.in/Tokyo?format=%l:+%c+%t で"
+- **結果: SUCCESS**
+  - Skill ID: `24428fff`
+  - name: 東京天気v2
+  - skill_type: **executable** ✅
+  - source_type: **acquired** ✅（= gateway action create_skill が呼ばれた証拠）
+  - code: `curl https://wttr.in/Tokyo?format=%l:+%c+%t`
+
+#### Step 3: execute_skill で天気情報取得
+- リクエスト: "execute_skillを使ってskill_name=東京天気v2を実行して東京の天気を教えて"
+- **caller_type: "trusted_user"** ✅
+- **結果: SUCCESS** → 「東京の天気は「tokyo: ☀️   +14°C」です。」✅
+
+#### Step 4: 一般ユーザーからのリクエスト（拒否確認）
+- user_id: 999999999（trusted_userではない）
+- **caller_type: "agent"** ✅（rejected）
+- create_skillがツールリストから除外された証拠：
+  - 一般ユーザー実行結果: source=**self_created**, skill_type=**experience**（built-in create_my_skillが使われた）
+  - trusted_user実行結果: source=**acquired**, skill_type=**executable**（gateway create_skillが使われた）
+- 一般ユーザーはexecutable skillを作れない ✅
+
+### Findings
+
+#### ✅ Confirmed Working
+- `POST /api/agents/{id}/messages` エンドポイント → user_id→CallerIdentity変換 ✅
+- CallerIdentity::TrustedUser → create_skill/execute_skill がツールリストに追加 ✅
+- CallerIdentity::Agent → create_skill/execute_skill がツールリストから除外 ✅
+- discord_manager経由でDiscordGatewayActionsをREST APIに統合 ✅
+- execute_skill で実際に `sh -c` コマンドが実行され天気情報を返した ✅
+
+#### ⚠️ Notes
+- LLMはデフォルトで `create_my_skill`（built-in）を選択する傾向がある
+  - create_skill(gateway)を使わせるには明示的な指示が必要
+  - この問題は以前のテストでも確認済み
+- REST API経由でもDiscordGatewayActionsが取得できれば gateway actions が利用可能
+

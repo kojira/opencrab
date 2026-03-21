@@ -86,6 +86,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents/{id}/channel-configs/{channel_id}", delete(api::channel_configs::delete_channel_config))
         .route("/api/agents/{id}/trusted-users", get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user))
         .route("/api/agents/{id}/trusted-users/{user_id}", axum::routing::patch(api::trusted_users::update_trusted_user).delete(api::trusted_users::delete_trusted_user))
+        // エージェントメッセージ
+        .route("/api/agents/{id}/messages", post(api::agents_messages::send_agent_message))
         // 許可コマンド管理
         .route("/api/agents/{id}/allowed-commands", get(api::allowed_commands::list_allowed_commands).post(api::allowed_commands::add_allowed_command))
         .route("/api/agents/{id}/allowed-commands/{command}", axum::routing::delete(api::allowed_commands::remove_allowed_command))
