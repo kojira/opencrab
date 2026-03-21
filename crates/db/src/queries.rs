@@ -569,6 +569,40 @@ pub fn find_skill_by_name(conn: &Connection, agent_id: &str, name: &str) -> Resu
     }
 }
 
+pub fn find_skill_by_name_any(conn: &Connection, agent_id: &str, name: &str) -> Result<Option<SkillRow>> {
+    let result = conn.query_row(
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+         FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) LIMIT 1",
+        params![agent_id, name],
+        |row| {
+            Ok(SkillRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                situation_pattern: row.get(4)?,
+                guidance: row.get(5)?,
+                source_type: row.get(6)?,
+                source_context: row.get(7)?,
+                file_path: row.get(8)?,
+                effectiveness: row.get(9)?,
+                usage_count: row.get(10)?,
+                is_active: row.get(11)?,
+                permission: row.get(12)?,
+                archived: row.get(13)?,
+                skill_type: row.get(14)?,
+                code: row.get(15)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
         "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
@@ -605,12 +639,17 @@ pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<Skil
 
 pub fn update_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     conn.execute(
-        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, updated_at = ?5 WHERE id = ?6",
+        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, skill_type = ?5, code = ?6, is_active = ?7, archived = ?8, file_path = ?9, updated_at = ?10 WHERE id = ?11",
         params![
             skill.name,
             skill.description,
             skill.situation_pattern,
             skill.guidance,
+            skill.skill_type,
+            skill.code,
+            skill.is_active,
+            skill.archived,
+            skill.file_path,
             Utc::now().to_rfc3339(),
             skill.id,
         ],
@@ -2142,6 +2181,87 @@ mod tests {
         let skills = list_skills(&conn, "agent-1", true).unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].usage_count, 1);
+    }
+
+    // 11a. test_find_skill_by_name_any_includes_archived
+    #[test]
+    fn test_find_skill_by_name_any_includes_archived() {
+        let conn = setup();
+
+        let skill = SkillRow {
+            id: "skill-arch-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            name: "ArchivedSkill".to_string(),
+            description: "Some description".to_string(),
+            situation_pattern: "".to_string(),
+            guidance: "".to_string(),
+            source_type: "acquired".to_string(),
+            source_context: None,
+            file_path: None,
+            effectiveness: None,
+            usage_count: 0,
+            is_active: false,
+            permission: "\"agent\"".to_string(),
+            archived: true,
+            skill_type: "experience".to_string(),
+            code: None,
+        };
+        insert_skill(&conn, &skill).unwrap();
+
+        // find_skill_by_name should NOT find archived
+        let not_found = find_skill_by_name(&conn, "agent-1", "ArchivedSkill").unwrap();
+        assert!(not_found.is_none(), "find_skill_by_name should not find archived skill");
+
+        // find_skill_by_name_any SHOULD find archived
+        let found = find_skill_by_name_any(&conn, "agent-1", "ArchivedSkill").unwrap();
+        assert!(found.is_some(), "find_skill_by_name_any should find archived skill");
+        assert_eq!(found.unwrap().archived, true);
+    }
+
+    // 11b. test_update_skill_full_fields
+    #[test]
+    fn test_update_skill_full_fields() {
+        let conn = setup();
+
+        let skill = SkillRow {
+            id: "skill-upd-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            name: "UpdateMe".to_string(),
+            description: "Original description".to_string(),
+            situation_pattern: "original pattern".to_string(),
+            guidance: "original guidance".to_string(),
+            source_type: "acquired".to_string(),
+            source_context: None,
+            file_path: None,
+            effectiveness: None,
+            usage_count: 0,
+            is_active: true,
+            permission: "\"agent\"".to_string(),
+            archived: true,
+            skill_type: "experience".to_string(),
+            code: None,
+        };
+        insert_skill(&conn, &skill).unwrap();
+
+        // Update with new values including archived=false restore
+        let mut updated = skill.clone();
+        updated.description = "Updated description".to_string();
+        updated.guidance = "Updated guidance".to_string();
+        updated.skill_type = "code".to_string();
+        updated.code = Some("fn main() {}".to_string());
+        updated.archived = false;
+        updated.is_active = true;
+        update_skill(&conn, &updated).unwrap();
+
+        let found = find_skill_by_name(&conn, "agent-1", "UpdateMe").unwrap();
+        assert!(found.is_some(), "should find restored skill");
+        let s = found.unwrap();
+        assert_eq!(s.description, "Updated description");
+        assert_eq!(s.guidance, "Updated guidance");
+        assert_eq!(s.skill_type, "code");
+        assert_eq!(s.code.as_deref(), Some("fn main() {}"));
+        assert_eq!(s.archived, false);
+        assert_eq!(s.is_active, true);
     }
 
     // 11. test_impressions_upsert_and_get
