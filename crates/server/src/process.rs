@@ -207,13 +207,49 @@ pub async fn run_agent_response(
         }
     });
 
+    // Collect image_urls: merge passed-in args with any stored in the latest user log metadata_json.
+    let merged_image_urls: Vec<String> = {
+        let mut urls: Vec<String> = image_urls.to_vec();
+        if let Ok(conn) = state.db.lock() {
+            if let Ok(logs) = opencrab_db::queries::list_session_logs_by_session(&conn, session_id) {
+                if let Some(latest_user_log) = logs.iter().rev().find(|log| {
+                    log.log_type == "speech"
+                        && log.speaker_id.as_deref().map(|s| s != agent_id).unwrap_or(true)
+                }) {
+                    if let Some(ref meta_json) = latest_user_log.metadata_json {
+                        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                            if let Some(arr) = meta["image_urls"].as_array() {
+                                for v in arr {
+                                    if let Some(s) = v.as_str() {
+                                        let url = s.to_string();
+                                        if !urls.contains(&url) {
+                                            urls.push(url);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !urls.is_empty() {
+            tracing::debug!(
+                session_id = %session_id,
+                count = urls.len(),
+                "run_agent_response: merging image_urls for LLM"
+            );
+        }
+        urls
+    };
+
     let result = engine
         .run_with_model_override(
             system_prompt,
             conversation,
             &state.default_model,
             Some(model_override),
-            image_urls,
+            &merged_image_urls,
         )
         .await;
 
