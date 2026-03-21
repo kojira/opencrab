@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-discord = ["dep:opencrab-discord"]
+discord = ["dep:opencrab-discord", "dep:serenity"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -29,6 +29,7 @@ opencrab-db = { workspace = true }
 dotenvy = { workspace = true }
 toml = { workspace = true }
 opencrab-discord = { workspace = true, optional = true }
+serenity = { workspace = true, optional = true }
 notify = "6"
 notify-debouncer-mini = "0.4"
 
