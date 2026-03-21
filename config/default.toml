@@ -59,13 +59,12 @@ base_url = "http://localhost:8080"
 
 # モデルエイリアス
 [llm.aliases]
-fast = { provider = "openai", model = "gpt-4o-mini" }
-smart = { provider = "openai", model = "gpt-4o" }
-reasoning = { provider = "openai", model = "o1" }
-creative = { provider = "anthropic", model = "claude-sonnet-4.5" }
+fast = { provider = "anthropic", model = "claude-haiku-4-5" }
+smart = { provider = "anthropic", model = "claude-sonnet-4-6" }
+reasoning = { provider = "anthropic", model = "claude-sonnet-4-6" }
+creative = { provider = "anthropic", model = "claude-sonnet-4-6" }
 local = { provider = "ollama", model = "llama3.1:8b" }
-cheap = { provider = "openai", model = "gpt-4o-mini" }
-deepseek = { provider = "openrouter", model = "deepseek/deepseek-chat" }
+cheap = { provider = "anthropic", model = "claude-haiku-4-5" }
 
 [gateway.rest]
 enabled = true
