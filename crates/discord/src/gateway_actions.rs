@@ -225,6 +225,7 @@ impl DiscordGatewayActions {
                     "channel_name": channel_name,
                     "readable": readable,
                     "writable": writable,
+                    "whitelisted": whitelisted,
                     "message": format!(
                         "チャンネル {} の設定を更新しました (readable={}, writable={})",
                         if channel_name.is_empty() { channel_id } else { channel_name },
@@ -343,7 +344,7 @@ impl GatewayActions for DiscordGatewayActions {
         vec![
             GatewayActionDef {
                 name: "discord_list_guilds".to_string(),
-                description: "Botが参加しているDiscordサーバー（guild）の一覧を取得する".to_string(),
+                description: "Botが参加しているDiscordサーバー（guild）の一覧を取得する。返り値の各サーバーの `id` フィールド（数値文字列）を、他のアクションの `guild_id` パラメータとして使用すること。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {},
@@ -352,7 +353,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_list_channels".to_string(),
-                description: "指定サーバーのチャンネル一覧と、現在のread/write設定を取得する。guild_idはdiscord_list_guildsで取得した数値IDを使うこと。".to_string(),
+                description: "指定サーバーのテキストチャンネル一覧と、各チャンネルの現在のreadable/writable/whitelisted設定を取得する。チャンネルの `id` フィールドを discord_channel_config の channel_id として使用すること。guild_id は discord_list_guilds で取得した数値IDを指定。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -372,23 +373,23 @@ impl GatewayActions for DiscordGatewayActions {
                     "properties": {
                         "channel_id": {
                             "type": "string",
-                            "description": "対象チャンネルのID"
+                            "description": "対象チャンネルの数値ID（discord_list_channelsの結果から取得）。チャンネル名ではなくIDを指定すること。"
                         },
                         "guild_id": {
                             "type": "string",
-                            "description": "チャンネルが属するサーバーの数値ID"
+                            "description": "チャンネルが属するサーバーの数値ID（discord_list_guildsまたはdiscord_list_channelsの結果から取得）。"
                         },
                         "channel_name": {
                             "type": "string",
-                            "description": "チャンネル名（表示用）"
+                            "description": "チャンネル名（任意・ログ表示用のみ。省略可）。"
                         },
                         "readable": {
                             "type": "boolean",
-                            "description": "このチャンネルのメッセージを読むか"
+                            "description": "このチャンネルのメッセージを読み取るか。falseにするとbotはそのチャンネルのメッセージを完全に無視する。"
                         },
                         "writable": {
                             "type": "boolean",
-                            "description": "このチャンネルに返信するか"
+                            "description": "このチャンネルに返信・投稿するか。falseにするとbotはそのチャンネルへの送信を行わない。"
                         },
                         "whitelisted": {
                             "type": "boolean",
@@ -406,15 +407,15 @@ impl GatewayActions for DiscordGatewayActions {
                     "properties": {
                         "channel_id": {
                             "type": "string",
-                            "description": "メッセージが存在するチャンネルのID"
+                            "description": "メッセージが存在するチャンネルの数値ID。"
                         },
                         "message_id": {
                             "type": "string",
-                            "description": "リアクションを付けるメッセージのID"
+                            "description": "リアクションを付けるメッセージの数値ID。現在処理中のメッセージのIDを使う場合はコンテキストから取得すること。"
                         },
                         "emoji": {
                             "type": "string",
-                            "description": "Unicode絵文字（例: ⚡、👍）またはカスタム絵文字のname:id形式"
+                            "description": "Unicode絵文字（例: ⚡、👍）またはカスタム絵文字（形式: 絵文字名:数値ID、例: parrot:123456789012345）。Unicode絵文字の場合はそのまま文字列を渡す。"
                         }
                     },
                     "required": ["channel_id", "message_id", "emoji"]
@@ -456,15 +457,16 @@ mod tests {
     // ---- definitions ----
 
     #[test]
-    fn test_definitions_returns_three_actions() {
+    fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 3);
+        assert_eq!(defs.len(), 4);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
         assert!(names.contains(&"discord_list_channels"));
         assert!(names.contains(&"discord_channel_config"));
+        assert!(names.contains(&"discord_add_reaction"));
     }
 
     #[test]
