@@ -1186,7 +1186,7 @@ impl GatewayActions for DiscordGatewayActions {
                     "properties": {
                         "channel_id": {
                             "type": "string",
-                            "description": "送信先DiscordチャンネルのID（数値文字列）。現在会話しているチャンネルのIDを使う場合が多い。ユーザーIDやBotIDではなく、チャンネルIDを指定すること。"
+                            "description": "送信先DiscordチャンネルのID（数値文字列）。現在のチャンネルIDはシステムプロンプトの[Discord context]セクションに`channel_id=XXXX`として記載されている。ユーザーIDやBotIDではなくチャンネルIDを指定すること。"
                         },
                         "file_path": {
                             "type": "string",
