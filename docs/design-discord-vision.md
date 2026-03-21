@@ -532,3 +532,8 @@ crates/
       process.rs              # build_conversation_string, run_agent_response
       agent_runner_impl.rs    # AgentRunner トレイト実装
 ```
+
+## レビューメモ（2026-03-22 by らぼみ）
+
+- 設計の問題箇所特定とURLパッシングスルー方式はOK
+- **型変換に注意**: `gateway::MessageContent::ContentPart::Image {url, alt}` と `llm::MessageContent::ContentPart::ImageUrl {image_url: ImageUrl}` は別の型。`gateway→llm` の型変換ロジックが漏れないように実装すること
