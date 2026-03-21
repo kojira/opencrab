@@ -73,3 +73,14 @@
     - 必要: ファイル（画像）をDiscordに送信するgateway action (`discord_send_file` など)
     - 用途: nano-banan-proで生成した画像をかいろがDiscordに投稿できるようにする
     - 関連: `serenity`のcreate_message + file_uploadまたはattachment機能
+
+18. **OpenClaw→OpenCrabインポート機能**
+    - ディレクトリ指定でOpenClawのワークスペースデータをインポート
+    - SOUL.md → soul、IDENTITY.md → identity、memory/*.md → curated memories変換
+    - 設計中: `docs/design-openclaw-import.md`（サブエージェント作成中）
+
+19. **もぐたろう防止アーキテクチャ（一次回答+バックグラウンド処理分離）**
+    - 現状: かいろのメインループで長い処理をするとコンテキストが膨張
+    - 求める設計: 受信→即時一次応答→長い処理はサブタスク自動エスカレート→完了通知
+    - HTTPサーバーのリクエスト/レスポンスモデルに相当
+    - 3人（のすたろう・らぼみ・kojira）でレビューしてから実装
