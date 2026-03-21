@@ -88,7 +88,7 @@ export default function AgentLayout() {
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-sm font-semibold text-on-surface break-words line-clamp-2">
+            <h1 className="text-sm font-semibold text-on-surface truncate">
               {agent.name}
             </h1>
             <p className="text-xs text-on-surface-variant truncate">
