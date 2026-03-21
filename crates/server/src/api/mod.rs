@@ -9,3 +9,4 @@ pub mod trusted_users;
 pub mod channel_configs;
 pub mod workspace;
 pub mod allowed_commands;
+pub mod llm_logs;

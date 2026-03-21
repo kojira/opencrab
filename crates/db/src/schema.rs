@@ -119,6 +119,22 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE soul DROP COLUMN personality_json")?;
     }
 
+    // llm_logs テーブル作成（既存DBへの対応）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_logs (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            session_id TEXT,
+            model TEXT,
+            prompt TEXT NOT NULL,
+            response TEXT NOT NULL,
+            tool_calls TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);"
+    )?;
+
     Ok(())
 }
 
@@ -470,4 +486,20 @@ CREATE TABLE IF NOT EXISTS agent_allowed_commands (
     UNIQUE (agent_id, command)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_allowed_commands_agent ON agent_allowed_commands(agent_id);
+
+-- ============================================
+-- LLM入出力ログ
+-- ============================================
+CREATE TABLE IF NOT EXISTS llm_logs (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    session_id TEXT,
+    model TEXT,
+    prompt TEXT NOT NULL,
+    response TEXT NOT NULL,
+    tool_calls TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
 "#;

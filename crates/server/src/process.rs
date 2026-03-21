@@ -176,11 +176,35 @@ pub async fn run_agent_response(
     let llm_client = LlmRouterAdapter::new(state.llm_router.clone()).with_metrics(metrics_ctx);
 
     // Run SkillEngine with model_override for dynamic switching.
-    let engine = opencrab_core::SkillEngine::new(
+    let mut engine = opencrab_core::SkillEngine::new(
         Box::new(llm_client),
         Box::new(executor),
         20, // max iterations
     );
+
+    // LLMログ記録のコールバックを設定
+    let log_db = state.db.clone();
+    let log_agent_id = agent_id.to_string();
+    let log_session_id = session_id.to_string();
+    engine.set_log_callback(move |request, response| {
+        let log_row = opencrab_db::queries::LlmLogRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: log_agent_id.clone(),
+            session_id: Some(log_session_id.clone()),
+            model: Some(request.model.clone()),
+            prompt: serde_json::to_string(&request.messages).unwrap_or_default(),
+            response: serde_json::to_string(response).unwrap_or_default(),
+            tool_calls: if response.tool_calls.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&response.tool_calls).ok()
+            },
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Ok(conn) = log_db.lock() {
+            let _ = opencrab_db::queries::insert_llm_log(&conn, &log_row);
+        }
+    });
 
     let result = engine
         .run_with_model_override(

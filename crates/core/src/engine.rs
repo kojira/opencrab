@@ -143,6 +143,8 @@ pub struct SkillEngine {
     pub max_iterations: usize,
     /// Set of actions declared by active skills. If Some, only declared actions are allowed.
     pub allowed_actions: Option<std::collections::HashSet<String>>,
+    /// Optional callback invoked after each LLM call for logging.
+    pub log_callback: Option<Box<dyn Fn(&ChatRequestSimple, &ChatResponseSimple) + Send + Sync>>,
 }
 
 impl SkillEngine {
@@ -157,7 +159,13 @@ impl SkillEngine {
             executor,
             max_iterations,
             allowed_actions: None,
+            log_callback: None,
         }
+    }
+
+    /// Set the LLM log callback, invoked after each LLM call.
+    pub fn set_log_callback(&mut self, cb: impl Fn(&ChatRequestSimple, &ChatResponseSimple) + Send + Sync + 'static) {
+        self.log_callback = Some(Box::new(cb));
     }
 
     /// Set the allowed actions from active skill declarations.
@@ -263,7 +271,11 @@ impl SkillEngine {
                 max_tokens: Some(4096),
             };
 
+            let request_for_log = request.clone();
             let response = self.llm.chat(request).await?;
+            if let Some(cb) = &self.log_callback {
+                cb(&request_for_log, &response);
+            }
 
             // If there are tool calls, execute them and continue the loop.
             if !response.tool_calls.is_empty() {
