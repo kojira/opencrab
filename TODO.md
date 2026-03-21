@@ -100,3 +100,8 @@
     - 現状: LLMレイヤーに`ImageUrl`/`supports_vision`実装あるが、Discord添付→LLMパイプラインが未接続
     - 修正: `message_loop.rs`でDiscordの`attachments`を取得し、画像URLをLLMの`ContentPart::ImageUrl`として渡す
     - 効果: かいろがDiscordで送られた画像を理解できるようになる
+
+23. **ホワイトリスト外チャンネルでのセッションDB保存バグ修正**
+    - 現状: whitelist外チャンネルのメッセージもDBにセッションログが蓄積される
+    - 修正: `message_loop.rs`でホワイトリストチェックをDBへの保存処理より前に実施
+    - 影響: 不要なセッション履歴が積み上がるのを防ぐ
