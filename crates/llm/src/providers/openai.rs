@@ -56,7 +56,7 @@ impl OpenAiProvider {
     fn build_request_body(&self, request: &ChatRequest) -> Value {
         let mut body = serde_json::json!({
             "model": request.model,
-            "messages": self.convert_messages(&request.messages),
+            "messages": self.convert_messages(&request.messages, &request.model),
         });
 
         if let Some(temp) = request.temperature {
@@ -105,11 +105,11 @@ impl OpenAiProvider {
         body
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<Value> {
-        messages.iter().map(|m| self.convert_message(m)).collect()
+    fn convert_messages(&self, messages: &[Message], model: &str) -> Vec<Value> {
+        messages.iter().map(|m| self.convert_message(m, model)).collect()
     }
 
-    fn convert_message(&self, msg: &Message) -> Value {
+    fn convert_message(&self, msg: &Message, model: &str) -> Value {
         let mut obj = serde_json::json!({
             "role": msg.role,
         });
@@ -120,14 +120,26 @@ impl OpenAiProvider {
                     obj["content"] = serde_json::json!(text);
                 }
                 MessageContent::Image { image_url, .. } => {
-                    obj["content"] = serde_json::json!([
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url.url,
+                    if model.contains("claude") {
+                        obj["content"] = serde_json::json!([
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": image_url.url,
+                                }
                             }
-                        }
-                    ]);
+                        ]);
+                    } else {
+                        obj["content"] = serde_json::json!([
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_url.url,
+                                }
+                            }
+                        ]);
+                    }
                 }
                 MessageContent::Multi(parts) => {
                     let parts_json: Vec<Value> = parts
@@ -137,10 +149,17 @@ impl OpenAiProvider {
                                 serde_json::json!({"type": "text", "text": text})
                             }
                             ContentPart::ImageUrl { image_url } => {
-                                serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url.url}
-                                })
+                                if model.contains("claude") {
+                                    serde_json::json!({
+                                        "type": "image",
+                                        "source": {"type": "url", "url": image_url.url}
+                                    })
+                                } else {
+                                    serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": {"url": image_url.url}
+                                    })
+                                }
                             }
                         })
                         .collect();
