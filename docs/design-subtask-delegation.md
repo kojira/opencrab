@@ -184,28 +184,64 @@ LLM → tool_call(execute_shell) → 実行完了 → Discord に中間送信 �
 
 ---
 
-### 案D: エージェント自身が「サブタスクツール」を呼ぶ ─ オプション案
+### 案D: `spawn_subtask` gateway action — かいろの自発的サブタスク起動 ⭐案Aと統合
+
+**[2026-03-22 更新] 案A（即時ack + バックグラウンド化）と統合する設計として確定。**
 
 **概要:**
-`spawn_background_task` というツールを追加し、LLM 自身が長い処理を「委譲すべき」と判断したら呼ぶ。
+`spawn_subtask` をgateway actionとして実装し、LLMがどこからでも呼べるようにする。
+メインエンジン（depth=0）が `spawn_subtask` を呼ぶと、サブエンジン（depth=1）が
+tokio::spawn で起動され、処理結果がセッション履歴に追加される。
 
 ```
-LLM → spawn_background_task(command, description) → 「了解、バックグラウンドで実行します」を返す
-                                                    ↓
-                                                tokio::spawn(実行) → 完了後に Discord 送信
+[Discordメッセージ受信]
+   ↓
+メインエンジン起動（depth=0）
+   ↓
+LLMが判断: 「これは時間がかかる → spawn_subtask を使おう」
+   ↓
+spawn_subtask ツール呼び出し → tokio::spawn で サブエンジン起動（depth=1）
+   ↓ （spawn直後に即リターン）
+LLMが ack テキストを返す: 「少し待ってて、処理するね ⚡」
+   ↓
+Discord に ack を送信（メインエンジン完了）
+
+[バックグラウンド処理]
+サブエンジン（depth=1）が処理完了
+   ↓
+セッション履歴に subtask_result を追加
+   ↓
+メインエンジンを再呼び出し（depth=0）
+   ↓
+LLMが subtask_result を解釈してかいろらしく応答
+   ↓
+Discord に最終応答を送信
 ```
+
+**なぜ gateway action として実装するか:**
+- gateway action = LLMがツールとして呼び出せる実行単位（execute_shell等と同様）
+- どのコンテキスト（Discordメッセージ返信中・ハートビート処理中・自律タスク中）でも呼べる
+- LLMが「長い処理かどうか」を文脈から判断して自発的に spawn できる
+
+**トリガーのバリエーション:**
+| トリガー | 説明 |
+|---------|------|
+| Discordメッセージ | 「画像生成して」→ spawn_subtask → ack返信 |
+| ハートビート | 定期処理中に「メール確認が重い → サブに投げよう」と判断 |
+| 自律タスク | スケジュールされたタスクから別タスクをサブに委譲 |
 
 **メリット:**
-- LLM の文脈判断でバックグラウンド委譲を制御できる
-- ツールとして追加するだけなので既存アーキテクチャへの影響が小さい
-- エージェントが「これは時間かかる」と判断して自律的に適用できる
+- LLMの文脈判断でバックグラウンド委譲を制御できる（機械的ルールより柔軟）
+- message_loop.rs の複雑な分岐が不要になる（常に同じ流れ）
+- ハートビートや自律タスクからもサブを起動できる
+- depth制限（3.7節）で再帰防止も保証される
 
-**デメリット:**
-- LLM が適切に判断・呼び出すかは不確実
-- 単発の短い処理まで委譲される可能性
-- 最初の応答（SkillEngine実行前）がまだブロックされる問題は残る
+**デメリット・リスク:**
+- LLMが spawn_subtask を呼ぶかどうかは確率的（プロンプト設計が重要）
+- 短い処理でも spawn_subtask を呼んでしまう可能性
+- ack を返すかどうかもLLM任せ（固定文言よりバラつく可能性）
 
-**難易度:** 中（案A の変形版として実装可能）
+**難易度:** 中〜高（gateway action の実装 + depth制限 + セッション履歴連携）
 
 ---
 
@@ -623,6 +659,151 @@ impl ActionExecutor for BridgedExecutor {
 
 ---
 
+### 3.8 `spawn_subtask` gateway action の実装
+
+`spawn_subtask` はLLMがツールとして呼び出せる gateway action として実装する。
+
+#### ツール定義（LLMに見せるスキーマ）
+
+```json
+{
+  "name": "spawn_subtask",
+  "description": "長い処理や並列実行が必要なタスクをバックグラウンドのサブエンジンに委譲する。サブエンジンはかいろと同じ人格・スキル構成で動く。結果はセッション履歴に追加され、その後メインエンジンが呼ばれて最終応答を生成する。depth=0（メインエンジン）でのみ使用可能。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "サブエンジンに渡すタスク指示。何をすべきかを明確に記述する。"
+      },
+      "reason": {
+        "type": "string",
+        "description": "なぜサブタスクに委譲するか（ログ・デバッグ用）"
+      }
+    },
+    "required": ["task"]
+  }
+}
+```
+
+#### Rust 実装（`crates/actions/src/spawn_subtask.rs`）
+
+```rust
+pub struct SpawnSubtaskAction {
+    pub state: Arc<AppState>,
+    pub depth: u8,
+    pub session_id: String,
+    pub agent_id: i64,
+    pub agent_name: String,
+    pub system_prompt: String,
+    pub gateway: Arc<dyn GatewayActions>,
+    pub channel_id: u64,
+    pub caller: Option<String>,
+}
+
+impl GatewayAction for SpawnSubtaskAction {
+    async fn execute(&self, args: Value) -> ToolResult {
+        // depth チェック（3.7節の再帰防止）
+        if self.depth >= 1 {
+            return ToolResult::error(
+                "サブエンジン内から spawn_subtask は使用できません（再帰防止: depth >= 1）"
+            );
+        }
+
+        let task = args["task"].as_str().unwrap_or("").to_string();
+        let reason = args["reason"].as_str().unwrap_or("").to_string();
+
+        let state = self.state.clone();
+        let session_id = self.session_id.clone();
+        let agent_id = self.agent_id;
+        let agent_name = self.agent_name.clone();
+        let system_prompt = self.system_prompt.clone();
+        let gateway = self.gateway.clone();
+        let channel_id = self.channel_id;
+        let caller = self.caller.clone();
+
+        // バックグラウンドでサブエンジン起動
+        tokio::spawn(async move {
+            // サブタスク用会話を構成
+            let sub_conversation = vec![
+                Message::system("これはバックグラウンドサブタスクです。かいろとして処理し、結果を返してください。Discordには直接送信しません。"),
+                Message::user(&task),
+            ];
+
+            // サブエンジン実行（depth=1, gateway_actions=None）
+            let sub_result = state.run_agent_response(
+                agent_id, &agent_name, &session_id,
+                &system_prompt, sub_conversation,
+                "background", None, caller.as_deref(), &[],
+                1, // depth = 1
+            ).await;
+
+            // 結果をセッション履歴に追加
+            state.append_to_session_history(&session_id, SessionMessage {
+                message_type: "subtask_result".to_string(),
+                result: sub_result
+                    .map(|r| r.response)
+                    .unwrap_or_else(|e| format!("エラー: {e}")),
+                metadata: json!({ "task": task, "reason": reason }),
+            }).await;
+
+            // メインエンジンを再呼び出し（最終応答生成）
+            let final_result = state.run_agent_response(
+                agent_id, &agent_name, &session_id,
+                &system_prompt,
+                vec![], // セッション履歴から自動ロード
+                "discord", Some(gateway.clone()), caller.as_deref(), &[],
+                0, // depth = 0（メインエンジン）
+            ).await;
+
+            if let Ok(engine_result) = final_result {
+                if !engine_result.response.is_empty() {
+                    let _ = gateway.send_to_channel(channel_id, &engine_result.response).await;
+                }
+            }
+        });
+
+        // spawn直後にすぐ返す（LLMはこの後ackテキストを返せる）
+        ToolResult::ok(json!({
+            "status": "spawned",
+            "message": "サブタスクをバックグラウンドで起動しました"
+        }))
+    }
+}
+```
+
+#### LLMの典型的な呼び出しパターン
+
+ユーザー: 「かわいい猫の画像生成して」
+
+```
+LLM のターン:
+1. spawn_subtask を呼ぶ
+   → args: { "task": "かわいい猫の画像を生成して。generate_imageツールを使って。", "reason": "画像生成は時間がかかるためサブに委譲" }
+   → ToolResult: { "status": "spawned" }
+2. テキストで ack を返す
+   → "ちょっと待ってて、猫ちゃんの画像生成してるね ⚡"
+3. メインエンジン終了 → Discord に ack 送信
+
+[バックグラウンド]
+サブエンジン: generate_image ツールで画像生成
+   → セッション履歴に subtask_result 追加
+   → メインエンジン再呼び出し
+   → "できたよ！ [画像URL]" を Discord 送信
+```
+
+#### ハートビートからのサブタスク起動例
+
+```
+ハートビートエンジン（depth=0）:
+→ 「メールを確認してください」という自律タスクを処理中
+→ LLMが「メール確認は時間がかかる → spawn_subtask を使おう」と判断
+→ spawn_subtask 呼び出し → サブエンジン（depth=1）でメール確認
+→ 結果をセッション履歴に追加 → メインエンジン再呼び出し → まとめてDiscordに通知
+```
+
+---
+
 ## 4. 実装ステップ（優先順位付き）
 
 ### Phase 1: 最小実装（2〜4時間）⭐最優先
@@ -665,6 +846,8 @@ impl ActionExecutor for BridgedExecutor {
    - `run_agent_response` に `depth: u8` 引数を追加、サブ呼び出し時は `depth=1` を渡す
    - `spawn_subtask` ツール内で `depth >= 1` チェックを追加
 
+9. **spawn_subtask gateway action の実装**: `crates/actions/src/spawn_subtask.rs` を新規作成。depth チェック、tokio::spawn、セッション履歴追加、メインエンジン再呼び出しの一連のフローを実装
+
 ### Phase 3: 高度機能（将来）
 
 9. **案D（サブタスクツール）の実装**
@@ -691,6 +874,8 @@ impl ActionExecutor for BridgedExecutor {
 - [x] ✅ **確定** **一次応答のキャラクター**: ackはシンプルな固定文言。最終応答のかいろらしさはLLMが担保
 - [x] ✅ **確定** **サブタスクのエンジン構成**: フルSkillEngine（かいろと同じ人格・スキル）を使用。単純なシェル実行器ではない
 - [x] ✅ **確定** **再帰防止**: depth制限を採用（depth: 0=メイン、1=サブ）。depth >= 1 では spawn_subtask を使用不可
+- [ ] **未定** **spawn_subtask のプロンプト設計**: LLMが適切に spawn_subtask を呼ぶようシステムプロンプトをどう書くか（過剰呼び出し防止）
+- [x] ✅ **確定** **spawn_subtask の実装位置**: gateway action として `crates/actions/src/spawn_subtask.rs` に実装
 
 ---
 
@@ -704,7 +889,7 @@ impl ActionExecutor for BridgedExecutor {
 | `crates/server/src/lib.rs` | `AppState` の Clone 対応確認 |
 | `crates/actions/src/` | 案D の場合: `spawn_background_task` ツール追加 |
 | `crates/core/src/engine.rs` | `SkillEngine::new` に `depth` 引数追加、BridgedExecutor に depth 伝播 |
-| `crates/actions/src/spawn_subtask.rs` | 将来実装: depth >= 1 で使用不可にする spawn_subtask ツール |
+| `crates/actions/src/spawn_subtask.rs` | spawn_subtask gateway action（新規実装: depth チェック + tokio::spawn + セッション履歴連携）|
 
 ---
 
@@ -976,3 +1161,4 @@ Cronジョブ → gateway.trigger_agent(task="朝の定例チェック")
 *2026-03-22 追記: サブタスクもフルSkillEngine（かいろ同等構成）で動かす設計に確定*
 *2026-03-22 追記: depth制限（再帰防止）設計を追加*
 *レビュー: のすたろう・らぼみ・kojira（TODO #19）*
+*2026-03-22 追記: spawn_subtask gateway action + 案Dとの統合設計を追加（かいろの自発的サブタスク起動）*
