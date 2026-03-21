@@ -51,6 +51,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         gateway_name: &str,
         gateway_actions: Option<Arc<dyn GatewayActions>>,
         caller: opencrab_actions::CallerIdentity,
+        image_urls: &[String],
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 
     /// エージェントのLLMクライアントを生成する。

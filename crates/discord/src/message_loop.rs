@@ -209,6 +209,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     "discord",
                     Some(gateway_actions.clone()),
                     caller.clone(),
+                    &image_urls,
                 )
                 .await;
 

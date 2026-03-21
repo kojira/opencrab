@@ -121,6 +121,7 @@ pub async fn run_agent_response(
     gateway: &str,
     gateway_actions: Option<Arc<dyn GatewayActions>>,
     caller: opencrab_actions::CallerIdentity,
+    image_urls: &[String],
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
@@ -212,6 +213,7 @@ pub async fn run_agent_response(
             conversation,
             &state.default_model,
             Some(model_override),
+            image_urls,
         )
         .await;
 

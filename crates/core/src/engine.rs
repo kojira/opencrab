@@ -216,7 +216,7 @@ impl SkillEngine {
         user_message: &str,
         model: &str,
     ) -> Result<EngineResult> {
-        self.run_with_model_override(system_context, user_message, model, None)
+        self.run_with_model_override(system_context, user_message, model, None, &[])
             .await
     }
 
@@ -230,8 +230,19 @@ impl SkillEngine {
         user_message: &str,
         default_model: &str,
         model_override: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+        image_urls: &[String],
     ) -> Result<EngineResult> {
         let tools = self.executor.list_tools();
+
+        let user_content_parts: Vec<ChatContentPart> = if image_urls.is_empty() {
+            vec![]
+        } else {
+            let mut parts = vec![ChatContentPart::Text { text: user_message.to_string() }];
+            for url in image_urls {
+                parts.push(ChatContentPart::ImageUrl { url: url.clone(), detail: Some("auto".to_string()) });
+            }
+            parts
+        };
 
         let mut messages = vec![
             ChatMessage {
@@ -246,7 +257,7 @@ impl SkillEngine {
                 content: user_message.to_string(),
                 tool_call_id: None,
                 tool_calls: vec![],
-                content_parts: vec![],
+                content_parts: user_content_parts,
             },
         ];
 
@@ -824,7 +835,7 @@ mod tests {
         });
 
         let result = engine
-            .run_with_model_override("system", "hi", "default-model", Some(model_override))
+            .run_with_model_override("system", "hi", "default-model", Some(model_override), &[])
             .await
             .unwrap();
 

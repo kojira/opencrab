@@ -163,6 +163,7 @@ fn make_heartbeat_callback(
                     "heartbeat",
                     None,
                     opencrab_actions::CallerIdentity::Owner,
+                    &[],
                 ).await;
 
                 let decision = match engine_result {
