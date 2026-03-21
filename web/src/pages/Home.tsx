@@ -41,27 +41,21 @@ function QuickLink({
   to,
   icon,
   title,
-  description,
 }: {
   to: string;
   icon: string;
   title: string;
-  description: string;
 }) {
   return (
-    <Link to={to} className="card-elevated flex items-center gap-3 group hover:border-primary/40">
+    <Link to={to} className="card-elevated h-20 flex flex-col items-center justify-center gap-2 group hover:border-primary/40">
       <div className="w-8 h-8 rounded-lg bg-primary-container flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:shadow-elevation-1 transition-all duration-200">
         <span className="material-symbols-outlined text-xl text-primary group-hover:text-primary-on transition-colors">
           {icon}
         </span>
       </div>
-      <div className="min-w-0">
-        <h3 className="text-title-sm text-on-surface group-hover:text-primary transition-colors font-semibold">
-          {title}
-        </h3>
-        <p className="text-body-sm text-on-surface-variant leading-relaxed">{description}</p>
-      </div>
-      <span className="material-symbols-outlined text-on-surface-variant/40 group-hover:text-primary/60 ml-auto shrink-0 transition-colors">chevron_right</span>
+      <h3 className="text-title-sm text-on-surface group-hover:text-primary transition-colors font-semibold">
+        {title}
+      </h3>
     </Link>
   );
 }
@@ -125,25 +119,21 @@ export default function Home() {
             to="/agents"
             icon="smart_toy"
             title={t("home.agentManagement")}
-            description={t("home.agentManagementDesc")}
           />
           <QuickLink
             to="/sessions"
             icon="forum"
             title={t("home.sessionMonitor")}
-            description={t("home.sessionMonitorDesc")}
           />
           <QuickLink
             to="/agents"
             icon="memory"
             title={t("home.memoryExplorer")}
-            description={t("home.memoryExplorerDesc")}
           />
           <QuickLink
             to="/agents"
             icon="analytics"
             title={t("home.analyticsMetrics")}
-            description={t("home.analyticsMetricsDesc")}
           />
         </div>
       </div>
