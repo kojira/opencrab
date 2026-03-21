@@ -20,6 +20,14 @@ pub struct IndexBuildResult {
     pub logs_indexed: usize,
 }
 
+/// ツリー再マージ結果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResult {
+    pub periods_processed: usize,
+    pub topics_merged: usize,
+    pub topics_deleted: usize,
+}
+
 /// LLMから返されるサマリーJSON
 #[derive(Debug, Deserialize)]
 struct LlmSummary {
@@ -294,6 +302,180 @@ impl IndexBuilder {
         Ok(IndexBuildResult {
             nodes_created,
             logs_indexed: logs.len(),
+        })
+    }
+
+    /// エージェントのインデックス全体を削除する。
+    pub fn delete_index(
+        conn: &Arc<Mutex<Connection>>,
+        agent_id: &str,
+    ) -> Result<()> {
+        let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+        opencrab_db::queries::delete_index_nodes_for_agent(&db, agent_id)?;
+        opencrab_db::queries::delete_index_watermark_for_agent(&db, agent_id)?;
+        Ok(())
+    }
+
+    /// インデックスをゼロから再構築する（削除 → 増分ビルド）。
+    pub async fn rebuild_index(
+        conn: &Arc<Mutex<Connection>>,
+        agent_id: &str,
+        llm: &dyn LlmClient,
+        model: &str,
+        batch_size: usize,
+    ) -> Result<IndexBuildResult> {
+        Self::delete_index(conn, agent_id)?;
+        Self::build_incremental(conn, agent_id, llm, model, batch_size).await
+    }
+
+    /// 既存のtopicノードをperiodレベルでLLM再要約・統合する（深さ調整）。
+    ///
+    /// topic数が max_topics_per_period を超えていたら、LLMでまとめて再要約し統合する。
+    pub async fn merge_topics(
+        conn: &Arc<Mutex<Connection>>,
+        agent_id: &str,
+        llm: &dyn LlmClient,
+        model: &str,
+        max_topics_per_period: usize,
+    ) -> Result<MergeResult> {
+        let now = Utc::now().to_rfc3339();
+        let tree = {
+            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            opencrab_db::queries::get_index_tree(&db, agent_id)?
+        };
+
+        let period_nodes: Vec<_> = tree.iter().filter(|n| n.node_type == "period").collect();
+
+        let mut merged_count = 0usize;
+        let mut deleted_count = 0usize;
+
+        for period in &period_nodes {
+            let session_ids: Vec<String> = tree
+                .iter()
+                .filter(|n| n.node_type == "session" && n.parent_id.as_deref() == Some(&period.id))
+                .map(|n| n.id.clone())
+                .collect();
+
+            let topic_nodes: Vec<_> = tree
+                .iter()
+                .filter(|n| {
+                    n.node_type == "topic"
+                        && n.parent_id
+                            .as_ref()
+                            .map(|pid| session_ids.contains(pid))
+                            .unwrap_or(false)
+                })
+                .collect();
+
+            if topic_nodes.len() <= max_topics_per_period {
+                continue;
+            }
+
+            let summaries: Vec<String> = topic_nodes
+                .iter()
+                .map(|t| format!("# {}\n{}", t.title, t.summary))
+                .collect();
+            let combined = summaries.join("\n\n");
+
+            let prompt = format!(
+                "以下の複数のトピック要約を1つにまとめてください。\nJSON形式で返してください: {{\"title\": \"...\", \"summary\": \"...\"}}\n\n{combined}"
+            );
+
+            let request = ChatRequestSimple {
+                model: model.to_string(),
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: prompt,
+                    tool_call_id: None,
+                    tool_calls: vec![],
+                }],
+                tools: vec![],
+                temperature: Some(0.0),
+                max_tokens: Some(300),
+            };
+
+            let merged_summary = match llm.chat(request).await {
+                Ok(resp) => {
+                    let text = resp.content.unwrap_or_default();
+                    let json_str = text
+                        .trim()
+                        .trim_start_matches("```json")
+                        .trim_start_matches("```")
+                        .trim_end_matches("```")
+                        .trim();
+                    serde_json::from_str::<LlmSummary>(json_str).unwrap_or(LlmSummary {
+                        title: format!("Merged topics for {}", period.title),
+                        summary: "Merged summary".to_string(),
+                    })
+                }
+                Err(_) => LlmSummary {
+                    title: format!("Merged topics for {}", period.title),
+                    summary: "Merge failed".to_string(),
+                },
+            };
+
+            let start_log = topic_nodes.iter().filter_map(|t| t.start_log_id).min();
+            let end_log = topic_nodes.iter().filter_map(|t| t.end_log_id).max();
+            let token_total: i32 = topic_nodes.iter().map(|t| t.token_count).sum();
+
+            let parent_session_id = topic_nodes
+                .first()
+                .and_then(|t| t.parent_id.clone())
+                .unwrap_or_else(|| session_ids.first().cloned().unwrap_or_default());
+
+            {
+                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                for topic in &topic_nodes {
+                    db.execute(
+                        "DELETE FROM memory_index_nodes WHERE id = ?1",
+                        rusqlite::params![topic.id],
+                    )?;
+                    deleted_count += 1;
+                }
+            }
+
+            let merged_id = format!("merged-topic-{agent_id}-{}", Utc::now().timestamp_millis());
+            let merged_node = opencrab_db::queries::IndexNodeRow {
+                id: merged_id,
+                agent_id: agent_id.to_string(),
+                parent_id: Some(parent_session_id),
+                node_type: "topic".to_string(),
+                title: merged_summary.title,
+                summary: merged_summary.summary,
+                start_log_id: start_log,
+                end_log_id: end_log,
+                source_session_id: None,
+                depth: 3,
+                child_count: 0,
+                token_count: token_total,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            {
+                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                opencrab_db::queries::insert_index_node(&db, &merged_node)?;
+            }
+            merged_count += 1;
+        }
+
+        {
+            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let all_nodes = opencrab_db::queries::get_index_tree(&db, agent_id)?;
+            let mut child_counts: HashMap<String, i32> = HashMap::new();
+            for node in &all_nodes {
+                if let Some(ref pid) = node.parent_id {
+                    *child_counts.entry(pid.clone()).or_default() += 1;
+                }
+            }
+            for (node_id, count) in &child_counts {
+                opencrab_db::queries::update_index_node_child_count(&db, node_id, *count)?;
+            }
+        }
+
+        Ok(MergeResult {
+            periods_processed: period_nodes.len(),
+            topics_merged: merged_count,
+            topics_deleted: deleted_count,
         })
     }
 }
