@@ -366,7 +366,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_channel_config".to_string(),
-                description: "Discordチャンネルの読み書き設定を変更する。readableをfalseにするとそのチャンネルのメッセージを無視し、writableをfalseにすると返信しない。".to_string(),
+                description: "Discordチャンネルの読み書き設定を変更する。readableをfalseにするとそのチャンネルのメッセージを無視し、writableをfalseにすると返信しない。whitelisted=trueにするとホワイトリストに登録され、そのチャンネルからのメッセージを優先処理する。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -389,6 +389,10 @@ impl GatewayActions for DiscordGatewayActions {
                         "writable": {
                             "type": "boolean",
                             "description": "このチャンネルに返信するか"
+                        },
+                        "whitelisted": {
+                            "type": "boolean",
+                            "description": "このチャンネルをホワイトリストに登録するか（trueにすると優先的に処理される）。デフォルトはfalse。"
                         }
                     },
                     "required": ["channel_id", "guild_id", "readable", "writable"]
