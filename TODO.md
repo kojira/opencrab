@@ -67,3 +67,9 @@
 
 16. ~~**スキル同名upsert対応**~~ ✅ 完了（2026-03-22、`c92b25c`）
     - `create_skill`・`create_my_skill` 同名upsert対応済み
+
+17. **Discord画像添付送信サポート**
+    - 現状: `send_speech`はテキストのみ
+    - 必要: ファイル（画像）をDiscordに送信するgateway action (`discord_send_file` など)
+    - 用途: nano-banan-proで生成した画像をかいろがDiscordに投稿できるようにする
+    - 関連: `serenity`のcreate_message + file_uploadまたはattachment機能
