@@ -113,6 +113,10 @@ message_loop.rs::run_discord_loop()
      最終応答（かいろの口調）をDiscordに送信
 ```
 
+> バックグラウンドタスクも `run_agent_response` と同じエンジン構成（LLM + スキル + パーソナリティ）で実行する。
+> サブタスクはDiscordに直接送信せず、処理結果をセッション履歴（subtask_result）として返すだけ。
+> メインエンジンが subtask_result を受け取り、かいろとして解釈・整形して最終応答を生成する。
+
 **メリット:**
 - ユーザー体験が大幅改善（即レスポンス）
 - Discord の「タイピングインジケーター」と組み合わせれば進捗感も演出可能
@@ -245,9 +249,19 @@ let bg_channel_id = channel_id;
 let bg_gateway = gateway.clone();
 
 tokio::spawn(async move {
-    // [新フロー] バックグラウンドで処理（execute_shell等）を実行
-    let bg_result = bg_state.run_background_task(
-        agent_id, session_id, system_prompt, conversation,
+    // [サブタスクもフルSkillEngineで動かす]
+    // かいろと同じ人格・スキル構成のエンジンで処理
+    // ただし出力はDiscordに送らず、セッション履歴にのみ追加
+    let sub_result = bg_state.run_agent_response(
+        agent_id,
+        agent_name,          // かいろと同じ人格
+        bg_session_id.clone(),
+        system_prompt,       // かいろと同じシステムプロンプト
+        sub_conversation,    // サブタスク用の会話（元メッセージ + サブ指示）
+        "background",        // channel="background"（Discord送信なし）
+        None,                // gateway_actions=None（Discordには送らない）
+        caller,
+        &image_urls,
     ).await;
 
     // [新フロー] 結果をセッション履歴に追加（Discordには直接送信しない）
@@ -255,23 +269,31 @@ tokio::spawn(async move {
         &bg_session_id,
         SessionMessage {
             message_type: "subtask_result".to_string(),
-            result: bg_result.output,
+            result: sub_result
+                .map(|r| r.response)
+                .unwrap_or_else(|e| format!("エラー: {e}")),
         }
     ).await;
 
     // [新フロー] メインエンジンを再度呼び出して最終応答を生成
     let final_result = bg_state.run_agent_response(
-        agent_id, agent_name, bg_session_id, system_prompt,
-        conversation_with_subtask_result,  // 結果を含む履歴
-        "discord", Some(gateway_actions), caller, &image_urls,
+        agent_id,
+        agent_name,
+        bg_session_id.clone(),
+        system_prompt,
+        conversation_with_subtask_result,  // subtask_resultを含む履歴
+        "discord",
+        Some(gateway_actions),
+        caller,
+        &image_urls,
     ).await;
 
-    // [新フロー] 最終応答をDiscordに送信（かいろらしい口調はLLMが担当）
+    // [新フロー] 最終応答をDiscordに送信
     match final_result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             bg_gateway.send_to_channel(bg_channel_id, &engine_result.response).await?;
         }
-        Ok(_) => { /* empty response */ }
+        Ok(_) => {}
         Err(e) => {
             bg_gateway.send_to_channel(bg_channel_id, "エラーが発生しました").await?;
         }
@@ -414,6 +436,60 @@ SessionLogRow {
 
 ---
 
+### 3.6 サブタスクのエンジン構成
+
+サブタスク（バックグラウンド処理）は**かいろと同じ人格・スキルを持つフルSkillEngineインスタンス**として動かす。
+
+#### なぜフルエンジンか
+
+- **人格一貫性:** サブタスクがただのシェル実行器では、複雑な判断（どのコマンドを使うか、エラーをどう解釈するか）をLLMに任せられない
+- **スキル活用:** `execute_shell`・`read_file`・`web_fetch` 等のスキルをサブタスク側でも使える
+- **エラーハンドリング:** サブタスクのLLMが自律的にリトライ・代替手段を試みられる
+- **一貫したアーキテクチャ:** `run_agent_response` を再利用するだけ（新たな実行器を実装不要）
+
+#### サブタスクとメインタスクの違い
+
+| 項目 | メインタスク | サブタスク |
+|------|-------------|-----------|
+| SkillEngine構成 | LLM + スキル + パーソナリティ | **同じ**（LLM + スキル + パーソナリティ） |
+| 人格（システムプロンプト） | かいろ | **かいろと同じ** |
+| Discord送信 | あり（最終応答） | **なし** |
+| channel引数 | `"discord"` | `"background"`（Discord送信をスキップ） |
+| gateway_actions | Some(...) | **None**（Discord操作不可） |
+| 出力先 | Discordチャンネル | セッション履歴（subtask_result） |
+| 目的 | ユーザーへの応答生成 | 処理の実行と結果の返却 |
+
+#### channel="background" の実装
+
+`message_loop.rs` で channel が `"background"` の場合はDiscord送信をスキップする:
+
+```rust
+// process.rs または message_loop.rs 内
+if channel != "background" {
+    gateway.send_to_channel(channel_id, &response).await?;
+}
+```
+
+または、`gateway_actions = None` の場合は送信処理を行わない（既存の分岐を活用）。
+
+#### サブタスク用の会話構成
+
+サブタスクに渡す `sub_conversation` は元のユーザーメッセージに加えて、
+「これはバックグラウンドタスクです。結果をそのまま返してください（Discordには送信しません）」
+という指示を付加する:
+
+```rust
+let mut sub_conversation = conversation.clone();
+sub_conversation.push(Message {
+    role: "system",
+    content: "これはバックグラウンド処理タスクです。\
+              処理を実行して結果を返してください。\
+              Discordには直接送信しません。かいろとしての人格で判断してください。",
+});
+```
+
+---
+
 ## 4. 実装ステップ（優先順位付き）
 
 ### Phase 1: 最小実装（2〜4時間）⭐最優先
@@ -424,6 +500,9 @@ SessionLogRow {
    - `run_discord_loop` でエンジン実行前に ack メッセージを Discord 送信
    - エンジン実行を `tokio::spawn` でバックグラウンド化
    - ack ログを DB に記録
+   - バックグラウンドタスクも `run_agent_response` を使う（新たな実行器は作らない）
+   - `channel="background"` または `gateway_actions=None` でDiscord送信をスキップ
+   - サブタスク用の会話に「バックグラウンドタスクである旨」のシステムメッセージを付加
 
 2. **`AppState` の `Clone` 対応確認**
    - `tokio::spawn` クロージャに渡すため `Clone` が必要
@@ -473,6 +552,7 @@ SessionLogRow {
 - [ ] **未定** **バックグラウンドタスクの永続化**: プロセス再起動時に実行中タスクが消える（許容するか）
 - [ ] **未定** **ack を送るかどうかの判断**: 常に送る vs 長そうな時だけ送る（誤検知の問題）
 - [x] ✅ **確定** **一次応答のキャラクター**: ackはシンプルな固定文言。最終応答のかいろらしさはLLMが担保
+- [x] ✅ **確定** **サブタスクのエンジン構成**: フルSkillEngine（かいろと同じ人格・スキル）を使用。単純なシェル実行器ではない
 
 ---
 
@@ -490,4 +570,5 @@ SessionLogRow {
 
 *作成: のすたろう, 2026-03-22*
 *設計確定: 2026-03-22（サブ結果→メインフィードバック方式に変更）*
+*2026-03-22 追記: サブタスクもフルSkillEngine（かいろ同等構成）で動かす設計に確定*
 *レビュー: のすたろう・らぼみ・kojira（TODO #19）*
