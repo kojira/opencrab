@@ -3048,3 +3048,80 @@ pub fn trusted_user_count(conn: &Connection, agent_id: &str) -> i64 {
     )
     .unwrap_or(0)
 }
+
+// ============================================
+// エージェント別メモリインデックス設定
+// ============================================
+
+/// 定数: 最小値ガード
+pub const BATCH_SIZE_MIN: i64 = 10;
+pub const THRESHOLD_MIN: i64 = 5;
+pub const BATCH_SIZE_DEFAULT: i64 = 50;
+pub const THRESHOLD_DEFAULT: i64 = 20;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMemoryIndexConfig {
+    pub agent_id: String,
+    pub batch_size: i64,
+    pub threshold: i64,
+    pub updated_at: String,
+}
+
+/// エージェントのメモリインデックス設定を取得（なければデフォルト値を返す）
+pub fn get_memory_index_config(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<AgentMemoryIndexConfig> {
+    let result = conn.query_row(
+        "SELECT agent_id, batch_size, threshold, updated_at FROM agent_memory_index_config WHERE agent_id = ?1",
+        rusqlite::params![agent_id],
+        |row| {
+            Ok(AgentMemoryIndexConfig {
+                agent_id: row.get(0)?,
+                batch_size: row.get(1)?,
+                threshold: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(config) => Ok(config),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(AgentMemoryIndexConfig {
+            agent_id: agent_id.to_string(),
+            batch_size: BATCH_SIZE_DEFAULT,
+            threshold: THRESHOLD_DEFAULT,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// エージェントのメモリインデックス設定を更新（最小値ガード付き）
+pub fn upsert_memory_index_config(
+    conn: &Connection,
+    agent_id: &str,
+    batch_size: i64,
+    threshold: i64,
+) -> Result<AgentMemoryIndexConfig> {
+    let batch_size = batch_size.max(BATCH_SIZE_MIN);
+    let threshold = threshold.max(THRESHOLD_MIN);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO agent_memory_index_config (agent_id, batch_size, threshold, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             batch_size = excluded.batch_size,
+             threshold = excluded.threshold,
+             updated_at = excluded.updated_at",
+        rusqlite::params![agent_id, batch_size, threshold, now],
+    )?;
+
+    Ok(AgentMemoryIndexConfig {
+        agent_id: agent_id.to_string(),
+        batch_size,
+        threshold,
+        updated_at: now,
+    })
+}

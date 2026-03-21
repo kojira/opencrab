@@ -190,17 +190,27 @@ pub async fn run_agent_response(
         let index_llm_router = state.llm_router.clone();
         let index_model = state.default_model.clone();
         tokio::spawn(async move {
-            let unindexed = {
+            let (unindexed, config) = {
                 let Ok(conn) = index_db.lock() else { return };
-                opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
-                    .unwrap_or(0)
+                let unindexed = opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
+                    .unwrap_or(0);
+                let config = opencrab_db::queries::get_memory_index_config(&conn, &index_agent_id)
+                    .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
+                        agent_id: index_agent_id.clone(),
+                        batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
+                        threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
+                        updated_at: String::new(),
+                    });
+                (unindexed, config)
             };
-            if unindexed < 20 {
+            if unindexed < config.threshold {
                 return;
             }
             tracing::info!(
                 agent_id = %index_agent_id,
                 unindexed = unindexed,
+                threshold = config.threshold,
+                batch_size = config.batch_size,
                 "Starting background memory index build"
             );
             let llm_adapter = LlmRouterAdapter::new(index_llm_router);
@@ -209,7 +219,7 @@ pub async fn run_agent_response(
                 &index_agent_id,
                 &llm_adapter,
                 &index_model,
-                50,
+                config.batch_size as usize,
             )
             .await;
         });
