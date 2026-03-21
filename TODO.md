@@ -40,9 +40,8 @@
     - ダッシュボードUI: AgentAllowedCommands.tsx 追加済み
     - E2E確認: kojiraが「curlを追加して」→実行→「削除して」フル動作確認済み
 
-11. **`dashboard/` (Leptosクレート) の整理**
-    - Task 6 v4でLeptosの`dashboard/src/`を変更したが、実際に使われているのは`web/`（React）
-    - Leptosクレートが不要なら削除、必要なら用途を整理する
+11. ~~**`dashboard/` (Leptosクレート) の整理**~~ ✅ 完了（削除済み）
+    - `dashboard/` ディレクトリは既に削除済み（`67820ca`）
 
 ## 新規課題（2026-03-21追加）
 
