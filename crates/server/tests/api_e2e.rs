@@ -144,9 +144,8 @@ async fn test_update_soul() {
         "agent_id": agent_id,
         "persona_name": "UpdatedPersona",
         "social_style_json": "{}",
-        "personality_json": "{}",
         "thinking_style_json": "{}",
-        "custom_traits_json": null
+        "personality": null
     });
 
     let (status, _) = send_request(
@@ -555,9 +554,8 @@ async fn test_agent_crud_full_cycle() {
             "agent_id": agent_id,
             "persona_name": "Updated CRUD Persona",
             "social_style_json": r#"{"style":"driver"}"#,
-            "personality_json": r#"{"openness":0.8}"#,
             "thinking_style_json": r#"{"primary":"Creative"}"#,
-            "custom_traits_json": null
+            "personality": null
         })),
     )
     .await;

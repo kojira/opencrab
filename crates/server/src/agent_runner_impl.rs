@@ -17,6 +17,10 @@ impl opencrab_discord::AgentRunner for AppState {
         &self.db
     }
 
+    fn tools_config(&self) -> &Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>> {
+        &self.tools_config
+    }
+
     fn has_llm_providers(&self) -> bool {
         !self.llm_router.provider_names().is_empty()
     }

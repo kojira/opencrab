@@ -7,3 +7,4 @@ pub mod memory;
 pub mod trusted_users;
 pub mod channel_configs;
 pub mod workspace;
+pub mod allowed_commands;

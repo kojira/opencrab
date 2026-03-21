@@ -12,7 +12,7 @@ pub struct ListQuery {
     pub guild_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChannelConfigDto {
     pub channel_id: String,
     pub guild_id: String,
@@ -20,6 +20,8 @@ pub struct ChannelConfigDto {
     pub readable: bool,
     pub writable: bool,
     pub whitelisted: bool,
+    pub heartbeat_enabled: bool,
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +48,8 @@ pub async fn list_channel_configs(
             readable: r.readable,
             writable: r.writable,
             whitelisted: r.whitelisted,
+            heartbeat_enabled: r.heartbeat_enabled,
+            heartbeat_interval_secs: r.heartbeat_interval_secs,
         })
         .collect();
     let count = configs.len();
@@ -68,6 +72,9 @@ pub struct UpsertRequest {
     pub writable: bool,
     #[serde(default)]
     pub whitelisted: bool,
+    #[serde(default = "default_true")]
+    pub heartbeat_enabled: bool,
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -87,6 +94,8 @@ pub async fn upsert_channel_config(
         readable: req.readable,
         writable: req.writable,
         whitelisted: req.whitelisted,
+        heartbeat_enabled: req.heartbeat_enabled,
+        heartbeat_interval_secs: req.heartbeat_interval_secs,
     };
     opencrab_db::queries::upsert_channel_config(&conn, &cfg)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -94,4 +103,21 @@ pub async fn upsert_channel_config(
         "channel_id": req.channel_id,
         "message": "channel config upserted"
     })))
+}
+
+pub async fn delete_channel_config(
+    State(state): State<AppState>,
+    Path((_agent_id, channel_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let conn = state.db.lock().unwrap();
+    let deleted = opencrab_db::queries::delete_channel_config(&conn, &channel_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if deleted {
+        Ok(Json(serde_json::json!({
+            "channel_id": channel_id,
+            "message": "channel config deleted"
+        })))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }

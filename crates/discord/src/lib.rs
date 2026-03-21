@@ -26,6 +26,9 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     /// Access the shared database connection.
     fn db(&self) -> &Arc<Mutex<rusqlite::Connection>>;
 
+    /// Access the shared tools configuration.
+    fn tools_config(&self) -> &Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>;
+
     /// Whether any LLM providers are configured.
     fn has_llm_providers(&self) -> bool;
 

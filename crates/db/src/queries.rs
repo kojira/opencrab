@@ -12,29 +12,26 @@ pub struct SoulRow {
     pub agent_id: String,
     pub persona_name: String,
     pub social_style_json: String,
-    pub personality_json: String,
     pub thinking_style_json: String,
-    pub custom_traits_json: Option<String>,
+    pub personality: Option<String>,
 }
 
 pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO soul (agent_id, persona_name, social_style_json, personality_json, thinking_style_json, custom_traits_json, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO soul (agent_id, persona_name, social_style_json, thinking_style_json, personality, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(agent_id) DO UPDATE SET
             persona_name = excluded.persona_name,
             social_style_json = excluded.social_style_json,
-            personality_json = excluded.personality_json,
             thinking_style_json = excluded.thinking_style_json,
-            custom_traits_json = excluded.custom_traits_json,
+            personality = excluded.personality,
             updated_at = excluded.updated_at",
         params![
             soul.agent_id,
             soul.persona_name,
             soul.social_style_json,
-            soul.personality_json,
             soul.thinking_style_json,
-            soul.custom_traits_json,
+            soul.personality,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -43,7 +40,7 @@ pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
 
 pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, persona_name, social_style_json, personality_json, thinking_style_json, custom_traits_json
+        "SELECT agent_id, persona_name, social_style_json, thinking_style_json, personality
          FROM soul WHERE agent_id = ?1",
         params![agent_id],
         |row| {
@@ -51,9 +48,8 @@ pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
                 agent_id: row.get(0)?,
                 persona_name: row.get(1)?,
                 social_style_json: row.get(2)?,
-                personality_json: row.get(3)?,
-                thinking_style_json: row.get(4)?,
-                custom_traits_json: row.get(5)?,
+                thinking_style_json: row.get(3)?,
+                personality: row.get(4)?,
             })
         },
     );
@@ -1294,6 +1290,8 @@ pub struct ChannelConfigRow {
     pub readable: bool,
     pub writable: bool,
     pub whitelisted: bool,
+    pub heartbeat_enabled: bool,
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 pub fn get_channel_config(
@@ -1301,7 +1299,7 @@ pub fn get_channel_config(
     channel_id: &str,
 ) -> Result<Option<ChannelConfigRow>> {
     let result = conn.query_row(
-        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted
+        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
          FROM discord_channel_config WHERE channel_id = ?1",
         params![channel_id],
         |row| {
@@ -1312,6 +1310,8 @@ pub fn get_channel_config(
                 readable: row.get(3)?,
                 writable: row.get(4)?,
                 whitelisted: row.get(5)?,
+                heartbeat_enabled: row.get(6)?,
+                heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
             })
         },
     );
@@ -1325,14 +1325,16 @@ pub fn get_channel_config(
 
 pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO discord_channel_config (channel_id, guild_id, channel_name, readable, writable, whitelisted, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO discord_channel_config (channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(channel_id) DO UPDATE SET
             guild_id = excluded.guild_id,
             channel_name = excluded.channel_name,
             readable = excluded.readable,
             writable = excluded.writable,
             whitelisted = excluded.whitelisted,
+            heartbeat_enabled = excluded.heartbeat_enabled,
+            heartbeat_interval_secs = excluded.heartbeat_interval_secs,
             updated_at = excluded.updated_at",
         params![
             cfg.channel_id,
@@ -1341,10 +1343,20 @@ pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Resul
             cfg.readable,
             cfg.writable,
             cfg.whitelisted,
+            cfg.heartbeat_enabled,
+            cfg.heartbeat_interval_secs.map(|v| v as i64),
             Utc::now().to_rfc3339(),
         ],
     )?;
     Ok(())
+}
+
+pub fn delete_channel_config(conn: &Connection, channel_id: &str) -> Result<bool> {
+    let rows_affected = conn.execute(
+        "DELETE FROM discord_channel_config WHERE channel_id = ?1",
+        rusqlite::params![channel_id],
+    )?;
+    Ok(rows_affected > 0)
 }
 
 pub fn list_channel_configs_by_guild(
@@ -1352,7 +1364,7 @@ pub fn list_channel_configs_by_guild(
     guild_id: &str,
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted
+        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
          FROM discord_channel_config WHERE guild_id = ?1 ORDER BY channel_name",
     )?;
 
@@ -1364,6 +1376,55 @@ pub fn list_channel_configs_by_guild(
             readable: row.get(3)?,
             writable: row.get(4)?,
             whitelisted: row.get(5)?,
+            heartbeat_enabled: row.get(6)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// whitelisted=true のチャンネルをすべて取得する。
+pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+         FROM discord_channel_config WHERE whitelisted = 1 ORDER BY channel_id",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ChannelConfigRow {
+            channel_id: row.get(0)?,
+            guild_id: row.get(1)?,
+            channel_name: row.get(2)?,
+            readable: row.get(3)?,
+            writable: row.get(4)?,
+            whitelisted: row.get(5)?,
+            heartbeat_enabled: row.get(6)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// heartbeat_enabled=true のチャンネルをすべて取得する。
+/// ハートビートを有効にすべきチャンネル一覧。
+pub fn list_heartbeat_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+         FROM discord_channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ChannelConfigRow {
+            channel_id: row.get(0)?,
+            guild_id: row.get(1)?,
+            channel_name: row.get(2)?,
+            readable: row.get(3)?,
+            writable: row.get(4)?,
+            whitelisted: row.get(5)?,
+            heartbeat_enabled: row.get(6)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
         })
     })?;
 
@@ -1755,9 +1816,8 @@ mod tests {
             agent_id: "agent-1".to_string(),
             persona_name: "Crab".to_string(),
             social_style_json: r#"{"style":"friendly"}"#.to_string(),
-            personality_json: r#"{"trait":"curious"}"#.to_string(),
             thinking_style_json: r#"{"approach":"analytical"}"#.to_string(),
-            custom_traits_json: Some(r#"{"hobby":"coding"}"#.to_string()),
+            personality: Some(r#"{"hobby":"coding"}"#.to_string()),
         };
 
         upsert_soul(&conn, &soul).unwrap();
@@ -1768,10 +1828,9 @@ mod tests {
         assert_eq!(fetched.agent_id, "agent-1");
         assert_eq!(fetched.persona_name, "Crab");
         assert_eq!(fetched.social_style_json, r#"{"style":"friendly"}"#);
-        assert_eq!(fetched.personality_json, r#"{"trait":"curious"}"#);
         assert_eq!(fetched.thinking_style_json, r#"{"approach":"analytical"}"#);
         assert_eq!(
-            fetched.custom_traits_json,
+            fetched.personality,
             Some(r#"{"hobby":"coding"}"#.to_string())
         );
     }
@@ -2412,9 +2471,8 @@ mod tests {
                 agent_id: "del-1".into(),
                 persona_name: "Doomed".into(),
                 social_style_json: "{}".into(),
-                personality_json: "{}".into(),
                 thinking_style_json: "{}".into(),
-                custom_traits_json: None,
+                personality: None,
             },
         )
         .unwrap();
@@ -2545,9 +2603,8 @@ mod tests {
                 agent_id: agent_id.into(),
                 persona_name: "Original Persona".into(),
                 social_style_json: "{}".into(),
-                personality_json: "{}".into(),
                 thinking_style_json: "{}".into(),
-                custom_traits_json: None,
+                personality: None,
             },
         )
         .unwrap();
@@ -2577,9 +2634,8 @@ mod tests {
                 agent_id: agent_id.into(),
                 persona_name: "Updated Persona".into(),
                 social_style_json: r#"{"style":"analytical"}"#.into(),
-                personality_json: "{}".into(),
                 thinking_style_json: "{}".into(),
-                custom_traits_json: None,
+                personality: None,
             },
         )
         .unwrap();
@@ -2618,6 +2674,8 @@ mod tests {
             readable: true,
             writable: false,
             whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
         };
 
         upsert_channel_config(&conn, &cfg).unwrap();
@@ -2643,6 +2701,8 @@ mod tests {
             readable: true,
             writable: true,
             whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
         };
         upsert_channel_config(&conn, &cfg).unwrap();
 
@@ -2669,6 +2729,8 @@ mod tests {
             readable: true,
             writable: true,
             whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
         };
         let cfg2 = ChannelConfigRow {
             channel_id: "ch-2".to_string(),
@@ -2677,6 +2739,8 @@ mod tests {
             readable: false,
             writable: true,
             whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
         };
         let cfg3 = ChannelConfigRow {
             channel_id: "ch-3".to_string(),
@@ -2685,6 +2749,8 @@ mod tests {
             readable: true,
             writable: true,
             whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
         };
 
         upsert_channel_config(&conn, &cfg1).unwrap();
@@ -2714,6 +2780,8 @@ mod tests {
             readable: false,
             writable: false,
             whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
         };
         upsert_channel_config(&conn, &cfg).unwrap();
 
@@ -3156,4 +3224,44 @@ pub fn upsert_memory_index_config(
         threshold,
         updated_at: now,
     })
+}
+
+// ============================================
+// AGENT ALLOWED COMMANDS
+// ============================================
+
+pub fn list_agent_allowed_commands(conn: &Connection, agent_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT command FROM agent_allowed_commands WHERE agent_id = ?1 ORDER BY added_at ASC",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+pub fn add_agent_allowed_command(
+    conn: &Connection,
+    agent_id: &str,
+    command: &str,
+    added_by: &str,
+) -> Result<bool> {
+    let id = format!("{}-{}", agent_id, command);
+    let now = Utc::now().to_rfc3339();
+    let rows_affected = conn.execute(
+        "INSERT OR IGNORE INTO agent_allowed_commands (id, agent_id, command, added_by, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, agent_id, command, added_by, now],
+    )?;
+    Ok(rows_affected > 0)
+}
+
+pub fn remove_agent_allowed_command(
+    conn: &Connection,
+    agent_id: &str,
+    command: &str,
+) -> Result<bool> {
+    let rows_affected = conn.execute(
+        "DELETE FROM agent_allowed_commands WHERE agent_id = ?1 AND command = ?2",
+        params![agent_id, command],
+    )?;
+    Ok(rows_affected > 0)
 }

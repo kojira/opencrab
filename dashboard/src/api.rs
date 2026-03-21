@@ -734,6 +734,8 @@ pub struct ChannelConfigDto {
     pub readable: bool,
     pub writable: bool,
     pub whitelisted: bool,
+    pub heartbeat_enabled: bool,
+    pub heartbeat_interval_secs: Option<u64>,
 }
 
 #[server]
@@ -753,6 +755,8 @@ pub async fn list_channel_configs(guild_id: String) -> Result<Vec<ChannelConfigD
             readable: r.readable,
             writable: r.writable,
             whitelisted: r.whitelisted,
+            heartbeat_enabled: r.heartbeat_enabled,
+            heartbeat_interval_secs: r.heartbeat_interval_secs,
         })
         .collect())
 }
@@ -767,6 +771,14 @@ pub async fn set_channel_whitelisted(
     let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+    // 既存の設定を読んでheartbeat値を保持
+    let existing = opencrab_db::queries::get_channel_config(&conn, &channel_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let (heartbeat_enabled, heartbeat_interval_secs) = existing
+        .map(|e| (e.heartbeat_enabled, e.heartbeat_interval_secs))
+        .unwrap_or((true, None));
+
     let cfg = opencrab_db::queries::ChannelConfigRow {
         channel_id,
         guild_id,
@@ -774,6 +786,42 @@ pub async fn set_channel_whitelisted(
         readable: true,
         writable: true,
         whitelisted,
+        heartbeat_enabled,
+        heartbeat_interval_secs,
+    };
+
+    opencrab_db::queries::upsert_channel_config(&conn, &cfg)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
+pub async fn set_channel_heartbeat_config(
+    channel_id: String,
+    guild_id: String,
+    channel_name: String,
+    heartbeat_enabled: bool,
+    heartbeat_interval_secs: Option<u64>,
+) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // 既存の設定を読む
+    let existing = opencrab_db::queries::get_channel_config(&conn, &channel_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let whitelisted = existing.map(|e| e.whitelisted).unwrap_or(false);
+
+    let cfg = opencrab_db::queries::ChannelConfigRow {
+        channel_id,
+        guild_id,
+        channel_name,
+        readable: true,
+        writable: true,
+        whitelisted,
+        heartbeat_enabled,
+        heartbeat_interval_secs,
     };
 
     opencrab_db::queries::upsert_channel_config(&conn, &cfg)

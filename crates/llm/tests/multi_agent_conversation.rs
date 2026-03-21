@@ -288,9 +288,8 @@ async fn test_three_agent_with_db_and_session() {
                 agent_id: id.clone(),
                 persona_name: persona.to_string(),
                 social_style_json: "{}".to_string(),
-                personality_json: "{}".to_string(),
                 thinking_style_json: "{}".to_string(),
-                custom_traits_json: None,
+                personality: None,
             },
         )
         .unwrap();

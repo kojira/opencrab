@@ -12,6 +12,8 @@ const tabs = [
   { key: 'sessions', path: '/sessions', icon: 'forum', labelKey: 'agentNav.sessions' },
   { key: 'co-agents', path: '/co-agents', icon: 'group', labelKey: 'agentNav.coAgents' },
   { key: 'trusted-users', path: '/trusted-users', icon: 'shield_person', labelKey: 'agentNav.trustedUsers' },
+  { key: 'channels', path: '/channels', icon: 'tag', labelKey: 'agentNav.channels' },
+  { key: 'allowed-commands', path: '/allowed-commands', icon: 'terminal', labelKey: 'agentNav.allowedCommands' },
   { key: 'analytics', path: '/analytics', icon: 'analytics', labelKey: 'agentNav.analytics' },
 ];
 

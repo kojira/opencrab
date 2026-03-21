@@ -29,9 +29,8 @@ export async function getAgent(id: string): Promise<AgentDetail> {
     image_url: i?.image_url ?? null,
     persona_name: s?.persona_name ?? '',
     social_style_json: s?.social_style_json ?? '{}',
-    personality_json: s?.personality_json ?? '{}',
     thinking_style_json: s?.thinking_style_json ?? '{}',
-    custom_traits_json: s?.custom_traits_json ?? null,
+    personality: s?.personality ?? null,
   };
 }
 

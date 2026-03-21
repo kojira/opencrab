@@ -1,5 +1,5 @@
 [agent]
-heartbeat_interval_secs = 30
+heartbeat_interval_secs = 1800
 heartbeat_enabled = true
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100

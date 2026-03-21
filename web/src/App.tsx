@@ -16,6 +16,8 @@ import AgentTrustedUsers from './pages/AgentTrustedUsers';
 import Sessions from './pages/Sessions';
 import SessionDetail from './pages/SessionDetail';
 import Workspace from './pages/Workspace';
+import AgentChannels from './pages/AgentChannels';
+import AgentAllowedCommands from './pages/AgentAllowedCommands';
 
 export default function App() {
   return (
@@ -35,6 +37,8 @@ export default function App() {
             <Route path="co-agents" element={<AgentCoAgents />} />
             <Route path="trusted-users" element={<AgentTrustedUsers />} />
             <Route path="analytics" element={<AgentAnalytics />} />
+            <Route path="channels" element={<AgentChannels />} />
+            <Route path="allowed-commands" element={<AgentAllowedCommands />} />
           </Route>
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />

@@ -23,11 +23,17 @@ pub struct DiscordGatewayActions {
     http: Arc<Http>,
     db: Arc<Mutex<rusqlite::Connection>>,
     agent_id: String,
+    tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
 }
 
 impl DiscordGatewayActions {
-    pub fn new(http: Arc<Http>, db: Arc<Mutex<rusqlite::Connection>>, agent_id: String) -> Self {
-        Self { http, db, agent_id }
+    pub fn new(
+        http: Arc<Http>,
+        db: Arc<Mutex<rusqlite::Connection>>,
+        agent_id: String,
+        tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
+    ) -> Self {
+        Self { http, db, agent_id, tools_config }
     }
 
     async fn execute_list_guilds(&self) -> GatewayActionResult {
@@ -204,6 +210,11 @@ impl DiscordGatewayActions {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let heartbeat_enabled = args
+            .get("heartbeat_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         let cfg = opencrab_db::queries::ChannelConfigRow {
             channel_id: channel_id.to_string(),
             guild_id: guild_id.to_string(),
@@ -211,6 +222,8 @@ impl DiscordGatewayActions {
             readable,
             writable,
             whitelisted,
+            heartbeat_enabled,
+            heartbeat_interval_secs: None,
         };
 
         let result = {
@@ -476,6 +489,170 @@ impl DiscordGatewayActions {
             }
         }
     }
+
+    fn execute_add_allowed_command(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+        if caller != "owner" {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("このアクションはオーナーのみ実行できます".to_string()),
+            };
+        }
+
+        let command = match args.get("command").and_then(|v| v.as_str()) {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("commandパラメータが必要です".to_string()),
+                }
+            }
+        };
+
+        if !command.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!(
+                    "コマンド名に無効な文字が含まれています: {}（英数字・ハイフン・アンダースコアのみ使用可）",
+                    command
+                )),
+            };
+        }
+
+        let conn = self.db.lock().unwrap();
+        match opencrab_db::queries::add_agent_allowed_command(&conn, &self.agent_id, command, "owner") {
+            Ok(true) => {
+                // Update in-memory tools_config
+                drop(conn);
+                if let Ok(mut cfg) = self.tools_config.write() {
+                    if let Some(ref mut shell) = cfg.shell {
+                        let cmd_str = command.to_string();
+                        if !shell.allowed_commands.contains(&cmd_str) {
+                            shell.allowed_commands.push(cmd_str);
+                        }
+                    }
+                }
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({
+                        "command": command,
+                        "agent_id": self.agent_id,
+                        "message": format!("`{}` を許可コマンドに追加しました", command),
+                    })),
+                    error: None,
+                }
+            }
+            Ok(false) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "command": command,
+                    "agent_id": self.agent_id,
+                    "message": format!("`{}` はすでに許可コマンドに登録されています", command),
+                    "already_exists": true,
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("add_agent_allowed_command failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("許可コマンドの追加に失敗: {e}")),
+                }
+            }
+        }
+    }
+
+    fn execute_list_allowed_commands(&self) -> GatewayActionResult {
+        let conn = self.db.lock().unwrap();
+        match opencrab_db::queries::list_agent_allowed_commands(&conn, &self.agent_id) {
+            Ok(commands) => {
+                let count = commands.len();
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({
+                        "commands": commands,
+                        "count": count,
+                        "agent_id": self.agent_id,
+                    })),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                error!("list_agent_allowed_commands failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("許可コマンドの取得に失敗: {e}")),
+                }
+            }
+        }
+    }
+
+    fn execute_remove_allowed_command(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+        if caller != "owner" {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("このアクションはオーナーのみ実行できます".to_string()),
+            };
+        }
+
+        let command = match args.get("command").and_then(|v| v.as_str()) {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("commandパラメータが必要です".to_string()),
+                }
+            }
+        };
+
+        let conn = self.db.lock().unwrap();
+        match opencrab_db::queries::remove_agent_allowed_command(&conn, &self.agent_id, command) {
+            Ok(true) => {
+                // Update in-memory tools_config
+                drop(conn);
+                if let Ok(mut cfg) = self.tools_config.write() {
+                    if let Some(ref mut shell) = cfg.shell {
+                        shell.allowed_commands.retain(|c| c != command);
+                    }
+                }
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({
+                        "command": command,
+                        "agent_id": self.agent_id,
+                        "message": format!("`{}` を許可コマンドから削除しました", command),
+                    })),
+                    error: None,
+                }
+            }
+            Ok(false) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "command": command,
+                    "agent_id": self.agent_id,
+                    "message": format!("`{}` は許可コマンドに登録されていませんでした", command),
+                    "not_found": true,
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("remove_agent_allowed_command failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("許可コマンドの削除に失敗: {e}")),
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -606,6 +783,43 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": []
                 }),
             },
+            GatewayActionDef {
+                name: "add_allowed_command".to_string(),
+                description: "シェルツールの許可コマンドリストに新しいコマンドを追加する。オーナーのみ実行可能。コマンド名（例: curl, wget, git）を指定する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "追加するコマンド名（英数字・ハイフン・アンダースコアのみ。例: curl, wget, git）"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            GatewayActionDef {
+                name: "list_allowed_commands".to_string(),
+                description: "現在DBに保存されている許可コマンドの一覧を取得する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "remove_allowed_command".to_string(),
+                description: "シェルツールの許可コマンドリストからコマンドを削除する。オーナーのみ実行可能。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "削除するコマンド名"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
         ]
     }
 
@@ -618,6 +832,9 @@ impl GatewayActions for DiscordGatewayActions {
             "list_duplicate_skills" => self.execute_list_duplicate_skills(),
             "merge_skills" => self.execute_merge_skills(args),
             "update_memory_index_config" => self.execute_update_memory_index_config(args),
+            "add_allowed_command" => self.execute_add_allowed_command(args),
+            "list_allowed_commands" => self.execute_list_allowed_commands(),
+            "remove_allowed_command" => self.execute_remove_allowed_command(args),
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -638,7 +855,8 @@ mod tests {
         let db = Arc::new(Mutex::new(opencrab_db::init_memory().unwrap()));
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
-        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string());
+        let tools_config = Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
+        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string(), tools_config);
         (actions, db)
     }
 
@@ -648,7 +866,7 @@ mod tests {
     fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 10);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -658,6 +876,9 @@ mod tests {
         assert!(names.contains(&"list_duplicate_skills"));
         assert!(names.contains(&"merge_skills"));
         assert!(names.contains(&"update_memory_index_config"));
+        assert!(names.contains(&"add_allowed_command"));
+        assert!(names.contains(&"list_allowed_commands"));
+        assert!(names.contains(&"remove_allowed_command"));
     }
 
     #[test]

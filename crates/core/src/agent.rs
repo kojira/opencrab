@@ -7,7 +7,7 @@ use crate::heartbeat::HeartbeatConfig;
 use crate::identity::Identity;
 use crate::memory::MemoryManager;
 use crate::skill::SkillManager;
-use crate::soul::Soul;
+use crate::soul::{Personality, Soul};
 use crate::workspace::Workspace;
 
 use opencrab_db::queries;
@@ -151,12 +151,11 @@ impl Agent {
                 persona_name: soul_row.persona_name,
                 social_style: serde_json::from_str(&soul_row.social_style_json)
                     .unwrap_or_default(),
-                personality: serde_json::from_str(&soul_row.personality_json)
-                    .unwrap_or_default(),
+                personality: Personality::default(),
                 thinking_style: serde_json::from_str(&soul_row.thinking_style_json)
                     .unwrap_or_default(),
                 custom_traits: soul_row
-                    .custom_traits_json
+                    .personality
                     .and_then(|s| serde_json::from_str(&s).ok()),
             };
 
@@ -253,9 +252,8 @@ mod tests {
                     agent_id: "agent-1".to_string(),
                     persona_name: "LoadedPersona".to_string(),
                     social_style_json: serde_json::to_string(&crate::soul::SocialStyle::default()).unwrap(),
-                    personality_json: serde_json::to_string(&crate::soul::Personality::default()).unwrap(),
                     thinking_style_json: serde_json::to_string(&crate::soul::ThinkingStyle::default()).unwrap(),
-                    custom_traits_json: None,
+                    personality: None,
                 },
             )
             .unwrap();

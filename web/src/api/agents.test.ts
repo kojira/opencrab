@@ -48,9 +48,8 @@ describe('getAgent', () => {
       agent_id: 'a1',
       persona_name: 'Curious Alice',
       social_style_json: '{"style":"analytical"}',
-      personality_json: '{"openness":0.8}',
       thinking_style_json: '{"primary":"logical"}',
-      custom_traits_json: null,
+      personality: null,
     };
 
     mockedApi.get.mockResolvedValue({ identity, soul });
@@ -65,9 +64,8 @@ describe('getAgent', () => {
       image_url: 'https://example.com/alice.png',
       persona_name: 'Curious Alice',
       social_style_json: '{"style":"analytical"}',
-      personality_json: '{"openness":0.8}',
       thinking_style_json: '{"primary":"logical"}',
-      custom_traits_json: null,
+      personality: null,
     });
   });
 
@@ -84,9 +82,8 @@ describe('getAgent', () => {
       image_url: null,
       persona_name: '',
       social_style_json: '{}',
-      personality_json: '{}',
       thinking_style_json: '{}',
-      custom_traits_json: null,
+      personality: null,
     });
   });
 });

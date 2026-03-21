@@ -147,9 +147,8 @@ async fn main() -> anyhow::Result<()> {
                         agent_id: agent_id.clone(),
                         persona_name: if persona.is_empty() { name.clone() } else { persona },
                         social_style_json: "{}".to_string(),
-                        personality_json: "{}".to_string(),
                         thinking_style_json: "{}".to_string(),
-                        custom_traits_json: None,
+                        personality: None,
                     },
                 )?;
 
