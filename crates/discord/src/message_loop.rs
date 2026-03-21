@@ -35,10 +35,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
             }
         };
 
-        let text = match incoming.content.as_text() {
-            Some(t) if !t.is_empty() => t.to_string(),
-            _ => continue,
-        };
+        let (text, image_urls) = extract_discord_content(&incoming.content);
+        if text.is_empty() && image_urls.is_empty() {
+            continue;
+        }
 
         // Extract Discord channel ID for routing responses.
         let (guild_id, channel_id_str) = match &incoming.source {
@@ -133,6 +133,9 @@ pub async fn run_discord_loop<T: AgentRunner>(
             });
             if let Some(ref avatar_url) = incoming.sender.avatar_url {
                 log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
+            }
+            if !image_urls.is_empty() {
+                log_meta["image_urls"] = serde_json::json!(image_urls);
             }
             let log = opencrab_db::queries::SessionLogRow {
                 id: None,
@@ -371,4 +374,25 @@ fn ensure_discord_session<T: AgentRunner>(
         metadata_json: Some(metadata_json),
     };
     opencrab_db::queries::insert_session(&conn, &session).ok();
+}
+
+/// メッセージコンテンツからテキストと画像URLを抽出する
+fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (String, Vec<String>) {
+    match content {
+        opencrab_gateway::MessageContent::Text(t) => (t.clone(), vec![]),
+        opencrab_gateway::MessageContent::Image { url, .. } => {
+            (String::new(), vec![url.clone()])
+        }
+        opencrab_gateway::MessageContent::Multi(parts) => {
+            let mut texts = Vec::new();
+            let mut urls = Vec::new();
+            for part in parts {
+                match part {
+                    opencrab_gateway::ContentPart::Text(t) => texts.push(t.clone()),
+                    opencrab_gateway::ContentPart::Image { url, .. } => urls.push(url.clone()),
+                }
+            }
+            (texts.join(" "), urls)
+        }
+    }
 }

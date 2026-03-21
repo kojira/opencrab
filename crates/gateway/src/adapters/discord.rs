@@ -12,7 +12,7 @@ use serenity::all::{
 use serenity::http::Http;
 
 use crate::message::{
-    Channel, IncomingMessage, MessageContent, MessageSource, MessageTarget,
+    Channel, IncomingMessage, MessageSource, MessageTarget,
     OutgoingMessage, Sender,
 };
 use crate::traits::Gateway;
@@ -181,6 +181,15 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// Discord添付ファイルが画像かどうかを判定する
+fn is_image_attachment(a: &serenity::model::channel::Attachment) -> bool {
+    a.content_type
+        .as_deref()
+        .map(|ct| ct.starts_with("image/"))
+        .unwrap_or(false)
+        || (a.width.is_some() && a.height.is_some())
+}
+
 // ==================== Serenity Event Handler ====================
 
 struct DiscordHandler {
@@ -212,6 +221,39 @@ impl EventHandler for DiscordHandler {
             .unwrap_or_default();
         let channel_id = msg.channel_id.to_string();
 
+        // 画像添付ファイルの処理
+        let non_image_notes: Vec<String> = msg.attachments.iter()
+            .filter(|a| !is_image_attachment(a))
+            .map(|a| {
+                let ct = a.content_type.as_deref().unwrap_or("unknown");
+                format!("[添付ファイル: {} ({}), {}B]", a.filename, ct, a.size)
+            })
+            .collect();
+
+        let full_text = if non_image_notes.is_empty() {
+            msg.content.clone()
+        } else {
+            format!("{}\n{}", msg.content, non_image_notes.join("\n"))
+        };
+
+        let image_parts: Vec<crate::message::ContentPart> = msg.attachments.iter()
+            .filter(|a| is_image_attachment(a))
+            .map(|a| crate::message::ContentPart::Image {
+                url: a.url.clone(),
+                alt: Some(a.filename.clone()),
+            })
+            .collect();
+
+        let content = if image_parts.is_empty() {
+            crate::message::MessageContent::text(&full_text)
+        } else if full_text.trim().is_empty() {
+            crate::message::MessageContent::Multi(image_parts)
+        } else {
+            let mut parts = vec![crate::message::ContentPart::Text(full_text.clone())];
+            parts.extend(image_parts);
+            crate::message::MessageContent::Multi(parts)
+        };
+
         let sender = Sender::user(msg.author.id.to_string(), &msg.author.name)
             .with_avatar(msg.author.face());
 
@@ -220,7 +262,7 @@ impl EventHandler for DiscordHandler {
                 guild_id,
                 channel_id: channel_id.clone(),
             },
-            MessageContent::text(&msg.content),
+            content,
             sender,
         )
         .with_channel(Channel {

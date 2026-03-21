@@ -37,6 +37,16 @@ pub trait ActionExecutor: Send + Sync {
 // Trait: LlmClient
 // ---------------------------------------------------------------------------
 
+/// Content part for multimodal messages (vision support).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ChatContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { url: String, detail: Option<String> },
+}
+
 /// A simplified chat message for the engine's LLM interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -49,6 +59,9 @@ pub struct ChatMessage {
     /// Tool calls requested by the assistant (only for role = "assistant").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
+    /// Multimodal content parts (vision). If non-empty, takes priority over `content`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<ChatContentPart>,
 }
 
 /// A tool/function definition for LLM function calling.
@@ -226,12 +239,14 @@ impl SkillEngine {
                 content: system_context.to_string(),
                 tool_call_id: None,
                 tool_calls: vec![],
+                content_parts: vec![],
             },
             ChatMessage {
                 role: "user".to_string(),
                 content: user_message.to_string(),
                 tool_call_id: None,
                 tool_calls: vec![],
+                content_parts: vec![],
             },
         ];
 
@@ -311,6 +326,7 @@ impl SkillEngine {
                     content: response.content.clone().unwrap_or_default(),
                     tool_call_id: None,
                     tool_calls: response.tool_calls.clone(),
+                    content_parts: vec![],
                 });
 
                 for tool_call in &response.tool_calls {
@@ -332,6 +348,7 @@ impl SkillEngine {
                             content: result_json,
                             tool_call_id: Some(tool_call.id.clone()),
                             tool_calls: vec![],
+                            content_parts: vec![],
                         });
                         continue;
                     }
@@ -346,6 +363,7 @@ impl SkillEngine {
                         content: result_json,
                         tool_call_id: Some(tool_call.id.clone()),
                         tool_calls: vec![],
+                        content_parts: vec![],
                     });
                 }
 
