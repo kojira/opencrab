@@ -32,13 +32,25 @@ pub async fn send_agent_message(
                 }
             }
             Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
-            None => opencrab_actions::CallerIdentity::Agent,
+            None => {
+                let cfg = opencrab_db::queries::get_agent_discord_config(&conn, &id);
+                if let Ok(Some(c)) = cfg {
+                    if c.owner_discord_id == req.user_id {
+                        opencrab_actions::CallerIdentity::Owner
+                    } else {
+                        opencrab_actions::CallerIdentity::Agent
+                    }
+                } else {
+                    opencrab_actions::CallerIdentity::Agent
+                }
+            }
         }
     };
 
     let caller_type = match &caller {
         opencrab_actions::CallerIdentity::CoAgent { .. } => "co_agent",
         opencrab_actions::CallerIdentity::TrustedUser => "trusted_user",
+        opencrab_actions::CallerIdentity::Owner => "owner",
         _ => "agent",
     };
 
