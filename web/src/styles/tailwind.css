@@ -3,6 +3,10 @@
 @tailwind utilities;
 
 @layer base {
+  html, body {
+    overflow-x: hidden;
+  }
+
   body {
     font-family: 'Inter', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -80,7 +84,7 @@
 
   /* ── M3 Inputs ── */
   .input-outlined {
-    @apply w-full px-4 py-3 rounded-md border border-outline bg-transparent
+    @apply w-full min-w-0 px-4 py-3 rounded-md border border-outline bg-transparent
            text-on-surface text-body-lg placeholder:text-on-surface-variant
            focus:border-primary focus:ring-2 focus:ring-primary/20 focus:outline-none
            transition-all duration-200;
