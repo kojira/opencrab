@@ -13,7 +13,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
       <div className="flex items-center gap-3">
         {/* Hamburger menu button (mobile only) */}
         <button
-          className="md:hidden p-2 rounded-full hover:bg-surface-container-high text-on-surface-variant shrink-0"
+          className="hidden p-2 rounded-full hover:bg-surface-container-high text-on-surface-variant shrink-0"
           onClick={onMenuClick}
           aria-label="Open menu"
         >
