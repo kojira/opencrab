@@ -52,11 +52,11 @@ export default function AgentChannels() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-3">
         <label className="text-label-lg text-on-surface-variant">Guild ID</label>
         <input
           type="text"
-          className="input-outlined flex-1"
+          className="input-outlined flex-1 min-w-0"
           value={guildId}
           onChange={e => setGuildId(e.target.value)}
           placeholder="Enter guild ID"

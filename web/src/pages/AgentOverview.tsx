@@ -7,11 +7,11 @@ import { useAgentContext } from '../hooks/useAgentContext';
 
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center py-2">
-      <span className="w-36 text-label-lg text-on-surface-variant">
+    <div className="flex items-start py-2 gap-2">
+      <span className="w-36 shrink-0 text-label-lg text-on-surface-variant">
         {label}
       </span>
-      <span className="text-body-lg text-on-surface font-mono">{value}</span>
+      <span className="text-body-lg text-on-surface font-mono break-all min-w-0">{value}</span>
     </div>
   );
 }
@@ -156,7 +156,7 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
             label={t('agentDetail.gatewayStatus')}
             value={config.running ? t('agentDetail.statusRunning') : t('agentDetail.statusStopped')}
           />
-          <div className="flex gap-2 pt-2">
+          <div className="flex gap-2 pt-2 flex-wrap">
             {config.running ? (
               <button className="btn-outlined" onClick={handleStop} disabled={saving}>
                 <span className="material-symbols-outlined text-xl">stop</span>

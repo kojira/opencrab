@@ -163,8 +163,8 @@ export default function SessionDetail() {
       {/* Session header */}
       {session ? (
         <div className="card-elevated mb-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-4 min-w-0">
               <Link to="/sessions" className="btn-text p-1">
                 <span className="material-symbols-outlined">arrow_back</span>
               </Link>
@@ -172,7 +172,7 @@ export default function SessionDetail() {
                 <h1 className="text-title-lg text-on-surface">
                   {session.theme}
                 </h1>
-                <div className="flex items-center gap-3 text-body-sm text-on-surface-variant mt-0.5">
+                <div className="flex items-center gap-2 flex-wrap text-body-sm text-on-surface-variant mt-0.5">
                   <span>{t('sessionDetail.mode', { value: session.mode })}</span>
                   <span>{t('sessionDetail.phase', { value: session.phase })}</span>
                   <span>{t('sessionDetail.turn', { value: session.turn_number })}</span>

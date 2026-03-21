@@ -95,17 +95,17 @@ export default function AgentLayout() {
               {agent.persona_name}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <Link to={`/agents/${id}/edit`} className="btn-tonal">
               <span className="material-symbols-outlined text-xl">edit</span>
-              {t('common.edit')}
+              <span className="hidden sm:inline">{t('common.edit')}</span>
             </Link>
             <button
               className="btn-outlined border-error text-error hover:bg-error-container/30"
               onClick={() => setShowDeleteConfirm(true)}
             >
               <span className="material-symbols-outlined text-xl">delete</span>
-              {t('common.delete')}
+              <span className="hidden sm:inline">{t('common.delete')}</span>
             </button>
           </div>
         </div>
@@ -122,7 +122,7 @@ export default function AgentLayout() {
 
       {/* Tab navigation */}
       {!isEditRoute && (
-        <div className="flex border-b border-outline-variant mb-6 gap-1">
+        <div className="flex overflow-x-auto flex-nowrap border-b border-outline-variant mb-6 gap-1">
           {tabs.map((tab) => {
             const tabPath = `${basePath}${tab.path}`;
             const active =
