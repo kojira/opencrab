@@ -1707,6 +1707,38 @@ pub fn get_unindexed_session_logs(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// エージェントの全インデックスノードを削除する
+pub fn delete_index_nodes_for_agent(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM memory_index_nodes WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
+    Ok(())
+}
+
+/// エージェントのインデックスウォーターマークを削除する
+pub fn delete_index_watermark_for_agent(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM memory_index_watermark WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
+    Ok(())
+}
+
+/// インデックスノードのtitle/summaryを更新する（再マージ用）
+pub fn update_index_node_summary(
+    conn: &Connection,
+    node_id: &str,
+    title: &str,
+    summary: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE memory_index_nodes SET title = ?1, summary = ?2, updated_at = ?3 WHERE id = ?4",
+        params![title, summary, Utc::now().to_rfc3339(), node_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -533,3 +533,100 @@ pub async fn update_memory_index_config(
         })),
     }
 }
+
+/// DELETE /api/agents/{id}/memory/index — インデックス全削除
+pub async fn delete_memory_index(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match opencrab_core::memory_index::IndexBuilder::delete_index(&state.db, &id) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "message": "Index deleted",
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+/// POST /api/agents/{id}/memory/index/rebuild — インデックス再構築
+pub async fn rebuild_memory_index(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let db = state.db.clone();
+    let agent_id = id.clone();
+    let llm_router = state.llm_router.clone();
+    let model = state.default_model.clone();
+
+    let config = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_memory_index_config(&conn, &agent_id)
+            .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
+                agent_id: agent_id.clone(),
+                batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
+                threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
+                updated_at: String::new(),
+            })
+    };
+
+    let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
+
+    match opencrab_core::memory_index::IndexBuilder::rebuild_index(
+        &db,
+        &agent_id,
+        &llm_adapter,
+        &model,
+        config.batch_size as usize,
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "ok": true,
+            "nodes_created": result.nodes_created,
+            "logs_indexed": result.logs_indexed,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+/// POST /api/agents/{id}/memory/index/merge — トピック再マージ
+pub async fn merge_memory_index_topics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let db = state.db.clone();
+    let agent_id = id.clone();
+    let llm_router = state.llm_router.clone();
+    let model = state.default_model.clone();
+
+    let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
+    // デフォルト: periodあたり最大10topic
+    let max_topics_per_period = 10usize;
+
+    match opencrab_core::memory_index::IndexBuilder::merge_topics(
+        &db,
+        &agent_id,
+        &llm_adapter,
+        &model,
+        max_topics_per_period,
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "ok": true,
+            "periods_processed": result.periods_processed,
+            "topics_merged": result.topics_merged,
+            "topics_deleted": result.topics_deleted,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        })),
+    }
+}
