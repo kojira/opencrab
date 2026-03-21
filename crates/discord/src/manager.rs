@@ -49,6 +49,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
                 self.state.db().clone(),
+                agent_id.to_string(),
             ),
         );
 

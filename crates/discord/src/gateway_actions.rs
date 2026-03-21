@@ -22,11 +22,12 @@ use opencrab_gateway::{GatewayActions, GatewayActionDef, GatewayActionResult};
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
     db: Arc<Mutex<rusqlite::Connection>>,
+    agent_id: String,
 }
 
 impl DiscordGatewayActions {
-    pub fn new(http: Arc<Http>, db: Arc<Mutex<rusqlite::Connection>>) -> Self {
-        Self { http, db }
+    pub fn new(http: Arc<Http>, db: Arc<Mutex<rusqlite::Connection>>, agent_id: String) -> Self {
+        Self { http, db, agent_id }
     }
 
     async fn execute_list_guilds(&self) -> GatewayActionResult {
@@ -336,6 +337,145 @@ impl DiscordGatewayActions {
             }
         }
     }
+
+    fn execute_list_duplicate_skills(&self) -> GatewayActionResult {
+        let conn = self.db.lock().unwrap();
+        match opencrab_db::queries::find_duplicate_skills(&conn, &self.agent_id) {
+            Ok(duplicates) => {
+                let list: Vec<serde_json::Value> = duplicates
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "id": s.id,
+                            "name": s.name,
+                            "description": s.description,
+                            "usage_count": s.usage_count,
+                        })
+                    })
+                    .collect();
+                let count = list.len();
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({
+                        "duplicates": list,
+                        "count": count,
+                        "agent_id": self.agent_id,
+                    })),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                error!("find_duplicate_skills failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("重複スキルの取得に失敗: {e}")),
+                }
+            }
+        }
+    }
+
+    fn execute_merge_skills(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let source_id = match args.get("source_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("source_idパラメータが必要です".to_string()),
+                }
+            }
+        };
+        let target_id = match args.get("target_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("target_idパラメータが必要です".to_string()),
+                }
+            }
+        };
+
+        let conn = self.db.lock().unwrap();
+        match opencrab_db::queries::merge_skills(&conn, source_id, target_id) {
+            Ok(()) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "message": format!("スキル {} を {} にマージしました", source_id, target_id),
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("merge_skills failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("スキルのマージに失敗: {e}")),
+                }
+            }
+        }
+    }
+
+    fn execute_update_memory_index_config(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let batch_size = args.get("batch_size").and_then(|v| v.as_i64());
+        let threshold = args.get("threshold").and_then(|v| v.as_i64());
+
+        if batch_size.is_none() && threshold.is_none() {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("batch_sizeまたはthresholdの少なくとも1つが必要です".to_string()),
+            };
+        }
+
+        let conn = self.db.lock().unwrap();
+
+        let current = opencrab_db::queries::get_memory_index_config(&conn, &self.agent_id);
+        let (current_batch_size, current_threshold) = match &current {
+            Ok(cfg) => (cfg.batch_size, cfg.threshold),
+            Err(_) => (
+                opencrab_db::queries::BATCH_SIZE_DEFAULT,
+                opencrab_db::queries::THRESHOLD_DEFAULT,
+            ),
+        };
+
+        let new_batch_size = batch_size.unwrap_or(current_batch_size);
+        let new_threshold = threshold.unwrap_or(current_threshold);
+
+        match opencrab_db::queries::upsert_memory_index_config(
+            &conn,
+            &self.agent_id,
+            new_batch_size,
+            new_threshold,
+        ) {
+            Ok(updated) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "agent_id": self.agent_id,
+                    "previous": {
+                        "batch_size": current_batch_size,
+                        "threshold": current_threshold,
+                    },
+                    "current": {
+                        "batch_size": updated.batch_size,
+                        "threshold": updated.threshold,
+                    },
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("upsert_memory_index_config failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("メモリインデックス設定の更新に失敗: {e}")),
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -421,6 +561,51 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["channel_id", "message_id", "emoji"]
                 }),
             },
+            GatewayActionDef {
+                name: "list_duplicate_skills".to_string(),
+                description: "エージェントの重複スキル（同名のスキルが複数存在するもの）を一覧表示する。マージ対象の候補を確認するために使用する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "merge_skills".to_string(),
+                description: "2つのスキルをマージする。source_idのスキルをtarget_idのスキルに統合し、使用回数を合算してsourceをアーカイブする。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "source_id": {
+                            "type": "string",
+                            "description": "マージ元（削除される側）のスキルID"
+                        },
+                        "target_id": {
+                            "type": "string",
+                            "description": "マージ先（残る側）のスキルID"
+                        }
+                    },
+                    "required": ["source_id", "target_id"]
+                }),
+            },
+            GatewayActionDef {
+                name: "update_memory_index_config".to_string(),
+                description: "メモリインデックスの設定（batch_size、threshold）を更新する。少なくとも1つのパラメータを指定する必要がある。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "batch_size": {
+                            "type": "integer",
+                            "description": "一度に処理するメモリのバッチサイズ"
+                        },
+                        "threshold": {
+                            "type": "integer",
+                            "description": "インデックス再構築の閾値"
+                        }
+                    },
+                    "required": []
+                }),
+            },
         ]
     }
 
@@ -430,6 +615,9 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_list_channels" => self.execute_list_channels(args).await,
             "discord_channel_config" => self.execute_channel_config(args),
             "discord_add_reaction" => self.execute_add_reaction(args).await,
+            "list_duplicate_skills" => self.execute_list_duplicate_skills(),
+            "merge_skills" => self.execute_merge_skills(args),
+            "update_memory_index_config" => self.execute_update_memory_index_config(args),
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -450,7 +638,7 @@ mod tests {
         let db = Arc::new(Mutex::new(opencrab_db::init_memory().unwrap()));
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
-        let actions = DiscordGatewayActions::new(http, db.clone());
+        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string());
         (actions, db)
     }
 
@@ -460,13 +648,16 @@ mod tests {
     fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 4);
+        assert_eq!(defs.len(), 7);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
         assert!(names.contains(&"discord_list_channels"));
         assert!(names.contains(&"discord_channel_config"));
         assert!(names.contains(&"discord_add_reaction"));
+        assert!(names.contains(&"list_duplicate_skills"));
+        assert!(names.contains(&"merge_skills"));
+        assert!(names.contains(&"update_memory_index_config"));
     }
 
     #[test]

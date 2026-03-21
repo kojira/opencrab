@@ -5,13 +5,15 @@ use tokio::sync::watch;
 use tracing;
 
 /// Configuration for the heartbeat loop.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeartbeatConfig {
     /// Interval in seconds between heartbeat ticks.
     /// Defaults to 7 (a prime number, to avoid synchronization patterns).
     pub interval_secs: u64,
     /// Whether the heartbeat is enabled.
     pub enabled: bool,
+    /// Optional heartbeat channel ID for Discord posting.
+    pub heartbeat_channel_id: Option<u64>,
 }
 
 impl Default for HeartbeatConfig {
@@ -19,6 +21,7 @@ impl Default for HeartbeatConfig {
         Self {
             interval_secs: 7,
             enabled: false,
+            heartbeat_channel_id: None,
         }
     }
 }

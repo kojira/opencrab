@@ -99,6 +99,24 @@ async fn evaluate_heartbeat_action_llm(
     }
 }
 
+/// config名またはUUIDのagent_idを、DBのUUIDに解決する。
+/// "crab"のような名前が渡された場合、find_agentsで検索してUUIDを返す。
+fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
+    // まず直接lookupを試みる
+    if let Ok(Some(_)) = opencrab_db::queries::get_identity(conn, agent_id) {
+        return agent_id.to_string();
+    }
+    // 名前で検索
+    if let Ok(agents) = opencrab_db::queries::find_agents(conn, agent_id) {
+        if let Some((uuid, _name)) = agents.first() {
+            tracing::info!(config_id = %agent_id, uuid = %uuid, "Resolved agent_id config name to UUID");
+            return uuid.clone();
+        }
+    }
+    tracing::warn!(agent_id = %agent_id, "Could not resolve agent_id to UUID, using as-is");
+    agent_id.to_string()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if present
@@ -178,10 +196,12 @@ async fn main() -> anyhow::Result<()> {
                 let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
                 gateway.start().await?;
 
+                let first_agent_id = valid_agent_ids.first().cloned().unwrap_or_default();
                 let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
                     opencrab_discord::DiscordGatewayActions::new(
                         gateway.http().clone(),
                         state.db.clone(),
+                        first_agent_id,
                     ),
                 );
 
@@ -223,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
     let initial_hb_config = HeartbeatConfig {
         interval_secs: cfg.agent.heartbeat_interval_secs,
         enabled: cfg.agent.heartbeat_enabled,
+        heartbeat_channel_id: cfg.gateway.discord.heartbeat_channel_id,
     };
 
     let (heartbeat_config_tx, mut heartbeat_config_rx) =
@@ -258,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
                 let config_clone = prev_config.clone();
                 let shutdown_rx = rx_tmpl.clone();
                 let db = heartbeat_db.clone();
+                let db_for_resolve = heartbeat_db.clone();
                 let agent_id = agent_id.clone();
                 let hb_discord_http = heartbeat_discord_http.clone();
                 let hb_channel_id = heartbeat_channel_id_arc.clone();
@@ -266,7 +288,12 @@ async fn main() -> anyhow::Result<()> {
                 _handles.push(tokio::spawn(async move {
                     let callback: HeartbeatCallback = Box::new({
                         let db = db.clone();
-                        let agent_id_owned = agent_id.clone();
+                        let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
+                            resolve_agent_id(&conn, &agent_id)
+                        } else {
+                            agent_id.clone()
+                        };
+                        let agent_id_owned = resolved_agent_id;
                         let discord_http = hb_discord_http.clone();
                         let channel_id = hb_channel_id.clone();
                         let llm_for_hb = llm_router_for_hb.clone();
@@ -382,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
             let new_config = heartbeat_config_rx.borrow().clone();
             if new_config.enabled != prev_config.enabled
                 || new_config.interval_secs != prev_config.interval_secs
+                || new_config.heartbeat_channel_id != prev_config.heartbeat_channel_id
             {
                 tracing::info!(
                     enabled = new_config.enabled,
@@ -394,6 +422,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _handles.clear();
 
+                // heartbeat_channel_id_arcも更新
+                if let Ok(mut guard) = heartbeat_channel_id_arc.lock() {
+                    *guard = new_config.heartbeat_channel_id;
+                }
+
                 // 新設定で起動
                 if new_config.enabled {
                     let (tx, rx_tmpl) = watch::channel(false);
@@ -401,6 +434,7 @@ async fn main() -> anyhow::Result<()> {
                         let config_clone = new_config.clone();
                         let shutdown_rx = rx_tmpl.clone();
                         let db = heartbeat_db.clone();
+                        let db_for_resolve = heartbeat_db.clone();
                         let agent_id = agent_id.clone();
                         let hb_discord_http = heartbeat_discord_http.clone();
                         let hb_channel_id = heartbeat_channel_id_arc.clone();
@@ -409,7 +443,12 @@ async fn main() -> anyhow::Result<()> {
                         _handles.push(tokio::spawn(async move {
                             let callback: HeartbeatCallback = Box::new({
                                 let db = db.clone();
-                                let agent_id_owned = agent_id.clone();
+                                let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
+                                    resolve_agent_id(&conn, &agent_id)
+                                } else {
+                                    agent_id.clone()
+                                };
+                                let agent_id_owned = resolved_agent_id;
                                 let discord_http = hb_discord_http.clone();
                                 let channel_id = hb_channel_id.clone();
                                 let llm_for_hb = llm_router_for_hb.clone();
