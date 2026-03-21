@@ -80,32 +80,30 @@ export default function AgentLayout() {
       </nav>
 
       {/* Agent header card */}
-      <div className="rounded-xl bg-gradient-to-r from-primary-container/60 to-surface-container border border-primary/20 p-5 mb-6 shadow-elevation-1">
-        <div className="flex items-center gap-2">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-2 shrink-0">
-            <span className="text-title-sm text-white font-bold">
+      <div className="rounded-xl bg-gradient-to-r from-primary-container/60 to-surface-container border border-primary/20 p-3 mb-4 shadow-elevation-1">
+        <div className="flex items-center gap-1.5">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-2 shrink-0">
+            <span className="text-xs text-white font-bold">
               {agent.name.charAt(0) || '?'}
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-title-lg text-on-surface font-bold truncate">
+            <h1 className="text-sm font-semibold text-on-surface truncate">
               {agent.name}
             </h1>
-            <p className="text-body-md text-on-surface-variant truncate">
+            <p className="text-xs text-on-surface-variant truncate">
               {agent.persona_name}
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-            <Link to={`/agents/${id}/edit`} className="btn-tonal">
+          <div className="flex items-center gap-1 shrink-0">
+            <Link to={`/agents/${id}/edit`} className="btn-tonal p-1.5">
               <span className="material-symbols-outlined text-xl">edit</span>
-              <span className="hidden sm:inline">{t('common.edit')}</span>
             </Link>
             <button
-              className="btn-outlined border-error text-error hover:bg-error-container/30"
+              className="btn-outlined border-error text-error hover:bg-error-container/30 p-1.5"
               onClick={() => setShowDeleteConfirm(true)}
             >
               <span className="material-symbols-outlined text-xl">delete</span>
-              <span className="hidden sm:inline">{t('common.delete')}</span>
             </button>
           </div>
         </div>
