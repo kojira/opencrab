@@ -70,7 +70,15 @@ pub fn build_agent_context(
          \n\
          The conversation history uses the format \"[speaker]: message\" for context, \
          but you must NOT include your own name prefix in your response. \
-         Just reply with the message content directly.{skills_text}{character_section}"
+         Just reply with the message content directly.\n\
+         \n\
+         あなたは複数のアクションを順番に計画・実行できます。\
+         例えば「Xを調べてYを設定する」という指示に対して、\
+         1. execute_shell で情報収集、\
+         2. 結果を解析、\
+         3. add_allowed_command でコマンド追加、\
+         4. create_my_skill でスキル作成、\
+         のように、複数のアクションを連続して呼び出してください。{skills_text}{character_section}"
     );
 
     (prompt, agent_name)

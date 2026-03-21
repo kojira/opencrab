@@ -129,3 +129,18 @@ permission = "owner"
 [[tools.shell.commands]]
 name = "cat"
 permission = "agent"
+
+[[tools.shell.commands]]
+name = "which"
+permission = "agent"
+description = "コマンドの場所確認"
+
+[[tools.shell.commands]]
+name = "grep"
+permission = "agent"
+description = "テキスト検索"
+
+[[tools.shell.commands]]
+name = "python3"
+permission = "agent"
+description = "Python3スクリプト実行"
