@@ -81,6 +81,8 @@ pub fn create_router(state: AppState) -> Router {
         // Co-Agent管理
         .route("/api/agents/{id}/co-agents", get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent))
         .route("/api/agents/{id}/co-agents/{co_agent_id}", axum::routing::patch(api::co_agents::update_co_agent).delete(api::co_agents::delete_co_agent))
+        // チャンネル設定
+        .route("/api/agents/{id}/channel-configs", get(api::channel_configs::list_channel_configs).put(api::channel_configs::upsert_channel_config))
         .route("/api/agents/{id}/trusted-users", get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user))
         .route("/api/agents/{id}/trusted-users/{user_id}", axum::routing::patch(api::trusted_users::update_trusted_user).delete(api::trusted_users::delete_trusted_user))
         .layer(CorsLayer::permissive())
