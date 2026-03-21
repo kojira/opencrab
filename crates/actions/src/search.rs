@@ -188,45 +188,83 @@ impl Action for CreateMySkillAction {
         );
 
         let file_path = format!("skills/{}.skill.md", name.replace(' ', "-").to_lowercase());
-        match ctx.workspace.write(&file_path, &skill_content).await {
-            Ok(_) => {
-                // DBにも登録
-                let skill_id = uuid::Uuid::new_v4().to_string();
-                let skill = opencrab_db::queries::SkillRow {
-                    id: skill_id.clone(),
-                    agent_id: ctx.agent_id.clone(),
-                    name: name.to_string(),
-                    description: args["description"].as_str().unwrap_or("").to_string(),
-                    situation_pattern: args["situation_pattern"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string(),
-                    guidance: args["guidance"].as_str().unwrap_or("").to_string(),
-                    source_type: "self_created".to_string(),
-                    source_context: None,
-                    file_path: Some(file_path.clone()),
-                    effectiveness: None,
-                    usage_count: 0,
-                    is_active: true,
-                    permission: "\"agent\"".to_string(),
-                    archived: false,
-                    skill_type: "experience".to_string(),
-                    code: None,
-                };
+        let description = args["description"].as_str().unwrap_or("").to_string();
+        let situation_pattern = args["situation_pattern"].as_str().unwrap_or("").to_string();
+        let guidance = args["guidance"].as_str().unwrap_or("").to_string();
 
-                if let Ok(conn) = ctx.db.lock() {
-                    let _ = opencrab_db::queries::insert_skill(&conn, &skill);
-                }
+        // Check if skill with same name already exists (including archived)
+        let existing = ctx.db.lock().ok().and_then(|conn| {
+            opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name).ok().flatten()
+        });
 
-                ActionResult::success(json!({
-                    "created": true,
-                    "skill_id": skill_id,
-                    "file_path": file_path,
-                }))
-                .with_side_effect(SideEffect::SkillAcquired { skill_id })
-                .with_side_effect(SideEffect::FileWritten { path: file_path })
+        if let Some(existing) = existing {
+            let was_archived = existing.archived;
+            let skill_id = existing.id.clone();
+
+            let mut updated = existing;
+            updated.description = description;
+            updated.situation_pattern = situation_pattern;
+            updated.guidance = guidance;
+            updated.skill_type = "experience".to_string();
+            updated.file_path = Some(file_path.clone());
+            updated.is_active = true;
+            updated.archived = false;
+
+            if let Ok(conn) = ctx.db.lock() {
+                let _ = opencrab_db::queries::update_skill(&conn, &updated);
             }
-            Err(e) => ActionResult::error(&e.to_string()),
+
+            // Overwrite the skill file
+            match ctx.workspace.write(&file_path, &skill_content).await {
+                Ok(_) => {
+                    let result_key = if was_archived { "restored" } else { "updated" };
+                    ActionResult::success(json!({
+                        result_key: true,
+                        "skill_id": skill_id,
+                        "file_path": file_path,
+                    }))
+                    .with_side_effect(SideEffect::FileWritten { path: file_path })
+                }
+                Err(e) => ActionResult::error(&e.to_string()),
+            }
+        } else {
+            match ctx.workspace.write(&file_path, &skill_content).await {
+                Ok(_) => {
+                    // DBにも登録
+                    let skill_id = uuid::Uuid::new_v4().to_string();
+                    let skill = opencrab_db::queries::SkillRow {
+                        id: skill_id.clone(),
+                        agent_id: ctx.agent_id.clone(),
+                        name: name.to_string(),
+                        description,
+                        situation_pattern,
+                        guidance,
+                        source_type: "self_created".to_string(),
+                        source_context: None,
+                        file_path: Some(file_path.clone()),
+                        effectiveness: None,
+                        usage_count: 0,
+                        is_active: true,
+                        permission: "\"agent\"".to_string(),
+                        archived: false,
+                        skill_type: "experience".to_string(),
+                        code: None,
+                    };
+
+                    if let Ok(conn) = ctx.db.lock() {
+                        let _ = opencrab_db::queries::insert_skill(&conn, &skill);
+                    }
+
+                    ActionResult::success(json!({
+                        "created": true,
+                        "skill_id": skill_id,
+                        "file_path": file_path,
+                    }))
+                    .with_side_effect(SideEffect::SkillAcquired { skill_id })
+                    .with_side_effect(SideEffect::FileWritten { path: file_path })
+                }
+                Err(e) => ActionResult::error(&e.to_string()),
+            }
         }
     }
 }

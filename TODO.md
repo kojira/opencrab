@@ -67,3 +67,8 @@
     - 目標: 「調べて→インストールして→設定して」を自然言語指示だけで実行
     - 設計: Multi-step Skill / Web Fetchスキル / Bootstrapスキルセット / LLMプロンプト改善案
     - 設計ドキュメント: data/design-autonomous-tasks.md（サブエージェントで作成中）
+
+16. **スキル同名upsert対応**
+    - 同名スキルを追加する際は新規作成せずに既存スキルを更新する
+    - `create_skill`・`create_my_skill`両方に適用
+    - テストのたびに重複スキルが増える問題の根本対策

@@ -748,7 +748,7 @@ impl DiscordGatewayActions {
 
         let conn = self.db.lock().unwrap();
 
-        // Deduplication: check if skill with same name exists
+        // Deduplication: check if skill with same name exists (non-archived)
         if let Ok(Some(existing)) = opencrab_db::queries::find_skill_by_name(&conn, &self.agent_id, name) {
             let mut updated = existing;
             updated.description = description.to_string();
@@ -768,6 +768,33 @@ impl DiscordGatewayActions {
                     "id": updated.id,
                     "name": name,
                     "action": "updated"
+                })),
+                error: None,
+            };
+        }
+
+        // Check archived skills
+        if let Ok(Some(existing)) = opencrab_db::queries::find_skill_by_name_any(&conn, &self.agent_id, name) {
+            let mut updated = existing;
+            updated.archived = false;
+            updated.is_active = true;
+            updated.description = description.to_string();
+            updated.guidance = guidance.to_string();
+            updated.skill_type = skill_type.to_string();
+            updated.code = code.map(|c| c.to_string());
+            if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("Failed to restore archived skill: {e}")),
+                };
+            }
+            return GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "id": updated.id,
+                    "name": name,
+                    "action": "restored"
                 })),
                 error: None,
             };
