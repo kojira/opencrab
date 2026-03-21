@@ -80,22 +80,22 @@ export default function AgentLayout() {
       </nav>
 
       {/* Agent header card */}
-      <div className="card-elevated mb-6">
-        <div className="flex items-center gap-5">
-          <div className="w-16 h-16 rounded-full bg-primary-container flex items-center justify-center">
-            <span className="text-headline-sm text-primary-on-container font-semibold">
+      <div className="rounded-xl bg-gradient-to-r from-primary-container/60 to-surface-container border border-primary/20 p-5 mb-6 shadow-elevation-1">
+        <div className="flex items-center gap-4">
+          <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-2 shrink-0">
+            <span className="text-headline-sm text-white font-bold">
               {agent.name.charAt(0) || '?'}
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-headline-sm text-on-surface font-medium truncate">
+            <h1 className="text-title-lg text-on-surface font-bold truncate">
               {agent.name}
             </h1>
-            <p className="text-body-lg text-on-surface-variant">
+            <p className="text-body-md text-on-surface-variant truncate">
               {agent.persona_name}
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
             <Link to={`/agents/${id}/edit`} className="btn-tonal">
               <span className="material-symbols-outlined text-xl">edit</span>
               <span className="hidden sm:inline">{t('common.edit')}</span>
@@ -122,7 +122,7 @@ export default function AgentLayout() {
 
       {/* Tab navigation */}
       {!isEditRoute && (
-        <div className="flex overflow-x-auto flex-nowrap border-b border-outline-variant mb-6 gap-1">
+        <div className="flex overflow-x-auto flex-nowrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1">
           {tabs.map((tab) => {
             const tabPath = `${basePath}${tab.path}`;
             const active =
@@ -133,10 +133,10 @@ export default function AgentLayout() {
               <Link
                 key={tab.key}
                 to={tabPath}
-                className={`flex items-center gap-1.5 px-4 py-3 text-label-lg border-b-2 transition-colors ${
+                className={`flex items-center gap-1.5 px-3 py-2 text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap flex-shrink-0 ${
                   active
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-on-surface-variant hover:text-on-surface hover:bg-surface-container'
+                    ? 'bg-surface-container shadow-elevation-1 text-primary font-semibold'
+                    : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container/60'
                 }`}
               >
                 <span className="material-symbols-outlined text-lg">{tab.icon}</span>

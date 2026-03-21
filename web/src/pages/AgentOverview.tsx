@@ -11,7 +11,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
       <span className="w-36 shrink-0 text-label-lg text-on-surface-variant">
         {label}
       </span>
-      <span className="text-body-lg text-on-surface font-mono break-all min-w-0">{value}</span>
+      <span className="text-body-lg text-on-surface font-mono break-words min-w-0">{value}</span>
     </div>
   );
 }
