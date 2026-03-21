@@ -6,16 +6,16 @@ max_workspace_size_mb = 100
 
 # デフォルトLLM設定
 [llm]
-default_provider = "openai"
-default_model = "gpt-4o"
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
 
 # 用途別モデル設定（オプション）
 [llm.models]
-thinking = { provider = "anthropic", model = "claude-opus-4.6" }
-conversation = { provider = "openai", model = "gpt-4o" }
-analysis = { provider = "openai", model = "gpt-4o-mini" }
-tool_calling = { provider = "openai", model = "gpt-4o" }
-creative = { provider = "anthropic", model = "claude-sonnet-4.5" }
+thinking = { provider = "anthropic", model = "claude-sonnet-4-6" }
+conversation = { provider = "anthropic", model = "claude-sonnet-4-6" }
+analysis = { provider = "anthropic", model = "claude-sonnet-4-6" }
+tool_calling = { provider = "anthropic", model = "claude-sonnet-4-6" }
+creative = { provider = "anthropic", model = "claude-sonnet-4-6" }
 embedding = { provider = "openai", model = "text-embedding-3-large" }
 
 # エージェント自身によるLLM選択
