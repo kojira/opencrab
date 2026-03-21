@@ -430,6 +430,8 @@ async fn main() -> anyhow::Result<()> {
                         state.db.clone(),
                         first_agent_id,
                         state.tools_config.clone(),
+                        Some(Arc::new(opencrab_server::llm_adapter::LlmRouterAdapter::new(state.llm_router.clone()))),
+                        state.default_model.clone(),
                     ),
                 );
 

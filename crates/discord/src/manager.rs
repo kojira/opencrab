@@ -51,6 +51,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 self.state.db().clone(),
                 agent_id.to_string(),
                 self.state.tools_config().clone(),
+                Some(self.state.create_llm_client()),
+                self.state.default_model(),
             ),
         );
 
