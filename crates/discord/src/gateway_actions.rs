@@ -718,6 +718,14 @@ impl DiscordGatewayActions {
     }
 
     fn execute_create_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+        if caller != "owner" {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("このアクションはオーナーのみ実行できます".to_string()),
+            };
+        }
         let name = match args.get("name").and_then(|v| v.as_str()) {
             Some(n) => n,
             None => return GatewayActionResult {
@@ -805,6 +813,14 @@ impl DiscordGatewayActions {
     }
 
     async fn execute_execute_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+        if caller != "owner" {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("このアクションはオーナーのみ実行できます".to_string()),
+            };
+        }
         let skill_id = args.get("skill_id").and_then(|v| v.as_str());
         let skill_name = args.get("skill_name").and_then(|v| v.as_str());
 
@@ -1372,6 +1388,7 @@ mod tests {
     async fn test_create_skill_basic() {
         let (actions, _db) = make_test_actions();
         let result = actions.execute("create_skill", &json!({
+            "__caller": "owner",
             "name": "天気確認",
             "description": "curl wttr.inで天気を確認する",
             "skill_type": "executable",
@@ -1387,12 +1404,14 @@ mod tests {
         let (actions, _db) = make_test_actions();
         // Create skill twice
         actions.execute("create_skill", &json!({
+            "__caller": "owner",
             "name": "天気確認",
             "description": "first version",
             "skill_type": "executable",
             "code": "echo hello"
         })).await;
         let result2 = actions.execute("create_skill", &json!({
+            "__caller": "owner",
             "name": "天気確認",
             "description": "updated version",
             "skill_type": "executable",
@@ -1408,6 +1427,7 @@ mod tests {
         let (actions, _db) = make_test_actions();
         // Create an executable skill
         actions.execute("create_skill", &json!({
+            "__caller": "owner",
             "name": "echo-test",
             "description": "test echo",
             "skill_type": "executable",
@@ -1416,6 +1436,7 @@ mod tests {
 
         // Execute it
         let result = actions.execute("execute_skill", &json!({
+            "__caller": "owner",
             "skill_name": "echo-test"
         })).await;
         assert!(result.success, "execute_skill should succeed: {:?}", result.error);
@@ -1429,11 +1450,13 @@ mod tests {
         let (actions, _db) = make_test_actions();
         // Create experience skill (default type)
         actions.execute("create_skill", &json!({
+            "__caller": "owner",
             "name": "経験スキル",
             "description": "just text guidance"
         })).await;
 
         let result = actions.execute("execute_skill", &json!({
+            "__caller": "owner",
             "skill_name": "経験スキル"
         })).await;
         assert!(!result.success, "should fail for non-executable skill");
@@ -1444,8 +1467,30 @@ mod tests {
     async fn test_execute_skill_not_found() {
         let (actions, _db) = make_test_actions();
         let result = actions.execute("execute_skill", &json!({
+            "__caller": "owner",
             "skill_name": "nonexistent-skill"
         })).await;
         assert!(!result.success, "should fail for missing skill");
+    }
+
+    #[tokio::test]
+    async fn test_create_skill_rejected_for_non_owner() {
+        let (actions, _db) = make_test_actions();
+        let result = actions.execute("create_skill", &json!({
+            "name": "test",
+            "description": "test"
+        })).await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("オーナーのみ"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_skill_rejected_for_non_owner() {
+        let (actions, _db) = make_test_actions();
+        let result = actions.execute("execute_skill", &json!({
+            "skill_name": "test"
+        })).await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("オーナーのみ"));
     }
 }
