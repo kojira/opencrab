@@ -12,9 +12,6 @@ use serenity::model::id::MessageId;
 use serenity::model::channel::ReactionType;
 use serde_json::json;
 use tracing::{debug, error};
-use tokio::process::Command as TokioCommand;
-use tokio::time::{timeout, Duration};
-
 use opencrab_gateway::{GatewayActions, GatewayActionDef, GatewayActionResult};
 
 /// Discord固有のゲートウェイアクション実装。
@@ -743,8 +740,6 @@ impl DiscordGatewayActions {
             },
         };
         let guidance = args.get("guidance").and_then(|v| v.as_str()).unwrap_or("");
-        let skill_type = args.get("skill_type").and_then(|v| v.as_str()).unwrap_or("experience");
-        let code = args.get("code").and_then(|v| v.as_str());
 
         let conn = self.db.lock().unwrap();
 
@@ -753,8 +748,6 @@ impl DiscordGatewayActions {
             let mut updated = existing;
             updated.description = description.to_string();
             updated.guidance = guidance.to_string();
-            updated.skill_type = skill_type.to_string();
-            updated.code = code.map(|c| c.to_string());
             if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
                 return GatewayActionResult {
                     success: false,
@@ -780,8 +773,6 @@ impl DiscordGatewayActions {
             updated.is_active = true;
             updated.description = description.to_string();
             updated.guidance = guidance.to_string();
-            updated.skill_type = skill_type.to_string();
-            updated.code = code.map(|c| c.to_string());
             if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
                 return GatewayActionResult {
                     success: false,
@@ -816,8 +807,6 @@ impl DiscordGatewayActions {
             is_active: true,
             permission: "\"agent\"".to_string(),
             archived: false,
-            skill_type: skill_type.to_string(),
-            code: code.map(|c| c.to_string()),
         };
 
         if let Err(e) = opencrab_db::queries::insert_skill(&conn, &row) {
@@ -839,111 +828,6 @@ impl DiscordGatewayActions {
         }
     }
 
-    async fn execute_execute_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
-        if caller != "owner" && caller != "co_agent" && caller != "trusted_user" {
-            return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("このアクションはtrusted userのみ実行できます".to_string()),
-            };
-        }
-        let skill_id = args.get("skill_id").and_then(|v| v.as_str());
-        let skill_name = args.get("skill_name").and_then(|v| v.as_str());
-
-        let skill = {
-            let conn = self.db.lock().unwrap();
-            if let Some(id) = skill_id {
-                match opencrab_db::queries::find_skill_by_id(&conn, id) {
-                    Ok(s) => s,
-                    Err(e) => return GatewayActionResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!("Failed to find skill: {e}")),
-                    },
-                }
-            } else if let Some(name) = skill_name {
-                match opencrab_db::queries::find_skill_by_name(&conn, &self.agent_id, name) {
-                    Ok(s) => s,
-                    Err(e) => return GatewayActionResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!("Failed to find skill: {e}")),
-                    },
-                }
-            } else {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("skill_id or skill_name is required".to_string()),
-                };
-            }
-        };
-
-        let skill = match skill {
-            Some(s) => s,
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("Skill not found".to_string()),
-            },
-        };
-
-        if skill.skill_type != "executable" {
-            return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("Skill '{}' is not executable (type: {})", skill.name, skill.skill_type)),
-            };
-        }
-
-        let code = match &skill.code {
-            Some(c) => c.clone(),
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("Skill '{}' has no code", skill.name)),
-            },
-        };
-
-        let result = timeout(
-            Duration::from_secs(30),
-            TokioCommand::new("sh")
-                .arg("-c")
-                .arg(&code)
-                .output(),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let exit_code = output.status.code().unwrap_or(-1);
-
-                GatewayActionResult {
-                    success: output.status.success(),
-                    data: Some(json!({
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "exit_code": exit_code,
-                        "skill_name": skill.name,
-                    })),
-                    error: None,
-                }
-            }
-            Ok(Err(e)) => GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("Failed to execute command: {e}")),
-            },
-            Err(_) => GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("Command timed out after 30 seconds".to_string()),
-            },
-        }
-    }
 }
 
 #[async_trait]
@@ -1122,7 +1006,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "create_skill".to_string(),
-                description: "ユーザーから「〇〇するスキルを作って」「このコマンドをスキルとして登録して」などと言われたとき、新しいスキルを作成する。実行可能なコード（curl, python, shコマンド等）が含まれる場合は skill_type='executable' に設定し、code フィールドにそのシェルコマンドを記述すること。例: ユーザーが「curl wttr.in/Tokyoを使って天気を調べるスキルを作って」と言ったら skill_type='executable', code='curl -s wttr.in/Tokyo?format=3' のように登録する。同名スキルが存在する場合は自動的に更新（upsert）される。".to_string(),
+                description: "ユーザーから「〇〇するスキルを作って」と言われたとき新しいスキルを作成する。guidanceにコマンド例・使い方を書くことで、LLMがexecute_shellで動的に実行できるようになる。同名スキルが存在する場合は更新される。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1137,35 +1021,9 @@ impl GatewayActions for DiscordGatewayActions {
                         "guidance": {
                             "type": "string",
                             "description": "スキルのガイダンス（省略時は空文字列）"
-                        },
-                        "code": {
-                            "type": "string",
-                            "description": "実行可能スキルのシェルコマンド（skill_type='executable'の場合に指定）"
-                        },
-                        "skill_type": {
-                            "type": "string",
-                            "description": "スキルタイプ: 'experience'（デフォルト）または 'executable'"
                         }
                     },
                     "required": ["name", "description"]
-                }),
-            },
-            GatewayActionDef {
-                name: "execute_skill".to_string(),
-                description: "登録済みの実行可能スキル（skill_type='executable'）を実行する。ユーザーが「天気を調べて」「〇〇スキルを実行して」などと言ったとき、システムコンテキストの「Available Skills」セクションに記載されているスキル一覧から該当スキルを見つけ、skill_nameを指定して実行する。skill_idまたはskill_nameのいずれかを指定すること。タイムアウトは30秒。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "skill_id": {
-                            "type": "string",
-                            "description": "実行するスキルのID"
-                        },
-                        "skill_name": {
-                            "type": "string",
-                            "description": "実行するスキル名（skill_idの代わりに使用可能）"
-                        }
-                    },
-                    "required": []
                 }),
             },
         ]
@@ -1185,7 +1043,6 @@ impl GatewayActions for DiscordGatewayActions {
             "remove_allowed_command" => self.execute_remove_allowed_command(args),
             "rebuild_memory_index" => self.execute_rebuild_memory_index().await,
             "create_skill" => self.execute_create_skill(args),
-            "execute_skill" => self.execute_execute_skill(args).await,
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -1217,7 +1074,7 @@ mod tests {
     fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 13);
+        assert_eq!(defs.len(), 12);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -1232,7 +1089,6 @@ mod tests {
         assert!(names.contains(&"remove_allowed_command"));
         assert!(names.contains(&"rebuild_memory_index"));
         assert!(names.contains(&"create_skill"));
-        assert!(names.contains(&"execute_skill"));
     }
 
     #[test]
@@ -1417,9 +1273,7 @@ mod tests {
         let result = actions.execute("create_skill", &json!({
             "__caller": "owner",
             "name": "天気確認",
-            "description": "curl wttr.inで天気を確認する",
-            "skill_type": "executable",
-            "code": "curl -s wttr.in/Tokyo?format=3"
+            "description": "curl wttr.inで天気を確認する"
         })).await;
         assert!(result.success, "create_skill should succeed");
         let data = result.data.unwrap();
@@ -1433,71 +1287,14 @@ mod tests {
         actions.execute("create_skill", &json!({
             "__caller": "owner",
             "name": "天気確認",
-            "description": "first version",
-            "skill_type": "executable",
-            "code": "echo hello"
+            "description": "first version"
         })).await;
         let result2 = actions.execute("create_skill", &json!({
             "__caller": "owner",
             "name": "天気確認",
-            "description": "updated version",
-            "skill_type": "executable",
-            "code": "echo updated"
+            "description": "updated version"
         })).await;
         assert!(result2.success, "second create should succeed (dedup)");
-    }
-
-    // ---- execute_skill ----
-
-    #[tokio::test]
-    async fn test_execute_skill_by_name() {
-        let (actions, _db) = make_test_actions();
-        // Create an executable skill
-        actions.execute("create_skill", &json!({
-            "__caller": "owner",
-            "name": "echo-test",
-            "description": "test echo",
-            "skill_type": "executable",
-            "code": "echo hello_from_skill"
-        })).await;
-
-        // Execute it
-        let result = actions.execute("execute_skill", &json!({
-            "__caller": "owner",
-            "skill_name": "echo-test"
-        })).await;
-        assert!(result.success, "execute_skill should succeed: {:?}", result.error);
-        let data = result.data.unwrap();
-        assert!(data["stdout"].as_str().unwrap().contains("hello_from_skill"));
-        assert_eq!(data["exit_code"], 0);
-    }
-
-    #[tokio::test]
-    async fn test_execute_skill_non_executable() {
-        let (actions, _db) = make_test_actions();
-        // Create experience skill (default type)
-        actions.execute("create_skill", &json!({
-            "__caller": "owner",
-            "name": "経験スキル",
-            "description": "just text guidance"
-        })).await;
-
-        let result = actions.execute("execute_skill", &json!({
-            "__caller": "owner",
-            "skill_name": "経験スキル"
-        })).await;
-        assert!(!result.success, "should fail for non-executable skill");
-        assert!(result.error.unwrap().contains("is not executable"));
-    }
-
-    #[tokio::test]
-    async fn test_execute_skill_not_found() {
-        let (actions, _db) = make_test_actions();
-        let result = actions.execute("execute_skill", &json!({
-            "__caller": "owner",
-            "skill_name": "nonexistent-skill"
-        })).await;
-        assert!(!result.success, "should fail for missing skill");
     }
 
     #[tokio::test]
@@ -1506,16 +1303,6 @@ mod tests {
         let result = actions.execute("create_skill", &json!({
             "name": "test",
             "description": "test"
-        })).await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("trusted user"));
-    }
-
-    #[tokio::test]
-    async fn test_execute_skill_rejected_for_non_owner() {
-        let (actions, _db) = make_test_actions();
-        let result = actions.execute("execute_skill", &json!({
-            "skill_name": "test"
         })).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("trusted user"));

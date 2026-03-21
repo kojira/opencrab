@@ -61,8 +61,6 @@ pub async fn add_skill(
         is_active: true,
         permission: req.permission.unwrap_or_else(|| "\"agent\"".to_string()),
         archived: false,
-        code: None,
-        skill_type: "experience".to_string(),
     };
 
     let conn = state.db.lock().unwrap();

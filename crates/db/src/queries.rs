@@ -442,8 +442,6 @@ pub struct SkillRow {
     pub is_active: bool,
     pub permission: String,
     pub archived: bool,
-    pub skill_type: String,
-    pub code: Option<String>,
 }
 
 pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Result<Vec<SkillRow>> {
@@ -453,15 +451,15 @@ pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Resu
 pub fn list_skills_filtered(conn: &Connection, agent_id: &str, active_only: bool, include_archived: bool) -> Result<Vec<SkillRow>> {
     let sql = match (active_only, include_archived) {
         (true, _) => {
-            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
              FROM skills WHERE agent_id = ?1 AND is_active = 1 AND archived = 0 ORDER BY usage_count DESC"
         }
         (false, true) => {
-            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
              FROM skills WHERE agent_id = ?1 ORDER BY usage_count DESC"
         }
         (false, false) => {
-            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
              FROM skills WHERE agent_id = ?1 AND archived = 0 ORDER BY usage_count DESC"
         }
     };
@@ -483,8 +481,6 @@ pub fn list_skills_filtered(conn: &Connection, agent_id: &str, active_only: bool
             is_active: row.get(11)?,
             permission: row.get(12)?,
             archived: row.get(13)?,
-            skill_type: row.get(14)?,
-            code: row.get(15)?,
         })
     })?;
 
@@ -493,8 +489,8 @@ pub fn list_skills_filtered(conn: &Connection, agent_id: &str, active_only: bool
 
 pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             skill.id,
             skill.agent_id,
@@ -510,8 +506,6 @@ pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
             skill.is_active,
             skill.permission,
             skill.archived,
-            skill.skill_type.as_str(),
-            skill.code.as_deref(),
             Utc::now().to_rfc3339(),
             Utc::now().to_rfc3339(),
         ],
@@ -537,7 +531,7 @@ pub fn set_skill_active(conn: &Connection, skill_id: &str, active: bool) -> Resu
 
 pub fn find_skill_by_name(conn: &Connection, agent_id: &str, name: &str) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) AND archived = 0 LIMIT 1",
         params![agent_id, name],
         |row| {
@@ -556,8 +550,6 @@ pub fn find_skill_by_name(conn: &Connection, agent_id: &str, name: &str) -> Resu
                 is_active: row.get(11)?,
                 permission: row.get(12)?,
                 archived: row.get(13)?,
-                skill_type: row.get(14)?,
-                code: row.get(15)?,
             })
         },
     );
@@ -571,7 +563,7 @@ pub fn find_skill_by_name(conn: &Connection, agent_id: &str, name: &str) -> Resu
 
 pub fn find_skill_by_name_any(conn: &Connection, agent_id: &str, name: &str) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) LIMIT 1",
         params![agent_id, name],
         |row| {
@@ -590,8 +582,6 @@ pub fn find_skill_by_name_any(conn: &Connection, agent_id: &str, name: &str) -> 
                 is_active: row.get(11)?,
                 permission: row.get(12)?,
                 archived: row.get(13)?,
-                skill_type: row.get(14)?,
-                code: row.get(15)?,
             })
         },
     );
@@ -605,7 +595,7 @@ pub fn find_skill_by_name_any(conn: &Connection, agent_id: &str, name: &str) -> 
 
 pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills WHERE id = ?1 LIMIT 1",
         params![skill_id],
         |row| {
@@ -624,8 +614,6 @@ pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<Skil
                 is_active: row.get(11)?,
                 permission: row.get(12)?,
                 archived: row.get(13)?,
-                skill_type: row.get(14)?,
-                code: row.get(15)?,
             })
         },
     );
@@ -639,14 +627,12 @@ pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<Skil
 
 pub fn update_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     conn.execute(
-        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, skill_type = ?5, code = ?6, is_active = ?7, archived = ?8, file_path = ?9, updated_at = ?10 WHERE id = ?11",
+        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, is_active = ?5, archived = ?6, file_path = ?7, updated_at = ?8 WHERE id = ?9",
         params![
             skill.name,
             skill.description,
             skill.situation_pattern,
             skill.guidance,
-            skill.skill_type,
-            skill.code,
             skill.is_active,
             skill.archived,
             skill.file_path,
@@ -683,7 +669,7 @@ pub fn merge_skills(conn: &Connection, source_id: &str, target_id: &str) -> Resu
 
 pub fn find_duplicate_skills(conn: &Connection, agent_id: &str) -> Result<Vec<SkillRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills
          WHERE agent_id = ?1 AND archived = 0
            AND LOWER(name) IN (
@@ -708,8 +694,6 @@ pub fn find_duplicate_skills(conn: &Connection, agent_id: &str) -> Result<Vec<Sk
             is_active: row.get(11)?,
             permission: row.get(12)?,
             archived: row.get(13)?,
-            skill_type: row.get(14)?,
-            code: row.get(15)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -718,7 +702,7 @@ pub fn find_duplicate_skills(conn: &Connection, agent_id: &str) -> Result<Vec<Sk
 pub fn find_unused_skills(conn: &Connection, agent_id: &str, days_old: i64) -> Result<Vec<SkillRow>> {
     let cutoff = (Utc::now() - chrono::Duration::days(days_old)).to_rfc3339();
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, skill_type, code
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills
          WHERE agent_id = ?1 AND usage_count = 0 AND archived = 0 AND created_at <= ?2
          ORDER BY created_at ASC",
@@ -739,8 +723,6 @@ pub fn find_unused_skills(conn: &Connection, agent_id: &str, days_old: i64) -> R
             is_active: row.get(11)?,
             permission: row.get(12)?,
             archived: row.get(13)?,
-            skill_type: row.get(14)?,
-            code: row.get(15)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -2136,8 +2118,6 @@ mod tests {
             is_active: true,
             permission: "\"agent\"".to_string(),
             archived: false,
-            skill_type: "experience".to_string(),
-            code: None,
         };
 
         insert_skill(&conn, &skill).unwrap();
@@ -2171,8 +2151,6 @@ mod tests {
             is_active: true,
             permission: "\"agent\"".to_string(),
             archived: false,
-            skill_type: "experience".to_string(),
-            code: None,
         };
 
         insert_skill(&conn, &skill).unwrap();
@@ -2203,8 +2181,6 @@ mod tests {
             is_active: false,
             permission: "\"agent\"".to_string(),
             archived: true,
-            skill_type: "experience".to_string(),
-            code: None,
         };
         insert_skill(&conn, &skill).unwrap();
 
@@ -2238,8 +2214,6 @@ mod tests {
             is_active: true,
             permission: "\"agent\"".to_string(),
             archived: true,
-            skill_type: "experience".to_string(),
-            code: None,
         };
         insert_skill(&conn, &skill).unwrap();
 
@@ -2247,8 +2221,6 @@ mod tests {
         let mut updated = skill.clone();
         updated.description = "Updated description".to_string();
         updated.guidance = "Updated guidance".to_string();
-        updated.skill_type = "code".to_string();
-        updated.code = Some("fn main() {}".to_string());
         updated.archived = false;
         updated.is_active = true;
         update_skill(&conn, &updated).unwrap();
@@ -2258,8 +2230,6 @@ mod tests {
         let s = found.unwrap();
         assert_eq!(s.description, "Updated description");
         assert_eq!(s.guidance, "Updated guidance");
-        assert_eq!(s.skill_type, "code");
-        assert_eq!(s.code.as_deref(), Some("fn main() {}"));
         assert_eq!(s.archived, false);
         assert_eq!(s.is_active, true);
     }

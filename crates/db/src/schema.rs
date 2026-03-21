@@ -39,26 +39,6 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")?;
     }
 
-    // skills.skill_type カラム追加
-    let has_skill_type: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='skill_type'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if !has_skill_type {
-        conn.execute_batch("ALTER TABLE skills ADD COLUMN skill_type TEXT NOT NULL DEFAULT 'experience'")?;
-    }
-
-    // skills.code カラム追加
-    let has_code_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='code'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if !has_code_col {
-        conn.execute_batch("ALTER TABLE skills ADD COLUMN code TEXT")?;
-    }
-
     // discord_channel_config.whitelisted カラム追加
     let has_whitelisted_col: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='whitelisted'")?
@@ -134,6 +114,26 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
         CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);"
     )?;
+
+    // skills.skill_type カラムDROP（v2: executableタイプ廃止）
+    let has_skill_type_drop: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='skill_type'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if has_skill_type_drop {
+        conn.execute_batch("ALTER TABLE skills DROP COLUMN skill_type")?;
+    }
+
+    // skills.code カラムDROP（v2: executableタイプ廃止）
+    let has_code_drop: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='code'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if has_code_drop {
+        conn.execute_batch("ALTER TABLE skills DROP COLUMN code")?;
+    }
 
     Ok(())
 }
@@ -222,8 +222,6 @@ CREATE TABLE IF NOT EXISTS skills (
     is_active INTEGER NOT NULL DEFAULT 1,
     permission TEXT NOT NULL DEFAULT '"agent"',
     archived INTEGER NOT NULL DEFAULT 0,
-    skill_type TEXT NOT NULL DEFAULT 'experience',
-    code TEXT,
     last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
