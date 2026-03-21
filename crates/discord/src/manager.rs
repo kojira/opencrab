@@ -45,6 +45,10 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let gateway = Arc::new(DiscordGateway::new(token));
         gateway.start().await?;
 
+        let workspace_path = self.state.workspace_base()
+            .replace("{agent_id}", agent_id);
+        let workspace_root = std::path::PathBuf::from(workspace_path);
+
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
             crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
@@ -53,6 +57,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 self.state.tools_config().clone(),
                 Some(self.state.create_llm_client()),
                 self.state.default_model(),
+                workspace_root,
             ),
         );
 

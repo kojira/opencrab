@@ -67,4 +67,8 @@ impl opencrab_discord::AgentRunner for AppState {
     fn default_model(&self) -> String {
         self.default_model.clone()
     }
+
+    fn workspace_base(&self) -> &str {
+        &self.workspace_base
+    }
 }

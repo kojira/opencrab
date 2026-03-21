@@ -3,9 +3,11 @@
 //! Discord管理操作（サーバー一覧、チャンネル一覧、チャンネル設定）を
 //! ゲートウェイ固有アクションとして提供する。
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serenity::all::{ChannelId, CreateAttachment, CreateMessage};
 use serenity::http::Http;
 use serenity::model::prelude::ChannelType;
 use serenity::model::id::MessageId;
@@ -25,6 +27,7 @@ pub struct DiscordGatewayActions {
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
     llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
     default_model: String,
+    workspace_root: PathBuf,
 }
 
 impl DiscordGatewayActions {
@@ -35,8 +38,9 @@ impl DiscordGatewayActions {
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
         llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
         default_model: String,
+        workspace_root: PathBuf,
     ) -> Self {
-        Self { http, db, agent_id, tools_config, llm_client, default_model }
+        Self { http, db, agent_id, tools_config, llm_client, default_model, workspace_root }
     }
 
     async fn execute_list_guilds(&self) -> GatewayActionResult {
@@ -714,6 +718,153 @@ impl DiscordGatewayActions {
         }
     }
 
+    async fn execute_send_file(&self, args: &serde_json::Value) -> GatewayActionResult {
+        let channel_id_str = match args.get("channel_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("channel_idパラメータが必要です".to_string()),
+                }
+            }
+        };
+        let file_path_str = match args.get("file_path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("file_pathパラメータが必要です".to_string()),
+                }
+            }
+        };
+        let caption = args.get("caption").and_then(|v| v.as_str()).unwrap_or("");
+        let filename_override = args.get("filename").and_then(|v| v.as_str());
+
+        let channel_id: u64 = match channel_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("無効なchannel_id: {channel_id_str}")),
+                }
+            }
+        };
+
+        // Workspace path validation (security: prevent path traversal)
+        let workspace_root = match self.workspace_root.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("ワークスペースのパス解決に失敗: {e}")),
+                }
+            }
+        };
+
+        let abs_path = if Path::new(file_path_str).is_absolute() {
+            PathBuf::from(file_path_str)
+        } else {
+            workspace_root.join(file_path_str)
+        };
+
+        let canonical = match abs_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("ファイルが見つかりません: {file_path_str}: {e}")),
+                }
+            }
+        };
+
+        if !canonical.starts_with(&workspace_root) {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!("ワークスペース外のファイルは送信できません: {file_path_str}")),
+            };
+        }
+
+        // File size check (25MB limit)
+        let metadata = match tokio::fs::metadata(&canonical).await {
+            Ok(m) => m,
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("ファイル情報の取得に失敗: {e}")),
+                }
+            }
+        };
+        const MAX_FILE_SIZE: u64 = 25 * 1024 * 1024;
+        if metadata.len() > MAX_FILE_SIZE {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!(
+                    "ファイルサイズが25MB制限を超えています: {}bytes",
+                    metadata.len()
+                )),
+            };
+        }
+
+        // Build attachment
+        let mut attachment = match CreateAttachment::path(&canonical).await {
+            Ok(a) => a,
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("ファイル読み込み失敗: {e}")),
+                }
+            }
+        };
+
+        // Apply filename override if specified (レビューメモ: display_nameに設定する)
+        let display_name = if let Some(fname) = filename_override {
+            attachment.filename = fname.to_string();
+            fname.to_string()
+        } else {
+            canonical
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string()
+        };
+
+        // Build message
+        let mut msg = CreateMessage::new().add_file(attachment);
+        if !caption.is_empty() {
+            msg = msg.content(caption);
+        }
+
+        // Send
+        match ChannelId::new(channel_id).send_message(&self.http, msg).await {
+            Ok(_) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "channel_id": channel_id_str,
+                    "file": display_name,
+                    "message": format!("ファイル {} を送信しました", display_name),
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("Discord send_message (file) failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("ファイル送信に失敗: {e}")),
+                }
+            }
+        }
+    }
+
     fn execute_create_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
         let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
         if caller != "owner" && caller != "co_agent" && caller != "trusted_user" {
@@ -1026,6 +1177,32 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["name", "description"]
                 }),
             },
+            GatewayActionDef {
+                name: "discord_send_file".to_string(),
+                description: "Discordチャンネルにファイル（画像等）をアップロードして送信する。ファイルパスはワークスペース内のパスのみ指定可能（パストラバーサル防止）。25MBサイズ制限あり。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "required": ["channel_id", "file_path"],
+                    "properties": {
+                        "channel_id": {
+                            "type": "string",
+                            "description": "送信先チャンネルの数値ID"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "送信するファイルのパス（ワークスペース相対パスまたは絶対パス）"
+                        },
+                        "caption": {
+                            "type": "string",
+                            "description": "ファイルに添付するテキストキャプション（省略可）"
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": "Discord上で表示されるファイル名（省略時は元のファイル名）"
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -1043,6 +1220,7 @@ impl GatewayActions for DiscordGatewayActions {
             "remove_allowed_command" => self.execute_remove_allowed_command(args),
             "rebuild_memory_index" => self.execute_rebuild_memory_index().await,
             "create_skill" => self.execute_create_skill(args),
+            "discord_send_file" => self.execute_send_file(args).await,
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -1064,7 +1242,7 @@ mod tests {
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
         let tools_config = Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
-        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string(), tools_config, None, String::new());
+        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string(), tools_config, None, String::new(), std::path::PathBuf::from("/tmp"));
         (actions, db)
     }
 
@@ -1074,7 +1252,7 @@ mod tests {
     fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 12);
+        assert_eq!(defs.len(), 13);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -1089,6 +1267,7 @@ mod tests {
         assert!(names.contains(&"remove_allowed_command"));
         assert!(names.contains(&"rebuild_memory_index"));
         assert!(names.contains(&"create_skill"));
+        assert!(names.contains(&"discord_send_file"));
     }
 
     #[test]
@@ -1306,5 +1485,33 @@ mod tests {
         })).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("trusted user"));
+    }
+
+    // ---- discord_send_file ----
+
+    #[tokio::test]
+    async fn test_send_file_workspace_violation() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "discord_send_file",
+                &json!({
+                    "channel_id": "12345678901234567",
+                    "file_path": "/etc/passwd",
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("ワークスペース外") || result.error.as_ref().unwrap().contains("見つかりません"));
+    }
+
+    #[tokio::test]
+    async fn test_send_file_missing_params() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute("discord_send_file", &json!({"channel_id": "123"}))
+            .await;
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("file_path"));
     }
 }
