@@ -806,6 +806,14 @@ LLM のターン:
 
 ## 4. 実装ステップ（優先順位付き）
 
+### Phase概要（更新版）
+
+| Phase | 内容 | 優先度 |
+|-------|------|-------|
+| Phase 1（最小実装） | 別セッション生成、steer（sessions_send）、depth制限（MAX_DEPTH=2）、Discord系アクションブロック、タイムアウト、ログトレース | ⭐最優先 |
+| Phase 2 | `ask_parent`実装、出力トランケーション、一次応答LLM生成 | 次フェーズ |
+| Phase 3 | co-agent呼び出し、相互評価システム、スマートなspawn_subtask判断 | 将来 |
+
 ### Phase 1: 最小実装（2〜4時間）⭐最優先
 
 **目標:** もぐたろう状態の解消（一次応答を即送信する）
@@ -1156,9 +1164,193 @@ Cronジョブ → gateway.trigger_agent(task="朝の定例チェック")
 
 ---
 
+## 10. 確定済み設計事項（追加）
+
+> 2026-03-22 確定済み設計事項を追記
+
+### 10.1 サブは別セッション
+
+サブタスク起動時に新しいセッションIDを生成する。
+
+**metadata_json の記録:**
+- サブセッション側: `parent_session_id`, `depth`
+- メインセッション側: `sub_session_id`, `depth`
+
+**クロスセッション参照:**
+```json
+{
+  "cross_session_ref": {
+    "session_id": "<session_id>",
+    "message_id": "<message_id>"
+  }
+}
+```
+`cross_session_ref: {session_id, message_id}` でメッセージ単位のトレースも可能。
+ダッシュボードから親子関係を辿れる設計とする。
+
+### 10.2 steer = サブセッションへのsessions_send
+
+メインからサブセッションにメッセージを送ることでsteer（軌道修正）を実現する。
+
+**管理構造:**
+```rust
+DashMap<subtask_id, (JoinHandle, session_id)>
+```
+
+サブタスクIDをキーに、JoinHandle（tokioタスク）とセッションIDのペアを管理する。
+
+**将来実装:** サブがmpscチャンネルを持ちsteerをリアルタイム受信できるようにする（Phase 2以降）。
+
+### 10.3 depth上限: MAX_DEPTH=2（3段階: 0→1→2）
+
+```rust
+const MAX_DEPTH: u8 = 2;
+```
+
+| depth | 意味 | spawn_subtask |
+|-------|------|---------------|
+| 0 | メインエンジン（Discordメッセージに直接応答） | ✅ 使用可 |
+| 1 | サブエンジン（メインから呼ばれた） | ✅ 使用可（MAX_DEPTH未満） |
+| 2 | サブのサブ（depth=1から呼ばれた） | ❌ 使用不可（MAX_DEPTH到達） |
+
+depth >= MAX_DEPTH(=2) のエンジンは `spawn_subtask` ツールを使用不可。
+
+> **注:** 既存の設計（3.7節・8節）では depth=1 以上でブロックとしていたが、
+> MAX_DEPTH=2（つまり3段階）に更新する。depth=1 のサブエンジンはサブのサブを起動できる。
+
+### 10.4 depth≥1でDiscord系アクション全ブロック
+
+`discord_send`、`discord_send_file` など、Discordに直接送るアクションは **depth≥1で全て禁止**。
+
+サブの出力はDiscordに流さず、セッション履歴のみに記録してメインに渡す。
+
+```rust
+impl BridgedExecutor {
+    pub fn new(actions: Vec<Box<dyn Action>>, depth: u8) -> Self {
+        let filtered_actions = if depth >= 1 {
+            actions.into_iter()
+                .filter(|a| {
+                    // Discord系アクションをすべてブロック
+                    !matches!(a.name(), "discord_send" | "discord_send_file" | "spawn_subtask" /* depth>=MAX_DEPTH */)
+                })
+                .collect()
+        } else {
+            actions
+        };
+        BridgedExecutor { actions: filtered_actions }
+    }
+}
+```
+
+> depth=0 のみがDiscordに直接応答できる。サブエンジンはセッション履歴に書き込むのみ。
+
+### 10.5 サブ→メインへの質問: ask_parent ツールコール方式
+
+**Phase 2実装予定。Phase 1では実装しない（一方向のみ: メイン→サブへのsteerのみ）。**
+
+`ask_parent(question: String)` をgateway actionとして実装する。
+
+**サブのLLMコンテキストでの記録（自然なツールコール形式）:**
+```
+user: 「aaaを始めよ」
+assistant: [tool_call: ask_parent("xxxはどういう意味ですか？")]
+tool_result: 「それはyyyやで。」
+assistant: 「aaaを始めます」
+```
+
+コンテキストが崩れず、ログも自然に辿れる。
+
+**実装方針:**
+- Phase 1: `ask_parent` は実装しない。一方向のみ（メイン→サブへのsteer）。
+- Phase 2: `ask_parent` を gateway action として実装。サブがメインに質問し、メインがDiscord経由でユーザーに確認→回答をサブに返す。
+
+### 10.6 ログ追跡の設計
+
+全セッションのログに以下を記録する:
+
+```json
+{
+  "depth": 0,
+  "parent_session_id": null
+}
+```
+
+```json
+{
+  "depth": 1,
+  "parent_session_id": "<親セッションID>"
+}
+```
+
+- `cross_session_ref` でメッセージ単位の参照も可能
+- ダッシュボードでセッションツリーを可視化できる形
+
+### 10.7 サブのコンテキスト（ログ）設計
+
+サブには以下を渡す:
+- システムプロンプト（人格・スキル）
+- タスク指示
+- 直近コンテキスト（全セッション履歴は渡さない）
+
+全セッション履歴を渡すとコンテキスト爆発するため不可。
+
+**出力トランケーション（Phase 2）:**
+サブの出力（execute_shell等）が大きい場合はトランケーション（上限は設定値で）。
+
+### 10.8 タイムアウト
+
+サブタスクにはタイムアウト設定を設ける（configで変更可能、デフォルト300秒）。
+
+```toml
+[subtask]
+timeout_seconds = 300  # デフォルト5分
+```
+
+**タイムアウト時の処理:**
+1. メインに通知
+2. メインがDiscordにエラーメッセージを送信
+3. サブタスクのJoinHandleをabortし、子プロセスもkill（プロセスグループkill）
+
+```rust
+// タイムアウト付きspawn
+tokio::spawn(async move {
+    tokio::select! {
+        result = run_subtask(...) => { handle_result(result).await; }
+        _ = tokio::time::sleep(Duration::from_secs(timeout_seconds)) => {
+            // タイムアウト処理
+            notify_main_timeout(&session_id).await;
+            // 子プロセスグループkill
+            kill_process_group(subtask_pgid).await;
+        }
+    }
+});
+```
+
+### 10.9 将来実装メモ（フューチャービジョン）
+
+#### co-agent呼び出し
+同一マシン上のco-agent（らぼみ、しのえもん等）をサブとして呼び出せる。
+
+```
+メインエンジン(かいろ) → spawn_subtask → co-agent(らぼみ) として呼び出し
+```
+
+#### 相互評価システム
+呼び出し側・被呼び出し側が相互に評価を記録する。
+- データが蓄積すると各エージェントの得意分野が明らかになる
+- 最適なエージェントへの自動委譲が可能になる
+
+#### Agentic RAG
+サブが記憶検索スキルを使って情報を掘り出し→メインに返す。
+（既存の7.3節参照。この方向性をco-agent呼び出しとも組み合わせる）
+
+---
+
 *作成: のすたろう, 2026-03-22*
 *設計確定: 2026-03-22（サブ結果→メインフィードバック方式に変更）*
 *2026-03-22 追記: サブタスクもフルSkillEngine（かいろ同等構成）で動かす設計に確定*
 *2026-03-22 追記: depth制限（再帰防止）設計を追加*
 *レビュー: のすたろう・らぼみ・kojira（TODO #19）*
 *2026-03-22 追記: spawn_subtask gateway action + 案Dとの統合設計を追加（かいろの自発的サブタスク起動）*
+*2026-03-22 追記: 確定済み設計事項（サブ別セッション・steer・depth上限MAX_DEPTH=2・Discord系アクションブロック・ask_parent・ログ追跡・サブコンテキスト・タイムアウト・フューチャービジョン）を追加*
+*2026-03-22 追記: Phase分け更新（Phase1=別セッション+steer+depth+ブロック+TO+ログ / Phase2=ask_parent+トランケーション / Phase3=co-agent）*
