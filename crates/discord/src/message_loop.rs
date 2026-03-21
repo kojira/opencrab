@@ -171,7 +171,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     Some(u) if u.permission == "owner" => {
                         opencrab_actions::CallerIdentity::Owner
                     }
-                    _ => opencrab_actions::CallerIdentity::Agent,
+                    Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
+                    None => opencrab_actions::CallerIdentity::Agent,
                 }
             }
         };
