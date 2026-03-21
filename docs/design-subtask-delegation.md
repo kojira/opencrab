@@ -708,6 +708,269 @@ impl ActionExecutor for BridgedExecutor {
 
 ---
 
+## 7. サブエンジンのアーキテクチャ: 人格・スキルを持つSkillEngine
+
+### 7.1 サブタスクは単純なシェル実行器ではない
+
+**重要な設計判断:** バックグラウンドタスク（サブエンジン）は、
+メインエンジンと **同じ `run_agent_response` の仕組み** で動く。
+
+```
+メインエンジン (depth=0)
+  ├─ LLM: claude-sonnet (フルコンテキスト)
+  ├─ スキル: 全スキル有効
+  ├─ パーソナリティ: かいろのシステムプロンプト（長め）
+  └─ ループ: max_iterations=20
+
+サブエンジン (depth=1)
+  ├─ LLM: 同じモデル or 軽量モデル（設定可）
+  ├─ スキル: 同じスキルセット（spawn_subtaskのみ無効化）
+  ├─ パーソナリティ: タスク指向の短いシステムプロンプト
+  └─ ループ: max_iterations=20（または専用上限）
+```
+
+サブエンジンも `SkillEngine::new(llm, executor, max_iterations)` で生成される完全なエージェント。
+「シェルコマンドを実行して終わり」ではなく、必要なら複数のツールを組み合わせて自律的に問題を解く。
+
+### 7.2 サブ用システムプロンプト
+
+メインとサブでシステムプロンプトの目的が異なる:
+
+| 項目 | メインエンジン | サブエンジン |
+|------|--------------|-------------|
+| 目的 | キャラクターとして会話・応答 | タスクを遂行して結果を返す |
+| 長さ | 長め（人格・記憶・文脈） | 短め（タスク指向） |
+| キャラクター | かいろのフルパーソナリティ | 最小限（タスク完遂が優先） |
+| 出力形式 | Discordメッセージ（自然な文章） | 構造化された結果（後でLLMが解釈） |
+
+**サブ用システムプロンプトのテンプレート（案）:**
+```
+あなたはバックグラウンドタスクエージェントです。
+以下のタスクを遂行し、結果を簡潔に返してください。
+結果はメインエージェントがユーザーに伝えます。
+
+タスク: {task_description}
+```
+
+### 7.3 Agentic RAG パターン
+
+サブエンジンがスキルを持つことで、より高度な自律タスクが実現できる:
+
+```
+ユーザー: 「先月の会話から画像生成に関する話を全部まとめて」
+
+[メインエンジン (depth=0)]
+  ↓ spawn_subtask("セッション履歴から画像生成に関する会話を検索・抽出")
+
+[サブエンジン (depth=1)]
+  ↓ memory_search_skill("画像生成", date_range="last_month")  ← スキル使用
+  ↓ memory_search_skill("image generation", ...)             ← 複数クエリ
+  ↓ 結果をまとめて subtask_result として返す
+
+[メインエンジン (depth=0)]
+  ↓ subtask_result を受け取り、かいろとして解釈・整形
+  ↓ Discordに最終応答
+```
+
+このパターンは **Agentic RAG** と呼ばれ、サブエージェントが能動的に情報を掘り出し、
+メインエージェントが豊富な文脈で応答する設計。
+
+---
+
+## 8. depth制限: 再帰無限ループの防止
+
+### 8.1 問題: スポーンの連鎖
+
+サブエンジンも `spawn_subtask` ツールを使えると、以下の無限ループが発生しうる:
+
+```
+メイン → サブ1 → サブ2 → サブ3 → ... → 無限
+```
+
+### 8.2 解決策: depth パラメータ
+
+`SkillEngine` または `run_agent_response` に `depth: usize` を追加し、
+depth >= 1 の場合は `spawn_subtask` ツールをツールリストから除外する。
+
+```rust
+// crates/server/src/process.rs
+pub async fn run_agent_response(
+    // ... 既存パラメータ ...
+    depth: usize,  // 追加: 0=メイン, 1=サブ, 将来的に2以上も
+) -> Result<EngineResult, Error> {
+
+    // depth に応じてツールリストをフィルタリング
+    let executor = BridgedExecutor::new(
+        actions,
+        depth,  // depth を渡す
+    );
+
+    let engine = SkillEngine::new(llm, executor, 20);
+    engine.run_with_model_override(...).await
+}
+```
+
+```rust
+// crates/server/src/bridge.rs（またはactions側）
+impl BridgedExecutor {
+    pub fn new(actions: Vec<Box<dyn Action>>, depth: usize) -> Self {
+        let filtered_actions = if depth >= 1 {
+            // depth >= 1 では spawn_subtask を除外
+            actions.into_iter()
+                .filter(|a| a.name() != "spawn_subtask")
+                .collect()
+        } else {
+            actions
+        };
+
+        BridgedExecutor { actions: filtered_actions }
+    }
+}
+```
+
+### 8.3 depth の意味
+
+| depth | 説明 | spawn_subtask |
+|-------|------|--------------|
+| 0 | メインエンジン（Discordメッセージに直接応答） | ✅ 使用可 |
+| 1 | サブエンジン（バックグラウンドタスク） | ❌ 除外 |
+| 2以上 | 将来的な多段サブ（現時点では未使用） | ❌ 除外 |
+
+**設計判断:** depth=1 以上では一律 `spawn_subtask` を除外する。
+これにより再帰の深さを 1 レベルに限定でき、リソース枯渇を防げる。
+
+### 8.4 関連する変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `crates/server/src/process.rs` | `run_agent_response` に `depth: usize` 引数追加 |
+| `crates/server/src/bridge.rs` | `BridgedExecutor::new` で depth>=1 時にフィルタリング |
+| `crates/discord/src/message_loop.rs` | メイン呼び出し時は `depth=0`、バックグラウンド時は `depth=1` |
+
+---
+
+## 9. LLMが自発的にspawn_subtaskを呼べる設計（案A+D統合）
+
+### 9.1 背景: 案Aと案Dの融合
+
+[セクション2の案A・案D]を組み合わせた **最終設計**:
+
+- **案A** のバックグラウンド化フローを基盤とする
+- **案D** の「LLMが自分でspawnを判断できる」設計を `spawn_subtask` ゲートウェイアクションとして実装
+
+```
+[従来の案A]
+message_loop.rs が強制的にバックグラウンド化
+  → LLMに委譲の判断権がない
+
+[案A+D統合]
+spawn_subtask ツールをメインエンジン(depth=0)に提供
+  → LLMが自分でいつでも spawn_subtask を呼べる
+  → メッセージ受信以外のトリガー（ハートビート・定期タスク）でも動く
+```
+
+### 9.2 spawn_subtask の実装方針
+
+`spawn_subtask` を **gateway action** として実装する:
+
+```rust
+// crates/actions/src/spawn_subtask.rs（新規）
+pub struct SpawnSubtaskAction {
+    app_state: Arc<AppState>,
+    channel_id: u64,
+    depth: usize,  // 呼び出し元のdepth（depth=0のみ使用可）
+}
+
+impl Action for SpawnSubtaskAction {
+    fn name(&self) -> &str { "spawn_subtask" }
+
+    fn description(&self) -> &str {
+        "時間のかかるタスクをバックグラウンドで実行します。
+        画像生成・大量検索・シェルコマンド等、10秒以上かかりそうな処理に使用してください。"
+    }
+
+    async fn execute(&self, params: Value) -> Result<String, Error> {
+        let task_description = params["task"].as_str()?;
+
+        tokio::spawn(async move {
+            // サブエンジン（depth=1）でタスク実行
+            let result = self.app_state.run_agent_response(
+                agent_id, session_id,
+                subtask_system_prompt,
+                vec![Message::user(task_description)],
+                depth: 1,  // サブエンジン
+            ).await;
+
+            // 結果をセッション履歴に追加
+            self.app_state.append_subtask_result(session_id, result).await;
+
+            // メインエンジンを再度トリガー（コールバック）
+            self.app_state.trigger_main_engine_callback(
+                channel_id, session_id
+            ).await;
+        });
+
+        // 即座に「バックグラウンドで開始しました」を返す
+        Ok("バックグラウンドタスクを開始しました。完了後に結果をお知らせします。".to_string())
+    }
+}
+```
+
+### 9.3 フロー例: 画像生成リクエスト
+
+```
+ユーザー: 「猫の画像を生成して」
+
+[メインエンジン (depth=0)]
+LLM判断: 「時間かかりそう → spawn_subtask を使おう」
+  ↓ ack メッセージを Discord に返す: 「了解！バックグラウンドで生成するね ⚡」
+  ↓ spawn_subtask({"task": "猫の画像を生成してURLを返す"}) を呼ぶ
+  ↓ 「バックグラウンドで開始しました」を受け取り、ループ終了
+
+[サブエンジン (depth=1), バックグラウンド]
+  ↓ 画像生成ツール実行（数十秒）
+  ↓ 結果（画像URL等）を subtask_result としてセッション履歴に追加
+  ↓ メインエンジン再トリガー
+
+[メインエンジン (depth=0), 再呼び出し]
+  ↓ subtask_result（画像URL）を受け取り
+  ↓ Discordに最終応答: 「生成できたよ！[画像URL] 猫かわいいじゃん ⚡」
+```
+
+### 9.4 メッセージ以外のトリガー
+
+`spawn_subtask` が gateway action として独立することで、
+**ユーザーメッセージ以外のトリガーでもサブを起動できる**:
+
+```
+[ハートビートトリガー]
+定期実行 → メインエンジン起動（ユーザーメッセージなし）
+  ↓ LLMが spawn_subtask("メールチェック")、spawn_subtask("カレンダー確認") を呼ぶ
+  ↓ 各サブエンジンが並行実行
+  ↓ 全完了後、メインエンジンが集約してまとめ報告
+
+[自律タスクトリガー]
+Cronジョブ → gateway.trigger_agent(task="朝の定例チェック")
+  ↓ メインエンジン起動 → spawn_subtask で各チェックを委譲
+  ↓ 結果集約 → Discordに送信
+```
+
+### 9.5 案Aとの違いと統合方針
+
+| 観点 | 案A（既存設計） | 案A+D統合（本設計） |
+|------|--------------|-------------------|
+| spawn判断 | `message_loop.rs` が強制的に判断 | LLMが文脈に応じて自律判断 |
+| トリガー | Discordメッセージのみ | メッセージ・ハートビート・Cron等 |
+| 実装箇所 | `message_loop.rs` | `spawn_subtask` gateway action |
+| 柔軟性 | 低（固定ルール） | 高（LLMが判断） |
+| 実装難易度 | 低 | 中 |
+
+**実装優先度:**
+- Phase 1（最小実装）: 案Aの強制バックグラウンド化を先に実装
+- Phase 3（高度機能）: `spawn_subtask` action を追加して案A+D統合へ移行
+
+---
+
 *作成: のすたろう, 2026-03-22*
 *設計確定: 2026-03-22（サブ結果→メインフィードバック方式に変更）*
 *2026-03-22 追記: サブタスクもフルSkillEngine（かいろ同等構成）で動かす設計に確定*
