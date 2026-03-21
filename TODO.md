@@ -95,3 +95,8 @@
     - 現状: cwdがサーバー起動ディレクトリ（opencrabルート）になっている
     - 修正: `cmd.current_dir(&ctx.workspace.root)` でワークスペースをcwdに設定
     - 効果: スクリプトやファイルパスが相対パスで書けるようになり可搬性が上がる
+
+22. **Discord添付画像のvision対応**
+    - 現状: LLMレイヤーに`ImageUrl`/`supports_vision`実装あるが、Discord添付→LLMパイプラインが未接続
+    - 修正: `message_loop.rs`でDiscordの`attachments`を取得し、画像URLをLLMの`ContentPart::ImageUrl`として渡す
+    - 効果: かいろがDiscordで送られた画像を理解できるようになる
