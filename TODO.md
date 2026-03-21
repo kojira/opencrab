@@ -27,9 +27,10 @@
      - heartbeat_logにchannel_idを記録（result_json=channel_id=...）
      - E2Eテスト: kairo-test(1470698801395273861)への自発投稿確認済み
 
-7. ~~**ツリー再マージ・インデックス再構築のDiscord E2E確認**~~ ✅ 完了（2026-03-22）
-   - DB確認: memory_index_nodes 78件・watermark 2026-03-21T19:18 更新済み
-   - kairo-test でかいろが実際にインデックス再構築を実行した記録あり
+7. **ツリー再マージ・インデックス再構築のDiscord E2E確認**
+   - cargo testは通過済み、DBにインデックス78件あり（自動構築？）
+   - Claude設定後にDiscord経由で `rebuild_memory_index` をかいろが実行したエビデンスなし
+   - kairo-testで「メモリインデックスを再構築して」と指示して確認が必要
 
 8. ~~**一般ユーザーからのメッセージへの反応確認**~~ ✅ 完了（2026-03-21、kojiraさんが「自己紹介して」でかいろ返答確認済み）
 
