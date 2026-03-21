@@ -155,7 +155,7 @@ cargo run -p opencrab-cli
 
 ## Action System
 
-The ActionDispatcher registers **27 actions** across 7 categories, invokable by agents during conversations:
+The ActionDispatcher registers **26 actions** across 6 categories, invokable by agents during conversations:
 
 | Category | Actions | Description |
 |----------|---------|-------------|
@@ -164,6 +164,16 @@ The ActionDispatcher registers **27 actions** across 7 categories, invokable by 
 | **Learning** (3) | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
 | **Search & Memory** (5) | `search_my_history`, `summarize_and_save`, `create_my_skill`, `browse_memory_index`, `retrieve_memory_nodes` | Memory search, curation, and Agentic RAG |
 | **LLM** (5) | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
+| **Shell** (1) | `execute_shell` | Run shell commands from the agent's allowed command list |
+
+In addition, the Discord gateway supports **gateway-only actions** invokable via natural language:
+
+| Category | Actions |
+|----------|---------|
+| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction` |
+| **Skills** | `create_skill`, `list_duplicate_skills`, `merge_skills` |
+| **Memory** | `rebuild_memory_index`, `update_memory_index_config` |
+| **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command` |
 
 ## Skills
 
