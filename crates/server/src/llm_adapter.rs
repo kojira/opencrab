@@ -170,13 +170,30 @@ fn to_llm_message(msg: ChatMessage) -> Message {
         )
     };
 
+    // Build content: if content_parts is non-empty, use multimodal MessageContent::Multi
+    let content = if !msg.content_parts.is_empty() {
+        use opencrab_core::ChatContentPart;
+        use opencrab_llm::message::{ContentPart as LlmContentPart, ImageUrl};
+        let parts: Vec<LlmContentPart> = msg.content_parts.into_iter()
+            .map(|p| match p {
+                ChatContentPart::Text { text } => LlmContentPart::Text { text },
+                ChatContentPart::ImageUrl { url, detail } => {
+                    LlmContentPart::ImageUrl {
+                        image_url: ImageUrl { url, detail },
+                    }
+                }
+            })
+            .collect();
+        Some(MessageContent::Multi(parts))
+    } else if msg.content.is_empty() {
+        None
+    } else {
+        Some(MessageContent::Text(msg.content))
+    };
+
     Message {
         role,
-        content: if msg.content.is_empty() {
-            None
-        } else {
-            Some(MessageContent::Text(msg.content))
-        },
+        content,
         name: None,
         function_call: None,
         tool_calls,
@@ -257,6 +274,7 @@ mod tests {
             content: "You are helpful.".to_string(),
             tool_call_id: None,
             tool_calls: vec![],
+            content_parts: vec![],
         };
         let llm_msg = to_llm_message(msg);
         assert_eq!(llm_msg.role, Role::System);
@@ -274,6 +292,7 @@ mod tests {
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
             }],
+            content_parts: vec![],
         };
         let llm_msg = to_llm_message(msg);
         assert_eq!(llm_msg.role, Role::Assistant);
@@ -336,5 +355,31 @@ mod tests {
         assert_eq!(simple.tool_calls[0].name, "learn");
         assert_eq!(simple.tool_calls[0].arguments["skill"], "test");
         assert_eq!(simple.finish_reason, "tool_calls");
+    }
+
+    #[test]
+    fn test_to_llm_message_with_image_parts() {
+        use opencrab_core::ChatContentPart;
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            content_parts: vec![
+                ChatContentPart::Text { text: "What is this?".to_string() },
+                ChatContentPart::ImageUrl {
+                    url: "https://cdn.discordapp.com/attachments/123/456/test.png".to_string(),
+                    detail: Some("auto".to_string()),
+                },
+            ],
+        };
+        let llm_msg = to_llm_message(msg);
+        assert_eq!(llm_msg.role, Role::User);
+        match llm_msg.content {
+            Some(MessageContent::Multi(parts)) => {
+                assert_eq!(parts.len(), 2);
+            }
+            other => panic!("Expected Multi content, got {:?}", other),
+        }
     }
 }

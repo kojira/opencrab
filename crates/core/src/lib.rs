@@ -33,5 +33,5 @@ pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use engine::{
     SkillEngine, ActionExecutor, ActionResult, LlmClient,
     ChatRequestSimple, ChatResponseSimple, ChatMessage,
-    ToolDefinition, ToolCall, UsageInfo, EngineResult,
+    ToolDefinition, ToolCall, UsageInfo, EngineResult, ChatContentPart,
 };
