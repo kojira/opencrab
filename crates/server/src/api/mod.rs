@@ -5,4 +5,5 @@ pub mod sessions;
 pub mod skills;
 pub mod memory;
 pub mod trusted_users;
+pub mod channel_configs;
 pub mod workspace;
