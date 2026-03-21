@@ -327,7 +327,7 @@ impl SkillEngine {
             }
 
             // No tool calls: this is the final response.
-            let final_text = strip_function_call_xml(&response.content.unwrap_or_default());
+            let final_text = response.content.unwrap_or_default();
 
             if final_text.is_empty() {
                 tracing::debug!(
@@ -343,30 +343,6 @@ impl SkillEngine {
             });
         }
     }
-}
-
-/// Strip any `<function_calls>...</function_calls>` XML blocks that the LLM
-/// may have emitted verbatim instead of executing them. This prevents raw XML
-/// from leaking into user-facing messages (e.g. Discord).
-fn strip_function_call_xml(text: &str) -> String {
-    const OPEN_TAG: &str = "<function_calls>";
-    const CLOSE_TAG: &str = "</function_calls>";
-
-    let mut result = text.to_string();
-    loop {
-        let Some(start) = result.find(OPEN_TAG) else {
-            break;
-        };
-        let Some(end) = result[start..].find(CLOSE_TAG) else {
-            // Opening tag without closing tag – remove from the opening tag to end of string.
-            result.truncate(start);
-            break;
-        };
-        let remove_end = start + end + CLOSE_TAG.len();
-        result.replace_range(start..remove_end, "");
-    }
-    let trimmed = result.trim_end();
-    trimmed.to_string()
 }
 
 /// The result of an engine run.
@@ -661,29 +637,5 @@ mod tests {
         assert_eq!(models[0], "default-model"); // First call uses default.
         // Second call should use the overridden model (race condition safe - set before tool call finishes).
         // Due to timing, it might be either; the important thing is the mechanism works.
-    }
-
-    #[test]
-    fn test_strip_single_function_calls_block() {
-        let input = "<function_calls>\n<invoke name=\"foo\"><param>bar</param></invoke>\n</function_calls>";
-        assert_eq!(strip_function_call_xml(input), "");
-    }
-
-    #[test]
-    fn test_strip_function_calls_preserves_surrounding_text() {
-        let input = "Hello!\n<function_calls>\n<invoke name=\"x\"/>\n</function_calls>\nGoodbye!";
-        assert_eq!(strip_function_call_xml(input), "Hello!\n\nGoodbye!");
-    }
-
-    #[test]
-    fn test_strip_function_calls_no_block() {
-        let input = "Just a normal message with no XML.";
-        assert_eq!(strip_function_call_xml(input), input);
-    }
-
-    #[test]
-    fn test_strip_multiple_function_calls_blocks() {
-        let input = "Start <function_calls>block1</function_calls> middle <function_calls>block2</function_calls> end";
-        assert_eq!(strip_function_call_xml(input), "Start  middle  end");
     }
 }
