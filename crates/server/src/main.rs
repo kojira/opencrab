@@ -113,6 +113,20 @@ fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
             return uuid.clone();
         }
     }
+    // シングルエージェントフォールバック: DBに登録済みのエージェントが1つだけの場合はそれを使う
+    // (config名"crab"などがDBの名前と一致しない場合の対応)
+    if let Ok(all_agents) = opencrab_db::queries::find_agents(conn, "") {
+        if all_agents.len() == 1 {
+            let (uuid, name) = &all_agents[0];
+            tracing::info!(
+                config_id = %agent_id,
+                uuid = %uuid,
+                name = %name,
+                "Resolved agent_id to only registered agent (single-agent fallback)"
+            );
+            return uuid.clone();
+        }
+    }
     tracing::warn!(agent_id = %agent_id, "Could not resolve agent_id to UUID, using as-is");
     agent_id.to_string()
 }
