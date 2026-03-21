@@ -24,6 +24,8 @@ pub struct DiscordGatewayActions {
     db: Arc<Mutex<rusqlite::Connection>>,
     agent_id: String,
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
+    llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
+    default_model: String,
 }
 
 impl DiscordGatewayActions {
@@ -32,8 +34,10 @@ impl DiscordGatewayActions {
         db: Arc<Mutex<rusqlite::Connection>>,
         agent_id: String,
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
+        llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
+        default_model: String,
     ) -> Self {
-        Self { http, db, agent_id, tools_config }
+        Self { http, db, agent_id, tools_config, llm_client, default_model }
     }
 
     async fn execute_list_guilds(&self) -> GatewayActionResult {
@@ -490,6 +494,63 @@ impl DiscordGatewayActions {
         }
     }
 
+    async fn execute_rebuild_memory_index(&self) -> GatewayActionResult {
+        let llm_client = match &self.llm_client {
+            Some(client) => client.clone(),
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("LLMクライアントが設定されていません".to_string()),
+                }
+            }
+        };
+
+        let config = {
+            let conn = self.db.lock().unwrap();
+            opencrab_db::queries::get_memory_index_config(&conn, &self.agent_id)
+                .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
+                    agent_id: self.agent_id.clone(),
+                    batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
+                    threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
+                    updated_at: String::new(),
+                })
+        };
+
+        match opencrab_core::memory_index::IndexBuilder::rebuild_index(
+            &self.db,
+            &self.agent_id,
+            llm_client.as_ref(),
+            &self.default_model,
+            config.batch_size as usize,
+        )
+        .await
+        {
+            Ok(result) => GatewayActionResult {
+                success: true,
+                data: Some(serde_json::json!({
+                    "agent_id": self.agent_id,
+                    "logs_indexed": result.logs_indexed,
+                    "nodes_created": result.nodes_created,
+                    "message": format!(
+                        "メモリインデックスを再構築しました（{}件のログ → {}ノード作成）",
+                        result.logs_indexed,
+                        result.nodes_created,
+                    ),
+                })),
+                error: None,
+            },
+            Err(e) => {
+                error!("rebuild_memory_index failed: {e}");
+                GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("メモリインデックスの再構築に失敗: {e}")),
+                }
+            }
+        }
+    }
+
     fn execute_add_allowed_command(&self, args: &serde_json::Value) -> GatewayActionResult {
         let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
         if caller != "owner" {
@@ -820,6 +881,15 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["command"]
                 }),
             },
+            GatewayActionDef {
+                name: "rebuild_memory_index".to_string(),
+                description: "メモリインデックスをゼロから再構築する。既存のインデックスを削除し、全ログを再インデックスする。時間がかかることがある。結果として logs_indexed（処理したログ数）と nodes_created（作成したインデックスノード数）を返す。".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
         ]
     }
 
@@ -835,6 +905,7 @@ impl GatewayActions for DiscordGatewayActions {
             "add_allowed_command" => self.execute_add_allowed_command(args),
             "list_allowed_commands" => self.execute_list_allowed_commands(),
             "remove_allowed_command" => self.execute_remove_allowed_command(args),
+            "rebuild_memory_index" => self.execute_rebuild_memory_index().await,
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -856,7 +927,7 @@ mod tests {
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
         let tools_config = Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
-        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string(), tools_config);
+        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string(), tools_config, None, String::new());
         (actions, db)
     }
 
@@ -866,7 +937,7 @@ mod tests {
     fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 10);
+        assert_eq!(defs.len(), 11);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -879,6 +950,7 @@ mod tests {
         assert!(names.contains(&"add_allowed_command"));
         assert!(names.contains(&"list_allowed_commands"));
         assert!(names.contains(&"remove_allowed_command"));
+        assert!(names.contains(&"rebuild_memory_index"));
     }
 
     #[test]

@@ -1479,3 +1479,61 @@ POST /api/agents/{id}/memory/index/rebuild
 - ⚠️ エージェントが「再構築した」と誤った返答をする（ゲートウェイアクション未実装のため）
 - 📋 **改善提案:** `rebuild_memory_index` ゲートウェイアクションの追加が必要
 
+
+---
+
+## Task 7b: rebuild_memory_index ゲートウェイアクション実装 (2026-03-21)
+
+### 実装内容
+
+`crates/discord/src/gateway_actions.rs` に `rebuild_memory_index` ゲートウェイアクションを追加した。
+
+#### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `crates/discord/src/gateway_actions.rs` | `llm_client`/`default_model`フィールド追加、`execute_rebuild_memory_index()`メソッド追加、definitions/execute更新 |
+| `crates/discord/src/lib.rs` | `AgentRunner`トレイトに`create_llm_client()`と`default_model()`追加 |
+| `crates/discord/src/manager.rs` | `DiscordGatewayActions::new()`にLlmClient注入 |
+| `crates/server/src/agent_runner_impl.rs` | `AppState`に`create_llm_client()`と`default_model()`実装 |
+| `crates/server/src/main.rs` | メインゲートウェイへのLlmClient注入 |
+
+### ビルド確認
+
+```
+cargo build --features discord
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.62s
+```
+
+### E2Eテスト結果
+
+**テスト方法:** Discord kairo-testチャンネル（1470698801395273861）に自然言語でメッセージ送信
+
+**メッセージ:**
+```
+かいろ、メモリインデックスを再構築してください。何件のログをインデックスしたか教えて。
+```
+
+**かいろの返答:**
+```
+メモリインデックスを再構築しました。30件のログをインデックスして、6つのノードを作成しました。
+他に何かお手伝いできることがあれば教えてください！
+```
+
+**確認事項:**
+
+| 確認項目 | 結果 |
+|---------|------|
+| rebuild_memory_index アクション定義あり | ✅ |
+| かいろが rebuild_memory_index を呼び出した | ✅ (tool_calls_made: 1) |
+| 実際の再構築が実行された | ✅ (logs_indexed=30, nodes_created=6) |
+| 正確な数値を返答 | ✅ |
+| 嘘の返答なし | ✅ |
+| ビルド成功 | ✅ |
+
+### 失敗→修正の経緯
+
+1. **初回失敗**: `manager.rs`で`llm_client=None`を渡していたため「設定の問題で実行できませんでした」エラー
+2. **修正**: `AgentRunner`トレイトに`create_llm_client()`と`default_model()`を追加してper-agentゲートウェイでもLlmClientを注入可能にした
+3. **再テスト**: 成功
+

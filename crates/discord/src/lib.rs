@@ -52,4 +52,10 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         gateway_actions: Option<Arc<dyn GatewayActions>>,
         caller: opencrab_actions::CallerIdentity,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
+
+    /// エージェントのLLMクライアントを生成する。
+    fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient>;
+
+    /// デフォルトモデル名を返す。
+    fn default_model(&self) -> String;
 }

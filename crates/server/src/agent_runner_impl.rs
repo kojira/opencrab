@@ -59,4 +59,12 @@ impl opencrab_discord::AgentRunner for AppState {
         )
         .await
     }
+
+    fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient> {
+        Arc::new(crate::llm_adapter::LlmRouterAdapter::new(self.llm_router.clone()))
+    }
+
+    fn default_model(&self) -> String {
+        self.default_model.clone()
+    }
 }
