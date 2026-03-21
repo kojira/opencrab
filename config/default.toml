@@ -25,7 +25,7 @@ allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
 
 # フォールバックチェーン
 [llm.fallback]
-chain = ["openai", "anthropic", "openrouter", "ollama"]
+chain = ["anthropic", "ollama"]
 
 # OpenAI設定
 [llm.providers.openai]
