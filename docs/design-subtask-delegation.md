@@ -1,7 +1,7 @@
 # 設計ドキュメント: サブタスク委譲アーキテクチャ（もぐたろう防止）
 
-> TODO #19 — 一次回答 + バックグラウンド処理分離  
-> ステータス: 設計中（レビュー待ち: のすたろう・らぼみ・kojira）
+> TODO #19 — 一次回答 + バックグラウンド処理分離
+> ステータス: **設計確定**（フロー確定: 2026-03-22）
 
 ---
 
@@ -88,13 +88,29 @@ message_loop.rs::run_discord_loop()
 
 ### 案A: 即時一次応答 + 残り処理を非同期タスクとして spawn ⭐推奨
 
+> **[2026-03-22 更新]** 案Aの変更点:
+> - 変更前: バックグラウンド完了後に直接Discord送信
+> - 変更後: バックグラウンド完了後 → セッション履歴追加 → メインエンジン再呼び出し → Discord送信
+
 **概要:**
 1. メッセージ受信後、まず「少し待って、処理中だよ」等の一次応答を即送信
 2. 残りの処理（SkillEngine 実行）を `tokio::spawn` でバックグラウンドに委譲
-3. 処理完了後、結果を Discord に送信
+3. 処理完了後、結果をセッション履歴に追加
+4. メインエンジンを再度呼び出し、LLMが結果を解釈してかいろらしく最終応答を生成
+5. 最終応答を Discord に送信
 
 ```
-受信 → 一次応答を即送信 → tokio::spawn(engine実行) → 完了後に結果送信
+受信 → 一次応答(ack)を即送信
+     ↓
+     tokio::spawn でバックグラウンド処理開始
+     ↓
+     バックグラウンド処理完了
+     ↓
+     セッション履歴に subtask_result を追加
+     ↓
+     メインエンジン再呼び出し（LLMがsubtask_resultを解釈）
+     ↓
+     最終応答（かいろの口調）をDiscordに送信
 ```
 
 **メリット:**
@@ -217,36 +233,46 @@ match result {
 
 変更後:
 ```rust
-// Step 1: 一次応答を即座に送信
-let ack_msg = generate_ack_message(&text);  // "少し待ってね" 等
+// Step 1: 一次応答を即座に送信（変更なし）
+let ack_msg = generate_ack_message(&text);
 gateway.send_to_channel(channel_id, &ack_msg).await?;
-
-// Log ack to session
 log_agent_ack(&state, &session_id, agent_id, &ack_msg);
 
-// Step 2: 残り処理をバックグラウンドで実行
+// Step 2: 長い処理をバックグラウンドで実行（フロー変更）
 let bg_state = state.clone();
 let bg_session_id = session_id.clone();
 let bg_channel_id = channel_id;
 let bg_gateway = gateway.clone();
-// ... その他必要な引数のクローン
 
 tokio::spawn(async move {
-    let result = bg_state.run_agent_response(
-        agent_id, agent_name, session_id, system_prompt, conversation,
+    // [新フロー] バックグラウンドで処理（execute_shell等）を実行
+    let bg_result = bg_state.run_background_task(
+        agent_id, session_id, system_prompt, conversation,
+    ).await;
+
+    // [新フロー] 結果をセッション履歴に追加（Discordには直接送信しない）
+    bg_state.append_to_session_history(
+        &bg_session_id,
+        SessionMessage {
+            message_type: "subtask_result".to_string(),
+            result: bg_result.output,
+        }
+    ).await;
+
+    // [新フロー] メインエンジンを再度呼び出して最終応答を生成
+    let final_result = bg_state.run_agent_response(
+        agent_id, agent_name, bg_session_id, system_prompt,
+        conversation_with_subtask_result,  // 結果を含む履歴
         "discord", Some(gateway_actions), caller, &image_urls,
     ).await;
-    
-    // 完了後に結果を Discord に送信
-    match result {
+
+    // [新フロー] 最終応答をDiscordに送信（かいろらしい口調はLLMが担当）
+    match final_result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
-            // writable check ...
             bg_gateway.send_to_channel(bg_channel_id, &engine_result.response).await?;
-            // Log to DB ...
         }
         Ok(_) => { /* empty response */ }
         Err(e) => {
-            // エラーも Discord に通知
             bg_gateway.send_to_channel(bg_channel_id, "エラーが発生しました").await?;
         }
     }
@@ -334,12 +360,10 @@ active_tasks に同一チャンネルのタスクが存在?
 **変更点:**
 
 現在: engine 完了後に一度だけ `agent_response` をログ
-変更後:
-1. 一次応答（ack）を `speech` ログとして記録（`metadata_json` に `is_ack: true`）
-2. engine 完了後の最終応答も通常通り `speech` ログとして記録
+変更後: 3段階でセッション履歴に記録
 
 ```rust
-// ack ログ
+// [1] ack ログ（変更なし）
 SessionLogRow {
     log_type: "speech",
     content: ack_msg,
@@ -348,21 +372,41 @@ SessionLogRow {
         "channel_id": channel_id_str,
         "is_ack": true,
     }).to_string()),
-    ...
 }
 
-// 最終応答ログ（既存と同じ）
+// [2] subtask_result ログ（新追加）
+// バックグラウンド処理完了後、結果をセッション履歴に追加
+// LLMが参照できるよう conversation に組み込む
+SessionLogRow {
+    log_type: "subtask_result",
+    content: bg_result.output,  // シェル実行結果等
+    metadata_json: Some(json!({
+        "source": "background_task",
+        "task_type": "execute_shell",  // または画像生成等
+        "channel_id": channel_id_str,
+    }).to_string()),
+}
+
+// [3] 最終応答ログ（変更なし）
+// メインエンジン再呼び出し後の最終応答
 SessionLogRow {
     log_type: "speech",
     content: engine_result.response,
     metadata_json: Some(json!({
-        "source": "discord_response",
+        "source": "discord_response_final",  // "discord_response" から変更
         "channel_id": channel_id_str,
         "tool_calls_made": engine_result.tool_calls_made,
+        "preceded_by_subtask": true,  // サブタスク経由であることを記録
     }).to_string()),
-    ...
 }
 ```
+
+**なぜこの方式か:**
+- バックグラウンド処理結果をそのままDiscordに出すのではなく、
+  LLMが「かいろ」として解釈・整形してから送信できる
+- セッション履歴に subtask_result を挟むことで、LLMが
+  「バックグラウンドで何が起きたか」を把握できる
+- キャラクター一貫性（かいろの口調）をLLMが担保できる
 
 **注意:** バックグラウンドタスクが DB を参照する際、`state.db` の `Arc<Mutex<Connection>>` を
 スレッドをまたいで使用する。既存の実装と同様のパターンで問題ない（既に `tokio::spawn` での
@@ -423,11 +467,12 @@ SessionLogRow {
 
 ## 5. レビューポイント
 
-- [ ] **一次応答の内容**: 固定文言 vs 動的生成、どちらが体験として良いか
-- [ ] **並行タスクの上限**: 同一チャンネルで同時実行を許すか、直列化するか
-- [ ] **バックグラウンドタスクの永続化**: プロセス再起動時に実行中タスクが消える（許容するか）
-- [ ] **ack を送るかどうかの判断**: 常に送る vs 長そうな時だけ送る（誤検知の問題）
-- [ ] **一次応答のキャラクター**: かいろらしい口調にするか（「ちょっと待ってて」等）
+- [x] ✅ **確定** **一次応答の内容**: 固定文言（「ちょっと待ってて ⚡」等）を採用。キャラクターはメインエンジン（LLM）が担当するため、ackは最小限でOK
+- [x] ✅ **確定** **バックグラウンド→Discord方式**: 直接送信 **なし**。subtask_result → セッション履歴 → メインエンジン再呼び出し → 最終送信の流れで統一
+- [ ] **未定** **並行タスクの上限**: 同一チャンネルで同時実行を許すか、直列化するか（Phase 2で決定）
+- [ ] **未定** **バックグラウンドタスクの永続化**: プロセス再起動時に実行中タスクが消える（許容するか）
+- [ ] **未定** **ack を送るかどうかの判断**: 常に送る vs 長そうな時だけ送る（誤検知の問題）
+- [x] ✅ **確定** **一次応答のキャラクター**: ackはシンプルな固定文言。最終応答のかいろらしさはLLMが担保
 
 ---
 
@@ -443,5 +488,6 @@ SessionLogRow {
 
 ---
 
-*作成: のすたろう, 2026-03-22*  
-*レビュー待ち: のすたろう・らぼみ・kojira（TODO #19 より）*
+*作成: のすたろう, 2026-03-22*
+*設計確定: 2026-03-22（サブ結果→メインフィードバック方式に変更）*
+*レビュー: のすたろう・らぼみ・kojira（TODO #19）*
