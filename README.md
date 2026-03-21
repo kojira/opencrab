@@ -13,20 +13,23 @@
 - **Multi-Provider LLM Support** -- OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, llama.cpp with intelligent routing and automatic fallback
 - **Agent Personality System** -- Big Five traits, social styles, and thinking preferences via the Soul/Identity model with saveable presets
 - **Memory Management** -- Curated memories, session logs with FTS5 search, and hierarchical memory index with LLM-powered Agentic RAG
-- **Skill System** -- Standard and acquired skills with effectiveness tracking, usage metrics, and bridge executor connecting ActionDispatcher to SkillEngine
+- **Skill System** -- Standard and acquired skills with effectiveness tracking, usage metrics, and guidance-based execution where the LLM dynamically calls `execute_shell`
 - **Multi-Channel Communication** -- REST API, CLI, WebSocket, and Discord gateway adapters
 - **Per-Agent Discord Gateway** -- DB-persisted Discord config per agent with independent start/stop lifecycle management
 - **Co-Agent Management** -- Trust relationships between agents with configurable permission levels (owner/agent/co-agent)
 - **Trusted User Whitelist** -- Per-agent Discord user trust management
 - **Sandboxed Workspace** -- Per-agent file operations with path traversal protection
-- **Heartbeat Loop** -- Periodic autonomous agent activity with prime-numbered interval (default 29s) and tokio::watch-based graceful shutdown
+- **Heartbeat Loop** -- Per-channel periodic autonomous agent activity with configurable interval (default 1800s / 30min) and tokio::watch-based graceful shutdown; creates a session per whitelisted channel and SPEAKs autonomously
 - **Self-Learning** -- Experience-based learning, peer learning, reflection, and skill creation
 - **LLM Self-Selection** -- Agents dynamically select LLMs per task based on past experience
 - **Response Evaluation** -- Quality scoring after each interaction
 - **Cost Tracking** -- Token usage, latency, and estimated cost per model
 - **Mentor Instruction** -- Send instructions to agents as a privileged "mentor" role
 - **Hot-Reload Configuration** -- `config/` directory watched with `notify_debouncer_mini`; ToolsConfig live-updates without restart
-- **i18n Dashboard** -- React frontend with English and Japanese localization
+- **Channel Whitelist** -- Per-channel readable/writable/whitelist management via `discord_channel_config` table
+- **Tool Allowed Commands** -- Agents manage their own tool permission lists via gateway actions (add/list/remove_allowed_command)
+- **LLM Logging** -- All LLM requests/responses logged to `llm_logs` table, viewable in dashboard
+- **i18n Dashboard** -- Mobile responsive React frontend with English and Japanese localization
 
 ## Architecture
 
@@ -43,8 +46,8 @@ opencrab/
 │   └── discord/    # Discord gateway with per-agent manager and message loop
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)
 │                   #   Pages: Agents, Soul/Identity, Skills, Memory, Sessions,
-│                   #   Co-Agents, Trusted Users, Analytics, Workspace browser
-├── dashboard/      # Dioxus dashboard (Rust/WASM fullstack)
+│                   #   Co-Agents, Trusted Users, Analytics, Workspace,
+│                   #   AgentChannels, AgentLlmLogs, AgentAllowedCommands
 ├── config/         # Configuration files (hot-reloaded)
 ├── docs/           # Design docs and assets
 └── skills/         # Standard skill definitions (Markdown)
@@ -68,6 +71,8 @@ cargo build
 ### 2. Set environment variables
 
 ```bash
+# Default: hermit-shell proxy (localhost:8765) as OpenAI-compatible Anthropic backend
+# If not using hermit-shell, set provider API keys directly:
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 # Optional
@@ -160,11 +165,15 @@ The ActionDispatcher registers **27 actions** across 7 categories, invokable by 
 | **Search & Memory** (5) | `search_my_history`, `summarize_and_save`, `create_my_skill`, `browse_memory_index`, `retrieve_memory_nodes` | Memory search, curation, and Agentic RAG |
 | **LLM** (5) | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
 
-A **bridge executor** connects the ActionDispatcher to the SkillEngine, allowing skill definitions to invoke actions.
-
 ## Skills
 
-Standard skills are defined as Markdown files in `skills/`:
+Skills have no executable type -- each skill defines a `guidance` field describing how to use it, and the LLM dynamically executes skills via actions at runtime.
+
+`SkillSource` has two variants:
+- **Standard** -- Loaded from Markdown files in `skills/`
+- **Acquired** -- Created through learning and experience
+
+Standard skills defined in `skills/`:
 
 | Skill | File | Description |
 |-------|------|-------------|
@@ -178,8 +187,8 @@ Standard skills are defined as Markdown files in `skills/`:
 
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:
 
-- **Agent settings** -- `heartbeat_interval_secs` (default 29), `heartbeat_enabled` (default false), `workspace_path`, `max_workspace_size_mb`
-- **LLM providers** -- Default provider, per-use-case model selection, fallback chains, model aliases, self-selection toggle
+- **Agent settings** -- `heartbeat_interval_secs` (default 1800), `heartbeat_enabled` (default false), `workspace_path`, `max_workspace_size_mb`
+- **LLM providers** -- Default provider (hermit-shell proxy at localhost:8765 by default), per-use-case model selection, fallback chains, model aliases, self-selection toggle
 - **Gateway settings** -- REST port (8080), per-agent Discord token (DB-persisted), CLI toggle
 - **Database** -- SQLite path
 - **Tools** -- Shell commands with per-command permission levels (`agent` / `owner`)
@@ -213,7 +222,6 @@ cargo test -p opencrab-server
 | Database | SQLite (rusqlite) with FTS5 |
 | HTTP Client | reqwest |
 | Frontend | React + Vite + Tailwind CSS |
-| Dashboard | Dioxus (fullstack, Rust/WASM) |
 | i18n | react-i18next (English / Japanese) |
 | Discord | serenity (per-agent gateway) |
 | Serialization | serde / serde_json |
