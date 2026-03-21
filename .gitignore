@@ -1,4 +1,6 @@
 /target
+dashboard/target/
+dashboard/Cargo.lock
 **/*.rs.bk
 *.pdb
 .DS_Store
