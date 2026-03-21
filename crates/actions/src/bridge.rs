@@ -83,7 +83,13 @@ impl ActionExecutor for BridgedExecutor {
 
         // Merge gateway action definitions.
         if let Some(ref gw) = self.gateway_actions {
+            // owner-only gateway actions: excluded for non-owner callers
+            let owner_only_actions = ["create_skill", "execute_skill"];
+            let is_owner = matches!(self.context.caller, crate::traits::CallerIdentity::Owner);
             for def in gw.definitions() {
+                if !is_owner && owner_only_actions.contains(&def.name.as_str()) {
+                    continue;
+                }
                 tools.push(ToolDefinition {
                     name: def.name,
                     description: def.description,
