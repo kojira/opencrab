@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::pin::Pin;
 use tokio::sync::watch;
 use tracing;
 
@@ -46,8 +48,12 @@ impl std::fmt::Display for HeartbeatDecision {
 /// Callback type for heartbeat tick processing.
 ///
 /// The callback receives the agent_id and tick count, and returns a decision.
-pub type HeartbeatCallback =
-    Box<dyn Fn(&str, u64) -> HeartbeatDecision + Send + Sync + 'static>;
+pub type HeartbeatCallback = Box<
+    dyn Fn(&str, u64) -> Pin<Box<dyn Future<Output = HeartbeatDecision> + Send>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Run the heartbeat loop for an agent.
 ///
@@ -84,7 +90,7 @@ pub async fn heartbeat_loop(
             _ = tokio::time::sleep(interval) => {
                 tick_count += 1;
 
-                let decision = callback(&agent_id, tick_count);
+                let decision = callback(&agent_id, tick_count).await;
 
                 tracing::debug!(
                     agent_id = %agent_id,

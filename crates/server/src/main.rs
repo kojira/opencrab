@@ -6,29 +6,97 @@ use opencrab_server::{config, create_router, AppState};
 use opencrab_core::heartbeat::{HeartbeatCallback, HeartbeatConfig, HeartbeatDecision, heartbeat_loop};
 use tokio::sync::watch;
 
-fn evaluate_heartbeat_action(
+fn build_heartbeat_prompt(
     conn: &rusqlite::Connection,
     agent_id: &str,
-    tick: u64,
+) -> String {
+    let soul_text = opencrab_db::queries::get_soul(conn, agent_id)
+        .ok()
+        .flatten()
+        .map(|s| format!("名前: {}\nペルソナ: {}", s.persona_name, s.personality_json))
+        .unwrap_or_else(|| "AIエージェント".to_string());
+
+    let memories = opencrab_db::queries::get_curated_memories(conn, agent_id, "")
+        .unwrap_or_default()
+        .iter()
+        .map(|m| format!("[{}] {}", m.category, m.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let last_speak_info = conn.query_row(
+        "SELECT created_at FROM heartbeat_log WHERE agent_id = ?1 AND decision = 'speak' ORDER BY created_at DESC LIMIT 1",
+        rusqlite::params![agent_id],
+        |row| row.get::<_, String>(0),
+    ).ok()
+     .map(|t| format!("最後に発言した時刻: {}", t))
+     .unwrap_or_else(|| "まだ一度も発言していない".to_string());
+
+    format!(
+        "あなたはAIエージェントです。以下のSoul（性格）と記憶、最後の発言情報を踏まえ、今この瞬間に何をすべきか判断してください。\n\n## Soul（性格・ペルソナ）\n{}\n\n## 最近の記憶\n{}\n\n## 発言履歴\n{}\n\n## 判断ルール\n以下の3つのいずれかを選んでください：\n- `SPEAK: <メッセージ>` — Discordで何か発言する（自然な独り言、気づき、感想など。日本語で）\n- `LEARN` — 内省・自己振り返りを行う（発言はしない）\n- `IDLE` — 何もしない\n\n## 重要\n- 発言は最低でも30分に1回以下が望ましい。最後の発言から時間が経っていない場合はIDLEまたはLEARNを選ぶ\n- SPEAKの場合は自然で短いメッセージにする（1〜2文程度）\n- 回答は必ず上記3形式のいずれか1行のみ。余計な説明は不要",
+        soul_text,
+        if memories.is_empty() { "記憶なし".to_string() } else { memories },
+        last_speak_info,
+    )
+}
+
+async fn evaluate_heartbeat_action_llm(
+    prompt: String,
+    llm_router: Arc<opencrab_llm::LlmRouter>,
+    default_model: &str,
 ) -> HeartbeatDecision {
-    if tick % 10 == 0 {
-        return HeartbeatDecision::Learn;
+    use opencrab_llm::{ChatRequest, Message, MessageContent, Role};
+
+    let request = ChatRequest {
+        model: default_model.to_string(),
+        messages: vec![
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(prompt)),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }
+        ],
+        max_tokens: Some(200),
+        temperature: Some(0.7),
+        stream: Some(false),
+        functions: None,
+        function_call: None,
+        stop: None,
+        metadata: Default::default(),
+    };
+
+    match llm_router.chat_completion(request).await {
+        Ok(response) => {
+            let text = response.choices.into_iter()
+                .next()
+                .and_then(|c| match c.message.content {
+                    Some(MessageContent::Text(t)) => Some(t),
+                    _ => None,
+                })
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+
+            if text.starts_with("SPEAK:") {
+                let content = text.trim_start_matches("SPEAK:").trim().to_string();
+                if content.is_empty() {
+                    HeartbeatDecision::Idle
+                } else {
+                    HeartbeatDecision::Speak(content)
+                }
+            } else if text.starts_with("LEARN") {
+                HeartbeatDecision::Learn
+            } else {
+                HeartbeatDecision::Idle
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Heartbeat LLM call failed: {e}");
+            HeartbeatDecision::Idle
+        }
     }
-    if tick % 3 == 0 {
-        let persona = opencrab_db::queries::get_soul(conn, agent_id)
-            .ok()
-            .flatten()
-            .map(|s| s.persona_name)
-            .unwrap_or_else(|| "Agent".to_string());
-        let messages = [
-            format!("⚡ ハートビート: {}として思考中です。", persona),
-            format!("静かに存在しています。"),
-            format!("⚡ 自律的に動作中。記憶を整理しています。"),
-        ];
-        let content = messages[(tick as usize / 3) % messages.len()].clone();
-        return HeartbeatDecision::Speak(content);
-    }
-    HeartbeatDecision::Idle
 }
 
 #[tokio::main]
@@ -170,6 +238,8 @@ async fn main() -> anyhow::Result<()> {
     // heartbeat設定変更を監視してループを再起動するタスク
     let heartbeat_agent_ids = agent_ids.clone();
     let heartbeat_db = state.db.clone();
+    let heartbeat_llm_router = state.llm_router.clone();
+    let heartbeat_default_model = state.default_model.clone();
     tokio::spawn(async move {
         let mut prev_config = initial_hb_config.clone();
         let mut current_shutdown_tx: Option<watch::Sender<bool>> = None;
@@ -191,15 +261,32 @@ async fn main() -> anyhow::Result<()> {
                 let agent_id = agent_id.clone();
                 let hb_discord_http = heartbeat_discord_http.clone();
                 let hb_channel_id = heartbeat_channel_id_arc.clone();
+                let llm_router_for_hb = heartbeat_llm_router.clone();
+                let default_model_for_hb = heartbeat_default_model.clone();
                 _handles.push(tokio::spawn(async move {
                     let callback: HeartbeatCallback = Box::new({
                         let db = db.clone();
                         let agent_id_owned = agent_id.clone();
                         let discord_http = hb_discord_http.clone();
                         let channel_id = hb_channel_id.clone();
+                        let llm_for_hb = llm_router_for_hb.clone();
+                        let model_for_hb = default_model_for_hb.clone();
                         move |_agent_id: &str, tick: u64| {
-                            let decision = if let Ok(conn) = db.lock() {
-                                evaluate_heartbeat_action(&conn, &agent_id_owned, tick)
+                            let _agent_id = _agent_id.to_string();
+                            let db = db.clone();
+                            let agent_id_owned = agent_id_owned.clone();
+                            let discord_http = discord_http.clone();
+                            let channel_id = channel_id.clone();
+                            let llm_for_hb = llm_for_hb.clone();
+                            let model_for_hb = model_for_hb.clone();
+                            Box::pin(async move {
+                            let prompt_opt = if let Ok(conn) = db.lock() {
+                                Some(build_heartbeat_prompt(&conn, &agent_id_owned))
+                            } else {
+                                None
+                            };
+                            let decision = if let Some(prompt) = prompt_opt {
+                                evaluate_heartbeat_action_llm(prompt, llm_for_hb, &model_for_hb).await
                             } else {
                                 HeartbeatDecision::Idle
                             };
@@ -275,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
                                 HeartbeatDecision::Idle => {}
                             }
                             decision
+                            }) // close Box::pin
                         }
                     });
                     heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
@@ -314,15 +402,32 @@ async fn main() -> anyhow::Result<()> {
                         let agent_id = agent_id.clone();
                         let hb_discord_http = heartbeat_discord_http.clone();
                         let hb_channel_id = heartbeat_channel_id_arc.clone();
+                        let llm_router_for_hb = heartbeat_llm_router.clone();
+                        let default_model_for_hb = heartbeat_default_model.clone();
                         _handles.push(tokio::spawn(async move {
                             let callback: HeartbeatCallback = Box::new({
                                 let db = db.clone();
                                 let agent_id_owned = agent_id.clone();
                                 let discord_http = hb_discord_http.clone();
                                 let channel_id = hb_channel_id.clone();
+                                let llm_for_hb = llm_router_for_hb.clone();
+                                let model_for_hb = default_model_for_hb.clone();
                                 move |_agent_id: &str, tick: u64| {
-                                    let decision = if let Ok(conn) = db.lock() {
-                                        evaluate_heartbeat_action(&conn, &agent_id_owned, tick)
+                                    let _agent_id = _agent_id.to_string();
+                                    let db = db.clone();
+                                    let agent_id_owned = agent_id_owned.clone();
+                                    let discord_http = discord_http.clone();
+                                    let channel_id = channel_id.clone();
+                                    let llm_for_hb = llm_for_hb.clone();
+                                    let model_for_hb = model_for_hb.clone();
+                                    Box::pin(async move {
+                                    let prompt_opt = if let Ok(conn) = db.lock() {
+                                        Some(build_heartbeat_prompt(&conn, &agent_id_owned))
+                                    } else {
+                                        None
+                                    };
+                                    let decision = if let Some(prompt) = prompt_opt {
+                                        evaluate_heartbeat_action_llm(prompt, llm_for_hb, &model_for_hb).await
                                     } else {
                                         HeartbeatDecision::Idle
                                     };
@@ -398,6 +503,7 @@ async fn main() -> anyhow::Result<()> {
                                         HeartbeatDecision::Idle => {}
                                     }
                                     decision
+                                    }) // close Box::pin
                                 }
                             });
                             heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
