@@ -18,6 +18,7 @@ function makeSkill(overrides: Partial<SkillDto> = {}): SkillDto {
     effectiveness: 0.85,
     usage_count: 42,
     is_active: true,
+    archived: false,
     ...overrides,
   };
 }

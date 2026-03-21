@@ -51,11 +51,15 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
       `}
     >
       {/* Logo */}
-      <div className="px-7 py-6">
+      <div className="px-5 py-5">
         <div className="flex items-center gap-3">
-          <img src="/icon.png" alt="OpenCrab" className="w-10 h-10 rounded-lg" />
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-1 shrink-0">
+            <span className="material-symbols-outlined text-xl text-white">
+              precision_manufacturing
+            </span>
+          </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-title-lg text-on-surface font-semibold truncate">
+            <h1 className="text-title-md text-on-surface font-bold truncate">
               {t('brand.name')}
             </h1>
             <p className="text-label-sm text-on-surface-variant truncate">
@@ -64,7 +68,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           </div>
           {/* Close button for mobile */}
           <button
-            className="md:hidden p-1 rounded-full hover:bg-surface-container-high text-on-surface-variant"
+            className="md:hidden p-1.5 rounded-lg hover:bg-surface-container-high text-on-surface-variant transition-colors"
             onClick={onClose}
             aria-label="Close menu"
           >

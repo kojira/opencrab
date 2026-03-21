@@ -3,9 +3,6 @@
 @tailwind utilities;
 
 @layer base {
-  html, body {
-    overflow-x: hidden;
-  }
 
   body {
     font-family: 'Inter', system-ui, sans-serif;
@@ -61,12 +58,13 @@
   }
 
   .card-elevated {
-    @apply rounded-lg bg-surface-container p-6 shadow-elevation-1
-           hover:shadow-elevation-2 transition-shadow duration-200;
+    @apply rounded-xl bg-surface-container p-5 shadow-elevation-1
+           hover:shadow-elevation-2 transition-all duration-200
+           border border-outline-variant/60;
   }
 
   .card-outlined {
-    @apply rounded-lg bg-surface-container p-6 border border-outline-variant;
+    @apply rounded-xl bg-surface-container p-5 border border-outline-variant;
   }
 
   /* ── M3 Navigation ── */
@@ -219,7 +217,7 @@
 
   /* ── Utility ── */
   .section-title {
-    @apply text-title-lg text-on-surface mb-4;
+    @apply text-title-lg text-on-surface mb-4 font-semibold;
   }
 
   .page-title {
@@ -236,5 +234,15 @@
 
   .empty-state-text {
     @apply text-body-lg text-on-surface-variant;
+  }
+
+  /* ── Gradient accents ── */
+  .gradient-primary {
+    @apply bg-gradient-to-br from-primary to-primary/80;
+  }
+
+  .stat-card {
+    @apply rounded-xl p-5 shadow-elevation-1 hover:shadow-elevation-2
+           transition-all duration-200 border border-outline-variant/40;
   }
 }
