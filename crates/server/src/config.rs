@@ -144,6 +144,9 @@ pub struct DiscordGatewayConfig {
     /// DMに応答するオーナーのDiscord User ID（設定時、このID以外からのDMは無視）
     #[serde(default)]
     pub owner_discord_id: String,
+    /// ハートビートメッセージを送信するDiscordチャンネルID
+    #[serde(default)]
+    pub heartbeat_channel_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

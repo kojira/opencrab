@@ -2,6 +2,9 @@
 name: OpenCrab Framework
 overview: 自律エージェントフレームワーク「OpenCrab」を新規作成。ゲートウェイ抽象化により様々な入出力（REST API、Discord、CLI等）に対応し、Webダッシュボードでペルソナ・スキル・記憶を管理。Rustで実装。
 todos:
+  - id: channel-rules
+    content: チャンネルごとのルール設定機能 — 通知先webhook・spawnスクリプトをチャンネルメタデータに紐付けて、エージェントが自律で正しいルールを選択できるようにする
+    status: pending
   - id: project-init
     content: Cargoワークスペース初期化、crates構造作成
     status: pending
