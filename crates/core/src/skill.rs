@@ -81,10 +81,6 @@ pub struct Skill {
     pub effectiveness: Option<f64>,
     /// Permission level required to use this skill.
     pub permission: SkillPermission,
-    /// Skill type: "experience" (default) or "executable"
-    pub skill_type: String,
-    /// Shell command code for executable skills
-    pub code: Option<String>,
 }
 
 /// Manages skills for an agent.
@@ -140,8 +136,6 @@ impl SkillManager {
             is_active: true,
             permission: SkillPermission::Agent.as_db_str().to_string(),
             archived: false,
-            skill_type: "experience".to_string(),
-            code: None,
         };
 
         queries::insert_skill(&conn, &row)?;
@@ -167,65 +161,6 @@ impl SkillManager {
             usage_count: 0,
             effectiveness: None,
             permission: SkillPermission::Agent,
-            skill_type: "experience".to_string(),
-            code: None,
-        })
-    }
-
-    /// Acquire an executable skill (shell command).
-    pub fn acquire_executable_skill(
-        &self,
-        name: &str,
-        description: &str,
-        guidance: &str,
-        code: &str,
-    ) -> Result<Skill> {
-        let id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
-
-        let row = queries::SkillRow {
-            id: id.clone(),
-            agent_id: self.agent_id.clone(),
-            name: name.to_string(),
-            description: description.to_string(),
-            situation_pattern: String::new(),
-            guidance: guidance.to_string(),
-            source_type: "acquired".to_string(),
-            source_context: None,
-            file_path: None,
-            effectiveness: None,
-            usage_count: 0,
-            is_active: true,
-            permission: SkillPermission::Agent.as_db_str().to_string(),
-            archived: false,
-            skill_type: "executable".to_string(),
-            code: Some(code.to_string()),
-        };
-
-        queries::insert_skill(&conn, &row)?;
-
-        tracing::info!(
-            agent_id = %self.agent_id,
-            skill_name = %name,
-            "Acquired executable skill"
-        );
-
-        Ok(Skill {
-            id,
-            name: name.to_string(),
-            description: description.to_string(),
-            version: "1.0.0".to_string(),
-            actions: Vec::new(),
-            guidance: guidance.to_string(),
-            source: SkillSource::Acquired {
-                source_type: "acquired".to_string(),
-                source_context: String::new(),
-            },
-            usage_count: 0,
-            effectiveness: None,
-            permission: SkillPermission::Agent,
-            skill_type: "executable".to_string(),
-            code: Some(code.to_string()),
         })
     }
 
@@ -335,9 +270,6 @@ impl SkillManager {
 
         for skill in &skills {
             ctx.push_str(&format!("### {} (used {} times)\n", skill.name, skill.usage_count));
-            if skill.skill_type == "executable" {
-                ctx.push_str("[executable] ");
-            }
             ctx.push_str(&format!("{}\n", skill.description));
 
             if !skill.actions.is_empty() {
@@ -345,15 +277,10 @@ impl SkillManager {
             }
 
             if !skill.guidance.is_empty() {
-                ctx.push_str(&format!("Guidance: {}\n", skill.guidance));
+                ctx.push_str(&format!("Guidance:\n  {}\n", skill.guidance));
             }
 
-            if let Some(ref code) = skill.code {
-                ctx.push_str(&format!("Code: `{}`\n", code));
-                ctx.push_str(&format!("実行方法: `execute_skill` アクションで skill_name=\"{}\" を指定\n", skill.name));
-            }
-
-            ctx.push('\n');
+            ctx.push_str("\n");
         }
 
         Ok(ctx)
@@ -396,8 +323,6 @@ impl SkillManager {
             usage_count: row.usage_count,
             effectiveness: row.effectiveness,
             permission: SkillPermission::from_db_str(&row.permission),
-            skill_type: row.skill_type,
-            code: row.code,
         }
     }
 }

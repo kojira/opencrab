@@ -205,7 +205,6 @@ impl Action for CreateMySkillAction {
             updated.description = description;
             updated.situation_pattern = situation_pattern;
             updated.guidance = guidance;
-            updated.skill_type = "experience".to_string();
             updated.file_path = Some(file_path.clone());
             updated.is_active = true;
             updated.archived = false;
@@ -247,8 +246,6 @@ impl Action for CreateMySkillAction {
                         is_active: true,
                         permission: "\"agent\"".to_string(),
                         archived: false,
-                        skill_type: "experience".to_string(),
-                        code: None,
                     };
 
                     if let Ok(conn) = ctx.db.lock() {
