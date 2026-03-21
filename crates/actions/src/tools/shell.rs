@@ -118,6 +118,7 @@ impl Action for ShellToolAction {
 
         let mut cmd = tokio::process::Command::new(&command);
         cmd.args(&cmd_args);
+        cmd.current_dir(ctx.workspace.root());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         if stdin_input.is_some() {
