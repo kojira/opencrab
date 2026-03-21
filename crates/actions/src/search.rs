@@ -210,6 +210,8 @@ impl Action for CreateMySkillAction {
                     is_active: true,
                     permission: "\"agent\"".to_string(),
                     archived: false,
+                    skill_type: "experience".to_string(),
+                    code: None,
                 };
 
                 if let Ok(conn) = ctx.db.lock() {
