@@ -1095,7 +1095,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "create_skill".to_string(),
-                description: "新しいスキルを作成する。同名のスキルが既に存在する場合は更新する。skill_type='executable'の場合、codeフィールドにシェルコマンドを指定する。".to_string(),
+                description: "ユーザーから「〇〇するスキルを作って」「このコマンドをスキルとして登録して」などと言われたとき、新しいスキルを作成する。実行可能なコード（curl, python, shコマンド等）が含まれる場合は skill_type='executable' に設定し、code フィールドにそのシェルコマンドを記述すること。例: ユーザーが「curl wttr.in/Tokyoを使って天気を調べるスキルを作って」と言ったら skill_type='executable', code='curl -s wttr.in/Tokyo?format=3' のように登録する。同名スキルが存在する場合は自動的に更新（upsert）される。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -1125,7 +1125,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "execute_skill".to_string(),
-                description: "実行可能スキル（skill_type='executable'）のコードを実行する。skill_idまたはskill_nameのいずれかを指定する。タイムアウトは30秒。".to_string(),
+                description: "登録済みの実行可能スキル（skill_type='executable'）を実行する。ユーザーが「天気を調べて」「〇〇スキルを実行して」などと言ったとき、システムコンテキストの「Available Skills」セクションに記載されているスキル一覧から該当スキルを見つけ、skill_nameを指定して実行する。skill_idまたはskill_nameのいずれかを指定すること。タイムアウトは30秒。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

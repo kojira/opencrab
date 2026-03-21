@@ -350,6 +350,7 @@ impl SkillManager {
 
             if let Some(ref code) = skill.code {
                 ctx.push_str(&format!("Code: `{}`\n", code));
+                ctx.push_str(&format!("実行方法: `execute_skill` アクションで skill_name=\"{}\" を指定\n", skill.name));
             }
 
             ctx.push('\n');
