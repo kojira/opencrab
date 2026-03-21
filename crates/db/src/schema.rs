@@ -49,6 +49,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0")?;
     }
 
+    // agent_memory_index_config テーブル作成（既存DBへの対応）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_memory_index_config (
+            agent_id TEXT PRIMARY KEY,
+            batch_size INTEGER NOT NULL DEFAULT 50,
+            threshold INTEGER NOT NULL DEFAULT 20,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )"
+    )?;
+
     Ok(())
 }
 
@@ -373,4 +383,14 @@ CREATE TABLE IF NOT EXISTS trusted_discord_users (
   UNIQUE (discord_user_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
+
+-- ============================================
+-- エージェント別メモリインデックス設定
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_memory_index_config (
+    agent_id TEXT PRIMARY KEY,
+    batch_size INTEGER NOT NULL DEFAULT 50,
+    threshold INTEGER NOT NULL DEFAULT 20,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 "#;

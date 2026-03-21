@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::api::{get_agents, get_curated_memories, search_session_logs, SessionLogDto};
+use crate::api::{get_agents, get_curated_memories, search_session_logs, SessionLogDto, get_memory_index_config, update_memory_index_config};
 
 #[component]
 pub fn Memory() -> Element {
@@ -7,9 +7,13 @@ pub fn Memory() -> Element {
     let mut selected_agent = use_signal(|| Option::<String>::None);
     let mut search_query = use_signal(|| String::new());
     let mut active_tab = use_signal(|| "curated".to_string());
+    let mut config_batch_size = use_signal(|| 50i64);
+    let mut config_threshold = use_signal(|| 20i64);
+    let mut config_save_status = use_signal(|| Option::<String>::None);
     let mut search_results = use_signal(|| Option::<Result<Vec<SessionLogDto>, String>>::None);
 
     let agent_id = selected_agent.read().clone();
+    let agent_id_for_config = agent_id.clone();
 
     let curated = use_resource(move || {
         let agent_id = agent_id.clone();
@@ -18,6 +22,17 @@ pub fn Memory() -> Element {
                 get_curated_memories(id).await
             } else {
                 Ok(vec![])
+            }
+        }
+    });
+
+    let config_resource = use_resource(move || {
+        let agent_id = agent_id_for_config.clone();
+        async move {
+            if let Some(id) = agent_id {
+                get_memory_index_config(id).await.ok()
+            } else {
+                None
             }
         }
     });
@@ -74,6 +89,20 @@ pub fn Memory() -> Element {
                             span { class: "material-symbols-outlined text-lg mr-1.5", "search" }
                             "Search Logs"
                         }
+                        button {
+                            class: if *active_tab.read() == "settings" { "segmented-btn-active" } else { "segmented-btn" },
+                            onclick: move |_| {
+                                active_tab.set("settings".to_string());
+                                // configリソースから値を同期
+                                let cfg_read = config_resource.peek();
+                                if let Some(Some(ref cfg)) = *cfg_read {
+                                    config_batch_size.set(cfg.batch_size);
+                                    config_threshold.set(cfg.threshold);
+                                }
+                            },
+                            span { class: "material-symbols-outlined text-lg mr-1.5", "settings" }
+                            "Index Settings"
+                        }
                     }
                 }
 
@@ -118,6 +147,76 @@ pub fn Memory() -> Element {
                                 p { class: "text-body-lg text-on-surface-variant", "Loading..." }
                             }
                         },
+                    }
+                } else if *active_tab.read() == "settings" {
+                    div { class: "card-elevated",
+                        h2 { class: "text-title-lg text-on-surface mb-4",
+                            span { class: "material-symbols-outlined text-xl mr-2 align-middle", "tune" }
+                            "Memory Index Configuration"
+                        }
+                        p { class: "text-body-md text-on-surface-variant mb-6",
+                            "Configure compaction batch size and threshold for this agent. Minimum values are enforced automatically."
+                        }
+
+                        div { class: "space-y-6",
+                            div {
+                                label { class: "block text-label-lg text-on-surface mb-1", "Batch Size" }
+                                p { class: "text-body-sm text-on-surface-variant mb-2",
+                                    "Number of logs to process per index build (min: 10)"
+                                }
+                                input {
+                                    r#type: "number",
+                                    class: "input-outlined w-40",
+                                    min: "10",
+                                    value: "{config_batch_size}",
+                                    oninput: move |e| {
+                                        if let Ok(v) = e.value().parse::<i64>() {
+                                            config_batch_size.set(v);
+                                        }
+                                    }
+                                }
+                            }
+
+                            div {
+                                label { class: "block text-label-lg text-on-surface mb-1", "Threshold" }
+                                p { class: "text-body-sm text-on-surface-variant mb-2",
+                                    "Minimum unindexed logs before auto-build triggers (min: 5)"
+                                }
+                                input {
+                                    r#type: "number",
+                                    class: "input-outlined w-40",
+                                    min: "5",
+                                    value: "{config_threshold}",
+                                    oninput: move |e| {
+                                        if let Ok(v) = e.value().parse::<i64>() {
+                                            config_threshold.set(v);
+                                        }
+                                    }
+                                }
+                            }
+
+                            div { class: "flex items-center gap-4",
+                                button {
+                                    class: "btn-filled",
+                                    onclick: move |_| {
+                                        let agent_id_val = selected_agent.read().clone().unwrap_or_default();
+                                        let bs = *config_batch_size.read();
+                                        let thr = *config_threshold.read();
+                                        spawn(async move {
+                                            match update_memory_index_config(agent_id_val, bs, thr).await {
+                                                Ok(_) => config_save_status.set(Some("✅ Saved!".to_string())),
+                                                Err(e) => config_save_status.set(Some(format!("❌ Error: {e}"))),
+                                            }
+                                        });
+                                    },
+                                    span { class: "material-symbols-outlined text-xl", "save" }
+                                    "Save Settings"
+                                }
+                                if let Some(status) = config_save_status.read().as_ref() {
+                                    span { class: "text-body-md", "{status}" }
+                                }
+                            }
+                        }
                     }
                 } else {
                     // Search interface

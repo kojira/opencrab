@@ -190,7 +190,7 @@ pub async fn get_agent(id: String) -> Result<AgentDetail, ServerFnError> {
     Ok(AgentDetail {
         id: identity.agent_id,
         name: identity.name,
-        role: identity.role,
+        role: String::new(),
         job_title: identity.job_title,
         organization: identity.organization,
         image_url: identity.image_url,
@@ -245,7 +245,6 @@ pub async fn create_agent(
     let identity = opencrab_db::queries::IdentityRow {
         agent_id: agent_id.clone(),
         name: name.clone(),
-        role: if role.is_empty() { "discussant".to_string() } else { role.clone() },
         job_title: None,
         organization: None,
         image_url: None,
@@ -270,7 +269,7 @@ pub async fn create_agent(
         id: agent_id,
         name,
         persona_name: pname,
-        role: identity.role,
+        role: String::new(),
         image_url: None,
         status: "idle".to_string(),
         skill_count: 0,
@@ -296,7 +295,6 @@ pub async fn update_identity(
     let identity = opencrab_db::queries::IdentityRow {
         agent_id,
         name,
-        role,
         job_title,
         organization,
         image_url: existing.image_url,
@@ -782,4 +780,48 @@ pub async fn set_channel_whitelisted(
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryIndexConfigDto {
+    pub batch_size: i64,
+    pub threshold: i64,
+    pub batch_size_min: i64,
+    pub threshold_min: i64,
+}
+
+#[server]
+pub async fn get_memory_index_config(agent_id: String) -> Result<MemoryIndexConfigDto, ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let config = opencrab_db::queries::get_memory_index_config(&conn, &agent_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(MemoryIndexConfigDto {
+        batch_size: config.batch_size,
+        threshold: config.threshold,
+        batch_size_min: opencrab_db::queries::BATCH_SIZE_MIN,
+        threshold_min: opencrab_db::queries::THRESHOLD_MIN,
+    })
+}
+
+#[server]
+pub async fn update_memory_index_config(
+    agent_id: String,
+    batch_size: i64,
+    threshold: i64,
+) -> Result<MemoryIndexConfigDto, ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let config = opencrab_db::queries::upsert_memory_index_config(&conn, &agent_id, batch_size, threshold)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(MemoryIndexConfigDto {
+        batch_size: config.batch_size,
+        threshold: config.threshold,
+        batch_size_min: opencrab_db::queries::BATCH_SIZE_MIN,
+        threshold_min: opencrab_db::queries::THRESHOLD_MIN,
+    })
 }
