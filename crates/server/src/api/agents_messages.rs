@@ -159,6 +159,7 @@ pub async fn send_agent_message(
         "rest",
         gateway_actions,
         caller,
+        &[],
     )
     .await;
 
