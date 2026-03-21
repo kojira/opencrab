@@ -56,10 +56,13 @@ pub struct SkillDto {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub guidance: String,
+    pub situation_pattern: String,
     pub source_type: String,
     pub effectiveness: Option<f64>,
     pub usage_count: i32,
     pub is_active: bool,
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -318,10 +321,15 @@ pub async fn delete_agent(agent_id: String) -> Result<bool, ServerFnError> {
 
 #[server]
 pub async fn get_skills(agent_id: String) -> Result<Vec<SkillDto>, ServerFnError> {
+    get_skills_filtered(agent_id, false).await
+}
+
+#[server]
+pub async fn get_skills_filtered(agent_id: String, include_archived: bool) -> Result<Vec<SkillDto>, ServerFnError> {
     let conn = opencrab_db::init_connection(&db_path())
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let skills = opencrab_db::queries::list_skills(&conn, &agent_id, false)
+    let skills = opencrab_db::queries::list_skills_filtered(&conn, &agent_id, false, include_archived)
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(skills
@@ -330,10 +338,13 @@ pub async fn get_skills(agent_id: String) -> Result<Vec<SkillDto>, ServerFnError
             id: s.id,
             name: s.name,
             description: s.description,
+            guidance: s.guidance,
+            situation_pattern: s.situation_pattern,
             source_type: s.source_type,
             effectiveness: s.effectiveness,
             usage_count: s.usage_count,
             is_active: s.is_active,
+            archived: s.archived,
         })
         .collect())
 }
@@ -344,6 +355,76 @@ pub async fn toggle_skill(skill_id: String, active: bool) -> Result<(), ServerFn
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     opencrab_db::queries::set_skill_active(&conn, &skill_id, active)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
+pub async fn update_skill_info(
+    skill_id: String,
+    name: Option<String>,
+    description: Option<String>,
+    guidance: Option<String>,
+    situation_pattern: Option<String>,
+) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Search across all agents by skill_id
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
+         FROM skills WHERE id = ?1"
+    ).map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let existing = stmt.query_row(rusqlite::params![skill_id], |row| {
+        Ok(opencrab_db::queries::SkillRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            name: row.get(2)?,
+            description: row.get(3)?,
+            situation_pattern: row.get(4)?,
+            guidance: row.get(5)?,
+            source_type: row.get(6)?,
+            source_context: row.get(7)?,
+            file_path: row.get(8)?,
+            effectiveness: row.get(9)?,
+            usage_count: row.get(10)?,
+            is_active: row.get(11)?,
+            permission: row.get(12)?,
+            archived: row.get(13)?,
+        })
+    }).map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut updated = existing;
+    if let Some(n) = name { updated.name = n; }
+    if let Some(d) = description { updated.description = d; }
+    if let Some(g) = guidance { updated.guidance = g; }
+    if let Some(p) = situation_pattern { updated.situation_pattern = p; }
+
+    opencrab_db::queries::update_skill(&conn, &updated)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
+pub async fn archive_skill(skill_id: String, archived: bool) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    opencrab_db::queries::archive_skill(&conn, &skill_id, archived)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+#[server]
+pub async fn merge_skills(source_id: String, target_id: String) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    opencrab_db::queries::merge_skills(&conn, &source_id, &target_id)
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(())

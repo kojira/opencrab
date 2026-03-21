@@ -29,6 +29,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills ADD COLUMN permission TEXT NOT NULL DEFAULT '\"agent\"'")?;
     }
 
+    // skills.archived カラム追加（スキルアーカイブ機能）
+    let has_archived_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='archived'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_archived_col {
+        conn.execute_batch("ALTER TABLE skills ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")?;
+    }
+
     Ok(())
 }
 

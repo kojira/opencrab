@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::api::{get_agents, get_skills, toggle_skill};
+use crate::api::{get_agents, get_skills_filtered, toggle_skill, update_skill_info, archive_skill, merge_skills};
 use crate::components::SkillEditor;
 
 #[component]
@@ -7,16 +7,19 @@ pub fn Skills() -> Element {
     let agents = use_resource(move || get_agents());
     let mut selected_agent = use_signal(|| Option::<String>::None);
     let mut skills_version = use_signal(|| 0u32);
+    let mut show_archived = use_signal(|| false);
 
     let agent_id = selected_agent.read().clone();
     let _version = *skills_version.read();
+    let include_archived = *show_archived.read();
 
     let skills = use_resource(move || {
         let agent_id = agent_id.clone();
         let _v = _version;
+        let archived = include_archived;
         async move {
             if let Some(id) = agent_id {
-                get_skills(id).await
+                get_skills_filtered(id, archived).await
             } else {
                 Ok(vec![])
             }
@@ -59,6 +62,24 @@ pub fn Skills() -> Element {
                 }
             }
 
+            // Archive toggle
+            if selected_agent.read().is_some() {
+                div { class: "flex items-center gap-3 mb-4",
+                    label { class: "flex items-center gap-2 text-body-md text-on-surface-variant cursor-pointer",
+                        input {
+                            r#type: "checkbox",
+                            checked: include_archived,
+                            onchange: move |e| {
+                                show_archived.set(e.checked());
+                                skills_version += 1;
+                            },
+                        }
+                        span { class: "material-symbols-outlined text-base", "archive" }
+                        "Show archived skills"
+                    }
+                }
+            }
+
             // Skills list
             if selected_agent.read().is_some() {
                 match &*skills.read() {
@@ -74,12 +95,31 @@ pub fn Skills() -> Element {
                                     SkillEditor {
                                         key: "{skill.id}",
                                         skill: skill.clone(),
+                                        all_skills: skill_list.clone(),
                                         on_toggle: move |(skill_id, active): (String, bool)| {
                                             spawn(async move {
                                                 let _ = toggle_skill(skill_id, active).await;
                                                 skills_version += 1;
                                             });
-                                        }
+                                        },
+                                        on_update: move |(skill_id, name, desc, guidance): (String, Option<String>, Option<String>, Option<String>)| {
+                                            spawn(async move {
+                                                let _ = update_skill_info(skill_id, name, desc, guidance, None).await;
+                                                skills_version += 1;
+                                            });
+                                        },
+                                        on_archive: move |(skill_id, archived): (String, bool)| {
+                                            spawn(async move {
+                                                let _ = archive_skill(skill_id, archived).await;
+                                                skills_version += 1;
+                                            });
+                                        },
+                                        on_merge: move |(source_id, target_id): (String, String)| {
+                                            spawn(async move {
+                                                let _ = merge_skills(source_id, target_id).await;
+                                                skills_version += 1;
+                                            });
+                                        },
                                     }
                                 }
                             }

@@ -135,6 +135,7 @@ impl SkillManager {
             usage_count: 0,
             is_active: true,
             permission: SkillPermission::Agent.as_db_str().to_string(),
+            archived: false,
         };
 
         queries::insert_skill(&conn, &row)?;
@@ -169,6 +170,93 @@ impl SkillManager {
         queries::increment_skill_usage(&conn, skill_id)?;
         tracing::debug!(skill_id = %skill_id, "Incremented skill usage");
         Ok(())
+    }
+
+    /// Acquire a skill with deduplication (upsert behavior).
+    /// If a skill with the same name exists, update it instead of creating a new one.
+    pub fn acquire_skill_dedup(
+        &self,
+        name: &str,
+        description: &str,
+        guidance: &str,
+        source_type: &str,
+        source_context: &str,
+    ) -> Result<Skill> {
+        let conn = self.conn.lock().unwrap();
+
+        if let Some(existing) = queries::find_skill_by_name(&conn, &self.agent_id, name)? {
+            let mut updated = existing;
+            updated.description = description.to_string();
+            updated.guidance = guidance.to_string();
+            queries::update_skill(&conn, &updated)?;
+
+            tracing::info!(
+                agent_id = %self.agent_id,
+                skill_name = %name,
+                "Updated existing skill (dedup)"
+            );
+
+            Ok(Self::row_to_skill(updated))
+        } else {
+            drop(conn);
+            self.acquire_skill(name, description, guidance, source_type, source_context)
+        }
+    }
+
+    /// Archive a skill (logical deletion).
+    pub fn archive_skill(&self, skill_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        queries::archive_skill(&conn, skill_id, true)?;
+        tracing::info!(skill_id = %skill_id, "Archived skill");
+        Ok(())
+    }
+
+    /// Restore an archived skill.
+    pub fn restore_skill(&self, skill_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        queries::archive_skill(&conn, skill_id, false)?;
+        tracing::info!(skill_id = %skill_id, "Restored skill");
+        Ok(())
+    }
+
+    /// Merge two skills: combine usage counts, delete source.
+    pub fn merge_skills(&self, source_id: &str, target_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        queries::merge_skills(&conn, source_id, target_id)?;
+        tracing::info!(
+            source_id = %source_id,
+            target_id = %target_id,
+            "Merged skills"
+        );
+        Ok(())
+    }
+
+    /// Check for duplicate skills and log them.
+    pub fn check_and_cleanup_duplicates(&self) -> Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let duplicates = queries::find_duplicate_skills(&conn, &self.agent_id)?;
+        let dup_count = duplicates.len();
+
+        if dup_count > 0 {
+            tracing::info!(
+                agent_id = %self.agent_id,
+                duplicate_count = dup_count,
+                "Found duplicate skills"
+            );
+        }
+
+        let unused = queries::find_unused_skills(&conn, &self.agent_id, 7)?;
+        let unused_count = unused.len();
+
+        if unused_count > 0 {
+            tracing::info!(
+                agent_id = %self.agent_id,
+                unused_count = unused_count,
+                "Found unused skills (7+ days old)"
+            );
+        }
+
+        Ok((dup_count, unused_count))
     }
 
     /// Build a context string describing available skills for LLM prompts.

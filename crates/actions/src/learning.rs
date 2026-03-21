@@ -74,6 +74,7 @@ impl Action for LearnFromExperienceAction {
             usage_count: 0,
             is_active: true,
             permission: "\"agent\"".to_string(),
+            archived: false,
         };
 
         if let Ok(conn) = ctx.db.lock() {
@@ -160,6 +161,7 @@ impl Action for LearnFromPeerAction {
             usage_count: 0,
             is_active: true,
             permission: "\"agent\"".to_string(),
+            archived: false,
         };
 
         if let Ok(conn) = ctx.db.lock() {
