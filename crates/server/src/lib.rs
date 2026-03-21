@@ -91,6 +91,8 @@ pub fn create_router(state: AppState) -> Router {
         // 許可コマンド管理
         .route("/api/agents/{id}/allowed-commands", get(api::allowed_commands::list_allowed_commands).post(api::allowed_commands::add_allowed_command))
         .route("/api/agents/{id}/allowed-commands/{command}", axum::routing::delete(api::allowed_commands::remove_allowed_command))
+        // LLMログ
+        .route("/api/agents/{id}/llm-logs", get(api::llm_logs::list_llm_logs))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

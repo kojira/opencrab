@@ -110,6 +110,7 @@
   "agentNav.channels": "Channels",
   "agentNav.analytics": "Analytics",
   "agentNav.allowedCommands": "Commands",
+  "agentNav.llmLogs": "LLM Logs",
   "allowedCommands.title": "Allowed Commands",
   "allowedCommands.description": "Manage commands allowed for the shell tool. Added commands persist across agent restarts.",
   "allowedCommands.placeholder": "Command name (e.g., curl, wget, git)",

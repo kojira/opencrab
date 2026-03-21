@@ -3435,3 +3435,60 @@ pub fn remove_agent_allowed_command(
     )?;
     Ok(rows_affected > 0)
 }
+
+// ============================================
+// LLM Logs
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmLogRow {
+    pub id: String,
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt: String,
+    pub response: String,
+    pub tool_calls: Option<String>,
+    pub created_at: String,
+}
+
+pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            row.id,
+            row.agent_id,
+            row.session_id,
+            row.model,
+            row.prompt,
+            row.response,
+            row.tool_calls,
+            row.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Vec<LlmLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, model, prompt, response, tool_calls, created_at
+         FROM llm_logs
+         WHERE agent_id = ?1
+         ORDER BY created_at DESC
+         LIMIT ?2"
+    )?;
+    let rows = stmt.query_map(params![agent_id, limit], |row| {
+        Ok(LlmLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            model: row.get(3)?,
+            prompt: row.get(4)?,
+            response: row.get(5)?,
+            tool_calls: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}

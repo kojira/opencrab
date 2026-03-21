@@ -14,6 +14,7 @@ const tabs = [
   { key: 'trusted-users', path: '/trusted-users', icon: 'shield_person', labelKey: 'agentNav.trustedUsers' },
   { key: 'channels', path: '/channels', icon: 'tag', labelKey: 'agentNav.channels' },
   { key: 'allowed-commands', path: '/allowed-commands', icon: 'terminal', labelKey: 'agentNav.allowedCommands' },
+  { key: 'llm-logs', path: '/llm-logs', icon: 'receipt_long', labelKey: 'agentNav.llmLogs' },
   { key: 'analytics', path: '/analytics', icon: 'analytics', labelKey: 'agentNav.analytics' },
 ];
 

@@ -110,6 +110,7 @@
   "agentNav.channels": "チャンネル",
   "agentNav.analytics": "分析",
   "agentNav.allowedCommands": "コマンド",
+  "agentNav.llmLogs": "LLMログ",
   "allowedCommands.title": "許可コマンド",
   "allowedCommands.description": "シェルツールで実行を許可するコマンドを管理します。追加したコマンドはDBに保存され、エージェント再起動後も有効です。",
   "allowedCommands.placeholder": "コマンド名（例: curl, wget, git）",
