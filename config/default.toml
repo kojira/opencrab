@@ -6,16 +6,16 @@ max_workspace_size_mb = 100
 
 # デフォルトLLM設定
 [llm]
-default_provider = "anthropic"
-default_model = "claude-sonnet-4-6"
+default_provider = "openai"
+default_model = "claude-sonnet-4-5"
 
 # 用途別モデル設定（オプション）
 [llm.models]
-thinking = { provider = "anthropic", model = "claude-sonnet-4-6" }
-conversation = { provider = "anthropic", model = "claude-sonnet-4-6" }
-analysis = { provider = "anthropic", model = "claude-sonnet-4-6" }
-tool_calling = { provider = "anthropic", model = "claude-sonnet-4-6" }
-creative = { provider = "anthropic", model = "claude-sonnet-4-6" }
+thinking = { provider = "openai", model = "claude-sonnet-4-5" }
+conversation = { provider = "openai", model = "claude-sonnet-4-5" }
+analysis = { provider = "openai", model = "claude-haiku" }
+tool_calling = { provider = "openai", model = "claude-sonnet-4-5" }
+creative = { provider = "openai", model = "claude-sonnet-4-5" }
 embedding = { provider = "openai", model = "text-embedding-3-large" }
 
 # エージェント自身によるLLM選択
@@ -27,16 +27,18 @@ allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
 [llm.fallback]
 chain = ["anthropic", "ollama"]
 
-# OpenAI設定
+# hermit-shell経由でAnthropicを使う（OpenAI互換プロキシ）
 [llm.providers.openai]
-api_key = "${OPENAI_API_KEY}"
-base_url = "https://api.openai.com/v1"
+api_key = "dummy"
+base_url = "http://localhost:8765/v1"
 organization = ""
 
 # Anthropic設定
 [llm.providers.anthropic]
 api_key = "${ANTHROPIC_API_KEY}"
 base_url = "https://api.anthropic.com"
+
+# hermit-shell (OpenAI互換 Anthropicプロキシ、ポート8765)
 
 # Google設定
 [llm.providers.google]
@@ -60,12 +62,12 @@ base_url = "http://localhost:8080"
 
 # モデルエイリアス
 [llm.aliases]
-fast = { provider = "anthropic", model = "claude-haiku-4-5" }
-smart = { provider = "anthropic", model = "claude-sonnet-4-6" }
-reasoning = { provider = "anthropic", model = "claude-sonnet-4-6" }
-creative = { provider = "anthropic", model = "claude-sonnet-4-6" }
+fast = { provider = "openai", model = "claude-haiku" }
+smart = { provider = "openai", model = "claude-sonnet-4-5" }
+reasoning = { provider = "openai", model = "claude-sonnet-4-5" }
+creative = { provider = "openai", model = "claude-sonnet-4-5" }
 local = { provider = "ollama", model = "llama3.1:8b" }
-cheap = { provider = "anthropic", model = "claude-haiku-4-5" }
+cheap = { provider = "openai", model = "claude-haiku" }
 
 [gateway.rest]
 enabled = true
