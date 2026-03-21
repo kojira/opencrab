@@ -19,6 +19,7 @@ fn create_test_app() -> Router {
         llm_router: Arc::new(LlmRouter::new()),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         default_model: "mock:test".to_string(),
+        tools_config: Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };
@@ -736,6 +737,7 @@ fn create_test_app_with_llm() -> (Router, Arc<Mutex<rusqlite::Connection>>, Arc<
             .to_string_lossy()
             .to_string(),
         default_model: "mock:gpt-4o".to_string(),
+        tools_config: Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };
