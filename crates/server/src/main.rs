@@ -424,6 +424,8 @@ async fn main() -> anyhow::Result<()> {
                 gateway.start().await?;
 
                 let first_agent_id = valid_agent_ids.first().cloned().unwrap_or_default();
+                let workspace_path = state.workspace_base.replace("{agent_id}", &first_agent_id);
+                let workspace_root = std::path::PathBuf::from(workspace_path);
                 let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
                     opencrab_discord::DiscordGatewayActions::new(
                         gateway.http().clone(),
@@ -432,6 +434,7 @@ async fn main() -> anyhow::Result<()> {
                         state.tools_config.clone(),
                         Some(Arc::new(opencrab_server::llm_adapter::LlmRouterAdapter::new(state.llm_router.clone()))),
                         state.default_model.clone(),
+                        workspace_root,
                     ),
                 );
 

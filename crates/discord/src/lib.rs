@@ -58,4 +58,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
 
     /// デフォルトモデル名を返す。
     fn default_model(&self) -> String;
+
+    /// ワークスペースベースパスを返す（例: "/data/workspace/{agent_id}"）。
+    fn workspace_base(&self) -> &str;
 }

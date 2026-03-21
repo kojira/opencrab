@@ -114,6 +114,8 @@ pub async fn send_agent_message(
         if let Some(ref dm) = state.discord_manager {
             if let Some(http) = dm.get_http_for_agent(&id).await {
                 let tools_cfg = state.tools_config.read().unwrap().clone();
+                let workspace_path = state.workspace_base.replace("{agent_id}", &id);
+                let workspace_root = std::path::PathBuf::from(workspace_path);
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
@@ -121,6 +123,7 @@ pub async fn send_agent_message(
                     Arc::new(std::sync::RwLock::new(tools_cfg)),
                     None,
                     state.default_model.clone(),
+                    workspace_root,
                 );
                 Some(Arc::new(ga) as Arc<dyn opencrab_gateway::GatewayActions>)
             } else {
