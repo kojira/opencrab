@@ -36,6 +36,7 @@ organization = ""
 # Anthropic設定
 [llm.providers.anthropic]
 api_key = "${ANTHROPIC_API_KEY}"
+base_url = "https://api.anthropic.com"
 
 # Google設定
 [llm.providers.google]
