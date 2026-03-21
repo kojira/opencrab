@@ -1481,7 +1481,7 @@ mod tests {
             "description": "test"
         })).await;
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("オーナーのみ"));
+        assert!(result.error.unwrap().contains("trusted user"));
     }
 
     #[tokio::test]
@@ -1491,6 +1491,6 @@ mod tests {
             "skill_name": "test"
         })).await;
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("オーナーのみ"));
+        assert!(result.error.unwrap().contains("trusted user"));
     }
 }
