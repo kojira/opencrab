@@ -443,3 +443,7 @@ crates/
         ├── common.rs             ← 変更なし
         └── dispatcher.rs         ← 変更なし
 ```
+
+## レビューメモ（2026-03-22 by らぼみ）
+
+- `filename_override` を受け取っているが、`CreateAttachment` の `display_name` に渡すのを忘れないこと
