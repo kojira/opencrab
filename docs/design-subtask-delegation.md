@@ -490,6 +490,139 @@ sub_conversation.push(Message {
 
 ---
 
+### 3.7 depth制限と再帰ループ防止
+
+サブエンジンが再びサブエンジンを spawn すると無限ループに陥る危険がある。
+これを防ぐため、エンジンの呼び出し深さ（depth）を制限する。
+
+#### depth の定義
+
+| depth | 意味 | spawn_subtask |
+|-------|------|---------------|
+| 0 | メインエンジン（Discord メッセージから直接起動） | 使用可 |
+| 1 | サブエンジン（tokio::spawn 内で起動） | **使用不可** |
+| 2以上 | 将来の多段サブタスク（現時点では到達しない） | **使用不可** |
+
+#### `EngineContext` への depth フィールド追加
+
+`run_agent_response` に渡すコンテキスト構造体（または引数）に `depth` を追加する:
+
+```rust
+// crates/server/src/process.rs または crates/core/src/engine.rs
+
+pub struct EngineContext {
+    pub agent_id: i64,
+    pub agent_name: String,
+    pub session_id: String,
+    pub system_prompt: String,
+    pub depth: u8,          // 0: メイン, 1: サブ, 2以上: 使用不可
+    // ... 既存フィールド
+}
+```
+
+または `run_agent_response` のシグネチャに直接 `depth: u8` を追加:
+
+```rust
+pub async fn run_agent_response(
+    // ... 既存引数
+    depth: u8,   // 0: メイン, 1: サブ
+) -> Result<EngineResult, ...> {
+    // ...
+}
+```
+
+#### `spawn_subtask` ツールの depth チェック
+
+`spawn_subtask` ツール（案D / 将来実装）の実行時に depth を検査する:
+
+```rust
+// crates/actions/src/spawn_subtask.rs（将来実装）
+
+pub async fn execute_spawn_subtask(ctx: &EngineContext, ...) -> ToolResult {
+    if ctx.depth >= 1 {
+        return ToolResult::error(
+            "サブエンジン内から spawn_subtask は使用できません（再帰防止）"
+        );
+    }
+    // ... 通常の spawn 処理
+}
+```
+
+#### メインエンジンからサブエンジンを呼ぶ際の depth 伝播
+
+```rust
+// message_loop.rs の tokio::spawn 内
+
+// サブエンジンは depth=1 で呼び出す
+let sub_result = bg_state.run_agent_response(
+    agent_id,
+    agent_name,
+    bg_session_id.clone(),
+    system_prompt,
+    sub_conversation,
+    "background",
+    None,   // gateway_actions なし
+    caller,
+    &image_urls,
+    1,      // depth = 1（サブエンジン）
+).await;
+
+// メインエンジンの最終呼び出しは depth=0 のまま
+let final_result = bg_state.run_agent_response(
+    // ...
+    0,      // depth = 0（メインエンジン）
+).await;
+```
+
+#### `AppState` への depth フィールド（代替案）
+
+`EngineContext` ではなく `AppState` に持たせる場合（リクエストスコープで管理）:
+
+```rust
+pub struct AppState {
+    // ... 既存フィールド
+    // depth は AppState には持たせない（状態を共有するため不適切）
+    // → run_agent_response の引数として渡す方式を推奨
+}
+```
+
+> **方針:** `depth` は **`run_agent_response` の引数または `EngineContext` フィールド** として渡す。
+> `AppState` はすべてのリクエストで共有されるため、depth のような呼び出しスコープの情報には不向き。
+
+#### SkillEngine への depth 伝播
+
+`SkillEngine` がツール実行時に depth を参照できるよう、executor にも伝播させる:
+
+```rust
+// engine.rs
+impl SkillEngine {
+    pub fn new(llm, executor, max_iterations, depth: u8) -> Self {
+        Self { llm, executor, max_iterations, depth }
+    }
+}
+
+// executor 側（BridgedExecutor）で spawn_subtask を呼ぶ前に depth チェック
+impl ActionExecutor for BridgedExecutor {
+    async fn execute(&self, tool_name: &str, args: Value) -> ToolResult {
+        if tool_name == "spawn_subtask" && self.depth >= 1 {
+            return ToolResult::error("再帰的なサブタスク呼び出しは禁止されています");
+        }
+        // ... 通常の実行
+    }
+}
+```
+
+#### 実装上の注意
+
+- depth の上限チェックは `spawn_subtask` ツール実行時だけで十分（他ツールは影響なし）
+- 将来的に depth=2（サブのサブ）を許容する場合は上限値を定数化しておく
+  ```rust
+  const MAX_SUBTASK_DEPTH: u8 = 1;
+  ```
+- depth はログにも記録しておくと、デバッグ時にどのエンジンが発火したか追跡しやすい
+
+---
+
 ## 4. 実装ステップ（優先順位付き）
 
 ### Phase 1: 最小実装（2〜4時間）⭐最優先
@@ -528,17 +661,21 @@ sub_conversation.push(Message {
 7. **`stopped_by_limit` の通知改善**
    - max_iterations 到達時に「処理が途中で止まりました」をわかりやすく通知
 
+8. **depth制限の実装**
+   - `run_agent_response` に `depth: u8` 引数を追加、サブ呼び出し時は `depth=1` を渡す
+   - `spawn_subtask` ツール内で `depth >= 1` チェックを追加
+
 ### Phase 3: 高度機能（将来）
 
-8. **案D（サブタスクツール）の実装**
+9. **案D（サブタスクツール）の実装**
    - `spawn_background_task` ツールを `crates/actions` に追加
    - LLM が自律的に長い処理を委譲できるようにする
 
-9. **タイピングインジケーターの継続**
+10. **タイピングインジケーターの継続**
    - バックグラウンドタスク実行中、定期的に `start_typing` を再送信
    - Discord の 10 秒タイムアウトに対応
 
-10. **進捗通知の仕組み**
+11. **進捗通知の仕組み**
     - ツールコール完了ごとに絵文字リアクション等で進捗を示す
     - 案C の軽量版として実装
 
@@ -553,6 +690,7 @@ sub_conversation.push(Message {
 - [ ] **未定** **ack を送るかどうかの判断**: 常に送る vs 長そうな時だけ送る（誤検知の問題）
 - [x] ✅ **確定** **一次応答のキャラクター**: ackはシンプルな固定文言。最終応答のかいろらしさはLLMが担保
 - [x] ✅ **確定** **サブタスクのエンジン構成**: フルSkillEngine（かいろと同じ人格・スキル）を使用。単純なシェル実行器ではない
+- [x] ✅ **確定** **再帰防止**: depth制限を採用（depth: 0=メイン、1=サブ）。depth >= 1 では spawn_subtask を使用不可
 
 ---
 
@@ -565,10 +703,13 @@ sub_conversation.push(Message {
 | `crates/core/src/engine.rs` | `run_with_model_override`（変更なし）、EngineResult.stopped_by_limit |
 | `crates/server/src/lib.rs` | `AppState` の Clone 対応確認 |
 | `crates/actions/src/` | 案D の場合: `spawn_background_task` ツール追加 |
+| `crates/core/src/engine.rs` | `SkillEngine::new` に `depth` 引数追加、BridgedExecutor に depth 伝播 |
+| `crates/actions/src/spawn_subtask.rs` | 将来実装: depth >= 1 で使用不可にする spawn_subtask ツール |
 
 ---
 
 *作成: のすたろう, 2026-03-22*
 *設計確定: 2026-03-22（サブ結果→メインフィードバック方式に変更）*
 *2026-03-22 追記: サブタスクもフルSkillEngine（かいろ同等構成）で動かす設計に確定*
+*2026-03-22 追記: depth制限（再帰防止）設計を追加*
 *レビュー: のすたろう・らぼみ・kojira（TODO #19）*
