@@ -86,6 +86,11 @@ impl Action for ShellToolAction {
                 // CoAgent can only run CoAgent level commands
                 cmd_config.permission == CommandPermission::CoAgent
             }
+            CallerIdentity::TrustedUser => {
+                // TrustedUser can run Agent and CoAgent level commands
+                cmd_config.permission == CommandPermission::Agent
+                    || cmd_config.permission == CommandPermission::CoAgent
+            }
         };
 
         if !permitted {

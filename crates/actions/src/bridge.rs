@@ -55,6 +55,7 @@ impl ActionExecutor for BridgedExecutor {
                     crate::traits::CallerIdentity::Owner => "owner",
                     crate::traits::CallerIdentity::Agent => "agent",
                     crate::traits::CallerIdentity::CoAgent { .. } => "co_agent",
+                    crate::traits::CallerIdentity::TrustedUser => "trusted_user",
                 };
                 map.insert("__caller".to_string(), serde_json::json!(caller_str));
             }
@@ -83,11 +84,16 @@ impl ActionExecutor for BridgedExecutor {
 
         // Merge gateway action definitions.
         if let Some(ref gw) = self.gateway_actions {
-            // owner-only gateway actions: excluded for non-owner callers
-            let owner_only_actions = ["create_skill", "execute_skill"];
-            let is_owner = matches!(self.context.caller, crate::traits::CallerIdentity::Owner);
+            // trusted-only gateway actions: excluded for non-trusted callers
+            let trusted_only_actions = ["create_skill", "execute_skill"];
+            let is_trusted = matches!(
+                self.context.caller,
+                crate::traits::CallerIdentity::Owner
+                    | crate::traits::CallerIdentity::CoAgent { .. }
+                    | crate::traits::CallerIdentity::TrustedUser
+            );
             for def in gw.definitions() {
-                if !is_owner && owner_only_actions.contains(&def.name.as_str()) {
+                if !is_trusted && trusted_only_actions.contains(&def.name.as_str()) {
                     continue;
                 }
                 tools.push(ToolDefinition {
@@ -159,6 +165,30 @@ mod tests {
                 },
             }
         }
+    }
+
+    fn test_context_with_caller(caller: CallerIdentity) -> (tempfile::TempDir, ActionContext) {
+        let conn = opencrab_db::init_memory().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            caller,
+            agent_id: "agent-1".to_string(),
+            agent_name: "Test Agent".to_string(),
+            session_id: Some("session-1".to_string()),
+            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            workspace: std::sync::Arc::new(ws),
+            last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test-model".to_string(),
+                active_model: None,
+                available_providers: vec!["mock".to_string()],
+                gateway: "test".to_string(),
+            })),
+        };
+        (dir, ctx)
     }
 
     fn test_context() -> (tempfile::TempDir, ActionContext) {
@@ -262,5 +292,67 @@ mod tests {
         let result = executor.execute("totally_unknown", &json!({})).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("Unknown gateway action"));
+    }
+
+    /// create_skill / execute_skill を含むモック
+    struct MockGatewayActionsWithSkills;
+
+    #[async_trait]
+    impl GatewayActions for MockGatewayActionsWithSkills {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            vec![
+                GatewayActionDef {
+                    name: "gw_action_a".to_string(),
+                    description: "Gateway action A".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+                GatewayActionDef {
+                    name: "create_skill".to_string(),
+                    description: "Create a skill".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+                GatewayActionDef {
+                    name: "execute_skill".to_string(),
+                    description: "Execute a skill".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+            ]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+            GatewayActionResult {
+                success: true,
+                data: None,
+                error: None,
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_tools_trusted_user_sees_skill_actions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
+
+        let tools = executor.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(names.contains(&"create_skill"), "TrustedUser should see create_skill");
+        assert!(names.contains(&"execute_skill"), "TrustedUser should see execute_skill");
+        assert!(names.contains(&"gw_action_a"), "TrustedUser should see regular gateway actions");
+    }
+
+    #[test]
+    fn test_list_tools_agent_cannot_see_skill_actions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
+
+        let tools = executor.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(!names.contains(&"create_skill"), "Agent should NOT see create_skill");
+        assert!(!names.contains(&"execute_skill"), "Agent should NOT see execute_skill");
+        assert!(names.contains(&"gw_action_a"), "Agent should still see regular gateway actions");
     }
 }

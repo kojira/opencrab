@@ -50,6 +50,7 @@ pub enum CallerIdentity {
     Owner,
     Agent,
     CoAgent { agent_id: String },
+    TrustedUser,
 }
 
 /// アクション実行コンテキスト

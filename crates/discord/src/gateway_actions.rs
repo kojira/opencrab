@@ -719,11 +719,11 @@ impl DiscordGatewayActions {
 
     fn execute_create_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
         let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
-        if caller != "owner" {
+        if caller != "owner" && caller != "co_agent" && caller != "trusted_user" {
             return GatewayActionResult {
                 success: false,
                 data: None,
-                error: Some("このアクションはオーナーのみ実行できます".to_string()),
+                error: Some("このアクションはtrusted userのみ実行できます".to_string()),
             };
         }
         let name = match args.get("name").and_then(|v| v.as_str()) {
@@ -814,11 +814,11 @@ impl DiscordGatewayActions {
 
     async fn execute_execute_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
         let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
-        if caller != "owner" {
+        if caller != "owner" && caller != "co_agent" && caller != "trusted_user" {
             return GatewayActionResult {
                 success: false,
                 data: None,
-                error: Some("このアクションはオーナーのみ実行できます".to_string()),
+                error: Some("このアクションはtrusted userのみ実行できます".to_string()),
             };
         }
         let skill_id = args.get("skill_id").and_then(|v| v.as_str());
