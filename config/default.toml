@@ -100,7 +100,7 @@ enabled = true
 allowed_commands = []
 timeout_secs = 30
 inherit_env = false
-allowed_env_vars = ["PATH", "HOME", "LANG"]
+allowed_env_vars = ["PATH", "HOME", "LANG", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 max_output_bytes = 65536
 
 [[tools.shell.commands]]
