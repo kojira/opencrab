@@ -1,6 +1,6 @@
 [agent]
-heartbeat_interval_secs = 1800
-heartbeat_enabled = false
+heartbeat_interval_secs = 30
+heartbeat_enabled = true
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 
@@ -77,6 +77,7 @@ token = "${DISCORD_TOKEN}"
 guild_ids = []
 agent_ids = ["crab"]  # Discordメッセージに応答するエージェントID（例: ["crab", "philosopher"]）
 owner_discord_id = "390732846236434452"  # DMに応答するオーナーのDiscord User ID
+heartbeat_channel_id = 1470698801395273861
 
 [gateway.cli]
 enabled = true
