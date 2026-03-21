@@ -88,7 +88,7 @@ export default function AgentLayout() {
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="text-sm font-semibold text-on-surface truncate">
+            <h1 className="text-sm font-semibold text-on-surface break-words line-clamp-2">
               {agent.name}
             </h1>
             <p className="text-xs text-on-surface-variant truncate">
@@ -131,14 +131,14 @@ export default function AgentLayout() {
               <Link
                 key={tab.key}
                 to={tabPath}
-                className={`flex items-center gap-1.5 px-3 py-2 text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap flex-shrink-0 ${
+                className={`flex flex-col sm:flex-row items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-2 text-label-sm sm:text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap flex-shrink-0 ${
                   active
                     ? 'bg-surface-container shadow-elevation-1 text-primary font-semibold'
                     : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container/60'
                 }`}
               >
-                <span className="material-symbols-outlined text-lg">{tab.icon}</span>
-                {t(tab.labelKey)}
+                <span className="material-symbols-outlined text-xl">{tab.icon}</span>
+                <span className="hidden sm:inline">{t(tab.labelKey)}</span>
               </Link>
             );
           })}

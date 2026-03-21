@@ -86,14 +86,14 @@ export default function Home() {
           <h1 className="text-xl text-on-surface font-bold">{t("home.title")}</h1>
           <p className="text-xs text-on-surface-variant mt-0.5">{t("home.subtitle", "Manage your AI agents and sessions")}</p>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success-container shrink-0 self-start sm:self-auto">
+        <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full bg-success-container shrink-0 self-start sm:self-auto">
           <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
           <span className="text-label-md text-success-on-container font-medium">{t("header.dbConnected")}</span>
         </div>
       </div>
 
       {/* Stats grid */}
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
         <StatCard
           icon="smart_toy"
           iconBg="bg-primary-container"
