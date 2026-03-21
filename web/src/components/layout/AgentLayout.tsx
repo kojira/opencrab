@@ -81,9 +81,9 @@ export default function AgentLayout() {
 
       {/* Agent header card */}
       <div className="rounded-xl bg-gradient-to-r from-primary-container/60 to-surface-container border border-primary/20 p-5 mb-6 shadow-elevation-1">
-        <div className="flex items-center gap-4">
-          <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-2 shrink-0">
-            <span className="text-headline-sm text-white font-bold">
+        <div className="flex items-center gap-2">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-elevation-2 shrink-0">
+            <span className="text-title-sm text-white font-bold">
               {agent.name.charAt(0) || '?'}
             </span>
           </div>
