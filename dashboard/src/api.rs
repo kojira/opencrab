@@ -723,3 +723,63 @@ pub async fn remove_co_agent(agent_id: String, co_agent_id: String) -> Result<bo
 
     Ok(deleted)
 }
+
+// ============================================
+// Channel Config
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelConfigDto {
+    pub channel_id: String,
+    pub guild_id: String,
+    pub channel_name: String,
+    pub readable: bool,
+    pub writable: bool,
+    pub whitelisted: bool,
+}
+
+#[server]
+pub async fn list_channel_configs(guild_id: String) -> Result<Vec<ChannelConfigDto>, ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let rows = opencrab_db::queries::list_channel_configs_by_guild(&conn, &guild_id)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| ChannelConfigDto {
+            channel_id: r.channel_id,
+            guild_id: r.guild_id,
+            channel_name: r.channel_name,
+            readable: r.readable,
+            writable: r.writable,
+            whitelisted: r.whitelisted,
+        })
+        .collect())
+}
+
+#[server]
+pub async fn set_channel_whitelisted(
+    channel_id: String,
+    guild_id: String,
+    channel_name: String,
+    whitelisted: bool,
+) -> Result<(), ServerFnError> {
+    let conn = opencrab_db::init_connection(&db_path())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let cfg = opencrab_db::queries::ChannelConfigRow {
+        channel_id,
+        guild_id,
+        channel_name,
+        readable: true,
+        writable: true,
+        whitelisted,
+    };
+
+    opencrab_db::queries::upsert_channel_config(&conn, &cfg)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}

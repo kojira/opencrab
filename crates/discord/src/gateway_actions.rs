@@ -127,6 +127,7 @@ impl DiscordGatewayActions {
                 let db_cfg = db_configs.iter().find(|c| c.channel_id == ch_id);
                 let readable = db_cfg.map(|c| c.readable).unwrap_or(true);
                 let writable = db_cfg.map(|c| c.writable).unwrap_or(true);
+                let whitelisted = db_cfg.map(|c| c.whitelisted).unwrap_or(false);
 
                 json!({
                     "id": ch_id,
@@ -134,6 +135,7 @@ impl DiscordGatewayActions {
                     "kind": "text",
                     "readable": readable,
                     "writable": writable,
+                    "whitelisted": whitelisted,
                 })
             })
             .collect();
@@ -196,12 +198,18 @@ impl DiscordGatewayActions {
             }
         };
 
+        let whitelisted = args
+            .get("whitelisted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let cfg = opencrab_db::queries::ChannelConfigRow {
             channel_id: channel_id.to_string(),
             guild_id: guild_id.to_string(),
             channel_name: channel_name.to_string(),
             readable,
             writable,
+            whitelisted,
         };
 
         let result = {

@@ -31,6 +31,8 @@ pub enum Route {
     Workspace { agent_id: String },
     #[route("/analytics")]
     Analytics {},
+    #[route("/channels")]
+    Channels {},
 }
 
 #[component]

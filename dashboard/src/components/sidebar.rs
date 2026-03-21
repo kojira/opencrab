@@ -18,6 +18,7 @@ pub fn Sidebar() -> Element {
     let is_skills = matches!(route, Route::Skills {});
     let is_memory = matches!(route, Route::Memory {});
     let is_sessions = matches!(route, Route::Sessions {} | Route::SessionDetail { .. });
+    let is_channels = matches!(route, Route::Channels {});
     let is_analytics = matches!(route, Route::Analytics {});
 
     rsx! {
@@ -45,6 +46,7 @@ pub fn Sidebar() -> Element {
                 SidebarLink { to: Route::Skills {}, label: "Skills", icon: "psychology", active: is_skills }
                 SidebarLink { to: Route::Memory {}, label: "Memory", icon: "memory", active: is_memory }
                 SidebarLink { to: Route::Sessions {}, label: "Sessions", icon: "forum", active: is_sessions }
+                SidebarLink { to: Route::Channels {}, label: "Channels", icon: "tune", active: is_channels }
                 SidebarLink { to: Route::Analytics {}, label: "Analytics", icon: "analytics", active: is_analytics }
             }
 
