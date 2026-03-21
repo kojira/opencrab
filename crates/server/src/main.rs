@@ -6,97 +6,294 @@ use opencrab_server::{config, create_router, AppState};
 use opencrab_core::heartbeat::{HeartbeatCallback, HeartbeatConfig, HeartbeatDecision, heartbeat_loop};
 use tokio::sync::watch;
 
-fn build_heartbeat_prompt(
-    conn: &rusqlite::Connection,
+#[cfg(feature = "discord")]
+type DiscordHttpArc = Arc<Mutex<Option<Arc<serenity::http::Http>>>>;
+#[cfg(not(feature = "discord"))]
+type DiscordHttpArc = Arc<Mutex<Option<()>>>;
+
+/// ハートビート用セッションを取得または作成する。
+fn get_or_create_heartbeat_session(
+    db: &Arc<Mutex<rusqlite::Connection>>,
     agent_id: &str,
+    channel_id: &str,
 ) -> String {
-    let soul_text = opencrab_db::queries::get_soul(conn, agent_id)
-        .ok()
-        .flatten()
-        .map(|s| format!("名前: {}\nペルソナ: {}", s.persona_name, s.personality_json))
-        .unwrap_or_else(|| "AIエージェント".to_string());
-
-    let memories = opencrab_db::queries::get_curated_memories(conn, agent_id, "")
-        .unwrap_or_default()
-        .iter()
-        .map(|m| format!("[{}] {}", m.category, m.content))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let last_speak_info = conn.query_row(
-        "SELECT created_at FROM heartbeat_log WHERE agent_id = ?1 AND decision = 'speak' ORDER BY created_at DESC LIMIT 1",
-        rusqlite::params![agent_id],
-        |row| row.get::<_, String>(0),
-    ).ok()
-     .map(|t| format!("最後に発言した時刻: {}", t))
-     .unwrap_or_else(|| "まだ一度も発言していない".to_string());
-
-    format!(
-        "あなたはAIエージェントです。以下のSoul（性格）と記憶、最後の発言情報を踏まえ、今この瞬間に何をすべきか判断してください。\n\n## Soul（性格・ペルソナ）\n{}\n\n## 最近の記憶\n{}\n\n## 発言履歴\n{}\n\n## 判断ルール\n以下の3つのいずれかを選んでください：\n- `SPEAK: <メッセージ>` — Discordで何か発言する（自然な独り言、気づき、感想など。日本語で）\n- `LEARN` — 内省・自己振り返りを行う（発言はしない）\n- `IDLE` — 何もしない\n\n## 重要\n- 発言は最低でも30分に1回以下が望ましい。最後の発言から時間が経っていない場合はIDLEまたはLEARNを選ぶ\n- SPEAKの場合は自然で短いメッセージにする（1〜2文程度）\n- 回答は必ず上記3形式のいずれか1行のみ。余計な説明は不要",
-        soul_text,
-        if memories.is_empty() { "記憶なし".to_string() } else { memories },
-        last_speak_info,
-    )
+    let session_id = format!("heartbeat-{}-{}", agent_id, channel_id);
+    let conn = db.lock().unwrap();
+    if let Ok(Some(_)) = opencrab_db::queries::get_session(&conn, &session_id) {
+        return session_id;
+    }
+    let session = opencrab_db::queries::SessionRow {
+        id: session_id.clone(),
+        mode: "heartbeat".to_string(),
+        theme: "ハートビート自律行動".to_string(),
+        phase: "active".to_string(),
+        turn_number: 0,
+        status: "active".to_string(),
+        participant_ids_json: serde_json::json!([agent_id]).to_string(),
+        facilitator_id: None,
+        done_count: 0,
+        max_turns: None,
+        metadata_json: None,
+    };
+    if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
+        tracing::warn!("Failed to create heartbeat session: {e}");
+    }
+    session_id
 }
 
-async fn evaluate_heartbeat_action_llm(
-    prompt: String,
-    llm_router: Arc<opencrab_llm::LlmRouter>,
-    default_model: &str,
-) -> HeartbeatDecision {
-    use opencrab_llm::{ChatRequest, Message, MessageContent, Role};
-
-    let request = ChatRequest {
-        model: default_model.to_string(),
-        messages: vec![
-            Message {
-                role: Role::User,
-                content: Some(MessageContent::Text(prompt)),
-                name: None,
-                function_call: None,
-                tool_calls: None,
-                tool_call_id: None,
-            }
-        ],
-        max_tokens: Some(200),
-        temperature: Some(0.7),
-        stream: Some(false),
-        functions: None,
-        function_call: None,
-        stop: None,
-        metadata: Default::default(),
-    };
-
-    match llm_router.chat_completion(request).await {
-        Ok(response) => {
-            let text = response.choices.into_iter()
-                .next()
-                .and_then(|c| match c.message.content {
-                    Some(MessageContent::Text(t)) => Some(t),
-                    _ => None,
-                })
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-
-            if text.starts_with("SPEAK:") {
-                let content = text.trim_start_matches("SPEAK:").trim().to_string();
-                if content.is_empty() {
-                    HeartbeatDecision::Idle
-                } else {
-                    HeartbeatDecision::Speak(content)
+/// ハートビートコールバックを生成する。
+/// 初期起動とhot-reload再起動の両方で使用。
+fn make_heartbeat_callback(
+    db: Arc<Mutex<rusqlite::Connection>>,
+    agent_id_owned: String,
+    discord_http: DiscordHttpArc,
+    state: AppState,
+    global_interval_secs: u64,
+    last_channel_ticks: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+) -> HeartbeatCallback {
+    Box::new(move |_agent_id: &str, tick: u64| {
+        let _agent_id = _agent_id.to_string();
+        let db = db.clone();
+        let agent_id_owned = agent_id_owned.clone();
+        let discord_http = discord_http.clone();
+        let state = state.clone();
+        let global_interval_secs = global_interval_secs;
+        let last_channel_ticks = last_channel_ticks.clone();
+        Box::pin(async move {
+            // heartbeat_enabled=trueのチャンネルを全取得
+            let whitelisted_channels: Vec<(String, String, Option<u64>)> = {
+                let conn = db.lock().unwrap();
+                match opencrab_db::queries::list_heartbeat_channels(&conn) {
+                    Ok(channels) => channels.into_iter()
+                        .map(|c| (c.channel_id.clone(), c.channel_name.clone(), c.heartbeat_interval_secs))
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("Failed to list whitelisted channels: {e}");
+                        vec![]
+                    }
                 }
-            } else if text.starts_with("LEARN") {
-                HeartbeatDecision::Learn
-            } else {
-                HeartbeatDecision::Idle
+            };
+
+            if whitelisted_channels.is_empty() {
+                tracing::debug!(agent_id = %agent_id_owned, tick, "No whitelisted channels, skipping heartbeat tick");
+                return HeartbeatDecision::Idle;
             }
-        }
-        Err(e) => {
-            tracing::warn!("Heartbeat LLM call failed: {e}");
-            HeartbeatDecision::Idle
-        }
-    }
+
+            // 最後の決定を返す（全チャンネルを処理した後）
+            let mut last_decision = HeartbeatDecision::Idle;
+
+            for (channel_id_str, channel_name, channel_interval_secs) in &whitelisted_channels {
+                // per-channel interval チェック
+                let effective_interval = channel_interval_secs
+                    .unwrap_or(global_interval_secs);
+                let should_fire = {
+                    let ticks = last_channel_ticks.lock().unwrap();
+                    let now = std::time::Instant::now();
+                    let last = ticks.get(channel_id_str.as_str());
+                    match last {
+                        None => true,
+                        Some(last_time) => now.duration_since(*last_time).as_secs() >= effective_interval,
+                    }
+                };
+                if !should_fire {
+                    tracing::debug!(
+                        agent_id = %agent_id_owned,
+                        channel_id = %channel_id_str,
+                        effective_interval,
+                        "Heartbeat: channel interval not elapsed, skipping"
+                    );
+                    continue;
+                }
+                // last_tickを更新
+                {
+                    let mut ticks = last_channel_ticks.lock().unwrap();
+                    ticks.insert(channel_id_str.clone(), std::time::Instant::now());
+                }
+
+                tracing::debug!(
+                    agent_id = %agent_id_owned,
+                    channel_id = %channel_id_str,
+                    channel_name = %channel_name,
+                    tick,
+                    "Heartbeat tick for channel"
+                );
+
+                // 1. チャンネルごとのセッション取得/作成
+                let session_id = get_or_create_heartbeat_session(&db, &agent_id_owned, channel_id_str);
+
+                // 2. ハートビートプロンプトをsession_logsに挿入
+                {
+                    let conn = db.lock().unwrap();
+                    let prompt = format!(
+                        "[ハートビート] チャンネル「{}」で今この瞬間、自律的に何をするか判断してください。SPEAK/LEARN/IDLEから選んでください。SPEAKの場合は'SPEAK: <メッセージ>'の形式で一言。発言は30分に1回以下が望ましい。",
+                        channel_name
+                    );
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: agent_id_owned.clone(),
+                        session_id: session_id.clone(),
+                        log_type: "system".to_string(),
+                        content: prompt,
+                        speaker_id: Some("heartbeat".to_string()),
+                        turn_number: None,
+                        metadata_json: None,
+                    };
+                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                        tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat prompt log: {e}");
+                        continue;
+                    }
+                }
+
+                // 3-4. エージェントコンテキストと会話文字列を構築
+                let (system_prompt, agent_name, conversation) = {
+                    let conn = db.lock().unwrap();
+                    let (sp, name) = opencrab_server::process::build_agent_context(&conn, &agent_id_owned, "ハートビート自律行動");
+                    let conv = opencrab_server::process::build_conversation_string(&conn, &session_id);
+                    (sp, name, conv)
+                };
+
+                // 5. run_agent_response を呼び出す
+                let engine_result = opencrab_server::process::run_agent_response(
+                    &state,
+                    &agent_id_owned,
+                    &agent_name,
+                    &session_id,
+                    &system_prompt,
+                    &conversation,
+                    "heartbeat",
+                    None,
+                    opencrab_actions::CallerIdentity::Owner,
+                ).await;
+
+                let decision = match engine_result {
+                    Ok(result) => {
+                        // 6. エージェント応答をsession_logsに記録
+                        {
+                            let conn = db.lock().unwrap();
+                            let log = opencrab_db::queries::SessionLogRow {
+                                id: None,
+                                agent_id: agent_id_owned.clone(),
+                                session_id: session_id.clone(),
+                                log_type: "speech".to_string(),
+                                content: result.response.clone(),
+                                speaker_id: Some(agent_id_owned.clone()),
+                                turn_number: None,
+                                metadata_json: None,
+                            };
+                            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                                tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat response log: {e}");
+                            }
+                        }
+
+                        // 7. 応答からSPEAK/LEARN/IDLEを解析
+                        let response_text = result.response.trim().to_string();
+                        if response_text.contains("SPEAK:") {
+                            let content = response_text.lines()
+                                .find(|l| l.contains("SPEAK:"))
+                                .and_then(|l| l.splitn(2, "SPEAK:").nth(1))
+                                .unwrap_or("").trim().to_string();
+                            if !content.is_empty() {
+                                HeartbeatDecision::Speak(content)
+                            } else {
+                                HeartbeatDecision::Idle
+                            }
+                        } else if response_text.to_uppercase().contains("LEARN") {
+                            HeartbeatDecision::Learn
+                        } else {
+                            HeartbeatDecision::Idle
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Heartbeat agent response failed for channel {}: {e}", channel_id_str);
+                        HeartbeatDecision::Idle
+                    }
+                };
+
+                tracing::debug!(agent_id = %_agent_id, tick, channel_id = %channel_id_str, decision = %decision, "Heartbeat tick result");
+
+                // heartbeat_logに記録
+                if let Ok(conn) = db.lock() {
+                    let decision_str = match &decision {
+                        HeartbeatDecision::Idle => "idle",
+                        HeartbeatDecision::Speak(_) => "speak",
+                        HeartbeatDecision::Learn => "learn",
+                        HeartbeatDecision::ManageSkills { .. } => "manage_skills",
+                    };
+                    if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
+                        &conn,
+                        &agent_id_owned,
+                        decision_str,
+                        Some(&format!("channel_id={}", channel_id_str)),
+                    ) {
+                        tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
+                    }
+                }
+
+                // Speak/Learn後続処理
+                match &decision {
+                    HeartbeatDecision::Speak(content) => {
+                        let content = content.clone();
+                        let discord_http = discord_http.clone();
+                        let channel_id_u64: Option<u64> = channel_id_str.parse().ok();
+                        let agent_id_log = agent_id_owned.clone();
+                        let ch_id_str = channel_id_str.clone();
+                        tokio::spawn(async move {
+                            let http_opt = discord_http.lock().unwrap().clone();
+                            if let (Some(_http), Some(ch_id)) = (http_opt.clone(), channel_id_u64) {
+                                #[cfg(feature = "discord")]
+                                {
+                                    use serenity::model::id::ChannelId;
+                                    use serenity::builder::CreateMessage;
+                                    let ch = ChannelId::new(ch_id);
+                                    if let Err(e) = ch.send_message(&_http, CreateMessage::new().content(&content)).await {
+                                        tracing::error!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat send_speech failed: {e}");
+                                    } else {
+                                        tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat spoke: {}", content);
+                                    }
+                                }
+                                #[cfg(not(feature = "discord"))]
+                                {
+                                    tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat Speak (discord disabled): {}", content);
+                                }
+                            } else {
+                                tracing::debug!(agent_id = %agent_id_log, "Heartbeat Speak: no Discord http or invalid channel_id");
+                            }
+                        });
+                    }
+                    HeartbeatDecision::Learn => {
+                        let db = db.clone();
+                        let agent_id_log = agent_id_owned.clone();
+                        let tick_val = tick;
+                        let ch_id_str = channel_id_str.clone();
+                        tokio::spawn(async move {
+                            if let Ok(conn) = db.lock() {
+                                let memory = opencrab_db::queries::CuratedMemoryRow {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    agent_id: agent_id_log.clone(),
+                                    category: "reflection".to_string(),
+                                    content: format!(
+                                        "ハートビート内省 (tick {}, channel {}): 静かに自己を振り返る。",
+                                        tick_val, ch_id_str
+                                    ),
+                                };
+                                if let Err(e) = opencrab_db::queries::upsert_curated_memory(&conn, &memory) {
+                                    tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");
+                                } else {
+                                    tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat reflect_and_learn: saved at tick {}", tick_val);
+                                }
+                            }
+                        });
+                    }
+                    HeartbeatDecision::Idle => {}
+                    HeartbeatDecision::ManageSkills { .. } => {}
+                }
+
+                last_decision = decision;
+            }
+
+            last_decision
+        })
+    })
 }
 
 /// config名またはUUIDのagent_idを、DBのUUIDに解決する。
@@ -156,12 +353,28 @@ async fn main() -> anyhow::Result<()> {
         cfg.llm.default_provider, cfg.llm.default_model
     );
 
+    // DB内の許可コマンドをtools_configにマージ
+    let mut tools_cfg = cfg.tools.clone();
+    if let Ok(agents) = opencrab_db::queries::find_agents(&conn, "") {
+        for (agent_id, _name) in &agents {
+            if let Ok(db_commands) = opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id) {
+                if let Some(ref mut shell) = tools_cfg.shell {
+                    for cmd in db_commands {
+                        if !shell.allowed_commands.contains(&cmd) {
+                            shell.allowed_commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[allow(unused_mut)]
     let mut state = AppState {
         db: Arc::new(Mutex::new(conn)),
         llm_router: Arc::new(llm_router),
         workspace_base: cfg.agent.workspace_path.clone(),
-        tools_config: Arc::new(std::sync::RwLock::new(cfg.tools.clone())),
+        tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         #[cfg(feature = "discord")]
         discord_manager: None,
@@ -191,6 +404,7 @@ async fn main() -> anyhow::Result<()> {
                 discord_cfg
                     .agent_ids
                     .iter()
+                    .map(|agent_id| resolve_agent_id(&conn, agent_id))
                     .filter(|agent_id| {
                         match opencrab_db::queries::get_identity(&conn, agent_id) {
                             Ok(Some(_)) => true,
@@ -200,7 +414,6 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     })
-                    .cloned()
                     .collect()
             };
 
@@ -216,6 +429,7 @@ async fn main() -> anyhow::Result<()> {
                         gateway.http().clone(),
                         state.db.clone(),
                         first_agent_id,
+                        state.tools_config.clone(),
                     ),
                 );
 
@@ -248,6 +462,23 @@ async fn main() -> anyhow::Result<()> {
         // Per-agent Discord gateway manager.
         let manager = opencrab_discord::DiscordGatewayManager::new(state.clone());
         manager.restore_from_db().await;
+
+        // Per-agentゲートウェイのHTTPクライアントをheartbeatに設定
+        let heartbeat_agent_id_for_http = {
+            let conn = state.db.lock().unwrap();
+            cfg.gateway.discord.agent_ids.first()
+                .map(|id| resolve_agent_id(&conn, id))
+                .unwrap_or_default()
+        };
+        if let Some(http) = manager.get_http_for_agent(&heartbeat_agent_id_for_http).await {
+            *heartbeat_discord_http.lock().unwrap() = Some(http);
+            tracing::info!(agent_id = %heartbeat_agent_id_for_http, "Set heartbeat Discord HTTP from per-agent gateway");
+        }
+        if let Some(ch_id) = cfg.gateway.discord.heartbeat_channel_id {
+            *heartbeat_channel_id_arc.lock().unwrap() = Some(ch_id);
+            tracing::info!(channel_id = %ch_id, "Set heartbeat channel ID from config");
+        }
+
         state.discord_manager = Some(Arc::new(manager));
 
         tracing::info!("Per-agent Discord gateway manager initialized");
@@ -273,8 +504,7 @@ async fn main() -> anyhow::Result<()> {
     // heartbeat設定変更を監視してループを再起動するタスク
     let heartbeat_agent_ids = agent_ids.clone();
     let heartbeat_db = state.db.clone();
-    let heartbeat_llm_router = state.llm_router.clone();
-    let heartbeat_default_model = state.default_model.clone();
+    let heartbeat_state = state.clone();
     tokio::spawn(async move {
         let mut prev_config = initial_hb_config.clone();
         let mut current_shutdown_tx: Option<watch::Sender<bool>> = None;
@@ -296,118 +526,23 @@ async fn main() -> anyhow::Result<()> {
                 let db_for_resolve = heartbeat_db.clone();
                 let agent_id = agent_id.clone();
                 let hb_discord_http = heartbeat_discord_http.clone();
-                let hb_channel_id = heartbeat_channel_id_arc.clone();
-                let llm_router_for_hb = heartbeat_llm_router.clone();
-                let default_model_for_hb = heartbeat_default_model.clone();
+                let _hb_channel_id = heartbeat_channel_id_arc.clone();
+                let state_for_hb = heartbeat_state.clone();
+                let last_channel_ticks = Arc::new(Mutex::new(std::collections::HashMap::<String, std::time::Instant>::new()));
                 _handles.push(tokio::spawn(async move {
-                    let callback: HeartbeatCallback = Box::new({
-                        let db = db.clone();
-                        let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
-                            resolve_agent_id(&conn, &agent_id)
-                        } else {
-                            agent_id.clone()
-                        };
-                        let agent_id_owned = resolved_agent_id;
-                        let discord_http = hb_discord_http.clone();
-                        let channel_id = hb_channel_id.clone();
-                        let llm_for_hb = llm_router_for_hb.clone();
-                        let model_for_hb = default_model_for_hb.clone();
-                        move |_agent_id: &str, tick: u64| {
-                            let _agent_id = _agent_id.to_string();
-                            let db = db.clone();
-                            let agent_id_owned = agent_id_owned.clone();
-                            let discord_http = discord_http.clone();
-                            let channel_id = channel_id.clone();
-                            let llm_for_hb = llm_for_hb.clone();
-                            let model_for_hb = model_for_hb.clone();
-                            Box::pin(async move {
-                            let prompt_opt = if let Ok(conn) = db.lock() {
-                                Some(build_heartbeat_prompt(&conn, &agent_id_owned))
-                            } else {
-                                None
-                            };
-                            let decision = if let Some(prompt) = prompt_opt {
-                                evaluate_heartbeat_action_llm(prompt, llm_for_hb, &model_for_hb).await
-                            } else {
-                                HeartbeatDecision::Idle
-                            };
-                            tracing::debug!(agent_id = %_agent_id, tick, decision = %decision, "Heartbeat tick");
-                            if let Ok(conn) = db.lock() {
-                                let decision_str = match &decision {
-                                    HeartbeatDecision::Idle => "idle",
-                                    HeartbeatDecision::Speak(_) => "speak",
-                                    HeartbeatDecision::Learn => "learn",
-                                    HeartbeatDecision::ManageSkills { .. } => "manage_skills",
-                                };
-                                if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
-                                    &conn,
-                                    &agent_id_owned,
-                                    decision_str,
-                                    None,
-                                ) {
-                                    tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
-                                }
-                            }
-                            match &decision {
-                                HeartbeatDecision::Speak(content) => {
-                                    let content = content.clone();
-                                    let discord_http = discord_http.clone();
-                                    let channel_id = channel_id.clone();
-                                    let agent_id_log = agent_id_owned.clone();
-                                    tokio::spawn(async move {
-                                        let http_opt = discord_http.lock().unwrap().clone();
-                                        let ch_opt = *channel_id.lock().unwrap();
-                                        if let (Some(_http), Some(ch_id)) = (http_opt.clone(), ch_opt) {
-                                            #[cfg(feature = "discord")]
-                                            {
-                                                use serenity::model::id::ChannelId;
-                                                use serenity::builder::CreateMessage;
-                                                let ch = ChannelId::new(ch_id);
-                                                if let Err(e) = ch.send_message(&_http, CreateMessage::new().content(&content)).await {
-                                                    tracing::error!(agent_id = %agent_id_log, "Heartbeat send_speech failed: {e}");
-                                                } else {
-                                                    tracing::info!(agent_id = %agent_id_log, "Heartbeat spoke: {}", content);
-                                                }
-                                            }
-                                            #[cfg(not(feature = "discord"))]
-                                            {
-                                                tracing::info!(agent_id = %agent_id_log, channel_id = ch_id, "Heartbeat Speak (discord disabled): {}", content);
-                                            }
-                                        } else {
-                                            tracing::debug!(agent_id = %agent_id_log, "Heartbeat Speak: no Discord channel configured");
-                                        }
-                                    });
-                                }
-                                HeartbeatDecision::Learn => {
-                                    let db = db.clone();
-                                    let agent_id_log = agent_id_owned.clone();
-                                    let tick_val = tick;
-                                    tokio::spawn(async move {
-                                        if let Ok(conn) = db.lock() {
-                                            let memory = opencrab_db::queries::CuratedMemoryRow {
-                                                id: uuid::Uuid::new_v4().to_string(),
-                                                agent_id: agent_id_log.clone(),
-                                                category: "reflection".to_string(),
-                                                content: format!(
-                                                    "ハートビート内省 (tick {}): 静かに自己を振り返る。",
-                                                    tick_val
-                                                ),
-                                            };
-                                            if let Err(e) = opencrab_db::queries::upsert_curated_memory(&conn, &memory) {
-                                                tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");
-                                            } else {
-                                                tracing::info!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn: saved at tick {}", tick_val);
-                                            }
-                                        }
-                                    });
-                                }
-                                HeartbeatDecision::Idle => {}
-                                HeartbeatDecision::ManageSkills { .. } => {}
-                            }
-                            decision
-                            }) // close Box::pin
-                        }
-                    });
+                    let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
+                        resolve_agent_id(&conn, &agent_id)
+                    } else {
+                        agent_id.clone()
+                    };
+                    let callback = make_heartbeat_callback(
+                        db,
+                        resolved_agent_id,
+                        hb_discord_http,
+                        state_for_hb,
+                        config_clone.interval_secs,
+                        last_channel_ticks,
+                    );
                     heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
                 }));
             }
@@ -451,118 +586,23 @@ async fn main() -> anyhow::Result<()> {
                         let db_for_resolve = heartbeat_db.clone();
                         let agent_id = agent_id.clone();
                         let hb_discord_http = heartbeat_discord_http.clone();
-                        let hb_channel_id = heartbeat_channel_id_arc.clone();
-                        let llm_router_for_hb = heartbeat_llm_router.clone();
-                        let default_model_for_hb = heartbeat_default_model.clone();
+                        let _hb_channel_id = heartbeat_channel_id_arc.clone();
+                        let state_for_hb = heartbeat_state.clone();
+                        let last_channel_ticks = Arc::new(Mutex::new(std::collections::HashMap::<String, std::time::Instant>::new()));
                         _handles.push(tokio::spawn(async move {
-                            let callback: HeartbeatCallback = Box::new({
-                                let db = db.clone();
-                                let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
-                                    resolve_agent_id(&conn, &agent_id)
-                                } else {
-                                    agent_id.clone()
-                                };
-                                let agent_id_owned = resolved_agent_id;
-                                let discord_http = hb_discord_http.clone();
-                                let channel_id = hb_channel_id.clone();
-                                let llm_for_hb = llm_router_for_hb.clone();
-                                let model_for_hb = default_model_for_hb.clone();
-                                move |_agent_id: &str, tick: u64| {
-                                    let _agent_id = _agent_id.to_string();
-                                    let db = db.clone();
-                                    let agent_id_owned = agent_id_owned.clone();
-                                    let discord_http = discord_http.clone();
-                                    let channel_id = channel_id.clone();
-                                    let llm_for_hb = llm_for_hb.clone();
-                                    let model_for_hb = model_for_hb.clone();
-                                    Box::pin(async move {
-                                    let prompt_opt = if let Ok(conn) = db.lock() {
-                                        Some(build_heartbeat_prompt(&conn, &agent_id_owned))
-                                    } else {
-                                        None
-                                    };
-                                    let decision = if let Some(prompt) = prompt_opt {
-                                        evaluate_heartbeat_action_llm(prompt, llm_for_hb, &model_for_hb).await
-                                    } else {
-                                        HeartbeatDecision::Idle
-                                    };
-                                    tracing::debug!(agent_id = %_agent_id, tick, decision = %decision, "Heartbeat tick");
-                                    if let Ok(conn) = db.lock() {
-                                        let decision_str = match &decision {
-                                            HeartbeatDecision::Idle => "idle",
-                                            HeartbeatDecision::Speak(_) => "speak",
-                                            HeartbeatDecision::Learn => "learn",
-                                            HeartbeatDecision::ManageSkills { .. } => "manage_skills",
-                                        };
-                                        if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
-                                            &conn,
-                                            &agent_id_owned,
-                                            decision_str,
-                                            None,
-                                        ) {
-                                            tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
-                                        }
-                                    }
-                                    match &decision {
-                                        HeartbeatDecision::Speak(content) => {
-                                            let content = content.clone();
-                                            let discord_http = discord_http.clone();
-                                            let channel_id = channel_id.clone();
-                                            let agent_id_log = agent_id_owned.clone();
-                                            tokio::spawn(async move {
-                                                let http_opt = discord_http.lock().unwrap().clone();
-                                                let ch_opt = *channel_id.lock().unwrap();
-                                                if let (Some(_http), Some(ch_id)) = (http_opt.clone(), ch_opt) {
-                                                    #[cfg(feature = "discord")]
-                                                    {
-                                                        use serenity::model::id::ChannelId;
-                                                        use serenity::builder::CreateMessage;
-                                                        let ch = ChannelId::new(ch_id);
-                                                        if let Err(e) = ch.send_message(&_http, CreateMessage::new().content(&content)).await {
-                                                            tracing::error!(agent_id = %agent_id_log, "Heartbeat send_speech failed: {e}");
-                                                        } else {
-                                                            tracing::info!(agent_id = %agent_id_log, "Heartbeat spoke: {}", content);
-                                                        }
-                                                    }
-                                                    #[cfg(not(feature = "discord"))]
-                                                    {
-                                                        tracing::info!(agent_id = %agent_id_log, channel_id = ch_id, "Heartbeat Speak (discord disabled): {}", content);
-                                                    }
-                                                } else {
-                                                    tracing::debug!(agent_id = %agent_id_log, "Heartbeat Speak: no Discord channel configured");
-                                                }
-                                            });
-                                        }
-                                        HeartbeatDecision::Learn => {
-                                            let db = db.clone();
-                                            let agent_id_log = agent_id_owned.clone();
-                                            let tick_val = tick;
-                                            tokio::spawn(async move {
-                                                if let Ok(conn) = db.lock() {
-                                                    let memory = opencrab_db::queries::CuratedMemoryRow {
-                                                        id: uuid::Uuid::new_v4().to_string(),
-                                                        agent_id: agent_id_log.clone(),
-                                                        category: "reflection".to_string(),
-                                                        content: format!(
-                                                            "ハートビート内省 (tick {}): 静かに自己を振り返る。",
-                                                            tick_val
-                                                        ),
-                                                    };
-                                                    if let Err(e) = opencrab_db::queries::upsert_curated_memory(&conn, &memory) {
-                                                        tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");
-                                                    } else {
-                                                        tracing::info!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn: saved at tick {}", tick_val);
-                                                    }
-                                                }
-                                            });
-                                        }
-                                        HeartbeatDecision::Idle => {}
-                                        HeartbeatDecision::ManageSkills { .. } => {}
-                                    }
-                                    decision
-                                    }) // close Box::pin
-                                }
-                            });
+                            let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
+                                resolve_agent_id(&conn, &agent_id)
+                            } else {
+                                agent_id.clone()
+                            };
+                            let callback = make_heartbeat_callback(
+                                db,
+                                resolved_agent_id,
+                                hb_discord_http,
+                                state_for_hb,
+                                config_clone.interval_secs,
+                                last_channel_ticks,
+                            );
                             heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
                         }));
                     }

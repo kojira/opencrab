@@ -48,7 +48,17 @@ impl ActionExecutor for BridgedExecutor {
 
         // Fallback to gateway actions.
         if let Some(ref gw) = self.gateway_actions {
-            let gw_result = gw.execute(name, args).await;
+            // Inject caller identity so gateway actions can do permission checks.
+            let mut enriched_args = args.clone();
+            if let serde_json::Value::Object(ref mut map) = enriched_args {
+                let caller_str = match &self.context.caller {
+                    crate::traits::CallerIdentity::Owner => "owner",
+                    crate::traits::CallerIdentity::Agent => "agent",
+                    crate::traits::CallerIdentity::CoAgent { .. } => "co_agent",
+                };
+                map.insert("__caller".to_string(), serde_json::json!(caller_str));
+            }
+            let gw_result = gw.execute(name, &enriched_args).await;
             return CoreActionResult {
                 success: gw_result.success,
                 data: gw_result.data.unwrap_or(serde_json::Value::Null),

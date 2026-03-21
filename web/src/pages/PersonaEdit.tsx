@@ -45,7 +45,7 @@ export default function PersonaEdit() {
     if (!id) return;
     getAgent(id).then((detail) => {
       setPersonaName(detail.persona_name);
-      setCustomTraits(detail.custom_traits_json || '');
+      setCustomTraits(detail.personality || '');
       setInitialized(true);
     });
     loadPresets();
@@ -57,9 +57,8 @@ export default function PersonaEdit() {
       await updateSoul(id, {
         persona_name: personaName,
         social_style_json: '{}',
-        personality_json: '{}',
         thinking_style_json: '{}',
-        custom_traits_json: customTraits || null,
+        personality: customTraits || null,
       });
       showToast(t('personaEdit.savedSuccess'));
     } catch (e) {
@@ -74,9 +73,8 @@ export default function PersonaEdit() {
       await updateSoul(id, {
         persona_name: personaName,
         social_style_json: '{}',
-        personality_json: '{}',
         thinking_style_json: '{}',
-        custom_traits_json: customTraits || null,
+        personality: customTraits || null,
       });
       await createSoulPreset(id, presetNameInput.trim());
       setPresetNameInput('');
@@ -100,7 +98,7 @@ export default function PersonaEdit() {
     await applySoulPreset(id, presetId);
     const detail = await getAgent(id);
     setPersonaName(detail.persona_name);
-    setCustomTraits(detail.custom_traits_json || '');
+    setCustomTraits(detail.personality || '');
     setConfirmApplyId(null);
     showToast(t('personaEdit.presetApplied'));
   };

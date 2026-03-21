@@ -78,9 +78,8 @@ pub async fn create_agent(
         agent_id: agent_id.clone(),
         persona_name: req.persona_name,
         social_style_json: serde_json::json!({"assertiveness": 0.0, "responsiveness": 0.0, "style_name": "Analytical"}).to_string(),
-        personality_json: serde_json::json!({"openness": 0.5, "conscientiousness": 0.5, "extraversion": 0.5, "agreeableness": 0.5, "neuroticism": 0.0}).to_string(),
         thinking_style_json: serde_json::json!({"primary": "論理的", "secondary": "分析的", "description": ""}).to_string(),
-        custom_traits_json: None,
+        personality: None,
     };
     opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
 
@@ -197,7 +196,7 @@ pub async fn create_soul_preset(
         agent_id: id,
         preset_name: req.preset_name,
         persona_name: soul.persona_name,
-        custom_traits_json: soul.custom_traits_json,
+        custom_traits_json: soul.personality,
     };
     opencrab_db::queries::insert_soul_preset(&conn, &preset).unwrap();
 
@@ -227,9 +226,8 @@ pub async fn apply_soul_preset(
         agent_id: id,
         persona_name: preset.persona_name,
         social_style_json: "{}".to_string(),
-        personality_json: "{}".to_string(),
         thinking_style_json: "{}".to_string(),
-        custom_traits_json: preset.custom_traits_json,
+        personality: preset.custom_traits_json,
     };
     opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
 

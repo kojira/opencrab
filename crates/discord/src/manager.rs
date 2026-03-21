@@ -50,6 +50,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 gateway.http().clone(),
                 self.state.db().clone(),
                 agent_id.to_string(),
+                self.state.tools_config().clone(),
             ),
         );
 
@@ -100,6 +101,12 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             .get(agent_id)
             .map(|e| !e.handle.is_finished())
             .unwrap_or(false)
+    }
+
+    /// Get the HTTP client for a per-agent gateway.
+    pub async fn get_http_for_agent(&self, agent_id: &str) -> Option<Arc<serenity::http::Http>> {
+        let gateways = self.gateways.read().await;
+        gateways.get(agent_id).map(|e| e.gateway.http().clone())
     }
 
     /// Restore all enabled agent Discord configs from DB and start their gateways.

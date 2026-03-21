@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -83,8 +83,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents/{id}/co-agents/{co_agent_id}", axum::routing::patch(api::co_agents::update_co_agent).delete(api::co_agents::delete_co_agent))
         // チャンネル設定
         .route("/api/agents/{id}/channel-configs", get(api::channel_configs::list_channel_configs).put(api::channel_configs::upsert_channel_config))
+        .route("/api/agents/{id}/channel-configs/{channel_id}", delete(api::channel_configs::delete_channel_config))
         .route("/api/agents/{id}/trusted-users", get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user))
         .route("/api/agents/{id}/trusted-users/{user_id}", axum::routing::patch(api::trusted_users::update_trusted_user).delete(api::trusted_users::delete_trusted_user))
+        // 許可コマンド管理
+        .route("/api/agents/{id}/allowed-commands", get(api::allowed_commands::list_allowed_commands).post(api::allowed_commands::add_allowed_command))
+        .route("/api/agents/{id}/allowed-commands/{command}", axum::routing::delete(api::allowed_commands::remove_allowed_command))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

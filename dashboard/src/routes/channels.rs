@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use crate::api::{list_channel_configs, set_channel_whitelisted, ChannelConfigDto};
+use crate::api::{list_channel_configs, set_channel_whitelisted, set_channel_heartbeat_config, ChannelConfigDto};
 
 #[component]
 pub fn Channels() -> Element {
@@ -73,6 +73,8 @@ pub fn Channels() -> Element {
                                             th { class: "text-left text-label-lg text-on-surface-variant px-4 py-3", "チャンネル名" }
                                             th { class: "text-left text-label-lg text-on-surface-variant px-4 py-3", "チャンネルID" }
                                             th { class: "text-center text-label-lg text-on-surface-variant px-4 py-3", "ホワイトリスト" }
+                                            th { class: "text-center text-label-lg text-on-surface-variant px-4 py-3", "HB有効" }
+                                            th { class: "text-left text-label-lg text-on-surface-variant px-4 py-3", "HB間隔(秒)" }
                                         }
                                     }
                                     tbody {
@@ -116,6 +118,17 @@ fn ChannelRow(config: ChannelConfigDto, channels: Resource<Result<Vec<ChannelCon
     let channel_name = config.channel_name.clone();
     let whitelisted = config.whitelisted;
 
+    let hb_channel_id = config.channel_id.clone();
+    let hb_guild_id = config.guild_id.clone();
+    let hb_channel_name = config.channel_name.clone();
+    let hb_interval_secs = config.heartbeat_interval_secs;
+
+    let hb_channel_id2 = config.channel_id.clone();
+    let hb_guild_id2 = config.guild_id.clone();
+    let hb_channel_name2 = config.channel_name.clone();
+    let hb_enabled2 = config.heartbeat_enabled;
+    let mut hb_interval_input = use_signal(|| config.heartbeat_interval_secs.map(|v| v.to_string()).unwrap_or_default());
+
     rsx! {
         tr { class: "border-b border-outline-variant last:border-b-0 hover:bg-surface-container-high/50 transition-colors",
             td { class: "px-4 py-3",
@@ -142,6 +155,50 @@ fn ChannelRow(config: ChannelConfigDto, channels: Resource<Result<Vec<ChannelCon
                         });
                     },
                     "{label}"
+                }
+            }
+            td { class: "px-4 py-3 text-center",
+                input {
+                    r#type: "checkbox",
+                    class: "w-4 h-4 cursor-pointer",
+                    checked: config.heartbeat_enabled,
+                    onchange: move |e| {
+                        let cid = hb_channel_id.clone();
+                        let gid = hb_guild_id.clone();
+                        let cname = hb_channel_name.clone();
+                        let enabled = e.checked();
+                        let interval = hb_interval_secs;
+                        let mut channels = channels.clone();
+                        spawn(async move {
+                            let _ = set_channel_heartbeat_config(cid, gid, cname, enabled, interval).await;
+                            channels.restart();
+                        });
+                    }
+                }
+            }
+            td { class: "px-4 py-3",
+                input {
+                    r#type: "number",
+                    class: "input-outlined w-28 text-sm",
+                    placeholder: "デフォルト",
+                    value: "{hb_interval_input}",
+                    min: "60",
+                    oninput: move |e| {
+                        hb_interval_input.set(e.value());
+                    },
+                    onblur: move |_| {
+                        let cid = hb_channel_id2.clone();
+                        let gid = hb_guild_id2.clone();
+                        let cname = hb_channel_name2.clone();
+                        let enabled = hb_enabled2;
+                        let val = hb_interval_input.read().clone();
+                        let interval = val.parse::<u64>().ok();
+                        let mut channels = channels.clone();
+                        spawn(async move {
+                            let _ = set_channel_heartbeat_config(cid, gid, cname, enabled, interval).await;
+                            channels.restart();
+                        });
+                    }
                 }
             }
         }

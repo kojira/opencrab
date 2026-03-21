@@ -49,6 +49,26 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0")?;
     }
 
+    // discord_channel_config.heartbeat_enabled カラム追加
+    let has_heartbeat_enabled_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='heartbeat_enabled'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_heartbeat_enabled_col {
+        conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN heartbeat_enabled INTEGER NOT NULL DEFAULT 1")?;
+    }
+
+    // discord_channel_config.heartbeat_interval_secs カラム追加
+    let has_hb_interval: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='heartbeat_interval_secs'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_hb_interval {
+        conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN heartbeat_interval_secs INTEGER")?;
+    }
+
     // agent_memory_index_config テーブル作成（既存DBへの対応）
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_memory_index_config (
@@ -58,6 +78,26 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )"
     )?;
+
+    // soul.custom_traits_json → soul.personality rename
+    let has_custom_traits: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='custom_traits_json'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if has_custom_traits {
+        conn.execute_batch("ALTER TABLE soul RENAME COLUMN custom_traits_json TO personality")?;
+    }
+
+    // soul.personality_json → drop
+    let has_personality_json: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='personality_json'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if has_personality_json {
+        conn.execute_batch("ALTER TABLE soul DROP COLUMN personality_json")?;
+    }
 
     Ok(())
 }
@@ -70,9 +110,8 @@ CREATE TABLE IF NOT EXISTS soul (
     agent_id TEXT PRIMARY KEY,
     persona_name TEXT NOT NULL,
     social_style_json TEXT NOT NULL DEFAULT '{}',
-    personality_json TEXT NOT NULL DEFAULT '{}',
     thinking_style_json TEXT NOT NULL DEFAULT '{}',
-    custom_traits_json TEXT,
+    personality TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -293,6 +332,8 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     readable INTEGER NOT NULL DEFAULT 1,
     writable INTEGER NOT NULL DEFAULT 1,
     whitelisted INTEGER NOT NULL DEFAULT 0,
+    heartbeat_enabled INTEGER NOT NULL DEFAULT 1,
+    heartbeat_interval_secs INTEGER,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (channel_id)
 );
@@ -393,4 +434,17 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     threshold INTEGER NOT NULL DEFAULT 20,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ============================================
+-- エージェント別許可コマンド（動的追加）
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_allowed_commands (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    added_by TEXT NOT NULL DEFAULT 'owner',
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (agent_id, command)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_allowed_commands_agent ON agent_allowed_commands(agent_id);
 "#;

@@ -17,9 +17,8 @@ export interface AgentDetail {
   image_url: string | null;
   persona_name: string;
   social_style_json: string;
-  personality_json: string;
   thinking_style_json: string;
-  custom_traits_json: string | null;
+  personality: string | null;
 }
 
 export interface IdentityRow {
@@ -35,9 +34,8 @@ export interface SoulRow {
   agent_id: string;
   persona_name: string;
   social_style_json: string;
-  personality_json: string;
   thinking_style_json: string;
-  custom_traits_json: string | null;
+  personality: string | null;
 }
 
 export interface PersonalityDto {
@@ -161,4 +159,22 @@ export interface LlmMetricsDetailDto {
   total_cost: number;
   request_count: number;
   avg_latency: number;
+}
+
+// Channel Config
+export interface ChannelConfigDto {
+  channel_id: string;
+  guild_id: string;
+  channel_name: string;
+  readable: boolean;
+  writable: boolean;
+  whitelisted: boolean;
+  heartbeat_enabled: boolean;
+  heartbeat_interval_secs: number | null;
+}
+
+export interface ChannelConfigListResponse {
+  guild_id: string;
+  configs: ChannelConfigDto[];
+  count: number;
 }

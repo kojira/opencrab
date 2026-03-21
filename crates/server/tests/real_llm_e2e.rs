@@ -117,9 +117,8 @@ async fn create_agent_with_personality(
             "agent_id": agent_id,
             "persona_name": persona,
             "social_style_json": "{}",
-            "personality_json": personality,
             "thinking_style_json": "{}",
-            "custom_traits_json": null
+            "personality": personality
         })),
     )
     .await;

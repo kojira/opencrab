@@ -37,7 +37,7 @@ pub fn build_agent_context(
 
     let custom_traits = soul
         .as_ref()
-        .and_then(|s| s.custom_traits_json.clone())
+        .and_then(|s| s.personality.clone())
         .unwrap_or_default();
 
     let skills_text = if skills.is_empty() {
