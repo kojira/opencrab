@@ -62,6 +62,7 @@ export interface SkillDto {
   effectiveness: number | null;
   usage_count: number;
   is_active: boolean;
+  archived: boolean;
 }
 
 // Memory

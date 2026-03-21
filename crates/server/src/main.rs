@@ -296,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
                                     HeartbeatDecision::Idle => "idle",
                                     HeartbeatDecision::Speak(_) => "speak",
                                     HeartbeatDecision::Learn => "learn",
+                                    HeartbeatDecision::ManageSkills { .. } => "manage_skills",
                                 };
                                 if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
                                     &conn,
@@ -360,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
                                     });
                                 }
                                 HeartbeatDecision::Idle => {}
+                                HeartbeatDecision::ManageSkills { .. } => {}
                             }
                             decision
                             }) // close Box::pin
@@ -437,6 +439,7 @@ async fn main() -> anyhow::Result<()> {
                                             HeartbeatDecision::Idle => "idle",
                                             HeartbeatDecision::Speak(_) => "speak",
                                             HeartbeatDecision::Learn => "learn",
+                                            HeartbeatDecision::ManageSkills { .. } => "manage_skills",
                                         };
                                         if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
                                             &conn,
@@ -501,6 +504,7 @@ async fn main() -> anyhow::Result<()> {
                                             });
                                         }
                                         HeartbeatDecision::Idle => {}
+                                        HeartbeatDecision::ManageSkills { .. } => {}
                                     }
                                     decision
                                     }) // close Box::pin

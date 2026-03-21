@@ -33,6 +33,8 @@ pub enum HeartbeatDecision {
     Learn,
     /// The agent decided to do nothing.
     Idle,
+    /// The agent decided to manage skills (cleanup duplicates, archive unused).
+    ManageSkills { duplicates_found: usize, archived_count: usize },
 }
 
 impl std::fmt::Display for HeartbeatDecision {
@@ -41,6 +43,9 @@ impl std::fmt::Display for HeartbeatDecision {
             HeartbeatDecision::Speak(msg) => write!(f, "speak: {}", msg),
             HeartbeatDecision::Learn => write!(f, "learn"),
             HeartbeatDecision::Idle => write!(f, "idle"),
+            HeartbeatDecision::ManageSkills { duplicates_found, archived_count } => {
+                write!(f, "manage_skills: duplicates={}, archived={}", duplicates_found, archived_count)
+            }
         }
     }
 }
@@ -117,6 +122,15 @@ pub async fn heartbeat_loop(
                     }
                     HeartbeatDecision::Idle => {
                         // Nothing to do.
+                    }
+                    HeartbeatDecision::ManageSkills { duplicates_found, archived_count } => {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            tick = tick_count,
+                            duplicates_found = duplicates_found,
+                            archived_count = archived_count,
+                            "Heartbeat: agent managed skills"
+                        );
                     }
                 }
             }

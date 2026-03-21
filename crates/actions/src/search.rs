@@ -209,6 +209,7 @@ impl Action for CreateMySkillAction {
                     usage_count: 0,
                     is_active: true,
                     permission: "\"agent\"".to_string(),
+                    archived: false,
                 };
 
                 if let Ok(conn) = ctx.db.lock() {
