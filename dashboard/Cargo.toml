@@ -20,3 +20,5 @@ opencrab-db = { path = "../crates/db" }
 opencrab-core = { path = "../crates/core" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
+
+[workspace]

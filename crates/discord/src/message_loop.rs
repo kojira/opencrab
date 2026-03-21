@@ -92,16 +92,16 @@ pub async fn run_discord_loop<T: AgentRunner>(
             }
         }
 
-        // Channel readable check: DMはフィルタリング対象外
+        // Channel whitelist check: DMはフィルタリング対象外
         if !is_dm {
-            let readable = {
+            let whitelisted = {
                 let conn = state.db().lock().unwrap();
-                opencrab_db::queries::is_channel_readable(&conn, &channel_id_str)
+                opencrab_db::queries::is_channel_whitelisted(&conn, &channel_id_str)
             };
-            if !readable {
+            if !whitelisted {
                 debug!(
                     channel = %channel_id_str,
-                    "Ignoring message from non-readable channel"
+                    "Ignoring message from non-whitelisted channel"
                 );
                 continue;
             }

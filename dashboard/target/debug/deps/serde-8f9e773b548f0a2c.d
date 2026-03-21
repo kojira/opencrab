@@ -1,0 +1,14 @@
+/Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/deps/serde-8f9e773b548f0a2c.d: /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/build/serde-f62c0188f1f9bf3d/out/private.rs
+
+/Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/deps/libserde-8f9e773b548f0a2c.rlib: /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/build/serde-f62c0188f1f9bf3d/out/private.rs
+
+/Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/deps/libserde-8f9e773b548f0a2c.rmeta: /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/build/serde-f62c0188f1f9bf3d/out/private.rs
+
+/Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/kojira/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/build/serde-f62c0188f1f9bf3d/out/private.rs:
+
+# env-dep:OUT_DIR=/Volumes/2TB/openclaw/workspace/projects/opencrab/dashboard/target/debug/build/serde-f62c0188f1f9bf3d/out

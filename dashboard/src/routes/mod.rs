@@ -6,6 +6,7 @@ mod memory;
 mod sessions;
 mod workspace;
 mod analytics;
+mod channels;
 
 pub use home::Home;
 pub use agents::{Agents, AgentCreate, AgentDetail, AgentIdentityEdit, AgentCoAgents};
@@ -15,3 +16,4 @@ pub use memory::Memory;
 pub use sessions::{Sessions, SessionDetail};
 pub use workspace::Workspace;
 pub use analytics::Analytics;
+pub use channels::Channels;

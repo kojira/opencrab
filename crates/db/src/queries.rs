@@ -1293,6 +1293,7 @@ pub struct ChannelConfigRow {
     pub channel_name: String,
     pub readable: bool,
     pub writable: bool,
+    pub whitelisted: bool,
 }
 
 pub fn get_channel_config(
@@ -1300,7 +1301,7 @@ pub fn get_channel_config(
     channel_id: &str,
 ) -> Result<Option<ChannelConfigRow>> {
     let result = conn.query_row(
-        "SELECT channel_id, guild_id, channel_name, readable, writable
+        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted
          FROM discord_channel_config WHERE channel_id = ?1",
         params![channel_id],
         |row| {
@@ -1310,6 +1311,7 @@ pub fn get_channel_config(
                 channel_name: row.get(2)?,
                 readable: row.get(3)?,
                 writable: row.get(4)?,
+                whitelisted: row.get(5)?,
             })
         },
     );
@@ -1323,13 +1325,14 @@ pub fn get_channel_config(
 
 pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO discord_channel_config (channel_id, guild_id, channel_name, readable, writable, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO discord_channel_config (channel_id, guild_id, channel_name, readable, writable, whitelisted, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(channel_id) DO UPDATE SET
             guild_id = excluded.guild_id,
             channel_name = excluded.channel_name,
             readable = excluded.readable,
             writable = excluded.writable,
+            whitelisted = excluded.whitelisted,
             updated_at = excluded.updated_at",
         params![
             cfg.channel_id,
@@ -1337,6 +1340,7 @@ pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Resul
             cfg.channel_name,
             cfg.readable,
             cfg.writable,
+            cfg.whitelisted,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -1348,7 +1352,7 @@ pub fn list_channel_configs_by_guild(
     guild_id: &str,
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, guild_id, channel_name, readable, writable
+        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted
          FROM discord_channel_config WHERE guild_id = ?1 ORDER BY channel_name",
     )?;
 
@@ -1359,6 +1363,7 @@ pub fn list_channel_configs_by_guild(
             channel_name: row.get(2)?,
             readable: row.get(3)?,
             writable: row.get(4)?,
+            whitelisted: row.get(5)?,
         })
     })?;
 
@@ -1476,6 +1481,15 @@ pub fn is_channel_writable(conn: &Connection, channel_id: &str) -> bool {
         .flatten()
         .map(|c| c.writable)
         .unwrap_or(true)
+}
+
+/// チャンネルがホワイトリストに登録されているか判定する。設定なし=false（デフォルト拒否）。
+pub fn is_channel_whitelisted(conn: &Connection, channel_id: &str) -> bool {
+    get_channel_config(conn, channel_id)
+        .ok()
+        .flatten()
+        .map(|c| c.whitelisted)
+        .unwrap_or(false)
 }
 
 // ============================================
@@ -2571,6 +2585,7 @@ mod tests {
             channel_name: "general".to_string(),
             readable: true,
             writable: false,
+            whitelisted: false,
         };
 
         upsert_channel_config(&conn, &cfg).unwrap();
@@ -2595,6 +2610,7 @@ mod tests {
             channel_name: "general".to_string(),
             readable: true,
             writable: true,
+            whitelisted: false,
         };
         upsert_channel_config(&conn, &cfg).unwrap();
 
@@ -2620,6 +2636,7 @@ mod tests {
             channel_name: "general".to_string(),
             readable: true,
             writable: true,
+            whitelisted: false,
         };
         let cfg2 = ChannelConfigRow {
             channel_id: "ch-2".to_string(),
@@ -2627,6 +2644,7 @@ mod tests {
             channel_name: "random".to_string(),
             readable: false,
             writable: true,
+            whitelisted: false,
         };
         let cfg3 = ChannelConfigRow {
             channel_id: "ch-3".to_string(),
@@ -2634,6 +2652,7 @@ mod tests {
             channel_name: "other".to_string(),
             readable: true,
             writable: true,
+            whitelisted: false,
         };
 
         upsert_channel_config(&conn, &cfg1).unwrap();
@@ -2662,6 +2681,7 @@ mod tests {
             channel_name: "blocked".to_string(),
             readable: false,
             writable: false,
+            whitelisted: false,
         };
         upsert_channel_config(&conn, &cfg).unwrap();
 

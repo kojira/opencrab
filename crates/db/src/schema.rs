@@ -39,6 +39,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")?;
     }
 
+    // discord_channel_config.whitelisted カラム追加
+    let has_whitelisted_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='whitelisted'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_whitelisted_col {
+        conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0")?;
+    }
+
     Ok(())
 }
 
@@ -272,6 +282,7 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     channel_name TEXT NOT NULL DEFAULT '',
     readable INTEGER NOT NULL DEFAULT 1,
     writable INTEGER NOT NULL DEFAULT 1,
+    whitelisted INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (channel_id)
 );
