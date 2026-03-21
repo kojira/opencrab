@@ -22,20 +22,17 @@ function StatCard({
 }) {
   return (
     <div className={`stat-card ${gradient || "bg-surface-container"}`}>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-1.5">
         <div
-          className={`w-11 h-11 rounded-xl ${iconBg} flex items-center justify-center shadow-elevation-1`}
+          className={`w-8 h-8 rounded-lg ${iconBg} flex items-center justify-center`}
         >
-          <span className={`material-symbols-outlined text-2xl ${iconColor}`}>
+          <span className={`material-symbols-outlined text-lg ${iconColor}`}>
             {icon}
           </span>
         </div>
-        <span className={`material-symbols-outlined text-4xl opacity-10 ${iconColor}`}>
-          {icon}
-        </span>
       </div>
-      <p className="text-body-md text-on-surface-variant mb-1">{label}</p>
-      <p className="text-headline-md text-on-surface font-bold">{value}</p>
+      <p className="text-xs text-on-surface-variant mb-0.5">{label}</p>
+      <p className="text-base text-on-surface font-bold">{value}</p>
     </div>
   );
 }
@@ -52,8 +49,8 @@ function QuickLink({
   description: string;
 }) {
   return (
-    <Link to={to} className="card-elevated flex items-center gap-4 group hover:border-primary/40">
-      <div className="w-11 h-11 rounded-xl bg-primary-container flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:shadow-elevation-1 transition-all duration-200">
+    <Link to={to} className="card-elevated flex items-center gap-3 group hover:border-primary/40">
+      <div className="w-8 h-8 rounded-lg bg-primary-container flex items-center justify-center shrink-0 group-hover:bg-primary group-hover:shadow-elevation-1 transition-all duration-200">
         <span className="material-symbols-outlined text-xl text-primary group-hover:text-primary-on transition-colors">
           {icon}
         </span>
@@ -82,12 +79,12 @@ export default function Home() {
   const activeSessions = sessions.filter((s) => s.status === 'active').length;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-8">
+    <div className="max-w-5xl mx-auto space-y-4">
       {/* Page header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-headline-md text-on-surface font-bold">{t("home.title")}</h1>
-          <p className="text-body-md text-on-surface-variant mt-1">{t("home.subtitle", "Manage your AI agents and sessions")}</p>
+          <h1 className="text-xl text-on-surface font-bold">{t("home.title")}</h1>
+          <p className="text-xs text-on-surface-variant mt-0.5">{t("home.subtitle", "Manage your AI agents and sessions")}</p>
         </div>
         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-success-container shrink-0 self-start sm:self-auto">
           <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
@@ -96,7 +93,7 @@ export default function Home() {
       </div>
 
       {/* Stats grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-2">
         <StatCard
           icon="smart_toy"
           iconBg="bg-primary-container"
@@ -123,7 +120,7 @@ export default function Home() {
       {/* Quick actions */}
       <div>
         <h2 className="section-title">{t("home.quickActions")}</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-2">
           <QuickLink
             to="/agents"
             icon="smart_toy"
