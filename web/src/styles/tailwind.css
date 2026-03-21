@@ -58,7 +58,7 @@
   }
 
   .card-elevated {
-    @apply rounded-xl bg-surface-container p-5 shadow-elevation-1
+    @apply rounded-xl bg-surface-container p-3 shadow-elevation-1
            hover:shadow-elevation-2 transition-all duration-200
            border border-outline-variant/60;
   }
@@ -242,7 +242,7 @@
   }
 
   .stat-card {
-    @apply rounded-xl p-5 shadow-elevation-1 hover:shadow-elevation-2
+    @apply rounded-xl p-3 shadow-elevation-1 hover:shadow-elevation-2
            transition-all duration-200 border border-outline-variant/40;
   }
 }
