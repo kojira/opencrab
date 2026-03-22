@@ -36,6 +36,8 @@ pub async fn list_llm_logs(
                     "error_code": log.error_code,
                     "error_body": log.error_body,
                     "requested_at": log.requested_at,
+                    "trigger_message_id": log.trigger_message_id,
+                    "is_bot_iteration": log.is_bot_iteration,
                     "created_at": log.created_at,
                 })
             }).collect();

@@ -3435,13 +3435,15 @@ pub struct LlmLogRow {
     pub error_code: Option<String>,
     pub error_body: Option<String>,
     pub requested_at: Option<String>,
+    pub trigger_message_id: Option<String>,
+    pub is_bot_iteration: bool,
     pub created_at: String,
 }
 
 pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, trigger_message_id, is_bot_iteration, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             row.id,
             row.agent_id,
@@ -3457,6 +3459,8 @@ pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
             row.error_code,
             row.error_body,
             row.requested_at,
+            row.trigger_message_id,
+            row.is_bot_iteration,
             row.created_at,
         ],
     )?;
@@ -3467,7 +3471,8 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, session_id, model, prompt, response, tool_calls,
                 latency_ms, prompt_tokens, completion_tokens, total_tokens,
-                error_code, error_body, requested_at, created_at
+                error_code, error_body, requested_at, trigger_message_id,
+                is_bot_iteration, created_at
          FROM llm_logs
          WHERE agent_id = ?1
          ORDER BY created_at DESC
@@ -3489,7 +3494,9 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
             error_code: row.get(11)?,
             error_body: row.get(12)?,
             requested_at: row.get(13)?,
-            created_at: row.get(14)?,
+            trigger_message_id: row.get(14)?,
+            is_bot_iteration: row.get::<_, i64>(15).map(|v| v != 0).unwrap_or(false),
+            created_at: row.get(16)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())

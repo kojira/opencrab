@@ -143,6 +143,7 @@ pub async fn run_agent_response(
     caller: opencrab_actions::CallerIdentity,
     image_urls: &[String],
     depth: u32,
+    trigger_message_id: Option<String>,
     on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
@@ -211,6 +212,7 @@ pub async fn run_agent_response(
     let log_db = state.db.clone();
     let log_agent_id = agent_id.to_string();
     let log_session_id = session_id.to_string();
+    let log_trigger_message_id = trigger_message_id.clone();
     engine.set_log_callback(move |log: &LlmCallLog| {
         let (prompt_tokens, completion_tokens, total_tokens) = log.response
             .as_ref()
@@ -243,6 +245,8 @@ pub async fn run_agent_response(
             error_code: log.error_str.as_ref().map(|_| "error".to_string()),
             error_body: log.error_str.clone(),
             requested_at: Some(log.requested_at.clone()),
+            trigger_message_id: log_trigger_message_id.clone(),
+            is_bot_iteration: log.is_bot_iteration,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         if let Ok(conn) = log_db.lock() {

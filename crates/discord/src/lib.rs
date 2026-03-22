@@ -54,6 +54,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         caller: opencrab_actions::CallerIdentity,
         image_urls: &[String],
         depth: u32,
+        trigger_message_id: Option<String>,
         on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 

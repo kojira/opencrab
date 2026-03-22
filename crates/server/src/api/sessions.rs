@@ -173,6 +173,7 @@ pub async fn send_message(
             opencrab_actions::CallerIdentity::Owner,
             &[],
             0,
+            None,   // trigger_message_id
             None,
         )
         .await;

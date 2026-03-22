@@ -292,6 +292,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             caller,
                             &[],
                             0,
+                            None,   // trigger_message_id
                             None,
                         ).await {
                             Ok(engine_result) if !engine_result.response.is_empty() => {
@@ -348,6 +349,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     caller.clone(),
                     &image_urls,
                     0,  // depth = 0 for main engine
+                    if discord_message_id.is_empty() { None } else { Some(discord_message_id.to_string()) },  // trigger_message_id
                     on_first_response,
                 )
                 .await;
