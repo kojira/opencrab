@@ -138,3 +138,9 @@
     - 現状: 同じチャンネルに複数のBotが存在するとBot同士が反応し合って無限ループになる
     - 原因: bot=trueのメッセージは無視しているが、異なるBotアカウント（opencrab版らぼみ×OpenClaw版らぼみ×かいろ）が互いに反応した
     - 修正案: 同じサーバーの既知Bot IDリストを管理し、それらからのメッセージは無視する
+
+29. **インポート設計: AGENTS.mdをsystemインストラクションとして扱う**
+    - 現状: AGENTS.mdをmemory_curated(agent_rules)にインポートしているため、RAG検索にヒットした時のみ参照される
+    - 問題: AGENTS.mdはOpenClawで「毎回読み込まれるルール集」なのに、opencrabでは常時参照されない
+    - 修正案: インポート時にAGENTS.mdの内容をsoul/personalityに統合するか、opencrabに「system_instructions」専用フィールドを追加する
+    - 関連: TODO #18インポート設計の穴
