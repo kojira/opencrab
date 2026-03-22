@@ -121,7 +121,8 @@ export default function AgentLayout() {
 
       {/* Tab navigation */}
       {!isEditRoute && (
-        <div className="flex overflow-x-auto flex-nowrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1">
+        <div className="relative overflow-hidden">
+        <div className="flex overflow-x-auto flex-nowrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1" style={{ scrollbarWidth: 'thin' }}>
           {tabs.map((tab) => {
             const tabPath = `${basePath}${tab.path}`;
             const active =
@@ -143,6 +144,8 @@ export default function AgentLayout() {
               </Link>
             );
           })}
+        </div>
+        <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-surface-container-high to-transparent pointer-events-none rounded-r-xl" />
         </div>
       )}
 
