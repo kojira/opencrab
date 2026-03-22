@@ -56,7 +56,7 @@ impl Action for SendNoreactAction {
     }
 
     fn description(&self) -> &str {
-        "発言しない（何も反応しない）"
+        "発言しない。OpenClawと同様、LLMが応答テキストとして`NO_REPLY`と返した場合も同様に扱われる"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -75,6 +75,40 @@ impl Action for SendNoreactAction {
         let reason = args["reason"].as_str().unwrap_or("特になし");
         ActionResult::success(json!({
             "action": "noreact",
+            "reason": reason,
+        }))
+    }
+}
+
+/// NO_REPLYエイリアス（send_noreactと同じ処理）
+pub struct NoReplyAction;
+
+#[async_trait]
+impl Action for NoReplyAction {
+    fn name(&self) -> &str {
+        "no_reply"
+    }
+
+    fn description(&self) -> &str {
+        "発言しない（OpenClawのNO_REPLY仕様に準拠）。グループチャットで自分に関係ない会話、Bot同士の会話、既に話が完結している場合に使用"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "発言しない理由"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
+        let reason = args["reason"].as_str().unwrap_or("特になし");
+        ActionResult::success(json!({
+            "action": "no_reply",
             "reason": reason,
         }))
     }
