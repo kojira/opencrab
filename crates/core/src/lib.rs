@@ -21,6 +21,7 @@ pub mod heartbeat;
 pub mod agent;
 pub mod engine;
 pub mod memory_index;
+pub mod import;
 
 // Re-export primary types for convenience.
 pub use soul::{Soul, SocialStyle, Personality, ThinkingStyle};
