@@ -119,8 +119,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);"
+        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);"
     )?;
 
     // llm_logs 新カラム追加（既存DBへの対応）
@@ -186,6 +185,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_col {
         conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN requested_at TEXT")?;
     }
+    // After the requested_at column is added (or confirmed to exist), create the index.
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC)")?;
 
     // skills.skill_type カラムDROP（v2: executableタイプ廃止）
     let has_skill_type_drop: bool = conn
@@ -590,5 +591,4 @@ CREATE TABLE IF NOT EXISTS llm_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
 CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
 "#;
