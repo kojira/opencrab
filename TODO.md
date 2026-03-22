@@ -144,3 +144,9 @@
     - 問題: AGENTS.mdはOpenClawで「毎回読み込まれるルール集」なのに、opencrabでは常時参照されない
     - 修正案: インポート時にAGENTS.mdの内容をsoul/personalityに統合するか、opencrabに「system_instructions」専用フィールドを追加する
     - 関連: TODO #18インポート設計の穴
+
+30. **cron/定期実行機能の追加**
+    - OpenClawにはcron設定（LaunchAgents/crontab）があるがopencrabには未実装
+    - opencrabのheartbeatは一定間隔のみ対応；cron式（特定時刻・曜日指定等）がない
+    - インポート時にもcron設定の移行が必要
+    - 設計が必要: cronジョブの保存先・実行エンジン・インポート時のパース処理
