@@ -306,10 +306,12 @@ fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
     if let Ok(Some(_)) = opencrab_db::queries::get_identity(conn, agent_id) {
         return agent_id.to_string();
     }
-    // 名前で検索
+    // 名前で検索（完全一致またはUUID前方一致のみ。部分一致は複数エージェント時に誤マッチするため使わない）
     if let Ok(agents) = opencrab_db::queries::find_agents(conn, agent_id) {
-        if let Some((uuid, _name)) = agents.first() {
-            tracing::info!(config_id = %agent_id, uuid = %uuid, "Resolved agent_id config name to UUID");
+        if let Some((uuid, _name)) = agents.iter().find(|(id, name)| {
+            id.starts_with(agent_id) || name.to_lowercase() == agent_id.to_lowercase()
+        }) {
+            tracing::info!(config_id = %agent_id, uuid = %uuid, "Resolved agent_id config name to UUID (exact match)");
             return uuid.clone();
         }
     }
