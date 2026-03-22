@@ -205,6 +205,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
             // Track whether on_first_response already sent a message to Discord.
             let first_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let first_sent_clone = first_sent.clone();
+            let first_response_speech: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+            let frs_for_cb = first_response_speech.clone();
             let gateway_for_cb = gateway.clone();
             let channel_id_for_cb = channel_id;
             let is_dm_for_cb = is_dm;
@@ -212,8 +214,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
             let on_first_response: Option<Box<dyn FnOnce(String) + Send>> = {
                 let state_db = state.db().clone();
-                let _agent_id_cb = agent_id.clone();
-                let _session_id_cb = session_id.clone();
                 Some(Box::new(move |text: String| {
                     if text.is_empty() {
                         return;
@@ -221,6 +221,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     // NO_REPLY は送信しない
                     if text.trim() == "NO_REPLY" {
                         return;
+                    }
+                    // Save the first response text (for logging when engine returns NO_REPLY)
+                    if let Ok(mut guard) = frs_for_cb.lock() {
+                        *guard = Some(text.clone());
                     }
                     // Only send if the channel is writable (or DM)
                     let writable = if is_dm_for_cb {
@@ -240,8 +244,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             tracing::error!("on_first_response Discord send failed: {e}");
                         }
                     });
-                    // Log to DB
-                    // (simplified - full logging happens after engine completes)
                 }))
             };
 
@@ -355,6 +357,33 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     // NO_REPLY は送信しない
                     if engine_result.response.trim() == "NO_REPLY" {
                         debug!(agent_id = %agent_id, "Agent returned NO_REPLY, skipping Discord send");
+                        // noreactと一緒に生成されたテキストをmemory_sessionsに保存
+                        if let Ok(guard) = first_response_speech.lock() {
+                            if let Some(ref speech_text) = *guard {
+                                if !speech_text.is_empty() {
+                                    let conn = state.db().lock().unwrap();
+                                    let log = opencrab_db::queries::SessionLogRow {
+                                        id: None,
+                                        agent_id: agent_id.clone(),
+                                        session_id: session_id.clone(),
+                                        log_type: "speech".to_string(),
+                                        content: speech_text.clone(),
+                                        speaker_id: Some(agent_id.clone()),
+                                        turn_number: None,
+                                        metadata_json: Some(
+                                            serde_json::json!({
+                                                "source": "discord_response",
+                                                "channel_id": channel_id_str,
+                                                "tool_calls_made": engine_result.tool_calls_made,
+                                                "via_noreact": true,
+                                            })
+                                            .to_string(),
+                                        ),
+                                    };
+                                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                                }
+                            }
+                        }
                         continue;
                     }
                     // Writable check: DMはフィルタリング対象外
