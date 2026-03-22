@@ -189,6 +189,8 @@ impl OpenRouterProvider {
                 prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }
         } else {
             Usage::default()

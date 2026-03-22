@@ -38,6 +38,8 @@ pub async fn list_llm_logs(
                     "requested_at": log.requested_at,
                     "trigger_message_id": log.trigger_message_id,
                     "is_bot_iteration": log.is_bot_iteration,
+                    "cache_read_tokens": log.cache_read_tokens,
+                    "cache_creation_tokens": log.cache_creation_tokens,
                     "created_at": log.created_at,
                 })
             }).collect();

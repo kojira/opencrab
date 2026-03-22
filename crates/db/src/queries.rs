@@ -3437,13 +3437,15 @@ pub struct LlmLogRow {
     pub requested_at: Option<String>,
     pub trigger_message_id: Option<String>,
     pub is_bot_iteration: bool,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
     pub created_at: String,
 }
 
 pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, trigger_message_id, is_bot_iteration, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, trigger_message_id, is_bot_iteration, cache_read_tokens, cache_creation_tokens, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             row.id,
             row.agent_id,
@@ -3461,6 +3463,8 @@ pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
             row.requested_at,
             row.trigger_message_id,
             row.is_bot_iteration,
+            row.cache_read_tokens,
+            row.cache_creation_tokens,
             row.created_at,
         ],
     )?;
@@ -3472,7 +3476,7 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
         "SELECT id, agent_id, session_id, model, prompt, response, tool_calls,
                 latency_ms, prompt_tokens, completion_tokens, total_tokens,
                 error_code, error_body, requested_at, trigger_message_id,
-                is_bot_iteration, created_at
+                is_bot_iteration, cache_read_tokens, cache_creation_tokens, created_at
          FROM llm_logs
          WHERE agent_id = ?1
          ORDER BY created_at DESC
@@ -3496,7 +3500,9 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
             requested_at: row.get(13)?,
             trigger_message_id: row.get(14)?,
             is_bot_iteration: row.get::<_, i64>(15).map(|v| v != 0).unwrap_or(false),
-            created_at: row.get(16)?,
+            cache_read_tokens: row.get(16)?,
+            cache_creation_tokens: row.get(17)?,
+            created_at: row.get(18)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -3511,6 +3517,8 @@ pub struct LlmLogStatRow {
     pub completion_tokens: i64,
     pub avg_latency_ms: f64,
     pub error_count: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
 }
 
 pub fn llm_logs_stats(conn: &Connection, agent_id: &str, days: i64) -> Result<Vec<LlmLogStatRow>> {
@@ -3520,7 +3528,9 @@ pub fn llm_logs_stats(conn: &Connection, agent_id: &str, days: i64) -> Result<Ve
                COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
                COALESCE(SUM(completion_tokens),0) as completion_tokens,
                COALESCE(AVG(latency_ms),0) as avg_latency_ms,
-               COUNT(CASE WHEN error_code IS NOT NULL THEN 1 END) as error_count
+               COUNT(CASE WHEN error_code IS NOT NULL THEN 1 END) as error_count,
+               COALESCE(SUM(cache_read_tokens),0) as cache_read_tokens,
+               COALESCE(SUM(cache_creation_tokens),0) as cache_creation_tokens
         FROM llm_logs
         WHERE agent_id = ?1
           AND COALESCE(requested_at, created_at) >= datetime('now', ?2)
@@ -3537,6 +3547,8 @@ pub fn llm_logs_stats(conn: &Connection, agent_id: &str, days: i64) -> Result<Ve
             completion_tokens: row.get(4)?,
             avg_latency_ms: row.get(5)?,
             error_count: row.get(6)?,
+            cache_read_tokens: row.get(7)?,
+            cache_creation_tokens: row.get(8)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())

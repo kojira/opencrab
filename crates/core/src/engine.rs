@@ -122,6 +122,8 @@ pub struct UsageInfo {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
 }
 
 /// Log entry for a single LLM call, passed to the log callback.
