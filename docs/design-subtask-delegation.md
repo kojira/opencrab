@@ -104,7 +104,12 @@ LLMがtool_callとして`spawn_subtask`を発行すると:
   - `parent_session_id`: 親のセッションID
   - `depth`: 現在の深さ
 - `cross_session_ref`でメッセージ単位のトレースが可能
-- steer = サブセッションへの`sessions_send`
+- **steer（サブタスクへの追加指示）**: 実行中のサブエンジンに対して、メインから途中で指示を送り込める仕組み
+  - サブは別セッションを持つため、そのセッションIDに対してメッセージを追加できる
+  - サブのLLMは次のループ呼び出し時にセッション履歴からそのメッセージを受け取り、指示に従って処理を変更する
+  - 例: 「方針を変えて英語で出力して」「処理を中断して結果だけ返して」等の軌道修正が可能
+  - 実装: `DashMap<subtask_id, (JoinHandle, session_id)>` でサブを管理し、`steer_subtask(subtask_id, message)` gateway actionでセッションにメッセージを追加する
+  - **Phase 1では受動的な実装のみ（セッションにメッセージを書くだけ）。Phase 2でサブがリアルタイム受信できる仕組みを追加**
 
 ### 2.6 サブのコンテキスト
 
