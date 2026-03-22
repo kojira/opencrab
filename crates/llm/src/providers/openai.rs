@@ -72,18 +72,22 @@ impl OpenAiProvider {
             body["stream"] = serde_json::json!(stream);
         }
         if let Some(ref functions) = request.functions {
-            // Convert to OpenAI tools format
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
-                    serde_json::json!({
+                    let mut tool = serde_json::json!({
                         "type": "function",
                         "function": {
                             "name": f.name,
                             "description": f.description,
                             "parameters": f.parameters,
                         }
-                    })
+                    });
+                    // cache_controlはAnthropicのツールトップレベルに置く
+                    if let Some(ref cc) = f.cache_control {
+                        tool["cache_control"] = cc.clone();
+                    }
+                    tool
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);
@@ -159,6 +163,10 @@ impl OpenAiProvider {
             obj["tool_call_id"] = serde_json::json!(tool_call_id);
         }
 
+        if let Some(ref cc) = msg.cache_control {
+            obj["cache_control"] = cc.clone();
+        }
+
         obj
     }
 
@@ -230,6 +238,7 @@ impl OpenAiProvider {
                                 function_call,
                                 tool_calls,
                                 tool_call_id,
+                                cache_control: None,
                             },
                             finish_reason,
                         }

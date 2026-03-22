@@ -36,7 +36,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     /// Build the agent's system prompt and name from DB.
     ///
     /// Returns `(system_prompt, agent_name)`.
-    fn build_agent_context(&self, agent_id: &str, theme: &str) -> (String, String);
+    fn build_agent_context(&self, agent_id: &str) -> (String, String);
 
     /// Build the conversation history string for a session.
     fn build_conversation_string(&self, session_id: &str) -> String;

@@ -147,6 +147,7 @@ impl OllamaProvider {
                     function_call: None,
                     tool_calls,
                     tool_call_id: None,
+                    cache_control: None,
                 },
                 finish_reason,
             }],

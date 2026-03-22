@@ -49,6 +49,14 @@ pub enum ChatContentPart {
     ImageUrl { url: String, detail: Option<String> },
 }
 
+/// Cache control directive for prompt caching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
 /// A simplified chat message for the engine's LLM interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -64,6 +72,8 @@ pub struct ChatMessage {
     /// Multimodal content parts (vision). If non-empty, takes priority over `content`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_parts: Vec<ChatContentPart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// A tool/function definition for LLM function calling.
@@ -75,6 +85,8 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON Schema describing the parameters.
     pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// A tool call requested by the LLM.
@@ -262,7 +274,14 @@ impl SkillEngine {
         model_override: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
         image_urls: &[String],
     ) -> Result<EngineResult> {
-        let tools = self.executor.list_tools();
+        let mut tools = self.executor.list_tools();
+        // BP1: toolsの最後のツールにcache_control(1h)を付与
+        if let Some(last_tool) = tools.last_mut() {
+            last_tool.cache_control = Some(CacheControl {
+                r#type: "ephemeral".to_string(),
+                ttl: Some("1h".to_string()),
+            });
+        }
 
         let user_content_parts: Vec<ChatContentPart> = if image_urls.is_empty() {
             vec![]
@@ -281,6 +300,10 @@ impl SkillEngine {
                 tool_call_id: None,
                 tool_calls: vec![],
                 content_parts: vec![],
+                cache_control: Some(CacheControl {
+                    r#type: "ephemeral".to_string(),
+                    ttl: Some("1h".to_string()),
+                }),
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -288,6 +311,7 @@ impl SkillEngine {
                 tool_call_id: None,
                 tool_calls: vec![],
                 content_parts: user_content_parts,
+                cache_control: None,
             },
         ];
 
@@ -407,6 +431,7 @@ impl SkillEngine {
                     tool_call_id: None,
                     tool_calls: response.tool_calls.clone(),
                     content_parts: vec![],
+                    cache_control: None,
                 });
 
                 for tool_call in &response.tool_calls {
@@ -429,6 +454,7 @@ impl SkillEngine {
                             tool_call_id: Some(tool_call.id.clone()),
                             tool_calls: vec![],
                             content_parts: vec![],
+                            cache_control: None,
                         });
                         continue;
                     }
@@ -444,6 +470,7 @@ impl SkillEngine {
                         tool_call_id: Some(tool_call.id.clone()),
                         tool_calls: vec![],
                         content_parts: vec![],
+                        cache_control: None,
                     });
                 }
 
@@ -696,6 +723,7 @@ mod tests {
                 name: "test_tool".to_string(),
                 description: "A test tool".to_string(),
                 parameters: serde_json::json!({}),
+                cache_control: None,
             }]
         }
     }

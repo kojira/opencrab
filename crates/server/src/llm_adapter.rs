@@ -198,6 +198,13 @@ fn to_llm_message(msg: ChatMessage) -> Message {
         function_call: None,
         tool_calls,
         tool_call_id: msg.tool_call_id,
+        cache_control: msg.cache_control.map(|cc| {
+            let mut obj = serde_json::json!({"type": cc.r#type});
+            if let Some(ttl) = cc.ttl {
+                obj["ttl"] = serde_json::json!(ttl);
+            }
+            obj
+        }),
     }
 }
 
@@ -211,6 +218,13 @@ fn to_function_def(td: ToolDefinition) -> FunctionDefinition {
             Some(td.description)
         },
         parameters: td.parameters,
+        cache_control: td.cache_control.map(|cc| {
+            let mut obj = serde_json::json!({"type": cc.r#type});
+            if let Some(ttl) = cc.ttl {
+                obj["ttl"] = serde_json::json!(ttl);
+            }
+            obj
+        }),
     }
 }
 
@@ -279,6 +293,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: vec![],
             content_parts: vec![],
+            cache_control: None,
         };
         let llm_msg = to_llm_message(msg);
         assert_eq!(llm_msg.role, Role::System);
@@ -297,6 +312,7 @@ mod tests {
                 arguments: serde_json::json!({"query": "test"}),
             }],
             content_parts: vec![],
+            cache_control: None,
         };
         let llm_msg = to_llm_message(msg);
         assert_eq!(llm_msg.role, Role::Assistant);
@@ -378,6 +394,7 @@ mod tests {
                     detail: Some("auto".to_string()),
                 },
             ],
+            cache_control: None,
         };
         let llm_msg = to_llm_message(msg);
         assert_eq!(llm_msg.role, Role::User);

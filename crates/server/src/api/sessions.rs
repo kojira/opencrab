@@ -151,13 +151,14 @@ pub async fn send_message(
         // Build agent context from DB.
         let (system_prompt, agent_name) = {
             let conn = state.db.lock().unwrap();
-            process::build_agent_context(&conn, agent_id, &session_theme)
+            process::build_agent_context(&conn, agent_id)
         };
 
         // Build conversation history from session logs.
         let conversation = {
             let conn = state.db.lock().unwrap();
-            process::build_conversation_string(&conn, &id)
+            let raw = process::build_conversation_string(&conn, &id);
+            process::prepend_runtime_context(&raw, &session_theme)
         };
 
         // Run agent through the shared pipeline.

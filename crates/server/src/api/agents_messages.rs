@@ -143,13 +143,14 @@ pub async fn send_agent_message(
     // 6. Build agent context.
     let (system_prompt, agent_name) = {
         let conn = state.db.lock().unwrap();
-        process::build_agent_context(&conn, &id, "direct_message")
+        process::build_agent_context(&conn, &id)
     };
 
     // 7. Build conversation string.
     let conversation = {
         let conn = state.db.lock().unwrap();
-        process::build_conversation_string(&conn, &session_id)
+        let raw = process::build_conversation_string(&conn, &session_id);
+        process::prepend_runtime_context(&raw, "direct_message")
     };
 
     // 8. Run agent response.
