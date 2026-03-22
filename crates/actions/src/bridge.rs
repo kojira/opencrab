@@ -20,6 +20,7 @@ pub struct BridgedExecutor {
     dispatcher: ActionDispatcher,
     context: ActionContext,
     gateway_actions: Option<Arc<dyn GatewayActions>>,
+    depth: u32,
 }
 
 impl BridgedExecutor {
@@ -28,7 +29,13 @@ impl BridgedExecutor {
             dispatcher,
             context,
             gateway_actions: None,
+            depth: 0,
         }
+    }
+
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
     }
 
     pub fn with_gateway_actions(mut self, actions: Arc<dyn GatewayActions>) -> Self {
@@ -58,6 +65,11 @@ impl ActionExecutor for BridgedExecutor {
                     crate::traits::CallerIdentity::TrustedUser => "trusted_user",
                 };
                 map.insert("__caller".to_string(), serde_json::json!(caller_str));
+                if let Some(ref session_id) = self.context.session_id {
+                    map.insert("__session_id".to_string(), serde_json::json!(session_id));
+                }
+                map.insert("__depth".to_string(), serde_json::json!(self.depth));
+                map.insert("__agent_id".to_string(), serde_json::json!(&self.context.agent_id));
             }
             let gw_result = gw.execute(name, &enriched_args).await;
             return CoreActionResult {
@@ -82,6 +94,17 @@ impl ActionExecutor for BridgedExecutor {
             })
             .collect();
 
+        // Discord-specific actions that are blocked at depth >= 1 (sub-engines cannot send to Discord directly)
+        const DISCORD_ACTIONS: &[&str] = &[
+            "discord_send", "discord_send_file", "discord_react",
+            "discord_delete_message", "discord_edit_message",
+            "discord_start_thread", "discord_list_channels", "discord_get_channel_info",
+            "discord_list_guilds", "discord_set_channel_writable", "discord_whitelist_channel",
+            "discord_add_reaction", "discord_remove_reaction", "discord_send_reply",
+            "discord_send_with_embed", "discord_pin_message", "discord_unpin_message",
+        ];
+        const MAX_DEPTH: u32 = 2;
+
         // Merge gateway action definitions.
         if let Some(ref gw) = self.gateway_actions {
             // trusted-only gateway actions: excluded for non-trusted callers
@@ -93,6 +116,14 @@ impl ActionExecutor for BridgedExecutor {
                     | crate::traits::CallerIdentity::TrustedUser
             );
             for def in gw.definitions() {
+                // At depth >= 1: block Discord-specific actions (sub-engines cannot directly send to Discord)
+                if self.depth >= 1 && DISCORD_ACTIONS.contains(&def.name.as_str()) {
+                    continue;
+                }
+                // At depth >= MAX_DEPTH: block spawn_subtask (prevent infinite nesting)
+                if self.depth >= MAX_DEPTH && def.name == "spawn_subtask" {
+                    continue;
+                }
                 if !is_trusted && trusted_only_actions.contains(&def.name.as_str()) {
                     continue;
                 }

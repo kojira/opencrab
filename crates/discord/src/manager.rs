@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 use opencrab_gateway::DiscordGateway;
 
 use crate::AgentRunner;
+use crate::gateway_actions::{SubtaskRegistry, CompletionRegistry};
 
 struct AgentGatewayEntry {
     gateway: Arc<DiscordGateway>,
@@ -49,6 +50,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             .replace("{agent_id}", agent_id);
         let workspace_root = std::path::PathBuf::from(workspace_path);
 
+        let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let completion_registry: CompletionRegistry = Arc::new(dashmap::DashMap::new());
+
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
             crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
@@ -58,6 +62,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 Some(self.state.create_llm_client()),
                 self.state.default_model(),
                 workspace_root,
+                subtask_registry,
+                completion_registry.clone(),
             ),
         );
 
@@ -73,6 +79,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 agent_ids,
                 gateway_actions,
                 owner,
+                completion_registry,
             )
             .await;
         });

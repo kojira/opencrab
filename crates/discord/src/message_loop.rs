@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
 
+use crate::gateway_actions::{CompletionRegistry, SubtaskCompletionFn};
 use crate::AgentRunner;
 
 /// Discordメッセージの受信→エージェント処理→応答送信のメインループ。
@@ -20,6 +21,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
+    completion_registry: CompletionRegistry,
 ) {
     info!(
         agents = ?agent_ids,
@@ -199,6 +201,130 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
             let conversation = state.build_conversation_string(&session_id);
 
+            // Track whether on_first_response already sent a message to Discord.
+            let first_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let first_sent_clone = first_sent.clone();
+            let gateway_for_cb = gateway.clone();
+            let channel_id_for_cb = channel_id;
+            let is_dm_for_cb = is_dm;
+            let channel_id_str_for_cb = channel_id_str.clone();
+
+            let on_first_response: Option<Box<dyn FnOnce(String) + Send>> = {
+                let state_db = state.db().clone();
+                let _agent_id_cb = agent_id.clone();
+                let _session_id_cb = session_id.clone();
+                Some(Box::new(move |text: String| {
+                    if text.is_empty() {
+                        return;
+                    }
+                    // Only send if the channel is writable (or DM)
+                    let writable = if is_dm_for_cb {
+                        true
+                    } else {
+                        state_db.lock()
+                            .map(|conn| opencrab_db::queries::is_channel_writable(&conn, &channel_id_str_for_cb))
+                            .unwrap_or(false)
+                    };
+                    if !writable {
+                        return;
+                    }
+                    first_sent_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // Spawn async send in a new tokio task
+                    tokio::spawn(async move {
+                        if let Err(e) = gateway_for_cb.send_to_channel(channel_id_for_cb, &text).await {
+                            tracing::error!("on_first_response Discord send failed: {e}");
+                        }
+                    });
+                    // Log to DB
+                    // (simplified - full logging happens after engine completes)
+                }))
+            };
+
+            // Register subtask completion callback for this session.
+            {
+                let gw_cb = gateway.clone();
+                let state_cb = state.clone();
+                let ga_cb = gateway_actions.clone();
+                let agent_id_cb = agent_id.clone();
+                let session_id_cb = session_id.clone();
+                let channel_id_cb = channel_id;
+                let is_dm_cb = is_dm;
+                let channel_id_str_cb = channel_id_str.clone();
+                let caller_cb = caller.clone();
+                let db_cb = state.db().clone();
+
+                let completion_cb: SubtaskCompletionFn = Arc::new(move |subtask_id: String, _result: String, exit_reason: String| {
+                    let gw = gw_cb.clone();
+                    let state = state_cb.clone();
+                    let ga = ga_cb.clone();
+                    let agent_id = agent_id_cb.clone();
+                    let session_id = session_id_cb.clone();
+                    let channel_id = channel_id_cb;
+                    let is_dm = is_dm_cb;
+                    let channel_id_str = channel_id_str_cb.clone();
+                    let caller = caller_cb.clone();
+                    let db = db_cb.clone();
+                    let exit_reason_clone = exit_reason.clone();
+
+                    tokio::spawn(async move {
+                        let (base_prompt, agent_name) = state.build_agent_context(&agent_id, "Discord conversation");
+                        let system_prompt = format!(
+                            "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, exit_reason={}]",
+                            base_prompt, channel_id_str, subtask_id, exit_reason_clone
+                        );
+                        let conversation = state.build_conversation_string(&session_id);
+
+                        match state.run_agent_response(
+                            &agent_id,
+                            &agent_name,
+                            &session_id,
+                            &system_prompt,
+                            &conversation,
+                            "discord",
+                            Some(ga),
+                            caller,
+                            &[],
+                            0,
+                            None,
+                        ).await {
+                            Ok(engine_result) if !engine_result.response.is_empty() => {
+                                // Writable check
+                                if !is_dm {
+                                    let writable = db.lock()
+                                        .map(|conn| opencrab_db::queries::is_channel_writable(&conn, &channel_id_str))
+                                        .unwrap_or(false);
+                                    if !writable { return; }
+                                }
+                                if let Err(e) = gw.send_to_channel(channel_id, &engine_result.response).await {
+                                    tracing::error!("Subtask completion Discord send failed: {e}");
+                                }
+                                // Log to DB
+                                if let Ok(conn) = db.lock() {
+                                    let log = opencrab_db::queries::SessionLogRow {
+                                        id: None,
+                                        agent_id: agent_id.clone(),
+                                        session_id: session_id.clone(),
+                                        log_type: "speech".to_string(),
+                                        content: engine_result.response,
+                                        speaker_id: Some(agent_id.clone()),
+                                        turn_number: None,
+                                        metadata_json: Some(serde_json::json!({
+                                            "source": "discord_response",
+                                            "channel_id": channel_id_str,
+                                            "triggered_by": "subtask_completed",
+                                        }).to_string()),
+                                    };
+                                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                });
+
+                completion_registry.insert(session_id.clone(), completion_cb);
+            }
+
             let result = state
                 .run_agent_response(
                     agent_id,
@@ -210,6 +336,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     Some(gateway_actions.clone()),
                     caller.clone(),
                     &image_urls,
+                    0,  // depth = 0 for main engine
+                    on_first_response,
                 )
                 .await;
 
@@ -231,12 +359,14 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         }
                     }
 
-                    // Send response to Discord.
-                    if let Err(e) = gateway
-                        .send_to_channel(channel_id, &engine_result.response)
-                        .await
-                    {
-                        error!(agent_id = %agent_id, "Failed to send Discord reply: {e}");
+                    // Only send final response if on_first_response didn't already send.
+                    if !first_sent.load(std::sync::atomic::Ordering::SeqCst) {
+                        if let Err(e) = gateway
+                            .send_to_channel(channel_id, &engine_result.response)
+                            .await
+                        {
+                            error!(agent_id = %agent_id, "Failed to send Discord reply: {e}");
+                        }
                     }
 
                     // Log agent response to DB.

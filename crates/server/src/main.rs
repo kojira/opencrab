@@ -164,6 +164,8 @@ fn make_heartbeat_callback(
                     None,
                     opencrab_actions::CallerIdentity::Owner,
                     &[],
+                    0,
+                    None,
                 ).await;
 
                 let decision = match engine_result {
@@ -427,6 +429,8 @@ async fn main() -> anyhow::Result<()> {
                 let first_agent_id = valid_agent_ids.first().cloned().unwrap_or_default();
                 let workspace_path = state.workspace_base.replace("{agent_id}", &first_agent_id);
                 let workspace_root = std::path::PathBuf::from(workspace_path);
+                let subtask_registry: opencrab_discord::SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+                let completion_registry: opencrab_discord::CompletionRegistry = Arc::new(dashmap::DashMap::new());
                 let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
                     opencrab_discord::DiscordGatewayActions::new(
                         gateway.http().clone(),
@@ -436,6 +440,8 @@ async fn main() -> anyhow::Result<()> {
                         Some(Arc::new(opencrab_server::llm_adapter::LlmRouterAdapter::new(state.llm_router.clone()))),
                         state.default_model.clone(),
                         workspace_root,
+                        subtask_registry,
+                        completion_registry.clone(),
                     ),
                 );
 
@@ -450,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
                         valid_agent_ids,
                         gateway_actions,
                         owner_discord_id,
+                        completion_registry,
                     )
                     .await;
                 });
