@@ -188,6 +188,26 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // After the requested_at column is added (or confirmed to exist), create the index.
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC)")?;
 
+    // llm_logs.trigger_message_id カラム追加
+    let has_trigger: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='trigger_message_id'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_trigger {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN trigger_message_id TEXT")?;
+    }
+
+    // llm_logs.is_bot_iteration カラム追加
+    let has_bot_iter: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='is_bot_iteration'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_bot_iter {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN is_bot_iteration INTEGER NOT NULL DEFAULT 0")?;
+    }
+
     // skills.skill_type カラムDROP（v2: executableタイプ廃止）
     let has_skill_type_drop: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='skill_type'")?
@@ -587,6 +607,8 @@ CREATE TABLE IF NOT EXISTS llm_logs (
     error_code TEXT,
     error_body TEXT,
     requested_at TEXT,
+    trigger_message_id TEXT,
+    is_bot_iteration INTEGER NOT NULL DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);

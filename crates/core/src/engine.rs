@@ -137,6 +137,8 @@ pub struct LlmCallLog {
     pub latency_ms: i64,
     /// RFC3339 timestamp (millisecond precision) of when the request was sent.
     pub requested_at: String,
+    /// Whether this is a bot-internal loop iteration (tool call follow-up), i.e., iteration > 1.
+    pub is_bot_iteration: bool,
 }
 
 /// Trait for LLM chat completion.
@@ -338,6 +340,7 @@ impl SkillEngine {
                         error_str: None,
                         latency_ms,
                         requested_at: requested_at.clone(),
+                        is_bot_iteration: iterations > 1,
                     }),
                     Err(e) => cb(&LlmCallLog {
                         request: request_for_log.clone(),
@@ -345,6 +348,7 @@ impl SkillEngine {
                         error_str: Some(e.to_string()),
                         latency_ms,
                         requested_at: requested_at.clone(),
+                        is_bot_iteration: iterations > 1,
                     }),
                 }
             }

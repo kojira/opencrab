@@ -165,6 +165,7 @@ pub async fn send_agent_message(
         caller,
         &[],
         0,
+        None,   // trigger_message_id
         None,
     )
     .await;

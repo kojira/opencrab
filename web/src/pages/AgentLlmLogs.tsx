@@ -18,6 +18,8 @@ interface LlmLog {
   error_code: string | null;
   error_body: string | null;
   requested_at: string | null;
+  trigger_message_id: string | null;
+  is_bot_iteration: boolean;
   created_at: string;
 }
 
@@ -434,6 +436,16 @@ function LogDetail({ log }: { log: LlmLog }) {
             リクエスト: {new Date(log.requested_at).toLocaleString()}
           </span>
         )}
+        {log.trigger_message_id && (
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200 font-medium">
+            {"\uD83D\uDCAC"} trigger_message_id: {log.trigger_message_id}
+          </span>
+        )}
+        {log.is_bot_iteration && (
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 font-medium">
+            {"\uD83D\uDD04"} Bot iteration (tool call follow-up)
+          </span>
+        )}
       </div>
 
       {/* ── Error section ── */}
@@ -693,6 +705,16 @@ function LogCard({ log }: { log: LlmLog }) {
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-error-container text-on-error-container text-label-sm font-medium">
                 <span className="material-symbols-outlined text-sm">error</span>
                 {log.error_code}
+              </span>
+            )}
+            {log.trigger_message_id && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200 text-label-sm">
+                {"\uD83D\uDCAC"} {log.trigger_message_id}
+              </span>
+            )}
+            {log.is_bot_iteration && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 text-label-sm">
+                {"\uD83D\uDD04"} bot iter
               </span>
             )}
           </div>

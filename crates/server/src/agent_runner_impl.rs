@@ -47,6 +47,7 @@ impl opencrab_discord::AgentRunner for AppState {
         caller: opencrab_actions::CallerIdentity,
         image_urls: &[String],
         depth: u32,
+        trigger_message_id: Option<String>,
         on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
     ) -> anyhow::Result<opencrab_core::EngineResult> {
         process::run_agent_response(
@@ -61,6 +62,7 @@ impl opencrab_discord::AgentRunner for AppState {
             caller,
             image_urls,
             depth,
+            trigger_message_id,
             on_first_response,
         )
         .await
