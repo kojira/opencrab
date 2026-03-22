@@ -19,6 +19,7 @@ export interface AgentDetail {
   social_style_json: string;
   thinking_style_json: string;
   personality: string | null;
+  instructions: string;
 }
 
 export interface IdentityRow {
@@ -36,6 +37,7 @@ export interface SoulRow {
   social_style_json: string;
   thinking_style_json: string;
   personality: string | null;
+  instructions: string;
 }
 
 export interface PersonalityDto {

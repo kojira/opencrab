@@ -135,6 +135,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills DROP COLUMN code")?;
     }
 
+    // soul.instructions カラム追加（操作ルール・AGENTS.md相当）
+    let has_instructions: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='instructions'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_instructions {
+        conn.execute_batch("ALTER TABLE soul ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")?;
+    }
+
     Ok(())
 }
 
@@ -148,6 +158,7 @@ CREATE TABLE IF NOT EXISTS soul (
     social_style_json TEXT NOT NULL DEFAULT '{}',
     thinking_style_json TEXT NOT NULL DEFAULT '{}',
     personality TEXT,
+    instructions TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 

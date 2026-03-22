@@ -14,17 +14,20 @@ pub struct SoulRow {
     pub social_style_json: String,
     pub thinking_style_json: String,
     pub personality: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
 }
 
 pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO soul (agent_id, persona_name, social_style_json, thinking_style_json, personality, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO soul (agent_id, persona_name, social_style_json, thinking_style_json, personality, instructions, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(agent_id) DO UPDATE SET
             persona_name = excluded.persona_name,
             social_style_json = excluded.social_style_json,
             thinking_style_json = excluded.thinking_style_json,
             personality = excluded.personality,
+            instructions = excluded.instructions,
             updated_at = excluded.updated_at",
         params![
             soul.agent_id,
@@ -32,6 +35,7 @@ pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
             soul.social_style_json,
             soul.thinking_style_json,
             soul.personality,
+            soul.instructions,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -40,7 +44,7 @@ pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
 
 pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, persona_name, social_style_json, thinking_style_json, personality
+        "SELECT agent_id, persona_name, social_style_json, thinking_style_json, personality, instructions
          FROM soul WHERE agent_id = ?1",
         params![agent_id],
         |row| {
@@ -50,6 +54,7 @@ pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
                 social_style_json: row.get(2)?,
                 thinking_style_json: row.get(3)?,
                 personality: row.get(4)?,
+                instructions: row.get(5)?,
             })
         },
     );
@@ -1885,6 +1890,7 @@ mod tests {
             social_style_json: r#"{"style":"friendly"}"#.to_string(),
             thinking_style_json: r#"{"approach":"analytical"}"#.to_string(),
             personality: Some(r#"{"hobby":"coding"}"#.to_string()),
+            instructions: String::new(),
         };
 
         upsert_soul(&conn, &soul).unwrap();
@@ -2613,6 +2619,7 @@ mod tests {
                 social_style_json: "{}".into(),
                 thinking_style_json: "{}".into(),
                 personality: None,
+                instructions: String::new(),
             },
         )
         .unwrap();
@@ -2745,6 +2752,7 @@ mod tests {
                 social_style_json: "{}".into(),
                 thinking_style_json: "{}".into(),
                 personality: None,
+                instructions: String::new(),
             },
         )
         .unwrap();
@@ -2776,6 +2784,7 @@ mod tests {
                 social_style_json: r#"{"style":"analytical"}"#.into(),
                 thinking_style_json: "{}".into(),
                 personality: None,
+                instructions: String::new(),
             },
         )
         .unwrap();

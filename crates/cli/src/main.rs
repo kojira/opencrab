@@ -149,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
                         social_style_json: "{}".to_string(),
                         thinking_style_json: "{}".to_string(),
                         personality: None,
+                        instructions: String::new(),
                     },
                 )?;
 

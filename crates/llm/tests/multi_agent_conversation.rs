@@ -290,6 +290,7 @@ async fn test_three_agent_with_db_and_session() {
                 social_style_json: "{}".to_string(),
                 thinking_style_json: "{}".to_string(),
                 personality: None,
+                instructions: String::new(),
             },
         )
         .unwrap();

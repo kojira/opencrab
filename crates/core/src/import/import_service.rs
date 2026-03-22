@@ -61,6 +61,7 @@ pub fn execute_import(
                 social_style_json: "{}".to_string(),
                 thinking_style_json: "{}".to_string(),
                 personality: Some(scan_result.soul.personality.clone()),
+                instructions: scan_result.instructions.clone(),
             };
             opencrab_db::queries::upsert_soul(conn, &soul)?;
             counts.soul = true;
@@ -231,6 +232,7 @@ mod tests {
                 found: true,
             },
             memory_curated: vec![],
+            instructions: String::new(),
             skills: vec![],
             daily_logs: vec![],
             warnings: vec![],
@@ -268,6 +270,7 @@ mod tests {
                 category: "long_term/テスト".to_string(),
                 content: "test content".to_string(),
             }],
+            instructions: String::new(),
             skills: vec![crate::import::openclaw_parser::SkillImportData {
                 name: "test-skill".to_string(),
                 description: "A test skill".to_string(),

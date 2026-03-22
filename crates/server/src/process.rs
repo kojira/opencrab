@@ -40,6 +40,11 @@ pub fn build_agent_context(
         .and_then(|s| s.personality.clone())
         .unwrap_or_default();
 
+    let instructions = soul
+        .as_ref()
+        .map(|s| s.instructions.clone())
+        .unwrap_or_default();
+
     let skills_text = if skills.is_empty() {
         String::new()
     } else {
@@ -56,6 +61,12 @@ pub fn build_agent_context(
         String::new()
     } else {
         format!("\n\n{custom_traits}")
+    };
+
+    let instructions_section = if instructions.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n## Instructions\n{instructions}")
     };
 
     let prompt = format!(
@@ -86,7 +97,7 @@ pub fn build_agent_context(
          - 他のBotが話している場合（Bot同士のループを防ぐ）\n\
          - 既に話が完結している場合\n\
          \n\
-         {skills_text}{character_section}"
+         {skills_text}{character_section}{instructions_section}"
     );
 
     (prompt, agent_name)
