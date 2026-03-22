@@ -363,27 +363,22 @@ MAX_DEPTH=2とした理由:
 
 `nostaro watch`のような終了しない常駐型プロセスへの対応:
 
-**短期監視（サブタスク内）**: screen/nohupで起動→screendumpをポーリング
-```bash
-# サブが実行:
-execute_shell("screen", ["-dmS", "nostr-watch", "nostaro", "watch"])
-# → すぐ返る。screenプロセスはバックグラウンドで常駐
+> **⚠️ セキュリティ注意**: `screen`はallowed_commandsに追加禁止。`screen -dmS xxx bash -c "任意コマンド"` でallowed_commandsを完全に迂回できるため。
 
-# 定期チェック:
-execute_shell("screen", ["-S", "nostr-watch", "-X", "hardcopy", "/tmp/nostr-output.txt"])
-execute_shell("cat", ["/tmp/nostr-output.txt"])
-# 差分があればreport_progress
+**推奨実装: `execute_shell`に`background=true`オプションを追加（Phase 2 TODO）**
+```
+execute_shell(command="nostaro", args=["watch"], background=true, output_file="/tmp/nostr.log")
+→ PIDを返す（即リターン）
+→ allowed_commandsの制限は維持
+→ kill_process(pid)で停止可能
 ```
 
-**重要**: screenプロセスはサブエンジンのタイムアウトと独立して生き続ける。
-サブがタイムアウトしても`nostaro watch`プロセスは継続する。
+内部実装: `tokio::process::Command::spawn()`でwaitせずPIDを返す + `DashMap<pid, Child>`で管理。
+`nohup`や`&`はシェル機能のため不要（tokioのCommand API直接制御）。
 
 **長期常駐型（24時間監視）**: heartbeat連携が必要
-- screenで起動したプロセスはサーバー再起動まで継続
-- opencrabのheartbeat機能が定期的にscreendumpをチェック→イベントがあればDiscord通知
+- opencrabのheartbeat機能が定期的にログファイルをチェック→イベントがあればDiscord通知
 - **この方式は本ドキュメント（サブタスク委譲）の設計範囲外**。heartbeat設計で別途対応
-
-**必要なallowed_commands**: `screen`を追加すること
 
 ## 5. システムプロンプト要件
 
@@ -476,7 +471,7 @@ spawn_subtaskを呼び出した後の動作について：
 | 7 | コードリファクタリング | spawn_coding_agent + progress_report.sh | ✅ |
 | 8 | Web調査+まとめ | spawn_subtask→DuckDuckGo複数回→まとめ | ✅ |
 | 9 | タスク分割（depth=1→2） | depth=1がspawn_subtask→depth=2が実行 | ✅ |
-| 10 | nostaro watchタイムライン監視 | screen -dmSで常駐 + heartbeat定期チェック | ✅ |
+| 10 | nostaro watchタイムライン監視 | execute_shell(background=true) + heartbeat定期チェック | ✅ (Phase 2 TODO) |
 
 注: ユースケース10はheartbeat連携が必要（本ドキュメントの範囲外）
 
