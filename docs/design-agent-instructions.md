@@ -103,6 +103,21 @@ instructionsを更新する専用のゲートウェイアクション。
 - 任意の会話中に書き換えられると不正変更・プロンプトインジェクションのリスクがある
 - owner承認が得られる文脈でのみ変更を許可することでセキュリティを確保
 
+### ツールフィルタリング実装
+
+`crates/actions/src/bridge.rs` の `list_tools()` に `owner_only_actions` を追加:
+
+```rust
+let is_owner = matches!(self.context.caller, CallerIdentity::Owner);
+let owner_only_actions = ["update_instructions"];
+if !is_owner && owner_only_actions.contains(&def.name.as_str()) {
+    continue;
+}
+```
+
+既存の `trusted_only_actions`（Owner/CoAgent/TrustedUser全員が見える）とは別に、
+`owner_only_actions`（Ownerのみが見える）を追加する。
+
 ### アクション定義
 ```json
 {
