@@ -154,3 +154,10 @@
 31. **typing keepalive（入力中インジケーター持続）**
     - 現状: `start_typing()`を1回送るだけで5秒後に消える
     - 修正: LLM処理・サブタスク実行中に4秒ごとにtyping再送するkeepaliveループを追加
+
+32. **Tainted Input / プロンプトインジェクション防止**
+    - 「送信者の信頼度（CallerIdentity）」とは別に「コンテンツの信頼度」を追跡する仕組み
+    - tainted扱いの例: web_fetchの結果、信頼されていないユーザーからの入力
+    - taintedなデータをOwner限定ツール（update_instructions等）の引数に渡せない
+    - LLMへの入力時にtainted部分を明示する（[UNTRUSTED]フラグ等）
+    - 設計書が必要: taint追跡の範囲・実装方法・パフォーマンスへの影響を検討
