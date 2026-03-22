@@ -106,14 +106,86 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             agent_id TEXT NOT NULL,
             session_id TEXT,
             model TEXT,
-            prompt TEXT NOT NULL,
-            response TEXT NOT NULL,
+            prompt TEXT NOT NULL DEFAULT '',
+            response TEXT NOT NULL DEFAULT '',
             tool_calls TEXT,
+            latency_ms INTEGER,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
+            error_code TEXT,
+            error_body TEXT,
+            requested_at TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);"
+        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);"
     )?;
+
+    // llm_logs 新カラム追加（既存DBへの対応）
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='latency_ms'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN latency_ms INTEGER")?;
+    }
+
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='prompt_tokens'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN prompt_tokens INTEGER")?;
+    }
+
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='completion_tokens'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN completion_tokens INTEGER")?;
+    }
+
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='total_tokens'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN total_tokens INTEGER")?;
+    }
+
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='error_code'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN error_code TEXT")?;
+    }
+
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='error_body'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN error_body TEXT")?;
+    }
+
+    let has_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='requested_at'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN requested_at TEXT")?;
+    }
 
     // skills.skill_type カラムDROP（v2: executableタイプ廃止）
     let has_skill_type_drop: bool = conn
@@ -504,11 +576,19 @@ CREATE TABLE IF NOT EXISTS llm_logs (
     agent_id TEXT NOT NULL,
     session_id TEXT,
     model TEXT,
-    prompt TEXT NOT NULL,
-    response TEXT NOT NULL,
+    prompt TEXT NOT NULL DEFAULT '',
+    response TEXT NOT NULL DEFAULT '',
     tool_calls TEXT,
+    latency_ms INTEGER,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    error_code TEXT,
+    error_body TEXT,
+    requested_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
 CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_logs_requested ON llm_logs(agent_id, requested_at DESC);
 "#;

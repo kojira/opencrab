@@ -29,11 +29,29 @@ pub async fn list_llm_logs(
                     "prompt": log.prompt,
                     "response": log.response,
                     "tool_calls": log.tool_calls,
+                    "latency_ms": log.latency_ms,
+                    "prompt_tokens": log.prompt_tokens,
+                    "completion_tokens": log.completion_tokens,
+                    "total_tokens": log.total_tokens,
+                    "error_code": log.error_code,
+                    "error_body": log.error_body,
+                    "requested_at": log.requested_at,
                     "created_at": log.created_at,
                 })
             }).collect();
             Json(serde_json::json!(data))
         }
+        Err(e) => Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+pub async fn llm_logs_stats(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    match opencrab_db::queries::llm_logs_stats(&conn, &id, 30) {
+        Ok(stats) => Json(serde_json::json!(stats)),
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),
     }
 }

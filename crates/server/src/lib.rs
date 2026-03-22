@@ -93,6 +93,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents/{id}/allowed-commands/{command}", axum::routing::delete(api::allowed_commands::remove_allowed_command))
         // LLMログ
         .route("/api/agents/{id}/llm-logs", get(api::llm_logs::list_llm_logs))
+        .route("/api/agents/{id}/llm-logs/stats", get(api::llm_logs::llm_logs_stats))
         // インポート
         .route("/api/import/scan", post(api::import::scan_workspace_handler))
         .route("/api/import/execute", post(api::import::execute_import_handler))
