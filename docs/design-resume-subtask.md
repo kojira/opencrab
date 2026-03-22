@@ -61,12 +61,13 @@ DB: session_logs から会話履歴を取得（時系列順）
 新しいエンジンを起動
   - 既存の会話履歴を初期コンテキストとして渡す
   - task が指定された場合は最後のユーザーメッセージとして追加
-  - task が省略された場合は「前回の作業を引き継いで続けてください」を追加
+  - task が省略された場合は追加メッセージなし（引き継いだ履歴からLLMが自然に判断）
   ↓
 新しい subtask_id を生成して DashMap に登録
   ↓
-メインセッション履歴に subtask_spawned を記録
-  {type: "subtask_resumed", subtask_id, session_id, resumed_from: original_session_id, spawned_at}
+メインセッション履歴に subtask_resumed を記録
+  {type: "subtask_resumed", new_subtask_id, new_session_id, resumed_from_session_id, spawned_at}
+  → メインLLMが「新しいsubtask_id: new_subtask_id」を把握できる（古いIDを使わないように）
 ```
 
 ### 2.3 セッション設計
@@ -143,6 +144,6 @@ Day 2: resume_subtask → Phase 2実装を継続
 
 | 制約 | 内容 |
 |------|------|
-| コンテキスト長 | 長大な会話履歴はLLMのコンテキスト上限に引っかかる可能性あり → 最新N件に制限するオプションを提供 |
+| コンテキスト長 | 長大な会話履歴はLLMのコンテキスト上限に引っかかる可能性あり → 「最新N件 or Kトークン以内」のどちらか先に達した方で制限するオプションを提供 |
 | depth整合性 | resumeしたサブがさらにサブを生成した場合のdepth管理は元のルールに従う |
 | セキュリティ | session_idを知っていれば誰でもresumeできてしまう問題（エージェントのオーナーチェック必須） |
