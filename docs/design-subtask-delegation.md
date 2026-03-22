@@ -263,7 +263,17 @@ RAGアクセス（記憶検索スキル）は**Phase 1から使用可能**。
 - `report_progress(message)` を実装
 - depth >= 1のサブのみ呼び出し可能（depth=0は呼べない）
 - メインセッション履歴に`{type: "subtask_progress", subtask_id, message}`を書き込む
-- メインエンジンは次の呼び出し時にこれを受け取りDiscordへ送信するかどうかを判断する
+- **デバウンス機構**: report_progressを受け取ったらデバウンスタイマー（デフォルト3秒）を起動。タイマー中に追加のprogressが来た場合はリセット。タイマー切れ後にメインエンジンを再呼び出ししてDiscordに送信する
+  ```
+  report_progress受信
+    ↓
+  メインセッション履歴に書き込み
+    ↓
+  デバウンスタイマー起動（3秒、configで調整可）
+    ├─ タイマー中にさらにprogressが来たらリセット
+    └─ タイマー切れ → メインエンジン再呼び出し → Discord送信
+  ```
+- デバウンス時間はconfigで調整可能（デフォルト3秒）
 
 #### Step 10: spawn_coding_agent gateway action
 
