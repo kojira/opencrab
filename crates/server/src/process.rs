@@ -216,7 +216,7 @@ pub async fn run_agent_response(
             agent_id: log_agent_id.clone(),
             session_id: Some(log_session_id.clone()),
             model: Some(request.model.clone()),
-            prompt: serde_json::to_string(&request.messages).unwrap_or_default(),
+            prompt: serde_json::to_string(&request).unwrap_or_default(),
             response: serde_json::to_string(response).unwrap_or_default(),
             tool_calls: if response.tool_calls.is_empty() {
                 None
