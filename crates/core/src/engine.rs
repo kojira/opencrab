@@ -124,6 +124,21 @@ pub struct UsageInfo {
     pub total_tokens: u32,
 }
 
+/// Log entry for a single LLM call, passed to the log callback.
+#[derive(Debug, Clone)]
+pub struct LlmCallLog {
+    /// The full request sent to the LLM.
+    pub request: ChatRequestSimple,
+    /// The response from the LLM (None if an error occurred).
+    pub response: Option<ChatResponseSimple>,
+    /// Error message string if the LLM call failed.
+    pub error_str: Option<String>,
+    /// Latency of the LLM call in milliseconds.
+    pub latency_ms: i64,
+    /// RFC3339 timestamp (millisecond precision) of when the request was sent.
+    pub requested_at: String,
+}
+
 /// Trait for LLM chat completion.
 ///
 /// Defined in `opencrab-core` so the engine can call the LLM without
@@ -159,7 +174,7 @@ pub struct SkillEngine {
     /// Set of actions declared by active skills. If Some, only declared actions are allowed.
     pub allowed_actions: Option<std::collections::HashSet<String>>,
     /// Optional callback invoked after each LLM call for logging.
-    pub log_callback: Option<Box<dyn Fn(&ChatRequestSimple, &ChatResponseSimple) + Send + Sync>>,
+    pub log_callback: Option<Box<dyn Fn(&LlmCallLog) + Send + Sync>>,
     /// Optional callback invoked with the first response text (iteration 1).
     /// Called even if there are tool_calls in the first response.
     pub on_first_response: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce(String) + Send>>>>>,
@@ -183,7 +198,7 @@ impl SkillEngine {
     }
 
     /// Set the LLM log callback, invoked after each LLM call.
-    pub fn set_log_callback(&mut self, cb: impl Fn(&ChatRequestSimple, &ChatResponseSimple) + Send + Sync + 'static) {
+    pub fn set_log_callback(&mut self, cb: impl Fn(&LlmCallLog) + Send + Sync + 'static) {
         self.log_callback = Some(Box::new(cb));
     }
 
@@ -309,10 +324,32 @@ impl SkillEngine {
             };
 
             let request_for_log = request.clone();
-            let response = self.llm.chat(request).await?;
+            let requested_at = chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let call_start = std::time::Instant::now();
+            let llm_result = self.llm.chat(request).await;
+            let latency_ms = call_start.elapsed().as_millis() as i64;
+
             if let Some(cb) = &self.log_callback {
-                cb(&request_for_log, &response);
+                match &llm_result {
+                    Ok(resp) => cb(&LlmCallLog {
+                        request: request_for_log.clone(),
+                        response: Some(resp.clone()),
+                        error_str: None,
+                        latency_ms,
+                        requested_at: requested_at.clone(),
+                    }),
+                    Err(e) => cb(&LlmCallLog {
+                        request: request_for_log.clone(),
+                        response: None,
+                        error_str: Some(e.to_string()),
+                        latency_ms,
+                        requested_at: requested_at.clone(),
+                    }),
+                }
             }
+
+            let response = llm_result?;
 
             // If the LLM returned no structured tool calls but embedded
             // <function_calls> XML in the content (e.g. DeepSeek via OpenRouter),

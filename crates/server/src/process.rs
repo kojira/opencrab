@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use opencrab_core::LlmCallLog;
 use opencrab_gateway::GatewayActions;
 use opencrab_llm::pricing::PricingRegistry;
 
@@ -210,19 +211,38 @@ pub async fn run_agent_response(
     let log_db = state.db.clone();
     let log_agent_id = agent_id.to_string();
     let log_session_id = session_id.to_string();
-    engine.set_log_callback(move |request, response| {
+    engine.set_log_callback(move |log: &LlmCallLog| {
+        let (prompt_tokens, completion_tokens, total_tokens) = log.response
+            .as_ref()
+            .and_then(|r| r.usage.as_ref())
+            .map(|u| (
+                Some(u.prompt_tokens as i64),
+                Some(u.completion_tokens as i64),
+                Some(u.total_tokens as i64),
+            ))
+            .unwrap_or((None, None, None));
+
+        let response_str = log.response.as_ref()
+            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .unwrap_or_default();
+
         let log_row = opencrab_db::queries::LlmLogRow {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: log_agent_id.clone(),
             session_id: Some(log_session_id.clone()),
-            model: Some(request.model.clone()),
-            prompt: serde_json::to_string(&request).unwrap_or_default(),
-            response: serde_json::to_string(response).unwrap_or_default(),
-            tool_calls: if response.tool_calls.is_empty() {
-                None
-            } else {
-                serde_json::to_string(&response.tool_calls).ok()
-            },
+            model: Some(log.request.model.clone()),
+            prompt: serde_json::to_string(&log.request).unwrap_or_default(),
+            response: response_str,
+            tool_calls: log.response.as_ref()
+                .filter(|r| !r.tool_calls.is_empty())
+                .and_then(|r| serde_json::to_string(&r.tool_calls).ok()),
+            latency_ms: Some(log.latency_ms),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            error_code: log.error_str.as_ref().map(|_| "error".to_string()),
+            error_body: log.error_str.clone(),
+            requested_at: Some(log.requested_at.clone()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         if let Ok(conn) = log_db.lock() {

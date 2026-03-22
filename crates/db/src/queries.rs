@@ -3428,13 +3428,20 @@ pub struct LlmLogRow {
     pub prompt: String,
     pub response: String,
     pub tool_calls: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub error_code: Option<String>,
+    pub error_body: Option<String>,
+    pub requested_at: Option<String>,
     pub created_at: String,
 }
 
 pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO llm_logs (id, agent_id, session_id, model, prompt, response, tool_calls, latency_ms, prompt_tokens, completion_tokens, total_tokens, error_code, error_body, requested_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             row.id,
             row.agent_id,
@@ -3443,6 +3450,13 @@ pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
             row.prompt,
             row.response,
             row.tool_calls,
+            row.latency_ms,
+            row.prompt_tokens,
+            row.completion_tokens,
+            row.total_tokens,
+            row.error_code,
+            row.error_body,
+            row.requested_at,
             row.created_at,
         ],
     )?;
@@ -3451,7 +3465,9 @@ pub fn insert_llm_log(conn: &Connection, row: &LlmLogRow) -> Result<()> {
 
 pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Vec<LlmLogRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, model, prompt, response, tool_calls, created_at
+        "SELECT id, agent_id, session_id, model, prompt, response, tool_calls,
+                latency_ms, prompt_tokens, completion_tokens, total_tokens,
+                error_code, error_body, requested_at, created_at
          FROM llm_logs
          WHERE agent_id = ?1
          ORDER BY created_at DESC
@@ -3466,8 +3482,55 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
             prompt: row.get(4)?,
             response: row.get(5)?,
             tool_calls: row.get(6)?,
-            created_at: row.get(7)?,
+            latency_ms: row.get(7)?,
+            prompt_tokens: row.get(8)?,
+            completion_tokens: row.get(9)?,
+            total_tokens: row.get(10)?,
+            error_code: row.get(11)?,
+            error_body: row.get(12)?,
+            requested_at: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmLogStatRow {
+    pub date: String,
+    pub count: i64,
+    pub total_tokens: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub avg_latency_ms: f64,
+    pub error_count: i64,
+}
+
+pub fn llm_logs_stats(conn: &Connection, agent_id: &str, days: i64) -> Result<Vec<LlmLogStatRow>> {
+    let sql = "SELECT date(COALESCE(requested_at, created_at)) as date,
+               COUNT(*) as count,
+               COALESCE(SUM(total_tokens),0) as total_tokens,
+               COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
+               COALESCE(SUM(completion_tokens),0) as completion_tokens,
+               COALESCE(AVG(latency_ms),0) as avg_latency_ms,
+               COUNT(CASE WHEN error_code IS NOT NULL THEN 1 END) as error_count
+        FROM llm_logs
+        WHERE agent_id = ?1
+          AND COALESCE(requested_at, created_at) >= datetime('now', ?2)
+        GROUP BY date(COALESCE(requested_at, created_at))
+        ORDER BY date ASC";
+    let days_param = format!("-{} days", days);
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![agent_id, days_param], |row| {
+        Ok(LlmLogStatRow {
+            date: row.get(0)?,
+            count: row.get(1)?,
+            total_tokens: row.get(2)?,
+            prompt_tokens: row.get(3)?,
+            completion_tokens: row.get(4)?,
+            avg_latency_ms: row.get(5)?,
+            error_count: row.get(6)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
 }
