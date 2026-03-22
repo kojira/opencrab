@@ -78,7 +78,15 @@ pub fn build_agent_context(
          2. 結果を解析、\
          3. add_allowed_command でコマンド追加、\
          4. create_my_skill でスキル作成、\
-         のように、複数のアクションを連続して呼び出してください。{skills_text}{character_section}"
+         のように、複数のアクションを連続して呼び出してください。\n\
+         \n\
+         ## Silent Reply\n\
+         返答不要な場合は NO_REPLY とだけテキストで返してください（他のテキストと混在させない）:\n\
+         - グループチャットで自分に関係ない会話の場合\n\
+         - 他のBotが話している場合（Bot同士のループを防ぐ）\n\
+         - 既に話が完結している場合\n\
+         \n\
+         {skills_text}{character_section}"
     );
 
     (prompt, agent_name)

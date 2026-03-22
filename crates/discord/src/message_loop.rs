@@ -217,6 +217,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     if text.is_empty() {
                         return;
                     }
+                    // NO_REPLY は送信しない
+                    if text.trim() == "NO_REPLY" {
+                        return;
+                    }
                     // Only send if the channel is writable (or DM)
                     let writable = if is_dm_for_cb {
                         true
@@ -288,6 +292,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             None,
                         ).await {
                             Ok(engine_result) if !engine_result.response.is_empty() => {
+                                // NO_REPLY は送信しない
+                                if engine_result.response.trim() == "NO_REPLY" {
+                                    return;
+                                }
                                 // Writable check
                                 if !is_dm {
                                     let writable = db.lock()
@@ -343,6 +351,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
             match result {
                 Ok(engine_result) if !engine_result.response.is_empty() => {
+                    // NO_REPLY は送信しない
+                    if engine_result.response.trim() == "NO_REPLY" {
+                        debug!(agent_id = %agent_id, "Agent returned NO_REPLY, skipping Discord send");
+                        continue;
+                    }
                     // Writable check: DMはフィルタリング対象外
                     if !is_dm {
                         let writable = {
