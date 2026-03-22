@@ -254,6 +254,7 @@ mod tests {
                     social_style_json: serde_json::to_string(&crate::soul::SocialStyle::default()).unwrap(),
                     thinking_style_json: serde_json::to_string(&crate::soul::ThinkingStyle::default()).unwrap(),
                     personality: None,
+                    instructions: String::new(),
                 },
             )
             .unwrap();

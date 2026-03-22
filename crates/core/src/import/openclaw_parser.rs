@@ -77,6 +77,7 @@ pub struct ScanResult {
     pub soul: SoulImportData,
     pub identity: IdentityImportData,
     pub memory_curated: Vec<MemoryCuratedImportData>,
+    pub instructions: String,
     pub skills: Vec<SkillImportData>,
     pub daily_logs: Vec<MemoryCuratedImportData>,
     pub warnings: Vec<String>,
@@ -116,9 +117,11 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
     if let Ok(content) = fs::read_to_string(path.join("USER.md")) {
         memory_curated.push(parse_user_md(&content));
     }
-    if let Ok(content) = fs::read_to_string(path.join("AGENTS.md")) {
-        memory_curated.push(parse_agents_md(&content));
-    }
+    let instructions = if let Ok(content) = fs::read_to_string(path.join("AGENTS.md")) {
+        content
+    } else {
+        String::new()
+    };
 
     let mut daily_logs = Vec::new();
     if options.include_daily_logs {
@@ -197,6 +200,7 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
         soul,
         identity,
         memory_curated,
+        instructions,
         skills,
         daily_logs,
         warnings,
@@ -339,6 +343,7 @@ pub fn parse_user_md(content: &str) -> MemoryCuratedImportData {
     }
 }
 
+#[allow(dead_code)]
 pub fn parse_agents_md(content: &str) -> MemoryCuratedImportData {
     MemoryCuratedImportData {
         category: "agent_rules".to_string(),

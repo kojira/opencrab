@@ -80,6 +80,7 @@ pub async fn create_agent(
         social_style_json: serde_json::json!({"assertiveness": 0.0, "responsiveness": 0.0, "style_name": "Analytical"}).to_string(),
         thinking_style_json: serde_json::json!({"primary": "論理的", "secondary": "分析的", "description": ""}).to_string(),
         personality: None,
+        instructions: String::new(),
     };
     opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
 
@@ -228,6 +229,7 @@ pub async fn apply_soul_preset(
         social_style_json: "{}".to_string(),
         thinking_style_json: "{}".to_string(),
         personality: preset.custom_traits_json,
+        instructions: String::new(),
     };
     opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
 
