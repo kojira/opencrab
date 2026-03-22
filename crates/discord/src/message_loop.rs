@@ -121,37 +121,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
             warn!("Failed to start typing indicator: {e}");
         }
 
-        // Session per Discord channel (auto-create if needed).
-        let session_id = format!("discord-{}-{}", guild_id, channel_id);
-        ensure_discord_session(&state, &session_id, &agent_ids, &incoming);
-
-        // Log the user's message.
-        {
-            let conn = state.db().lock().unwrap();
-            let mut log_meta = serde_json::json!({
-                "source": "discord",
-                "channel_id": channel_id_str,
-                "user_name": incoming.sender.name,
-            });
-            if let Some(ref avatar_url) = incoming.sender.avatar_url {
-                log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
-            }
-            if !image_urls.is_empty() {
-                log_meta["image_urls"] = serde_json::json!(image_urls);
-            }
-            let log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: incoming.sender.id.clone(),
-                session_id: session_id.clone(),
-                log_type: "speech".to_string(),
-                content: text.clone(),
-                speaker_id: Some(incoming.sender.id.clone()),
-                turn_number: None,
-                metadata_json: Some(log_meta.to_string()),
-            };
-            opencrab_db::queries::insert_session_log(&conn, &log).ok();
-        }
-
         // Skip agent processing if no LLM providers are configured.
         if !state.has_llm_providers() {
             debug!("No LLM providers configured, skipping agent response");
@@ -191,6 +160,38 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         // Process with each configured agent.
         for agent_id in &agent_ids {
+            // BUG FIX: session_id にagent_idを含め、エージェントごとに独立した会話履歴を持たせる。
+            // 旧形式 "discord-{guild}-{channel}" では複数Botが同じチャンネルにいると会話ログが混在していた。
+            let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
+            ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
+
+            // Log the user's message (per-agent session).
+            {
+                let conn = state.db().lock().unwrap();
+                let mut log_meta = serde_json::json!({
+                    "source": "discord",
+                    "channel_id": channel_id_str,
+                    "user_name": incoming.sender.name,
+                });
+                if let Some(ref avatar_url) = incoming.sender.avatar_url {
+                    log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
+                }
+                if !image_urls.is_empty() {
+                    log_meta["image_urls"] = serde_json::json!(image_urls);
+                }
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: incoming.sender.id.clone(),
+                    session_id: session_id.clone(),
+                    log_type: "speech".to_string(),
+                    content: text.clone(),
+                    speaker_id: Some(incoming.sender.id.clone()),
+                    turn_number: None,
+                    metadata_json: Some(log_meta.to_string()),
+                };
+                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+            }
+
             let (base_prompt, agent_name) = state.build_agent_context(agent_id, "Discord conversation");
 
             // Bug 1 fix: inject Discord channel/message context so LLM can use reactions.
