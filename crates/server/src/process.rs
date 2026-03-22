@@ -226,6 +226,13 @@ pub async fn run_agent_response(
             ))
             .unwrap_or((None, None, None));
 
+        let cache_read_tokens = log.response.as_ref()
+            .and_then(|r| r.usage.as_ref())
+            .map(|u| u.cache_read_input_tokens as i64);
+        let cache_creation_tokens = log.response.as_ref()
+            .and_then(|r| r.usage.as_ref())
+            .map(|u| u.cache_creation_input_tokens as i64);
+
         let response_str = log.response.as_ref()
             .map(|r| serde_json::to_string(r).unwrap_or_default())
             .unwrap_or_default();
@@ -249,6 +256,8 @@ pub async fn run_agent_response(
             requested_at: Some(log.requested_at.clone()),
             trigger_message_id: log_trigger_message_id.clone(),
             is_bot_iteration: log.is_bot_iteration,
+            cache_read_tokens,
+            cache_creation_tokens,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         if let Ok(conn) = log_db.lock() {

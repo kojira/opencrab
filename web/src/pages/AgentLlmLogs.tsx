@@ -19,6 +19,8 @@ interface LlmLog {
   error_body: string | null;
   requested_at: string | null;
   trigger_message_id: string | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
   is_bot_iteration: boolean;
   created_at: string;
 }
@@ -31,6 +33,8 @@ interface LlmLogStat {
   completion_tokens: number;
   avg_latency_ms: number;
   error_count: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
 }
 
 interface ToolCallEntry {
@@ -65,6 +69,8 @@ interface UsageInfo {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 }
 
 interface ChatResponseSimple {
@@ -359,6 +365,18 @@ function UsageBar({ usage }: { usage: UsageInfo }) {
           <span className="material-symbols-outlined text-sm">data_usage</span>
           Total: <strong className="text-on-surface">{formatNumber(usage.total_tokens)}</strong>
         </span>
+        {(usage.cache_read_input_tokens || 0) > 0 && (
+          <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+            <span className="material-symbols-outlined text-sm">cached</span>
+            Cache hit: <strong>{formatNumber(usage.cache_read_input_tokens!)}</strong>
+          </span>
+        )}
+        {(usage.cache_creation_input_tokens || 0) > 0 && (
+          <span className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400">
+            <span className="material-symbols-outlined text-sm">save</span>
+            Cache write: <strong>{formatNumber(usage.cache_creation_input_tokens!)}</strong>
+          </span>
+        )}
       </div>
       <div className="w-full h-2 bg-surface-container-high rounded-full overflow-hidden">
         <div
@@ -587,6 +605,8 @@ function StatsSection({ stats }: { stats: LlmLogStat[] }) {
   const totalCalls = stats.reduce((s, d) => s + d.count, 0);
   const totalTokens = stats.reduce((s, d) => s + d.total_tokens, 0);
   const totalErrors = stats.reduce((s, d) => s + d.error_count, 0);
+  const totalCacheRead = stats.reduce((s, d) => s + d.cache_read_tokens, 0);
+  const totalCacheCreation = stats.reduce((s, d) => s + d.cache_creation_tokens, 0);
   const weightedLatency = stats.reduce((s, d) => s + d.avg_latency_ms * d.count, 0);
   const avgLatency = totalCalls > 0 ? Math.round(weightedLatency / totalCalls) : 0;
   const maxDayTokens = Math.max(...stats.map((d) => d.total_tokens), 1);
@@ -616,6 +636,18 @@ function StatsSection({ stats }: { stats: LlmLogStat[] }) {
           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-error-container text-on-error-container">
             <span className="material-symbols-outlined text-sm">error</span>
             エラー: <strong>{formatNumber(totalErrors)}</strong>
+          </span>
+        )}
+        {totalCacheRead > 0 && (
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">
+            <span className="material-symbols-outlined text-sm">cached</span>
+            キャッシュヒット: <strong>{formatNumber(totalCacheRead)}</strong>
+          </span>
+        )}
+        {totalCacheCreation > 0 && (
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200">
+            <span className="material-symbols-outlined text-sm">save</span>
+            キャッシュ書込: <strong>{formatNumber(totalCacheCreation)}</strong>
           </span>
         )}
       </div>

@@ -208,6 +208,26 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN is_bot_iteration INTEGER NOT NULL DEFAULT 0")?;
     }
 
+    // llm_logs.cache_read_tokens カラム追加
+    let has_cache_read: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='cache_read_tokens'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_cache_read {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN cache_read_tokens INTEGER")?;
+    }
+
+    // llm_logs.cache_creation_tokens カラム追加
+    let has_cache_creation: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='cache_creation_tokens'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_cache_creation {
+        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN cache_creation_tokens INTEGER")?;
+    }
+
     // skills.skill_type カラムDROP（v2: executableタイプ廃止）
     let has_skill_type_drop: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='skill_type'")?
@@ -609,6 +629,8 @@ CREATE TABLE IF NOT EXISTS llm_logs (
     requested_at TEXT,
     trigger_message_id TEXT,
     is_bot_iteration INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER,
+    cache_creation_tokens INTEGER,
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);

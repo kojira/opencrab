@@ -154,6 +154,8 @@ impl OllamaProvider {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             created: chrono::Utc::now().timestamp(),
         })

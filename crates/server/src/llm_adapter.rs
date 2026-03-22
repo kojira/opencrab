@@ -249,6 +249,8 @@ fn from_llm_response(resp: opencrab_llm::message::ChatResponse) -> ChatResponseS
         prompt_tokens: resp.usage.prompt_tokens,
         completion_tokens: resp.usage.completion_tokens,
         total_tokens: resp.usage.total_tokens,
+        cache_read_input_tokens: resp.usage.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.usage.cache_creation_input_tokens,
     };
 
     ChatResponseSimple {
@@ -259,6 +261,8 @@ fn from_llm_response(resp: opencrab_llm::message::ChatResponse) -> ChatResponseS
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
         }),
     }
 }
@@ -316,6 +320,8 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             created: 0,
         };

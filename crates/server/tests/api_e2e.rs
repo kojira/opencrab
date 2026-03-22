@@ -664,6 +664,8 @@ impl MockLlmProvider {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             created: 0,
         };
