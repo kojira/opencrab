@@ -78,6 +78,11 @@ subtask_result → セッション履歴に追加
 
 新規ファイル `crates/actions/src/spawn_subtask.rs` に実装。
 
+引数:
+- `task`: タスク説明（必須）
+- `timeout_secs: Option<u32>`: タイムアウト秒数（省略時はデフォルト1800秒）
+- `max_iterations: Option<u32>`: LLMループの最大イテレーション数（省略時はデフォルト）
+
 LLMがtool_callとして`spawn_subtask`を発行すると:
 
 1. 新しいセッションIDを生成
@@ -123,6 +128,17 @@ LLMがtool_callとして`spawn_subtask`を発行すると:
   - 例: 「方針を変えて英語で出力して」「処理を中断して結果だけ返して」等の軌道修正が可能
   - 実装: `DashMap<subtask_id, (JoinHandle, session_id)>` でサブを管理し、`steer_subtask(subtask_id, message)` gateway actionでセッションにメッセージを追加する
   - **Phase 1では受動的な実装のみ（セッションにメッセージを書くだけ）。Phase 2でサブがリアルタイム受信できる仕組みを追加**
+- **サブ起動時のメインセッション履歴への自動書き込み**: サブタスクが起動されると、メインセッション履歴に以下のシステムメッセージが自動的に書き込まれる:
+  ```json
+  {
+    "type": "subtask_spawned",
+    "subtask_id": "xxx",
+    "session_id": "yyy",
+    "spawned_at": "2026-03-22T11:00:00Z"
+  }
+  ```
+  - これによりメインLLMがsubtask_idを把握できる
+  - steer/cancelはこのsubtask_idを使って呼ぶ
 
 ### 2.6 サブのコンテキスト
 
@@ -138,7 +154,7 @@ RAGアクセス（記憶検索スキル）は**Phase 1から使用可能**。
 
 ### 2.7 タイムアウト
 
-- デフォルト: **300秒**、configで変更可能
+- デフォルト: **1800秒（30分）**、configで変更可能（spawn_subtaskの`timeout_secs`引数でもオーバーライド可能）
 - タイムアウト時の処理:
   1. メインエンジンに通知
   2. Discordにエラー送信
@@ -184,7 +200,10 @@ RAGアクセス（記憶検索スキル）は**Phase 1から使用可能**。
 #### Step 4: spawn_subtask.rs新規作成
 
 - gateway actionとして実装
-- 引数: タスク説明、タイムアウト（optional）
+- 引数:
+  - `task`: タスク説明（必須）
+  - `timeout_secs: Option<u32>`: タイムアウト秒数（省略時はデフォルト1800秒）
+  - `max_iterations: Option<u32>`: LLMループの最大イテレーション数（省略時はデフォルト）
 - 処理:
   1. 新セッションID生成
   2. metadata_json設定（parent_session_id, depth）
@@ -212,6 +231,36 @@ RAGアクセス（記憶検索スキル）は**Phase 1から使用可能**。
 
 - サブエンジンのコンテキストにRAG（記憶検索スキル）を含める
 - メインと同じRAG設定を引き継ぐ
+
+#### Step 8: cancel_subtask gateway action
+
+- `cancel_subtask(subtask_id)` を実装
+- DashMapからJoinHandleを取得して`abort()`
+- メインセッション履歴に`{type: "subtask_cancelled", subtask_id}`を記録
+
+#### Step 9: report_progress gateway action
+
+- `report_progress(message)` を実装
+- depth >= 1のサブのみ呼び出し可能（depth=0は呼べない）
+- メインセッション履歴に`{type: "subtask_progress", subtask_id, message}`を書き込む
+- メインエンジンは次の呼び出し時にこれを受け取りDiscordへ送信するかどうかを判断する
+
+#### Step 10: spawn_coding_agent gateway action
+
+- `spawn_coding_agent(agent_type: "claude|codex", task, timeout_secs?)` を実装
+- spawn_subtaskの特化版（通常タスクとは別の専用アクション）
+- 起動時に以下を自動実行:
+  1. `progress_report.sh` をサブのワークスペースに自動生成・配置
+     ```bash
+     #!/bin/bash
+     MESSAGE="$1"
+     curl -s -X POST http://localhost:8080/api/agents/AGENT_ID/subtasks/SUBTASK_ID/progress \
+       -H "Content-Type: application/json" \
+       -d "{\"message\": \"$MESSAGE\"}"
+     ```
+  2. タイムアウトを長めに設定（デフォルト1800秒、引数でオーバーライド可）
+  3. サブのシステムプロンプトに「ステップ完了時は `./progress_report.sh 'メッセージ'` を呼ぶこと」を追加
+- progress APIエンドポイント `POST /api/agents/{id}/subtasks/{subtask_id}/progress` を新規追加
 
 ### Phase 2
 
@@ -287,6 +336,7 @@ MAX_DEPTH=2とした理由:
 | サブがパニック | JoinHandleのエラーをキャッチ → メインに通知 |
 | サブがmax_iterations到達 | stopped_by_limitとして結果を返す → メインが判断 |
 | depth超過でspawn_subtask呼び出し | アクション一覧に含まれないため、LLMが呼べない |
+| サブがタイムアウト（30分） | メインに通知 → Discordにエラー送信 → abort + kill |
 
 ---
 
@@ -351,6 +401,18 @@ spawn_subtaskを呼び出した後の動作について：
 **この仕様を明記する理由:**
 - エージェントが「自分がツールを同期的に実行している」と誤解するのを防ぐ
 - 再呼び出し時に「サブタスクの結果を受け取った続き」として正しくコンテキストを解釈させるため
+
+### 5.5 subtask_idを使ったキャンセル・制御
+
+サブ起動時に `{subtask_id, session_id}` がメインセッション履歴に記録される。ユーザーがキャンセルや進捗確認を求めてきた場合、セッション履歴からsubtask_idを読み取って`cancel_subtask` / `steer_subtask`を呼ぶこと：
+
+```
+サブタスクの制御について：
+- spawn_subtask実行後、メインセッション履歴にsubtask_idが記録される
+- ユーザーから「キャンセルして」「止めて」と言われた場合: cancel_subtask(subtask_id)を呼ぶ
+- ユーザーから「方針を変えて」等の軌道修正を求められた場合: steer_subtask(subtask_id, message)を呼ぶ
+- subtask_idはセッション履歴のtype="subtask_spawned"エントリから取得する
+```
 
 ---
 
