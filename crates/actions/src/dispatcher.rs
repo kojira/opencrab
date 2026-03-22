@@ -7,6 +7,7 @@ use crate::llm_analysis::*;
 use crate::llm_evaluation::*;
 use crate::llm_selection::*;
 use crate::search::*;
+use crate::soul::*;
 use crate::traits::*;
 use crate::workspace::*;
 
@@ -56,6 +57,9 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(AnalyzeLlmUsageAction));
         dispatcher.register(Arc::new(RecallModelExperiencesAction));
         dispatcher.register(Arc::new(SaveModelInsightAction));
+
+        // Soul関連アクション登録
+        dispatcher.register(Arc::new(UpdateInstructionsAction));
 
         dispatcher
     }

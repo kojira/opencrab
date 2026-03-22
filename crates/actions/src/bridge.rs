@@ -83,10 +83,20 @@ impl ActionExecutor for BridgedExecutor {
     }
 
     fn list_tools(&self) -> Vec<ToolDefinition> {
+        let is_owner = matches!(self.context.caller, crate::traits::CallerIdentity::Owner);
+        const OWNER_ONLY_ACTIONS: &[&str] = &["update_instructions"];
+
         let mut tools: Vec<ToolDefinition> = self
             .dispatcher
             .get_definitions(&[])
             .into_iter()
+            .filter(|d| {
+                // owner_only_actions はOwnerのみに見せる
+                if !is_owner && OWNER_ONLY_ACTIONS.contains(&d.name.as_str()) {
+                    return false;
+                }
+                true
+            })
             .map(|d| ToolDefinition {
                 name: d.name,
                 description: d.description,
@@ -125,6 +135,9 @@ impl ActionExecutor for BridgedExecutor {
                     continue;
                 }
                 if !is_trusted && trusted_only_actions.contains(&def.name.as_str()) {
+                    continue;
+                }
+                if !is_owner && OWNER_ONLY_ACTIONS.contains(&def.name.as_str()) {
                     continue;
                 }
                 tools.push(ToolDefinition {
@@ -385,5 +398,46 @@ mod tests {
         assert!(!names.contains(&"create_skill"), "Agent should NOT see create_skill");
         assert!(!names.contains(&"execute_skill"), "Agent should NOT see execute_skill");
         assert!(names.contains(&"gw_action_a"), "Agent should still see regular gateway actions");
+    }
+
+    // ---- owner_only_actions filtering ----
+
+    #[test]
+    fn test_list_tools_owner_sees_update_instructions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+
+        let tools = executor.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"update_instructions"),
+            "Owner should see update_instructions"
+        );
+    }
+
+    #[test]
+    fn test_list_tools_agent_cannot_see_update_instructions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+
+        let tools = executor.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            !names.contains(&"update_instructions"),
+            "Agent should NOT see update_instructions"
+        );
+    }
+
+    #[test]
+    fn test_list_tools_trusted_user_cannot_see_update_instructions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+
+        let tools = executor.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            !names.contains(&"update_instructions"),
+            "TrustedUser should NOT see update_instructions"
+        );
     }
 }

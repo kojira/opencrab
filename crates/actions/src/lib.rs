@@ -7,6 +7,7 @@ pub mod search;
 pub mod llm_selection;
 pub mod llm_evaluation;
 pub mod llm_analysis;
+pub mod soul;
 pub mod bridge;
 pub mod tools;
 
