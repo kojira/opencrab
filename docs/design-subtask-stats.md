@@ -483,6 +483,145 @@ ORDER BY success_rate_pct DESC;
 }
 ```
 
+### 4.4 gateway action: `get_subtask_stats`
+
+エージェント自身がランタイム中に統計を参照し、自律的な意思決定（スキル修正・代替手段の選択）に活用するためのアクション。
+内部では上記の REST API（`GET /api/agents/{id}/stats/subtasks` と `/stats/tools`）を呼び出す形で実装する。
+
+#### シグネチャ
+
+```
+get_subtask_stats(period?: "1h" | "24h" | "7d" | "30d") -> StatsSnapshot
+```
+
+| 引数 | 型 | デフォルト | 説明 |
+|------|----|--------|------|
+| `period` | string | `"24h"` | 集計対象の期間 |
+
+#### 戻り値（`StatsSnapshot`）
+
+```json
+{
+  "period": "24h",
+  "generated_at": "2026-03-22T15:00:00Z",
+  "subtasks": {
+    "total": 18,
+    "completed": 14,
+    "stopped_by_limit": 3,
+    "cancelled": 1,
+    "success_rate_pct": 77.8,
+    "avg_duration_secs": 203.4
+  },
+  "tools": [
+    {
+      "tool_name": "execute_shell",
+      "total_calls": 94,
+      "error_calls": 11,
+      "error_rate_pct": 11.7
+    }
+  ],
+  "external_apis": [
+    {
+      "api_name": "wttr.in",
+      "total_calls": 12,
+      "failures": 5,
+      "failure_rate_pct": 41.7,
+      "last_failure_at": "2026-03-22T14:47:00Z"
+    },
+    {
+      "api_name": "coinapi.io",
+      "total_calls": 8,
+      "failures": 0,
+      "failure_rate_pct": 0.0,
+      "last_failure_at": null
+    }
+  ],
+  "alerts": [
+    "wttr.in の失敗率が 41.7% です（閾値: 20%）",
+    "3件のサブタスクが max_iterations に到達しました"
+  ]
+}
+```
+
+`alerts` フィールドは以下の閾値を超えた場合に自動生成される:
+
+| 条件 | 閾値 | アラート文言 |
+|------|------|-------------|
+| 外部API失敗率 | > 20% | `"{api} の失敗率が {pct}% です"` |
+| stopped_by_limit 率 | > 15% | `"{n}件のサブタスクが max_iterations に到達しました"` |
+| execute_shell 全体エラー率 | > 10% | `"シェルコマンドのエラー率が高くなっています ({pct}%)"` |
+
+#### 使用例（エージェント視点）
+
+エージェントがハートビートや定期チェックで `get_subtask_stats` を呼び出し、`alerts` を見て対処する:
+
+```
+# 天気スキルが壊れているとき
+get_subtask_stats(period="1h")
+  → alerts: ["wttr.in の失敗率が 41.7% です"]
+  → エージェントの判断: wttr.in の代わりに open-meteo を使うようスキルを修正する
+  → create_skill("get-weather", "open-meteo を使う実装に変更...")
+
+# max_iterations が多発しているとき
+get_subtask_stats(period="7d")
+  → alerts: ["15件のサブタスクが max_iterations に到達しました"]
+  → エージェントの判断: 詰まりやすいタスクを特定してタスク分割戦略を見直す
+```
+
+#### self-healing パターン（heartbeat との組み合わせ）
+
+heartbeat アクション（定期チェック）と組み合わせることで、エージェントが自律的に自分の「調子」を監視できる:
+
+```
+heartbeat_check():
+  1. get_subtask_stats(period="1h") を呼ぶ
+  2. alerts がある場合:
+     a. 外部API障害 → 代替APIを使うスキルへの修正を spawn_subtask で依頼
+     b. stopped_by_limit 多発 → 問題のあるタスクタイプを特定し報告
+  3. alerts がない場合: サイレントスキップ（ログのみ）
+```
+
+このパターンにより、エージェントは「最近 wttr.in でエラーが多い」を自分で検知し、人間の介入なしにスキルを修正する **self-healing** 的な動作が可能になる。
+
+#### 実装詳細（gateway action 側）
+
+gateway action の実装は `discord/src/gateway_actions.rs` に追加:
+
+```rust
+/// get_subtask_stats: エージェント自身が統計を参照するアクション
+async fn execute_get_subtask_stats(&self, args: &serde_json::Value) -> GatewayActionResult {
+    let period = args["period"].as_str().unwrap_or("24h");
+    let days = match period {
+        "1h"  => 0,   // SQLクエリで hours フィルタを使う
+        "24h" => 1,
+        "7d"  => 7,
+        "30d" => 30,
+        _     => 1,
+    };
+
+    // 内部でDBクエリを直接実行（HTTPは経由しない）
+    let conn = self.db.lock().unwrap();
+    let subtask_summary = queries::get_subtask_summary(&conn, &self.agent_id, period)?;
+    let tool_stats = queries::get_tool_stats(&conn, &self.agent_id, days)?;
+    let api_stats = queries::get_external_api_stats(&conn, &self.agent_id, days)?;
+
+    // アラート生成
+    let alerts = generate_alerts(&subtask_summary, &tool_stats, &api_stats);
+
+    GatewayActionResult::success(json!({
+        "period": period,
+        "generated_at": Utc::now().to_rfc3339(),
+        "subtasks": subtask_summary,
+        "tools": tool_stats,
+        "external_apis": api_stats,
+        "alerts": alerts,
+    }))
+}
+```
+
+> **注意**: 内部実装では REST API を HTTP で呼び出さず、DB クエリを直接実行する。
+> これにより、サブタスクのコンテキスト内からでもオーバーヘッドなしに呼び出せる。
+
 ---
 
 ## 5. 実装計画
@@ -512,16 +651,27 @@ ORDER BY success_rate_pct DESC;
    - クエリ 8 を実装
    - llm_logs との JOIN が必要
 
+6. **gateway action: `get_subtask_stats`**（エージェント向け）
+   - DB クエリを直接実行（HTTP 経由なし）
+   - アラート生成ロジック
+   - heartbeat スキルとの統合テスト
+
 #### 実装場所
 
 ```
 crates/server/src/api/
 ├── agents.rs          -- 既存（変更なし）
-├── stats.rs           -- 新規追加
+├── stats.rs           -- 新規追加（REST API）
 └── mod.rs             -- ルーティング追加
+
+crates/db/src/
+└── queries.rs         -- 集計クエリ関数を追加（gateway action と REST API が共用）
+
+crates/discord/src/
+└── gateway_actions.rs -- execute_get_subtask_stats を追加
 ```
 
-`stats.rs` に以下を実装:
+`stats.rs` に以下を実装（REST API）:
 
 ```rust
 pub async fn get_subtask_stats(
@@ -542,6 +692,14 @@ pub async fn get_tool_stats(
 ```rust
 .route("/api/agents/:id/stats/subtasks", get(stats::get_subtask_stats))
 .route("/api/agents/:id/stats/tools", get(stats::get_tool_stats))
+```
+
+`queries.rs` に追加する集計関数（REST API と gateway action が共用）:
+
+```rust
+pub fn get_subtask_summary(conn: &Connection, agent_id: &str, period: &str) -> Result<SubtaskSummary>;
+pub fn get_tool_error_stats(conn: &Connection, agent_id: &str, days: u32) -> Result<Vec<ToolStats>>;
+pub fn get_external_api_stats(conn: &Connection, agent_id: &str, days: u32) -> Result<Vec<ApiStats>>;
 ```
 
 ### 5.2 Phase 2: ダッシュボードUI（将来）
@@ -625,6 +783,30 @@ CREATE TABLE subtask_stats (
 - [design-subtask-delegation.md](./design-subtask-delegation.md) — サブタスク委譲アーキテクチャ
 - [design-resume-subtask.md](./design-resume-subtask.md) — サブセッション Resume 機能（TODO #24）
 - [DESIGN.md](./DESIGN.md) — OpenCrab アーキテクチャ概要
+
+### self-healing パターンの実装参考
+
+`get_subtask_stats` を heartbeat スキルから呼び出す想定実装（スキル側の疑似コード）:
+
+```
+# heartbeat スキル（例）
+function check_agent_health():
+  stats = get_subtask_stats(period="1h")
+  
+  if stats.alerts is empty:
+    return  # 問題なし、静かに終了
+  
+  for alert in stats.alerts:
+    # 外部API障害
+    if "wttr.in" in alert and stats.external_apis["wttr.in"].failure_rate_pct > 30:
+      spawn_subtask("get-weatherスキルをopen-meteo APIに切り替えて")
+    
+    # max_iterations 多発
+    if "max_iterations" in alert:
+      report_to_owner("⚠️ サブタスクが詰まっています: " + alert)
+  
+  return stats.alerts  # アラート内容を返す
+```
 
 ---
 
