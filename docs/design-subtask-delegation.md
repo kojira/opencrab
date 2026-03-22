@@ -61,7 +61,12 @@ loop {
 [バックグラウンド]
 サブエンジン（depth=1）でタスク処理
   ↓
-subtask_result → セッション履歴に追加
+サブ完了（テキスト生成なし・ツールのみでも）
+  ↓
+システムが自動的に subtask_completed 通知を生成
+  {type: "subtask_completed", subtask_id, exit_reason, result}
+  ↓
+メインセッション履歴に追加
   ↓
 メインエンジン再呼び出し（depth=0）
   ↓
@@ -81,7 +86,9 @@ subtask_result → セッション履歴に追加
 引数:
 - `task`: タスク説明（必須）
 - `timeout_secs: Option<u32>`: タイムアウト秒数（省略時はデフォルト1800秒）
-- `max_iterations: Option<u32>`: LLMループの最大イテレーション数（省略時はデフォルト）
+- `max_iterations: Option<u32>`: LLMループの最大イテレーション数（省略時はデフォルト100。claude code等の長いタスクは200〜500を推奨）
+
+> **実装注意**: 現状 `crates/server/src/process.rs` でmax_iterationsが`20`にハードコードされている。Phase 1実装時に引数から可変にし、デフォルトを**100**に引き上げること。
 
 LLMがtool_callとして`spawn_subtask`を発行すると:
 
