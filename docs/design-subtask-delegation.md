@@ -363,22 +363,38 @@ MAX_DEPTH=2とした理由:
 
 `nostaro watch`のような終了しない常駐型プロセスへの対応:
 
-> **⚠️ セキュリティ注意**: `screen`はallowed_commandsに追加禁止。`screen -dmS xxx bash -c "任意コマンド"` でallowed_commandsを完全に迂回できるため。
+> ⚠️ **`screen`は禁止**: `screen -dmS xxx bash -c "任意コマンド"` でallowed_commandsを完全に迂回できるため、セキュリティホールになる。screenはallowed_commandsに追加しないこと。
 
-**推奨実装: `execute_shell`に`background=true`オプションを追加（Phase 2 TODO）**
-```
-execute_shell(command="nostaro", args=["watch"], background=true, output_file="/tmp/nostr.log")
-→ PIDを返す（即リターン）
-→ allowed_commandsの制限は維持
-→ kill_process(pid)で停止可能
-```
+**推奨方式: `execute_shell`に`background=true`オプションを追加する**
 
-内部実装: `tokio::process::Command::spawn()`でwaitせずPIDを返す + `DashMap<pid, Child>`で管理。
-`nohup`や`&`はシェル機能のため不要（tokioのCommand API直接制御）。
+- コマンドはallowed_commandsで制限されたまま維持（セキュリティ境界を守る）
+- `background=true`の場合はプロセスをdetachして即returnし、PIDを返す
+- 返されたPIDを使ってkill・監視ができる
+
+```json
+// サブが実行:
+execute_shell("nostaro", ["watch"], {"background": true})
+// → 即返る。{"pid": 12345} を返す
+
+// 監視（定期チェック）:
+execute_shell("kill", ["-0", "12345"])
+// → exit 0なら生存、exit 1なら終了済み
+
+// 停止:
+execute_shell("kill", ["12345"])
+```
 
 **長期常駐型（24時間監視）**: heartbeat連携が必要
-- opencrabのheartbeat機能が定期的にログファイルをチェック→イベントがあればDiscord通知
+- background=trueで起動したプロセスはサブエンジンのタイムアウトと独立して生き続ける
+- サブがタイムアウトしても`nostaro watch`プロセスは継続する
+- opencrabのheartbeat機能が定期的にPIDチェック＋出力確認→イベントがあればDiscord通知
 - **この方式は本ドキュメント（サブタスク委譲）の設計範囲外**。heartbeat設計で別途対応
+
+**`execute_shell` background=trueの実装要件**:
+- allowed_commandsチェックは通常通り実施（迂回不可）
+- プロセスグループを作成して子プロセスを独立させる（`setsid`相当）
+- PIDをtool_resultとして返す
+- サブエンジンのJoinHandle abort時にはPIDをkillしない（意図的に切り離す）
 
 ## 5. システムプロンプト要件
 
