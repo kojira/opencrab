@@ -359,8 +359,12 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         }
                     }
 
-                    // Only send final response if on_first_response didn't already send.
-                    if !first_sent.load(std::sync::atomic::Ordering::SeqCst) {
+                    // Send final response if:
+                    // - on_first_response didn't already send, OR
+                    // - tool calls were made (final response after tools differs from first streamed chunk)
+                    let should_send = !first_sent.load(std::sync::atomic::Ordering::SeqCst)
+                        || engine_result.tool_calls_made > 0;
+                    if should_send {
                         if let Err(e) = gateway
                             .send_to_channel(channel_id, &engine_result.response)
                             .await
