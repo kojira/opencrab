@@ -46,6 +46,8 @@ impl opencrab_discord::AgentRunner for AppState {
         gateway_actions: Option<Arc<dyn GatewayActions>>,
         caller: opencrab_actions::CallerIdentity,
         image_urls: &[String],
+        depth: u32,
+        on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
     ) -> anyhow::Result<opencrab_core::EngineResult> {
         process::run_agent_response(
             self,
@@ -58,6 +60,8 @@ impl opencrab_discord::AgentRunner for AppState {
             gateway_actions,
             caller,
             image_urls,
+            depth,
+            on_first_response,
         )
         .await
     }

@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use opencrab_gateway::GatewayActions;
 
 pub use gateway_actions::DiscordGatewayActions;
+pub use gateway_actions::{SpawnedSubtask, SubtaskCompletionFn, CompletionRegistry, SubtaskRegistry};
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 
@@ -52,6 +53,8 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         gateway_actions: Option<Arc<dyn GatewayActions>>,
         caller: opencrab_actions::CallerIdentity,
         image_urls: &[String],
+        depth: u32,
+        on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 
     /// エージェントのLLMクライアントを生成する。

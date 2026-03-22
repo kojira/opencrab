@@ -116,6 +116,8 @@ pub async fn send_agent_message(
                 let tools_cfg = state.tools_config.read().unwrap().clone();
                 let workspace_path = state.workspace_base.replace("{agent_id}", &id);
                 let workspace_root = std::path::PathBuf::from(workspace_path);
+                let subtask_registry: opencrab_discord::SubtaskRegistry = std::sync::Arc::new(dashmap::DashMap::new());
+                let completion_registry: opencrab_discord::CompletionRegistry = std::sync::Arc::new(dashmap::DashMap::new());
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
@@ -124,6 +126,8 @@ pub async fn send_agent_message(
                     None,
                     state.default_model.clone(),
                     workspace_root,
+                    subtask_registry,
+                    completion_registry,
                 );
                 Some(Arc::new(ga) as Arc<dyn opencrab_gateway::GatewayActions>)
             } else {
@@ -160,6 +164,8 @@ pub async fn send_agent_message(
         gateway_actions,
         caller,
         &[],
+        0,
+        None,
     )
     .await;
 

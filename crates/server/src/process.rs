@@ -122,6 +122,8 @@ pub async fn run_agent_response(
     gateway_actions: Option<Arc<dyn GatewayActions>>,
     caller: opencrab_actions::CallerIdentity,
     image_urls: &[String],
+    depth: u32,
+    on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
@@ -158,7 +160,8 @@ pub async fn run_agent_response(
     let tools_cfg = state.tools_config.read().unwrap().clone();
     opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
     let executor = {
-        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx);
+        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx)
+            .with_depth(depth);
         match gateway_actions {
             Some(ga) => bridged.with_gateway_actions(ga),
             None => bridged,
@@ -176,11 +179,12 @@ pub async fn run_agent_response(
     };
     let llm_client = LlmRouterAdapter::new(state.llm_router.clone()).with_metrics(metrics_ctx);
 
-    // Run SkillEngine with model_override for dynamic switching.
+    // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
+    let max_iterations = if depth == 0 { 30 } else { usize::MAX };
     let mut engine = opencrab_core::SkillEngine::new(
         Box::new(llm_client),
         Box::new(executor),
-        20, // max iterations
+        max_iterations,
     );
 
     // LLMログ記録のコールバックを設定
@@ -206,6 +210,11 @@ pub async fn run_agent_response(
             let _ = opencrab_db::queries::insert_llm_log(&conn, &log_row);
         }
     });
+
+    // Set optional first-response callback (for immediate Discord acknowledgment).
+    if let Some(cb) = on_first_response {
+        engine.set_on_first_response(cb);
+    }
 
     // Collect image_urls: merge passed-in args with any stored in the latest user log metadata_json.
     let merged_image_urls: Vec<String> = {

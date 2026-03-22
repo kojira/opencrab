@@ -16,6 +16,8 @@ opencrab-actions = { workspace = true }
 opencrab-gateway = { workspace = true, features = ["discord"] }
 opencrab-db = { workspace = true }
 uuid = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

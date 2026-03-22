@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -158,6 +160,9 @@ pub struct SkillEngine {
     pub allowed_actions: Option<std::collections::HashSet<String>>,
     /// Optional callback invoked after each LLM call for logging.
     pub log_callback: Option<Box<dyn Fn(&ChatRequestSimple, &ChatResponseSimple) + Send + Sync>>,
+    /// Optional callback invoked with the first response text (iteration 1).
+    /// Called even if there are tool_calls in the first response.
+    pub on_first_response: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce(String) + Send>>>>>,
 }
 
 impl SkillEngine {
@@ -173,12 +178,18 @@ impl SkillEngine {
             max_iterations,
             allowed_actions: None,
             log_callback: None,
+            on_first_response: None,
         }
     }
 
     /// Set the LLM log callback, invoked after each LLM call.
     pub fn set_log_callback(&mut self, cb: impl Fn(&ChatRequestSimple, &ChatResponseSimple) + Send + Sync + 'static) {
         self.log_callback = Some(Box::new(cb));
+    }
+
+    /// Set the on_first_response callback, invoked with the first response text.
+    pub fn set_on_first_response(&mut self, cb: impl FnOnce(String) + Send + 'static) {
+        self.on_first_response = Some(Arc::new(std::sync::Mutex::new(Some(Box::new(cb)))));
     }
 
     /// Set the allowed actions from active skill declarations.
@@ -324,6 +335,21 @@ impl SkillEngine {
                             } else {
                                 Some(cleaned)
                             };
+                        }
+                    }
+                }
+            }
+
+            // Fire on_first_response callback on the first iteration if there's text.
+            if iterations == 1 {
+                if let Some(ref text) = response.content {
+                    if !text.is_empty() {
+                        if let Some(ref cb_lock) = self.on_first_response {
+                            if let Ok(mut guard) = cb_lock.lock() {
+                                if let Some(cb) = guard.take() {
+                                    cb(text.clone());
+                                }
+                            }
                         }
                     }
                 }
