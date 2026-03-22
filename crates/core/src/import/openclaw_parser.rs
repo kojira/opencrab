@@ -10,6 +10,17 @@ pub struct ScanOptions {
     pub overwrite_if_exists: bool,
 }
 
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            include_daily_logs: true,
+            daily_log_days: u32::MAX,
+            include_skills: true,
+            overwrite_if_exists: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoulImportData {
     pub persona_name: String,
