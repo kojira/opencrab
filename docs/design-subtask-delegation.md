@@ -47,6 +47,12 @@ loop {
 
 ---
 
+### 設計原則
+
+- **メインエンジンは会話・判断に集中する**: 複雑な処理（コード実装・長時間調査・画像生成など）はスキル化してサブへ委譲
+- **サブエンジンはタイムアウトで制御する**: max_iterationsは不要な制限。タイムアウト（デフォルト1800秒）のみで管理する
+- **LLMを信頼する**: subtask_resultはテキスト自由形式。ファイルパスなどはLLMが自然に読み取る（構造化不要）
+
 ## 2. 確定設計（案A+D統合: LLM第1ターン活用方式）
 
 ### 2.1 全体フロー
@@ -72,6 +78,13 @@ loop {
   ↓
 最終応答をDiscordに送信
 ```
+
+### 2.1.1 subtask_resultの仕様
+
+- サブの最終ターンのLLM出力テキストがそのままsubtask_resultとしてメインセッション履歴に追加される
+- **構造化は不要**: LLMを信頼してテキスト自由形式で渡す
+- 例: 画像生成サブは「生成完了。ファイル: /workspace/cat.png」とテキストで返す → メインがパスを読み取ってdiscord_send_fileを呼ぶ
+- 例: コード実装サブは「実装完了。コミット: abc1234」とテキストで返す → メインがユーザーに報告する
 
 ### 2.2 一次応答の設計
 
@@ -346,6 +359,32 @@ MAX_DEPTH=2とした理由:
 
 ---
 
+### デーモン型プロセスの扱い
+
+`nostaro watch`のような終了しない常駐型プロセスへの対応:
+
+**短期監視（サブタスク内）**: screen/nohupで起動→screendumpをポーリング
+```bash
+# サブが実行:
+execute_shell("screen", ["-dmS", "nostr-watch", "nostaro", "watch"])
+# → すぐ返る。screenプロセスはバックグラウンドで常駐
+
+# 定期チェック:
+execute_shell("screen", ["-S", "nostr-watch", "-X", "hardcopy", "/tmp/nostr-output.txt"])
+execute_shell("cat", ["/tmp/nostr-output.txt"])
+# 差分があればreport_progress
+```
+
+**重要**: screenプロセスはサブエンジンのタイムアウトと独立して生き続ける。
+サブがタイムアウトしても`nostaro watch`プロセスは継続する。
+
+**長期常駐型（24時間監視）**: heartbeat連携が必要
+- screenで起動したプロセスはサーバー再起動まで継続
+- opencrabのheartbeat機能が定期的にscreendumpをチェック→イベントがあればDiscord通知
+- **この方式は本ドキュメント（サブタスク委譲）の設計範囲外**。heartbeat設計で別途対応
+
+**必要なallowed_commands**: `screen`を追加すること
+
 ## 5. システムプロンプト要件
 
 ### 5.1 テキスト先行応答の強制
@@ -421,6 +460,25 @@ spawn_subtaskを呼び出した後の動作について：
 ```
 
 ---
+
+## 6. ユースケース検証
+
+以下の10ユースケースが本設計でカバーできることを確認済み:
+
+| # | ユースケース | パターン | 対応 |
+|---|------------|---------|------|
+| 1 | クイック回答（ツールなし） | テキストのみ→即返信 | ✅ |
+| 2 | 短時間ツール実行（天気確認等） | execute_shell×1→結果返信 | ✅ |
+| 3 | 画像生成 | spawn_subtask→subtask_completed→discord_send_file | ✅ |
+| 4 | 複数ステップ調査 | spawn_subtask + report_progress×複数 | ✅ |
+| 5 | コード実装 | spawn_coding_agent→progress_report.sh→完了報告 | ✅ |
+| 6 | 画像生成+説明 | spawn_subtask→ファイルパスをテキストで返す→メインがdiscord_send_file | ✅ |
+| 7 | コードリファクタリング | spawn_coding_agent + progress_report.sh | ✅ |
+| 8 | Web調査+まとめ | spawn_subtask→DuckDuckGo複数回→まとめ | ✅ |
+| 9 | タスク分割（depth=1→2） | depth=1がspawn_subtask→depth=2が実行 | ✅ |
+| 10 | nostaro watchタイムライン監視 | screen -dmSで常駐 + heartbeat定期チェック | ✅ |
+
+注: ユースケース10はheartbeat連携が必要（本ドキュメントの範囲外）
 
 ## Appendix: 採用しなかった案の比較
 
