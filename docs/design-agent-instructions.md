@@ -86,7 +86,40 @@ SoulタブにInstructionsのテキストエリアを追加。
 - プレースホルダー: "NO_REPLYの使い方、安全ルール、グループチャットの振る舞い等"
 - personality と横並び or 下に配置
 
-エージェント自身もAPIを通じてinstructionsを編集できる（自律学習のユースケース）。
+エージェント自身はAPIを直接呼び出す方法ではなく、`update_instructions` ゲートウェイアクションを通じてのみ編集できる。
+
+## update_instructions ゲートウェイアクション
+
+### 概要
+instructionsを更新する専用のゲートウェイアクション。
+
+### 制約（重要）
+- **ownerからのメッセージへの返信時のみ実行可能**（`CallerIdentity::Owner`限定）
+- 通常の会話中・グループチャット・サブタスク中は使用不可
+- ownerが直接話しかけてきた文脈でのみ、エージェントが自分のinstructionsを更新できる
+
+### 理由
+- instructionsはエージェントの行動基盤となる重要な設定
+- 任意の会話中に書き換えられると不正変更・プロンプトインジェクションのリスクがある
+- owner承認が得られる文脈でのみ変更を許可することでセキュリティを確保
+
+### アクション定義
+```json
+{
+  "name": "update_instructions",
+  "description": "自分のinstructionsを更新する（ownerへの返信時のみ使用可能）",
+  "parameters": {
+    "instructions": {
+      "type": "string",
+      "description": "新しいinstructionsの内容"
+    },
+    "reason": {
+      "type": "string",
+      "description": "更新する理由"
+    }
+  }
+}
+```
 
 ## インポート変更
 
