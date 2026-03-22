@@ -2,11 +2,23 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+fn default_daily_log_days() -> u32 {
+    u32::MAX
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanOptions {
+    #[serde(default = "default_true")]
     pub include_daily_logs: bool,
+    #[serde(default = "default_daily_log_days")]
     pub daily_log_days: u32,
+    #[serde(default = "default_true")]
     pub include_skills: bool,
+    #[serde(default)]
     pub overwrite_if_exists: bool,
 }
 
