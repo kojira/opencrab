@@ -72,8 +72,6 @@ pub fn build_agent_context(
 
     let prompt = format!(
         "You are {agent_name} ({persona}).\n\
-         Current date and time: {now}\n\
-         Current discussion topic: {session_theme}\n\
          \n\
          You are an autonomous agent participating in a discussion. \
          Respond thoughtfully to the conversation. \
@@ -98,7 +96,11 @@ pub fn build_agent_context(
          - 他のBotが話している場合（Bot同士のループを防ぐ）\n\
          - 既に話が完結している場合\n\
          \n\
-         {skills_text}{character_section}{instructions_section}"
+         {skills_text}{character_section}{instructions_section}\n\
+         \n\
+         ## Runtime\n\
+         Current date and time: {now}\n\
+         Current discussion topic: {session_theme}"
     );
 
     (prompt, agent_name)
