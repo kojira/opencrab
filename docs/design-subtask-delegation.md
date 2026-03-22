@@ -273,10 +273,9 @@ match result {
 
 変更後:
 ```rust
-// Step 1: 一次応答を即座に送信（変更なし）
-let ack_msg = generate_ack_message(&text);
-gateway.send_to_channel(channel_id, &ack_msg).await?;
-log_agent_ack(&state, &session_id, agent_id, &ack_msg);
+// Step 1: エンジン第1ターンのテキストを即座に送信（一次応答）
+// generate_ack_message不要: LLMが自然にackテキストを生成する
+// engine.rs の immediate_text_callback が第1ターンのテキストをDiscordに直接送信
 
 // Step 2: 長い処理をバックグラウンドで実行（フロー変更）
 let bg_state = state.clone();
@@ -344,30 +343,73 @@ tokio::spawn(async move {
 
 ---
 
-### 3.2 一次応答の生成方法
+### 3.2 一次応答の設計（確定: LLMの第1ターン活用方式）
 
-**シンプル実装（推奨）:** 固定パターンの一次応答
+> **[2026-03-22 設計変更]** 旧設計（固定文言ハードコード・軽量LLM別途呼び出し）は廃止。
+> LLMの最初のターンの動作に乗っかる方式に確定。
+
+#### フロー
+
+```
+メッセージ受信
+  ↓
+メインエンジンで普通にLLM呼び出し（第1ターン）
+  ↓
+LLMのレスポンスを確認：
+  ├─ テキスト応答のみ → 即Discordに送信（これが一次応答）、ツールなければ終了
+  ├─ テキスト + tool_calls → テキストを即Discordに送信、tool_callsをバックグラウンドで処理
+  └─ tool_callsのみ → バックグラウンドに切り替え（エンジン続行）
+```
+
+#### メリット
+
+- **ハードコードなし**: 固定文言を埋め込む必要がない
+- **追加コストなし**: 軽量LLM別途呼び出し不要
+- **LLMが自然にackを生成**: 「ちょっと待ってね（ツール呼び出し）」という動作がLLM判断で実現
+- **Anthropic API対応**: テキストとtool_callを同一ターンで返せる仕様を自然に活用
+
+#### 実装変更箇所
+
+**`crates/core/src/engine.rs` — `run_with_model_override` ループへの変更:**
+
 ```rust
-fn generate_ack_message(user_text: &str) -> String {
-    // キーワードベースの簡単なルーティング
-    if user_text.len() > 100 || contains_task_keywords(user_text) {
-        "ちょっと待ってて、処理するね ⚡".to_string()
-    } else {
-        // 短いメッセージは通常通り処理（バックグラウンドに回さない）
-        // → この判断自体を別ロジックで行う
-        "...".to_string()
+loop {
+    iterations += 1;
+    let response = self.llm.chat(request).await?;
+
+    // ★ 第1ターン: テキストが含まれる場合は即座にコールバック
+    if iterations == 1 {
+        if let Some(text) = &response.text {
+            if !text.is_empty() {
+                // コールバック経由で即Discord送信（一次応答）
+                self.immediate_text_callback.call(text).await;
+            }
+        }
     }
+
+    if !response.tool_calls.is_empty() {
+        // ★ 第1ターン + テキストあり → バックグラウンドへの切り替えシグナル
+        if iterations == 1 && response.text.is_some() {
+            // テキストは送信済み、tool_calls処理をバックグラウンドに委譲
+            // message_loop.rsがこのシグナルを受けてバックグラウンド化
+        }
+        // ツール実行
+        for tool_call in &response.tool_calls {
+            let result = self.executor.execute(...).await;
+            messages.push(tool result);
+        }
+        continue;
+    }
+
+    // ツールコールなし → 最終応答
+    return Ok(EngineResult { response: final_text, ... });
 }
 ```
 
-**高度実装（将来案）:** 軽量 LLM で一次応答を生成
-- 別の軽量モデル（gemini-flash 等）で 1 ターンだけ応答を生成
-- 一次応答として即送信後、フル SkillEngine をバックグラウンドで実行
+**`message_loop.rs` — バックグラウンド委譲のトリガー受け取り:**
 
-**判断基準（バックグラウンド化するかどうか）:**
-- メッセージの長さ（100文字超）
-- タスクキーワードの検出（「作って」「調べて」「生成して」等）
-- 常にバックグラウンド化（最もシンプル）← **最初はこれ推奨**
+エンジンから「テキスト送信済み + tool_calls継続中」のシグナルを受け取り、
+処理をバックグラウンドに委譲するだけ。複雑な一次応答生成ロジックは不要。
 
 ---
 
@@ -818,13 +860,17 @@ LLM のターン:
 
 **目標:** もぐたろう状態の解消（一次応答を即送信する）
 
-1. **`message_loop.rs` の改修**
-   - `run_discord_loop` でエンジン実行前に ack メッセージを Discord 送信
-   - エンジン実行を `tokio::spawn` でバックグラウンド化
-   - ack ログを DB に記録
-   - バックグラウンドタスクも `run_agent_response` を使う（新たな実行器は作らない）
-   - `channel="background"` または `gateway_actions=None` でDiscord送信をスキップ
-   - サブタスク用の会話に「バックグラウンドタスクである旨」のシステムメッセージを付加
+> **方式:** LLMの第1ターンのテキスト応答を即Discord送信（ハードコードなし）。engine.rsのiterations==1時にコールバック経由で送信。
+
+1. **`engine.rs` の `run_with_model_override` への変更**
+   - `iterations == 1` かつLLMレスポンスにテキストが含まれる場合、コールバックで即Discord送信
+   - テキスト + tool_calls の場合: テキスト送信後、tool_calls処理をバックグラウンドに委譲
+   - tool_calls のみの場合: そのままバックグラウンドに切り替え
+
+2. **`message_loop.rs` の改修**
+   - エンジンのバックグラウンド委譲シグナルを受け取る仕組みを実装
+   - `generate_ack_message` 関数は不要（削除）
+   - `tokio::spawn` でバックグラウンド処理を継続
 
 2. **`AppState` の `Clone` 対応確認**
    - `tokio::spawn` クロージャに渡すため `Clone` が必要
@@ -874,7 +920,7 @@ LLM のターン:
 
 ## 5. レビューポイント
 
-- [x] ✅ **確定** **一次応答の内容**: 固定文言（「ちょっと待ってて ⚡」等）を採用。キャラクターはメインエンジン（LLM）が担当するため、ackは最小限でOK
+- [x] ✅ **確定** **一次応答の内容**: LLMの第1ターンのテキストをそのまま使用。固定文言ハードコードなし・軽量LLM別途呼び出しなし。Anthropic APIの「テキスト+tool_calls同時返却」を自然に活用。
 - [x] ✅ **確定** **バックグラウンド→Discord方式**: 直接送信 **なし**。subtask_result → セッション履歴 → メインエンジン再呼び出し → 最終送信の流れで統一
 - [ ] **未定** **並行タスクの上限**: 同一チャンネルで同時実行を許すか、直列化するか（Phase 2で決定）
 - [ ] **未定** **バックグラウンドタスクの永続化**: プロセス再起動時に実行中タスクが消える（許容するか）
@@ -1355,6 +1401,8 @@ tokio::spawn(async move {
 将来的にco-agent呼び出しとも組み合わせることができる。
 
 ---
+
+*2026-03-22 追記: 一次応答設計を変更（固定文言廃止 → LLM第1ターン活用方式に確定。engine.rsのiterations==1コールバック + message_loop.rsのバックグラウンド委譲）*
 
 *作成: のすたろう, 2026-03-22*
 *設計確定: 2026-03-22（サブ結果→メインフィードバック方式に変更）*
