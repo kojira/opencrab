@@ -1,6 +1,6 @@
 # OpenClaw → OpenCrab インポート機能 設計ドキュメント
 
-**作成日**: 2026-03-22  
+**作成日**: 2026-03-22
 **ステータス**: Draft
 
 ---
@@ -244,14 +244,14 @@ CLIは既存の `crates/cli/` に追加コマンドとして実装。
 
 **Step 1: ディレクトリ指定**
 ```
-POST /api/agents/{agent_id}/import/scan
+POST /api/import/scan
 Body: {
   "source_dir": "/Volumes/2TB/openclaw/workspace",
   "options": {
     "include_daily_logs": true,
     "daily_log_days": 30,        // 最新N日分
     "include_skills": true,
-    "overwrite_existing": false  // 既存データを上書きするか
+    "overwrite_if_exists": false  // 同名エージェントが既に存在する場合に上書きするか
   }
 }
 ```
@@ -293,9 +293,10 @@ Body: {
 
 **Step 3: 実行**
 ```
-POST /api/agents/{agent_id}/import/execute
+POST /api/import/execute
 Body: {
   "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "agent_name": "のすたろう",
   "options": { ... },
   "confirmed": true
 }
@@ -303,7 +304,7 @@ Body: {
 
 **Step 4: 進捗レスポンス（SSE or ポーリング）**
 ```
-GET /api/agents/{agent_id}/import/status/{import_id}
+GET /api/import/status/{import_id}
 
 {
   "status": "running",  // pending | running | completed | failed
@@ -325,7 +326,7 @@ GET /api/agents/{agent_id}/import/status/{import_id}
 ┌────────────────────────────────────────────────────┐
 │  OpenClaw インポート                                │
 ├────────────────────────────────────────────────────┤
-│  対象エージェント: [かいろ ▼]                      │
+│  新規エージェント名: [のすたろう    ]              │
 │  ソースディレクトリ: [/Volumes/2TB/openclaw/workspace] [スキャン] │
 ├────────────────────────────────────────────────────┤
 │  スキャン結果                                       │
@@ -350,30 +351,66 @@ GET /api/agents/{agent_id}/import/status/{import_id}
 
 ```bash
 # スキャン（dryrun）
-opencrab import scan --agent <agent_id> --source /path/to/openclaw/workspace
+opencrab import scan --name のすたろう --source /path/to/openclaw/workspace
 
 # 実行
-opencrab import run --agent <agent_id> --source /path/to/openclaw/workspace \
+opencrab import run --name のすたろう --source /path/to/openclaw/workspace \
   --daily-log-days 30 \
   --overwrite
 
 # 対話式（おすすめ）
-opencrab import --agent <agent_id> --source /path/to/openclaw/workspace
+opencrab import --name のすたろう --source /path/to/openclaw/workspace
 > スキャン結果を表示... インポートしますか？ [y/N]
 ```
 
 ---
 
-## 5. 実装ステップ（優先順位付き）
+## 5. スクリプトパス変換
+
+### 5.1 問題
+
+スキルのguidanceやスクリプトファイルには元のワークスペースのパスがハードコードされている場合がある。
+例: `/Volumes/2TB/openclaw/workspace/skills/nano-banana-pro/scripts/generate_image.py`
+
+これをそのままインポートすると、新しいエージェントのワークスペースでは動作しない。
+
+### 5.2 LLMを使ったパス変換
+
+インポート時にLLMを使ってパスを自動変換する。
+
+**変換方針**:
+- guidance/スクリプトテキストをLLMに渡す
+- 元のワークスペースパス: `{source_dir}` (スキャン時に特定)
+- 新しいワークスペースパス: `{new_agent_workspace}` (インポート先)
+- プロンプト: 「以下のテキスト内の `{source_dir}` を含むパスを `{new_agent_workspace}` に置き換えてください。パス以外は変更しないでください。」
+
+**変換対象**:
+- `skills.guidance` フィールド
+- スキルディレクトリ内の `.py`, `.sh`, `.js`, `.ts` ファイル（ワークスペースにコピーする場合）
+
+**LLM変換のフォールバック**:
+- LLMが失敗した場合は単純な文字列置換（`str.replace(source_dir, new_workspace)`）にフォールバック
+- 変換後も元パスが残っている場合はwarningとして報告
+
+### 5.3 スクリプトファイルのコピー
+
+スキルディレクトリ内にSKILL.md以外のスクリプトファイルが存在する場合：
+1. 新しいエージェントのワークスペース（`data/agents/{agent_id}/workspace/`）にコピー
+2. コピー後にLLMパス変換を適用
+3. インポート完了レポートに「コピーされたスクリプト一覧」を表示
+
+---
+
+## 6. 実装ステップ（優先順位付き）
 
 ### Phase 1: コア実装（必須・最優先）
 
-**P1-1: データパーサー**  
+**P1-1: データパーサー**
 `crates/core/src/import/` を新規作成
 
 - [ ] `openclaw_parser.rs`: OpenClawファイルの解析
   - `parse_soul_md(path)` → `SoulImportData`
-  - `parse_identity_md(path)` → `IdentityImportData`  
+  - `parse_identity_md(path)` → `IdentityImportData`
   - `parse_memory_md(path)` → `Vec<MemoryCuratedImportData>`
   - `parse_skill_md(skill_dir)` → `SkillImportData`
   - `scan_workspace(dir, options)` → `ScanResult`
@@ -383,12 +420,12 @@ opencrab import --agent <agent_id> --source /path/to/openclaw/workspace
   - トランザクションで全データを一括コミット
   - `overwrite=false` 時は既存データをスキップ
 
-**P1-2: REST APIエンドポイント**  
+**P1-2: REST APIエンドポイント**
 `crates/server/src/api/import.rs` を新規作成
 
-- [ ] `POST /api/agents/{agent_id}/import/scan`
-- [ ] `POST /api/agents/{agent_id}/import/execute`
-- [ ] `GET /api/agents/{agent_id}/import/status/{import_id}`
+- [ ] `POST /api/import/scan`
+- [ ] `POST /api/import/execute`
+- [ ] `GET /api/import/status/{import_id}`
 
 **P1-3: データ変換**
 
@@ -465,15 +502,15 @@ fn parse_skill(dir: &Path) -> Option<SkillImportData> {
 
 ---
 
-## 6. セキュリティ考慮事項
+## 7. セキュリティ考慮事項
 
-### 6.1 パストラバーサル対策
+### 7.1 パストラバーサル対策
 
 - ソースディレクトリは絶対パスに正規化
 - シンボリックリンクはディレクトリ外へのリンクを除外
 - ファイルサイズ上限（例: 10MB/ファイル）
 
-### 6.2 除外パターンの実装
+### 7.2 除外パターンの実装
 
 ```rust
 const EXCLUDED_PATTERNS: &[&str] = &[
@@ -496,7 +533,7 @@ const EXCLUDED_PATTERNS: &[&str] = &[
 ];
 ```
 
-### 6.3 シークレット検出（任意）
+### 7.3 シークレット検出（任意）
 
 インポート対象テキストに以下のパターンが含まれる場合に警告：
 - `DISCORD_BOT_TOKEN=` / `bot_token:`
@@ -506,9 +543,28 @@ const EXCLUDED_PATTERNS: &[&str] = &[
 
 ---
 
-## 7. テスト計画
+## 8. 既知の制約
 
-### 7.1 ユニットテスト
+### 8.1 situation_pattern の精度
+
+スキルの `situation_pattern` はPhase 1では `description` をそのまま流用する。
+「どういう状況で使うか」と「何をするか」は異なる概念であり、精度が低下するリスクがある。
+
+**対策**:
+- インポート完了レポートに「situation_pattern要修正スキル一覧」を表示する
+- インポート後に手動修正を推奨する
+- Phase 4でLLMによる自動生成を実装予定（`## 10. 実装優先順位まとめ` 参照）
+
+### 8.2 その他の既知制約
+
+- スクリプトファイルのパス変換はLLMのベストエフォートであり、複雑なパス生成ロジックは検出できない可能性がある
+- インポート後に動作確認を実施することを推奨する
+
+---
+
+## 9. テスト計画
+
+### 9.1 ユニットテスト
 
 ```rust
 #[test]
@@ -527,7 +583,7 @@ fn test_parse_skill_dir() { ... }
 fn test_excluded_patterns() { ... }
 ```
 
-### 7.2 E2Eテスト
+### 9.2 E2Eテスト
 
 - テスト用フィクスチャーディレクトリを `tests/fixtures/openclaw_workspace/` に作成
 - `scan` → `execute` の完全フローをテスト
@@ -536,7 +592,7 @@ fn test_excluded_patterns() { ... }
 
 ---
 
-## 8. 実装優先順位まとめ
+## 10. 実装優先順位まとめ
 
 | 優先度 | 項目 | 工数見積 |
 |---|---|---|
@@ -551,7 +607,7 @@ fn test_excluded_patterns() { ... }
 
 ---
 
-## 9. 参考情報
+## 11. 参考情報
 
 ### OpenClawワークスペース構成（実測）
 
