@@ -245,6 +245,7 @@ impl OpenRouterProvider {
                                 function_call,
                                 tool_calls,
                                 tool_call_id: None,
+                                cache_control: None,
                             },
                             finish_reason,
                         }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 
 use crate::common::*;
@@ -13,13 +13,13 @@ use crate::workspace::*;
 
 /// アクションディスパッチャー
 pub struct ActionDispatcher {
-    actions: HashMap<String, Arc<dyn Action>>,
+    actions: IndexMap<String, Arc<dyn Action>>,
 }
 
 impl ActionDispatcher {
     pub fn new() -> Self {
         let mut dispatcher = Self {
-            actions: HashMap::new(),
+            actions: IndexMap::new(),
         };
 
         // 共通アクション登録

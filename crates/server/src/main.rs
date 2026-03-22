@@ -147,10 +147,11 @@ fn make_heartbeat_callback(
                 // 3-4. エージェントコンテキストと会話文字列を構築
                 let (system_prompt, agent_name, conversation) = {
                     let conn = db.lock().unwrap();
-                    let (sp, name) = opencrab_server::process::build_agent_context(&conn, &agent_id_owned, "ハートビート自律行動");
+                    let (sp, name) = opencrab_server::process::build_agent_context(&conn, &agent_id_owned);
                     let conv = opencrab_server::process::build_conversation_string(&conn, &session_id);
                     (sp, name, conv)
                 };
+                let conversation = opencrab_server::process::prepend_runtime_context(&conversation, "ハートビート自律行動");
 
                 // 5. run_agent_response を呼び出す
                 let engine_result = opencrab_server::process::run_agent_response(

@@ -74,6 +74,8 @@ pub struct Message {
     /// For tool role messages, the tool_call_id this is responding to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -86,6 +88,7 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -98,6 +101,7 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -110,6 +114,7 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: None,
+            cache_control: None,
         }
     }
 
@@ -122,6 +127,7 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            cache_control: None,
         }
     }
 
@@ -141,6 +147,8 @@ pub struct FunctionDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub parameters: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 /// Controls how the model calls functions.

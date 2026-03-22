@@ -18,7 +18,6 @@ use crate::AppState;
 pub fn build_agent_context(
     conn: &rusqlite::Connection,
     agent_id: &str,
-    session_theme: &str,
 ) -> (String, String) {
     let identity = opencrab_db::queries::get_identity(conn, agent_id)
         .ok()
@@ -55,8 +54,6 @@ pub fn build_agent_context(
             .collect();
         format!("\n\nYour skills:\n{}", list.join("\n"))
     };
-
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
 
     let character_section = if custom_traits.is_empty() {
         String::new()
@@ -96,11 +93,7 @@ pub fn build_agent_context(
          - 他のBotが話している場合（Bot同士のループを防ぐ）\n\
          - 既に話が完結している場合\n\
          \n\
-         {skills_text}{character_section}{instructions_section}\n\
-         \n\
-         ## Runtime\n\
-         Current date and time: {now}\n\
-         Current discussion topic: {session_theme}"
+         {skills_text}{character_section}{instructions_section}"
     );
 
     (prompt, agent_name)
@@ -128,6 +121,29 @@ pub fn build_conversation_string(
     }
 
     parts.join("\n")
+}
+
+/// 変動コンテキストを最後のuserメッセージに前置するヘルパー
+pub fn prepend_runtime_context(
+    user_message: &str,
+    session_theme: &str,
+) -> String {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+    format!(
+        "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\n\n{user_message}"
+    )
+}
+
+/// Discord用: message_idを含む変動コンテキストを前置するヘルパー
+pub fn prepend_runtime_context_discord(
+    user_message: &str,
+    session_theme: &str,
+    message_id: &str,
+) -> String {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+    format!(
+        "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nDiscord message_id: {message_id}\n\n{user_message}"
+    )
 }
 
 /// エージェントにメッセージを処理させ、応答テキストを返す。

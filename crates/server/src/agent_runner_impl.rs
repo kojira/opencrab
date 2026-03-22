@@ -25,9 +25,9 @@ impl opencrab_discord::AgentRunner for AppState {
         !self.llm_router.provider_names().is_empty()
     }
 
-    fn build_agent_context(&self, agent_id: &str, theme: &str) -> (String, String) {
+    fn build_agent_context(&self, agent_id: &str) -> (String, String) {
         let conn = self.db.lock().unwrap();
-        process::build_agent_context(&conn, agent_id, theme)
+        process::build_agent_context(&conn, agent_id)
     }
 
     fn build_conversation_string(&self, session_id: &str) -> String {

@@ -192,15 +192,19 @@ pub async fn run_discord_loop<T: AgentRunner>(
                 opencrab_db::queries::insert_session_log(&conn, &log).ok();
             }
 
-            let (base_prompt, agent_name) = state.build_agent_context(agent_id, "Discord conversation");
+            let (base_prompt, agent_name) = state.build_agent_context(agent_id);
 
-            // Bug 1 fix: inject Discord channel/message context so LLM can use reactions.
             let system_prompt = format!(
-                "{}\n\n[Discord context: channel_id={}, message_id={}]",
-                base_prompt, channel_id_str, discord_message_id
+                "{}\n\n[Discord context: channel_id={}]",
+                base_prompt, channel_id_str
             );
 
-            let conversation = state.build_conversation_string(&session_id);
+            let conversation_raw = state.build_conversation_string(&session_id);
+            let conversation = prepend_runtime_context_discord(
+                &conversation_raw,
+                "Discord conversation",
+                discord_message_id,
+            );
 
             // Track whether on_first_response already sent a message to Discord.
             let first_sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -274,12 +278,17 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     let exit_reason_clone = exit_reason.clone();
 
                     tokio::spawn(async move {
-                        let (base_prompt, agent_name) = state.build_agent_context(&agent_id, "Discord conversation");
+                        let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
                         let system_prompt = format!(
                             "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, exit_reason={}]",
                             base_prompt, channel_id_str, subtask_id, exit_reason_clone
                         );
-                        let conversation = state.build_conversation_string(&session_id);
+                        let conversation_raw = state.build_conversation_string(&session_id);
+                        let conversation = prepend_runtime_context_discord(
+                            &conversation_raw,
+                            "Discord conversation",
+                            "",
+                        );
 
                         match state.run_agent_response(
                             &agent_id,
@@ -554,6 +563,18 @@ fn ensure_discord_session<T: AgentRunner>(
         metadata_json: Some(metadata_json),
     };
     opencrab_db::queries::insert_session(&conn, &session).ok();
+}
+
+/// Discord用: message_idを含む変動コンテキストを前置するヘルパー
+fn prepend_runtime_context_discord(
+    user_message: &str,
+    session_theme: &str,
+    message_id: &str,
+) -> String {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+    format!(
+        "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nDiscord message_id: {message_id}\n\n{user_message}"
+    )
 }
 
 /// メッセージコンテンツからテキストと画像URLを抽出する

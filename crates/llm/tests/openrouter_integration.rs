@@ -103,6 +103,7 @@ async fn test_chat_completion_tool_calling() {
             },
             "required": ["location"]
         }),
+        cache_control: None,
     };
 
     let request = ChatRequest {
