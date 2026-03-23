@@ -79,24 +79,24 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )"
     )?;
 
-    // soul.custom_traits_json → soul.personality rename
-    let has_custom_traits: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='custom_traits_json'")?
+    // soul.social_style_json カラムDROP（dead code削除）
+    let has_social_style: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='social_style_json'")?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
-    if has_custom_traits {
-        conn.execute_batch("ALTER TABLE soul RENAME COLUMN custom_traits_json TO personality")?;
+    if has_social_style {
+        conn.execute_batch("ALTER TABLE soul DROP COLUMN social_style_json")?;
     }
 
-    // soul.personality_json → drop
-    let has_personality_json: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='personality_json'")?
+    // soul.thinking_style_json カラムDROP（dead code削除）
+    let has_thinking_style: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='thinking_style_json'")?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
-    if has_personality_json {
-        conn.execute_batch("ALTER TABLE soul DROP COLUMN personality_json")?;
+    if has_thinking_style {
+        conn.execute_batch("ALTER TABLE soul DROP COLUMN thinking_style_json")?;
     }
 
     // llm_logs テーブル作成（既存DBへの対応）
@@ -268,8 +268,6 @@ const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS soul (
     agent_id TEXT PRIMARY KEY,
     persona_name TEXT NOT NULL,
-    social_style_json TEXT NOT NULL DEFAULT '{}',
-    thinking_style_json TEXT NOT NULL DEFAULT '{}',
     personality TEXT,
     instructions TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL

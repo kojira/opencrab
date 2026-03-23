@@ -245,12 +245,12 @@ fn make_heartbeat_callback(
                         let ch_id_str = channel_id_str.clone();
                         tokio::spawn(async move {
                             let http_opt = discord_http.lock().unwrap().clone();
-                            if let (Some(_http), Some(ch_id)) = (http_opt.clone(), channel_id_u64) {
+                            if let (Some(_http), Some(_ch_id)) = (http_opt.clone(), channel_id_u64) {
                                 #[cfg(feature = "discord")]
                                 {
                                     use serenity::model::id::ChannelId;
                                     use serenity::builder::CreateMessage;
-                                    let ch = ChannelId::new(ch_id);
+                                    let ch = ChannelId::new(_ch_id);
                                     if let Err(e) = ch.send_message(&_http, CreateMessage::new().content(&content)).await {
                                         tracing::error!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat send_speech failed: {e}");
                                     } else {

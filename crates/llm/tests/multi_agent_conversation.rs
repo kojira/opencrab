@@ -287,8 +287,6 @@ async fn test_three_agent_with_db_and_session() {
             &opencrab_db::queries::SoulRow {
                 agent_id: id.clone(),
                 persona_name: persona.to_string(),
-                social_style_json: "{}".to_string(),
-                thinking_style_json: "{}".to_string(),
                 personality: None,
                 instructions: String::new(),
             },

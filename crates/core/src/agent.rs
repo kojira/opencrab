@@ -7,7 +7,7 @@ use crate::heartbeat::HeartbeatConfig;
 use crate::identity::Identity;
 use crate::memory::MemoryManager;
 use crate::skill::SkillManager;
-use crate::soul::{Personality, Soul};
+use crate::soul::Soul;
 use crate::workspace::Workspace;
 
 use opencrab_db::queries;
@@ -149,11 +149,7 @@ impl Agent {
 
             let soul = Soul {
                 persona_name: soul_row.persona_name,
-                social_style: serde_json::from_str(&soul_row.social_style_json)
-                    .unwrap_or_default(),
-                personality: Personality::default(),
-                thinking_style: serde_json::from_str(&soul_row.thinking_style_json)
-                    .unwrap_or_default(),
+                thinking_style: Default::default(),
                 custom_traits: soul_row
                     .personality
                     .and_then(|s| serde_json::from_str(&s).ok()),
@@ -251,8 +247,6 @@ mod tests {
                 &queries::SoulRow {
                     agent_id: "agent-1".to_string(),
                     persona_name: "LoadedPersona".to_string(),
-                    social_style_json: serde_json::to_string(&crate::soul::SocialStyle::default()).unwrap(),
-                    thinking_style_json: serde_json::to_string(&crate::soul::ThinkingStyle::default()).unwrap(),
                     personality: None,
                     instructions: String::new(),
                 },

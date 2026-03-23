@@ -60,8 +60,6 @@ impl Action for UpdateInstructionsAction {
         let updated = opencrab_db::queries::SoulRow {
             agent_id: soul.agent_id,
             persona_name: soul.persona_name,
-            social_style_json: soul.social_style_json,
-            thinking_style_json: soul.thinking_style_json,
             personality: soul.personality,
             instructions: instructions.clone(),
         };
@@ -90,8 +88,6 @@ mod tests {
         let soul = SoulRow {
             agent_id: "agent-1".to_string(),
             persona_name: "テスト".to_string(),
-            social_style_json: "{}".to_string(),
-            thinking_style_json: "{}".to_string(),
             personality: None,
             instructions: "".to_string(),
         };

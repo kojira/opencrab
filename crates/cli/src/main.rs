@@ -146,8 +146,6 @@ async fn main() -> anyhow::Result<()> {
                     &opencrab_db::queries::SoulRow {
                         agent_id: agent_id.clone(),
                         persona_name: if persona.is_empty() { name.clone() } else { persona },
-                        social_style_json: "{}".to_string(),
-                        thinking_style_json: "{}".to_string(),
                         personality: None,
                         instructions: String::new(),
                     },
