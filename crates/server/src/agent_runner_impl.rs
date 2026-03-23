@@ -30,9 +30,9 @@ impl opencrab_discord::AgentRunner for AppState {
         process::build_agent_context(&conn, agent_id)
     }
 
-    fn build_conversation_string(&self, session_id: &str) -> String {
+    fn build_conversation_string(&self, session_id: &str, agent_id: &str, context_budget_tokens: usize) -> String {
         let conn = self.db.lock().unwrap();
-        process::build_conversation_string(&conn, session_id)
+        process::build_conversation_string(&conn, session_id, agent_id, context_budget_tokens)
     }
 
     async fn run_agent_response(
@@ -74,6 +74,16 @@ impl opencrab_discord::AgentRunner for AppState {
 
     fn default_model(&self) -> String {
         self.default_model.clone()
+    }
+
+    fn context_budget_tokens(&self) -> usize {
+        let conn = self.db.lock().unwrap();
+        let parts: Vec<&str> = self.default_model.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            process::compute_context_budget(&conn, parts[0], parts[1], self.compaction_ratio)
+        } else {
+            100_000 // fallback
+        }
     }
 
     fn workspace_base(&self) -> &str {

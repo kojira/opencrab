@@ -427,6 +427,97 @@ pub fn list_session_logs_by_session(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Count the number of logs in a session.
+pub fn count_session_logs(conn: &Connection, session_id: &str) -> Result<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// List session logs with id > after_id, ordered by id ASC.
+pub fn list_session_logs_after_id(
+    conn: &Connection,
+    session_id: &str,
+    after_id: i64,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+         FROM memory_sessions WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id, after_id], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// List the most recent N session logs (returned in id DESC order; caller should reverse).
+pub fn list_recent_session_logs(
+    conn: &Connection,
+    session_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+         FROM memory_sessions WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![session_id, limit as i64], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Get topic nodes for a specific session, ordered by start_log_id ASC.
+pub fn get_topic_nodes_for_session(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at
+         FROM memory_index_nodes WHERE agent_id = ?1 AND source_session_id = ?2 AND node_type = 'topic' ORDER BY start_log_id ASC",
+    )?;
+    let rows = stmt.query_map(params![agent_id, session_id], |row| {
+        Ok(IndexNodeRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            parent_id: row.get(2)?,
+            node_type: row.get(3)?,
+            title: row.get(4)?,
+            summary: row.get(5)?,
+            start_log_id: row.get(6)?,
+            end_log_id: row.get(7)?,
+            source_session_id: row.get(8)?,
+            depth: row.get(9)?,
+            child_count: row.get(10)?,
+            token_count: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 // ============================================
 // Skills
 // ============================================

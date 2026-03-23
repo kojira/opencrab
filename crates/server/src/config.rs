@@ -73,6 +73,9 @@ pub struct LlmConfig {
     pub fallback: FallbackConfig,
     #[serde(default)]
     pub aliases: HashMap<String, AliasConfig>,
+    /// 会話コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0)。
+    #[serde(default = "default_compaction_ratio")]
+    pub compaction_ratio: f64,
 }
 
 impl Default for LlmConfig {
@@ -83,8 +86,13 @@ impl Default for LlmConfig {
             providers: HashMap::new(),
             fallback: FallbackConfig::default(),
             aliases: HashMap::new(),
+            compaction_ratio: default_compaction_ratio(),
         }
     }
+}
+
+fn default_compaction_ratio() -> f64 {
+    0.5
 }
 
 fn default_provider() -> String {

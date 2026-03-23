@@ -48,6 +48,7 @@ fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
         workspace_base,
         default_model: "openrouter:openai/gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
+        compaction_ratio: 0.5,
         #[cfg(feature = "discord")]
         discord_manager: None,
     };

@@ -149,7 +149,8 @@ pub async fn send_agent_message(
     // 7. Build conversation string.
     let conversation = {
         let conn = state.db.lock().unwrap();
-        let raw = process::build_conversation_string(&conn, &session_id);
+        let budget = process::compute_context_budget(&conn, &state.default_model.split(':').next().unwrap_or(""), state.default_model.split(':').nth(1).unwrap_or(""), state.compaction_ratio);
+        let raw = process::build_conversation_string(&conn, &session_id, &id, budget);
         process::prepend_runtime_context(&raw, "direct_message")
     };
 

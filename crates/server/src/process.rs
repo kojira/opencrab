@@ -93,34 +93,222 @@ pub fn build_agent_context(
          - 他のBotが話している場合（Bot同士のループを防ぐ）\n\
          - 既に話が完結している場合\n\
          \n\
+         ## Async Behavior\n\
+         \n\
+         You work asynchronously. When you call a tool, the result arrives later — and you\n\
+         are called again with the result in the conversation history.\n\
+         \n\
+         When you see `[subtask_completed: ...]` in the conversation:\n\
+         - It means a tool you called has finished, and it's your turn again\n\
+         - Check what the result contains\n\
+         - If there's more to do: continue with the next step\n\
+         - If the task is done: summarize and reply to the user\n\
+         - If no reply is needed: respond with NO_REPLY\n\
+         \n\
+         Do NOT repeat what you already said in the previous turn.\n\
+         Do NOT re-explain what you're about to do if you already said it.\n\
+         Just act on the result.\n\
+         \n\
+         Before responding after [subtask_completed: ...]:\n\
+         1. Check your last message in the conversation history\n\
+         2. If your last message already covers the same result → NO_REPLY\n\
+         3. Only respond if you have genuinely NEW information to report\n\
+         \n\
+         ## Memory & Context\n\
+         \n\
+         Long conversations are automatically compacted. When this happens, older messages \
+         are replaced with a [Past context summary] section showing topic summaries with node IDs.\n\
+         \n\
+         To recall details from past conversations:\n\
+         1. Look at [Past context summary] for topic titles and node IDs (e.g. [topic-xxx-1-20])\n\
+         2. Use `retrieve_memory_nodes` with the node_id to get the full conversation text\n\
+         3. Use `browse_memory_index` to explore all past topics beyond what's shown in the summary\n\
+         \n\
+         These tools let you access your full history even after compaction.\n\
+         \n\
          {skills_text}{character_section}{instructions_section}"
     );
 
     (prompt, agent_name)
 }
 
-/// セッションログから会話文字列を構築する。
+/// コンパクション時に最低限保持する最近のログ件数。
+const RECENT_MIN_LOGS: usize = 10;
+/// context_window が不明な場合のデフォルト予算（トークン数）。
+const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
+
+/// 文字列の概算トークン数を返す（日本語混在想定: chars / 3）。
+/// memory_index.rs と同じ推定手法。
+fn estimate_tokens(s: &str) -> usize {
+    s.len() / 3
+}
+
+/// セッションログから会話文字列を構築する（トークン予算ベースのコンパクション対応）。
+///
+/// `context_budget_tokens` はこの会話セクションに使えるトークン予算。
+/// 全文が予算内ならそのまま返す。超えたら memory_index の topic 要約で古い部分を置き換え、
+/// 最近のログを予算内で最大限保持する。
 pub fn build_conversation_string(
     conn: &rusqlite::Connection,
     session_id: &str,
+    agent_id: &str,
+    context_budget_tokens: usize,
 ) -> String {
+    // まず全文を試す
+    let full = build_full_conversation(conn, session_id);
+    if full == "No messages yet." {
+        return full;
+    }
+
+    // 全文が予算内ならそのまま返す
+    if estimate_tokens(&full) <= context_budget_tokens {
+        return full;
+    }
+
+    // 予算超過 → コンパクション
+    // memory_index の topic 要約を取得
+    let topics = opencrab_db::queries::get_topic_nodes_for_session(conn, agent_id, session_id)
+        .unwrap_or_default();
+
+    if topics.is_empty() {
+        // フォールバック: 要約がない場合は最新ログを予算内で切り詰め
+        return build_truncated_conversation(conn, session_id, context_budget_tokens);
+    }
+
+    // [Past context summary] セクション構築
+    // node_id を併記してエージェントが retrieve_memory_nodes で全文検索できるようにする
+    let summary_section: String = topics
+        .iter()
+        .map(|t| format!("- [{}] {}: {}", t.id, t.title, t.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let summary_header = "[Past context summary (use retrieve_memory_nodes with node_id to recall details)]\n";
+    let recent_header = "\n\n[Recent conversation]\n";
+    let overhead_tokens = estimate_tokens(summary_header)
+        + estimate_tokens(&summary_section)
+        + estimate_tokens(recent_header);
+
+    // 残りの予算を最近のログに割り当て
+    let remaining_budget = context_budget_tokens.saturating_sub(overhead_tokens);
+
+    // indexed_boundary: topic でカバーされている最後の log_id
+    let indexed_boundary = topics
+        .iter()
+        .filter_map(|t| t.end_log_id)
+        .max()
+        .unwrap_or(0);
+
+    // indexed_boundary 以降のログを取得
+    let mut recent_logs = opencrab_db::queries::list_session_logs_after_id(
+        conn,
+        session_id,
+        indexed_boundary,
+    )
+    .unwrap_or_default();
+
+    // ログが少なければ追加取得（最低 RECENT_MIN_LOGS 件は確保）
+    if recent_logs.len() < RECENT_MIN_LOGS {
+        let mut logs = opencrab_db::queries::list_recent_session_logs(
+            conn,
+            session_id,
+            RECENT_MIN_LOGS,
+        )
+        .unwrap_or_default();
+        logs.reverse();
+        recent_logs = logs;
+    }
+
+    // 予算内に収まるようにログを後ろから詰める
+    let recent_text = fit_logs_to_budget(&recent_logs, remaining_budget);
+
+    format!(
+        "{summary_header}{summary_section}{recent_header}{recent_text}"
+    )
+}
+
+/// context_budget_tokens を呼び出し元で計算するヘルパー。
+/// model_pricing の context_window と compaction_ratio から予算を算出する。
+pub fn compute_context_budget(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    model: &str,
+    compaction_ratio: f64,
+) -> usize {
+    let context_window = opencrab_db::queries::get_model_pricing(conn, provider, model)
+        .ok()
+        .flatten()
+        .and_then(|p| p.context_window)
+        .unwrap_or(DEFAULT_CONTEXT_BUDGET_TOKENS as i32) as usize;
+    ((context_window as f64) * compaction_ratio) as usize
+}
+
+fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> String {
     let logs =
         opencrab_db::queries::list_session_logs_by_session(conn, session_id).unwrap_or_default();
-
     if logs.is_empty() {
         return "No messages yet.".to_string();
     }
+    format_logs(&logs)
+}
 
-    let mut parts = Vec::new();
-    for log in &logs {
-        let speaker = log
-            .speaker_id
-            .as_deref()
-            .unwrap_or(&log.agent_id);
-        parts.push(format!("[{}]: {}", speaker, log.content));
+fn build_truncated_conversation(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    budget_tokens: usize,
+) -> String {
+    let mut logs = opencrab_db::queries::list_recent_session_logs(conn, session_id, 500)
+        .unwrap_or_default();
+    logs.reverse();
+
+    let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
+    let header_tokens = estimate_tokens(header);
+    let remaining = budget_tokens.saturating_sub(header_tokens);
+    let recent_text = fit_logs_to_budget(&logs, remaining);
+
+    format!("{header}{recent_text}")
+}
+
+/// ログを末尾（最新）から逆順に辿り、予算内に収まる分だけ返す。
+/// 最低 RECENT_MIN_LOGS 件は常に含める。
+fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_tokens: usize) -> String {
+    if logs.is_empty() {
+        return String::new();
     }
 
-    parts.join("\n")
+    // まず各ログを文字列化
+    let formatted: Vec<String> = logs
+        .iter()
+        .map(|log| {
+            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+            format!("[{}]: {}", speaker, log.content)
+        })
+        .collect();
+
+    // 後ろから詰めていく
+    let mut used_tokens = 0;
+    let mut start_idx = formatted.len();
+
+    for (i, line) in formatted.iter().enumerate().rev() {
+        let line_tokens = estimate_tokens(line) + 1; // +1 for newline
+        if used_tokens + line_tokens > budget_tokens && (formatted.len() - start_idx) >= RECENT_MIN_LOGS {
+            break;
+        }
+        used_tokens += line_tokens;
+        start_idx = i;
+    }
+
+    formatted[start_idx..].join("\n")
+}
+
+fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
+    logs.iter()
+        .map(|log| {
+            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+            format!("[{}]: {}", speaker, log.content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 変動コンテキストを最後のuserメッセージに前置するヘルパー
