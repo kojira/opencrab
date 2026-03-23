@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 pub struct SoulRow {
     pub agent_id: String,
     pub persona_name: String,
-    pub social_style_json: String,
-    pub thinking_style_json: String,
     pub personality: Option<String>,
     #[serde(default)]
     pub instructions: String,
@@ -20,20 +18,16 @@ pub struct SoulRow {
 
 pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO soul (agent_id, persona_name, social_style_json, thinking_style_json, personality, instructions, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO soul (agent_id, persona_name, personality, instructions, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(agent_id) DO UPDATE SET
             persona_name = excluded.persona_name,
-            social_style_json = excluded.social_style_json,
-            thinking_style_json = excluded.thinking_style_json,
             personality = excluded.personality,
             instructions = excluded.instructions,
             updated_at = excluded.updated_at",
         params![
             soul.agent_id,
             soul.persona_name,
-            soul.social_style_json,
-            soul.thinking_style_json,
             soul.personality,
             soul.instructions,
             Utc::now().to_rfc3339(),
@@ -44,17 +38,15 @@ pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
 
 pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, persona_name, social_style_json, thinking_style_json, personality, instructions
+        "SELECT agent_id, persona_name, personality, instructions
          FROM soul WHERE agent_id = ?1",
         params![agent_id],
         |row| {
             Ok(SoulRow {
                 agent_id: row.get(0)?,
                 persona_name: row.get(1)?,
-                social_style_json: row.get(2)?,
-                thinking_style_json: row.get(3)?,
-                personality: row.get(4)?,
-                instructions: row.get(5)?,
+                personality: row.get(2)?,
+                instructions: row.get(3)?,
             })
         },
     );
@@ -1930,8 +1922,6 @@ mod tests {
         let soul = SoulRow {
             agent_id: "agent-1".to_string(),
             persona_name: "Crab".to_string(),
-            social_style_json: r#"{"style":"friendly"}"#.to_string(),
-            thinking_style_json: r#"{"approach":"analytical"}"#.to_string(),
             personality: Some(r#"{"hobby":"coding"}"#.to_string()),
             instructions: String::new(),
         };
@@ -1943,8 +1933,6 @@ mod tests {
         let fetched = fetched.unwrap();
         assert_eq!(fetched.agent_id, "agent-1");
         assert_eq!(fetched.persona_name, "Crab");
-        assert_eq!(fetched.social_style_json, r#"{"style":"friendly"}"#);
-        assert_eq!(fetched.thinking_style_json, r#"{"approach":"analytical"}"#);
         assert_eq!(
             fetched.personality,
             Some(r#"{"hobby":"coding"}"#.to_string())
@@ -2659,8 +2647,6 @@ mod tests {
             &SoulRow {
                 agent_id: "del-1".into(),
                 persona_name: "Doomed".into(),
-                social_style_json: "{}".into(),
-                thinking_style_json: "{}".into(),
                 personality: None,
                 instructions: String::new(),
             },
@@ -2792,8 +2778,6 @@ mod tests {
             &SoulRow {
                 agent_id: agent_id.into(),
                 persona_name: "Original Persona".into(),
-                social_style_json: "{}".into(),
-                thinking_style_json: "{}".into(),
                 personality: None,
                 instructions: String::new(),
             },
@@ -2824,8 +2808,6 @@ mod tests {
             &SoulRow {
                 agent_id: agent_id.into(),
                 persona_name: "Updated Persona".into(),
-                social_style_json: r#"{"style":"analytical"}"#.into(),
-                thinking_style_json: "{}".into(),
                 personality: None,
                 instructions: String::new(),
             },

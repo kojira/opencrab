@@ -4,6 +4,8 @@ pub mod common;
 pub mod workspace;
 pub mod learning;
 pub mod search;
+pub mod skill_management;
+pub mod memory_access;
 pub mod llm_selection;
 pub mod llm_evaluation;
 pub mod llm_analysis;

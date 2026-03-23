@@ -145,8 +145,6 @@ async fn test_update_soul() {
     let soul_update = serde_json::json!({
         "agent_id": agent_id,
         "persona_name": "UpdatedPersona",
-        "social_style_json": "{}",
-        "thinking_style_json": "{}",
         "personality": null
     });
 
@@ -555,8 +553,6 @@ async fn test_agent_crud_full_cycle() {
         Some(serde_json::json!({
             "agent_id": agent_id,
             "persona_name": "Updated CRUD Persona",
-            "social_style_json": r#"{"style":"driver"}"#,
-            "thinking_style_json": r#"{"primary":"Creative"}"#,
             "personality": null
         })),
     )

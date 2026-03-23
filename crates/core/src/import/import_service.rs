@@ -58,8 +58,6 @@ pub fn execute_import(
             let soul = opencrab_db::queries::SoulRow {
                 agent_id: agent_id.to_string(),
                 persona_name: scan_result.soul.persona_name.clone(),
-                social_style_json: "{}".to_string(),
-                thinking_style_json: "{}".to_string(),
                 personality: Some(scan_result.soul.personality.clone()),
                 instructions: scan_result.instructions.clone(),
             };

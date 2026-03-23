@@ -7,6 +7,8 @@ use crate::llm_analysis::*;
 use crate::llm_evaluation::*;
 use crate::llm_selection::*;
 use crate::search::*;
+use crate::skill_management::*;
+use crate::memory_access::*;
 use crate::soul::*;
 use crate::traits::*;
 use crate::workspace::*;

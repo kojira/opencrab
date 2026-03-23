@@ -24,7 +24,7 @@ pub mod memory_index;
 pub mod import;
 
 // Re-export primary types for convenience.
-pub use soul::{Soul, SocialStyle, Personality, ThinkingStyle};
+pub use soul::{Soul, ThinkingStyle};
 pub use identity::Identity;
 pub use memory::MemoryManager;
 pub use skill::{SkillManager, Skill, SkillSource};

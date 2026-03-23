@@ -77,8 +77,6 @@ pub async fn create_agent(
     let soul = opencrab_db::queries::SoulRow {
         agent_id: agent_id.clone(),
         persona_name: req.persona_name,
-        social_style_json: serde_json::json!({"assertiveness": 0.0, "responsiveness": 0.0, "style_name": "Analytical"}).to_string(),
-        thinking_style_json: serde_json::json!({"primary": "論理的", "secondary": "分析的", "description": ""}).to_string(),
         personality: None,
         instructions: String::new(),
     };
@@ -226,8 +224,6 @@ pub async fn apply_soul_preset(
     let soul = opencrab_db::queries::SoulRow {
         agent_id: id,
         persona_name: preset.persona_name,
-        social_style_json: "{}".to_string(),
-        thinking_style_json: "{}".to_string(),
         personality: preset.custom_traits_json,
         instructions: String::new(),
     };
