@@ -392,7 +392,7 @@ LLMによる直接テキスト置換ではなく、テンポラリエージェ�
      - `target_files`: パス変換対象のファイル一覧
 
 3. **Claude Codeによるパス書き換え**
-   - テンポラリエージェントが `spawn_coding_agent`（claude）を使ってスクリプト内のパスを書き換える
+   - テンポラリエージェントが `spawn_subtask`（claude）を使ってスクリプト内のパスを書き換える
    - 変換タスク例: 「以下のファイル内に含まれる `{source_dir}` を `{new_workspace}` に書き換えてください: {target_files}」
 
 4. **テンポラリエージェントの削除**

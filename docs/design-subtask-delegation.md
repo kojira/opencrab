@@ -284,23 +284,6 @@ RAGアクセス（記憶検索スキル）は**Phase 1から使用可能**。
   ```
 - デバウンス時間はconfigで調整可能（デフォルト3秒）
 
-#### Step 10: spawn_coding_agent gateway action
-
-- `spawn_coding_agent(agent_type: "claude|codex", task, timeout_secs?)` を実装
-- spawn_subtaskの特化版（通常タスクとは別の専用アクション）
-- 起動時に以下を自動実行:
-  1. `progress_report.sh` をサブのワークスペースに自動生成・配置
-     ```bash
-     #!/bin/bash
-     MESSAGE="$1"
-     curl -s -X POST http://localhost:8080/api/agents/AGENT_ID/subtasks/SUBTASK_ID/progress \
-       -H "Content-Type: application/json" \
-       -d "{\"message\": \"$MESSAGE\"}"
-     ```
-  2. タイムアウトを長めに設定（デフォルト1800秒、引数でオーバーライド可）
-  3. サブのシステムプロンプトに「ステップ完了時は `./progress_report.sh 'メッセージ'` を呼ぶこと」を追加
-- progress APIエンドポイント `POST /api/agents/{id}/subtasks/{subtask_id}/progress` を新規追加
-
 ### Phase 2
 
 目標: サブ↔メイン双方向通信と安全性向上
@@ -509,9 +492,9 @@ spawn_subtaskを呼び出した後の動作について：
 | 2 | 短時間ツール実行（天気確認等） | execute_shell×1→結果返信 | ✅ |
 | 3 | 画像生成 | spawn_subtask→subtask_completed→discord_send_file | ✅ |
 | 4 | 複数ステップ調査 | spawn_subtask + report_progress×複数 | ✅ |
-| 5 | コード実装 | spawn_coding_agent→progress_report.sh→完了報告 | ✅ |
+| 5 | コード実装 | spawn_subtask→report_progress→完了報告 | ✅ |
 | 6 | 画像生成+説明 | spawn_subtask→ファイルパスをテキストで返す→メインがdiscord_send_file | ✅ |
-| 7 | コードリファクタリング | spawn_coding_agent + progress_report.sh | ✅ |
+| 7 | コードリファクタリング | spawn_subtask + report_progress | ✅ |
 | 8 | Web調査+まとめ | spawn_subtask→DuckDuckGo複数回→まとめ | ✅ |
 | 9 | タスク分割（depth=1→2） | depth=1がspawn_subtask→depth=2が実行 | ✅ |
 | 10 | nostaro watchタイムライン監視 | execute_shell(background=true) + heartbeat定期チェック | ✅ (Phase 2 TODO) |

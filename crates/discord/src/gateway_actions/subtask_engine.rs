@@ -1,4 +1,4 @@
-//! サブタスクエンジン操作 (spawn_subtask, cancel_subtask, report_progress, spawn_coding_agent)
+//! サブタスクエンジン操作 (spawn_subtask, cancel_subtask, report_progress)
 
 use std::sync::Arc;
 
@@ -334,31 +334,4 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) async fn execute_spawn_coding_agent(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let agent_type = args["agent_type"].as_str().unwrap_or("claude").to_string();
-        let task = match args["task"].as_str() {
-            Some(t) => t.to_string(),
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("spawn_coding_agent: 'task' is required".to_string()),
-            },
-        };
-        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(1800);
-        let _parent_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
-
-        // Delegate to spawn_subtask with coding agent system prompt.
-        let enhanced_task = format!(
-            "あなたはコーディングエージェント（{agent_type}）として起動されています。\n\n\
-             タスク:\n{task}"
-        );
-
-        let mut spawn_args = args.clone();
-        if let serde_json::Value::Object(ref mut map) = spawn_args {
-            map.insert("task".to_string(), serde_json::json!(enhanced_task));
-            map.insert("timeout_secs".to_string(), serde_json::json!(timeout_secs));
-        }
-
-        self.execute_spawn_subtask(&spawn_args).await
-    }
 }

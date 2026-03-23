@@ -326,29 +326,6 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["message"]
                 }),
             },
-            GatewayActionDef {
-                name: "spawn_coding_agent".to_string(),
-                description: "コーディングタスク専用のサブエンジンをバックグラウンドで起動します。spawn_subtaskのコーディング特化版で、AIエージェントがコーディングモードで実行されます。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_type": {
-                            "type": "string",
-                            "enum": ["claude", "codex"],
-                            "description": "コーディングエージェントの種類"
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "コーディングエージェントに実行させるタスク"
-                        },
-                        "timeout_secs": {
-                            "type": "integer",
-                            "description": "タイムアウト秒数（省略時1800秒）"
-                        }
-                    },
-                    "required": ["agent_type", "task"]
-                }),
-            },
         ]
     }
 
@@ -368,7 +345,6 @@ impl GatewayActions for DiscordGatewayActions {
             "spawn_subtask" => self.execute_spawn_subtask(args).await,
             "cancel_subtask" => self.execute_cancel_subtask(args),
             "report_progress" => self.execute_report_progress(args).await,
-            "spawn_coding_agent" => self.execute_spawn_coding_agent(args).await,
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -402,7 +378,7 @@ mod tests {
     fn test_definitions_returns_four_actions() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 15);
+        assert_eq!(defs.len(), 14);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -419,7 +395,6 @@ mod tests {
         assert!(names.contains(&"spawn_subtask"));
         assert!(names.contains(&"cancel_subtask"));
         assert!(names.contains(&"report_progress"));
-        assert!(names.contains(&"spawn_coding_agent"));
     }
 
     #[test]
