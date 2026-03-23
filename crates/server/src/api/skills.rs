@@ -134,32 +134,6 @@ pub async fn restore_skill(
     Json(serde_json::json!({"restored": true}))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MergeSkillsRequest {
-    pub source_id: String,
-    pub target_id: String,
-}
-
-pub async fn merge_skills(
-    State(state): State<AppState>,
-    Path(_id): Path<String>,
-    Json(req): Json<MergeSkillsRequest>,
-) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    match opencrab_db::queries::merge_skills(&conn, &req.source_id, &req.target_id) {
-        Ok(_) => Json(serde_json::json!({"merged": true})),
-        Err(e) => Json(serde_json::json!({"merged": false, "error": e.to_string()})),
-    }
-}
-
-pub async fn list_duplicates(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<Vec<opencrab_db::queries::SkillRow>> {
-    let conn = state.db.lock().unwrap();
-    let skills = opencrab_db::queries::find_duplicate_skills(&conn, &id).unwrap_or_default();
-    Json(skills)
-}
 
 pub async fn list_unused(
     State(state): State<AppState>,

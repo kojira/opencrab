@@ -49,8 +49,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents/{id}/skills/{skill_id}/toggle", post(api::skills::toggle_skill))
         .route("/api/agents/{id}/skills/{skill_id}/archive", post(api::skills::archive_skill))
         .route("/api/agents/{id}/skills/{skill_id}/restore", post(api::skills::restore_skill))
-        .route("/api/agents/{id}/skills/merge", post(api::skills::merge_skills))
-        .route("/api/agents/{id}/skills/duplicates", get(api::skills::list_duplicates))
         .route("/api/agents/{id}/skills/unused", get(api::skills::list_unused))
         // 記憶管理
         .route("/api/agents/{id}/memory/curated", get(api::memory::list_curated_memory))

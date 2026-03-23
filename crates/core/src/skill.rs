@@ -219,31 +219,9 @@ impl SkillManager {
         Ok(())
     }
 
-    /// Merge two skills: combine usage counts, delete source.
-    pub fn merge_skills(&self, source_id: &str, target_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        queries::merge_skills(&conn, source_id, target_id)?;
-        tracing::info!(
-            source_id = %source_id,
-            target_id = %target_id,
-            "Merged skills"
-        );
-        Ok(())
-    }
-
-    /// Check for duplicate skills and log them.
+    /// Check for unused skills and log them.
     pub fn check_and_cleanup_duplicates(&self) -> Result<(usize, usize)> {
         let conn = self.conn.lock().unwrap();
-        let duplicates = queries::find_duplicate_skills(&conn, &self.agent_id)?;
-        let dup_count = duplicates.len();
-
-        if dup_count > 0 {
-            tracing::info!(
-                agent_id = %self.agent_id,
-                duplicate_count = dup_count,
-                "Found duplicate skills"
-            );
-        }
 
         let unused = queries::find_unused_skills(&conn, &self.agent_id, 7)?;
         let unused_count = unused.len();
@@ -256,7 +234,7 @@ impl SkillManager {
             );
         }
 
-        Ok((dup_count, unused_count))
+        Ok((0, unused_count))
     }
 
     /// Build a context string describing available skills for LLM prompts.
