@@ -161,3 +161,13 @@
     - taintedなデータをOwner限定ツール（update_instructions等）の引数に渡せない
     - LLMへの入力時にtainted部分を明示する（[UNTRUSTED]フラグ等）
     - 設計書が必要: taint追跡の範囲・実装方法・パフォーマンスへの影響を検討
+
+33. **インポート時のAGENTS.md→opencrab向けinstructions LLM変換**
+    - 現状: インポート時にOpenClawのAGENTS.mdがそのままinstructionsに入る
+    - LLMで「OpenClaw固有の記述を除去してopencrab向けのinstructionsに変換する」処理が必要
+    - 設計書作成→kojiraレビュー→実装の順で進める
+
+34. **バイナリ配布（GitHub Releases / Homebrew tap）**
+    - 現状: cloneして自分でビルドする必要がある
+    - GitHub Actionsでcross-compileしてリリースにバイナリ添付
+    - `brew install kojira/tap/opencrab` 形式のHomebrew tapも検討
