@@ -6,13 +6,18 @@
 //! - P1修正: 処理をtokio::spawnで非同期化、メインループをブロックしない
 //! - P2修正: SubtaskCompleted callbackをLoopEvent送信に変更、イベントループで直列処理
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
+
+/// 同一(channel, sender)のメッセージをまとめるまでの待機時間。
+const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
 
 use crate::gateway_actions::{CompletionRegistry, SubtaskCompletionFn};
 use crate::AgentRunner;
@@ -71,45 +76,92 @@ pub async fn run_discord_loop<T: AgentRunner>(
     );
 
     // イベント処理ループ（直列）: P2のDB競合を構造的に解消
+    // デバウンス: 同一(channel_id, sender_id)のメッセージを DEBOUNCE_DELAY 分まとめてから処理
+    let mut debounce_buffers: HashMap<(String, String), (Vec<IncomingMessage>, Instant)> =
+        HashMap::new();
+
     loop {
-        match event_rx.recv().await {
-            Some(LoopEvent::IncomingMessage(msg)) => {
-                process_incoming_message(
-                    msg,
-                    gateway.clone(),
-                    state.clone(),
-                    agent_ids.clone(),
-                    gateway_actions.clone(),
-                    owner_discord_id.clone(),
-                    completion_registry.clone(),
-                    event_tx.clone(),
-                )
-                .await;
+        // 次にフラッシュすべきバッファのデッドラインを計算
+        let next_deadline = debounce_buffers.values().map(|(_, deadline)| *deadline).min();
+
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(LoopEvent::IncomingMessage(msg)) => {
+                        let key = debounce_key(&msg);
+                        let entry = debounce_buffers
+                            .entry(key)
+                            .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
+                        entry.0.push(msg);
+                        entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
+                    }
+                    Some(LoopEvent::SubtaskCompleted {
+                        session_id,
+                        agent_id,
+                        subtask_id,
+                        exit_reason,
+                        channel_id,
+                        channel_id_str,
+                        is_dm,
+                    }) => {
+                        process_subtask_completed(
+                            session_id,
+                            agent_id,
+                            subtask_id,
+                            exit_reason,
+                            channel_id,
+                            channel_id_str,
+                            is_dm,
+                            gateway.clone(),
+                            state.clone(),
+                            gateway_actions.clone(),
+                        )
+                        .await;
+                    }
+                    None => break,
+                }
             }
-            Some(LoopEvent::SubtaskCompleted {
-                session_id,
-                agent_id,
-                subtask_id,
-                exit_reason,
-                channel_id,
-                channel_id_str,
-                is_dm,
-            }) => {
-                process_subtask_completed(
-                    session_id,
-                    agent_id,
-                    subtask_id,
-                    exit_reason,
-                    channel_id,
-                    channel_id_str,
-                    is_dm,
-                    gateway.clone(),
-                    state.clone(),
-                    gateway_actions.clone(),
-                )
-                .await;
+            _ = tokio::time::sleep_until(next_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600))), if !debounce_buffers.is_empty() => {
+                // デッドラインを過ぎたバッファをフラッシュ
             }
-            None => break,
+        }
+
+        // デバウンス期限が来たバッファをまとめて処理
+        let now = Instant::now();
+        let expired_keys: Vec<_> = debounce_buffers
+            .iter()
+            .filter(|(_, (_, deadline))| *deadline <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in expired_keys {
+            if let Some((messages, _)) = debounce_buffers.remove(&key) {
+                let merged = merge_incoming_messages(messages);
+                if let Some(merged) = merged {
+                    let count = merged.metadata.get("debounce_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1);
+                    if count > 1 {
+                        info!(
+                            channel = %key.0,
+                            sender = %key.1,
+                            count = count,
+                            "Debounced messages merged"
+                        );
+                    }
+                    process_incoming_message(
+                        merged,
+                        gateway.clone(),
+                        state.clone(),
+                        agent_ids.clone(),
+                        gateway_actions.clone(),
+                        owner_discord_id.clone(),
+                        completion_registry.clone(),
+                        event_tx.clone(),
+                    )
+                    .await;
+                }
+            }
         }
     }
 
@@ -519,9 +571,24 @@ async fn process_subtask_completed<T: AgentRunner>(
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
 ) {
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
+
+    // Get task description from subtask session
+    let task_description = {
+        let sub_session_id = format!("subtask-{}", subtask_id);
+        state.db()
+            .lock()
+            .ok()
+            .and_then(|conn| opencrab_db::queries::get_session(&conn, &sub_session_id).ok().flatten())
+            .map(|s| {
+                // theme is "Subtask: {task}", strip the prefix
+                s.theme.strip_prefix("Subtask: ").unwrap_or(&s.theme).to_string()
+            })
+            .unwrap_or_default()
+    };
+
     let system_prompt = format!(
-        "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, exit_reason={}]",
-        base_prompt, channel_id_str, subtask_id, exit_reason
+        "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, task=\"{}\", exit_reason={}]",
+        base_prompt, channel_id_str, subtask_id, task_description, exit_reason
     );
     let conversation_raw = state.build_conversation_string(&session_id);
     let conversation =
@@ -706,6 +773,63 @@ fn prepend_runtime_context_discord(
     format!(
         "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nDiscord message_id: {message_id}\n\n{user_message}"
     )
+}
+
+/// デバウンスキーを生成する: (channel_id, sender_id)。
+fn debounce_key(msg: &IncomingMessage) -> (String, String) {
+    let channel_id = match &msg.source {
+        opencrab_gateway::MessageSource::Discord { channel_id, .. } => channel_id.clone(),
+        _ => String::new(),
+    };
+    (channel_id, msg.sender.id.clone())
+}
+
+/// 複数のIncomingMessageを1つにマージする。
+/// テキストは改行で結合、画像URLはすべて集約、メタデータは最後のメッセージを使用。
+fn merge_incoming_messages(mut messages: Vec<IncomingMessage>) -> Option<IncomingMessage> {
+    if messages.is_empty() {
+        return None;
+    }
+    if messages.len() == 1 {
+        return Some(messages.remove(0));
+    }
+
+    let count = messages.len();
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
+
+    for msg in &messages {
+        let (text, img_urls) = extract_discord_content(&msg.content);
+        if !text.is_empty() {
+            texts.push(text);
+        }
+        images.extend(img_urls);
+    }
+
+    // 最後のメッセージをベースにする（最新のメタデータ・タイムスタンプ）
+    let mut merged = messages.pop().unwrap();
+
+    // コンテンツをマージ
+    let merged_text = texts.join("\n");
+    if images.is_empty() {
+        merged.content = opencrab_gateway::MessageContent::Text(merged_text);
+    } else {
+        let mut parts: Vec<opencrab_gateway::ContentPart> = Vec::new();
+        if !merged_text.is_empty() {
+            parts.push(opencrab_gateway::ContentPart::Text(merged_text));
+        }
+        for url in images {
+            parts.push(opencrab_gateway::ContentPart::Image { url, alt: None });
+        }
+        merged.content = opencrab_gateway::MessageContent::Multi(parts);
+    }
+
+    // デバウンスでまとめたことをメタデータに記録
+    merged
+        .metadata
+        .insert("debounce_count".to_string(), serde_json::json!(count));
+
+    Some(merged)
 }
 
 /// メッセージコンテンツからテキストと画像URLを抽出する。
