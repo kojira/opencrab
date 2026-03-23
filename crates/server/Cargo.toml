@@ -33,6 +33,7 @@ opencrab-discord = { workspace = true, optional = true }
 serenity = { workspace = true, optional = true }
 notify = "6"
 notify-debouncer-mini = "0.4"
+tiktoken-rs = "0.9.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -3,7 +3,9 @@
 //! REST API (`api/sessions.rs`) と Discordゲートウェイ (`discord.rs`) の
 //! 両方から利用される。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use tiktoken_rs::CoreBPE;
 
 use opencrab_core::LlmCallLog;
 use opencrab_gateway::GatewayActions;
@@ -137,10 +139,14 @@ const RECENT_MIN_LOGS: usize = 10;
 /// context_window が不明な場合のデフォルト予算（トークン数）。
 const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
 
-/// 文字列の概算トークン数を返す（日本語混在想定: chars / 3）。
-/// memory_index.rs と同じ推定手法。
+fn get_tokenizer() -> &'static CoreBPE {
+    static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
+    TOKENIZER.get_or_init(|| tiktoken_rs::o200k_base().expect("failed to load o200k_base tokenizer"))
+}
+
+/// 文字列の正確なトークン数を返す (tiktoken o200k_base)。
 fn estimate_tokens(s: &str) -> usize {
-    s.len() / 3
+    get_tokenizer().encode_with_special_tokens(s).len()
 }
 
 /// セッションログから会話文字列を構築する（トークン予算ベースのコンパクション対応）。
