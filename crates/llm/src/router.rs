@@ -3,11 +3,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures::stream::BoxStream;
+use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::message::{ChatRequest, ChatResponse, ChatStreamDelta};
 use crate::metrics::MetricsCollector;
 use crate::traits::LlmProvider;
+
+/// Maximum number of retry attempts per provider.
+const MAX_RETRIES: u32 = 3;
+/// Base delay for exponential backoff (doubles each retry: 1s, 2s, 4s).
+const BACKOFF_BASE_MS: u64 = 1000;
 
 /// LLM Router for dynamic provider switching with fallback chains.
 ///
@@ -128,43 +134,26 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing chat completion");
 
-        // Try the resolved provider first
+        // Try the resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
-            let start = std::time::Instant::now();
-            match provider.chat_completion(request.clone()).await {
-                Ok(response) => {
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.record_success(
-                            &provider_name,
-                            &response.model,
-                            response.usage.prompt_tokens,
-                            response.usage.completion_tokens,
-                            start.elapsed().as_millis() as u64,
-                        );
-                    }
-                    return Ok(response);
-                }
+            match self
+                .try_provider_with_retry(provider, &provider_name, &request)
+                .await
+            {
+                Ok(response) => return Ok(response),
                 Err(e) => {
                     warn!(
                         provider = %provider_name,
                         error = %e,
-                        "Primary provider failed, trying fallback chain"
+                        "Primary provider failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.record_failure(
-                            &provider_name,
-                            &request.model,
-                            start.elapsed().as_millis() as u64,
-                            &e.to_string(),
-                        );
-                    }
                 }
             }
         } else {
             warn!(provider = %provider_name, "Provider not found, trying fallback chain");
         }
 
-        // Try fallback chain
+        // Try fallback chain (each with retries)
         for fallback_name in &self.fallback_chain {
             if fallback_name == &provider_name {
                 continue; // Skip the provider we already tried
@@ -172,35 +161,20 @@ impl LlmRouter {
 
             if let Some(provider) = self.providers.get(fallback_name) {
                 debug!(provider = %fallback_name, "Trying fallback provider");
-                let start = std::time::Instant::now();
-                match provider.chat_completion(request.clone()).await {
+                match self
+                    .try_provider_with_retry(provider, fallback_name, &request)
+                    .await
+                {
                     Ok(response) => {
                         info!(provider = %fallback_name, "Fallback provider succeeded");
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.record_success(
-                                fallback_name,
-                                &response.model,
-                                response.usage.prompt_tokens,
-                                response.usage.completion_tokens,
-                                start.elapsed().as_millis() as u64,
-                            );
-                        }
                         return Ok(response);
                     }
                     Err(e) => {
                         warn!(
                             provider = %fallback_name,
                             error = %e,
-                            "Fallback provider failed"
+                            "Fallback provider failed after {MAX_RETRIES} attempts"
                         );
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.record_failure(
-                                fallback_name,
-                                &request.model,
-                                start.elapsed().as_millis() as u64,
-                                &e.to_string(),
-                            );
-                        }
                     }
                 }
             }
@@ -224,28 +198,34 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing streaming chat completion");
 
-        // Try resolved provider first
+        // Try resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
-            match provider.chat_completion_stream(request.clone()).await {
+            match self
+                .try_provider_stream_with_retry(provider, &provider_name, &request)
+                .await
+            {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     warn!(
                         provider = %provider_name,
                         error = %e,
-                        "Primary provider stream failed, trying fallback chain"
+                        "Primary provider stream failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
                 }
             }
         }
 
-        // Try fallback chain
+        // Try fallback chain (each with retries)
         for fallback_name in &self.fallback_chain {
             if fallback_name == &provider_name {
                 continue;
             }
 
             if let Some(provider) = self.providers.get(fallback_name) {
-                match provider.chat_completion_stream(request.clone()).await {
+                match self
+                    .try_provider_stream_with_retry(provider, fallback_name, &request)
+                    .await
+                {
                     Ok(stream) => {
                         info!(provider = %fallback_name, "Fallback provider stream succeeded");
                         return Ok(stream);
@@ -254,7 +234,7 @@ impl LlmRouter {
                         warn!(
                             provider = %fallback_name,
                             error = %e,
-                            "Fallback provider stream failed"
+                            "Fallback provider stream failed after {MAX_RETRIES} attempts"
                         );
                     }
                 }
@@ -267,6 +247,102 @@ impl LlmRouter {
             provider_name,
             self.fallback_chain
         )
+    }
+
+    /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
+    async fn try_provider_with_retry(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        provider_name: &str,
+        request: &ChatRequest,
+    ) -> Result<ChatResponse> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_millis(BACKOFF_BASE_MS * 2u64.pow(attempt - 1));
+                warn!(
+                    provider = %provider_name,
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis() as u64,
+                    "Retrying after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            let start = std::time::Instant::now();
+            match provider.chat_completion(request.clone()).await {
+                Ok(response) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_success(
+                            provider_name,
+                            &response.model,
+                            response.usage.prompt_tokens,
+                            response.usage.completion_tokens,
+                            start.elapsed().as_millis() as u64,
+                        );
+                    }
+                    return Ok(response);
+                }
+                Err(e) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_failure(
+                            provider_name,
+                            &request.model,
+                            start.elapsed().as_millis() as u64,
+                            &e.to_string(),
+                        );
+                    }
+                    warn!(
+                        provider = %provider_name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Provider attempt failed"
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
+    }
+
+    /// Try a streaming provider with exponential backoff retry (up to MAX_RETRIES attempts).
+    async fn try_provider_stream_with_retry(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        provider_name: &str,
+        request: &ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_millis(BACKOFF_BASE_MS * 2u64.pow(attempt - 1));
+                warn!(
+                    provider = %provider_name,
+                    attempt = attempt + 1,
+                    delay_ms = delay.as_millis() as u64,
+                    "Retrying stream after backoff"
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            match provider.chat_completion_stream(request.clone()).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    warn!(
+                        provider = %provider_name,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Provider stream attempt failed"
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
     }
 
     /// Run health checks on all registered providers.
