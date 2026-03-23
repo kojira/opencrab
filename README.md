@@ -140,7 +140,7 @@ In addition, the Discord gateway supports **gateway-only actions** invokable via
 | Category | Actions |
 |----------|---------|
 | **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file` |
-| **Skills** | `create_skill`, `list_duplicate_skills`, `merge_skills` |
+| **Skills** | `create_skill` |
 | **Memory** | `rebuild_memory_index`, `update_memory_index_config` |
 | **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command` |
 | **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress`, `spawn_coding_agent` |

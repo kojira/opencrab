@@ -747,54 +747,6 @@ pub fn archive_skill(conn: &Connection, skill_id: &str, archived: bool) -> Resul
     Ok(())
 }
 
-pub fn merge_skills(conn: &Connection, source_id: &str, target_id: &str) -> Result<()> {
-    let source_usage: i32 = conn.query_row(
-        "SELECT usage_count FROM skills WHERE id = ?1",
-        params![source_id],
-        |row| row.get(0),
-    )?;
-
-    conn.execute(
-        "UPDATE skills SET usage_count = usage_count + ?1, updated_at = ?2 WHERE id = ?3",
-        params![source_usage, Utc::now().to_rfc3339(), target_id],
-    )?;
-
-    conn.execute("DELETE FROM skills WHERE id = ?1", params![source_id])?;
-    Ok(())
-}
-
-pub fn find_duplicate_skills(conn: &Connection, agent_id: &str) -> Result<Vec<SkillRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-         FROM skills
-         WHERE agent_id = ?1 AND archived = 0
-           AND LOWER(name) IN (
-               SELECT LOWER(name) FROM skills WHERE agent_id = ?1 AND archived = 0
-               GROUP BY LOWER(name) HAVING COUNT(*) > 1
-           )
-         ORDER BY LOWER(name), usage_count DESC",
-    )?;
-    let rows = stmt.query_map(params![agent_id], |row| {
-        Ok(SkillRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            name: row.get(2)?,
-            description: row.get(3)?,
-            situation_pattern: row.get(4)?,
-            guidance: row.get(5)?,
-            source_type: row.get(6)?,
-            source_context: row.get(7)?,
-            file_path: row.get(8)?,
-            effectiveness: row.get(9)?,
-            usage_count: row.get(10)?,
-            is_active: row.get(11)?,
-            permission: row.get(12)?,
-            archived: row.get(13)?,
-        })
-    })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
 pub fn find_unused_skills(conn: &Connection, agent_id: &str, days_old: i64) -> Result<Vec<SkillRow>> {
     let cutoff = (Utc::now() - chrono::Duration::days(days_old)).to_rfc3339();
     let mut stmt = conn.prepare(
