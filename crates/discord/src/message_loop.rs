@@ -328,7 +328,7 @@ async fn process_incoming_message<T: AgentRunner>(
             "{}\n\n[Discord context: channel_id={}]",
             base_prompt, channel_id_str
         );
-        let conversation_raw = state.build_conversation_string(&session_id);
+        let conversation_raw = state.build_conversation_string(&session_id, agent_id, state.context_budget_tokens());
         let conversation = prepend_runtime_context_discord(
             &conversation_raw,
             "Discord conversation",
@@ -590,7 +590,7 @@ async fn process_subtask_completed<T: AgentRunner>(
         "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, task=\"{}\", exit_reason={}]",
         base_prompt, channel_id_str, subtask_id, task_description, exit_reason
     );
-    let conversation_raw = state.build_conversation_string(&session_id);
+    let conversation_raw = state.build_conversation_string(&session_id, &agent_id, state.context_budget_tokens());
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 

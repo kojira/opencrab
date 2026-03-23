@@ -38,8 +38,8 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     /// Returns `(system_prompt, agent_name)`.
     fn build_agent_context(&self, agent_id: &str) -> (String, String);
 
-    /// Build the conversation history string for a session.
-    fn build_conversation_string(&self, session_id: &str) -> String;
+    /// Build the conversation history string for a session (with compaction).
+    fn build_conversation_string(&self, session_id: &str, agent_id: &str, context_budget_tokens: usize) -> String;
 
     /// Run the full agent response pipeline (SkillEngine + LLM).
     async fn run_agent_response(
@@ -61,8 +61,11 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     /// エージェントのLLMクライアントを生成する。
     fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient>;
 
-    /// デフォルトモデル名を返す。
+    /// デフォルトモデル名を返す（"provider:model" 形式）。
     fn default_model(&self) -> String;
+
+    /// 会話コンテキストのトークン予算を返す（context_window * compaction_ratio）。
+    fn context_budget_tokens(&self) -> usize;
 
     /// ワークスペースベースパスを返す（例: "/data/workspace/{agent_id}"）。
     fn workspace_base(&self) -> &str;

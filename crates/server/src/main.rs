@@ -148,7 +148,8 @@ fn make_heartbeat_callback(
                 let (system_prompt, agent_name, conversation) = {
                     let conn = db.lock().unwrap();
                     let (sp, name) = opencrab_server::process::build_agent_context(&conn, &agent_id_owned);
-                    let conv = opencrab_server::process::build_conversation_string(&conn, &session_id);
+                    let budget = opencrab_server::process::compute_context_budget(&conn, state.default_model.split(':').next().unwrap_or(""), state.default_model.split(':').nth(1).unwrap_or(""), state.compaction_ratio);
+                    let conv = opencrab_server::process::build_conversation_string(&conn, &session_id, &agent_id_owned, budget);
                     (sp, name, conv)
                 };
                 let conversation = opencrab_server::process::prepend_runtime_context(&conversation, "ハートビート自律行動");
@@ -383,6 +384,7 @@ async fn main() -> anyhow::Result<()> {
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
+        compaction_ratio: cfg.llm.compaction_ratio,
         #[cfg(feature = "discord")]
         discord_manager: None,
     };

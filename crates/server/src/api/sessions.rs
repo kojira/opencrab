@@ -157,7 +157,8 @@ pub async fn send_message(
         // Build conversation history from session logs.
         let conversation = {
             let conn = state.db.lock().unwrap();
-            let raw = process::build_conversation_string(&conn, &id);
+            let budget = process::compute_context_budget(&conn, &state.default_model.split(':').next().unwrap_or(""), state.default_model.split(':').nth(1).unwrap_or(""), state.compaction_ratio);
+            let raw = process::build_conversation_string(&conn, &id, agent_id, budget);
             process::prepend_runtime_context(&raw, &session_theme)
         };
 
