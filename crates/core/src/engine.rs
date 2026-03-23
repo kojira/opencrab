@@ -407,8 +407,11 @@ impl SkillEngine {
                 }
             }
 
-            // Fire on_first_response callback on the first iteration if there's text.
-            if iterations == 1 {
+            // Fire on_first_response ONLY when there are no tool calls
+            // (meaning this IS the final response, not an intermediate step).
+            // With tools present, on_first_response would cause double-send:
+            // both the intermediate text and the final response would be sent.
+            if iterations == 1 && response.tool_calls.is_empty() {
                 if let Some(ref text) = response.content {
                     if !text.is_empty() {
                         if let Some(ref cb_lock) = self.on_first_response {
@@ -1040,5 +1043,59 @@ mod tests {
         let stripped = strip_function_calls_xml(content);
         assert_eq!(stripped, "Before\n\nAfter");
         assert!(!stripped.contains("<function_calls>"));
+    }
+
+    #[tokio::test]
+    async fn test_on_first_response_not_fired_with_tools() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![ToolCall {
+                id: "tc-1".to_string(),
+                name: "test_tool".to_string(),
+                arguments: serde_json::json!({}),
+            }]),
+            text_response("Done after tool"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+            },
+        );
+
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_clone = fired.clone();
+        engine.set_on_first_response(move |_| {
+            fired_clone.store(true, Ordering::SeqCst);
+        });
+
+        let result = engine.run("system", "do with tools", "test-model").await.unwrap();
+        assert!(!fired.load(Ordering::SeqCst), "on_first_response should NOT fire when iteration 1 has tool_calls");
+        assert_eq!(result.response, "Done after tool");
+        assert_eq!(result.tool_calls_made, 1);
+    }
+
+    #[tokio::test]
+    async fn test_on_first_response_fired_without_tools() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let llm = MockLlm::new(vec![text_response("Direct answer")]);
+        let executor = MockExecutor::new();
+
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_clone = fired.clone();
+        engine.set_on_first_response(move |_| {
+            fired_clone.store(true, Ordering::SeqCst);
+        });
+
+        let result = engine.run("system", "direct question", "test-model").await.unwrap();
+        assert!(fired.load(Ordering::SeqCst), "on_first_response SHOULD fire when no tool_calls");
+        assert_eq!(result.response, "Direct answer");
     }
 }
