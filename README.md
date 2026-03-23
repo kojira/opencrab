@@ -24,11 +24,17 @@
 - **LLM Self-Selection** -- Agents dynamically select LLMs per task based on past experience
 - **Response Evaluation** -- Quality scoring after each interaction
 - **Cost Tracking** -- Token usage, latency, and estimated cost per model
-- **Mentor Instruction** -- Send instructions to agents as a privileged "mentor" role
+- **Mentor Instruction (planned)** -- Owner registers behavioral rules for specific scenarios; agents reference them for case-based decision-making (future feature)
 - **Hot-Reload Configuration** -- `config/` directory watched with `notify_debouncer_mini`; ToolsConfig live-updates without restart
 - **Channel Whitelist** -- Per-channel readable/writable/whitelist management via `discord_channel_config` table
 - **Tool Allowed Commands** -- Agents manage their own tool permission lists via gateway actions (add/list/remove_allowed_command)
 - **LLM Logging** -- All LLM requests/responses logged to `llm_logs` table, viewable in dashboard
+- **Conversation Compaction** -- Token-budget-based automatic compaction of long conversations; replaces older messages with memory index topic summaries, keeping recent logs in full (configurable ratio, default 0.5)
+- **Message Debounce** -- Per (channel, sender) debounce window (2s) batches rapid messages into a single request, preventing retry storms after server restarts
+- **LLM Retry with Backoff** -- Exponential backoff retry (max 3 attempts, delays: 1s/2s/4s) per provider before falling back to next in chain
+- **Async Behavior Instructions** -- Built-in system prompt section explaining asynchronous tool execution and subtask completion handling to all agents
+- **Prompt Cache** -- cache_control (1h) applied to the last tool definition (BP1) and system prompt (BP2) for Anthropic-compatible providers
+- **Accurate Token Counting** -- tiktoken-rs o200k_base tokenizer replaces rough character-length estimates for precise context window calculations
 - **i18n Dashboard** -- Mobile responsive React frontend with English and Japanese localization
 
 ## Architecture
@@ -39,7 +45,7 @@ opencrab/
 │   ├── core/       # Agent engine, soul, identity, memory, skills, workspace, heartbeat
 │   ├── llm/        # Multi-provider LLM abstraction, routing, metrics, pricing
 │   ├── gateway/    # Multi-channel message gateway (REST, CLI, WebSocket, Discord)
-│   ├── actions/    # Action dispatcher (27 actions) and skill bridge executor
+│   ├── actions/    # Action dispatcher (28 actions) and skill bridge executor
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── server/     # Axum REST API server with hot-reload config watcher
 │   ├── cli/        # Interactive REPL CLI
@@ -135,7 +141,7 @@ cargo run -p opencrab-cli
 | GET | `/api/sessions/{id}` | Get session detail |
 | POST | `/api/sessions/{id}/messages` | Send message |
 | GET | `/api/sessions/{id}/logs` | Get session logs |
-| POST | `/api/sessions/{id}/mentor` | Send mentor instruction |
+| POST | `/api/sessions/{id}/mentor` | Send mentor instruction (planned) |
 | **Analytics** | | |
 | GET | `/api/agents/{id}/analytics` | Get agent analytics summary |
 | GET | `/api/agents/{id}/analytics/detail` | Get detailed analytics |
@@ -155,25 +161,27 @@ cargo run -p opencrab-cli
 
 ## Action System
 
-The ActionDispatcher registers **26 actions** across 6 categories, invokable by agents during conversations:
+The ActionDispatcher registers **28 actions** across 7 categories, invokable by agents during conversations:
 
 | Category | Actions | Description |
 |----------|---------|-------------|
-| **Common** (6) | `send_speech`, `send_noreact`, `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info` | Core communication and session control |
+| **Common** (7) | `send_speech`, `send_noreact`, `no_reply`, `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info` | Core communication and session control |
 | **Workspace** (6) | `ws_read`, `ws_write`, `ws_edit`, `ws_list`, `ws_delete`, `ws_mkdir` | Sandboxed per-agent file operations |
 | **Learning** (3) | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
 | **Search & Memory** (5) | `search_my_history`, `summarize_and_save`, `create_my_skill`, `browse_memory_index`, `retrieve_memory_nodes` | Memory search, curation, and Agentic RAG |
 | **LLM** (5) | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
+| **Soul** (1) | `update_instructions` | Owner-only agent behavioral instruction update |
 | **Shell** (1) | `execute_shell` | Run shell commands from the agent's allowed command list |
 
 In addition, the Discord gateway supports **gateway-only actions** invokable via natural language:
 
 | Category | Actions |
 |----------|---------|
-| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction` |
+| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file` |
 | **Skills** | `create_skill`, `list_duplicate_skills`, `merge_skills` |
 | **Memory** | `rebuild_memory_index`, `update_memory_index_config` |
 | **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command` |
+| **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress`, `spawn_coding_agent` |
 
 ## Skills
 
