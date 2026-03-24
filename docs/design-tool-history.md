@@ -65,3 +65,16 @@ iteration 2:
 
 Discordメッセージ: 「調べてみる。」→「〇〇の結果です。」（2回、重複なし）
 ```
+
+---
+
+## 5. TODO
+
+### NO_REPLY時の記録
+
+エージェントが`NO_REPLY`を出力した場合も`session_log`に記録する。
+
+- **目的**: エージェントが自分の発言履歴（黙っていた箇所も含む）を辿れるようにする
+- **記録内容**: `log_type: "no_reply"`, `content: "NO_REPLY"`, メタデータにターン番号・理由
+- **変更箇所**: `crates/discord/src/message_loop.rs` のNO_REPLY判定ブロック
+- **効果**: `build_conversation_string`で沈黙ターンも会話履歴として再現でき、LLMが「そのターンで意図的に黙った」と認識できる
