@@ -419,6 +419,10 @@ async fn process_incoming_message<T: AgentRunner>(
         let channel_id_str_spawn = channel_id_str.clone();
 
         tokio::spawn(async move {
+            let prefix_msgs = {
+                let conn = state_spawn.db().lock().unwrap();
+                build_pending_tool_prefix_messages(&conn, &session_id_spawn, &agent_id_spawn)
+            };
             let result = state_spawn
                 .run_agent_response(
                     &agent_id_spawn,
@@ -437,7 +441,7 @@ async fn process_incoming_message<T: AgentRunner>(
                         Some(discord_message_id_spawn)
                     },
                     on_first_response,
-                    vec![],
+                    prefix_msgs,
                 )
                 .await;
 
@@ -958,4 +962,98 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
             (texts.join(" "), urls)
         }
     }
+}
+
+/// エージェントの最後のspeech以降にある、完了済みtool_call/tool_resultペアを
+/// prefix messagesとして組み立てる。割り込みメッセージ時にLLMが前回のツール実行結果を
+/// 認識できるようにする。
+fn build_pending_tool_prefix_messages(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+) -> Vec<opencrab_core::ChatMessage> {
+    let logs = match opencrab_db::queries::list_session_logs_by_session(conn, session_id) {
+        Ok(logs) => logs,
+        Err(_) => return vec![],
+    };
+
+    // agent_idのspeechログの最後のIDを見つける
+    let last_speech_id: i64 = logs
+        .iter()
+        .filter(|log| {
+            log.log_type == "speech"
+                && log.speaker_id.as_deref() == Some(agent_id)
+        })
+        .filter_map(|log| log.id)
+        .last()
+        .unwrap_or(0);
+
+    // last_speech_id以降のtool_call / tool_resultログを抽出
+    let after_speech: Vec<_> = logs
+        .iter()
+        .filter(|log| log.id.unwrap_or(0) > last_speech_id)
+        .filter(|log| log.log_type == "tool_call" || log.log_type == "tool_result")
+        .collect();
+
+    // tool_resultログから tool_call_id -> content のHashMapを構築
+    let mut result_map: HashMap<String, String> = HashMap::new();
+    for log in &after_speech {
+        if log.log_type == "tool_result" {
+            if let Some(tc_id) = log
+                .metadata_json
+                .as_deref()
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                .and_then(|v| v["tool_call_id"].as_str().map(|s| s.to_string()))
+            {
+                result_map.insert(tc_id, log.content.clone());
+            }
+        }
+    }
+
+    // tool_callログを処理してprefix messagesを組み立てる
+    let mut prefix = Vec::new();
+    for log in &after_speech {
+        if log.log_type != "tool_call" {
+            continue;
+        }
+
+        let tool_calls: Vec<opencrab_core::ToolCall> = log
+            .metadata_json
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .and_then(|v| v["tool_calls_json"].as_str().map(|s| s.to_string()))
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        // tool_callsのうち少なくとも1つがresult_mapにある場合のみ処理
+        if !tool_calls.iter().any(|tc| result_map.contains_key(&tc.id)) {
+            continue;
+        }
+
+        // assistant ChatMessage
+        prefix.push(opencrab_core::ChatMessage {
+            role: "assistant".to_string(),
+            content: log.content.clone(),
+            tool_call_id: None,
+            tool_calls: tool_calls.clone(),
+            content_parts: vec![],
+            cache_control: None,
+        });
+
+        // 各tool_callに対応するtool result ChatMessage
+        for tc in &tool_calls {
+            if let Some(result_content) = result_map.get(&tc.id) {
+                prefix.push(opencrab_core::ChatMessage {
+                    role: "tool".to_string(),
+                    content: result_content.clone(),
+                    tool_call_id: Some(tc.id.clone()),
+                    tool_calls: vec![],
+                    content_parts: vec![],
+                    cache_control: None,
+                });
+            }
+        }
+    }
+
+    prefix
 }
