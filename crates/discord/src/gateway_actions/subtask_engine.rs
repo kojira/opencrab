@@ -246,6 +246,16 @@ impl DiscordGatewayActions {
                 let parent_session_id = subtask.parent_session_id.clone();
                 if !parent_session_id.is_empty() {
                     if let Ok(conn) = self.db.lock() {
+                        let task_description = opencrab_db::queries::get_session(&conn, &subtask.session_id)
+                            .ok()
+                            .flatten()
+                            .map(|session| {
+                                session.theme
+                                    .strip_prefix("Subtask: ")
+                                    .unwrap_or(&session.theme)
+                                    .to_string()
+                            })
+                            .unwrap_or_default();
                         let log = opencrab_db::queries::SessionLogRow {
                             id: None,
                             agent_id: subtask.agent_id.clone(),
@@ -254,6 +264,8 @@ impl DiscordGatewayActions {
                             content: serde_json::json!({
                                 "type": "subtask_cancelled",
                                 "subtask_id": subtask_id,
+                                "session_id": subtask.session_id,
+                                "task": task_description,
                             }).to_string(),
                             speaker_id: None,
                             turn_number: None,
