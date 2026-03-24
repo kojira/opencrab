@@ -98,6 +98,13 @@ export function updateDiscordConfig(
   return api.put(`/agents/${id}/discord`, body);
 }
 
+export function patchDiscordConfig(
+  id: string,
+  body: { bot_token?: string; owner_discord_id?: string },
+): Promise<{ ok: boolean; configured?: boolean; enabled?: boolean; token_masked?: string; owner_discord_id?: string; error?: string }> {
+  return api.patch(`/agents/${id}/discord`, body);
+}
+
 export function deleteDiscordConfig(
   id: string,
 ): Promise<{ deleted: boolean }> {

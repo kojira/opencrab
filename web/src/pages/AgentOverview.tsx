@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getDiscordConfig, updateDiscordConfig, deleteDiscordConfig, startDiscordGateway, stopDiscordGateway } from '../api/agents';
+import { getDiscordConfig, updateDiscordConfig, patchDiscordConfig, deleteDiscordConfig, startDiscordGateway, stopDiscordGateway } from '../api/agents';
 import type { DiscordConfigDto } from '../api/types';
 import { useAgentContext } from '../hooks/useAgentContext';
 
@@ -46,6 +46,7 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
   const [ownerDiscordId, setOwnerDiscordId] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [editMode, setEditMode] = useState<"full" | "owner_only">("owner_only");
 
   const loadConfig = useCallback(() => {
     getDiscordConfig(agentId)
@@ -61,12 +62,19 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
     setSaving(true);
     setMessage(null);
     try {
-      const res = await updateDiscordConfig(agentId, {
-        bot_token: token,
-        owner_discord_id: ownerDiscordId || undefined,
-      });
+      let res: { ok: boolean; message?: string; error?: string };
+      if (editMode === "full") {
+        res = await updateDiscordConfig(agentId, {
+          bot_token: token,
+          owner_discord_id: ownerDiscordId || undefined,
+        });
+      } else {
+        res = await patchDiscordConfig(agentId, {
+          owner_discord_id: ownerDiscordId,
+        });
+      }
       if (res.ok) {
-        setMessage(t('agentDetail.gatewayStarted'));
+        setMessage(editMode === "full" ? t('agentDetail.gatewayStarted') : "Owner Discord ID を更新しました。");
         setEditing(false);
         setToken('');
         loadConfig();
@@ -139,7 +147,12 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
           <p className="text-body-md text-on-surface-variant mb-3">
             {t('agentDetail.noDiscordBot')}
           </p>
-          <button className="btn-tonal" onClick={() => setEditing(true)}>
+          <button className="btn-tonal" onClick={() => {
+            setToken("");
+            setOwnerDiscordId("");
+            setEditMode("full");
+            setEditing(true);
+          }}>
             <span className="material-symbols-outlined text-xl">add</span>
             {t('agentDetail.configureBot')}
           </button>
@@ -169,8 +182,9 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
               </button>
             )}
             <button className="btn-tonal" onClick={() => {
-              setToken('');
-              setOwnerDiscordId(config.owner_discord_id || '');
+              setToken("");
+              setOwnerDiscordId(config.owner_discord_id || "");
+              setEditMode("owner_only");
               setEditing(true);
             }}>
               <span className="material-symbols-outlined text-xl">edit</span>
@@ -189,37 +203,82 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
 
       {editing && (
         <div className="space-y-3">
-          <div>
-            <label className="text-label-lg text-on-surface-variant block mb-1">
-              {t('agentDetail.botTokenLabel')}
-            </label>
-            <input
-              type="password"
-              className="input w-full"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="Bot token..."
-            />
+          {/* モード切り替えタブ */}
+          <div className="flex gap-2 border-b border-outline-variant pb-2">
+            <button
+              className={`text-label-lg px-3 py-1 rounded-t ${editMode === "owner_only" ? "bg-primary-container text-on-primary-container" : "text-on-surface-variant hover:bg-surface-variant/50"}`}
+              onClick={() => setEditMode("owner_only")}
+            >
+              Owner ID のみ変更
+            </button>
+            <button
+              className={`text-label-lg px-3 py-1 rounded-t ${editMode === "full" ? "bg-primary-container text-on-primary-container" : "text-on-surface-variant hover:bg-surface-variant/50"}`}
+              onClick={() => setEditMode("full")}
+            >
+              Bot トークンを変更
+            </button>
           </div>
-          <div>
-            <label className="text-label-lg text-on-surface-variant block mb-1">
-              {t('agentDetail.ownerDiscordIdLabel')}
-              <span className="text-body-sm text-on-surface-variant ml-1">({t('common.optional')})</span>
-            </label>
-            <input
-              type="text"
-              className="input w-full"
-              value={ownerDiscordId}
-              onChange={(e) => setOwnerDiscordId(e.target.value)}
-              placeholder="e.g. 390123456789012345"
-            />
-          </div>
+
+          {/* owner_only モード */}
+          {editMode === "owner_only" && (
+            <div>
+              <label className="text-label-lg text-on-surface-variant block mb-1">
+                {t("agentDetail.ownerDiscordIdLabel")}
+              </label>
+              <input
+                type="text"
+                className="input w-full"
+                value={ownerDiscordId}
+                onChange={(e) => setOwnerDiscordId(e.target.value)}
+                placeholder="e.g. 390123456789012345"
+              />
+              <p className="text-body-sm text-on-surface-variant mt-1">
+                Bot トークンはそのまま保持されます
+              </p>
+            </div>
+          )}
+
+          {/* full モード */}
+          {editMode === "full" && (
+            <>
+              <div>
+                <label className="text-label-lg text-on-surface-variant block mb-1">
+                  {t("agentDetail.botTokenLabel")}
+                </label>
+                <input
+                  type="password"
+                  className="input w-full"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  placeholder="Bot token..."
+                />
+              </div>
+              <div>
+                <label className="text-label-lg text-on-surface-variant block mb-1">
+                  {t("agentDetail.ownerDiscordIdLabel")}
+                  <span className="text-body-sm text-on-surface-variant ml-1">({t("common.optional")})</span>
+                </label>
+                <input
+                  type="text"
+                  className="input w-full"
+                  value={ownerDiscordId}
+                  onChange={(e) => setOwnerDiscordId(e.target.value)}
+                  placeholder="e.g. 390123456789012345"
+                />
+              </div>
+            </>
+          )}
+
           <div className="flex gap-2">
-            <button className="btn-filled" onClick={handleSave} disabled={saving || !token}>
-              {saving ? t('common.saving') : t('common.save')}
+            <button
+              className="btn-filled"
+              onClick={handleSave}
+              disabled={saving || (editMode === "full" && !token)}
+            >
+              {saving ? t("common.saving") : t("common.save")}
             </button>
             <button className="btn-outlined" onClick={() => setEditing(false)}>
-              {t('common.cancel')}
+              {t("common.cancel")}
             </button>
           </div>
         </div>
