@@ -40,6 +40,8 @@ pub struct SkillEngine {
     pub on_first_response: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce(String) + Send>>>>>,
     /// Optional callback invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
     on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
+    /// Optional callback invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
+    on_tool_result: Option<Arc<dyn Fn(String, String, String, bool) + Send + Sync>>,
     /// Messages to prepend after the user message (tool_use/tool_result history from previous runs).
     prefix_messages: Vec<ChatMessage>,
 }
@@ -59,6 +61,7 @@ impl SkillEngine {
             log_callback: None,
             on_first_response: None,
             on_tool_call: None,
+            on_tool_result: None,
             prefix_messages: vec![],
         }
     }
@@ -76,6 +79,11 @@ impl SkillEngine {
     /// Set the on_tool_call callback, invoked when the assistant produces tool calls.
     pub fn set_on_tool_call(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
         self.on_tool_call = Some(Arc::new(cb));
+    }
+
+    /// Set the on_tool_result callback, invoked when a tool result is received.
+    pub fn set_on_tool_result(&mut self, cb: impl Fn(String, String, String, bool) + Send + Sync + 'static) {
+        self.on_tool_result = Some(Arc::new(cb));
     }
 
     /// Set prefix messages (tool_use/tool_result history from previous runs).
@@ -326,6 +334,11 @@ impl SkillEngine {
                             content_parts: vec![],
                             cache_control: None,
                         });
+
+                        // Notify on_tool_result callback for denied action.
+                        if let Some(ref cb) = self.on_tool_result {
+                            cb(tool_call.id.clone(), tool_call.name.clone(), result_json.clone(), true);
+                        }
                         continue;
                     }
 
@@ -347,6 +360,11 @@ impl SkillEngine {
                         content_parts: vec![],
                         cache_control: None,
                     });
+
+                    // Notify on_tool_result callback.
+                    if let Some(ref cb) = self.on_tool_result {
+                        cb(tool_call.id.clone(), tool_call.name.clone(), result_json.clone(), !result.success);
+                    }
                 }
 
                 continue;
