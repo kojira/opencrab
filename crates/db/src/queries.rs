@@ -1615,6 +1615,30 @@ pub fn set_agent_discord_config_enabled(
     Ok(updated > 0)
 }
 
+pub fn patch_agent_discord_config(
+    conn: &Connection,
+    agent_id: &str,
+    bot_token: Option<&str>,
+    owner_discord_id: Option<&str>,
+) -> Result<bool> {
+    let updated = match (bot_token, owner_discord_id) {
+        (Some(token), Some(owner)) => conn.execute(
+            "UPDATE agent_discord_config SET bot_token = ?1, owner_discord_id = ?2, updated_at = ?3 WHERE agent_id = ?4",
+            params![token, owner, chrono::Utc::now().to_rfc3339(), agent_id],
+        )?,
+        (Some(token), None) => conn.execute(
+            "UPDATE agent_discord_config SET bot_token = ?1, updated_at = ?2 WHERE agent_id = ?3",
+            params![token, chrono::Utc::now().to_rfc3339(), agent_id],
+        )?,
+        (None, Some(owner)) => conn.execute(
+            "UPDATE agent_discord_config SET owner_discord_id = ?1, updated_at = ?2 WHERE agent_id = ?3",
+            params![owner, chrono::Utc::now().to_rfc3339(), agent_id],
+        )?,
+        (None, None) => 0,
+    };
+    Ok(updated > 0)
+}
+
 pub fn list_enabled_agent_discord_configs(conn: &Connection) -> Result<Vec<AgentDiscordConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, bot_token, owner_discord_id, enabled
