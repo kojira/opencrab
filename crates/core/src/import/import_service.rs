@@ -27,6 +27,7 @@ pub struct ImportResult {
     pub counts: ImportCounts,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+    pub indexed_logs_count: usize,
 }
 
 pub fn execute_import(
@@ -147,6 +148,7 @@ pub fn execute_import(
         counts,
         warnings,
         errors,
+        indexed_logs_count: 0,
     })
 }
 
