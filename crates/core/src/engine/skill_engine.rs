@@ -38,6 +38,12 @@ pub struct SkillEngine {
     /// Optional callback invoked with the first response text (iteration 1).
     /// Called even if there are tool_calls in the first response.
     pub on_first_response: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce(String) + Send>>>>>,
+    /// Optional callback invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
+    on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
+    /// Optional callback invoked when a tool result is produced: (tool_call_id, content).
+    on_tool_result: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
+    /// Messages to prepend after the user message (tool_use/tool_result history from previous runs).
+    prefix_messages: Vec<ChatMessage>,
 }
 
 impl SkillEngine {
@@ -54,6 +60,9 @@ impl SkillEngine {
             allowed_actions: None,
             log_callback: None,
             on_first_response: None,
+            on_tool_call: None,
+            on_tool_result: None,
+            prefix_messages: vec![],
         }
     }
 
@@ -65,6 +74,21 @@ impl SkillEngine {
     /// Set the on_first_response callback, invoked with the first response text.
     pub fn set_on_first_response(&mut self, cb: impl FnOnce(String) + Send + 'static) {
         self.on_first_response = Some(Arc::new(std::sync::Mutex::new(Some(Box::new(cb)))));
+    }
+
+    /// Set the on_tool_call callback, invoked when the assistant produces tool calls.
+    pub fn set_on_tool_call(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
+        self.on_tool_call = Some(Arc::new(cb));
+    }
+
+    /// Set the on_tool_result callback, invoked when a tool result is produced.
+    pub fn set_on_tool_result(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
+        self.on_tool_result = Some(Arc::new(cb));
+    }
+
+    /// Set prefix messages (tool_use/tool_result history from previous runs).
+    pub fn set_prefix_messages(&mut self, messages: Vec<ChatMessage>) {
+        self.prefix_messages = messages;
     }
 
     /// Set the allowed actions from active skill declarations.
@@ -158,6 +182,9 @@ impl SkillEngine {
                 cache_control: None,
             },
         ];
+
+        // Append prefix messages (tool_use/tool_result history from previous runs).
+        messages.extend(self.prefix_messages.clone());
 
         let mut iterations = 0;
         let mut total_tool_calls = 0;
@@ -279,6 +306,12 @@ impl SkillEngine {
                     cache_control: None,
                 });
 
+                // Notify on_tool_call callback.
+                if let Some(ref cb) = self.on_tool_call {
+                    let calls_json = serde_json::to_string(&response.tool_calls).unwrap_or_default();
+                    cb(response.content.clone().unwrap_or_default(), calls_json);
+                }
+
                 for tool_call in &response.tool_calls {
                     total_tool_calls += 1;
 
@@ -295,12 +328,15 @@ impl SkillEngine {
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
-                            content: result_json,
+                            content: result_json.clone(),
                             tool_call_id: Some(tool_call.id.clone()),
                             tool_calls: vec![],
                             content_parts: vec![],
                             cache_control: None,
                         });
+                        if let Some(ref cb) = self.on_tool_result {
+                            cb(tool_call.id.clone(), result_json);
+                        }
                         continue;
                     }
 
@@ -311,12 +347,15 @@ impl SkillEngine {
 
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: result_json,
+                        content: result_json.clone(),
                         tool_call_id: Some(tool_call.id.clone()),
                         tool_calls: vec![],
                         content_parts: vec![],
                         cache_control: None,
                     });
+                    if let Some(ref cb) = self.on_tool_result {
+                        cb(tool_call.id.clone(), result_json);
+                    }
                 }
 
                 continue;

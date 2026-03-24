@@ -169,6 +169,7 @@ fn make_heartbeat_callback(
                     0,
                     None,   // trigger_message_id
                     None,
+                    vec![],
                 ).await;
 
                 let decision = match engine_result {

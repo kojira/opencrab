@@ -433,6 +433,7 @@ async fn process_incoming_message<T: AgentRunner>(
                         Some(discord_message_id_spawn)
                     },
                     on_first_response,
+                    vec![],
                 )
                 .await;
 
@@ -471,6 +472,20 @@ async fn handle_agent_response<T: AgentRunner>(
             // NO_REPLY は送信しない
             if engine_result.response.trim() == "NO_REPLY" {
                 debug!(agent_id = %agent_id, "Agent returned NO_REPLY, skipping Discord send");
+                // NO_REPLY をsession_logに記録
+                if let Ok(conn) = state.db().lock() {
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: agent_id.to_string(),
+                        session_id: session_id.to_string(),
+                        log_type: "speech".to_string(),
+                        content: "NO_REPLY".to_string(),
+                        speaker_id: Some(agent_id.to_string()),
+                        turn_number: None,
+                        metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
+                    };
+                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                }
                 // noreactと一緒に生成されたテキストをDBに保存
                 if let Ok(guard) = first_response_speech.lock() {
                     if let Some(ref speech_text) = *guard {
@@ -594,6 +609,53 @@ async fn process_subtask_completed<T: AgentRunner>(
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
+    // Restore tool_call/tool_result history from DB as prefix_messages.
+    let prefix_messages: Vec<opencrab_core::ChatMessage> = {
+        state.db()
+            .lock()
+            .ok()
+            .map(|conn| {
+                opencrab_db::queries::list_tool_messages_for_session(&conn, &session_id)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|log| {
+                if log.log_type == "tool_call" {
+                    let tool_calls: Vec<opencrab_core::ToolCall> = log.metadata_json
+                        .as_deref()
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        .and_then(|v| v["tool_calls_json"].as_str().map(|s| s.to_string()))
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                    Some(opencrab_core::ChatMessage {
+                        role: "assistant".to_string(),
+                        content: log.content,
+                        tool_call_id: None,
+                        tool_calls,
+                        content_parts: vec![],
+                        cache_control: None,
+                    })
+                } else if log.log_type == "tool_result" {
+                    let tool_call_id = log.metadata_json
+                        .as_deref()
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        .and_then(|v| v["tool_call_id"].as_str().map(|s| s.to_string()));
+                    Some(opencrab_core::ChatMessage {
+                        role: "tool".to_string(),
+                        content: log.content,
+                        tool_call_id,
+                        tool_calls: vec![],
+                        content_parts: vec![],
+                        cache_control: None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
     match state
         .run_agent_response(
             &agent_id,
@@ -608,11 +670,26 @@ async fn process_subtask_completed<T: AgentRunner>(
             0,
             None,
             None,
+            prefix_messages,
         )
         .await
     {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
+                // NO_REPLY をsession_logに記録
+                if let Ok(conn) = state.db().lock() {
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: agent_id.to_string(),
+                        session_id: session_id.clone(),
+                        log_type: "speech".to_string(),
+                        content: "NO_REPLY".to_string(),
+                        speaker_id: Some(agent_id.to_string()),
+                        turn_number: None,
+                        metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
+                    };
+                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                }
                 return;
             }
             if !is_dm {
