@@ -508,28 +508,6 @@ pub async fn run_agent_response(
         });
     }
 
-    // on_tool_result callback: save tool_result to DB.
-    {
-        let tr_db = state.db.clone();
-        let tr_agent = agent_id.to_string();
-        let tr_session = session_id.to_string();
-        engine.set_on_tool_result(move |tool_call_id: String, content: String| {
-            if let Ok(conn) = tr_db.lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: tr_agent.clone(),
-                    session_id: tr_session.clone(),
-                    log_type: "tool_result".to_string(),
-                    content,
-                    speaker_id: None,
-                    turn_number: None,
-                    metadata_json: Some(serde_json::json!({"tool_call_id": tool_call_id}).to_string()),
-                };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
-            }
-        });
-    }
-
     // Collect image_urls: merge passed-in args with any stored in the latest user log metadata_json.
     let merged_image_urls: Vec<String> = {
         let mut urls: Vec<String> = image_urls.to_vec();

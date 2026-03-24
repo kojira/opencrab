@@ -31,6 +31,7 @@ enum LoopEvent {
         session_id: String,
         agent_id: String,
         subtask_id: String,
+        result: String,
         exit_reason: String,
         channel_id: u64,
         channel_id_str: String,
@@ -99,6 +100,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         session_id,
                         agent_id,
                         subtask_id,
+                        result,
                         exit_reason,
                         channel_id,
                         channel_id_str,
@@ -108,6 +110,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             session_id,
                             agent_id,
                             subtask_id,
+                            result,
                             exit_reason,
                             channel_id,
                             channel_id_str,
@@ -343,11 +346,12 @@ async fn process_incoming_message<T: AgentRunner>(
             let channel_id_str_cb = channel_id_str.clone();
 
             let completion_cb: SubtaskCompletionFn =
-                Arc::new(move |subtask_id: String, _result: String, exit_reason: String| {
+                Arc::new(move |subtask_id: String, result: String, exit_reason: String| {
                     let _ = cb_event_tx.send(LoopEvent::SubtaskCompleted {
                         session_id: session_id_cb.clone(),
                         agent_id: agent_id_cb.clone(),
                         subtask_id,
+                        result,
                         exit_reason,
                         channel_id,
                         channel_id_str: channel_id_str_cb.clone(),
@@ -577,6 +581,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     session_id: String,
     agent_id: String,
     subtask_id: String,
+    result: String,
     exit_reason: String,
     channel_id: u64,
     channel_id_str: String,
@@ -609,51 +614,76 @@ async fn process_subtask_completed<T: AgentRunner>(
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
-    // Restore tool_call/tool_result history from DB as prefix_messages.
+    // subtask_idからtool_call_idを取得し、assistantメッセージ+tool_resultをその場で組み立てる
     let prefix_messages: Vec<opencrab_core::ChatMessage> = {
-        state.db()
+        let tool_call_id_opt = state.db()
             .lock()
             .ok()
-            .map(|conn| {
-                opencrab_db::queries::list_tool_messages_for_session(&conn, &session_id)
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|log| {
-                if log.log_type == "tool_call" {
-                    let tool_calls: Vec<opencrab_core::ToolCall> = log.metadata_json
+            .and_then(|conn| {
+                opencrab_db::queries::get_tool_call_id_for_subtask(&conn, &session_id, &subtask_id)
+                    .ok()
+                    .flatten()
+            });
+
+        match tool_call_id_opt {
+            None => vec![],
+            Some(tool_call_id) => {
+                let tool_call_logs = state.db()
+                    .lock()
+                    .ok()
+                    .map(|conn| {
+                        opencrab_db::queries::list_tool_messages_for_session(&conn, &session_id)
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+
+                let assistant_msg_opt = tool_call_logs.iter().find(|log| {
+                    log.metadata_json
                         .as_deref()
                         .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                        .and_then(|v| v["tool_calls_json"].as_str().map(|s| s.to_string()))
-                        .and_then(|s| serde_json::from_str(&s).ok())
-                        .unwrap_or_default();
-                    Some(opencrab_core::ChatMessage {
-                        role: "assistant".to_string(),
-                        content: log.content,
-                        tool_call_id: None,
-                        tool_calls,
-                        content_parts: vec![],
-                        cache_control: None,
-                    })
-                } else if log.log_type == "tool_result" {
-                    let tool_call_id = log.metadata_json
-                        .as_deref()
-                        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                        .and_then(|v| v["tool_call_id"].as_str().map(|s| s.to_string()));
-                    Some(opencrab_core::ChatMessage {
-                        role: "tool".to_string(),
-                        content: log.content,
-                        tool_call_id,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    })
-                } else {
-                    None
+                        .and_then(|v| {
+                            v["tool_calls_json"]
+                                .as_str()
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        })
+                        .and_then(|arr| arr.as_array().map(|a| {
+                            a.iter().any(|tc| tc["id"].as_str() == Some(&tool_call_id))
+                        }))
+                        .unwrap_or(false)
+                });
+
+                match assistant_msg_opt {
+                    None => vec![],
+                    Some(log) => {
+                        let tool_calls: Vec<opencrab_core::ToolCall> = log.metadata_json
+                            .as_deref()
+                            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                            .and_then(|v| v["tool_calls_json"].as_str().map(|s| s.to_string()))
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+
+                        vec![
+                            opencrab_core::ChatMessage {
+                                role: "assistant".to_string(),
+                                content: log.content.clone(),
+                                tool_call_id: None,
+                                tool_calls,
+                                content_parts: vec![],
+                                cache_control: None,
+                            },
+                            opencrab_core::ChatMessage {
+                                role: "tool".to_string(),
+                                content: result.clone(),
+                                tool_call_id: Some(tool_call_id),
+                                tool_calls: vec![],
+                                content_parts: vec![],
+                                cache_control: None,
+                            },
+                        ]
+                    }
                 }
-            })
-            .collect()
+            }
+        }
     };
 
     match state

@@ -25,6 +25,7 @@ impl DiscordGatewayActions {
         let agent_id = args["__agent_id"].as_str()
             .unwrap_or(&self.agent_id)
             .to_string();
+        let tool_call_id = args["__tool_call_id"].as_str().unwrap_or("").to_string();
 
         let subtask_id = Uuid::new_v4().to_string();
         let sub_session_id = format!("subtask-{}", subtask_id);
@@ -66,6 +67,7 @@ impl DiscordGatewayActions {
                         "subtask_id": subtask_id,
                         "session_id": sub_session_id,
                         "spawned_at": spawned_at,
+                        "tool_call_id": tool_call_id,
                     }).to_string(),
                     speaker_id: None,
                     turn_number: None,

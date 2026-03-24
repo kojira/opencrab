@@ -40,8 +40,6 @@ pub struct SkillEngine {
     pub on_first_response: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce(String) + Send>>>>>,
     /// Optional callback invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
     on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
-    /// Optional callback invoked when a tool result is produced: (tool_call_id, content).
-    on_tool_result: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
     /// Messages to prepend after the user message (tool_use/tool_result history from previous runs).
     prefix_messages: Vec<ChatMessage>,
 }
@@ -61,7 +59,6 @@ impl SkillEngine {
             log_callback: None,
             on_first_response: None,
             on_tool_call: None,
-            on_tool_result: None,
             prefix_messages: vec![],
         }
     }
@@ -79,11 +76,6 @@ impl SkillEngine {
     /// Set the on_tool_call callback, invoked when the assistant produces tool calls.
     pub fn set_on_tool_call(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
         self.on_tool_call = Some(Arc::new(cb));
-    }
-
-    /// Set the on_tool_result callback, invoked when a tool result is produced.
-    pub fn set_on_tool_result(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
-        self.on_tool_result = Some(Arc::new(cb));
     }
 
     /// Set prefix messages (tool_use/tool_result history from previous runs).
@@ -334,13 +326,15 @@ impl SkillEngine {
                             content_parts: vec![],
                             cache_control: None,
                         });
-                        if let Some(ref cb) = self.on_tool_result {
-                            cb(tool_call.id.clone(), result_json);
-                        }
                         continue;
                     }
 
-                    let result = self.executor.execute(&tool_call.name, &tool_call.arguments).await;
+                    // Inject __tool_call_id so gateway actions can record the mapping.
+                    let mut enriched_args = tool_call.arguments.clone();
+                    if let serde_json::Value::Object(ref mut map) = enriched_args {
+                        map.insert("__tool_call_id".to_string(), serde_json::json!(tool_call.id));
+                    }
+                    let result = self.executor.execute(&tool_call.name, &enriched_args).await;
 
                     let result_json = serde_json::to_string(&result)
                         .unwrap_or_else(|_| r#"{"error": "Failed to serialize result"}"#.to_string());
@@ -353,9 +347,6 @@ impl SkillEngine {
                         content_parts: vec![],
                         cache_control: None,
                     });
-                    if let Some(ref cb) = self.on_tool_result {
-                        cb(tool_call.id.clone(), result_json);
-                    }
                 }
 
                 continue;
