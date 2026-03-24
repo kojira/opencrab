@@ -959,12 +959,11 @@ fn build_pending_tool_prefix_messages(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        // tool_callsのうち少なくとも1つがresult_mapにある場合のみ処理
-        if !tool_calls.iter().any(|tc| result_map.contains_key(&tc.id)) {
+        if tool_calls.is_empty() {
             continue;
         }
 
-        // assistant ChatMessage
+        // assistant ChatMessage（result_mapにあるかどうかに関わらず常に含める）
         prefix.push(opencrab_core::ChatMessage {
             role: "assistant".to_string(),
             content: log.content.clone(),
@@ -975,17 +974,23 @@ fn build_pending_tool_prefix_messages(
         });
 
         // 各tool_callに対応するtool result ChatMessage
+        // resultがない場合は合成メッセージ（中断）を使用
         for tc in &tool_calls {
-            if let Some(result_content) = result_map.get(&tc.id) {
-                prefix.push(opencrab_core::ChatMessage {
-                    role: "tool".to_string(),
-                    content: result_content.clone(),
-                    tool_call_id: Some(tc.id.clone()),
-                    tool_calls: vec![],
-                    content_parts: vec![],
-                    cache_control: None,
+            let result_content = result_map
+                .get(&tc.id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    "[Tool execution was interrupted by a new message. Please retry if needed.]"
+                        .to_string()
                 });
-            }
+            prefix.push(opencrab_core::ChatMessage {
+                role: "tool".to_string(),
+                content: result_content,
+                tool_call_id: Some(tc.id.clone()),
+                tool_calls: vec![],
+                content_parts: vec![],
+                cache_control: None,
+            });
         }
     }
 
