@@ -327,23 +327,20 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
                     if let Some(tool_calls_json) = meta.get("tool_calls_json").and_then(|v| v.as_str()) {
                         if let Ok(tool_calls) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
-                            if let Some(tool_names) = tool_calls.as_array()
-                                .map(|items| items.iter()
-                                    .filter_map(|item| item.get("name").and_then(|v| v.as_str()))
-                                    .collect::<Vec<_>>())
-                                .filter(|names| !names.is_empty())
-                            {
-                                let content = if log.content.trim().is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("{}\n", log.content)
-                                };
-                                return format!(
-                                    "[tool_call]{}:\n{}Tools: {}",
-                                    ts,
-                                    content,
-                                    tool_names.join(", ")
-                                );
+                            if let Some(items) = tool_calls.as_array() {
+                                let call_lines: Vec<String> = items.iter()
+                                    .filter_map(|item| {
+                                        let id = item.get("id")?.as_str()?;
+                                        let name = item.get("name")?.as_str()?;
+                                        let args = item.get("arguments")
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_default();
+                                        Some(format!("[id={}]: {}({})", id, name, args))
+                                    })
+                                    .collect();
+                                if !call_lines.is_empty() {
+                                    return format!("[tool_call]{}:\n{}", ts, call_lines.join("\n"));
+                                }
                             }
                         }
                     }
@@ -352,13 +349,32 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
             format!("[tool_call]{}:\n{}", ts, log.content)
         }
         "tool_result" => {
-            let tool_name = log.metadata_json.as_deref()
-                .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok())
-                .and_then(|meta| meta.get("tool_name").and_then(|v| v.as_str()).map(str::to_string));
-            match tool_name {
-                Some(tool_name) => format!("[tool_result: {}]{}:\n{}", tool_name, ts, log.content),
-                None => format!("[tool_result]{}:\n{}", ts, log.content),
-            }
+            let meta = log.metadata_json.as_deref()
+                .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok());
+            let tool_call_id = meta.as_ref()
+                .and_then(|value| value.get("tool_call_id").and_then(|v| v.as_str()))
+                .unwrap_or("?");
+            let tool_name = meta.as_ref()
+                .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
+                .unwrap_or("unknown");
+            format!("[tool_result]{}:\n[id={}]: {} → {}", ts, tool_call_id, tool_name, log.content)
+        }
+        "tool_cancelled" => {
+            let meta = log.metadata_json.as_deref()
+                .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok());
+            let tool_call_id = meta.as_ref()
+                .and_then(|value| value.get("tool_call_id").and_then(|v| v.as_str()))
+                .unwrap_or("?");
+            let tool_name = meta.as_ref()
+                .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
+                .unwrap_or("unknown");
+            format!(
+                "[tool_cancelled]{}:\n[id={}]: {} がキャンセルされた\n{}",
+                ts,
+                tool_call_id,
+                tool_name,
+                log.content
+            )
         }
         "system" => {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&log.content) {
