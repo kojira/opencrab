@@ -51,8 +51,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
     completion_registry: CompletionRegistry,
 ) {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<LoopEvent>();
-    let active_sessions: Arc<dashmap::DashMap<String, tokio::task::AbortHandle>> =
-        Arc::new(dashmap::DashMap::new());
 
     // Discord受信をイベントに変換するタスク（P1: メインループをブロックしない）
     {
@@ -163,7 +161,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         owner_discord_id.clone(),
                         completion_registry.clone(),
                         event_tx.clone(),
-                        active_sessions.clone(),
                     )
                     .await;
                 }
@@ -186,7 +183,6 @@ async fn process_incoming_message<T: AgentRunner>(
     owner_discord_id: String,
     completion_registry: CompletionRegistry,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
-    active_sessions: Arc<dashmap::DashMap<String, tokio::task::AbortHandle>>,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -390,12 +386,6 @@ async fn process_incoming_message<T: AgentRunner>(
             }))
         };
 
-        // 既存のセッションタスクがあればabort（二重実行防止）
-        if let Some((_, old_handle)) = active_sessions.remove(&session_id) {
-            warn!(session_id = %session_id, "Aborting existing session task due to new message interrupt");
-            old_handle.abort();
-        }
-
         // エージェント処理をspawn（P1: メインループをブロックしない）
         let state_spawn = state.clone();
         let ga_spawn = gateway_actions.clone();
@@ -408,10 +398,8 @@ async fn process_incoming_message<T: AgentRunner>(
         let image_urls_spawn = image_urls.clone();
         let discord_message_id_spawn = discord_message_id.clone();
         let channel_id_str_spawn = channel_id_str.clone();
-        let active_sessions_spawn = active_sessions.clone();
-        let session_id_for_cleanup = session_id.clone();
 
-        let task_handle = tokio::spawn(async move {
+        let _ = tokio::spawn(async move {
             let result = state_spawn
                 .run_agent_response(
                     &agent_id_spawn,
@@ -441,10 +429,7 @@ async fn process_incoming_message<T: AgentRunner>(
                 &state_spawn,
             )
             .await;
-
-            active_sessions_spawn.remove(&session_id_for_cleanup);
         });
-        active_sessions.insert(session_id.clone(), task_handle.abort_handle());
     }
 }
 
