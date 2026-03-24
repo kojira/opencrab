@@ -260,16 +260,15 @@ impl DiscordGatewayActions {
                             id: None,
                             agent_id: subtask.agent_id.clone(),
                             session_id: parent_session_id.clone(),
-                            log_type: "system".to_string(),
-                            content: serde_json::json!({
-                                "type": "subtask_cancelled",
-                                "subtask_id": subtask_id,
-                                "session_id": subtask.session_id,
-                                "task": task_description,
-                            }).to_string(),
+                            log_type: "tool_cancelled".to_string(),
+                            content: format!("subtask '{}' was cancelled", task_description),
                             speaker_id: None,
                             turn_number: None,
-                            metadata_json: None,
+                            metadata_json: Some(serde_json::json!({
+                                "tool_call_id": subtask_id,
+                                "tool_name": "spawn_subtask",
+                                "task": task_description,
+                            }).to_string()),
                             created_at: None,
                         };
                         opencrab_db::queries::insert_session_log(&conn, &log).ok();
