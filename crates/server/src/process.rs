@@ -282,18 +282,10 @@ fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_token
         return String::new();
     }
 
-    // まず各ログを文字列化（tool_call/tool_resultはスキップ）
+    // まず各ログを文字列化
     let formatted: Vec<String> = logs
         .iter()
-        .filter(|log| log.log_type != "tool_call" && log.log_type != "tool_result")
-        .map(|log| {
-            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
-            let ts = log.created_at.as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
-                .unwrap_or_default();
-            format!("[{}]{}:\n{}", speaker, ts, log.content)
-        })
+        .map(format_single_log)
         .collect();
 
     // 後ろから詰めていく
@@ -314,17 +306,71 @@ fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_token
 
 fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
     logs.iter()
-        .filter(|log| log.log_type != "tool_call" && log.log_type != "tool_result")
-        .map(|log| {
-            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
-            let ts = log.created_at.as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
-                .unwrap_or_default();
-            format!("[{}]{}:\n{}", speaker, ts, log.content)
-        })
+        .map(format_single_log)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
+    let ts = log.created_at.as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
+        .unwrap_or_default();
+
+    match log.log_type.as_str() {
+        "speech" => {
+            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
+            format!("[{}]{}:\n{}", speaker, ts, log.content)
+        }
+        "tool_call" => {
+            if let Some(meta_json) = log.metadata_json.as_deref() {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
+                    if let Some(tool_calls_json) = meta.get("tool_calls_json").and_then(|v| v.as_str()) {
+                        if let Ok(tool_calls) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
+                            if let Some(tool_names) = tool_calls.as_array()
+                                .map(|items| items.iter()
+                                    .filter_map(|item| item.get("name").and_then(|v| v.as_str()))
+                                    .collect::<Vec<_>>())
+                                .filter(|names| !names.is_empty())
+                            {
+                                let content = if log.content.trim().is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("{}\n", log.content)
+                                };
+                                return format!(
+                                    "[tool_call]{}:\n{}Tools: {}",
+                                    ts,
+                                    content,
+                                    tool_names.join(", ")
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            format!("[tool_call]{}:\n{}", ts, log.content)
+        }
+        "tool_result" => {
+            let tool_name = log.metadata_json.as_deref()
+                .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok())
+                .and_then(|meta| meta.get("tool_name").and_then(|v| v.as_str()).map(str::to_string));
+            match tool_name {
+                Some(tool_name) => format!("[tool_result: {}]{}:\n{}", tool_name, ts, log.content),
+                None => format!("[tool_result]{}:\n{}", ts, log.content),
+            }
+        }
+        "system" => {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&log.content) {
+                if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
+                    let content = serde_json::to_string_pretty(&value).unwrap_or_else(|_| log.content.clone());
+                    return format!("[system: {}]{}:\n{}", kind, ts, content);
+                }
+            }
+            format!("[system]{}:\n{}", ts, log.content)
+        }
+        other => format!("[{}]{}:\n{}", other, ts, log.content),
+    }
 }
 
 /// 変動コンテキストを最後のuserメッセージに前置するヘルパー

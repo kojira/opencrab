@@ -201,11 +201,10 @@ struct DiscordHandler {
 impl EventHandler for DiscordHandler {
     async fn message(&self, ctx: Context, msg: SerenityMessage) {
         // 自分自身のメッセージは無視（無限ループ防止）
-        // ready()前はハードコードIDをフォールバックとして使用
-        const KAIRO_BOT_ID: u64 = 1470442468473438288;
-        let self_id = self.self_user_id.get().copied().unwrap_or(KAIRO_BOT_ID);
-        if msg.author.id.get() == self_id {
-            return;
+        if let Some(self_id) = self.self_user_id.get().copied() {
+            if msg.author.id.get() == self_id {
+                return;
+            }
         }
 
         info!(
