@@ -74,6 +74,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/discord",
             get(api::agents::get_discord_config)
                 .put(api::agents::update_discord_config)
+                .patch(api::agents::patch_discord_config)
                 .delete(api::agents::delete_discord_config),
         )
         .route("/api/agents/{id}/discord/start", post(api::agents::start_discord_gateway))

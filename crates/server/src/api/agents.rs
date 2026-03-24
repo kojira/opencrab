@@ -276,6 +276,70 @@ pub async fn get_discord_config(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PatchDiscordConfigRequest {
+    pub bot_token: Option<String>,
+    pub owner_discord_id: Option<String>,
+}
+
+pub async fn patch_discord_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PatchDiscordConfigRequest>,
+) -> Json<serde_json::Value> {
+    // 既存の設定を取得
+    let existing = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_discord_config(&conn, &id).unwrap()
+    };
+
+    let Some(_existing) = existing else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "No Discord config found. Use PUT to create one.",
+        }));
+    };
+
+    // 部分更新
+    let updated = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::patch_agent_discord_config(
+            &conn,
+            &id,
+            req.bot_token.as_deref(),
+            req.owner_discord_id.as_deref(),
+        )
+        .unwrap()
+    };
+
+    if !updated {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "Update failed.",
+        }));
+    };
+
+    // 更新後の設定を返す
+    let cfg = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_discord_config(&conn, &id).unwrap().unwrap()
+    };
+
+    let token_masked = if cfg.bot_token.len() > 10 {
+        format!("{}...", &cfg.bot_token[..10])
+    } else {
+        "***".to_string()
+    };
+
+    Json(serde_json::json!({
+        "ok": true,
+        "configured": true,
+        "enabled": cfg.enabled,
+        "token_masked": token_masked,
+        "owner_discord_id": cfg.owner_discord_id,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateDiscordConfigRequest {
     pub bot_token: String,
     pub owner_discord_id: Option<String>,
