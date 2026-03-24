@@ -3,6 +3,7 @@ import { useOutletContext } from "react-router-dom";
 import type { AgentDetail } from "../api/types";
 import { getTrustedUsers, addTrustedUser, removeTrustedUser, updateTrustedUser } from "../api/trusted_users";
 import type { TrustedUserDto } from "../api/trusted_users";
+import { useTranslation } from "react-i18next";
 
 interface AgentContext {
   agent: AgentDetail;
@@ -13,6 +14,7 @@ const PERMISSIONS = ["user", "co-agent", "owner"];
 
 export default function AgentTrustedUsers() {
   const { agentId } = useOutletContext<AgentContext>();
+  const { t } = useTranslation();
   const [users, setUsers] = useState<TrustedUserDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +49,7 @@ export default function AgentTrustedUsers() {
   const handleAdd = async () => {
     const uid = newUserId.trim();
     if (!uid) {
-      setAddError("Discord User ID is required.");
+      setAddError(t("trustedUsers.idRequired"));
       return;
     }
     setAdding(true);
@@ -82,10 +84,10 @@ export default function AgentTrustedUsers() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-title-lg text-on-surface font-medium">
-            Trusted Users
+            {t("trustedUsers.title")}
           </h2>
           <p className="text-body-md text-on-surface-variant mt-1">
-            Discord users who can send DMs to this agent. If empty, only the owner can interact via DM.
+            {t("trustedUsers.description")}
           </p>
         </div>
         <button
@@ -98,13 +100,13 @@ export default function AgentTrustedUsers() {
           }}
         >
           <span className="material-symbols-outlined text-xl">add</span>
-          Add User
+          {t("trustedUsers.addButton")}
         </button>
       </div>
 
       {loading && (
         <div className="empty-state">
-          <p className="text-body-lg text-on-surface-variant">Loading...</p>
+          <p className="text-body-lg text-on-surface-variant">{t("common.loading")}</p>
         </div>
       )}
 
@@ -112,7 +114,7 @@ export default function AgentTrustedUsers() {
         <div className="card-outlined border-error bg-error-container/30 p-4">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-error">error</span>
-            <p className="text-body-lg text-error-on-container">Error: {error}</p>
+            <p className="text-body-lg text-error-on-container">{t("common.error", { message: error })}</p>
           </div>
         </div>
       )}
@@ -122,9 +124,9 @@ export default function AgentTrustedUsers() {
           <span className="material-symbols-outlined empty-state-icon">
             shield_person
           </span>
-          <p className="empty-state-text">No trusted users.</p>
+          <p className="empty-state-text">{t("trustedUsers.noUsers")}</p>
           <p className="text-body-sm text-on-surface-variant mt-2">
-            Add Discord user IDs to allow them to interact with this agent via DM.
+            {t("trustedUsers.emptyDesc")}
           </p>
         </div>
       )}
@@ -135,16 +137,16 @@ export default function AgentTrustedUsers() {
             <thead>
               <tr className="border-b border-outline-variant">
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Discord User ID
+                  {t("trustedUsers.tableId")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Permission
+                  {t("trustedUsers.tablePermission")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Added By
+                  {t("trustedUsers.tableAddedBy")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Added At
+                  {t("trustedUsers.tableAddedAt")}
                 </th>
                 <th className="px-4 py-3"></th>
               </tr>
@@ -170,8 +172,8 @@ export default function AgentTrustedUsers() {
                             <option key={p} value={p}>{p}</option>
                           ))}
                         </select>
-                        <button className="btn-tonal text-sm" onClick={() => handleUpdatePermission(u.id)}>Save</button>
-                        <button className="btn-text text-sm" onClick={() => setEditingId(null)}>Cancel</button>
+                        <button className="btn-tonal text-sm" onClick={() => handleUpdatePermission(u.id)}>{t("common.save")}</button>
+                        <button className="btn-text text-sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</button>
                       </div>
                     ) : (
                       <span
@@ -194,7 +196,7 @@ export default function AgentTrustedUsers() {
                       onClick={() => setConfirmRemoveId(u.id)}
                     >
                       <span className="material-symbols-outlined text-base">delete</span>
-                      Remove
+                      {t("common.remove")}
                     </button>
                   </td>
                 </tr>
@@ -207,11 +209,11 @@ export default function AgentTrustedUsers() {
       {showAddModal && (
         <div className="scrim">
           <div className="dialog">
-            <h3 className="text-title-lg text-on-surface mb-4">Add Trusted User</h3>
+            <h3 className="text-title-lg text-on-surface mb-4">{t("trustedUsers.addModalTitle")}</h3>
             <div className="space-y-4 mb-6">
               <div>
                 <label className="block text-label-lg text-on-surface mb-2">
-                  Discord User ID *
+                  {t("trustedUsers.idLabel")}
                 </label>
                 <input
                   type="text"
@@ -223,7 +225,7 @@ export default function AgentTrustedUsers() {
               </div>
               <div>
                 <label className="block text-label-lg text-on-surface mb-2">
-                  Permission
+                  {t("trustedUsers.permissionLabel")}
                 </label>
                 <select
                   className="input-outlined"
@@ -241,10 +243,10 @@ export default function AgentTrustedUsers() {
             </div>
             <div className="flex gap-3 justify-end">
               <button className="btn-outlined" onClick={() => setShowAddModal(false)}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button className="btn-filled" disabled={adding} onClick={handleAdd}>
-                {adding ? "Adding..." : "Add"}
+                {adding ? t("common.adding") : t("common.add")}
               </button>
             </div>
           </div>
@@ -256,17 +258,17 @@ export default function AgentTrustedUsers() {
           <div className="dialog">
             <div className="flex items-center gap-3 mb-4">
               <span className="material-symbols-outlined text-2xl text-error">warning</span>
-              <h3 className="text-title-lg text-on-surface">Remove User?</h3>
+              <h3 className="text-title-lg text-on-surface">{t("trustedUsers.confirmRemoveTitle")}</h3>
             </div>
             <p className="text-body-lg text-on-surface-variant mb-6">
-              Remove this user from trusted users?
+              {t("trustedUsers.confirmRemoveMsg")}
             </p>
             <div className="flex gap-3 justify-end">
               <button className="btn-outlined" onClick={() => setConfirmRemoveId(null)}>
-                Cancel
+                {t("common.cancel")}
               </button>
               <button className="btn-danger" onClick={() => handleRemove(confirmRemoveId)}>
-                Remove
+                {t("common.remove")}
               </button>
             </div>
           </div>

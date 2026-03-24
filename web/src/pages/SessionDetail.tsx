@@ -165,8 +165,9 @@ export default function SessionDetail() {
         <div className="card-elevated mb-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-4 min-w-0">
-              <Link to="/sessions" className="btn-text p-1">
+              <Link to="/sessions" className="btn-text p-1 flex items-center gap-1">
                 <span className="material-symbols-outlined">arrow_back</span>
+                <span className="text-sm hidden sm:inline">{t('sessions.backToList')}</span>
               </Link>
               <div>
                 <h1 className="text-title-lg text-on-surface">

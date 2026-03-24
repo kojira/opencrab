@@ -50,6 +50,7 @@ describe('getAgent', () => {
       social_style_json: '{"style":"analytical"}',
       thinking_style_json: '{"primary":"logical"}',
       personality: null,
+      instructions: '',
     };
 
     mockedApi.get.mockResolvedValue({ identity, soul });
