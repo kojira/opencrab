@@ -1,80 +1,78 @@
-# 設計書: tool_call履歴管理（最終方針）
+# 設計書: tool_call履歴管理
 
-## 1. 問題の概要
+## 概要
 
-`spawn_subtask`等の非同期ツール実行時、エージェントの初回発話（例: 「調べてみる。」）がDBに記録されない。サブタスク完了後の`process_subtask_completed`で会話履歴を再構築すると初回発話が欠落し、LLMが同じ発話を再生成してDiscordに重複送信される。
-
----
-
-## 2. 根本原因
-
-**Anthropic Messages APIの制約**: assistantメッセージに`tool_use`ブロックが含まれる場合、後続のuserメッセージに対応する`tool_result`ブロックが必須。
-
-現状、`process_subtask_completed`が再構築する会話履歴には`tool_use`/`tool_result`ペアが含まれない。そのためAnthropicは「前のターンで何のtool_callをしたか」を把握できず、文脈を失った状態でレスポンスを生成してしまう。
-
-具体的な欠落:
-- `on_first_response`での初回発話テキストがDBに未記録
-- `tool_use`/`tool_result`の構造体がDBに未保存（最終テキストのみ保存）
-- `process_subtask_completed`時にtool_use→tool_resultの完全履歴を復元できない
+execute_shellを含む全ツール呼び出しは非同期で処理され、process_subtask_completedで会話を再構築する際にtool_use/tool_resultのペアが欠落しているためAnthropicのAPI制約に違反し、LLMがtextを重複生成する。
 
 ---
 
-## 3. 最終修正方針
+## 根本原因
 
-### P0（即時対応・workaround）
-
-**方針1**: `on_first_response`テキストをDBに記録する
-**変更箇所**: `crates/discord/src/message_loop.rs`
-- `on_first_response`コールバック内で`session_logs`にエージェント発話を挿入
-- `process_subtask_completed`の`build_conversation_string`が初回発話を取得できるようになる
-
-**方針2**: `tool_calls`がある場合はassistant contentを空にする
-**変更箇所**: `crates/core/src/engine/skill_engine.rs`
-- `messages.push`時、`tool_calls`が非空なら`content = ""`にする
-- Anthropicが「中断された思考の補完」として重複テキストを生成するのを防ぐ
-
-### P1（根本解決・優先）
-
-**方針3**: `tool_use`/`tool_result`をDBに保存し、`process_subtask_completed`時に完全復元する
-
-**変更箇所**:
-1. DBスキーマ: `subtask_tool_calls`テーブルを追加（`session_id`, `tool_call_id`, `subtask_id`, `input_json`）
-2. `crates/discord/src/gateway_actions/subtask_engine.rs`: spawn時にtool_call_idとsubtask_idの対応をDBに保存
-3. `crates/server/src/process.rs`の`process_subtask_completed`: DBからtool_call_idを取得し、messages配列に`tool_use`→`tool_result`ペアを復元してLLMに渡す
+- Anthropic Messages APIの制約: assistantメッセージに`tool_use`ブロックがある場合、後続のuserメッセージに対応する`tool_result`ブロックが必須
+- opencrabでは全ツール呼び出しが非同期。tool実行完了後、process_subtask_completedで会話を再構築するが、この時点でtool_use（assistantメッセージ）とtool_result（toolメッセージ）がDBに保存されておらず欠落している
+- AnthropicはAPI制約違反の状態でレスポンスを生成するため、LLMが前の発言（「調べてみる。」）を「中断された思考」として再生成してしまう
 
 ---
 
-## 4. 期待動作（修正後）
+## 修正方針（P1）
 
-**非同期ツール（spawn_subtask）の正常フロー**:
+**DBにtool_use/tool_resultを保存し、process_subtask_completed時に復元する**
 
+変更箇所:
+1. `skill_engine.rs` - tool call発行時にassistantメッセージ（content + tool_calls）をDBに保存
+2. `skill_engine.rs` - tool実行完了時にtool_resultをDBに保存（tool_call_idで紐付け）
+3. `skill_engine.rs` - process_subtask_completed時の会話再構築でDBからtool_use+tool_resultペアを復元してmessages配列に追加
+
+---
+
+## P1適用後のLLMコール履歴（天気ユースケース）
+
+**【LLMコール #1】** ユーザー発言を受けて
 ```
-iteration 1:
-  LLM → "調べてみる。" + tool_calls:[spawn_subtask]
-  on_first_response → Discord送信 + DB記録 ✓（方針1）
-  messages配列 → {role:assistant, content:"", tool_calls:[...]}（方針2）
-
-iteration 2:
-  tool_result = {"status":"spawned","subtask_id":"..."}
-  LLM → "" or NO_REPLY
-
-サブタスク完了時:
-  build_conversation_string → [user: "教えて"][agent: "調べてみる。"] ✓
-  （P1適用時）tool_use/tool_resultペアも復元してLLMに渡す
-  LLM → "〇〇の結果です。"（重複なし）
-
-Discordメッセージ: 「調べてみる。」→「〇〇の結果です。」（2回、重複なし）
+[system]    "You are らぼみ..."
+[user]      "ドイツの天気教えて"
+```
+→ LLMレスポンス:
+```
+content = "調べてみる。"
+tool_calls = [{id:"t01", name:"execute_shell", input:{command:"curl", args:["wttr.in/Frankfurt?format=j1"]}}]
 ```
 
+↓ on_first_response: Discord「調べてみる。」送信
+↓ DBに保存: assistant{content="調べてみる。", tool_calls=[t01]}
+↓ execute_shell実行（非同期）→ 完了
+↓ DBに保存: tool{tool_call_id="t01", content="{\"temp_C\":\"5\",\"desc\":\"Sunny\"}"}
+
+**【LLMコール #2】** process_subtask_completedで再構築
+```
+[system]    "You are らぼみ..."
+[user]      "ドイツの天気教えて"
+[assistant] content="調べてみる。"
+            tool_calls=[{id:"t01", name:"execute_shell", input:{command:"curl", args:["wttr.in/Frankfurt?format=j1"]}}]
+[tool]      tool_call_id="t01"
+            content="{\"temp_C\":\"5\",\"desc\":\"Sunny\"}"
+```
+→ LLMレスポンス:
+```
+content = "取れた！フランクフルトの天気は5°C、晴れだよ！"
+```
+↓ Discord: 「取れた！フランクフルトの天気は5°C、晴れだよ！」（重複なし）
+
+**ツールが2回呼ばれた場合のLLMコール #3:**
+```
+[system]    "You are らぼみ..."
+[user]      "ドイツの天気教えて"
+[assistant] content="調べてみる。"
+            tool_calls=[{id:"t01", name:"execute_shell", ...}]
+[tool]      tool_call_id="t01", content="..."
+[assistant] content="もうちょっと詳しく調べるね。"
+            tool_calls=[{id:"t02", name:"execute_shell", ...}]
+[tool]      tool_call_id="t02", content="..."
+```
+→ LLMレスポンス: 最終回答
+
 ---
 
-## 5. TODO
+## TODO
 
-### NO_REPLY時の記録
-
-エージェントが`NO_REPLY`を出力した場合も`session_log`に記録する。
-
-- **目的**: エージェントが自分の発言履歴（黙っていた箇所も含む）を辿れるようにする
-- **記録内容**: `log_type: "no_reply"`, `content: "NO_REPLY"`, メタデータにターン番号・理由
-- **変更箇所**: `crates/discord/src/message_loop.rs` のNO_REPLY判定ブロック
-- **効果**: `build_conversation_string`で沈黙ターンも会話履歴として再現でき、LLMが「そのターンで意図的に黙った」と認識できる
+- NO_REPLY時のsession_log記録（エージェントが自分の黙った箇所を履歴から辿れるようにする）
