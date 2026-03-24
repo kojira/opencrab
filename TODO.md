@@ -175,3 +175,10 @@
     - 現状: cloneして自分でビルドする必要がある
     - GitHub Actionsでcross-compileしてリリースにバイナリ添付
     - `brew install kojira/tap/opencrab` 形式のHomebrew tapも検討
+
+36. **NO_REPLY時のsession_log記録（エージェントが自分の黙った箇所を履歴から辿れるようにする）**
+    - 現状: エージェントがNO_REPLYを出力した場合、session_logに何も記録されない
+    - 修正: NO_REPLY判定時も`log_type: "no_reply"`としてsession_logに挿入する
+    - 効果: エージェントが会話履歴から「自分がそのターンで意図的に黙った」を認識できる
+    - 変更箇所: `crates/discord/src/message_loop.rs`
+    - 関連: `docs/design-tool-history.md` §5 TODO
