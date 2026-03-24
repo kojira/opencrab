@@ -41,8 +41,6 @@ pub struct SkillEngine {
     on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
     /// Optional callback invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
     on_tool_result: Option<Arc<dyn Fn(String, String, String, bool) + Send + Sync>>,
-    /// Messages to prepend after the user message (tool_use/tool_result history from previous runs).
-    prefix_messages: Vec<ChatMessage>,
 }
 
 impl SkillEngine {
@@ -61,7 +59,6 @@ impl SkillEngine {
             on_response_text: None,
             on_tool_call: None,
             on_tool_result: None,
-            prefix_messages: vec![],
         }
     }
 
@@ -83,11 +80,6 @@ impl SkillEngine {
     /// Set the on_tool_result callback, invoked when a tool result is received.
     pub fn set_on_tool_result(&mut self, cb: impl Fn(String, String, String, bool) + Send + Sync + 'static) {
         self.on_tool_result = Some(Arc::new(cb));
-    }
-
-    /// Set prefix messages (tool_use/tool_result history from previous runs).
-    pub fn set_prefix_messages(&mut self, messages: Vec<ChatMessage>) {
-        self.prefix_messages = messages;
     }
 
     /// Set the allowed actions from active skill declarations.
@@ -181,9 +173,6 @@ impl SkillEngine {
                 cache_control: None,
             },
         ];
-
-        // Append prefix messages (tool_use/tool_result history from previous runs).
-        messages.extend(self.prefix_messages.clone());
 
         let mut iterations = 0;
         let mut total_tool_calls = 0;
@@ -334,12 +323,7 @@ impl SkillEngine {
                         continue;
                     }
 
-                    // Inject __tool_call_id so gateway actions can record the mapping.
-                    let mut enriched_args = tool_call.arguments.clone();
-                    if let serde_json::Value::Object(ref mut map) = enriched_args {
-                        map.insert("__tool_call_id".to_string(), serde_json::json!(tool_call.id));
-                    }
-                    let result = self.executor.execute(&tool_call.name, &enriched_args).await;
+                    let result = self.executor.execute(&tool_call.name, &tool_call.arguments).await;
 
                     let result_json = serde_json::to_string(&result)
                         .unwrap_or_else(|_| r#"{"error": "Failed to serialize result"}"#.to_string());
@@ -706,6 +690,85 @@ mod tests {
         assert_eq!(texts[0], "調べてみます");
         assert_eq!(texts[1], "天気は20度です");
         assert_eq!(result.response, "天気は20度です");
+    }
+
+    #[tokio::test]
+    async fn test_tool_history_in_next_llm_call() {
+        use std::sync::{Arc, Mutex};
+
+        // MockLlm that captures the messages from each request
+        struct MessageCapturingLlm {
+            responses: Mutex<Vec<ChatResponseSimple>>,
+            captured_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for MessageCapturingLlm {
+            async fn chat(&self, request: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
+                self.captured_messages
+                    .lock()
+                    .unwrap()
+                    .push(request.messages.clone());
+                let mut responses = self.responses.lock().unwrap();
+                if responses.is_empty() {
+                    anyhow::bail!("no more mock responses");
+                }
+                Ok(responses.remove(0))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<Vec<ChatMessage>>::new()));
+        let llm = MessageCapturingLlm {
+            responses: Mutex::new(vec![
+                // First response: tool call
+                tool_call_response(vec![ToolCall {
+                    id: "tc-1".to_string(),
+                    name: "test_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }]),
+                // Second response: final text
+                text_response("All done"),
+            ]),
+            captured_messages: captured.clone(),
+        };
+
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"result": "ok"}),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+
+        let result = engine.run("system", "do it", "test-model").await.unwrap();
+        assert_eq!(result.response, "All done");
+        assert_eq!(result.iterations, 2);
+
+        let all_messages = captured.lock().unwrap();
+        assert_eq!(all_messages.len(), 2, "LLM should have been called twice");
+
+        // Check messages sent on the second LLM call (iteration 2)
+        let second_call_msgs = &all_messages[1];
+
+        // Should contain an assistant message with non-empty tool_calls
+        let has_assistant_with_tool_calls = second_call_msgs.iter().any(|m| {
+            m.role == "assistant" && !m.tool_calls.is_empty()
+        });
+        assert!(
+            has_assistant_with_tool_calls,
+            "Second LLM call must include an assistant message with tool_calls"
+        );
+
+        // Should contain a tool message with tool_call_id set
+        let has_tool_result = second_call_msgs.iter().any(|m| {
+            m.role == "tool" && m.tool_call_id.is_some()
+        });
+        assert!(
+            has_tool_result,
+            "Second LLM call must include a tool result message with tool_call_id"
+        );
     }
 
     #[tokio::test]

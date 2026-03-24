@@ -176,6 +176,12 @@
     - GitHub Actionsでcross-compileしてリリースにバイナリ添付
     - `brew install kojira/tap/opencrab` 形式のHomebrew tapも検討
 
+37. **サブタスク状況問い合わせ機能**
+    - メインエージェントが `query_subtask(subtask_id, question)` でサブに状況を問い合わせられる
+    - サブは問い合わせに対して現在の状態（進捗・実行中のステップ）を返す
+    - メインはタイムアウト検出にも活用できる
+    - 双方向通信型（完了報告の受け身だけでなく、メインから能動的に確認）
+
 36. **NO_REPLY時のsession_log記録（エージェントが自分の黙った箇所を履歴から辿れるようにする）**
     - 現状: エージェントがNO_REPLYを出力した場合、session_logに何も記録されない
     - 修正: NO_REPLY判定時も`log_type: "no_reply"`としてsession_logに挿入する

@@ -118,6 +118,7 @@ export interface SessionLogRow {
   speaker_id: string | null;
   turn_number: number | null;
   metadata_json: string | null;
+  created_at: string | null;
 }
 
 // Workspace

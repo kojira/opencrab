@@ -288,7 +288,11 @@ fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_token
         .filter(|log| log.log_type != "tool_call" && log.log_type != "tool_result")
         .map(|log| {
             let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
-            format!("[{}]: {}", speaker, log.content)
+            let ts = log.created_at.as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
+                .unwrap_or_default();
+            format!("[{}]{}:\n{}", speaker, ts, log.content)
         })
         .collect();
 
@@ -313,7 +317,11 @@ fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
         .filter(|log| log.log_type != "tool_call" && log.log_type != "tool_result")
         .map(|log| {
             let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
-            format!("[{}]: {}", speaker, log.content)
+            let ts = log.created_at.as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
+                .unwrap_or_default();
+            format!("[{}]{}:\n{}", speaker, ts, log.content)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -359,7 +367,6 @@ pub async fn run_agent_response(
     depth: u32,
     trigger_message_id: Option<String>,
     on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    prefix_messages: Vec<opencrab_core::ChatMessage>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
@@ -483,9 +490,6 @@ pub async fn run_agent_response(
         engine.set_on_response_text(move |text: String| cb(text));
     }
 
-    // Set prefix messages (tool_use/tool_result history from previous runs).
-    engine.set_prefix_messages(prefix_messages);
-
     // on_tool_call callback: save tool_call to DB.
     {
         let tc_db = state.db.clone();
@@ -502,6 +506,7 @@ pub async fn run_agent_response(
                     speaker_id: Some(tc_agent.clone()),
                     turn_number: None,
                     metadata_json: Some(serde_json::json!({"tool_calls_json": tool_calls_json}).to_string()),
+                    created_at: None,
                 };
                 opencrab_db::queries::insert_session_log(&conn, &log).ok();
             }
@@ -545,6 +550,7 @@ pub async fn run_agent_response(
                         "tool_name": tool_name,
                         "is_error": is_error,
                     }).to_string()),
+                    created_at: None,
                 };
                 opencrab_db::queries::insert_session_log(&conn, &log).ok();
             }
