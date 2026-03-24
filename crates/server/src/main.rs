@@ -281,6 +281,7 @@ fn make_heartbeat_callback(
                                         "ハートビート内省 (tick {}, channel {}): 静かに自己を振り返る。",
                                         tick_val, ch_id_str
                                     ),
+                                    created_at: String::new(),
                                 };
                                 if let Err(e) = opencrab_db::queries::upsert_curated_memory(&conn, &memory) {
                                     tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");

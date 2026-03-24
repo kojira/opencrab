@@ -167,6 +167,10 @@
     - LLMで「OpenClaw固有の記述を除去してopencrab向けのinstructionsに変換する」処理が必要
     - 設計書作成→kojiraレビュー→実装の順で進める
 
+35. **PATCH /discord 後にGateway自動再起動**
+    - 現状: PATCH でowner_discord_idやbot_tokenを変更しても起動中のGatewayループに反映されない
+    - 修正: PATCH実行後にgateway stop→startを自動実行する
+
 34. **バイナリ配布（GitHub Releases / Homebrew tap）**
     - 現状: cloneして自分でビルドする必要がある
     - GitHub Actionsでcross-compileしてリリースにバイナリ添付

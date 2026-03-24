@@ -409,7 +409,7 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
         let conn = db.lock().unwrap();
         let skills = opencrab_db::queries::list_skills(&conn, &reflector_id, false).unwrap();
         let memories =
-            opencrab_db::queries::list_curated_memories(&conn, &reflector_id).unwrap();
+            opencrab_db::queries::list_curated_memories(&conn, &reflector_id, 10000, 0).unwrap().0;
         (skills, memories)
     };
 

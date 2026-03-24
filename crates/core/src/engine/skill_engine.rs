@@ -251,11 +251,9 @@ impl SkillEngine {
                 }
             }
 
-            // Fire on_first_response ONLY when there are no tool calls
-            // (meaning this IS the final response, not an intermediate step).
-            // With tools present, on_first_response would cause double-send:
-            // both the intermediate text and the final response would be sent.
-            if iterations == 1 && response.tool_calls.is_empty() {
+            // Fire on_first_response on the very first LLM reply,
+            // regardless of whether tool calls are present.
+            if iterations == 1 {
                 if let Some(ref text) = response.content {
                     if !text.is_empty() {
                         if let Some(ref cb_lock) = self.on_first_response {
@@ -629,7 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_first_response_not_fired_with_tools() {
+    async fn test_on_first_response_not_fired_without_text() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let llm = MockLlm::new(vec![

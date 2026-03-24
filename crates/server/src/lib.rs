@@ -54,6 +54,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/agents/{id}/memory/curated", get(api::memory::list_curated_memory))
         .route("/api/agents/{id}/memory/search", post(api::memory::search_memory))
         .route("/api/agents/{id}/memory/index", get(api::agents::get_memory_index_status).post(api::agents::trigger_memory_index_build).delete(api::agents::delete_memory_index))
+        .route("/api/agents/{id}/memory/index/tree", get(api::memory::get_memory_index_tree))
         .route("/api/agents/{id}/memory/index/config", put(api::agents::update_memory_index_config))
         .route("/api/agents/{id}/memory/index/rebuild", post(api::agents::rebuild_memory_index))
         .route("/api/agents/{id}/memory/index/merge", post(api::agents::merge_memory_index_topics))

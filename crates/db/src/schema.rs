@@ -248,6 +248,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills DROP COLUMN code")?;
     }
 
+    // memory_curated.created_at カラム追加
+    let has_curated_created_at: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_curated') WHERE name='created_at'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_curated_created_at {
+        conn.execute_batch("ALTER TABLE memory_curated ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")?;
+    }
+
     // soul.instructions カラム追加（操作ルール・AGENTS.md相当）
     let has_instructions: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='instructions'")?
