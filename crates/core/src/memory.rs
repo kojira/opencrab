@@ -82,6 +82,7 @@ impl MemoryManager {
                 speaker_id: speaker_id.map(|s| s.to_string()),
                 turn_number,
                 metadata_json: metadata.map(|m| serde_json::to_string(&m).unwrap_or_default()),
+                created_at: None,
             },
         )?;
         tracing::debug!(

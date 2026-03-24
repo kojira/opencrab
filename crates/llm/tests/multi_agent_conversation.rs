@@ -355,6 +355,7 @@ async fn test_three_agent_with_db_and_session() {
             speaker_id: Some(agent_id.clone()),
             turn_number: Some(i as i32 + 1),
             metadata_json: None,
+            created_at: None,
         };
         opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
 

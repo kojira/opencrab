@@ -175,6 +175,7 @@ mod tests {
                 }),
                 turn_number: Some(i as i32),
                 metadata_json: None,
+                created_at: None,
             };
             opencrab_db::queries::insert_session_log(conn, &log).unwrap();
         }

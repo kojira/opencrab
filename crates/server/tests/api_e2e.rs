@@ -364,7 +364,8 @@ async fn test_list_curated_memory_empty() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(resp.as_array().unwrap().len(), 0);
+    assert_eq!(resp["items"].as_array().unwrap().len(), 0);
+    assert_eq!(resp["total"].as_i64().unwrap(), 0);
 }
 
 #[tokio::test]

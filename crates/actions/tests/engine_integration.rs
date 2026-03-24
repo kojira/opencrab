@@ -86,6 +86,7 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
         speaker_id: Some("agent-1".to_string()),
         turn_number: Some(1),
         metadata_json: None,
+        created_at: None,
     };
     opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
 
@@ -302,6 +303,7 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
                 speaker_id: Some(speaker.to_string()),
                 turn_number: Some(i as i32),
                 metadata_json: None,
+                created_at: None,
             };
             opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
         }

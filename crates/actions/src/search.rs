@@ -181,6 +181,7 @@ mod tests {
                 speaker_id: Some("agent-1".to_string()),
                 turn_number: Some(1),
                 metadata_json: None,
+                created_at: None,
             };
             opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
         }

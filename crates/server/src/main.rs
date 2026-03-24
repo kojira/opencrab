@@ -137,6 +137,7 @@ fn make_heartbeat_callback(
                         speaker_id: Some("heartbeat".to_string()),
                         turn_number: None,
                         metadata_json: None,
+                        created_at: None,
                     };
                     if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
                         tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat prompt log: {e}");
@@ -169,7 +170,6 @@ fn make_heartbeat_callback(
                     0,
                     None,   // trigger_message_id
                     None,
-                    vec![],
                 ).await;
 
                 let decision = match engine_result {
@@ -186,6 +186,7 @@ fn make_heartbeat_callback(
                                 speaker_id: Some(agent_id_owned.clone()),
                                 turn_number: None,
                                 metadata_json: None,
+                                created_at: None,
                             };
                             if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
                                 tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat response log: {e}");

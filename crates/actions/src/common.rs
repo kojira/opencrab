@@ -157,6 +157,7 @@ impl Action for GenerateInnerVoiceAction {
                 speaker_id: Some(ctx.agent_id.clone()),
                 turn_number: None,
                 metadata_json: None,
+                created_at: None,
             };
             if let Ok(conn) = ctx.db.lock() {
                 let _ = opencrab_db::queries::insert_session_log(&conn, &log);

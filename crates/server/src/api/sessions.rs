@@ -35,6 +35,7 @@ pub async fn send_mentor_instruction(
         speaker_id: Some("mentor".to_string()),
         turn_number: None,
         metadata_json: None,
+        created_at: None,
     };
     let conn = state.db.lock().unwrap();
     let log_id = opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
@@ -114,6 +115,7 @@ pub async fn send_message(
         speaker_id: Some(req.agent_id.clone()),
         turn_number: None,
         metadata_json: None,
+        created_at: None,
     };
 
     let log_id = {
@@ -177,7 +179,6 @@ pub async fn send_message(
             0,
             None,   // trigger_message_id
             None,
-            vec![],
         )
         .await;
 
@@ -199,6 +200,7 @@ pub async fn send_message(
                         })
                         .to_string(),
                     ),
+                    created_at: None,
                 };
                 {
                     let conn = state.db.lock().unwrap();
@@ -230,4 +232,3 @@ pub async fn send_message(
         "responses": responses,
     }))
 }
-

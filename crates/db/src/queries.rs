@@ -330,6 +330,7 @@ pub struct SessionLogRow {
     pub speaker_id: Option<String>,
     pub turn_number: Option<i32>,
     pub metadata_json: Option<String>,
+    pub created_at: Option<String>,
 }
 
 pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64> {
@@ -412,7 +413,7 @@ pub fn list_session_logs_by_session(
     session_id: &str,
 ) -> Result<Vec<SessionLogRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
          FROM memory_sessions WHERE session_id = ?1 ORDER BY id ASC",
     )?;
 
@@ -426,65 +427,11 @@ pub fn list_session_logs_by_session(
             speaker_id: row.get(5)?,
             turn_number: row.get(6)?,
             metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
         })
     })?;
 
     Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
-/// List tool_call logs for a session, ordered by id.
-pub fn list_tool_messages_for_session(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<Vec<SessionLogRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
-         FROM memory_sessions
-         WHERE session_id = ?1 AND log_type = 'tool_call'
-         ORDER BY id ASC",
-    )?;
-
-    let rows = stmt.query_map(params![session_id], |row| {
-        Ok(SessionLogRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            session_id: row.get(2)?,
-            log_type: row.get(3)?,
-            content: row.get(4)?,
-            speaker_id: row.get(5)?,
-            turn_number: row.get(6)?,
-            metadata_json: row.get(7)?,
-        })
-    })?;
-
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
-/// subtask_idに対応するtool_call_idをsubtask_spawned logから取得する
-pub fn get_tool_call_id_for_subtask(
-    conn: &Connection,
-    session_id: &str,
-    subtask_id: &str,
-) -> Result<Option<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT content FROM memory_sessions
-         WHERE session_id = ?1 AND log_type = 'system'
-         ORDER BY id ASC"
-    )?;
-    let rows = stmt.query_map(params![session_id], |row| {
-        row.get::<_, String>(0)
-    })?;
-    for row in rows {
-        let content = row?;
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-            if v["type"].as_str() == Some("subtask_spawned")
-                && v["subtask_id"].as_str() == Some(subtask_id)
-            {
-                return Ok(v["tool_call_id"].as_str().map(|s| s.to_string()));
-            }
-        }
-    }
-    Ok(None)
 }
 
 /// Count the number of logs in a session.
@@ -504,7 +451,7 @@ pub fn list_session_logs_after_id(
     after_id: i64,
 ) -> Result<Vec<SessionLogRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
          FROM memory_sessions WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map(params![session_id, after_id], |row| {
@@ -517,6 +464,7 @@ pub fn list_session_logs_after_id(
             speaker_id: row.get(5)?,
             turn_number: row.get(6)?,
             metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -529,7 +477,7 @@ pub fn list_recent_session_logs(
     limit: usize,
 ) -> Result<Vec<SessionLogRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
          FROM memory_sessions WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![session_id, limit as i64], |row| {
@@ -542,6 +490,7 @@ pub fn list_recent_session_logs(
             speaker_id: row.get(5)?,
             turn_number: row.get(6)?,
             metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1878,7 +1827,7 @@ pub fn get_session_logs_by_id_range(
     to_id: i64,
 ) -> Result<Vec<SessionLogRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
          FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3 ORDER BY id ASC",
     )?;
     let rows = stmt.query_map(params![agent_id, from_id, to_id], |row| {
@@ -1891,6 +1840,7 @@ pub fn get_session_logs_by_id_range(
             speaker_id: row.get(5)?,
             turn_number: row.get(6)?,
             metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1949,7 +1899,7 @@ pub fn get_unindexed_session_logs(
     limit: usize,
 ) -> Result<Vec<SessionLogRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
          FROM memory_sessions WHERE agent_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3",
     )?;
     let rows = stmt.query_map(params![agent_id, after_id, limit as i64], |row| {
@@ -1962,6 +1912,7 @@ pub fn get_unindexed_session_logs(
             speaker_id: row.get(5)?,
             turn_number: row.get(6)?,
             metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -2143,6 +2094,7 @@ mod tests {
             speaker_id: Some("agent-1".to_string()),
             turn_number: Some(1),
             metadata_json: None,
+            created_at: None,
         };
         let log2 = SessionLogRow {
             id: None,
@@ -2153,6 +2105,7 @@ mod tests {
             speaker_id: Some("agent-1".to_string()),
             turn_number: Some(2),
             metadata_json: None,
+            created_at: None,
         };
         let log3 = SessionLogRow {
             id: None,
@@ -2163,6 +2116,7 @@ mod tests {
             speaker_id: Some("agent-1".to_string()),
             turn_number: Some(3),
             metadata_json: None,
+            created_at: None,
         };
 
         insert_session_log(&conn, &log1).unwrap();
@@ -2188,6 +2142,7 @@ mod tests {
             speaker_id: Some("agent-1".to_string()),
             turn_number: Some(1),
             metadata_json: None,
+            created_at: None,
         };
         let log2 = SessionLogRow {
             id: None,
@@ -2198,6 +2153,7 @@ mod tests {
             speaker_id: Some("agent-1".to_string()),
             turn_number: Some(2),
             metadata_json: None,
+            created_at: None,
         };
 
         insert_session_log(&conn, &log1).unwrap();
@@ -2223,6 +2179,7 @@ mod tests {
             speaker_id: Some("agent-1".to_string()),
             turn_number: Some(1),
             metadata_json: None,
+            created_at: None,
         };
         insert_session_log(&conn, &log).unwrap();
 

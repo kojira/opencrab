@@ -91,6 +91,7 @@ pub async fn send_agent_message(
             speaker_id: Some(req.user_id.clone()),
             turn_number: None,
             metadata_json: None,
+            created_at: None,
         };
         let conn = state.db.lock().unwrap();
         if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
@@ -169,7 +170,6 @@ pub async fn send_agent_message(
         0,
         None,   // trigger_message_id
         None,
-        vec![],
     )
     .await;
 
@@ -192,6 +192,7 @@ pub async fn send_agent_message(
                     })
                     .to_string(),
                 ),
+                created_at: None,
             };
             {
                 let conn = state.db.lock().unwrap();
