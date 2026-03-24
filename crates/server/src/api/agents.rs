@@ -330,6 +330,22 @@ pub async fn patch_discord_config(
         "***".to_string()
     };
 
+    // Restart the gateway with new config if enabled and token is present.
+    #[cfg(feature = "discord")]
+    if let Some(ref manager) = state.discord_manager {
+        // Stop the current gateway first (no-op if not running).
+        manager.stop_agent_gateway(&id).await;
+        // Restart only if enabled and token is present.
+        if cfg.enabled && !cfg.bot_token.is_empty() {
+            if let Err(e) = manager
+                .start_agent_gateway(&id, &cfg.bot_token, &cfg.owner_discord_id)
+                .await
+            {
+                tracing::error!(agent_id = %id, error = %e, "Failed to restart Discord gateway after patch");
+            }
+        }
+    }
+
     Json(serde_json::json!({
         "ok": true,
         "configured": true,
