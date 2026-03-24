@@ -48,7 +48,7 @@ impl opencrab_discord::AgentRunner for AppState {
         image_urls: &[String],
         depth: u32,
         trigger_message_id: Option<String>,
-        on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
+        on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
         prefix_messages: Vec<opencrab_core::ChatMessage>,
     ) -> anyhow::Result<opencrab_core::EngineResult> {
         process::run_agent_response(
@@ -64,7 +64,7 @@ impl opencrab_discord::AgentRunner for AppState {
             image_urls,
             depth,
             trigger_message_id,
-            on_first_response,
+            on_response_text,
             prefix_messages,
         )
         .await

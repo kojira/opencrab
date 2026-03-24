@@ -35,9 +35,8 @@ pub struct SkillEngine {
     pub allowed_actions: Option<std::collections::HashSet<String>>,
     /// Optional callback invoked after each LLM call for logging.
     pub log_callback: Option<Box<dyn Fn(&LlmCallLog) + Send + Sync>>,
-    /// Optional callback invoked with the first response text (iteration 1).
-    /// Called even if there are tool_calls in the first response.
-    pub on_first_response: Option<Arc<std::sync::Mutex<Option<Box<dyn FnOnce(String) + Send>>>>>,
+    /// Optional callback invoked with response text on every LLM reply.
+    pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
     /// Optional callback invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
     on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
     /// Optional callback invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
@@ -59,7 +58,7 @@ impl SkillEngine {
             max_iterations,
             allowed_actions: None,
             log_callback: None,
-            on_first_response: None,
+            on_response_text: None,
             on_tool_call: None,
             on_tool_result: None,
             prefix_messages: vec![],
@@ -71,9 +70,9 @@ impl SkillEngine {
         self.log_callback = Some(Box::new(cb));
     }
 
-    /// Set the on_first_response callback, invoked with the first response text.
-    pub fn set_on_first_response(&mut self, cb: impl FnOnce(String) + Send + 'static) {
-        self.on_first_response = Some(Arc::new(std::sync::Mutex::new(Some(Box::new(cb)))));
+    /// Set the on_response_text callback, invoked with response text on every LLM reply.
+    pub fn set_on_response_text(&mut self, cb: impl Fn(String) + Send + Sync + 'static) {
+        self.on_response_text = Some(Arc::new(cb));
     }
 
     /// Set the on_tool_call callback, invoked when the assistant produces tool calls.
@@ -278,18 +277,11 @@ impl SkillEngine {
                 }
             }
 
-            // Fire on_first_response on the very first LLM reply,
-            // regardless of whether tool calls are present.
-            if iterations == 1 {
-                if let Some(ref text) = response.content {
-                    if !text.is_empty() {
-                        if let Some(ref cb_lock) = self.on_first_response {
-                            if let Ok(mut guard) = cb_lock.lock() {
-                                if let Some(cb) = guard.take() {
-                                    cb(text.clone());
-                                }
-                            }
-                        }
+            // Fire on_response_text for every LLM reply that has non-empty text.
+            if let Some(ref text) = response.content {
+                if !text.trim().is_empty() {
+                    if let Some(ref cb) = self.on_response_text {
+                        cb(text.clone());
                     }
                 }
             }
@@ -675,56 +667,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_first_response_not_fired_without_text() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn test_on_response_text_fires_on_every_iteration() {
+        use std::sync::{Arc, Mutex};
 
         let llm = MockLlm::new(vec![
-            tool_call_response(vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "test_tool".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
-            text_response("Done after tool"),
+            ChatResponseSimple {
+                content: Some("調べてみます".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "tc-1".to_string(),
+                    name: "test_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                finish_reason: "tool_calls".to_string(),
+                usage: None,
+            },
+            ChatResponseSimple {
+                content: Some("天気は20度です".to_string()),
+                tool_calls: vec![],
+                finish_reason: "stop".to_string(),
+                usage: None,
+            },
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
-            ActionResult {
-                success: true,
-                data: serde_json::json!({"ok": true}),
-                error: None,
-            },
+            ActionResult { success: true, data: serde_json::json!(null), error: None },
         );
 
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
-        let fired = Arc::new(AtomicBool::new(false));
-        let fired_clone = fired.clone();
-        engine.set_on_first_response(move |_| {
-            fired_clone.store(true, Ordering::SeqCst);
+        let fired_texts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let fired_clone = fired_texts.clone();
+        engine.set_on_response_text(move |text: String| {
+            fired_clone.lock().unwrap().push(text);
         });
 
-        let result = engine.run("system", "do with tools", "test-model").await.unwrap();
-        assert!(!fired.load(Ordering::SeqCst), "on_first_response should NOT fire when iteration 1 has tool_calls");
-        assert_eq!(result.response, "Done after tool");
-        assert_eq!(result.tool_calls_made, 1);
+        let result = engine.run("system", "天気は？", "test-model").await.unwrap();
+        let texts = fired_texts.lock().unwrap();
+        assert_eq!(texts.len(), 2, "should fire for both iterations");
+        assert_eq!(texts[0], "調べてみます");
+        assert_eq!(texts[1], "天気は20度です");
+        assert_eq!(result.response, "天気は20度です");
     }
 
     #[tokio::test]
-    async fn test_on_first_response_fired_without_tools() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
+    async fn test_on_response_text_fires_for_direct_response() {
+        use std::sync::{Arc, Mutex};
 
-        let llm = MockLlm::new(vec![text_response("Direct answer")]);
+        let llm = MockLlm::new(vec![text_response("直接答えます")]);
         let executor = MockExecutor::new();
 
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
-        let fired = Arc::new(AtomicBool::new(false));
-        let fired_clone = fired.clone();
-        engine.set_on_first_response(move |_| {
-            fired_clone.store(true, Ordering::SeqCst);
+        let fired_texts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let fired_clone = fired_texts.clone();
+        engine.set_on_response_text(move |text: String| {
+            fired_clone.lock().unwrap().push(text);
         });
 
-        let result = engine.run("system", "direct question", "test-model").await.unwrap();
-        assert!(fired.load(Ordering::SeqCst), "on_first_response SHOULD fire when no tool_calls");
-        assert_eq!(result.response, "Direct answer");
+        let result = engine.run("system", "direct", "test-model").await.unwrap();
+        let texts = fired_texts.lock().unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0], "直接答えます");
+        assert_eq!(result.response, "直接答えます");
     }
 }

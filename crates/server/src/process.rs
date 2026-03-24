@@ -358,7 +358,7 @@ pub async fn run_agent_response(
     image_urls: &[String],
     depth: u32,
     trigger_message_id: Option<String>,
-    on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
+    on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
     prefix_messages: Vec<opencrab_core::ChatMessage>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
@@ -478,9 +478,9 @@ pub async fn run_agent_response(
         }
     });
 
-    // Set optional first-response callback (for immediate Discord acknowledgment).
-    if let Some(cb) = on_first_response {
-        engine.set_on_first_response(cb);
+    // Set optional response-text callback (for immediate Discord acknowledgment).
+    if let Some(cb) = on_response_text {
+        engine.set_on_response_text(move |text: String| cb(text));
     }
 
     // Set prefix messages (tool_use/tool_result history from previous runs).
