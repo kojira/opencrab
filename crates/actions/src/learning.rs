@@ -228,6 +228,7 @@ impl Action for ReflectAndLearnAction {
                 args["insights"],
                 args["action_items"]
             ),
+            created_at: String::new(),
         };
 
         if let Ok(conn) = ctx.db.lock() {

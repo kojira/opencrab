@@ -240,12 +240,14 @@ pub struct CuratedMemoryRow {
     pub agent_id: String,
     pub category: String,
     pub content: String,
+    pub created_at: String,
 }
 
 pub fn upsert_curated_memory(conn: &Connection, memory: &CuratedMemoryRow) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO memory_curated (id, agent_id, category, content, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO memory_curated (id, agent_id, category, content, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET
             content = excluded.content,
             updated_at = excluded.updated_at",
@@ -254,7 +256,8 @@ pub fn upsert_curated_memory(conn: &Connection, memory: &CuratedMemoryRow) -> Re
             memory.agent_id,
             memory.category,
             memory.content,
-            Utc::now().to_rfc3339(),
+            now,
+            now,
         ],
     )?;
     Ok(())
@@ -266,7 +269,7 @@ pub fn get_curated_memories(
     category: &str,
 ) -> Result<Vec<CuratedMemoryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, category, content FROM memory_curated
+        "SELECT id, agent_id, category, content, created_at FROM memory_curated
          WHERE agent_id = ?1 AND category = ?2 ORDER BY updated_at DESC",
     )?;
 
@@ -276,6 +279,7 @@ pub fn get_curated_memories(
             agent_id: row.get(1)?,
             category: row.get(2)?,
             content: row.get(3)?,
+            created_at: row.get(4)?,
         })
     })?;
 
@@ -285,22 +289,31 @@ pub fn get_curated_memories(
 pub fn list_curated_memories(
     conn: &Connection,
     agent_id: &str,
-) -> Result<Vec<CuratedMemoryRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, category, content FROM memory_curated
-         WHERE agent_id = ?1 ORDER BY updated_at DESC",
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<CuratedMemoryRow>, i64)> {
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_curated WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get(0),
     )?;
 
-    let rows = stmt.query_map(params![agent_id], |row| {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, category, content, created_at FROM memory_curated
+         WHERE agent_id = ?1 ORDER BY created_at ASC LIMIT ?2 OFFSET ?3",
+    )?;
+
+    let rows = stmt.query_map(params![agent_id, limit, offset], |row| {
         Ok(CuratedMemoryRow {
             id: row.get(0)?,
             agent_id: row.get(1)?,
             category: row.get(2)?,
             content: row.get(3)?,
+            created_at: row.get(4)?,
         })
     })?;
 
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    Ok((rows.collect::<std::result::Result<_, _>>()?, total))
 }
 
 // ============================================
@@ -2013,12 +2026,14 @@ mod tests {
             agent_id: "agent-1".to_string(),
             category: "facts".to_string(),
             content: "Rust is a systems programming language.".to_string(),
+            created_at: String::new(),
         };
         let mem2 = CuratedMemoryRow {
             id: "mem-2".to_string(),
             agent_id: "agent-1".to_string(),
             category: "facts".to_string(),
             content: "Crabs have ten legs.".to_string(),
+            created_at: String::new(),
         };
 
         upsert_curated_memory(&conn, &mem1).unwrap();
@@ -2038,18 +2053,20 @@ mod tests {
             agent_id: "agent-1".to_string(),
             category: "facts".to_string(),
             content: "The sky is blue.".to_string(),
+            created_at: String::new(),
         };
         let mem2 = CuratedMemoryRow {
             id: "mem-2".to_string(),
             agent_id: "agent-1".to_string(),
             category: "opinions".to_string(),
             content: "Rust is great.".to_string(),
+            created_at: String::new(),
         };
 
         upsert_curated_memory(&conn, &mem1).unwrap();
         upsert_curated_memory(&conn, &mem2).unwrap();
 
-        let all = list_curated_memories(&conn, "agent-1").unwrap();
+        let (all, _total) = list_curated_memories(&conn, "agent-1", 10000, 0).unwrap();
         assert_eq!(all.len(), 2);
 
         let categories: Vec<&str> = all.iter().map(|m| m.category.as_str()).collect();
@@ -2683,6 +2700,7 @@ mod tests {
                 agent_id: "del-1".into(),
                 category: "fact".into(),
                 content: "will be deleted".into(),
+                created_at: String::new(),
             },
         )
         .unwrap();
@@ -2698,7 +2716,7 @@ mod tests {
         // Verify everything is gone
         assert!(get_identity(&conn, "del-1").unwrap().is_none());
         assert!(get_soul(&conn, "del-1").unwrap().is_none());
-        assert!(list_curated_memories(&conn, "del-1").unwrap().is_empty());
+        assert!(list_curated_memories(&conn, "del-1", 10000, 0).unwrap().0.is_empty());
     }
 
     #[test]

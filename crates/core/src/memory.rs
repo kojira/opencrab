@@ -30,7 +30,7 @@ impl MemoryManager {
         let rows = if let Some(cat) = category {
             queries::get_curated_memories(&conn, &self.agent_id, cat)?
         } else {
-            queries::list_curated_memories(&conn, &self.agent_id)?
+            queries::list_curated_memories(&conn, &self.agent_id, 10000, 0)?.0
         };
 
         Ok(rows
@@ -53,6 +53,7 @@ impl MemoryManager {
                 agent_id: self.agent_id.clone(),
                 category: category.to_string(),
                 content: content.to_string(),
+                created_at: String::new(),
             },
         )?;
         tracing::debug!(agent_id = %self.agent_id, category = %category, "Saved curated memory");

@@ -100,6 +100,7 @@ pub fn execute_import(
                 agent_id: agent_id.to_string(),
                 category: mem.category.clone(),
                 content: mem.content.clone(),
+                created_at: String::new(),
             };
             opencrab_db::queries::upsert_curated_memory(conn, &row)?;
             counts.memory_curated += 1;
@@ -111,6 +112,7 @@ pub fn execute_import(
                 agent_id: agent_id.to_string(),
                 category: log.category.clone(),
                 content: log.content.clone(),
+                created_at: String::new(),
             };
             opencrab_db::queries::upsert_curated_memory(conn, &row)?;
             counts.daily_logs += 1;
