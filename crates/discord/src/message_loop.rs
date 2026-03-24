@@ -2,7 +2,7 @@
 //!
 //! v3の変更点:
 //! - Event-Drivenモデル: IncomingMessageとSubtaskCompletedをmpscチャンネルで処理
-//! - P0修正: should_send = !first_sent（engine.rsのon_first_response条件変更と組み合わせ）
+//! - P0修正: on_response_textコールバックでストリーミング応答を送信
 //! - P1修正: 処理をtokio::spawnで非同期化、メインループをブロックしない
 //! - P2修正: SubtaskCompleted callbackをLoopEvent送信に変更、イベントループで直列処理
 
@@ -51,6 +51,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
     completion_registry: CompletionRegistry,
 ) {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<LoopEvent>();
+    let active_sessions: Arc<dashmap::DashMap<String, tokio::task::AbortHandle>> =
+        Arc::new(dashmap::DashMap::new());
 
     // Discord受信をイベントに変換するタスク（P1: メインループをブロックしない）
     {
@@ -161,6 +163,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         owner_discord_id.clone(),
                         completion_registry.clone(),
                         event_tx.clone(),
+                        active_sessions.clone(),
                     )
                     .await;
                 }
@@ -183,6 +186,7 @@ async fn process_incoming_message<T: AgentRunner>(
     owner_discord_id: String,
     completion_registry: CompletionRegistry,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
+    active_sessions: Arc<dashmap::DashMap<String, tokio::task::AbortHandle>>,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -361,52 +365,38 @@ async fn process_incoming_message<T: AgentRunner>(
             completion_registry.insert(session_id.clone(), completion_cb);
         }
 
-        // on_first_response: ツールなし応答のみ発火（P0: engine.rsの修正と組み合わせ）
-        let first_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let first_sent_for_cb = first_sent.clone();
-        let first_sent_for_handle = first_sent.clone();
-        let first_response_speech: Arc<std::sync::Mutex<Option<String>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let frs_for_cb = first_response_speech.clone();
-        let frs_for_handle = first_response_speech.clone();
-        let gateway_for_cb = gateway.clone();
-        let channel_id_str_for_cb = channel_id_str.clone();
-        let is_dm_for_cb = is_dm;
-
-        let on_first_response: Option<Box<dyn FnOnce(String) + Send>> = {
+        let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
             let state_db = state.db().clone();
-            Some(Box::new(move |text: String| {
-                if text.is_empty() || text.trim() == "NO_REPLY" {
-                    return;
-                }
-                if let Ok(mut guard) = frs_for_cb.lock() {
-                    *guard = Some(text.clone());
-                }
+            let gateway_for_cb = gateway.clone();
+            let channel_id_str_for_cb = channel_id_str.clone();
+            let is_dm_for_cb = is_dm;
+            Some(std::sync::Arc::new(move |text: String| {
+                if text.is_empty() || text.trim() == "NO_REPLY" { return; }
                 let writable = if is_dm_for_cb {
                     true
                 } else {
-                    state_db
-                        .lock()
-                        .map(|conn| {
-                            opencrab_db::queries::is_channel_writable(&conn, &channel_id_str_for_cb)
-                        })
-                        .unwrap_or(false)
+                    state_db.lock().map(|conn| {
+                        opencrab_db::queries::is_channel_writable(&conn, &channel_id_str_for_cb)
+                    }).unwrap_or(false)
                 };
-                if !writable {
-                    return;
-                }
-                first_sent_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                if !writable { return; }
+                let gateway_cb = gateway_for_cb.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = gateway_for_cb.send_to_channel(channel_id, &text).await {
-                        tracing::error!("on_first_response Discord send failed: {e}");
+                    if let Err(e) = gateway_cb.send_to_channel(channel_id, &text).await {
+                        tracing::error!("on_response_text Discord send failed: {e}");
                     }
                 });
             }))
         };
 
+        // 既存のセッションタスクがあればabort（二重実行防止）
+        if let Some((_, old_handle)) = active_sessions.remove(&session_id) {
+            warn!(session_id = %session_id, "Aborting existing session task due to new message interrupt");
+            old_handle.abort();
+        }
+
         // エージェント処理をspawn（P1: メインループをブロックしない）
         let state_spawn = state.clone();
-        let gateway_spawn = gateway.clone();
         let ga_spawn = gateway_actions.clone();
         let agent_id_spawn = agent_id.clone();
         let agent_name_spawn = agent_name.clone();
@@ -417,8 +407,10 @@ async fn process_incoming_message<T: AgentRunner>(
         let image_urls_spawn = image_urls.clone();
         let discord_message_id_spawn = discord_message_id.clone();
         let channel_id_str_spawn = channel_id_str.clone();
+        let active_sessions_spawn = active_sessions.clone();
+        let session_id_for_cleanup = session_id.clone();
 
-        tokio::spawn(async move {
+        let task_handle = tokio::spawn(async move {
             let prefix_msgs = {
                 let conn = state_spawn.db().lock().unwrap();
                 build_pending_tool_prefix_messages(&conn, &session_id_spawn, &agent_id_spawn)
@@ -440,7 +432,7 @@ async fn process_incoming_message<T: AgentRunner>(
                     } else {
                         Some(discord_message_id_spawn)
                     },
-                    on_first_response,
+                    on_response_text,
                     prefix_msgs,
                 )
                 .await;
@@ -449,16 +441,14 @@ async fn process_incoming_message<T: AgentRunner>(
                 result,
                 &agent_id_spawn,
                 &session_id_spawn,
-                channel_id,
                 &channel_id_str_spawn,
-                is_dm,
-                &gateway_spawn,
                 &state_spawn,
-                first_sent_for_handle,
-                frs_for_handle,
             )
             .await;
+
+            active_sessions_spawn.remove(&session_id_for_cleanup);
         });
+        active_sessions.insert(session_id.clone(), task_handle.abort_handle());
     }
 }
 
@@ -467,20 +457,13 @@ async fn handle_agent_response<T: AgentRunner>(
     result: anyhow::Result<opencrab_core::EngineResult>,
     agent_id: &str,
     session_id: &str,
-    channel_id: u64,
     channel_id_str: &str,
-    is_dm: bool,
-    gateway: &Arc<DiscordGateway>,
     state: &T,
-    first_sent: Arc<std::sync::atomic::AtomicBool>,
-    first_response_speech: Arc<std::sync::Mutex<Option<String>>>,
 ) {
     match result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
-            // NO_REPLY は送信しない
             if engine_result.response.trim() == "NO_REPLY" {
-                debug!(agent_id = %agent_id, "Agent returned NO_REPLY, skipping Discord send");
-                // NO_REPLY をsession_logに記録
+                debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
                 if let Ok(conn) = state.db().lock() {
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
@@ -494,86 +477,29 @@ async fn handle_agent_response<T: AgentRunner>(
                     };
                     opencrab_db::queries::insert_session_log(&conn, &log).ok();
                 }
-                // noreactと一緒に生成されたテキストをDBに保存
-                if let Ok(guard) = first_response_speech.lock() {
-                    if let Some(ref speech_text) = *guard {
-                        if !speech_text.is_empty() {
-                            let conn = state.db().lock().unwrap();
-                            let log = opencrab_db::queries::SessionLogRow {
-                                id: None,
-                                agent_id: agent_id.to_string(),
-                                session_id: session_id.to_string(),
-                                log_type: "speech".to_string(),
-                                content: speech_text.clone(),
-                                speaker_id: Some(agent_id.to_string()),
-                                turn_number: None,
-                                metadata_json: Some(
-                                    serde_json::json!({
-                                        "source": "discord_response",
-                                        "channel_id": channel_id_str,
-                                        "via_noreact": true,
-                                    })
-                                    .to_string(),
-                                ),
-                            };
-                            opencrab_db::queries::insert_session_log(&conn, &log).ok();
-                        }
-                    }
-                }
                 return;
             }
 
-            // Writable check
-            if !is_dm {
-                let writable = {
-                    let conn = state.db().lock().unwrap();
-                    opencrab_db::queries::is_channel_writable(&conn, channel_id_str)
+            if let Ok(conn) = state.db().lock() {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    log_type: "speech".to_string(),
+                    content: engine_result.response.clone(),
+                    speaker_id: Some(agent_id.to_string()),
+                    turn_number: None,
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "source": "discord_response",
+                            "channel_id": channel_id_str,
+                            "tool_calls_made": engine_result.tool_calls_made,
+                        })
+                        .to_string(),
+                    ),
                 };
-                if !writable {
-                    warn!(
-                        agent_id = %agent_id,
-                        channel = %channel_id_str,
-                        "Skipping response to non-writable channel"
-                    );
-                    return;
-                }
+                opencrab_db::queries::insert_session_log(&conn, &log).ok();
             }
-
-            // P0修正: should_send = !first_sent
-            // on_first_response はツールなし応答のみ発火（engine.rsで保証）。
-            // first_sent=true → on_first_responseが既に送信済み → 再送しない。
-            // first_sent=false → ツールあり応答 or no text → finalが唯一の送信。
-            let should_send =
-                !first_sent.load(std::sync::atomic::Ordering::SeqCst);
-            if should_send {
-                if let Err(e) = gateway
-                    .send_to_channel(channel_id, &engine_result.response)
-                    .await
-                {
-                    error!(agent_id = %agent_id, "Failed to send Discord reply: {e}");
-                }
-            }
-
-            // DBにエージェント応答をログ
-            let conn = state.db().lock().unwrap();
-            let log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: agent_id.to_string(),
-                session_id: session_id.to_string(),
-                log_type: "speech".to_string(),
-                content: engine_result.response,
-                speaker_id: Some(agent_id.to_string()),
-                turn_number: None,
-                metadata_json: Some(
-                    serde_json::json!({
-                        "source": "discord_response",
-                        "channel_id": channel_id_str,
-                        "tool_calls_made": engine_result.tool_calls_made,
-                    })
-                    .to_string(),
-                ),
-            };
-            opencrab_db::queries::insert_session_log(&conn, &log).ok();
         }
         Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
         Err(e) => error!(agent_id = %agent_id, error = %e, "SkillEngine failed"),
@@ -977,21 +903,29 @@ fn build_pending_tool_prefix_messages(
         Err(_) => return vec![],
     };
 
-    // agent_idのspeechログの最後のIDを見つける
-    let last_speech_id: i64 = logs
+    // agent_idのspeechログの最後のIDを見つける（NO_REPLYを除外）
+    // NO_REPLYスピーチを除外: spawn_subtask→NO_REPLYの後に割り込みが来てもtool履歴が消えないようにする
+    let last_meaningful_speech_id: i64 = logs
         .iter()
         .filter(|log| {
-            log.log_type == "speech"
-                && log.speaker_id.as_deref() == Some(agent_id)
+            if log.log_type != "speech" { return false; }
+            if log.speaker_id.as_deref() != Some(agent_id) { return false; }
+            // NO_REPLY speeches are excluded so their preceding tool_calls remain in prefix
+            let is_no_reply = log.metadata_json
+                .as_deref()
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                .and_then(|v| v["no_reply"].as_bool())
+                .unwrap_or(false);
+            !is_no_reply
         })
         .filter_map(|log| log.id)
         .last()
         .unwrap_or(0);
 
-    // last_speech_id以降のtool_call / tool_resultログを抽出
+    // last_meaningful_speech_id以降のtool_call / tool_resultログを抽出
     let after_speech: Vec<_> = logs
         .iter()
-        .filter(|log| log.id.unwrap_or(0) > last_speech_id)
+        .filter(|log| log.id.unwrap_or(0) > last_meaningful_speech_id)
         .filter(|log| log.log_type == "tool_call" || log.log_type == "tool_result")
         .collect();
 
