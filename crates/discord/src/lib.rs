@@ -56,6 +56,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         depth: u32,
         trigger_message_id: Option<String>,
         on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
+        prefix_messages: Vec<opencrab_core::ChatMessage>,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 
     /// エージェントのLLMクライアントを生成する。

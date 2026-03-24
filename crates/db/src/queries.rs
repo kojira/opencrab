@@ -432,6 +432,34 @@ pub fn list_session_logs_by_session(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// List tool_call and tool_result logs for a session, ordered by id.
+pub fn list_tool_messages_for_session(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json
+         FROM memory_sessions
+         WHERE session_id = ?1 AND log_type IN ('tool_call', 'tool_result')
+         ORDER BY id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Count the number of logs in a session.
 pub fn count_session_logs(conn: &Connection, session_id: &str) -> Result<i64> {
     let count: i64 = conn.query_row(

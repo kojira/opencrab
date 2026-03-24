@@ -282,9 +282,10 @@ fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_token
         return String::new();
     }
 
-    // まず各ログを文字列化
+    // まず各ログを文字列化（tool_call/tool_resultはスキップ）
     let formatted: Vec<String> = logs
         .iter()
+        .filter(|log| log.log_type != "tool_call" && log.log_type != "tool_result")
         .map(|log| {
             let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
             format!("[{}]: {}", speaker, log.content)
@@ -309,6 +310,7 @@ fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_token
 
 fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
     logs.iter()
+        .filter(|log| log.log_type != "tool_call" && log.log_type != "tool_result")
         .map(|log| {
             let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
             format!("[{}]: {}", speaker, log.content)
@@ -357,6 +359,7 @@ pub async fn run_agent_response(
     depth: u32,
     trigger_message_id: Option<String>,
     on_first_response: Option<Box<dyn FnOnce(String) + Send>>,
+    prefix_messages: Vec<opencrab_core::ChatMessage>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
     let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
@@ -478,6 +481,53 @@ pub async fn run_agent_response(
     // Set optional first-response callback (for immediate Discord acknowledgment).
     if let Some(cb) = on_first_response {
         engine.set_on_first_response(cb);
+    }
+
+    // Set prefix messages (tool_use/tool_result history from previous runs).
+    engine.set_prefix_messages(prefix_messages);
+
+    // on_tool_call callback: save tool_call to DB.
+    {
+        let tc_db = state.db.clone();
+        let tc_agent = agent_id.to_string();
+        let tc_session = session_id.to_string();
+        engine.set_on_tool_call(move |content: String, tool_calls_json: String| {
+            if let Ok(conn) = tc_db.lock() {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: tc_agent.clone(),
+                    session_id: tc_session.clone(),
+                    log_type: "tool_call".to_string(),
+                    content,
+                    speaker_id: Some(tc_agent.clone()),
+                    turn_number: None,
+                    metadata_json: Some(serde_json::json!({"tool_calls_json": tool_calls_json}).to_string()),
+                };
+                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+            }
+        });
+    }
+
+    // on_tool_result callback: save tool_result to DB.
+    {
+        let tr_db = state.db.clone();
+        let tr_agent = agent_id.to_string();
+        let tr_session = session_id.to_string();
+        engine.set_on_tool_result(move |tool_call_id: String, content: String| {
+            if let Ok(conn) = tr_db.lock() {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: tr_agent.clone(),
+                    session_id: tr_session.clone(),
+                    log_type: "tool_result".to_string(),
+                    content,
+                    speaker_id: None,
+                    turn_number: None,
+                    metadata_json: Some(serde_json::json!({"tool_call_id": tool_call_id}).to_string()),
+                };
+                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+            }
+        });
     }
 
     // Collect image_urls: merge passed-in args with any stored in the latest user log metadata_json.
