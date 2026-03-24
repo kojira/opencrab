@@ -27,15 +27,15 @@ export default function AgentCard({ agent }: Props) {
 
   return (
     <Link to={`/agents/${agent.id}`} className="card-elevated block group hover:border-primary/40">
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3 mb-3">
         {agent.image_url ? (
           <img
-            className="w-12 h-12 rounded-xl object-cover shadow-elevation-1"
+            className="w-10 h-10 rounded-xl object-cover shadow-elevation-1"
             src={agent.image_url}
             alt={agent.name}
           />
         ) : (
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary-container to-primary/20 flex items-center justify-center shadow-elevation-1">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-container to-primary/20 flex items-center justify-center shadow-elevation-1">
             <span className="text-title-md text-primary font-bold">
               {firstChar}
             </span>
@@ -55,7 +55,7 @@ export default function AgentCard({ agent }: Props) {
           <span className="material-symbols-outlined text-sm mr-0.5">
             {statusIcon}
           </span>
-          {agent.status}
+          {t('agentStatus.' + agent.status, { defaultValue: agent.status })}
         </span>
       </div>
 

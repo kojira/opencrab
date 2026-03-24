@@ -96,21 +96,21 @@ export default function SessionCard({ session }: { session: SessionDto }) {
       <img
         src={discordMeta.dm_user_avatar_url}
         alt={discordMeta.dm_user_name || ''}
-        className="w-10 h-10 rounded-full"
+        className="w-8 h-8 rounded-full"
       />
     ) : discordMeta.guild_icon_url ? (
       <img
         src={discordMeta.guild_icon_url}
         alt={discordMeta.guild_name || ''}
-        className="w-10 h-10 rounded-full"
+        className="w-8 h-8 rounded-full"
       />
     ) : (
-      <div className="w-10 h-10 rounded-lg bg-tertiary-container flex items-center justify-center">
+      <div className="w-8 h-8 rounded-lg bg-tertiary-container flex items-center justify-center">
         <span className="material-symbols-outlined text-xl text-tertiary">forum</span>
       </div>
     )
   ) : (
-    <div className="w-10 h-10 rounded-lg bg-tertiary-container flex items-center justify-center">
+    <div className="w-8 h-8 rounded-lg bg-tertiary-container flex items-center justify-center">
       <span className="material-symbols-outlined text-xl text-tertiary">forum</span>
     </div>
   );
@@ -121,7 +121,7 @@ export default function SessionCard({ session }: { session: SessionDto }) {
         <div className="flex items-center gap-4 flex-1 min-w-0">
           <div className="shrink-0">{sessionIcon}</div>
           <div className="min-w-0">
-            <h3 className="text-title-md text-on-surface group-hover:text-primary transition-colors truncate">
+            <h3 className="text-title-sm text-on-surface group-hover:text-primary transition-colors truncate">
               {session.theme}
             </h3>
             <div className="flex items-center gap-3 text-body-sm text-on-surface-variant mt-0.5">
@@ -152,7 +152,7 @@ export default function SessionCard({ session }: { session: SessionDto }) {
           </span>
           <span className={badgeClass}>
             <span className="material-symbols-outlined text-sm mr-0.5">{statusIcon}</span>
-            {session.status}
+            {t('sessionStatus.' + session.status, { defaultValue: session.status })}
           </span>
         </div>
       </div>

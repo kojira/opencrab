@@ -198,6 +198,15 @@ pub async fn send_agent_message(
                 opencrab_db::queries::insert_session_log(&conn, &response_log).ok();
             }
 
+            // Mark session as completed after agent responds
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "UPDATE sessions SET status = 'completed' WHERE id = ?1",
+                    [&session_id],
+                ).ok();
+            }
+
             Json(serde_json::json!({
                 "session_id": session_id,
                 "caller_type": caller_type,
@@ -209,6 +218,14 @@ pub async fn send_agent_message(
         }
         Err(e) => {
             tracing::error!(agent_id = %id, error = %e, "Agent response failed");
+            // Mark session as completed after agent responds
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "UPDATE sessions SET status = 'completed' WHERE id = ?1",
+                    [&session_id],
+                ).ok();
+            }
             Json(serde_json::json!({
                 "session_id": session_id,
                 "caller_type": caller_type,

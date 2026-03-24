@@ -2,9 +2,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { useAgentContext } from '../hooks/useAgentContext';
 import { listChannelConfigs, upsertChannelConfig, deleteChannelConfig } from '../api/channel_configs';
 import type { ChannelConfigDto } from '../api/types';
+import { useTranslation } from "react-i18next";
 
 export default function AgentChannels() {
   const { agentId } = useAgentContext();
+  const { t } = useTranslation();
   const [guildId, setGuildId] = useState('');
   const [configs, setConfigs] = useState<ChannelConfigDto[]>([]);
   const [loading, setLoading] = useState(false);
@@ -53,16 +55,16 @@ export default function AgentChannels() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <label className="text-label-lg text-on-surface-variant">Guild ID</label>
+        <label className="text-label-lg text-on-surface-variant">{t("channels.guildIdLabel")}</label>
         <input
           type="text"
           className="input-outlined flex-1 min-w-0"
           value={guildId}
           onChange={e => setGuildId(e.target.value)}
-          placeholder="Enter guild ID"
+          placeholder={t("channels.guildIdPlaceholder")}
         />
         <button className="btn-filled" onClick={load} disabled={!guildId || loading}>
-          Load
+          {t("channels.loadButton")}
         </button>
       </div>
 
@@ -72,20 +74,20 @@ export default function AgentChannels() {
         </div>
       )}
 
-      {loading && <p className="text-body-lg text-on-surface-variant">Loading...</p>}
+      {loading && <p className="text-body-lg text-on-surface-variant">{t("common.loading")}</p>}
 
       {configs.length > 0 && (
         <div className="card-outlined overflow-x-auto">
           <table className="w-full text-body-md">
             <thead>
               <tr className="border-b border-outline-variant">
-                <th className="p-3 text-left text-label-lg">Channel</th>
-                <th className="p-3 text-center text-label-lg">Readable</th>
-                <th className="p-3 text-center text-label-lg">Writable</th>
-                <th className="p-3 text-center text-label-lg">Whitelisted</th>
-                <th className="p-3 text-center text-label-lg">Heartbeat</th>
-                <th className="p-3 text-center text-label-lg">Interval (sec)</th>
-                <th className="p-3 text-center text-label-lg">Actions</th>
+                <th className="p-3 text-left text-label-lg">{t("channels.tableChannel")}</th>
+                <th className="p-3 text-center text-label-lg">{t("channels.tableReadable")}</th>
+                <th className="p-3 text-center text-label-lg">{t("channels.tableWritable")}</th>
+                <th className="p-3 text-center text-label-lg">{t("channels.tableWhitelisted")}</th>
+                <th className="p-3 text-center text-label-lg">{t("channels.tableHeartbeat")}</th>
+                <th className="p-3 text-center text-label-lg">{t("channels.tableInterval")}</th>
+                <th className="p-3 text-center text-label-lg">{t("channels.tableActions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -129,7 +131,7 @@ export default function AgentChannels() {
                       className="input-outlined w-24 text-center"
                       value={config.heartbeat_interval_secs ?? ''}
                       onChange={e => handleFieldChange(idx, 'heartbeat_interval_secs', e.target.value ? Number(e.target.value) : null)}
-                      placeholder="Global"
+                      placeholder={t("channels.globalPlaceholder")}
                     />
                   </td>
                   <td className="p-3 text-center space-x-2">
@@ -137,13 +139,13 @@ export default function AgentChannels() {
                       className="btn-tonal text-body-sm"
                       onClick={() => handleSave(config)}
                     >
-                      Save
+                      {t("common.save")}
                     </button>
                     <button
                       className="btn-text text-error text-body-sm"
                       onClick={() => handleDelete(config.channel_id)}
                     >
-                      Delete
+                      {t("common.delete")}
                     </button>
                   </td>
                 </tr>
@@ -155,7 +157,7 @@ export default function AgentChannels() {
 
       {!loading && configs.length === 0 && guildId && (
         <div className="empty-state">
-          <p className="text-body-lg text-on-surface-variant">No channel configs found for this guild.</p>
+          <p className="text-body-lg text-on-surface-variant">{t("channels.noConfigs")}</p>
         </div>
       )}
     </div>

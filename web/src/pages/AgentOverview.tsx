@@ -74,7 +74,7 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
         });
       }
       if (res.ok) {
-        setMessage(editMode === "full" ? t('agentDetail.gatewayStarted') : "Owner Discord ID を更新しました。");
+        setMessage(editMode === "full" ? t('agentDetail.gatewayStarted') : t('agentDetail.ownerUpdated'));
         setEditing(false);
         setToken('');
         loadConfig();
@@ -161,7 +161,7 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
 
       {config.configured && !editing && (
         <div className="space-y-2">
-          <DetailRow label={t('agentDetail.botToken')} value={config.token_masked || '***'} />
+          <DetailRow label={t('agentDetail.botToken')} value={config.configured ? '●●●●●●●●●●●●●●●●●●●●' : t('agentDetail.notConfigured')} />
           {config.owner_discord_id && (
             <DetailRow label={t('agentDetail.ownerDiscordId')} value={config.owner_discord_id} />
           )}
@@ -209,13 +209,13 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
               className={`text-label-lg px-3 py-1 rounded-t ${editMode === "owner_only" ? "bg-primary-container text-on-primary-container" : "text-on-surface-variant hover:bg-surface-variant/50"}`}
               onClick={() => setEditMode("owner_only")}
             >
-              Owner ID のみ変更
+              {t('agentDetail.editModeOwnerOnly')}
             </button>
             <button
               className={`text-label-lg px-3 py-1 rounded-t ${editMode === "full" ? "bg-primary-container text-on-primary-container" : "text-on-surface-variant hover:bg-surface-variant/50"}`}
               onClick={() => setEditMode("full")}
             >
-              Bot トークンを変更
+              {t('agentDetail.editModeFullToken')}
             </button>
           </div>
 

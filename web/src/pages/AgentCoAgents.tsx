@@ -3,6 +3,7 @@ import { useOutletContext } from "react-router-dom";
 import type { AgentDetail } from "../api/types";
 import { getCoAgents, addCoAgent, removeCoAgent } from "../api/co_agents";
 import type { CoAgentDto } from "../api/co_agents";
+import { useTranslation } from "react-i18next";
 
 interface AgentContext {
   agent: AgentDetail;
@@ -11,6 +12,7 @@ interface AgentContext {
 
 export default function AgentCoAgents() {
   const { agentId } = useOutletContext<AgentContext>();
+  const { t } = useTranslation();
   const [coAgents, setCoAgents] = useState<CoAgentDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +47,7 @@ export default function AgentCoAgents() {
   const handleAdd = async () => {
     const cid = newCoAgentId.trim();
     if (!cid) {
-      setAddError("Co-Agent ID is required.");
+      setAddError(t("coAgents.idRequired"));
       return;
     }
     const allowed =
@@ -84,11 +86,10 @@ export default function AgentCoAgents() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-title-lg text-on-surface font-medium">
-            Co-Agents
+            {t("coAgents.title")}
           </h2>
           <p className="text-body-md text-on-surface-variant mt-1">
-            Trusted co-agents that can act on behalf of this agent. Empty
-            allowed actions means all actions are permitted.
+            {t("coAgents.description")}
           </p>
         </div>
         <button
@@ -101,13 +102,13 @@ export default function AgentCoAgents() {
           }}
         >
           <span className="material-symbols-outlined text-xl">add</span>
-          Add Co-Agent
+          {t("coAgents.addButton")}
         </button>
       </div>
 
       {loading && (
         <div className="empty-state">
-          <p className="text-body-lg text-on-surface-variant">Loading...</p>
+          <p className="text-body-lg text-on-surface-variant">{t("common.loading")}</p>
         </div>
       )}
 
@@ -116,7 +117,7 @@ export default function AgentCoAgents() {
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-error">error</span>
             <p className="text-body-lg text-error-on-container">
-              Error: {error}
+              {t("common.error", { message: error })}
             </p>
           </div>
         </div>
@@ -127,9 +128,9 @@ export default function AgentCoAgents() {
           <span className="material-symbols-outlined empty-state-icon">
             group
           </span>
-          <p className="empty-state-text">No trusted co-agents.</p>
+          <p className="empty-state-text">{t("coAgents.noCoAgents")}</p>
           <p className="text-body-sm text-on-surface-variant mt-2">
-            Add co-agents to allow them to act on behalf of this agent.
+            {t("coAgents.emptyDesc")}
           </p>
         </div>
       )}
@@ -140,16 +141,16 @@ export default function AgentCoAgents() {
             <thead>
               <tr className="border-b border-outline-variant">
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Co-Agent ID
+                  {t("coAgents.tableId")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Allowed Actions
+                  {t("coAgents.tableActions")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Added By
+                  {t("coAgents.tableAddedBy")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
-                  Added At
+                  {t("coAgents.tableAddedAt")}
                 </th>
                 <th className="px-4 py-3"></th>
               </tr>
@@ -165,7 +166,7 @@ export default function AgentCoAgents() {
                   </td>
                   <td className="px-4 py-3 text-body-md text-on-surface-variant">
                     {!ca.allowed_actions || ca.allowed_actions.length === 0
-                      ? "All actions"
+                      ? t("coAgents.allActions")
                       : ca.allowed_actions.join(", ")}
                   </td>
                   <td className="px-4 py-3 text-body-sm text-on-surface-variant">
@@ -182,7 +183,7 @@ export default function AgentCoAgents() {
                       <span className="material-symbols-outlined text-base">
                         delete
                       </span>
-                      Remove
+                      {t("common.remove")}
                     </button>
                   </td>
                 </tr>
@@ -197,12 +198,12 @@ export default function AgentCoAgents() {
         <div className="scrim">
           <div className="dialog">
             <h3 className="text-title-lg text-on-surface mb-4">
-              Add Co-Agent
+              {t("coAgents.addModalTitle")}
             </h3>
             <div className="space-y-4 mb-6">
               <div>
                 <label className="block text-label-lg text-on-surface mb-2">
-                  Co-Agent ID *
+                  {t("coAgents.idLabel")}
                 </label>
                 <input
                   type="text"
@@ -214,10 +215,7 @@ export default function AgentCoAgents() {
               </div>
               <div>
                 <label className="block text-label-lg text-on-surface mb-2">
-                  Allowed Actions{" "}
-                  <span className="text-on-surface-variant font-normal">
-                    (comma-separated, empty = all actions)
-                  </span>
+                  {t("coAgents.actionsLabel")}
                 </label>
                 <input
                   type="text"
@@ -236,14 +234,14 @@ export default function AgentCoAgents() {
                 className="btn-outlined"
                 onClick={() => setShowAddModal(false)}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 className="btn-filled"
                 disabled={adding}
                 onClick={handleAdd}
               >
-                {adding ? "Adding..." : "Add"}
+                {adding ? t("common.adding") : t("common.add")}
               </button>
             </div>
           </div>
@@ -259,24 +257,24 @@ export default function AgentCoAgents() {
                 warning
               </span>
               <h3 className="text-title-lg text-on-surface">
-                Remove Co-Agent?
+                {t("coAgents.confirmRemoveTitle")}
               </h3>
             </div>
             <p className="text-body-lg text-on-surface-variant mb-6">
-              Remove &quot;{confirmRemoveId}&quot; from trusted co-agents?
+              {t("coAgents.confirmRemoveMsg", { id: confirmRemoveId })}
             </p>
             <div className="flex gap-3 justify-end">
               <button
                 className="btn-outlined"
                 onClick={() => setConfirmRemoveId(null)}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 className="btn-danger"
                 onClick={() => handleRemove(confirmRemoveId)}
               >
-                Remove
+                {t("common.remove")}
               </button>
             </div>
           </div>
