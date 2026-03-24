@@ -34,6 +34,7 @@ pub struct AppState {
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .route("/api/health", get(api_health_check))
         // エージェント管理
         .route("/api/agents", get(api::agents::list_agents).post(api::agents::create_agent))
         .route("/api/agents/{id}", get(api::agents::get_agent).delete(api::agents::delete_agent))
@@ -106,4 +107,8 @@ pub fn create_router(state: AppState) -> Router {
 
 async fn health_check() -> &'static str {
     "ok"
+}
+
+async fn api_health_check() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({"status": "ok"}))
 }
