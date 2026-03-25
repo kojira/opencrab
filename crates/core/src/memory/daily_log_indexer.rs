@@ -53,14 +53,20 @@ impl DailyLogIndexer {
         };
 
         let last_indexed_date = {
-            let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
             opencrab_db::queries::get_daily_log_watermark(&db, agent_id)?
                 .map(|w| w.last_indexed_date)
                 .unwrap_or_else(|| "0000-00-00".to_string())
         };
 
         let entries = {
-            let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
             opencrab_db::queries::get_unindexed_daily_logs(&db, agent_id, &last_indexed_date)?
         };
 
@@ -73,74 +79,36 @@ impl DailyLogIndexer {
         let root_id = format!("{agent_id}:daily_log:root");
         let mut periods_seen = HashSet::new();
         for entry in &entries {
-            let date_str = &entry.date_str;
-            let year_month = &date_str[..7];
-            let period_id = self.ensure_period_node(agent_id, year_month, &root_id, &now)?;
-            periods_seen.insert(year_month.to_string());
-
-            let (day_summary, topics) = self.summarize_day(date_str, &entry.content).await;
-            stats.llm_calls += 1;
-
-            let daily_id = format!("{agent_id}:daily_log:daily:{date_str}");
+            match self
+                .process_entry(agent_id, entry, &root_id, &now, &mut periods_seen)
+                .await
             {
-                let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-                let daily_node = opencrab_db::queries::IndexNodeRow {
-                    id: daily_id.clone(),
-                    agent_id: agent_id.to_string(),
-                    parent_id: Some(period_id.clone()),
-                    node_type: "daily".to_string(),
-                    source_type: "daily_log".to_string(),
-                    title: date_str.clone(),
-                    summary: day_summary,
-                    start_log_id: None,
-                    end_log_id: None,
-                    source_session_id: None,
-                    date_from: Some(date_str.clone()),
-                    date_to: Some(date_str.clone()),
-                    depth: 2,
-                    child_count: 0,
-                    token_count: (entry.content.len() / 3) as i32,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                };
-                opencrab_db::queries::upsert_daily_log_index_node(&db, &daily_node)?;
+                Ok(llm_calls) => {
+                    stats.llm_calls += llm_calls;
+                    stats.days_indexed += 1;
+                    let db = self
+                        .db
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+                    opencrab_db::queries::upsert_daily_log_watermark(
+                        &db,
+                        &opencrab_db::queries::DailyLogWatermarkRow {
+                            agent_id: agent_id.to_string(),
+                            last_indexed_date: entry.date_str.clone(),
+                            updated_at: now.clone(),
+                        },
+                    )?;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        date=%entry.date_str,
+                        error=%e,
+                        "skipping daily log entry due to error"
+                    );
+                    stats.days_skipped += 1;
+                    continue;
+                }
             }
-
-            for (i, topic) in topics.iter().enumerate().take(5) {
-                let topic_id = format!("{agent_id}:daily_log:topic:{date_str}:{i}");
-                let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-                let topic_node = opencrab_db::queries::IndexNodeRow {
-                    id: topic_id,
-                    agent_id: agent_id.to_string(),
-                    parent_id: Some(daily_id.clone()),
-                    node_type: "topic".to_string(),
-                    source_type: "daily_log".to_string(),
-                    title: topic.title.clone(),
-                    summary: topic.summary.clone(),
-                    start_log_id: None,
-                    end_log_id: None,
-                    source_session_id: None,
-                    date_from: Some(date_str.clone()),
-                    date_to: Some(date_str.clone()),
-                    depth: 3,
-                    child_count: 0,
-                    token_count: 0,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                };
-                opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
-            }
-
-            stats.days_indexed += 1;
-            let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-            opencrab_db::queries::upsert_daily_log_watermark(
-                &db,
-                &opencrab_db::queries::DailyLogWatermarkRow {
-                    agent_id: agent_id.to_string(),
-                    last_indexed_date: date_str.clone(),
-                    updated_at: now.clone(),
-                },
-            )?;
         }
 
         self.update_child_counts(agent_id)?;
@@ -155,7 +123,10 @@ impl DailyLogIndexer {
 
         for date_str in dates {
             let entry = {
-                let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
                 opencrab_db::queries::get_daily_log_by_date(&db, agent_id, date_str)?
             };
             if let Some(entry) = entry {
@@ -165,7 +136,10 @@ impl DailyLogIndexer {
                 let daily_id = format!("{agent_id}:daily_log:daily:{date_str}");
 
                 {
-                    let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+                    let db = self
+                        .db
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
                     let daily_node = opencrab_db::queries::IndexNodeRow {
                         id: daily_id.clone(),
                         agent_id: agent_id.to_string(),
@@ -190,7 +164,10 @@ impl DailyLogIndexer {
 
                 for (i, topic) in topics.iter().enumerate().take(5) {
                     let topic_id = format!("{agent_id}:daily_log:topic:{date_str}:{i}");
-                    let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+                    let db = self
+                        .db
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
                     let topic_node = opencrab_db::queries::IndexNodeRow {
                         id: topic_id,
                         agent_id: agent_id.to_string(),
@@ -220,7 +197,11 @@ impl DailyLogIndexer {
 
     async fn summarize_day(&self, date: &str, content: &str) -> (String, Vec<TopicJson>) {
         let truncated = if content.len() > 4096 {
-            &content[..4096]
+            let mut end = 4096;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            &content[..end]
         } else {
             content
         };
@@ -275,9 +256,86 @@ impl DailyLogIndexer {
         }
     }
 
+    async fn process_entry(
+        &self,
+        agent_id: &str,
+        entry: &opencrab_db::queries::DailyLogEntry,
+        root_id: &str,
+        now: &str,
+        periods_seen: &mut HashSet<String>,
+    ) -> Result<usize> {
+        let date_str = &entry.date_str;
+        let year_month = &date_str[..7];
+        let period_id = self.ensure_period_node(agent_id, year_month, root_id, now)?;
+        periods_seen.insert(year_month.to_string());
+
+        let (day_summary, topics) = self.summarize_day(date_str, &entry.content).await;
+
+        let daily_id = format!("{agent_id}:daily_log:daily:{date_str}");
+        {
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let daily_node = opencrab_db::queries::IndexNodeRow {
+                id: daily_id.clone(),
+                agent_id: agent_id.to_string(),
+                parent_id: Some(period_id.clone()),
+                node_type: "daily".to_string(),
+                source_type: "daily_log".to_string(),
+                title: date_str.clone(),
+                summary: day_summary,
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: Some(date_str.clone()),
+                date_to: Some(date_str.clone()),
+                depth: 2,
+                child_count: 0,
+                token_count: (entry.content.len() / 3) as i32,
+                created_at: now.to_string(),
+                updated_at: now.to_string(),
+            };
+            opencrab_db::queries::upsert_daily_log_index_node(&db, &daily_node)?;
+        }
+
+        for (i, topic) in topics.iter().enumerate().take(5) {
+            let topic_id = format!("{agent_id}:daily_log:topic:{date_str}:{i}");
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let topic_node = opencrab_db::queries::IndexNodeRow {
+                id: topic_id,
+                agent_id: agent_id.to_string(),
+                parent_id: Some(daily_id.clone()),
+                node_type: "topic".to_string(),
+                source_type: "daily_log".to_string(),
+                title: topic.title.clone(),
+                summary: topic.summary.clone(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: Some(date_str.clone()),
+                date_to: Some(date_str.clone()),
+                depth: 3,
+                child_count: 0,
+                token_count: 0,
+                created_at: now.to_string(),
+                updated_at: now.to_string(),
+            };
+            opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
+        }
+
+        Ok(1)
+    }
+
     fn ensure_root_node(&self, agent_id: &str, now: &str) -> Result<()> {
         let root_id = format!("{agent_id}:daily_log:root");
-        let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
         if opencrab_db::queries::get_index_node(&db, &root_id)?.is_none() {
             let root = opencrab_db::queries::IndexNodeRow {
                 id: root_id,
@@ -311,7 +369,10 @@ impl DailyLogIndexer {
         now: &str,
     ) -> Result<String> {
         let period_id = format!("{agent_id}:daily_log:period:{year_month}");
-        let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
         if opencrab_db::queries::get_index_node(&db, &period_id)?.is_none() {
             let year = &year_month[..4];
             let month = &year_month[5..7];
@@ -340,7 +401,10 @@ impl DailyLogIndexer {
     }
 
     fn update_child_counts(&self, agent_id: &str) -> Result<()> {
-        let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
         let mut stmt = db.prepare(
             "SELECT id, parent_id FROM memory_index_nodes WHERE agent_id=?1 AND source_type='daily_log'",
         )?;
@@ -377,7 +441,10 @@ impl DailyLogIndexer {
 
     pub async fn rebuild(&self, agent_id: &str) -> Result<DailyLogIndexStats> {
         {
-            let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let db = self
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
             db.execute(
                 "DELETE FROM memory_index_nodes WHERE agent_id=?1 AND source_type='daily_log'",
                 rusqlite::params![agent_id],
@@ -445,11 +512,20 @@ mod tests {
 
         let db = conn.lock().unwrap();
         let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
-        let daily_log_nodes: Vec<_> = tree.iter().filter(|n| n.source_type == "daily_log").collect();
+        let daily_log_nodes: Vec<_> = tree
+            .iter()
+            .filter(|n| n.source_type == "daily_log")
+            .collect();
         assert!(daily_log_nodes.len() >= 5, "root+period+2daily+2topic >= 5");
         assert!(daily_log_nodes.iter().any(|n| n.node_type == "root"));
         assert!(daily_log_nodes.iter().any(|n| n.node_type == "period"));
-        assert_eq!(daily_log_nodes.iter().filter(|n| n.node_type == "daily").count(), 2);
+        assert_eq!(
+            daily_log_nodes
+                .iter()
+                .filter(|n| n.node_type == "daily")
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -491,12 +567,33 @@ mod tests {
         let db = conn.lock().unwrap();
         let tree1 = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
         let tree2 = opencrab_db::queries::get_index_tree(&db, "agent-2").unwrap();
-        let dl1: Vec<_> = tree1.iter().filter(|n| n.source_type == "daily_log").collect();
-        let dl2: Vec<_> = tree2.iter().filter(|n| n.source_type == "daily_log").collect();
+        let dl1: Vec<_> = tree1
+            .iter()
+            .filter(|n| n.source_type == "daily_log")
+            .collect();
+        let dl2: Vec<_> = tree2
+            .iter()
+            .filter(|n| n.source_type == "daily_log")
+            .collect();
         assert!(!dl1.is_empty());
         assert!(!dl2.is_empty());
         for n1 in &dl1 {
             assert!(dl2.iter().all(|n2| n2.id != n1.id));
         }
+    }
+
+    #[tokio::test]
+    async fn test_utf8_japanese_truncation() {
+        let db = opencrab_db::init_memory().unwrap();
+        let content = "あ".repeat(1500);
+        assert!(content.len() > 4096);
+        insert_daily_log(&db, "agent-1", "2026-02-03", &content);
+        let conn = Arc::new(Mutex::new(db));
+        let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string());
+
+        let stats = indexer.run("agent-1").await.unwrap();
+
+        assert_eq!(stats.days_indexed, 1);
+        assert_eq!(stats.days_skipped, 0);
     }
 }
