@@ -240,10 +240,19 @@ impl IndexBuilder {
                             .unwrap_or_default(),
                     })
                 }
-                Err(_) => LlmSummary {
-                    title: format!("Topic (logs {first_log_id}-{last_log_id})"),
-                    summary: "Summary generation failed".to_string(),
-                },
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        first_log_id = first_log_id,
+                        last_log_id = last_log_id,
+                        error = %e,
+                        "LLM summary generation failed, using fallback"
+                    );
+                    LlmSummary {
+                        title: format!("Topic (logs {first_log_id}-{last_log_id})"),
+                        summary: "Summary generation failed".to_string(),
+                    }
+                }
             };
 
             // topicノード作成
@@ -251,7 +260,7 @@ impl IndexBuilder {
                 "topic-{agent_id}-{session_id}-{first_log_id}-{last_log_id}"
             );
             let topic = opencrab_db::queries::IndexNodeRow {
-                id: topic_id,
+                id: topic_id.clone(),
                 agent_id: agent_id.to_string(),
                 parent_id: Some(session_node_id.clone()),
                 node_type: "topic".to_string(),
@@ -269,8 +278,15 @@ impl IndexBuilder {
 
             {
                 let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
-                opencrab_db::queries::insert_index_node(&db, &topic)?;
-                nodes_created += 1;
+                if opencrab_db::queries::get_index_node(&db, &topic_id)?.is_none() {
+                    opencrab_db::queries::insert_index_node(&db, &topic)?;
+                    nodes_created += 1;
+                } else {
+                    tracing::debug!(
+                        topic_id = %topic_id,
+                        "Topic node already exists, skipping insertion"
+                    );
+                }
             }
         }
 

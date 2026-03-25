@@ -1733,7 +1733,7 @@ pub struct WatermarkRow {
 
 pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at)
+        "INSERT OR IGNORE INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             node.id,
