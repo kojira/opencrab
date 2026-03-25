@@ -26,7 +26,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_permission_col {
-        conn.execute_batch("ALTER TABLE skills ADD COLUMN permission TEXT NOT NULL DEFAULT '\"agent\"'")?;
+        conn.execute_batch(
+            "ALTER TABLE skills ADD COLUMN permission TEXT NOT NULL DEFAULT '\"agent\"'",
+        )?;
     }
 
     // skills.archived カラム追加（スキルアーカイブ機能）
@@ -46,7 +48,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_whitelisted_col {
-        conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0")?;
+        conn.execute_batch(
+            "ALTER TABLE discord_channel_config ADD COLUMN whitelisted INTEGER NOT NULL DEFAULT 0",
+        )?;
     }
 
     // discord_channel_config.heartbeat_enabled カラム追加
@@ -66,7 +70,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_hb_interval {
-        conn.execute_batch("ALTER TABLE discord_channel_config ADD COLUMN heartbeat_interval_secs INTEGER")?;
+        conn.execute_batch(
+            "ALTER TABLE discord_channel_config ADD COLUMN heartbeat_interval_secs INTEGER",
+        )?;
     }
 
     // agent_memory_index_config テーブル作成（既存DBへの対応）
@@ -76,7 +82,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             batch_size INTEGER NOT NULL DEFAULT 50,
             threshold INTEGER NOT NULL DEFAULT 20,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )"
+        )",
     )?;
 
     // soul.social_style_json カラムDROP（dead code削除）
@@ -119,7 +125,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);"
+        CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);",
     )?;
 
     // llm_logs 新カラム追加（既存DBへの対応）
@@ -142,7 +148,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     let has_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='completion_tokens'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='completion_tokens'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -190,7 +198,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     // llm_logs.trigger_message_id カラム追加
     let has_trigger: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='trigger_message_id'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='trigger_message_id'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -200,17 +210,23 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     // llm_logs.is_bot_iteration カラム追加
     let has_bot_iter: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='is_bot_iteration'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='is_bot_iteration'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_bot_iter {
-        conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN is_bot_iteration INTEGER NOT NULL DEFAULT 0")?;
+        conn.execute_batch(
+            "ALTER TABLE llm_logs ADD COLUMN is_bot_iteration INTEGER NOT NULL DEFAULT 0",
+        )?;
     }
 
     // llm_logs.cache_read_tokens カラム追加
     let has_cache_read: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='cache_read_tokens'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='cache_read_tokens'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -220,7 +236,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     // llm_logs.cache_creation_tokens カラム追加
     let has_cache_creation: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='cache_creation_tokens'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('llm_logs') WHERE name='cache_creation_tokens'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -250,12 +268,16 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     // memory_curated.created_at カラム追加
     let has_curated_created_at: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_curated') WHERE name='created_at'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('memory_curated') WHERE name='created_at'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
     if !has_curated_created_at {
-        conn.execute_batch("ALTER TABLE memory_curated ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")?;
+        conn.execute_batch(
+            "ALTER TABLE memory_curated ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+        )?;
     }
 
     // soul.instructions カラム追加（操作ルール・AGENTS.md相当）
@@ -267,6 +289,39 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_instructions {
         conn.execute_batch("ALTER TABLE soul ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")?;
     }
+
+    // import_sync_state テーブル作成
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS import_sync_state (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            source_dir TEXT NOT NULL,
+            file_type TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            synced_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_import_sync_state_key
+            ON import_sync_state(agent_id, source_dir, file_name);
+        CREATE INDEX IF NOT EXISTS idx_import_sync_state_agent
+            ON import_sync_state(agent_id);",
+    )?;
+
+    // memory_curated の (agent_id, category) UNIQUE INDEX 追加
+    // 既存の重複レコードをself-joinで削除してからインデックスを作成
+    // SQLite特有の制限: サブクエリ内でLIMITが使えないのでself-joinを使う
+    conn.execute_batch(
+        "DELETE FROM memory_curated
+         WHERE id IN (
+             SELECT mc1.id FROM memory_curated mc1
+             INNER JOIN memory_curated mc2 ON mc1.agent_id = mc2.agent_id
+                 AND mc1.category = mc2.category
+                 AND mc1.updated_at < mc2.updated_at
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_curated_agent_category
+             ON memory_curated(agent_id, category);",
+    )?;
 
     Ok(())
 }
@@ -643,4 +698,22 @@ CREATE TABLE IF NOT EXISTS llm_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_logs_agent ON llm_logs(agent_id);
 CREATE INDEX IF NOT EXISTS idx_llm_logs_created ON llm_logs(agent_id, created_at DESC);
+
+-- ============================================
+-- インポート同期状態
+-- ============================================
+CREATE TABLE IF NOT EXISTS import_sync_state (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    source_dir TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_import_sync_state_key
+    ON import_sync_state(agent_id, source_dir, file_name);
+CREATE INDEX IF NOT EXISTS idx_import_sync_state_agent
+    ON import_sync_state(agent_id);
 "#;

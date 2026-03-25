@@ -129,10 +129,7 @@ pub fn insert_soul_preset(conn: &Connection, preset: &SoulPresetRow) -> Result<(
 }
 
 pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
-    let deleted = conn.execute(
-        "DELETE FROM soul_presets WHERE id = ?1",
-        params![preset_id],
-    )?;
+    let deleted = conn.execute("DELETE FROM soul_presets WHERE id = ?1", params![preset_id])?;
     Ok(deleted > 0)
 }
 
@@ -200,9 +197,15 @@ pub fn get_identity(conn: &Connection, agent_id: &str) -> Result<Option<Identity
 
 /// Delete an agent and all related data (identity, soul, skills, curated memory, discord config).
 pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
-    let deleted = conn.execute("DELETE FROM identity WHERE agent_id = ?1", params![agent_id])?;
+    let deleted = conn.execute(
+        "DELETE FROM identity WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
     conn.execute("DELETE FROM soul WHERE agent_id = ?1", params![agent_id])?;
-    conn.execute("DELETE FROM soul_presets WHERE agent_id = ?1", params![agent_id])?;
+    conn.execute(
+        "DELETE FROM soul_presets WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
     conn.execute("DELETE FROM skills WHERE agent_id = ?1", params![agent_id])?;
     conn.execute(
         "DELETE FROM memory_curated WHERE agent_id = ?1",
@@ -216,10 +219,7 @@ pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
 }
 
 /// Find agents by partial ID prefix or name (case-insensitive).
-pub fn find_agents(
-    conn: &Connection,
-    query: &str,
-) -> Result<Vec<(String, String)>> {
+pub fn find_agents(conn: &Connection, query: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, name FROM identity WHERE agent_id LIKE ?1 OR LOWER(name) LIKE LOWER(?2)",
     )?;
@@ -248,7 +248,7 @@ pub fn upsert_curated_memory(conn: &Connection, memory: &CuratedMemoryRow) -> Re
     conn.execute(
         "INSERT INTO memory_curated (id, agent_id, category, content, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET
+         ON CONFLICT(agent_id, category) DO UPDATE SET
             content = excluded.content,
             updated_at = excluded.updated_at",
         params![
@@ -355,7 +355,13 @@ pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64>
     conn.execute(
         "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![row_id, log.content, log.agent_id, log.session_id, log.log_type],
+        params![
+            row_id,
+            log.content,
+            log.agent_id,
+            log.session_id,
+            log.log_type
+        ],
     )?;
 
     Ok(row_id)
@@ -553,7 +559,12 @@ pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Resu
     list_skills_filtered(conn, agent_id, active_only, false)
 }
 
-pub fn list_skills_filtered(conn: &Connection, agent_id: &str, active_only: bool, include_archived: bool) -> Result<Vec<SkillRow>> {
+pub fn list_skills_filtered(
+    conn: &Connection,
+    agent_id: &str,
+    active_only: bool,
+    include_archived: bool,
+) -> Result<Vec<SkillRow>> {
     let sql = match (active_only, include_archived) {
         (true, _) => {
             "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
@@ -634,7 +645,11 @@ pub fn set_skill_active(conn: &Connection, skill_id: &str, active: bool) -> Resu
     Ok(())
 }
 
-pub fn find_skill_by_name(conn: &Connection, agent_id: &str, name: &str) -> Result<Option<SkillRow>> {
+pub fn find_skill_by_name(
+    conn: &Connection,
+    agent_id: &str,
+    name: &str,
+) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
         "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) AND archived = 0 LIMIT 1",
@@ -666,7 +681,11 @@ pub fn find_skill_by_name(conn: &Connection, agent_id: &str, name: &str) -> Resu
     }
 }
 
-pub fn find_skill_by_name_any(conn: &Connection, agent_id: &str, name: &str) -> Result<Option<SkillRow>> {
+pub fn find_skill_by_name_any(
+    conn: &Connection,
+    agent_id: &str,
+    name: &str,
+) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
         "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
          FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) LIMIT 1",
@@ -756,7 +775,11 @@ pub fn archive_skill(conn: &Connection, skill_id: &str, archived: bool) -> Resul
     Ok(())
 }
 
-pub fn find_unused_skills(conn: &Connection, agent_id: &str, days_old: i64) -> Result<Vec<SkillRow>> {
+pub fn find_unused_skills(
+    conn: &Connection,
+    agent_id: &str,
+    days_old: i64,
+) -> Result<Vec<SkillRow>> {
     let cutoff = (Utc::now() - chrono::Duration::days(days_old)).to_rfc3339();
     let mut stmt = conn.prepare(
         "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
@@ -927,11 +950,7 @@ pub fn update_llm_metrics_evaluation(
     Ok(())
 }
 
-pub fn update_llm_metrics_tags(
-    conn: &Connection,
-    metrics_id: &str,
-    tags_json: &str,
-) -> Result<()> {
+pub fn update_llm_metrics_tags(conn: &Connection, metrics_id: &str, tags_json: &str) -> Result<()> {
     conn.execute(
         "UPDATE llm_usage_metrics SET tags = ?1 WHERE id = ?2",
         params![tags_json, metrics_id],
@@ -980,7 +999,9 @@ pub fn list_model_experience_notes(
     agent_id: &str,
     model_filter: Option<&str>,
 ) -> Result<Vec<ModelExperienceNote>> {
-    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) = model_filter {
+    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) =
+        model_filter
+    {
         (
             "SELECT id, agent_id, provider, model, situation, observation, recommendation, tags, created_at
              FROM model_experience_notes WHERE agent_id = ?1 AND model = ?2 ORDER BY created_at DESC",
@@ -995,7 +1016,8 @@ pub fn list_model_experience_notes(
     };
 
     let mut stmt = conn.prepare(sql)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(ModelExperienceNote {
             id: row.get(0)?,
@@ -1021,7 +1043,9 @@ pub fn get_recent_evaluations(
     limit: usize,
 ) -> Result<Vec<(String, String, String, f64, Option<String>, Option<String>)>> {
     // Returns: (model, purpose, self_evaluation, quality_score, tags, timestamp)
-    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) = model_filter {
+    let (sql, param_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(model) =
+        model_filter
+    {
         (
             "SELECT model, purpose, COALESCE(self_evaluation, ''), COALESCE(quality_score, 0.0), tags, timestamp
              FROM llm_usage_metrics
@@ -1047,7 +1071,8 @@ pub fn get_recent_evaluations(
     };
 
     let mut stmt = conn.prepare(sql)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -1418,10 +1443,7 @@ pub struct ChannelConfigRow {
     pub heartbeat_interval_secs: Option<u64>,
 }
 
-pub fn get_channel_config(
-    conn: &Connection,
-    channel_id: &str,
-) -> Result<Option<ChannelConfigRow>> {
+pub fn get_channel_config(conn: &Connection, channel_id: &str) -> Result<Option<ChannelConfigRow>> {
     let result = conn.query_row(
         "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
          FROM discord_channel_config WHERE channel_id = ?1",
@@ -2016,10 +2038,7 @@ mod tests {
             fetched.image_url,
             Some("https://example.com/avatar.png".to_string())
         );
-        assert_eq!(
-            fetched.metadata_json,
-            Some(r#"{"lang":"en"}"#.to_string())
-        );
+        assert_eq!(fetched.metadata_json, Some(r#"{"lang":"en"}"#.to_string()));
     }
 
     // 4. test_curated_memory_crud
@@ -2046,7 +2065,8 @@ mod tests {
         upsert_curated_memory(&conn, &mem2).unwrap();
 
         let results = get_curated_memories(&conn, "agent-1", "facts").unwrap();
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "Crabs have ten legs.");
     }
 
     // 5. test_curated_memory_list_all
@@ -2159,8 +2179,7 @@ mod tests {
         insert_session_log(&conn, &log1).unwrap();
         insert_session_log(&conn, &log2).unwrap();
 
-        let results =
-            search_session_logs(&conn, "agent-1", "quantum cryptography", 10).unwrap();
+        let results = search_session_logs(&conn, "agent-1", "quantum cryptography", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.contains("Quantum"));
     }
@@ -2183,8 +2202,7 @@ mod tests {
         };
         insert_session_log(&conn, &log).unwrap();
 
-        let results =
-            search_session_logs(&conn, "agent-1", "nonexistenttermxyz", 10).unwrap();
+        let results = search_session_logs(&conn, "agent-1", "nonexistenttermxyz", 10).unwrap();
         assert!(results.is_empty());
     }
 
@@ -2276,11 +2294,17 @@ mod tests {
 
         // find_skill_by_name should NOT find archived
         let not_found = find_skill_by_name(&conn, "agent-1", "ArchivedSkill").unwrap();
-        assert!(not_found.is_none(), "find_skill_by_name should not find archived skill");
+        assert!(
+            not_found.is_none(),
+            "find_skill_by_name should not find archived skill"
+        );
 
         // find_skill_by_name_any SHOULD find archived
         let found = find_skill_by_name_any(&conn, "agent-1", "ArchivedSkill").unwrap();
-        assert!(found.is_some(), "find_skill_by_name_any should find archived skill");
+        assert!(
+            found.is_some(),
+            "find_skill_by_name_any should find archived skill"
+        );
         assert_eq!(found.unwrap().archived, true);
     }
 
@@ -2441,8 +2465,7 @@ mod tests {
         insert_llm_metrics(&conn, &metrics1).unwrap();
         insert_llm_metrics(&conn, &metrics2).unwrap();
 
-        let summary =
-            get_llm_metrics_summary(&conn, "agent-1", "2020-01-01").unwrap();
+        let summary = get_llm_metrics_summary(&conn, "agent-1", "2020-01-01").unwrap();
         assert_eq!(summary.count, 2);
         assert_eq!(summary.total_tokens, Some(430));
         let total_cost = summary.total_cost.unwrap();
@@ -2631,8 +2654,14 @@ mod tests {
         assert!(purposes.contains(&"analysis"));
 
         // Verify we can distinguish same model in different purposes.
-        let gpt4o_conv = stats.iter().find(|s| s.model == "gpt-4o" && s.purpose == "conversation").unwrap();
-        let gpt4o_anl = stats.iter().find(|s| s.model == "gpt-4o" && s.purpose == "analysis").unwrap();
+        let gpt4o_conv = stats
+            .iter()
+            .find(|s| s.model == "gpt-4o" && s.purpose == "conversation")
+            .unwrap();
+        let gpt4o_anl = stats
+            .iter()
+            .find(|s| s.model == "gpt-4o" && s.purpose == "analysis")
+            .unwrap();
         assert!((gpt4o_conv.total_cost - 0.005).abs() < 1e-9);
         assert!((gpt4o_anl.total_cost - 0.008).abs() < 1e-9);
     }
@@ -2667,12 +2696,7 @@ mod tests {
     fn test_heartbeat_log_insert() {
         let conn = setup();
 
-        let result = insert_heartbeat_log(
-            &conn,
-            "agent-1",
-            "idle",
-            Some(r#"{"action":"none"}"#),
-        );
+        let result = insert_heartbeat_log(&conn, "agent-1", "idle", Some(r#"{"action":"none"}"#));
         assert!(result.is_ok());
     }
 
@@ -2728,7 +2752,10 @@ mod tests {
         // Verify everything is gone
         assert!(get_identity(&conn, "del-1").unwrap().is_none());
         assert!(get_soul(&conn, "del-1").unwrap().is_none());
-        assert!(list_curated_memories(&conn, "del-1", 10000, 0).unwrap().0.is_empty());
+        assert!(list_curated_memories(&conn, "del-1", 10000, 0)
+            .unwrap()
+            .0
+            .is_empty());
     }
 
     #[test]
@@ -3086,11 +3113,15 @@ mod tests {
             enabled: true,
         };
         upsert_agent_discord_config(&conn, &cfg).unwrap();
-        assert!(get_agent_discord_config(&conn, "agent-del").unwrap().is_some());
+        assert!(get_agent_discord_config(&conn, "agent-del")
+            .unwrap()
+            .is_some());
 
         let deleted = delete_agent_discord_config(&conn, "agent-del").unwrap();
         assert!(deleted);
-        assert!(get_agent_discord_config(&conn, "agent-del").unwrap().is_none());
+        assert!(get_agent_discord_config(&conn, "agent-del")
+            .unwrap()
+            .is_none());
 
         // Delete nonexistent → false
         let deleted2 = delete_agent_discord_config(&conn, "agent-del").unwrap();
@@ -3146,19 +3177,25 @@ mod tests {
         upsert_agent_discord_config(&conn, &cfg).unwrap();
 
         // Initially enabled
-        let fetched = get_agent_discord_config(&conn, "agent-toggle").unwrap().unwrap();
+        let fetched = get_agent_discord_config(&conn, "agent-toggle")
+            .unwrap()
+            .unwrap();
         assert!(fetched.enabled);
 
         // Disable
         let updated = set_agent_discord_config_enabled(&conn, "agent-toggle", false).unwrap();
         assert!(updated);
-        let fetched = get_agent_discord_config(&conn, "agent-toggle").unwrap().unwrap();
+        let fetched = get_agent_discord_config(&conn, "agent-toggle")
+            .unwrap()
+            .unwrap();
         assert!(!fetched.enabled);
 
         // Re-enable
         let updated = set_agent_discord_config_enabled(&conn, "agent-toggle", true).unwrap();
         assert!(updated);
-        let fetched = get_agent_discord_config(&conn, "agent-toggle").unwrap().unwrap();
+        let fetched = get_agent_discord_config(&conn, "agent-toggle")
+            .unwrap()
+            .unwrap();
         assert!(fetched.enabled);
 
         // Nonexistent agent → false
@@ -3257,7 +3294,12 @@ pub fn insert_trusted_co_agent(conn: &Connection, row: &TrustedCoAgentRow) -> Re
     Ok(())
 }
 
-pub fn update_trusted_co_agent_actions(conn: &Connection, agent_id: &str, co_agent_id: &str, allowed_actions: Option<&str>) -> Result<bool> {
+pub fn update_trusted_co_agent_actions(
+    conn: &Connection,
+    agent_id: &str,
+    co_agent_id: &str,
+    allowed_actions: Option<&str>,
+) -> Result<bool> {
     let updated = conn.execute(
         "UPDATE trusted_co_agents SET allowed_actions = ?3 WHERE agent_id = ?1 AND co_agent_id = ?2",
         params![agent_id, co_agent_id, allowed_actions],
@@ -3265,7 +3307,11 @@ pub fn update_trusted_co_agent_actions(conn: &Connection, agent_id: &str, co_age
     Ok(updated > 0)
 }
 
-pub fn delete_trusted_co_agent(conn: &Connection, agent_id: &str, co_agent_id: &str) -> Result<bool> {
+pub fn delete_trusted_co_agent(
+    conn: &Connection,
+    agent_id: &str,
+    co_agent_id: &str,
+) -> Result<bool> {
     let deleted = conn.execute(
         "DELETE FROM trusted_co_agents WHERE agent_id = ?1 AND co_agent_id = ?2",
         params![agent_id, co_agent_id],
@@ -3345,7 +3391,11 @@ pub fn add_trusted_user(
     Ok(())
 }
 
-pub fn update_trusted_user_permission(conn: &Connection, id: &str, permission: &str) -> Result<bool> {
+pub fn update_trusted_user_permission(
+    conn: &Connection,
+    id: &str,
+    permission: &str,
+) -> Result<bool> {
     let n = conn.execute(
         "UPDATE trusted_discord_users SET permission = ?2 WHERE id = ?1",
         [id, permission],
@@ -3559,7 +3609,7 @@ pub fn list_llm_logs(conn: &Connection, agent_id: &str, limit: i64) -> Result<Ve
          FROM llm_logs
          WHERE agent_id = ?1
          ORDER BY created_at DESC
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![agent_id, limit], |row| {
         Ok(LlmLogRow {
@@ -3631,4 +3681,128 @@ pub fn llm_logs_stats(conn: &Connection, agent_id: &str, days: i64) -> Result<Ve
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+}
+
+// ============================================
+// IMPORT SYNC STATE
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStateRow {
+    pub id: String,
+    pub agent_id: String,
+    pub source_dir: String,
+    pub file_type: String,
+    pub file_name: String,
+    pub content_hash: String,
+    pub synced_at: String,
+    pub created_at: String,
+}
+
+pub fn get_sync_state(
+    conn: &Connection,
+    agent_id: &str,
+    source_dir: &str,
+    file_name: &str,
+) -> Result<Option<SyncStateRow>> {
+    let result = conn.query_row(
+        "SELECT id, agent_id, source_dir, file_type, file_name, content_hash, synced_at, created_at
+         FROM import_sync_state
+         WHERE agent_id = ?1 AND source_dir = ?2 AND file_name = ?3",
+        params![agent_id, source_dir, file_name],
+        |row| {
+            Ok(SyncStateRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                source_dir: row.get(2)?,
+                file_type: row.get(3)?,
+                file_name: row.get(4)?,
+                content_hash: row.get(5)?,
+                synced_at: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        },
+    );
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_sync_state(conn: &Connection, row: &SyncStateRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO import_sync_state (id, agent_id, source_dir, file_type, file_name, content_hash, synced_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(agent_id, source_dir, file_name) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            synced_at = excluded.synced_at,
+            file_type = excluded.file_type",
+        params![
+            row.id,
+            row.agent_id,
+            row.source_dir,
+            row.file_type,
+            row.file_name,
+            row.content_hash,
+            row.synced_at,
+            row.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_sync_states(
+    conn: &Connection,
+    agent_id: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<(Vec<SyncStateRow>, i64)> {
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM import_sync_state WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, source_dir, file_type, file_name, content_hash, synced_at, created_at
+         FROM import_sync_state WHERE agent_id = ?1
+         ORDER BY synced_at DESC LIMIT ?2 OFFSET ?3",
+    )?;
+
+    let rows = stmt.query_map(params![agent_id, limit, offset], |row| {
+        Ok(SyncStateRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            source_dir: row.get(2)?,
+            file_type: row.get(3)?,
+            file_name: row.get(4)?,
+            content_hash: row.get(5)?,
+            synced_at: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+
+    Ok((rows.collect::<std::result::Result<_, _>>()?, total))
+}
+
+pub fn delete_sync_states_for_agent(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM import_sync_state WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_latest_sync_at(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT MAX(synced_at) FROM import_sync_state WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(val) => Ok(val),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
