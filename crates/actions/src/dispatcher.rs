@@ -27,7 +27,6 @@ impl ActionDispatcher {
         // 共通アクション登録
         dispatcher.register(Arc::new(SendSpeechAction));
         dispatcher.register(Arc::new(SendNoreactAction));
-        dispatcher.register(Arc::new(NoReplyAction));
         dispatcher.register(Arc::new(GenerateInnerVoiceAction));
         dispatcher.register(Arc::new(UpdateImpressionAction));
         dispatcher.register(Arc::new(DeclareDoneAction));
