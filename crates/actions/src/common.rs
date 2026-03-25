@@ -80,40 +80,6 @@ impl Action for SendNoreactAction {
     }
 }
 
-/// NO_REPLYエイリアス（send_noreactと同じ処理）
-pub struct NoReplyAction;
-
-#[async_trait]
-impl Action for NoReplyAction {
-    fn name(&self) -> &str {
-        "no_reply"
-    }
-
-    fn description(&self) -> &str {
-        "発言しない（OpenClawのNO_REPLY仕様に準拠）。グループチャットで自分に関係ない会話、Bot同士の会話、既に話が完結している場合に使用"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "発言しない理由"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
-        let reason = args["reason"].as_str().unwrap_or("特になし");
-        ActionResult::success(json!({
-            "action": "no_reply",
-            "reason": reason,
-        }))
-    }
-}
-
 /// 心の声アクション
 pub struct GenerateInnerVoiceAction;
 
