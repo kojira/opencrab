@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 use crate::engine::{ChatMessage, ChatRequestSimple, LlmClient};
 
@@ -100,11 +102,21 @@ impl DailyLogIndexer {
                     )?;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        date=%entry.date_str,
-                        error=%e,
-                        "skipping daily log entry due to error"
-                    );
+                    let error = e.to_string();
+                    if error.to_lowercase().contains("context") {
+                        tracing::error!(
+                            date=%entry.date_str,
+                            content_bytes=entry.content.len(),
+                            error=%error,
+                            "skipping daily log entry due to context-related error"
+                        );
+                    } else {
+                        tracing::warn!(
+                            date=%entry.date_str,
+                            error=%error,
+                            "skipping daily log entry due to error"
+                        );
+                    }
                     stats.days_skipped += 1;
                     continue;
                 }
@@ -132,7 +144,9 @@ impl DailyLogIndexer {
             if let Some(entry) = entry {
                 let year_month = &date_str[..7];
                 let period_id = self.ensure_period_node(agent_id, year_month, &root_id, &now)?;
-                let (day_summary, topics) = self.summarize_day(date_str, &entry.content).await;
+                let ((day_summary, topics), _) = self
+                    .summarize_day_with_retry(date_str, &entry.content)
+                    .await?;
                 let daily_id = format!("{agent_id}:daily_log:daily:{date_str}");
 
                 {
@@ -195,19 +209,10 @@ impl DailyLogIndexer {
         Ok(())
     }
 
-    async fn summarize_day(&self, date: &str, content: &str) -> (String, Vec<TopicJson>) {
-        let truncated = if content.len() > 4096 {
-            let mut end = 4096;
-            while end > 0 && !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            &content[..end]
-        } else {
-            content
-        };
+    async fn summarize_day(&self, date: &str, content: &str) -> Result<(String, Vec<TopicJson>)> {
         let prompt = format!(
             "以下は {} の日次ログです。\nJSONのみで出力 (コードブロック不要):\n{{\"day_summary\":\"50字以内の1行要約\",\"topics\":[{{\"title\":\"20字以内\",\"summary\":\"100字以内\"}}]}}\n\nログ:\n{}",
-            date, truncated
+            date, content
         );
         let request = ChatRequestSimple {
             model: self.model.clone(),
@@ -223,35 +228,59 @@ impl DailyLogIndexer {
             temperature: Some(0.0),
             max_tokens: Some(500),
         };
-        match self.llm_client.chat(request).await {
-            Ok(resp) => {
-                let text = resp.content.unwrap_or_default();
-                let json_str = text
-                    .trim()
-                    .trim_start_matches("```json")
-                    .trim_start_matches("```")
-                    .trim_end_matches("```")
-                    .trim();
-                match serde_json::from_str::<DaySummaryJson>(json_str) {
-                    Ok(parsed) => (parsed.day_summary, parsed.topics),
-                    Err(_) => (
-                        format!("{date} の日次ログ"),
-                        vec![TopicJson {
-                            title: date.to_string(),
-                            summary: "要約生成失敗".to_string(),
-                        }],
-                    ),
+        let resp = self.llm_client.chat(request).await?;
+        let text = resp.content.unwrap_or_default();
+        let json_str = text
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        let parsed = serde_json::from_str::<DaySummaryJson>(json_str)?;
+        Ok((parsed.day_summary, parsed.topics))
+    }
+
+    async fn summarize_day_with_retry(
+        &self,
+        date: &str,
+        content: &str,
+    ) -> Result<((String, Vec<TopicJson>), usize)> {
+        const NON_RETRYABLE_PATTERNS: [&str; 7] = [
+            "400",
+            "bad request",
+            "invalid_request_error",
+            "context",
+            "too large",
+            "maximum context",
+            "context length",
+        ];
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match self.summarize_day(date, content).await {
+                Ok(result) => return Ok((result, attempts)),
+                Err(err) => {
+                    let err_text = err.to_string();
+                    let err_lower = err_text.to_lowercase();
+                    let should_skip = NON_RETRYABLE_PATTERNS
+                        .iter()
+                        .any(|pattern| err_lower.contains(pattern));
+
+                    if should_skip || attempts >= 3 {
+                        return Err(err);
+                    }
+
+                    let backoff_secs = attempts as u64;
+                    tracing::warn!(
+                        date,
+                        attempt = attempts,
+                        backoff_secs,
+                        error = %err_text,
+                        "daily log summarization failed, retrying"
+                    );
+                    sleep(Duration::from_secs(backoff_secs)).await;
                 }
-            }
-            Err(e) => {
-                tracing::warn!(date=%date, error=%e, "daily_log LLM summary failed");
-                (
-                    format!("{date} の日次ログ"),
-                    vec![TopicJson {
-                        title: date.to_string(),
-                        summary: "LLMエラー".to_string(),
-                    }],
-                )
             }
         }
     }
@@ -269,7 +298,9 @@ impl DailyLogIndexer {
         let period_id = self.ensure_period_node(agent_id, year_month, root_id, now)?;
         periods_seen.insert(year_month.to_string());
 
-        let (day_summary, topics) = self.summarize_day(date_str, &entry.content).await;
+        let ((day_summary, topics), llm_calls) = self
+            .summarize_day_with_retry(date_str, &entry.content)
+            .await?;
 
         let daily_id = format!("{agent_id}:daily_log:daily:{date_str}");
         {
@@ -327,7 +358,7 @@ impl DailyLogIndexer {
             opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
         }
 
-        Ok(1)
+        Ok(llm_calls)
     }
 
     fn ensure_root_node(&self, agent_id: &str, now: &str) -> Result<()> {
@@ -475,6 +506,23 @@ mod tests {
         }
     }
 
+    struct RecordingMockLlm {
+        last_request: Arc<Mutex<Option<ChatRequestSimple>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingMockLlm {
+        async fn chat(&self, req: ChatRequestSimple) -> Result<ChatResponseSimple> {
+            *self.last_request.lock().unwrap() = Some(req);
+            Ok(ChatResponseSimple {
+                content: Some(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()),
+                tool_calls: vec![],
+                finish_reason: "stop".to_string(),
+                usage: None,
+            })
+        }
+    }
+
     fn insert_daily_log(conn: &rusqlite::Connection, agent_id: &str, date: &str, content: &str) {
         opencrab_db::queries::upsert_curated_memory(
             conn,
@@ -583,17 +631,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_utf8_japanese_truncation() {
+    async fn test_large_content_no_truncation() {
         let db = opencrab_db::init_memory().unwrap();
         let content = "あ".repeat(1500);
         assert!(content.len() > 4096);
         insert_daily_log(&db, "agent-1", "2026-02-03", &content);
         let conn = Arc::new(Mutex::new(db));
-        let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string());
+        let last_request = Arc::new(Mutex::new(None));
+        let indexer = DailyLogIndexer::new(
+            conn,
+            Arc::new(RecordingMockLlm {
+                last_request: last_request.clone(),
+            }),
+            "test-model".to_string(),
+        );
 
         let stats = indexer.run("agent-1").await.unwrap();
 
         assert_eq!(stats.days_indexed, 1);
         assert_eq!(stats.days_skipped, 0);
+
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = &request.messages[0].content;
+        assert!(prompt.contains(&content));
     }
 }
