@@ -247,7 +247,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     let has_source_type_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='source_type'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='source_type'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -258,7 +260,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     let has_date_from_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='date_from'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='date_from'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -267,7 +271,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     }
 
     let has_date_to_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='date_to'")?
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='date_to'",
+        )?
         .query_row([], |row| row.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -362,6 +368,20 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_curated_agent_category
              ON memory_curated(agent_id, category);",
+    )?;
+
+    // agent_logs テーブル作成（既存DBへの対応）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_logs (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT,
+            level TEXT NOT NULL,
+            context TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_logs_agent ON agent_logs(agent_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_agent_logs_level ON agent_logs(level, created_at DESC);",
     )?;
 
     Ok(())
@@ -766,4 +786,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_import_sync_state_key
     ON import_sync_state(agent_id, source_dir, file_name);
 CREATE INDEX IF NOT EXISTS idx_import_sync_state_agent
     ON import_sync_state(agent_id);
+
+-- ============================================
+-- エージェントログ
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_logs (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT,
+    level TEXT NOT NULL,
+    context TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_agent ON agent_logs(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_level ON agent_logs(level, created_at DESC);
 "#;

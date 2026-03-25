@@ -1,11 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opencrab_core::{
-    ActionExecutor,
-    ActionResult as CoreActionResult,
-    ToolDefinition,
-};
+use opencrab_core::{ActionExecutor, ActionResult as CoreActionResult, ToolDefinition};
 use opencrab_gateway::GatewayActions;
 
 use crate::dispatcher::ActionDispatcher;
@@ -69,7 +65,10 @@ impl ActionExecutor for BridgedExecutor {
                     map.insert("__session_id".to_string(), serde_json::json!(session_id));
                 }
                 map.insert("__depth".to_string(), serde_json::json!(self.depth));
-                map.insert("__agent_id".to_string(), serde_json::json!(&self.context.agent_id));
+                map.insert(
+                    "__agent_id".to_string(),
+                    serde_json::json!(&self.context.agent_id),
+                );
             }
             let gw_result = gw.execute(name, &enriched_args).await;
             return CoreActionResult {
@@ -107,12 +106,23 @@ impl ActionExecutor for BridgedExecutor {
 
         // Discord-specific actions that are blocked at depth >= 1 (sub-engines cannot send to Discord directly)
         const DISCORD_ACTIONS: &[&str] = &[
-            "discord_send", "discord_send_file", "discord_react",
-            "discord_delete_message", "discord_edit_message",
-            "discord_start_thread", "discord_list_channels", "discord_get_channel_info",
-            "discord_list_guilds", "discord_set_channel_writable", "discord_whitelist_channel",
-            "discord_add_reaction", "discord_remove_reaction", "discord_send_reply",
-            "discord_send_with_embed", "discord_pin_message", "discord_unpin_message",
+            "discord_send",
+            "discord_send_file",
+            "discord_react",
+            "discord_delete_message",
+            "discord_edit_message",
+            "discord_start_thread",
+            "discord_list_channels",
+            "discord_get_channel_info",
+            "discord_list_guilds",
+            "discord_set_channel_writable",
+            "discord_whitelist_channel",
+            "discord_add_reaction",
+            "discord_remove_reaction",
+            "discord_send_reply",
+            "discord_send_with_embed",
+            "discord_pin_message",
+            "discord_unpin_message",
         ];
         const MAX_DEPTH: u32 = 2;
 
@@ -383,9 +393,18 @@ mod tests {
         let tools = executor.list_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-        assert!(names.contains(&"create_skill"), "TrustedUser should see create_skill");
-        assert!(names.contains(&"execute_skill"), "TrustedUser should see execute_skill");
-        assert!(names.contains(&"gw_action_a"), "TrustedUser should see regular gateway actions");
+        assert!(
+            names.contains(&"create_skill"),
+            "TrustedUser should see create_skill"
+        );
+        assert!(
+            names.contains(&"execute_skill"),
+            "TrustedUser should see execute_skill"
+        );
+        assert!(
+            names.contains(&"gw_action_a"),
+            "TrustedUser should see regular gateway actions"
+        );
     }
 
     #[test]
@@ -397,9 +416,18 @@ mod tests {
         let tools = executor.list_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-        assert!(!names.contains(&"create_skill"), "Agent should NOT see create_skill");
-        assert!(!names.contains(&"execute_skill"), "Agent should NOT see execute_skill");
-        assert!(names.contains(&"gw_action_a"), "Agent should still see regular gateway actions");
+        assert!(
+            !names.contains(&"create_skill"),
+            "Agent should NOT see create_skill"
+        );
+        assert!(
+            !names.contains(&"execute_skill"),
+            "Agent should NOT see execute_skill"
+        );
+        assert!(
+            names.contains(&"gw_action_a"),
+            "Agent should still see regular gateway actions"
+        );
     }
 
     // ---- owner_only_actions filtering ----

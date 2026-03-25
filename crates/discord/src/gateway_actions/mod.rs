@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions};
 use serde_json::json;
 use serenity::http::Http;
 use tokio::task::AbortHandle;
-use opencrab_gateway::{GatewayActions, GatewayActionDef, GatewayActionResult};
 
-mod discord_ops;
 mod agent_management;
+mod discord_ops;
 mod subtask_engine;
 
 /// A running subtask tracked by the registry.
@@ -40,7 +40,10 @@ struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
 
 #[async_trait::async_trait]
 impl opencrab_core::LlmClient for ArcLlmClient {
-    async fn chat(&self, request: opencrab_core::ChatRequestSimple) -> anyhow::Result<opencrab_core::ChatResponseSimple> {
+    async fn chat(
+        &self,
+        request: opencrab_core::ChatRequestSimple,
+    ) -> anyhow::Result<opencrab_core::ChatResponseSimple> {
         self.0.chat(request).await
     }
 }
@@ -73,7 +76,17 @@ impl DiscordGatewayActions {
         subtask_registry: SubtaskRegistry,
         completion_registry: CompletionRegistry,
     ) -> Self {
-        Self { http, db, agent_id, tools_config, llm_client, default_model, workspace_root, subtask_registry, completion_registry }
+        Self {
+            http,
+            db,
+            agent_id,
+            tools_config,
+            llm_client,
+            default_model,
+            workspace_root,
+            subtask_registry,
+            completion_registry,
+        }
     }
 }
 
@@ -365,10 +378,22 @@ mod tests {
         let db = Arc::new(Mutex::new(opencrab_db::init_memory().unwrap()));
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
-        let tools_config = Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
+        let tools_config = Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        ));
         let subtask_registry: SubtaskRegistry = Arc::new(DashMap::new());
         let completion_registry: CompletionRegistry = Arc::new(DashMap::new());
-        let actions = DiscordGatewayActions::new(http, db.clone(), "test-agent".to_string(), tools_config, None, String::new(), std::path::PathBuf::from("/tmp"), subtask_registry, completion_registry);
+        let actions = DiscordGatewayActions::new(
+            http,
+            db.clone(),
+            "test-agent".to_string(),
+            tools_config,
+            None,
+            String::new(),
+            std::path::PathBuf::from("/tmp"),
+            subtask_registry,
+            completion_registry,
+        );
         (actions, db)
     }
 
@@ -401,7 +426,11 @@ mod tests {
     fn test_definitions_have_valid_parameters() {
         let (actions, _db) = make_test_actions();
         for def in actions.definitions() {
-            assert!(def.parameters.is_object(), "parameters should be object for {}", def.name);
+            assert!(
+                def.parameters.is_object(),
+                "parameters should be object for {}",
+                def.name
+            );
             assert!(def.parameters["type"] == "object");
         }
     }
@@ -489,10 +518,7 @@ mod tests {
 
         // channel_idのみ → guild_idが欠けてエラー
         let result = actions
-            .execute(
-                "discord_channel_config",
-                &json!({"channel_id": "ch-1"}),
-            )
+            .execute("discord_channel_config", &json!({"channel_id": "ch-1"}))
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("guild_id"));
@@ -554,9 +580,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_channels_missing_guild_id() {
         let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute("discord_list_channels", &json!({}))
-            .await;
+        let result = actions.execute("discord_list_channels", &json!({})).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("guild_id"));
     }
@@ -565,7 +589,10 @@ mod tests {
     async fn test_list_channels_invalid_guild_id() {
         let (actions, _db) = make_test_actions();
         let result = actions
-            .execute("discord_list_channels", &json!({"guild_id": "not-a-number"}))
+            .execute(
+                "discord_list_channels",
+                &json!({"guild_id": "not-a-number"}),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("数値ID"));
@@ -576,11 +603,16 @@ mod tests {
     #[tokio::test]
     async fn test_create_skill_basic() {
         let (actions, _db) = make_test_actions();
-        let result = actions.execute("create_skill", &json!({
-            "__caller": "owner",
-            "name": "天気確認",
-            "description": "curl wttr.inで天気を確認する"
-        })).await;
+        let result = actions
+            .execute(
+                "create_skill",
+                &json!({
+                    "__caller": "owner",
+                    "name": "天気確認",
+                    "description": "curl wttr.inで天気を確認する"
+                }),
+            )
+            .await;
         assert!(result.success, "create_skill should succeed");
         let data = result.data.unwrap();
         assert!(data["id"].is_string(), "should return id");
@@ -590,26 +622,41 @@ mod tests {
     async fn test_create_skill_dedup() {
         let (actions, _db) = make_test_actions();
         // Create skill twice
-        actions.execute("create_skill", &json!({
-            "__caller": "owner",
-            "name": "天気確認",
-            "description": "first version"
-        })).await;
-        let result2 = actions.execute("create_skill", &json!({
-            "__caller": "owner",
-            "name": "天気確認",
-            "description": "updated version"
-        })).await;
+        actions
+            .execute(
+                "create_skill",
+                &json!({
+                    "__caller": "owner",
+                    "name": "天気確認",
+                    "description": "first version"
+                }),
+            )
+            .await;
+        let result2 = actions
+            .execute(
+                "create_skill",
+                &json!({
+                    "__caller": "owner",
+                    "name": "天気確認",
+                    "description": "updated version"
+                }),
+            )
+            .await;
         assert!(result2.success, "second create should succeed (dedup)");
     }
 
     #[tokio::test]
     async fn test_create_skill_rejected_for_non_owner() {
         let (actions, _db) = make_test_actions();
-        let result = actions.execute("create_skill", &json!({
-            "name": "test",
-            "description": "test"
-        })).await;
+        let result = actions
+            .execute(
+                "create_skill",
+                &json!({
+                    "name": "test",
+                    "description": "test"
+                }),
+            )
+            .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("trusted user"));
     }
@@ -629,7 +676,10 @@ mod tests {
             )
             .await;
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("ワークスペース外") || result.error.as_ref().unwrap().contains("見つかりません"));
+        assert!(
+            result.error.as_ref().unwrap().contains("ワークスペース外")
+                || result.error.as_ref().unwrap().contains("見つかりません")
+        );
     }
 
     #[tokio::test]

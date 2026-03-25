@@ -85,8 +85,9 @@ pub async fn update_trusted_user(
     Json(req): Json<UpdateTrustedUserRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = state.db.lock().unwrap();
-    let updated = opencrab_db::queries::update_trusted_user_permission(&conn, &user_id, &req.permission)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated =
+        opencrab_db::queries::update_trusted_user_permission(&conn, &user_id, &req.permission)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
 

@@ -51,10 +51,7 @@ impl Action for LearnFromExperienceAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let skill_name = args["skill_name"]
-            .as_str()
-            .unwrap_or("unnamed")
-            .to_string();
+        let skill_name = args["skill_name"].as_str().unwrap_or("unnamed").to_string();
         let skill_id = uuid::Uuid::new_v4().to_string();
 
         let skill = opencrab_db::queries::SkillRow {
@@ -62,10 +59,7 @@ impl Action for LearnFromExperienceAction {
             agent_id: ctx.agent_id.clone(),
             name: skill_name.clone(),
             description: args["lesson"].as_str().unwrap_or("").to_string(),
-            situation_pattern: args["situation_pattern"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            situation_pattern: args["situation_pattern"].as_str().unwrap_or("").to_string(),
             guidance: args["guidance"].as_str().unwrap_or("").to_string(),
             source_type: "experience".to_string(),
             source_context: args["experience"].as_str().map(|s| s.to_string()),
@@ -135,10 +129,7 @@ impl Action for LearnFromPeerAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        let skill_name = args["skill_name"]
-            .as_str()
-            .unwrap_or("unnamed")
-            .to_string();
+        let skill_name = args["skill_name"].as_str().unwrap_or("unnamed").to_string();
         let skill_id = uuid::Uuid::new_v4().to_string();
 
         let source_context = format!(
@@ -224,9 +215,7 @@ impl Action for ReflectAndLearnAction {
             category: "reflection".to_string(),
             content: format!(
                 "振り返り: {}\n洞察: {:?}\nアクション: {:?}",
-                reflection,
-                args["insights"],
-                args["action_items"]
+                reflection, args["insights"], args["action_items"]
             ),
             created_at: String::new(),
         };
@@ -293,7 +282,10 @@ mod tests {
         assert!(result.success);
         let data = result.data.unwrap();
         assert_eq!(data["skill_name"], "debugging_help");
-        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
+        assert!(result
+            .side_effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
 
         // Verify DB
         let conn = ctx.db.lock().unwrap();

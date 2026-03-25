@@ -47,7 +47,9 @@ fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
         llm_router: Arc::new(router),
         workspace_base,
         default_model: "openrouter:openai/gpt-4o".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
+        tools_config: Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        )),
         compaction_ratio: 0.5,
         #[cfg(feature = "discord")]
         discord_manager: None,
@@ -84,8 +86,8 @@ async fn send_request(
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .unwrap_or(serde_json::json!(body_bytes.to_vec()));
+    let json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::json!(body_bytes.to_vec()));
     (status, json)
 }
 
@@ -137,10 +139,20 @@ async fn create_agent_with_personality(
 async fn test_real_llm_basic_conversation() {
     let (app, _db) = create_real_llm_app();
 
-    let (agent_a, app) =
-        create_agent_with_personality(app, "Alice", "Curious Researcher", r#"{"trait":"curious","style":"asks questions"}"#).await;
-    let (agent_b, app) =
-        create_agent_with_personality(app, "Bob", "Thoughtful Analyst", r#"{"trait":"analytical","style":"gives detailed answers"}"#).await;
+    let (agent_a, app) = create_agent_with_personality(
+        app,
+        "Alice",
+        "Curious Researcher",
+        r#"{"trait":"curious","style":"asks questions"}"#,
+    )
+    .await;
+    let (agent_b, app) = create_agent_with_personality(
+        app,
+        "Bob",
+        "Thoughtful Analyst",
+        r#"{"trait":"analytical","style":"gives detailed answers"}"#,
+    )
+    .await;
 
     // Create session
     let (_, resp) = send_request(
@@ -211,13 +223,9 @@ async fn test_real_llm_agent_learns_and_creates_skill() {
     })
     .to_string();
 
-    let (learner_id, app) = create_agent_with_personality(
-        app,
-        "Learner",
-        "Self-Improving Agent",
-        &learner_personality,
-    )
-    .await;
+    let (learner_id, app) =
+        create_agent_with_personality(app, "Learner", "Self-Improving Agent", &learner_personality)
+            .await;
 
     // Create session
     let (_, resp) = send_request(
@@ -277,7 +285,10 @@ async fn test_real_llm_agent_learns_and_creates_skill() {
             !skills.is_empty(),
             "Learner used tools but no skills were created"
         );
-        println!("\n✓ Learner successfully created {} skill(s) via real LLM!", skills.len());
+        println!(
+            "\n✓ Learner successfully created {} skill(s) via real LLM!",
+            skills.len()
+        );
     } else {
         println!("\n⚠ Learner didn't use tools this time (LLM chose text-only response)");
         println!("  This can happen — real LLMs are non-deterministic.");
@@ -309,13 +320,9 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     })
     .to_string();
 
-    let (debater_id, app) = create_agent_with_personality(
-        app,
-        "Debater",
-        "Strong Advocate",
-        &debater_personality,
-    )
-    .await;
+    let (debater_id, app) =
+        create_agent_with_personality(app, "Debater", "Strong Advocate", &debater_personality)
+            .await;
 
     let (reflector_id, app) = create_agent_with_personality(
         app,
@@ -358,7 +365,10 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let responses = resp["responses"].as_array().unwrap();
     if !responses.is_empty() {
         println!("[Debater]: I believe AI agents should be able to modify their own code...");
-        println!("[Reflector]: {}\n", responses[0]["content"].as_str().unwrap_or("(no response)"));
+        println!(
+            "[Reflector]: {}\n",
+            responses[0]["content"].as_str().unwrap_or("(no response)")
+        );
     }
 
     // Round 2: Reflector pushes back, Debater responds
@@ -377,7 +387,10 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let responses = resp["responses"].as_array().unwrap();
     if !responses.is_empty() {
         println!("[Reflector]: While self-improvement sounds appealing...");
-        println!("[Debater]: {}\n", responses[0]["content"].as_str().unwrap_or("(no response)"));
+        println!(
+            "[Debater]: {}\n",
+            responses[0]["content"].as_str().unwrap_or("(no response)")
+        );
     }
 
     // Round 3: Final round — Debater sends closing argument,
@@ -397,7 +410,9 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let responses = resp["responses"].as_array().unwrap();
     if !responses.is_empty() {
         let reflector_resp = &responses[0];
-        let content = reflector_resp["content"].as_str().unwrap_or("(no response)");
+        let content = reflector_resp["content"]
+            .as_str()
+            .unwrap_or("(no response)");
         let tool_calls = reflector_resp["tool_calls_made"].as_i64().unwrap_or(0);
         println!("[Debater]: (closing argument + encouragement to use tools)");
         println!("[Reflector]: {}", content);
@@ -408,8 +423,9 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     let (skills_reflector, memories_reflector) = {
         let conn = db.lock().unwrap();
         let skills = opencrab_db::queries::list_skills(&conn, &reflector_id, false).unwrap();
-        let memories =
-            opencrab_db::queries::list_curated_memories(&conn, &reflector_id, 10000, 0).unwrap().0;
+        let memories = opencrab_db::queries::list_curated_memories(&conn, &reflector_id, 10000, 0)
+            .unwrap()
+            .0;
         (skills, memories)
     };
 
@@ -417,14 +433,21 @@ async fn test_real_llm_multi_round_discussion_with_reflection() {
     println!("RESULTS:");
     println!("  Reflector skills: {}", skills_reflector.len());
     for s in &skills_reflector {
-        println!("    - {} (type: {}, active: {})", s.name, s.source_type, s.is_active);
+        println!(
+            "    - {} (type: {}, active: {})",
+            s.name, s.source_type, s.is_active
+        );
         if !s.description.is_empty() {
             println!("      {}", s.description);
         }
     }
     println!("  Reflector memories: {}", memories_reflector.len());
     for m in &memories_reflector {
-        println!("    - [{}] {}", m.category, &m.content[..m.content.len().min(80)]);
+        println!(
+            "    - [{}] {}",
+            m.category,
+            &m.content[..m.content.len().min(80)]
+        );
     }
 
     // Verify conversation was logged
@@ -518,7 +541,10 @@ async fn test_real_llm_search_history_and_create_skill() {
         .await;
     }
 
-    println!("\n--- Seeded {} messages about collaboration ---\n", seed_messages.len());
+    println!(
+        "\n--- Seeded {} messages about collaboration ---\n",
+        seed_messages.len()
+    );
 
     // Now Prompter asks Researcher to review and learn
     let (status, resp) = send_request(

@@ -56,10 +56,7 @@ impl Agent {
             .with_max_tokens(150);
 
         let response = provider.chat_completion(request).await?;
-        let text = response
-            .first_text()
-            .unwrap_or("[no response]")
-            .to_string();
+        let text = response.first_text().unwrap_or("[no response]").to_string();
         Ok(text)
     }
 }
@@ -109,7 +106,10 @@ async fn test_three_agent_discussion() {
         println!("[{}]: {}\n", agent.name, response);
 
         // Add to shared history as user message so other agents see it
-        history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+        history.push(Message::assistant(&format!(
+            "[{}]: {}",
+            agent.name, response
+        )));
         history.push(Message::user("Next participant, please share your view."));
     }
 
@@ -123,7 +123,10 @@ async fn test_three_agent_discussion() {
         let response = agent.respond(&p, &history).await.unwrap();
         println!("[{}]: {}\n", agent.name, response);
 
-        history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+        history.push(Message::assistant(&format!(
+            "[{}]: {}",
+            agent.name, response
+        )));
     }
 
     // Round 3: Summary and conclusion
@@ -138,7 +141,10 @@ async fn test_three_agent_discussion() {
         println!("[{}]: {}\n", agent.name, response);
         final_responses.push(response.clone());
 
-        history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+        history.push(Message::assistant(&format!(
+            "[{}]: {}",
+            agent.name, response
+        )));
     }
 
     // ---------- Assertions ----------
@@ -172,7 +178,10 @@ async fn test_three_agent_discussion() {
     );
 
     println!("{sep}");
-    println!("Discussion complete! {} total messages exchanged.", history.len());
+    println!(
+        "Discussion complete! {} total messages exchanged.",
+        history.len()
+    );
     println!("{sep}");
 }
 
@@ -220,7 +229,10 @@ async fn test_three_agent_creative_story() {
             let response = agent.respond(&p, &history).await.unwrap();
             println!("[{}]: {}\n", agent.name, response);
 
-            history.push(Message::assistant(&format!("[{}]: {}", agent.name, response)));
+            history.push(Message::assistant(&format!(
+                "[{}]: {}",
+                agent.name, response
+            )));
         }
         if round < 2 {
             history.push(Message::user("Continue the story. What happens next?"));
@@ -236,7 +248,9 @@ async fn test_three_agent_creative_story() {
         .to_lowercase();
 
     assert!(
-        story_text.contains("library") || story_text.contains("book") || story_text.contains("ancient"),
+        story_text.contains("library")
+            || story_text.contains("book")
+            || story_text.contains("ancient"),
         "Story should reference the library setting"
     );
 
@@ -381,5 +395,8 @@ async fn test_three_agent_with_db_and_session() {
         assert!(identity.is_some(), "Agent should exist in DB");
     }
 
-    println!("Full integration test passed! 3 agents, 1 session, {} logs.", agent_ids.len());
+    println!(
+        "Full integration test passed! 3 agents, 1 session, {} logs.",
+        agent_ids.len()
+    );
 }

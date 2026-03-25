@@ -12,27 +12,27 @@
 //! - **Agent**: The combined agent struct.
 //! - **Engine**: LLM-driven action loop for executing skills.
 
-pub mod soul;
-pub mod identity;
-pub mod memory;
-pub mod skill;
-pub mod workspace;
-pub mod heartbeat;
 pub mod agent;
 pub mod engine;
-pub mod memory_index;
+pub mod heartbeat;
+pub mod identity;
 pub mod import;
+pub mod memory;
+pub mod memory_index;
+pub mod skill;
+pub mod soul;
+pub mod workspace;
 
 // Re-export primary types for convenience.
-pub use soul::{Soul, ThinkingStyle};
-pub use identity::Identity;
-pub use memory::MemoryManager;
-pub use skill::{SkillManager, Skill, SkillSource};
-pub use workspace::{Workspace, FileEntry};
-pub use heartbeat::{HeartbeatConfig, HeartbeatDecision, HeartbeatCallback, heartbeat_loop};
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use engine::{
-    SkillEngine, ActionExecutor, ActionResult, LlmClient,
-    ChatRequestSimple, ChatResponseSimple, ChatMessage,
-    ToolDefinition, ToolCall, UsageInfo, EngineResult, ChatContentPart, LlmCallLog,
+    ActionExecutor, ActionResult, ChatContentPart, ChatMessage, ChatRequestSimple,
+    ChatResponseSimple, EngineResult, LlmCallLog, LlmClient, SkillEngine, ToolCall, ToolDefinition,
+    UsageInfo,
 };
+pub use heartbeat::{heartbeat_loop, HeartbeatCallback, HeartbeatConfig, HeartbeatDecision};
+pub use identity::Identity;
+pub use memory::MemoryManager;
+pub use skill::{Skill, SkillManager, SkillSource};
+pub use soul::{Soul, ThinkingStyle};
+pub use workspace::{FileEntry, Workspace};

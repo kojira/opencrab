@@ -4,8 +4,8 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tracing;
 
+use super::config::{CommandPermission, ShellToolConfig};
 use crate::traits::{Action, ActionContext, ActionResult, CallerIdentity};
-use super::config::{ShellToolConfig, CommandPermission};
 
 pub struct ShellToolAction {
     pub config: ShellToolConfig,
@@ -28,7 +28,12 @@ impl Action for ShellToolAction {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        let allowed: Vec<String> = self.config.effective_commands().iter().map(|c| c.name.clone()).collect();
+        let allowed: Vec<String> = self
+            .config
+            .effective_commands()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
         let allowed_str = allowed.join(", ");
         json!({
             "type": "object",
@@ -51,11 +56,7 @@ impl Action for ShellToolAction {
         })
     }
 
-    async fn execute(
-        &self,
-        args: &serde_json::Value,
-        ctx: &ActionContext,
-    ) -> ActionResult {
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => return ActionResult::error("Missing required field: command"),
@@ -155,9 +156,7 @@ impl Action for ShellToolAction {
         let timeout_duration = std::time::Duration::from_secs(self.config.timeout_secs);
         let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
             Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
-                return ActionResult::error(&format!("Command execution failed: {}", e))
-            }
+            Ok(Err(e)) => return ActionResult::error(&format!("Command execution failed: {}", e)),
             Err(_) => {
                 return ActionResult::error(&format!(
                     "Command timed out after {} seconds",
@@ -193,8 +192,8 @@ fn truncate_bytes(bytes: &[u8], max: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{ActionContext, CallerIdentity, RuntimeInfo};
     use crate::tools::config::{CommandConfig, CommandPermission, ShellToolConfig};
+    use crate::traits::{ActionContext, CallerIdentity, RuntimeInfo};
     use std::sync::{Arc, Mutex};
 
     fn make_ctx(caller: CallerIdentity) -> (tempfile::TempDir, ActionContext) {
@@ -224,64 +223,71 @@ mod tests {
     #[tokio::test]
     async fn test_agent_cannot_run_owner_command() {
         let config = ShellToolConfig {
-            commands: vec![
-                CommandConfig {
-                    name: "rm".to_string(),
-                    permission: CommandPermission::Owner,
-                    timeout_secs: None,
-                    description: Some("Dangerous".to_string()),
-                },
-            ],
+            commands: vec![CommandConfig {
+                name: "rm".to_string(),
+                permission: CommandPermission::Owner,
+                timeout_secs: None,
+                description: Some("Dangerous".to_string()),
+            }],
             ..ShellToolConfig::default()
         };
         let action = ShellToolAction::new(config);
         let (_dir, ctx) = make_ctx(CallerIdentity::Agent);
-        let args = serde_json::json!({"command": "rm", "args": ["-f", "/tmp/nonexistent_test_file_xyz"]});
+        let args =
+            serde_json::json!({"command": "rm", "args": ["-f", "/tmp/nonexistent_test_file_xyz"]});
         let result = action.execute(&args, &ctx).await;
-        assert!(!result.success, "Agent should not be able to run owner-only command");
+        assert!(
+            !result.success,
+            "Agent should not be able to run owner-only command"
+        );
         assert!(
             result.error.as_deref().unwrap_or("").contains("ermission"),
-            "Error should mention permission: {:?}", result.error
+            "Error should mention permission: {:?}",
+            result.error
         );
     }
 
     #[tokio::test]
     async fn test_owner_can_run_owner_command() {
         let config = ShellToolConfig {
-            commands: vec![
-                CommandConfig {
-                    name: "echo".to_string(),
-                    permission: CommandPermission::Owner,
-                    timeout_secs: None,
-                    description: None,
-                },
-            ],
+            commands: vec![CommandConfig {
+                name: "echo".to_string(),
+                permission: CommandPermission::Owner,
+                timeout_secs: None,
+                description: None,
+            }],
             ..ShellToolConfig::default()
         };
         let action = ShellToolAction::new(config);
         let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
         let args = serde_json::json!({"command": "echo", "args": ["hello"]});
         let result = action.execute(&args, &ctx).await;
-        assert!(result.success, "Owner should be able to run owner-level command");
+        assert!(
+            result.success,
+            "Owner should be able to run owner-level command"
+        );
     }
 
     #[tokio::test]
     async fn test_coagent_cannot_run_agent_command() {
         let config = ShellToolConfig {
-            commands: vec![
-                CommandConfig {
-                    name: "echo".to_string(),
-                    permission: CommandPermission::Agent,
-                    timeout_secs: None,
-                    description: None,
-                },
-            ],
+            commands: vec![CommandConfig {
+                name: "echo".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
             ..ShellToolConfig::default()
         };
         let action = ShellToolAction::new(config);
-        let (_dir, ctx) = make_ctx(CallerIdentity::CoAgent { agent_id: "helper-bot".to_string() });
+        let (_dir, ctx) = make_ctx(CallerIdentity::CoAgent {
+            agent_id: "helper-bot".to_string(),
+        });
         let args = serde_json::json!({"command": "echo", "args": ["hello"]});
         let result = action.execute(&args, &ctx).await;
-        assert!(!result.success, "CoAgent should not be able to run agent-level command");
+        assert!(
+            !result.success,
+            "CoAgent should not be able to run agent-level command"
+        );
     }
 }

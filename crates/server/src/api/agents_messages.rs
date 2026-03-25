@@ -6,8 +6,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::AppState;
 use crate::process;
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct SendAgentMessageRequest {
@@ -26,11 +26,9 @@ pub async fn send_agent_message(
     let caller = {
         let conn = state.db.lock().unwrap();
         match opencrab_db::queries::get_trusted_user(&conn, &req.user_id, &id) {
-            Some(u) if u.permission == "co_agent" => {
-                opencrab_actions::CallerIdentity::CoAgent {
-                    agent_id: req.user_id.clone(),
-                }
-            }
+            Some(u) if u.permission == "co_agent" => opencrab_actions::CallerIdentity::CoAgent {
+                agent_id: req.user_id.clone(),
+            },
             Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
             None => {
                 let cfg = opencrab_db::queries::get_agent_discord_config(&conn, &id);
@@ -75,7 +73,9 @@ pub async fn send_agent_message(
                 metadata_json: None,
             };
             if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
-                return Json(serde_json::json!({"error": format!("Failed to create session: {}", e)}));
+                return Json(
+                    serde_json::json!({"error": format!("Failed to create session: {}", e)}),
+                );
             }
         }
     }
@@ -117,8 +117,10 @@ pub async fn send_agent_message(
                 let tools_cfg = state.tools_config.read().unwrap().clone();
                 let workspace_path = state.workspace_base.replace("{agent_id}", &id);
                 let workspace_root = std::path::PathBuf::from(workspace_path);
-                let subtask_registry: opencrab_discord::SubtaskRegistry = std::sync::Arc::new(dashmap::DashMap::new());
-                let completion_registry: opencrab_discord::CompletionRegistry = std::sync::Arc::new(dashmap::DashMap::new());
+                let subtask_registry: opencrab_discord::SubtaskRegistry =
+                    std::sync::Arc::new(dashmap::DashMap::new());
+                let completion_registry: opencrab_discord::CompletionRegistry =
+                    std::sync::Arc::new(dashmap::DashMap::new());
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
@@ -150,7 +152,12 @@ pub async fn send_agent_message(
     // 7. Build conversation string.
     let conversation = {
         let conn = state.db.lock().unwrap();
-        let budget = process::compute_context_budget(&conn, &state.default_model.split(':').next().unwrap_or(""), state.default_model.split(':').nth(1).unwrap_or(""), state.compaction_ratio);
+        let budget = process::compute_context_budget(
+            &conn,
+            &state.default_model.split(':').next().unwrap_or(""),
+            state.default_model.split(':').nth(1).unwrap_or(""),
+            state.compaction_ratio,
+        );
         let raw = process::build_conversation_string(&conn, &session_id, &id, budget);
         process::prepend_runtime_context(&raw, "direct_message")
     };
@@ -168,7 +175,7 @@ pub async fn send_agent_message(
         caller,
         &[],
         0,
-        None,   // trigger_message_id
+        None, // trigger_message_id
         None,
     )
     .await;
@@ -205,7 +212,8 @@ pub async fn send_agent_message(
                 conn.execute(
                     "UPDATE sessions SET status = 'completed' WHERE id = ?1",
                     [&session_id],
-                ).ok();
+                )
+                .ok();
             }
 
             Json(serde_json::json!({
@@ -225,7 +233,8 @@ pub async fn send_agent_message(
                 conn.execute(
                     "UPDATE sessions SET status = 'completed' WHERE id = ?1",
                     [&session_id],
-                ).ok();
+                )
+                .ok();
             }
             Json(serde_json::json!({
                 "session_id": session_id,

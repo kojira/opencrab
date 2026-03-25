@@ -27,7 +27,8 @@ pub async fn list_skills_all(
 ) -> Json<Vec<opencrab_db::queries::SkillRow>> {
     let conn = state.db.lock().unwrap();
     let include_archived = q.include_archived.unwrap_or(false);
-    let skills = opencrab_db::queries::list_skills_filtered(&conn, &id, false, include_archived).unwrap_or_default();
+    let skills = opencrab_db::queries::list_skills_filtered(&conn, &id, false, include_archived)
+        .unwrap_or_default();
     Json(skills)
 }
 
@@ -100,14 +101,23 @@ pub async fn update_skill(
     Json(req): Json<UpdateSkillRequest>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
-    let skills = opencrab_db::queries::list_skills_filtered(&conn, &agent_id, false, true).unwrap_or_default();
+    let skills = opencrab_db::queries::list_skills_filtered(&conn, &agent_id, false, true)
+        .unwrap_or_default();
     let existing = skills.into_iter().find(|s| s.id == skill_id);
 
     if let Some(mut skill) = existing {
-        if let Some(name) = req.name { skill.name = name; }
-        if let Some(desc) = req.description { skill.description = desc; }
-        if let Some(guidance) = req.guidance { skill.guidance = guidance; }
-        if let Some(pattern) = req.situation_pattern { skill.situation_pattern = pattern; }
+        if let Some(name) = req.name {
+            skill.name = name;
+        }
+        if let Some(desc) = req.description {
+            skill.description = desc;
+        }
+        if let Some(guidance) = req.guidance {
+            skill.guidance = guidance;
+        }
+        if let Some(pattern) = req.situation_pattern {
+            skill.situation_pattern = pattern;
+        }
 
         opencrab_db::queries::update_skill(&conn, &skill).unwrap();
         Json(serde_json::json!({"updated": true}))
@@ -133,7 +143,6 @@ pub async fn restore_skill(
     opencrab_db::queries::archive_skill(&conn, &skill_id, false).unwrap();
     Json(serde_json::json!({"restored": true}))
 }
-
 
 pub async fn list_unused(
     State(state): State<AppState>,

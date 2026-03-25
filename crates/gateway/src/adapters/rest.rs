@@ -5,9 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, warn};
 
-use crate::message::{
-    IncomingMessage, MessageContent, MessageSource, OutgoingMessage, Sender,
-};
+use crate::message::{IncomingMessage, MessageContent, MessageSource, OutgoingMessage, Sender};
 use crate::traits::Gateway;
 
 /// REST APIゲートウェイ
@@ -260,7 +258,10 @@ mod tests {
     #[tokio::test]
     async fn test_submit_text_helper() {
         let mut gateway = RestGateway::new(32);
-        let msg_id = gateway.submit_text("hello", "user-1", "User").await.unwrap();
+        let msg_id = gateway
+            .submit_text("hello", "user-1", "User")
+            .await
+            .unwrap();
         assert!(!msg_id.is_empty());
 
         let received = gateway.receive().await.unwrap();

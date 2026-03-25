@@ -12,8 +12,8 @@ use tracing::{error, info, warn};
 
 use opencrab_gateway::DiscordGateway;
 
+use crate::gateway_actions::{CompletionRegistry, SubtaskRegistry};
 use crate::AgentRunner;
-use crate::gateway_actions::{SubtaskRegistry, CompletionRegistry};
 
 struct AgentGatewayEntry {
     gateway: Arc<DiscordGateway>,
@@ -46,15 +46,14 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let gateway = Arc::new(DiscordGateway::new(token));
         gateway.start().await?;
 
-        let workspace_path = self.state.workspace_base()
-            .replace("{agent_id}", agent_id);
+        let workspace_path = self.state.workspace_base().replace("{agent_id}", agent_id);
         let workspace_root = std::path::PathBuf::from(workspace_path);
 
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         let completion_registry: CompletionRegistry = Arc::new(dashmap::DashMap::new());
 
-        let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-            crate::DiscordGatewayActions::new(
+        let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
+            Arc::new(crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
                 self.state.db().clone(),
                 agent_id.to_string(),
@@ -64,8 +63,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 workspace_root,
                 subtask_registry,
                 completion_registry.clone(),
-            ),
-        );
+            ));
 
         let loop_state = self.state.clone();
         let loop_gateway = gateway.clone();
@@ -85,10 +83,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         });
 
         let mut gateways = self.gateways.write().await;
-        gateways.insert(
-            agent_id.to_string(),
-            AgentGatewayEntry { gateway, handle },
-        );
+        gateways.insert(agent_id.to_string(), AgentGatewayEntry { gateway, handle });
 
         info!(agent_id = %agent_id, "Per-agent Discord gateway started");
         Ok(())

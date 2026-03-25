@@ -318,7 +318,11 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
     router.set_default_provider(&config.default_provider);
 
     // Set fallback chain (only include registered providers)
-    let registered: Vec<String> = router.provider_names().iter().map(|s| s.to_string()).collect();
+    let registered: Vec<String> = router
+        .provider_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let chain: Vec<String> = config
         .fallback
         .chain

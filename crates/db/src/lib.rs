@@ -1,5 +1,5 @@
-pub mod schema;
 pub mod queries;
+pub mod schema;
 
 use anyhow::Result;
 use rusqlite::Connection;

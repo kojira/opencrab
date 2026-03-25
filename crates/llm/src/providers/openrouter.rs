@@ -219,22 +219,19 @@ impl OpenRouterProvider {
                             .get("function_call")
                             .and_then(|fc| serde_json::from_value::<FunctionCall>(fc.clone()).ok());
 
-                        let tool_calls = msg
-                            .get("tool_calls")
-                            .and_then(|tc| {
-                                serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
-                            });
+                        let tool_calls = msg.get("tool_calls").and_then(|tc| {
+                            serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
+                        });
 
-                        let finish_reason = c.get("finish_reason").and_then(|fr| {
-                            match fr.as_str()? {
+                        let finish_reason =
+                            c.get("finish_reason").and_then(|fr| match fr.as_str()? {
                                 "stop" => Some(FinishReason::Stop),
                                 "length" => Some(FinishReason::Length),
                                 "function_call" => Some(FinishReason::FunctionCall),
                                 "tool_calls" => Some(FinishReason::ToolCalls),
                                 "content_filter" => Some(FinishReason::ContentFilter),
                                 _ => None,
-                            }
-                        });
+                            });
 
                         Choice {
                             index: c["index"].as_u64().unwrap_or(0) as u32,
@@ -389,30 +386,22 @@ impl LlmProvider for OpenRouterProvider {
                                         StreamChoice {
                                             index: c["index"].as_u64().unwrap_or(0) as u32,
                                             delta: DeltaMessage {
-                                                role: delta
-                                                    .get("role")
-                                                    .and_then(|r| {
-                                                        serde_json::from_value(r.clone()).ok()
-                                                    }),
+                                                role: delta.get("role").and_then(|r| {
+                                                    serde_json::from_value(r.clone()).ok()
+                                                }),
                                                 content: delta
                                                     .get("content")
                                                     .and_then(|v| v.as_str().map(String::from)),
-                                                function_call: delta
-                                                    .get("function_call")
-                                                    .and_then(|fc| {
-                                                        serde_json::from_value(fc.clone()).ok()
-                                                    }),
-                                                tool_calls: delta
-                                                    .get("tool_calls")
-                                                    .and_then(|tc| {
-                                                        serde_json::from_value(tc.clone()).ok()
-                                                    }),
+                                                function_call: delta.get("function_call").and_then(
+                                                    |fc| serde_json::from_value(fc.clone()).ok(),
+                                                ),
+                                                tool_calls: delta.get("tool_calls").and_then(
+                                                    |tc| serde_json::from_value(tc.clone()).ok(),
+                                                ),
                                             },
-                                            finish_reason: c
-                                                .get("finish_reason")
-                                                .and_then(|fr| {
-                                                    serde_json::from_value(fr.clone()).ok()
-                                                }),
+                                            finish_reason: c.get("finish_reason").and_then(|fr| {
+                                                serde_json::from_value(fr.clone()).ok()
+                                            }),
                                         }
                                     })
                                     .collect()

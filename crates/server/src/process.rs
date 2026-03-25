@@ -17,21 +17,20 @@ use crate::AppState;
 /// DBからエージェントのidentity/soul/skillsを読み込んでシステムプロンプトを構築する。
 ///
 /// 返り値: (system_prompt, agent_name)
-pub fn build_agent_context(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-) -> (String, String) {
+pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (String, String) {
     let identity = opencrab_db::queries::get_identity(conn, agent_id)
         .ok()
         .flatten();
-    let soul = opencrab_db::queries::get_soul(conn, agent_id).ok().flatten();
+    let soul = opencrab_db::queries::get_soul(conn, agent_id)
+        .ok()
+        .flatten();
     let skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
     let curated_categories = ["long_term", "user_profile", "agent_rules"];
     let curated_sections: Vec<String> = curated_categories
         .iter()
         .filter_map(|cat| {
-            let memories = opencrab_db::queries::get_curated_memories(conn, agent_id, cat)
-                .unwrap_or_default();
+            let memories =
+                opencrab_db::queries::get_curated_memories(conn, agent_id, cat).unwrap_or_default();
             if memories.is_empty() {
                 return None;
             }
@@ -198,8 +197,14 @@ pub fn build_conversation_string(
 
     // 予算超過 → コンパクション
     // memory_index の topic 要約を取得
-    let topics = opencrab_db::queries::get_topic_nodes_for_session(conn, agent_id, session_id)
-        .unwrap_or_default();
+    let topics = match opencrab_db::queries::get_topic_nodes_for_session(conn, agent_id, session_id)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, session_id = %session_id, "Failed to get topic nodes: {e}");
+            vec![]
+        }
+    };
 
     if topics.is_empty() {
         // フォールバック: 要約がない場合は最新ログを予算内で切り詰め
@@ -232,15 +237,31 @@ pub fn build_conversation_string(
         .unwrap_or(0);
 
     // indexed_boundary 以降のログを取得
-    let mut recent_logs =
-        opencrab_db::queries::list_session_logs_after_id(conn, session_id, indexed_boundary)
-            .unwrap_or_default();
+    let mut recent_logs = match opencrab_db::queries::list_session_logs_after_id(
+        conn,
+        session_id,
+        indexed_boundary,
+    ) {
+        Ok(logs) => logs,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "Failed to list session logs after id: {e}");
+            vec![]
+        }
+    };
 
     // ログが少なければ追加取得（最低 RECENT_MIN_LOGS 件は確保）
     if recent_logs.len() < RECENT_MIN_LOGS {
-        let mut logs =
-            opencrab_db::queries::list_recent_session_logs(conn, session_id, RECENT_MIN_LOGS)
-                .unwrap_or_default();
+        let mut logs = match opencrab_db::queries::list_recent_session_logs(
+            conn,
+            session_id,
+            RECENT_MIN_LOGS,
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, "Failed to list recent session logs: {e}");
+                vec![]
+            }
+        };
         logs.reverse();
         recent_logs = logs;
     }
@@ -268,8 +289,13 @@ pub fn compute_context_budget(
 }
 
 fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> String {
-    let logs =
-        opencrab_db::queries::list_session_logs_by_session(conn, session_id).unwrap_or_default();
+    let logs = match opencrab_db::queries::list_session_logs_by_session(conn, session_id) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "Failed to list session logs: {e}");
+            return "No messages yet.".to_string();
+        }
+    };
     if logs.is_empty() {
         return "No messages yet.".to_string();
     }
@@ -281,8 +307,13 @@ fn build_truncated_conversation(
     session_id: &str,
     budget_tokens: usize,
 ) -> String {
-    let mut logs =
-        opencrab_db::queries::list_recent_session_logs(conn, session_id, 500).unwrap_or_default();
+    let mut logs = match opencrab_db::queries::list_recent_session_logs(conn, session_id, 500) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "Failed to list recent session logs for truncation: {e}");
+            vec![]
+        }
+    };
     logs.reverse();
 
     let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
@@ -591,7 +622,9 @@ pub async fn run_agent_response(
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         if let Ok(conn) = log_db.lock() {
-            let _ = opencrab_db::queries::insert_llm_log(&conn, &log_row);
+            if let Err(e) = opencrab_db::queries::insert_llm_log(&conn, &log_row) {
+                tracing::error!("Failed to insert llm_log: {e}");
+            }
         }
     });
 
@@ -620,7 +653,9 @@ pub async fn run_agent_response(
                     ),
                     created_at: None,
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                    tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert tool_call log: {e}");
+                }
             }
         });
     }
@@ -668,7 +703,9 @@ pub async fn run_agent_response(
                         ),
                         created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                        tracing::error!(agent_id = %tr_agent, session_id = %tr_session, "Failed to insert tool_result log: {e}");
+                    }
                 }
             },
         );

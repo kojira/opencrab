@@ -82,7 +82,9 @@ impl Action for CreateMySkillAction {
 
         // Check if skill with same name already exists (including archived)
         let existing = ctx.db.lock().ok().and_then(|conn| {
-            opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name).ok().flatten()
+            opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name)
+                .ok()
+                .flatten()
         });
 
         if let Some(existing) = existing {
@@ -206,8 +208,14 @@ mod tests {
         assert!(data["file_path"].as_str().unwrap().contains("skills/"));
 
         // Verify side effects
-        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
-        assert!(result.side_effects.iter().any(|e| matches!(e, SideEffect::FileWritten { .. })));
+        assert!(result
+            .side_effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::SkillAcquired { .. })));
+        assert!(result
+            .side_effects
+            .iter()
+            .any(|e| matches!(e, SideEffect::FileWritten { .. })));
 
         // Verify DB insertion
         let conn = ctx.db.lock().unwrap();
@@ -241,7 +249,11 @@ mod tests {
                 &ctx,
             )
             .await;
-        let content = ctx.workspace.read("skills/file-check.skill.md").await.unwrap();
+        let content = ctx
+            .workspace
+            .read("skills/file-check.skill.md")
+            .await
+            .unwrap();
         assert!(content.contains("File Check"));
         assert!(content.contains("guide"));
         assert!(content.contains("pattern"));

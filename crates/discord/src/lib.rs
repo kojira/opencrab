@@ -13,7 +13,9 @@ use async_trait::async_trait;
 use opencrab_gateway::GatewayActions;
 
 pub use gateway_actions::DiscordGatewayActions;
-pub use gateway_actions::{SpawnedSubtask, SubtaskCompletionFn, CompletionRegistry, SubtaskRegistry};
+pub use gateway_actions::{
+    CompletionRegistry, SpawnedSubtask, SubtaskCompletionFn, SubtaskRegistry,
+};
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 
@@ -39,7 +41,12 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     fn build_agent_context(&self, agent_id: &str) -> (String, String);
 
     /// Build the conversation history string for a session (with compaction).
-    fn build_conversation_string(&self, session_id: &str, agent_id: &str, context_budget_tokens: usize) -> String;
+    fn build_conversation_string(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        context_budget_tokens: usize,
+    ) -> String;
 
     /// Run the full agent response pipeline (SkillEngine + LLM).
     async fn run_agent_response(

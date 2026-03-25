@@ -17,10 +17,7 @@ pub struct Identity {
 
 impl Identity {
     /// Create a new Identity with the given agent_id and name.
-    pub fn new(
-        agent_id: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
+    pub fn new(agent_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             agent_id: agent_id.into(),
             name: name.into(),

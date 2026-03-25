@@ -2,11 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage};
 use serenity::model::channel::ReactionType;
 use serenity::model::id::MessageId;
 use serenity::model::prelude::ChannelType;
-use serde_json::json;
 use tracing::{debug, error};
 
 use opencrab_gateway::GatewayActionResult;
@@ -43,13 +43,18 @@ impl DiscordGatewayActions {
                 GatewayActionResult {
                     success: false,
                     data: None,
-                    error: Some(format!("サーバー一覧の取得に失敗: Failed to get guilds: {e}")),
+                    error: Some(format!(
+                        "サーバー一覧の取得に失敗: Failed to get guilds: {e}"
+                    )),
                 }
             }
         }
     }
 
-    pub(crate) async fn execute_list_channels(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) async fn execute_list_channels(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
         let guild_id = match args.get("guild_id").and_then(|v| v.as_str()) {
             Some(id) => id,
             None => {
@@ -86,7 +91,9 @@ impl DiscordGatewayActions {
                 return GatewayActionResult {
                     success: false,
                     data: None,
-                    error: Some(format!("チャンネル一覧の取得に失敗: Failed to get channels for guild {gid}: {e}")),
+                    error: Some(format!(
+                        "チャンネル一覧の取得に失敗: Failed to get channels for guild {gid}: {e}"
+                    )),
                 };
             }
         };
@@ -94,14 +101,16 @@ impl DiscordGatewayActions {
         debug!(
             "Got {} channels from guild {gid}, {} are text",
             channels.len(),
-            channels.iter().filter(|c| c.kind == ChannelType::Text).count()
+            channels
+                .iter()
+                .filter(|c| c.kind == ChannelType::Text)
+                .count()
         );
 
         // DB設定も合わせて取得
         let db_configs = {
             let conn = self.db.lock().unwrap();
-            opencrab_db::queries::list_channel_configs_by_guild(&conn, guild_id)
-                .unwrap_or_default()
+            opencrab_db::queries::list_channel_configs_by_guild(&conn, guild_id).unwrap_or_default()
         };
 
         let channel_list: Vec<serde_json::Value> = channels
@@ -137,7 +146,10 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) fn execute_discord_channel_config(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) fn execute_discord_channel_config(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
         let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
             Some(id) => id,
             None => {
@@ -235,7 +247,10 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) async fn execute_discord_add_reaction(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) async fn execute_discord_add_reaction(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
         let channel_id_str = match args.get("channel_id").and_then(|v| v.as_str()) {
             Some(id) => id,
             None => {
@@ -304,11 +319,15 @@ impl DiscordGatewayActions {
             ReactionType::Unicode(emoji_str.to_string())
         };
 
-        match self.http.create_reaction(
-            serenity::model::id::ChannelId::new(channel_id),
-            MessageId::new(message_id),
-            &reaction,
-        ).await {
+        match self
+            .http
+            .create_reaction(
+                serenity::model::id::ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &reaction,
+            )
+            .await
+        {
             Ok(()) => GatewayActionResult {
                 success: true,
                 data: Some(json!({
@@ -398,7 +417,9 @@ impl DiscordGatewayActions {
             return GatewayActionResult {
                 success: false,
                 data: None,
-                error: Some(format!("ワークスペース外のファイルは送信できません: {file_path_str}")),
+                error: Some(format!(
+                    "ワークスペース外のファイルは送信できません: {file_path_str}"
+                )),
             };
         }
 
@@ -456,7 +477,10 @@ impl DiscordGatewayActions {
         }
 
         // Send
-        match ChannelId::new(channel_id).send_message(&self.http, msg).await {
+        match ChannelId::new(channel_id)
+            .send_message(&self.http, msg)
+            .await
+        {
             Ok(_) => GatewayActionResult {
                 success: true,
                 data: Some(json!({

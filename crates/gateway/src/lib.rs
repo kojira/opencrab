@@ -1,18 +1,16 @@
-pub mod traits;
-pub mod message;
 pub mod adapters;
+pub mod message;
+pub mod traits;
 
-pub use traits::Gateway;
-pub use traits::{GatewayActions, GatewayActionDef, GatewayActionResult};
-pub use message::{
-    IncomingMessage, OutgoingMessage,
-    MessageSource, MessageContent, ContentPart,
-    MessageTarget, Sender, Channel,
-    GatewayConfig,
-};
-pub use adapters::rest::RestGateway;
 pub use adapters::cli::CliGateway;
+pub use adapters::rest::RestGateway;
 pub use adapters::websocket::WebSocketGateway;
+pub use message::{
+    Channel, ContentPart, GatewayConfig, IncomingMessage, MessageContent, MessageSource,
+    MessageTarget, OutgoingMessage, Sender,
+};
+pub use traits::Gateway;
+pub use traits::{GatewayActionDef, GatewayActionResult, GatewayActions};
 
 #[cfg(feature = "discord")]
 pub use adapters::discord::DiscordGateway;

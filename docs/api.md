@@ -6,7 +6,8 @@ Base URL: `http://localhost:3000`
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| GET | `/health` | Health check → `"ok"` |
+| GET | `/health` | Health check → `"ok"` (plain text) |
+| GET | `/api/health` | Health check → `{"status":"ok"}` (JSON) |
 | **Agents** | | |
 | POST | `/api/agents` | Create agent |
 | GET | `/api/agents` | List agents |
@@ -23,20 +24,32 @@ Base URL: `http://localhost:3000`
 | DELETE | `/api/agents/{id}/soul/presets/{preset_id}` | Delete preset |
 | POST | `/api/agents/{id}/soul/presets/{preset_id}/apply` | Apply preset to soul |
 | **Skills** | | |
-| GET | `/api/agents/{id}/skills` | List skills |
+| GET | `/api/agents/{id}/skills` | List skills (active only) |
 | POST | `/api/agents/{id}/skills` | Add skill |
+| PUT | `/api/agents/{id}/skills/{skill_id}` | Update skill (partial) |
 | POST | `/api/agents/{id}/skills/{skill_id}/toggle` | Toggle skill on/off |
+| POST | `/api/agents/{id}/skills/{skill_id}/archive` | Archive skill |
+| POST | `/api/agents/{id}/skills/{skill_id}/restore` | Restore archived skill |
+| GET | `/api/agents/{id}/skills/unused` | List skills unused for 7+ days |
 | **Memory** | | |
 | GET | `/api/agents/{id}/memory/curated` | List curated memories |
 | POST | `/api/agents/{id}/memory/search` | Search memory (FTS5) |
 | GET | `/api/agents/{id}/memory/index` | Get index status |
-| POST | `/api/agents/{id}/memory/index` | Trigger index build |
+| POST | `/api/agents/{id}/memory/index` | Trigger incremental index build |
+| DELETE | `/api/agents/{id}/memory/index` | Delete entire memory index |
+| GET | `/api/agents/{id}/memory/index/tree` | Get index tree structure |
+| PUT | `/api/agents/{id}/memory/index/config` | Update index config |
+| POST | `/api/agents/{id}/memory/index/rebuild` | Full index rebuild |
+| POST | `/api/agents/{id}/memory/index/merge` | Merge topics |
 | **Sessions** | | |
 | POST | `/api/sessions` | Create session |
 | GET | `/api/sessions` | List sessions |
 | GET | `/api/sessions/{id}` | Get session detail |
-| POST | `/api/sessions/{id}/messages` | Send message |
+| POST | `/api/sessions/{id}/messages` | Send message (triggers agent response) |
 | GET | `/api/sessions/{id}/logs` | Get session logs |
+| POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
+| **Agent Messages** | | |
+| POST | `/api/agents/{id}/messages` | Send direct message to agent |
 | **Analytics** | | |
 | GET | `/api/agents/{id}/analytics` | Analytics summary |
 | GET | `/api/agents/{id}/analytics/detail` | Analytics by model |
@@ -46,10 +59,15 @@ Base URL: `http://localhost:3000`
 | PUT | `/api/agents/{id}/workspace/{path}` | Write file |
 | **Discord** | | |
 | GET | `/api/agents/{id}/discord` | Get Discord config |
-| PUT | `/api/agents/{id}/discord` | Save Discord config |
+| PUT | `/api/agents/{id}/discord` | Save Discord config (full update) |
+| PATCH | `/api/agents/{id}/discord` | Partial update Discord config |
 | DELETE | `/api/agents/{id}/discord` | Remove Discord config |
 | POST | `/api/agents/{id}/discord/start` | Start Discord gateway |
 | POST | `/api/agents/{id}/discord/stop` | Stop Discord gateway |
+| **Channel Configs** | | |
+| GET | `/api/agents/{id}/channel-configs` | List channel configs by guild |
+| PUT | `/api/agents/{id}/channel-configs` | Upsert channel config |
+| DELETE | `/api/agents/{id}/channel-configs/{channel_id}` | Delete channel config |
 | **Co-Agents** | | |
 | GET | `/api/agents/{id}/co-agents` | List co-agents |
 | POST | `/api/agents/{id}/co-agents` | Register co-agent |
@@ -60,6 +78,16 @@ Base URL: `http://localhost:3000`
 | POST | `/api/agents/{id}/trusted-users` | Add trusted user |
 | PATCH | `/api/agents/{id}/trusted-users/{user_id}` | Update permission |
 | DELETE | `/api/agents/{id}/trusted-users/{user_id}` | Remove trusted user |
+| **Allowed Commands** | | |
+| GET | `/api/agents/{id}/allowed-commands` | List allowed shell commands |
+| POST | `/api/agents/{id}/allowed-commands` | Add allowed command |
+| DELETE | `/api/agents/{id}/allowed-commands/{command}` | Remove allowed command |
+| **LLM Logs** | | |
+| GET | `/api/agents/{id}/llm-logs` | List LLM call logs |
+| GET | `/api/agents/{id}/llm-logs/stats` | LLM log statistics (30d) |
+| **Import** | | |
+| POST | `/api/import/scan` | Scan workspace directory |
+| POST | `/api/import/execute` | Execute workspace import |
 
 ---
 
@@ -69,7 +97,19 @@ Base URL: `http://localhost:3000`
 
 **目的**: サーバー生存確認
 
-**Response**: `"ok"` (plain text)
+**Response**: `"ok"` (plain text, Content-Type: text/plain)
+
+---
+
+### GET /api/health
+
+**目的**: API サーバー生存確認（JSON 形式）
+
+**Response**
+
+```json
+{"status": "ok"}
+```
 
 ---
 
@@ -127,7 +167,7 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-[{"id": "550e8400-...", "name": "kairo", "persona_name": "かいろ", "image_url": "https://example.com/kairo.png", "status": "active", "skill_count": 5, "session_count": 12}]
+[{"id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo", "persona_name": "かいろ", "image_url": "https://example.com/kairo.png", "status": "active", "skill_count": 5, "session_count": 12}]
 ```
 
 ---
@@ -146,7 +186,24 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-{"identity": {"agent_id": "550e8400-...", "name": "kairo", "job_title": "AI Assistant", "organization": "opencrab", "image_url": "https://example.com/kairo.png", "metadata_json": "{}"}, "soul": {"agent_id": "550e8400-...", "persona_name": "かいろ", "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}", "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}", "personality": "friendly and curious", "instructions": "You are a helpful hermit crab AI agent."}}
+{
+  "identity": {
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "name": "kairo",
+    "job_title": "AI Assistant",
+    "organization": "opencrab",
+    "image_url": "https://example.com/kairo.png",
+    "metadata_json": "{}"
+  },
+  "soul": {
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "persona_name": "かいろ",
+    "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}",
+    "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}",
+    "personality": "friendly and curious",
+    "instructions": "You are a helpful hermit crab AI agent."
+  }
+}
 ```
 
 ---
@@ -156,12 +213,6 @@ Base URL: `http://localhost:3000`
 **目的**: エージェントを削除する
 
 **Response**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| deleted | bool | 削除成功なら `true` |
-
-**Example Response**
 
 ```json
 {"deleted": true}
@@ -220,7 +271,14 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-{"agent_id": "550e8400-...", "persona_name": "かいろ", "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}", "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}", "personality": "friendly and curious", "instructions": "You are a helpful hermit crab AI agent."}
+{
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "persona_name": "かいろ",
+  "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}",
+  "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}",
+  "personality": "friendly and curious",
+  "instructions": "You are a helpful hermit crab AI agent."
+}
 ```
 
 ---
@@ -244,7 +302,12 @@ Base URL: `http://localhost:3000`
 **Example Request**
 
 ```json
-{"persona_name": "かいろ", "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}", "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}", "instructions": "You are a helpful hermit crab AI agent."}
+{
+  "persona_name": "かいろ",
+  "social_style_json": "{\"assertiveness\":0.3,\"responsiveness\":0.8,\"style_name\":\"Amiable\"}",
+  "thinking_style_json": "{\"primary\":\"直感的\",\"secondary\":\"論理的\",\"description\":\"\"}",
+  "instructions": "You are a helpful hermit crab AI agent."
+}
 ```
 
 **Response**
@@ -264,7 +327,7 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-{"agent_id": "550e8400-...", "name": "kairo", "job_title": "AI Assistant", "organization": "opencrab", "image_url": "https://example.com/kairo.png", "metadata_json": "{}"}
+{"agent_id": "550e8400-e29b-41d4-a716-446655440000", "name": "kairo", "job_title": "AI Assistant", "organization": "opencrab", "image_url": "https://example.com/kairo.png", "metadata_json": "{}"}
 ```
 
 ---
@@ -318,7 +381,7 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-[{"id": "a1b2c3d4-...", "agent_id": "550e8400-...", "preset_name": "formal-mode", "persona_name": "かいろ", "custom_traits_json": null}]
+[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "agent_id": "550e8400-e29b-41d4-a716-446655440000", "preset_name": "formal-mode", "persona_name": "かいろ", "custom_traits_json": null}]
 ```
 
 ---
@@ -390,7 +453,9 @@ Base URL: `http://localhost:3000`
 | description | string | スキルの説明 |
 | situation_pattern | string | このスキルを使う状況パターン |
 | guidance | string | スキル実行時の指示内容 |
-| source_type | string | スキルの出自 |
+| source_type | string | スキルの出自（`"manual"` など） |
+| source_context | string \| null | 出自コンテキスト |
+| file_path | string \| null | スクリプトファイルパス |
 | is_active | bool | 有効/無効 |
 | permission | string | `"agent"` \| `"owner"` \| `"trusted"` |
 | archived | bool | アーカイブ済みか |
@@ -401,14 +466,35 @@ Base URL: `http://localhost:3000`
 
 ### GET /api/agents/{id}/skills
 
-**目的**: エージェントのスキル一覧を取得する
+**目的**: エージェントのスキル一覧を取得する（デフォルトはアクティブのみ）
+
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| include_archived | bool | ❌ | `true` でアーカイブ済みも含む (default: `false`) |
 
 **Response**: SkillRow[]
 
 **Example Response**
 
 ```json
-[{"id": "b2c3d4e5-...", "agent_id": "550e8400-...", "name": "greeting", "description": "Greet users warmly", "situation_pattern": "user says hello", "guidance": "Respond with a friendly greeting.", "permission": "agent", "is_active": true}]
+[{
+  "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "greeting",
+  "description": "Greet users warmly",
+  "situation_pattern": "user says hello",
+  "guidance": "Respond with a friendly greeting.",
+  "source_type": "manual",
+  "source_context": null,
+  "file_path": null,
+  "permission": "\"agent\"",
+  "is_active": true,
+  "archived": false,
+  "usage_count": 5,
+  "effectiveness": null
+}]
 ```
 
 ---
@@ -430,7 +516,12 @@ Base URL: `http://localhost:3000`
 **Example Request**
 
 ```json
-{"name": "greeting", "description": "Greet users warmly", "situation_pattern": "user says hello", "guidance": "Respond with a friendly greeting."}
+{
+  "name": "greeting",
+  "description": "Greet users warmly",
+  "situation_pattern": "user says hello",
+  "guidance": "Respond with a friendly greeting."
+}
 ```
 
 **Response**
@@ -443,6 +534,39 @@ Base URL: `http://localhost:3000`
 
 ```json
 {"id": "b2c3d4e5-f6a7-8901-bcde-f12345678901"}
+```
+
+---
+
+### PUT /api/agents/{id}/skills/{skill_id}
+
+**目的**: スキルを部分更新する（指定したフィールドのみ更新）
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| name | string | ❌ | スキル名 |
+| description | string | ❌ | スキルの説明 |
+| guidance | string | ❌ | スキル実行時の指示内容 |
+| situation_pattern | string | ❌ | このスキルを使う状況パターン |
+
+**Example Request**
+
+```json
+{"guidance": "Respond with a warm and friendly greeting. Use the user's name if known."}
+```
+
+**Response**
+
+```json
+{"updated": true}
+```
+
+**Error Response** (skill not found)
+
+```json
+{"updated": false, "error": "skill not found"}
 ```
 
 ---
@@ -471,18 +595,90 @@ Base URL: `http://localhost:3000`
 
 ---
 
+### POST /api/agents/{id}/skills/{skill_id}/archive
+
+**目的**: スキルをアーカイブする（ソフト削除）
+
+アーカイブされたスキルは通常の一覧には表示されないが、`include_archived=true` で取得できる。
+
+**Request Body**: なし
+
+**Response**
+
+```json
+{"archived": true}
+```
+
+---
+
+### POST /api/agents/{id}/skills/{skill_id}/restore
+
+**目的**: アーカイブされたスキルを復元する
+
+**Request Body**: なし
+
+**Response**
+
+```json
+{"restored": true}
+```
+
+---
+
+### GET /api/agents/{id}/skills/unused
+
+**目的**: 7日以上使われていないスキルを一覧取得する
+
+**Response**: SkillRow[]（SkillRow 構造は上記と同じ）
+
+**Example Response**
+
+```json
+[{
+  "id": "c3d4e5f6-a7b8-9012-cdef-012345678902",
+  "name": "legacy-task",
+  "description": "Old task handler",
+  "usage_count": 0,
+  "is_active": true,
+  "archived": false
+}]
+```
+
+---
+
 ## Memory
 
 ### GET /api/agents/{id}/memory/curated
 
 **目的**: キュレーション済みメモリ一覧を取得する
 
-**Response**: CuratedMemoryRow[]
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| limit | number | ❌ | 最大件数 (default: `100`) |
+| offset | number | ❌ | オフセット (default: `0`) |
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| total | number | 全件数 |
+| items | CuratedMemoryRow[] | メモリ一覧 |
 
 **Example Response**
 
 ```json
-[{"id": "c3d4e5f6-...", "agent_id": "550e8400-...", "content": "User prefers concise answers.", "category": "preference", "created_at": "2026-03-20T10:00:00Z"}]
+{
+  "total": 42,
+  "items": [{
+    "id": "c3d4e5f6-a7b8-9012-cdef-012345678902",
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "content": "User prefers concise answers.",
+    "category": "preference",
+    "created_at": "2026-03-20T10:00:00Z"
+  }]
+}
 ```
 
 ---
@@ -515,7 +711,11 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-{"query": "user preferences", "count": 2, "results": [{"id": "c3d4e5f6-...", "content": "User prefers concise answers.", "score": 0.95}]}
+{
+  "query": "user preferences",
+  "count": 2,
+  "results": [{"id": 1, "content": "User prefers concise answers.", "log_type": "speech"}]
+}
 ```
 
 ---
@@ -538,14 +738,23 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-{"agent_id": "550e8400-...", "total_nodes": 42, "unindexed_logs": 5, "watermark": "2026-03-24T08:00:00Z", "node_type_counts": {"root": 1, "period": 3, "session": 12, "topic": 26}, "config": {"batch_size": 50, "threshold": 0.7, "batch_size_min": 10, "threshold_min": 0.3}}
+{
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "total_nodes": 42,
+  "unindexed_logs": 5,
+  "watermark": "2026-03-24T08:00:00Z",
+  "node_type_counts": {"root": 1, "period": 3, "session": 12, "topic": 26},
+  "config": {"batch_size": 50, "threshold": 70, "batch_size_min": 10, "threshold_min": 30}
+}
 ```
 
 ---
 
 ### POST /api/agents/{id}/memory/index
 
-**目的**: メモリインデックスを手動構築する
+**目的**: メモリインデックスを手動で増分構築する（未インデックスのログを処理）
+
+**Request Body**: なし
 
 **Response**
 
@@ -559,6 +768,167 @@ Base URL: `http://localhost:3000`
 
 ```json
 {"ok": true, "nodes_created": 3, "logs_indexed": 5}
+```
+
+---
+
+### DELETE /api/agents/{id}/memory/index
+
+**目的**: メモリインデックスを全削除する（再構築前のリセット等に使用）
+
+**Request Body**: なし
+
+**Response**
+
+```json
+{"ok": true, "message": "Index deleted"}
+```
+
+**Error Response**
+
+```json
+{"ok": false, "error": "..."}
+```
+
+---
+
+### GET /api/agents/{id}/memory/index/tree
+
+**目的**: メモリインデックスのツリー構造を取得する（ルートから階層的に表示）
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| nodes | IndexNodeRow[] | 全ノードのフラットリスト |
+| tree | TreeNode[] | ルートから階層的なツリー |
+
+**IndexNodeRow 構造**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | string | ノード ID |
+| title | string | ノードタイトル |
+| node_type | string | `"root"` \| `"period"` \| `"session"` \| `"topic"` |
+| summary | string | ノードのサマリー |
+| depth | number | 木の深さ（root=0） |
+| child_count | number | 子ノード数 |
+| parent_id | string \| null | 親ノード ID |
+
+**Example Response**
+
+```json
+{
+  "nodes": [
+    {"id": "root-1", "title": "Memory Root", "node_type": "root", "summary": "...", "depth": 0, "child_count": 2, "parent_id": null}
+  ],
+  "tree": [{
+    "id": "root-1",
+    "title": "Memory Root",
+    "node_type": "root",
+    "summary": "Overview of all memories",
+    "depth": 0,
+    "child_count": 2,
+    "children": [
+      {"id": "period-1", "title": "March 2026", "node_type": "period", "depth": 1, "children": []}
+    ]
+  }]
+}
+```
+
+---
+
+### PUT /api/agents/{id}/memory/index/config
+
+**目的**: メモリインデックスの構築設定を更新する
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| batch_size | number | ❌ | 一度に処理するログ数（省略時は現在値を維持） |
+| threshold | number | ❌ | インデックス構築の閾値（省略時は現在値を維持） |
+
+**Example Request**
+
+```json
+{"batch_size": 100, "threshold": 80}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| ok | bool | 成功なら `true` |
+| config | object | 更新後の設定 |
+
+**Example Response**
+
+```json
+{
+  "ok": true,
+  "config": {
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "batch_size": 100,
+    "threshold": 80,
+    "updated_at": "2026-03-25T10:00:00Z"
+  }
+}
+```
+
+---
+
+### POST /api/agents/{id}/memory/index/rebuild
+
+**目的**: メモリインデックスを完全再構築する（既存インデックスを削除して全ログから再作成）
+
+> ⚠️ 時間がかかる場合があります。LLM 呼び出しが発生します。
+
+**Request Body**: なし
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| ok | bool | 成功なら `true` |
+| nodes_created | number | 作成されたノード数 |
+| logs_indexed | number | インデックスされたログ数 |
+
+**Example Response**
+
+```json
+{"ok": true, "nodes_created": 45, "logs_indexed": 200}
+```
+
+**Error Response**
+
+```json
+{"ok": false, "error": "..."}
+```
+
+---
+
+### POST /api/agents/{id}/memory/index/merge
+
+**目的**: 同一期間内のトピックを再マージして整理する（デフォルト: period あたり最大 10 topics）
+
+> ⚠️ LLM 呼び出しが発生します。
+
+**Request Body**: なし
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| ok | bool | 成功なら `true` |
+| periods_processed | number | 処理された期間数 |
+| topics_merged | number | マージされたトピック数 |
+| topics_deleted | number | 削除されたトピック数 |
+
+**Example Response**
+
+```json
+{"ok": true, "periods_processed": 3, "topics_merged": 8, "topics_deleted": 5}
 ```
 
 ---
@@ -581,16 +951,13 @@ Base URL: `http://localhost:3000`
 **Example Request**
 
 ```json
-{"theme": "brainstorming", "participant_ids": ["550e8400-e29b-41d4-a716-446655440000"]}
+{
+  "theme": "brainstorming",
+  "participant_ids": ["550e8400-e29b-41d4-a716-446655440000"]
+}
 ```
 
 **Response**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | 作成されたセッション ID |
-
-**Example Response**
 
 ```json
 {"id": "d4e5f6a7-b8c9-0123-def0-123456789013"}
@@ -611,15 +978,29 @@ Base URL: `http://localhost:3000`
 | theme | string | テーマ |
 | phase | string | `"divergent"` \| `"convergent"` \| `"done"` |
 | turn_number | number | 現在のターン番号 |
-| status | string | `"active"` \| `"done"` |
+| status | string | `"active"` \| `"done"` \| `"completed"` |
 | participant_ids_json | JSON string | 参加者 ID の JSON 配列文字列 |
+| facilitator_id | UUID \| null | ファシリテーター ID |
 | done_count | number | 完了投票数 |
 | max_turns | number \| null | 最大ターン数 |
+| metadata_json | JSON string \| null | メタデータ |
 
 **Example Response**
 
 ```json
-[{"id": "d4e5f6a7-...", "mode": "autonomous", "theme": "brainstorming", "phase": "divergent", "turn_number": 5, "status": "active", "participant_ids_json": "[\"550e8400-...\"]", "done_count": 0, "max_turns": 20}]
+[{
+  "id": "d4e5f6a7-b8c9-0123-def0-123456789013",
+  "mode": "autonomous",
+  "theme": "brainstorming",
+  "phase": "divergent",
+  "turn_number": 5,
+  "status": "active",
+  "participant_ids_json": "[\"550e8400-e29b-41d4-a716-446655440000\"]",
+  "facilitator_id": null,
+  "done_count": 0,
+  "max_turns": 20,
+  "metadata_json": null
+}]
 ```
 
 ---
@@ -628,13 +1009,15 @@ Base URL: `http://localhost:3000`
 
 **目的**: セッション詳細を取得する
 
-**Response**: SessionRow（上記と同構造）
+**Response**: SessionRow（上記と同構造）または `null`
 
 ---
 
 ### POST /api/sessions/{id}/messages
 
-**目的**: セッションにメッセージを送信し、エージェントの応答を得る
+**目的**: セッションにメッセージを送信し、他の参加エージェントの応答を得る
+
+> メッセージ送信者（`agent_id`）以外の全参加者が自動的に応答する。LLM 呼び出しが発生する。
 
 **Request Body**
 
@@ -646,21 +1029,42 @@ Base URL: `http://localhost:3000`
 **Example Request**
 
 ```json
-{"agent_id": "550e8400-e29b-41d4-a716-446655440000", "content": "What do you think about this idea?"}
+{
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "content": "What do you think about this idea?"
+}
 ```
 
 **Response**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| id | number | メッセージ ID |
+| id | number | メッセージ DB ID |
 | session_id | UUID | セッション ID |
-| responses | object[] | `[{agent_id, agent_name, content, tool_calls_made}]` |
+| responses | object[] | 各エージェントの応答 |
+
+**responses 要素**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| agent_id | UUID | 応答エージェント ID |
+| agent_name | string | エージェント名 |
+| content | string | 応答内容 |
+| tool_calls_made | number | ツール呼び出し回数 |
 
 **Example Response**
 
 ```json
-{"id": 42, "session_id": "d4e5f6a7-...", "responses": [{"agent_id": "550e8400-...", "agent_name": "kairo", "content": "That sounds interesting!", "tool_calls_made": 0}]}
+{
+  "id": 42,
+  "session_id": "d4e5f6a7-b8c9-0123-def0-123456789013",
+  "responses": [{
+    "agent_id": "660f9500-f3a0-52e5-b827-557766551111",
+    "agent_name": "assistant",
+    "content": "That sounds interesting!",
+    "tool_calls_made": 0
+  }]
+}
 ```
 
 ---
@@ -673,7 +1077,7 @@ Base URL: `http://localhost:3000`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| id | number \| null | ログ ID |
+| id | number \| null | ログ DB ID |
 | agent_id | UUID | エージェント ID |
 | session_id | UUID | セッション ID |
 | log_type | string | `"speech"` \| `"system"` \| `"action"` |
@@ -681,11 +1085,122 @@ Base URL: `http://localhost:3000`
 | speaker_id | UUID \| null | 発話者 ID |
 | turn_number | number \| null | ターン番号 |
 | metadata_json | JSON string \| null | メタデータ |
+| created_at | ISO8601 \| null | 作成日時 |
 
 **Example Response**
 
 ```json
-[{"id": 1, "session_id": "d4e5f6a7-...", "agent_id": "550e8400-...", "log_type": "speech", "content": "Hello! How can I help?", "speaker_id": null, "turn_number": 1, "metadata_json": null}]
+[{
+  "id": 1,
+  "session_id": "d4e5f6a7-b8c9-0123-def0-123456789013",
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "log_type": "speech",
+  "content": "Hello! How can I help?",
+  "speaker_id": "550e8400-e29b-41d4-a716-446655440000",
+  "turn_number": 1,
+  "metadata_json": null,
+  "created_at": "2026-03-20T10:00:00Z"
+}]
+```
+
+---
+
+### POST /api/sessions/{id}/mentor
+
+**目的**: セッションにメンター指示を挿入する（`log_type: "system"` として記録）
+
+エージェントの応答は生成されない。次回ターンでエージェントがこの指示を参照する。
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| content | string | ✅ | メンター指示の内容 |
+
+**Example Request**
+
+```json
+{"content": "Please be more concise in your responses from now on."}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | number | 作成されたログ DB ID |
+
+**Example Response**
+
+```json
+{"id": 99}
+```
+
+---
+
+## Agent Messages
+
+### POST /api/agents/{id}/messages
+
+**目的**: エージェントに直接メッセージを送信して応答を得る（セッション ID を自動管理）
+
+セッション ID は `agent-msg-{agent_id}-{user_id}` の形式で自動生成・再利用される。会話履歴は保持される。
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| content | string | ✅ | メッセージ本文 |
+| user_id | string | ✅ | 送信者の ID（Discord ユーザー ID または エージェント ID） |
+
+**Caller 権限の決定ロジック**:
+- `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
+- `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
+- `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`
+- それ以外 → `Agent`
+
+**Example Request**
+
+```json
+{"content": "What's the weather today?", "user_id": "123456789012345678"}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| session_id | string | セッション ID |
+| caller_type | string | `"owner"` \| `"trusted_user"` \| `"co_agent"` \| `"agent"` |
+| responses | object[] | エージェントの応答 |
+
+**responses 要素**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| agent_id | UUID | エージェント ID |
+| content | string | 応答内容 |
+
+**Example Response**
+
+```json
+{
+  "session_id": "agent-msg-550e8400-...-123456789012345678",
+  "caller_type": "owner",
+  "responses": [{
+    "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+    "content": "I don't have real-time weather access, but I can help with other things!"
+  }]
+}
+```
+
+**Error Response** (no LLM provider)
+
+```json
+{
+  "session_id": "agent-msg-...",
+  "caller_type": "agent",
+  "responses": [],
+  "error": "No LLM providers available"
+}
 ```
 
 ---
@@ -779,6 +1294,8 @@ Base URL: `http://localhost:3000`
 
 **目的**: ワークスペース内のファイルを読む
 
+**Path Parameter**: `{path}` はファイルのパス（サブディレクトリを含む場合は `/` でつなぐ）
+
 **Response**
 
 | Field | Type | Description |
@@ -796,7 +1313,7 @@ Base URL: `http://localhost:3000`
 
 ### PUT /api/agents/{id}/workspace/{path}
 
-**目的**: ワークスペース内のファイルを書き込む
+**目的**: ワークスペース内のファイルを書き込む（存在しない場合は作成）
 
 **Request Body**
 
@@ -830,7 +1347,7 @@ Base URL: `http://localhost:3000`
 |-------|------|-------------|
 | configured | bool | 設定済みか |
 | enabled | bool \| undefined | Bot が有効か（未設定時は不在） |
-| token_masked | string \| undefined | マスクされたトークン |
+| token_masked | string \| undefined | マスクされたトークン（先頭10文字 + `...`） |
 | owner_discord_id | string \| undefined | オーナーの Discord ID |
 | running | bool \| undefined | Gateway が起動中か |
 
@@ -850,7 +1367,7 @@ Base URL: `http://localhost:3000`
 
 ### PUT /api/agents/{id}/discord
 
-**目的**: Discord Bot 設定を保存する
+**目的**: Discord Bot 設定を保存し、Gateway を起動する（フル更新）
 
 **Request Body**
 
@@ -862,7 +1379,7 @@ Base URL: `http://localhost:3000`
 **Example Request**
 
 ```json
-{"bot_token": "BOTTOKENxxxxxxxxxxxxxxxxxxxxxxxx"}
+{"bot_token": "BOTTOKENxxxxxxxxxxxxxxxxxxxxxxxx", "owner_discord_id": "123456789012345678"}
 ```
 
 **Response**
@@ -872,10 +1389,63 @@ Base URL: `http://localhost:3000`
 | ok | bool | 成功なら `true` |
 | message | string | 結果メッセージ |
 
-**Example Response**
+**Example Response (discord feature enabled)**
 
 ```json
 {"ok": true, "message": "Discord bot started."}
+```
+
+**Example Response (discord feature disabled)**
+
+```json
+{"ok": true, "message": "Config saved. Gateway not started (discord feature not active)."}
+```
+
+---
+
+### PATCH /api/agents/{id}/discord
+
+**目的**: Discord Bot 設定を部分更新する。設定済みの場合のみ有効。Gateway が起動中なら再起動する。
+
+**Request Body**（全フィールドが省略可能）
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| bot_token | string | ❌ | Discord Bot トークン |
+| owner_discord_id | string | ❌ | オーナーの Discord ユーザー ID |
+
+**Example Request**
+
+```json
+{"owner_discord_id": "987654321098765432"}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| ok | bool | 成功なら `true` |
+| configured | bool | 設定済みか |
+| enabled | bool | Bot が有効か |
+| token_masked | string | マスクされたトークン |
+| owner_discord_id | string | オーナーの Discord ID |
+
+**Example Response**
+
+```json
+{
+  "ok": true,
+  "configured": true,
+  "enabled": true,
+  "token_masked": "BOTTOKEN...",
+  "owner_discord_id": "987654321098765432"
+}
+```
+
+**Error Response** (no existing config)
+
+```json
+{"ok": false, "error": "No Discord config found. Use PUT to create one."}
 ```
 
 ---
@@ -894,7 +1464,9 @@ Base URL: `http://localhost:3000`
 
 ### POST /api/agents/{id}/discord/start
 
-**目的**: Discord Gateway を起動する
+**目的**: Discord Gateway を起動する（DB の enabled フラグを `true` にセット）
+
+**Request Body**: なし
 
 **Response**
 
@@ -919,13 +1491,132 @@ Base URL: `http://localhost:3000`
 
 ### POST /api/agents/{id}/discord/stop
 
-**目的**: Discord Gateway を停止する
+**目的**: Discord Gateway を停止する（DB の enabled フラグを `false` にセット）
+
+**Request Body**: なし
 
 **Response**
 
 ```json
 {"ok": true}
 ```
+
+---
+
+## Channel Configs
+
+Discordチャンネルごとの読み書き権限・ハートビート設定を管理する。
+
+### ChannelConfigDto 構造
+
+| Field | Type | Description |
+|-------|------|-------------|
+| channel_id | string | Discord チャンネル ID |
+| guild_id | string | Discord ギルド（サーバー）ID |
+| channel_name | string | チャンネル名 |
+| readable | bool | 読み取り可能か |
+| writable | bool | 書き込み可能か |
+| whitelisted | bool | ホワイトリスト登録済みか |
+| heartbeat_enabled | bool | ハートビートを有効にするか |
+| heartbeat_interval_secs | number \| null | ハートビート間隔（秒） |
+
+---
+
+### GET /api/agents/{id}/channel-configs
+
+**目的**: ギルド別のチャンネル設定一覧を取得する
+
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| guild_id | string | ✅ | Discord ギルド ID |
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| guild_id | string | ギルド ID |
+| configs | ChannelConfigDto[] | チャンネル設定一覧 |
+| count | number | 件数 |
+
+**Example Request**
+
+```
+GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
+```
+
+**Example Response**
+
+```json
+{
+  "guild_id": "111222333444555666",
+  "configs": [{
+    "channel_id": "777888999000111222",
+    "guild_id": "111222333444555666",
+    "channel_name": "general",
+    "readable": true,
+    "writable": true,
+    "whitelisted": false,
+    "heartbeat_enabled": true,
+    "heartbeat_interval_secs": 3600
+  }],
+  "count": 1
+}
+```
+
+---
+
+### PUT /api/agents/{id}/channel-configs
+
+**目的**: チャンネル設定を作成または更新する（Upsert）
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| channel_id | string | ✅ | Discord チャンネル ID |
+| guild_id | string | ✅ | Discord ギルド ID |
+| channel_name | string | ❌ | チャンネル名 (default: `""`) |
+| readable | bool | ❌ | 読み取り可能か (default: `true`) |
+| writable | bool | ❌ | 書き込み可能か (default: `true`) |
+| whitelisted | bool | ❌ | ホワイトリスト登録 (default: `false`) |
+| heartbeat_enabled | bool | ❌ | ハートビート有効 (default: `true`) |
+| heartbeat_interval_secs | number | ❌ | ハートビート間隔（秒） |
+
+**Example Request**
+
+```json
+{
+  "channel_id": "777888999000111222",
+  "guild_id": "111222333444555666",
+  "channel_name": "general",
+  "readable": true,
+  "writable": true,
+  "heartbeat_enabled": true,
+  "heartbeat_interval_secs": 3600
+}
+```
+
+**Response**
+
+```json
+{"channel_id": "777888999000111222", "message": "channel config upserted"}
+```
+
+---
+
+### DELETE /api/agents/{id}/channel-configs/{channel_id}
+
+**目的**: チャンネル設定を削除する
+
+**Response**
+
+```json
+{"channel_id": "777888999000111222", "message": "channel config deleted"}
+```
+
+**Error**: 設定が存在しない場合は HTTP 404
 
 ---
 
@@ -949,7 +1640,14 @@ Base URL: `http://localhost:3000`
 **Example Response**
 
 ```json
-[{"id": "e5f6a7b8-...", "agent_id": "550e8400-...", "co_agent_id": "660f9500-...", "allowed_actions": ["chat", "memory_read"], "created_by": "admin", "created_at": "2026-03-20T10:00:00Z"}]
+[{
+  "id": "e5f6a7b8-c9d0-1234-ef01-234567890123",
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "co_agent_id": "660f9500-f3a0-52e5-b827-557766551111",
+  "allowed_actions": ["chat", "memory_read"],
+  "created_by": "admin",
+  "created_at": "2026-03-20T10:00:00Z"
+}]
 ```
 
 ---
@@ -1024,14 +1722,21 @@ Base URL: `http://localhost:3000`
 | id | UUID | レコード ID |
 | discord_user_id | string | Discord ユーザー ID |
 | agent_id | UUID | エージェント ID |
-| permission | string | `"owner"` \| `"trusted"` \| `"user"` |
+| permission | string | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` |
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
 
 **Example Response**
 
 ```json
-[{"id": "f6a7b8c9-...", "discord_user_id": "123456789012345678", "agent_id": "550e8400-...", "permission": "owner", "created_by": "owner", "created_at": "2026-03-20T10:00:00Z"}]
+[{
+  "id": "f6a7b8c9-d0e1-2345-f012-345678901234",
+  "discord_user_id": "123456789012345678",
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "permission": "owner",
+  "created_by": "owner",
+  "created_at": "2026-03-20T10:00:00Z"
+}]
 ```
 
 ---
@@ -1050,7 +1755,7 @@ Base URL: `http://localhost:3000`
 **Example Request**
 
 ```json
-{"discord_user_id": "123456789012345678"}
+{"discord_user_id": "123456789012345678", "permission": "trusted"}
 ```
 
 **Response**: TrustedUserRow（上記と同構造）
@@ -1089,4 +1794,331 @@ Base URL: `http://localhost:3000`
 
 ```json
 {"deleted": true}
+```
+
+---
+
+## Allowed Commands
+
+エージェントが使用できるシェルコマンドのホワイトリストを管理する。
+
+### GET /api/agents/{id}/allowed-commands
+
+**目的**: 許可されているシェルコマンド一覧を取得する
+
+**Response**: `[{command: string}]`
+
+**Example Response**
+
+```json
+[{"command": "ls"}, {"command": "cat"}, {"command": "grep"}]
+```
+
+---
+
+### POST /api/agents/{id}/allowed-commands
+
+**目的**: シェルコマンドを許可リストに追加する
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| command | string | ✅ | 許可するコマンド名（空文字は拒否） |
+
+**Example Request**
+
+```json
+{"command": "curl"}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| command | string | 追加されたコマンド |
+| added | bool | 成功なら `true` |
+
+**Example Response**
+
+```json
+{"command": "curl", "added": true}
+```
+
+**Error**: 空文字の場合は HTTP 400
+
+---
+
+### DELETE /api/agents/{id}/allowed-commands/{command}
+
+**目的**: シェルコマンドを許可リストから削除する
+
+**Path Parameter**: `{command}` は削除するコマンド名（URL エンコード必要）
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| removed | bool | 削除されたなら `true`、存在しなかった場合は `false` |
+
+**Example Response**
+
+```json
+{"removed": true}
+```
+
+---
+
+## LLM Logs
+
+### GET /api/agents/{id}/llm-logs
+
+**目的**: エージェントの LLM 呼び出しログを取得する
+
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| limit | number | ❌ | 最大件数 (default: `20`) |
+
+**Response**: LlmLogRow[]
+
+| Field | Type | Description |
+|-------|------|-------------|
+| id | number | ログ ID |
+| agent_id | UUID | エージェント ID |
+| session_id | string \| null | セッション ID |
+| model | string | 使用モデル名 |
+| prompt | string | プロンプト内容 |
+| response | string \| null | レスポンス内容 |
+| tool_calls | JSON string \| null | ツール呼び出し情報 |
+| latency_ms | number \| null | レイテンシ (ms) |
+| prompt_tokens | number \| null | プロンプトトークン数 |
+| completion_tokens | number \| null | 補完トークン数 |
+| total_tokens | number \| null | 合計トークン数 |
+| error_code | string \| null | エラーコード |
+| error_body | string \| null | エラー詳細 |
+| requested_at | ISO8601 \| null | リクエスト時刻 |
+| trigger_message_id | string \| null | トリガーとなったメッセージ ID |
+| is_bot_iteration | bool \| null | Bot ループの反復か |
+| cache_read_tokens | number \| null | キャッシュ読み取りトークン数 |
+| cache_creation_tokens | number \| null | キャッシュ作成トークン数 |
+| created_at | ISO8601 \| null | 作成日時 |
+
+**Example Request**
+
+```
+GET /api/agents/550e8400-.../llm-logs?limit=5
+```
+
+**Example Response**
+
+```json
+[{
+  "id": 1,
+  "agent_id": "550e8400-e29b-41d4-a716-446655440000",
+  "session_id": "d4e5f6a7-b8c9-0123-def0-123456789013",
+  "model": "anthropic:claude-sonnet-4-6",
+  "prompt": "You are a helpful assistant...",
+  "response": "Hello! How can I help?",
+  "tool_calls": null,
+  "latency_ms": 350,
+  "prompt_tokens": 120,
+  "completion_tokens": 25,
+  "total_tokens": 145,
+  "error_code": null,
+  "error_body": null,
+  "requested_at": "2026-03-25T10:00:00Z",
+  "trigger_message_id": null,
+  "is_bot_iteration": false,
+  "cache_read_tokens": 0,
+  "cache_creation_tokens": 0,
+  "created_at": "2026-03-25T10:00:01Z"
+}]
+```
+
+---
+
+### GET /api/agents/{id}/llm-logs/stats
+
+**目的**: 過去 30 日間の LLM 呼び出し統計を取得する
+
+**Response**: 統計サマリー（内容は DB の集計クエリによる）
+
+**Example Response**
+
+```json
+{
+  "total_calls": 500,
+  "total_tokens": 150000,
+  "total_prompt_tokens": 100000,
+  "total_completion_tokens": 50000,
+  "avg_latency_ms": 310.5,
+  "error_count": 2,
+  "models": [
+    {"model": "anthropic:claude-sonnet-4-6", "call_count": 300},
+    {"model": "openai:gpt-4o", "call_count": 200}
+  ]
+}
+```
+
+---
+
+## Import
+
+openclaw ワークスペース（SOUL.md、IDENTITY.md、skills/ など）を opencrab に一括インポートする。
+
+### ScanOptions 構造
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| include_daily_logs | bool | `true` | 日次ログを含めるか |
+| daily_log_days | number | 無制限 | 取り込む日次ログの日数 |
+| include_skills | bool | `true` | スキルを含めるか |
+| overwrite_if_exists | bool | `false` | 既存データを上書きするか |
+
+---
+
+### POST /api/import/scan
+
+**目的**: ワークスペースディレクトリをスキャンして、インポート対象を確認する（実際にはインポートしない）
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| source_dir | string | ✅ | スキャン対象のディレクトリパス |
+| options | ScanOptions | ✅ | スキャンオプション |
+
+**Example Request**
+
+```json
+{
+  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "options": {
+    "include_daily_logs": true,
+    "daily_log_days": 30,
+    "include_skills": true,
+    "overwrite_if_exists": false
+  }
+}
+```
+
+**Response**: ScanResult
+
+| Field | Type | Description |
+|-------|------|-------------|
+| source_dir | string | スキャンしたディレクトリ |
+| soul | SoulImportData | SOUL.md から取得した情報 |
+| identity | IdentityImportData | IDENTITY.md から取得した情報 |
+| memory_curated | MemoryCuratedImportData[] | MEMORY.md から取得したメモリ |
+| instructions | string | 指示内容 |
+| skills | SkillImportData[] | skills/ から取得したスキル |
+| daily_logs | MemoryCuratedImportData[] | 日次ログ |
+| warnings | string[] | 警告メッセージ |
+| excluded | string[] | 除外されたファイル |
+
+**SoulImportData**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| persona_name | string | ペルソナ名 |
+| personality | string | 性格の記述 |
+| found | bool | SOUL.md が見つかったか |
+
+**Example Response**
+
+```json
+{
+  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "soul": {"persona_name": "のすたろう", "personality": "17歳高校生...", "found": true},
+  "identity": {"name": "のすたろう", "image_url": null, "metadata_json": "{}", "found": true},
+  "memory_curated": [{"category": "preference", "content": "..."}],
+  "instructions": "You are a helpful agent...",
+  "skills": [{"name": "weather", "description": "Get weather info", "situation_pattern": "...", "guidance": "...", "source_type": "skill_dir", "source_context": "weather", "script_files": []}],
+  "daily_logs": [],
+  "warnings": [],
+  "excluded": ["target/", "node_modules/"]
+}
+```
+
+**Error Response** (directory not found)
+
+```json
+{"error": "Directory does not exist: /path/to/dir"}
+```
+
+---
+
+### POST /api/import/execute
+
+**目的**: ワークスペースをスキャンして opencrab にインポートする（エージェントを新規作成）
+
+> ⚠️ `confirmed: true` が必須。インポート後にメモリインデックスも構築する（LLM 呼び出し発生）。
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| source_dir | string | ✅ | インポート元のディレクトリパス |
+| agent_name | string | ✅ | 作成するエージェントの名前 |
+| options | ScanOptions | ✅ | スキャンオプション |
+| confirmed | bool | ✅ | `true` でないと実行されない（誤実行防止） |
+
+**Example Request**
+
+```json
+{
+  "source_dir": "/Volumes/2TB/openclaw/workspace",
+  "agent_name": "nostarou",
+  "options": {
+    "include_daily_logs": true,
+    "daily_log_days": 90,
+    "include_skills": true,
+    "overwrite_if_exists": false
+  },
+  "confirmed": true
+}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| agent_id | UUID | 作成されたエージェントの ID |
+| result | ImportResult | インポート結果 |
+
+**ImportResult 構造**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| soul_imported | bool | Soul がインポートされたか |
+| identity_imported | bool | Identity がインポートされたか |
+| skills_imported | number | インポートされたスキル数 |
+| memories_imported | number | インポートされたメモリ数 |
+| logs_imported | number | インポートされたログ数 |
+| indexed_logs_count | number | インデックス構築されたログ数 |
+| warnings | string[] | 警告メッセージ |
+
+**Example Response**
+
+```json
+{
+  "agent_id": "a0b1c2d3-e4f5-6789-abcd-ef0123456789",
+  "result": {
+    "soul_imported": true,
+    "identity_imported": true,
+    "skills_imported": 12,
+    "memories_imported": 45,
+    "logs_imported": 200,
+    "indexed_logs_count": 200,
+    "warnings": []
+  }
+}
+```
+
+**Error Response** (confirmed not true)
+
+```json
+{"error": "confirmed must be true"}
 ```

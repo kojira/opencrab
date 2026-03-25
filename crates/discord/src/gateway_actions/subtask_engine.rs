@@ -3,26 +3,32 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use opencrab_gateway::GatewayActionResult;
 use serde_json::json;
 use uuid::Uuid;
-use opencrab_gateway::GatewayActionResult;
 
 use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
 
 impl DiscordGatewayActions {
-    pub(crate) async fn execute_spawn_subtask(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) async fn execute_spawn_subtask(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
         let task = match args["task"].as_str() {
             Some(t) => t.to_string(),
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("spawn_subtask: 'task' argument is required".to_string()),
-            },
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("spawn_subtask: 'task' argument is required".to_string()),
+                }
+            }
         };
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(1800) as u64;
         let parent_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
         let parent_depth = args["__depth"].as_u64().unwrap_or(0) as u32;
-        let agent_id = args["__agent_id"].as_str()
+        let agent_id = args["__agent_id"]
+            .as_str()
             .unwrap_or(&self.agent_id)
             .to_string();
 
@@ -66,7 +72,8 @@ impl DiscordGatewayActions {
                         "subtask_id": subtask_id,
                         "session_id": sub_session_id,
                         "spawned_at": spawned_at,
-                    }).to_string(),
+                    })
+                    .to_string(),
                     speaker_id: None,
                     turn_number: None,
                     metadata_json: None,
@@ -79,22 +86,26 @@ impl DiscordGatewayActions {
         // Build sub-engine context.
         let llm_client = match self.llm_client.clone() {
             Some(c) => c,
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("spawn_subtask: no LLM client available".to_string()),
-            },
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("spawn_subtask: no LLM client available".to_string()),
+                }
+            }
         };
 
         let ws_path = self.workspace_root.join(&agent_id);
         std::fs::create_dir_all(&ws_path).ok();
         let workspace = match opencrab_core::workspace::Workspace::from_root(&ws_path) {
             Ok(w) => w,
-            Err(e) => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("spawn_subtask: workspace error: {e}")),
-            },
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("spawn_subtask: workspace error: {e}")),
+                }
+            }
         };
 
         let sub_ctx = opencrab_actions::ActionContext {
@@ -118,8 +129,8 @@ impl DiscordGatewayActions {
         let mut sub_dispatcher = opencrab_actions::ActionDispatcher::new();
         let tools_cfg = self.tools_config.read().unwrap().clone();
         opencrab_actions::register_tools_from_config(&tools_cfg, &mut sub_dispatcher);
-        let sub_executor = opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx)
-            .with_depth(depth);
+        let sub_executor =
+            opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx).with_depth(depth);
 
         let sub_engine = opencrab_core::SkillEngine::new(
             Box::new(ArcLlmClient(llm_client)),
@@ -188,7 +199,8 @@ impl DiscordGatewayActions {
                             "session_id": sub_session_id_clone,
                             "exit_reason": exit_reason,
                             "result": result_text,
-                        }).to_string(),
+                        })
+                        .to_string(),
                         speaker_id: None,
                         turn_number: None,
                         metadata_json: None,
@@ -203,18 +215,25 @@ impl DiscordGatewayActions {
 
             // Call completion callback if registered.
             if let Some(cb) = completion_registry_clone.get(&parent_session_clone) {
-                cb(subtask_id_clone.clone(), result_text.clone(), exit_reason.clone());
+                cb(
+                    subtask_id_clone.clone(),
+                    result_text.clone(),
+                    exit_reason.clone(),
+                );
             }
         });
 
         let abort_handle = join_handle.abort_handle();
-        self.subtask_registry.insert(subtask_id.clone(), SpawnedSubtask {
-            abort_handle,
-            session_id: sub_session_id.clone(),
-            parent_session_id: parent_session_id.clone(),
-            spawned_at: spawned_at.clone(),
-            agent_id: agent_id.clone(),
-        });
+        self.subtask_registry.insert(
+            subtask_id.clone(),
+            SpawnedSubtask {
+                abort_handle,
+                session_id: sub_session_id.clone(),
+                parent_session_id: parent_session_id.clone(),
+                spawned_at: spawned_at.clone(),
+                agent_id: agent_id.clone(),
+            },
+        );
 
         GatewayActionResult {
             success: true,
@@ -231,11 +250,13 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_cancel_subtask(&self, args: &serde_json::Value) -> GatewayActionResult {
         let subtask_id = match args["subtask_id"].as_str() {
             Some(id) => id.to_string(),
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("cancel_subtask: 'subtask_id' is required".to_string()),
-            },
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("cancel_subtask: 'subtask_id' is required".to_string()),
+                }
+            }
         };
 
         match self.subtask_registry.remove(&subtask_id) {
@@ -246,16 +267,18 @@ impl DiscordGatewayActions {
                 let parent_session_id = subtask.parent_session_id.clone();
                 if !parent_session_id.is_empty() {
                     if let Ok(conn) = self.db.lock() {
-                        let task_description = opencrab_db::queries::get_session(&conn, &subtask.session_id)
-                            .ok()
-                            .flatten()
-                            .map(|session| {
-                                session.theme
-                                    .strip_prefix("Subtask: ")
-                                    .unwrap_or(&session.theme)
-                                    .to_string()
-                            })
-                            .unwrap_or_default();
+                        let task_description =
+                            opencrab_db::queries::get_session(&conn, &subtask.session_id)
+                                .ok()
+                                .flatten()
+                                .map(|session| {
+                                    session
+                                        .theme
+                                        .strip_prefix("Subtask: ")
+                                        .unwrap_or(&session.theme)
+                                        .to_string()
+                                })
+                                .unwrap_or_default();
                         let log = opencrab_db::queries::SessionLogRow {
                             id: None,
                             agent_id: subtask.agent_id.clone(),
@@ -264,11 +287,14 @@ impl DiscordGatewayActions {
                             content: format!("subtask '{}' was cancelled", task_description),
                             speaker_id: None,
                             turn_number: None,
-                            metadata_json: Some(serde_json::json!({
-                                "tool_call_id": subtask_id,
-                                "tool_name": "spawn_subtask",
-                                "task": task_description,
-                            }).to_string()),
+                            metadata_json: Some(
+                                serde_json::json!({
+                                    "tool_call_id": subtask_id,
+                                    "tool_name": "spawn_subtask",
+                                    "task": task_description,
+                                })
+                                .to_string(),
+                            ),
                             created_at: None,
                         };
                         opencrab_db::queries::insert_session_log(&conn, &log).ok();
@@ -284,26 +310,36 @@ impl DiscordGatewayActions {
             None => GatewayActionResult {
                 success: false,
                 data: None,
-                error: Some(format!("cancel_subtask: subtask '{}' not found", subtask_id)),
+                error: Some(format!(
+                    "cancel_subtask: subtask '{}' not found",
+                    subtask_id
+                )),
             },
         }
     }
 
-    pub(crate) async fn execute_report_progress(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) async fn execute_report_progress(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
         let message = match args["message"].as_str() {
             Some(m) => m.to_string(),
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("report_progress: 'message' is required".to_string()),
-            },
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("report_progress: 'message' is required".to_string()),
+                }
+            }
         };
         let parent_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
-        let subtask_id = args.get("subtask_id")
+        let subtask_id = args
+            .get("subtask_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let agent_id = args["__agent_id"].as_str()
+        let agent_id = args["__agent_id"]
+            .as_str()
             .unwrap_or(&self.agent_id)
             .to_string();
 
@@ -320,7 +356,8 @@ impl DiscordGatewayActions {
                         "subtask_id": subtask_id,
                         "message": message,
                         "timestamp": Utc::now().to_rfc3339(),
-                    }).to_string(),
+                    })
+                    .to_string(),
                     speaker_id: None,
                     turn_number: None,
                     metadata_json: None,
@@ -348,5 +385,4 @@ impl DiscordGatewayActions {
             error: None,
         }
     }
-
 }

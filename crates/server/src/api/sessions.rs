@@ -4,8 +4,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::AppState;
 use crate::process;
+use crate::AppState;
 
 pub async fn list_session_logs(
     State(state): State<AppState>,
@@ -159,7 +159,12 @@ pub async fn send_message(
         // Build conversation history from session logs.
         let conversation = {
             let conn = state.db.lock().unwrap();
-            let budget = process::compute_context_budget(&conn, &state.default_model.split(':').next().unwrap_or(""), state.default_model.split(':').nth(1).unwrap_or(""), state.compaction_ratio);
+            let budget = process::compute_context_budget(
+                &conn,
+                &state.default_model.split(':').next().unwrap_or(""),
+                state.default_model.split(':').nth(1).unwrap_or(""),
+                state.compaction_ratio,
+            );
             let raw = process::build_conversation_string(&conn, &id, agent_id, budget);
             process::prepend_runtime_context(&raw, &session_theme)
         };
@@ -177,7 +182,7 @@ pub async fn send_message(
             opencrab_actions::CallerIdentity::Owner,
             &[],
             0,
-            None,   // trigger_message_id
+            None, // trigger_message_id
             None,
         )
         .await;

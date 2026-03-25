@@ -17,9 +17,14 @@ pub async fn list_allowed_commands(
     Path(agent_id): Path<String>,
 ) -> Json<Vec<AllowedCommandDto>> {
     let conn = state.db.lock().unwrap();
-    let commands = opencrab_db::queries::list_agent_allowed_commands(&conn, &agent_id)
-        .unwrap_or_default();
-    Json(commands.into_iter().map(|c| AllowedCommandDto { command: c }).collect())
+    let commands =
+        opencrab_db::queries::list_agent_allowed_commands(&conn, &agent_id).unwrap_or_default();
+    Json(
+        commands
+            .into_iter()
+            .map(|c| AllowedCommandDto { command: c })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,9 +42,9 @@ pub async fn add_allowed_command(
     }
 
     let conn = state.db.lock().unwrap();
-    let added = opencrab_db::queries::add_agent_allowed_command(
-        &conn, &agent_id, &req.command, "owner"
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let added =
+        opencrab_db::queries::add_agent_allowed_command(&conn, &agent_id, &req.command, "owner")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Update in-memory tools_config
     drop(conn);

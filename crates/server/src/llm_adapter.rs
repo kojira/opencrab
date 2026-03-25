@@ -9,8 +9,8 @@ use opencrab_core::{
     ToolDefinition, UsageInfo,
 };
 use opencrab_llm::message::{
-    ChatRequest, Choice, FinishReason, FunctionCall, FunctionDefinition, Message,
-    MessageContent, Role, ToolCall as LlmToolCall, Usage,
+    ChatRequest, Choice, FinishReason, FunctionCall, FunctionDefinition, Message, MessageContent,
+    Role, ToolCall as LlmToolCall, Usage,
 };
 use opencrab_llm::pricing::PricingRegistry;
 use opencrab_llm::router::LlmRouter;
@@ -76,7 +76,13 @@ impl LlmClient for LlmRouterAdapter {
             let (input_tokens, output_tokens, total_tokens) = response
                 .usage
                 .as_ref()
-                .map(|u| (u.prompt_tokens as i32, u.completion_tokens as i32, u.total_tokens as i32))
+                .map(|u| {
+                    (
+                        u.prompt_tokens as i32,
+                        u.completion_tokens as i32,
+                        u.total_tokens as i32,
+                    )
+                })
                 .unwrap_or((0, 0, 0));
 
             let estimated_cost = ctx
@@ -91,7 +97,11 @@ impl LlmClient for LlmRouterAdapter {
                 timestamp: Utc::now().to_rfc3339(),
                 provider,
                 model,
-                purpose: ctx.current_purpose.lock().map(|p| p.clone()).unwrap_or_else(|_| "conversation".to_string()),
+                purpose: ctx
+                    .current_purpose
+                    .lock()
+                    .map(|p| p.clone())
+                    .unwrap_or_else(|_| "conversation".to_string()),
                 task_type: None,
                 complexity: None,
                 input_tokens,
@@ -174,14 +184,14 @@ fn to_llm_message(msg: ChatMessage) -> Message {
     let content = if !msg.content_parts.is_empty() {
         use opencrab_core::ChatContentPart;
         use opencrab_llm::message::{ContentPart as LlmContentPart, ImageUrl};
-        let parts: Vec<LlmContentPart> = msg.content_parts.into_iter()
+        let parts: Vec<LlmContentPart> = msg
+            .content_parts
+            .into_iter()
             .map(|p| match p {
                 ChatContentPart::Text { text } => LlmContentPart::Text { text },
-                ChatContentPart::ImageUrl { url, detail } => {
-                    LlmContentPart::ImageUrl {
-                        image_url: ImageUrl { url, detail },
-                    }
-                }
+                ChatContentPart::ImageUrl { url, detail } => LlmContentPart::ImageUrl {
+                    image_url: ImageUrl { url, detail },
+                },
             })
             .collect();
         Some(MessageContent::Multi(parts))
@@ -388,7 +398,9 @@ mod tests {
             tool_call_id: None,
             tool_calls: vec![],
             content_parts: vec![
-                ChatContentPart::Text { text: "What is this?".to_string() },
+                ChatContentPart::Text {
+                    text: "What is this?".to_string(),
+                },
                 ChatContentPart::ImageUrl {
                     url: "https://cdn.discordapp.com/attachments/123/456/test.png".to_string(),
                     detail: Some("auto".to_string()),

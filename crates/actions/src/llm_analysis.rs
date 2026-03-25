@@ -43,14 +43,16 @@ impl Action for AnalyzeLlmUsageAction {
         };
 
         // Overall summary.
-        let summary = match opencrab_db::queries::get_llm_metrics_summary(&conn, &ctx.agent_id, &since) {
-            Ok(s) => s,
-            Err(e) => return ActionResult::error(&format!("Failed: {e}")),
-        };
+        let summary =
+            match opencrab_db::queries::get_llm_metrics_summary(&conn, &ctx.agent_id, &since) {
+                Ok(s) => s,
+                Err(e) => return ActionResult::error(&format!("Failed: {e}")),
+            };
 
         // Per-model breakdown.
-        let model_stats = opencrab_db::queries::get_llm_metrics_by_model(&conn, &ctx.agent_id, &since)
-            .unwrap_or_default();
+        let model_stats =
+            opencrab_db::queries::get_llm_metrics_by_model(&conn, &ctx.agent_id, &since)
+                .unwrap_or_default();
 
         let model_breakdown: Vec<serde_json::Value> = model_stats
             .iter()
@@ -70,7 +72,9 @@ impl Action for AnalyzeLlmUsageAction {
 
         // Per-model per-purpose breakdown.
         let purpose_stats = opencrab_db::queries::get_llm_metrics_by_model_and_purpose(
-            &conn, &ctx.agent_id, &since,
+            &conn,
+            &ctx.agent_id,
+            &since,
         )
         .unwrap_or_default();
 
@@ -151,7 +155,9 @@ impl Action for RecallModelExperiencesAction {
 
         // 1. Raw metrics by model.
         let model_stats = opencrab_db::queries::get_llm_metrics_by_model(
-            &conn, &ctx.agent_id, "1970-01-01T00:00:00Z",
+            &conn,
+            &ctx.agent_id,
+            "1970-01-01T00:00:00Z",
         )
         .unwrap_or_default();
 
@@ -173,7 +179,9 @@ impl Action for RecallModelExperiencesAction {
 
         // 2. Per-purpose breakdown.
         let purpose_stats = opencrab_db::queries::get_llm_metrics_by_model_and_purpose(
-            &conn, &ctx.agent_id, "1970-01-01T00:00:00Z",
+            &conn,
+            &ctx.agent_id,
+            "1970-01-01T00:00:00Z",
         )
         .unwrap_or_default();
 
@@ -195,7 +203,10 @@ impl Action for RecallModelExperiencesAction {
 
         // 3. Recent evaluations (with free-text feedback).
         let evaluations = opencrab_db::queries::get_recent_evaluations(
-            &conn, &ctx.agent_id, model_filter, eval_limit,
+            &conn,
+            &ctx.agent_id,
+            model_filter,
+            eval_limit,
         )
         .unwrap_or_default();
 
@@ -216,7 +227,9 @@ impl Action for RecallModelExperiencesAction {
         // 4. Experience notes.
         let notes = if include_notes {
             let notes = opencrab_db::queries::list_model_experience_notes(
-                &conn, &ctx.agent_id, model_filter,
+                &conn,
+                &ctx.agent_id,
+                model_filter,
             )
             .unwrap_or_default();
 
@@ -312,9 +325,7 @@ impl Action for SaveModelInsightAction {
         };
 
         // Meta: which model is writing this insight?
-        let author_model = ctx.model_override.lock()
-            .ok()
-            .and_then(|m| m.clone());
+        let author_model = ctx.model_override.lock().ok().and_then(|m| m.clone());
 
         let provider = args["provider"].as_str();
         let model = args["model"].as_str();
@@ -388,16 +399,116 @@ mod tests {
     fn seed_diverse_metrics(conn: &rusqlite::Connection) {
         let scenarios = vec![
             // (id_prefix, provider, model, purpose, cost, latency, quality, eval_text, count)
-            ("conv-4o",    "openai",    "gpt-4o",       "会話",     0.0030, 2000, 0.90, "丁寧で正確な回答", 3),
-            ("conv-mini",  "openai",    "gpt-4o-mini",  "会話",     0.0003, 400,  0.82, "速いが浅い回答", 5),
-            ("conv-claude","anthropic", "claude-sonnet-4", "会話",     0.0015, 1200, 0.88, "自然な文体だった", 4),
-            ("anl-4o",     "openai",    "gpt-4o",       "複雑な推論", 0.0050, 3000, 0.95, "難しい問題も正確に解けた", 4),
-            ("anl-mini",   "openai",    "gpt-4o-mini",  "複雑な推論", 0.0005, 600,  0.45, "推論が浅く間違いが多かった", 2),
-            ("anl-claude", "anthropic", "claude-sonnet-4", "複雑な推論", 0.0025, 1500, 0.93, "論理的で良かった", 5),
-            ("cre-claude", "anthropic", "claude-sonnet-4", "創作",     0.0020, 1300, 0.94, "独創的な表現が良かった", 4),
-            ("cre-mini",   "openai",    "gpt-4o-mini",  "創作",     0.0004, 500,  0.65, "テンプレ的でつまらない", 2),
-            ("tc-mini",    "openai",    "gpt-4o-mini",  "ツール呼び出し", 0.0003, 350, 0.85, "tool_callsの精度が高い", 6),
-            ("tc-4o",      "openai",    "gpt-4o",       "ツール呼び出し", 0.0035, 1800, 0.88, "正確だがコスト高", 3),
+            (
+                "conv-4o",
+                "openai",
+                "gpt-4o",
+                "会話",
+                0.0030,
+                2000,
+                0.90,
+                "丁寧で正確な回答",
+                3,
+            ),
+            (
+                "conv-mini",
+                "openai",
+                "gpt-4o-mini",
+                "会話",
+                0.0003,
+                400,
+                0.82,
+                "速いが浅い回答",
+                5,
+            ),
+            (
+                "conv-claude",
+                "anthropic",
+                "claude-sonnet-4",
+                "会話",
+                0.0015,
+                1200,
+                0.88,
+                "自然な文体だった",
+                4,
+            ),
+            (
+                "anl-4o",
+                "openai",
+                "gpt-4o",
+                "複雑な推論",
+                0.0050,
+                3000,
+                0.95,
+                "難しい問題も正確に解けた",
+                4,
+            ),
+            (
+                "anl-mini",
+                "openai",
+                "gpt-4o-mini",
+                "複雑な推論",
+                0.0005,
+                600,
+                0.45,
+                "推論が浅く間違いが多かった",
+                2,
+            ),
+            (
+                "anl-claude",
+                "anthropic",
+                "claude-sonnet-4",
+                "複雑な推論",
+                0.0025,
+                1500,
+                0.93,
+                "論理的で良かった",
+                5,
+            ),
+            (
+                "cre-claude",
+                "anthropic",
+                "claude-sonnet-4",
+                "創作",
+                0.0020,
+                1300,
+                0.94,
+                "独創的な表現が良かった",
+                4,
+            ),
+            (
+                "cre-mini",
+                "openai",
+                "gpt-4o-mini",
+                "創作",
+                0.0004,
+                500,
+                0.65,
+                "テンプレ的でつまらない",
+                2,
+            ),
+            (
+                "tc-mini",
+                "openai",
+                "gpt-4o-mini",
+                "ツール呼び出し",
+                0.0003,
+                350,
+                0.85,
+                "tool_callsの精度が高い",
+                6,
+            ),
+            (
+                "tc-4o",
+                "openai",
+                "gpt-4o",
+                "ツール呼び出し",
+                0.0035,
+                1800,
+                0.88,
+                "正確だがコスト高",
+                3,
+            ),
         ];
 
         for (prefix, provider, model, purpose, cost, latency, quality, eval, count) in scenarios {
@@ -422,18 +533,51 @@ mod tests {
                 };
                 opencrab_db::queries::insert_llm_metrics(conn, &row).unwrap();
                 opencrab_db::queries::update_llm_metrics_evaluation(
-                    conn, &id, quality, quality >= 0.7, eval,
-                ).unwrap();
+                    conn,
+                    &id,
+                    quality,
+                    quality >= 0.7,
+                    eval,
+                )
+                .unwrap();
             }
         }
     }
 
     fn seed_experience_notes(conn: &rusqlite::Connection) {
         let notes = vec![
-            ("gpt-4o", "openai", "複雑な数学の証明を頼んだとき", "ステップバイステップで正確に解けた。コストは高いが複雑なタスクでは価値がある。", Some("複雑な推論タスクではgpt-4oを使うべき"), r#"["複雑な推論","数学","高品質"]"#),
-            ("gpt-4o-mini", "openai", "簡単な質問応答", "十分な品質で非常に高速。コスト効率が良い。", Some("簡単なタスクやツール呼び出しにはgpt-4o-miniで十分"), r#"["簡単なタスク","コスト重視","高速"]"#),
-            ("gpt-4o-mini", "openai", "複雑な分析タスクを頼んだとき", "推論が浅く、重要なポイントを見落とした。この種のタスクには向かない。", Some("複雑な分析にはgpt-4o-miniを使わない"), r#"["複雑な推論","失敗","要注意"]"#),
-            ("claude-sonnet-4", "anthropic", "創作文を書かせたとき", "独創的で文学的な表現ができた。創作タスクでは最も良い結果。", Some("創作タスクではclaude-sonnetがベスト"), r#"["創作","高品質","推薦"]"#),
+            (
+                "gpt-4o",
+                "openai",
+                "複雑な数学の証明を頼んだとき",
+                "ステップバイステップで正確に解けた。コストは高いが複雑なタスクでは価値がある。",
+                Some("複雑な推論タスクではgpt-4oを使うべき"),
+                r#"["複雑な推論","数学","高品質"]"#,
+            ),
+            (
+                "gpt-4o-mini",
+                "openai",
+                "簡単な質問応答",
+                "十分な品質で非常に高速。コスト効率が良い。",
+                Some("簡単なタスクやツール呼び出しにはgpt-4o-miniで十分"),
+                r#"["簡単なタスク","コスト重視","高速"]"#,
+            ),
+            (
+                "gpt-4o-mini",
+                "openai",
+                "複雑な分析タスクを頼んだとき",
+                "推論が浅く、重要なポイントを見落とした。この種のタスクには向かない。",
+                Some("複雑な分析にはgpt-4o-miniを使わない"),
+                r#"["複雑な推論","失敗","要注意"]"#,
+            ),
+            (
+                "claude-sonnet-4",
+                "anthropic",
+                "創作文を書かせたとき",
+                "独創的で文学的な表現ができた。創作タスクでは最も良い結果。",
+                Some("創作タスクではclaude-sonnetがベスト"),
+                r#"["創作","高品質","推薦"]"#,
+            ),
         ];
 
         for (model, provider, situation, observation, recommendation, tags) in notes {
@@ -475,7 +619,6 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
         };
         (dir, ctx)
     }
@@ -500,7 +643,6 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
         };
         (dir, ctx)
     }
@@ -512,9 +654,7 @@ mod tests {
         let (_dir, ctx) = test_context();
         let action = AnalyzeLlmUsageAction;
 
-        let result = action
-            .execute(&json!({"period": "all"}), &ctx)
-            .await;
+        let result = action.execute(&json!({"period": "all"}), &ctx).await;
 
         assert!(result.success);
         let data = result.data.unwrap();
@@ -531,9 +671,7 @@ mod tests {
         assert!(!by_mp.is_empty());
 
         // Purposes are free-form Japanese text, not enum.
-        let purposes: Vec<&str> = by_mp.iter()
-            .filter_map(|e| e["purpose"].as_str())
-            .collect();
+        let purposes: Vec<&str> = by_mp.iter().filter_map(|e| e["purpose"].as_str()).collect();
         assert!(purposes.contains(&"会話"));
         assert!(purposes.contains(&"複雑な推論"));
         assert!(purposes.contains(&"創作"));
@@ -572,18 +710,25 @@ mod tests {
         let evals = data["recent_evaluations"].as_array().unwrap();
         assert!(!evals.is_empty());
         // Evaluations contain free-text Japanese.
-        let has_japanese_eval = evals.iter().any(|e|
-            e["evaluation"].as_str().map_or(false, |t| t.contains("丁寧"))
+        let has_japanese_eval = evals.iter().any(|e| {
+            e["evaluation"]
+                .as_str()
+                .map_or(false, |t| t.contains("丁寧"))
+        });
+        assert!(
+            has_japanese_eval,
+            "Evaluations should contain free-text feedback"
         );
-        assert!(has_japanese_eval, "Evaluations should contain free-text feedback");
 
         // Has experience notes.
         let notes = data["experience_notes"].as_array().unwrap();
         assert_eq!(notes.len(), 4);
         // Notes contain qualitative observations.
-        let has_insight = notes.iter().any(|n|
-            n["observation"].as_str().map_or(false, |t| t.contains("ステップバイステップ"))
-        );
+        let has_insight = notes.iter().any(|n| {
+            n["observation"]
+                .as_str()
+                .map_or(false, |t| t.contains("ステップバイステップ"))
+        });
         assert!(has_insight, "Notes should contain qualitative observations");
 
         // Print what the agent would see.
@@ -616,7 +761,9 @@ mod tests {
                 n["model"].as_str().unwrap_or("general"),
                 n["situation"].as_str().unwrap(),
                 n["observation"].as_str().unwrap(),
-                n["recommendation"].as_str().unwrap_or("(no recommendation)"),
+                n["recommendation"]
+                    .as_str()
+                    .unwrap_or("(no recommendation)"),
             );
         }
     }
@@ -626,7 +773,9 @@ mod tests {
         let (_dir, ctx) = test_context();
         let action = RecallModelExperiencesAction;
 
-        let result = action.execute(&json!({"model_filter": "gpt-4o-mini"}), &ctx).await;
+        let result = action
+            .execute(&json!({"model_filter": "gpt-4o-mini"}), &ctx)
+            .await;
         assert!(result.success);
         let data = result.data.unwrap();
 
@@ -678,7 +827,9 @@ mod tests {
 
         // Verify it's stored in DB.
         let conn = ctx.db.lock().unwrap();
-        let notes = opencrab_db::queries::list_model_experience_notes(&conn, "agent-1", Some("gpt-4o")).unwrap();
+        let notes =
+            opencrab_db::queries::list_model_experience_notes(&conn, "agent-1", Some("gpt-4o"))
+                .unwrap();
         let has_new_note = notes.iter().any(|n| n.situation.contains("長文の要約"));
         assert!(has_new_note);
     }
@@ -706,10 +857,7 @@ mod tests {
         let (_dir, ctx) = test_context();
         let action = SaveModelInsightAction;
 
-        let result = action.execute(
-            &json!({"observation": "test"}),
-            &ctx,
-        ).await;
+        let result = action.execute(&json!({"observation": "test"}), &ctx).await;
 
         assert!(!result.success);
     }
