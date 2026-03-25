@@ -26,6 +26,30 @@ pub fn build_agent_context(
         .flatten();
     let soul = opencrab_db::queries::get_soul(conn, agent_id).ok().flatten();
     let skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
+    let curated_categories = ["long_term", "user_profile", "agent_rules"];
+    let curated_sections: Vec<String> = curated_categories
+        .iter()
+        .filter_map(|cat| {
+            let memories = opencrab_db::queries::get_curated_memories(conn, agent_id, cat)
+                .unwrap_or_default();
+            if memories.is_empty() {
+                return None;
+            }
+            let content = memories
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let header = match *cat {
+                "long_term" => "## Long-term Memory",
+                "user_profile" => "## User Profile",
+                "agent_rules" => "## Agent Rules",
+                _ => return None,
+            };
+            Some(format!("\n\n{header}\n{content}"))
+        })
+        .collect();
+    let curated_section = curated_sections.join("");
 
     let agent_name = identity
         .as_ref()
@@ -128,7 +152,7 @@ pub fn build_agent_context(
          \n\
          These tools let you access your full history even after compaction.\n\
          \n\
-         {skills_text}{character_section}{instructions_section}"
+         {skills_text}{character_section}{instructions_section}{curated_section}"
     );
 
     (prompt, agent_name)
@@ -141,7 +165,8 @@ const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
 
 fn get_tokenizer() -> &'static CoreBPE {
     static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
-    TOKENIZER.get_or_init(|| tiktoken_rs::o200k_base().expect("failed to load o200k_base tokenizer"))
+    TOKENIZER
+        .get_or_init(|| tiktoken_rs::o200k_base().expect("failed to load o200k_base tokenizer"))
 }
 
 /// 文字列の正確なトークン数を返す (tiktoken o200k_base)。
@@ -189,7 +214,8 @@ pub fn build_conversation_string(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let summary_header = "[Past context summary (use retrieve_memory_nodes with node_id to recall details)]\n";
+    let summary_header =
+        "[Past context summary (use retrieve_memory_nodes with node_id to recall details)]\n";
     let recent_header = "\n\n[Recent conversation]\n";
     let overhead_tokens = estimate_tokens(summary_header)
         + estimate_tokens(&summary_section)
@@ -206,21 +232,15 @@ pub fn build_conversation_string(
         .unwrap_or(0);
 
     // indexed_boundary 以降のログを取得
-    let mut recent_logs = opencrab_db::queries::list_session_logs_after_id(
-        conn,
-        session_id,
-        indexed_boundary,
-    )
-    .unwrap_or_default();
+    let mut recent_logs =
+        opencrab_db::queries::list_session_logs_after_id(conn, session_id, indexed_boundary)
+            .unwrap_or_default();
 
     // ログが少なければ追加取得（最低 RECENT_MIN_LOGS 件は確保）
     if recent_logs.len() < RECENT_MIN_LOGS {
-        let mut logs = opencrab_db::queries::list_recent_session_logs(
-            conn,
-            session_id,
-            RECENT_MIN_LOGS,
-        )
-        .unwrap_or_default();
+        let mut logs =
+            opencrab_db::queries::list_recent_session_logs(conn, session_id, RECENT_MIN_LOGS)
+                .unwrap_or_default();
         logs.reverse();
         recent_logs = logs;
     }
@@ -228,9 +248,7 @@ pub fn build_conversation_string(
     // 予算内に収まるようにログを後ろから詰める
     let recent_text = fit_logs_to_budget(&recent_logs, remaining_budget);
 
-    format!(
-        "{summary_header}{summary_section}{recent_header}{recent_text}"
-    )
+    format!("{summary_header}{summary_section}{recent_header}{recent_text}")
 }
 
 /// context_budget_tokens を呼び出し元で計算するヘルパー。
@@ -263,8 +281,8 @@ fn build_truncated_conversation(
     session_id: &str,
     budget_tokens: usize,
 ) -> String {
-    let mut logs = opencrab_db::queries::list_recent_session_logs(conn, session_id, 500)
-        .unwrap_or_default();
+    let mut logs =
+        opencrab_db::queries::list_recent_session_logs(conn, session_id, 500).unwrap_or_default();
     logs.reverse();
 
     let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
@@ -277,16 +295,16 @@ fn build_truncated_conversation(
 
 /// ログを末尾（最新）から逆順に辿り、予算内に収まる分だけ返す。
 /// 最低 RECENT_MIN_LOGS 件は常に含める。
-fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_tokens: usize) -> String {
+fn fit_logs_to_budget(
+    logs: &[opencrab_db::queries::SessionLogRow],
+    budget_tokens: usize,
+) -> String {
     if logs.is_empty() {
         return String::new();
     }
 
     // まず各ログを文字列化
-    let formatted: Vec<String> = logs
-        .iter()
-        .map(format_single_log)
-        .collect();
+    let formatted: Vec<String> = logs.iter().map(format_single_log).collect();
 
     // 後ろから詰めていく
     let mut used_tokens = 0;
@@ -294,7 +312,9 @@ fn fit_logs_to_budget(logs: &[opencrab_db::queries::SessionLogRow], budget_token
 
     for (i, line) in formatted.iter().enumerate().rev() {
         let line_tokens = estimate_tokens(line) + 1; // +1 for newline
-        if used_tokens + line_tokens > budget_tokens && (formatted.len() - start_idx) >= RECENT_MIN_LOGS {
+        if used_tokens + line_tokens > budget_tokens
+            && (formatted.len() - start_idx) >= RECENT_MIN_LOGS
+        {
             break;
         }
         used_tokens += line_tokens;
@@ -312,7 +332,9 @@ fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
 }
 
 fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
-    let ts = log.created_at.as_deref()
+    let ts = log
+        .created_at
+        .as_deref()
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.format(" [%Y-%m-%d %H:%M:%S]").to_string())
         .unwrap_or_default();
@@ -325,21 +347,31 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
         "tool_call" => {
             if let Some(meta_json) = log.metadata_json.as_deref() {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
-                    if let Some(tool_calls_json) = meta.get("tool_calls_json").and_then(|v| v.as_str()) {
-                        if let Ok(tool_calls) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
+                    if let Some(tool_calls_json) =
+                        meta.get("tool_calls_json").and_then(|v| v.as_str())
+                    {
+                        if let Ok(tool_calls) =
+                            serde_json::from_str::<serde_json::Value>(tool_calls_json)
+                        {
                             if let Some(items) = tool_calls.as_array() {
-                                let call_lines: Vec<String> = items.iter()
+                                let call_lines: Vec<String> = items
+                                    .iter()
                                     .filter_map(|item| {
                                         let id = item.get("id")?.as_str()?;
                                         let name = item.get("name")?.as_str()?;
-                                        let args = item.get("arguments")
+                                        let args = item
+                                            .get("arguments")
                                             .map(|value| value.to_string())
                                             .unwrap_or_default();
                                         Some(format!("[id={}]: {}({})", id, name, args))
                                     })
                                     .collect();
                                 if !call_lines.is_empty() {
-                                    return format!("[tool_call]{}:\n{}", ts, call_lines.join("\n"));
+                                    return format!(
+                                        "[tool_call]{}:\n{}",
+                                        ts,
+                                        call_lines.join("\n")
+                                    );
                                 }
                             }
                         }
@@ -349,37 +381,46 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
             format!("[tool_call]{}:\n{}", ts, log.content)
         }
         "tool_result" => {
-            let meta = log.metadata_json.as_deref()
+            let meta = log
+                .metadata_json
+                .as_deref()
                 .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok());
-            let tool_call_id = meta.as_ref()
+            let tool_call_id = meta
+                .as_ref()
                 .and_then(|value| value.get("tool_call_id").and_then(|v| v.as_str()))
                 .unwrap_or("?");
-            let tool_name = meta.as_ref()
+            let tool_name = meta
+                .as_ref()
                 .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
-            format!("[tool_result]{}:\n[id={}]: {} → {}", ts, tool_call_id, tool_name, log.content)
+            format!(
+                "[tool_result]{}:\n[id={}]: {} → {}",
+                ts, tool_call_id, tool_name, log.content
+            )
         }
         "tool_cancelled" => {
-            let meta = log.metadata_json.as_deref()
+            let meta = log
+                .metadata_json
+                .as_deref()
                 .and_then(|meta_json| serde_json::from_str::<serde_json::Value>(meta_json).ok());
-            let tool_call_id = meta.as_ref()
+            let tool_call_id = meta
+                .as_ref()
                 .and_then(|value| value.get("tool_call_id").and_then(|v| v.as_str()))
                 .unwrap_or("?");
-            let tool_name = meta.as_ref()
+            let tool_name = meta
+                .as_ref()
                 .and_then(|value| value.get("tool_name").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
             format!(
                 "[tool_cancelled]{}:\n[id={}]: {} がキャンセルされた\n{}",
-                ts,
-                tool_call_id,
-                tool_name,
-                log.content
+                ts, tool_call_id, tool_name, log.content
             )
         }
         "system" => {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&log.content) {
                 if let Some(kind) = value.get("type").and_then(|v| v.as_str()) {
-                    let content = serde_json::to_string_pretty(&value).unwrap_or_else(|_| log.content.clone());
+                    let content = serde_json::to_string_pretty(&value)
+                        .unwrap_or_else(|_| log.content.clone());
                     return format!("[system: {}]{}:\n{}", kind, ts, content);
                 }
             }
@@ -390,10 +431,7 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
 }
 
 /// 変動コンテキストを最後のuserメッセージに前置するヘルパー
-pub fn prepend_runtime_context(
-    user_message: &str,
-    session_theme: &str,
-) -> String {
+pub fn prepend_runtime_context(user_message: &str, session_theme: &str) -> String {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
     format!(
         "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\n\n{user_message}"
@@ -433,19 +471,22 @@ pub async fn run_agent_response(
     // Build workspace path for this agent.
     let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
     std::fs::create_dir_all(&ws_path).ok();
-    let workspace =
-        opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
+    let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
 
     // Create BridgedExecutor with ActionContext.
     let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
     let model_override = Arc::new(std::sync::Mutex::new(None));
-    let current_purpose =
-        Arc::new(std::sync::Mutex::new("conversation".to_string()));
+    let current_purpose = Arc::new(std::sync::Mutex::new("conversation".to_string()));
 
     let runtime_info = opencrab_actions::RuntimeInfo {
         default_model: state.default_model.clone(),
         active_model: model_override.lock().unwrap().clone(),
-        available_providers: state.llm_router.provider_names().into_iter().map(String::from).collect(),
+        available_providers: state
+            .llm_router
+            .provider_names()
+            .into_iter()
+            .map(String::from)
+            .collect(),
         gateway: gateway.to_string(),
     };
 
@@ -465,8 +506,7 @@ pub async fn run_agent_response(
     let tools_cfg = state.tools_config.read().unwrap().clone();
     opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
     let executor = {
-        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx)
-            .with_depth(depth);
+        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
         match gateway_actions {
             Some(ga) => bridged.with_gateway_actions(ga),
             None => bridged,
@@ -486,11 +526,8 @@ pub async fn run_agent_response(
 
     // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
     let max_iterations = if depth == 0 { 30 } else { usize::MAX };
-    let mut engine = opencrab_core::SkillEngine::new(
-        Box::new(llm_client),
-        Box::new(executor),
-        max_iterations,
-    );
+    let mut engine =
+        opencrab_core::SkillEngine::new(Box::new(llm_client), Box::new(executor), max_iterations);
 
     // LLMログ記録のコールバックを設定
     let log_db = state.db.clone();
@@ -498,24 +535,33 @@ pub async fn run_agent_response(
     let log_session_id = session_id.to_string();
     let log_trigger_message_id = trigger_message_id.clone();
     engine.set_log_callback(move |log: &LlmCallLog| {
-        let (prompt_tokens, completion_tokens, total_tokens) = log.response
+        let (prompt_tokens, completion_tokens, total_tokens) = log
+            .response
             .as_ref()
             .and_then(|r| r.usage.as_ref())
-            .map(|u| (
-                Some(u.prompt_tokens as i64),
-                Some(u.completion_tokens as i64),
-                Some(u.total_tokens as i64),
-            ))
+            .map(|u| {
+                (
+                    Some(u.prompt_tokens as i64),
+                    Some(u.completion_tokens as i64),
+                    Some(u.total_tokens as i64),
+                )
+            })
             .unwrap_or((None, None, None));
 
-        let cache_read_tokens = log.response.as_ref()
+        let cache_read_tokens = log
+            .response
+            .as_ref()
             .and_then(|r| r.usage.as_ref())
             .map(|u| u.cache_read_input_tokens as i64);
-        let cache_creation_tokens = log.response.as_ref()
+        let cache_creation_tokens = log
+            .response
+            .as_ref()
             .and_then(|r| r.usage.as_ref())
             .map(|u| u.cache_creation_input_tokens as i64);
 
-        let response_str = log.response.as_ref()
+        let response_str = log
+            .response
+            .as_ref()
             .map(|r| serde_json::to_string(r).unwrap_or_default())
             .unwrap_or_default();
 
@@ -526,7 +572,9 @@ pub async fn run_agent_response(
             model: Some(log.request.model.clone()),
             prompt: serde_json::to_string(&log.request).unwrap_or_default(),
             response: response_str,
-            tool_calls: log.response.as_ref()
+            tool_calls: log
+                .response
+                .as_ref()
                 .filter(|r| !r.tool_calls.is_empty())
                 .and_then(|r| serde_json::to_string(&r.tool_calls).ok()),
             latency_ms: Some(log.latency_ms),
@@ -567,7 +615,9 @@ pub async fn run_agent_response(
                     content,
                     speaker_id: Some(tc_agent.clone()),
                     turn_number: None,
-                    metadata_json: Some(serde_json::json!({"tool_calls_json": tool_calls_json}).to_string()),
+                    metadata_json: Some(
+                        serde_json::json!({"tool_calls_json": tool_calls_json}).to_string(),
+                    ),
                     created_at: None,
                 };
                 opencrab_db::queries::insert_session_log(&conn, &log).ok();
@@ -581,52 +631,62 @@ pub async fn run_agent_response(
         let tr_agent = agent_id.to_string();
         let tr_session = session_id.to_string();
         let tr_workspace = state.workspace_base.clone();
-        engine.set_on_tool_result(move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
-            const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
-            let content = if result_json.len() >= TOOL_RESULT_SIZE_LIMIT {
-                // 大きい結果はファイルに保存
-                let tmp_dir = std::path::Path::new(&tr_workspace).join("tmp");
-                let _ = std::fs::create_dir_all(&tmp_dir);
-                let filename = format!("{}_{}.json", tr_session, tool_call_id);
-                let file_path = tmp_dir.join(&filename);
-                if std::fs::write(&file_path, &result_json).is_ok() {
-                    format!("[Tool Result: file://tmp/{}]", filename)
+        engine.set_on_tool_result(
+            move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
+                const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
+                let content = if result_json.len() >= TOOL_RESULT_SIZE_LIMIT {
+                    // 大きい結果はファイルに保存
+                    let tmp_dir = std::path::Path::new(&tr_workspace).join("tmp");
+                    let _ = std::fs::create_dir_all(&tmp_dir);
+                    let filename = format!("{}_{}.json", tr_session, tool_call_id);
+                    let file_path = tmp_dir.join(&filename);
+                    if std::fs::write(&file_path, &result_json).is_ok() {
+                        format!("[Tool Result: file://tmp/{}]", filename)
+                    } else {
+                        result_json[..TOOL_RESULT_SIZE_LIMIT].to_string()
+                    }
                 } else {
-                    result_json[..TOOL_RESULT_SIZE_LIMIT].to_string()
-                }
-            } else {
-                result_json.clone()
-            };
-
-            if let Ok(conn) = tr_db.lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: tr_agent.clone(),
-                    session_id: tr_session.clone(),
-                    log_type: "tool_result".to_string(),
-                    content,
-                    speaker_id: Some(tr_agent.clone()),
-                    turn_number: None,
-                    metadata_json: Some(serde_json::json!({
-                        "tool_call_id": tool_call_id,
-                        "tool_name": tool_name,
-                        "is_error": is_error,
-                    }).to_string()),
-                    created_at: None,
+                    result_json.clone()
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
-            }
-        });
+
+                if let Ok(conn) = tr_db.lock() {
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: tr_agent.clone(),
+                        session_id: tr_session.clone(),
+                        log_type: "tool_result".to_string(),
+                        content,
+                        speaker_id: Some(tr_agent.clone()),
+                        turn_number: None,
+                        metadata_json: Some(
+                            serde_json::json!({
+                                "tool_call_id": tool_call_id,
+                                "tool_name": tool_name,
+                                "is_error": is_error,
+                            })
+                            .to_string(),
+                        ),
+                        created_at: None,
+                    };
+                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                }
+            },
+        );
     }
 
     // Collect image_urls: merge passed-in args with any stored in the latest user log metadata_json.
     let merged_image_urls: Vec<String> = {
         let mut urls: Vec<String> = image_urls.to_vec();
         if let Ok(conn) = state.db.lock() {
-            if let Ok(logs) = opencrab_db::queries::list_session_logs_by_session(&conn, session_id) {
+            if let Ok(logs) = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)
+            {
                 if let Some(latest_user_log) = logs.iter().rev().find(|log| {
                     log.log_type == "speech"
-                        && log.speaker_id.as_deref().map(|s| s != agent_id).unwrap_or(true)
+                        && log
+                            .speaker_id
+                            .as_deref()
+                            .map(|s| s != agent_id)
+                            .unwrap_or(true)
                 }) {
                     if let Some(ref meta_json) = latest_user_log.metadata_json {
                         if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
@@ -674,8 +734,9 @@ pub async fn run_agent_response(
         tokio::spawn(async move {
             let (unindexed, config) = {
                 let Ok(conn) = index_db.lock() else { return };
-                let unindexed = opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
-                    .unwrap_or(0);
+                let unindexed =
+                    opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
+                        .unwrap_or(0);
                 let config = opencrab_db::queries::get_memory_index_config(&conn, &index_agent_id)
                     .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
                         agent_id: index_agent_id.clone(),
