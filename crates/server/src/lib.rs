@@ -118,6 +118,14 @@ pub fn create_router(state: AppState) -> Router {
             post(api::agents::rebuild_memory_index),
         )
         .route(
+            "/api/agents/{id}/daily-log-index/status",
+            get(api::daily_log_index::get_status),
+        )
+        .route(
+            "/api/agents/{id}/daily-log-index/rebuild",
+            post(api::daily_log_index::rebuild),
+        )
+        .route(
             "/api/agents/{id}/memory/index/merge",
             post(api::agents::merge_memory_index_topics),
         )

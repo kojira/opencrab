@@ -1,14 +1,8 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 
 use opencrab_core::import::{
-    ScanOptions, ScanResult,
-    ImportOptions,
-    scan_workspace, execute_import,
+    execute_import, scan_workspace, ImportOptions, ScanOptions, ScanResult,
 };
 
 use crate::AppState;
@@ -77,13 +71,14 @@ pub async fn execute_import_handler(
     // Build memory index incrementally
     let config = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::get_memory_index_config(&conn, &agent_id)
-            .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
+        opencrab_db::queries::get_memory_index_config(&conn, &agent_id).unwrap_or_else(|_| {
+            opencrab_db::queries::AgentMemoryIndexConfig {
                 agent_id: agent_id.clone(),
                 batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
                 threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
                 updated_at: String::new(),
-            })
+            }
+        })
     };
     let batch_size = config.batch_size as usize;
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(state.llm_router.clone());
@@ -114,6 +109,24 @@ pub async fn execute_import_handler(
 
     let mut result = import_result;
     result.indexed_logs_count = total_indexed;
+
+    {
+        let db_clone = state.db.clone();
+        let llm_clone = state.llm_router.clone();
+        let model_clone = state.default_model.clone();
+        let agent_id_clone = agent_id.clone();
+        tokio::spawn(async move {
+            let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
+            let indexer = opencrab_core::memory::DailyLogIndexer::new(
+                db_clone,
+                std::sync::Arc::new(adapter),
+                model_clone,
+            );
+            if let Err(e) = indexer.run(&agent_id_clone).await {
+                tracing::warn!("daily_log indexing failed: {}", e);
+            }
+        });
+    }
 
     Ok(Json(serde_json::json!({
         "agent_id": agent_id,

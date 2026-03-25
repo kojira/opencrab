@@ -509,7 +509,7 @@ pub fn get_topic_nodes_for_session(
     session_id: &str,
 ) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at
          FROM memory_index_nodes WHERE agent_id = ?1 AND source_session_id = ?2 AND node_type = 'topic' ORDER BY start_log_id ASC",
     )?;
     let rows = stmt.query_map(params![agent_id, session_id], |row| {
@@ -518,16 +518,19 @@ pub fn get_topic_nodes_for_session(
             agent_id: row.get(1)?,
             parent_id: row.get(2)?,
             node_type: row.get(3)?,
-            title: row.get(4)?,
-            summary: row.get(5)?,
-            start_log_id: row.get(6)?,
-            end_log_id: row.get(7)?,
-            source_session_id: row.get(8)?,
-            depth: row.get(9)?,
-            child_count: row.get(10)?,
-            token_count: row.get(11)?,
-            created_at: row.get(12)?,
-            updated_at: row.get(13)?,
+            source_type: row.get(4)?,
+            title: row.get(5)?,
+            summary: row.get(6)?,
+            start_log_id: row.get(7)?,
+            end_log_id: row.get(8)?,
+            source_session_id: row.get(9)?,
+            date_from: row.get(10)?,
+            date_to: row.get(11)?,
+            depth: row.get(12)?,
+            child_count: row.get(13)?,
+            token_count: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1733,11 +1736,14 @@ pub struct IndexNodeRow {
     pub agent_id: String,
     pub parent_id: Option<String>,
     pub node_type: String,
+    pub source_type: String,
     pub title: String,
     pub summary: String,
     pub start_log_id: Option<i64>,
     pub end_log_id: Option<i64>,
     pub source_session_id: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
     pub depth: i32,
     pub child_count: i32,
     pub token_count: i32,
@@ -1753,20 +1759,39 @@ pub struct WatermarkRow {
     pub total_nodes: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DailyLogWatermarkRow {
+    pub agent_id: String,
+    pub last_indexed_date: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DailyLogEntry {
+    pub id: String,
+    pub agent_id: String,
+    pub category: String,
+    pub content: String,
+    pub date_str: String,
+}
+
 pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT OR IGNORE INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             node.id,
             node.agent_id,
             node.parent_id,
             node.node_type,
+            node.source_type,
             node.title,
             node.summary,
             node.start_log_id,
             node.end_log_id,
             node.source_session_id,
+            node.date_from,
+            node.date_to,
             node.depth,
             node.child_count,
             node.token_count,
@@ -1787,7 +1812,7 @@ pub fn update_index_node_child_count(conn: &Connection, node_id: &str, count: i3
 
 pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at
          FROM memory_index_nodes WHERE agent_id = ?1 ORDER BY depth ASC, created_at ASC",
     )?;
     let rows = stmt.query_map(params![agent_id], |row| {
@@ -1796,16 +1821,19 @@ pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNode
             agent_id: row.get(1)?,
             parent_id: row.get(2)?,
             node_type: row.get(3)?,
-            title: row.get(4)?,
-            summary: row.get(5)?,
-            start_log_id: row.get(6)?,
-            end_log_id: row.get(7)?,
-            source_session_id: row.get(8)?,
-            depth: row.get(9)?,
-            child_count: row.get(10)?,
-            token_count: row.get(11)?,
-            created_at: row.get(12)?,
-            updated_at: row.get(13)?,
+            source_type: row.get(4)?,
+            title: row.get(5)?,
+            summary: row.get(6)?,
+            start_log_id: row.get(7)?,
+            end_log_id: row.get(8)?,
+            source_session_id: row.get(9)?,
+            date_from: row.get(10)?,
+            date_to: row.get(11)?,
+            depth: row.get(12)?,
+            child_count: row.get(13)?,
+            token_count: row.get(14)?,
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1813,7 +1841,7 @@ pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNode
 
 pub fn get_index_node(conn: &Connection, node_id: &str) -> Result<Option<IndexNodeRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, parent_id, node_type, title, summary, start_log_id, end_log_id, source_session_id, depth, child_count, token_count, created_at, updated_at
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at
          FROM memory_index_nodes WHERE id = ?1",
         params![node_id],
         |row| {
@@ -1822,16 +1850,19 @@ pub fn get_index_node(conn: &Connection, node_id: &str) -> Result<Option<IndexNo
                 agent_id: row.get(1)?,
                 parent_id: row.get(2)?,
                 node_type: row.get(3)?,
-                title: row.get(4)?,
-                summary: row.get(5)?,
-                start_log_id: row.get(6)?,
-                end_log_id: row.get(7)?,
-                source_session_id: row.get(8)?,
-                depth: row.get(9)?,
-                child_count: row.get(10)?,
-                token_count: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                source_type: row.get(4)?,
+                title: row.get(5)?,
+                summary: row.get(6)?,
+                start_log_id: row.get(7)?,
+                end_log_id: row.get(8)?,
+                source_session_id: row.get(9)?,
+                date_from: row.get(10)?,
+                date_to: row.get(11)?,
+                depth: row.get(12)?,
+                child_count: row.get(13)?,
+                token_count: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         },
     );
@@ -1840,6 +1871,138 @@ pub fn get_index_node(conn: &Connection, node_id: &str) -> Result<Option<IndexNo
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+pub fn get_daily_log_watermark(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Option<DailyLogWatermarkRow>> {
+    let result = conn.query_row(
+        "SELECT agent_id, last_indexed_date, updated_at
+         FROM daily_log_index_watermark WHERE agent_id = ?1",
+        params![agent_id],
+        |row| {
+            Ok(DailyLogWatermarkRow {
+                agent_id: row.get(0)?,
+                last_indexed_date: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_daily_log_watermark(conn: &Connection, row: &DailyLogWatermarkRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO daily_log_index_watermark (agent_id, last_indexed_date, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(agent_id) DO UPDATE SET
+            last_indexed_date = excluded.last_indexed_date,
+            updated_at = excluded.updated_at",
+        params![row.agent_id, row.last_indexed_date, row.updated_at],
+    )?;
+    Ok(())
+}
+
+pub fn delete_daily_log_watermark(conn: &Connection, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM daily_log_index_watermark WHERE agent_id = ?1",
+        params![agent_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_unindexed_daily_logs(
+    conn: &Connection,
+    agent_id: &str,
+    after_date: &str,
+) -> Result<Vec<DailyLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, category, content
+         FROM memory_curated
+         WHERE agent_id = ?1
+           AND category LIKE 'daily_log/%'
+           AND substr(category, 11) > ?2
+         ORDER BY category ASC",
+    )?;
+    let rows = stmt.query_map(params![agent_id, after_date], |row| {
+        let category: String = row.get(2)?;
+        Ok(DailyLogEntry {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            date_str: category.trim_start_matches("daily_log/").to_string(),
+            category,
+            content: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn get_daily_log_by_date(
+    conn: &Connection,
+    agent_id: &str,
+    date_str: &str,
+) -> Result<Option<DailyLogEntry>> {
+    let category = format!("daily_log/{date_str}");
+    let result = conn.query_row(
+        "SELECT id, agent_id, category, content
+         FROM memory_curated
+         WHERE agent_id = ?1 AND category = ?2",
+        params![agent_id, category],
+        |row| {
+            let category: String = row.get(2)?;
+            Ok(DailyLogEntry {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                date_str: category.trim_start_matches("daily_log/").to_string(),
+                category,
+                content: row.get(3)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(entry) => Ok(Some(entry)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_daily_log_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+         ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            summary = excluded.summary,
+            updated_at = excluded.updated_at,
+            child_count = excluded.child_count",
+        params![
+            node.id,
+            node.agent_id,
+            node.parent_id,
+            node.node_type,
+            node.source_type,
+            node.title,
+            node.summary,
+            node.start_log_id,
+            node.end_log_id,
+            node.source_session_id,
+            node.date_from,
+            node.date_to,
+            node.depth,
+            node.child_count,
+            node.token_count,
+            node.created_at,
+            node.updated_at,
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn get_session_logs_by_id_range(
