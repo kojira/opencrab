@@ -696,14 +696,31 @@ pub async fn run_agent_response(
                 "Starting background memory index build"
             );
             let llm_adapter = LlmRouterAdapter::new(index_llm_router);
-            let _ = opencrab_core::memory_index::IndexBuilder::build_incremental(
+            match opencrab_core::memory_index::IndexBuilder::build_incremental(
                 &index_db,
                 &index_agent_id,
                 &llm_adapter,
                 &index_model,
                 config.batch_size as usize,
             )
-            .await;
+            .await
+            {
+                Ok(result) => {
+                    tracing::info!(
+                        agent_id = %index_agent_id,
+                        nodes_created = result.nodes_created,
+                        logs_indexed = result.logs_indexed,
+                        "Background memory index build completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        agent_id = %index_agent_id,
+                        error = %e,
+                        "Background memory index build FAILED"
+                    );
+                }
+            }
         });
     }
 
