@@ -48,7 +48,9 @@ impl IndexBuilder {
     ) -> Result<IndexBuildResult> {
         // 1. ウォーターマーク取得
         let (last_indexed_id, existing_total_nodes) = {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
             let wm = opencrab_db::queries::get_index_watermark(&db, agent_id)?;
             (
                 wm.as_ref().map(|w| w.last_indexed_log_id).unwrap_or(0),
@@ -58,8 +60,15 @@ impl IndexBuilder {
 
         // 2. 未処理ログ取得
         let logs = {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
-            opencrab_db::queries::get_unindexed_session_logs(&db, agent_id, last_indexed_id, batch_size)?
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            opencrab_db::queries::get_unindexed_session_logs(
+                &db,
+                agent_id,
+                last_indexed_id,
+                batch_size,
+            )?
         };
 
         if logs.is_empty() {
@@ -86,18 +95,23 @@ impl IndexBuilder {
         // 4. ルートノード確保
         let root_id = format!("root-{agent_id}");
         {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
             if opencrab_db::queries::get_index_node(&db, &root_id)?.is_none() {
                 let root = opencrab_db::queries::IndexNodeRow {
                     id: root_id.clone(),
                     agent_id: agent_id.to_string(),
                     parent_id: None,
                     node_type: "root".to_string(),
+                    source_type: "session_log".to_string(),
                     title: "Memory Root".to_string(),
                     summary: "Root node for all memories".to_string(),
                     start_log_id: None,
                     end_log_id: None,
                     source_session_id: None,
+                    date_from: None,
+                    date_to: None,
                     depth: 0,
                     child_count: 0,
                     token_count: 0,
@@ -121,18 +135,23 @@ impl IndexBuilder {
             let period_label = Utc::now().format("%Y-%m").to_string();
             let period_id = format!("period-{agent_id}-{period_label}");
             {
-                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                let db = conn
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 if opencrab_db::queries::get_index_node(&db, &period_id)?.is_none() {
                     let period = opencrab_db::queries::IndexNodeRow {
                         id: period_id.clone(),
                         agent_id: agent_id.to_string(),
                         parent_id: Some(root_id.clone()),
                         node_type: "period".to_string(),
+                        source_type: "session_log".to_string(),
                         title: period_label.clone(),
                         summary: format!("Conversations from {period_label}"),
                         start_log_id: None,
                         end_log_id: None,
                         source_session_id: None,
+                        date_from: None,
+                        date_to: None,
                         depth: 1,
                         child_count: 0,
                         token_count: 0,
@@ -147,7 +166,9 @@ impl IndexBuilder {
             // セッションノードを確保
             let session_node_id = format!("session-{agent_id}-{session_id}");
             {
-                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                let db = conn
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 if opencrab_db::queries::get_index_node(&db, &session_node_id)?.is_none() {
                     // セッションノードのタイトルは最初のログから推測
                     let preview = session_logs
@@ -166,11 +187,14 @@ impl IndexBuilder {
                         agent_id: agent_id.to_string(),
                         parent_id: Some(period_id.clone()),
                         node_type: "session".to_string(),
+                        source_type: "session_log".to_string(),
                         title: format!("Session: {}", &session_id[..session_id.len().min(8)]),
                         summary: preview,
                         start_log_id: Some(first_log_id),
                         end_log_id: Some(last_log_id),
                         source_session_id: Some(session_id.clone()),
+                        date_from: None,
+                        date_to: None,
                         depth: 2,
                         child_count: 0,
                         token_count: 0,
@@ -256,19 +280,20 @@ impl IndexBuilder {
             };
 
             // topicノード作成
-            let topic_id = format!(
-                "topic-{agent_id}-{session_id}-{first_log_id}-{last_log_id}"
-            );
+            let topic_id = format!("topic-{agent_id}-{session_id}-{first_log_id}-{last_log_id}");
             let topic = opencrab_db::queries::IndexNodeRow {
                 id: topic_id.clone(),
                 agent_id: agent_id.to_string(),
                 parent_id: Some(session_node_id.clone()),
                 node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
                 title: summary.title,
                 summary: summary.summary,
                 start_log_id: Some(first_log_id),
                 end_log_id: Some(last_log_id),
                 source_session_id: Some(session_id.clone()),
+                date_from: None,
+                date_to: None,
                 depth: 3,
                 child_count: 0,
                 token_count,
@@ -277,7 +302,9 @@ impl IndexBuilder {
             };
 
             {
-                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                let db = conn
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 if opencrab_db::queries::get_index_node(&db, &topic_id)?.is_none() {
                     opencrab_db::queries::insert_index_node(&db, &topic)?;
                     nodes_created += 1;
@@ -292,7 +319,9 @@ impl IndexBuilder {
 
         // 6. 子ノード数を更新
         {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
             let all_nodes = opencrab_db::queries::get_index_tree(&db, agent_id)?;
             let mut child_counts: HashMap<String, i32> = HashMap::new();
             for node in &all_nodes {
@@ -307,7 +336,9 @@ impl IndexBuilder {
 
         // 7. ウォーターマーク更新
         {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
             let wm = opencrab_db::queries::WatermarkRow {
                 agent_id: agent_id.to_string(),
                 last_indexed_log_id: max_log_id,
@@ -324,11 +355,10 @@ impl IndexBuilder {
     }
 
     /// エージェントのインデックス全体を削除する。
-    pub fn delete_index(
-        conn: &Arc<Mutex<Connection>>,
-        agent_id: &str,
-    ) -> Result<()> {
-        let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+    pub fn delete_index(conn: &Arc<Mutex<Connection>>, agent_id: &str) -> Result<()> {
+        let db = conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
         opencrab_db::queries::delete_index_nodes_for_agent(&db, agent_id)?;
         opencrab_db::queries::delete_index_watermark_for_agent(&db, agent_id)?;
         Ok(())
@@ -358,7 +388,9 @@ impl IndexBuilder {
     ) -> Result<MergeResult> {
         let now = Utc::now().to_rfc3339();
         let tree = {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
             opencrab_db::queries::get_index_tree(&db, agent_id)?
         };
 
@@ -444,7 +476,9 @@ impl IndexBuilder {
                 .unwrap_or_else(|| session_ids.first().cloned().unwrap_or_default());
 
             {
-                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                let db = conn
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 for topic in &topic_nodes {
                     db.execute(
                         "DELETE FROM memory_index_nodes WHERE id = ?1",
@@ -460,11 +494,14 @@ impl IndexBuilder {
                 agent_id: agent_id.to_string(),
                 parent_id: Some(parent_session_id),
                 node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
                 title: merged_summary.title,
                 summary: merged_summary.summary,
                 start_log_id: start_log,
                 end_log_id: end_log,
                 source_session_id: None,
+                date_from: None,
+                date_to: None,
                 depth: 3,
                 child_count: 0,
                 token_count: token_total,
@@ -472,14 +509,18 @@ impl IndexBuilder {
                 updated_at: now.clone(),
             };
             {
-                let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                let db = conn
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 opencrab_db::queries::insert_index_node(&db, &merged_node)?;
             }
             merged_count += 1;
         }
 
         {
-            let db = conn.lock().map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+            let db = conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
             let all_nodes = opencrab_db::queries::get_index_tree(&db, agent_id)?;
             let mut child_counts: HashMap<String, i32> = HashMap::new();
             for node in &all_nodes {
@@ -503,8 +544,8 @@ impl IndexBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
     use async_trait::async_trait;
-    use crate::engine::{ChatResponseSimple, LlmClient, ChatRequestSimple};
 
     struct MockLlm;
 
@@ -512,7 +553,9 @@ mod tests {
     impl LlmClient for MockLlm {
         async fn chat(&self, _request: ChatRequestSimple) -> Result<ChatResponseSimple> {
             Ok(ChatResponseSimple {
-                content: Some(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()),
+                content: Some(
+                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
+                ),
                 tool_calls: vec![],
                 finish_reason: "stop".to_string(),
                 usage: None,
@@ -942,7 +985,9 @@ mod tests {
             .unwrap();
         let first_tree_len = {
             let db = conn.lock().unwrap();
-            opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap().len()
+            opencrab_db::queries::get_index_tree(&db, "agent-1")
+                .unwrap()
+                .len()
         };
         assert!(r1.nodes_created > 0);
 
@@ -961,7 +1006,10 @@ mod tests {
             let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
                 .unwrap()
                 .unwrap();
-            assert_eq!(wm.last_indexed_log_id, 8, "ウォーターマークが最終ログIDを指すはず");
+            assert_eq!(
+                wm.last_indexed_log_id, 8,
+                "ウォーターマークが最終ログIDを指すはず"
+            );
 
             // ツリーが再構築されている
             let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
@@ -1017,7 +1065,11 @@ mod tests {
             let db = conn.lock().unwrap();
             opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap()
         };
-        assert_eq!(tree_before.len(), tree_after.len(), "マージなしでツリー長は変化しない");
+        assert_eq!(
+            tree_before.len(),
+            tree_after.len(),
+            "マージなしでツリー長は変化しない"
+        );
     }
 
     /// merge_topics: topicが閾値超過でマージされ、要約が統合されるか
@@ -1042,8 +1094,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.periods_processed, 1, "1つのperiodが処理されるはず");
-        assert!(result.topics_merged >= 1, "少なくとも1回のマージが実行されるはず");
-        assert!(result.topics_deleted >= 3, "旧topicは削除されるはず（4 - 1 = 3）");
+        assert!(
+            result.topics_merged >= 1,
+            "少なくとも1回のマージが実行されるはず"
+        );
+        assert!(
+            result.topics_deleted >= 3,
+            "旧topicは削除されるはず（4 - 1 = 3）"
+        );
 
         // マージ後: 4topicが統合されて1topicになる
         let db = conn.lock().unwrap();
@@ -1052,7 +1110,10 @@ mod tests {
         // マージで4→1になる（merged-topicが1つ）
         assert_eq!(topics.len(), 1, "4topicがマージされて1topicになるはず");
         // マージされたtopicはMockLlmのタイトルを持つ
-        assert_eq!(topics[0].title, "テストトピック", "LLM生成タイトルを持つはず");
+        assert_eq!(
+            topics[0].title, "テストトピック",
+            "LLM生成タイトルを持つはず"
+        );
 
         // child_countが正しく更新されている
         let session_nodes: Vec<_> = tree.iter().filter(|n| n.node_type == "session").collect();
@@ -1084,11 +1145,15 @@ mod tests {
         let rebuild_result = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50)
             .await
             .unwrap();
-        assert_eq!(rebuild_result.logs_indexed, 15, "5セッション×3ログ=15件が再インデックス");
+        assert_eq!(
+            rebuild_result.logs_indexed, 15,
+            "5セッション×3ログ=15件が再インデックス"
+        );
 
         // orphanなし、child_count整合
         let db = conn.lock().unwrap();
-        let metrics = crate::memory_index::graph_query::IndexQualityMetrics::compute(&db, "agent-1").unwrap();
+        let metrics =
+            crate::memory_index::graph_query::IndexQualityMetrics::compute(&db, "agent-1").unwrap();
         assert_eq!(metrics.orphan_count, 0);
         assert_eq!(metrics.child_count_mismatch, 0);
         assert_eq!(metrics.log_coverage, 1.0);

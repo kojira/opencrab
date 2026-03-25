@@ -90,13 +90,6 @@ pub async fn execute_import_sync(
     State(state): State<AppState>,
     Json(req): Json<SyncRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let conn = state.db.lock().unwrap();
-
-    let identity = get_identity(&conn, &agent_id).map_err(internal_error)?;
-    if identity.is_none() {
-        return Err(agent_not_found());
-    }
-
     let opts = req.options.as_ref();
     let options = SyncOptions {
         include_daily_logs: opts.and_then(|o| o.include_daily_logs).unwrap_or(true),
@@ -104,8 +97,32 @@ pub async fn execute_import_sync(
         force_resync: opts.and_then(|o| o.force_resync).unwrap_or(false),
     };
 
-    let result =
-        execute_sync_import(&conn, &agent_id, &req.source_dir, &options).map_err(bad_request)?;
+    let result = {
+        let conn = state.db.lock().unwrap();
+        let identity = get_identity(&conn, &agent_id).map_err(internal_error)?;
+        if identity.is_none() {
+            return Err(agent_not_found());
+        }
+        execute_sync_import(&conn, &agent_id, &req.source_dir, &options).map_err(bad_request)?
+    };
+
+    if result.daily_logs_imported > 0 {
+        let db_clone = state.db.clone();
+        let llm_clone = state.llm_router.clone();
+        let model_clone = state.default_model.clone();
+        let agent_id_clone = agent_id.clone();
+        tokio::spawn(async move {
+            let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
+            let indexer = opencrab_core::memory::DailyLogIndexer::new(
+                db_clone,
+                std::sync::Arc::new(adapter),
+                model_clone,
+            );
+            if let Err(e) = indexer.run(&agent_id_clone).await {
+                tracing::warn!("daily_log sync indexing failed: {}", e);
+            }
+        });
+    }
 
     Ok(Json(serde_json::json!({
         "agent_id": result.agent_id,

@@ -97,7 +97,10 @@ impl Action for RetrieveMemoryNodesAction {
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
         let node_ids: Vec<String> = match args["node_ids"].as_array() {
-            Some(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
             None => return ActionResult::error("node_ids is required (array of strings)"),
         };
 
@@ -225,11 +228,14 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 parent_id: None,
                 node_type: "root".to_string(),
+                source_type: "session_log".to_string(),
                 title: "Memory Root".to_string(),
                 summary: "Root node".to_string(),
                 start_log_id: None,
                 end_log_id: None,
                 source_session_id: None,
+                date_from: None,
+                date_to: None,
                 depth: 0,
                 child_count: 1,
                 token_count: 0,
@@ -242,11 +248,14 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 parent_id: Some("root-agent-1".to_string()),
                 node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
                 title: "Rust Discussion".to_string(),
                 summary: "A discussion about Rust.".to_string(),
                 start_log_id: Some(1),
                 end_log_id: Some(5),
                 source_session_id: Some("session-1".to_string()),
+                date_from: None,
+                date_to: None,
                 depth: 1,
                 child_count: 0,
                 token_count: 100,
@@ -310,11 +319,14 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 parent_id: None,
                 node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
                 title: "Test Topic".to_string(),
                 summary: "Test summary".to_string(),
                 start_log_id: Some(1),
                 end_log_id: Some(1),
                 source_session_id: Some("session-1".to_string()),
+                date_from: None,
+                date_to: None,
                 depth: 3,
                 child_count: 0,
                 token_count: 10,

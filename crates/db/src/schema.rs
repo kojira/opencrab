@@ -246,6 +246,47 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE llm_logs ADD COLUMN cache_creation_tokens INTEGER")?;
     }
 
+    let has_source_type_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='source_type'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_source_type_col {
+        conn.execute_batch(
+            "ALTER TABLE memory_index_nodes ADD COLUMN source_type TEXT NOT NULL DEFAULT 'session_log'",
+        )?;
+    }
+
+    let has_date_from_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='date_from'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_date_from_col {
+        conn.execute_batch("ALTER TABLE memory_index_nodes ADD COLUMN date_from TEXT")?;
+    }
+
+    let has_date_to_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='date_to'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_date_to_col {
+        conn.execute_batch("ALTER TABLE memory_index_nodes ADD COLUMN date_to TEXT")?;
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS daily_log_index_watermark (
+            agent_id TEXT NOT NULL PRIMARY KEY,
+            last_indexed_date TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memory_index_nodes_source_type
+         ON memory_index_nodes (agent_id, source_type)",
+    )?;
+
     // skills.skill_type カラムDROP（v2: executableタイプ廃止）
     let has_skill_type_drop: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='skill_type'")?
@@ -596,11 +637,14 @@ CREATE TABLE IF NOT EXISTS memory_index_nodes (
     agent_id TEXT NOT NULL,
     parent_id TEXT,
     node_type TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'session_log',
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
     start_log_id INTEGER,
     end_log_id INTEGER,
     source_session_id TEXT,
+    date_from TEXT,
+    date_to TEXT,
     depth INTEGER NOT NULL DEFAULT 0,
     child_count INTEGER NOT NULL DEFAULT 0,
     token_count INTEGER NOT NULL DEFAULT 0,
@@ -619,6 +663,12 @@ CREATE TABLE IF NOT EXISTS memory_index_watermark (
     last_indexed_log_id INTEGER NOT NULL DEFAULT 0,
     last_indexed_at TEXT NOT NULL,
     total_nodes INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS daily_log_index_watermark (
+    agent_id TEXT NOT NULL PRIMARY KEY,
+    last_indexed_date TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 -- ============================================
