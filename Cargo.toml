@@ -50,6 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utils
 uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
 toml = "0.8"
 tempfile = "3"
 dashmap = "6"

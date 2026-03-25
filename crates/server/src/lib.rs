@@ -36,41 +36,127 @@ pub fn create_router(state: AppState) -> Router {
         .route("/health", get(health_check))
         .route("/api/health", get(api_health_check))
         // エージェント管理
-        .route("/api/agents", get(api::agents::list_agents).post(api::agents::create_agent))
-        .route("/api/agents/{id}", get(api::agents::get_agent).delete(api::agents::delete_agent))
-        .route("/api/agents/{id}/soul", get(api::agents::get_soul).put(api::agents::update_soul))
-        .route("/api/agents/{id}/identity", get(api::agents::get_identity).put(api::agents::update_identity))
+        .route(
+            "/api/agents",
+            get(api::agents::list_agents).post(api::agents::create_agent),
+        )
+        .route(
+            "/api/agents/{id}",
+            get(api::agents::get_agent).delete(api::agents::delete_agent),
+        )
+        .route(
+            "/api/agents/{id}/soul",
+            get(api::agents::get_soul).put(api::agents::update_soul),
+        )
+        .route(
+            "/api/agents/{id}/identity",
+            get(api::agents::get_identity).put(api::agents::update_identity),
+        )
         // ペルソナプリセット
-        .route("/api/agents/{id}/soul/presets", get(api::agents::list_soul_presets).post(api::agents::create_soul_preset))
-        .route("/api/agents/{id}/soul/presets/{preset_id}", axum::routing::delete(api::agents::delete_soul_preset))
-        .route("/api/agents/{id}/soul/presets/{preset_id}/apply", post(api::agents::apply_soul_preset))
+        .route(
+            "/api/agents/{id}/soul/presets",
+            get(api::agents::list_soul_presets).post(api::agents::create_soul_preset),
+        )
+        .route(
+            "/api/agents/{id}/soul/presets/{preset_id}",
+            axum::routing::delete(api::agents::delete_soul_preset),
+        )
+        .route(
+            "/api/agents/{id}/soul/presets/{preset_id}/apply",
+            post(api::agents::apply_soul_preset),
+        )
         // スキル管理
-        .route("/api/agents/{id}/skills", get(api::skills::list_skills).post(api::skills::add_skill))
-        .route("/api/agents/{id}/skills/{skill_id}", put(api::skills::update_skill))
-        .route("/api/agents/{id}/skills/{skill_id}/toggle", post(api::skills::toggle_skill))
-        .route("/api/agents/{id}/skills/{skill_id}/archive", post(api::skills::archive_skill))
-        .route("/api/agents/{id}/skills/{skill_id}/restore", post(api::skills::restore_skill))
-        .route("/api/agents/{id}/skills/unused", get(api::skills::list_unused))
+        .route(
+            "/api/agents/{id}/skills",
+            get(api::skills::list_skills).post(api::skills::add_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}",
+            put(api::skills::update_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}/toggle",
+            post(api::skills::toggle_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}/archive",
+            post(api::skills::archive_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/{skill_id}/restore",
+            post(api::skills::restore_skill),
+        )
+        .route(
+            "/api/agents/{id}/skills/unused",
+            get(api::skills::list_unused),
+        )
         // 記憶管理
-        .route("/api/agents/{id}/memory/curated", get(api::memory::list_curated_memory))
-        .route("/api/agents/{id}/memory/search", post(api::memory::search_memory))
-        .route("/api/agents/{id}/memory/index", get(api::agents::get_memory_index_status).post(api::agents::trigger_memory_index_build).delete(api::agents::delete_memory_index))
-        .route("/api/agents/{id}/memory/index/tree", get(api::memory::get_memory_index_tree))
-        .route("/api/agents/{id}/memory/index/config", put(api::agents::update_memory_index_config))
-        .route("/api/agents/{id}/memory/index/rebuild", post(api::agents::rebuild_memory_index))
-        .route("/api/agents/{id}/memory/index/merge", post(api::agents::merge_memory_index_topics))
+        .route(
+            "/api/agents/{id}/memory/curated",
+            get(api::memory::list_curated_memory),
+        )
+        .route(
+            "/api/agents/{id}/memory/search",
+            post(api::memory::search_memory),
+        )
+        .route(
+            "/api/agents/{id}/memory/index",
+            get(api::agents::get_memory_index_status)
+                .post(api::agents::trigger_memory_index_build)
+                .delete(api::agents::delete_memory_index),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/tree",
+            get(api::memory::get_memory_index_tree),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/config",
+            put(api::agents::update_memory_index_config),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/rebuild",
+            post(api::agents::rebuild_memory_index),
+        )
+        .route(
+            "/api/agents/{id}/memory/index/merge",
+            post(api::agents::merge_memory_index_topics),
+        )
         // セッション管理
-        .route("/api/sessions", get(api::sessions::list_sessions).post(api::sessions::create_session))
+        .route(
+            "/api/sessions",
+            get(api::sessions::list_sessions).post(api::sessions::create_session),
+        )
         .route("/api/sessions/{id}", get(api::sessions::get_session))
-        .route("/api/sessions/{id}/messages", post(api::sessions::send_message))
-        .route("/api/sessions/{id}/logs", get(api::sessions::list_session_logs))
-        .route("/api/sessions/{id}/mentor", post(api::sessions::send_mentor_instruction))
+        .route(
+            "/api/sessions/{id}/messages",
+            post(api::sessions::send_message),
+        )
+        .route(
+            "/api/sessions/{id}/logs",
+            get(api::sessions::list_session_logs),
+        )
+        .route(
+            "/api/sessions/{id}/mentor",
+            post(api::sessions::send_mentor_instruction),
+        )
         // アナリティクス
-        .route("/api/agents/{id}/analytics", get(api::analytics::get_metrics_summary))
-        .route("/api/agents/{id}/analytics/detail", get(api::analytics::get_metrics_detail))
+        .route(
+            "/api/agents/{id}/analytics",
+            get(api::analytics::get_metrics_summary),
+        )
+        .route(
+            "/api/agents/{id}/analytics/detail",
+            get(api::analytics::get_metrics_detail),
+        )
         // ワークスペース管理
-        .route("/api/agents/{id}/workspace", get(api::workspace::list_workspace))
-        .route("/api/agents/{id}/workspace/{*path}", get(api::workspace::read_file).put(api::workspace::write_file))
+        .route(
+            "/api/agents/{id}/workspace",
+            get(api::workspace::list_workspace),
+        )
+        .route(
+            "/api/agents/{id}/workspace/{*path}",
+            get(api::workspace::read_file).put(api::workspace::write_file),
+        )
         // Discord per-agent config (always available; gateway ops require discord feature)
         .route(
             "/api/agents/{id}/discord",
@@ -79,27 +165,88 @@ pub fn create_router(state: AppState) -> Router {
                 .patch(api::agents::patch_discord_config)
                 .delete(api::agents::delete_discord_config),
         )
-        .route("/api/agents/{id}/discord/start", post(api::agents::start_discord_gateway))
-        .route("/api/agents/{id}/discord/stop", post(api::agents::stop_discord_gateway))
+        .route(
+            "/api/agents/{id}/discord/start",
+            post(api::agents::start_discord_gateway),
+        )
+        .route(
+            "/api/agents/{id}/discord/stop",
+            post(api::agents::stop_discord_gateway),
+        )
         // Co-Agent管理
-        .route("/api/agents/{id}/co-agents", get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent))
-        .route("/api/agents/{id}/co-agents/{co_agent_id}", axum::routing::patch(api::co_agents::update_co_agent).delete(api::co_agents::delete_co_agent))
+        .route(
+            "/api/agents/{id}/co-agents",
+            get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent),
+        )
+        .route(
+            "/api/agents/{id}/co-agents/{co_agent_id}",
+            axum::routing::patch(api::co_agents::update_co_agent)
+                .delete(api::co_agents::delete_co_agent),
+        )
         // チャンネル設定
-        .route("/api/agents/{id}/channel-configs", get(api::channel_configs::list_channel_configs).put(api::channel_configs::upsert_channel_config))
-        .route("/api/agents/{id}/channel-configs/{channel_id}", delete(api::channel_configs::delete_channel_config))
-        .route("/api/agents/{id}/trusted-users", get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user))
-        .route("/api/agents/{id}/trusted-users/{user_id}", axum::routing::patch(api::trusted_users::update_trusted_user).delete(api::trusted_users::delete_trusted_user))
+        .route(
+            "/api/agents/{id}/channel-configs",
+            get(api::channel_configs::list_channel_configs)
+                .put(api::channel_configs::upsert_channel_config),
+        )
+        .route(
+            "/api/agents/{id}/channel-configs/{channel_id}",
+            delete(api::channel_configs::delete_channel_config),
+        )
+        .route(
+            "/api/agents/{id}/trusted-users",
+            get(api::trusted_users::list_trusted_users).post(api::trusted_users::add_trusted_user),
+        )
+        .route(
+            "/api/agents/{id}/trusted-users/{user_id}",
+            axum::routing::patch(api::trusted_users::update_trusted_user)
+                .delete(api::trusted_users::delete_trusted_user),
+        )
         // エージェントメッセージ
-        .route("/api/agents/{id}/messages", post(api::agents_messages::send_agent_message))
+        .route(
+            "/api/agents/{id}/messages",
+            post(api::agents_messages::send_agent_message),
+        )
         // 許可コマンド管理
-        .route("/api/agents/{id}/allowed-commands", get(api::allowed_commands::list_allowed_commands).post(api::allowed_commands::add_allowed_command))
-        .route("/api/agents/{id}/allowed-commands/{command}", axum::routing::delete(api::allowed_commands::remove_allowed_command))
+        .route(
+            "/api/agents/{id}/allowed-commands",
+            get(api::allowed_commands::list_allowed_commands)
+                .post(api::allowed_commands::add_allowed_command),
+        )
+        .route(
+            "/api/agents/{id}/allowed-commands/{command}",
+            axum::routing::delete(api::allowed_commands::remove_allowed_command),
+        )
         // LLMログ
-        .route("/api/agents/{id}/llm-logs", get(api::llm_logs::list_llm_logs))
-        .route("/api/agents/{id}/llm-logs/stats", get(api::llm_logs::llm_logs_stats))
+        .route(
+            "/api/agents/{id}/llm-logs",
+            get(api::llm_logs::list_llm_logs),
+        )
+        .route(
+            "/api/agents/{id}/llm-logs/stats",
+            get(api::llm_logs::llm_logs_stats),
+        )
         // インポート
-        .route("/api/import/scan", post(api::import::scan_workspace_handler))
-        .route("/api/import/execute", post(api::import::execute_import_handler))
+        .route(
+            "/api/import/scan",
+            post(api::import::scan_workspace_handler),
+        )
+        .route(
+            "/api/import/execute",
+            post(api::import::execute_import_handler),
+        )
+        .route(
+            "/api/agents/{id}/import/sync/status",
+            get(api::import_sync::get_sync_status),
+        )
+        .route(
+            "/api/agents/{id}/import/sync",
+            post(api::import_sync::execute_import_sync),
+        )
+        .route(
+            "/api/agents/{id}/import/sync/history",
+            get(api::import_sync::get_import_sync_history),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
