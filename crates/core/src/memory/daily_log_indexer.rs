@@ -72,8 +72,6 @@ impl DailyLogIndexer {
 
         let root_id = format!("{agent_id}:daily_log:root");
         let mut periods_seen = HashSet::new();
-        let mut last_processed_date = last_indexed_date.clone();
-
         for entry in &entries {
             let date_str = &entry.date_str;
             let year_month = &date_str[..7];
@@ -133,17 +131,13 @@ impl DailyLogIndexer {
                 opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
             }
 
-            last_processed_date = date_str.clone();
             stats.days_indexed += 1;
-        }
-
-        {
             let db = self.db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
             opencrab_db::queries::upsert_daily_log_watermark(
                 &db,
                 &opencrab_db::queries::DailyLogWatermarkRow {
                     agent_id: agent_id.to_string(),
-                    last_indexed_date: last_processed_date,
+                    last_indexed_date: date_str.clone(),
                     updated_at: now.clone(),
                 },
             )?;

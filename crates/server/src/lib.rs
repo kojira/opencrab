@@ -126,6 +126,10 @@ pub fn create_router(state: AppState) -> Router {
             post(api::daily_log_index::rebuild),
         )
         .route(
+            "/api/agents/{id}/daily-log-index/run",
+            post(api::daily_log_index::run),
+        )
+        .route(
             "/api/agents/{id}/memory/index/merge",
             post(api::agents::merge_memory_index_topics),
         )
