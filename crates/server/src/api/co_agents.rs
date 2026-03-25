@@ -18,7 +18,9 @@ pub struct CoAgentDto {
 }
 
 fn row_to_dto(r: opencrab_db::queries::TrustedCoAgentRow) -> CoAgentDto {
-    let allowed_actions = r.allowed_actions.as_deref()
+    let allowed_actions = r
+        .allowed_actions
+        .as_deref()
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
     CoAgentDto {
         id: r.id,
@@ -53,7 +55,9 @@ pub async fn add_co_agent(
     let conn = state.db.lock().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let actions_json = req.allowed_actions.as_ref()
+    let actions_json = req
+        .allowed_actions
+        .as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_default());
 
     let row = opencrab_db::queries::TrustedCoAgentRow {
@@ -89,7 +93,9 @@ pub async fn update_co_agent(
     Json(req): Json<UpdateCoAgentRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = state.db.lock().unwrap();
-    let actions_json = req.allowed_actions.as_ref()
+    let actions_json = req
+        .allowed_actions
+        .as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_default());
 
     let updated = opencrab_db::queries::update_trusted_co_agent_actions(
@@ -97,7 +103,8 @@ pub async fn update_co_agent(
         &agent_id,
         &co_agent_id,
         actions_json.as_deref(),
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "updated": updated })))
 }

@@ -351,10 +351,7 @@ mod tests {
         assert!(result.success);
         let data = result.data.unwrap();
         let entries = data["entries"].as_array().unwrap();
-        let names: Vec<&str> = entries
-            .iter()
-            .filter_map(|e| e["name"].as_str())
-            .collect();
+        let names: Vec<&str> = entries.iter().filter_map(|e| e["name"].as_str()).collect();
         assert!(names.contains(&"listed.txt"));
     }
 
@@ -411,10 +408,7 @@ mod tests {
         assert!(list_result.success);
         let data = list_result.data.unwrap();
         let entries = data["entries"].as_array().unwrap();
-        let names: Vec<&str> = entries
-            .iter()
-            .filter_map(|e| e["name"].as_str())
-            .collect();
+        let names: Vec<&str> = entries.iter().filter_map(|e| e["name"].as_str()).collect();
         assert!(names.contains(&"newdir"));
     }
 }

@@ -247,7 +247,10 @@ impl SkillManager {
         let mut ctx = String::from("## Available Skills\n\n");
 
         for skill in &skills {
-            ctx.push_str(&format!("### {} (used {} times)\n", skill.name, skill.usage_count));
+            ctx.push_str(&format!(
+                "### {} (used {} times)\n",
+                skill.name, skill.usage_count
+            ));
             ctx.push_str(&format!("{}\n", skill.description));
 
             if !skill.actions.is_empty() {
@@ -318,7 +321,13 @@ mod tests {
     fn test_acquire_skill() {
         let sm = test_sm();
         let skill = sm
-            .acquire_skill("coding", "Write code", "Use best practices", "training", "initial setup")
+            .acquire_skill(
+                "coding",
+                "Write code",
+                "Use best practices",
+                "training",
+                "initial setup",
+            )
             .unwrap();
         assert_eq!(skill.name, "coding");
         assert_eq!(skill.description, "Write code");
@@ -335,8 +344,10 @@ mod tests {
     #[test]
     fn test_get_active_with_skills() {
         let sm = test_sm();
-        sm.acquire_skill("skill-a", "desc a", "guide a", "training", "ctx").unwrap();
-        sm.acquire_skill("skill-b", "desc b", "guide b", "training", "ctx").unwrap();
+        sm.acquire_skill("skill-a", "desc a", "guide a", "training", "ctx")
+            .unwrap();
+        sm.acquire_skill("skill-b", "desc b", "guide b", "training", "ctx")
+            .unwrap();
         let skills = sm.get_active_skills().unwrap();
         assert_eq!(skills.len(), 2);
     }

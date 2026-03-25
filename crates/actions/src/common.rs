@@ -206,7 +206,10 @@ impl Action for UpdateImpressionAction {
             target_id: target_id.to_string(),
             target_name: target_name.to_string(),
             personality: args["personality"].as_str().unwrap_or("").to_string(),
-            communication_style: args["communication_style"].as_str().unwrap_or("").to_string(),
+            communication_style: args["communication_style"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
             recent_behavior: args["recent_behavior"].as_str().unwrap_or("").to_string(),
             agreement: args["agreement"].as_str().unwrap_or("中立").to_string(),
             notes: args["notes"].as_str().unwrap_or("").to_string(),
@@ -248,7 +251,9 @@ impl Action for GetSystemInfoAction {
 
     async fn execute(&self, _args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
         let info = ctx.runtime_info.lock().unwrap().clone();
-        let active = info.active_model.unwrap_or_else(|| info.default_model.clone());
+        let active = info
+            .active_model
+            .unwrap_or_else(|| info.default_model.clone());
 
         ActionResult::success(json!({
             "agent_id": ctx.agent_id,
@@ -328,10 +333,15 @@ mod tests {
     #[tokio::test]
     async fn test_send_speech_success() {
         let (_dir, ctx) = test_context();
-        let result = SendSpeechAction.execute(&json!({"content": "hello"}), &ctx).await;
+        let result = SendSpeechAction
+            .execute(&json!({"content": "hello"}), &ctx)
+            .await;
         assert!(result.success);
         assert!(
-            result.side_effects.iter().any(|e| matches!(e, SideEffect::MessageSent { .. })),
+            result
+                .side_effects
+                .iter()
+                .any(|e| matches!(e, SideEffect::MessageSent { .. })),
             "Expected MessageSent side effect"
         );
     }
@@ -346,14 +356,18 @@ mod tests {
     #[tokio::test]
     async fn test_send_noreact() {
         let (_dir, ctx) = test_context();
-        let result = SendNoreactAction.execute(&json!({"reason": "thinking"}), &ctx).await;
+        let result = SendNoreactAction
+            .execute(&json!({"reason": "thinking"}), &ctx)
+            .await;
         assert!(result.success);
     }
 
     #[tokio::test]
     async fn test_declare_done() {
         let (_dir, ctx) = test_context();
-        let result = DeclareDoneAction.execute(&json!({"reason": "done"}), &ctx).await;
+        let result = DeclareDoneAction
+            .execute(&json!({"reason": "done"}), &ctx)
+            .await;
         assert!(result.success);
     }
 }

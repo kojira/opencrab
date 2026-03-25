@@ -83,7 +83,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
     loop {
         // 次にフラッシュすべきバッファのデッドラインを計算
-        let next_deadline = debounce_buffers.values().map(|(_, deadline)| *deadline).min();
+        let next_deadline = debounce_buffers
+            .values()
+            .map(|(_, deadline)| *deadline)
+            .min();
 
         tokio::select! {
             event = event_rx.recv() => {
@@ -141,7 +144,9 @@ pub async fn run_discord_loop<T: AgentRunner>(
             if let Some((messages, _)) = debounce_buffers.remove(&key) {
                 let merged = merge_incoming_messages(messages);
                 if let Some(merged) = merged {
-                    let count = merged.metadata.get("debounce_count")
+                    let count = merged
+                        .metadata
+                        .get("debounce_count")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(1);
                     if count > 1 {
@@ -212,12 +217,12 @@ async fn process_incoming_message<T: AgentRunner>(
         } else {
             let allowed = {
                 let conn = state.db().lock().unwrap();
-                let any_trusted = agent_ids.iter().any(|aid| {
-                    opencrab_db::queries::is_trusted_user(&conn, sender_id, aid)
-                });
-                let any_registered = agent_ids.iter().any(|aid| {
-                    opencrab_db::queries::trusted_user_count(&conn, aid) > 0
-                });
+                let any_trusted = agent_ids
+                    .iter()
+                    .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
+                let any_registered = agent_ids
+                    .iter()
+                    .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
                 if any_registered {
                     any_trusted
                 } else {
@@ -273,13 +278,15 @@ async fn process_incoming_message<T: AgentRunner>(
             opencrab_actions::CallerIdentity::Owner
         } else {
             let conn = state.db().lock().unwrap();
-            let trust_info = agent_ids.iter().find_map(|aid| {
-                opencrab_db::queries::get_trusted_user(&conn, sender_id, aid)
-            });
+            let trust_info = agent_ids
+                .iter()
+                .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid));
             drop(conn);
             match trust_info {
                 Some(u) if u.permission == "co_agent" => {
-                    opencrab_actions::CallerIdentity::CoAgent { agent_id: sender_id.clone() }
+                    opencrab_actions::CallerIdentity::CoAgent {
+                        agent_id: sender_id.clone(),
+                    }
                 }
                 Some(u) if u.permission == "owner" => opencrab_actions::CallerIdentity::Owner,
                 Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
@@ -332,7 +339,8 @@ async fn process_incoming_message<T: AgentRunner>(
             "{}\n\n[Discord context: channel_id={}]",
             base_prompt, channel_id_str
         );
-        let conversation_raw = state.build_conversation_string(&session_id, agent_id, state.context_budget_tokens());
+        let conversation_raw =
+            state.build_conversation_string(&session_id, agent_id, state.context_budget_tokens());
         let conversation = prepend_runtime_context_discord(
             &conversation_raw,
             "Discord conversation",
@@ -346,8 +354,8 @@ async fn process_incoming_message<T: AgentRunner>(
             let session_id_cb = session_id.clone();
             let channel_id_str_cb = channel_id_str.clone();
 
-            let completion_cb: SubtaskCompletionFn =
-                Arc::new(move |subtask_id: String, result: String, exit_reason: String| {
+            let completion_cb: SubtaskCompletionFn = Arc::new(
+                move |subtask_id: String, result: String, exit_reason: String| {
                     let _ = cb_event_tx.send(LoopEvent::SubtaskCompleted {
                         session_id: session_id_cb.clone(),
                         agent_id: agent_id_cb.clone(),
@@ -358,7 +366,8 @@ async fn process_incoming_message<T: AgentRunner>(
                         channel_id_str: channel_id_str_cb.clone(),
                         is_dm,
                     });
-                });
+                },
+            );
             completion_registry.insert(session_id.clone(), completion_cb);
         }
 
@@ -368,15 +377,22 @@ async fn process_incoming_message<T: AgentRunner>(
             let channel_id_str_for_cb = channel_id_str.clone();
             let is_dm_for_cb = is_dm;
             Some(std::sync::Arc::new(move |text: String| {
-                if text.is_empty() || text.trim() == "NO_REPLY" { return; }
+                if text.is_empty() || text.trim() == "NO_REPLY" {
+                    return;
+                }
                 let writable = if is_dm_for_cb {
                     true
                 } else {
-                    state_db.lock().map(|conn| {
-                        opencrab_db::queries::is_channel_writable(&conn, &channel_id_str_for_cb)
-                    }).unwrap_or(false)
+                    state_db
+                        .lock()
+                        .map(|conn| {
+                            opencrab_db::queries::is_channel_writable(&conn, &channel_id_str_for_cb)
+                        })
+                        .unwrap_or(false)
                 };
-                if !writable { return; }
+                if !writable {
+                    return;
+                }
                 let gateway_cb = gateway_for_cb.clone();
                 tokio::spawn(async move {
                     if let Err(e) = gateway_cb.send_to_channel(channel_id, &text).await {
@@ -506,13 +522,21 @@ async fn process_subtask_completed<T: AgentRunner>(
     // Get task description from subtask session
     let task_description = {
         let sub_session_id = format!("subtask-{}", subtask_id);
-        state.db()
+        state
+            .db()
             .lock()
             .ok()
-            .and_then(|conn| opencrab_db::queries::get_session(&conn, &sub_session_id).ok().flatten())
+            .and_then(|conn| {
+                opencrab_db::queries::get_session(&conn, &sub_session_id)
+                    .ok()
+                    .flatten()
+            })
             .map(|s| {
                 // theme is "Subtask: {task}", strip the prefix
-                s.theme.strip_prefix("Subtask: ").unwrap_or(&s.theme).to_string()
+                s.theme
+                    .strip_prefix("Subtask: ")
+                    .unwrap_or(&s.theme)
+                    .to_string()
             })
             .unwrap_or_default()
     };
@@ -521,7 +545,8 @@ async fn process_subtask_completed<T: AgentRunner>(
         "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, task=\"{}\", exit_reason={}]",
         base_prompt, channel_id_str, subtask_id, task_description, exit_reason
     );
-    let conversation_raw = state.build_conversation_string(&session_id, &agent_id, state.context_budget_tokens());
+    let conversation_raw =
+        state.build_conversation_string(&session_id, &agent_id, state.context_budget_tokens());
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
@@ -685,7 +710,10 @@ fn ensure_discord_session<T: AgentRunner>(
         if existing.metadata_json.is_none() {
             let (theme, metadata_json) = build_discord_session_metadata(incoming);
             opencrab_db::queries::update_session_metadata(
-                &conn, session_id, &metadata_json, &theme,
+                &conn,
+                session_id,
+                &metadata_json,
+                &theme,
             )
             .ok();
         }
@@ -783,9 +811,7 @@ fn merge_incoming_messages(mut messages: Vec<IncomingMessage>) -> Option<Incomin
 fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (String, Vec<String>) {
     match content {
         opencrab_gateway::MessageContent::Text(t) => (t.clone(), vec![]),
-        opencrab_gateway::MessageContent::Image { url, .. } => {
-            (String::new(), vec![url.clone()])
-        }
+        opencrab_gateway::MessageContent::Image { url, .. } => (String::new(), vec![url.clone()]),
         opencrab_gateway::MessageContent::Multi(parts) => {
             let mut texts = Vec::new();
             let mut urls = Vec::new();

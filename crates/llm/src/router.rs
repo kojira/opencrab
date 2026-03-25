@@ -249,7 +249,21 @@ impl LlmRouter {
         )
     }
 
+    /// Returns true if the error represents a non-retryable client-side HTTP error (4xx).
+    ///
+    /// These errors indicate a permanent failure (bad request, auth, not found, etc.)
+    /// and should not be retried — retrying won't help.
+    fn is_non_retryable_error(error: &anyhow::Error) -> bool {
+        let msg = error.to_string();
+        // Match "(4xx)" status codes in error messages from HTTP providers.
+        ["(400)", "(401)", "(403)", "(404)", "(422)"]
+            .iter()
+            .any(|code| msg.contains(code))
+    }
+
     /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
+    ///
+    /// Non-retryable 4xx errors are returned immediately without further attempts.
     async fn try_provider_with_retry(
         &self,
         provider: &Arc<dyn LlmProvider>,
@@ -299,6 +313,14 @@ impl LlmRouter {
                         error = %e,
                         "Provider attempt failed"
                     );
+                    if Self::is_non_retryable_error(&e) {
+                        warn!(
+                            provider = %provider_name,
+                            error = %e,
+                            "Non-retryable client error (4xx), aborting retry"
+                        );
+                        return Err(e);
+                    }
                     last_error = Some(e);
                 }
             }
@@ -308,6 +330,8 @@ impl LlmRouter {
     }
 
     /// Try a streaming provider with exponential backoff retry (up to MAX_RETRIES attempts).
+    ///
+    /// Non-retryable 4xx errors are returned immediately without further attempts.
     async fn try_provider_stream_with_retry(
         &self,
         provider: &Arc<dyn LlmProvider>,
@@ -337,6 +361,14 @@ impl LlmRouter {
                         error = %e,
                         "Provider stream attempt failed"
                     );
+                    if Self::is_non_retryable_error(&e) {
+                        warn!(
+                            provider = %provider_name,
+                            error = %e,
+                            "Non-retryable client error (4xx), aborting stream retry"
+                        );
+                        return Err(e);
+                    }
                     last_error = Some(e);
                 }
             }

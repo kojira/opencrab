@@ -70,9 +70,8 @@ pub fn execute_import(
     // Identity upsert
     if scan_result.identity.found {
         if existing_identity.is_some() && !options.overwrite_if_exists {
-            warnings.push(
-                "Identity already exists, skipping (overwrite_if_exists=false)".to_string(),
-            );
+            warnings
+                .push("Identity already exists, skipping (overwrite_if_exists=false)".to_string());
         } else {
             let name = if let Some(ref agent_name) = options.agent_name {
                 agent_name.clone()

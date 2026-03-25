@@ -36,10 +36,7 @@ pub struct IndexQualityMetrics {
 
 impl IndexQualityMetrics {
     /// DBからインデックスの品質メトリクスを計算する。
-    pub fn compute(
-        conn: &rusqlite::Connection,
-        agent_id: &str,
-    ) -> Result<Self> {
+    pub fn compute(conn: &rusqlite::Connection, agent_id: &str) -> Result<Self> {
         let tree = opencrab_db::queries::get_index_tree(conn, agent_id)?;
         let node_ids: std::collections::HashSet<String> =
             tree.iter().map(|n| n.id.clone()).collect();
@@ -108,14 +105,15 @@ impl IndexQualityMetrics {
         }
         // 実際にそのagentのログIDと交差する数
         let covered_log_ids = if total_logs > 0 {
-            let mut stmt = conn.prepare(
-                "SELECT id FROM memory_sessions WHERE agent_id = ?1",
-            )?;
+            let mut stmt = conn.prepare("SELECT id FROM memory_sessions WHERE agent_id = ?1")?;
             let real_ids: Vec<i64> = stmt
                 .query_map(rusqlite::params![agent_id], |row| row.get(0))?
                 .filter_map(|r| r.ok())
                 .collect();
-            real_ids.iter().filter(|id| covered_ids.contains(id)).count()
+            real_ids
+                .iter()
+                .filter(|id| covered_ids.contains(id))
+                .count()
         } else {
             0
         };
@@ -152,12 +150,12 @@ impl IndexQualityMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use crate::memory_index::index_builder::IndexBuilder;
     use crate::engine::LlmClient;
-    use async_trait::async_trait;
+    use crate::engine::{ChatRequestSimple, ChatResponseSimple};
+    use crate::memory_index::index_builder::IndexBuilder;
     use anyhow::Result;
-    use crate::engine::{ChatResponseSimple, ChatRequestSimple};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
 
     /// ヘルパー: 指定セッションにN件のログを投入
     fn insert_logs(conn: &rusqlite::Connection, agent_id: &str, session_id: &str, count: usize) {
@@ -187,7 +185,9 @@ mod tests {
     impl LlmClient for MockLlm {
         async fn chat(&self, _request: ChatRequestSimple) -> Result<ChatResponseSimple> {
             Ok(ChatResponseSimple {
-                content: Some(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()),
+                content: Some(
+                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
+                ),
                 tool_calls: vec![],
                 finish_reason: "stop".to_string(),
                 usage: None,
@@ -216,12 +216,18 @@ mod tests {
         assert_eq!(metrics.orphan_count, 0, "orphanノードがあってはならない");
         assert_eq!(metrics.child_count_mismatch, 0, "child_countが不整合");
         assert_eq!(metrics.empty_title_count, 0, "空タイトルがあってはならない");
-        assert_eq!(metrics.empty_summary_count, 0, "空サマリーがあってはならない");
+        assert_eq!(
+            metrics.empty_summary_count, 0,
+            "空サマリーがあってはならない"
+        );
 
         // カバレッジ
         assert_eq!(metrics.total_logs, 18);
         assert_eq!(metrics.covered_log_ids, 18, "全ログがカバーされるべき");
-        assert!((metrics.log_coverage - 1.0).abs() < f64::EPSILON, "カバレッジ100%");
+        assert!(
+            (metrics.log_coverage - 1.0).abs() < f64::EPSILON,
+            "カバレッジ100%"
+        );
 
         // ノードタイプ分布
         assert_eq!(metrics.nodes_by_type.get("root"), Some(&1));

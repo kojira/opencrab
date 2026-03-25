@@ -7,6 +7,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+pub mod agent_log;
 pub mod api;
 pub mod config;
 pub mod hot_reload;
@@ -258,6 +259,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/agents/{id}/import/sync/history",
             get(api::import_sync::get_import_sync_history),
+        )
+        .route(
+            "/api/system/log-level",
+            get(api::system::get_log_level_handler).patch(api::system::patch_log_level_handler),
         )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

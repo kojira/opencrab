@@ -20,29 +20,32 @@ pub async fn list_llm_logs(
     let conn = state.db.lock().unwrap();
     match opencrab_db::queries::list_llm_logs(&conn, &id, limit) {
         Ok(logs) => {
-            let data: Vec<serde_json::Value> = logs.into_iter().map(|log| {
-                serde_json::json!({
-                    "id": log.id,
-                    "agent_id": log.agent_id,
-                    "session_id": log.session_id,
-                    "model": log.model,
-                    "prompt": log.prompt,
-                    "response": log.response,
-                    "tool_calls": log.tool_calls,
-                    "latency_ms": log.latency_ms,
-                    "prompt_tokens": log.prompt_tokens,
-                    "completion_tokens": log.completion_tokens,
-                    "total_tokens": log.total_tokens,
-                    "error_code": log.error_code,
-                    "error_body": log.error_body,
-                    "requested_at": log.requested_at,
-                    "trigger_message_id": log.trigger_message_id,
-                    "is_bot_iteration": log.is_bot_iteration,
-                    "cache_read_tokens": log.cache_read_tokens,
-                    "cache_creation_tokens": log.cache_creation_tokens,
-                    "created_at": log.created_at,
+            let data: Vec<serde_json::Value> = logs
+                .into_iter()
+                .map(|log| {
+                    serde_json::json!({
+                        "id": log.id,
+                        "agent_id": log.agent_id,
+                        "session_id": log.session_id,
+                        "model": log.model,
+                        "prompt": log.prompt,
+                        "response": log.response,
+                        "tool_calls": log.tool_calls,
+                        "latency_ms": log.latency_ms,
+                        "prompt_tokens": log.prompt_tokens,
+                        "completion_tokens": log.completion_tokens,
+                        "total_tokens": log.total_tokens,
+                        "error_code": log.error_code,
+                        "error_body": log.error_body,
+                        "requested_at": log.requested_at,
+                        "trigger_message_id": log.trigger_message_id,
+                        "is_bot_iteration": log.is_bot_iteration,
+                        "cache_read_tokens": log.cache_read_tokens,
+                        "cache_creation_tokens": log.cache_creation_tokens,
+                        "created_at": log.created_at,
+                    })
                 })
-            }).collect();
+                .collect();
             Json(serde_json::json!(data))
         }
         Err(e) => Json(serde_json::json!({"error": e.to_string()})),

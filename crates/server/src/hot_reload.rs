@@ -75,11 +75,7 @@ pub fn start_config_watcher(
                 let cfg: crate::config::AppConfig = match toml::from_str(&expanded) {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!(
-                            "Failed to parse config file {:?}: {}",
-                            path,
-                            e
-                        );
+                        tracing::error!("Failed to parse config file {:?}: {}", path, e);
                         continue;
                     }
                 };

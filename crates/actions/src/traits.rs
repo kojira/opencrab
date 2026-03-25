@@ -96,9 +96,5 @@ pub trait Action: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
 
-    async fn execute(
-        &self,
-        args: &serde_json::Value,
-        ctx: &ActionContext,
-    ) -> ActionResult;
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult;
 }

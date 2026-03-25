@@ -60,20 +60,13 @@ impl Action for EvaluateResponseAction {
         let evaluation = args["evaluation"].as_str().unwrap_or("");
 
         // Meta: record which model is making this evaluation (the evaluator itself).
-        let evaluator_model = ctx.model_override.lock()
-            .ok()
-            .and_then(|m| m.clone());
+        let evaluator_model = ctx.model_override.lock().ok().and_then(|m| m.clone());
 
         // Resolve metrics_id: explicit param or auto-fill from last LLM call.
         let metrics_id = args["metrics_id"]
             .as_str()
             .map(|s| s.to_string())
-            .or_else(|| {
-                ctx.last_metrics_id
-                    .lock()
-                    .ok()
-                    .and_then(|id| id.clone())
-            });
+            .or_else(|| ctx.last_metrics_id.lock().ok().and_then(|id| id.clone()));
 
         // Save tags as JSON string.
         let tags_json = if args["tags"].is_array() {
@@ -160,7 +153,6 @@ mod tests {
                 available_providers: vec!["mock".to_string()],
                 gateway: "test".to_string(),
             })),
-
         };
         (dir, ctx, metrics_id)
     }
@@ -218,9 +210,6 @@ mod tests {
             .await;
 
         assert!(result.success);
-        assert_eq!(
-            result.data.as_ref().unwrap()["metrics_id"],
-            metrics_id,
-        );
+        assert_eq!(result.data.as_ref().unwrap()["metrics_id"], metrics_id,);
     }
 }

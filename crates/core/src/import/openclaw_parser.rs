@@ -130,15 +130,15 @@ pub fn scan_workspace(dir: &str, options: &ScanOptions) -> anyhow::Result<ScanRe
             let mut entries: Vec<_> = fs::read_dir(&memory_dir)?
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map_or(false, |ext| ext == "md")
+                    e.path().extension().map_or(false, |ext| ext == "md")
                         && e.path()
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .map_or(false, |s| {
                                 // Match YYYY-MM-DD pattern
-                                s.len() == 10 && s.chars().nth(4) == Some('-') && s.chars().nth(7) == Some('-')
+                                s.len() == 10
+                                    && s.chars().nth(4) == Some('-')
+                                    && s.chars().nth(7) == Some('-')
                             })
                 })
                 .collect();
@@ -214,12 +214,18 @@ pub fn parse_soul_md(content: &str) -> SoulImportData {
     // Look for persona name in **Name:** or **名前:** lines
     for line in content.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("**Name:**").or_else(|| trimmed.strip_prefix("**名前:**")) {
+        if let Some(rest) = trimmed
+            .strip_prefix("**Name:**")
+            .or_else(|| trimmed.strip_prefix("**名前:**"))
+        {
             persona_name = rest.trim().to_string();
             break;
         }
         // Also try: "- **Name:** value" format
-        if let Some(rest) = trimmed.strip_prefix("- **Name:**").or_else(|| trimmed.strip_prefix("- **名前:**")) {
+        if let Some(rest) = trimmed
+            .strip_prefix("- **Name:**")
+            .or_else(|| trimmed.strip_prefix("- **名前:**"))
+        {
             persona_name = rest.trim().to_string();
             break;
         }

@@ -57,14 +57,20 @@ async fn test_chat_completion_simple() {
 
     let response = p.chat_completion(request).await.unwrap();
 
-    assert!(!response.choices.is_empty(), "Should have at least one choice");
+    assert!(
+        !response.choices.is_empty(),
+        "Should have at least one choice"
+    );
     let text = response.first_text().expect("Response should contain text");
     assert!(!text.is_empty(), "Response text should not be empty");
     assert!(
         text.contains('5'),
         "Response should contain '5', got: {text}"
     );
-    assert!(response.usage.total_tokens > 0, "Usage tokens should be reported");
+    assert!(
+        response.usage.total_tokens > 0,
+        "Usage tokens should be reported"
+    );
 }
 
 #[tokio::test]
@@ -213,7 +219,9 @@ async fn test_router_model_alias() {
 
     let request = ChatRequest::new(
         "cheap",
-        vec![Message::user("What is 10 * 10? Reply with just the number.")],
+        vec![Message::user(
+            "What is 10 * 10? Reply with just the number.",
+        )],
     )
     .with_temperature(0.0)
     .with_max_tokens(10);

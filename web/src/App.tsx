@@ -20,6 +20,7 @@ import Workspace from './pages/Workspace';
 import AgentChannels from './pages/AgentChannels';
 import AgentAllowedCommands from './pages/AgentAllowedCommands';
 import AgentLlmLogs from './pages/AgentLlmLogs';
+import SystemSettings from './pages/SystemSettings';
 
 const queryClient = new QueryClient();
 
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/sessions/:id" element={<SessionDetail />} />
           <Route path="/workspace/:agentId" element={<Workspace />} />
+          <Route path="/settings" element={<SystemSettings />} />
         </Route>
       </Routes>
     </BrowserRouter>

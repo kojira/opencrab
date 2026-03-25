@@ -104,9 +104,7 @@ mod tests {
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            current_purpose: std::sync::Arc::new(std::sync::Mutex::new(
-                "conversation".to_string(),
-            )),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
             runtime_info: std::sync::Arc::new(std::sync::Mutex::new(crate::RuntimeInfo {
                 default_model: "mock:test-model".to_string(),
                 active_model: None,
@@ -127,7 +125,10 @@ mod tests {
                 &ctx,
             )
             .await;
-        assert!(result.success, "Owner should be able to update instructions");
+        assert!(
+            result.success,
+            "Owner should be able to update instructions"
+        );
         assert_eq!(result.data.unwrap()["updated"], true);
 
         // DBに保存されたか確認
@@ -143,10 +144,7 @@ mod tests {
         let (_dir, ctx) = make_context(CallerIdentity::Agent);
         let action = UpdateInstructionsAction;
         let result = action
-            .execute(
-                &json!({"instructions": "乗っ取り", "reason": "悪意"}),
-                &ctx,
-            )
+            .execute(&json!({"instructions": "乗っ取り", "reason": "悪意"}), &ctx)
             .await;
         assert!(
             !result.success,
@@ -160,10 +158,7 @@ mod tests {
         let (_dir, ctx) = make_context(CallerIdentity::TrustedUser);
         let action = UpdateInstructionsAction;
         let result = action
-            .execute(
-                &json!({"instructions": "不正変更", "reason": "悪意"}),
-                &ctx,
-            )
+            .execute(&json!({"instructions": "不正変更", "reason": "悪意"}), &ctx)
             .await;
         assert!(
             !result.success,

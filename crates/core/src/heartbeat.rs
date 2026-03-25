@@ -37,7 +37,10 @@ pub enum HeartbeatDecision {
     /// The agent decided to do nothing.
     Idle,
     /// The agent decided to manage skills (cleanup duplicates, archive unused).
-    ManageSkills { duplicates_found: usize, archived_count: usize },
+    ManageSkills {
+        duplicates_found: usize,
+        archived_count: usize,
+    },
 }
 
 impl std::fmt::Display for HeartbeatDecision {
@@ -46,8 +49,15 @@ impl std::fmt::Display for HeartbeatDecision {
             HeartbeatDecision::Speak(msg) => write!(f, "speak: {}", msg),
             HeartbeatDecision::Learn => write!(f, "learn"),
             HeartbeatDecision::Idle => write!(f, "idle"),
-            HeartbeatDecision::ManageSkills { duplicates_found, archived_count } => {
-                write!(f, "manage_skills: duplicates={}, archived={}", duplicates_found, archived_count)
+            HeartbeatDecision::ManageSkills {
+                duplicates_found,
+                archived_count,
+            } => {
+                write!(
+                    f,
+                    "manage_skills: duplicates={}, archived={}",
+                    duplicates_found, archived_count
+                )
             }
         }
     }

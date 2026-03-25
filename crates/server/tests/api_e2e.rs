@@ -19,7 +19,9 @@ fn create_test_app() -> Router {
         llm_router: Arc::new(LlmRouter::new()),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         default_model: "mock:test".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
+        tools_config: Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        )),
         compaction_ratio: 0.5,
         #[cfg(feature = "discord")]
         discord_manager: None,
@@ -57,8 +59,8 @@ async fn send_request(
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .unwrap_or(serde_json::json!(body_bytes.to_vec()));
+    let json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).unwrap_or(serde_json::json!(body_bytes.to_vec()));
     (status, json)
 }
 
@@ -98,8 +100,7 @@ async fn test_create_and_get_agent() {
     let app = create_test_app();
     let (agent_id, app) = create_test_agent(app).await;
 
-    let (status, resp) =
-        send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    let (status, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["identity"]["name"], "Test Agent");
     assert_eq!(resp["soul"]["persona_name"], "TestPersona");
@@ -132,8 +133,7 @@ async fn test_delete_agent() {
     assert_eq!(resp["deleted"], true);
 
     // Verify gone
-    let (_, resp) =
-        send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert!(resp["identity"].is_null());
 }
 
@@ -157,13 +157,7 @@ async fn test_update_soul() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_, resp) = send_request(
-        app,
-        "GET",
-        &format!("/api/agents/{agent_id}/soul"),
-        None,
-    )
-    .await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}/soul"), None).await;
     assert_eq!(resp["persona_name"], "UpdatedPersona");
 }
 
@@ -297,13 +291,7 @@ async fn test_add_and_list_skills() {
     assert_eq!(status, StatusCode::OK);
     assert!(resp["id"].as_str().is_some());
 
-    let (_, resp) = send_request(
-        app,
-        "GET",
-        &format!("/api/agents/{agent_id}/skills"),
-        None,
-    )
-    .await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}/skills"), None).await;
     let skills = resp.as_array().unwrap();
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0]["name"], "Test Skill");
@@ -339,13 +327,7 @@ async fn test_toggle_skill() {
     assert_eq!(resp["toggled"], true);
 
     // Verify skill is now inactive
-    let (_, resp) = send_request(
-        app,
-        "GET",
-        &format!("/api/agents/{agent_id}/skills"),
-        None,
-    )
-    .await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}/skills"), None).await;
     let skills = resp.as_array().unwrap();
     let skill = skills.iter().find(|s| s["id"] == skill_id).unwrap();
     assert_eq!(skill["is_active"], false);
@@ -498,8 +480,7 @@ async fn test_full_workflow() {
     assert_eq!(resp["theme"], "Full Workflow Test");
 
     // 6. Get agent
-    let (_, resp) =
-        send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(resp["identity"]["name"], "Workflow Agent");
 }
 
@@ -592,8 +573,7 @@ async fn test_agent_crud_full_cycle() {
     assert!(!found, "Deleted agent should not appear in list");
 
     // 9. Verify get returns null
-    let (_, resp) =
-        send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert!(resp["identity"].is_null());
 }
 
@@ -615,8 +595,7 @@ async fn test_create_agent_minimal_fields() {
     assert_eq!(status, StatusCode::OK);
     let agent_id = resp["id"].as_str().unwrap().to_string();
 
-    let (_, resp) =
-        send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(resp["identity"]["name"], "Minimal Agent");
 }
 
@@ -624,13 +603,8 @@ async fn test_create_agent_minimal_fields() {
 async fn test_delete_nonexistent_agent() {
     let app = create_test_app();
 
-    let (status, resp) = send_request(
-        app,
-        "DELETE",
-        "/api/agents/nonexistent-id-12345",
-        None,
-    )
-    .await;
+    let (status, resp) =
+        send_request(app, "DELETE", "/api/agents/nonexistent-id-12345", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["deleted"], false);
 }
@@ -703,9 +677,7 @@ impl LlmProvider for MockLlmProvider {
         "mock"
     }
 
-    async fn available_models(
-        &self,
-    ) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+    async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
         Ok(vec![])
     }
 
@@ -721,7 +693,11 @@ impl LlmProvider for MockLlmProvider {
 
 /// Create test app with a MockLlmProvider registered in the LlmRouter.
 /// Returns (Router, Arc<Mutex<Connection>>, Arc<MockLlmProvider>).
-fn create_test_app_with_llm() -> (Router, Arc<Mutex<rusqlite::Connection>>, Arc<MockLlmProvider>) {
+fn create_test_app_with_llm() -> (
+    Router,
+    Arc<Mutex<rusqlite::Connection>>,
+    Arc<MockLlmProvider>,
+) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = Arc::new(Mutex::new(conn));
 
@@ -738,7 +714,9 @@ fn create_test_app_with_llm() -> (Router, Arc<Mutex<rusqlite::Connection>>, Arc<
             .to_string_lossy()
             .to_string(),
         default_model: "mock:gpt-4o".to_string(),
-        tools_config: Arc::new(std::sync::RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
+        tools_config: Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        )),
         compaction_ratio: 0.5,
         #[cfg(feature = "discord")]
         discord_manager: None,
@@ -748,11 +726,7 @@ fn create_test_app_with_llm() -> (Router, Arc<Mutex<rusqlite::Connection>>, Arc<
 }
 
 /// Create a named agent with a specific persona via the API.
-async fn create_test_agent_named(
-    app: Router,
-    name: &str,
-    persona: &str,
-) -> (String, Router) {
+async fn create_test_agent_named(app: Router, name: &str, persona: &str) -> (String, Router) {
     let (_, resp) = send_request(
         app.clone(),
         "POST",
@@ -909,9 +883,7 @@ async fn test_agents_discuss_and_generate_skill() {
         "Agent A should have a skill in the DB after learn_from_experience"
     );
 
-    let skill = skills
-        .iter()
-        .find(|s| s.name == "collaborative_learning");
+    let skill = skills.iter().find(|s| s.name == "collaborative_learning");
     assert!(
         skill.is_some(),
         "Should find 'collaborative_learning' skill"
@@ -962,13 +934,12 @@ async fn test_llm_optimization_cycle() {
     // Verify metrics were recorded in DB after round 1.
     {
         let conn = db.lock().unwrap();
-        let summary = opencrab_db::queries::get_llm_metrics_summary(
-            &conn,
-            &agent_b,
-            "1970-01-01",
-        )
-        .unwrap();
-        assert_eq!(summary.count, 1, "Should have 1 metrics record after round 1");
+        let summary =
+            opencrab_db::queries::get_llm_metrics_summary(&conn, &agent_b, "1970-01-01").unwrap();
+        assert_eq!(
+            summary.count, 1,
+            "Should have 1 metrics record after round 1"
+        );
     }
 
     // Round 2: Agent B uses the optimization tools.
@@ -1038,23 +1009,20 @@ async fn test_llm_optimization_cycle() {
     let responses = resp["responses"].as_array().unwrap();
     assert_eq!(responses.len(), 1);
     let tool_calls_made = responses[0]["tool_calls_made"].as_i64().unwrap();
-    assert_eq!(tool_calls_made, 4, "Expected 4 tool calls: analyze + optimize + select + evaluate");
-    assert!(
-        responses[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("cost-effective"),
+    assert_eq!(
+        tool_calls_made, 4,
+        "Expected 4 tool calls: analyze + optimize + select + evaluate"
     );
+    assert!(responses[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("cost-effective"),);
 
     // Verify metrics were recorded for both rounds.
     {
         let conn = db.lock().unwrap();
-        let summary = opencrab_db::queries::get_llm_metrics_summary(
-            &conn,
-            &agent_b,
-            "1970-01-01",
-        )
-        .unwrap();
+        let summary =
+            opencrab_db::queries::get_llm_metrics_summary(&conn, &agent_b, "1970-01-01").unwrap();
         // Round 1 = 1 call, Round 2 = 5 calls (analyze→optimize→select→evaluate→final).
         assert!(
             summary.count >= 2,
@@ -1250,13 +1218,7 @@ async fn test_import_execute_full() {
 
     // Verify agent was actually created
     let agent_id = resp["agent_id"].as_str().unwrap();
-    let (status, resp) = send_request(
-        app,
-        "GET",
-        &format!("/api/agents/{agent_id}"),
-        None,
-    )
-    .await;
+    let (status, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["identity"]["name"], "ImportBot");
 }

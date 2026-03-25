@@ -3,8 +3,8 @@ pub mod shell;
 
 pub use config::{ShellToolConfig, ToolsConfig};
 
-use std::sync::Arc;
 use crate::dispatcher::ActionDispatcher;
+use std::sync::Arc;
 
 /// Config駆動でアクションを登録する
 pub fn register_tools_from_config(config: &ToolsConfig, dispatcher: &mut ActionDispatcher) {

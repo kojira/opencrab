@@ -121,9 +121,9 @@ impl OllamaProvider {
             .filter(|s| !s.is_empty())
             .map(|s| MessageContent::Text(s.to_string()));
 
-        let tool_calls = msg.get("tool_calls").and_then(|tc| {
-            serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
-        });
+        let tool_calls = msg
+            .get("tool_calls")
+            .and_then(|tc| serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok());
 
         let finish_reason = if body["done"].as_bool().unwrap_or(false) {
             Some(FinishReason::Stop)
@@ -184,7 +184,10 @@ impl LlmProvider for OllamaProvider {
             .await
             .context("failed to list Ollama models")?;
 
-        let body: Value = resp.json().await.context("failed to parse Ollama model list")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Ollama model list")?;
         let models = body["models"]
             .as_array()
             .map(|arr| {
@@ -226,7 +229,10 @@ impl LlmProvider for OllamaProvider {
             anyhow::bail!("Ollama API error ({}): {}", status, err_text);
         }
 
-        let resp_body: Value = resp.json().await.context("failed to parse Ollama response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Ollama response")?;
         self.parse_response(resp_body)
     }
 
@@ -293,11 +299,7 @@ impl LlmProvider for OllamaProvider {
                         function_call: None,
                         tool_calls: None,
                     },
-                    finish_reason: if done {
-                        Some(FinishReason::Stop)
-                    } else {
-                        None
-                    },
+                    finish_reason: if done { Some(FinishReason::Stop) } else { None },
                 }],
             })
         });

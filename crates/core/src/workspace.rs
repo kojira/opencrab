@@ -34,9 +34,9 @@ impl Workspace {
             .with_context(|| format!("Failed to create workspace directory: {}", root.display()))?;
 
         // Canonicalize to resolve any symlinks in the root itself.
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("Failed to canonicalize workspace root: {}", root.display()))?;
+        let root = root.canonicalize().with_context(|| {
+            format!("Failed to canonicalize workspace root: {}", root.display())
+        })?;
 
         Ok(Self { root })
     }
@@ -50,9 +50,9 @@ impl Workspace {
             .with_context(|| format!("Failed to create workspace directory: {}", root.display()))?;
 
         // Canonicalize to resolve any symlinks in the root itself.
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("Failed to canonicalize workspace root: {}", root.display()))?;
+        let root = root.canonicalize().with_context(|| {
+            format!("Failed to canonicalize workspace root: {}", root.display())
+        })?;
 
         Ok(Self { root })
     }
@@ -93,22 +93,19 @@ impl Workspace {
                     std::path::Component::Normal(c) => normalized.push(c),
                     std::path::Component::ParentDir => {
                         if !normalized.pop() || !normalized.starts_with(&self.root) {
-                            bail!(
-                                "Path traversal detected: '{}' escapes workspace",
-                                relative
-                            );
+                            bail!("Path traversal detected: '{}' escapes workspace", relative);
                         }
                         // Re-check that we haven't escaped.
                         if !normalized.starts_with(&self.root) {
-                            bail!(
-                                "Path traversal detected: '{}' escapes workspace",
-                                relative
-                            );
+                            bail!("Path traversal detected: '{}' escapes workspace", relative);
                         }
                     }
                     std::path::Component::CurDir => {} // ignore "."
                     std::path::Component::RootDir => {
-                        bail!("Absolute paths are not allowed in workspace: '{}'", relative);
+                        bail!(
+                            "Absolute paths are not allowed in workspace: '{}'",
+                            relative
+                        );
                     }
                     std::path::Component::Prefix(_) => {
                         bail!("Path prefixes are not allowed in workspace: '{}'", relative);

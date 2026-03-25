@@ -8,7 +8,10 @@ use opencrab_gateway::GatewayActionResult;
 use super::DiscordGatewayActions;
 
 impl DiscordGatewayActions {
-    pub(crate) fn execute_update_memory_index_config(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) fn execute_update_memory_index_config(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
         let batch_size = args.get("batch_size").and_then(|v| v.as_i64());
         let threshold = args.get("threshold").and_then(|v| v.as_i64());
 
@@ -80,13 +83,14 @@ impl DiscordGatewayActions {
 
         let config = {
             let conn = self.db.lock().unwrap();
-            opencrab_db::queries::get_memory_index_config(&conn, &self.agent_id)
-                .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
+            opencrab_db::queries::get_memory_index_config(&conn, &self.agent_id).unwrap_or_else(
+                |_| opencrab_db::queries::AgentMemoryIndexConfig {
                     agent_id: self.agent_id.clone(),
                     batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
                     threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
                     updated_at: String::new(),
-                })
+                },
+            )
         };
 
         match opencrab_core::memory_index::IndexBuilder::rebuild_index(
@@ -123,8 +127,14 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) fn execute_add_allowed_command(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+    pub(crate) fn execute_add_allowed_command(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
+        let caller = args
+            .get("__caller")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent");
         if caller != "owner" {
             return GatewayActionResult {
                 success: false,
@@ -144,7 +154,10 @@ impl DiscordGatewayActions {
             }
         };
 
-        if !command.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        if !command
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
             return GatewayActionResult {
                 success: false,
                 data: None,
@@ -156,7 +169,12 @@ impl DiscordGatewayActions {
         }
 
         let conn = self.db.lock().unwrap();
-        match opencrab_db::queries::add_agent_allowed_command(&conn, &self.agent_id, command, "owner") {
+        match opencrab_db::queries::add_agent_allowed_command(
+            &conn,
+            &self.agent_id,
+            command,
+            "owner",
+        ) {
             Ok(true) => {
                 // Update in-memory tools_config
                 drop(conn);
@@ -225,8 +243,14 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) fn execute_remove_allowed_command(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+    pub(crate) fn execute_remove_allowed_command(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
+        let caller = args
+            .get("__caller")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent");
         if caller != "owner" {
             return GatewayActionResult {
                 success: false,
@@ -288,7 +312,10 @@ impl DiscordGatewayActions {
     }
 
     pub(crate) fn execute_create_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let caller = args.get("__caller").and_then(|v| v.as_str()).unwrap_or("agent");
+        let caller = args
+            .get("__caller")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent");
         if caller != "owner" && caller != "co_agent" && caller != "trusted_user" {
             return GatewayActionResult {
                 success: false,
@@ -298,26 +325,32 @@ impl DiscordGatewayActions {
         }
         let name = match args.get("name").and_then(|v| v.as_str()) {
             Some(n) => n,
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("name is required".to_string()),
-            },
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("name is required".to_string()),
+                }
+            }
         };
         let description = match args.get("description").and_then(|v| v.as_str()) {
             Some(d) => d,
-            None => return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("description is required".to_string()),
-            },
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("description is required".to_string()),
+                }
+            }
         };
         let guidance = args.get("guidance").and_then(|v| v.as_str()).unwrap_or("");
 
         let conn = self.db.lock().unwrap();
 
         // Deduplication: check if skill with same name exists (non-archived)
-        if let Ok(Some(existing)) = opencrab_db::queries::find_skill_by_name(&conn, &self.agent_id, name) {
+        if let Ok(Some(existing)) =
+            opencrab_db::queries::find_skill_by_name(&conn, &self.agent_id, name)
+        {
             let mut updated = existing;
             updated.description = description.to_string();
             updated.guidance = guidance.to_string();
@@ -340,7 +373,9 @@ impl DiscordGatewayActions {
         }
 
         // Check archived skills
-        if let Ok(Some(existing)) = opencrab_db::queries::find_skill_by_name_any(&conn, &self.agent_id, name) {
+        if let Ok(Some(existing)) =
+            opencrab_db::queries::find_skill_by_name_any(&conn, &self.agent_id, name)
+        {
             let mut updated = existing;
             updated.archived = false;
             updated.is_active = true;

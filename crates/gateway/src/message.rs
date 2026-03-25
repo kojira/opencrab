@@ -115,11 +115,7 @@ pub struct IncomingMessage {
 
 impl IncomingMessage {
     /// 新しい受信メッセージを作成
-    pub fn new(
-        source: MessageSource,
-        content: MessageContent,
-        sender: Sender,
-    ) -> Self {
+    pub fn new(source: MessageSource, content: MessageContent, sender: Sender) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             source,
@@ -243,7 +239,10 @@ mod tests {
 
     #[test]
     fn test_message_content_as_text() {
-        assert_eq!(MessageContent::Text("hello".to_string()).as_text(), Some("hello"));
+        assert_eq!(
+            MessageContent::Text("hello".to_string()).as_text(),
+            Some("hello")
+        );
         let image = MessageContent::Image {
             url: "http://example.com/img.png".to_string(),
             alt: Some("an image".to_string()),

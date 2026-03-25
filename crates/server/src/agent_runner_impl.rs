@@ -30,7 +30,12 @@ impl opencrab_discord::AgentRunner for AppState {
         process::build_agent_context(&conn, agent_id)
     }
 
-    fn build_conversation_string(&self, session_id: &str, agent_id: &str, context_budget_tokens: usize) -> String {
+    fn build_conversation_string(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        context_budget_tokens: usize,
+    ) -> String {
         let conn = self.db.lock().unwrap();
         process::build_conversation_string(&conn, session_id, agent_id, context_budget_tokens)
     }
@@ -69,7 +74,9 @@ impl opencrab_discord::AgentRunner for AppState {
     }
 
     fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient> {
-        Arc::new(crate::llm_adapter::LlmRouterAdapter::new(self.llm_router.clone()))
+        Arc::new(crate::llm_adapter::LlmRouterAdapter::new(
+            self.llm_router.clone(),
+        ))
     }
 
     fn default_model(&self) -> String {

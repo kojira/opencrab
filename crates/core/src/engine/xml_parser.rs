@@ -125,7 +125,10 @@ fn parse_invoke_body(body: &str) -> Value {
 
         // Try to parse as JSON value (array, object, number, bool).
         let json_value = match serde_json::from_str::<Value>(raw_value) {
-            Ok(v @ Value::Array(_)) | Ok(v @ Value::Object(_)) | Ok(v @ Value::Number(_)) | Ok(v @ Value::Bool(_)) => v,
+            Ok(v @ Value::Array(_))
+            | Ok(v @ Value::Object(_))
+            | Ok(v @ Value::Number(_))
+            | Ok(v @ Value::Bool(_)) => v,
             _ => Value::String(raw_value.to_string()),
         };
 

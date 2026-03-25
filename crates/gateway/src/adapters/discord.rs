@@ -6,14 +6,12 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
 use serenity::all::{
-    ChannelId, Client, Context, EventHandler, GatewayIntents,
-    Message as SerenityMessage, Ready,
+    ChannelId, Client, Context, EventHandler, GatewayIntents, Message as SerenityMessage, Ready,
 };
 use serenity::http::Http;
 
 use crate::message::{
-    Channel, IncomingMessage, MessageSource, MessageTarget,
-    OutgoingMessage, Sender,
+    Channel, IncomingMessage, MessageSource, MessageTarget, OutgoingMessage, Sender,
 };
 use crate::traits::Gateway;
 
@@ -214,14 +212,13 @@ impl EventHandler for DiscordHandler {
             "Discord message event received"
         );
 
-        let guild_id = msg
-            .guild_id
-            .map(|id| id.to_string())
-            .unwrap_or_default();
+        let guild_id = msg.guild_id.map(|id| id.to_string()).unwrap_or_default();
         let channel_id = msg.channel_id.to_string();
 
         // 画像添付ファイルの処理
-        let non_image_notes: Vec<String> = msg.attachments.iter()
+        let non_image_notes: Vec<String> = msg
+            .attachments
+            .iter()
             .filter(|a| !is_image_attachment(a))
             .map(|a| {
                 let ct = a.content_type.as_deref().unwrap_or("unknown");
@@ -235,7 +232,9 @@ impl EventHandler for DiscordHandler {
             format!("{}\n{}", msg.content, non_image_notes.join("\n"))
         };
 
-        let image_parts: Vec<crate::message::ContentPart> = msg.attachments.iter()
+        let image_parts: Vec<crate::message::ContentPart> = msg
+            .attachments
+            .iter()
             .filter(|a| is_image_attachment(a))
             .map(|a| crate::message::ContentPart::Image {
                 url: a.url.clone(),
@@ -268,10 +267,7 @@ impl EventHandler for DiscordHandler {
             id: channel_id,
             name: msg.channel_id.to_string(),
         })
-        .with_metadata(
-            "discord_message_id",
-            serde_json::json!(msg.id.to_string()),
-        );
+        .with_metadata("discord_message_id", serde_json::json!(msg.id.to_string()));
 
         // ギルド情報（チャンネルの場合のみ）
         if let Some(gid) = msg.guild_id {
@@ -371,7 +367,9 @@ mod tests {
 
     #[test]
     fn test_split_message_multiline() {
-        let lines: Vec<String> = (0..100).map(|i| format!("Line {i}: some content here")).collect();
+        let lines: Vec<String> = (0..100)
+            .map(|i| format!("Line {i}: some content here"))
+            .collect();
         let text = lines.join("\n");
         let chunks = split_message(&text, 200);
         for chunk in &chunks {

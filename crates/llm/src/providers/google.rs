@@ -144,32 +144,27 @@ impl GoogleProvider {
                     }
                 })]
             }
-            Some(MessageContent::Multi(parts)) => {
-                parts
-                    .iter()
-                    .map(|p| match p {
-                        ContentPart::Text { text } => serde_json::json!({"text": text}),
-                        ContentPart::ImageUrl { image_url } => {
-                            serde_json::json!({
-                                "inlineData": {
-                                    "mimeType": "image/jpeg",
-                                    "data": image_url.url,
-                                }
-                            })
-                        }
-                    })
-                    .collect()
-            }
+            Some(MessageContent::Multi(parts)) => parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::Text { text } => serde_json::json!({"text": text}),
+                    ContentPart::ImageUrl { image_url } => {
+                        serde_json::json!({
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
+                                "data": image_url.url,
+                            }
+                        })
+                    }
+                })
+                .collect(),
             None => vec![serde_json::json!({"text": ""})],
         }
     }
 
     /// Parse Gemini API response into unified format.
     fn parse_response(&self, body: Value, model: &str) -> Result<ChatResponse> {
-        let candidates = body["candidates"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let candidates = body["candidates"].as_array().cloned().unwrap_or_default();
 
         let mut choices: Vec<Choice> = Vec::new();
         for (i, candidate) in candidates.iter().enumerate() {
@@ -307,7 +302,10 @@ impl LlmProvider for GoogleProvider {
             .context("Gemini API request failed")?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await.context("failed to parse Gemini response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Gemini response")?;
 
         if !status.is_success() {
             let error_msg = resp_body["error"]["message"]
@@ -353,7 +351,12 @@ impl LlmProvider for GoogleProvider {
             let model = model.clone();
 
             // Gemini stream returns JSON array elements separated by commas
-            let trimmed = text.trim().trim_start_matches('[').trim_end_matches(']').trim_start_matches(',').trim();
+            let trimmed = text
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim_start_matches(',')
+                .trim();
 
             let mut content_text = String::new();
             if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {

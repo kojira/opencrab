@@ -87,15 +87,11 @@ impl LlamaCppProvider {
 
     /// Parse OpenAI-compatible response from llama.cpp server.
     fn parse_response(&self, body: Value) -> Result<ChatResponse> {
-        let id = body["id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        let model = body["model"]
-            .as_str()
-            .unwrap_or("local")
-            .to_string();
-        let created = body["created"].as_i64().unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let id = body["id"].as_str().unwrap_or_default().to_string();
+        let model = body["model"].as_str().unwrap_or("local").to_string();
+        let created = body["created"]
+            .as_i64()
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
         let usage = if let Some(u) = body.get("usage") {
             Usage {
@@ -129,13 +125,12 @@ impl LlamaCppProvider {
                             .filter(|s| !s.is_empty())
                             .map(|s| MessageContent::Text(s.to_string()));
 
-                        let finish_reason = c.get("finish_reason").and_then(|fr| {
-                            match fr.as_str()? {
+                        let finish_reason =
+                            c.get("finish_reason").and_then(|fr| match fr.as_str()? {
                                 "stop" => Some(FinishReason::Stop),
                                 "length" => Some(FinishReason::Length),
                                 _ => None,
-                            }
-                        });
+                            });
 
                         Choice {
                             index: c["index"].as_u64().unwrap_or(0) as u32,
@@ -283,10 +278,7 @@ impl LlmProvider for LlamaCppProvider {
                 if let Some(data) = line.strip_prefix("data: ") {
                     if let Ok(parsed) = serde_json::from_str::<Value>(data) {
                         let id = parsed["id"].as_str().unwrap_or_default().to_string();
-                        let model = parsed["model"]
-                            .as_str()
-                            .unwrap_or("local")
-                            .to_string();
+                        let model = parsed["model"].as_str().unwrap_or("local").to_string();
 
                         let choices = parsed["choices"]
                             .as_array()
@@ -297,22 +289,18 @@ impl LlmProvider for LlamaCppProvider {
                                         StreamChoice {
                                             index: c["index"].as_u64().unwrap_or(0) as u32,
                                             delta: DeltaMessage {
-                                                role: delta
-                                                    .get("role")
-                                                    .and_then(|r| {
-                                                        serde_json::from_value(r.clone()).ok()
-                                                    }),
+                                                role: delta.get("role").and_then(|r| {
+                                                    serde_json::from_value(r.clone()).ok()
+                                                }),
                                                 content: delta
                                                     .get("content")
                                                     .and_then(|v| v.as_str().map(String::from)),
                                                 function_call: None,
                                                 tool_calls: None,
                                             },
-                                            finish_reason: c
-                                                .get("finish_reason")
-                                                .and_then(|fr| {
-                                                    serde_json::from_value(fr.clone()).ok()
-                                                }),
+                                            finish_reason: c.get("finish_reason").and_then(|fr| {
+                                                serde_json::from_value(fr.clone()).ok()
+                                            }),
                                         }
                                     })
                                     .collect()

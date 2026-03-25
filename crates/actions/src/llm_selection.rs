@@ -119,7 +119,10 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.data.as_ref().unwrap()["switched"], true);
-        assert_eq!(result.data.as_ref().unwrap()["selected"], "openai:gpt-4o-mini");
+        assert_eq!(
+            result.data.as_ref().unwrap()["selected"],
+            "openai:gpt-4o-mini"
+        );
 
         // Verify model_override was updated.
         let override_val = ctx.model_override.lock().unwrap();

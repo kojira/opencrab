@@ -4,8 +4,8 @@ use anyhow::Result;
 use tracing;
 
 use super::types::{
-    ActionResult, ActionExecutor, CacheControl, ChatContentPart, ChatMessage,
-    ChatRequestSimple, EngineResult, LlmCallLog, LlmClient,
+    ActionExecutor, ActionResult, CacheControl, ChatContentPart, ChatMessage, ChatRequestSimple,
+    EngineResult, LlmCallLog, LlmClient,
 };
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
 
@@ -78,7 +78,10 @@ impl SkillEngine {
     }
 
     /// Set the on_tool_result callback, invoked when a tool result is received.
-    pub fn set_on_tool_result(&mut self, cb: impl Fn(String, String, String, bool) + Send + Sync + 'static) {
+    pub fn set_on_tool_result(
+        &mut self,
+        cb: impl Fn(String, String, String, bool) + Send + Sync + 'static,
+    ) {
         self.on_tool_result = Some(Arc::new(cb));
     }
 
@@ -145,9 +148,14 @@ impl SkillEngine {
         let user_content_parts: Vec<ChatContentPart> = if image_urls.is_empty() {
             vec![]
         } else {
-            let mut parts = vec![ChatContentPart::Text { text: user_message.to_string() }];
+            let mut parts = vec![ChatContentPart::Text {
+                text: user_message.to_string(),
+            }];
             for url in image_urls {
-                parts.push(ChatContentPart::ImageUrl { url: url.clone(), detail: Some("auto".to_string()) });
+                parts.push(ChatContentPart::ImageUrl {
+                    url: url.clone(),
+                    detail: Some("auto".to_string()),
+                });
             }
             parts
         };
@@ -211,8 +219,8 @@ impl SkillEngine {
             };
 
             let request_for_log = request.clone();
-            let requested_at = chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let requested_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             let call_start = std::time::Instant::now();
             let llm_result = self.llm.chat(request).await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
@@ -289,7 +297,8 @@ impl SkillEngine {
 
                 // Notify on_tool_call callback.
                 if let Some(ref cb) = self.on_tool_call {
-                    let calls_json = serde_json::to_string(&response.tool_calls).unwrap_or_default();
+                    let calls_json =
+                        serde_json::to_string(&response.tool_calls).unwrap_or_default();
                     cb(response.content.clone().unwrap_or_default(), calls_json);
                 }
 
@@ -318,15 +327,24 @@ impl SkillEngine {
 
                         // Notify on_tool_result callback for denied action.
                         if let Some(ref cb) = self.on_tool_result {
-                            cb(tool_call.id.clone(), tool_call.name.clone(), result_json.clone(), true);
+                            cb(
+                                tool_call.id.clone(),
+                                tool_call.name.clone(),
+                                result_json.clone(),
+                                true,
+                            );
                         }
                         continue;
                     }
 
-                    let result = self.executor.execute(&tool_call.name, &tool_call.arguments).await;
+                    let result = self
+                        .executor
+                        .execute(&tool_call.name, &tool_call.arguments)
+                        .await;
 
-                    let result_json = serde_json::to_string(&result)
-                        .unwrap_or_else(|_| r#"{"error": "Failed to serialize result"}"#.to_string());
+                    let result_json = serde_json::to_string(&result).unwrap_or_else(|_| {
+                        r#"{"error": "Failed to serialize result"}"#.to_string()
+                    });
 
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
@@ -339,7 +357,12 @@ impl SkillEngine {
 
                     // Notify on_tool_result callback.
                     if let Some(ref cb) = self.on_tool_result {
-                        cb(tool_call.id.clone(), tool_call.name.clone(), result_json.clone(), !result.success);
+                        cb(
+                            tool_call.id.clone(),
+                            tool_call.name.clone(),
+                            result_json.clone(),
+                            !result.success,
+                        );
                     }
                 }
 
@@ -350,9 +373,7 @@ impl SkillEngine {
             let final_text = response.content.unwrap_or_default();
 
             if final_text.is_empty() {
-                tracing::debug!(
-                    "LLM returned empty content (no tool calls), using empty response"
-                );
+                tracing::debug!("LLM returned empty content (no tool calls), using empty response");
             }
 
             return Ok(EngineResult {
@@ -367,10 +388,10 @@ impl SkillEngine {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::{ChatResponseSimple, ToolCall, ToolDefinition};
     use super::*;
     use async_trait::async_trait;
     use serde_json::Value;
-    use super::super::types::{ChatResponseSimple, ToolCall, ToolDefinition};
 
     struct MockLlm {
         responses: std::sync::Mutex<Vec<ChatResponseSimple>>,
@@ -414,14 +435,11 @@ mod tests {
     #[async_trait]
     impl ActionExecutor for MockExecutor {
         async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
-            self.results
-                .get(name)
-                .cloned()
-                .unwrap_or(ActionResult {
-                    success: false,
-                    data: serde_json::json!(null),
-                    error: Some(format!("Unknown action: {name}")),
-                })
+            self.results.get(name).cloned().unwrap_or(ActionResult {
+                success: false,
+                data: serde_json::json!(null),
+                error: Some(format!("Unknown action: {name}")),
+            })
         }
         fn list_tools(&self) -> Vec<ToolDefinition> {
             vec![ToolDefinition {
@@ -484,7 +502,10 @@ mod tests {
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
 
-        let result = engine.run("system", "do something", "test-model").await.unwrap();
+        let result = engine
+            .run("system", "do something", "test-model")
+            .await
+            .unwrap();
         assert_eq!(result.iterations, 2);
         assert_eq!(result.tool_calls_made, 1);
         assert!(!result.stopped_by_limit);
@@ -514,7 +535,10 @@ mod tests {
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 1);
 
-        let result = engine.run("system", "loop forever", "test-model").await.unwrap();
+        let result = engine
+            .run("system", "loop forever", "test-model")
+            .await
+            .unwrap();
         assert!(result.stopped_by_limit);
     }
 
@@ -545,7 +569,10 @@ mod tests {
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
 
-        let result = engine.run("system", "do two things", "test-model").await.unwrap();
+        let result = engine
+            .run("system", "do two things", "test-model")
+            .await
+            .unwrap();
         assert_eq!(result.tool_calls_made, 2);
         assert_eq!(result.iterations, 2);
         assert!(!result.stopped_by_limit);
@@ -571,7 +598,10 @@ mod tests {
         );
         let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
 
-        let result = engine.run("system", "query something", "test-model").await.unwrap();
+        let result = engine
+            .run("system", "query something", "test-model")
+            .await
+            .unwrap();
         assert_eq!(result.response, "Received tool feedback");
         assert_eq!(result.iterations, 2);
         assert_eq!(result.tool_calls_made, 1);
@@ -646,8 +676,8 @@ mod tests {
         let models = captured.lock().unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0], "default-model"); // First call uses default.
-        // Second call should use the overridden model (race condition safe - set before tool call finishes).
-        // Due to timing, it might be either; the important thing is the mechanism works.
+                                                // Second call should use the overridden model (race condition safe - set before tool call finishes).
+                                                // Due to timing, it might be either; the important thing is the mechanism works.
     }
 
     #[tokio::test]
@@ -674,7 +704,11 @@ mod tests {
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
-            ActionResult { success: true, data: serde_json::json!(null), error: None },
+            ActionResult {
+                success: true,
+                data: serde_json::json!(null),
+                error: None,
+            },
         );
 
         let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -684,7 +718,10 @@ mod tests {
             fired_clone.lock().unwrap().push(text);
         });
 
-        let result = engine.run("system", "天気は？", "test-model").await.unwrap();
+        let result = engine
+            .run("system", "天気は？", "test-model")
+            .await
+            .unwrap();
         let texts = fired_texts.lock().unwrap();
         assert_eq!(texts.len(), 2, "should fire for both iterations");
         assert_eq!(texts[0], "調べてみます");
@@ -753,18 +790,18 @@ mod tests {
         let second_call_msgs = &all_messages[1];
 
         // Should contain an assistant message with non-empty tool_calls
-        let has_assistant_with_tool_calls = second_call_msgs.iter().any(|m| {
-            m.role == "assistant" && !m.tool_calls.is_empty()
-        });
+        let has_assistant_with_tool_calls = second_call_msgs
+            .iter()
+            .any(|m| m.role == "assistant" && !m.tool_calls.is_empty());
         assert!(
             has_assistant_with_tool_calls,
             "Second LLM call must include an assistant message with tool_calls"
         );
 
         // Should contain a tool message with tool_call_id set
-        let has_tool_result = second_call_msgs.iter().any(|m| {
-            m.role == "tool" && m.tool_call_id.is_some()
-        });
+        let has_tool_result = second_call_msgs
+            .iter()
+            .any(|m| m.role == "tool" && m.tool_call_id.is_some());
         assert!(
             has_tool_result,
             "Second LLM call must include a tool result message with tool_call_id"

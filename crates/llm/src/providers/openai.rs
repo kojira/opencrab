@@ -41,7 +41,9 @@ impl OpenAiProvider {
     /// Build the request with auth headers.
     fn request_builder(&self, endpoint: &str) -> reqwest::RequestBuilder {
         let url = format!("{}/{}", self.base_url, endpoint);
-        let mut builder = self.client.post(&url)
+        let mut builder = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
 
@@ -182,7 +184,8 @@ impl OpenAiProvider {
                 completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
                 cache_read_input_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32,
-                cache_creation_input_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32,
+                cache_creation_input_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+                    as u32,
             }
         } else {
             Usage::default()
@@ -202,13 +205,13 @@ impl OpenAiProvider {
                             _ => Role::Assistant,
                         };
 
-                        let content = msg.get("content").and_then(|v| {
-                            v.as_str().map(|s| MessageContent::Text(s.to_string()))
-                        });
+                        let content = msg
+                            .get("content")
+                            .and_then(|v| v.as_str().map(|s| MessageContent::Text(s.to_string())));
 
-                        let function_call = msg.get("function_call").and_then(|fc| {
-                            serde_json::from_value::<FunctionCall>(fc.clone()).ok()
-                        });
+                        let function_call = msg
+                            .get("function_call")
+                            .and_then(|fc| serde_json::from_value::<FunctionCall>(fc.clone()).ok());
 
                         let tool_calls = msg.get("tool_calls").and_then(|tc| {
                             serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
@@ -218,16 +221,15 @@ impl OpenAiProvider {
                             .get("tool_call_id")
                             .and_then(|v| v.as_str().map(String::from));
 
-                        let finish_reason = c.get("finish_reason").and_then(|fr| {
-                            match fr.as_str()? {
+                        let finish_reason =
+                            c.get("finish_reason").and_then(|fr| match fr.as_str()? {
                                 "stop" => Some(FinishReason::Stop),
                                 "length" => Some(FinishReason::Length),
                                 "function_call" => Some(FinishReason::FunctionCall),
                                 "tool_calls" => Some(FinishReason::ToolCalls),
                                 "content_filter" => Some(FinishReason::ContentFilter),
                                 _ => None,
-                            }
-                        });
+                            });
 
                         Choice {
                             index: c["index"].as_u64().unwrap_or(0) as u32,
@@ -307,7 +309,10 @@ impl LlmProvider for OpenAiProvider {
             .context("OpenAI API request failed")?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await.context("failed to parse OpenAI response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse OpenAI response")?;
 
         if !status.is_success() {
             let error_msg = resp_body["error"]["message"]
@@ -367,32 +372,22 @@ impl LlmProvider for OpenAiProvider {
                                         StreamChoice {
                                             index: c["index"].as_u64().unwrap_or(0) as u32,
                                             delta: DeltaMessage {
-                                                role: delta
-                                                    .get("role")
-                                                    .and_then(|r| {
-                                                        serde_json::from_value(r.clone()).ok()
-                                                    }),
+                                                role: delta.get("role").and_then(|r| {
+                                                    serde_json::from_value(r.clone()).ok()
+                                                }),
                                                 content: delta
                                                     .get("content")
-                                                    .and_then(|v| {
-                                                        v.as_str().map(String::from)
-                                                    }),
-                                                function_call: delta
-                                                    .get("function_call")
-                                                    .and_then(|fc| {
-                                                        serde_json::from_value(fc.clone()).ok()
-                                                    }),
-                                                tool_calls: delta
-                                                    .get("tool_calls")
-                                                    .and_then(|tc| {
-                                                        serde_json::from_value(tc.clone()).ok()
-                                                    }),
+                                                    .and_then(|v| v.as_str().map(String::from)),
+                                                function_call: delta.get("function_call").and_then(
+                                                    |fc| serde_json::from_value(fc.clone()).ok(),
+                                                ),
+                                                tool_calls: delta.get("tool_calls").and_then(
+                                                    |tc| serde_json::from_value(tc.clone()).ok(),
+                                                ),
                                             },
-                                            finish_reason: c
-                                                .get("finish_reason")
-                                                .and_then(|fr| {
-                                                    serde_json::from_value(fr.clone()).ok()
-                                                }),
+                                            finish_reason: c.get("finish_reason").and_then(|fr| {
+                                                serde_json::from_value(fr.clone()).ok()
+                                            }),
                                         }
                                     })
                                     .collect()
@@ -429,4 +424,3 @@ impl LlmProvider for OpenAiProvider {
         Ok(resp.status().is_success())
     }
 }
-

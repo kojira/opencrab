@@ -95,9 +95,5 @@ fn default_max_output() -> usize {
     65536
 }
 fn default_allowed_env_vars() -> Vec<String> {
-    vec![
-        "PATH".to_string(),
-        "HOME".to_string(),
-        "LANG".to_string(),
-    ]
+    vec!["PATH".to_string(), "HOME".to_string(), "LANG".to_string()]
 }

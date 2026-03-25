@@ -30,6 +30,12 @@ const navItems: NavItem[] = [
     icon: 'forum',
     match: (p) => p === '/sessions' || p.startsWith('/sessions/'),
   },
+  {
+    to: '/settings',
+    labelKey: 'nav.settings',
+    icon: 'settings',
+    match: (p) => p === '/settings',
+  },
 ];
 
 interface SidebarProps {

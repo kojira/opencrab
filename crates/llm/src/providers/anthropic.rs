@@ -228,9 +228,11 @@ impl AnthropicProvider {
                 prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: (u["input_tokens"].as_u64().unwrap_or(0)
-                    + u["output_tokens"].as_u64().unwrap_or(0)) as u32,
+                    + u["output_tokens"].as_u64().unwrap_or(0))
+                    as u32,
                 cache_read_input_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32,
-                cache_creation_input_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32,
+                cache_creation_input_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+                    as u32,
             }
         } else {
             Usage::default()
@@ -356,7 +358,10 @@ impl LlmProvider for AnthropicProvider {
             .context("Anthropic API request failed")?;
 
         let status = resp.status();
-        let resp_body: Value = resp.json().await.context("failed to parse Anthropic response")?;
+        let resp_body: Value = resp
+            .json()
+            .await
+            .context("failed to parse Anthropic response")?;
 
         if !status.is_success() {
             let error_msg = resp_body["error"]["message"]
@@ -466,11 +471,7 @@ impl LlmProvider for AnthropicProvider {
             "max_tokens": 1,
         });
 
-        let resp = self
-            .request_builder("messages")
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.request_builder("messages").json(&body).send().await?;
 
         // 200 or 401 both mean the endpoint is reachable
         Ok(resp.status().is_success() || resp.status().as_u16() == 401)

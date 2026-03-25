@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use opencrab_actions::bridge::BridgedExecutor;
 use opencrab_actions::dispatcher::ActionDispatcher;
 use opencrab_actions::traits::{ActionContext, CallerIdentity};
-use opencrab_core::{
-    ChatRequestSimple, ChatResponseSimple, LlmClient, SkillEngine, ToolCall,
-};
+use opencrab_core::{ChatRequestSimple, ChatResponseSimple, LlmClient, SkillEngine, ToolCall};
 
 // ---------------------------------------------------------------------------
 // MockLlm — returns pre-queued responses in order
@@ -66,14 +64,17 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
             available_providers: vec!["mock".to_string()],
             gateway: "test".to_string(),
         })),
-
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
     (dir, executor)
 }
 
-fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite::Connection>>) {
+fn setup_with_data() -> (
+    tempfile::TempDir,
+    BridgedExecutor,
+    Arc<Mutex<rusqlite::Connection>>,
+) {
     let conn = opencrab_db::init_memory().unwrap();
 
     // Seed a session log so search_my_history can find it
@@ -110,7 +111,6 @@ fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite:
             available_providers: vec!["mock".to_string()],
             gateway: "test".to_string(),
         })),
-
     };
 
     let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
@@ -246,13 +246,22 @@ async fn test_engine_lists_all_tools() {
     let tools = executor.list_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-    assert!(names.contains(&"search_my_history"), "missing search_my_history");
-    assert!(names.contains(&"create_my_skill"), "missing create_my_skill");
+    assert!(
+        names.contains(&"search_my_history"),
+        "missing search_my_history"
+    );
+    assert!(
+        names.contains(&"create_my_skill"),
+        "missing create_my_skill"
+    );
     assert!(
         names.contains(&"learn_from_experience"),
         "missing learn_from_experience"
     );
-    assert!(names.contains(&"learn_from_peer"), "missing learn_from_peer");
+    assert!(
+        names.contains(&"learn_from_peer"),
+        "missing learn_from_peer"
+    );
     assert!(
         names.contains(&"reflect_and_learn"),
         "missing reflect_and_learn"
@@ -267,29 +276,57 @@ async fn test_engine_lists_all_tools() {
 // ---------------------------------------------------------------------------
 
 /// ログ投入 + インデックス構築のセットアップヘルパー（async版）
-async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc<Mutex<rusqlite::Connection>>) {
+async fn setup_with_indexed_memory() -> (
+    tempfile::TempDir,
+    BridgedExecutor,
+    Arc<Mutex<rusqlite::Connection>>,
+) {
     let conn = opencrab_db::init_memory().unwrap();
 
     // 3つのセッションに異なるトピックのログを投入
     let sessions = vec![
-        ("session-rust", vec![
-            ("user-1", "Rustのライフタイムについて教えてください"),
-            ("agent-1", "ライフタイムは参照の有効期間を示すアノテーションです"),
-            ("user-1", "借用チェッカーとの関係は？"),
-            ("agent-1", "借用チェッカーがライフタイムを検証してメモリ安全性を保証します"),
-        ]),
-        ("session-python", vec![
-            ("user-1", "Pythonのasync/awaitについて質問があります"),
-            ("agent-1", "Pythonのasyncioは非同期I/Oフレームワークです"),
-            ("user-1", "イベントループの仕組みは？"),
-            ("agent-1", "asyncioはシングルスレッドのイベントループでコルーチンをスケジューリングします"),
-        ]),
-        ("session-db", vec![
-            ("user-1", "SQLiteのWALモードの利点を教えてください"),
-            ("agent-1", "WALモードは書き込みと読み取りの並行性を向上させます"),
-            ("user-1", "パフォーマンスへの影響は？"),
-            ("agent-1", "読み取りが書き込みをブロックしないため、高負荷時のスループットが向上します"),
-        ]),
+        (
+            "session-rust",
+            vec![
+                ("user-1", "Rustのライフタイムについて教えてください"),
+                (
+                    "agent-1",
+                    "ライフタイムは参照の有効期間を示すアノテーションです",
+                ),
+                ("user-1", "借用チェッカーとの関係は？"),
+                (
+                    "agent-1",
+                    "借用チェッカーがライフタイムを検証してメモリ安全性を保証します",
+                ),
+            ],
+        ),
+        (
+            "session-python",
+            vec![
+                ("user-1", "Pythonのasync/awaitについて質問があります"),
+                ("agent-1", "Pythonのasyncioは非同期I/Oフレームワークです"),
+                ("user-1", "イベントループの仕組みは？"),
+                (
+                    "agent-1",
+                    "asyncioはシングルスレッドのイベントループでコルーチンをスケジューリングします",
+                ),
+            ],
+        ),
+        (
+            "session-db",
+            vec![
+                ("user-1", "SQLiteのWALモードの利点を教えてください"),
+                (
+                    "agent-1",
+                    "WALモードは書き込みと読み取りの並行性を向上させます",
+                ),
+                ("user-1", "パフォーマンスへの影響は？"),
+                (
+                    "agent-1",
+                    "読み取りが書き込みをブロックしないため、高負荷時のスループットが向上します",
+                ),
+            ],
+        ),
     ];
 
     for (session_id, messages) in &sessions {
@@ -315,7 +352,11 @@ async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, Arc
     #[async_trait]
     impl LlmClient for IndexMockLlm {
         async fn chat(&self, req: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
-            let content = req.messages.last().map(|m| m.content.as_str()).unwrap_or("");
+            let content = req
+                .messages
+                .last()
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
             let summary = if content.contains("ライフタイム") || content.contains("借用") {
                 r#"{"title": "Rustのライフタイムと借用チェッカー", "summary": "Rustのライフタイムアノテーションと借用チェッカーの仕組みについての議論。メモリ安全性の保証方法を解説。"}"#
             } else if content.contains("async") || content.contains("Python") {
@@ -505,8 +546,14 @@ async fn test_agentic_rag_multi_node_retrieve() {
     let (rust_topic_id, db_topic_id) = {
         let conn = db.lock().unwrap();
         let tree = opencrab_db::queries::get_index_tree(&conn, "agent-1").unwrap();
-        let rust = tree.iter().find(|n| n.node_type == "topic" && n.title.contains("Rust")).unwrap();
-        let db_node = tree.iter().find(|n| n.node_type == "topic" && n.title.contains("SQLite")).unwrap();
+        let rust = tree
+            .iter()
+            .find(|n| n.node_type == "topic" && n.title.contains("Rust"))
+            .unwrap();
+        let db_node = tree
+            .iter()
+            .find(|n| n.node_type == "topic" && n.title.contains("SQLite"))
+            .unwrap();
         (rust.id.clone(), db_node.id.clone())
     };
 
@@ -570,7 +617,10 @@ async fn test_agentic_rag_combined_with_fts() {
     let python_topic_id = {
         let conn = db.lock().unwrap();
         let tree = opencrab_db::queries::get_index_tree(&conn, "agent-1").unwrap();
-        let python = tree.iter().find(|n| n.node_type == "topic" && n.title.contains("Python")).unwrap();
+        let python = tree
+            .iter()
+            .find(|n| n.node_type == "topic" && n.title.contains("Python"))
+            .unwrap();
         python.id.clone()
     };
 

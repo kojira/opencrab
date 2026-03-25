@@ -61,7 +61,10 @@ impl Soul {
 
         if let Some(ref traits) = self.custom_traits {
             ctx.push_str("\n### Custom Traits\n");
-            ctx.push_str(&format!("{}\n", serde_json::to_string_pretty(traits).unwrap_or_default()));
+            ctx.push_str(&format!(
+                "{}\n",
+                serde_json::to_string_pretty(traits).unwrap_or_default()
+            ));
         }
 
         ctx

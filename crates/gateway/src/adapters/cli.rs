@@ -3,9 +3,7 @@ use async_trait::async_trait;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tracing::debug;
 
-use crate::message::{
-    IncomingMessage, MessageContent, MessageSource, OutgoingMessage, Sender,
-};
+use crate::message::{IncomingMessage, MessageContent, MessageSource, OutgoingMessage, Sender};
 use crate::traits::Gateway;
 
 /// CLIゲートウェイ
@@ -29,10 +27,7 @@ impl CliGateway {
     }
 
     /// セッションIDを指定して作成
-    pub fn with_session_id(
-        user_name: impl Into<String>,
-        session_id: impl Into<String>,
-    ) -> Self {
+    pub fn with_session_id(user_name: impl Into<String>, session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
             user_name: user_name.into(),
