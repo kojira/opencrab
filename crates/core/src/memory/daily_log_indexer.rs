@@ -226,7 +226,7 @@ impl DailyLogIndexer {
             }],
             tools: vec![],
             temperature: Some(0.0),
-            max_tokens: Some(500),
+            max_tokens: Some(4096),
         };
         let resp = self.llm_client.chat(request).await?;
         let text = resp.content.unwrap_or_default();
