@@ -266,7 +266,6 @@ async fn test_engine_lists_all_tools() {
         names.contains(&"reflect_and_learn"),
         "missing reflect_and_learn"
     );
-    assert!(names.contains(&"send_speech"), "missing send_speech");
     assert!(names.contains(&"ws_read"), "missing ws_read");
     assert!(tools.len() >= 20, "expected 20+ tools, got {}", tools.len());
 }

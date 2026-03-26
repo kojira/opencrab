@@ -373,6 +373,7 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
             format!("[{}]{}:\n{}", speaker, ts, log.content)
         }
         "tool_call" => {
+            let speaker = log.speaker_id.as_deref().unwrap_or(&log.agent_id);
             if let Some(meta_json) = log.metadata_json.as_deref() {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta_json) {
                     if let Some(tool_calls_json) =
@@ -396,7 +397,8 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                                     .collect();
                                 if !call_lines.is_empty() {
                                     return format!(
-                                        "[tool_call]{}:\n{}",
+                                        "[{}]{}:\n[tool_call]:\n{}",
+                                        speaker,
                                         ts,
                                         call_lines.join("\n")
                                     );
@@ -406,7 +408,7 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                     }
                 }
             }
-            format!("[tool_call]{}:\n{}", ts, log.content)
+            format!("[{}]{}:\n[tool_call]:\n{}", speaker, ts, log.content)
         }
         "tool_result" => {
             let meta = log

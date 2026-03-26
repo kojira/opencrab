@@ -25,7 +25,6 @@ impl ActionDispatcher {
         };
 
         // 共通アクション登録
-        dispatcher.register(Arc::new(SendSpeechAction));
         dispatcher.register(Arc::new(SendNoreactAction));
         dispatcher.register(Arc::new(GenerateInnerVoiceAction));
         dispatcher.register(Arc::new(UpdateImpressionAction));
@@ -146,7 +145,6 @@ mod tests {
             "Expected at least 20 actions, got {}",
             names.len()
         );
-        assert!(names.contains(&"send_speech".to_string()));
         assert!(names.contains(&"ws_read".to_string()));
         assert!(names.contains(&"ws_write".to_string()));
     }
@@ -169,8 +167,8 @@ mod tests {
     #[test]
     fn test_get_definitions_filtered() {
         let dispatcher = ActionDispatcher::new();
-        let defs = dispatcher.get_definitions(&["send_speech".to_string()]);
+        let defs = dispatcher.get_definitions(&["generate_inner_voice".to_string()]);
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "send_speech");
+        assert_eq!(defs[0].name, "generate_inner_voice");
     }
 }

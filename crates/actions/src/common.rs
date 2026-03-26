@@ -1,50 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
-
-/// 発言アクション
-pub struct SendSpeechAction;
-
-#[async_trait]
-impl Action for SendSpeechAction {
-    fn name(&self) -> &str {
-        "send_speech"
-    }
-
-    fn description(&self) -> &str {
-        "メッセージを送信する"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "required": ["content"],
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "送信するメッセージの内容"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
-        let content = match args["content"].as_str() {
-            Some(c) => c.to_string(),
-            None => return ActionResult::error("content is required"),
-        };
-
-        ActionResult::success(json!({
-            "sent": true,
-            "content": content,
-        }))
-        .with_side_effect(SideEffect::MessageSent {
-            channel: "default".to_string(),
-            content,
-        })
-    }
-}
+use crate::traits::{Action, ActionContext, ActionResult};
 
 /// 無反応アクション
 pub struct SendNoreactAction;
@@ -328,29 +285,6 @@ mod tests {
             })),
         };
         (dir, ctx)
-    }
-
-    #[tokio::test]
-    async fn test_send_speech_success() {
-        let (_dir, ctx) = test_context();
-        let result = SendSpeechAction
-            .execute(&json!({"content": "hello"}), &ctx)
-            .await;
-        assert!(result.success);
-        assert!(
-            result
-                .side_effects
-                .iter()
-                .any(|e| matches!(e, SideEffect::MessageSent { .. })),
-            "Expected MessageSent side effect"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_send_speech_missing_content() {
-        let (_dir, ctx) = test_context();
-        let result = SendSpeechAction.execute(&json!({}), &ctx).await;
-        assert!(!result.success);
     }
 
     #[tokio::test]
