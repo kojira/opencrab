@@ -158,7 +158,12 @@ pub async fn send_agent_message(
             state.default_model.split(':').nth(1).unwrap_or(""),
             state.compaction_ratio,
         );
-        let raw = process::build_conversation_string(&conn, &session_id, &id, budget);
+        let raw = match process::build_conversation_string(&conn, &session_id, &id, budget) {
+            Ok(s) => s,
+            Err(e) => {
+                return Json(serde_json::json!({"error": format!("Failed to build conversation: {}", e)}));
+            }
+        };
         process::prepend_runtime_context(&raw, "direct_message")
     };
 

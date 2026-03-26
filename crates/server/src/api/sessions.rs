@@ -165,7 +165,13 @@ pub async fn send_message(
                 state.default_model.split(':').nth(1).unwrap_or(""),
                 state.compaction_ratio,
             );
-            let raw = process::build_conversation_string(&conn, &id, agent_id, budget);
+            let raw = match process::build_conversation_string(&conn, &id, agent_id, budget) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(agent_id = %agent_id, session_id = %id, "build_conversation_string failed: {e}");
+                    continue;
+                }
+            };
             process::prepend_runtime_context(&raw, &session_theme)
         };
 

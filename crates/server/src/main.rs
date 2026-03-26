@@ -167,12 +167,18 @@ fn make_heartbeat_callback(
                         state.default_model.split(':').nth(1).unwrap_or(""),
                         state.compaction_ratio,
                     );
-                    let conv = opencrab_server::process::build_conversation_string(
+                    let conv = match opencrab_server::process::build_conversation_string(
                         &conn,
                         &session_id,
                         &agent_id_owned,
                         budget,
-                    );
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!(agent_id = %agent_id_owned, session_id = %session_id, "build_conversation_string failed: {e}");
+                            continue;
+                        }
+                    };
                     (sp, name, conv)
                 };
                 let conversation = opencrab_server::process::prepend_runtime_context(

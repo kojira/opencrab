@@ -35,7 +35,7 @@ impl opencrab_discord::AgentRunner for AppState {
         session_id: &str,
         agent_id: &str,
         context_budget_tokens: usize,
-    ) -> String {
+    ) -> Result<String, anyhow::Error> {
         let conn = self.db.lock().unwrap();
         process::build_conversation_string(&conn, session_id, agent_id, context_budget_tokens)
     }

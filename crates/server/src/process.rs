@@ -183,16 +183,16 @@ pub fn build_conversation_string(
     session_id: &str,
     agent_id: &str,
     context_budget_tokens: usize,
-) -> String {
+) -> Result<String, anyhow::Error> {
     // まず全文を試す
     let full = build_full_conversation(conn, session_id);
     if full == "No messages yet." {
-        return full;
+        return Ok(full);
     }
 
     // 全文が予算内ならそのまま返す
     if estimate_tokens(&full) <= context_budget_tokens {
-        return full;
+        return Ok(full);
     }
 
     // 予算超過 → コンパクション
@@ -201,14 +201,13 @@ pub fn build_conversation_string(
     {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!(agent_id = %agent_id, session_id = %session_id, "Failed to get topic nodes: {e}");
-            vec![]
+            return Err(anyhow::anyhow!("Failed to get topic nodes for session {session_id}: {e}"));
         }
     };
 
     if topics.is_empty() {
         // フォールバック: 要約がない場合は最新ログを予算内で切り詰め
-        return build_truncated_conversation(conn, session_id, context_budget_tokens);
+        return Ok(build_truncated_conversation(conn, session_id, context_budget_tokens));
     }
 
     // [Past context summary] セクション構築
@@ -244,8 +243,7 @@ pub fn build_conversation_string(
     ) {
         Ok(logs) => logs,
         Err(e) => {
-            tracing::warn!(session_id = %session_id, "Failed to list session logs after id: {e}");
-            vec![]
+            return Err(anyhow::anyhow!("Failed to list session logs after id for session {session_id}: {e}"));
         }
     };
 
@@ -258,8 +256,7 @@ pub fn build_conversation_string(
         ) {
             Ok(l) => l,
             Err(e) => {
-                tracing::warn!(session_id = %session_id, "Failed to list recent session logs: {e}");
-                vec![]
+                return Err(anyhow::anyhow!("Failed to list recent session logs for session {session_id}: {e}"));
             }
         };
         logs.reverse();
@@ -269,7 +266,7 @@ pub fn build_conversation_string(
     // 予算内に収まるようにログを後ろから詰める
     let recent_text = fit_logs_to_budget(&recent_logs, remaining_budget);
 
-    format!("{summary_header}{summary_section}{recent_header}{recent_text}")
+    Ok(format!("{summary_header}{summary_section}{recent_header}{recent_text}"))
 }
 
 /// context_budget_tokens を呼び出し元で計算するヘルパー。
