@@ -46,7 +46,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         session_id: &str,
         agent_id: &str,
         context_budget_tokens: usize,
-    ) -> String;
+    ) -> Result<String, anyhow::Error>;
 
     /// Run the full agent response pipeline (SkillEngine + LLM).
     async fn run_agent_response(
