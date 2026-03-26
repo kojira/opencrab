@@ -52,6 +52,15 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         let completion_registry: CompletionRegistry = Arc::new(dashmap::DashMap::new());
 
+        let eff_model = {
+            let conn = self.state.db().lock().unwrap();
+            opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                agent_id,
+                &self.state.default_model(),
+            )
+            .unwrap_or_else(|_| self.state.default_model())
+        };
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
             Arc::new(crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
@@ -59,7 +68,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 agent_id.to_string(),
                 self.state.tools_config().clone(),
                 Some(self.state.create_llm_client()),
-                self.state.default_model(),
+                eff_model,
                 workspace_root,
                 subtask_registry,
                 completion_registry.clone(),

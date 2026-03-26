@@ -2,8 +2,7 @@ import { api } from './client';
 import type {
   AgentSummary,
   AgentDetail,
-  IdentityRow,
-  SoulRow,
+  AgentPatchBody,
   SoulPresetDto,
   DiscordConfigDto,
 } from './types';
@@ -12,27 +11,45 @@ export function getAgents(): Promise<AgentSummary[]> {
   return api.get<AgentSummary[]>('/agents');
 }
 
-interface GetAgentResponse {
-  identity: IdentityRow | null;
-  soul: SoulRow | null;
+/** API の agent_id 付き行をダッシュボード用 AgentDetail に変換 */
+function mapAgentRow(
+  id: string,
+  row: Record<string, unknown> | null,
+): AgentDetail {
+  if (!row || typeof row !== 'object') {
+    return {
+      id,
+      name: '',
+      job_title: null,
+      organization: null,
+      image_url: null,
+      persona_name: '',
+      personality: null,
+      instructions: '',
+      model: null,
+      metadata_json: null,
+    };
+  }
+  return {
+    id: (row.agent_id as string) ?? id,
+    name: (row.name as string) ?? '',
+    job_title: (row.job_title as string | null) ?? null,
+    organization: (row.organization as string | null) ?? null,
+    image_url: (row.image_url as string | null) ?? null,
+    persona_name: (row.persona_name as string) ?? '',
+    personality: (row.personality as string | null) ?? null,
+    instructions: (row.instructions as string) ?? '',
+    model: (row.model as string | null) ?? null,
+    metadata_json: (row.metadata_json as string | null) ?? null,
+  };
 }
 
 export async function getAgent(id: string): Promise<AgentDetail> {
-  const res = await api.get<GetAgentResponse>(`/agents/${id}`);
-  const i = res.identity;
-  const s = res.soul;
-  return {
-    id: i?.agent_id ?? id,
-    name: i?.name ?? '',
-    job_title: i?.job_title ?? null,
-    organization: i?.organization ?? null,
-    image_url: i?.image_url ?? null,
-    persona_name: s?.persona_name ?? '',
-    social_style_json: s?.social_style_json ?? '{}',
-    thinking_style_json: s?.thinking_style_json ?? '{}',
-    personality: s?.personality ?? null,
-    instructions: s?.instructions ?? "",
-  };
+  const res = await api.get<Record<string, unknown> | null>(`/agents/${id}`);
+  if (res === null) {
+    throw new Error('Agent not found');
+  }
+  return mapAgentRow(id, res);
 }
 
 export function createAgent(body: {
@@ -46,18 +63,11 @@ export function deleteAgent(id: string): Promise<{ deleted: boolean }> {
   return api.del(`/agents/${id}`);
 }
 
-export function updateIdentity(
+export function patchAgent(
   id: string,
-  identity: Omit<IdentityRow, 'agent_id'>,
-): Promise<{ updated: boolean }> {
-  return api.put(`/agents/${id}/identity`, { agent_id: id, ...identity });
-}
-
-export function updateSoul(
-  id: string,
-  soul: Omit<SoulRow, 'agent_id'>,
-): Promise<{ updated: boolean }> {
-  return api.put(`/agents/${id}/soul`, { agent_id: id, ...soul });
+  body: AgentPatchBody,
+): Promise<{ updated: boolean; error?: string }> {
+  return api.patch(`/agents/${id}`, body);
 }
 
 // Soul Presets
@@ -101,7 +111,14 @@ export function updateDiscordConfig(
 export function patchDiscordConfig(
   id: string,
   body: { bot_token?: string; owner_discord_id?: string },
-): Promise<{ ok: boolean; configured?: boolean; enabled?: boolean; token_masked?: string; owner_discord_id?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  configured?: boolean;
+  enabled?: boolean;
+  token_masked?: string;
+  owner_discord_id?: string;
+  error?: string;
+}> {
   return api.patch(`/agents/${id}/discord`, body);
 }
 

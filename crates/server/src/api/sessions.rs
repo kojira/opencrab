@@ -159,12 +159,14 @@ pub async fn send_message(
         // Build conversation history from session logs.
         let conversation = {
             let conn = state.db.lock().unwrap();
-            let budget = process::compute_context_budget(
+            let eff = opencrab_db::queries::effective_model_for_agent(
                 &conn,
-                &state.default_model.split(':').next().unwrap_or(""),
-                state.default_model.split(':').nth(1).unwrap_or(""),
-                state.compaction_ratio,
-            );
+                agent_id,
+                &state.default_model,
+            )
+            .unwrap_or_else(|_| state.default_model.clone());
+            let (prov, mdl) = process::split_llm_model_spec(&eff);
+            let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
             let raw = match process::build_conversation_string(&conn, &id, agent_id, budget) {
                 Ok(s) => s,
                 Err(e) => {

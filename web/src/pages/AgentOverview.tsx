@@ -1,7 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getDiscordConfig, updateDiscordConfig, patchDiscordConfig, deleteDiscordConfig, startDiscordGateway, stopDiscordGateway } from '../api/agents';
+import {
+  getDiscordConfig,
+  updateDiscordConfig,
+  patchDiscordConfig,
+  deleteDiscordConfig,
+  startDiscordGateway,
+  stopDiscordGateway,
+  patchAgent,
+} from '../api/agents';
+import { getLlmModelChoices } from '../api/llm';
 import type { DiscordConfigDto } from '../api/types';
 import { useAgentContext } from '../hooks/useAgentContext';
 
@@ -287,6 +296,93 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
   );
 }
 
+function LlmModelSection({ agentId }: { agentId: string }) {
+  const { t } = useTranslation();
+  const { agent } = useAgentContext();
+  const [defaultModel, setDefaultModel] = useState('');
+  const [choices, setChoices] = useState<string[]>([]);
+  const [selection, setSelection] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    getLlmModelChoices()
+      .then((c) => {
+        setDefaultModel(c.default_model);
+        setChoices(c.choices);
+      })
+      .catch(() => {
+        setDefaultModel('');
+        setChoices([]);
+      });
+  }, [agentId]);
+
+  useEffect(() => {
+    setSelection(agent?.model ?? '');
+  }, [agent?.model]);
+
+  const save = async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await patchAgent(agentId, {
+        model: selection === '' ? null : selection,
+      });
+      if (res.updated) {
+        setMessage(t('agentDetail.modelSaved'));
+      } else {
+        setMessage(res.error ?? t('agentDetail.modelSaveFailed'));
+      }
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card-outlined mt-6">
+      <h2 className="section-title flex items-center gap-2">
+        <span className="material-symbols-outlined text-xl text-primary">smart_toy</span>
+        {t('agentDetail.llmModel')}
+      </h2>
+      <p className="text-body-sm text-on-surface-variant mb-3">
+        {t('agentDetail.llmModelDesc', { default: defaultModel || '—' })}
+      </p>
+      {message && (
+        <p className="text-body-sm mb-2 text-on-surface-variant">{message}</p>
+      )}
+      <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-end">
+        <div className="flex-1">
+          <label className="text-label-lg text-on-surface-variant block mb-1">
+            {t('agentDetail.modelSelect')}
+          </label>
+          <select
+            className="input w-full"
+            value={selection}
+            onChange={(e) => setSelection(e.target.value)}
+          >
+            <option value="">{t('agentDetail.useServerDefault')}</option>
+            {choices.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          className="btn-filled"
+          disabled={saving}
+          onClick={() => void save()}
+        >
+          {saving ? t('common.saving') : t('common.save')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function AgentOverview() {
   const { t } = useTranslation();
   const { agent, agentId } = useAgentContext();
@@ -346,8 +442,14 @@ export default function AgentOverview() {
         <div className="space-y-3">
           <DetailRow label={t('agentDetail.agentId')} value={agent.id} />
           <DetailRow label={t('agentDetail.name')} value={agent.name} />
+          <DetailRow
+            label={t('agentDetail.effectiveModel')}
+            value={agent.model ?? t('agentDetail.useServerDefault')}
+          />
         </div>
       </div>
+
+      <LlmModelSection agentId={agentId} />
 
       {/* Discord Bot */}
       <DiscordBotSection agentId={agentId} />

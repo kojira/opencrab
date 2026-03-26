@@ -41,7 +41,11 @@ pub async fn rebuild(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let db_clone = state.db.clone();
     let llm_clone = state.llm_router.clone();
-    let model_clone = state.default_model.clone();
+    let model_clone = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
     tokio::spawn(async move {
         let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
         let indexer =
@@ -59,7 +63,11 @@ pub async fn run(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let db_clone = state.db.clone();
     let llm_clone = state.llm_router.clone();
-    let model_clone = state.default_model.clone();
+    let model_clone = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
     tokio::spawn(async move {
         let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
         let indexer =

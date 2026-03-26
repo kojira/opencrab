@@ -85,24 +85,31 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )",
     )?;
 
-    // soul.social_style_json カラムDROP（dead code削除）
-    let has_social_style: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='social_style_json'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if has_social_style {
-        conn.execute_batch("ALTER TABLE soul DROP COLUMN social_style_json")?;
-    }
+    // 旧 soul テーブル向けマイグレーション（新規DBでは soul 不存在のためスキップ）
+    if table_exists(conn, "soul")? {
+        // soul.social_style_json カラムDROP（dead code削除）
+        let has_social_style: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='social_style_json'",
+            )?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_social_style {
+            conn.execute_batch("ALTER TABLE soul DROP COLUMN social_style_json")?;
+        }
 
-    // soul.thinking_style_json カラムDROP（dead code削除）
-    let has_thinking_style: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='thinking_style_json'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if has_thinking_style {
-        conn.execute_batch("ALTER TABLE soul DROP COLUMN thinking_style_json")?;
+        // soul.thinking_style_json カラムDROP（dead code削除）
+        let has_thinking_style: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='thinking_style_json'",
+            )?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_thinking_style {
+            conn.execute_batch("ALTER TABLE soul DROP COLUMN thinking_style_json")?;
+        }
     }
 
     // llm_logs テーブル作成（既存DBへの対応）
@@ -327,14 +334,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
-    // soul.instructions カラム追加（操作ルール・AGENTS.md相当）
-    let has_instructions: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='instructions'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if !has_instructions {
-        conn.execute_batch("ALTER TABLE soul ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")?;
+    if table_exists(conn, "soul")? {
+        // soul.instructions カラム追加（操作ルール・AGENTS.md相当）
+        let has_instructions: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='instructions'")?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_instructions {
+            conn.execute_batch(
+                "ALTER TABLE soul ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
+            )?;
+        }
     }
 
     // import_sync_state テーブル作成
@@ -384,32 +395,107 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_logs_level ON agent_logs(level, created_at DESC);",
     )?;
 
+    // soul + identity → agents 集約（既存DBのみ。soul テーブルがあればデータ移行して DROP）
+    migrate_soul_identity_to_agents(conn)?;
+
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 旧 soul / identity を agents に統合し、旧テーブルを削除する。
+fn migrate_soul_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "soul")? {
+        return Ok(());
+    }
+
+    // agents は SCHEMA で CREATE IF NOT EXISTS 済み。空または未作成のどちらでもよい。
+    conn.execute_batch(
+        r#"
+        INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json, created_at, updated_at)
+        SELECT
+            s.agent_id,
+            i.name,
+            i.job_title,
+            i.organization,
+            i.image_url,
+            s.persona_name,
+            s.personality,
+            s.instructions,
+            NULL,
+            i.metadata_json,
+            datetime('now'),
+            CASE WHEN s.updated_at >= i.updated_at THEN s.updated_at ELSE i.updated_at END
+        FROM soul s
+        INNER JOIN identity i ON s.agent_id = i.agent_id
+        WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = s.agent_id);
+
+        INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json, created_at, updated_at)
+        SELECT
+            s.agent_id,
+            s.persona_name,
+            NULL,
+            NULL,
+            NULL,
+            s.persona_name,
+            s.personality,
+            s.instructions,
+            NULL,
+            NULL,
+            datetime('now'),
+            s.updated_at
+        FROM soul s
+        WHERE NOT EXISTS (SELECT 1 FROM identity i WHERE i.agent_id = s.agent_id)
+          AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = s.agent_id);
+
+        INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json, created_at, updated_at)
+        SELECT
+            i.agent_id,
+            i.name,
+            i.job_title,
+            i.organization,
+            i.image_url,
+            i.name,
+            NULL,
+            '',
+            NULL,
+            i.metadata_json,
+            datetime('now'),
+            i.updated_at
+        FROM identity i
+        WHERE NOT EXISTS (SELECT 1 FROM soul s WHERE s.agent_id = i.agent_id)
+          AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = i.agent_id);
+        "#,
+    )?;
+
+    conn.execute_batch("DROP TABLE IF EXISTS soul; DROP TABLE IF EXISTS identity;")?;
     Ok(())
 }
 
 const SCHEMA_SQL: &str = r#"
 -- ============================================
--- SOUL: ペルソナの核心
+-- AGENTS: soul + identity 統合 + エージェント別モデル
 -- ============================================
-CREATE TABLE IF NOT EXISTS soul (
-    agent_id TEXT PRIMARY KEY,
-    persona_name TEXT NOT NULL,
-    personality TEXT,
-    instructions TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL
-);
-
--- ============================================
--- IDENTITY: 役割・立場
--- ============================================
-CREATE TABLE IF NOT EXISTS identity (
+CREATE TABLE IF NOT EXISTS agents (
     agent_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     job_title TEXT,
     organization TEXT,
     image_url TEXT,
+    persona_name TEXT NOT NULL,
+    personality TEXT,
+    instructions TEXT NOT NULL DEFAULT '',
+    model TEXT,
     metadata_json TEXT,
-    updated_at TEXT NOT NULL
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ============================================

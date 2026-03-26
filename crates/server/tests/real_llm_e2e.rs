@@ -74,11 +74,12 @@ async fn send_request(
         "GET" => builder.method("GET"),
         "POST" => builder.method("POST"),
         "PUT" => builder.method("PUT"),
+        "PATCH" => builder.method("PATCH"),
         "DELETE" => builder.method("DELETE"),
         _ => panic!("unsupported method"),
     };
 
-    if method == "POST" || method == "PUT" {
+    if method == "POST" || method == "PUT" || method == "PATCH" {
         builder = builder.header("content-type", "application/json");
     }
 
@@ -112,13 +113,11 @@ async fn create_agent_with_personality(
     .await;
     let agent_id = resp["id"].as_str().unwrap().to_string();
 
-    // Update soul with personality that encourages tool usage
     send_request(
         app.clone(),
-        "PUT",
-        &format!("/api/agents/{agent_id}/soul"),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
         Some(serde_json::json!({
-            "agent_id": agent_id,
             "persona_name": persona,
             "personality": personality
         })),

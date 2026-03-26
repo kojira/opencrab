@@ -19,15 +19,13 @@ pub struct AgentSummary {
 
 pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary>> {
     let conn = state.db.lock().unwrap();
-    // JOIN soul and identity to get agent summaries
     let mut stmt = conn
         .prepare(
-            "SELECT i.agent_id, i.name, COALESCE(s.persona_name, ''), i.image_url,
-                    (SELECT COUNT(*) FROM skills WHERE agent_id = i.agent_id) as skill_count,
-                    (SELECT COUNT(*) FROM sessions WHERE participant_ids_json LIKE '%' || i.agent_id || '%') as session_count
-             FROM identity i
-             LEFT JOIN soul s ON i.agent_id = s.agent_id
-             ORDER BY i.name",
+            "SELECT a.agent_id, a.name, a.persona_name, a.image_url,
+                    (SELECT COUNT(*) FROM skills WHERE agent_id = a.agent_id) as skill_count,
+                    (SELECT COUNT(*) FROM sessions WHERE participant_ids_json LIKE '%' || a.agent_id || '%') as session_count
+             FROM agents a
+             ORDER BY a.name",
         )
         .unwrap();
 
@@ -64,23 +62,19 @@ pub async fn create_agent(
     let agent_id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let conn = state.db.lock().unwrap();
 
-    let identity = opencrab_db::queries::IdentityRow {
+    let row = opencrab_db::queries::AgentRow {
         agent_id: agent_id.clone(),
         name: req.name.clone(),
         job_title: None,
         organization: None,
         image_url: None,
-        metadata_json: None,
-    };
-    opencrab_db::queries::upsert_identity(&conn, &identity).unwrap();
-
-    let soul = opencrab_db::queries::SoulRow {
-        agent_id: agent_id.clone(),
         persona_name: req.persona_name,
         personality: None,
         instructions: String::new(),
+        model: None,
+        metadata_json: None,
     };
-    opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
+    opencrab_db::queries::upsert_agent(&conn, &row).unwrap();
 
     Json(serde_json::json!({
         "id": agent_id,
@@ -93,14 +87,57 @@ pub async fn get_agent(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
+    let agent = opencrab_db::queries::get_agent(&conn, &id).unwrap();
+    Json(serde_json::to_value(agent).unwrap())
+}
 
-    let identity = opencrab_db::queries::get_identity(&conn, &id).unwrap();
-    let soul = opencrab_db::queries::get_soul(&conn, &id).unwrap();
+#[derive(Debug, Deserialize)]
+pub struct PutAgentBody {
+    pub name: String,
+    pub job_title: Option<String>,
+    pub organization: Option<String>,
+    pub image_url: Option<String>,
+    pub persona_name: String,
+    pub personality: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
+    pub model: Option<String>,
+    pub metadata_json: Option<String>,
+}
 
-    Json(serde_json::json!({
-        "identity": identity,
-        "soul": soul,
-    }))
+pub async fn put_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PutAgentBody>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    let row = opencrab_db::queries::AgentRow {
+        agent_id: id,
+        name: body.name,
+        job_title: body.job_title,
+        organization: body.organization,
+        image_url: body.image_url,
+        persona_name: body.persona_name,
+        personality: body.personality,
+        instructions: body.instructions,
+        model: body.model,
+        metadata_json: body.metadata_json,
+    };
+    opencrab_db::queries::upsert_agent(&conn, &row).unwrap();
+    Json(serde_json::json!({"updated": true}))
+}
+
+pub async fn patch_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(patch): Json<opencrab_db::queries::AgentPatch>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    match opencrab_db::queries::apply_agent_patch(&conn, &id, &patch) {
+        Ok(true) => Json(serde_json::json!({"updated": true})),
+        Ok(false) => Json(serde_json::json!({"updated": false, "error": "Agent not found"})),
+        Err(e) => Json(serde_json::json!({"updated": false, "error": e.to_string()})),
+    }
 }
 
 pub async fn delete_agent(
@@ -117,48 +154,6 @@ pub async fn delete_agent(
     let deleted = opencrab_db::queries::delete_agent(&conn, &id).unwrap();
 
     Json(serde_json::json!({"deleted": deleted}))
-}
-
-pub async fn get_soul(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    let soul = opencrab_db::queries::get_soul(&conn, &id).unwrap();
-    Json(serde_json::to_value(soul).unwrap())
-}
-
-pub async fn update_soul(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(soul): Json<opencrab_db::queries::SoulRow>,
-) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    let mut soul = soul;
-    soul.agent_id = id;
-    opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
-    Json(serde_json::json!({"updated": true}))
-}
-
-pub async fn get_identity(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    let identity = opencrab_db::queries::get_identity(&conn, &id).unwrap();
-    Json(serde_json::to_value(identity).unwrap())
-}
-
-pub async fn update_identity(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(identity): Json<opencrab_db::queries::IdentityRow>,
-) -> Json<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
-    let mut identity = identity;
-    identity.agent_id = id;
-    opencrab_db::queries::upsert_identity(&conn, &identity).unwrap();
-    Json(serde_json::json!({"updated": true}))
 }
 
 // ============================================
@@ -185,17 +180,17 @@ pub async fn create_soul_preset(
     Json(req): Json<CreateSoulPresetRequest>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
-    let soul = opencrab_db::queries::get_soul(&conn, &id).unwrap();
-    let Some(soul) = soul else {
-        return Json(serde_json::json!({ "ok": false, "error": "Soul not found." }));
+    let agent = opencrab_db::queries::get_agent(&conn, &id).unwrap();
+    let Some(agent) = agent else {
+        return Json(serde_json::json!({ "ok": false, "error": "Agent not found." }));
     };
 
     let preset = opencrab_db::queries::SoulPresetRow {
         id: uuid::Uuid::new_v4().to_string(),
         agent_id: id,
         preset_name: req.preset_name,
-        persona_name: soul.persona_name,
-        custom_traits_json: soul.personality,
+        persona_name: agent.persona_name,
+        custom_traits_json: agent.personality,
     };
     opencrab_db::queries::insert_soul_preset(&conn, &preset).unwrap();
 
@@ -221,13 +216,12 @@ pub async fn apply_soul_preset(
         return Json(serde_json::json!({ "ok": false, "error": "Preset not found." }));
     };
 
-    let soul = opencrab_db::queries::SoulRow {
-        agent_id: id,
-        persona_name: preset.persona_name,
-        personality: preset.custom_traits_json,
-        instructions: String::new(),
+    let Some(mut agent) = opencrab_db::queries::get_agent(&conn, &id).unwrap() else {
+        return Json(serde_json::json!({ "ok": false, "error": "Agent not found." }));
     };
-    opencrab_db::queries::upsert_soul(&conn, &soul).unwrap();
+    agent.persona_name = preset.persona_name;
+    agent.personality = preset.custom_traits_json;
+    opencrab_db::queries::upsert_agent(&conn, &agent).unwrap();
 
     Json(serde_json::json!({ "ok": true }))
 }
@@ -537,7 +531,11 @@ pub async fn trigger_memory_index_build(
     let db = state.db.clone();
     let agent_id = id.clone();
     let llm_router = state.llm_router.clone();
-    let model = state.default_model.clone();
+    let model = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
 
     let config = {
         let conn = state.db.lock().unwrap();
@@ -645,7 +643,11 @@ pub async fn rebuild_memory_index(
     let db = state.db.clone();
     let agent_id = id.clone();
     let llm_router = state.llm_router.clone();
-    let model = state.default_model.clone();
+    let model = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
 
     let config = {
         let conn = state.db.lock().unwrap();
@@ -690,7 +692,11 @@ pub async fn merge_memory_index_topics(
     let db = state.db.clone();
     let agent_id = id.clone();
     let llm_router = state.llm_router.clone();
-    let model = state.default_model.clone();
+    let model = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
 
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
     // デフォルト: periodあたり最大10topic

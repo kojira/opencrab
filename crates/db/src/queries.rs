@@ -4,58 +4,144 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 // ============================================
-// SOUL
+// AGENTS (soul + identity 統合)
 // ============================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SoulRow {
+pub struct AgentRow {
     pub agent_id: String,
+    pub name: String,
+    pub job_title: Option<String>,
+    pub organization: Option<String>,
+    pub image_url: Option<String>,
     pub persona_name: String,
     pub personality: Option<String>,
     #[serde(default)]
     pub instructions: String,
+    pub model: Option<String>,
+    pub metadata_json: Option<String>,
 }
 
-pub fn upsert_soul(conn: &Connection, soul: &SoulRow) -> Result<()> {
+/// PATCH 用: 未指定のフィールドは変更しない。`Option<Option<T>>` は JSON の null でクリア。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AgentPatch {
+    pub name: Option<String>,
+    pub job_title: Option<Option<String>>,
+    pub organization: Option<Option<String>>,
+    pub image_url: Option<Option<String>>,
+    pub persona_name: Option<String>,
+    pub personality: Option<Option<String>>,
+    pub instructions: Option<String>,
+    pub model: Option<Option<String>>,
+    pub metadata_json: Option<Option<String>>,
+}
+
+pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO soul (agent_id, persona_name, personality, instructions, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(agent_id) DO UPDATE SET
+            name = excluded.name,
+            job_title = excluded.job_title,
+            organization = excluded.organization,
+            image_url = excluded.image_url,
             persona_name = excluded.persona_name,
             personality = excluded.personality,
             instructions = excluded.instructions,
+            model = excluded.model,
+            metadata_json = excluded.metadata_json,
             updated_at = excluded.updated_at",
         params![
-            soul.agent_id,
-            soul.persona_name,
-            soul.personality,
-            soul.instructions,
-            Utc::now().to_rfc3339(),
+            agent.agent_id,
+            agent.name,
+            agent.job_title,
+            agent.organization,
+            agent.image_url,
+            agent.persona_name,
+            agent.personality,
+            agent.instructions,
+            agent.model,
+            agent.metadata_json,
+            now,
+            now,
         ],
     )?;
     Ok(())
 }
 
-pub fn get_soul(conn: &Connection, agent_id: &str) -> Result<Option<SoulRow>> {
+pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, persona_name, personality, instructions
-         FROM soul WHERE agent_id = ?1",
+        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json
+         FROM agents WHERE agent_id = ?1",
         params![agent_id],
         |row| {
-            Ok(SoulRow {
+            Ok(AgentRow {
                 agent_id: row.get(0)?,
-                persona_name: row.get(1)?,
-                personality: row.get(2)?,
-                instructions: row.get(3)?,
+                name: row.get(1)?,
+                job_title: row.get(2)?,
+                organization: row.get(3)?,
+                image_url: row.get(4)?,
+                persona_name: row.get(5)?,
+                personality: row.get(6)?,
+                instructions: row.get(7)?,
+                model: row.get(8)?,
+                metadata_json: row.get(9)?,
             })
         },
     );
-
     match result {
-        Ok(soul) => Ok(Some(soul)),
+        Ok(a) => Ok(Some(a)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// `agents.model` が空でなければそれを使い、否则は `default_model`（通常は `provider:model`）。
+pub fn effective_model_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+    default_model: &str,
+) -> Result<String> {
+    Ok(get_agent(conn, agent_id)?
+        .and_then(|a| a.model)
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| default_model.to_string()))
+}
+
+pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) -> Result<bool> {
+    let Some(mut row) = get_agent(conn, agent_id)? else {
+        return Ok(false);
+    };
+    if let Some(ref v) = patch.name {
+        row.name = v.clone();
+    }
+    if let Some(ref v) = patch.job_title {
+        row.job_title = v.clone();
+    }
+    if let Some(ref v) = patch.organization {
+        row.organization = v.clone();
+    }
+    if let Some(ref v) = patch.image_url {
+        row.image_url = v.clone();
+    }
+    if let Some(ref v) = patch.persona_name {
+        row.persona_name = v.clone();
+    }
+    if let Some(ref v) = patch.personality {
+        row.personality = v.clone();
+    }
+    if let Some(ref v) = patch.instructions {
+        row.instructions = v.clone();
+    }
+    if let Some(ref v) = patch.model {
+        row.model = v.clone();
+    }
+    if let Some(ref v) = patch.metadata_json {
+        row.metadata_json = v.clone();
+    }
+    upsert_agent(conn, &row)?;
+    Ok(true)
 }
 
 // ============================================
@@ -133,75 +219,12 @@ pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
     Ok(deleted > 0)
 }
 
-// ============================================
-// IDENTITY
-// ============================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdentityRow {
-    pub agent_id: String,
-    pub name: String,
-    pub job_title: Option<String>,
-    pub organization: Option<String>,
-    pub image_url: Option<String>,
-    pub metadata_json: Option<String>,
-}
-
-pub fn upsert_identity(conn: &Connection, identity: &IdentityRow) -> Result<()> {
-    conn.execute(
-        "INSERT INTO identity (agent_id, name, job_title, organization, image_url, metadata_json, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(agent_id) DO UPDATE SET
-            name = excluded.name,
-            job_title = excluded.job_title,
-            organization = excluded.organization,
-            image_url = excluded.image_url,
-            metadata_json = excluded.metadata_json,
-            updated_at = excluded.updated_at",
-        params![
-            identity.agent_id,
-            identity.name,
-            identity.job_title,
-            identity.organization,
-            identity.image_url,
-            identity.metadata_json,
-            Utc::now().to_rfc3339(),
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn get_identity(conn: &Connection, agent_id: &str) -> Result<Option<IdentityRow>> {
-    let result = conn.query_row(
-        "SELECT agent_id, name, job_title, organization, image_url, metadata_json
-         FROM identity WHERE agent_id = ?1",
-        params![agent_id],
-        |row| {
-            Ok(IdentityRow {
-                agent_id: row.get(0)?,
-                name: row.get(1)?,
-                job_title: row.get(2)?,
-                organization: row.get(3)?,
-                image_url: row.get(4)?,
-                metadata_json: row.get(5)?,
-            })
-        },
-    );
-
-    match result {
-        Ok(id) => Ok(Some(id)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Delete an agent and all related data (identity, soul, skills, curated memory, discord config).
+/// Delete an agent and all related data (agents row, skills, curated memory, discord config, presets).
 pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
     let deleted = conn.execute(
-        "DELETE FROM identity WHERE agent_id = ?1",
+        "DELETE FROM agents WHERE agent_id = ?1",
         params![agent_id],
     )?;
-    conn.execute("DELETE FROM soul WHERE agent_id = ?1", params![agent_id])?;
     conn.execute(
         "DELETE FROM soul_presets WHERE agent_id = ?1",
         params![agent_id],
@@ -221,7 +244,7 @@ pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
 /// Find agents by partial ID prefix or name (case-insensitive).
 pub fn find_agents(conn: &Connection, query: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT agent_id, name FROM identity WHERE agent_id LIKE ?1 OR LOWER(name) LIKE LOWER(?2)",
+        "SELECT agent_id, name FROM agents WHERE agent_id LIKE ?1 OR LOWER(name) LIKE LOWER(?2)",
     )?;
     let rows = stmt.query_map(
         params![format!("{}%", query), format!("%{}%", query)],
@@ -2143,65 +2166,85 @@ mod tests {
         crate::init_memory().expect("failed to init in-memory DB")
     }
 
-    // 1. test_soul_upsert_and_get
     #[test]
-    fn test_soul_upsert_and_get() {
+    fn test_agent_upsert_and_get() {
         let conn = setup();
-        let soul = SoulRow {
-            agent_id: "agent-1".to_string(),
-            persona_name: "Crab".to_string(),
-            personality: Some(r#"{"hobby":"coding"}"#.to_string()),
-            instructions: String::new(),
-        };
-
-        upsert_soul(&conn, &soul).unwrap();
-
-        let fetched = get_soul(&conn, "agent-1").unwrap();
-        assert!(fetched.is_some());
-        let fetched = fetched.unwrap();
-        assert_eq!(fetched.agent_id, "agent-1");
-        assert_eq!(fetched.persona_name, "Crab");
-        assert_eq!(
-            fetched.personality,
-            Some(r#"{"hobby":"coding"}"#.to_string())
-        );
-    }
-
-    // 2. test_soul_get_nonexistent
-    #[test]
-    fn test_soul_get_nonexistent() {
-        let conn = setup();
-        let result = get_soul(&conn, "nonexistent-agent").unwrap();
-        assert!(result.is_none());
-    }
-
-    // 3. test_identity_upsert_and_get
-    #[test]
-    fn test_identity_upsert_and_get() {
-        let conn = setup();
-        let identity = IdentityRow {
+        let agent = AgentRow {
             agent_id: "agent-1".to_string(),
             name: "Alice".to_string(),
             job_title: Some("Engineer".to_string()),
             organization: Some("OpenCrab Inc.".to_string()),
             image_url: Some("https://example.com/avatar.png".to_string()),
+            persona_name: "Crab".to_string(),
+            personality: Some(r#"{"hobby":"coding"}"#.to_string()),
+            instructions: String::new(),
+            model: None,
             metadata_json: Some(r#"{"lang":"en"}"#.to_string()),
         };
 
-        upsert_identity(&conn, &identity).unwrap();
+        upsert_agent(&conn, &agent).unwrap();
 
-        let fetched = get_identity(&conn, "agent-1").unwrap();
+        let fetched = get_agent(&conn, "agent-1").unwrap();
         assert!(fetched.is_some());
         let fetched = fetched.unwrap();
         assert_eq!(fetched.agent_id, "agent-1");
         assert_eq!(fetched.name, "Alice");
+        assert_eq!(fetched.persona_name, "Crab");
+        assert_eq!(
+            fetched.personality,
+            Some(r#"{"hobby":"coding"}"#.to_string())
+        );
         assert_eq!(fetched.job_title, Some("Engineer".to_string()));
-        assert_eq!(fetched.organization, Some("OpenCrab Inc.".to_string()));
         assert_eq!(
             fetched.image_url,
             Some("https://example.com/avatar.png".to_string())
         );
         assert_eq!(fetched.metadata_json, Some(r#"{"lang":"en"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_agent_get_nonexistent() {
+        let conn = setup();
+        let result = get_agent(&conn, "nonexistent-agent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_effective_model_for_agent() {
+        let conn = setup();
+        let agent = AgentRow {
+            agent_id: "a1".to_string(),
+            name: "N".to_string(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "p".to_string(),
+            personality: None,
+            instructions: String::new(),
+            model: Some("openai:gpt-4o".to_string()),
+            metadata_json: None,
+        };
+        upsert_agent(&conn, &agent).unwrap();
+        let m = effective_model_for_agent(&conn, "a1", "anthropic:claude").unwrap();
+        assert_eq!(m, "openai:gpt-4o");
+        let m2 = effective_model_for_agent(&conn, "a1", "anthropic:claude").unwrap();
+        assert_eq!(m2, "openai:gpt-4o");
+
+        let agent2 = AgentRow {
+            agent_id: "a2".to_string(),
+            name: "N2".to_string(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "p".to_string(),
+            personality: None,
+            instructions: String::new(),
+            model: None,
+            metadata_json: None,
+        };
+        upsert_agent(&conn, &agent2).unwrap();
+        let m3 = effective_model_for_agent(&conn, "a2", "global:default").unwrap();
+        assert_eq!(m3, "global:default");
     }
 
     // 4. test_curated_memory_crud
@@ -2869,26 +2912,19 @@ mod tests {
     fn test_delete_agent() {
         let conn = setup();
 
-        // Create agent with identity, soul, skill, and curated memory
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: "del-1".into(),
                 name: "DeleteMe".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
-                metadata_json: None,
-            },
-        )
-        .unwrap();
-        upsert_soul(
-            &conn,
-            &SoulRow {
-                agent_id: "del-1".into(),
                 persona_name: "Doomed".into(),
                 personality: None,
                 instructions: String::new(),
+                model: None,
+                metadata_json: None,
             },
         )
         .unwrap();
@@ -2904,17 +2940,12 @@ mod tests {
         )
         .unwrap();
 
-        // Verify data exists
-        assert!(get_identity(&conn, "del-1").unwrap().is_some());
-        assert!(get_soul(&conn, "del-1").unwrap().is_some());
+        assert!(get_agent(&conn, "del-1").unwrap().is_some());
 
-        // Delete
         let deleted = delete_agent(&conn, "del-1").unwrap();
         assert!(deleted);
 
-        // Verify everything is gone
-        assert!(get_identity(&conn, "del-1").unwrap().is_none());
-        assert!(get_soul(&conn, "del-1").unwrap().is_none());
+        assert!(get_agent(&conn, "del-1").unwrap().is_none());
         assert!(list_curated_memories(&conn, "del-1", 10000, 0)
             .unwrap()
             .0
@@ -2933,26 +2964,34 @@ mod tests {
     #[test]
     fn test_find_agents_by_id_prefix() {
         let conn = setup();
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: "abc-12345".into(),
                 name: "Alice".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
+                persona_name: "a".into(),
+                personality: None,
+                instructions: String::new(),
+                model: None,
                 metadata_json: None,
             },
         )
         .unwrap();
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: "xyz-99999".into(),
                 name: "Bob".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
+                persona_name: "b".into(),
+                personality: None,
+                instructions: String::new(),
+                model: None,
                 metadata_json: None,
             },
         )
@@ -2976,14 +3015,18 @@ mod tests {
     #[test]
     fn test_find_agents_partial_name() {
         let conn = setup();
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: "agent-find-1".into(),
                 name: "Creative Researcher".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
+                persona_name: "cr".into(),
+                personality: None,
+                instructions: String::new(),
+                model: None,
                 metadata_json: None,
             },
         )
@@ -3003,66 +3046,49 @@ mod tests {
     fn test_agent_crud_full_cycle() {
         let conn = setup();
 
-        // Create
         let agent_id = "crud-agent-1";
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: agent_id.into(),
                 name: "TestAgent".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
+                persona_name: "Original Persona".into(),
+                personality: None,
+                instructions: String::new(),
+                model: None,
                 metadata_json: None,
             },
         )
         .unwrap();
-        upsert_soul(
-            &conn,
-            &SoulRow {
-                agent_id: agent_id.into(),
-                persona_name: "Original Persona".into(),
-                personality: None,
-                instructions: String::new(),
-            },
-        )
-        .unwrap();
 
-        // Read
-        let identity = get_identity(&conn, agent_id).unwrap().unwrap();
-        assert_eq!(identity.name, "TestAgent");
-        let soul = get_soul(&conn, agent_id).unwrap().unwrap();
-        assert_eq!(soul.persona_name, "Original Persona");
+        let row = get_agent(&conn, agent_id).unwrap().unwrap();
+        assert_eq!(row.name, "TestAgent");
+        assert_eq!(row.persona_name, "Original Persona");
 
-        // Update
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: agent_id.into(),
                 name: "UpdatedAgent".into(),
                 job_title: Some("Lead".into()),
                 organization: None,
                 image_url: None,
+                persona_name: "Updated Persona".into(),
+                personality: None,
+                instructions: String::new(),
+                model: None,
                 metadata_json: None,
             },
         )
         .unwrap();
-        upsert_soul(
-            &conn,
-            &SoulRow {
-                agent_id: agent_id.into(),
-                persona_name: "Updated Persona".into(),
-                personality: None,
-                instructions: String::new(),
-            },
-        )
-        .unwrap();
 
-        let identity = get_identity(&conn, agent_id).unwrap().unwrap();
-        assert_eq!(identity.name, "UpdatedAgent");
-        assert_eq!(identity.job_title, Some("Lead".to_string()));
-        let soul = get_soul(&conn, agent_id).unwrap().unwrap();
-        assert_eq!(soul.persona_name, "Updated Persona");
+        let row = get_agent(&conn, agent_id).unwrap().unwrap();
+        assert_eq!(row.name, "UpdatedAgent");
+        assert_eq!(row.job_title, Some("Lead".to_string()));
+        assert_eq!(row.persona_name, "Updated Persona");
 
         // Find
         let results = find_agents(&conn, "Updated").unwrap();
@@ -3071,8 +3097,7 @@ mod tests {
         // Delete
         let deleted = delete_agent(&conn, agent_id).unwrap();
         assert!(deleted);
-        assert!(get_identity(&conn, agent_id).unwrap().is_none());
-        assert!(get_soul(&conn, agent_id).unwrap().is_none());
+        assert!(get_agent(&conn, agent_id).unwrap().is_none());
 
         // Find after delete
         let results = find_agents(&conn, "Updated").unwrap();
@@ -3371,14 +3396,18 @@ mod tests {
         let conn = setup();
 
         let agent_id = "agent-discord-del";
-        upsert_identity(
+        upsert_agent(
             &conn,
-            &IdentityRow {
+            &AgentRow {
                 agent_id: agent_id.into(),
                 name: "DiscordAgent".into(),
                 job_title: None,
                 organization: None,
                 image_url: None,
+                persona_name: "d".into(),
+                personality: None,
+                instructions: String::new(),
+                model: None,
                 metadata_json: None,
             },
         )

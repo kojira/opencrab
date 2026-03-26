@@ -50,21 +50,18 @@ impl Action for UpdateInstructionsAction {
         // DBに保存
         let conn = ctx.db.lock().unwrap();
 
-        // 現在のsoulを取得してinstructionsだけ更新
-        let soul = match opencrab_db::queries::get_soul(&conn, &ctx.agent_id) {
-            Ok(Some(s)) => s,
-            Ok(None) => return ActionResult::error("soul not found"),
+        let agent = match opencrab_db::queries::get_agent(&conn, &ctx.agent_id) {
+            Ok(Some(a)) => a,
+            Ok(None) => return ActionResult::error("agent not found"),
             Err(e) => return ActionResult::error(&format!("DB error: {e}")),
         };
 
-        let updated = opencrab_db::queries::SoulRow {
-            agent_id: soul.agent_id,
-            persona_name: soul.persona_name,
-            personality: soul.personality,
+        let updated = opencrab_db::queries::AgentRow {
             instructions: instructions.clone(),
+            ..agent
         };
 
-        if let Err(e) = opencrab_db::queries::upsert_soul(&conn, &updated) {
+        if let Err(e) = opencrab_db::queries::upsert_agent(&conn, &updated) {
             return ActionResult::error(&format!("Failed to save instructions: {e}"));
         }
 
@@ -79,19 +76,25 @@ impl Action for UpdateInstructionsAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_db::queries::{upsert_soul, SoulRow};
+    use opencrab_db::queries::{upsert_agent, AgentRow};
     use serde_json::json;
 
     fn make_context(caller: CallerIdentity) -> (tempfile::TempDir, ActionContext) {
         let conn = opencrab_db::init_memory().unwrap();
         // soulレコードを作成
-        let soul = SoulRow {
+        let agent = AgentRow {
             agent_id: "agent-1".to_string(),
+            name: "Test Agent".to_string(),
+            job_title: None,
+            organization: None,
+            image_url: None,
             persona_name: "テスト".to_string(),
             personality: None,
             instructions: "".to_string(),
+            model: None,
+            metadata_json: None,
         };
-        upsert_soul(&conn, &soul).unwrap();
+        upsert_agent(&conn, &agent).unwrap();
 
         let dir = tempfile::TempDir::new().unwrap();
         let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
@@ -133,10 +136,10 @@ mod tests {
 
         // DBに保存されたか確認
         let conn = ctx.db.lock().unwrap();
-        let soul = opencrab_db::queries::get_soul(&conn, "agent-1")
+        let agent = opencrab_db::queries::get_agent(&conn, "agent-1")
             .unwrap()
             .unwrap();
-        assert_eq!(soul.instructions, "新しいルール");
+        assert_eq!(agent.instructions, "新しいルール");
     }
 
     #[tokio::test]

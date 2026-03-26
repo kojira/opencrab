@@ -356,7 +356,7 @@ fn make_heartbeat_callback(
 /// "crab"のような名前が渡された場合、find_agentsで検索してUUIDを返す。
 fn resolve_agent_id(conn: &rusqlite::Connection, agent_id: &str) -> String {
     // まず直接lookupを試みる
-    if let Ok(Some(_)) = opencrab_db::queries::get_identity(conn, agent_id) {
+    if let Ok(Some(_)) = opencrab_db::queries::get_agent(conn, agent_id) {
         return agent_id.to_string();
     }
     // 名前で検索（完全一致またはUUID前方一致のみ。部分一致は複数エージェント時に誤マッチするため使わない）
@@ -462,7 +462,7 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .map(|agent_id| resolve_agent_id(&conn, agent_id))
                     .filter(
-                        |agent_id| match opencrab_db::queries::get_identity(&conn, agent_id) {
+                        |agent_id| match opencrab_db::queries::get_agent(&conn, agent_id) {
                             Ok(Some(_)) => true,
                             _ => {
                                 tracing::warn!(
@@ -483,6 +483,15 @@ async fn main() -> anyhow::Result<()> {
                 gateway.start().await?;
 
                 let first_agent_id = valid_agent_ids.first().cloned().unwrap_or_default();
+                let eff_model = {
+                    let conn = state.db.lock().unwrap();
+                    opencrab_db::queries::effective_model_for_agent(
+                        &conn,
+                        &first_agent_id,
+                        &state.default_model,
+                    )
+                    .unwrap_or_else(|_| state.default_model.clone())
+                };
                 let workspace_path = state.workspace_base.replace("{agent_id}", &first_agent_id);
                 let workspace_root = std::path::PathBuf::from(workspace_path);
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
@@ -500,7 +509,7 @@ async fn main() -> anyhow::Result<()> {
                                 state.llm_router.clone(),
                             ),
                         )),
-                        state.default_model.clone(),
+                        eff_model,
                         workspace_root,
                         subtask_registry,
                         completion_registry.clone(),

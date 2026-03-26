@@ -72,7 +72,8 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     fn default_model(&self) -> String;
 
     /// 会話コンテキストのトークン予算を返す（context_window * compaction_ratio）。
-    fn context_budget_tokens(&self) -> usize;
+    /// `agent_id` の per-agent モデルに応じた pricing を参照する。
+    fn context_budget_tokens(&self, agent_id: &str) -> usize;
 
     /// ワークスペースベースパスを返す（例: "/data/workspace/{agent_id}"）。
     fn workspace_base(&self) -> &str;

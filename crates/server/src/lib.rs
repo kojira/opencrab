@@ -43,16 +43,12 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/agents/{id}",
-            get(api::agents::get_agent).delete(api::agents::delete_agent),
+            get(api::agents::get_agent)
+                .put(api::agents::put_agent)
+                .patch(api::agents::patch_agent)
+                .delete(api::agents::delete_agent),
         )
-        .route(
-            "/api/agents/{id}/soul",
-            get(api::agents::get_soul).put(api::agents::update_soul),
-        )
-        .route(
-            "/api/agents/{id}/identity",
-            get(api::agents::get_identity).put(api::agents::update_identity),
-        )
+        .route("/api/llm/model-choices", get(api::llm::model_choices))
         // ペルソナプリセット
         .route(
             "/api/agents/{id}/soul/presets",

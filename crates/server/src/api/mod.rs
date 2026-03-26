@@ -7,6 +7,7 @@ pub mod co_agents;
 pub mod daily_log_index;
 pub mod import;
 pub mod import_sync;
+pub mod llm;
 pub mod llm_logs;
 pub mod memory;
 pub mod sessions;

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getAgent, updateSoul, listSoulPresets, createSoulPreset, deleteSoulPreset, applySoulPreset } from '../api/agents';
+import { getAgent, patchAgent, listSoulPresets, createSoulPreset, deleteSoulPreset, applySoulPreset } from '../api/agents';
 import type { SoulPresetDto } from '../api/types';
 
 export default function PersonaEdit() {
@@ -56,10 +56,8 @@ export default function PersonaEdit() {
   const handleSave = async () => {
     if (!id) return;
     try {
-      await updateSoul(id, {
+      await patchAgent(id, {
         persona_name: personaName,
-        social_style_json: '{}',
-        thinking_style_json: '{}',
         personality: customTraits || null,
         instructions: instructions,
       });
@@ -73,10 +71,8 @@ export default function PersonaEdit() {
     if (!id || !presetNameInput.trim()) return;
     setSavingPreset(true);
     try {
-      await updateSoul(id, {
+      await patchAgent(id, {
         persona_name: personaName,
-        social_style_json: '{}',
-        thinking_style_json: '{}',
         personality: customTraits || null,
         instructions: instructions,
       });
