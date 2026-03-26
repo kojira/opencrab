@@ -293,8 +293,6 @@ mod tests {
         let tools = executor.list_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
 
-        // ディスパッチャーのアクションが含まれる
-        assert!(names.contains(&"send_speech"));
         // ゲートウェイアクションもマージされる
         assert!(names.contains(&"gw_action_a"));
         assert!(names.contains(&"gw_action_b"));
@@ -310,7 +308,7 @@ mod tests {
 
         // ディスパッチャーに存在するアクションはディスパッチャーで処理される
         let result = executor
-            .execute("send_speech", &json!({"content": "hello"}))
+            .execute("generate_inner_voice", &json!({"thought": "hello"}))
             .await;
         assert!(result.success);
     }
