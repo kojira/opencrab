@@ -12,6 +12,7 @@
 //! - **Agent**: The combined agent struct.
 //! - **Engine**: LLM-driven action loop for executing skills.
 
+pub mod a2ui;
 pub mod agent;
 pub mod engine;
 pub mod heartbeat;
@@ -36,3 +37,9 @@ pub use memory::MemoryManager;
 pub use skill::{Skill, SkillManager, SkillSource};
 pub use soul::{Soul, ThinkingStyle};
 pub use workspace::{FileEntry, Workspace};
+
+// A2UI types
+pub use a2ui::{
+    A2uiAction, A2uiComponent, A2uiComponentType, A2uiUserAction, RenderError, RenderTarget,
+    RenderedMessage, UiRenderer, UserActionResponse, build_confirmation_components,
+};

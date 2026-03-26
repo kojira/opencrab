@@ -527,6 +527,8 @@ async fn main() -> anyhow::Result<()> {
                         gateway_actions,
                         owner_discord_id,
                         completion_registry,
+                        None, // pending_registry
+                        None, // event_channel
                     )
                     .await;
                 });
