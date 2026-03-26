@@ -47,48 +47,56 @@ pub fn execute_import(
         scripts_copied: 0,
     };
 
-    // Check if agent already exists
-    let existing_soul = opencrab_db::queries::get_soul(conn, agent_id)?;
-    let existing_identity = opencrab_db::queries::get_identity(conn, agent_id)?;
+    let existing = opencrab_db::queries::get_agent(conn, agent_id)?;
 
-    // Soul upsert
+    let mut row = existing.clone().unwrap_or_else(|| opencrab_db::queries::AgentRow {
+        agent_id: agent_id.to_string(),
+        name: String::new(),
+        job_title: None,
+        organization: None,
+        image_url: None,
+        persona_name: String::new(),
+        personality: None,
+        instructions: String::new(),
+        model: None,
+        metadata_json: None,
+    });
+
     if scan_result.soul.found {
-        if existing_soul.is_some() && !options.overwrite_if_exists {
-            warnings.push("Soul already exists, skipping (overwrite_if_exists=false)".to_string());
+        if existing.is_some() && !options.overwrite_if_exists {
+            warnings.push("Agent already exists, skipping soul (overwrite_if_exists=false)".to_string());
         } else {
-            let soul = opencrab_db::queries::SoulRow {
-                agent_id: agent_id.to_string(),
-                persona_name: scan_result.soul.persona_name.clone(),
-                personality: Some(scan_result.soul.personality.clone()),
-                instructions: scan_result.instructions.clone(),
-            };
-            opencrab_db::queries::upsert_soul(conn, &soul)?;
+            row.persona_name = scan_result.soul.persona_name.clone();
+            row.personality = Some(scan_result.soul.personality.clone());
+            row.instructions = scan_result.instructions.clone();
             counts.soul = true;
         }
     }
 
-    // Identity upsert
     if scan_result.identity.found {
-        if existing_identity.is_some() && !options.overwrite_if_exists {
-            warnings
-                .push("Identity already exists, skipping (overwrite_if_exists=false)".to_string());
+        if existing.is_some() && !options.overwrite_if_exists {
+            warnings.push(
+                "Agent already exists, skipping identity (overwrite_if_exists=false)".to_string(),
+            );
         } else {
-            let name = if let Some(ref agent_name) = options.agent_name {
-                agent_name.clone()
-            } else {
-                scan_result.identity.name.clone()
-            };
-            let identity = opencrab_db::queries::IdentityRow {
-                agent_id: agent_id.to_string(),
-                name,
-                job_title: None,
-                organization: None,
-                image_url: scan_result.identity.image_url.clone(),
-                metadata_json: Some(scan_result.identity.metadata_json.clone()),
-            };
-            opencrab_db::queries::upsert_identity(conn, &identity)?;
+            row.name = options
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| scan_result.identity.name.clone());
+            row.image_url = scan_result.identity.image_url.clone();
+            row.metadata_json = Some(scan_result.identity.metadata_json.clone());
             counts.identity = true;
         }
+    }
+
+    if counts.soul || counts.identity {
+        if row.name.is_empty() {
+            row.name = row.persona_name.clone();
+        }
+        if row.persona_name.is_empty() {
+            row.persona_name = row.name.clone();
+        }
+        opencrab_db::queries::upsert_agent(conn, &row)?;
     }
 
     // Memory curated (insert in transaction)

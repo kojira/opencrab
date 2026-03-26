@@ -141,26 +141,21 @@ impl Agent {
         let (soul, identity) = {
             let db = conn.lock().unwrap();
 
-            let soul_row = queries::get_soul(&db, agent_id)?
-                .with_context(|| format!("Soul not found for agent: {}", agent_id))?;
-
-            let identity_row = queries::get_identity(&db, agent_id)?
-                .with_context(|| format!("Identity not found for agent: {}", agent_id))?;
+            let row = queries::get_agent(&db, agent_id)?
+                .with_context(|| format!("Agent not found for agent: {}", agent_id))?;
 
             let soul = Soul {
-                persona_name: soul_row.persona_name,
+                persona_name: row.persona_name,
                 thinking_style: Default::default(),
-                custom_traits: soul_row
-                    .personality
-                    .and_then(|s| serde_json::from_str(&s).ok()),
+                custom_traits: row.personality.and_then(|s| serde_json::from_str(&s).ok()),
             };
 
             let identity = Identity {
-                agent_id: identity_row.agent_id,
-                name: identity_row.name,
-                job_title: identity_row.job_title,
-                organization: identity_row.organization,
-                image_url: identity_row.image_url,
+                agent_id: row.agent_id,
+                name: row.name,
+                job_title: row.job_title,
+                organization: row.organization,
+                image_url: row.image_url,
             };
 
             (soul, identity)
@@ -239,27 +234,20 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let conn = test_conn();
 
-        // Upsert soul and identity to the database.
         {
             let db = conn.lock().unwrap();
-            queries::upsert_soul(
+            queries::upsert_agent(
                 &db,
-                &queries::SoulRow {
-                    agent_id: "agent-1".to_string(),
-                    persona_name: "LoadedPersona".to_string(),
-                    personality: None,
-                    instructions: String::new(),
-                },
-            )
-            .unwrap();
-            queries::upsert_identity(
-                &db,
-                &queries::IdentityRow {
+                &queries::AgentRow {
                     agent_id: "agent-1".to_string(),
                     name: "LoadedAgent".to_string(),
                     job_title: None,
                     organization: None,
                     image_url: None,
+                    persona_name: "LoadedPersona".to_string(),
+                    personality: None,
+                    instructions: String::new(),
+                    model: None,
                     metadata_json: None,
                 },
             )

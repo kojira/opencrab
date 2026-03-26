@@ -9,6 +9,7 @@ export interface AgentSummary {
   session_count: number;
 }
 
+/** GET /api/agents/:id のフラットレスポンスに対応 */
 export interface AgentDetail {
   id: string;
   name: string;
@@ -16,28 +17,24 @@ export interface AgentDetail {
   organization: string | null;
   image_url: string | null;
   persona_name: string;
-  social_style_json: string;
-  thinking_style_json: string;
   personality: string | null;
   instructions: string;
-}
-
-export interface IdentityRow {
-  agent_id: string;
-  name: string;
-  job_title: string | null;
-  organization: string | null;
-  image_url: string | null;
+  /** null = サーバー既定の default_model を使用 */
+  model: string | null;
   metadata_json: string | null;
 }
 
-export interface SoulRow {
-  agent_id: string;
-  persona_name: string;
-  social_style_json: string;
-  thinking_style_json: string;
-  personality: string | null;
-  instructions: string;
+/** PATCH /api/agents/:id 用（未指定フィールドは変更しない） */
+export interface AgentPatchBody {
+  name?: string;
+  job_title?: string | null;
+  organization?: string | null;
+  image_url?: string | null;
+  persona_name?: string;
+  personality?: string | null;
+  instructions?: string;
+  model?: string | null;
+  metadata_json?: string | null;
 }
 
 export interface PersonalityDto {

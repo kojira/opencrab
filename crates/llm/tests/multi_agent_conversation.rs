@@ -284,25 +284,19 @@ async fn test_three_agent_with_db_and_session() {
     let mut agent_ids = Vec::new();
     for (name, persona, _role) in &agent_configs {
         let id = uuid::Uuid::new_v4().to_string();
-        opencrab_db::queries::upsert_identity(
+        opencrab_db::queries::upsert_agent(
             &conn,
-            &opencrab_db::queries::IdentityRow {
+            &opencrab_db::queries::AgentRow {
                 agent_id: id.clone(),
                 name: name.to_string(),
                 job_title: None,
                 organization: None,
                 image_url: None,
-                metadata_json: None,
-            },
-        )
-        .unwrap();
-        opencrab_db::queries::upsert_soul(
-            &conn,
-            &opencrab_db::queries::SoulRow {
-                agent_id: id.clone(),
                 persona_name: persona.to_string(),
                 personality: None,
                 instructions: String::new(),
+                model: None,
+                metadata_json: None,
             },
         )
         .unwrap();
@@ -391,8 +385,8 @@ async fn test_three_agent_with_db_and_session() {
 
     // Verify all 3 agents exist
     for id in &agent_ids {
-        let identity = opencrab_db::queries::get_identity(&conn, id).unwrap();
-        assert!(identity.is_some(), "Agent should exist in DB");
+        let agent = opencrab_db::queries::get_agent(&conn, id).unwrap();
+        assert!(agent.is_some(), "Agent should exist in DB");
     }
 
     println!(

@@ -121,13 +121,18 @@ pub async fn send_agent_message(
                     std::sync::Arc::new(dashmap::DashMap::new());
                 let completion_registry: opencrab_discord::CompletionRegistry =
                     std::sync::Arc::new(dashmap::DashMap::new());
+                let eff_model = {
+                    let conn = state.db.lock().unwrap();
+                    opencrab_db::queries::effective_model_for_agent(&conn, &id, &state.default_model)
+                        .unwrap_or_else(|_| state.default_model.clone())
+                };
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
                     id.clone(),
                     Arc::new(std::sync::RwLock::new(tools_cfg)),
                     None,
-                    state.default_model.clone(),
+                    eff_model,
                     workspace_root,
                     subtask_registry,
                     completion_registry,
@@ -152,12 +157,10 @@ pub async fn send_agent_message(
     // 7. Build conversation string.
     let conversation = {
         let conn = state.db.lock().unwrap();
-        let budget = process::compute_context_budget(
-            &conn,
-            &state.default_model.split(':').next().unwrap_or(""),
-            state.default_model.split(':').nth(1).unwrap_or(""),
-            state.compaction_ratio,
-        );
+        let eff = opencrab_db::queries::effective_model_for_agent(&conn, &id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone());
+        let (prov, mdl) = process::split_llm_model_spec(&eff);
+        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
         let raw = match process::build_conversation_string(&conn, &session_id, &id, budget) {
             Ok(s) => s,
             Err(e) => {

@@ -47,11 +47,12 @@ async fn send_request(
         "GET" => builder.method("GET"),
         "POST" => builder.method("POST"),
         "PUT" => builder.method("PUT"),
+        "PATCH" => builder.method("PATCH"),
         "DELETE" => builder.method("DELETE"),
         _ => panic!("unsupported method"),
     };
 
-    if method == "POST" || method == "PUT" {
+    if method == "POST" || method == "PUT" || method == "PATCH" {
         builder = builder.header("content-type", "application/json");
     }
 
@@ -102,8 +103,8 @@ async fn test_create_and_get_agent() {
 
     let (status, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(resp["identity"]["name"], "Test Agent");
-    assert_eq!(resp["soul"]["persona_name"], "TestPersona");
+    assert_eq!(resp["name"], "Test Agent");
+    assert_eq!(resp["persona_name"], "TestPersona");
 }
 
 #[tokio::test]
@@ -134,63 +135,51 @@ async fn test_delete_agent() {
 
     // Verify gone
     let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert!(resp["identity"].is_null());
+    assert!(resp.is_null());
 }
 
 #[tokio::test]
-async fn test_update_soul() {
+async fn test_patch_agent_persona() {
     let app = create_test_app();
     let (agent_id, app) = create_test_agent(app).await;
 
-    let soul_update = serde_json::json!({
-        "agent_id": agent_id,
-        "persona_name": "UpdatedPersona",
-        "personality": null
-    });
-
     let (status, _) = send_request(
         app.clone(),
-        "PUT",
-        &format!("/api/agents/{agent_id}/soul"),
-        Some(soul_update),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
+        Some(serde_json::json!({
+            "persona_name": "UpdatedPersona",
+            "personality": null
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}/soul"), None).await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(resp["persona_name"], "UpdatedPersona");
 }
 
 #[tokio::test]
-async fn test_update_identity() {
+async fn test_patch_agent_identity_fields() {
     let app = create_test_app();
     let (agent_id, app) = create_test_agent(app).await;
 
-    let identity_update = serde_json::json!({
-        "agent_id": agent_id,
-        "name": "Updated Name",
-        "job_title": "Lead",
-        "organization": "OpenCrab Inc",
-        "image_url": null,
-        "metadata_json": null
-    });
-
     let (status, _) = send_request(
         app.clone(),
-        "PUT",
-        &format!("/api/agents/{agent_id}/identity"),
-        Some(identity_update),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
+        Some(serde_json::json!({
+            "name": "Updated Name",
+            "job_title": "Lead",
+            "organization": "OpenCrab Inc",
+            "image_url": null,
+            "metadata_json": null
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_, resp) = send_request(
-        app,
-        "GET",
-        &format!("/api/agents/{agent_id}/identity"),
-        None,
-    )
-    .await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(resp["name"], "Updated Name");
 }
 
@@ -481,7 +470,7 @@ async fn test_full_workflow() {
 
     // 6. Get agent
     let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert_eq!(resp["identity"]["name"], "Workflow Agent");
+    assert_eq!(resp["name"], "Workflow Agent");
 }
 
 // ── Agent CRUD cycle (mirrors dashboard operations) ──
@@ -507,16 +496,15 @@ async fn test_agent_crud_full_cycle() {
     // 2. Read - verify created
     let (_, resp) =
         send_request(app.clone(), "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert_eq!(resp["identity"]["name"], "CRUD Agent");
-    assert_eq!(resp["soul"]["persona_name"], "CRUD Persona");
+    assert_eq!(resp["name"], "CRUD Agent");
+    assert_eq!(resp["persona_name"], "CRUD Persona");
 
-    // 3. Update identity
+    // 3–4. Partial updates (旧 identity / soul 相当)
     let (status, _) = send_request(
         app.clone(),
-        "PUT",
-        &format!("/api/agents/{agent_id}/identity"),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
         Some(serde_json::json!({
-            "agent_id": agent_id,
             "name": "Updated CRUD Agent",
             "job_title": "Team Lead",
             "organization": "OpenCrab Labs",
@@ -527,13 +515,11 @@ async fn test_agent_crud_full_cycle() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // 4. Update soul
     let (status, _) = send_request(
         app.clone(),
-        "PUT",
-        &format!("/api/agents/{agent_id}/soul"),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
         Some(serde_json::json!({
-            "agent_id": agent_id,
             "persona_name": "Updated CRUD Persona",
             "personality": null
         })),
@@ -544,10 +530,10 @@ async fn test_agent_crud_full_cycle() {
     // 5. Read - verify both updates
     let (_, resp) =
         send_request(app.clone(), "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert_eq!(resp["identity"]["name"], "Updated CRUD Agent");
-    assert_eq!(resp["identity"]["job_title"], "Team Lead");
-    assert_eq!(resp["identity"]["organization"], "OpenCrab Labs");
-    assert_eq!(resp["soul"]["persona_name"], "Updated CRUD Persona");
+    assert_eq!(resp["name"], "Updated CRUD Agent");
+    assert_eq!(resp["job_title"], "Team Lead");
+    assert_eq!(resp["organization"], "OpenCrab Labs");
+    assert_eq!(resp["persona_name"], "Updated CRUD Persona");
 
     // 6. Verify shows in list
     let (_, resp) = send_request(app.clone(), "GET", "/api/agents", None).await;
@@ -574,7 +560,7 @@ async fn test_agent_crud_full_cycle() {
 
     // 9. Verify get returns null
     let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert!(resp["identity"].is_null());
+    assert!(resp.is_null());
 }
 
 #[tokio::test]
@@ -596,7 +582,7 @@ async fn test_create_agent_minimal_fields() {
     let agent_id = resp["id"].as_str().unwrap().to_string();
 
     let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
-    assert_eq!(resp["identity"]["name"], "Minimal Agent");
+    assert_eq!(resp["name"], "Minimal Agent");
 }
 
 #[tokio::test]
@@ -1220,5 +1206,5 @@ async fn test_import_execute_full() {
     let agent_id = resp["agent_id"].as_str().unwrap();
     let (status, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(resp["identity"]["name"], "ImportBot");
+    assert_eq!(resp["name"], "ImportBot");
 }

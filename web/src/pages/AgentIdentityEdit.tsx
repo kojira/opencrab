@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getAgent, updateIdentity } from '../api/agents';
+import { getAgent, patchAgent } from '../api/agents';
 
 export default function AgentIdentityEdit() {
   const { t } = useTranslation();
@@ -24,7 +24,7 @@ export default function AgentIdentityEdit() {
     if (!id) return;
     setSaving(true);
     try {
-      await updateIdentity(id, {
+      await patchAgent(id, {
         name,
         job_title: null,
         organization: null,

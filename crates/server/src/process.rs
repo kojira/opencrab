@@ -14,16 +14,11 @@ use opencrab_llm::pricing::PricingRegistry;
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};
 use crate::AppState;
 
-/// DBからエージェントのidentity/soul/skillsを読み込んでシステムプロンプトを構築する。
+/// DBからエージェントの agents 行と skills を読み込んでシステムプロンプトを構築する。
 ///
 /// 返り値: (system_prompt, agent_name)
 pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (String, String) {
-    let identity = opencrab_db::queries::get_identity(conn, agent_id)
-        .ok()
-        .flatten();
-    let soul = opencrab_db::queries::get_soul(conn, agent_id)
-        .ok()
-        .flatten();
+    let agent = opencrab_db::queries::get_agent(conn, agent_id).ok().flatten();
     let skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
     let curated_categories = ["long_term", "user_profile", "agent_rules"];
     let curated_sections: Vec<String> = curated_categories
@@ -50,24 +45,24 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
         .collect();
     let curated_section = curated_sections.join("");
 
-    let agent_name = identity
+    let agent_name = agent
         .as_ref()
-        .map(|i| i.name.clone())
+        .map(|a| a.name.clone())
         .unwrap_or_else(|| agent_id.to_string());
 
-    let persona = soul
+    let persona = agent
         .as_ref()
-        .map(|s| s.persona_name.clone())
+        .map(|a| a.persona_name.clone())
         .unwrap_or_default();
 
-    let custom_traits = soul
+    let custom_traits = agent
         .as_ref()
-        .and_then(|s| s.personality.clone())
+        .and_then(|a| a.personality.clone())
         .unwrap_or_default();
 
-    let instructions = soul
+    let instructions = agent
         .as_ref()
-        .map(|s| s.instructions.clone())
+        .map(|a| a.instructions.clone())
         .unwrap_or_default();
 
     let skills_text = if skills.is_empty() {
@@ -155,6 +150,15 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
     );
 
     (prompt, agent_name)
+}
+
+/// `provider:model` 形式（またはモデル名のみ）を pricing 参照用に分割する。
+pub fn split_llm_model_spec(full: &str) -> (&str, &str) {
+    if let Some(i) = full.find(':') {
+        (&full[..i], &full[i + 1..])
+    } else {
+        ("", full)
+    }
 }
 
 /// コンパクション時に最低限保持する最近のログ件数。
@@ -503,6 +507,12 @@ pub async fn run_agent_response(
     std::fs::create_dir_all(&ws_path).ok();
     let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
 
+    let effective_model = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
+
     // Create BridgedExecutor with ActionContext.
     let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
     let model_override = Arc::new(std::sync::Mutex::new(None));
@@ -772,7 +782,7 @@ pub async fn run_agent_response(
         .run_with_model_override(
             system_prompt,
             conversation,
-            &state.default_model,
+            &effective_model,
             Some(model_override),
             &merged_image_urls,
         )
@@ -783,7 +793,7 @@ pub async fn run_agent_response(
         let index_db = state.db.clone();
         let index_agent_id = agent_id.to_string();
         let index_llm_router = state.llm_router.clone();
-        let index_model = state.default_model.clone();
+        let index_model = effective_model.clone();
         tokio::spawn(async move {
             let (unindexed, config) = {
                 let Ok(conn) = index_db.lock() else { return };

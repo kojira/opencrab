@@ -133,22 +133,14 @@ async fn main() -> anyhow::Result<()> {
                 let agent_id = uuid::Uuid::new_v4().to_string();
                 let conn = db.lock().unwrap();
 
-                opencrab_db::queries::upsert_identity(
+                opencrab_db::queries::upsert_agent(
                     &conn,
-                    &opencrab_db::queries::IdentityRow {
+                    &opencrab_db::queries::AgentRow {
                         agent_id: agent_id.clone(),
                         name: name.clone(),
                         job_title: None,
                         organization: None,
                         image_url: None,
-                        metadata_json: None,
-                    },
-                )?;
-
-                opencrab_db::queries::upsert_soul(
-                    &conn,
-                    &opencrab_db::queries::SoulRow {
-                        agent_id: agent_id.clone(),
                         persona_name: if persona.is_empty() {
                             name.clone()
                         } else {
@@ -156,6 +148,8 @@ async fn main() -> anyhow::Result<()> {
                         },
                         personality: None,
                         instructions: String::new(),
+                        model: None,
+                        metadata_json: None,
                     },
                 )?;
 
@@ -166,23 +160,19 @@ async fn main() -> anyhow::Result<()> {
             ["agents", "show", query] => {
                 let conn = db.lock().unwrap();
                 if let Some(agent_id) = resolve_agent(&conn, query) {
-                    let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                    let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
+                    let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
                     let skills = opencrab_db::queries::list_skills(&conn, &agent_id, false)?;
 
-                    if let Some(id) = identity {
-                        println!("Agent: {}", id.name);
-                        println!("  ID:           {}", id.agent_id);
-                        if let Some(ref jt) = id.job_title {
+                    if let Some(a) = agent {
+                        println!("Agent: {}", a.name);
+                        println!("  ID:           {}", a.agent_id);
+                        if let Some(ref jt) = a.job_title {
                             println!("  Job title:    {}", jt);
                         }
-                        if let Some(ref org) = id.organization {
+                        if let Some(ref org) = a.organization {
                             println!("  Organization: {}", org);
                         }
-                    }
-
-                    if let Some(s) = soul {
-                        println!("  Persona:      {}", s.persona_name);
+                        println!("  Persona:      {}", a.persona_name);
                     }
 
                     if !skills.is_empty() {
@@ -212,15 +202,12 @@ async fn main() -> anyhow::Result<()> {
                     // Read current values
                     let (cur_name, cur_persona) = {
                         let conn = db.lock().unwrap();
-                        let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                        let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
+                        let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
                         (
-                            identity
+                            agent.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+                            agent
                                 .as_ref()
-                                .map(|i| i.name.clone())
-                                .unwrap_or_default(),
-                            soul.as_ref()
-                                .map(|s| s.persona_name.clone())
+                                .map(|a| a.persona_name.clone())
                                 .unwrap_or_default(),
                         )
                     };
@@ -233,17 +220,11 @@ async fn main() -> anyhow::Result<()> {
 
                     let conn = db.lock().unwrap();
 
-                    // Re-read full rows to preserve other fields
-                    let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                    if let Some(mut id) = identity {
-                        id.name = name.clone();
-                        opencrab_db::queries::upsert_identity(&conn, &id)?;
-                    }
-
-                    let soul = opencrab_db::queries::get_soul(&conn, &agent_id)?;
-                    if let Some(mut s) = soul {
-                        s.persona_name = persona;
-                        opencrab_db::queries::upsert_soul(&conn, &s)?;
+                    let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
+                    if let Some(mut a) = agent {
+                        a.name = name.clone();
+                        a.persona_name = persona;
+                        opencrab_db::queries::upsert_agent(&conn, &a)?;
                     }
 
                     println!("Updated agent: {}", name);
@@ -257,9 +238,9 @@ async fn main() -> anyhow::Result<()> {
             ["agents", "delete", query] => {
                 let conn = db.lock().unwrap();
                 if let Some(agent_id) = resolve_agent(&conn, query) {
-                    let identity = opencrab_db::queries::get_identity(&conn, &agent_id)?;
-                    let name = identity
-                        .map(|i| i.name)
+                    let agent = opencrab_db::queries::get_agent(&conn, &agent_id)?;
+                    let name = agent
+                        .map(|a| a.name)
                         .unwrap_or_else(|| agent_id[..8].to_string());
                     drop(conn); // release lock for prompt
 

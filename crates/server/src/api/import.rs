@@ -82,7 +82,11 @@ pub async fn execute_import_handler(
     };
     let batch_size = config.batch_size as usize;
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(state.llm_router.clone());
-    let model = state.default_model.clone();
+    let model = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
+    };
 
     let mut total_indexed: usize = 0;
     loop {
@@ -113,7 +117,11 @@ pub async fn execute_import_handler(
     {
         let db_clone = state.db.clone();
         let llm_clone = state.llm_router.clone();
-        let model_clone = state.default_model.clone();
+        let model_clone = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
+                .unwrap_or_else(|_| state.default_model.clone())
+        };
         let agent_id_clone = agent_id.clone();
         tokio::spawn(async move {
             let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
