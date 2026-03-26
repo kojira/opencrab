@@ -520,7 +520,7 @@ pub async fn run_agent_response(
 
     let runtime_info = opencrab_actions::RuntimeInfo {
         default_model: state.default_model.clone(),
-        active_model: model_override.lock().unwrap().clone(),
+        active_model: Some(effective_model.clone()),
         available_providers: state
             .llm_router
             .provider_names()
