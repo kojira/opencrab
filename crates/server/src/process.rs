@@ -639,6 +639,23 @@ pub async fn run_agent_response(
         let tc_session = session_id.to_string();
         engine.set_on_tool_call(move |content: String, tool_calls_json: String| {
             if let Ok(conn) = tc_db.lock() {
+                // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する
+                if !content.trim().is_empty() {
+                    let speech_log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: tc_agent.clone(),
+                        session_id: tc_session.clone(),
+                        log_type: "speech".to_string(),
+                        content: content.clone(),
+                        speaker_id: Some(tc_agent.clone()),
+                        turn_number: None,
+                        metadata_json: None,
+                        created_at: None,
+                    };
+                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &speech_log) {
+                        tracing::error!(agent_id = %tc_agent, session_id = %tc_session, "Failed to insert speech log (with tool_call): {e}");
+                    }
+                }
                 let log = opencrab_db::queries::SessionLogRow {
                     id: None,
                     agent_id: tc_agent.clone(),

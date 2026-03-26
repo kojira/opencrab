@@ -3,40 +3,6 @@ use serde_json::json;
 
 use crate::traits::{Action, ActionContext, ActionResult};
 
-/// 無反応アクション
-pub struct SendNoreactAction;
-
-#[async_trait]
-impl Action for SendNoreactAction {
-    fn name(&self) -> &str {
-        "send_noreact"
-    }
-
-    fn description(&self) -> &str {
-        "発言しない。OpenClawと同様、LLMが応答テキストとして`NO_REPLY`と返した場合も同様に扱われる"
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "発言しない理由"
-                }
-            }
-        })
-    }
-
-    async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> ActionResult {
-        let reason = args["reason"].as_str().unwrap_or("特になし");
-        ActionResult::success(json!({
-            "action": "noreact",
-            "reason": reason,
-        }))
-    }
-}
-
 /// 心の声アクション
 pub struct GenerateInnerVoiceAction;
 
@@ -285,15 +251,6 @@ mod tests {
             })),
         };
         (dir, ctx)
-    }
-
-    #[tokio::test]
-    async fn test_send_noreact() {
-        let (_dir, ctx) = test_context();
-        let result = SendNoreactAction
-            .execute(&json!({"reason": "thinking"}), &ctx)
-            .await;
-        assert!(result.success);
     }
 
     #[tokio::test]
