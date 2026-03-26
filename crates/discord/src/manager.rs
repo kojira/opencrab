@@ -14,6 +14,7 @@ use opencrab_gateway::DiscordGateway;
 
 use crate::gateway_actions::{CompletionRegistry, SubtaskRegistry};
 use crate::AgentRunner;
+use crate::PendingInteractionRegistry;
 
 struct AgentGatewayEntry {
     gateway: Arc<DiscordGateway>,
@@ -51,6 +52,21 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
 
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         let completion_registry: CompletionRegistry = Arc::new(dashmap::DashMap::new());
+        let pending_interaction_registry: PendingInteractionRegistry =
+            Arc::new(dashmap::DashMap::new());
+
+        // Create event channel for A2UI and other async events
+        let (event_tx, event_rx) = crate::message_loop::create_event_channel();
+
+        // Cleanup stale pending interactions from previous runs
+        {
+            let conn = self.state.db().lock().unwrap();
+            if let Ok(count) = opencrab_db::queries::cleanup_stale_pending_interactions(&conn) {
+                if count > 0 {
+                    info!(agent_id = %agent_id, count = count, "Cleaned up stale pending interactions");
+                }
+            }
+        }
 
         let eff_model = {
             let conn = self.state.db().lock().unwrap();
@@ -61,8 +77,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             )
             .unwrap_or_else(|_| self.state.default_model())
         };
-        let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
-            Arc::new(crate::DiscordGatewayActions::new(
+        let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+            crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
                 self.state.db().clone(),
                 agent_id.to_string(),
@@ -72,7 +88,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 workspace_root,
                 subtask_registry,
                 completion_registry.clone(),
-            ));
+            )
+            .with_a2ui(pending_interaction_registry.clone(), event_tx.clone()),
+        );
 
         let loop_state = self.state.clone();
         let loop_gateway = gateway.clone();
@@ -87,6 +105,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 gateway_actions,
                 owner,
                 completion_registry,
+                Some(pending_interaction_registry),
+                Some((event_tx, event_rx)),
             )
             .await;
         });

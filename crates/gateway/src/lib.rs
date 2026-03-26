@@ -14,3 +14,6 @@ pub use traits::{GatewayActionDef, GatewayActionResult, GatewayActions};
 
 #[cfg(feature = "discord")]
 pub use adapters::discord::DiscordGateway;
+
+#[cfg(feature = "discord")]
+pub use adapters::discord::ComponentInteractionData;

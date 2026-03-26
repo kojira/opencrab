@@ -886,4 +886,32 @@ CREATE TABLE IF NOT EXISTS agent_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_logs_agent ON agent_logs(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_level ON agent_logs(level, created_at DESC);
+
+-- ============================================
+-- A2UI: 保留中のインタラクション
+-- ============================================
+CREATE TABLE IF NOT EXISTS pending_interactions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT,
+    platform TEXT NOT NULL DEFAULT 'discord',
+    surface_id TEXT NOT NULL,
+    a2ui_components_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    response_json TEXT,
+    responder_id TEXT,
+    owner_only INTEGER NOT NULL DEFAULT 1,
+    timeout_secs INTEGER NOT NULL DEFAULT 300,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    responded_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pending_interactions_agent
+    ON pending_interactions(agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_pending_interactions_session
+    ON pending_interactions(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_pending_interactions_surface
+    ON pending_interactions(surface_id);
 "#;

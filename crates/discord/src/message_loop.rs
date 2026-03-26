@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+use opencrab_core::a2ui::UiRenderer;
 use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
 
@@ -23,7 +24,7 @@ use crate::gateway_actions::{CompletionRegistry, SubtaskCompletionFn};
 use crate::AgentRunner;
 
 /// メッセージループへの内部イベント。
-enum LoopEvent {
+pub enum LoopEvent {
     /// Discordからの新規メッセージ。
     IncomingMessage(IncomingMessage),
     /// サブタスク完了通知（P2対策: tokio::spawnではなくイベントで直列処理）。
@@ -37,11 +38,32 @@ enum LoopEvent {
         channel_id_str: String,
         is_dm: bool,
     },
+    /// A2UIインタラクション応答（ボタンクリック or タイムアウト）。
+    InteractionResponse {
+        interaction_id: String,
+        session_id: String,
+        agent_id: String,
+        channel_id: u64,
+        channel_id_str: String,
+        response: opencrab_core::a2ui::A2uiUserAction,
+        is_dm: bool,
+    },
 }
 
 /// Discordメッセージの受信→エージェント処理→応答送信のEvent-Drivenループ。
 ///
 /// バックグラウンドタスクとして`tokio::spawn`から呼ばれることを想定。
+/// Create the event channel pair for the discord loop.
+///
+/// Returns (sender, receiver). The sender should be cloned and given to
+/// DiscordGatewayActions (via `with_a2ui`) so it can inject events.
+pub fn create_event_channel() -> (
+    mpsc::UnboundedSender<LoopEvent>,
+    mpsc::UnboundedReceiver<LoopEvent>,
+) {
+    mpsc::unbounded_channel()
+}
+
 pub async fn run_discord_loop<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
@@ -49,8 +71,16 @@ pub async fn run_discord_loop<T: AgentRunner>(
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
     completion_registry: CompletionRegistry,
+    pending_registry: Option<crate::PendingInteractionRegistry>,
+    event_channel: Option<(
+        mpsc::UnboundedSender<LoopEvent>,
+        mpsc::UnboundedReceiver<LoopEvent>,
+    )>,
 ) {
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<LoopEvent>();
+    let (event_tx, mut event_rx) = match event_channel {
+        Some((tx, rx)) => (tx, rx),
+        None => mpsc::unbounded_channel::<LoopEvent>(),
+    };
 
     // Discord受信をイベントに変換するタスク（P1: メインループをブロックしない）
     {
@@ -64,6 +94,33 @@ pub async fn run_discord_loop<T: AgentRunner>(
                     }
                     Err(e) => {
                         error!("Discord recv error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // A2UIインタラクション受信タスク: gatewayのinteraction channelから受信して処理
+    if let Some(ref registry) = pending_registry {
+        let gw = gateway.clone();
+        let tx = event_tx.clone();
+        let registry = registry.clone();
+        let renderer_http = gateway.http().clone();
+        tokio::spawn(async move {
+            loop {
+                match gw.recv_interaction().await {
+                    Ok(data) => {
+                        handle_component_interaction(
+                            data,
+                            &registry,
+                            renderer_http.clone(),
+                            tx.clone(),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        error!("Discord interaction recv error: {e}");
                         break;
                     }
                 }
@@ -117,6 +174,29 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             exit_reason,
                             channel_id,
                             channel_id_str,
+                            is_dm,
+                            gateway.clone(),
+                            state.clone(),
+                            gateway_actions.clone(),
+                        )
+                        .await;
+                    }
+                    Some(LoopEvent::InteractionResponse {
+                        interaction_id,
+                        session_id,
+                        agent_id,
+                        channel_id,
+                        channel_id_str,
+                        response,
+                        is_dm,
+                    }) => {
+                        process_interaction_response(
+                            interaction_id,
+                            session_id,
+                            agent_id,
+                            channel_id,
+                            channel_id_str,
+                            response,
                             is_dm,
                             gateway.clone(),
                             state.clone(),
@@ -627,6 +707,285 @@ async fn process_subtask_completed<T: AgentRunner>(
                             "source": "discord_response",
                             "channel_id": channel_id_str,
                             "triggered_by": "subtask_completed",
+                        })
+                        .to_string(),
+                    ),
+                    created_at: None,
+                };
+                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Discordコンポーネントインタラクション（ボタンクリック）を処理する。
+///
+/// PendingInteractionRegistryから該当するインタラクションを検索し、
+/// LoopEvent::InteractionResponseとしてイベントループに送信する。
+async fn handle_component_interaction(
+    data: opencrab_gateway::ComponentInteractionData,
+    registry: &crate::PendingInteractionRegistry,
+    renderer_http: Arc<serenity::http::Http>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+) {
+    // Parse custom_id format: "interaction:{uuid}:{action_name}"
+    let parts: Vec<&str> = data.custom_id.splitn(3, ':').collect();
+    if parts.len() < 3 || parts[0] != "interaction" {
+        warn!(custom_id = %data.custom_id, "Invalid A2UI custom_id format");
+        return;
+    }
+    let interaction_id = parts[1].to_string();
+    let action_name = parts[2].to_string();
+
+    // Look up in registry, capture fields, then drop the ref
+    let pending_data = {
+        let pending_ref = registry.get(&interaction_id);
+        match pending_ref {
+            Some(ref pending) => {
+                // Owner-only check
+                if !pending.owner_discord_id.is_empty()
+                    && data.user_id != pending.owner_discord_id
+                {
+                    debug!(
+                        user_id = %data.user_id,
+                        owner_id = %pending.owner_discord_id,
+                        "Non-owner tried to interact with owner-only UI"
+                    );
+                    return;
+                }
+
+                Some((
+                    pending.session_id.clone(),
+                    pending.agent_id.clone(),
+                    pending.channel_id,
+                    pending.channel_id_str.clone(),
+                    pending.is_dm,
+                    pending.surface_id.clone(),
+                    pending.rendered_message.clone(),
+                ))
+            }
+            None => {
+                debug!(
+                    interaction_id = %interaction_id,
+                    "Interaction not found in registry (expired or already handled)"
+                );
+                None
+            }
+        }
+    };
+
+    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message) =
+        match pending_data {
+            Some(d) => d,
+            None => return,
+        };
+
+    // Remove from registry
+    let _ = registry.remove(&interaction_id);
+
+    // Disable buttons on the message
+    let renderer = crate::renderer::DiscordRenderer::new(renderer_http);
+    let _ = renderer
+        .update_on_response(
+            &rendered_message,
+            &opencrab_core::a2ui::UserActionResponse {
+                action_name: action_name.clone(),
+                context: None,
+                user_id: data.user_id.clone(),
+            },
+        )
+        .await;
+
+    // Send event to the loop
+    let _ = event_tx.send(LoopEvent::InteractionResponse {
+        interaction_id,
+        session_id,
+        agent_id,
+        channel_id,
+        channel_id_str,
+        response: opencrab_core::a2ui::A2uiUserAction {
+            surface_id,
+            component_id: data.custom_id.clone(),
+            action_name,
+            context: None,
+            responder_id: data.user_id,
+        },
+        is_dm,
+    });
+}
+
+/// A2UIインタラクション応答イベントを処理する。
+///
+/// SubtaskCompletedと同様のパターンで、応答情報をシステムプロンプトに含めて
+/// エージェントを再呼び出しする。
+async fn process_interaction_response<T: AgentRunner>(
+    interaction_id: String,
+    session_id: String,
+    agent_id: String,
+    channel_id: u64,
+    channel_id_str: String,
+    response: opencrab_core::a2ui::A2uiUserAction,
+    is_dm: bool,
+    gateway: Arc<DiscordGateway>,
+    state: T,
+    gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+) {
+    info!(
+        interaction_id = %interaction_id,
+        action = %response.action_name,
+        component = %response.component_id,
+        "Processing A2UI interaction response"
+    );
+
+    // 1. Update DB
+    {
+        if let Ok(conn) = state.db().lock() {
+            let response_json = serde_json::to_string(&response).ok();
+            opencrab_db::queries::update_pending_interaction_status(
+                &conn,
+                &interaction_id,
+                if response.action_name == "timeout" {
+                    "timeout"
+                } else {
+                    "responded"
+                },
+                response_json.as_deref(),
+                Some(&response.responder_id),
+            )
+            .ok();
+        }
+    }
+
+    // 2. Record in session_log
+    {
+        if let Ok(conn) = state.db().lock() {
+            let log_content = format!(
+                "[interaction_response] ユーザーがUIに応答しました。\nsurface_id: {}\ncomponent_id: {}\naction: {}\ncontext: {}\nresponder: {}",
+                response.surface_id,
+                response.component_id,
+                response.action_name,
+                response.context.as_ref().map(|c| c.to_string()).unwrap_or_default(),
+                response.responder_id,
+            );
+            let log = opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
+                log_type: "interaction_response".to_string(),
+                content: log_content,
+                speaker_id: Some("system".to_string()),
+                turn_number: None,
+                metadata_json: Some(
+                    serde_json::json!({
+                        "interaction_id": interaction_id,
+                        "surface_id": response.surface_id,
+                        "action_name": response.action_name,
+                        "component_id": response.component_id,
+                        "responder_id": response.responder_id,
+                    })
+                    .to_string(),
+                ),
+                created_at: None,
+            };
+            opencrab_db::queries::insert_session_log(&conn, &log).ok();
+        }
+    }
+
+    // 3. Re-invoke agent (same pattern as SubtaskCompleted)
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
+
+    let context_str = response
+        .context
+        .as_ref()
+        .map(|c| c.to_string())
+        .unwrap_or_default();
+    let system_prompt = format!(
+        "{}\n\n[Discord context: channel_id={}]\n[interaction_response: interaction_id={}, surface_id={}, action={}, component_id={}, context={}, responder={}]",
+        base_prompt, channel_id_str, interaction_id, response.surface_id,
+        response.action_name, response.component_id, context_str, response.responder_id,
+    );
+    let conversation_raw = match state.build_conversation_string(
+        &session_id,
+        &agent_id,
+        state.context_budget_tokens(&agent_id),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
+            return;
+        }
+    };
+    let conversation =
+        prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
+
+    match state
+        .run_agent_response(
+            &agent_id,
+            &agent_name,
+            &session_id,
+            &system_prompt,
+            &conversation,
+            "discord",
+            Some(gateway_actions),
+            opencrab_actions::CallerIdentity::Agent,
+            &[],
+            0,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(engine_result) if !engine_result.response.is_empty() => {
+            if engine_result.response.trim() == "NO_REPLY" {
+                if let Ok(conn) = state.db().lock() {
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: agent_id.to_string(),
+                        session_id: session_id.clone(),
+                        log_type: "speech".to_string(),
+                        content: "NO_REPLY".to_string(),
+                        speaker_id: Some(agent_id.to_string()),
+                        turn_number: None,
+                        metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
+                        created_at: None,
+                    };
+                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                }
+                return;
+            }
+            if !is_dm {
+                let writable = state
+                    .db()
+                    .lock()
+                    .map(|conn| opencrab_db::queries::is_channel_writable(&conn, &channel_id_str))
+                    .unwrap_or(false);
+                if !writable {
+                    return;
+                }
+            }
+            if let Err(e) = gateway
+                .send_to_channel(channel_id, &engine_result.response)
+                .await
+            {
+                error!("Interaction response Discord send failed: {e}");
+            }
+            // DBにログ
+            if let Ok(conn) = state.db().lock() {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: agent_id.clone(),
+                    session_id: session_id.clone(),
+                    log_type: "speech".to_string(),
+                    content: engine_result.response,
+                    speaker_id: Some(agent_id.clone()),
+                    turn_number: None,
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "source": "discord_response",
+                            "channel_id": channel_id_str,
+                            "triggered_by": "interaction_response",
+                            "interaction_id": interaction_id,
                         })
                         .to_string(),
                     ),

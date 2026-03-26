@@ -3,10 +3,11 @@ use std::sync::Arc;
 use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use serenity::all::{
-    ChannelId, Client, Context, EventHandler, GatewayIntents, Message as SerenityMessage, Ready,
+    ChannelId, Client, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
+    EventHandler, GatewayIntents, Interaction, Message as SerenityMessage, Ready,
 };
 use serenity::http::Http;
 
@@ -14,6 +15,26 @@ use crate::message::{
     Channel, IncomingMessage, MessageSource, MessageTarget, OutgoingMessage, Sender,
 };
 use crate::traits::Gateway;
+
+/// Discordのコンポーネントインタラクション（ボタンクリック等）のデータ。
+///
+/// serenityのInteraction型からplatform-agnosticなデータに変換したもの。
+/// discord crateのイベントループで実際の処理を行う。
+#[derive(Debug, Clone)]
+pub struct ComponentInteractionData {
+    /// custom_id (例: "interaction:{uuid}:{action_name}")
+    pub custom_id: String,
+    /// ボタンをクリックしたユーザーのID
+    pub user_id: String,
+    /// ボタンをクリックしたユーザー名
+    pub user_name: String,
+    /// チャンネルID
+    pub channel_id: String,
+    /// ギルドID (DMの場合は空)
+    pub guild_id: String,
+    /// メッセージID
+    pub message_id: String,
+}
 
 /// Discordゲートウェイ
 ///
@@ -44,12 +65,16 @@ pub struct DiscordGateway {
     tx: mpsc::Sender<IncomingMessage>,
     http: Arc<Http>,
     shard_manager: Mutex<Option<Arc<serenity::gateway::ShardManager>>>,
+    /// A2UIコンポーネントインタラクション受信チャンネル
+    interaction_rx: Mutex<mpsc::Receiver<ComponentInteractionData>>,
+    interaction_tx: mpsc::Sender<ComponentInteractionData>,
 }
 
 impl DiscordGateway {
     pub fn new(token: impl Into<String>) -> Self {
         let token = token.into();
         let (tx, rx) = mpsc::channel(256);
+        let (interaction_tx, interaction_rx) = mpsc::channel(64);
         let http = Arc::new(Http::new(&token));
         Self {
             token,
@@ -57,6 +82,8 @@ impl DiscordGateway {
             tx,
             http,
             shard_manager: Mutex::new(None),
+            interaction_rx: Mutex::new(interaction_rx),
+            interaction_tx,
         }
     }
 
@@ -74,6 +101,7 @@ impl DiscordGateway {
 
         let handler = DiscordHandler {
             tx: self.tx.clone(),
+            interaction_tx: self.interaction_tx.clone(),
             self_user_id: tokio::sync::OnceCell::new(),
         };
 
@@ -136,6 +164,16 @@ impl DiscordGateway {
         Ok(())
     }
 
+    /// コンポーネントインタラクション（ボタンクリック等）を受信する。
+    ///
+    /// Discordからのinteraction_createイベントがあるまで待機する。
+    pub async fn recv_interaction(&self) -> Result<ComponentInteractionData> {
+        let mut rx = self.interaction_rx.lock().await;
+        rx.recv()
+            .await
+            .context("Discord interaction channel closed")
+    }
+
     /// Botをシャットダウンする
     pub async fn shutdown(&self) {
         let sm = self.shard_manager.lock().await;
@@ -192,6 +230,7 @@ fn is_image_attachment(a: &serenity::model::channel::Attachment) -> bool {
 
 struct DiscordHandler {
     tx: mpsc::Sender<IncomingMessage>,
+    interaction_tx: mpsc::Sender<ComponentInteractionData>,
     self_user_id: tokio::sync::OnceCell<u64>,
 }
 
@@ -287,6 +326,60 @@ impl EventHandler for DiscordHandler {
 
         if let Err(e) = self.tx.send(incoming).await {
             warn!("Failed to forward Discord message to gateway: {e}");
+        }
+    }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        // Only handle ComponentInteraction (button clicks)
+        let component = match interaction {
+            Interaction::Component(c) => c,
+            _ => return,
+        };
+
+        let custom_id = component.data.custom_id.clone();
+
+        // Only handle our A2UI interactions (format: "interaction:{uuid}:{action}")
+        if !custom_id.starts_with("interaction:") {
+            return;
+        }
+
+        debug!(
+            custom_id = %custom_id,
+            user = %component.user.name,
+            "Discord component interaction received"
+        );
+
+        let guild_id = component
+            .guild_id
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let channel_id = component.channel_id.to_string();
+        let message_id = component.message.id.to_string();
+        let user_id = component.user.id.to_string();
+        let user_name = component.user.name.clone();
+
+        // ACK with deferred update (prevents "interaction failed" message)
+        let _ = component
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::UpdateMessage(
+                    CreateInteractionResponseMessage::new(),
+                ),
+            )
+            .await;
+
+        // Forward to the interaction channel for processing by the discord crate
+        let data = ComponentInteractionData {
+            custom_id,
+            user_id,
+            user_name,
+            channel_id,
+            guild_id,
+            message_id,
+        };
+
+        if let Err(e) = self.interaction_tx.send(data).await {
+            warn!("Failed to forward component interaction: {e}");
         }
     }
 

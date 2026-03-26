@@ -6,10 +6,12 @@
 pub mod gateway_actions;
 pub mod manager;
 pub mod message_loop;
+pub mod renderer;
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use opencrab_gateway::GatewayActions;
 
 pub use gateway_actions::DiscordGatewayActions;
@@ -18,6 +20,26 @@ pub use gateway_actions::{
 };
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
+pub use renderer::DiscordRenderer;
+
+/// A2UI pending interaction registry type.
+pub type PendingInteractionRegistry = Arc<DashMap<String, PendingInteraction>>;
+
+/// A pending A2UI interaction waiting for user response.
+pub struct PendingInteraction {
+    pub session_id: String,
+    pub agent_id: String,
+    pub channel_id: u64,
+    pub channel_id_str: String,
+    pub is_dm: bool,
+    pub surface_id: String,
+    pub a2ui_components: Vec<opencrab_core::a2ui::A2uiComponent>,
+    pub owner_discord_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub timeout_secs: u64,
+    pub rendered_message: opencrab_core::a2ui::RenderedMessage,
+    pub event_tx: tokio::sync::mpsc::UnboundedSender<message_loop::LoopEvent>,
+}
 
 /// Trait abstracting the server-side agent processing pipeline.
 ///
