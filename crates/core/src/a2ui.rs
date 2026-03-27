@@ -33,6 +33,50 @@ pub enum A2uiComponentType {
     Column {
         children: Vec<String>,
     },
+    SelectMenu {
+        options: Vec<SelectOption>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min_values: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_values: Option<u32>,
+        action: A2uiAction,
+    },
+    TextInput {
+        label: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min_length: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_length: Option<u32>,
+        #[serde(default = "default_true")]
+        required: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        style: Option<String>,
+    },
+    Form {
+        title: String,
+        children: Vec<String>,
+        action: A2uiAction,
+    },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectOption {
+    pub label: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -360,7 +360,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "send_ui".to_string(),
-                description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する。\n\n使用例:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"選んでください\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"btn1\", \"btn2\"]}, {\"id\": \"btn1\", \"component\": \"Button\", \"text\": \"選択A\", \"variant\": \"primary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"A\"}}}, {\"id\": \"btn2\", \"component\": \"Button\", \"text\": \"選択B\", \"variant\": \"secondary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"B\"}}}]}\n\n注意: Rowのchildrenで参照するButtonはトップレベルのcomponents配列に定義する。各Buttonには一意のidとaction（name + context）を設定する。同じaction.nameでもボタンごとにcontextを変えることで区別できる。".to_string(),
+                description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する。\n\n使用例（ボタン）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"選んでください\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"btn1\", \"btn2\"]}, {\"id\": \"btn1\", \"component\": \"Button\", \"text\": \"選択A\", \"style\": \"primary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"A\"}}}, {\"id\": \"btn2\", \"component\": \"Button\", \"text\": \"選択B\", \"style\": \"secondary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"B\"}}}]}\n\n使用例（セレクトメニュー）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"モデルを選択\"}, {\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"sel1\"]}, {\"id\": \"sel1\", \"component\": \"SelectMenu\", \"placeholder\": \"モデルを選んでください\", \"options\": [{\"label\": \"GPT-4\", \"value\": \"gpt-4\"}, {\"label\": \"Claude\", \"value\": \"claude\"}], \"action\": {\"name\": \"select_model\"}}]}\n\n使用例（フォーム/モーダル）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"row1\"]}, {\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"設定を変更\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"trigger_btn\"]}, {\"id\": \"trigger_btn\", \"component\": \"Button\", \"text\": \"設定を開く\", \"style\": \"primary\", \"action\": {\"name\": \"open_form\"}}, {\"id\": \"form1\", \"component\": \"Form\", \"title\": \"設定変更\", \"children\": [\"input_name\", \"input_desc\"], \"action\": {\"name\": \"submit_form\"}}, {\"id\": \"input_name\", \"component\": \"TextInput\", \"label\": \"名前\", \"placeholder\": \"名前を入力\", \"style\": \"short\", \"required\": true}, {\"id\": \"input_desc\", \"component\": \"TextInput\", \"label\": \"説明\", \"placeholder\": \"説明を入力\", \"style\": \"paragraph\", \"required\": false}]}\n\n注意: Rowのchildrenで参照するButton/SelectMenuはトップレベルのcomponents配列に定義する。各Buttonには一意のidとaction（name + context）を設定する。SelectMenuの選択結果はaction.contextにselected_valuesとして返される。Formはモーダル表示用でトリガーボタンが必要。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -375,9 +375,11 @@ impl GatewayActions for DiscordGatewayActions {
                                 "type": "object",
                                 "properties": {
                                     "id": { "type": "string" },
-                                    "component": { "type": "string", "enum": ["Text", "Button", "Row", "Column"] },
+                                    "component": { "type": "string", "enum": ["Text", "Button", "Row", "Column", "SelectMenu", "TextInput", "Form"] },
                                     "text": { "type": "string" },
                                     "variant": { "type": "string" },
+                                    "label": { "type": "string", "description": "TextInputのラベル" },
+                                    "title": { "type": "string", "description": "Formのタイトル" },
                                     "action": {
                                         "type": "object",
                                         "properties": {
@@ -387,7 +389,28 @@ impl GatewayActions for DiscordGatewayActions {
                                     },
                                     "style": { "type": "string" },
                                     "emoji": { "type": "string" },
-                                    "children": { "type": "array", "items": { "type": "string" } }
+                                    "children": { "type": "array", "items": { "type": "string" } },
+                                    "options": {
+                                        "type": "array",
+                                        "description": "SelectMenuの選択肢",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string" },
+                                                "value": { "type": "string" },
+                                                "description": { "type": "string" },
+                                                "emoji": { "type": "string" },
+                                                "default": { "type": "boolean" }
+                                            },
+                                            "required": ["label", "value"]
+                                        }
+                                    },
+                                    "placeholder": { "type": "string" },
+                                    "min_values": { "type": "integer" },
+                                    "max_values": { "type": "integer" },
+                                    "min_length": { "type": "integer" },
+                                    "max_length": { "type": "integer" },
+                                    "required": { "type": "boolean" }
                                 },
                                 "required": ["id", "component"]
                             }
@@ -466,7 +489,7 @@ mod tests {
     // ---- definitions ----
 
     #[test]
-    fn test_definitions_returns_four_actions() {
+    fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
         assert_eq!(defs.len(), 15);
