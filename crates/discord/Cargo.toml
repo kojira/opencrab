@@ -18,6 +18,7 @@ opencrab-db = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
 chrono = { workspace = true }
+iana-time-zone = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

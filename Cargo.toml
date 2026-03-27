@@ -39,6 +39,7 @@ rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+iana-time-zone = "0.1"
 
 # Error handling
 anyhow = "1"
