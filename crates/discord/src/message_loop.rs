@@ -1114,7 +1114,9 @@ fn prepend_runtime_context_discord(
     session_theme: &str,
     message_id: &str,
 ) -> String {
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
+    let tz_name = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+    let now = format!("{now} ({tz_name})");
     format!(
         "[Context]\nCurrent date and time: {now}\nCurrent discussion topic: {session_theme}\nDiscord message_id: {message_id}\n\n{user_message}"
     )
