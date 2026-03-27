@@ -1,5 +1,6 @@
 //! A2UI DiscordRenderer — A2UIコンポーネントツリーをDiscordメッセージとして描画する。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -92,7 +93,14 @@ impl DiscordRenderer {
             components.iter().map(|c| c.id.as_str()).collect()
         };
 
+        // SelectMenu は Column の子として直接並ぶ場合と Row の子として並ぶ場合があり、
+        // 同じ id が両方に現れると二重に ActionRow 化して custom_id が重複する。
+        let mut emitted_select_menu_ids: HashSet<String> = HashSet::new();
+
         for child_id in child_ids {
+            if emitted_select_menu_ids.contains(child_id) {
+                continue;
+            }
             if let Some(comp) = components.iter().find(|c| c.id == child_id) {
                 match &comp.component_type {
                     A2uiComponentType::Row { children } => {
@@ -110,9 +118,13 @@ impl DiscordRenderer {
                         if has_select {
                             // SelectMenu: 1 ActionRow per SelectMenu (Discord limitation)
                             for cid in children {
+                                if emitted_select_menu_ids.contains(cid.as_str()) {
+                                    continue;
+                                }
                                 if let Some(select_menu) =
                                     self.build_select_menu(surface_id, cid, components)?
                                 {
+                                    emitted_select_menu_ids.insert(cid.clone());
                                     action_rows.push(CreateActionRow::SelectMenu(select_menu));
                                 }
                             }
@@ -129,6 +141,7 @@ impl DiscordRenderer {
                         if let Some(select_menu) =
                             self.build_select_menu(surface_id, child_id, components)?
                         {
+                            emitted_select_menu_ids.insert(child_id.to_string());
                             action_rows.push(CreateActionRow::SelectMenu(select_menu));
                         }
                     }
@@ -826,7 +839,7 @@ mod tests {
         let r = test_renderer();
         // 6 rows × 1 button each = 6 action rows → error
         let row_ids: Vec<String> = (0..6).map(|i| format!("r{}", i)).collect();
-        let mut children: Vec<&str> = row_ids.iter().map(|s| s.as_str()).collect();
+        let children: Vec<&str> = row_ids.iter().map(|s| s.as_str()).collect();
         let mut comps = vec![column(
             "root",
             children.clone(),
@@ -1023,6 +1036,29 @@ mod tests {
         assert!(json["components"].as_array().unwrap()[0]["options"]
             .as_array()
             .is_some());
+    }
+
+    /// Regression: SelectMenu が Row 内と Column 直下の両方に同じ id で列挙されても 1 ActionRow のみ。
+    #[test]
+    fn build_action_rows_select_menu_not_duplicated_when_row_and_column_child() {
+        let r = test_renderer();
+        let comps = vec![
+            column("root", vec!["t1", "row1", "sel1"]),
+            text("t1", "Pick one", None),
+            row("row1", vec!["sel1"]),
+            select_menu("sel1", vec![("A", "a"), ("B", "b")], "pick"),
+        ];
+        let rows = r.build_action_rows("interaction:uuid-1", &comps).unwrap();
+        assert_eq!(rows.len(), 1);
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        let opts = json["components"].as_array().unwrap()[0]["options"]
+            .as_array()
+            .unwrap();
+        assert_eq!(opts.len(), 2);
+        let cid = json["components"].as_array().unwrap()[0]["custom_id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(cid, "interaction:uuid-1:sel1:pick");
     }
 
     #[test]

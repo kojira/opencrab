@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use serenity::all::{CreateActionRow, CreateModal};
+
 use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
@@ -15,6 +17,17 @@ use crate::message::{
     Channel, IncomingMessage, MessageSource, MessageTarget, OutgoingMessage, Sender,
 };
 use crate::traits::Gateway;
+
+/// A2UI Form 用モーダル応答（ボタン押下時に `CreateInteractionResponse::Modal` で返す）。
+#[derive(Clone)]
+pub struct A2uiFormModalSpec {
+    pub modal_custom_id: String,
+    pub title: String,
+    pub components: Vec<CreateActionRow>,
+}
+
+/// `custom_id` とクリックユーザー ID を受け取り、モーダルを出すべきときだけ `Some` を返す。
+pub type A2uiFormModalResolver = Arc<dyn Fn(&str, &str) -> Option<A2uiFormModalSpec> + Send + Sync>;
 
 /// Discordのコンポーネントインタラクション（ボタンクリック等）のデータ。
 ///
@@ -82,10 +95,20 @@ pub struct DiscordGateway {
     /// A2UIコンポーネントインタラクション受信チャンネル
     interaction_rx: Mutex<mpsc::Receiver<ComponentInteractionData>>,
     interaction_tx: mpsc::Sender<ComponentInteractionData>,
+    /// Form トリガーボタン → モーダル応答（未設定時は従来どおり UpdateMessage ACK のみ）
+    form_modal_resolver: Option<A2uiFormModalResolver>,
 }
 
 impl DiscordGateway {
     pub fn new(token: impl Into<String>) -> Self {
+        Self::with_form_modal_resolver(token, None)
+    }
+
+    /// `form_modal_resolver` を渡すと、Form に紐づくボタン押下時にモーダルで応答する。
+    pub fn with_form_modal_resolver(
+        token: impl Into<String>,
+        form_modal_resolver: Option<A2uiFormModalResolver>,
+    ) -> Self {
         let token = token.into();
         let (tx, rx) = mpsc::channel(256);
         let (interaction_tx, interaction_rx) = mpsc::channel(64);
@@ -98,6 +121,7 @@ impl DiscordGateway {
             shard_manager: Mutex::new(None),
             interaction_rx: Mutex::new(interaction_rx),
             interaction_tx,
+            form_modal_resolver,
         }
     }
 
@@ -117,6 +141,7 @@ impl DiscordGateway {
             tx: self.tx.clone(),
             interaction_tx: self.interaction_tx.clone(),
             self_user_id: tokio::sync::OnceCell::new(),
+            form_modal_resolver: self.form_modal_resolver.clone(),
         };
 
         let mut client = Client::builder(&self.token, intents)
@@ -246,6 +271,7 @@ struct DiscordHandler {
     tx: mpsc::Sender<IncomingMessage>,
     interaction_tx: mpsc::Sender<ComponentInteractionData>,
     self_user_id: tokio::sync::OnceCell<u64>,
+    form_modal_resolver: Option<A2uiFormModalResolver>,
 }
 
 #[async_trait]
@@ -379,6 +405,28 @@ impl EventHandler for DiscordHandler {
                     }
                     _ => (InteractionKind::Button, None),
                 };
+
+                // Form トリガー: モーダルで応答（UpdateMessage だとモーダルが開けない）
+                if interaction_kind == InteractionKind::Button {
+                    if let Some(ref resolver) = self.form_modal_resolver {
+                        if let Some(spec) =
+                            resolver(&custom_id, &component.user.id.to_string())
+                        {
+                            let modal = CreateModal::new(
+                                spec.modal_custom_id.clone(),
+                                spec.title.clone(),
+                            )
+                            .components(spec.components.clone());
+                            let _ = component
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Modal(modal),
+                                )
+                                .await;
+                            return;
+                        }
+                    }
+                }
 
                 // ACK with deferred update (prevents "interaction failed" message)
                 let _ = component
@@ -531,6 +579,23 @@ impl Gateway for DiscordGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_modal_spec_builds_serenity_modal() {
+        let spec = A2uiFormModalSpec {
+            modal_custom_id: "interaction:uuid-1:modal:submit".into(),
+            title: "Form title".into(),
+            components: vec![CreateActionRow::InputText(
+                serenity::all::CreateInputText::new(
+                    serenity::all::InputTextStyle::Short,
+                    "Field",
+                    "field_id",
+                ),
+            )],
+        };
+        let _modal = CreateModal::new(&spec.modal_custom_id, &spec.title)
+            .components(spec.components.clone());
+    }
 
     #[test]
     fn test_split_message_short() {

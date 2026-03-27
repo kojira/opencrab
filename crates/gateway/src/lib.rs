@@ -16,7 +16,6 @@ pub use traits::{GatewayActionDef, GatewayActionResult, GatewayActions};
 pub use adapters::discord::DiscordGateway;
 
 #[cfg(feature = "discord")]
-pub use adapters::discord::ComponentInteractionData;
-
-#[cfg(feature = "discord")]
-pub use adapters::discord::InteractionKind;
+pub use adapters::discord::{
+    A2uiFormModalResolver, A2uiFormModalSpec, ComponentInteractionData, InteractionKind,
+};

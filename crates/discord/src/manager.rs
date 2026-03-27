@@ -44,7 +44,14 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         // Stop existing gateway for this agent if running.
         self.stop_agent_gateway(agent_id).await;
 
-        let gateway = Arc::new(DiscordGateway::new(token));
+        let pending_interaction_registry: PendingInteractionRegistry =
+            Arc::new(dashmap::DashMap::new());
+        let form_modal_resolver =
+            Some(crate::form_modal::form_modal_resolver(pending_interaction_registry.clone()));
+        let gateway = Arc::new(DiscordGateway::with_form_modal_resolver(
+            token,
+            form_modal_resolver,
+        ));
         gateway.start().await?;
 
         let workspace_path = self.state.workspace_base().replace("{agent_id}", agent_id);
@@ -52,8 +59,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
 
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         let completion_registry: CompletionRegistry = Arc::new(dashmap::DashMap::new());
-        let pending_interaction_registry: PendingInteractionRegistry =
-            Arc::new(dashmap::DashMap::new());
 
         // Create event channel for A2UI and other async events
         let (event_tx, event_rx) = crate::message_loop::create_event_channel();

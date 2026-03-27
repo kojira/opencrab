@@ -764,12 +764,6 @@ async fn handle_component_interaction(
                     pending.is_dm,
                     pending.surface_id.clone(),
                     pending.rendered_message.clone(),
-                    pending.form_data.as_ref().map(|fd| (
-                        fd.modal_custom_id.clone(),
-                        fd.title.clone(),
-                        fd.action_rows.clone(),
-                        fd.action.clone(),
-                    )),
                 ))
             }
             None => {
@@ -782,7 +776,7 @@ async fn handle_component_interaction(
         }
     };
 
-    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message, _form_data) =
+    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message) =
         match pending_data {
             Some(d) => d,
             None => return,
@@ -869,14 +863,7 @@ async fn handle_component_interaction(
         return;
     }
 
-    // Handle Button: check if this button should trigger a Modal (Form)
-    // Note: For modal triggering, we DON'T remove from registry yet - the modal submit will do that
-    // But we need to show the modal via a different mechanism. Since we already ACK'd
-    // with UpdateMessage in the gateway, we can't show a modal here.
-    // Instead, the Form trigger button approach needs the gateway to respond with Modal.
-    // This is a limitation - for now, Form buttons need special handling in the gateway layer.
-    // TODO: For full modal support, the gateway needs to detect form-trigger buttons
-    //       and respond with CreateInteractionResponse::Modal instead of UpdateMessage.
+    // Handle Button: Form オープンは gateway の interaction_create で Modal 応答済み（ここには来ない）。
 
     // Remove from registry
     let _ = registry.remove(&interaction_id);

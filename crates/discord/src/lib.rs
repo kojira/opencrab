@@ -3,6 +3,7 @@
 //! Provides Discord gateway actions, message processing loop, and per-agent bot management.
 //! All Discord-specific logic lives here, keeping the server crate Discord-free.
 
+pub mod form_modal;
 pub mod gateway_actions;
 pub mod manager;
 pub mod message_loop;
@@ -45,7 +46,7 @@ pub struct PendingInteraction {
 
 /// Form/Modal表示に必要なデータ
 pub struct FormData {
-    /// Modal custom_id（形式: interaction:{uuid}:{form_id}:{action_name}）
+    /// Modal custom_id（形式: `interaction:{uuid}:modal:{form_action_name}`）
     pub modal_custom_id: String,
     /// Modalタイトル
     pub title: String,
