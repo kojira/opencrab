@@ -729,14 +729,15 @@ async fn handle_component_interaction(
     renderer_http: Arc<serenity::http::Http>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
 ) {
-    // Parse custom_id format: "interaction:{uuid}:{action_name}"
-    let parts: Vec<&str> = data.custom_id.splitn(3, ':').collect();
-    if parts.len() < 3 || parts[0] != "interaction" {
+    // Parse custom_id format: "interaction:{uuid}:{button_id}:{action_name}"
+    let parts: Vec<&str> = data.custom_id.splitn(4, ':').collect();
+    if parts.len() < 4 || parts[0] != "interaction" {
         warn!(custom_id = %data.custom_id, "Invalid A2UI custom_id format");
         return;
     }
     let interaction_id = parts[1].to_string();
-    let action_name = parts[2].to_string();
+    let button_id = parts[2].to_string();
+    let action_name = parts[3].to_string();
 
     // Look up in registry, capture fields, then drop the ref
     let pending_data = {
@@ -806,7 +807,7 @@ async fn handle_component_interaction(
         channel_id_str,
         response: opencrab_core::a2ui::A2uiUserAction {
             surface_id,
-            component_id: data.custom_id.clone(),
+            component_id: button_id,
             action_name,
             context: None,
             responder_id: data.user_id,

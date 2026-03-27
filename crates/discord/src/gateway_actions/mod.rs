@@ -360,7 +360,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "send_ui".to_string(),
-                description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する".to_string(),
+                description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する。\n\n使用例:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"選んでください\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"btn1\", \"btn2\"]}, {\"id\": \"btn1\", \"component\": \"Button\", \"text\": \"選択A\", \"variant\": \"primary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"A\"}}}, {\"id\": \"btn2\", \"component\": \"Button\", \"text\": \"選択B\", \"variant\": \"secondary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"B\"}}}]}\n\n注意: Rowのchildrenで参照するButtonはトップレベルのcomponents配列に定義する。各Buttonには一意のidとaction（name + context）を設定する。同じaction.nameでもボタンごとにcontextを変えることで区別できる。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
