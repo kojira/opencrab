@@ -129,6 +129,9 @@ impl DiscordGatewayActions {
         if let Some(ref registry) = self.pending_interaction_registry {
             let channel_id_num: u64 = channel_id.parse().unwrap_or(0);
 
+            // Build Form data if a Form component exists
+            let form_data = self.build_form_data(&surface_id, &interaction_id, &components);
+
             let pending = crate::PendingInteraction {
                 session_id: args
                     .get("__session_id")
@@ -150,6 +153,7 @@ impl DiscordGatewayActions {
                 timeout_secs,
                 rendered_message: rendered.clone(),
                 event_tx: self.event_tx.clone().unwrap(),
+                form_data,
             };
             registry.insert(interaction_id.clone(), pending);
 
@@ -207,5 +211,45 @@ impl DiscordGatewayActions {
             })),
             error: None,
         }
+    }
+
+    /// FormコンポーネントからModal表示用のFormDataを構築する。
+    fn build_form_data(
+        &self,
+        surface_id: &str,
+        _interaction_id: &str,
+        components: &[A2uiComponent],
+    ) -> Option<crate::FormData> {
+        // Find the first Form component
+        let form = components.iter().find(|c| {
+            matches!(&c.component_type, A2uiComponentType::Form { .. })
+        })?;
+
+        let (title, _children, action) = match &form.component_type {
+            A2uiComponentType::Form {
+                title,
+                children,
+                action,
+            } => (title, children, action),
+            _ => return None,
+        };
+
+        let renderer = DiscordRenderer::new(self.http.clone());
+        let action_rows = renderer.build_modal_action_rows(form, components).ok()?;
+
+        let uuid_part = surface_id
+            .strip_prefix("interaction:")
+            .unwrap_or(surface_id);
+        let modal_custom_id = format!(
+            "interaction:{}:{}:{}",
+            uuid_part, form.id, action.name
+        );
+
+        Some(crate::FormData {
+            modal_custom_id,
+            title: title.clone(),
+            action_rows,
+            action: action.clone(),
+        })
     }
 }

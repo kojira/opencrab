@@ -34,6 +34,20 @@ pub struct ComponentInteractionData {
     pub guild_id: String,
     /// メッセージID
     pub message_id: String,
+    /// セレクトメニューの選択値（StringSelect時のみ）
+    pub selected_values: Option<Vec<String>>,
+    /// モーダルSubmitのフィールド値（custom_id → value）
+    pub modal_values: Option<Vec<(String, String)>>,
+    /// インタラクション種別
+    pub interaction_kind: InteractionKind,
+}
+
+/// コンポーネントインタラクションの種別
+#[derive(Debug, Clone, PartialEq)]
+pub enum InteractionKind {
+    Button,
+    SelectMenu,
+    ModalSubmit,
 }
 
 /// Discordゲートウェイ
@@ -330,56 +344,130 @@ impl EventHandler for DiscordHandler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        // Only handle ComponentInteraction (button clicks)
-        let component = match interaction {
-            Interaction::Component(c) => c,
+        match interaction {
+            Interaction::Component(component) => {
+                let custom_id = component.data.custom_id.clone();
+
+                // Only handle our A2UI interactions (format: "interaction:{uuid}:{action}")
+                if !custom_id.starts_with("interaction:") {
+                    return;
+                }
+
+                debug!(
+                    custom_id = %custom_id,
+                    user = %component.user.name,
+                    "Discord component interaction received"
+                );
+
+                let guild_id = component
+                    .guild_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+                let channel_id = component.channel_id.to_string();
+                let message_id = component.message.id.to_string();
+                let user_id = component.user.id.to_string();
+                let user_name = component.user.name.clone();
+
+                // Detect interaction kind and extract select values
+                use serenity::all::ComponentInteractionDataKind;
+                let (interaction_kind, selected_values) = match &component.data.kind {
+                    ComponentInteractionDataKind::StringSelect { values } => {
+                        (InteractionKind::SelectMenu, Some(values.clone()))
+                    }
+                    ComponentInteractionDataKind::Button => {
+                        (InteractionKind::Button, None)
+                    }
+                    _ => (InteractionKind::Button, None),
+                };
+
+                // ACK with deferred update (prevents "interaction failed" message)
+                let _ = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new(),
+                        ),
+                    )
+                    .await;
+
+                let data = ComponentInteractionData {
+                    custom_id,
+                    user_id,
+                    user_name,
+                    channel_id,
+                    guild_id,
+                    message_id,
+                    selected_values,
+                    modal_values: None,
+                    interaction_kind,
+                };
+
+                if let Err(e) = self.interaction_tx.send(data).await {
+                    warn!("Failed to forward component interaction: {e}");
+                }
+            }
+            Interaction::Modal(modal) => {
+                let custom_id = modal.data.custom_id.clone();
+
+                // Only handle our A2UI modals
+                if !custom_id.starts_with("interaction:") {
+                    return;
+                }
+
+                debug!(
+                    custom_id = %custom_id,
+                    user = %modal.user.name,
+                    "Discord modal submit received"
+                );
+
+                let guild_id = modal
+                    .guild_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+                let channel_id = modal.channel_id.to_string();
+                let user_id = modal.user.id.to_string();
+                let user_name = modal.user.name.clone();
+
+                // Extract modal field values
+                let mut modal_values = Vec::new();
+                for row in &modal.data.components {
+                    for comp in &row.components {
+                        if let serenity::all::ActionRowComponent::InputText(input) = comp {
+                            modal_values.push((
+                                input.custom_id.clone(),
+                                input.value.clone().unwrap_or_default(),
+                            ));
+                        }
+                    }
+                }
+
+                // ACK the modal submit
+                let _ = modal
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::UpdateMessage(
+                            CreateInteractionResponseMessage::new(),
+                        ),
+                    )
+                    .await;
+
+                let data = ComponentInteractionData {
+                    custom_id,
+                    user_id,
+                    user_name,
+                    channel_id,
+                    guild_id,
+                    message_id: String::new(), // Modal submits don't have a message_id
+                    selected_values: None,
+                    modal_values: Some(modal_values),
+                    interaction_kind: InteractionKind::ModalSubmit,
+                };
+
+                if let Err(e) = self.interaction_tx.send(data).await {
+                    warn!("Failed to forward modal submit: {e}");
+                }
+            }
             _ => return,
-        };
-
-        let custom_id = component.data.custom_id.clone();
-
-        // Only handle our A2UI interactions (format: "interaction:{uuid}:{action}")
-        if !custom_id.starts_with("interaction:") {
-            return;
-        }
-
-        debug!(
-            custom_id = %custom_id,
-            user = %component.user.name,
-            "Discord component interaction received"
-        );
-
-        let guild_id = component
-            .guild_id
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        let channel_id = component.channel_id.to_string();
-        let message_id = component.message.id.to_string();
-        let user_id = component.user.id.to_string();
-        let user_name = component.user.name.clone();
-
-        // ACK with deferred update (prevents "interaction failed" message)
-        let _ = component
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::UpdateMessage(
-                    CreateInteractionResponseMessage::new(),
-                ),
-            )
-            .await;
-
-        // Forward to the interaction channel for processing by the discord crate
-        let data = ComponentInteractionData {
-            custom_id,
-            user_id,
-            user_name,
-            channel_id,
-            guild_id,
-            message_id,
-        };
-
-        if let Err(e) = self.interaction_tx.send(data).await {
-            warn!("Failed to forward component interaction: {e}");
         }
     }
 

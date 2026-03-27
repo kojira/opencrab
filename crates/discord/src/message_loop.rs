@@ -719,7 +719,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     }
 }
 
-/// Discordコンポーネントインタラクション（ボタンクリック）を処理する。
+/// Discordコンポーネントインタラクション（ボタンクリック・セレクトメニュー・モーダルSubmit）を処理する。
 ///
 /// PendingInteractionRegistryから該当するインタラクションを検索し、
 /// LoopEvent::InteractionResponseとしてイベントループに送信する。
@@ -729,14 +729,14 @@ async fn handle_component_interaction(
     renderer_http: Arc<serenity::http::Http>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
 ) {
-    // Parse custom_id format: "interaction:{uuid}:{button_id}:{action_name}"
+    // Parse custom_id format: "interaction:{uuid}:{component_id}:{action_name}"
     let parts: Vec<&str> = data.custom_id.splitn(4, ':').collect();
     if parts.len() < 4 || parts[0] != "interaction" {
         warn!(custom_id = %data.custom_id, "Invalid A2UI custom_id format");
         return;
     }
     let interaction_id = parts[1].to_string();
-    let button_id = parts[2].to_string();
+    let component_id = parts[2].to_string();
     let action_name = parts[3].to_string();
 
     // Look up in registry, capture fields, then drop the ref
@@ -764,6 +764,12 @@ async fn handle_component_interaction(
                     pending.is_dm,
                     pending.surface_id.clone(),
                     pending.rendered_message.clone(),
+                    pending.form_data.as_ref().map(|fd| (
+                        fd.modal_custom_id.clone(),
+                        fd.title.clone(),
+                        fd.action_rows.clone(),
+                        fd.action.clone(),
+                    )),
                 ))
             }
             None => {
@@ -776,11 +782,101 @@ async fn handle_component_interaction(
         }
     };
 
-    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message) =
+    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message, _form_data) =
         match pending_data {
             Some(d) => d,
             None => return,
         };
+
+    // Handle ModalSubmit: extract field values and merge into context
+    if data.interaction_kind == opencrab_gateway::InteractionKind::ModalSubmit {
+        // Remove from registry
+        let _ = registry.remove(&interaction_id);
+
+        // Build context from modal values
+        let mut context = serde_json::Map::new();
+        if let Some(modal_values) = &data.modal_values {
+            for (field_id, value) in modal_values {
+                context.insert(field_id.clone(), serde_json::Value::String(value.clone()));
+            }
+        }
+
+        let _ = event_tx.send(LoopEvent::InteractionResponse {
+            interaction_id,
+            session_id,
+            agent_id,
+            channel_id,
+            channel_id_str,
+            response: opencrab_core::a2ui::A2uiUserAction {
+                surface_id,
+                component_id,
+                action_name,
+                context: Some(serde_json::Value::Object(context)),
+                responder_id: data.user_id,
+            },
+            is_dm,
+        });
+        return;
+    }
+
+    // Handle SelectMenu: merge selected_values into context
+    if data.interaction_kind == opencrab_gateway::InteractionKind::SelectMenu {
+        // Remove from registry
+        let _ = registry.remove(&interaction_id);
+
+        // Disable the select menu
+        let renderer = crate::renderer::DiscordRenderer::new(renderer_http);
+        let _ = renderer
+            .update_on_response(
+                &rendered_message,
+                &opencrab_core::a2ui::UserActionResponse {
+                    action_name: action_name.clone(),
+                    context: None,
+                    user_id: data.user_id.clone(),
+                },
+            )
+            .await;
+
+        // Build context with selected_values
+        let mut context = serde_json::Map::new();
+        if let Some(values) = &data.selected_values {
+            context.insert(
+                "selected_values".to_string(),
+                serde_json::Value::Array(
+                    values
+                        .iter()
+                        .map(|v| serde_json::Value::String(v.clone()))
+                        .collect(),
+                ),
+            );
+        }
+
+        let _ = event_tx.send(LoopEvent::InteractionResponse {
+            interaction_id,
+            session_id,
+            agent_id,
+            channel_id,
+            channel_id_str,
+            response: opencrab_core::a2ui::A2uiUserAction {
+                surface_id,
+                component_id,
+                action_name,
+                context: Some(serde_json::Value::Object(context)),
+                responder_id: data.user_id,
+            },
+            is_dm,
+        });
+        return;
+    }
+
+    // Handle Button: check if this button should trigger a Modal (Form)
+    // Note: For modal triggering, we DON'T remove from registry yet - the modal submit will do that
+    // But we need to show the modal via a different mechanism. Since we already ACK'd
+    // with UpdateMessage in the gateway, we can't show a modal here.
+    // Instead, the Form trigger button approach needs the gateway to respond with Modal.
+    // This is a limitation - for now, Form buttons need special handling in the gateway layer.
+    // TODO: For full modal support, the gateway needs to detect form-trigger buttons
+    //       and respond with CreateInteractionResponse::Modal instead of UpdateMessage.
 
     // Remove from registry
     let _ = registry.remove(&interaction_id);
@@ -807,7 +903,7 @@ async fn handle_component_interaction(
         channel_id_str,
         response: opencrab_core::a2ui::A2uiUserAction {
             surface_id,
-            component_id: button_id,
+            component_id,
             action_name,
             context: None,
             responder_id: data.user_id,

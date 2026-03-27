@@ -5,7 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serenity::all::{
     ActionRowComponent, ButtonKind, ButtonStyle, ChannelId, CreateActionRow, CreateButton,
-    CreateMessage, EditMessage, Http, MessageId, ReactionType,
+    CreateInputText, CreateMessage, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, EditMessage, Http, InputTextStyle, MessageId, ReactionType,
 };
 use tracing::debug;
 
@@ -93,12 +94,45 @@ impl DiscordRenderer {
 
         for child_id in child_ids {
             if let Some(comp) = components.iter().find(|c| c.id == child_id) {
-                if let A2uiComponentType::Row { children } = &comp.component_type {
-                    let buttons = self.build_buttons(surface_id, children, components)?;
-                    // Discord制限: 1つのActionRowに最大5ボタン
-                    for chunk in buttons.chunks(5) {
-                        action_rows.push(CreateActionRow::Buttons(chunk.to_vec()));
+                match &comp.component_type {
+                    A2uiComponentType::Row { children } => {
+                        // Check if Row contains a SelectMenu
+                        let has_select = children.iter().any(|cid| {
+                            components.iter().any(|c| {
+                                c.id == *cid
+                                    && matches!(
+                                        &c.component_type,
+                                        A2uiComponentType::SelectMenu { .. }
+                                    )
+                            })
+                        });
+
+                        if has_select {
+                            // SelectMenu: 1 ActionRow per SelectMenu (Discord limitation)
+                            for cid in children {
+                                if let Some(select_menu) =
+                                    self.build_select_menu(surface_id, cid, components)?
+                                {
+                                    action_rows.push(CreateActionRow::SelectMenu(select_menu));
+                                }
+                            }
+                        } else {
+                            let buttons = self.build_buttons(surface_id, children, components)?;
+                            // Discord制限: 1つのActionRowに最大5ボタン
+                            for chunk in buttons.chunks(5) {
+                                action_rows.push(CreateActionRow::Buttons(chunk.to_vec()));
+                            }
+                        }
                     }
+                    A2uiComponentType::SelectMenu { .. } => {
+                        // Direct SelectMenu child of Column
+                        if let Some(select_menu) =
+                            self.build_select_menu(surface_id, child_id, components)?
+                        {
+                            action_rows.push(CreateActionRow::SelectMenu(select_menu));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -181,6 +215,150 @@ impl DiscordRenderer {
         Ok(buttons)
     }
 
+    /// A2UI SelectMenuコンポーネントからCreateSelectMenuを構築する。
+    ///
+    /// custom_id形式: `interaction:{uuid_part}:{component_id}:{action_name}`
+    fn build_select_menu(
+        &self,
+        surface_id: &str,
+        component_id: &str,
+        components: &[A2uiComponent],
+    ) -> Result<Option<CreateSelectMenu>, RenderError> {
+        let comp = components
+            .iter()
+            .find(|c| c.id == component_id)
+            .ok_or_else(|| RenderError::ComponentNotFound(component_id.to_string()))?;
+
+        if let A2uiComponentType::SelectMenu {
+            options,
+            placeholder,
+            min_values,
+            max_values,
+            action,
+        } = &comp.component_type
+        {
+            let uuid_part = surface_id
+                .strip_prefix("interaction:")
+                .unwrap_or(surface_id);
+
+            let custom_id = format!(
+                "interaction:{}:{}:{}",
+                uuid_part, component_id, action.name
+            );
+            let custom_id = if custom_id.len() > 100 {
+                custom_id[..100].to_string()
+            } else {
+                custom_id
+            };
+
+            let menu_options: Vec<CreateSelectMenuOption> = options
+                .iter()
+                .map(|opt| {
+                    let mut menu_opt =
+                        CreateSelectMenuOption::new(&opt.label, &opt.value);
+                    if let Some(desc) = &opt.description {
+                        menu_opt = menu_opt.description(desc);
+                    }
+                    if let Some(emoji_str) = &opt.emoji {
+                        menu_opt =
+                            menu_opt.emoji(ReactionType::Unicode(emoji_str.clone()));
+                    }
+                    if opt.default {
+                        menu_opt = menu_opt.default_selection(true);
+                    }
+                    menu_opt
+                })
+                .collect();
+
+            let mut menu = CreateSelectMenu::new(
+                &custom_id,
+                CreateSelectMenuKind::String {
+                    options: menu_options,
+                },
+            );
+
+            if let Some(ph) = placeholder {
+                menu = menu.placeholder(ph);
+            }
+            if let Some(min) = min_values {
+                menu = menu.min_values(*min as u8);
+            }
+            if let Some(max) = max_values {
+                menu = menu.max_values(*max as u8);
+            }
+
+            Ok(Some(menu))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// A2UI FormコンポーネントからModal用のActionRow（InputText）リストを構築する。
+    ///
+    /// Form内のTextInputコンポーネントをCreateInputTextに変換し、
+    /// 各InputTextを個別のActionRowに格納する（Discordの制約）。
+    pub fn build_modal_action_rows(
+        &self,
+        form: &A2uiComponent,
+        components: &[A2uiComponent],
+    ) -> Result<Vec<CreateActionRow>, RenderError> {
+        let (_title, children, _action) = match &form.component_type {
+            A2uiComponentType::Form {
+                title,
+                children,
+                action,
+            } => (title, children, action),
+            _ => {
+                return Err(RenderError::InvalidTree(
+                    "Expected Form component".to_string(),
+                ))
+            }
+        };
+
+        let mut rows = Vec::new();
+        for child_id in children {
+            let comp = components
+                .iter()
+                .find(|c| c.id == *child_id)
+                .ok_or_else(|| RenderError::ComponentNotFound(child_id.clone()))?;
+
+            if let A2uiComponentType::TextInput {
+                label,
+                placeholder,
+                min_length,
+                max_length,
+                required,
+                style,
+            } = &comp.component_type
+            {
+                let input_style = match style.as_deref() {
+                    Some("paragraph") => InputTextStyle::Paragraph,
+                    _ => InputTextStyle::Short,
+                };
+
+                let mut input =
+                    CreateInputText::new(input_style, label, &comp.id);
+                input = input.required(*required);
+                if let Some(ph) = placeholder {
+                    input = input.placeholder(ph);
+                }
+                if let Some(min) = min_length {
+                    input = input.min_length(*min as u16);
+                }
+                if let Some(max) = max_length {
+                    input = input.max_length(*max as u16);
+                }
+                rows.push(CreateActionRow::InputText(input));
+            }
+        }
+
+        if rows.len() > 5 {
+            return Err(RenderError::TooManyActionRows(rows.len()));
+        }
+
+        Ok(rows)
+    }
+
     /// メッセージのボタンを全て無効化して編集する内部ヘルパー。
     ///
     /// 元メッセージを取得し、全ボタンを disabled=true で再構築して編集する。
@@ -212,28 +390,61 @@ impl DiscordRenderer {
 
         let mut edit = EditMessage::new();
 
-        // 全ボタンを無効化したActionRowを再構築
+        // 全ボタン・セレクトメニューを無効化したActionRowを再構築
         let mut new_rows = Vec::new();
         for row in &original.components {
             let mut new_buttons = Vec::new();
+            let mut select_menu = None;
             for comp in &row.components {
-                if let ActionRowComponent::Button(btn) = comp {
-                    if let ButtonKind::NonLink { custom_id, style } = &btn.data {
-                        let mut new_btn = CreateButton::new(custom_id)
-                            .style(*style)
-                            .disabled(true);
-                        if let Some(label) = &btn.label {
-                            new_btn = new_btn.label(label);
+                match comp {
+                    ActionRowComponent::Button(btn) => {
+                        if let ButtonKind::NonLink { custom_id, style } = &btn.data {
+                            let mut new_btn = CreateButton::new(custom_id)
+                                .style(*style)
+                                .disabled(true);
+                            if let Some(label) = &btn.label {
+                                new_btn = new_btn.label(label);
+                            }
+                            if let Some(emoji) = &btn.emoji {
+                                let emoji: ReactionType = emoji.clone();
+                                new_btn = new_btn.emoji(emoji);
+                            }
+                            new_buttons.push(new_btn);
                         }
-                        if let Some(emoji) = &btn.emoji {
-                            let emoji: ReactionType = emoji.clone();
-                            new_btn = new_btn.emoji(emoji);
-                        }
-                        new_buttons.push(new_btn);
                     }
+                    ActionRowComponent::SelectMenu(menu) => {
+                        if let Some(ref cid) = menu.custom_id {
+                            let options: Vec<CreateSelectMenuOption> = menu
+                                .options
+                                .iter()
+                                .map(|opt| {
+                                    let mut o = CreateSelectMenuOption::new(
+                                        &opt.label,
+                                        &opt.value,
+                                    );
+                                    if let Some(ref desc) = opt.description {
+                                        o = o.description(desc);
+                                    }
+                                    o
+                                })
+                                .collect();
+                            let mut new_menu = CreateSelectMenu::new(
+                                cid,
+                                CreateSelectMenuKind::String { options },
+                            )
+                            .disabled(true);
+                            if let Some(ref ph) = menu.placeholder {
+                                new_menu = new_menu.placeholder(ph);
+                            }
+                            select_menu = Some(new_menu);
+                        }
+                    }
+                    _ => {}
                 }
             }
-            if !new_buttons.is_empty() {
+            if let Some(menu) = select_menu {
+                new_rows.push(CreateActionRow::SelectMenu(menu));
+            } else if !new_buttons.is_empty() {
                 new_rows.push(CreateActionRow::Buttons(new_buttons));
             }
         }
@@ -631,5 +842,302 @@ mod tests {
             result.unwrap_err(),
             RenderError::TooManyActionRows(6)
         ));
+    }
+
+    // ── Phase 2: SelectMenu テスト ─────────────────────────
+
+    fn select_menu(
+        id: &str,
+        options: Vec<(&str, &str)>,
+        action_name: &str,
+    ) -> A2uiComponent {
+        A2uiComponent {
+            id: id.into(),
+            component_type: A2uiComponentType::SelectMenu {
+                options: options
+                    .into_iter()
+                    .map(|(label, value)| opencrab_core::a2ui::SelectOption {
+                        label: label.into(),
+                        value: value.into(),
+                        description: None,
+                        emoji: None,
+                        default: false,
+                    })
+                    .collect(),
+                placeholder: Some("Choose...".into()),
+                min_values: None,
+                max_values: None,
+                action: A2uiAction {
+                    name: action_name.into(),
+                    context: None,
+                },
+            },
+        }
+    }
+
+    fn text_input(
+        id: &str,
+        label: &str,
+        style: Option<&str>,
+        required: bool,
+    ) -> A2uiComponent {
+        A2uiComponent {
+            id: id.into(),
+            component_type: A2uiComponentType::TextInput {
+                label: label.into(),
+                placeholder: Some("Enter text...".into()),
+                min_length: None,
+                max_length: None,
+                required,
+                style: style.map(String::from),
+            },
+        }
+    }
+
+    fn form(id: &str, title: &str, children: Vec<&str>, action_name: &str) -> A2uiComponent {
+        A2uiComponent {
+            id: id.into(),
+            component_type: A2uiComponentType::Form {
+                title: title.into(),
+                children: children.into_iter().map(String::from).collect(),
+                action: A2uiAction {
+                    name: action_name.into(),
+                    context: None,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn build_select_menu_basic() {
+        let r = test_renderer();
+        let comps = vec![select_menu(
+            "sel1",
+            vec![("Option A", "a"), ("Option B", "b")],
+            "choose",
+        )];
+        let result = r
+            .build_select_menu("interaction:abc-123", "sel1", &comps)
+            .unwrap();
+        assert!(result.is_some());
+        let menu = result.unwrap();
+        let json = serde_json::to_value(&menu).unwrap();
+        assert_eq!(
+            json["custom_id"].as_str().unwrap(),
+            "interaction:abc-123:sel1:choose"
+        );
+        assert_eq!(json["placeholder"].as_str().unwrap(), "Choose...");
+        let options = json["options"].as_array().unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["label"].as_str().unwrap(), "Option A");
+        assert_eq!(options[0]["value"].as_str().unwrap(), "a");
+    }
+
+    #[test]
+    fn build_select_menu_custom_id_truncated() {
+        let r = test_renderer();
+        let long_action = "x".repeat(120);
+        let comps = vec![A2uiComponent {
+            id: "sel1".into(),
+            component_type: A2uiComponentType::SelectMenu {
+                options: vec![opencrab_core::a2ui::SelectOption {
+                    label: "A".into(),
+                    value: "a".into(),
+                    description: None,
+                    emoji: None,
+                    default: false,
+                }],
+                placeholder: None,
+                min_values: None,
+                max_values: None,
+                action: A2uiAction {
+                    name: long_action,
+                    context: None,
+                },
+            },
+        }];
+        let result = r
+            .build_select_menu("interaction:uuid", "sel1", &comps)
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        let cid = json["custom_id"].as_str().unwrap();
+        assert!(cid.len() <= 100);
+    }
+
+    #[test]
+    fn build_select_menu_with_options_details() {
+        let r = test_renderer();
+        let comps = vec![A2uiComponent {
+            id: "sel1".into(),
+            component_type: A2uiComponentType::SelectMenu {
+                options: vec![
+                    opencrab_core::a2ui::SelectOption {
+                        label: "Alpha".into(),
+                        value: "alpha".into(),
+                        description: Some("First option".into()),
+                        emoji: Some("🅰️".into()),
+                        default: true,
+                    },
+                    opencrab_core::a2ui::SelectOption {
+                        label: "Beta".into(),
+                        value: "beta".into(),
+                        description: None,
+                        emoji: None,
+                        default: false,
+                    },
+                ],
+                placeholder: Some("Pick one".into()),
+                min_values: Some(1),
+                max_values: Some(2),
+                action: A2uiAction {
+                    name: "pick".into(),
+                    context: None,
+                },
+            },
+        }];
+        let result = r
+            .build_select_menu("interaction:uuid", "sel1", &comps)
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["min_values"].as_u64().unwrap(), 1);
+        assert_eq!(json["max_values"].as_u64().unwrap(), 2);
+        let opts = json["options"].as_array().unwrap();
+        assert_eq!(opts[0]["description"].as_str().unwrap(), "First option");
+        assert!(opts[0]["default"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn build_action_rows_with_select_menu() {
+        let r = test_renderer();
+        let comps = vec![
+            column("root", vec!["t1", "sel1"]),
+            text("t1", "Select something", None),
+            select_menu("sel1", vec![("A", "a"), ("B", "b")], "select"),
+        ];
+        let rows = r.build_action_rows("interaction:uuid", &comps).unwrap();
+        assert_eq!(rows.len(), 1);
+        // Verify it's a SelectMenu row
+        let json = serde_json::to_value(&rows[0]).unwrap();
+        assert!(json["components"].as_array().unwrap()[0]["options"]
+            .as_array()
+            .is_some());
+    }
+
+    #[test]
+    fn build_select_menu_not_found_returns_error() {
+        let r = test_renderer();
+        let comps = vec![];
+        let result = r.build_select_menu("interaction:x", "missing", &comps);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RenderError::ComponentNotFound(ref id) if id == "missing"
+        ));
+    }
+
+    // ── Phase 2: Form/Modal テスト ─────────────────────────
+
+    #[test]
+    fn build_modal_action_rows_basic() {
+        let r = test_renderer();
+        let comps = vec![
+            form("form1", "Test Form", vec!["input1", "input2"], "submit"),
+            text_input("input1", "Name", Some("short"), true),
+            text_input("input2", "Description", Some("paragraph"), false),
+        ];
+        let form_comp = &comps[0];
+        let rows = r.build_modal_action_rows(form_comp, &comps).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn build_modal_action_rows_too_many_inputs() {
+        let r = test_renderer();
+        let input_ids: Vec<String> = (0..6).map(|i| format!("input{}", i)).collect();
+        let mut comps = vec![form(
+            "form1",
+            "Big Form",
+            input_ids.iter().map(|s| s.as_str()).collect(),
+            "submit",
+        )];
+        for id in &input_ids {
+            comps.push(text_input(id, "Field", Some("short"), true));
+        }
+        let result = r.build_modal_action_rows(&comps[0], &comps);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RenderError::TooManyActionRows(6)
+        ));
+    }
+
+    #[test]
+    fn build_modal_action_rows_missing_child() {
+        let r = test_renderer();
+        let comps = vec![form(
+            "form1",
+            "Test",
+            vec!["missing_input"],
+            "submit",
+        )];
+        let result = r.build_modal_action_rows(&comps[0], &comps);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            RenderError::ComponentNotFound(ref id) if id == "missing_input"
+        ));
+    }
+
+    // ── Phase 2: A2UI Serialization テスト ─────────────────
+
+    #[test]
+    fn a2ui_select_menu_serialization_roundtrip() {
+        let comp = select_menu("sel1", vec![("A", "a"), ("B", "b")], "choose");
+        let json = serde_json::to_string(&comp).unwrap();
+        let parsed: A2uiComponent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed.component_type,
+            A2uiComponentType::SelectMenu { .. }
+        ));
+        assert_eq!(parsed.id, "sel1");
+    }
+
+    #[test]
+    fn a2ui_form_serialization_roundtrip() {
+        let comp = form("form1", "My Form", vec!["input1"], "submit");
+        let json = serde_json::to_string(&comp).unwrap();
+        let parsed: A2uiComponent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed.component_type,
+            A2uiComponentType::Form { .. }
+        ));
+        if let A2uiComponentType::Form {
+            title, children, ..
+        } = &parsed.component_type
+        {
+            assert_eq!(title, "My Form");
+            assert_eq!(children, &["input1"]);
+        }
+    }
+
+    #[test]
+    fn a2ui_text_input_serialization_roundtrip() {
+        let comp = text_input("ti1", "Enter name", Some("paragraph"), false);
+        let json = serde_json::to_string(&comp).unwrap();
+        let parsed: A2uiComponent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed.component_type,
+            A2uiComponentType::TextInput { .. }
+        ));
+        if let A2uiComponentType::TextInput {
+            label, required, style, ..
+        } = &parsed.component_type
+        {
+            assert_eq!(label, "Enter name");
+            assert!(!required);
+            assert_eq!(style.as_deref(), Some("paragraph"));
+        }
     }
 }

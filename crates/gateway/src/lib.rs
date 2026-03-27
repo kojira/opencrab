@@ -17,3 +17,6 @@ pub use adapters::discord::DiscordGateway;
 
 #[cfg(feature = "discord")]
 pub use adapters::discord::ComponentInteractionData;
+
+#[cfg(feature = "discord")]
+pub use adapters::discord::InteractionKind;

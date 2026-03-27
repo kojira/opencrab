@@ -39,6 +39,20 @@ pub struct PendingInteraction {
     pub timeout_secs: u64,
     pub rendered_message: opencrab_core::a2ui::RenderedMessage,
     pub event_tx: tokio::sync::mpsc::UnboundedSender<message_loop::LoopEvent>,
+    /// Formコンポーネント情報（モーダル用）。Button押下時にModalを表示するために保持。
+    pub form_data: Option<FormData>,
+}
+
+/// Form/Modal表示に必要なデータ
+pub struct FormData {
+    /// Modal custom_id（形式: interaction:{uuid}:{form_id}:{action_name}）
+    pub modal_custom_id: String,
+    /// Modalタイトル
+    pub title: String,
+    /// Modal用ActionRows（CreateInputTextの配列）
+    pub action_rows: Vec<serenity::all::CreateActionRow>,
+    /// Submit時のアクション
+    pub action: opencrab_core::a2ui::A2uiAction,
 }
 
 /// Trait abstracting the server-side agent processing pipeline.
