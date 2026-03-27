@@ -240,10 +240,7 @@ impl DiscordGatewayActions {
         let uuid_part = surface_id
             .strip_prefix("interaction:")
             .unwrap_or(surface_id);
-        let modal_custom_id = format!(
-            "interaction:{}:{}:{}",
-            uuid_part, form.id, action.name
-        );
+        let modal_custom_id = format!("interaction:{}:modal:{}", uuid_part, action.name);
 
         Some(crate::FormData {
             modal_custom_id,
