@@ -112,7 +112,7 @@ impl DiscordRenderer {
 
     /// ボタンコンポーネントからCreateButtonを構築する。
     ///
-    /// custom_id形式: `interaction:{uuid_part}:{action_name}`
+    /// custom_id形式: `interaction:{uuid_part}:{button_id}:{action_name}`
     /// - ラベルは80文字で切り詰め
     /// - custom_idは100文字で切り詰め
     fn build_buttons(
@@ -142,8 +142,8 @@ impl DiscordRenderer {
                 disabled,
             } = &comp.component_type
             {
-                // custom_id: interaction:{uuid}:{action_name}
-                let custom_id = format!("interaction:{}:{}", uuid_part, action.name);
+                // custom_id: interaction:{uuid}:{button_id}:{action_name}
+                let custom_id = format!("interaction:{}:{}:{}", uuid_part, btn_id, action.name);
                 // Discord制限: custom_idは100文字まで
                 let custom_id = if custom_id.len() > 100 {
                     custom_id[..100].to_string()
