@@ -47,6 +47,7 @@ impl Action for BrowseMemoryIndexAction {
             .map(|n| {
                 json!({
                     "node_id": n.id,
+                    "short_id": n.short_id,
                     "parent_id": n.parent_id,
                     "node_type": n.node_type,
                     "title": n.title,

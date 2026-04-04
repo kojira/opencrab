@@ -219,8 +219,14 @@ pub fn build_conversation_string(
     let summary_section: String = topics
         .iter()
         .map(|t| {
-            let label = t.short_id.as_deref().unwrap_or(&t.id);
-            format!("- [{}] {}: {}", label, t.title, t.summary)
+            let key = t.short_id.as_deref().unwrap_or(&t.id);
+            let date_hint = match (t.date_from.as_deref(), t.date_to.as_deref()) {
+                (Some(from), Some(to)) if from == to => format!(" ({})", &from[5..]),
+                (Some(from), Some(to)) => format!(" ({}~{})", &from[5..], &to[5..]),
+                (Some(from), None) => format!(" ({})", &from[5..]),
+                _ => String::new(),
+            };
+            format!("- [{}]{} {}: {}", key, date_hint, t.title, t.summary)
         })
         .collect::<Vec<_>>()
         .join("\n");
