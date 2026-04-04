@@ -218,12 +218,15 @@ pub fn build_conversation_string(
     // node_id を併記してエージェントが retrieve_memory_nodes で全文検索できるようにする
     let summary_section: String = topics
         .iter()
-        .map(|t| format!("- [{}] {}: {}", t.id, t.title, t.summary))
+        .map(|t| {
+            let label = t.short_id.as_deref().unwrap_or(&t.id);
+            format!("- [{}] {}: {}", label, t.title, t.summary)
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
     let summary_header =
-        "[Past context summary (use retrieve_memory_nodes with node_id to recall details)]\n";
+        "[Past context summary (use retrieve_memory_nodes with short_id to recall details)]\n";
     let recent_header = "\n\n[Recent conversation]\n";
     let overhead_tokens = estimate_tokens(summary_header)
         + estimate_tokens(&summary_section)

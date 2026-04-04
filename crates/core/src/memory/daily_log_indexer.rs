@@ -154,6 +154,7 @@ impl DailyLogIndexer {
                         .db
                         .lock()
                         .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+                    let daily_short_id = opencrab_db::queries::next_short_id(&db, agent_id, "d")?;
                     let daily_node = opencrab_db::queries::IndexNodeRow {
                         id: daily_id.clone(),
                         agent_id: agent_id.to_string(),
@@ -172,6 +173,7 @@ impl DailyLogIndexer {
                         token_count: (entry.content.len() / 3) as i32,
                         created_at: now.clone(),
                         updated_at: now.clone(),
+                        short_id: Some(daily_short_id),
                     };
                     opencrab_db::queries::upsert_daily_log_index_node(&db, &daily_node)?;
                 }
@@ -182,6 +184,7 @@ impl DailyLogIndexer {
                         .db
                         .lock()
                         .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+                    let topic_short_id = opencrab_db::queries::next_short_id(&db, agent_id, "t")?;
                     let topic_node = opencrab_db::queries::IndexNodeRow {
                         id: topic_id,
                         agent_id: agent_id.to_string(),
@@ -200,6 +203,7 @@ impl DailyLogIndexer {
                         token_count: 0,
                         created_at: now.clone(),
                         updated_at: now.clone(),
+                        short_id: Some(topic_short_id),
                     };
                     opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
                 }
@@ -308,6 +312,7 @@ impl DailyLogIndexer {
                 .db
                 .lock()
                 .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let daily_short_id = opencrab_db::queries::next_short_id(&db, agent_id, "d")?;
             let daily_node = opencrab_db::queries::IndexNodeRow {
                 id: daily_id.clone(),
                 agent_id: agent_id.to_string(),
@@ -326,6 +331,7 @@ impl DailyLogIndexer {
                 token_count: (entry.content.len() / 3) as i32,
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
+                short_id: Some(daily_short_id),
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &daily_node)?;
         }
@@ -336,6 +342,7 @@ impl DailyLogIndexer {
                 .db
                 .lock()
                 .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            let topic_short_id = opencrab_db::queries::next_short_id(&db, agent_id, "t")?;
             let topic_node = opencrab_db::queries::IndexNodeRow {
                 id: topic_id,
                 agent_id: agent_id.to_string(),
@@ -354,6 +361,7 @@ impl DailyLogIndexer {
                 token_count: 0,
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
+                short_id: Some(topic_short_id),
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
         }
@@ -386,6 +394,7 @@ impl DailyLogIndexer {
                 token_count: 0,
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
+                short_id: None,
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &root)?;
         }
@@ -425,6 +434,7 @@ impl DailyLogIndexer {
                 token_count: 0,
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
+                short_id: None,
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &period)?;
         }

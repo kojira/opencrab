@@ -288,6 +288,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE memory_index_nodes ADD COLUMN date_to TEXT")?;
     }
 
+    let has_short_id_col: bool = conn
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('memory_index_nodes') WHERE name='short_id'",
+        )?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_short_id_col {
+        conn.execute_batch("ALTER TABLE memory_index_nodes ADD COLUMN short_id TEXT")?;
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL",
+        )?;
+        crate::queries::backfill_short_ids(conn).map_err(|e| rusqlite::Error::InvalidParameterName(format!("{e}")))?;
+    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS daily_log_index_watermark (
             agent_id TEXT NOT NULL PRIMARY KEY,
@@ -755,11 +770,13 @@ CREATE TABLE IF NOT EXISTS memory_index_nodes (
     child_count INTEGER NOT NULL DEFAULT 0,
     token_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    short_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
 CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL;
 
 -- ============================================
 -- 記憶インデックス: ウォーターマーク（進捗管理）

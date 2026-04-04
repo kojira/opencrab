@@ -117,6 +117,7 @@ impl IndexBuilder {
                     token_count: 0,
                     created_at: now.clone(),
                     updated_at: now.clone(),
+                    short_id: Some("r0".to_string()),
                 };
                 opencrab_db::queries::insert_index_node(&db, &root)?;
                 nodes_created += 1;
@@ -139,6 +140,7 @@ impl IndexBuilder {
                     .lock()
                     .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 if opencrab_db::queries::get_index_node(&db, &period_id)?.is_none() {
+                    let period_short_id = opencrab_db::queries::next_short_id(&db, agent_id, "p")?;
                     let period = opencrab_db::queries::IndexNodeRow {
                         id: period_id.clone(),
                         agent_id: agent_id.to_string(),
@@ -157,6 +159,7 @@ impl IndexBuilder {
                         token_count: 0,
                         created_at: now.clone(),
                         updated_at: now.clone(),
+                        short_id: Some(period_short_id),
                     };
                     opencrab_db::queries::insert_index_node(&db, &period)?;
                     nodes_created += 1;
@@ -182,6 +185,7 @@ impl IndexBuilder {
                             }
                         })
                         .unwrap_or_default();
+                    let session_short_id = opencrab_db::queries::next_short_id(&db, agent_id, "s")?;
                     let session_node = opencrab_db::queries::IndexNodeRow {
                         id: session_node_id.clone(),
                         agent_id: agent_id.to_string(),
@@ -200,6 +204,7 @@ impl IndexBuilder {
                         token_count: 0,
                         created_at: now.clone(),
                         updated_at: now.clone(),
+                        short_id: Some(session_short_id),
                     };
                     opencrab_db::queries::insert_index_node(&db, &session_node)?;
                     nodes_created += 1;
@@ -281,7 +286,9 @@ impl IndexBuilder {
 
             // topicノード作成
             let topic_id = format!("topic-{agent_id}-{session_id}-{first_log_id}-{last_log_id}");
-            let topic = opencrab_db::queries::IndexNodeRow {
+            let date_from = session_logs.iter().filter_map(|l| l.created_at.as_deref()).min().map(|s| s[..10].to_string());
+            let date_to = session_logs.iter().filter_map(|l| l.created_at.as_deref()).max().map(|s| s[..10].to_string());
+            let mut topic = opencrab_db::queries::IndexNodeRow {
                 id: topic_id.clone(),
                 agent_id: agent_id.to_string(),
                 parent_id: Some(session_node_id.clone()),
@@ -292,13 +299,14 @@ impl IndexBuilder {
                 start_log_id: Some(first_log_id),
                 end_log_id: Some(last_log_id),
                 source_session_id: Some(session_id.clone()),
-                date_from: None,
-                date_to: None,
+                date_from,
+                date_to,
                 depth: 3,
                 child_count: 0,
                 token_count,
                 created_at: now.clone(),
                 updated_at: now.clone(),
+                short_id: None,
             };
 
             {
@@ -306,6 +314,7 @@ impl IndexBuilder {
                     .lock()
                     .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 if opencrab_db::queries::get_index_node(&db, &topic_id)?.is_none() {
+                    topic.short_id = Some(opencrab_db::queries::next_short_id(&db, agent_id, "t")?);
                     opencrab_db::queries::insert_index_node(&db, &topic)?;
                     nodes_created += 1;
                 } else {
@@ -507,6 +516,7 @@ impl IndexBuilder {
                 token_count: token_total,
                 created_at: now.clone(),
                 updated_at: now.clone(),
+                short_id: None,
             };
             {
                 let db = conn

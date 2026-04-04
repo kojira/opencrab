@@ -532,7 +532,7 @@ pub fn get_topic_nodes_for_session(
     session_id: &str,
 ) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id
          FROM memory_index_nodes WHERE agent_id = ?1 AND source_session_id = ?2 AND node_type = 'topic' ORDER BY start_log_id ASC",
     )?;
     let rows = stmt.query_map(params![agent_id, session_id], |row| {
@@ -554,6 +554,7 @@ pub fn get_topic_nodes_for_session(
             token_count: row.get(14)?,
             created_at: row.get(15)?,
             updated_at: row.get(16)?,
+            short_id: row.get(17)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1772,6 +1773,7 @@ pub struct IndexNodeRow {
     pub token_count: i32,
     pub created_at: String,
     pub updated_at: String,
+    pub short_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1800,8 +1802,8 @@ pub struct DailyLogEntry {
 
 pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT OR IGNORE INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             node.id,
             node.agent_id,
@@ -1820,6 +1822,7 @@ pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
             node.token_count,
             node.created_at,
             node.updated_at,
+            node.short_id,
         ],
     )?;
     Ok(())
@@ -1835,7 +1838,7 @@ pub fn update_index_node_child_count(conn: &Connection, node_id: &str, count: i3
 
 pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id
          FROM memory_index_nodes WHERE agent_id = ?1 ORDER BY depth ASC, created_at ASC",
     )?;
     let rows = stmt.query_map(params![agent_id], |row| {
@@ -1857,6 +1860,7 @@ pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNode
             token_count: row.get(14)?,
             created_at: row.get(15)?,
             updated_at: row.get(16)?,
+            short_id: row.get(17)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1864,7 +1868,7 @@ pub fn get_index_tree(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNode
 
 pub fn get_index_node(conn: &Connection, node_id: &str) -> Result<Option<IndexNodeRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id
          FROM memory_index_nodes WHERE id = ?1",
         params![node_id],
         |row| {
@@ -1886,6 +1890,7 @@ pub fn get_index_node(conn: &Connection, node_id: &str) -> Result<Option<IndexNo
                 token_count: row.get(14)?,
                 created_at: row.get(15)?,
                 updated_at: row.get(16)?,
+                short_id: row.get(17)?,
             })
         },
     );
@@ -1998,8 +2003,8 @@ pub fn get_daily_log_by_date(
 
 pub fn upsert_daily_log_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             summary = excluded.summary,
@@ -2023,6 +2028,7 @@ pub fn upsert_daily_log_index_node(conn: &Connection, node: &IndexNodeRow) -> Re
             node.token_count,
             node.created_at,
             node.updated_at,
+            node.short_id,
         ],
     )?;
     Ok(())
@@ -3433,6 +3439,300 @@ mod tests {
         // Discord config should also be gone
         assert!(get_agent_discord_config(&conn, agent_id).unwrap().is_none());
     }
+
+    // ============================================
+    // short_id tests (T-1.1 ~ T-1.6)
+    // ============================================
+
+    #[test]
+    fn test_next_short_id_empty_table() {
+        // T-1.1: Empty table should return "t1"
+        let conn = setup();
+        let result = next_short_id(&conn, "a1", "t").unwrap();
+        assert_eq!(result, "t1");
+    }
+
+    #[test]
+    fn test_next_short_id_sequential() {
+        // T-1.2: With t1,t2,t3 existing, should return "t4"
+        let conn = setup();
+        for i in 1..=3 {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: format!("node-{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: String::new(),
+                title: format!("Topic {i}"),
+                summary: "test".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some(format!("t{i}")),
+            }).unwrap();
+        }
+        let result = next_short_id(&conn, "a1", "t").unwrap();
+        assert_eq!(result, "t4");
+    }
+
+    #[test]
+    fn test_next_short_id_independent_prefix() {
+        // T-1.3: t1, t2, h1 exist -> prefix="h" returns "h2"
+        let conn = setup();
+        for (id, prefix, num) in &[("n1", "t", 1), ("n2", "t", 2), ("n3", "h", 1)] {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: id.to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: String::new(),
+                title: "T".to_string(),
+                summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some(format!("{prefix}{num}")),
+            }).unwrap();
+        }
+        let result = next_short_id(&conn, "a1", "h").unwrap();
+        assert_eq!(result, "h2");
+    }
+
+    #[test]
+    fn test_next_short_id_independent_agent() {
+        // T-1.4: agent a1 has t1-t10, agent a2 has t1 -> a2 prefix="t" returns "t2"
+        let conn = setup();
+        for i in 1..=10 {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: format!("a1-node-{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+                title: "T".to_string(), summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some(format!("t{i}")),
+            }).unwrap();
+        }
+        insert_index_node(&conn, &IndexNodeRow {
+            id: "a2-node-1".to_string(),
+            agent_id: "a2".to_string(),
+            parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+            title: "T".to_string(), summary: "s".to_string(),
+            start_log_id: None, end_log_id: None, source_session_id: None,
+            date_from: None, date_to: None,
+            depth: 0, child_count: 0, token_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            short_id: Some("t1".to_string()),
+        }).unwrap();
+        let result = next_short_id(&conn, "a2", "t").unwrap();
+        assert_eq!(result, "t2");
+    }
+
+    #[test]
+    fn test_next_short_id_with_gaps() {
+        // T-1.5: t1, t3, t5 exist (gaps) -> returns "t6" (MAX+1)
+        let conn = setup();
+        for (id, num) in &[("n1", 1), ("n2", 3), ("n3", 5)] {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: id.to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+                title: "T".to_string(), summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some(format!("t{num}")),
+            }).unwrap();
+        }
+        let result = next_short_id(&conn, "a1", "t").unwrap();
+        assert_eq!(result, "t6");
+    }
+
+    #[test]
+    fn test_next_short_id_all_prefixes() {
+        // T-1.6: All prefix patterns return "{prefix}1" on empty table
+        let conn = setup();
+        for prefix in &["t", "h", "d", "w", "m", "y", "p", "r", "s"] {
+            let result = next_short_id(&conn, "a1", prefix).unwrap();
+            assert_eq!(result, format!("{prefix}1"), "Failed for prefix {prefix}");
+        }
+    }
+
+    // ============================================
+    // backfill_short_ids tests (T-1.7 ~ T-1.9)
+    // ============================================
+
+    #[test]
+    fn test_backfill_short_ids_basic() {
+        // T-1.7: 5 topics + 3 dailies with NULL short_id -> get assigned
+        let conn = setup();
+        for i in 1..=5 {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: format!("topic-{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+                title: format!("Topic {i}"), summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: format!("2026-01-01T00:0{i}:00Z"),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: None,
+            }).unwrap();
+        }
+        for i in 1..=3 {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: format!("daily-{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: None, node_type: "daily".to_string(), source_type: String::new(),
+                title: format!("Daily {i}"), summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: format!("2026-01-01T01:0{i}:00Z"),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: None,
+            }).unwrap();
+        }
+        let count = backfill_short_ids(&conn).unwrap();
+        assert_eq!(count, 8);
+        // Verify topics got t1-t5, dailies got d1-d3
+        let node = get_index_node(&conn, "topic-1").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("t1".to_string()));
+        let node = get_index_node(&conn, "topic-5").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("t5".to_string()));
+        let node = get_index_node(&conn, "daily-1").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("d1".to_string()));
+        let node = get_index_node(&conn, "daily-3").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("d3".to_string()));
+    }
+
+    #[test]
+    fn test_backfill_short_ids_skip_existing() {
+        // T-1.8: t1, t2 already set, 3 NULL -> only NULL ones get t3, t4, t5
+        let conn = setup();
+        for i in 1..=2 {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: format!("topic-{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+                title: "T".to_string(), summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: format!("2026-01-01T00:0{i}:00Z"),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some(format!("t{i}")),
+            }).unwrap();
+        }
+        for i in 3..=5 {
+            insert_index_node(&conn, &IndexNodeRow {
+                id: format!("topic-{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+                title: "T".to_string(), summary: "s".to_string(),
+                start_log_id: None, end_log_id: None, source_session_id: None,
+                date_from: None, date_to: None,
+                depth: 0, child_count: 0, token_count: 0,
+                created_at: format!("2026-01-01T00:0{i}:00Z"),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: None,
+            }).unwrap();
+        }
+        let count = backfill_short_ids(&conn).unwrap();
+        assert_eq!(count, 3);
+        // t1, t2 unchanged
+        let node = get_index_node(&conn, "topic-1").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("t1".to_string()));
+        // New ones got t3, t4, t5
+        let node = get_index_node(&conn, "topic-3").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("t3".to_string()));
+        let node = get_index_node(&conn, "topic-5").unwrap().unwrap();
+        assert_eq!(node.short_id, Some("t5".to_string()));
+    }
+
+    #[test]
+    fn test_backfill_short_ids_empty_table() {
+        // T-1.9: No nodes -> 0 changes, no error
+        let conn = setup();
+        let count = backfill_short_ids(&conn).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // ============================================
+    // T-1.10 ~ T-1.12: date_from/date_to backfill tests
+    // TODO: These tests require session_log data infrastructure setup.
+    //       Implement when session_log-based date inference is added.
+    // ============================================
+
+    // ============================================
+    // get_index_node_by_short_or_id tests (T-1.13 ~ T-1.15)
+    // ============================================
+
+    #[test]
+    fn test_get_index_node_by_short_id() {
+        // T-1.13: Search by short_id "t42"
+        let conn = setup();
+        insert_index_node(&conn, &IndexNodeRow {
+            id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
+            agent_id: "a1".to_string(),
+            parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+            title: "Test Topic".to_string(), summary: "test summary".to_string(),
+            start_log_id: None, end_log_id: None, source_session_id: None,
+            date_from: None, date_to: None,
+            depth: 0, child_count: 0, token_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            short_id: Some("t42".to_string()),
+        }).unwrap();
+        let result = get_index_node_by_short_or_id(&conn, "a1", "t42").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, "topic-agent:nostarou:main-sess_abc-1-20");
+    }
+
+    #[test]
+    fn test_get_index_node_by_full_id() {
+        // T-1.14: Search by full id
+        let conn = setup();
+        insert_index_node(&conn, &IndexNodeRow {
+            id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
+            agent_id: "a1".to_string(),
+            parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
+            title: "Test Topic".to_string(), summary: "test summary".to_string(),
+            start_log_id: None, end_log_id: None, source_session_id: None,
+            date_from: None, date_to: None,
+            depth: 0, child_count: 0, token_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            short_id: Some("t42".to_string()),
+        }).unwrap();
+        let result = get_index_node_by_short_or_id(&conn, "a1", "topic-agent:nostarou:main-sess_abc-1-20").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().id, "topic-agent:nostarou:main-sess_abc-1-20");
+    }
+
+    #[test]
+    fn test_get_index_node_by_short_id_not_found() {
+        // T-1.15: Non-existent short_id returns None
+        let conn = setup();
+        let result = get_index_node_by_short_or_id(&conn, "a1", "t99999").unwrap();
+        assert!(result.is_none());
+    }
 }
 
 // ============================================
@@ -4205,6 +4505,93 @@ pub fn update_pending_interaction_status(
         params![id, status, response_json, responder_id],
     )?;
     Ok(())
+}
+
+pub fn next_short_id(conn: &Connection, agent_id: &str, prefix: &str) -> Result<String> {
+    let max: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(CAST(SUBSTR(short_id, ?3) AS INTEGER)) FROM memory_index_nodes WHERE agent_id = ?1 AND short_id LIKE ?2",
+            params![agent_id, format!("{prefix}%"), (prefix.len() + 1) as i64],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    Ok(format!("{prefix}{}", max.unwrap_or(0) + 1))
+}
+
+pub fn backfill_short_ids(conn: &Connection) -> Result<usize> {
+    let agent_ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT agent_id FROM memory_index_nodes WHERE short_id IS NULL")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    let mut total = 0usize;
+    for agent_id in &agent_ids {
+        let nodes: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, node_type FROM memory_index_nodes WHERE agent_id = ?1 AND short_id IS NULL ORDER BY created_at ASC"
+            )?;
+            let rows = stmt.query_map(params![agent_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for (node_id, node_type) in &nodes {
+            let prefix = match node_type.as_str() {
+                "topic" => "t",
+                "period" => "p",
+                "daily" => "d",
+                "session" => "s",
+                "hourly" => "h",
+                "weekly" => "w",
+                "monthly" => "m",
+                "yearly" => "y",
+                "root" => "r",
+                _ => "x",
+            };
+            let sid = next_short_id(conn, agent_id, prefix)?;
+            conn.execute(
+                "UPDATE memory_index_nodes SET short_id = ?1 WHERE id = ?2",
+                params![sid, node_id],
+            )?;
+            total += 1;
+        }
+    }
+    Ok(total)
+}
+
+pub fn get_index_node_by_short_or_id(conn: &Connection, agent_id: &str, query: &str) -> Result<Option<IndexNodeRow>> {
+    let result = conn.query_row(
+        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id
+         FROM memory_index_nodes WHERE agent_id = ?1 AND short_id = ?2",
+        params![agent_id, query],
+        |row| {
+            Ok(IndexNodeRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                node_type: row.get(3)?,
+                source_type: row.get(4)?,
+                title: row.get(5)?,
+                summary: row.get(6)?,
+                start_log_id: row.get(7)?,
+                end_log_id: row.get(8)?,
+                source_session_id: row.get(9)?,
+                date_from: row.get(10)?,
+                date_to: row.get(11)?,
+                depth: row.get(12)?,
+                child_count: row.get(13)?,
+                token_count: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
+                short_id: row.get(17)?,
+            })
+        },
+    );
+    match result {
+        Ok(node) => Ok(Some(node)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => get_index_node(conn, query),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// stale pending interactions のクリーンアップ（起動時に呼ぶ）
