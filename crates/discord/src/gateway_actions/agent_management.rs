@@ -93,12 +93,23 @@ impl DiscordGatewayActions {
             )
         };
 
+        let (persona_name, personality) = {
+            let conn = self.db.lock().unwrap();
+            opencrab_db::queries::get_agent(&conn, &self.agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.persona_name, a.personality))
+                .unwrap_or_default()
+        };
+
         match opencrab_core::memory_index::IndexBuilder::rebuild_index(
             &self.db,
             &self.agent_id,
             llm_client.as_ref(),
             &self.default_model,
             config.batch_size as usize,
+            &persona_name,
+            personality.as_deref(),
         )
         .await
         {

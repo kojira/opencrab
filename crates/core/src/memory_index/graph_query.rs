@@ -205,7 +205,7 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -253,13 +253,13 @@ mod tests {
         let llm = MockLlm;
 
         // batch_size=15 で3回に分けてビルド
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 15)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 15, "", None)
             .await
             .unwrap();
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 15)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 15, "", None)
             .await
             .unwrap();
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 15)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 15, "", None)
             .await
             .unwrap();
 
@@ -290,7 +290,7 @@ mod tests {
             let db = conn.lock().unwrap();
             insert_logs(&db, "agent-1", "session-1", 10);
         }
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -306,7 +306,7 @@ mod tests {
             let db = conn.lock().unwrap();
             insert_logs(&db, "agent-1", "session-2", 15);
         }
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -323,7 +323,7 @@ mod tests {
             insert_logs(&db, "agent-1", "session-3", 20);
             insert_logs(&db, "agent-1", "session-4", 5);
         }
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -353,7 +353,7 @@ mod tests {
 
         // batch_size=100 で5回ビルド
         for _ in 0..5 {
-            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 100)
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 100, "", None)
                 .await
                 .unwrap();
         }
@@ -385,10 +385,10 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
-        IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 

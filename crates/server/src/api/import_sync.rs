@@ -115,12 +115,22 @@ pub async fn execute_import_sync(
                 .unwrap_or_else(|_| state.default_model.clone())
         };
         let agent_id_clone = agent_id.clone();
+        let (daily_persona_name, daily_personality) = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::get_agent(&conn, &agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.persona_name, a.personality))
+                .unwrap_or_default()
+        };
         tokio::spawn(async move {
             let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
             let indexer = opencrab_core::memory::DailyLogIndexer::new(
                 db_clone,
                 std::sync::Arc::new(adapter),
                 model_clone,
+                daily_persona_name,
+                daily_personality,
             );
             if let Err(e) = indexer.run(&agent_id_clone).await {
                 tracing::warn!("daily_log sync indexing failed: {}", e);

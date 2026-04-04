@@ -549,6 +549,15 @@ pub async fn trigger_memory_index_build(
         })
     };
 
+    let (persona_name, personality) = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|a| (a.persona_name, a.personality))
+            .unwrap_or_default()
+    };
+
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
 
     match opencrab_core::memory_index::IndexBuilder::build_incremental(
@@ -557,6 +566,8 @@ pub async fn trigger_memory_index_build(
         &llm_adapter,
         &model,
         config.batch_size as usize,
+        &persona_name,
+        personality.as_deref(),
     )
     .await
     {
@@ -661,6 +672,15 @@ pub async fn rebuild_memory_index(
         })
     };
 
+    let (persona_name, personality) = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|a| (a.persona_name, a.personality))
+            .unwrap_or_default()
+    };
+
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
 
     match opencrab_core::memory_index::IndexBuilder::rebuild_index(
@@ -669,6 +689,8 @@ pub async fn rebuild_memory_index(
         &llm_adapter,
         &model,
         config.batch_size as usize,
+        &persona_name,
+        personality.as_deref(),
     )
     .await
     {
@@ -698,6 +720,15 @@ pub async fn merge_memory_index_topics(
             .unwrap_or_else(|_| state.default_model.clone())
     };
 
+    let (persona_name, personality) = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|a| (a.persona_name, a.personality))
+            .unwrap_or_default()
+    };
+
     let llm_adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_router);
     // デフォルト: periodあたり最大10topic
     let max_topics_per_period = 10usize;
@@ -708,6 +739,8 @@ pub async fn merge_memory_index_topics(
         &llm_adapter,
         &model,
         max_topics_per_period,
+        &persona_name,
+        personality.as_deref(),
     )
     .await
     {

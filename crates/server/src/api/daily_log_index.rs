@@ -46,10 +46,18 @@ pub async fn rebuild(
         opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
             .unwrap_or_else(|_| state.default_model.clone())
     };
+    let (daily_persona_name, daily_personality) = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|a| (a.persona_name, a.personality))
+            .unwrap_or_default()
+    };
     tokio::spawn(async move {
         let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
         let indexer =
-            opencrab_core::memory::DailyLogIndexer::new(db_clone, Arc::new(adapter), model_clone);
+            opencrab_core::memory::DailyLogIndexer::new(db_clone, Arc::new(adapter), model_clone, daily_persona_name, daily_personality);
         if let Err(e) = indexer.rebuild(&agent_id).await {
             tracing::warn!("daily_log rebuild failed: {}", e);
         }
@@ -68,10 +76,18 @@ pub async fn run(
         opencrab_db::queries::effective_model_for_agent(&conn, &agent_id, &state.default_model)
             .unwrap_or_else(|_| state.default_model.clone())
     };
+    let (daily_persona_name, daily_personality) = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|a| (a.persona_name, a.personality))
+            .unwrap_or_default()
+    };
     tokio::spawn(async move {
         let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
         let indexer =
-            opencrab_core::memory::DailyLogIndexer::new(db_clone, Arc::new(adapter), model_clone);
+            opencrab_core::memory::DailyLogIndexer::new(db_clone, Arc::new(adapter), model_clone, daily_persona_name, daily_personality);
         if let Err(e) = indexer.run(&agent_id).await {
             tracing::warn!("daily_log run failed: {}", e);
         }
