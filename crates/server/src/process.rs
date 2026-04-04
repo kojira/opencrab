@@ -807,6 +807,14 @@ pub async fn run_agent_response(
         let index_agent_id = agent_id.to_string();
         let index_llm_router = state.llm_router.clone();
         let index_model = effective_model.clone();
+        let (index_persona_name, index_personality) = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::get_agent(&conn, &index_agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.persona_name, a.personality))
+                .unwrap_or_default()
+        };
         tokio::spawn(async move {
             let (unindexed, config) = {
                 let Ok(conn) = index_db.lock() else { return };
@@ -839,6 +847,8 @@ pub async fn run_agent_response(
                 &llm_adapter,
                 &index_model,
                 config.batch_size as usize,
+                &index_persona_name,
+                index_personality.as_deref(),
             )
             .await
             {

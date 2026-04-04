@@ -34,14 +34,18 @@ pub struct DailyLogIndexer {
     db: Arc<Mutex<Connection>>,
     llm_client: Arc<dyn LlmClient>,
     model: String,
+    persona_name: String,
+    personality: Option<String>,
 }
 
 impl DailyLogIndexer {
-    pub fn new(db: Arc<Mutex<Connection>>, llm_client: Arc<dyn LlmClient>, model: String) -> Self {
+    pub fn new(db: Arc<Mutex<Connection>>, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
         Self {
             db,
             llm_client,
             model,
+            persona_name,
+            personality,
         }
     }
 
@@ -214,10 +218,17 @@ impl DailyLogIndexer {
     }
 
     async fn summarize_day(&self, date: &str, content: &str) -> Result<(String, Vec<TopicJson>)> {
-        let prompt = format!(
-            "以下は {} の日次ログです。\nJSONのみで出力 (コードブロック不要):\n{{\"day_summary\":\"50字以内の1行要約\",\"topics\":[{{\"title\":\"20字以内\",\"summary\":\"100字以内\"}}]}}\n\nログ:\n{}",
-            date, content
-        );
+        let prompt = if let Some(p) = self.personality.as_ref().filter(|s| !s.is_empty()) {
+            format!(
+                "あなたは {} です。\n{}\n\n以下は {} にあなたが体験した1日のログです。\nあなた自身の記憶として、以下の観点を含めて要約してください:\n\n1. 学んだこと・技術知見（新しく知ったこと、理解が深まったこと）\n2. 判断の理由（なぜそうしたか、どういう選択肢があったか）\n3. 関係性・感情（誰と何をしたか、どう感じたか）\n4. 失敗と教訓（うまくいかなかったこと、次回への学び）\n\n一人称で書いてください。客観的なイベントログではなく、あなたの記憶として。\n\nJSONのみで出力 (コードブロック不要):\n{{\"day_summary\":\"50字以内の1行要約\",\"topics\":[{{\"title\":\"20字以内\",\"summary\":\"100字以内\"}}]}}\n\nログ:\n{}",
+                self.persona_name, p, date, content
+            )
+        } else {
+            format!(
+                "以下は {} にあなたが体験した1日のログです。\n一人称視点で記憶として要約してください。\n\n1. 学んだこと・技術知見\n2. 判断の理由\n3. 関係性・感情\n4. 失敗と教訓\n\nJSONのみで出力 (コードブロック不要):\n{{\"day_summary\":\"50字以内の1行要約\",\"topics\":[{{\"title\":\"20字以内\",\"summary\":\"100字以内\"}}]}}\n\nログ:\n{}",
+                date, content
+            )
+        };
         let request = ChatRequestSimple {
             model: self.model.clone(),
             messages: vec![ChatMessage {
@@ -551,7 +562,7 @@ mod tests {
     async fn test_run_empty() {
         let db = opencrab_db::init_memory().unwrap();
         let conn = Arc::new(Mutex::new(db));
-        let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string());
+        let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let stats = indexer.run("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 0);
     }
@@ -563,7 +574,7 @@ mod tests {
         insert_daily_log(&db, "agent-1", "2026-02-02", "2月2日のログ");
         let conn = Arc::new(Mutex::new(db));
         let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string());
+            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let stats = indexer.run("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 2);
         assert_eq!(stats.periods_updated, 1);
@@ -592,7 +603,7 @@ mod tests {
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
         let conn = Arc::new(Mutex::new(db));
         let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string());
+            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let r1 = indexer.run("agent-1").await.unwrap();
         assert_eq!(r1.days_indexed, 1);
         let r2 = indexer.run("agent-1").await.unwrap();
@@ -605,7 +616,7 @@ mod tests {
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
         let conn = Arc::new(Mutex::new(db));
         let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string());
+            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         indexer.run("agent-1").await.unwrap();
         let stats = indexer.rebuild("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 1);
@@ -618,7 +629,7 @@ mod tests {
         insert_daily_log(&db, "agent-2", "2026-02-01", "エージェント2のログ");
         let conn = Arc::new(Mutex::new(db));
         let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string());
+            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         indexer.run("agent-1").await.unwrap();
         indexer.run("agent-2").await.unwrap();
 
@@ -654,6 +665,8 @@ mod tests {
                 last_request: last_request.clone(),
             }),
             "test-model".to_string(),
+            String::new(),
+            None,
         );
 
         let stats = indexer.run("agent-1").await.unwrap();
@@ -664,5 +677,49 @@ mod tests {
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = &request.messages[0].content;
         assert!(prompt.contains(&content));
+    }
+
+    /// T-2.3: DailyLogIndexer の要約プロンプトにペルソナ情報が含まれる
+    #[tokio::test]
+    async fn test_daily_persona_prompt_contains_persona_info() {
+        let db = opencrab_db::init_memory().unwrap();
+        insert_daily_log(&db, "agent-1", "2026-02-01", "kojiraとRustの設計を議論した");
+        let conn = Arc::new(Mutex::new(db));
+        let last_request = Arc::new(Mutex::new(None));
+        let indexer = DailyLogIndexer::new(
+            conn,
+            Arc::new(RecordingMockLlm { last_request: last_request.clone() }),
+            "test-model".to_string(),
+            "のすたろう".to_string(),
+            Some("17歳のオタク高校生。クールに振る舞うけど根はオタク。".to_string()),
+        );
+        let stats = indexer.run("agent-1").await.unwrap();
+        assert_eq!(stats.days_indexed, 1);
+
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = &request.messages[0].content;
+        assert!(prompt.contains("のすたろう"), "プロンプトにpersona_nameが含まれるべき");
+        assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
+        assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸");
+        assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸");
+        assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性軸");
+        assert!(prompt.contains("失敗") || prompt.contains("教訓"), "失敗・教訓軸");
+    }
+
+    /// T-2.4: DailyLogIndexer でペルソナなしでも動作する
+    #[tokio::test]
+    async fn test_daily_persona_empty_works() {
+        let db = opencrab_db::init_memory().unwrap();
+        insert_daily_log(&db, "agent-1", "2026-02-01", "テストログ");
+        let conn = Arc::new(Mutex::new(db));
+        let indexer = DailyLogIndexer::new(
+            conn.clone(),
+            Arc::new(MockLlm),
+            "test-model".to_string(),
+            String::new(),
+            None,
+        );
+        let stats = indexer.run("agent-1").await.unwrap();
+        assert_eq!(stats.days_indexed, 1);
     }
 }

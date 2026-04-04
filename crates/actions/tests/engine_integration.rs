@@ -383,6 +383,8 @@ async fn setup_with_indexed_memory() -> (
         &IndexMockLlm,
         "test-model",
         50,
+        "",
+        None,
     )
     .await
     .unwrap();

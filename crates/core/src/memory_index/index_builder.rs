@@ -45,6 +45,8 @@ impl IndexBuilder {
         llm: &dyn LlmClient,
         model: &str,
         batch_size: usize,
+        persona_name: &str,
+        personality: Option<&str>,
     ) -> Result<IndexBuildResult> {
         // 1. ウォーターマーク取得
         let (last_indexed_id, existing_total_nodes) = {
@@ -225,9 +227,15 @@ impl IndexBuilder {
             let token_count = (chunk_text.len() / 3) as i32;
 
             // LLM呼び出しでサマリー生成
-            let prompt = format!(
-                "以下の会話メッセージからタイトル（10語以内）と要約（2-3文）を生成してください。\nJSON形式で返してください: {{\"title\": \"...\", \"summary\": \"...\"}}\n\nメッセージ:\n{chunk_text}"
-            );
+            let prompt = if let Some(p) = personality.filter(|s| !s.is_empty()) {
+                format!(
+                    "あなたは {persona_name} です。\n{p}\n\n以下はあなたが体験した会話のログです。\nあなた自身の記憶として、以下の観点を含めて要約してください:\n\n1. 学んだこと・技術知見（新しく知ったこと、理解が深まったこと）\n2. 判断の理由（なぜそうしたか、どういう選択肢があったか）\n3. 関係性・感情（誰と何をしたか、どう感じたか）\n4. 失敗と教訓（うまくいかなかったこと、次回への学び）\n\n一人称で書いてください。客観的なイベントログではなく、あなたの記憶として。\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\"}}\n\nログ:\n{chunk_text}"
+                )
+            } else {
+                format!(
+                    "以下の会話のログについて、一人称視点で記憶として要約してください。\n\n1. 学んだこと・技術知見\n2. 判断の理由\n3. 関係性・感情\n4. 失敗と教訓\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\"}}\n\nログ:\n{chunk_text}"
+                )
+            };
 
             let request = ChatRequestSimple {
                 model: model.to_string(),
@@ -380,9 +388,11 @@ impl IndexBuilder {
         llm: &dyn LlmClient,
         model: &str,
         batch_size: usize,
+        persona_name: &str,
+        personality: Option<&str>,
     ) -> Result<IndexBuildResult> {
         Self::delete_index(conn, agent_id)?;
-        Self::build_incremental(conn, agent_id, llm, model, batch_size).await
+        Self::build_incremental(conn, agent_id, llm, model, batch_size, persona_name, personality).await
     }
 
     /// 既存のtopicノードをperiodレベルでLLM再要約・統合する（深さ調整）。
@@ -394,6 +404,8 @@ impl IndexBuilder {
         llm: &dyn LlmClient,
         model: &str,
         max_topics_per_period: usize,
+        persona_name: &str,
+        personality: Option<&str>,
     ) -> Result<MergeResult> {
         let now = Utc::now().to_rfc3339();
         let tree = {
@@ -436,9 +448,15 @@ impl IndexBuilder {
                 .collect();
             let combined = summaries.join("\n\n");
 
-            let prompt = format!(
-                "以下の複数のトピック要約を1つにまとめてください。\nJSON形式で返してください: {{\"title\": \"...\", \"summary\": \"...\"}}\n\n{combined}"
-            );
+            let prompt = if let Some(p) = personality.filter(|s| !s.is_empty()) {
+                format!(
+                    "あなたは {persona_name} です。\n{p}\n\n以下の複数のトピック要約を、あなた自身の記憶として1つにまとめてください。\nJSON形式で返してください: {{\"title\": \"...\", \"summary\": \"...\"}}\n\n{combined}"
+                )
+            } else {
+                format!(
+                    "以下の複数のトピック要約を1つにまとめてください。\nJSON形式で返してください: {{\"title\": \"...\", \"summary\": \"...\"}}\n\n{combined}"
+                )
+            };
 
             let request = ChatRequestSimple {
                 model: model.to_string(),
@@ -573,13 +591,32 @@ mod tests {
         }
     }
 
+    struct RecordingMockLlm {
+        last_request: Arc<Mutex<Option<ChatRequestSimple>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingMockLlm {
+        async fn chat(&self, req: ChatRequestSimple) -> Result<ChatResponseSimple> {
+            *self.last_request.lock().unwrap() = Some(req);
+            Ok(ChatResponseSimple {
+                content: Some(
+                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
+                ),
+                tool_calls: vec![],
+                finish_reason: "stop".to_string(),
+                usage: None,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn test_build_incremental_empty() {
         let db_conn = opencrab_db::init_memory().unwrap();
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(result.nodes_created, 0);
@@ -619,7 +656,7 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -649,6 +686,133 @@ mod tests {
         assert_eq!(topic.summary, "テスト要約です。");
     }
 
+    /// T-2.1: ペルソナ情報が要約プロンプトに含まれる
+    #[tokio::test]
+    async fn test_persona_prompt_contains_persona_info() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Hello, this is a test message.".to_string(),
+            speaker_id: Some("user-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+
+        let conn = Arc::new(Mutex::new(db_conn));
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+
+        let _result = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &llm,
+            "test-model",
+            50,
+            "のすたろう",
+            Some("17歳のオタク高校生"),
+        )
+        .await
+        .unwrap();
+
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = &request.messages[0].content;
+        assert!(prompt.contains("のすたろう"), "プロンプトにペルソナ名が含まれるべき");
+        assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
+    }
+
+    /// T-2.2: 注目ポイント4軸がプロンプトに含まれる
+    #[tokio::test]
+    async fn test_persona_prompt_contains_four_axes() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Test message for four axes check.".to_string(),
+            speaker_id: Some("user-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+
+        let conn = Arc::new(Mutex::new(db_conn));
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+
+        let _result = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &llm,
+            "test-model",
+            50,
+            "テスト",
+            Some("テスト用ペルソナ"),
+        )
+        .await
+        .unwrap();
+
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = &request.messages[0].content;
+        assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸が含まれるべき");
+        assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸が含まれるべき");
+        assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性・感情軸が含まれるべき");
+        assert!(prompt.contains("失敗") || prompt.contains("教訓"), "失敗・教訓軸が含まれるべき");
+    }
+
+    /// T-2.5: ペルソナが空でもエラーにならずデフォルト一人称で要約される
+    #[tokio::test]
+    async fn test_persona_empty_uses_default() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Test message for empty persona.".to_string(),
+            speaker_id: Some("user-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+
+        let conn = Arc::new(Mutex::new(db_conn));
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+
+        let result = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &llm,
+            "test-model",
+            50,
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.nodes_created > 0, "ノードが生成されるべき");
+
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = &request.messages[0].content;
+        // Default prompt should still use 一人称
+        assert!(prompt.contains("一人称"), "デフォルトプロンプトに一人称が含まれるべき");
+    }
+
     #[tokio::test]
     async fn test_build_incremental_idempotent() {
         let db_conn = opencrab_db::init_memory().unwrap();
@@ -669,13 +833,13 @@ mod tests {
         let llm = MockLlm;
 
         // First build
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert!(r1.nodes_created > 0);
 
         // Second build should create no new nodes (no new logs)
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(r2.nodes_created, 0);
@@ -715,7 +879,7 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -752,7 +916,7 @@ mod tests {
         let llm = MockLlm;
 
         // batch_size=10: 最初の10件のみ処理される
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10)
+        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
             .await
             .unwrap();
         assert_eq!(r1.logs_indexed, 10);
@@ -767,19 +931,19 @@ mod tests {
         }
 
         // 2回目: 次の10件
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10)
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
             .await
             .unwrap();
         assert_eq!(r2.logs_indexed, 10);
 
         // 3回目: 残り10件
-        let r3 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10)
+        let r3 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
             .await
             .unwrap();
         assert_eq!(r3.logs_indexed, 10);
 
         // 4回目: もう残りなし
-        let r4 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10)
+        let r4 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
             .await
             .unwrap();
         assert_eq!(r4.logs_indexed, 0);
@@ -805,7 +969,7 @@ mod tests {
         let llm = MockLlm;
 
         // 初回ビルド
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(r1.logs_indexed, 5);
@@ -818,7 +982,7 @@ mod tests {
         }
 
         // 2回目ビルド — 新ログのみ処理、session-2のノードが追加される
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(r2.logs_indexed, 3);
@@ -848,7 +1012,7 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 200)
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 200, "", None)
             .await
             .unwrap();
 
@@ -882,13 +1046,13 @@ mod tests {
         let llm = MockLlm;
 
         // agent-1のみビルド
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(r1.logs_indexed, 5);
 
         // agent-2のみビルド
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50)
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(r2.logs_indexed, 8);
@@ -920,7 +1084,7 @@ mod tests {
         let llm = MockLlm;
 
         // まずインデックスを構築
-        let r = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert!(r.nodes_created > 0);
@@ -956,10 +1120,10 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
-        IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -990,7 +1154,7 @@ mod tests {
         let llm = MockLlm;
 
         // 初回ビルド
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         let first_tree_len = {
@@ -1002,7 +1166,7 @@ mod tests {
         assert!(r1.nodes_created > 0);
 
         // 再構築
-        let r2 = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50)
+        let r2 = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -1036,7 +1200,7 @@ mod tests {
         let llm = MockLlm;
 
         // ビルドせずに再構築（初回rebuild）
-        let r = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50)
+        let r = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(r.logs_indexed, 3);
@@ -1053,7 +1217,7 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
@@ -1063,7 +1227,7 @@ mod tests {
         };
 
         // max_topics_per_period=5 なので2topicは閾値以下
-        let result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 5)
+        let result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 5, "", None)
             .await
             .unwrap();
 
@@ -1094,12 +1258,12 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
         // max_topics_per_period=2 → 4topics > 2 なのでマージ発動
-        let result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 2)
+        let result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 2, "", None)
             .await
             .unwrap();
 
@@ -1141,18 +1305,18 @@ mod tests {
         let conn = Arc::new(Mutex::new(db_conn));
         let llm = MockLlm;
 
-        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50)
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
 
         // まずマージ
-        let merge_result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 2)
+        let merge_result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 2, "", None)
             .await
             .unwrap();
         assert!(merge_result.topics_merged > 0);
 
         // その後rebuildすると完全にリフレッシュされる
-        let rebuild_result = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50)
+        let rebuild_result = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50, "", None)
             .await
             .unwrap();
         assert_eq!(
@@ -1211,7 +1375,7 @@ mod tests {
             insert_log_with_date(&c, "agent-d", "sess-d", 1, "Afternoon msg", "2026-04-01 15:00:00");
         }
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-d", &llm, "test-model", 2)
+        let result = IndexBuilder::build_incremental(&conn, "agent-d", &llm, "test-model", 2, "", None)
             .await
             .unwrap();
         assert!(result.nodes_created > 0);
@@ -1237,7 +1401,7 @@ mod tests {
             insert_log_with_date(&c, "agent-m", "sess-m", 1, "Day 3 msg", "2026-04-03 14:00:00");
         }
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-m", &llm, "test-model", 2)
+        let result = IndexBuilder::build_incremental(&conn, "agent-m", &llm, "test-model", 2, "", None)
             .await
             .unwrap();
         assert!(result.nodes_created > 0);
@@ -1267,7 +1431,7 @@ mod tests {
             c.execute_batch("UPDATE memory_sessions SET created_at = '' WHERE agent_id = 'agent-n'").unwrap();
         }
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-n", &llm, "test-model", 3)
+        let result = IndexBuilder::build_incremental(&conn, "agent-n", &llm, "test-model", 3, "", None)
             .await
             .unwrap();
         // Should not panic, nodes should still be created

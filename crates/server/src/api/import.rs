@@ -88,6 +88,15 @@ pub async fn execute_import_handler(
             .unwrap_or_else(|_| state.default_model.clone())
     };
 
+    let (persona_name, personality) = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, &agent_id)
+            .ok()
+            .flatten()
+            .map(|a| (a.persona_name, a.personality))
+            .unwrap_or_default()
+    };
+
     let mut total_indexed: usize = 0;
     loop {
         match opencrab_core::memory_index::IndexBuilder::build_incremental(
@@ -96,6 +105,8 @@ pub async fn execute_import_handler(
             &llm_adapter,
             &model,
             batch_size,
+            &persona_name,
+            personality.as_deref(),
         )
         .await
         {
@@ -123,12 +134,16 @@ pub async fn execute_import_handler(
                 .unwrap_or_else(|_| state.default_model.clone())
         };
         let agent_id_clone = agent_id.clone();
+        let daily_persona_name = persona_name.clone();
+        let daily_personality = personality.clone();
         tokio::spawn(async move {
             let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
             let indexer = opencrab_core::memory::DailyLogIndexer::new(
                 db_clone,
                 std::sync::Arc::new(adapter),
                 model_clone,
+                daily_persona_name,
+                daily_personality,
             );
             if let Err(e) = indexer.run(&agent_id_clone).await {
                 tracing::warn!("daily_log indexing failed: {}", e);
