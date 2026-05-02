@@ -56,9 +56,14 @@ app_name = "OpenCrab"
 base_url = "http://localhost:11434"
 default_model = "llama3.1:8b"
 
-# llama.cpp設定（ローカル）
+# llama.cpp設定（ローカル��
 [llm.providers.llamacpp]
 base_url = "http://localhost:8080"
+
+# Codex CLI設定（ローカル）
+[llm.providers.codex]
+default_model = "o4-mini"
+# base_url = "/usr/local/bin/codex"  # カスタムパス（省略時はPATHから検索）
 
 # モデルエイリアス
 [llm.aliases]
