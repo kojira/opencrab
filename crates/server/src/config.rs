@@ -303,6 +303,16 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 }
                 Some(Arc::new(p))
             }
+            "codex" => {
+                let mut p = opencrab_llm::CodexProvider::new();
+                if !pconfig.default_model.is_empty() {
+                    p = p.with_default_model(&pconfig.default_model);
+                }
+                if !pconfig.base_url.is_empty() {
+                    p = p.with_codex_path(&pconfig.base_url);
+                }
+                Some(Arc::new(p))
+            }
             other => {
                 info!(provider = %other, "Unknown provider in config, skipping");
                 None
