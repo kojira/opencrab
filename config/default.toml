@@ -63,7 +63,10 @@ base_url = "http://localhost:8080"
 # Codex CLI設定（ローカル）
 [llm.providers.codex]
 default_model = "o4-mini"
-# base_url = "/usr/local/bin/codex"  # カスタムパス（省略時はPATHから検索）
+sandbox = "read-only"
+timeout_secs = 300
+# binary_path = "/usr/local/bin/codex"  # カスタムパス（省略時はPATHから検索）
+# working_dir = ""                       # Codex の作業ディレクトリ
 
 # モデルエイリアス
 [llm.aliases]
