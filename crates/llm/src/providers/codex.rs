@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::debug;
 
@@ -8,6 +11,7 @@ use crate::traits::{LlmProvider, ModelInfo};
 
 const DEFAULT_CODEX_PATH: &str = "codex";
 const DEFAULT_MODEL: &str = "o4-mini";
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Debug, Clone)]
 pub struct CodexProvider {
@@ -15,6 +19,7 @@ pub struct CodexProvider {
     default_model: String,
     sandbox: String,
     working_dir: Option<String>,
+    timeout: Duration,
 }
 
 impl CodexProvider {
@@ -24,6 +29,7 @@ impl CodexProvider {
             default_model: DEFAULT_MODEL.to_string(),
             sandbox: "read-only".to_string(),
             working_dir: None,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
@@ -44,6 +50,11 @@ impl CodexProvider {
 
     pub fn with_working_dir(mut self, dir: impl Into<String>) -> Self {
         self.working_dir = Some(dir.into());
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout = Duration::from_secs(secs);
         self
     }
 
@@ -118,10 +129,13 @@ impl LlmProvider for CodexProvider {
 
         let prompt = self.build_prompt(&request);
 
-        let output_file = format!(
-            "/tmp/opencrab-codex-{}.txt",
-            uuid::Uuid::new_v4()
-        );
+        // tempfile crate creates with O_EXCL and cleans up on Drop.
+        let output_file = tempfile::Builder::new()
+            .prefix("opencrab-codex-")
+            .suffix(".txt")
+            .tempfile()
+            .context("failed to create temp file for codex output")?;
+        let output_path = output_file.path().to_string_lossy().to_string();
 
         let mut cmd = Command::new(&self.codex_path);
         cmd.arg("exec")
@@ -132,26 +146,52 @@ impl LlmProvider for CodexProvider {
             .arg("-s")
             .arg(&self.sandbox)
             .arg("-o")
-            .arg(&output_file)
+            .arg(&output_path)
+            // Never prompt for approval (non-interactive).
             .arg("-a")
             .arg("never")
-            .arg(&prompt);
+            // Read prompt from stdin to avoid ARG_MAX limits and /proc exposure.
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
 
         if let Some(ref dir) = self.working_dir {
             cmd.arg("-C").arg(dir);
         }
 
-        let output = cmd
-            .output()
-            .await
-            .context("failed to execute codex CLI")?;
+        let mut child = cmd.spawn().context("failed to spawn codex CLI")?;
 
-        let response_text = match tokio::fs::read_to_string(&output_file).await {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .context("failed to write prompt to codex stdin")?;
+            // Drop stdin to signal EOF.
+        }
+
+        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "codex CLI timed out after {}s",
+                    self.timeout.as_secs()
+                )
+            })?
+            .context("failed to wait for codex CLI")?;
+
+        // Read response from the output file (-o flag).
+        let response_text = match tokio::fs::read_to_string(&output_path).await {
             Ok(text) => {
-                let _ = tokio::fs::remove_file(&output_file).await;
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "codex exited with {} despite producing output",
+                        output.status
+                    );
+                }
                 text
             }
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if !output.status.success() {
@@ -164,6 +204,16 @@ impl LlmProvider for CodexProvider {
                 }
                 stdout.to_string()
             }
+            Err(e) => {
+                return Err(e).context("failed to read codex output file");
+            }
+        };
+        // output_file (NamedTempFile) is dropped here, auto-deleting the file.
+
+        let content = if response_text.trim().is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(response_text))
         };
 
         Ok(ChatResponse {
@@ -173,7 +223,7 @@ impl LlmProvider for CodexProvider {
                 index: 0,
                 message: Message {
                     role: Role::Assistant,
-                    content: Some(MessageContent::Text(response_text)),
+                    content,
                     name: None,
                     function_call: None,
                     tool_calls: None,
@@ -256,6 +306,7 @@ mod tests {
         assert_eq!(provider.default_model, "o4-mini");
         assert_eq!(provider.sandbox, "read-only");
         assert!(provider.working_dir.is_none());
+        assert_eq!(provider.timeout, Duration::from_secs(300));
     }
 
     #[test]
@@ -264,11 +315,13 @@ mod tests {
             .with_codex_path("/usr/local/bin/codex")
             .with_default_model("o3")
             .with_sandbox("workspace-write")
-            .with_working_dir("/home/user/project");
+            .with_working_dir("/home/user/project")
+            .with_timeout_secs(600);
 
         assert_eq!(provider.codex_path, "/usr/local/bin/codex");
         assert_eq!(provider.default_model, "o3");
         assert_eq!(provider.sandbox, "workspace-write");
         assert_eq!(provider.working_dir.as_deref(), Some("/home/user/project"));
+        assert_eq!(provider.timeout, Duration::from_secs(600));
     }
 }

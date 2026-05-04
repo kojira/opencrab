@@ -116,6 +116,18 @@ pub struct ProviderConfig {
     pub site_url: String,
     #[serde(default)]
     pub default_model: String,
+    #[serde(default)]
+    pub binary_path: String,
+    #[serde(default)]
+    pub sandbox: String,
+    #[serde(default)]
+    pub working_dir: String,
+    #[serde(default = "default_codex_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_codex_timeout() -> u64 {
+    300
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -308,8 +320,17 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if !pconfig.default_model.is_empty() {
                     p = p.with_default_model(&pconfig.default_model);
                 }
-                if !pconfig.base_url.is_empty() {
-                    p = p.with_codex_path(&pconfig.base_url);
+                if !pconfig.binary_path.is_empty() {
+                    p = p.with_codex_path(&pconfig.binary_path);
+                }
+                if !pconfig.sandbox.is_empty() {
+                    p = p.with_sandbox(&pconfig.sandbox);
+                }
+                if !pconfig.working_dir.is_empty() {
+                    p = p.with_working_dir(&pconfig.working_dir);
+                }
+                if pconfig.timeout_secs > 0 {
+                    p = p.with_timeout_secs(pconfig.timeout_secs);
                 }
                 Some(Arc::new(p))
             }
