@@ -65,8 +65,9 @@ base_url = "http://localhost:8080"
 default_model = "o4-mini"
 sandbox = "read-only"
 timeout_secs = 300
-# binary_path = "/usr/local/bin/codex"  # カスタムパス（省略時はPATHから検索）
-# working_dir = ""                       # Codex の作業ディレクトリ
+models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示するモデル一覧
+# binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）
+# working_dir = ""                        # Codex の作業ディレクトリ
 
 # モデルエイリアス
 [llm.aliases]

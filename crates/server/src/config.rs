@@ -124,6 +124,8 @@ pub struct ProviderConfig {
     pub working_dir: String,
     #[serde(default = "default_codex_timeout")]
     pub timeout_secs: u64,
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 fn default_codex_timeout() -> u64 {
@@ -331,6 +333,14 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 }
                 if pconfig.timeout_secs > 0 {
                     p = p.with_timeout_secs(pconfig.timeout_secs);
+                }
+                if !pconfig.models.is_empty() {
+                    let extra: Vec<(String, u32)> = pconfig
+                        .models
+                        .iter()
+                        .map(|m| (m.clone(), 200_000u32))
+                        .collect();
+                    p = p.with_extra_models(extra);
                 }
                 Some(Arc::new(p))
             }
