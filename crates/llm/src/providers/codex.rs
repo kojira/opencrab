@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
+use futures::stream::BoxStream;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::debug;
 
@@ -13,6 +14,12 @@ const DEFAULT_CODEX_PATH: &str = "codex";
 const DEFAULT_MODEL: &str = "o4-mini";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+static DEFAULT_MODELS: &[(&str, u32)] = &[
+    ("o4-mini", 200_000),
+    ("o3", 200_000),
+    ("codex-mini", 200_000),
+];
+
 #[derive(Debug, Clone)]
 pub struct CodexProvider {
     codex_path: String,
@@ -20,6 +27,7 @@ pub struct CodexProvider {
     sandbox: String,
     working_dir: Option<String>,
     timeout: Duration,
+    extra_models: Vec<(String, u32)>,
 }
 
 impl CodexProvider {
@@ -30,6 +38,7 @@ impl CodexProvider {
             sandbox: "read-only".to_string(),
             working_dir: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            extra_models: Vec::new(),
         }
     }
 
@@ -58,6 +67,12 @@ impl CodexProvider {
         self
     }
 
+    /// Add additional model IDs beyond the built-in defaults.
+    pub fn with_extra_models(mut self, models: Vec<(String, u32)>) -> Self {
+        self.extra_models = models;
+        self
+    }
+
     fn build_prompt(&self, request: &ChatRequest) -> String {
         let mut parts = Vec::new();
 
@@ -79,6 +94,26 @@ impl CodexProvider {
 
         parts.join("\n\n")
     }
+
+    fn build_base_command(&self, model: &str) -> Command {
+        let mut cmd = Command::new(&self.codex_path);
+        cmd.arg("exec")
+            .arg("--ephemeral")
+            .arg("--skip-git-repo-check")
+            .arg("-m")
+            .arg(model)
+            .arg("-s")
+            .arg(&self.sandbox)
+            // Never prompt for approval (non-interactive).
+            .arg("-a")
+            .arg("never");
+
+        if let Some(ref dir) = self.working_dir {
+            cmd.arg("-C").arg(dir);
+        }
+
+        cmd
+    }
 }
 
 impl Default for CodexProvider {
@@ -94,29 +129,30 @@ impl LlmProvider for CodexProvider {
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
-        Ok(vec![
-            ModelInfo {
-                id: "o4-mini".to_string(),
-                name: "o4-mini".to_string(),
-                context_window: 200_000,
+        let mut models: Vec<ModelInfo> = DEFAULT_MODELS
+            .iter()
+            .map(|(id, ctx)| ModelInfo {
+                id: id.to_string(),
+                name: id.to_string(),
+                context_window: *ctx,
                 supports_function_calling: false,
                 supports_vision: false,
-            },
-            ModelInfo {
-                id: "o3".to_string(),
-                name: "o3".to_string(),
-                context_window: 200_000,
-                supports_function_calling: false,
-                supports_vision: false,
-            },
-            ModelInfo {
-                id: "codex-mini".to_string(),
-                name: "codex-mini".to_string(),
-                context_window: 200_000,
-                supports_function_calling: false,
-                supports_vision: false,
-            },
-        ])
+            })
+            .collect();
+
+        for (id, ctx) in &self.extra_models {
+            if !models.iter().any(|m| m.id == *id) {
+                models.push(ModelInfo {
+                    id: id.clone(),
+                    name: id.clone(),
+                    context_window: *ctx,
+                    supports_function_calling: false,
+                    supports_vision: false,
+                });
+            }
+        }
+
+        Ok(models)
     }
 
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
@@ -137,28 +173,14 @@ impl LlmProvider for CodexProvider {
             .context("failed to create temp file for codex output")?;
         let output_path = output_file.path().to_string_lossy().to_string();
 
-        let mut cmd = Command::new(&self.codex_path);
-        cmd.arg("exec")
-            .arg("--ephemeral")
-            .arg("--skip-git-repo-check")
-            .arg("-m")
-            .arg(model)
-            .arg("-s")
-            .arg(&self.sandbox)
-            .arg("-o")
+        let mut cmd = self.build_base_command(model);
+        cmd.arg("-o")
             .arg(&output_path)
-            // Never prompt for approval (non-interactive).
-            .arg("-a")
-            .arg("never")
             // Read prompt from stdin to avoid ARG_MAX limits and /proc exposure.
             .arg("-")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-
-        if let Some(ref dir) = self.working_dir {
-            cmd.arg("-C").arg(dir);
-        }
 
         let mut child = cmd.spawn().context("failed to spawn codex CLI")?;
 
@@ -167,7 +189,6 @@ impl LlmProvider for CodexProvider {
                 .write_all(prompt.as_bytes())
                 .await
                 .context("failed to write prompt to codex stdin")?;
-            // Drop stdin to signal EOF.
         }
 
         let output = tokio::time::timeout(self.timeout, child.wait_with_output())
@@ -216,6 +237,9 @@ impl LlmProvider for CodexProvider {
             Some(MessageContent::Text(response_text))
         };
 
+        // Parse usage from stdout JSONL if available (turn.completed events).
+        let usage = parse_usage_from_stdout(&output.stdout);
+
         Ok(ChatResponse {
             id: uuid::Uuid::new_v4().to_string(),
             model: model.to_string(),
@@ -232,15 +256,79 @@ impl LlmProvider for CodexProvider {
                 },
                 finish_reason: Some(FinishReason::Stop),
             }],
-            usage: Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
+            usage,
             created: chrono::Utc::now().timestamp(),
         })
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        request: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
+        let model = if request.model.is_empty() {
+            self.default_model.clone()
+        } else {
+            request.model.clone()
+        };
+        debug!(model = %model, "Codex CLI streaming chat completion");
+
+        let prompt = self.build_prompt(&request);
+
+        let mut cmd = self.build_base_command(&model);
+        cmd.arg("--json")
+            // Read prompt from stdin.
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().context("failed to spawn codex CLI for streaming")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .context("failed to write prompt to codex stdin")?;
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .context("failed to get codex stdout")?;
+
+        let reader = BufReader::new(stdout);
+        let lines = reader.lines();
+        let model_clone = model.clone();
+
+        let stream = futures::stream::unfold(
+            (lines, child, model_clone),
+            |(mut lines, mut child, model)| async move {
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            if let Some(delta) = parse_jsonl_event(&line, &model) {
+                                return Some((Ok(delta), (lines, child, model)));
+                            }
+                            // Non-content event, keep reading.
+                        }
+                        Ok(None) => {
+                            // EOF — process finished.
+                            let _ = child.wait().await;
+                            return None;
+                        }
+                        Err(e) => {
+                            let _ = child.wait().await;
+                            return Some((
+                                Err(anyhow::anyhow!("stream read error: {}", e)),
+                                (lines, child, model),
+                            ));
+                        }
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
     }
 
     fn supports_function_calling(&self) -> bool {
@@ -253,6 +341,93 @@ impl LlmProvider for CodexProvider {
             .output()
             .await;
         Ok(output.map(|o| o.status.success()).unwrap_or(false))
+    }
+}
+
+/// Parse a JSONL event line from `codex exec --json` and extract streaming content.
+/// Returns a ChatStreamDelta for agent_message item.completed events.
+fn parse_jsonl_event(line: &str, model: &str) -> Option<ChatStreamDelta> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+
+    let event_type = v.get("type")?.as_str()?;
+
+    match event_type {
+        "item.completed" => {
+            let item = v.get("item")?;
+            let item_type = item.get("type")?.as_str()?;
+            if item_type == "agent_message" {
+                let text = item.get("text")?.as_str()?;
+                return Some(ChatStreamDelta {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    model: model.to_string(),
+                    choices: vec![StreamChoice {
+                        index: 0,
+                        delta: DeltaMessage {
+                            role: Some(Role::Assistant),
+                            content: Some(text.to_string()),
+                            function_call: None,
+                            tool_calls: None,
+                        },
+                        finish_reason: Some(FinishReason::Stop),
+                    }],
+                });
+            }
+            None
+        }
+        "turn.completed" => Some(ChatStreamDelta {
+            id: uuid::Uuid::new_v4().to_string(),
+            model: model.to_string(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: DeltaMessage {
+                    role: None,
+                    content: None,
+                    function_call: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some(FinishReason::Stop),
+            }],
+        }),
+        _ => None,
+    }
+}
+
+/// Parse usage information from stdout JSONL (look for turn.completed with usage).
+fn parse_usage_from_stdout(stdout: &[u8]) -> Usage {
+    let text = String::from_utf8_lossy(stdout);
+    for line in text.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("turn.completed") {
+                if let Some(usage) = v.get("usage") {
+                    let input = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let cached = usage
+                        .get("cached_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let output = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    return Usage {
+                        prompt_tokens: input,
+                        completion_tokens: output,
+                        total_tokens: input + output,
+                        cache_read_input_tokens: cached,
+                        cache_creation_input_tokens: 0,
+                    };
+                }
+            }
+        }
+    }
+    Usage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
     }
 }
 
@@ -323,5 +498,52 @@ mod tests {
         assert_eq!(provider.sandbox, "workspace-write");
         assert_eq!(provider.working_dir.as_deref(), Some("/home/user/project"));
         assert_eq!(provider.timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_extra_models() {
+        let provider = CodexProvider::new()
+            .with_extra_models(vec![("gpt-5".to_string(), 128_000)]);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let models = rt.block_on(provider.available_models()).unwrap();
+        assert!(models.iter().any(|m| m.id == "gpt-5"));
+        assert!(models.iter().any(|m| m.id == "o4-mini"));
+    }
+
+    #[test]
+    fn test_parse_jsonl_event_agent_message() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Hello world"}}"#;
+        let delta = parse_jsonl_event(line, "o4-mini").unwrap();
+        assert_eq!(delta.choices[0].delta.content.as_deref(), Some("Hello world"));
+    }
+
+    #[test]
+    fn test_parse_jsonl_event_turn_completed() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20}}"#;
+        let delta = parse_jsonl_event(line, "o4-mini").unwrap();
+        assert_eq!(delta.choices[0].finish_reason, Some(FinishReason::Stop));
+        assert!(delta.choices[0].delta.content.is_none());
+    }
+
+    #[test]
+    fn test_parse_jsonl_event_irrelevant() {
+        let line = r#"{"type":"thread.started","thread_id":"abc"}"#;
+        assert!(parse_jsonl_event(line, "o4-mini").is_none());
+    }
+
+    #[test]
+    fn test_parse_usage_from_stdout() {
+        let stdout = br#"{"type":"thread.started","thread_id":"abc"}
+{"type":"turn.started"}
+{"type":"turn.completed","usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":50}}
+"#;
+        let usage = parse_usage_from_stdout(stdout);
+        assert_eq!(usage.prompt_tokens, 500);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 550);
+        assert_eq!(usage.cache_read_input_tokens, 400);
     }
 }
