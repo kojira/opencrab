@@ -35,6 +35,7 @@ pub struct MetricsContext {
 pub struct LlmRouterAdapter {
     router: Arc<LlmRouter>,
     metrics_ctx: Option<MetricsContext>,
+    working_dir: Option<String>,
 }
 
 impl LlmRouterAdapter {
@@ -42,11 +43,17 @@ impl LlmRouterAdapter {
         Self {
             router,
             metrics_ctx: None,
+            working_dir: None,
         }
     }
 
     pub fn with_metrics(mut self, ctx: MetricsContext) -> Self {
         self.metrics_ctx = Some(ctx);
+        self
+    }
+
+    pub fn with_working_dir(mut self, dir: impl Into<String>) -> Self {
+        self.working_dir = Some(dir.into());
         self
     }
 }
@@ -55,7 +62,14 @@ impl LlmRouterAdapter {
 impl LlmClient for LlmRouterAdapter {
     async fn chat(&self, request: ChatRequestSimple) -> Result<ChatResponseSimple> {
         let model_requested = request.model.clone();
-        let llm_request = to_llm_request(request);
+        let mut llm_request = to_llm_request(request);
+
+        if let Some(ref dir) = self.working_dir {
+            llm_request.metadata.insert(
+                "working_dir".to_string(),
+                serde_json::Value::String(dir.clone()),
+            );
+        }
 
         let start = std::time::Instant::now();
         let llm_response = self.router.chat_completion(llm_request).await?;
