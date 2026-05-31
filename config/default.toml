@@ -69,6 +69,12 @@ models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示する
 # binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）
 # working_dir = ""                        # Codex の作業ディレクトリ
 
+# ChatGPT direct API (uses ~/.codex/auth.json OAuth token)
+[llm.providers.chatgpt]
+enabled = true
+auth_file = "~/.codex/auth.json"
+default_model = "gpt-5.5"
+
 # Bonsai 8B (1-bit LLM, PrismML)
 [llm.providers.bonsai]
 base_url = "http://localhost:8081"

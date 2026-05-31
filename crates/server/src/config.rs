@@ -126,6 +126,8 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub auth_file: String,
 }
 
 fn default_codex_timeout() -> u64 {
@@ -341,6 +343,19 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                         .map(|m| (m.clone(), 200_000u32))
                         .collect();
                     p = p.with_extra_models(extra);
+                }
+                Some(Arc::new(p))
+            }
+            "chatgpt" => {
+                let mut p = ChatGptProvider::new();
+                if !pconfig.auth_file.is_empty() {
+                    p = p.with_auth_file(&pconfig.auth_file);
+                }
+                if !pconfig.base_url.is_empty() {
+                    p = p.with_base_url(&pconfig.base_url);
+                }
+                if !pconfig.default_model.is_empty() {
+                    p = p.with_default_model(&pconfig.default_model);
                 }
                 Some(Arc::new(p))
             }
