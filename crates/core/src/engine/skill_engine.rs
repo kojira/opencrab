@@ -216,6 +216,7 @@ impl SkillEngine {
                 tools: tools.clone(),
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
+                agent_id: None,
             };
 
             let request_for_log = request.clone();

@@ -577,7 +577,7 @@ pub async fn run_agent_response(
     };
     let llm_client = LlmRouterAdapter::new(state.llm_router.clone())
         .with_metrics(metrics_ctx)
-        .with_working_dir(ws_path.clone());
+        .with_agent_id(agent_id);
 
     // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
     let max_iterations = if depth == 0 { 30 } else { usize::MAX };

@@ -131,7 +131,7 @@ impl CodexProvider {
         parts.join("\n\n")
     }
 
-    fn build_base_command(&self, model: &str, working_dir_override: Option<&str>) -> Command {
+    fn build_base_command(&self, model: &str, agent_id: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.codex_path);
         cmd.arg("exec")
             .arg("--ephemeral")
@@ -144,9 +144,14 @@ impl CodexProvider {
             .arg("-c")
             .arg("approval=never");
 
-        // working_dir_override takes precedence over the configured working_dir.
-        let working_dir = working_dir_override.or(self.working_dir.as_deref());
-        if let Some(dir) = working_dir {
+        // Derive a per-agent workspace path from the agent identity. Falls back
+        // to the provider-configured working_dir when no agent_id is supplied.
+        let working_dir: Option<String> = agent_id
+            .map(|id| format!("data/agents/{}/workspace", id))
+            .or_else(|| self.working_dir.clone());
+
+        if let Some(dir) = &working_dir {
+            std::fs::create_dir_all(dir).ok();
             cmd.arg("-C").arg(dir);
         }
 
@@ -201,11 +206,6 @@ impl LlmProvider for CodexProvider {
         };
         debug!(model = %model, "Codex CLI chat completion");
 
-        let working_dir_override = request
-            .metadata
-            .get("working_dir")
-            .and_then(|v| v.as_str());
-
         let prompt = self.build_prompt(&request);
 
         // tempfile crate creates with O_EXCL and cleans up on Drop.
@@ -216,7 +216,7 @@ impl LlmProvider for CodexProvider {
             .context("failed to create temp file for codex output")?;
         let output_path = output_file.path().to_string_lossy().to_string();
 
-        let mut cmd = self.build_base_command(model, working_dir_override);
+        let mut cmd = self.build_base_command(model, request.agent_id.as_deref());
         cmd.arg("-o")
             .arg(&output_path)
             // Read prompt from stdin to avoid ARG_MAX limits and /proc exposure.
@@ -315,14 +315,9 @@ impl LlmProvider for CodexProvider {
         };
         debug!(model = %model, "Codex CLI streaming chat completion");
 
-        let working_dir_override = request
-            .metadata
-            .get("working_dir")
-            .and_then(|v| v.as_str());
-
         let prompt = self.build_prompt(&request);
 
-        let mut cmd = self.build_base_command(&model, working_dir_override);
+        let mut cmd = self.build_base_command(&model, request.agent_id.as_deref());
         cmd.arg("--json")
             // Read prompt from stdin.
             .arg("-")
@@ -574,6 +569,7 @@ mod tests {
             stop: None,
             stream: None,
             metadata: Default::default(),
+            agent_id: None,
         };
 
         let prompt = provider.build_prompt(&request);
@@ -602,6 +598,7 @@ mod tests {
             stop: None,
             stream: None,
             metadata: Default::default(),
+            agent_id: None,
         };
 
         let prompt = provider.build_prompt(&request);
@@ -652,6 +649,7 @@ mod tests {
             stop: None,
             stream: None,
             metadata: Default::default(),
+            agent_id: None,
         };
 
         let prompt = provider.build_prompt(&request);

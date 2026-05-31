@@ -122,6 +122,7 @@ async fn test_chat_completion_tool_calling() {
         stop: None,
         stream: Some(false),
         metadata: Default::default(),
+        agent_id: None,
     };
 
     let response = p.chat_completion(request).await.unwrap();

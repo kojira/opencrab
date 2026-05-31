@@ -181,6 +181,10 @@ pub struct ChatRequest {
     /// Arbitrary metadata for provider-specific extensions.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, Value>,
+    /// Identity of the agent making this request. Providers can derive
+    /// agent-specific context (e.g. a workspace path) from this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 impl ChatRequest {
@@ -196,6 +200,7 @@ impl ChatRequest {
             stop: None,
             stream: None,
             metadata: HashMap::new(),
+            agent_id: None,
         }
     }
 
