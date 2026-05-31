@@ -547,4 +547,41 @@ mod tests {
     fn test_extract_account_id_invalid() {
         assert!(extract_account_id("notajwt").is_err());
     }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_chatgpt_api() {
+        // Uses real ~/.codex/auth.json — run with: cargo test -- --ignored
+        let provider = ChatGptProvider::new();
+        let request = ChatRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("Say exactly: hello from test".to_string())),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+                cache_control: None,
+            }],
+            functions: None,
+            function_call: None,
+            temperature: None,
+            max_tokens: Some(50),
+            stop: None,
+            stream: Some(false),
+            metadata: std::collections::HashMap::new(),
+            agent_id: None,
+        };
+        let response = provider.chat_completion(request).await;
+        assert!(response.is_ok(), "API call failed: {:?}", response.err());
+        let resp = response.unwrap();
+        assert!(!resp.choices.is_empty(), "No choices returned");
+        let content = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.clone(),
+            _ => panic!("Expected text content"),
+        };
+        assert!(!content.is_empty(), "Empty response content");
+        println!("Response: {}", content);
+    }
 }
