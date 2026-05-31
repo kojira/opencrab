@@ -93,6 +93,10 @@ pub fn create_router(state: AppState) -> Router {
             get(api::memory::list_curated_memory),
         )
         .route(
+            "/api/agents/{id}/memory/curated/{entry_id}",
+            axum::routing::delete(api::memory::delete_curated_memory_entry),
+        )
+        .route(
             "/api/agents/{id}/memory/search",
             post(api::memory::search_memory),
         )

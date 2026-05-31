@@ -118,7 +118,15 @@ impl DiscordGatewayActions {
             .filter(|ch| ch.kind == ChannelType::Text)
             .map(|ch| {
                 let ch_id = ch.id.to_string();
-                let db_cfg = db_configs.iter().find(|c| c.channel_id == ch_id);
+                // エージェント固有設定を優先、なければグローバル設定（agent_id=""）
+                let db_cfg = db_configs
+                    .iter()
+                    .find(|c| c.channel_id == ch_id && c.agent_id == self.agent_id)
+                    .or_else(|| {
+                        db_configs
+                            .iter()
+                            .find(|c| c.channel_id == ch_id && c.agent_id.is_empty())
+                    });
                 let readable = db_cfg.map(|c| c.readable).unwrap_or(true);
                 let writable = db_cfg.map(|c| c.writable).unwrap_or(true);
                 let whitelisted = db_cfg.map(|c| c.whitelisted).unwrap_or(false);
@@ -207,6 +215,7 @@ impl DiscordGatewayActions {
 
         let cfg = opencrab_db::queries::ChannelConfigRow {
             channel_id: channel_id.to_string(),
+            agent_id: self.agent_id.clone(),
             guild_id: guild_id.to_string(),
             channel_name: channel_name.to_string(),
             readable,

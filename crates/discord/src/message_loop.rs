@@ -319,20 +319,7 @@ async fn process_incoming_message<T: AgentRunner>(
         }
     }
 
-    // Channel whitelist check
-    if !is_dm {
-        let whitelisted = {
-            let conn = state.db().lock().unwrap();
-            opencrab_db::queries::is_channel_whitelisted(&conn, &channel_id_str)
-        };
-        if !whitelisted {
-            debug!(
-                channel = %channel_id_str,
-                "Ignoring message from non-whitelisted channel"
-            );
-            return;
-        }
-    }
+    // Channel whitelist check はエージェントごとに行う（agent loop 内）
 
     debug!(
         user = %incoming.sender.name,
@@ -340,11 +327,6 @@ async fn process_incoming_message<T: AgentRunner>(
         text = %text.chars().take(50).collect::<String>(),
         "Discord message received"
     );
-
-    // タイピングインジケーター送信
-    if let Err(e) = gateway.start_typing(channel_id).await {
-        warn!("Failed to start typing indicator: {e}");
-    }
 
     if !state.has_llm_providers() {
         debug!("No LLM providers configured, skipping agent response");
@@ -383,6 +365,31 @@ async fn process_incoming_message<T: AgentRunner>(
         .to_string();
 
     for agent_id in &agent_ids {
+        // Per-agent channel whitelist check
+        if !is_dm {
+            let whitelisted = {
+                let conn = state.db().lock().unwrap();
+                opencrab_db::queries::is_channel_whitelisted_for_agent(
+                    &conn,
+                    &channel_id_str,
+                    agent_id,
+                )
+            };
+            if !whitelisted {
+                debug!(
+                    channel = %channel_id_str,
+                    agent = %agent_id,
+                    "Ignoring message from non-whitelisted channel for agent"
+                );
+                continue; // skip this agent, not return
+            }
+        }
+
+        // タイピングインジケーター送信（ホワイトリスト通過後のみ）
+        if let Err(e) = gateway.start_typing(channel_id).await {
+            warn!("Failed to start typing indicator: {e}");
+        }
+
         let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
         ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
 

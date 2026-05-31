@@ -6,8 +6,8 @@ max_workspace_size_mb = 100
 
 # デフォルトLLM設定
 [llm]
-default_provider = "openrouter"
-default_model = "claude-sonnet-4-6"
+default_provider = "codex"
+default_model = "gpt-5.5"
 
 # 用途別モデル設定（オプション）
 [llm.models]
@@ -63,7 +63,7 @@ base_url = "http://localhost:8080"
 # Codex CLI設定（ローカル）
 [llm.providers.codex]
 default_model = "o4-mini"
-sandbox = "read-only"
+sandbox = "danger-full-access"
 timeout_secs = 300
 models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示するモデル一覧
 # binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）

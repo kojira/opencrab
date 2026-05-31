@@ -33,6 +33,18 @@ pub async fn list_curated_memory(
     }
 }
 
+pub async fn delete_curated_memory_entry(
+    State(state): State<AppState>,
+    Path((id, entry_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let conn = state.db.lock().unwrap();
+    match opencrab_db::queries::delete_curated_memory_entry(&conn, &id, &entry_id) {
+        Ok(true) => Json(serde_json::json!({"deleted": true})),
+        Ok(false) => Json(serde_json::json!({"deleted": false, "error": "Not found"})),
+        Err(e) => Json(serde_json::json!({"deleted": false, "error": e.to_string()})),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchMemoryRequest {
     pub query: String,

@@ -76,18 +76,54 @@ impl CodexProvider {
     fn build_prompt(&self, request: &ChatRequest) -> String {
         let mut parts = Vec::new();
 
-        for msg in &request.messages {
-            let content = msg.text_content().unwrap_or("").to_string();
-            if content.is_empty() {
-                continue;
+        // Inject available tool definitions as an XML block so the model can
+        // emit <function_calls> blocks (codex CLI has no native tool calling).
+        if let Some(tools) = &request.functions {
+            if !tools.is_empty() {
+                parts.push(render_tool_definitions(tools));
             }
+        }
+
+        for msg in &request.messages {
+            let content = msg.text_content().unwrap_or("");
             match msg.role {
-                Role::System => parts.push(format!("[System]\n{content}")),
-                Role::User => parts.push(format!("[User]\n{content}")),
-                Role::Assistant => parts.push(format!("[Assistant]\n{content}")),
+                Role::System => {
+                    if !content.is_empty() {
+                        parts.push(format!("[System]\n{content}"));
+                    }
+                }
+                Role::User => {
+                    if !content.is_empty() {
+                        parts.push(format!("[User]\n{content}"));
+                    }
+                }
+                Role::Assistant => {
+                    // An assistant turn may carry text, tool calls, or both.
+                    let mut body = String::new();
+                    if !content.is_empty() {
+                        body.push_str(content);
+                    }
+                    if let Some(tool_calls) = &msg.tool_calls {
+                        if !tool_calls.is_empty() {
+                            if !body.is_empty() {
+                                body.push_str("\n\n");
+                            }
+                            body.push_str(&render_tool_calls(tool_calls));
+                        }
+                    }
+                    if !body.is_empty() {
+                        parts.push(format!("[Assistant]\n{body}"));
+                    }
+                }
                 Role::Tool => {
+                    // Identify which tool call this result corresponds to so the
+                    // model can match results back to its <function_calls>.
                     let name = msg.name.as_deref().unwrap_or("tool");
-                    parts.push(format!("[Tool Result: {name}]\n{content}"));
+                    let header = match msg.tool_call_id.as_deref() {
+                        Some(id) => format!("[Tool Result: {name} (call_id={id})]"),
+                        None => format!("[Tool Result: {name}]"),
+                    };
+                    parts.push(format!("{header}\n{content}"));
                 }
             }
         }
@@ -105,8 +141,8 @@ impl CodexProvider {
             .arg("-s")
             .arg(&self.sandbox)
             // Never prompt for approval (non-interactive).
-            .arg("-a")
-            .arg("never");
+            .arg("-c")
+            .arg("approval=never");
 
         if let Some(ref dir) = self.working_dir {
             cmd.arg("-C").arg(dir);
@@ -344,6 +380,65 @@ impl LlmProvider for CodexProvider {
     }
 }
 
+/// Render tool definitions as an XML block describing how to invoke them.
+/// codex CLI lacks native function calling, so we instruct the model to reply
+/// with `<function_calls>` blocks that `parse_xml_tool_calls` understands.
+fn render_tool_definitions(tools: &[FunctionDefinition]) -> String {
+    let mut out = String::from(
+        "[Available Tools]\nYou can call these tools by responding with \
+         <function_calls>...</function_calls> XML blocks.\n\n<tools>\n",
+    );
+
+    for tool in tools {
+        out.push_str(&format!("<tool name=\"{}\">\n", tool.name));
+        if let Some(desc) = &tool.description {
+            out.push_str(&format!("<description>{desc}</description>\n"));
+        }
+        // Embed the raw JSON Schema for the parameters.
+        let params = serde_json::to_string(&tool.parameters)
+            .unwrap_or_else(|_| "{}".to_string());
+        out.push_str(&format!("<parameters>{params}</parameters>\n"));
+        out.push_str("</tool>\n");
+    }
+
+    out.push_str(
+        "</tools>\n\nTo call a tool, respond with:\n<function_calls>\n\
+         <invoke name=\"tool_name\">\n<param_name>param_value</param_name>\n\
+         </invoke>\n</function_calls>",
+    );
+    out
+}
+
+/// Render assistant tool calls back into `<function_calls>` XML so the model
+/// sees its own prior calls in a format consistent with how it must produce them.
+fn render_tool_calls(tool_calls: &[ToolCall]) -> String {
+    let mut out = String::from("<function_calls>\n");
+
+    for call in tool_calls {
+        out.push_str(&format!("<invoke name=\"{}\">\n", call.function.name));
+        // arguments is a JSON object string; expand each field into a param tag.
+        match serde_json::from_str::<serde_json::Value>(&call.function.arguments) {
+            Ok(serde_json::Value::Object(map)) => {
+                for (key, value) in map {
+                    let rendered = match value {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    out.push_str(&format!("<{key}>{rendered}</{key}>\n"));
+                }
+            }
+            // Fall back to emitting the raw arguments if they are not an object.
+            _ => {
+                out.push_str(&format!("<arguments>{}</arguments>\n", call.function.arguments));
+            }
+        }
+        out.push_str("</invoke>\n");
+    }
+
+    out.push_str("</function_calls>");
+    out
+}
+
 /// Parse a JSONL event line from `codex exec --json` and extract streaming content.
 /// Returns a ChatStreamDelta for agent_message item.completed events.
 fn parse_jsonl_event(line: &str, model: &str) -> Option<ChatStreamDelta> {
@@ -472,6 +567,90 @@ mod tests {
         let prompt = provider.build_prompt(&request);
         assert!(prompt.contains("[System]\nYou are helpful."));
         assert!(prompt.contains("[User]\nHello"));
+    }
+
+    #[test]
+    fn test_build_prompt_injects_tool_definitions() {
+        let provider = CodexProvider::new();
+        let request = ChatRequest {
+            model: "o4-mini".to_string(),
+            messages: vec![Message::user("Do the thing")],
+            functions: Some(vec![FunctionDefinition {
+                name: "spawn_subtask".to_string(),
+                description: Some("Launch a subtask asynchronously".to_string()),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}}
+                }),
+                cache_control: None,
+            }]),
+            function_call: None,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            stream: None,
+            metadata: Default::default(),
+        };
+
+        let prompt = provider.build_prompt(&request);
+        assert!(prompt.contains("[Available Tools]"));
+        assert!(prompt.contains("<tool name=\"spawn_subtask\">"));
+        assert!(prompt.contains("<description>Launch a subtask asynchronously</description>"));
+        assert!(prompt.contains("\"prompt\""));
+        assert!(prompt.contains("<function_calls>"));
+        assert!(prompt.contains("[User]\nDo the thing"));
+    }
+
+    #[test]
+    fn test_build_prompt_renders_assistant_tool_calls() {
+        let provider = CodexProvider::new();
+        let request = ChatRequest {
+            model: "o4-mini".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: Some(MessageContent::Text("Calling a tool now.".to_string())),
+                    name: None,
+                    function_call: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "send_message".to_string(),
+                            arguments: r#"{"text":"hi","count":3}"#.to_string(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                    cache_control: None,
+                },
+                Message {
+                    role: Role::Tool,
+                    content: Some(MessageContent::Text("done".to_string())),
+                    name: Some("send_message".to_string()),
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: Some("call_1".to_string()),
+                    cache_control: None,
+                },
+            ],
+            functions: None,
+            function_call: None,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            stream: None,
+            metadata: Default::default(),
+        };
+
+        let prompt = provider.build_prompt(&request);
+        // Assistant text and tool calls both rendered under [Assistant].
+        assert!(prompt.contains("[Assistant]\nCalling a tool now."));
+        assert!(prompt.contains("<invoke name=\"send_message\">"));
+        assert!(prompt.contains("<text>hi</text>"));
+        // Non-string JSON values are serialized without quotes.
+        assert!(prompt.contains("<count>3</count>"));
+        // Tool result identifies the originating call.
+        assert!(prompt.contains("[Tool Result: send_message (call_id=call_1)]\ndone"));
     }
 
     #[test]

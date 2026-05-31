@@ -161,10 +161,17 @@ fn make_heartbeat_callback(
                     let conn = db.lock().unwrap();
                     let (sp, name) =
                         opencrab_server::process::build_agent_context(&conn, &agent_id_owned);
+                    // Use per-agent model from DB, fallback to global default
+                    let agent_model = opencrab_db::queries::effective_model_for_agent(
+                        &conn,
+                        &agent_id_owned,
+                        &state.default_model,
+                    )
+                    .unwrap_or_else(|_| state.default_model.clone());
                     let budget = opencrab_server::process::compute_context_budget(
                         &conn,
-                        state.default_model.split(':').next().unwrap_or(""),
-                        state.default_model.split(':').nth(1).unwrap_or(""),
+                        agent_model.split(':').next().unwrap_or(""),
+                        agent_model.split(':').nth(1).unwrap_or(""),
                         state.compaction_ratio,
                     );
                     let conv = match opencrab_server::process::build_conversation_string(
