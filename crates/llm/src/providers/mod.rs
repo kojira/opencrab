@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod codex;
 pub mod google;
 pub mod llamacpp;
 pub mod ollama;
@@ -6,6 +7,7 @@ pub mod openai;
 pub mod openrouter;
 
 pub use anthropic::AnthropicProvider;
+pub use codex::CodexProvider;
 pub use google::GoogleProvider;
 pub use llamacpp::LlamaCppProvider;
 pub use ollama::OllamaProvider;
