@@ -227,6 +227,8 @@ impl IndexBuilder {
             let token_count = (chunk_text.len() / 3) as i32;
 
             // LLM呼び出しでサマリー生成
+            tracing::debug!("index_builder: LLM call start - persona_name={:?}, has_personality={}", persona_name, personality.as_ref().map(|p| !p.is_empty()).unwrap_or(false));
+            tracing::debug!("index_builder: personality content = {:?}", personality);
             let prompt = if let Some(p) = personality.filter(|s| !s.is_empty()) {
                 format!(
                     "あなたは {persona_name} です。\n{p}\n\n以下はあなたが体験した会話のログです。\nあなた自身の記憶として、以下の観点を含めて要約してください:\n\n1. 学んだこと・技術知見（新しく知ったこと、理解が深まったこと）\n2. 判断の理由（なぜそうしたか、どういう選択肢があったか）\n3. 関係性・感情（誰と何をしたか、どう感じたか）\n4. 失敗と教訓（うまくいかなかったこと、次回への学び）\n\n一人称で書いてください。客観的なイベントログではなく、あなたの記憶として。\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\"}}\n\nログ:\n{chunk_text}"
@@ -237,16 +239,32 @@ impl IndexBuilder {
                 )
             };
 
+            tracing::debug!("index_builder: generated prompt (first 200 chars) = {:?}", &prompt[..prompt.len().min(200)]);
+            let system_content = if let Some(p) = personality.filter(|s| !s.is_empty()) {
+                format!("あなたは {persona_name} です。\n{p}")
+            } else {
+                "You are a helpful assistant.".to_string()
+            };
             let request = ChatRequestSimple {
                 model: model.to_string(),
-                messages: vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: prompt,
-                    tool_call_id: None,
-                    tool_calls: vec![],
-                    content_parts: vec![],
-                    cache_control: None,
-                }],
+                messages: vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: system_content,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                        content_parts: vec![],
+                        cache_control: None,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: prompt,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                        content_parts: vec![],
+                        cache_control: None,
+                    },
+                ],
                 tools: vec![],
                 temperature: Some(0.0),
                 max_tokens: Some(200),
@@ -459,16 +477,31 @@ impl IndexBuilder {
                 )
             };
 
+            let system_content = if let Some(p) = personality.filter(|s| !s.is_empty()) {
+                format!("あなたは {persona_name} です。\n{p}")
+            } else {
+                "You are a helpful assistant.".to_string()
+            };
             let request = ChatRequestSimple {
                 model: model.to_string(),
-                messages: vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: prompt,
-                    tool_call_id: None,
-                    tool_calls: vec![],
-                    content_parts: vec![],
-                    cache_control: None,
-                }],
+                messages: vec![
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: system_content,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                        content_parts: vec![],
+                        cache_control: None,
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: prompt,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                        content_parts: vec![],
+                        cache_control: None,
+                    },
+                ],
                 tools: vec![],
                 temperature: Some(0.0),
                 max_tokens: Some(300),
@@ -724,7 +757,7 @@ mod tests {
         .unwrap();
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = &request.messages[1].content;
         assert!(prompt.contains("のすたろう"), "プロンプトにペルソナ名が含まれるべき");
         assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
     }
@@ -765,7 +798,7 @@ mod tests {
         .unwrap();
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = &request.messages[1].content;
         assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸が含まれるべき");
         assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸が含まれるべき");
         assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性・感情軸が含まれるべき");
@@ -810,7 +843,7 @@ mod tests {
         assert!(result.nodes_created > 0, "ノードが生成されるべき");
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = &request.messages[1].content;
         // Default prompt should still use 一人称
         assert!(prompt.contains("一人称"), "デフォルトプロンプトに一人称が含まれるべき");
     }

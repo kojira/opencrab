@@ -174,16 +174,39 @@ impl ChatGptProvider {
     /// Build the request body in the Responses API format.
     fn build_request_body(&self, request: &ChatRequest, stream: bool) -> Value {
         let mut system_prompts: Vec<String> = Vec::new();
+        tracing::warn!("chatgpt build_request_body: messages count={}, system_prompts will be extracted", request.messages.len());
         let mut input: Vec<Value> = Vec::new();
+
+        tracing::debug!(message_count = request.messages.len(), "build_request_body: received messages");
+        for msg in &request.messages {
+            tracing::debug!(role = ?msg.role, "build_request_body: message role");
+        }
 
         for msg in &request.messages {
             if msg.role == Role::System {
+                tracing::debug!(
+                    role = "system",
+                    content_is_some = msg.content.is_some(),
+                    "build_request_body: processing system message"
+                );
                 if let Some(MessageContent::Text(text)) = &msg.content {
+                    tracing::debug!(text_len = text.len(), "build_request_body: system message is Text, adding to system_prompts");
                     system_prompts.push(text.clone());
                 } else if let Some(content) = Self::message_content_value(&msg.content) {
                     if let Some(s) = content.as_str() {
+                        tracing::debug!(str_len = s.len(), "build_request_body: system message content converted to str via message_content_value");
                         system_prompts.push(s.to_string());
+                    } else {
+                        tracing::warn!(
+                            content_type = ?&msg.content,
+                            "build_request_body: system message content is not a string after message_content_value conversion, SKIPPING"
+                        );
                     }
+                } else {
+                    tracing::warn!(
+                        content_is_none = msg.content.is_none(),
+                        "build_request_body: system message content is None or could not be converted, SKIPPING"
+                    );
                 }
                 continue;
             }
@@ -221,6 +244,14 @@ impl ChatGptProvider {
             "parallel_tool_calls": true,
         });
 
+        tracing::warn!("chatgpt build_request_body: system_prompts count={}, content={:?}", system_prompts.len(), system_prompts.first().map(|s| &s[..s.len().min(100)]));
+        if system_prompts.is_empty() {
+            tracing::warn!(
+                total_messages = request.messages.len(),
+                "build_request_body: system_prompts is EMPTY! instructions field will NOT be set -> API will return 400 Bad Request"
+            );
+        }
+
         if !system_prompts.is_empty() {
             body["instructions"] = serde_json::json!(system_prompts.join("\n\n"));
         }
@@ -251,6 +282,16 @@ impl ChatGptProvider {
                 }
             }
         }
+
+        debug!(
+            model = %request.model,
+            stream = stream,
+            input_count = input.len(),
+            system_prompt_count = system_prompts.len(),
+            has_tools = request.functions.is_some(),
+            body = %body,
+            "chatgpt build_request_body"
+        );
 
         body
     }

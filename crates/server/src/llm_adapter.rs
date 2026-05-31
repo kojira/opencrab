@@ -213,6 +213,22 @@ fn to_llm_message(msg: ChatMessage) -> Message {
         Some(MessageContent::Text(msg.content))
     };
 
+    // Log the content type variant for system messages to help debug how the
+    // system prompt is being serialized (string vs. block array).
+    if role == Role::System {
+        let content_type = match &content {
+            None => "None",
+            Some(MessageContent::Text(_)) => "Text(String)",
+            Some(MessageContent::Image { .. }) => "Image",
+            Some(MessageContent::Multi(_)) => "Multi(Vec<ContentPart>)",
+        };
+        tracing::debug!(content_type, "to_llm_message: system message content type");
+
+        if content.is_none() {
+            tracing::warn!("to_llm_message: system message has None content - instructions will be missing in chatgpt request");
+        }
+    }
+
     Message {
         role,
         content,
