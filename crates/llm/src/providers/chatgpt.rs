@@ -394,3 +394,39 @@ impl LlmProvider for ChatGptProvider {
         Ok(self.load_access_token().is_ok())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_expand_tilde_basic() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(
+            expand_tilde("~/.codex/auth.json"),
+            format!("{}/.codex/auth.json", home)
+        );
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn test_parse_auth_json() {
+        let mut file = NamedTempFile::new().expect("failed to create temp file");
+        write!(file, r#"{{"tokens":{{"access_token":"test-token-123"}}}}"#)
+            .expect("failed to write temp file");
+        let path = file.path().to_str().expect("invalid temp path").to_string();
+        let provider = ChatGptProvider::new().with_auth_file(path);
+        let token = provider.load_access_token();
+        assert_eq!(token.unwrap(), "test-token-123");
+    }
+
+    #[test]
+    fn test_load_access_token_missing_file() {
+        let provider = ChatGptProvider::new().with_auth_file("/nonexistent/path/auth.json");
+        assert!(provider.load_access_token().is_err());
+    }
+}
