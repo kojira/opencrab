@@ -12,6 +12,18 @@ use crate::traits::{LlmProvider, ModelInfo};
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 
+/// Expand a leading `~` in a path to the value of the `HOME` environment variable.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/{}", home, rest)
+    } else if path == "~" {
+        std::env::var("HOME").unwrap_or_default()
+    } else {
+        path.to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatGptProvider {
     client: Client,
@@ -39,7 +51,8 @@ impl ChatGptProvider {
     }
 
     pub fn with_auth_file(mut self, path: impl Into<String>) -> Self {
-        self.auth_file = path.into();
+        let p: String = path.into();
+        self.auth_file = expand_tilde(&p);
         self
     }
 
