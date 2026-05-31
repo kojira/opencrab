@@ -286,6 +286,20 @@ pub fn upsert_curated_memory(conn: &Connection, memory: &CuratedMemoryRow) -> Re
     Ok(())
 }
 
+/// Deletes a single curated memory entry by ID and agent_id.
+/// Returns true if deleted, false if not found.
+pub fn delete_curated_memory_entry(
+    conn: &Connection,
+    agent_id: &str,
+    entry_id: &str,
+) -> Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM memory_curated WHERE id = ?1 AND agent_id = ?2",
+        params![entry_id, agent_id],
+    )?;
+    Ok(deleted > 0)
+}
+
 pub fn get_curated_memories(
     conn: &Connection,
     agent_id: &str,
@@ -1461,6 +1475,8 @@ pub fn get_model_pricing(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelConfigRow {
     pub channel_id: String,
+    #[serde(default)]
+    pub agent_id: String, // "" = global
     pub guild_id: String,
     pub channel_name: String,
     pub readable: bool,
@@ -1470,21 +1486,32 @@ pub struct ChannelConfigRow {
     pub heartbeat_interval_secs: Option<u64>,
 }
 
+/// グローバル設定（agent_id = ''）を取得する。
 pub fn get_channel_config(conn: &Connection, channel_id: &str) -> Result<Option<ChannelConfigRow>> {
+    get_channel_config_for_agent(conn, channel_id, "")
+}
+
+/// (channel_id, agent_id) で設定を取得する。agent_id = "" はグローバル設定。
+pub fn get_channel_config_for_agent(
+    conn: &Connection,
+    channel_id: &str,
+    agent_id: &str,
+) -> Result<Option<ChannelConfigRow>> {
     let result = conn.query_row(
-        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
-         FROM discord_channel_config WHERE channel_id = ?1",
-        params![channel_id],
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+         FROM discord_channel_config WHERE channel_id = ?1 AND agent_id = ?2",
+        params![channel_id, agent_id],
         |row| {
             Ok(ChannelConfigRow {
                 channel_id: row.get(0)?,
-                guild_id: row.get(1)?,
-                channel_name: row.get(2)?,
-                readable: row.get(3)?,
-                writable: row.get(4)?,
-                whitelisted: row.get(5)?,
-                heartbeat_enabled: row.get(6)?,
-                heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                agent_id: row.get(1)?,
+                guild_id: row.get(2)?,
+                channel_name: row.get(3)?,
+                readable: row.get(4)?,
+                writable: row.get(5)?,
+                whitelisted: row.get(6)?,
+                heartbeat_enabled: row.get(7)?,
+                heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
             })
         },
     );
@@ -1498,9 +1525,9 @@ pub fn get_channel_config(conn: &Connection, channel_id: &str) -> Result<Option<
 
 pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO discord_channel_config (channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(channel_id) DO UPDATE SET
+        "INSERT INTO discord_channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(channel_id, agent_id) DO UPDATE SET
             guild_id = excluded.guild_id,
             channel_name = excluded.channel_name,
             readable = excluded.readable,
@@ -1511,6 +1538,7 @@ pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Resul
             updated_at = excluded.updated_at",
         params![
             cfg.channel_id,
+            cfg.agent_id,
             cfg.guild_id,
             cfg.channel_name,
             cfg.readable,
@@ -1524,10 +1552,20 @@ pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Resul
     Ok(())
 }
 
+/// グローバル設定（agent_id = ''）を削除する。
 pub fn delete_channel_config(conn: &Connection, channel_id: &str) -> Result<bool> {
+    delete_channel_config_for_agent(conn, channel_id, "")
+}
+
+/// (channel_id, agent_id) の設定を削除する。
+pub fn delete_channel_config_for_agent(
+    conn: &Connection,
+    channel_id: &str,
+    agent_id: &str,
+) -> Result<bool> {
     let rows_affected = conn.execute(
-        "DELETE FROM discord_channel_config WHERE channel_id = ?1",
-        rusqlite::params![channel_id],
+        "DELETE FROM discord_channel_config WHERE channel_id = ?1 AND agent_id = ?2",
+        rusqlite::params![channel_id, agent_id],
     )?;
     Ok(rows_affected > 0)
 }
@@ -1537,43 +1575,70 @@ pub fn list_channel_configs_by_guild(
     guild_id: &str,
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
          FROM discord_channel_config WHERE guild_id = ?1 ORDER BY channel_name",
     )?;
 
     let rows = stmt.query_map(params![guild_id], |row| {
         Ok(ChannelConfigRow {
             channel_id: row.get(0)?,
-            guild_id: row.get(1)?,
-            channel_name: row.get(2)?,
-            readable: row.get(3)?,
-            writable: row.get(4)?,
-            whitelisted: row.get(5)?,
-            heartbeat_enabled: row.get(6)?,
-            heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            agent_id: row.get(1)?,
+            guild_id: row.get(2)?,
+            channel_name: row.get(3)?,
+            readable: row.get(4)?,
+            writable: row.get(5)?,
+            whitelisted: row.get(6)?,
+            heartbeat_enabled: row.get(7)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
         })
     })?;
 
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// 特定エージェントの設定一覧を取得する。agent_id = "" でグローバル設定。
+pub fn list_channel_configs_by_agent(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Vec<ChannelConfigRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+         FROM discord_channel_config WHERE agent_id = ?1 ORDER BY channel_name",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok(ChannelConfigRow {
+            channel_id: row.get(0)?,
+            agent_id: row.get(1)?,
+            guild_id: row.get(2)?,
+            channel_name: row.get(3)?,
+            readable: row.get(4)?,
+            writable: row.get(5)?,
+            whitelisted: row.get(6)?,
+            heartbeat_enabled: row.get(7)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// whitelisted=true のチャンネルをすべて取得する。
 pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
          FROM discord_channel_config WHERE whitelisted = 1 ORDER BY channel_id",
     )?;
 
     let rows = stmt.query_map([], |row| {
         Ok(ChannelConfigRow {
             channel_id: row.get(0)?,
-            guild_id: row.get(1)?,
-            channel_name: row.get(2)?,
-            readable: row.get(3)?,
-            writable: row.get(4)?,
-            whitelisted: row.get(5)?,
-            heartbeat_enabled: row.get(6)?,
-            heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            agent_id: row.get(1)?,
+            guild_id: row.get(2)?,
+            channel_name: row.get(3)?,
+            readable: row.get(4)?,
+            writable: row.get(5)?,
+            whitelisted: row.get(6)?,
+            heartbeat_enabled: row.get(7)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
         })
     })?;
 
@@ -1584,20 +1649,21 @@ pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigR
 /// ハートビートを有効にすべきチャンネル一覧。
 pub fn list_heartbeat_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
          FROM discord_channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id",
     )?;
 
     let rows = stmt.query_map([], |row| {
         Ok(ChannelConfigRow {
             channel_id: row.get(0)?,
-            guild_id: row.get(1)?,
-            channel_name: row.get(2)?,
-            readable: row.get(3)?,
-            writable: row.get(4)?,
-            whitelisted: row.get(5)?,
-            heartbeat_enabled: row.get(6)?,
-            heartbeat_interval_secs: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+            agent_id: row.get(1)?,
+            guild_id: row.get(2)?,
+            channel_name: row.get(3)?,
+            readable: row.get(4)?,
+            writable: row.get(5)?,
+            whitelisted: row.get(6)?,
+            heartbeat_enabled: row.get(7)?,
+            heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
         })
     })?;
 
@@ -1748,6 +1814,60 @@ pub fn is_channel_whitelisted(conn: &Connection, channel_id: &str) -> bool {
         .flatten()
         .map(|c| c.whitelisted)
         .unwrap_or(false)
+}
+
+/// エージェント固有設定を優先し、なければグローバル設定にフォールバックして
+/// チャンネルがホワイトリストに登録されているか判定する。設定なし=false。
+pub fn is_channel_whitelisted_for_agent(
+    conn: &Connection,
+    channel_id: &str,
+    agent_id: &str,
+) -> bool {
+    // エージェント固有設定を優先、なければグローバル設定
+    if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)
+        .ok()
+        .flatten()
+    {
+        return cfg.whitelisted;
+    }
+    // グローバル設定へフォールバック
+    get_channel_config_for_agent(conn, channel_id, "")
+        .ok()
+        .flatten()
+        .map(|c| c.whitelisted)
+        .unwrap_or(false)
+}
+
+/// エージェント固有設定を優先し、なければグローバル設定にフォールバックして
+/// チャンネルが読み取り可能か判定する。設定なし=true（デフォルト許可）。
+pub fn is_channel_readable_for_agent(conn: &Connection, channel_id: &str, agent_id: &str) -> bool {
+    if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)
+        .ok()
+        .flatten()
+    {
+        return cfg.readable;
+    }
+    get_channel_config_for_agent(conn, channel_id, "")
+        .ok()
+        .flatten()
+        .map(|c| c.readable)
+        .unwrap_or(true)
+}
+
+/// エージェント固有設定を優先し、なければグローバル設定にフォールバックして
+/// チャンネルが書き込み可能か判定する。設定なし=true（デフォルト許可）。
+pub fn is_channel_writable_for_agent(conn: &Connection, channel_id: &str, agent_id: &str) -> bool {
+    if let Some(cfg) = get_channel_config_for_agent(conn, channel_id, agent_id)
+        .ok()
+        .flatten()
+    {
+        return cfg.writable;
+    }
+    get_channel_config_for_agent(conn, channel_id, "")
+        .ok()
+        .flatten()
+        .map(|c| c.writable)
+        .unwrap_or(true)
 }
 
 // ============================================
@@ -3118,6 +3238,7 @@ mod tests {
 
         let cfg = ChannelConfigRow {
             channel_id: "123456".to_string(),
+            agent_id: String::new(),
             guild_id: "guild-1".to_string(),
             channel_name: "general".to_string(),
             readable: true,
@@ -3145,6 +3266,7 @@ mod tests {
 
         let cfg = ChannelConfigRow {
             channel_id: "123456".to_string(),
+            agent_id: String::new(),
             guild_id: "guild-1".to_string(),
             channel_name: "general".to_string(),
             readable: true,
@@ -3173,6 +3295,7 @@ mod tests {
 
         let cfg1 = ChannelConfigRow {
             channel_id: "ch-1".to_string(),
+            agent_id: String::new(),
             guild_id: "guild-1".to_string(),
             channel_name: "general".to_string(),
             readable: true,
@@ -3183,6 +3306,7 @@ mod tests {
         };
         let cfg2 = ChannelConfigRow {
             channel_id: "ch-2".to_string(),
+            agent_id: String::new(),
             guild_id: "guild-1".to_string(),
             channel_name: "random".to_string(),
             readable: false,
@@ -3193,6 +3317,7 @@ mod tests {
         };
         let cfg3 = ChannelConfigRow {
             channel_id: "ch-3".to_string(),
+            agent_id: String::new(),
             guild_id: "guild-2".to_string(),
             channel_name: "other".to_string(),
             readable: true,
@@ -3224,6 +3349,7 @@ mod tests {
         // Set readable=false
         let cfg = ChannelConfigRow {
             channel_id: "ch-blocked".to_string(),
+            agent_id: String::new(),
             guild_id: "guild-1".to_string(),
             channel_name: "blocked".to_string(),
             readable: false,

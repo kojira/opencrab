@@ -75,6 +75,41 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    // discord_channel_config: agent_idカラム追加 + PKを(channel_id, agent_id)に変更
+    let has_agent_id_col: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='agent_id'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_agent_id_col {
+        // テーブル再作成でPKを(channel_id, agent_id)に変更
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS discord_channel_config_new (
+                channel_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                guild_id TEXT NOT NULL,
+                channel_name TEXT NOT NULL DEFAULT '',
+                readable INTEGER NOT NULL DEFAULT 1,
+                writable INTEGER NOT NULL DEFAULT 1,
+                whitelisted INTEGER NOT NULL DEFAULT 0,
+                heartbeat_enabled INTEGER NOT NULL DEFAULT 1,
+                heartbeat_interval_secs INTEGER,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (channel_id, agent_id)
+            );
+            INSERT INTO discord_channel_config_new
+                (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at)
+            SELECT channel_id, '', guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at
+            FROM discord_channel_config;
+            DROP TABLE discord_channel_config;
+            ALTER TABLE discord_channel_config_new RENAME TO discord_channel_config;
+            CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
+            CREATE INDEX IF NOT EXISTS idx_discord_channel_agent ON discord_channel_config(agent_id);
+        ")?;
+    }
+    // agent_idカラムが存在する場合もインデックスを保証する（新規DB・マイグレーション済みDB共通）
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_discord_channel_agent ON discord_channel_config(agent_id)")?;
+
     // agent_memory_index_config テーブル作成（既存DBへの対応）
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_memory_index_config (
@@ -713,6 +748,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 -- ============================================
 CREATE TABLE IF NOT EXISTS discord_channel_config (
     channel_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
     guild_id TEXT NOT NULL,
     channel_name TEXT NOT NULL DEFAULT '',
     readable INTEGER NOT NULL DEFAULT 1,
@@ -721,7 +757,7 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     heartbeat_enabled INTEGER NOT NULL DEFAULT 1,
     heartbeat_interval_secs INTEGER,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (channel_id)
+    PRIMARY KEY (channel_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_discord_channel_guild ON discord_channel_config(guild_id);
 
