@@ -116,6 +116,20 @@ pub struct ProviderConfig {
     pub site_url: String,
     #[serde(default)]
     pub default_model: String,
+    #[serde(default)]
+    pub binary_path: String,
+    #[serde(default)]
+    pub sandbox: String,
+    #[serde(default)]
+    pub working_dir: String,
+    #[serde(default = "default_codex_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+fn default_codex_timeout() -> u64 {
+    300
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -300,6 +314,33 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 let mut p = LlamaCppProvider::new();
                 if !pconfig.base_url.is_empty() {
                     p = p.with_base_url(&pconfig.base_url);
+                }
+                Some(Arc::new(p))
+            }
+            "codex" => {
+                let mut p = opencrab_llm::CodexProvider::new();
+                if !pconfig.default_model.is_empty() {
+                    p = p.with_default_model(&pconfig.default_model);
+                }
+                if !pconfig.binary_path.is_empty() {
+                    p = p.with_codex_path(&pconfig.binary_path);
+                }
+                if !pconfig.sandbox.is_empty() {
+                    p = p.with_sandbox(&pconfig.sandbox);
+                }
+                if !pconfig.working_dir.is_empty() {
+                    p = p.with_working_dir(&pconfig.working_dir);
+                }
+                if pconfig.timeout_secs > 0 {
+                    p = p.with_timeout_secs(pconfig.timeout_secs);
+                }
+                if !pconfig.models.is_empty() {
+                    let extra: Vec<(String, u32)> = pconfig
+                        .models
+                        .iter()
+                        .map(|m| (m.clone(), 200_000u32))
+                        .collect();
+                    p = p.with_extra_models(extra);
                 }
                 Some(Arc::new(p))
             }
