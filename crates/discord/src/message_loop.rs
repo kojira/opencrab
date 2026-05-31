@@ -494,7 +494,7 @@ async fn process_incoming_message<T: AgentRunner>(
             }))
         };
 
-        // エージェント処理を直列で実行
+        // エージェント処理をバックグラウンドspawnで実行（P1: メインループをブロックしない）
         let state_spawn = state.clone();
         let ga_spawn = gateway_actions.clone();
         let agent_id_spawn = agent_id.clone();
@@ -507,35 +507,37 @@ async fn process_incoming_message<T: AgentRunner>(
         let discord_message_id_spawn = discord_message_id.clone();
         let channel_id_str_spawn = channel_id_str.clone();
 
-        let result = state_spawn
-            .run_agent_response(
+        tokio::spawn(async move {
+            let result = state_spawn
+                .run_agent_response(
+                    &agent_id_spawn,
+                    &agent_name_spawn,
+                    &session_id_spawn,
+                    &system_prompt_spawn,
+                    &conversation_spawn,
+                    "discord",
+                    Some(ga_spawn),
+                    caller_spawn,
+                    &image_urls_spawn,
+                    0,
+                    if discord_message_id_spawn.is_empty() {
+                        None
+                    } else {
+                        Some(discord_message_id_spawn)
+                    },
+                    on_response_text,
+                )
+                .await;
+
+            handle_agent_response(
+                result,
                 &agent_id_spawn,
-                &agent_name_spawn,
                 &session_id_spawn,
-                &system_prompt_spawn,
-                &conversation_spawn,
-                "discord",
-                Some(ga_spawn),
-                caller_spawn,
-                &image_urls_spawn,
-                0,
-                if discord_message_id_spawn.is_empty() {
-                    None
-                } else {
-                    Some(discord_message_id_spawn)
-                },
-                on_response_text,
+                &channel_id_str_spawn,
+                &state_spawn,
             )
             .await;
-
-        handle_agent_response(
-            result,
-            &agent_id_spawn,
-            &session_id_spawn,
-            &channel_id_str_spawn,
-            &state_spawn,
-        )
-        .await;
+        });
     }
 }
 
