@@ -344,6 +344,13 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 }
                 Some(Arc::new(p))
             }
+            "bonsai" => {
+                let mut p = LlamaCppProvider::new().with_name("bonsai");
+                if !pconfig.base_url.is_empty() {
+                    p = p.with_base_url(&pconfig.base_url);
+                }
+                Some(Arc::new(p))
+            }
             other => {
                 info!(provider = %other, "Unknown provider in config, skipping");
                 None

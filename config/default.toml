@@ -6,7 +6,7 @@ max_workspace_size_mb = 100
 
 # デフォルトLLM設定
 [llm]
-default_provider = "openai"
+default_provider = "openrouter"
 default_model = "claude-sonnet-4-6"
 
 # 用途別モデル設定（オプション）
@@ -21,7 +21,7 @@ embedding = { provider = "openai", model = "text-embedding-3-large" }
 # エージェント自身によるLLM選択
 [llm.self_selection]
 enabled = true
-allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
+allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap", "bonsai"]
 
 # フォールバックチェーン
 [llm.fallback]
@@ -69,6 +69,10 @@ models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示する
 # binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）
 # working_dir = ""                        # Codex の作業ディレクトリ
 
+# Bonsai 8B (1-bit LLM, PrismML)
+[llm.providers.bonsai]
+base_url = "http://localhost:8081"
+
 # モデルエイリアス
 [llm.aliases]
 fast = { provider = "openai", model = "claude-haiku" }
@@ -76,6 +80,7 @@ smart = { provider = "openai", model = "claude-sonnet-4-6" }
 reasoning = { provider = "openai", model = "claude-sonnet-4-6" }
 creative = { provider = "openai", model = "claude-sonnet-4-6" }
 local = { provider = "ollama", model = "llama3.1:8b" }
+bonsai = { provider = "bonsai", model = "Bonsai-8B.gguf" }
 cheap = { provider = "openai", model = "claude-haiku" }
 
 [gateway.rest]
@@ -86,7 +91,7 @@ port = 8080
 enabled = true
 token = "${DISCORD_TOKEN}"
 guild_ids = []
-agent_ids = ["crab"]  # Discordメッセージに応答するエージェントID（例: ["crab", "philosopher"]）
+agent_ids = ["crab", "54fab4ec-fad2-45d9-92dd-e62e50e2b36b", "6b79ac3a-7f17-4618-a827-5bda992a3698"]  # Discordメッセージに応答するエージェントID
 owner_discord_id = "390732846236434452"  # DMに応答するオーナーのDiscord User ID
 heartbeat_channel_id = 1470698801395273861
 
