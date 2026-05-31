@@ -302,22 +302,61 @@ impl ChatGptProvider {
         let mut id = String::new();
         let mut usage = Usage::default();
 
+        // [parse_response DEBUG] temporary diagnostic logging (remove later)
+        {
+            let chars: Vec<char> = sse_text.chars().collect();
+            let head: String = chars.iter().take(1000).collect();
+            let tail: String = if chars.len() > 500 {
+                chars[chars.len() - 500..].iter().collect()
+            } else {
+                chars.iter().collect()
+            };
+            tracing::warn!("[parse_response DEBUG] sse_text head(1000)=\n{}", head);
+            tracing::warn!("[parse_response DEBUG] sse_text tail(500)=\n{}", tail);
+        }
+        tracing::warn!(
+            "[parse_response DEBUG] sse_text total lines = {}",
+            sse_text.lines().count()
+        );
+        let mut dbg_data_line_count: usize = 0;
+        let mut dbg_json_ok_count: usize = 0;
+        let mut dbg_delta_event_count: usize = 0;
+        let mut current_event = String::new();
+
         for line in sse_text.lines() {
             let line = line.trim();
+            if let Some(ev) = line.strip_prefix("event:") {
+                current_event = ev.trim().to_string();
+                continue;
+            }
             let data = match line.strip_prefix("data:") {
                 Some(d) => d.trim(),
                 None => continue,
             };
+            dbg_data_line_count += 1;
             if data == "[DONE]" {
+                current_event.clear();
                 continue;
             }
             let parsed: Value = match serde_json::from_str(data) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(_) => {
+                    current_event.clear();
+                    continue;
+                }
             };
-            match parsed["type"].as_str().unwrap_or("") {
+            dbg_json_ok_count += 1;
+            // Effective event type: prefer parsed["type"], fall back to current_event.
+            let effective_event = parsed["type"].as_str().unwrap_or(&current_event);
+            match effective_event {
                 "response.output_text.delta" => {
                     if let Some(delta) = parsed["delta"].as_str() {
+                        dbg_delta_event_count += 1;
+                        let dbg_delta_head: String = delta.chars().take(50).collect();
+                        tracing::warn!(
+                            "[parse_response DEBUG] delta event #{} first50={:?}",
+                            dbg_delta_event_count, dbg_delta_head
+                        );
                         content.push_str(delta);
                     }
                 }
@@ -343,7 +382,26 @@ impl ChatGptProvider {
                 }
                 _ => {}
             }
+            current_event.clear();
         }
+
+        tracing::warn!(
+            "[parse_response DEBUG] data: prefixed lines = {}",
+            dbg_data_line_count
+        );
+        tracing::warn!(
+            "[parse_response DEBUG] serde_json::from_str OK count = {}",
+            dbg_json_ok_count
+        );
+        tracing::warn!(
+            "[parse_response DEBUG] output_text.delta event count = {}",
+            dbg_delta_event_count
+        );
+        tracing::warn!(
+            "[parse_response DEBUG] final content length: bytes={} chars={}",
+            content.len(),
+            content.chars().count()
+        );
 
         Ok(ChatResponse {
             id,
@@ -396,6 +454,15 @@ impl LlmProvider for ChatGptProvider {
         let token = self.load_access_token()?;
         let account_id = extract_account_id(&token)?;
         let body = self.build_request_body(&request, true);
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        tracing::warn!(
+            model = %request.model,
+            has_instructions = body.get("instructions").is_some(),
+            instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
+            input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
+            body_preview = %&body_str[..body_str.len().min(300)],
+            "ChatGPT chat_completion: sending request"
+        );
         let resp = self
             .request_builder("codex/responses", &token, &account_id)
             .json(&body)
@@ -407,10 +474,15 @@ impl LlmProvider for ChatGptProvider {
             .text()
             .await
             .context("failed to read ChatGPT response body")?;
+        tracing::warn!(status = %status, body_preview = %&text[..text.len().min(500)], "ChatGPT chat_completion response received");
         if !status.is_success() {
+            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
             anyhow::bail!("ChatGPT API error ({}): {}", status, text);
         }
-        self.parse_response(&text, &request.model)
+        tracing::warn!(body_len = text.len(), "ChatGPT chat_completion parsing response");
+        let result = self.parse_response(&text, &request.model);
+        tracing::warn!(success = result.is_ok(), "ChatGPT chat_completion parse result");
+        result
     }
 
     async fn chat_completion_stream(
@@ -421,14 +493,24 @@ impl LlmProvider for ChatGptProvider {
         let token = self.load_access_token()?;
         let account_id = extract_account_id(&token)?;
         let body = self.build_request_body(&request, true);
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        tracing::warn!(
+            model = %request.model,
+            has_instructions = body.get("instructions").is_some(),
+            instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
+            input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
+            body_preview = %&body_str[..body_str.len().min(300)],
+            "ChatGPT chat_completion_stream: sending request"
+        );
         let resp = self
             .request_builder("codex/responses", &token, &account_id)
             .json(&body)
             .send()
             .await
             .context("ChatGPT streaming request failed")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!("ChatGPT API error ({}): {}", status, text);
         }
@@ -437,20 +519,31 @@ impl LlmProvider for ChatGptProvider {
             let chunk = chunk.context("stream chunk error")?;
             let text = String::from_utf8_lossy(&chunk);
             let mut last_delta: Option<ChatStreamDelta> = None;
+            let mut current_event = String::new();
             for line in text.lines() {
                 let line = line.trim();
+                if let Some(ev) = line.strip_prefix("event:") {
+                    current_event = ev.trim().to_string();
+                    continue;
+                }
                 let data = match line.strip_prefix("data:") {
                     Some(d) => d.trim(),
                     None => continue,
                 };
                 if data == "[DONE]" {
+                    current_event.clear();
                     continue;
                 }
                 let parsed: Value = match serde_json::from_str(data) {
                     Ok(v) => v,
-                    Err(_) => continue,
+                    Err(_) => {
+                        current_event.clear();
+                        continue;
+                    }
                 };
-                match parsed["type"].as_str().unwrap_or("") {
+                // Effective event type: prefer parsed["type"], fall back to current_event.
+                let effective_event = parsed["type"].as_str().unwrap_or(&current_event);
+                match effective_event {
                     "response.output_text.delta" => {
                         let delta_text =
                             parsed["delta"].as_str().unwrap_or_default().to_string();
@@ -487,6 +580,7 @@ impl LlmProvider for ChatGptProvider {
                     }
                     _ => {}
                 }
+                current_event.clear();
             }
             Ok(last_delta.unwrap_or(ChatStreamDelta {
                 id: String::new(),
