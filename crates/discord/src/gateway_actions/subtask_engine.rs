@@ -138,15 +138,37 @@ impl DiscordGatewayActions {
             usize::MAX,
         );
 
+        // エージェントの personality と instructions を DB から取得
+        let (agent_personality, agent_instructions) = {
+            let conn = self.db.lock().unwrap();
+            opencrab_db::queries::get_agent(&conn, &agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.personality.unwrap_or_default(), a.instructions))
+                .unwrap_or_default()
+        };
+
         // System prompt for the sub-engine.
+        let personality_section = if !agent_personality.is_empty() {
+            format!("{}\n\n", agent_personality)
+        } else {
+            String::new()
+        };
+        let instructions_section = if !agent_instructions.is_empty() {
+            format!("\n\n## Instructions\n{}", agent_instructions)
+        } else {
+            String::new()
+        };
         let sub_system_prompt = format!(
-            "あなたはサブエンジンとして起動されています。\n\
+            "{personality_section}\
+             あなたはサブエンジンとして起動されています。\n\
              - subtask_id: {subtask_id}\n\
              - depth: {depth}\n\
              - Discordへの直接送信は禁止されています\n\
              - 進捗報告は report_progress を使ってください\n\
              - タスク完了時はテキストで結果を返してください（Discord送信はメインエンジンが行います）\n\n\
-             You are a sub-engine executing a delegated task."
+             You are a sub-engine executing a delegated task.\
+             {instructions_section}"
         );
 
         // Clone for the spawned task.
