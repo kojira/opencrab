@@ -279,7 +279,14 @@ impl SkillEngine {
             if let Some(ref text) = response.content {
                 if !text.trim().is_empty() {
                     if let Some(ref cb) = self.on_response_text {
+                        tracing::warn!(
+                            iteration = iterations,
+                            text_len = text.len(),
+                            text_preview = %text.chars().take(100).collect::<String>(),
+                            "LLM response text received, firing on_response_text callback"
+                        );
                         cb(text.clone());
+                        tracing::warn!(iteration = iterations, "on_response_text callback fired");
                     }
                 }
             }
@@ -372,6 +379,13 @@ impl SkillEngine {
 
             // No tool calls: this is the final response.
             let final_text = response.content.unwrap_or_default();
+
+            tracing::warn!(
+                iteration = iterations,
+                text_len = final_text.len(),
+                text_preview = %final_text.chars().take(100).collect::<String>(),
+                "SkillEngine final response ready"
+            );
 
             if final_text.is_empty() {
                 tracing::debug!("LLM returned empty content (no tool calls), using empty response");

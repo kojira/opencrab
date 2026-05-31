@@ -469,6 +469,12 @@ async fn process_incoming_message<T: AgentRunner>(
             let channel_id_str_for_cb = channel_id_str.clone();
             let is_dm_for_cb = is_dm;
             Some(std::sync::Arc::new(move |text: String| {
+                tracing::warn!(
+                    channel_id = channel_id,
+                    text_len = text.len(),
+                    text_preview = %text.chars().take(100).collect::<String>(),
+                    "on_response_text callback invoked"
+                );
                 if text.is_empty() || text.trim() == "NO_REPLY" {
                     return;
                 }
@@ -483,12 +489,16 @@ async fn process_incoming_message<T: AgentRunner>(
                         .unwrap_or(false)
                 };
                 if !writable {
+                    tracing::warn!(channel_id_str = %channel_id_str_for_cb, "on_response_text: channel not writable, skipping Discord send");
                     return;
                 }
                 let gateway_cb = gateway_for_cb.clone();
                 tokio::spawn(async move {
+                    tracing::warn!(channel_id = channel_id, text_len = text.len(), "on_response_text: sending to Discord channel");
                     if let Err(e) = gateway_cb.send_to_channel(channel_id, &text).await {
                         tracing::error!("on_response_text Discord send failed: {e}");
+                    } else {
+                        tracing::warn!(channel_id = channel_id, "on_response_text: Discord send succeeded");
                     }
                 });
             }))
