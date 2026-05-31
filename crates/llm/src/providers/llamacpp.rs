@@ -14,6 +14,7 @@ const LLAMACPP_DEFAULT_URL: &str = "http://localhost:8080";
 /// llama.cpp server provider (llama-server / llama-cpp-python).
 #[derive(Debug, Clone)]
 pub struct LlamaCppProvider {
+    name: String,
     client: Client,
     base_url: String,
 }
@@ -21,6 +22,7 @@ pub struct LlamaCppProvider {
 impl LlamaCppProvider {
     pub fn new() -> Self {
         Self {
+            name: "llamacpp".to_string(),
             client: Client::new(),
             base_url: LLAMACPP_DEFAULT_URL.to_string(),
         }
@@ -28,6 +30,11 @@ impl LlamaCppProvider {
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -169,7 +176,7 @@ impl Default for LlamaCppProvider {
 #[async_trait]
 impl LlmProvider for LlamaCppProvider {
     fn name(&self) -> &str {
-        "llamacpp"
+        &self.name
     }
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
