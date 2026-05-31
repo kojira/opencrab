@@ -24,6 +24,54 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
+/// Decode a base64url string (no padding required) into bytes.
+fn base64url_decode(input: &str) -> anyhow::Result<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &c in input.as_bytes() {
+        if c == b'=' || c == b'\n' || c == b'\r' {
+            continue;
+        }
+        let v = val(c).ok_or_else(|| anyhow::anyhow!("invalid base64url character"))? as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Extract the `chatgpt_account_id` from a JWT access token's claims.
+fn extract_account_id(token: &str) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        anyhow::bail!("invalid JWT: expected at least 2 dot-separated parts");
+    }
+    let payload_bytes =
+        base64url_decode(parts[1]).context("failed to base64url-decode JWT payload")?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&payload_bytes).context("failed to parse JWT payload JSON")?;
+    let account_id = payload["https://api.openai.com/auth"]["chatgpt_account_id"]
+        .as_str()
+        .context("chatgpt_account_id not found in JWT claims")?
+        .to_string();
+    Ok(account_id)
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatGptProvider {
     client: Client,
@@ -79,175 +127,193 @@ impl ChatGptProvider {
         Ok(token)
     }
 
-    fn request_builder(&self, endpoint: &str, token: &str) -> reqwest::RequestBuilder {
+    fn request_builder(
+        &self,
+        endpoint: &str,
+        token: &str,
+        account_id: &str,
+    ) -> reqwest::RequestBuilder {
         let url = format!("{}/{}", self.base_url, endpoint);
         self.client
             .post(&url)
             .header("Authorization", format!("Bearer {}", token))
+            .header("chatgpt-account-id", account_id)
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("originator", "pi")
+            .header("accept", "text/event-stream")
             .header("Content-Type", "application/json")
     }
 
-    /// Build the request body (OpenAI-compatible format)
-    fn build_request_body(&self, request: &ChatRequest) -> Value {
-        let messages: Vec<Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-                let mut m = serde_json::json!({"role": role});
-                match &msg.content {
-                    Some(MessageContent::Text(text)) => {
-                        m["content"] = serde_json::json!(text);
-                    }
-                    Some(MessageContent::Image { image_url, .. }) => {
-                        m["content"] = serde_json::json!([{
+    /// Convert a message's content into the Responses API content value.
+    fn message_content_value(content: &Option<MessageContent>) -> Option<Value> {
+        match content {
+            Some(MessageContent::Text(text)) => Some(serde_json::json!(text)),
+            Some(MessageContent::Image { image_url, .. }) => Some(serde_json::json!([{
+                "type": "image_url",
+                "image_url": {"url": image_url.url}
+            }])),
+            Some(MessageContent::Multi(parts)) => {
+                let parts_json: Vec<Value> = parts
+                    .iter()
+                    .map(|p| match p {
+                        ContentPart::Text { text } => {
+                            serde_json::json!({"type": "text", "text": text})
+                        }
+                        ContentPart::ImageUrl { image_url } => serde_json::json!({
                             "type": "image_url",
                             "image_url": {"url": image_url.url}
-                        }]);
+                        }),
+                    })
+                    .collect();
+                Some(serde_json::json!(parts_json))
+            }
+            None => None,
+        }
+    }
+
+    /// Build the request body in the Responses API format.
+    fn build_request_body(&self, request: &ChatRequest, stream: bool) -> Value {
+        let mut system_prompts: Vec<String> = Vec::new();
+        let mut input: Vec<Value> = Vec::new();
+
+        for msg in &request.messages {
+            if msg.role == Role::System {
+                if let Some(MessageContent::Text(text)) = &msg.content {
+                    system_prompts.push(text.clone());
+                } else if let Some(content) = Self::message_content_value(&msg.content) {
+                    if let Some(s) = content.as_str() {
+                        system_prompts.push(s.to_string());
                     }
-                    Some(MessageContent::Multi(parts)) => {
-                        let parts_json: Vec<Value> = parts
-                            .iter()
-                            .map(|p| match p {
-                                ContentPart::Text { text } => {
-                                    serde_json::json!({"type": "text", "text": text})
-                                }
-                                ContentPart::ImageUrl { image_url } => serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url.url}
-                                }),
-                            })
-                            .collect();
-                        m["content"] = serde_json::json!(parts_json);
-                    }
-                    None => {}
                 }
-                if let Some(ref name) = msg.name {
-                    m["name"] = serde_json::json!(name);
-                }
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    m["tool_calls"] = serde_json::to_value(tool_calls).unwrap_or_default();
-                }
-                if let Some(ref tool_call_id) = msg.tool_call_id {
-                    m["tool_call_id"] = serde_json::json!(tool_call_id);
-                }
-                m
-            })
-            .collect();
+                continue;
+            }
+
+            let role = match msg.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            };
+            let mut m = serde_json::json!({"role": role});
+            if let Some(content) = Self::message_content_value(&msg.content) {
+                m["content"] = content;
+            }
+            if let Some(ref name) = msg.name {
+                m["name"] = serde_json::json!(name);
+            }
+            if let Some(ref tool_calls) = msg.tool_calls {
+                m["tool_calls"] = serde_json::to_value(tool_calls).unwrap_or_default();
+            }
+            if let Some(ref tool_call_id) = msg.tool_call_id {
+                m["tool_call_id"] = serde_json::json!(tool_call_id);
+            }
+            input.push(m);
+        }
 
         let mut body = serde_json::json!({
             "model": request.model,
-            "messages": messages,
+            "store": false,
+            "stream": stream,
+            "input": input,
+            "text": {"verbosity": "medium"},
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
         });
 
-        if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::json!(temp);
+        if !system_prompts.is_empty() {
+            body["instructions"] = serde_json::json!(system_prompts.join("\n\n"));
         }
-        if let Some(max) = request.max_tokens {
-            body["max_tokens"] = serde_json::json!(max);
-        }
-        if let Some(ref stop) = request.stop {
-            body["stop"] = serde_json::json!(stop);
-        }
+
         if let Some(ref functions) = request.functions {
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
                     serde_json::json!({
                         "type": "function",
-                        "function": {"name": f.name, "description": f.description, "parameters": f.parameters}
+                        "name": f.name,
+                        "description": f.description,
+                        "parameters": f.parameters,
                     })
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);
         }
+
         if let Some(ref fc) = request.function_call {
             match fc {
                 FunctionCallBehavior::Mode(mode) => {
                     body["tool_choice"] = serde_json::json!(mode);
                 }
                 FunctionCallBehavior::Named { name } => {
-                    body["tool_choice"] = serde_json::json!({"type": "function", "function": {"name": name}});
+                    body["tool_choice"] =
+                        serde_json::json!({"type": "function", "name": name});
                 }
             }
         }
+
         body
     }
 
-    fn parse_response(&self, body: Value) -> Result<ChatResponse> {
-        let id = body["id"].as_str().unwrap_or_default().to_string();
-        let model = body["model"].as_str().unwrap_or_default().to_string();
-        let created = body["created"].as_i64().unwrap_or(0);
-        let usage = if let Some(u) = body.get("usage") {
-            Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
+    /// Parse a fully-collected SSE response body into a `ChatResponse`.
+    fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
+        let mut content = String::new();
+        let mut id = String::new();
+        let mut usage = Usage::default();
+
+        for line in sse_text.lines() {
+            let line = line.trim();
+            let data = match line.strip_prefix("data:") {
+                Some(d) => d.trim(),
+                None => continue,
+            };
+            if data == "[DONE]" {
+                continue;
             }
-        } else {
-            Usage::default()
-        };
-        let choices = body["choices"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|c| {
-                        let msg = &c["message"];
-                        let role = match msg["role"].as_str().unwrap_or("assistant") {
-                            "system" => Role::System,
-                            "user" => Role::User,
-                            "tool" => Role::Tool,
-                            _ => Role::Assistant,
-                        };
-                        let content = msg
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .map(|s| MessageContent::Text(s.to_string()));
-                        let function_call = msg
-                            .get("function_call")
-                            .and_then(|fc| serde_json::from_value::<FunctionCall>(fc.clone()).ok());
-                        let tool_calls = msg
-                            .get("tool_calls")
-                            .and_then(|tc| serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok());
-                        let finish_reason =
-                            c.get("finish_reason").and_then(|fr| match fr.as_str()? {
-                                "stop" => Some(FinishReason::Stop),
-                                "length" => Some(FinishReason::Length),
-                                "function_call" => Some(FinishReason::FunctionCall),
-                                "tool_calls" => Some(FinishReason::ToolCalls),
-                                "content_filter" => Some(FinishReason::ContentFilter),
-                                _ => None,
-                            });
-                        Choice {
-                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                            message: Message {
-                                role,
-                                content,
-                                name: None,
-                                function_call,
-                                tool_calls,
-                                tool_call_id: None,
-                                cache_control: None,
-                            },
-                            finish_reason,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+            let parsed: Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            match parsed["type"].as_str().unwrap_or("") {
+                "response.output_text.delta" => {
+                    if let Some(delta) = parsed["delta"].as_str() {
+                        content.push_str(delta);
+                    }
+                }
+                "response.completed" | "response.done" => {
+                    if let Some(rid) = parsed["response"]["id"].as_str() {
+                        id = rid.to_string();
+                    }
+                    let u = &parsed["response"]["usage"];
+                    usage = Usage {
+                        prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
+                        completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
+                        total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    };
+                }
+                "error" => {
+                    let msg = parsed["message"]
+                        .as_str()
+                        .or_else(|| parsed["error"]["message"].as_str())
+                        .unwrap_or("unknown error");
+                    anyhow::bail!("ChatGPT API error: {}", msg);
+                }
+                _ => {}
+            }
+        }
+
         Ok(ChatResponse {
             id,
-            model,
-            choices,
+            model: model.to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant(content),
+                finish_reason: Some(FinishReason::Stop),
+            }],
             usage,
-            created,
+            created: 0,
         })
     }
 }
@@ -287,25 +353,23 @@ impl LlmProvider for ChatGptProvider {
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
         debug!(model = %request.model, "ChatGPT chat completion");
         let token = self.load_access_token()?;
-        let body = self.build_request_body(&request);
+        let account_id = extract_account_id(&token)?;
+        let body = self.build_request_body(&request, true);
         let resp = self
-            .request_builder("chat/completions", &token)
+            .request_builder("codex/responses", &token, &account_id)
             .json(&body)
             .send()
             .await
             .context("ChatGPT API request failed")?;
         let status = resp.status();
-        let resp_body: Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
-            .context("failed to parse ChatGPT response")?;
+            .context("failed to read ChatGPT response body")?;
         if !status.is_success() {
-            let error_msg = resp_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
-            anyhow::bail!("ChatGPT API error ({}): {}", status, error_msg);
+            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
         }
-        self.parse_response(resp_body)
+        self.parse_response(&text, &request.model)
     }
 
     async fn chat_completion_stream(
@@ -314,70 +378,80 @@ impl LlmProvider for ChatGptProvider {
     ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
         debug!(model = %request.model, "ChatGPT streaming chat completion");
         let token = self.load_access_token()?;
-        let mut body = self.build_request_body(&request);
-        body["stream"] = serde_json::json!(true);
+        let account_id = extract_account_id(&token)?;
+        let body = self.build_request_body(&request, true);
         let resp = self
-            .request_builder("chat/completions", &token)
+            .request_builder("codex/responses", &token, &account_id)
             .json(&body)
             .send()
             .await
             .context("ChatGPT streaming request failed")?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let err_body: Value = resp.json().await.unwrap_or_default();
-            let msg = err_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
-            anyhow::bail!("ChatGPT API error ({}): {}", status, msg);
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
         }
+        let request_model = request.model.clone();
         let stream = resp.bytes_stream().map(move |chunk| {
             let chunk = chunk.context("stream chunk error")?;
             let text = String::from_utf8_lossy(&chunk);
-            let mut last_delta = None;
+            let mut last_delta: Option<ChatStreamDelta> = None;
             for line in text.lines() {
                 let line = line.trim();
-                if line.is_empty() || line == "data: [DONE]" {
+                let data = match line.strip_prefix("data:") {
+                    Some(d) => d.trim(),
+                    None => continue,
+                };
+                if data == "[DONE]" {
                     continue;
                 }
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                        let id = parsed["id"].as_str().unwrap_or_default().to_string();
-                        let model = parsed["model"].as_str().unwrap_or_default().to_string();
-                        let choices = parsed["choices"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .map(|c| {
-                                        let delta = &c["delta"];
-                                        StreamChoice {
-                                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                                            delta: DeltaMessage {
-                                                role: delta.get("role").and_then(|r| {
-                                                    serde_json::from_value(r.clone()).ok()
-                                                }),
-                                                content: delta
-                                                    .get("content")
-                                                    .and_then(|v| v.as_str().map(String::from)),
-                                                function_call: delta.get("function_call").and_then(
-                                                    |fc| serde_json::from_value(fc.clone()).ok(),
-                                                ),
-                                                tool_calls: delta.get("tool_calls").and_then(
-                                                    |tc| serde_json::from_value(tc.clone()).ok(),
-                                                ),
-                                            },
-                                            finish_reason: c.get("finish_reason").and_then(|fr| {
-                                                serde_json::from_value(fr.clone()).ok()
-                                            }),
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        last_delta = Some(ChatStreamDelta { id, model, choices });
+                let parsed: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match parsed["type"].as_str().unwrap_or("") {
+                    "response.output_text.delta" => {
+                        let delta_text =
+                            parsed["delta"].as_str().unwrap_or_default().to_string();
+                        last_delta = Some(ChatStreamDelta {
+                            id: String::new(),
+                            model: request_model.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta: DeltaMessage {
+                                    role: None,
+                                    content: Some(delta_text),
+                                    function_call: None,
+                                    tool_calls: None,
+                                },
+                                finish_reason: None,
+                            }],
+                        });
                     }
+                    "response.completed" | "response.done" => {
+                        last_delta = Some(ChatStreamDelta {
+                            id: String::new(),
+                            model: request_model.clone(),
+                            choices: vec![StreamChoice {
+                                index: 0,
+                                delta: DeltaMessage {
+                                    role: None,
+                                    content: Some(String::new()),
+                                    function_call: None,
+                                    tool_calls: None,
+                                },
+                                finish_reason: Some(FinishReason::Stop),
+                            }],
+                        });
+                    }
+                    _ => {}
                 }
             }
-            last_delta.ok_or_else(|| anyhow::anyhow!("no parseable SSE data in chunk"))
+            Ok(last_delta.unwrap_or(ChatStreamDelta {
+                id: String::new(),
+                model: request_model.clone(),
+                choices: vec![],
+            }))
         });
         Ok(Box::pin(stream))
     }
@@ -400,6 +474,26 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn b64url_encode(data: &[u8]) -> String {
+        const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            out.push(ALPHA[((n >> 18) & 63) as usize] as char);
+            out.push(ALPHA[((n >> 12) & 63) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(ALPHA[((n >> 6) & 63) as usize] as char);
+            }
+            if chunk.len() > 2 {
+                out.push(ALPHA[(n & 63) as usize] as char);
+            }
+        }
+        out
+    }
 
     #[test]
     fn test_expand_tilde_basic() {
@@ -428,5 +522,29 @@ mod tests {
     fn test_load_access_token_missing_file() {
         let provider = ChatGptProvider::new().with_auth_file("/nonexistent/path/auth.json");
         assert!(provider.load_access_token().is_err());
+    }
+
+    #[test]
+    fn test_base64url_decode_roundtrip() {
+        let samples: &[&[u8]] = &[b"", b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"];
+        for s in samples {
+            let encoded = b64url_encode(s);
+            assert_eq!(base64url_decode(&encoded).unwrap(), s.to_vec());
+        }
+    }
+
+    #[test]
+    fn test_extract_account_id() {
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct-xyz-123" }
+        });
+        let payload_b64 = b64url_encode(payload.to_string().as_bytes());
+        let token = format!("header.{}.signature", payload_b64);
+        assert_eq!(extract_account_id(&token).unwrap(), "acct-xyz-123");
+    }
+
+    #[test]
+    fn test_extract_account_id_invalid() {
+        assert!(extract_account_id("notajwt").is_err());
     }
 }
