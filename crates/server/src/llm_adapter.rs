@@ -35,7 +35,7 @@ pub struct MetricsContext {
 pub struct LlmRouterAdapter {
     router: Arc<LlmRouter>,
     metrics_ctx: Option<MetricsContext>,
-    working_dir: Option<String>,
+    agent_id: Option<String>,
 }
 
 impl LlmRouterAdapter {
@@ -43,7 +43,7 @@ impl LlmRouterAdapter {
         Self {
             router,
             metrics_ctx: None,
-            working_dir: None,
+            agent_id: None,
         }
     }
 
@@ -52,8 +52,8 @@ impl LlmRouterAdapter {
         self
     }
 
-    pub fn with_working_dir(mut self, dir: impl Into<String>) -> Self {
-        self.working_dir = Some(dir.into());
+    pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = Some(id.into());
         self
     }
 }
@@ -64,11 +64,8 @@ impl LlmClient for LlmRouterAdapter {
         let model_requested = request.model.clone();
         let mut llm_request = to_llm_request(request);
 
-        if let Some(ref dir) = self.working_dir {
-            llm_request.metadata.insert(
-                "working_dir".to_string(),
-                serde_json::Value::String(dir.clone()),
-            );
+        if self.agent_id.is_some() {
+            llm_request.agent_id = self.agent_id.clone();
         }
 
         let start = std::time::Instant::now();
@@ -162,6 +159,7 @@ fn to_llm_request(req: ChatRequestSimple) -> ChatRequest {
         stop: None,
         stream: None,
         metadata: Default::default(),
+        agent_id: req.agent_id,
     }
 }
 

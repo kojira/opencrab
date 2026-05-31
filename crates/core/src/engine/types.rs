@@ -110,6 +110,10 @@ pub struct ChatRequestSimple {
     pub temperature: Option<f32>,
     /// Maximum tokens to generate.
     pub max_tokens: Option<u32>,
+    /// Identity of the agent making this request. Providers can derive
+    /// agent-specific context (e.g. a workspace path) from this.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 /// A simplified chat response from the LLM.

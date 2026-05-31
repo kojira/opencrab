@@ -250,6 +250,7 @@ impl IndexBuilder {
                 tools: vec![],
                 temperature: Some(0.0),
                 max_tokens: Some(200),
+                agent_id: None,
             };
 
             let summary = match llm.chat(request).await {
@@ -471,6 +472,7 @@ impl IndexBuilder {
                 tools: vec![],
                 temperature: Some(0.0),
                 max_tokens: Some(300),
+                agent_id: None,
             };
 
             let merged_summary = match llm.chat(request).await {
