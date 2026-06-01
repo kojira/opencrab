@@ -129,7 +129,13 @@ impl Action for ShellToolAction {
         }
 
         // Environment setup
-        if !self.config.inherit_env {
+        if self.config.inherit_env {
+            // inherit_env=true: 親の全環境を明示的に継承（SSH_AUTH_SOCK 等）。
+            // tokio の暗黙のデフォルト継承に頼らず明示的に渡すことで、
+            // 将来 env_clear が他経路で呼ばれても確実に継承される。
+            cmd.envs(std::env::vars());
+        } else {
+            // inherit_env=false: allowlist のみ。それ以外の親環境は子に渡さない。
             cmd.env_clear();
             for var in &self.config.allowed_env_vars {
                 if let Ok(val) = std::env::var(var) {
@@ -265,6 +271,139 @@ mod tests {
         assert!(
             result.success,
             "Owner should be able to run owner-level command"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherit_env_passes_custom_parent_var() {
+        // When inherit_env is enabled, a custom var set in the parent process
+        // must be visible to the child.
+        std::env::set_var("OPENCRAB_TEST_CUSTOM_VAR", "hello123");
+        let config = ShellToolConfig {
+            inherit_env: true,
+            commands: vec![CommandConfig {
+                name: "printenv".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "printenv", "args": ["OPENCRAB_TEST_CUSTOM_VAR"]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "printenv should succeed: {:?}", result.error);
+        let stdout = result.data.as_ref().and_then(|d| d.get("stdout")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            stdout.contains("hello123"),
+            "child should see inherited custom var, got: {:?}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherit_env_passes_ssh_auth_sock() {
+        // SSH_AUTH_SOCK-like var must be inherited when inherit_env is enabled.
+        std::env::set_var("SSH_AUTH_SOCK", "/tmp/opencrab-test-agent.sock");
+        let config = ShellToolConfig {
+            inherit_env: true,
+            commands: vec![CommandConfig {
+                name: "printenv".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "printenv", "args": ["SSH_AUTH_SOCK"]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "printenv should succeed: {:?}", result.error);
+        let stdout = result.data.as_ref().and_then(|d| d.get("stdout")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            stdout.contains("/tmp/opencrab-test-agent.sock"),
+            "child should inherit SSH_AUTH_SOCK, got: {:?}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restrictive_allowlist_passes_only_allowed_vars() {
+        // When inherit_env is disabled, only allow-listed vars reach the child.
+        std::env::set_var("OPENCRAB_TEST_ALLOWED", "yes-allowed");
+        std::env::set_var("OPENCRAB_TEST_BLOCKED", "no-blocked");
+        let config = ShellToolConfig {
+            inherit_env: false,
+            // PATH is required so the child can resolve the `env` binary.
+            allowed_env_vars: vec!["PATH".to_string(), "OPENCRAB_TEST_ALLOWED".to_string()],
+            commands: vec![CommandConfig {
+                name: "env".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "env"});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "env should succeed: {:?}", result.error);
+        let stdout = result.data.as_ref().and_then(|d| d.get("stdout")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            stdout.contains("OPENCRAB_TEST_ALLOWED=yes-allowed"),
+            "allow-listed var should be passed through, got: {:?}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("OPENCRAB_TEST_BLOCKED"),
+            "non-allow-listed var must NOT leak to child, got: {:?}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restrictive_allowlist_passes_ssh_auth_sock() {
+        // When inherit_env is disabled but SSH_AUTH_SOCK is allow-listed,
+        // the parent's SSH_AUTH_SOCK must reach the child. Use a unique var
+        // name to avoid colliding with the inherit-mode SSH test under
+        // parallel (process-global env) execution.
+        std::env::set_var(
+            "OPENCRAB_TEST_SSH_AUTH_SOCK",
+            "/tmp/opencrab-allowlist-agent.sock",
+        );
+        let config = ShellToolConfig {
+            inherit_env: false,
+            allowed_env_vars: vec![
+                "PATH".to_string(),
+                "OPENCRAB_TEST_SSH_AUTH_SOCK".to_string(),
+            ],
+            commands: vec![CommandConfig {
+                name: "printenv".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args =
+            serde_json::json!({"command": "printenv", "args": ["OPENCRAB_TEST_SSH_AUTH_SOCK"]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "printenv should succeed: {:?}", result.error);
+        let stdout = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("stdout"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            stdout.contains("/tmp/opencrab-allowlist-agent.sock"),
+            "allow-listed SSH_AUTH_SOCK-like var should reach child, got: {:?}",
+            stdout
         );
     }
 

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
@@ -156,8 +156,7 @@ impl ChatGptProvider {
     fn load_access_token(&self) -> Result<String> {
         let content = std::fs::read_to_string(&self.auth_file)
             .with_context(|| format!("Failed to read auth file: {}", self.auth_file))?;
-        let parsed: Value =
-            serde_json::from_str(&content).context("Failed to parse auth.json")?;
+        let parsed: Value = serde_json::from_str(&content).context("Failed to parse auth.json")?;
         let token = parsed["tokens"]["access_token"]
             .as_str()
             .context("tokens.access_token not found in auth.json")?
@@ -212,10 +211,16 @@ impl ChatGptProvider {
     /// Build the request body in the Responses API format.
     fn build_request_body(&self, request: &ChatRequest, stream: bool) -> Value {
         let mut system_prompts: Vec<String> = Vec::new();
-        tracing::warn!("chatgpt build_request_body: messages count={}, system_prompts will be extracted", request.messages.len());
+        tracing::warn!(
+            "chatgpt build_request_body: messages count={}, system_prompts will be extracted",
+            request.messages.len()
+        );
         let mut input: Vec<Value> = Vec::new();
 
-        tracing::debug!(message_count = request.messages.len(), "build_request_body: received messages");
+        tracing::debug!(
+            message_count = request.messages.len(),
+            "build_request_body: received messages"
+        );
         for msg in &request.messages {
             tracing::debug!(role = ?msg.role, "build_request_body: message role");
         }
@@ -228,11 +233,17 @@ impl ChatGptProvider {
                     "build_request_body: processing system message"
                 );
                 if let Some(MessageContent::Text(text)) = &msg.content {
-                    tracing::debug!(text_len = text.len(), "build_request_body: system message is Text, adding to system_prompts");
+                    tracing::debug!(
+                        text_len = text.len(),
+                        "build_request_body: system message is Text, adding to system_prompts"
+                    );
                     system_prompts.push(text.clone());
                 } else if let Some(content) = Self::message_content_value(&msg.content) {
                     if let Some(s) = content.as_str() {
-                        tracing::debug!(str_len = s.len(), "build_request_body: system message content converted to str via message_content_value");
+                        tracing::debug!(
+                            str_len = s.len(),
+                            "build_request_body: system message content converted to str via message_content_value"
+                        );
                         system_prompts.push(s.to_string());
                     } else {
                         tracing::warn!(
@@ -249,11 +260,37 @@ impl ChatGptProvider {
                 continue;
             }
 
+            if msg.role == Role::Assistant {
+                if let Some(tool_calls) = &msg.tool_calls {
+                    for tool_call in tool_calls {
+                        input.push(serde_json::json!({
+                            "type": "function_call",
+                            "call_id": tool_call.id,
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        }));
+                    }
+                    continue;
+                }
+            }
+
+            if msg.role == Role::Tool {
+                if let Some(tool_call_id) = &msg.tool_call_id {
+                    let output = msg.text_content().unwrap_or_default();
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": output,
+                    }));
+                    continue;
+                }
+            }
+
             let role = match msg.role {
                 Role::System => "system",
                 Role::User => "user",
                 Role::Assistant => "assistant",
-                Role::Tool => "tool",
+                Role::Tool => "user",
             };
             let mut m = serde_json::json!({"role": role});
             if let Some(content) = Self::message_content_value(&msg.content) {
@@ -262,8 +299,6 @@ impl ChatGptProvider {
             if let Some(ref name) = msg.name {
                 m["name"] = serde_json::json!(name);
             }
-            // NOTE: tool_calls and tool_call_id are NOT supported by the chatgpt
-            // Responses API input array ("Unknown parameter"). Omit them.
             input.push(m);
         }
 
@@ -289,7 +324,10 @@ impl ChatGptProvider {
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
 
-        tracing::warn!("chatgpt build_request_body: system_prompts count={}", system_prompts.len());
+        tracing::warn!(
+            "chatgpt build_request_body: system_prompts count={}",
+            system_prompts.len()
+        );
         if system_prompts.is_empty() {
             tracing::warn!(
                 total_messages = request.messages.len(),
@@ -322,8 +360,7 @@ impl ChatGptProvider {
                     body["tool_choice"] = serde_json::json!(mode);
                 }
                 FunctionCallBehavior::Named { name } => {
-                    body["tool_choice"] =
-                        serde_json::json!({"type": "function", "name": name});
+                    body["tool_choice"] = serde_json::json!({"type": "function", "name": name});
                 }
             }
         }
@@ -344,6 +381,7 @@ impl ChatGptProvider {
     /// Parse a fully-collected SSE response body into a `ChatResponse`.
     fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
         let mut content = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut id = String::new();
         let mut usage = Usage::default();
         let mut dbg_data_line_count: usize = 0;
@@ -381,12 +419,23 @@ impl ChatGptProvider {
                         content.push_str(delta);
                     }
                 }
-                // Tool calls (function_call items) are ignored for now.
-                // They arrive via response.output_item.done but we have no
-                // way to feed results back to the API yet.
+                "response.output_item.done" | "response.output_item.completed" => {
+                    if let Some(call) = Self::parse_function_call_item(&parsed["item"]) {
+                        tool_calls.push(call);
+                    }
+                }
                 "response.completed" | "response.done" => {
                     if let Some(rid) = parsed["response"]["id"].as_str() {
                         id = rid.to_string();
+                    }
+                    if let Some(output) = parsed["response"]["output"].as_array() {
+                        for item in output {
+                            if let Some(call) = Self::parse_function_call_item(item) {
+                                if !tool_calls.iter().any(|tc| tc.id == call.id) {
+                                    tool_calls.push(call);
+                                }
+                            }
+                        }
                     }
                     let u = &parsed["response"]["usage"];
                     usage = Usage {
@@ -410,22 +459,71 @@ impl ChatGptProvider {
         }
 
         tracing::warn!(
-            "chatgpt parse_response: data_lines={} delta_events={} content_bytes={}",
+            "chatgpt parse_response: data_lines={} delta_events={} content_bytes={} tool_calls={}",
             dbg_data_line_count,
             dbg_delta_event_count,
             content.len(),
+            tool_calls.len(),
         );
+
+        let content = if content.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(content))
+        };
+        let finish_reason = if tool_calls.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolCalls
+        };
+        let tool_calls = if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        };
 
         Ok(ChatResponse {
             id,
             model: model.to_string(),
             choices: vec![Choice {
                 index: 0,
-                message: Message::assistant(content),
-                finish_reason: Some(FinishReason::Stop),
+                message: Message {
+                    role: Role::Assistant,
+                    content,
+                    name: None,
+                    function_call: None,
+                    tool_calls,
+                    tool_call_id: None,
+                    cache_control: None,
+                },
+                finish_reason: Some(finish_reason),
             }],
             usage,
             created: 0,
+        })
+    }
+
+    fn parse_function_call_item(item: &Value) -> Option<ToolCall> {
+        if item["type"].as_str()? != "function_call" {
+            return None;
+        }
+
+        let name = item["name"].as_str()?.to_string();
+        let arguments = match item.get("arguments") {
+            Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+            Some(Value::Object(_)) | Some(Value::Array(_)) => item["arguments"].to_string(),
+            _ => "{}".to_string(),
+        };
+        let id = item["call_id"]
+            .as_str()
+            .or_else(|| item["id"].as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        Some(ToolCall {
+            id,
+            call_type: "function".to_string(),
+            function: FunctionCall { name, arguments },
         })
     }
 }
@@ -530,13 +628,23 @@ impl LlmProvider for ChatGptProvider {
                 continue;
             }
 
-            tracing::warn!(body_len = text.len(), "ChatGPT chat_completion parsing response");
+            tracing::warn!(
+                body_len = text.len(),
+                "ChatGPT chat_completion parsing response"
+            );
             let result = self.parse_response(&text, &request.model);
-            tracing::warn!(success = result.is_ok(), "ChatGPT chat_completion parse result");
+            tracing::warn!(
+                success = result.is_ok(),
+                "ChatGPT chat_completion parse result"
+            );
             return result;
         }
 
-        anyhow::bail!("ChatGPT API request failed after {} attempts: {}", max_retries, last_error)
+        anyhow::bail!(
+            "ChatGPT API request failed after {} attempts: {}",
+            max_retries,
+            last_error
+        )
     }
 
     async fn chat_completion_stream(
@@ -588,7 +696,8 @@ impl LlmProvider for ChatGptProvider {
                         let text = r.text().await.unwrap_or_default();
                         last_error = format!("HTTP {}: (body_len={})", status, text.len());
                         tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
-                        if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
+                        if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429
+                        {
                             anyhow::bail!("ChatGPT API error ({}): {}", status, text);
                         }
                         continue;
@@ -604,7 +713,13 @@ impl LlmProvider for ChatGptProvider {
             }
         }
 
-        let resp = resp.ok_or_else(|| anyhow::anyhow!("ChatGPT streaming request failed after {} attempts: {}", max_retries, last_error))?;
+        let resp = resp.ok_or_else(|| {
+            anyhow::anyhow!(
+                "ChatGPT streaming request failed after {} attempts: {}",
+                max_retries,
+                last_error
+            )
+        })?;
         let request_model = request.model.clone();
         let stream = resp.bytes_stream().map(move |chunk| {
             let chunk = chunk.context("stream chunk error")?;
@@ -636,8 +751,7 @@ impl LlmProvider for ChatGptProvider {
                 let effective_event = parsed["type"].as_str().unwrap_or(&current_event);
                 match effective_event {
                     "response.output_text.delta" => {
-                        let delta_text =
-                            parsed["delta"].as_str().unwrap_or_default().to_string();
+                        let delta_text = parsed["delta"].as_str().unwrap_or_default().to_string();
                         last_delta = Some(ChatStreamDelta {
                             id: String::new(),
                             model: request_model.clone(),
@@ -701,6 +815,10 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Model used by the real-API (`--ignored`) tests. ChatGPT/Codex accounts
+    /// reject `gpt-4o`, so we use the provider default path (`gpt-5.5`).
+    const TEST_MODEL: &str = DEFAULT_MODEL;
 
     fn b64url_encode(data: &[u8]) -> String {
         const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -796,23 +914,117 @@ mod tests {
     fn test_with_reasoning_effort_sets_max_output_tokens() {
         // The internal field is set but must NOT appear in the serialized body.
         let low = ChatGptProvider::new().with_reasoning_effort("low");
-        let body_low = low
-            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
+        let body_low = low.build_request_body(
+            &ChatRequest::new("gpt-5.5", vec![Message::user("hi")]),
+            false,
+        );
         assert!(
             body_low.get("max_output_tokens").is_none(),
             "max_output_tokens must not be sent to the API"
         );
 
         let high = ChatGptProvider::new().with_reasoning_effort("high");
-        let body_high = high
-            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
+        let body_high = high.build_request_body(
+            &ChatRequest::new("gpt-5.5", vec![Message::user("hi")]),
+            false,
+        );
         assert!(body_high.get("max_output_tokens").is_none());
     }
 
     #[test]
-    fn test_parse_response_tool_calls_ignored() {
-        // Tool calls from the API are currently ignored (future work).
-        // The response should complete with Stop and empty text content.
+    fn test_build_request_body_converts_assistant_tool_calls_to_function_call_items() {
+        let provider = ChatGptProvider::new();
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Tokyo"}"#.to_string(),
+            },
+        }]);
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("hi"), assistant])
+            .with_max_tokens(256);
+
+        let body = provider.build_request_body(&request, false);
+
+        assert!(body.get("max_output_tokens").is_none());
+        let input = body["input"].as_array().expect("input must be an array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], serde_json::json!("function_call"));
+        assert_eq!(input[1]["call_id"], serde_json::json!("call_1"));
+        assert_eq!(input[1]["name"], serde_json::json!("get_weather"));
+        assert_eq!(
+            input[1]["arguments"],
+            serde_json::json!(r#"{"city":"Tokyo"}"#)
+        );
+        assert!(
+            input[1].get("role").is_none(),
+            "function_call input items must not be role messages"
+        );
+        assert!(
+            input[1].get("content").is_none(),
+            "function_call input items must not require content"
+        );
+
+        fn contains_key(value: &Value, key: &str) -> bool {
+            match value {
+                Value::Object(map) => {
+                    map.contains_key(key) || map.values().any(|v| contains_key(v, key))
+                }
+                Value::Array(values) => values.iter().any(|v| contains_key(v, key)),
+                _ => false,
+            }
+        }
+        assert!(
+            !contains_key(&body, "tool_calls"),
+            "tool_calls must not be sent to the Responses API"
+        );
+        assert!(
+            !contains_key(&body, "tool_call_id"),
+            "tool_call_id must not be sent to the Responses API"
+        );
+    }
+
+    #[test]
+    fn test_build_request_body_converts_tool_result_to_function_call_output_item() {
+        let provider = ChatGptProvider::new();
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Tokyo"}"#.to_string(),
+            },
+        }]);
+        let tool = Message::tool("call_1", r#"{"temperature":22}"#);
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("hi"), assistant, tool]);
+
+        let body = provider.build_request_body(&request, false);
+
+        let input = body["input"].as_array().expect("input must be an array");
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], serde_json::json!("function_call"));
+        assert_eq!(input[2]["type"], serde_json::json!("function_call_output"));
+        assert_eq!(input[2]["call_id"], serde_json::json!("call_1"));
+        assert_eq!(
+            input[2]["output"],
+            serde_json::json!(r#"{"temperature":22}"#)
+        );
+        assert!(
+            input[2].get("role").is_none(),
+            "function_call_output input items must not be role messages"
+        );
+        assert!(
+            input[2].get("content").is_none(),
+            "function_call_output input items must not use message content"
+        );
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn test_parse_response_tool_calls_from_completed_output() {
         let provider = ChatGptProvider::new();
         let sse = concat!(
             "event: response.completed\n",
@@ -822,19 +1034,52 @@ mod tests {
             "\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n",
             "\n",
         );
-        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
-        // Tool calls are ignored → Stop, no structured tool_calls, empty text.
-        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
-        assert!(resp.choices[0].message.tool_calls.is_none());
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls must be parsed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].call_type, "function");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, r#"{"city":"Tokyo"}"#);
         assert_eq!(resp.usage.completion_tokens, 5);
-        match &resp.choices[0].message.content {
-            Some(MessageContent::Text(t)) => assert!(
-                t.is_empty(),
-                "content must be empty when only tool calls are returned: {t:?}"
-            ),
-            None => {} // also acceptable
-            other => panic!("unexpected content: {other:?}"),
-        }
+        assert!(resp.choices[0].message.content.is_none());
+    }
+
+    #[test]
+    fn test_parse_response_tool_calls_from_output_item_done() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",",
+            "\"id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"search\",",
+            "\"arguments\":\"{\\\"query\\\":\\\"opencrab\\\"}\"}}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"total_tokens\":11}}}\n",
+            "\n",
+        );
+
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool calls must be parsed");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_2");
+        assert_eq!(calls[0].function.name, "search");
+        assert_eq!(calls[0].function.arguments, r#"{"query":"opencrab"}"#);
     }
 
     // ── build_request_body field validation ──────────────────────────────────
@@ -844,10 +1089,7 @@ mod tests {
         let provider = ChatGptProvider::new();
         let request = ChatRequest::new(
             "gpt-5.5",
-            vec![
-                Message::system("You are helpful."),
-                Message::user("Hello"),
-            ],
+            vec![Message::system("You are helpful."), Message::user("Hello")],
         );
         let body = provider.build_request_body(&request, false);
 
@@ -919,13 +1161,12 @@ mod tests {
         let provider = ChatGptProvider::new();
         let request = ChatRequest::new(
             "gpt-5.5",
-            vec![
-                Message::system("Be concise."),
-                Message::user("Hi"),
-            ],
+            vec![Message::system("Be concise."), Message::user("Hi")],
         );
         let body = provider.build_request_body(&request, false);
-        let instructions = body["instructions"].as_str().expect("instructions must be set");
+        let instructions = body["instructions"]
+            .as_str()
+            .expect("instructions must be set");
         assert!(
             instructions.contains("Be concise."),
             "instructions must include system message"
@@ -946,7 +1187,9 @@ mod tests {
             "\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n",
             "\n",
         );
-        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
         let text = match &resp.choices[0].message.content {
             Some(MessageContent::Text(t)) => t.as_str(),
             other => panic!("expected Text content, got: {other:?}"),
@@ -974,7 +1217,9 @@ mod tests {
             "\"usage\":{\"input_tokens\":2,\"output_tokens\":2,\"total_tokens\":4}}}\n",
             "\n",
         );
-        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
         let text = match &resp.choices[0].message.content {
             Some(MessageContent::Text(t)) => t.as_str(),
             other => panic!("expected Text content, got: {other:?}"),
@@ -992,7 +1237,9 @@ mod tests {
             "\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}\n",
             "\n",
         );
-        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
         assert_eq!(resp.usage.completion_tokens, 0);
         assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
     }
@@ -1010,12 +1257,21 @@ mod tests {
             "\"usage\":{\"input_tokens\":1,\"output_tokens\":5,\"total_tokens\":6}}}\n",
             "\n",
         );
-        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
         let text = match &resp.choices[0].message.content {
             Some(MessageContent::Text(t)) => t.as_str(),
             other => panic!("expected Text content, got: {other:?}"),
         };
         assert_eq!(text, "こんにちは");
+    }
+
+    /// A system message for the real-API tests. Without it
+    /// `build_request_body` emits no `instructions` field and the API
+    /// rejects the request with HTTP 400 "Instructions are required".
+    fn real_test_system() -> Message {
+        Message::system("You are a helpful assistant.")
     }
 
     #[tokio::test]
@@ -1024,16 +1280,21 @@ mod tests {
         // Uses real ~/.codex/auth.json — run with: cargo test -- --ignored
         let provider = ChatGptProvider::new();
         let request = ChatRequest {
-            model: "gpt-4o".to_string(),
-            messages: vec![Message {
-                role: Role::User,
-                content: Some(MessageContent::Text("Say exactly: hello from test".to_string())),
-                name: None,
-                function_call: None,
-                tool_calls: None,
-                tool_call_id: None,
-                cache_control: None,
-            }],
+            model: TEST_MODEL.to_string(),
+            messages: vec![
+                real_test_system(),
+                Message {
+                    role: Role::User,
+                    content: Some(MessageContent::Text(
+                        "Say exactly: hello from test".to_string(),
+                    )),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    cache_control: None,
+                },
+            ],
             functions: None,
             function_call: None,
             temperature: None,
@@ -1053,5 +1314,165 @@ mod tests {
         };
         assert!(!content.is_empty(), "Empty response content");
         println!("Response: {}", content);
+    }
+
+    /// Build a simple weather function tool used by the real-API tool tests.
+    fn weather_tool() -> FunctionDefinition {
+        FunctionDefinition {
+            name: "get_current_weather".to_string(),
+            description: Some("Get the current weather for a given city.".to_string()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string", "description": "City name, e.g. Tokyo"}
+                },
+                "required": ["city"],
+                "additionalProperties": false
+            }),
+            cache_control: None,
+        }
+    }
+
+    /// Real API: the model can emit a parseable tool call.
+    /// Run with: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_chatgpt_api_tool_call() {
+        let provider = ChatGptProvider::new();
+        let request = ChatRequest {
+            model: TEST_MODEL.to_string(),
+            messages: vec![
+                real_test_system(),
+                Message::user(
+                    "What is the current weather in Tokyo? Call the get_current_weather tool to find out.",
+                ),
+            ],
+            functions: Some(vec![weather_tool()]),
+            // Force the call so the test is deterministic.
+            function_call: Some(FunctionCallBehavior::Named {
+                name: "get_current_weather".to_string(),
+            }),
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            stream: Some(false),
+            metadata: std::collections::HashMap::new(),
+            agent_id: None,
+        };
+        let response = provider.chat_completion(request).await;
+        // On 400 the provider bails with the full HTTP body — surface it here.
+        assert!(
+            response.is_ok(),
+            "tool-call API request failed (inspect for HTTP 400 detail): {:?}",
+            response.err()
+        );
+        let resp = response.unwrap();
+        assert!(!resp.choices.is_empty(), "no choices returned");
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some(FinishReason::ToolCalls),
+            "expected the model to emit a tool call"
+        );
+        let calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls must be present");
+        assert!(!calls.is_empty(), "tool_calls vec must not be empty");
+        let call = &calls[0];
+        assert_eq!(
+            call.function.name, "get_current_weather",
+            "unexpected tool name"
+        );
+        let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+            .unwrap_or_else(|e| panic!("tool arguments must be valid JSON ({e}): {}", call.function.arguments));
+        assert!(
+            args.get("city").is_some(),
+            "expected a 'city' argument, got: {}",
+            call.function.arguments
+        );
+        println!(
+            "Tool call: {} args={}",
+            call.function.name, call.function.arguments
+        );
+    }
+
+    /// Real API: a continuation request after tool execution must NOT 400.
+    /// First force a tool call, then send back the tool result as a
+    /// function_call_output and assert the model produces a final answer.
+    /// Run with: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_chatgpt_api_tool_continuation() {
+        let provider = ChatGptProvider::new();
+        let user = Message::user(
+            "What is the current weather in Tokyo? Call the get_current_weather tool.",
+        );
+
+        // Phase 1: force the tool call.
+        let first = ChatRequest {
+            model: TEST_MODEL.to_string(),
+            messages: vec![real_test_system(), user.clone()],
+            functions: Some(vec![weather_tool()]),
+            function_call: Some(FunctionCallBehavior::Named {
+                name: "get_current_weather".to_string(),
+            }),
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            stream: Some(false),
+            metadata: std::collections::HashMap::new(),
+            agent_id: None,
+        };
+        let first_resp = provider
+            .chat_completion(first)
+            .await
+            .unwrap_or_else(|e| panic!("first (tool-call) request failed: {e:?}"));
+        let calls = first_resp.choices[0]
+            .message
+            .tool_calls
+            .clone()
+            .expect("expected a tool call in the first response");
+        assert!(!calls.is_empty(), "tool_calls must not be empty");
+
+        // Phase 2: assistant message carrying the tool calls + tool results.
+        let mut assistant = Message::assistant("");
+        assistant.tool_calls = Some(calls.clone());
+
+        let mut messages = vec![real_test_system(), user, assistant];
+        for c in &calls {
+            messages.push(Message::tool(
+                c.id.clone(),
+                r#"{"temperature_c":22,"condition":"Sunny"}"#,
+            ));
+        }
+
+        let second = ChatRequest {
+            model: TEST_MODEL.to_string(),
+            messages,
+            functions: Some(vec![weather_tool()]),
+            // Let the model produce the final text answer.
+            function_call: None,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            stream: Some(false),
+            metadata: std::collections::HashMap::new(),
+            agent_id: None,
+        };
+        let response = provider.chat_completion(second).await;
+        assert!(
+            response.is_ok(),
+            "continuation request failed — must NOT be HTTP 400 (full error): {:?}",
+            response.err()
+        );
+        let final_resp = response.unwrap();
+        let text = final_resp.first_text().unwrap_or("");
+        assert!(
+            !text.is_empty(),
+            "final continuation text must not be empty; finish_reason={:?}",
+            final_resp.choices.first().and_then(|c| c.finish_reason.clone())
+        );
+        println!("Continuation final text: {}", text);
     }
 }

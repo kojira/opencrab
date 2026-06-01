@@ -122,8 +122,12 @@ enabled = true
 enabled = true
 allowed_commands = []
 timeout_secs = 30
-inherit_env = false
-allowed_env_vars = ["PATH", "HOME", "LANG", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+# Inherit the parent process environment so child processes see SSH_AUTH_SOCK,
+# HOME, PATH, USER, LOGNAME, SHELL, etc. (needed by ssh-agent users).
+inherit_env = true
+# Used only when inherit_env = false (restrictive mode): the allow-listed vars
+# that are passed through to children.
+allowed_env_vars = ["PATH", "HOME", "LANG", "USER", "LOGNAME", "SHELL", "SSH_AUTH_SOCK", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 max_output_bytes = 65536
 
 [[tools.shell.commands]]
