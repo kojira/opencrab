@@ -74,6 +74,7 @@ models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示する
 enabled = true
 auth_file = "~/.codex/auth.json"
 default_model = "gpt-5.5"
+reasoning_effort = "low"
 
 # Bonsai 8B (1-bit LLM, PrismML)
 [llm.providers.bonsai]
