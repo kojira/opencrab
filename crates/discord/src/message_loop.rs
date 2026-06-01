@@ -385,6 +385,10 @@ async fn process_incoming_message<T: AgentRunner>(
         .unwrap_or("")
         .to_string();
 
+    // 処理対象として確定したメッセージに付ける 👀 を一度だけ付与するためのフラグ。
+    // bot投稿（自bot/他bot）には付けない。自botは受信側で除外済みだが念のためここでも弾く。
+    let mut reaction_added = incoming.sender.is_bot;
+
     for agent_id in &agent_ids {
         // Per-agent channel whitelist check
         if !is_dm {
@@ -404,6 +408,13 @@ async fn process_incoming_message<T: AgentRunner>(
                 );
                 continue; // skip this agent, not return
             }
+        }
+
+        // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。
+        // 失敗は非致命的。複数エージェントが同一投稿を処理しても一度だけ付与する。
+        if !reaction_added {
+            add_seen_reaction(&gateway, channel_id, &channel_id_str, &discord_message_id).await;
+            reaction_added = true;
         }
 
         // タイピングインジケーター送信（ホワイトリスト通過後のみ）
@@ -1261,6 +1272,52 @@ fn prepend_runtime_context_discord(
     )
 }
 
+/// 処理対象として確定したユーザー投稿に 👀 リアクションを付ける（非致命的）。
+///
+/// 失敗（権限不足・削除済みメッセージ・無効なID等）してもエラーは握りつぶし、
+/// channel_id/message_id とエラー内容のみログに残す（秘密値は含めない）。
+async fn add_seen_reaction(
+    gateway: &DiscordGateway,
+    channel_id: u64,
+    channel_id_str: &str,
+    message_id: &str,
+) {
+    const SEEN_EMOJI: &str = "👀";
+
+    let msg_id = match parse_seen_message_id(message_id) {
+        Some(id) => id,
+        None => {
+            if !message_id.is_empty() {
+                warn!(
+                    channel_id = %channel_id_str,
+                    message_id = %message_id,
+                    "Skip 👀 reaction: invalid message_id"
+                );
+            }
+            return;
+        }
+    };
+    if let Err(e) = gateway.add_reaction(channel_id, msg_id, SEEN_EMOJI).await {
+        warn!(
+            channel_id = %channel_id_str,
+            message_id = %message_id,
+            error = %e,
+            "Failed to add 👀 reaction (non-fatal)"
+        );
+    }
+}
+
+/// 👀 リアクションを付ける対象の message_id を解析する。
+///
+/// 空文字（message_idがメタデータに無い）や数値でない場合は `None` を返し、
+/// 呼び出し側はリアクション付与をスキップする。
+fn parse_seen_message_id(message_id: &str) -> Option<u64> {
+    if message_id.is_empty() {
+        return None;
+    }
+    message_id.parse::<u64>().ok()
+}
+
 /// デバウンスキーを生成する: (channel_id, sender_id)。
 fn debounce_key(msg: &IncomingMessage) -> (String, String) {
     let channel_id = match &msg.source {
@@ -1339,7 +1396,7 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
 
 #[cfg(test)]
 mod tests {
-    use super::discord_context_line;
+    use super::{discord_context_line, parse_seen_message_id};
 
     #[test]
     fn context_line_includes_guild_id_when_present() {
@@ -1355,5 +1412,25 @@ mod tests {
             discord_context_line("", "456"),
             "[Discord context: channel_id=456]"
         );
+    }
+
+    #[test]
+    fn parse_seen_message_id_accepts_valid_numeric_id() {
+        assert_eq!(
+            parse_seen_message_id("1234567890123456789"),
+            Some(1234567890123456789)
+        );
+    }
+
+    #[test]
+    fn parse_seen_message_id_rejects_empty() {
+        // メタデータに discord_message_id が無いケース → スキップ
+        assert_eq!(parse_seen_message_id(""), None);
+    }
+
+    #[test]
+    fn parse_seen_message_id_rejects_non_numeric() {
+        assert_eq!(parse_seen_message_id("not-a-number"), None);
+        assert_eq!(parse_seen_message_id("123abc"), None);
     }
 }

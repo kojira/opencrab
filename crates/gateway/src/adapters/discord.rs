@@ -9,7 +9,8 @@ use tracing::{debug, error, info, warn};
 
 use serenity::all::{
     ChannelId, Client, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EventHandler, GatewayIntents, Interaction, Message as SerenityMessage, Ready,
+    EventHandler, GatewayIntents, Interaction, Message as SerenityMessage, MessageId,
+    ReactionType, Ready,
 };
 use serenity::http::Http;
 
@@ -191,6 +192,27 @@ impl DiscordGateway {
                     .context("Failed to send message chunk to Discord channel")?;
             }
         }
+        Ok(())
+    }
+
+    /// 指定メッセージにUnicode絵文字のリアクションを付ける。
+    ///
+    /// 受信メッセージを処理対象として認識したことを示す 👀 などに使う。
+    /// 呼び出し側は失敗を非致命的に扱うこと（権限不足・削除済みメッセージ等で失敗しうる）。
+    pub async fn add_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> Result<()> {
+        ChannelId::new(channel_id)
+            .create_reaction(
+                &self.http,
+                MessageId::new(message_id),
+                ReactionType::Unicode(emoji.to_string()),
+            )
+            .await
+            .context("Failed to add reaction to Discord message")?;
         Ok(())
     }
 
