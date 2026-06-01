@@ -249,16 +249,20 @@ impl LlmRouter {
         )
     }
 
-    /// Returns true if the error represents a non-retryable client-side HTTP error (4xx).
+    /// Returns true if the error represents a non-retryable client-side HTTP error.
     ///
-    /// These errors indicate a permanent failure (bad request, auth, not found, etc.)
-    /// and should not be retried — retrying won't help.
+    /// Retry policy:
+    ///   - Retryable:     429 (rate-limit), 500, 502, 503, 504 (transient server errors)
+    ///   - Non-retryable: all other 4xx (permanent client errors — retrying won't help)
     fn is_non_retryable_error(error: &anyhow::Error) -> bool {
         let msg = error.to_string();
-        // Match "(4xx)" status codes in error messages from HTTP providers.
-        ["(400)", "(401)", "(403)", "(404)", "(422)"]
-            .iter()
-            .any(|code| msg.contains(code))
+        // Error messages from HTTP providers embed the status as "(NNN)".
+        // Find any "(4xx)" pattern; 429 is the only 4xx we still retry.
+        if msg.contains("(429)") {
+            return false; // rate-limited — retryable
+        }
+        // Match any "(4xx)" — 400..428, 430..499
+        (400u16..500).any(|code| msg.contains(&format!("({code})")))
     }
 
     /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
