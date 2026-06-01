@@ -76,6 +76,7 @@ auth_file = "~/.codex/auth.json"
 default_model = "gpt-5.5"
 reasoning_effort = "low"
 include_reasoning_encrypted_content = false
+max_output_tokens = 25000
 
 # Bonsai 8B (1-bit LLM, PrismML)
 [llm.providers.bonsai]
