@@ -275,7 +275,7 @@ impl ChatGptProvider {
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
 
-        tracing::warn!("chatgpt build_request_body: system_prompts count={}, content={:?}", system_prompts.len(), system_prompts.first().map(|s| &s[..s.len().min(100)]));
+        tracing::warn!("chatgpt build_request_body: system_prompts count={}", system_prompts.len());
         if system_prompts.is_empty() {
             tracing::warn!(
                 total_messages = request.messages.len(),
@@ -491,7 +491,7 @@ impl LlmProvider for ChatGptProvider {
             has_instructions = body.get("instructions").is_some(),
             instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
             input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
-            body_preview = %&body_str[..body_str.len().min(300)],
+            body_len = body_str.len(),
             "ChatGPT chat_completion: sending request"
         );
         let max_retries = 3u32;
@@ -534,10 +534,10 @@ impl LlmProvider for ChatGptProvider {
                 }
             };
 
-            tracing::warn!(status = %status, body_preview = %&text[..text.len().min(500)], "ChatGPT chat_completion response received");
+            tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
 
             if !status.is_success() {
-                last_error = format!("HTTP {}: {}", status, &text[..text.len().min(200)]);
+                last_error = format!("HTTP {}: (body_len={})", status, text.len());
                 tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
                 // Don't retry on 4xx client errors (except 429)
                 if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
@@ -569,7 +569,7 @@ impl LlmProvider for ChatGptProvider {
             has_instructions = body.get("instructions").is_some(),
             instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
             input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
-            body_preview = %&body_str[..body_str.len().min(300)],
+            body_len = body_str.len(),
             "ChatGPT chat_completion_stream: sending request"
         );
         let max_retries = 3u32;
@@ -600,7 +600,7 @@ impl LlmProvider for ChatGptProvider {
                     tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
                     if !status.is_success() {
                         let text = r.text().await.unwrap_or_default();
-                        last_error = format!("HTTP {}: {}", status, &text[..text.len().min(200)]);
+                        last_error = format!("HTTP {}: (body_len={})", status, text.len());
                         tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
                         if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
                             anyhow::bail!("ChatGPT API error ({}): {}", status, text);
