@@ -285,9 +285,9 @@ impl ChatGptProvider {
             body["reasoning"] = serde_json::json!({"effort": value});
         }
 
-        if let Some(max_tokens) = request.max_tokens.or(self.max_output_tokens) {
-            body["max_output_tokens"] = serde_json::json!(max_tokens);
-        }
+        // NOTE: max_output_tokens is NOT supported by the chatgpt Responses API
+        // (returns 400 "Unsupported parameter: max_output_tokens"). Omit from body.
+        // The field is kept internally for potential future use.
 
         if self.include_encrypted_content {
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
@@ -926,50 +926,36 @@ mod tests {
 
     #[test]
     fn test_build_request_body_max_output_tokens() {
+        // max_output_tokens must NOT appear in the request body (unsupported by the API).
         let provider = ChatGptProvider::new();
         let mut request = ChatRequest::new("gpt-5.5", vec![Message::user("hi")]);
         request.max_tokens = Some(256);
         let body = provider.build_request_body(&request, false);
-        // Per-request value overrides the provider default.
-        assert_eq!(body["max_output_tokens"], serde_json::json!(256));
+        assert!(
+            body.get("max_output_tokens").is_none(),
+            "max_output_tokens must not be sent to the API"
+        );
 
-        // Falls back to the provider default (8192) when no per-request value.
         let request_none = ChatRequest::new("gpt-5.5", vec![Message::user("hi")]);
         let body_none = provider.build_request_body(&request_none, false);
-        assert_eq!(body_none["max_output_tokens"], serde_json::json!(8192));
-
-        // Override the provider default explicitly.
-        let provider_custom = ChatGptProvider::new().with_max_output_tokens(512);
-        let body_custom = provider_custom.build_request_body(&request_none, false);
-        assert_eq!(body_custom["max_output_tokens"], serde_json::json!(512));
+        assert!(body_none.get("max_output_tokens").is_none());
     }
 
     #[test]
     fn test_with_reasoning_effort_sets_max_output_tokens() {
-        // low / medium -> 25000
+        // The internal field is set but must NOT appear in the serialized body.
         let low = ChatGptProvider::new().with_reasoning_effort("low");
         let body_low = low
             .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
-        assert_eq!(body_low["max_output_tokens"], serde_json::json!(25000));
+        assert!(
+            body_low.get("max_output_tokens").is_none(),
+            "max_output_tokens must not be sent to the API"
+        );
 
-        let medium = ChatGptProvider::new().with_reasoning_effort("medium");
-        let body_medium = medium
-            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
-        assert_eq!(body_medium["max_output_tokens"], serde_json::json!(25000));
-
-        // high -> 32000
         let high = ChatGptProvider::new().with_reasoning_effort("high");
         let body_high = high
             .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
-        assert_eq!(body_high["max_output_tokens"], serde_json::json!(32000));
-
-        // A subsequent explicit with_max_output_tokens (e.g. from config) wins.
-        let overridden = ChatGptProvider::new()
-            .with_reasoning_effort("high")
-            .with_max_output_tokens(1234);
-        let body_over = overridden
-            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
-        assert_eq!(body_over["max_output_tokens"], serde_json::json!(1234));
+        assert!(body_high.get("max_output_tokens").is_none());
     }
 
     #[test]
