@@ -262,12 +262,8 @@ impl ChatGptProvider {
             if let Some(ref name) = msg.name {
                 m["name"] = serde_json::json!(name);
             }
-            if let Some(ref tool_calls) = msg.tool_calls {
-                m["tool_calls"] = serde_json::to_value(tool_calls).unwrap_or_default();
-            }
-            if let Some(ref tool_call_id) = msg.tool_call_id {
-                m["tool_call_id"] = serde_json::json!(tool_call_id);
-            }
+            // NOTE: tool_calls and tool_call_id are NOT supported by the chatgpt
+            // Responses API input array ("Unknown parameter"). Omit them.
             input.push(m);
         }
 
@@ -345,88 +341,12 @@ impl ChatGptProvider {
         body
     }
 
-    /// Build a `ToolCall` from a Responses API `function_call` output item.
-    ///
-    /// The item looks like:
-    /// `{"type":"function_call","id":"fc_..","call_id":"call_..","name":"..","arguments":"{..}"}`.
-    /// Returns `None` if the item is not a function call or is missing a name.
-    fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
-        if item["type"].as_str() != Some("function_call") {
-            return None;
-        }
-        let name = item["name"].as_str()?.to_string();
-        // Prefer `call_id` (referenced by subsequent tool-result messages),
-        // falling back to the item `id`.
-        let id = item["call_id"]
-            .as_str()
-            .or_else(|| item["id"].as_str())
-            .unwrap_or_default()
-            .to_string();
-        let arguments = item["arguments"].as_str().unwrap_or("").to_string();
-        Some(ToolCall {
-            id,
-            call_type: "function".to_string(),
-            function: FunctionCall { name, arguments },
-        })
-    }
-
-    /// Render tool calls into the `<function_calls>` XML block that opencrab's
-    /// engine parses via `parse_xml_tool_calls`. Each tool call becomes an
-    /// `<invoke name="...">` element whose JSON-object arguments are expanded
-    /// into per-parameter tags (matching the codex provider's encoding).
-    fn tool_calls_to_xml(tool_calls: &[ToolCall]) -> String {
-        let mut out = String::from("<function_calls>\n");
-        for call in tool_calls {
-            out.push_str(&format!("<invoke name=\"{}\">\n", call.function.name));
-            match serde_json::from_str::<Value>(&call.function.arguments) {
-                Ok(Value::Object(map)) => {
-                    for (key, value) in map {
-                        let rendered = match value {
-                            Value::String(s) => s,
-                            other => other.to_string(),
-                        };
-                        out.push_str(&format!("<{key}>{rendered}</{key}>\n"));
-                    }
-                }
-                // Fall back to emitting the raw arguments if they are not an object.
-                _ => {
-                    out.push_str(&format!(
-                        "<arguments>{}</arguments>\n",
-                        call.function.arguments
-                    ));
-                }
-            }
-            out.push_str("</invoke>\n");
-        }
-        out.push_str("</function_calls>");
-        out
-    }
-
     /// Parse a fully-collected SSE response body into a `ChatResponse`.
     fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
         let mut content = String::new();
         let mut id = String::new();
         let mut usage = Usage::default();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-
-        // [parse_response DEBUG] temporary diagnostic logging (remove later)
-        {
-            let chars: Vec<char> = sse_text.chars().collect();
-            let head: String = chars.iter().take(1000).collect();
-            let tail: String = if chars.len() > 500 {
-                chars[chars.len() - 500..].iter().collect()
-            } else {
-                chars.iter().collect()
-            };
-            tracing::warn!("[parse_response DEBUG] sse_text head(1000)=\n{}", head);
-            tracing::warn!("[parse_response DEBUG] sse_text tail(500)=\n{}", tail);
-        }
-        tracing::warn!(
-            "[parse_response DEBUG] sse_text total lines = {}",
-            sse_text.lines().count()
-        );
         let mut dbg_data_line_count: usize = 0;
-        let mut dbg_json_ok_count: usize = 0;
         let mut dbg_delta_event_count: usize = 0;
         let mut current_event = String::new();
 
@@ -452,43 +372,21 @@ impl ChatGptProvider {
                     continue;
                 }
             };
-            dbg_json_ok_count += 1;
             // Effective event type: prefer parsed["type"], fall back to current_event.
             let effective_event = parsed["type"].as_str().unwrap_or(&current_event);
             match effective_event {
                 "response.output_text.delta" => {
                     if let Some(delta) = parsed["delta"].as_str() {
                         dbg_delta_event_count += 1;
-                        let dbg_delta_head: String = delta.chars().take(50).collect();
-                        tracing::warn!(
-                            "[parse_response DEBUG] delta event #{} first50={:?}",
-                            dbg_delta_event_count, dbg_delta_head
-                        );
                         content.push_str(delta);
                     }
                 }
-                "response.output_item.done" => {
-                    // Incremental completion of a single output item; capture any
-                    // function call here in case the final output array is absent.
-                    if let Some(tc) = Self::tool_call_from_item(&parsed["item"]) {
-                        if !tool_calls.iter().any(|existing| existing.id == tc.id) {
-                            tool_calls.push(tc);
-                        }
-                    }
-                }
+                // Tool calls (function_call items) are ignored for now.
+                // They arrive via response.output_item.done but we have no
+                // way to feed results back to the API yet.
                 "response.completed" | "response.done" => {
                     if let Some(rid) = parsed["response"]["id"].as_str() {
                         id = rid.to_string();
-                    }
-                    // The final output array carries the complete tool calls.
-                    if let Some(output) = parsed["response"]["output"].as_array() {
-                        for item in output {
-                            if let Some(tc) = Self::tool_call_from_item(item) {
-                                if !tool_calls.iter().any(|existing| existing.id == tc.id) {
-                                    tool_calls.push(tc);
-                                }
-                            }
-                        }
                     }
                     let u = &parsed["response"]["usage"];
                     usage = Usage {
@@ -512,53 +410,19 @@ impl ChatGptProvider {
         }
 
         tracing::warn!(
-            "[parse_response DEBUG] data: prefixed lines = {}",
-            dbg_data_line_count
-        );
-        tracing::warn!(
-            "[parse_response DEBUG] serde_json::from_str OK count = {}",
-            dbg_json_ok_count
-        );
-        tracing::warn!(
-            "[parse_response DEBUG] output_text.delta event count = {}",
-            dbg_delta_event_count
-        );
-        tracing::warn!(
-            "[parse_response DEBUG] final content length: bytes={} chars={}",
+            "chatgpt parse_response: data_lines={} delta_events={} content_bytes={}",
+            dbg_data_line_count,
+            dbg_delta_event_count,
             content.len(),
-            content.chars().count()
         );
-
-        let finish_reason = if tool_calls.is_empty() {
-            FinishReason::Stop
-        } else {
-            FinishReason::ToolCalls
-        };
-
-        // When tool calls are present, expose them in the content as a
-        // `<function_calls>` XML block so the engine's `parse_xml_tool_calls`
-        // can recover them, while also keeping the structured `tool_calls`.
-        let message = if tool_calls.is_empty() {
-            Message::assistant(content)
-        } else {
-            let xml = Self::tool_calls_to_xml(&tool_calls);
-            let combined = if content.trim().is_empty() {
-                xml
-            } else {
-                format!("{content}\n{xml}")
-            };
-            let mut m = Message::assistant(combined);
-            m.tool_calls = Some(tool_calls);
-            m
-        };
 
         Ok(ChatResponse {
             id,
             model: model.to_string(),
             choices: vec![Choice {
                 index: 0,
-                message,
-                finish_reason: Some(finish_reason),
+                message: Message::assistant(content),
+                finish_reason: Some(FinishReason::Stop),
             }],
             usage,
             created: 0,
@@ -790,20 +654,7 @@ impl LlmProvider for ChatGptProvider {
                         });
                     }
                     "response.completed" | "response.done" => {
-                        let tool_calls: Vec<ToolCall> = parsed["response"]["output"]
-                            .as_array()
-                            .map(|output| {
-                                output
-                                    .iter()
-                                    .filter_map(Self::tool_call_from_item)
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let (finish_reason, tool_calls) = if tool_calls.is_empty() {
-                            (FinishReason::Stop, None)
-                        } else {
-                            (FinishReason::ToolCalls, Some(tool_calls))
-                        };
+                        // Tool calls are ignored for now (future work).
                         last_delta = Some(ChatStreamDelta {
                             id: String::new(),
                             model: request_model.clone(),
@@ -813,9 +664,9 @@ impl LlmProvider for ChatGptProvider {
                                     role: None,
                                     content: Some(String::new()),
                                     function_call: None,
-                                    tool_calls,
+                                    tool_calls: None,
                                 },
-                                finish_reason: Some(finish_reason),
+                                finish_reason: Some(FinishReason::Stop),
                             }],
                         });
                     }
@@ -959,7 +810,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_response_tool_calls() {
+    fn test_parse_response_tool_calls_ignored() {
+        // Tool calls from the API are currently ignored (future work).
+        // The response should complete with Stop and empty text content.
         let provider = ChatGptProvider::new();
         let sse = concat!(
             "event: response.completed\n",
@@ -970,27 +823,18 @@ mod tests {
             "\n",
         );
         let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
-        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::ToolCalls));
-        let tool_calls = resp.choices[0]
-            .message
-            .tool_calls
-            .as_ref()
-            .expect("expected tool_calls");
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].id, "call_1");
-        assert_eq!(tool_calls[0].call_type, "function");
-        assert_eq!(tool_calls[0].function.name, "get_weather");
-        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Tokyo\"}");
-
-        // The content carries a <function_calls> XML block that the engine's
-        // parse_xml_tool_calls() can recover.
-        let content = match &resp.choices[0].message.content {
-            Some(MessageContent::Text(t)) => t.clone(),
-            _ => panic!("expected text content"),
-        };
-        assert!(content.contains("<function_calls>"), "content: {content}");
-        assert!(content.contains("<invoke name=\"get_weather\">"), "content: {content}");
-        assert!(content.contains("<city>Tokyo</city>"), "content: {content}");
+        // Tool calls are ignored → Stop, no structured tool_calls, empty text.
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
+        assert!(resp.choices[0].message.tool_calls.is_none());
+        assert_eq!(resp.usage.completion_tokens, 5);
+        match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => assert!(
+                t.is_empty(),
+                "content must be empty when only tool calls are returned: {t:?}"
+            ),
+            None => {} // also acceptable
+            other => panic!("unexpected content: {other:?}"),
+        }
     }
 
     // ── build_request_body field validation ──────────────────────────────────
