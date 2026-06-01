@@ -83,7 +83,8 @@ impl ActionExecutor for BridgedExecutor {
 
     fn list_tools(&self) -> Vec<ToolDefinition> {
         let is_owner = matches!(self.context.caller, crate::traits::CallerIdentity::Owner);
-        const OWNER_ONLY_ACTIONS: &[&str] = &["update_instructions"];
+        const OWNER_ONLY_ACTIONS: &[&str] =
+            &["update_instructions", "update_heartbeat_instructions"];
 
         let mut tools: Vec<ToolDefinition> = self
             .dispatcher
@@ -129,7 +130,11 @@ impl ActionExecutor for BridgedExecutor {
         // Merge gateway action definitions.
         if let Some(ref gw) = self.gateway_actions {
             // trusted-only gateway actions: excluded for non-trusted callers
-            let trusted_only_actions = ["create_skill", "execute_skill"];
+            let trusted_only_actions = [
+                "create_skill",
+                "execute_skill",
+                "read_heartbeat_instructions",
+            ];
             let is_trusted = matches!(
                 self.context.caller,
                 crate::traits::CallerIdentity::Owner
@@ -219,6 +224,35 @@ mod tests {
                     data: None,
                     error: Some(format!("Unknown gateway action: {name}")),
                 },
+            }
+        }
+    }
+
+    /// update_heartbeat_instructions / read_heartbeat_instructions を含むモック。
+    struct MockGatewayHeartbeat;
+
+    #[async_trait]
+    impl GatewayActions for MockGatewayHeartbeat {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            vec![
+                GatewayActionDef {
+                    name: "update_heartbeat_instructions".to_string(),
+                    description: "update".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+                GatewayActionDef {
+                    name: "read_heartbeat_instructions".to_string(),
+                    description: "read".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+            ]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+            GatewayActionResult {
+                success: true,
+                data: None,
+                error: None,
             }
         }
     }
@@ -454,6 +488,38 @@ mod tests {
             !names.contains(&"update_instructions"),
             "Agent should NOT see update_instructions"
         );
+    }
+
+    #[test]
+    fn test_list_tools_owner_sees_update_heartbeat_instructions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
+        let names: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(names.iter().any(|n| n == "update_heartbeat_instructions"));
+        assert!(names.iter().any(|n| n == "read_heartbeat_instructions"));
+    }
+
+    #[test]
+    fn test_list_tools_agent_cannot_see_heartbeat_actions() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
+        let names: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        // Agent (non-owner, non-trusted) sees neither.
+        assert!(!names.iter().any(|n| n == "update_heartbeat_instructions"));
+        assert!(!names.iter().any(|n| n == "read_heartbeat_instructions"));
+    }
+
+    #[test]
+    fn test_list_tools_trusted_user_heartbeat_read_only() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayHeartbeat));
+        let names: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        // TrustedUser can read but not write (write is owner-only).
+        assert!(names.iter().any(|n| n == "read_heartbeat_instructions"));
+        assert!(!names.iter().any(|n| n == "update_heartbeat_instructions"));
     }
 
     #[test]

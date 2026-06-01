@@ -49,22 +49,27 @@ pub fn execute_import(
 
     let existing = opencrab_db::queries::get_agent(conn, agent_id)?;
 
-    let mut row = existing.clone().unwrap_or_else(|| opencrab_db::queries::AgentRow {
-        agent_id: agent_id.to_string(),
-        name: String::new(),
-        job_title: None,
-        organization: None,
-        image_url: None,
-        persona_name: String::new(),
-        personality: None,
-        instructions: String::new(),
-        model: None,
-        metadata_json: None,
-    });
+    let mut row = existing
+        .clone()
+        .unwrap_or_else(|| opencrab_db::queries::AgentRow {
+            agent_id: agent_id.to_string(),
+            name: String::new(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: String::new(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: String::new(),
+            model: None,
+            metadata_json: None,
+        });
 
     if scan_result.soul.found {
         if existing.is_some() && !options.overwrite_if_exists {
-            warnings.push("Agent already exists, skipping soul (overwrite_if_exists=false)".to_string());
+            warnings.push(
+                "Agent already exists, skipping soul (overwrite_if_exists=false)".to_string(),
+            );
         } else {
             row.persona_name = scan_result.soul.persona_name.clone();
             row.personality = Some(scan_result.soul.personality.clone());

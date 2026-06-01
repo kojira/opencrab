@@ -247,6 +247,7 @@ mod tests {
                     persona_name: "LoadedPersona".to_string(),
                     personality: None,
                     instructions: String::new(),
+                    heartbeat_instructions: String::new(),
                     model: None,
                     metadata_json: None,
                 },

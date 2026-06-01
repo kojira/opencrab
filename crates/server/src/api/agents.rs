@@ -71,6 +71,7 @@ pub async fn create_agent(
         persona_name: req.persona_name,
         personality: None,
         instructions: String::new(),
+        heartbeat_instructions: String::new(),
         model: None,
         metadata_json: None,
     };
@@ -101,6 +102,8 @@ pub struct PutAgentBody {
     pub personality: Option<String>,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default)]
+    pub heartbeat_instructions: String,
     pub model: Option<String>,
     pub metadata_json: Option<String>,
 }
@@ -120,6 +123,7 @@ pub async fn put_agent(
         persona_name: body.persona_name,
         personality: body.personality,
         instructions: body.instructions,
+        heartbeat_instructions: body.heartbeat_instructions,
         model: body.model,
         metadata_json: body.metadata_json,
     };

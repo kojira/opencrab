@@ -18,6 +18,9 @@ pub struct AgentRow {
     pub personality: Option<String>,
     #[serde(default)]
     pub instructions: String,
+    /// ハートビート専用の自律行動指示。空文字なら既定文言にフォールバックする。
+    #[serde(default)]
+    pub heartbeat_instructions: String,
     pub model: Option<String>,
     pub metadata_json: Option<String>,
 }
@@ -32,6 +35,7 @@ pub struct AgentPatch {
     pub persona_name: Option<String>,
     pub personality: Option<Option<String>>,
     pub instructions: Option<String>,
+    pub heartbeat_instructions: Option<String>,
     pub model: Option<Option<String>>,
     pub metadata_json: Option<Option<String>>,
 }
@@ -39,8 +43,8 @@ pub struct AgentPatch {
 pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name,
             job_title = excluded.job_title,
@@ -49,6 +53,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             persona_name = excluded.persona_name,
             personality = excluded.personality,
             instructions = excluded.instructions,
+            heartbeat_instructions = excluded.heartbeat_instructions,
             model = excluded.model,
             metadata_json = excluded.metadata_json,
             updated_at = excluded.updated_at",
@@ -61,6 +66,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             agent.persona_name,
             agent.personality,
             agent.instructions,
+            agent.heartbeat_instructions,
             agent.model,
             agent.metadata_json,
             now,
@@ -72,7 +78,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
 
 pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, model, metadata_json
+        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, metadata_json
          FROM agents WHERE agent_id = ?1",
         params![agent_id],
         |row| {
@@ -85,8 +91,9 @@ pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> 
                 persona_name: row.get(5)?,
                 personality: row.get(6)?,
                 instructions: row.get(7)?,
-                model: row.get(8)?,
-                metadata_json: row.get(9)?,
+                heartbeat_instructions: row.get(8)?,
+                model: row.get(9)?,
+                metadata_json: row.get(10)?,
             })
         },
     );
@@ -133,6 +140,9 @@ pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) 
     }
     if let Some(ref v) = patch.instructions {
         row.instructions = v.clone();
+    }
+    if let Some(ref v) = patch.heartbeat_instructions {
+        row.heartbeat_instructions = v.clone();
     }
     if let Some(ref v) = patch.model {
         row.model = v.clone();
@@ -221,10 +231,7 @@ pub fn delete_soul_preset(conn: &Connection, preset_id: &str) -> Result<bool> {
 
 /// Delete an agent and all related data (agents row, skills, curated memory, discord config, presets).
 pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
-    let deleted = conn.execute(
-        "DELETE FROM agents WHERE agent_id = ?1",
-        params![agent_id],
-    )?;
+    let deleted = conn.execute("DELETE FROM agents WHERE agent_id = ?1", params![agent_id])?;
     conn.execute(
         "DELETE FROM soul_presets WHERE agent_id = ?1",
         params![agent_id],
@@ -1408,6 +1415,161 @@ pub fn insert_heartbeat_log(
 }
 
 // ============================================
+// Heartbeat Instructions（ハートビート指示）
+// ============================================
+
+/// ハートビート指示が未設定のときに使う既定文言（後方互換）。
+/// 出力形式の規約（SPEAK/LEARN/IDLE）はランタイム側で固定するため、ここには含めない。
+pub const DEFAULT_HEARTBEAT_INSTRUCTIONS: &str =
+    "今この瞬間、自律的に何をするか判断してください。発言は30分に1回以下が望ましい。";
+
+/// ハートビート指示の最大文字数。
+pub const MAX_HEARTBEAT_INSTRUCTIONS_LEN: usize = 4000;
+
+/// 指示本文をサニタイズする。制御文字（改行・タブを除く）を除去し、最大長でクランプする。
+pub fn sanitize_heartbeat_instructions(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect();
+    cleaned
+        .chars()
+        .take(MAX_HEARTBEAT_INSTRUCTIONS_LEN)
+        .collect()
+}
+
+/// ハートビート指示の解決結果。`source` はどの設定が使われたかを示す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHeartbeatInstructions {
+    pub text: String,
+    /// "default" | "agent" | "channel" | "agent+channel"
+    pub source: &'static str,
+}
+
+/// ハートビートtickのプロンプト本文を解決する。
+///
+/// 優先順位（§4.2）:
+///  1. `(channel_id, agent_id)` のチャンネル上書き
+///  2. `(channel_id, "")` のグローバルチャンネル上書き
+///  3. `agents.heartbeat_instructions`（エージェント全体）
+///  4. 既定文言
+///
+/// 合成方針: エージェント指示とチャンネル上書きが両方あれば連結する（チャンネル側が後）。
+pub fn resolve_heartbeat_instructions(
+    conn: &Connection,
+    agent_id: &str,
+    channel_id: &str,
+) -> ResolvedHeartbeatInstructions {
+    let agent_global = get_agent(conn, agent_id)
+        .ok()
+        .flatten()
+        .map(|a| sanitize_heartbeat_instructions(&a.heartbeat_instructions))
+        .unwrap_or_default();
+
+    // channel(agent) override → channel(global) override
+    let channel_override = {
+        let per_agent = get_channel_config_for_agent(conn, channel_id, agent_id)
+            .ok()
+            .flatten()
+            .map(|c| sanitize_heartbeat_instructions(&c.heartbeat_instructions))
+            .filter(|s| !s.is_empty());
+        match per_agent {
+            Some(s) => s,
+            None => get_channel_config_for_agent(conn, channel_id, "")
+                .ok()
+                .flatten()
+                .map(|c| sanitize_heartbeat_instructions(&c.heartbeat_instructions))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default(),
+        }
+    };
+
+    let has_agent = !agent_global.is_empty();
+    let has_channel = !channel_override.is_empty();
+
+    match (has_agent, has_channel) {
+        (false, false) => ResolvedHeartbeatInstructions {
+            text: DEFAULT_HEARTBEAT_INSTRUCTIONS.to_string(),
+            source: "default",
+        },
+        (true, false) => ResolvedHeartbeatInstructions {
+            text: agent_global,
+            source: "agent",
+        },
+        (false, true) => ResolvedHeartbeatInstructions {
+            text: channel_override,
+            source: "channel",
+        },
+        (true, true) => ResolvedHeartbeatInstructions {
+            text: format!("{agent_global}\n\n{channel_override}"),
+            source: "agent+channel",
+        },
+    }
+}
+
+/// ハートビート指示の監査ログ1件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatInstructionsAuditRow {
+    pub agent_id: String,
+    pub scope: String,
+    pub channel_id: Option<String>,
+    pub caller_identity: String,
+    pub caller_discord_id: Option<String>,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// 監査ログを記録する。
+pub fn insert_heartbeat_instructions_audit(
+    conn: &Connection,
+    audit: &HeartbeatInstructionsAuditRow,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO heartbeat_instructions_audit
+            (agent_id, scope, channel_id, caller_identity, caller_discord_id, old_value, new_value, reason, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            audit.agent_id,
+            audit.scope,
+            audit.channel_id,
+            audit.caller_identity,
+            audit.caller_discord_id,
+            audit.old_value,
+            audit.new_value,
+            audit.reason,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// エージェントの監査ログを新しい順に取得する（テスト・確認用）。
+pub fn list_heartbeat_instructions_audit(
+    conn: &Connection,
+    agent_id: &str,
+    limit: i64,
+) -> Result<Vec<HeartbeatInstructionsAuditRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, scope, channel_id, caller_identity, caller_discord_id, old_value, new_value, reason
+         FROM heartbeat_instructions_audit WHERE agent_id = ?1 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![agent_id, limit], |row| {
+        Ok(HeartbeatInstructionsAuditRow {
+            agent_id: row.get(0)?,
+            scope: row.get(1)?,
+            channel_id: row.get(2)?,
+            caller_identity: row.get(3)?,
+            caller_discord_id: row.get(4)?,
+            old_value: row.get(5)?,
+            new_value: row.get(6)?,
+            reason: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+// ============================================
 // Model Pricing
 // ============================================
 
@@ -1484,6 +1646,9 @@ pub struct ChannelConfigRow {
     pub whitelisted: bool,
     pub heartbeat_enabled: bool,
     pub heartbeat_interval_secs: Option<u64>,
+    /// チャンネル単位のハートビート指示の上書き。空文字なら上書きなし。
+    #[serde(default)]
+    pub heartbeat_instructions: String,
 }
 
 /// グローバル設定（agent_id = ''）を取得する。
@@ -1498,7 +1663,7 @@ pub fn get_channel_config_for_agent(
     agent_id: &str,
 ) -> Result<Option<ChannelConfigRow>> {
     let result = conn.query_row(
-        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
          FROM discord_channel_config WHERE channel_id = ?1 AND agent_id = ?2",
         params![channel_id, agent_id],
         |row| {
@@ -1512,6 +1677,7 @@ pub fn get_channel_config_for_agent(
                 whitelisted: row.get(6)?,
                 heartbeat_enabled: row.get(7)?,
                 heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                heartbeat_instructions: row.get(9)?,
             })
         },
     );
@@ -1525,8 +1691,8 @@ pub fn get_channel_config_for_agent(
 
 pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO discord_channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO discord_channel_config (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(channel_id, agent_id) DO UPDATE SET
             guild_id = excluded.guild_id,
             channel_name = excluded.channel_name,
@@ -1535,6 +1701,7 @@ pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Resul
             whitelisted = excluded.whitelisted,
             heartbeat_enabled = excluded.heartbeat_enabled,
             heartbeat_interval_secs = excluded.heartbeat_interval_secs,
+            heartbeat_instructions = excluded.heartbeat_instructions,
             updated_at = excluded.updated_at",
         params![
             cfg.channel_id,
@@ -1546,6 +1713,7 @@ pub fn upsert_channel_config(conn: &Connection, cfg: &ChannelConfigRow) -> Resul
             cfg.whitelisted,
             cfg.heartbeat_enabled,
             cfg.heartbeat_interval_secs.map(|v| v as i64),
+            cfg.heartbeat_instructions,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -1575,7 +1743,7 @@ pub fn list_channel_configs_by_guild(
     guild_id: &str,
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
          FROM discord_channel_config WHERE guild_id = ?1 ORDER BY channel_name",
     )?;
 
@@ -1590,6 +1758,7 @@ pub fn list_channel_configs_by_guild(
             whitelisted: row.get(6)?,
             heartbeat_enabled: row.get(7)?,
             heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+            heartbeat_instructions: row.get(9)?,
         })
     })?;
 
@@ -1602,7 +1771,7 @@ pub fn list_channel_configs_by_agent(
     agent_id: &str,
 ) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
          FROM discord_channel_config WHERE agent_id = ?1 ORDER BY channel_name",
     )?;
     let rows = stmt.query_map(params![agent_id], |row| {
@@ -1616,6 +1785,7 @@ pub fn list_channel_configs_by_agent(
             whitelisted: row.get(6)?,
             heartbeat_enabled: row.get(7)?,
             heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+            heartbeat_instructions: row.get(9)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1624,7 +1794,7 @@ pub fn list_channel_configs_by_agent(
 /// whitelisted=true のチャンネルをすべて取得する。
 pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
          FROM discord_channel_config WHERE whitelisted = 1 ORDER BY channel_id",
     )?;
 
@@ -1639,6 +1809,7 @@ pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigR
             whitelisted: row.get(6)?,
             heartbeat_enabled: row.get(7)?,
             heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+            heartbeat_instructions: row.get(9)?,
         })
     })?;
 
@@ -1649,7 +1820,7 @@ pub fn list_whitelisted_channels(conn: &Connection) -> Result<Vec<ChannelConfigR
 /// ハートビートを有効にすべきチャンネル一覧。
 pub fn list_heartbeat_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow>> {
     let mut stmt = conn.prepare(
-        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs
+        "SELECT channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions
          FROM discord_channel_config WHERE heartbeat_enabled = 1 ORDER BY channel_id",
     )?;
 
@@ -1664,6 +1835,7 @@ pub fn list_heartbeat_channels(conn: &Connection) -> Result<Vec<ChannelConfigRow
             whitelisted: row.get(6)?,
             heartbeat_enabled: row.get(7)?,
             heartbeat_interval_secs: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+            heartbeat_instructions: row.get(9)?,
         })
     })?;
 
@@ -2304,6 +2476,7 @@ mod tests {
             persona_name: "Crab".to_string(),
             personality: Some(r#"{"hobby":"coding"}"#.to_string()),
             instructions: String::new(),
+            heartbeat_instructions: String::new(),
             model: None,
             metadata_json: Some(r#"{"lang":"en"}"#.to_string()),
         };
@@ -2347,6 +2520,7 @@ mod tests {
             persona_name: "p".to_string(),
             personality: None,
             instructions: String::new(),
+            heartbeat_instructions: String::new(),
             model: Some("openai:gpt-4o".to_string()),
             metadata_json: None,
         };
@@ -2365,6 +2539,7 @@ mod tests {
             persona_name: "p".to_string(),
             personality: None,
             instructions: String::new(),
+            heartbeat_instructions: String::new(),
             model: None,
             metadata_json: None,
         };
@@ -3049,6 +3224,7 @@ mod tests {
                 persona_name: "Doomed".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3101,6 +3277,7 @@ mod tests {
                 persona_name: "a".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3117,6 +3294,7 @@ mod tests {
                 persona_name: "b".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3152,6 +3330,7 @@ mod tests {
                 persona_name: "cr".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3184,6 +3363,7 @@ mod tests {
                 persona_name: "Original Persona".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3205,6 +3385,7 @@ mod tests {
                 persona_name: "Updated Persona".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3246,6 +3427,7 @@ mod tests {
             whitelisted: false,
             heartbeat_enabled: true,
             heartbeat_interval_secs: None,
+            heartbeat_instructions: String::new(),
         };
 
         upsert_channel_config(&conn, &cfg).unwrap();
@@ -3274,6 +3456,7 @@ mod tests {
             whitelisted: false,
             heartbeat_enabled: true,
             heartbeat_interval_secs: None,
+            heartbeat_instructions: String::new(),
         };
         upsert_channel_config(&conn, &cfg).unwrap();
 
@@ -3303,6 +3486,7 @@ mod tests {
             whitelisted: false,
             heartbeat_enabled: true,
             heartbeat_interval_secs: None,
+            heartbeat_instructions: String::new(),
         };
         let cfg2 = ChannelConfigRow {
             channel_id: "ch-2".to_string(),
@@ -3314,6 +3498,7 @@ mod tests {
             whitelisted: false,
             heartbeat_enabled: true,
             heartbeat_interval_secs: None,
+            heartbeat_instructions: String::new(),
         };
         let cfg3 = ChannelConfigRow {
             channel_id: "ch-3".to_string(),
@@ -3325,6 +3510,7 @@ mod tests {
             whitelisted: false,
             heartbeat_enabled: true,
             heartbeat_interval_secs: None,
+            heartbeat_instructions: String::new(),
         };
 
         upsert_channel_config(&conn, &cfg1).unwrap();
@@ -3357,11 +3543,149 @@ mod tests {
             whitelisted: false,
             heartbeat_enabled: true,
             heartbeat_interval_secs: None,
+            heartbeat_instructions: String::new(),
         };
         upsert_channel_config(&conn, &cfg).unwrap();
 
         assert!(!is_channel_readable(&conn, "ch-blocked"));
         assert!(!is_channel_writable(&conn, "ch-blocked"));
+    }
+
+    // ── Heartbeat Instructions ──
+
+    fn hb_agent(id: &str, heartbeat: &str) -> AgentRow {
+        AgentRow {
+            agent_id: id.to_string(),
+            name: "N".to_string(),
+            job_title: None,
+            organization: None,
+            image_url: None,
+            persona_name: "P".to_string(),
+            personality: None,
+            instructions: String::new(),
+            heartbeat_instructions: heartbeat.to_string(),
+            model: None,
+            metadata_json: None,
+        }
+    }
+
+    fn hb_channel(channel_id: &str, agent_id: &str, heartbeat: &str) -> ChannelConfigRow {
+        ChannelConfigRow {
+            channel_id: channel_id.to_string(),
+            agent_id: agent_id.to_string(),
+            guild_id: "g1".to_string(),
+            channel_name: String::new(),
+            readable: true,
+            writable: true,
+            whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: None,
+            heartbeat_instructions: heartbeat.to_string(),
+        }
+    }
+
+    /// T-1.1 / T-1.2: agents.heartbeat_instructions round-trips and patches independently.
+    #[test]
+    fn test_agent_heartbeat_instructions_roundtrip_and_patch() {
+        let conn = setup();
+        upsert_agent(&conn, &hb_agent("a1", "話題があるときだけ話す")).unwrap();
+        let got = get_agent(&conn, "a1").unwrap().unwrap();
+        assert_eq!(got.heartbeat_instructions, "話題があるときだけ話す");
+        assert_eq!(got.instructions, "");
+
+        // patch only heartbeat_instructions; other fields stay.
+        let patch = AgentPatch {
+            heartbeat_instructions: Some("業務連絡のみ".to_string()),
+            ..Default::default()
+        };
+        assert!(apply_agent_patch(&conn, "a1", &patch).unwrap());
+        let got = get_agent(&conn, "a1").unwrap().unwrap();
+        assert_eq!(got.heartbeat_instructions, "業務連絡のみ");
+        assert_eq!(got.name, "N");
+        assert_eq!(got.persona_name, "P");
+    }
+
+    /// T-1.3: channel override round-trips.
+    #[test]
+    fn test_channel_heartbeat_instructions_roundtrip() {
+        let conn = setup();
+        upsert_channel_config(&conn, &hb_channel("ch1", "a1", "雑談禁止")).unwrap();
+        let got = get_channel_config_for_agent(&conn, "ch1", "a1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.heartbeat_instructions, "雑談禁止");
+    }
+
+    /// T-2.1: priority channel(agent) > channel(global) > agent global.
+    #[test]
+    fn test_resolve_priority() {
+        let conn = setup();
+        upsert_agent(&conn, &hb_agent("a1", "AGENT")).unwrap();
+        upsert_channel_config(&conn, &hb_channel("ch1", "", "GLOBAL_CH")).unwrap();
+        upsert_channel_config(&conn, &hb_channel("ch1", "a1", "AGENT_CH")).unwrap();
+
+        // channel(agent) wins and is concatenated after agent global.
+        let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
+        assert_eq!(r.source, "agent+channel");
+        assert_eq!(r.text, "AGENT\n\nAGENT_CH");
+
+        // remove channel(agent) override → falls back to channel(global).
+        delete_channel_config_for_agent(&conn, "ch1", "a1").unwrap();
+        let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
+        assert_eq!(r.text, "AGENT\n\nGLOBAL_CH");
+
+        // remove channel(global) → agent global only.
+        delete_channel_config_for_agent(&conn, "ch1", "").unwrap();
+        let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
+        assert_eq!(r.source, "agent");
+        assert_eq!(r.text, "AGENT");
+    }
+
+    /// T-2.2: all empty → default fallback.
+    #[test]
+    fn test_resolve_default_fallback() {
+        let conn = setup();
+        upsert_agent(&conn, &hb_agent("a1", "")).unwrap();
+        let r = resolve_heartbeat_instructions(&conn, "a1", "ch-none");
+        assert_eq!(r.source, "default");
+        assert_eq!(r.text, DEFAULT_HEARTBEAT_INSTRUCTIONS);
+    }
+
+    /// T-2.4: clamp to max length and strip control characters.
+    #[test]
+    fn test_sanitize_clamp_and_control_chars() {
+        let long = "あ".repeat(MAX_HEARTBEAT_INSTRUCTIONS_LEN + 100);
+        let out = sanitize_heartbeat_instructions(&long);
+        assert_eq!(out.chars().count(), MAX_HEARTBEAT_INSTRUCTIONS_LEN);
+
+        let dirty = "ok\u{0007}line\nnext\ttab";
+        let cleaned = sanitize_heartbeat_instructions(dirty);
+        assert!(!cleaned.contains('\u{0007}'));
+        assert!(cleaned.contains('\n'));
+        assert!(cleaned.contains('\t'));
+        assert_eq!(cleaned, "okline\nnext\ttab");
+    }
+
+    /// T-3.2: audit row records old/new/reason and is retrievable.
+    #[test]
+    fn test_heartbeat_instructions_audit_roundtrip() {
+        let conn = setup();
+        let audit = HeartbeatInstructionsAuditRow {
+            agent_id: "a1".to_string(),
+            scope: "agent".to_string(),
+            channel_id: None,
+            caller_identity: "owner".to_string(),
+            caller_discord_id: Some("123".to_string()),
+            old_value: Some("old".to_string()),
+            new_value: Some("new".to_string()),
+            reason: Some("オーナー依頼".to_string()),
+        };
+        insert_heartbeat_instructions_audit(&conn, &audit).unwrap();
+        let rows = list_heartbeat_instructions_audit(&conn, "a1", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].old_value.as_deref(), Some("old"));
+        assert_eq!(rows[0].new_value.as_deref(), Some("new"));
+        assert_eq!(rows[0].reason.as_deref(), Some("オーナー依頼"));
     }
 
     // ── Agent Discord Config ──
@@ -3539,6 +3863,7 @@ mod tests {
                 persona_name: "d".into(),
                 personality: None,
                 instructions: String::new(),
+                heartbeat_instructions: String::new(),
                 model: None,
                 metadata_json: None,
             },
@@ -3583,26 +3908,30 @@ mod tests {
         // T-1.2: With t1,t2,t3 existing, should return "t4"
         let conn = setup();
         for i in 1..=3 {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: format!("node-{i}"),
-                agent_id: "a1".to_string(),
-                parent_id: None,
-                node_type: "topic".to_string(),
-                source_type: String::new(),
-                title: format!("Topic {i}"),
-                summary: "test".to_string(),
-                start_log_id: None,
-                end_log_id: None,
-                source_session_id: None,
-                date_from: None,
-                date_to: None,
-                depth: 0,
-                child_count: 0,
-                token_count: 0,
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: Some(format!("t{i}")),
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: format!("node-{i}"),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: format!("Topic {i}"),
+                    summary: "test".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some(format!("t{i}")),
+                },
+            )
+            .unwrap();
         }
         let result = next_short_id(&conn, "a1", "t").unwrap();
         assert_eq!(result, "t4");
@@ -3613,21 +3942,30 @@ mod tests {
         // T-1.3: t1, t2, h1 exist -> prefix="h" returns "h2"
         let conn = setup();
         for (id, prefix, num) in &[("n1", "t", 1), ("n2", "t", 2), ("n3", "h", 1)] {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: id.to_string(),
-                agent_id: "a1".to_string(),
-                parent_id: None,
-                node_type: "topic".to_string(),
-                source_type: String::new(),
-                title: "T".to_string(),
-                summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: Some(format!("{prefix}{num}")),
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: id.to_string(),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: "T".to_string(),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some(format!("{prefix}{num}")),
+                },
+            )
+            .unwrap();
         }
         let result = next_short_id(&conn, "a1", "h").unwrap();
         assert_eq!(result, "h2");
@@ -3638,31 +3976,55 @@ mod tests {
         // T-1.4: agent a1 has t1-t10, agent a2 has t1 -> a2 prefix="t" returns "t2"
         let conn = setup();
         for i in 1..=10 {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: format!("a1-node-{i}"),
-                agent_id: "a1".to_string(),
-                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-                title: "T".to_string(), summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: format!("a1-node-{i}"),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: "T".to_string(),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some(format!("t{i}")),
+                },
+            )
+            .unwrap();
+        }
+        insert_index_node(
+            &conn,
+            &IndexNodeRow {
+                id: "a2-node-1".to_string(),
+                agent_id: "a2".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: String::new(),
+                title: "T".to_string(),
+                summary: "s".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: Some(format!("t{i}")),
-            }).unwrap();
-        }
-        insert_index_node(&conn, &IndexNodeRow {
-            id: "a2-node-1".to_string(),
-            agent_id: "a2".to_string(),
-            parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-            title: "T".to_string(), summary: "s".to_string(),
-            start_log_id: None, end_log_id: None, source_session_id: None,
-            date_from: None, date_to: None,
-            depth: 0, child_count: 0, token_count: 0,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-            short_id: Some("t1".to_string()),
-        }).unwrap();
+                short_id: Some("t1".to_string()),
+            },
+        )
+        .unwrap();
         let result = next_short_id(&conn, "a2", "t").unwrap();
         assert_eq!(result, "t2");
     }
@@ -3672,18 +4034,30 @@ mod tests {
         // T-1.5: t1, t3, t5 exist (gaps) -> returns "t6" (MAX+1)
         let conn = setup();
         for (id, num) in &[("n1", 1), ("n2", 3), ("n3", 5)] {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: id.to_string(),
-                agent_id: "a1".to_string(),
-                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-                title: "T".to_string(), summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: Some(format!("t{num}")),
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: id.to_string(),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: "T".to_string(),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some(format!("t{num}")),
+                },
+            )
+            .unwrap();
         }
         let result = next_short_id(&conn, "a1", "t").unwrap();
         assert_eq!(result, "t6");
@@ -3708,32 +4082,56 @@ mod tests {
         // T-1.7: 5 topics + 3 dailies with NULL short_id -> get assigned
         let conn = setup();
         for i in 1..=5 {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: format!("topic-{i}"),
-                agent_id: "a1".to_string(),
-                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-                title: format!("Topic {i}"), summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
-                created_at: format!("2026-01-01T00:0{i}:00Z"),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: None,
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: format!("topic-{i}"),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: format!("Topic {i}"),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: format!("2026-01-01T00:0{i}:00Z"),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: None,
+                },
+            )
+            .unwrap();
         }
         for i in 1..=3 {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: format!("daily-{i}"),
-                agent_id: "a1".to_string(),
-                parent_id: None, node_type: "daily".to_string(), source_type: String::new(),
-                title: format!("Daily {i}"), summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
-                created_at: format!("2026-01-01T01:0{i}:00Z"),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: None,
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: format!("daily-{i}"),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "daily".to_string(),
+                    source_type: String::new(),
+                    title: format!("Daily {i}"),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: format!("2026-01-01T01:0{i}:00Z"),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: None,
+                },
+            )
+            .unwrap();
         }
         let count = backfill_short_ids(&conn).unwrap();
         assert_eq!(count, 8);
@@ -3753,32 +4151,56 @@ mod tests {
         // T-1.8: t1, t2 already set, 3 NULL -> only NULL ones get t3, t4, t5
         let conn = setup();
         for i in 1..=2 {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: format!("topic-{i}"),
-                agent_id: "a1".to_string(),
-                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-                title: "T".to_string(), summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
-                created_at: format!("2026-01-01T00:0{i}:00Z"),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: Some(format!("t{i}")),
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: format!("topic-{i}"),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: "T".to_string(),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: format!("2026-01-01T00:0{i}:00Z"),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some(format!("t{i}")),
+                },
+            )
+            .unwrap();
         }
         for i in 3..=5 {
-            insert_index_node(&conn, &IndexNodeRow {
-                id: format!("topic-{i}"),
-                agent_id: "a1".to_string(),
-                parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-                title: "T".to_string(), summary: "s".to_string(),
-                start_log_id: None, end_log_id: None, source_session_id: None,
-                date_from: None, date_to: None,
-                depth: 0, child_count: 0, token_count: 0,
-                created_at: format!("2026-01-01T00:0{i}:00Z"),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
-                short_id: None,
-            }).unwrap();
+            insert_index_node(
+                &conn,
+                &IndexNodeRow {
+                    id: format!("topic-{i}"),
+                    agent_id: "a1".to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: String::new(),
+                    title: "T".to_string(),
+                    summary: "s".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: format!("2026-01-01T00:0{i}:00Z"),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: None,
+                },
+            )
+            .unwrap();
         }
         let count = backfill_short_ids(&conn).unwrap();
         assert_eq!(count, 3);
@@ -3814,42 +4236,74 @@ mod tests {
     fn test_get_index_node_by_short_id() {
         // T-1.13: Search by short_id "t42"
         let conn = setup();
-        insert_index_node(&conn, &IndexNodeRow {
-            id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
-            agent_id: "a1".to_string(),
-            parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-            title: "Test Topic".to_string(), summary: "test summary".to_string(),
-            start_log_id: None, end_log_id: None, source_session_id: None,
-            date_from: None, date_to: None,
-            depth: 0, child_count: 0, token_count: 0,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-            short_id: Some("t42".to_string()),
-        }).unwrap();
+        insert_index_node(
+            &conn,
+            &IndexNodeRow {
+                id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: String::new(),
+                title: "Test Topic".to_string(),
+                summary: "test summary".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some("t42".to_string()),
+            },
+        )
+        .unwrap();
         let result = get_index_node_by_short_or_id(&conn, "a1", "t42").unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "topic-agent:nostarou:main-sess_abc-1-20");
+        assert_eq!(
+            result.unwrap().id,
+            "topic-agent:nostarou:main-sess_abc-1-20"
+        );
     }
 
     #[test]
     fn test_get_index_node_by_full_id() {
         // T-1.14: Search by full id
         let conn = setup();
-        insert_index_node(&conn, &IndexNodeRow {
-            id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
-            agent_id: "a1".to_string(),
-            parent_id: None, node_type: "topic".to_string(), source_type: String::new(),
-            title: "Test Topic".to_string(), summary: "test summary".to_string(),
-            start_log_id: None, end_log_id: None, source_session_id: None,
-            date_from: None, date_to: None,
-            depth: 0, child_count: 0, token_count: 0,
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-01T00:00:00Z".to_string(),
-            short_id: Some("t42".to_string()),
-        }).unwrap();
-        let result = get_index_node_by_short_or_id(&conn, "a1", "topic-agent:nostarou:main-sess_abc-1-20").unwrap();
+        insert_index_node(
+            &conn,
+            &IndexNodeRow {
+                id: "topic-agent:nostarou:main-sess_abc-1-20".to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: String::new(),
+                title: "Test Topic".to_string(),
+                summary: "test summary".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some("t42".to_string()),
+            },
+        )
+        .unwrap();
+        let result =
+            get_index_node_by_short_or_id(&conn, "a1", "topic-agent:nostarou:main-sess_abc-1-20")
+                .unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().id, "topic-agent:nostarou:main-sess_abc-1-20");
+        assert_eq!(
+            result.unwrap().id,
+            "topic-agent:nostarou:main-sess_abc-1-20"
+        );
     }
 
     #[test]
@@ -4646,7 +5100,8 @@ pub fn next_short_id(conn: &Connection, agent_id: &str, prefix: &str) -> Result<
 
 pub fn backfill_short_ids(conn: &Connection) -> Result<usize> {
     let agent_ids: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT DISTINCT agent_id FROM memory_index_nodes WHERE short_id IS NULL")?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT agent_id FROM memory_index_nodes WHERE short_id IS NULL")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
@@ -4685,7 +5140,11 @@ pub fn backfill_short_ids(conn: &Connection) -> Result<usize> {
     Ok(total)
 }
 
-pub fn get_index_node_by_short_or_id(conn: &Connection, agent_id: &str, query: &str) -> Result<Option<IndexNodeRow>> {
+pub fn get_index_node_by_short_or_id(
+    conn: &Connection,
+    agent_id: &str,
+    query: &str,
+) -> Result<Option<IndexNodeRow>> {
     let result = conn.query_row(
         "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id
          FROM memory_index_nodes WHERE agent_id = ?1 AND short_id = ?2",

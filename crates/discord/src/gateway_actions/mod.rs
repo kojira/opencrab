@@ -18,6 +18,7 @@ use crate::PendingInteractionRegistry;
 
 mod agent_management;
 mod discord_ops;
+mod heartbeat_instructions;
 mod subtask_engine;
 mod ui;
 mod webhook;
@@ -440,6 +441,56 @@ impl GatewayActions for DiscordGatewayActions {
                 }),
             },
             GatewayActionDef {
+                name: "update_heartbeat_instructions".to_string(),
+                description: "ハートビート（自律発言）時の振る舞い指示を更新する。オーナーが「これからハートビートでは○○して」と明示的に依頼した文脈でのみ呼ぶこと。出力形式（SPEAK/LEARN/IDLE）はランタイムが固定するため、ここでは頻度・トーン・話題・沈黙条件などの方針のみを書く。オーナー限定。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "channel"],
+                            "description": "agent=エージェント全体のグローバル指示、channel=特定チャンネルの上書き。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "scope=channelのとき必須。対象チャンネルの数値ID。"
+                        },
+                        "guild_id": {
+                            "type": "string",
+                            "description": "scope=channelで新規にチャンネル設定を作成する場合に必要なサーバーの数値ID。"
+                        },
+                        "instructions": {
+                            "type": "string",
+                            "description": "新しいハートビート指示の全文（最大4000字）。"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "変更理由（監査ログに記録される。省略可）。"
+                        }
+                    },
+                    "required": ["scope", "instructions"]
+                }),
+            },
+            GatewayActionDef {
+                name: "read_heartbeat_instructions".to_string(),
+                description: "現在のハートビート指示を読み出す。scope=agentでエージェント全体、scope=channelでチャンネル上書きのみ、scope=effectiveで実際にtickで使われる合成結果（解決ルール適用後）を返す。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "channel", "effective"],
+                            "description": "agent / channel / effective。channel・effectiveのときはchannel_id必須。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "scope=channel または effective のとき必須。対象チャンネルの数値ID。"
+                        }
+                    },
+                    "required": ["scope"]
+                }),
+            },
+            GatewayActionDef {
                 name: "send_ui".to_string(),
                 description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する。\n\n使用例（ボタン）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"選んでください\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"btn1\", \"btn2\"]}, {\"id\": \"btn1\", \"component\": \"Button\", \"text\": \"選択A\", \"style\": \"primary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"A\"}}}, {\"id\": \"btn2\", \"component\": \"Button\", \"text\": \"選択B\", \"style\": \"secondary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"B\"}}}]}\n\n使用例（セレクトメニュー）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"モデルを選択\"}, {\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"sel1\"]}, {\"id\": \"sel1\", \"component\": \"SelectMenu\", \"placeholder\": \"モデルを選んでください\", \"options\": [{\"label\": \"GPT-4\", \"value\": \"gpt-4\"}, {\"label\": \"Claude\", \"value\": \"claude\"}], \"action\": {\"name\": \"select_model\"}}]}\n\n使用例（フォーム/モーダル）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"row1\"]}, {\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"設定を変更\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"trigger_btn\"]}, {\"id\": \"trigger_btn\", \"component\": \"Button\", \"text\": \"設定を開く\", \"style\": \"primary\", \"action\": {\"name\": \"open_form\"}}, {\"id\": \"form1\", \"component\": \"Form\", \"title\": \"設定変更\", \"children\": [\"input_name\", \"input_desc\"], \"action\": {\"name\": \"submit_form\"}}, {\"id\": \"input_name\", \"component\": \"TextInput\", \"label\": \"名前\", \"placeholder\": \"名前を入力\", \"style\": \"short\", \"required\": true}, {\"id\": \"input_desc\", \"component\": \"TextInput\", \"label\": \"説明\", \"placeholder\": \"説明を入力\", \"style\": \"paragraph\", \"required\": false}]}\n\n注意: Rowのchildrenで参照するButton/SelectMenuはトップレベルのcomponents配列に定義する。各Buttonには一意のidとaction（name + context）を設定する。SelectMenuの選択結果はaction.contextにselected_valuesとして返される。Formはモーダル表示用でトリガーボタンが必要。".to_string(),
                 parameters: json!({
@@ -530,6 +581,8 @@ impl GatewayActions for DiscordGatewayActions {
             "cancel_subtask" => self.execute_cancel_subtask(args),
             "report_progress" => self.execute_report_progress(args).await,
             "send_ui" => self.execute_send_ui(args).await,
+            "update_heartbeat_instructions" => self.execute_update_heartbeat_instructions(args),
+            "read_heartbeat_instructions" => self.execute_read_heartbeat_instructions(args),
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -575,7 +628,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 17);
+        assert_eq!(defs.len(), 19);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -595,6 +648,8 @@ mod tests {
         assert!(names.contains(&"cancel_subtask"));
         assert!(names.contains(&"report_progress"));
         assert!(names.contains(&"send_ui"));
+        assert!(names.contains(&"update_heartbeat_instructions"));
+        assert!(names.contains(&"read_heartbeat_instructions"));
     }
 
     #[test]
@@ -934,6 +989,134 @@ mod tests {
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("2〜100文字"));
+    }
+
+    // ---- heartbeat instructions ----
+
+    #[tokio::test]
+    async fn test_update_heartbeat_instructions_rejected_for_non_owner() {
+        let (actions, db) = make_test_actions();
+        let result = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({
+                    "__caller": "trusted_user",
+                    "scope": "agent",
+                    "instructions": "話題があるときだけ話す",
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("オーナー"));
+        // No audit recorded.
+        let conn = db.lock().unwrap();
+        let rows = opencrab_db::queries::list_heartbeat_instructions_audit(&conn, "test-agent", 10)
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_heartbeat_instructions_owner_success_and_audit() {
+        let (actions, db) = make_test_actions();
+        // Agent row must exist for scope=agent patch.
+        {
+            let conn = db.lock().unwrap();
+            let agent = opencrab_db::queries::AgentRow {
+                agent_id: "test-agent".to_string(),
+                name: "N".to_string(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "P".to_string(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: "OLD".to_string(),
+                model: None,
+                metadata_json: None,
+            };
+            opencrab_db::queries::upsert_agent(&conn, &agent).unwrap();
+        }
+        let result = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({
+                    "__caller": "owner",
+                    "scope": "agent",
+                    "instructions": "NEW指示",
+                    "reason": "オーナー依頼",
+                }),
+            )
+            .await;
+        assert!(
+            result.success,
+            "owner update should succeed: {:?}",
+            result.error
+        );
+
+        let conn = db.lock().unwrap();
+        let got = opencrab_db::queries::get_agent(&conn, "test-agent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.heartbeat_instructions, "NEW指示");
+        let rows = opencrab_db::queries::list_heartbeat_instructions_audit(&conn, "test-agent", 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].old_value.as_deref(), Some("OLD"));
+        assert_eq!(rows[0].new_value.as_deref(), Some("NEW指示"));
+        assert_eq!(rows[0].reason.as_deref(), Some("オーナー依頼"));
+    }
+
+    #[tokio::test]
+    async fn test_read_heartbeat_instructions_effective() {
+        let (actions, db) = make_test_actions();
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "test-agent".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: false,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: "業務連絡のみ".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        let result = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "effective", "channel_id": "ch1", "__caller": "trusted_user"}),
+            )
+            .await;
+        assert!(result.success);
+        let data = result.data.unwrap();
+        assert_eq!(data["source"], "channel");
+        assert_eq!(data["instructions"], "業務連絡のみ");
+    }
+
+    #[tokio::test]
+    async fn test_read_heartbeat_instructions_rejected_for_plain_agent() {
+        let (actions, _db) = make_test_actions();
+        // __caller 未指定（=素のagent扱い）は拒否される。
+        let result = actions
+            .execute("read_heartbeat_instructions", &json!({"scope": "agent"}))
+            .await;
+        assert!(!result.success);
+
+        // co_agent は許可される。
+        let allowed = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "agent", "__caller": "co_agent"}),
+            )
+            .await;
+        assert!(allowed.success);
     }
 
     #[tokio::test]

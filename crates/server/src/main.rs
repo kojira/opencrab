@@ -62,20 +62,42 @@ fn make_heartbeat_callback(
         let global_interval_secs = global_interval_secs;
         let last_channel_ticks = last_channel_ticks.clone();
         Box::pin(async move {
-            // heartbeat_enabled=trueのチャンネルを全取得
+            // heartbeat_enabled=trueのチャンネルを取得。
+            // グローバル設定（agent_id="")とエージェント固有設定の両方が同一channel_idに
+            // 存在しうるため、(1) 当該エージェントに無関係な行を除外し、
+            // (2) 同一channel_idではエージェント固有行をグローバル行より優先して
+            // 重複処理を防ぐ。
             let whitelisted_channels: Vec<(String, String, Option<u64>)> = {
                 let conn = db.lock().unwrap();
                 match opencrab_db::queries::list_heartbeat_channels(&conn) {
-                    Ok(channels) => channels
-                        .into_iter()
-                        .map(|c| {
-                            (
-                                c.channel_id.clone(),
-                                c.channel_name.clone(),
-                                c.heartbeat_interval_secs,
-                            )
-                        })
-                        .collect(),
+                    Ok(channels) => {
+                        // channel_id -> 選択された行。エージェント固有行を優先。
+                        let mut selected: std::collections::HashMap<
+                            String,
+                            opencrab_db::queries::ChannelConfigRow,
+                        > = std::collections::HashMap::new();
+                        for c in channels {
+                            // 当該エージェント向けでもグローバルでもない行は無視。
+                            if !c.agent_id.is_empty() && c.agent_id != agent_id_owned {
+                                continue;
+                            }
+                            match selected.get(&c.channel_id) {
+                                // 既にエージェント固有行を選択済みならグローバル行で上書きしない。
+                                Some(existing)
+                                    if !existing.agent_id.is_empty() && c.agent_id.is_empty() =>
+                                {
+                                    continue;
+                                }
+                                _ => {
+                                    selected.insert(c.channel_id.clone(), c);
+                                }
+                            }
+                        }
+                        selected
+                            .into_values()
+                            .map(|c| (c.channel_id, c.channel_name, c.heartbeat_interval_secs))
+                            .collect()
+                    }
                     Err(e) => {
                         tracing::warn!("Failed to list whitelisted channels: {e}");
                         vec![]
@@ -133,11 +155,19 @@ fn make_heartbeat_callback(
                     get_or_create_heartbeat_session(&db, &agent_id_owned, channel_id_str);
 
                 // 2. ハートビートプロンプトをsession_logsに挿入
+                //    指示部分（方針・頻度・トーン）は設定可能、出力形式の規約はランタイム固定。
+                let mut hb_source = "default";
                 {
                     let conn = db.lock().unwrap();
+                    let resolved = opencrab_db::queries::resolve_heartbeat_instructions(
+                        &conn,
+                        &agent_id_owned,
+                        channel_id_str,
+                    );
+                    hb_source = resolved.source;
                     let prompt = format!(
-                        "[ハートビート] チャンネル「{}」で今この瞬間、自律的に何をするか判断してください。SPEAK/LEARN/IDLEから選んでください。SPEAKの場合は'SPEAK: <メッセージ>'の形式で一言。発言は30分に1回以下が望ましい。",
-                        channel_name
+                        "[ハートビート] チャンネル「{}」。{}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。",
+                        channel_name, resolved.text
                     );
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
@@ -272,11 +302,16 @@ fn make_heartbeat_callback(
                         HeartbeatDecision::Learn => "learn",
                         HeartbeatDecision::ManageSkills { .. } => "manage_skills",
                     };
+                    let result_json = serde_json::json!({
+                        "channel_id": channel_id_str,
+                        "source": hb_source,
+                    })
+                    .to_string();
                     if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
                         &conn,
                         &agent_id_owned,
                         decision_str,
-                        Some(&format!("channel_id={}", channel_id_str)),
+                        Some(&result_json),
                     ) {
                         tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
                     }

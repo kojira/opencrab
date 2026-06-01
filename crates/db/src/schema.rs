@@ -108,7 +108,53 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ")?;
     }
     // agent_idカラムが存在する場合もインデックスを保証する（新規DB・マイグレーション済みDB共通）
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_discord_channel_agent ON discord_channel_config(agent_id)")?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_discord_channel_agent ON discord_channel_config(agent_id)",
+    )?;
+
+    // agents.heartbeat_instructions カラム追加（ハートビート専用指示）
+    let has_agent_hb_instr: bool = conn
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name='heartbeat_instructions'",
+        )?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_agent_hb_instr {
+        conn.execute_batch(
+            "ALTER TABLE agents ADD COLUMN heartbeat_instructions TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+
+    // discord_channel_config.heartbeat_instructions カラム追加（チャンネル単位の上書き）
+    let has_channel_hb_instr: bool = conn
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='heartbeat_instructions'")?
+        .query_row([], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_channel_hb_instr {
+        conn.execute_batch(
+            "ALTER TABLE discord_channel_config ADD COLUMN heartbeat_instructions TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+
+    // heartbeat_instructions_audit テーブル作成（指示改変の監査ログ）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS heartbeat_instructions_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            channel_id TEXT,
+            caller_identity TEXT NOT NULL,
+            caller_discord_id TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            reason TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_heartbeat_instr_audit_agent
+            ON heartbeat_instructions_audit(agent_id, created_at DESC);",
+    )?;
 
     // agent_memory_index_config テーブル作成（既存DBへの対応）
     conn.execute_batch(
@@ -335,7 +381,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL",
         )?;
-        crate::queries::backfill_short_ids(conn).map_err(|e| rusqlite::Error::InvalidParameterName(format!("{e}")))?;
+        crate::queries::backfill_short_ids(conn)
+            .map_err(|e| rusqlite::Error::InvalidParameterName(format!("{e}")))?;
     }
 
     conn.execute_batch(
@@ -542,6 +589,7 @@ CREATE TABLE IF NOT EXISTS agents (
     persona_name TEXT NOT NULL,
     personality TEXT,
     instructions TEXT NOT NULL DEFAULT '',
+    heartbeat_instructions TEXT NOT NULL DEFAULT '',
     model TEXT,
     metadata_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -714,6 +762,24 @@ CREATE TABLE IF NOT EXISTS heartbeat_log (
 CREATE INDEX IF NOT EXISTS idx_heartbeat_agent ON heartbeat_log(agent_id);
 
 -- ============================================
+-- ハートビート指示の監査ログ
+-- ============================================
+CREATE TABLE IF NOT EXISTS heartbeat_instructions_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    channel_id TEXT,
+    caller_identity TEXT NOT NULL,
+    caller_discord_id TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_heartbeat_instr_audit_agent
+    ON heartbeat_instructions_audit(agent_id, created_at DESC);
+
+-- ============================================
 -- セッション状態
 -- ============================================
 CREATE TABLE IF NOT EXISTS sessions (
@@ -756,6 +822,7 @@ CREATE TABLE IF NOT EXISTS discord_channel_config (
     whitelisted INTEGER NOT NULL DEFAULT 0,
     heartbeat_enabled INTEGER NOT NULL DEFAULT 1,
     heartbeat_interval_secs INTEGER,
+    heartbeat_instructions TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     PRIMARY KEY (channel_id, agent_id)
 );

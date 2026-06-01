@@ -213,20 +213,30 @@ impl DiscordGatewayActions {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let cfg = opencrab_db::queries::ChannelConfigRow {
-            channel_id: channel_id.to_string(),
-            agent_id: self.agent_id.clone(),
-            guild_id: guild_id.to_string(),
-            channel_name: channel_name.to_string(),
-            readable,
-            writable,
-            whitelisted,
-            heartbeat_enabled,
-            heartbeat_interval_secs: None,
-        };
-
         let result = {
             let conn = self.db.lock().unwrap();
+            // 既存のハートビート上書き・intervalを保持する（読み書き設定の更新で消さない）。
+            let existing = opencrab_db::queries::get_channel_config_for_agent(
+                &conn,
+                channel_id,
+                &self.agent_id,
+            )
+            .ok()
+            .flatten();
+            let cfg = opencrab_db::queries::ChannelConfigRow {
+                channel_id: channel_id.to_string(),
+                agent_id: self.agent_id.clone(),
+                guild_id: guild_id.to_string(),
+                channel_name: channel_name.to_string(),
+                readable,
+                writable,
+                whitelisted,
+                heartbeat_enabled,
+                heartbeat_interval_secs: existing.as_ref().and_then(|c| c.heartbeat_interval_secs),
+                heartbeat_instructions: existing
+                    .map(|c| c.heartbeat_instructions)
+                    .unwrap_or_default(),
+            };
             opencrab_db::queries::upsert_channel_config(&conn, &cfg)
         };
 

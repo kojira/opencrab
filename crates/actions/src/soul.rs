@@ -91,6 +91,7 @@ mod tests {
             persona_name: "テスト".to_string(),
             personality: None,
             instructions: "".to_string(),
+            heartbeat_instructions: "".to_string(),
             model: None,
             metadata_json: None,
         };
