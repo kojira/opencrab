@@ -79,6 +79,7 @@ pub struct ChatGptProvider {
     auth_file: String,
     base_url: String,
     default_model: String,
+    reasoning_effort: Option<String>,
 }
 
 impl Default for ChatGptProvider {
@@ -95,6 +96,7 @@ impl ChatGptProvider {
             auth_file: format!("{}/.codex/auth.json", home),
             base_url: CHATGPT_BASE_URL.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
+            reasoning_effort: Some("low".to_string()),
         }
     }
 
@@ -111,6 +113,16 @@ impl ChatGptProvider {
 
     pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = model.into();
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        let s: String = effort.into();
+        if s.is_empty() {
+            self.reasoning_effort = None;
+        } else {
+            self.reasoning_effort = Some(s);
+        }
         self
     }
 
@@ -239,10 +251,13 @@ impl ChatGptProvider {
             "stream": stream,
             "input": input,
             "text": {"verbosity": "medium"},
-            "include": ["reasoning.encrypted_content"],
             "tool_choice": "auto",
             "parallel_tool_calls": true,
         });
+
+        if let Some(value) = &self.reasoning_effort {
+            body["reasoning"] = serde_json::json!({"effort": value});
+        }
 
         tracing::warn!("chatgpt build_request_body: system_prompts count={}, content={:?}", system_prompts.len(), system_prompts.first().map(|s| &s[..s.len().min(100)]));
         if system_prompts.is_empty() {
