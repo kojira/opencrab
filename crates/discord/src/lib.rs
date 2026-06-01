@@ -32,6 +32,8 @@ pub struct PendingInteraction {
     pub agent_id: String,
     pub channel_id: u64,
     pub channel_id_str: String,
+    /// ギルドID（DMの場合は空文字列）。送信時には不明なことがあるため空がデフォルト。
+    pub guild_id: String,
     pub is_dm: bool,
     pub surface_id: String,
     pub a2ui_components: Vec<opencrab_core::a2ui::A2uiComponent>,

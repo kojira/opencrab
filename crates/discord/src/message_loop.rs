@@ -36,6 +36,7 @@ pub enum LoopEvent {
         exit_reason: String,
         channel_id: u64,
         channel_id_str: String,
+        guild_id: String,
         is_dm: bool,
     },
     /// A2UIインタラクション応答（ボタンクリック or タイムアウト）。
@@ -45,9 +46,25 @@ pub enum LoopEvent {
         agent_id: String,
         channel_id: u64,
         channel_id_str: String,
+        guild_id: String,
         response: opencrab_core::a2ui::A2uiUserAction,
         is_dm: bool,
     },
+}
+
+/// Discordのsystem promptに埋め込むcontext行を生成する。
+///
+/// guild_idが非空のときは `[Discord context: guild_id=..., channel_id=...]`、
+/// 空（DM）のときは後方互換のため `[Discord context: channel_id=...]` を返す。
+fn discord_context_line(guild_id: &str, channel_id: &str) -> String {
+    if guild_id.is_empty() {
+        format!("[Discord context: channel_id={}]", channel_id)
+    } else {
+        format!(
+            "[Discord context: guild_id={}, channel_id={}]",
+            guild_id, channel_id
+        )
+    }
 }
 
 /// Discordメッセージの受信→エージェント処理→応答送信のEvent-Drivenループ。
@@ -164,6 +181,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         exit_reason,
                         channel_id,
                         channel_id_str,
+                        guild_id,
                         is_dm,
                     }) => {
                         process_subtask_completed(
@@ -174,6 +192,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             exit_reason,
                             channel_id,
                             channel_id_str,
+                            guild_id,
                             is_dm,
                             gateway.clone(),
                             state.clone(),
@@ -187,6 +206,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         agent_id,
                         channel_id,
                         channel_id_str,
+                        guild_id,
                         response,
                         is_dm,
                     }) => {
@@ -196,6 +216,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             agent_id,
                             channel_id,
                             channel_id_str,
+                            guild_id,
                             response,
                             is_dm,
                             gateway.clone(),
@@ -423,8 +444,9 @@ async fn process_incoming_message<T: AgentRunner>(
 
         let (base_prompt, agent_name) = state.build_agent_context(agent_id);
         let system_prompt = format!(
-            "{}\n\n[Discord context: channel_id={}]",
-            base_prompt, channel_id_str
+            "{}\n\n{}",
+            base_prompt,
+            discord_context_line(&guild_id, &channel_id_str)
         );
         let conversation_raw = match state.build_conversation_string(&session_id, agent_id, state.context_budget_tokens(agent_id)) {
             Ok(s) => s,
@@ -445,6 +467,7 @@ async fn process_incoming_message<T: AgentRunner>(
             let agent_id_cb = agent_id.clone();
             let session_id_cb = session_id.clone();
             let channel_id_str_cb = channel_id_str.clone();
+            let guild_id_cb = guild_id.clone();
 
             let completion_cb: SubtaskCompletionFn = Arc::new(
                 move |subtask_id: String, result: String, exit_reason: String| {
@@ -456,6 +479,7 @@ async fn process_incoming_message<T: AgentRunner>(
                         exit_reason,
                         channel_id,
                         channel_id_str: channel_id_str_cb.clone(),
+                        guild_id: guild_id_cb.clone(),
                         is_dm,
                     });
                 },
@@ -616,6 +640,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     exit_reason: String,
     channel_id: u64,
     channel_id_str: String,
+    guild_id: String,
     is_dm: bool,
     gateway: Arc<DiscordGateway>,
     state: T,
@@ -646,8 +671,12 @@ async fn process_subtask_completed<T: AgentRunner>(
     };
 
     let system_prompt = format!(
-        "{}\n\n[Discord context: channel_id={}]\n[subtask_completed: subtask_id={}, task=\"{}\", exit_reason={}]",
-        base_prompt, channel_id_str, subtask_id, task_description, exit_reason
+        "{}\n\n{}\n[subtask_completed: subtask_id={}, task=\"{}\", exit_reason={}]",
+        base_prompt,
+        discord_context_line(&guild_id, &channel_id_str),
+        subtask_id,
+        task_description,
+        exit_reason
     );
     let conversation_raw = match state.build_conversation_string(&session_id, &agent_id, state.context_budget_tokens(&agent_id)) {
         Ok(s) => s,
@@ -757,6 +786,8 @@ async fn handle_component_interaction(
     let interaction_id = parts[1].to_string();
     let component_id = parts[2].to_string();
     let action_name = parts[3].to_string();
+    // serenityのインタラクション由来のguild_id（DMの場合は空）を保持。
+    let guild_id = data.guild_id.clone();
 
     // Look up in registry, capture fields, then drop the ref
     let pending_data = {
@@ -820,6 +851,7 @@ async fn handle_component_interaction(
             agent_id,
             channel_id,
             channel_id_str,
+            guild_id: guild_id.clone(),
             response: opencrab_core::a2ui::A2uiUserAction {
                 surface_id,
                 component_id,
@@ -870,6 +902,7 @@ async fn handle_component_interaction(
             agent_id,
             channel_id,
             channel_id_str,
+            guild_id: guild_id.clone(),
             response: opencrab_core::a2ui::A2uiUserAction {
                 surface_id,
                 component_id,
@@ -907,6 +940,7 @@ async fn handle_component_interaction(
         agent_id,
         channel_id,
         channel_id_str,
+        guild_id,
         response: opencrab_core::a2ui::A2uiUserAction {
             surface_id,
             component_id,
@@ -928,6 +962,7 @@ async fn process_interaction_response<T: AgentRunner>(
     agent_id: String,
     channel_id: u64,
     channel_id_str: String,
+    guild_id: String,
     response: opencrab_core::a2ui::A2uiUserAction,
     is_dm: bool,
     gateway: Arc<DiscordGateway>,
@@ -1004,8 +1039,10 @@ async fn process_interaction_response<T: AgentRunner>(
         .map(|c| c.to_string())
         .unwrap_or_default();
     let system_prompt = format!(
-        "{}\n\n[Discord context: channel_id={}]\n[interaction_response: interaction_id={}, surface_id={}, action={}, component_id={}, context={}, responder={}]",
-        base_prompt, channel_id_str, interaction_id, response.surface_id,
+        "{}\n\n{}\n[interaction_response: interaction_id={}, surface_id={}, action={}, component_id={}, context={}, responder={}]",
+        base_prompt,
+        discord_context_line(&guild_id, &channel_id_str),
+        interaction_id, response.surface_id,
         response.action_name, response.component_id, context_str, response.responder_id,
     );
     let conversation_raw = match state.build_conversation_string(
@@ -1297,5 +1334,26 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
             }
             (texts.join(" "), urls)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discord_context_line;
+
+    #[test]
+    fn context_line_includes_guild_id_when_present() {
+        assert_eq!(
+            discord_context_line("123", "456"),
+            "[Discord context: guild_id=123, channel_id=456]"
+        );
+    }
+
+    #[test]
+    fn context_line_omits_guild_id_for_dm() {
+        assert_eq!(
+            discord_context_line("", "456"),
+            "[Discord context: channel_id=456]"
+        );
     }
 }

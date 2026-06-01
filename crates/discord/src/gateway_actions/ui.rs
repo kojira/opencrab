@@ -141,6 +141,9 @@ impl DiscordGatewayActions {
                 agent_id: self.agent_id.clone(),
                 channel_id: channel_id_num,
                 channel_id_str: channel_id.to_string(),
+                // send_ui時点ではguild_idを確実に取得できないため空。
+                // 実際のインタラクション応答時はserenity由来のguild_idを使用する。
+                guild_id: String::new(),
                 is_dm: false,
                 surface_id: surface_id.clone(),
                 a2ui_components: components.clone(),
@@ -188,6 +191,7 @@ impl DiscordGatewayActions {
                         agent_id: pending.agent_id.clone(),
                         channel_id: pending.channel_id,
                         channel_id_str: pending.channel_id_str.clone(),
+                        guild_id: pending.guild_id.clone(),
                         response: A2uiUserAction {
                             surface_id: surface_id_clone,
                             component_id: "_timeout".into(),

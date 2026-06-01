@@ -92,6 +92,7 @@ mod tests {
             agent_id: "a1".into(),
             channel_id: 1,
             channel_id_str: "1".into(),
+            guild_id: String::new(),
             is_dm: false,
             surface_id: "interaction:uuid-abc".into(),
             a2ui_components: vec![],
