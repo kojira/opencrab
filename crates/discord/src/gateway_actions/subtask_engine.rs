@@ -7,6 +7,7 @@ use opencrab_gateway::GatewayActionResult;
 use serde_json::json;
 use uuid::Uuid;
 
+use super::webhook::{self, DeliveryBatch, LifecycleMeta, WebhookConfig};
 use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
 
 impl DiscordGatewayActions {
@@ -21,7 +22,7 @@ impl DiscordGatewayActions {
                     success: false,
                     data: None,
                     error: Some("spawn_subtask: 'task' argument is required".to_string()),
-                }
+                };
             }
         };
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(1800) as u64;
@@ -35,7 +36,37 @@ impl DiscordGatewayActions {
         let subtask_id = Uuid::new_v4().to_string();
         let sub_session_id = format!("subtask-{}", subtask_id);
         let spawned_at = Utc::now().to_rfc3339();
+        let started_instant = std::time::Instant::now();
         let depth = parent_depth + 1;
+
+        // Subtask lifecycle webhook (spawn 時指定)。指定が無ければ無効。
+        let webhook = WebhookConfig::from_args(args);
+        let label = args["label"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| task.chars().take(50).collect::<String>());
+
+        // 同一 run の lifecycle delivery を直列化する worker を起動し、started を送る。
+        let webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>> =
+            if let Some(cfg) = &webhook {
+                let tx = webhook::spawn_run_worker(self.webhook_client.clone());
+                if cfg.wants("started") {
+                    let meta = LifecycleMeta {
+                        label: label.clone(),
+                        run_id: subtask_id.clone(),
+                        session_key: sub_session_id.clone(),
+                    };
+                    let messages =
+                        webhook::build_started_messages(&meta, &task, webhook::DISCORD_CHUNK_LIMIT);
+                    let _ = tx.send(DeliveryBatch {
+                        url: cfg.url.clone(),
+                        messages,
+                    });
+                }
+                Some(tx)
+            } else {
+                None
+            };
 
         // Create the sub-session in the DB.
         {
@@ -91,7 +122,7 @@ impl DiscordGatewayActions {
                     success: false,
                     data: None,
                     error: Some("spawn_subtask: no LLM client available".to_string()),
-                }
+                };
             }
         };
 
@@ -104,7 +135,7 @@ impl DiscordGatewayActions {
                     success: false,
                     data: None,
                     error: Some(format!("spawn_subtask: workspace error: {e}")),
-                }
+                };
             }
         };
 
@@ -132,11 +163,51 @@ impl DiscordGatewayActions {
         let sub_executor =
             opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx).with_depth(depth);
 
-        let sub_engine = opencrab_core::SkillEngine::new(
+        let mut sub_engine = opencrab_core::SkillEngine::new(
             Box::new(ArcLlmClient(llm_client)),
             Box::new(sub_executor),
             usize::MAX,
         );
+
+        if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
+            if cfg.wants("progress") {
+                let progress_url = cfg.url.clone();
+                let progress_tx = tx.clone();
+                let progress_subtask_id = subtask_id.clone();
+                let progress_session_id = sub_session_id.clone();
+                sub_engine.set_on_tool_call(move |assistant_content, tool_calls_json| {
+                    let detail = summarize_tool_calls(&assistant_content, &tool_calls_json);
+                    let msg = webhook::build_progress_message(
+                        &progress_subtask_id,
+                        &progress_session_id,
+                        &detail,
+                    );
+                    let _ = progress_tx.send(DeliveryBatch {
+                        url: progress_url.clone(),
+                        messages: vec![msg],
+                    });
+                });
+
+                let progress_url = cfg.url.clone();
+                let progress_tx = tx.clone();
+                let progress_subtask_id = subtask_id.clone();
+                let progress_session_id = sub_session_id.clone();
+                sub_engine.set_on_tool_result(move |_tool_call_id, tool_name, result_json, is_error| {
+                    let status = if is_error { "failed" } else { "completed" };
+                    let preview: String = result_json.chars().take(500).collect();
+                    let detail = format!("tool `{tool_name}` {status}\n{preview}");
+                    let msg = webhook::build_progress_message(
+                        &progress_subtask_id,
+                        &progress_session_id,
+                        &detail,
+                    );
+                    let _ = progress_tx.send(DeliveryBatch {
+                        url: progress_url.clone(),
+                        messages: vec![msg],
+                    });
+                });
+            }
+        }
 
         // エージェントの personality と instructions を DB から取得
         let (agent_personality, agent_instructions) = {
@@ -180,6 +251,8 @@ impl DiscordGatewayActions {
         let completion_registry_clone = self.completion_registry.clone();
         let subtask_registry_clone = self.subtask_registry.clone();
         let default_model_clone = self.default_model.clone();
+        let webhook_clone = webhook.clone();
+        let webhook_tx_clone = webhook_tx.clone();
 
         let join_handle = tokio::spawn(async move {
             let result = tokio::time::timeout(
@@ -232,6 +305,25 @@ impl DiscordGatewayActions {
                 }
             }
 
+            // Emit terminal lifecycle webhook (completed / failed / timed_out).
+            if let (Some(cfg), Some(tx)) = (&webhook_clone, &webhook_tx_clone) {
+                let status = webhook::exit_reason_to_status(&exit_reason);
+                if cfg.wants(status) {
+                    let duration_ms = started_instant.elapsed().as_millis() as u64;
+                    let msg = webhook::build_terminal_message(
+                        status,
+                        &subtask_id_clone,
+                        &sub_session_id_clone,
+                        Some(duration_ms),
+                        &result_text,
+                    );
+                    let _ = tx.send(DeliveryBatch {
+                        url: cfg.url.clone(),
+                        messages: vec![msg],
+                    });
+                }
+            }
+
             // Remove from registry.
             subtask_registry_clone.remove(&subtask_id_clone);
 
@@ -254,6 +346,9 @@ impl DiscordGatewayActions {
                 parent_session_id: parent_session_id.clone(),
                 spawned_at: spawned_at.clone(),
                 agent_id: agent_id.clone(),
+                webhook: webhook.clone(),
+                webhook_tx: webhook_tx.clone(),
+                started_instant,
             },
         );
 
@@ -277,13 +372,32 @@ impl DiscordGatewayActions {
                     success: false,
                     data: None,
                     error: Some("cancel_subtask: 'subtask_id' is required".to_string()),
-                }
+                };
             }
         };
 
         match self.subtask_registry.remove(&subtask_id) {
             Some((_, subtask)) => {
                 subtask.abort_handle.abort();
+
+                // Emit aborted lifecycle webhook. アボートで spawned closure は
+                // 中断されるため terminal completed/failed は来ない → ここが唯一の終端。
+                if let (Some(cfg), Some(tx)) = (&subtask.webhook, &subtask.webhook_tx) {
+                    if cfg.wants("aborted") {
+                        let duration_ms = subtask.started_instant.elapsed().as_millis() as u64;
+                        let msg = webhook::build_terminal_message(
+                            "aborted",
+                            &subtask_id,
+                            &subtask.session_id,
+                            Some(duration_ms),
+                            "cancelled by request",
+                        );
+                        let _ = tx.send(DeliveryBatch {
+                            url: cfg.url.clone(),
+                            messages: vec![msg],
+                        });
+                    }
+                }
 
                 // Write subtask_cancelled to parent session log.
                 let parent_session_id = subtask.parent_session_id.clone();
@@ -351,11 +465,11 @@ impl DiscordGatewayActions {
                     success: false,
                     data: None,
                     error: Some("report_progress: 'message' is required".to_string()),
-                }
+                };
             }
         };
-        let parent_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
-        let subtask_id = args
+        let current_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
+        let subtask_id_arg = args
             .get("subtask_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -364,6 +478,25 @@ impl DiscordGatewayActions {
             .as_str()
             .unwrap_or(&self.agent_id)
             .to_string();
+
+        let subtask_entry = if !subtask_id_arg.is_empty() {
+            self.subtask_registry
+                .get(&subtask_id_arg)
+                .map(|entry| (subtask_id_arg.clone(), entry.clone()))
+        } else {
+            self.subtask_registry
+                .iter()
+                .find(|entry| entry.session_id == current_session_id)
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+        };
+        let subtask_id = subtask_entry
+            .as_ref()
+            .map(|(id, _)| id.clone())
+            .unwrap_or(subtask_id_arg);
+        let parent_session_id = subtask_entry
+            .as_ref()
+            .map(|(_, subtask)| subtask.parent_session_id.clone())
+            .unwrap_or_else(|| current_session_id.clone());
 
         // Write progress to parent session log.
         if !parent_session_id.is_empty() {
@@ -389,6 +522,22 @@ impl DiscordGatewayActions {
             }
         }
 
+        if let Some((resolved_subtask_id, subtask)) = &subtask_entry {
+            if let (Some(cfg), Some(tx)) = (&subtask.webhook, &subtask.webhook_tx) {
+                if cfg.wants("progress") {
+                    let msg = webhook::build_progress_message(
+                        resolved_subtask_id,
+                        &subtask.session_id,
+                        &message,
+                    );
+                    let _ = tx.send(DeliveryBatch {
+                        url: cfg.url.clone(),
+                        messages: vec![msg],
+                    });
+                }
+            }
+        }
+
         // Debounce: wait 3 seconds then trigger main engine re-invocation via completion callback.
         let completion_registry_clone = self.completion_registry.clone();
         let parent_session_clone = parent_session_id.clone();
@@ -406,5 +555,29 @@ impl DiscordGatewayActions {
             data: Some(json!({"reported": true, "message": message})),
             error: None,
         }
+    }
+}
+
+fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> String {
+    let mut names = Vec::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
+        if let Some(calls) = value.as_array() {
+            for call in calls {
+                if let Some(name) = call.get("name").and_then(|v| v.as_str()) {
+                    names.push(format!("`{name}`"));
+                }
+            }
+        }
+    }
+    let tools = if names.is_empty() {
+        "tool call".to_string()
+    } else {
+        names.join(", ")
+    };
+    let preview: String = assistant_content.trim().chars().take(500).collect();
+    if preview.is_empty() {
+        format!("calling {tools}")
+    } else {
+        format!("calling {tools}\n{preview}")
     }
 }

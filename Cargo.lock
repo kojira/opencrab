@@ -1352,6 +1352,7 @@ dependencies = [
  "opencrab-core",
  "opencrab-db",
  "opencrab-gateway",
+ "reqwest",
  "rusqlite",
  "serde_json",
  "serenity",

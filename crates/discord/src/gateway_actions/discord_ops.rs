@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use serenity::all::{ChannelId, CreateAttachment, CreateMessage};
+use serenity::all::{ChannelId, CreateAttachment, CreateMessage, CreateWebhook};
 use serenity::model::channel::ReactionType;
 use serenity::model::id::MessageId;
 use serenity::model::prelude::ChannelType;
@@ -253,6 +253,124 @@ impl DiscordGatewayActions {
                 data: None,
                 error: Some(format!("チャンネル設定の保存に失敗: {e}")),
             },
+        }
+    }
+
+    pub(crate) async fn execute_discord_create_webhook(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
+        let channel_id_str = match args.get("channel_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("channel_idパラメータが必要です".to_string()),
+                }
+            }
+        };
+
+        let channel_id: u64 = match channel_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("無効なchannel_id: {channel_id_str}")),
+                }
+            }
+        };
+
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("opencrab-subtask");
+
+        if name.chars().count() < 2 || name.chars().count() > 80 {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("webhook名は2〜80文字で指定してください".to_string()),
+            };
+        }
+
+        let webhook = match ChannelId::new(channel_id)
+            .create_webhook(
+                self.http.clone(),
+                CreateWebhook::new(name).audit_log_reason("opencrab discord_create_webhook"),
+            )
+            .await
+        {
+            Ok(webhook) => webhook,
+            Err(e) => {
+                error!("Discord create_webhook failed for channel {channel_id}: {e}");
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!(
+                        "webhookの作成に失敗: BotにManage Webhooks権限があるか確認してください: {e}"
+                    )),
+                };
+            }
+        };
+
+        let webhook_value = match serde_json::to_value(&webhook) {
+            Ok(value) => value,
+            Err(e) => {
+                error!("Failed to serialize created webhook metadata: {e}");
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("作成したwebhook情報の処理に失敗: {e}")),
+                };
+            }
+        };
+
+        let webhook_id = webhook.id.to_string();
+        let token = webhook_value
+            .get("token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let url = webhook_value
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if token.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "https://discord.com/api/webhooks/{webhook_id}/{token}"
+                    ))
+                }
+            });
+
+        let url = match url {
+            Some(url) => url,
+            None => {
+                error!("Discord create_webhook response did not include a token");
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("webhookは作成されましたが、Discord API応答にtokenがありませんでした".to_string()),
+                };
+            }
+        };
+
+        GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "channel_id": channel_id_str,
+                "webhook_id": webhook_id,
+                "name": webhook.name.unwrap_or_else(|| name.to_string()),
+                "url": url,
+                "message": "webhookを作成しました。このurlをspawn_subtask.webhook.urlに渡せます。",
+            })),
+            error: None,
         }
     }
 

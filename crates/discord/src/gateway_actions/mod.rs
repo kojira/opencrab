@@ -20,14 +20,24 @@ mod agent_management;
 mod discord_ops;
 mod subtask_engine;
 mod ui;
+mod webhook;
+
+use webhook::{DeliveryBatch, WebhookConfig};
 
 /// A running subtask tracked by the registry.
+#[derive(Clone)]
 pub struct SpawnedSubtask {
     pub abort_handle: AbortHandle,
     pub session_id: String,
     pub parent_session_id: String,
     pub spawned_at: String,
     pub agent_id: String,
+    /// Subtask lifecycle webhook config (spawn 時指定)。None なら通知無効。
+    pub webhook: Option<WebhookConfig>,
+    /// 同一 run の lifecycle delivery を直列化する sender。
+    pub webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>>,
+    /// duration 算出用の起動時刻。
+    pub started_instant: std::time::Instant,
 }
 
 /// Callback invoked when a subtask completes.
@@ -66,6 +76,8 @@ pub struct DiscordGatewayActions {
     workspace_root: PathBuf,
     subtask_registry: SubtaskRegistry,
     completion_registry: CompletionRegistry,
+    /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
+    webhook_client: reqwest::Client,
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
 }
@@ -92,6 +104,7 @@ impl DiscordGatewayActions {
             workspace_root,
             subtask_registry,
             completion_registry,
+            webhook_client: reqwest::Client::new(),
             pending_interaction_registry: None,
             event_tx: None,
         }
@@ -190,6 +203,24 @@ impl GatewayActions for DiscordGatewayActions {
                         }
                     },
                     "required": ["channel_id", "message_id", "emoji"]
+                }),
+            },
+            GatewayActionDef {
+                name: "discord_create_webhook".to_string(),
+                description: "指定したDiscordテキストチャンネルにwebhookを作成し、spawn_subtask.webhook.urlに渡せるURLを返す。Botには対象チャンネルのManage Webhooks権限が必要。返り値のurlは秘密トークンを含むため公開しないこと。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "channel_id": {
+                            "type": "string",
+                            "description": "webhookを作成するDiscordチャンネルの数値ID。"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "webhook名（省略時: opencrab-subtask）。2〜80文字。"
+                        }
+                    },
+                    "required": ["channel_id"]
                 }),
             },
             GatewayActionDef {
@@ -321,6 +352,26 @@ impl GatewayActions for DiscordGatewayActions {
                         "max_iterations": {
                             "type": "integer",
                             "description": "LLMループの最大イテレーション数（省略時は無制限）"
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "サブタスクのラベル（webhook通知の表示用。省略時はtask先頭を使用）"
+                        },
+                        "webhook": {
+                            "type": "object",
+                            "description": "subtask lifecycle を Discord webhook へ通知する設定（省略可）。",
+                            "properties": {
+                                "url": {
+                                    "type": "string",
+                                    "description": "Discord webhook URL"
+                                },
+                                "events": {
+                                    "type": "array",
+                                    "description": "通知するイベント（省略時は全て）。started/progress/completed/failed/timed_out/aborted",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["url"]
                         }
                     },
                     "required": ["task"]
@@ -436,6 +487,7 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_list_channels" => self.execute_list_channels(args).await,
             "discord_channel_config" => self.execute_discord_channel_config(args),
             "discord_add_reaction" => self.execute_discord_add_reaction(args).await,
+            "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "update_memory_index_config" => self.execute_update_memory_index_config(args),
             "add_allowed_command" => self.execute_add_allowed_command(args),
             "list_allowed_commands" => self.execute_list_allowed_commands(),
@@ -492,13 +544,14 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 15);
+        assert_eq!(defs.len(), 16);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
         assert!(names.contains(&"discord_list_channels"));
         assert!(names.contains(&"discord_channel_config"));
         assert!(names.contains(&"discord_add_reaction"));
+        assert!(names.contains(&"discord_create_webhook"));
         assert!(names.contains(&"update_memory_index_config"));
         assert!(names.contains(&"add_allowed_command"));
         assert!(names.contains(&"list_allowed_commands"));
