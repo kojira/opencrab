@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use serenity::all::{ChannelId, CreateAttachment, CreateMessage, CreateWebhook};
+use serenity::all::{ChannelId, CreateAttachment, CreateChannel, CreateMessage, CreateWebhook};
 use serenity::model::channel::ReactionType;
-use serenity::model::id::MessageId;
+use serenity::model::id::{GuildId, MessageId};
 use serenity::model::prelude::ChannelType;
 use tracing::{debug, error};
 
@@ -356,7 +356,10 @@ impl DiscordGatewayActions {
                 return GatewayActionResult {
                     success: false,
                     data: None,
-                    error: Some("webhookは作成されましたが、Discord API応答にtokenがありませんでした".to_string()),
+                    error: Some(
+                        "webhookは作成されましたが、Discord API応答にtokenがありませんでした"
+                            .to_string(),
+                    ),
                 };
             }
         };
@@ -369,6 +372,139 @@ impl DiscordGatewayActions {
                 "name": webhook.name.unwrap_or_else(|| name.to_string()),
                 "url": url,
                 "message": "webhookを作成しました。このurlをspawn_subtask.webhook.urlに渡せます。",
+            })),
+            error: None,
+        }
+    }
+
+    pub(crate) async fn execute_discord_create_channel(
+        &self,
+        args: &serde_json::Value,
+    ) -> GatewayActionResult {
+        // guild_id は必須（このレイヤーではデフォルトサーバーを解決できない）
+        let guild_id_str = match args.get("guild_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "guild_idパラメータが必要です（デフォルトサーバーは解決できないため、discord_list_guildsで取得した数値IDを指定してください）"
+                            .to_string(),
+                    ),
+                }
+            }
+        };
+
+        let guild_id: u64 = match guild_id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                error!("Invalid guild_id passed to create_channel: {guild_id_str}");
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!(
+                        "guild_idが数値IDではありません: '{guild_id_str}' — guild名ではなくdiscord_list_guildsで取得したIDを使ってください"
+                    )),
+                };
+            }
+        };
+
+        let name = match args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(n) => n,
+            None => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some("nameパラメータが必要です".to_string()),
+                }
+            }
+        };
+
+        if name.chars().count() < 2 || name.chars().count() > 100 {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("チャンネル名は2〜100文字で指定してください".to_string()),
+            };
+        }
+
+        // parent_id は任意。指定された場合のみ数値IDとして解析する。
+        let parent_id: Option<u64> = match args.get("parent_id").and_then(|v| v.as_str()) {
+            Some(p) if !p.trim().is_empty() => match p.trim().parse() {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return GatewayActionResult {
+                        success: false,
+                        data: None,
+                        error: Some(format!("parent_idが数値IDではありません: '{p}'")),
+                    }
+                }
+            },
+            _ => None,
+        };
+
+        let topic = args
+            .get("topic")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("opencrab discord_create_channel");
+
+        let mut builder = CreateChannel::new(name)
+            .kind(ChannelType::Text)
+            .audit_log_reason(reason);
+        if let Some(pid) = parent_id {
+            builder = builder.category(ChannelId::new(pid));
+        }
+        if let Some(t) = topic {
+            builder = builder.topic(t);
+        }
+
+        let channel = match GuildId::new(guild_id)
+            .create_channel(self.http.clone(), builder)
+            .await
+        {
+            Ok(ch) => ch,
+            Err(e) => {
+                error!("Discord create_channel failed for guild {guild_id}: {e}");
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!(
+                        "チャンネルの作成に失敗: BotにManage Channels権限があるか確認してください: {e}"
+                    )),
+                };
+            }
+        };
+
+        let channel_id = channel.id.to_string();
+        let parent_id_value = channel
+            .parent_id
+            .map(|p| serde_json::Value::String(p.to_string()))
+            .unwrap_or(serde_json::Value::Null);
+        let url = format!("https://discord.com/channels/{guild_id}/{channel_id}");
+
+        GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "id": channel_id,
+                "name": channel.name,
+                "guild_id": channel.guild_id.to_string(),
+                "parent_id": parent_id_value,
+                "url": url,
+                "message": format!("チャンネル {} を作成しました", channel.name),
             })),
             error: None,
         }

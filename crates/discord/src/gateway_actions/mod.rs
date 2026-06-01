@@ -13,8 +13,8 @@ use serde_json::json;
 use serenity::http::Http;
 use tokio::task::AbortHandle;
 
-use crate::PendingInteractionRegistry;
 use crate::message_loop::LoopEvent;
+use crate::PendingInteractionRegistry;
 
 mod agent_management;
 mod discord_ops;
@@ -221,6 +221,36 @@ impl GatewayActions for DiscordGatewayActions {
                         }
                     },
                     "required": ["channel_id"]
+                }),
+            },
+            GatewayActionDef {
+                name: "discord_create_channel".to_string(),
+                description: "指定したDiscordサーバー（guild）に新しいテキストチャンネルを作成する。Botには対象サーバーのManage Channels権限が必要。guild_idは必須で、discord_list_guildsで取得した数値IDを指定すること（このレイヤーではデフォルトサーバーを解決できないため省略不可）。返り値のurlでチャンネルを開ける。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "guild_id": {
+                            "type": "string",
+                            "description": "チャンネルを作成する対象サーバーの数値ID（discord_list_guildsの結果から取得）。必須。サーバー名ではなくIDを指定すること。"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "作成するチャンネル名。2〜100文字。"
+                        },
+                        "parent_id": {
+                            "type": "string",
+                            "description": "親カテゴリの数値ID（省略可）。指定するとそのカテゴリ配下に作成される。"
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "チャンネルトピック（省略可・0〜1024文字）。"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Discord監査ログ（Audit Log）に記録する理由（省略時: opencrab discord_create_channel）。"
+                        }
+                    },
+                    "required": ["guild_id", "name"]
                 }),
             },
             GatewayActionDef {
@@ -488,6 +518,7 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_channel_config" => self.execute_discord_channel_config(args),
             "discord_add_reaction" => self.execute_discord_add_reaction(args).await,
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
+            "discord_create_channel" => self.execute_discord_create_channel(args).await,
             "update_memory_index_config" => self.execute_update_memory_index_config(args),
             "add_allowed_command" => self.execute_add_allowed_command(args),
             "list_allowed_commands" => self.execute_list_allowed_commands(),
@@ -544,7 +575,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 16);
+        assert_eq!(defs.len(), 17);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -552,6 +583,7 @@ mod tests {
         assert!(names.contains(&"discord_channel_config"));
         assert!(names.contains(&"discord_add_reaction"));
         assert!(names.contains(&"discord_create_webhook"));
+        assert!(names.contains(&"discord_create_channel"));
         assert!(names.contains(&"update_memory_index_config"));
         assert!(names.contains(&"add_allowed_command"));
         assert!(names.contains(&"list_allowed_commands"));
@@ -833,5 +865,91 @@ mod tests {
             .await;
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("file_path"));
+    }
+
+    // ---- discord_create_channel ----
+
+    #[test]
+    fn test_create_channel_schema() {
+        let (actions, _db) = make_test_actions();
+        let defs = actions.definitions();
+        let def = defs
+            .iter()
+            .find(|d| d.name == "discord_create_channel")
+            .expect("discord_create_channel definition should exist");
+
+        // required fields
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "guild_id"));
+        assert!(required.iter().any(|v| v == "name"));
+
+        // properties present
+        let props = &def.parameters["properties"];
+        for key in ["guild_id", "name", "parent_id", "topic", "reason"] {
+            assert!(props.get(key).is_some(), "missing property {key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_missing_guild_id() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute("discord_create_channel", &json!({"name": "general"}))
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("guild_id"));
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_invalid_guild_id() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "discord_create_channel",
+                &json!({"guild_id": "not-a-number", "name": "general"}),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("数値ID"));
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_missing_name() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute("discord_create_channel", &json!({"guild_id": "123456789"}))
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("name"));
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_name_too_short() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "discord_create_channel",
+                &json!({"guild_id": "123456789", "name": "a"}),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("2〜100文字"));
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_invalid_parent_id() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "discord_create_channel",
+                &json!({
+                    "guild_id": "123456789",
+                    "name": "general",
+                    "parent_id": "not-a-number",
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("parent_id"));
     }
 }
