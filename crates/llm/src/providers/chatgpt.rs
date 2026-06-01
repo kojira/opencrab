@@ -491,6 +491,8 @@ impl LlmProvider for ChatGptProvider {
             has_instructions = body.get("instructions").is_some(),
             instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
             input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
+            has_reasoning = body.get("reasoning").is_some(),
+            reasoning_effort = body["reasoning"]["effort"].as_str().unwrap_or("none"),
             body_len = body_str.len(),
             "ChatGPT chat_completion: sending request"
         );
@@ -569,6 +571,8 @@ impl LlmProvider for ChatGptProvider {
             has_instructions = body.get("instructions").is_some(),
             instructions_len = body["instructions"].as_str().map(|s| s.len()).unwrap_or(0),
             input_count = body["input"].as_array().map(|a| a.len()).unwrap_or(0),
+            has_reasoning = body.get("reasoning").is_some(),
+            reasoning_effort = body["reasoning"]["effort"].as_str().unwrap_or("none"),
             body_len = body_str.len(),
             "ChatGPT chat_completion_stream: sending request"
         );
