@@ -82,6 +82,7 @@ pub struct ChatGptProvider {
     default_model: String,
     reasoning_effort: Option<String>,
     include_encrypted_content: bool,
+    max_output_tokens: Option<u32>,
 }
 
 impl Default for ChatGptProvider {
@@ -104,6 +105,7 @@ impl ChatGptProvider {
             default_model: DEFAULT_MODEL.to_string(),
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
+            max_output_tokens: Some(8192),
         }
     }
 
@@ -128,6 +130,13 @@ impl ChatGptProvider {
         if s.is_empty() {
             self.reasoning_effort = None;
         } else {
+            // Higher reasoning effort produces more reasoning tokens, so size the
+            // output budget accordingly. An explicit `with_max_output_tokens` call
+            // (e.g. from config) applied afterwards still overrides this.
+            self.max_output_tokens = Some(match s.as_str() {
+                "high" => 32000,
+                _ => 25000, // "low" / "medium" / anything else
+            });
             self.reasoning_effort = Some(s);
         }
         self
@@ -135,6 +144,11 @@ impl ChatGptProvider {
 
     pub fn with_include_encrypted_content(mut self, v: bool) -> Self {
         self.include_encrypted_content = v;
+        self
+    }
+
+    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = Some(tokens);
         self
     }
 
@@ -271,6 +285,10 @@ impl ChatGptProvider {
             body["reasoning"] = serde_json::json!({"effort": value});
         }
 
+        if let Some(max_tokens) = request.max_tokens.or(self.max_output_tokens) {
+            body["max_output_tokens"] = serde_json::json!(max_tokens);
+        }
+
         if self.include_encrypted_content {
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
@@ -327,11 +345,69 @@ impl ChatGptProvider {
         body
     }
 
+    /// Build a `ToolCall` from a Responses API `function_call` output item.
+    ///
+    /// The item looks like:
+    /// `{"type":"function_call","id":"fc_..","call_id":"call_..","name":"..","arguments":"{..}"}`.
+    /// Returns `None` if the item is not a function call or is missing a name.
+    fn tool_call_from_item(item: &Value) -> Option<ToolCall> {
+        if item["type"].as_str() != Some("function_call") {
+            return None;
+        }
+        let name = item["name"].as_str()?.to_string();
+        // Prefer `call_id` (referenced by subsequent tool-result messages),
+        // falling back to the item `id`.
+        let id = item["call_id"]
+            .as_str()
+            .or_else(|| item["id"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        let arguments = item["arguments"].as_str().unwrap_or("").to_string();
+        Some(ToolCall {
+            id,
+            call_type: "function".to_string(),
+            function: FunctionCall { name, arguments },
+        })
+    }
+
+    /// Render tool calls into the `<function_calls>` XML block that opencrab's
+    /// engine parses via `parse_xml_tool_calls`. Each tool call becomes an
+    /// `<invoke name="...">` element whose JSON-object arguments are expanded
+    /// into per-parameter tags (matching the codex provider's encoding).
+    fn tool_calls_to_xml(tool_calls: &[ToolCall]) -> String {
+        let mut out = String::from("<function_calls>\n");
+        for call in tool_calls {
+            out.push_str(&format!("<invoke name=\"{}\">\n", call.function.name));
+            match serde_json::from_str::<Value>(&call.function.arguments) {
+                Ok(Value::Object(map)) => {
+                    for (key, value) in map {
+                        let rendered = match value {
+                            Value::String(s) => s,
+                            other => other.to_string(),
+                        };
+                        out.push_str(&format!("<{key}>{rendered}</{key}>\n"));
+                    }
+                }
+                // Fall back to emitting the raw arguments if they are not an object.
+                _ => {
+                    out.push_str(&format!(
+                        "<arguments>{}</arguments>\n",
+                        call.function.arguments
+                    ));
+                }
+            }
+            out.push_str("</invoke>\n");
+        }
+        out.push_str("</function_calls>");
+        out
+    }
+
     /// Parse a fully-collected SSE response body into a `ChatResponse`.
     fn parse_response(&self, sse_text: &str, model: &str) -> Result<ChatResponse> {
         let mut content = String::new();
         let mut id = String::new();
         let mut usage = Usage::default();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         // [parse_response DEBUG] temporary diagnostic logging (remove later)
         {
@@ -391,9 +467,28 @@ impl ChatGptProvider {
                         content.push_str(delta);
                     }
                 }
+                "response.output_item.done" => {
+                    // Incremental completion of a single output item; capture any
+                    // function call here in case the final output array is absent.
+                    if let Some(tc) = Self::tool_call_from_item(&parsed["item"]) {
+                        if !tool_calls.iter().any(|existing| existing.id == tc.id) {
+                            tool_calls.push(tc);
+                        }
+                    }
+                }
                 "response.completed" | "response.done" => {
                     if let Some(rid) = parsed["response"]["id"].as_str() {
                         id = rid.to_string();
+                    }
+                    // The final output array carries the complete tool calls.
+                    if let Some(output) = parsed["response"]["output"].as_array() {
+                        for item in output {
+                            if let Some(tc) = Self::tool_call_from_item(item) {
+                                if !tool_calls.iter().any(|existing| existing.id == tc.id) {
+                                    tool_calls.push(tc);
+                                }
+                            }
+                        }
                     }
                     let u = &parsed["response"]["usage"];
                     usage = Usage {
@@ -434,13 +529,36 @@ impl ChatGptProvider {
             content.chars().count()
         );
 
+        let finish_reason = if tool_calls.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolCalls
+        };
+
+        // When tool calls are present, expose them in the content as a
+        // `<function_calls>` XML block so the engine's `parse_xml_tool_calls`
+        // can recover them, while also keeping the structured `tool_calls`.
+        let message = if tool_calls.is_empty() {
+            Message::assistant(content)
+        } else {
+            let xml = Self::tool_calls_to_xml(&tool_calls);
+            let combined = if content.trim().is_empty() {
+                xml
+            } else {
+                format!("{content}\n{xml}")
+            };
+            let mut m = Message::assistant(combined);
+            m.tool_calls = Some(tool_calls);
+            m
+        };
+
         Ok(ChatResponse {
             id,
             model: model.to_string(),
             choices: vec![Choice {
                 index: 0,
-                message: Message::assistant(content),
-                finish_reason: Some(FinishReason::Stop),
+                message,
+                finish_reason: Some(finish_reason),
             }],
             usage,
             created: 0,
@@ -672,6 +790,20 @@ impl LlmProvider for ChatGptProvider {
                         });
                     }
                     "response.completed" | "response.done" => {
+                        let tool_calls: Vec<ToolCall> = parsed["response"]["output"]
+                            .as_array()
+                            .map(|output| {
+                                output
+                                    .iter()
+                                    .filter_map(Self::tool_call_from_item)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let (finish_reason, tool_calls) = if tool_calls.is_empty() {
+                            (FinishReason::Stop, None)
+                        } else {
+                            (FinishReason::ToolCalls, Some(tool_calls))
+                        };
                         last_delta = Some(ChatStreamDelta {
                             id: String::new(),
                             model: request_model.clone(),
@@ -681,9 +813,9 @@ impl LlmProvider for ChatGptProvider {
                                     role: None,
                                     content: Some(String::new()),
                                     function_call: None,
-                                    tool_calls: None,
+                                    tool_calls,
                                 },
-                                finish_reason: Some(FinishReason::Stop),
+                                finish_reason: Some(finish_reason),
                             }],
                         });
                     }
@@ -790,6 +922,89 @@ mod tests {
     #[test]
     fn test_extract_account_id_invalid() {
         assert!(extract_account_id("notajwt").is_err());
+    }
+
+    #[test]
+    fn test_build_request_body_max_output_tokens() {
+        let provider = ChatGptProvider::new();
+        let mut request = ChatRequest::new("gpt-5.5", vec![Message::user("hi")]);
+        request.max_tokens = Some(256);
+        let body = provider.build_request_body(&request, false);
+        // Per-request value overrides the provider default.
+        assert_eq!(body["max_output_tokens"], serde_json::json!(256));
+
+        // Falls back to the provider default (8192) when no per-request value.
+        let request_none = ChatRequest::new("gpt-5.5", vec![Message::user("hi")]);
+        let body_none = provider.build_request_body(&request_none, false);
+        assert_eq!(body_none["max_output_tokens"], serde_json::json!(8192));
+
+        // Override the provider default explicitly.
+        let provider_custom = ChatGptProvider::new().with_max_output_tokens(512);
+        let body_custom = provider_custom.build_request_body(&request_none, false);
+        assert_eq!(body_custom["max_output_tokens"], serde_json::json!(512));
+    }
+
+    #[test]
+    fn test_with_reasoning_effort_sets_max_output_tokens() {
+        // low / medium -> 25000
+        let low = ChatGptProvider::new().with_reasoning_effort("low");
+        let body_low = low
+            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
+        assert_eq!(body_low["max_output_tokens"], serde_json::json!(25000));
+
+        let medium = ChatGptProvider::new().with_reasoning_effort("medium");
+        let body_medium = medium
+            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
+        assert_eq!(body_medium["max_output_tokens"], serde_json::json!(25000));
+
+        // high -> 32000
+        let high = ChatGptProvider::new().with_reasoning_effort("high");
+        let body_high = high
+            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
+        assert_eq!(body_high["max_output_tokens"], serde_json::json!(32000));
+
+        // A subsequent explicit with_max_output_tokens (e.g. from config) wins.
+        let overridden = ChatGptProvider::new()
+            .with_reasoning_effort("high")
+            .with_max_output_tokens(1234);
+        let body_over = overridden
+            .build_request_body(&ChatRequest::new("gpt-5.5", vec![Message::user("hi")]), false);
+        assert_eq!(body_over["max_output_tokens"], serde_json::json!(1234));
+    }
+
+    #[test]
+    fn test_parse_response_tool_calls() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",",
+            "\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",",
+            "\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}],",
+            "\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n",
+            "\n",
+        );
+        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+        let tool_calls = resp.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("expected tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[0].call_type, "function");
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Tokyo\"}");
+
+        // The content carries a <function_calls> XML block that the engine's
+        // parse_xml_tool_calls() can recover.
+        let content = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert!(content.contains("<function_calls>"), "content: {content}");
+        assert!(content.contains("<invoke name=\"get_weather\">"), "content: {content}");
+        assert!(content.contains("<city>Tokyo</city>"), "content: {content}");
     }
 
     #[tokio::test]
