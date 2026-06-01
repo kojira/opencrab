@@ -4,6 +4,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 use tracing::debug;
 
 use crate::message::*;
@@ -93,7 +94,11 @@ impl ChatGptProvider {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(60))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default(),
             auth_file: format!("{}/.codex/auth.json", home),
             base_url: CHATGPT_BASE_URL.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
@@ -489,26 +494,65 @@ impl LlmProvider for ChatGptProvider {
             body_preview = %&body_str[..body_str.len().min(300)],
             "ChatGPT chat_completion: sending request"
         );
-        let resp = self
-            .request_builder("codex/responses", &token, &account_id)
-            .json(&body)
-            .send()
-            .await
-            .context("ChatGPT API request failed")?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .context("failed to read ChatGPT response body")?;
-        tracing::warn!(status = %status, body_preview = %&text[..text.len().min(500)], "ChatGPT chat_completion response received");
-        if !status.is_success() {
-            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
-            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+        let max_retries = 3u32;
+        let mut last_error = String::new();
+
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                let backoff_secs = 1u64 << (attempt - 1); // 1, 2, 4
+                tracing::warn!(
+                    attempt,
+                    backoff_secs,
+                    last_error = %last_error,
+                    "ChatGPT chat_completion: retrying after error"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            }
+
+            let resp_result = self
+                .request_builder("codex/responses", &token, &account_id)
+                .json(&body)
+                .send()
+                .await;
+
+            let resp = match resp_result {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = format!("request failed: {e}");
+                    tracing::warn!(attempt, error = %e, "ChatGPT chat_completion: network error");
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            let text = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    last_error = format!("failed to read body: {e}");
+                    tracing::warn!(attempt, error = %e, "ChatGPT chat_completion: body read error");
+                    continue;
+                }
+            };
+
+            tracing::warn!(status = %status, body_preview = %&text[..text.len().min(500)], "ChatGPT chat_completion response received");
+
+            if !status.is_success() {
+                last_error = format!("HTTP {}: {}", status, &text[..text.len().min(200)]);
+                tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
+                // Don't retry on 4xx client errors (except 429)
+                if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
+                    anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+                }
+                continue;
+            }
+
+            tracing::warn!(body_len = text.len(), "ChatGPT chat_completion parsing response");
+            let result = self.parse_response(&text, &request.model);
+            tracing::warn!(success = result.is_ok(), "ChatGPT chat_completion parse result");
+            return result;
         }
-        tracing::warn!(body_len = text.len(), "ChatGPT chat_completion parsing response");
-        let result = self.parse_response(&text, &request.model);
-        tracing::warn!(success = result.is_ok(), "ChatGPT chat_completion parse result");
-        result
+
+        anyhow::bail!("ChatGPT API request failed after {} attempts: {}", max_retries, last_error)
     }
 
     async fn chat_completion_stream(
@@ -528,18 +572,53 @@ impl LlmProvider for ChatGptProvider {
             body_preview = %&body_str[..body_str.len().min(300)],
             "ChatGPT chat_completion_stream: sending request"
         );
-        let resp = self
-            .request_builder("codex/responses", &token, &account_id)
-            .json(&body)
-            .send()
-            .await
-            .context("ChatGPT streaming request failed")?;
-        let status = resp.status();
-        tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+        let max_retries = 3u32;
+        let mut resp = None;
+        let mut last_error = String::new();
+
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                let backoff_secs = 1u64 << (attempt - 1);
+                tracing::warn!(
+                    attempt,
+                    backoff_secs,
+                    last_error = %last_error,
+                    "ChatGPT chat_completion_stream: retrying after error"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            }
+
+            let resp_result = self
+                .request_builder("codex/responses", &token, &account_id)
+                .json(&body)
+                .send()
+                .await;
+
+            match resp_result {
+                Ok(r) => {
+                    let status = r.status();
+                    tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
+                    if !status.is_success() {
+                        let text = r.text().await.unwrap_or_default();
+                        last_error = format!("HTTP {}: {}", status, &text[..text.len().min(200)]);
+                        tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
+                        if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
+                            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+                        }
+                        continue;
+                    }
+                    resp = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    last_error = format!("request failed: {e}");
+                    tracing::warn!(attempt, error = %e, "ChatGPT chat_completion_stream: network error");
+                    continue;
+                }
+            }
         }
+
+        let resp = resp.ok_or_else(|| anyhow::anyhow!("ChatGPT streaming request failed after {} attempts: {}", max_retries, last_error))?;
         let request_model = request.model.clone();
         let stream = resp.bytes_stream().map(move |chunk| {
             let chunk = chunk.context("stream chunk error")?;
