@@ -993,6 +993,187 @@ mod tests {
         assert!(content.contains("<city>Tokyo</city>"), "content: {content}");
     }
 
+    // ── build_request_body field validation ──────────────────────────────────
+
+    #[test]
+    fn test_request_body_required_fields() {
+        let provider = ChatGptProvider::new();
+        let request = ChatRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::system("You are helpful."),
+                Message::user("Hello"),
+            ],
+        );
+        let body = provider.build_request_body(&request, false);
+
+        // Required fields must be present.
+        assert_eq!(body["model"], serde_json::json!("gpt-5.5"));
+        assert!(body.get("input").is_some(), "input field must be present");
+        assert_eq!(body["stream"], serde_json::json!(false));
+        assert_eq!(body["store"], serde_json::json!(false));
+
+        // max_output_tokens must NEVER appear (unsupported by Responses API).
+        assert!(
+            body.get("max_output_tokens").is_none(),
+            "max_output_tokens must not be sent to the API"
+        );
+    }
+
+    #[test]
+    fn test_request_body_stream_flag() {
+        let provider = ChatGptProvider::new();
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("Hi")]);
+        let body_stream = provider.build_request_body(&request, true);
+        assert_eq!(body_stream["stream"], serde_json::json!(true));
+        let body_no_stream = provider.build_request_body(&request, false);
+        assert_eq!(body_no_stream["stream"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_request_body_reasoning_effort_low() {
+        let provider = ChatGptProvider::new().with_reasoning_effort("low");
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("Hi")]);
+        let body = provider.build_request_body(&request, false);
+        assert_eq!(
+            body["reasoning"]["effort"],
+            serde_json::json!("low"),
+            "reasoning.effort must be 'low'"
+        );
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn test_request_body_reasoning_effort_high() {
+        let provider = ChatGptProvider::new().with_reasoning_effort("high");
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("Hi")]);
+        let body = provider.build_request_body(&request, false);
+        assert_eq!(
+            body["reasoning"]["effort"],
+            serde_json::json!("high"),
+            "reasoning.effort must be 'high'"
+        );
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn test_request_body_no_reasoning_by_default() {
+        // Default new() sets reasoning_effort = Some("low"), so "reasoning" WILL appear.
+        // But if we explicitly clear it, it must not appear.
+        let mut provider = ChatGptProvider::new();
+        provider.reasoning_effort = None;
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("Hi")]);
+        let body = provider.build_request_body(&request, false);
+        assert!(
+            body.get("reasoning").is_none(),
+            "reasoning field must not appear when reasoning_effort is None"
+        );
+    }
+
+    #[test]
+    fn test_request_body_instructions_from_system_message() {
+        let provider = ChatGptProvider::new();
+        let request = ChatRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::system("Be concise."),
+                Message::user("Hi"),
+            ],
+        );
+        let body = provider.build_request_body(&request, false);
+        let instructions = body["instructions"].as_str().expect("instructions must be set");
+        assert!(
+            instructions.contains("Be concise."),
+            "instructions must include system message"
+        );
+    }
+
+    // ── parse_response delta text extraction ─────────────────────────────────
+
+    #[test]
+    fn test_parse_response_text_delta_single() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello, world!\"}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n",
+            "\n",
+        );
+        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let text = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.as_str(),
+            other => panic!("expected Text content, got: {other:?}"),
+        };
+        assert_eq!(text, "Hello, world!");
+        assert_eq!(resp.usage.completion_tokens, 3);
+    }
+
+    #[test]
+    fn test_parse_response_text_delta_multiple() {
+        let provider = ChatGptProvider::new();
+        // Multiple delta chunks must be concatenated in order.
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Foo\"}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" \"}\n",
+            "\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Bar\"}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":2,\"output_tokens\":2,\"total_tokens\":4}}}\n",
+            "\n",
+        );
+        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let text = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.as_str(),
+            other => panic!("expected Text content, got: {other:?}"),
+        };
+        assert_eq!(text, "Foo Bar");
+    }
+
+    #[test]
+    fn test_parse_response_empty_no_output() {
+        // A response with no delta events and no tool calls → empty content is fine.
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r3\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":1,\"output_tokens\":0,\"total_tokens\":1}}}\n",
+            "\n",
+        );
+        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        assert_eq!(resp.usage.completion_tokens, 0);
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn test_parse_response_unicode_delta() {
+        // Multibyte characters must be handled correctly.
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"こんにちは\"}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r4\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":1,\"output_tokens\":5,\"total_tokens\":6}}}\n",
+            "\n",
+        );
+        let resp = provider.parse_response(sse, "gpt-5.5").expect("parse failed");
+        let text = match &resp.choices[0].message.content {
+            Some(MessageContent::Text(t)) => t.as_str(),
+            other => panic!("expected Text content, got: {other:?}"),
+        };
+        assert_eq!(text, "こんにちは");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_real_chatgpt_api() {
