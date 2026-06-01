@@ -80,6 +80,7 @@ pub struct ChatGptProvider {
     base_url: String,
     default_model: String,
     reasoning_effort: Option<String>,
+    include_encrypted_content: bool,
 }
 
 impl Default for ChatGptProvider {
@@ -97,6 +98,7 @@ impl ChatGptProvider {
             base_url: CHATGPT_BASE_URL.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
             reasoning_effort: Some("low".to_string()),
+            include_encrypted_content: false,
         }
     }
 
@@ -123,6 +125,11 @@ impl ChatGptProvider {
         } else {
             self.reasoning_effort = Some(s);
         }
+        self
+    }
+
+    pub fn with_include_encrypted_content(mut self, v: bool) -> Self {
+        self.include_encrypted_content = v;
         self
     }
 
@@ -257,6 +264,10 @@ impl ChatGptProvider {
 
         if let Some(value) = &self.reasoning_effort {
             body["reasoning"] = serde_json::json!({"effort": value});
+        }
+
+        if self.include_encrypted_content {
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
         }
 
         tracing::warn!("chatgpt build_request_body: system_prompts count={}, content={:?}", system_prompts.len(), system_prompts.first().map(|s| &s[..s.len().min(100)]));

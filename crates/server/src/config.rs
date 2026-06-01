@@ -130,6 +130,8 @@ pub struct ProviderConfig {
     pub auth_file: String,
     #[serde(default)]
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub include_reasoning_encrypted_content: bool,
 }
 
 fn default_codex_timeout() -> u64 {
@@ -362,6 +364,7 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if !pconfig.reasoning_effort.is_empty() {
                     p = p.with_reasoning_effort(&pconfig.reasoning_effort);
                 }
+                p = p.with_include_encrypted_content(pconfig.include_reasoning_encrypted_content);
                 Some(Arc::new(p))
             }
             "bonsai" => {
