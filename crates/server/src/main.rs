@@ -540,6 +540,15 @@ async fn main() -> anyhow::Result<()> {
                     Arc::new(dashmap::DashMap::new());
                 let completion_registry: opencrab_discord::CompletionRegistry =
                     Arc::new(dashmap::DashMap::new());
+                let default_subtask_webhook = discord_cfg
+                    .default_subtask_webhook
+                    .as_ref()
+                    .and_then(|cfg| {
+                        opencrab_discord::WebhookConfig::from_parts(
+                            cfg.url.clone(),
+                            cfg.events.clone(),
+                        )
+                    });
                 let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
                     Arc::new(opencrab_discord::DiscordGatewayActions::new(
                         gateway.http().clone(),
@@ -555,6 +564,7 @@ async fn main() -> anyhow::Result<()> {
                         workspace_root,
                         subtask_registry,
                         completion_registry.clone(),
+                        default_subtask_webhook,
                     ));
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());

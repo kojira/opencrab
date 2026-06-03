@@ -23,7 +23,8 @@ mod subtask_engine;
 mod ui;
 mod webhook;
 
-use webhook::{DeliveryBatch, WebhookConfig};
+use webhook::DeliveryBatch;
+pub use webhook::WebhookConfig;
 
 /// A running subtask tracked by the registry.
 #[derive(Clone)]
@@ -79,6 +80,8 @@ pub struct DiscordGatewayActions {
     completion_registry: CompletionRegistry,
     /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
     webhook_client: reqwest::Client,
+    /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook。
+    default_subtask_webhook: Option<WebhookConfig>,
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
 }
@@ -94,6 +97,7 @@ impl DiscordGatewayActions {
         workspace_root: PathBuf,
         subtask_registry: SubtaskRegistry,
         completion_registry: CompletionRegistry,
+        default_subtask_webhook: Option<WebhookConfig>,
     ) -> Self {
         Self {
             http,
@@ -106,6 +110,7 @@ impl DiscordGatewayActions {
             subtask_registry,
             completion_registry,
             webhook_client: reqwest::Client::new(),
+            default_subtask_webhook,
             pending_interaction_registry: None,
             event_tx: None,
         }
@@ -390,7 +395,7 @@ impl GatewayActions for DiscordGatewayActions {
                         },
                         "webhook": {
                             "type": "object",
-                            "description": "subtask lifecycle を Discord webhook へ通知する設定（省略可）。",
+                            "description": "subtask lifecycle を Discord webhook へ通知する設定（省略時は gateway.discord.default_subtask_webhook を使用）。",
                             "properties": {
                                 "url": {
                                     "type": "string",
@@ -618,6 +623,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             subtask_registry,
             completion_registry,
+            None,
         );
         (actions, db)
     }

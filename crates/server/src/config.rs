@@ -177,6 +177,17 @@ pub struct DiscordGatewayConfig {
     /// ハートビートメッセージを送信するDiscordチャンネルID
     #[serde(default)]
     pub heartbeat_channel_id: Option<u64>,
+    /// spawn_subtask.webhook が省略された時に使うデフォルトの lifecycle webhook。
+    #[serde(default)]
+    pub default_subtask_webhook: Option<SubtaskWebhookConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SubtaskWebhookConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub events: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

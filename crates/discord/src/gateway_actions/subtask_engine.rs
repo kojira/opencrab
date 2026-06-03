@@ -39,8 +39,9 @@ impl DiscordGatewayActions {
         let started_instant = std::time::Instant::now();
         let depth = parent_depth + 1;
 
-        // Subtask lifecycle webhook (spawn 時指定)。指定が無ければ無効。
-        let webhook = WebhookConfig::from_args(args);
+        // Subtask lifecycle webhook. 明示指定を優先し、省略時は gateway default を使う。
+        let webhook =
+            WebhookConfig::from_args(args).or_else(|| self.default_subtask_webhook.clone());
         let label = args["label"]
             .as_str()
             .map(|s| s.to_string())
@@ -192,20 +193,22 @@ impl DiscordGatewayActions {
                 let progress_tx = tx.clone();
                 let progress_subtask_id = subtask_id.clone();
                 let progress_session_id = sub_session_id.clone();
-                sub_engine.set_on_tool_result(move |_tool_call_id, tool_name, result_json, is_error| {
-                    let status = if is_error { "failed" } else { "completed" };
-                    let preview: String = result_json.chars().take(500).collect();
-                    let detail = format!("tool `{tool_name}` {status}\n{preview}");
-                    let msg = webhook::build_progress_message(
-                        &progress_subtask_id,
-                        &progress_session_id,
-                        &detail,
-                    );
-                    let _ = progress_tx.send(DeliveryBatch {
-                        url: progress_url.clone(),
-                        messages: vec![msg],
-                    });
-                });
+                sub_engine.set_on_tool_result(
+                    move |_tool_call_id, tool_name, result_json, is_error| {
+                        let status = if is_error { "failed" } else { "completed" };
+                        let preview: String = result_json.chars().take(500).collect();
+                        let detail = format!("tool `{tool_name}` {status}\n{preview}");
+                        let msg = webhook::build_progress_message(
+                            &progress_subtask_id,
+                            &progress_session_id,
+                            &detail,
+                        );
+                        let _ = progress_tx.send(DeliveryBatch {
+                            url: progress_url.clone(),
+                            messages: vec![msg],
+                        });
+                    },
+                );
             }
         }
 

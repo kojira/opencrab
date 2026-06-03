@@ -17,7 +17,7 @@ use opencrab_gateway::GatewayActions;
 
 pub use gateway_actions::DiscordGatewayActions;
 pub use gateway_actions::{
-    CompletionRegistry, SpawnedSubtask, SubtaskCompletionFn, SubtaskRegistry,
+    CompletionRegistry, SpawnedSubtask, SubtaskCompletionFn, SubtaskRegistry, WebhookConfig,
 };
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;

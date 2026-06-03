@@ -123,8 +123,12 @@ pub async fn send_agent_message(
                     std::sync::Arc::new(dashmap::DashMap::new());
                 let eff_model = {
                     let conn = state.db.lock().unwrap();
-                    opencrab_db::queries::effective_model_for_agent(&conn, &id, &state.default_model)
-                        .unwrap_or_else(|_| state.default_model.clone())
+                    opencrab_db::queries::effective_model_for_agent(
+                        &conn,
+                        &id,
+                        &state.default_model,
+                    )
+                    .unwrap_or_else(|_| state.default_model.clone())
                 };
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
@@ -136,6 +140,7 @@ pub async fn send_agent_message(
                     workspace_root,
                     subtask_registry,
                     completion_registry,
+                    None,
                 );
                 Some(Arc::new(ga) as Arc<dyn opencrab_gateway::GatewayActions>)
             } else {
@@ -164,7 +169,9 @@ pub async fn send_agent_message(
         let raw = match process::build_conversation_string(&conn, &session_id, &id, budget) {
             Ok(s) => s,
             Err(e) => {
-                return Json(serde_json::json!({"error": format!("Failed to build conversation: {}", e)}));
+                return Json(
+                    serde_json::json!({"error": format!("Failed to build conversation: {}", e)}),
+                );
             }
         };
         process::prepend_runtime_context(&raw, "direct_message")

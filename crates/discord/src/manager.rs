@@ -46,8 +46,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
 
         let pending_interaction_registry: PendingInteractionRegistry =
             Arc::new(dashmap::DashMap::new());
-        let form_modal_resolver =
-            Some(crate::form_modal::form_modal_resolver(pending_interaction_registry.clone()));
+        let form_modal_resolver = Some(crate::form_modal::form_modal_resolver(
+            pending_interaction_registry.clone(),
+        ));
         let gateway = Arc::new(DiscordGateway::with_form_modal_resolver(
             token,
             form_modal_resolver,
@@ -93,6 +94,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 workspace_root,
                 subtask_registry,
                 completion_registry.clone(),
+                None,
             )
             .with_a2ui(pending_interaction_registry.clone(), event_tx.clone()),
         );

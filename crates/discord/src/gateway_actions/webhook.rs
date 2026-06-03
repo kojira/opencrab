@@ -50,6 +50,13 @@ impl WebhookConfig {
         Some(WebhookConfig { url, events })
     }
 
+    pub fn from_parts(url: String, events: Option<Vec<String>>) -> Option<WebhookConfig> {
+        if url.trim().is_empty() {
+            return None;
+        }
+        Some(WebhookConfig { url, events })
+    }
+
     /// 指定イベントを送るべきか。events 未指定なら常に true。
     pub fn wants(&self, event: &str) -> bool {
         match &self.events {
@@ -414,6 +421,20 @@ mod tests {
         assert!(WebhookConfig::from_args(&json!({})).is_none());
         assert!(WebhookConfig::from_args(&json!({ "webhook": {} })).is_none());
         assert!(WebhookConfig::from_args(&json!({ "webhook": { "url": "" } })).is_none());
+    }
+
+    #[test]
+    fn test_webhook_config_from_parts_missing_or_empty() {
+        assert!(WebhookConfig::from_parts("".to_string(), None).is_none());
+        assert!(WebhookConfig::from_parts("   ".to_string(), None).is_none());
+
+        let cfg = WebhookConfig::from_parts(
+            "https://discord.com/api/webhooks/x".to_string(),
+            Some(vec!["started".to_string()]),
+        )
+        .unwrap();
+        assert_eq!(cfg.url, "https://discord.com/api/webhooks/x");
+        assert_eq!(cfg.events, Some(vec!["started".to_string()]));
     }
 
     #[test]

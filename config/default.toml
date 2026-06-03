@@ -103,6 +103,9 @@ guild_ids = []
 agent_ids = ["crab", "54fab4ec-fad2-45d9-92dd-e62e50e2b36b", "6b79ac3a-7f17-4618-a827-5bda992a3698"]  # Discordメッセージに応答するエージェントID
 owner_discord_id = "390732846236434452"  # DMに応答するオーナーのDiscord User ID
 heartbeat_channel_id = 1470698801395273861
+# spawn_subtask.webhook を明示しない時に使う lifecycle webhook。
+# url = "" または未指定なら無効。実URLは環境変数で渡す。
+default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
 
 [gateway.cli]
 enabled = true
