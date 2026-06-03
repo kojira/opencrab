@@ -99,17 +99,25 @@ CREATE INDEX IF NOT EXISTS idx_agent_webhook_agent ON agent_webhook_config(agent
 
 `spawn_subtask.webhook` を省略した場合でも、エージェントが既存の通知先を理解・再利用できるように、subtask 用の既定 Webhook を明示的な解決対象にする。`02940b7 feat: add default subtask webhook config` の config/env 既定値は後方互換の fallback として残すが、それだけを正にしない。エージェントが gateway action/tool で確認・設定・再利用できる永続設定を正とする。
 
-解決順は以下で固定する。
+解決順は以下で固定する。**明示的な作業指示なしのフォールバックは禁止**とし、設定エラーを別の設定で隠蔽しない。
 
 1. `spawn_subtask` 引数 `args["webhook"]` が指定されていれば、それをその run の**ライフサイクル + subtask 由来のツール観測イベント**の宛先として最優先（現行挙動を壊さない）。
-2. 引数指定が無い場合、agent/tool-specific の subtask Webhook 設定を参照する。例: `scope='agent'` + `agent_id` + `kind='subtask'`、または `scope='tool'` + `tool_name='spawn_subtask'`。
-3. agent/tool-specific が無い場合、global/default subtask Webhook を参照する。
-4. DB に有効な既定が無い場合のみ、既存の env/config fallback（`02940b7` の設定）を読む。
-5. どれも無い、または空/不正 URL の場合は Webhook なしで実行する。fallback の失敗で subtask 本体を止めない。
+2. 引数指定が無い場合、tool-specific の subtask Webhook 設定を参照する。例: `scope='tool'` + `agent_id` + `tool_name='spawn_subtask'` + `kind='subtask'`。
+3. tool-specific が無い場合、agent-specific の subtask Webhook 設定を参照する。例: `scope='agent'` + `agent_id` + `kind='subtask'`。
+4. agent-specific が無い場合、global/default subtask Webhook を参照する。
+5. DB に該当行がまったく無い場合のみ、既存の env/config fallback（`02940b7` の設定）を読む。
+6. どれも無い場合は Webhook なしで実行する。
+
+エラー時の扱い:
+
+- 明示 `spawn_subtask.webhook` が空/不正 URL の場合は fallback せず、`spawn_subtask` 自体を `invalid_webhook_url` で失敗させる。エージェントが指定した webhook のミスは、エージェントが気付ける形で返す。
+- DB 設定行が存在するが URL が空/不正な場合は fallback せず、`invalid_default_webhook` として失敗させる。設定バグを env/config で隠さない。
+- `enabled=false` は「この scope で明示的に無効化した」という意味にする。下位 fallback へ進まず、その scope の解決結果は Webhook なしとする。停止意図を env/config fallback で復活させない。
+- env/config fallback は移行互換のための最後尾読み取り専用経路であり、DB に該当行が無い時だけ使う。DB 行の不正値・無効化・配送失敗の救済には使わない。
 
 明示指定と subtask default（`kind='subtask'` / `kind='lifecycle'`）を同時に送る挙動にはしない。`spawn_subtask.webhook` は「この run だけ subtask 通知先を上書きする」意味であり、重複通知を避ける。一方、全ツール活動 Webhook（`kind='tool'`）を別チャンネルへ流す既存設計は独立した観測ストリームとして維持し、同じ URL へ解決された場合だけ URL で de-dupe する。つまり上記の単一勝者ルールは subtask default 解決に適用し、恒久的な `kind='tool'` 配信を暗黙に無効化しない。
 
-実装上は `WebhookConfig` を拡張し「複数宛先 + 出力ポリシー」を表せる新型 `ResolvedWebhooks { targets: Vec<WebhookTarget> }` を導入。`WebhookTarget { url, events, output_mode, max_chars, source }`。`source` は `explicit` / `agent_default` / `tool_default` / `global_default` / `env_config` のいずれかで、ログや通常レスポンスには URL ではなく source と redacted URL のみを出す。`from_args` は引数由来の 1 ターゲットを返し、別関数 `resolve_for_agent(db, agent_id, tool_name, args)` が DB と env/config fallback を順に解決して `ResolvedWebhooks` を組む。既存 `WebhookConfig` は後方互換のため残置（内部で `WebhookTarget` に変換）。
+実装上は `WebhookConfig` を拡張し「複数宛先 + 出力ポリシー」を表せる新型 `ResolvedWebhooks { targets: Vec<WebhookTarget>, diagnostics: Vec<WebhookDiagnostic> }` を導入。`WebhookTarget { url, events, output_mode, max_chars, source }`。`source` は `explicit` / `tool_default` / `agent_default` / `global_default` / `env_config` のいずれかで、ログや通常レスポンスには URL ではなく source と redacted URL のみを出す。`from_args` は引数由来の 1 ターゲットを返し、別関数 `resolve_for_agent(db, agent_id, tool_name, args)` が上記順序で解決する。既存 `WebhookConfig` は後方互換のため残置（内部で `WebhookTarget` に変換）。
 
 ### 2.3 既定 Webhook の永続化と再利用ポリシー
 
@@ -128,11 +136,11 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 再利用方針:
 
 - `ensure_subtask_webhook` は、解決順で使える既存 default があれば `discord_create_webhook` を呼ばず、その設定を返す。
-- 新規作成は「有効な既定が無い」「呼び出し元が owner/admin-capable」「対象チャンネルが明示されている」場合だけに限定する。
+- 新規作成は「有効な既定が無い」「呼び出し元が `CallerIdentity::Owner`」「対象チャンネルが明示されている」「呼び出しが `ensure_subtask_webhook` である」場合だけに限定する。通常の `spawn_subtask` 解決中に暗黙作成しない。
 - 同じ用途で毎回 Discord Webhook を作ると、Webhook token の流通量が増え、チャンネルの Webhook 一覧が散らかり、監査・削除・漏洩時のローテーションが難しくなる。既定再利用を標準にして、token 数・通知ノイズ・チャンネル clutter を抑える。
-- 空文字、URL として parse できない値、Discord Webhook 形式として不正な値は disabled 相当として扱い、env/config fallback へ進む。fallback も不正なら Webhook なし。
+- 空文字、URL として parse できない値、Discord Webhook 形式として不正な値は disabled 相当にしない。設定ミスとして扱い、呼び出し元にエラーを返す。
 
-`02940b7` の env/config fallback は「DB 設定がまだ無い初期導入」「移行前の既存運用」を支える読み取り専用の最後尾 fallback とする。agent が `set_default_subtask_webhook` を実行した後は DB の値が優先され、env/config は上書きしない。
+`02940b7` の env/config fallback は「DB 設定がまだ無い初期導入」「移行前の既存運用」を支える読み取り専用の最後尾 fallback とする。agent が `set_default_subtask_webhook` を実行した後は DB の値が優先され、env/config は上書きしない。env/config fallback が使われた場合も silent にせず、`webhook_source='env_config'` を返す。
 
 ### 2.4 Agent-facing Gateway Actions / Tool API
 
@@ -140,24 +148,26 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 
 - `get_default_subtask_webhook(args)`:
   - 入力: `agent_id?`, `tool_name?`, `scope?`, `include_secret?=false`
-  - 解決順に従い、現在使われる default の `scope` / `source` / `enabled` / `events` / `redacted_url` / `updated_at` を返す。
-  - `include_secret=true` は owner/admin-capable かつ監査ログ記録ありの場合のみ raw URL を返す。それ以外は拒否または redacted のみ。
+  - 解決順に従い、現在使われる default の `scope` / `source` / `enabled` / `events` / `redacted_url` / `updated_at` / `diagnostics` を返す。
+  - 通常は raw URL を返さない。`include_secret=true` は原則拒否し、どうしても必要な場合は owner 専用の別 action と監査ログ付きで設計する（本フェーズでは非対応）。
 - `set_default_subtask_webhook(args)`:
   - 入力: `scope`, `agent_id?`, `tool_name?`, `url?`, `enabled?`, `events?`, `output_mode?`, `max_chars?`
-  - owner/admin-capable のみ実行可。URL が空なら対象 scope の DB default を disabled にする（削除ではなく監査可能な無効化）。
+  - `CallerIdentity::Owner` のみ実行可。URL が空なら対象 scope の DB default を disabled にする（削除ではなく監査可能な無効化）。
   - URL は保存前に parse/形式検証し、ログ・レスポンスには redacted URL だけを出す。
 - `ensure_subtask_webhook(args)`:
   - 入力: `scope?`, `agent_id?`, `tool_name?`, `channel_id?`, `name?`, `events?`
-  - 既存の有効な default があればそれを返す。無ければ owner/admin-capable のみ `discord_create_webhook` を呼び、作成した URL を DB に保存して返す。
+  - 既存の有効な default があればそれを返す。無ければ `CallerIdentity::Owner` のみ `discord_create_webhook` を呼び、作成した URL を DB に保存して返す。
   - `channel_id` 無しで新規作成しない。既存再利用だけなら `channel_id` は不要。
 - `list_subtask_webhooks(args)`:
   - 入力: `agent_id?`, `scope?`, `include_disabled?=false`, `include_secret?=false`
-  - DB に登録された subtask/tool/lifecycle Webhook 設定を一覧する。通常は `redacted_url` のみ。raw token は `get_default_subtask_webhook` と同じ明示認可が必要。
+  - DB に登録された subtask/tool/lifecycle Webhook 設定を一覧する。`redacted_url` のみ返し、raw token は返さない。
+
+`spawn_subtask` の戻り値・親セッションログには、エージェントが通知状態を検知できるよう `webhook_source` / `webhook_redacted_url` / `webhook_status` / `webhook_error` を含める。明示 webhook の検証・started 配送で検出できた失敗は `spawn_subtask` のエラーとして返す。progress/completed など非同期配送で後から失敗した場合は、親セッションの `subtask_progress` または `subtask_completed` に warning/error として残す。
 
 権限モデル:
 
-- 読み取り（redacted）は当該 agent の owner、または admin-capable caller に許可する。共有文脈では raw URL を返さない。
-- set/create/ensure の作成部分は owner/admin-capable に限定する。通常 agent が勝手に別チャンネルへ Webhook を作らない。
+- 読み取り（redacted）は当該 agent の owner、trusted_user、co_agent に許可する。共有文脈では raw URL を返さない。
+- set/create/ensure の作成部分は `CallerIdentity::Owner` に限定する。通常 agent が勝手に別チャンネルへ Webhook を作らない。
 - すべての action は監査ログに `caller` / `scope` / `agent_id` / `tool_name` / `source` / `redacted_url` / `result` を記録し、raw URL/token は記録しない。
 
 ---
@@ -264,8 +274,8 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 **Phase 3 — エージェント単位設定の永続化**
 - `crates/db/src/schema.rs`: `agent_webhook_config` を `CREATE TABLE IF NOT EXISTS` で追加（既存テーブル不変）。
 - `crates/db/src/queries.rs`: `AgentWebhookConfigRow` / get / upsert / list。subtask default 用に `scope` / `tool_name` / `name` / `created_by` を扱う。
-- `subtask_engine` で `resolve_for_agent(db, agent_id, tool_name, args)` を実装し、引数指定、agent/tool/global default、env/config fallback を 2.2 の順で解決。
-- テスト: 解決優先順位、enabled=0 で無効、URL de-dupe、空/不正 URL で fallback または Webhook なし。
+- `subtask_engine` で `resolve_for_agent(db, agent_id, tool_name, args)` を実装し、引数指定、tool/agent/global default、env/config fallback を 2.2 の順で解決する。明示なし fallback は禁止し、不正値はエラーとして返す。
+- テスト: 解決優先順位、enabled=false で下位 fallback しないこと、URL de-dupe、空/不正 URL が fallback されずエラーになること。
 
 **Phase 4 — 出力ポリシーと full opt-in（任意）**
 - `output_mode` / `max_chars` を尊重。`full` 時のみ `tool_output_chunk` を chunk 配信。
@@ -273,17 +283,18 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 
 **Phase 5 — Gateway actions / API 露出**
 - `get_default_subtask_webhook` / `set_default_subtask_webhook` / `ensure_subtask_webhook` / `list_subtask_webhooks` を追加。
-- `ensure_subtask_webhook` は既存 default 再利用を先に行い、必要な場合だけ `discord_create_webhook` を呼ぶ。
+- `ensure_subtask_webhook` は既存 default 再利用を先に行い、Owner が明示的に呼んだ場合だけ `discord_create_webhook` を呼ぶ。`spawn_subtask` 解決中の暗黙作成は禁止。
 - エージェント編集 UI から `agent_webhook_config` を CRUD する場合も、同じ権限・redaction・監査ログのルールを通す。
 
 ### テスト戦略
 - 純関数（redaction / 整形 / chunk / summary）はユニットテスト中心（既存 `webhook.rs` のテスト様式に倣う）。
 - `BridgedExecutor` はモック sink + モックツールで発火を検証。
 - 配信はモック HTTP（既存パターンが無ければ `send_with_retry` を関数注入可能にして検証）。
-- 解決規則は in-memory DB（`init_memory`）で検証: `spawn_subtask.webhook` 省略時に default が使われる、明示 `spawn_subtask.webhook` が default より勝つ、agent/tool-specific が global より勝つ、空/不正 URL は安全に fallback/無効化される。
-- `02940b7` の env/config fallback は、DB default が無い場合だけ使われること、DB default がある場合は上書きしないことを検証。
-- gateway actions は権限検証を必須にする: owner/admin-capable だけが set/create 可能、通常 read は redacted URL のみ、`include_secret=true` は明示認可なしでは raw token を返さない。
-- webhook worker は解決済み default URL を受け取って配送できることをモック HTTP で検証し、ログには raw URL/token が出ないことをログ capture で確認する。
+- 解決規則は in-memory DB（`init_memory`）で検証: `spawn_subtask.webhook` 省略時に default が使われる、明示 `spawn_subtask.webhook` が default より勝つ、tool-specific > agent-specific > global の順に勝つ、DB 行が無い時だけ env/config fallback が使われる。
+- 明示 `spawn_subtask.webhook` の空/不正 URL、DB default の空/不正 URL、`enabled=false` が下位 fallback で隠蔽されず、エージェントに識別可能なエラーまたは Webhook なし結果として返ることを検証。
+- `02940b7` の env/config fallback は、DB default が無い場合だけ使われること、DB default がある場合は上書きしないこと、fallback 使用時に `webhook_source='env_config'` が返ることを検証。
+- gateway actions は権限検証を必須にする: `CallerIdentity::Owner` だけが set/create 可能、通常 read は redacted URL のみ、raw token を返さない。
+- webhook worker は解決済み default URL を受け取って配送できること、明示 webhook の started 配送失敗が `spawn_subtask` のエラーとして返ること、非同期配送失敗が親セッションログに warning/error として残ること、ログには raw URL/token が出ないことをモック HTTP とログ capture で確認する。
 
 ### Migration / 後方互換
 - 新テーブルのみ追加、既存スキーマは不変 → 既存 DB はそのまま起動可能。
