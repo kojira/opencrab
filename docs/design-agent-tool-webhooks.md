@@ -60,30 +60,38 @@
 
 ### 2.1 エージェント単位 Webhook 設定
 
-エージェントに紐づく「ツール活動 Webhook」の URL とイベントフィルタを永続化する。`spawn_subtask` 引数の都度指定とは独立に、**エージェント既定**として常時有効化できることが狙い。
+エージェントに紐づく Webhook 設定（本設計のツール活動配信、および subtask ライフサイクル既定）の URL とイベントフィルタを永続化する。`spawn_subtask` 引数の都度指定とは独立に、**エージェント既定**として常時有効化できることが狙い。スコープ（agent / tool / global）と種別（`kind`）は同一テーブルで表す（2.3 参照）。
 
 **採用案: 専用テーブル `agent_webhook_config` を新設**（`agents.metadata_json` への埋め込みではなく）。理由:
 - 複数 URL（ライフサイクル用・ツール用で別チャンネル）を将来許容しやすい。
 - `enabled` / イベントフィルタ / 出力ポリシーを構造化列で持て、`metadata_json` の肥大化と読み書き競合を避ける。
 - migration が `ALTER` ではなく `CREATE TABLE IF NOT EXISTS` で完結（既存テーブルに触れない＝後方互換）。
 
+スコープ・種別・出力ポリシーをすべて含む最終的な概念スキーマを 1 か所にまとめる（2.3 で別途列を追加しない）:
+
 ```sql
 CREATE TABLE IF NOT EXISTS agent_webhook_config (
-    agent_id     TEXT NOT NULL,
-    kind         TEXT NOT NULL DEFAULT 'tool',  -- 'tool' | 'lifecycle'（将来分離用）
+    scope        TEXT NOT NULL DEFAULT 'agent',   -- 'agent' | 'tool' | 'global'
+    agent_id     TEXT NOT NULL,                   -- global は '*'
+    tool_name    TEXT NOT NULL DEFAULT '',        -- scope='tool' のとき使用。未使用は ''（NULL を避けキーを一意化）
+    kind         TEXT NOT NULL DEFAULT 'subtask', -- 'subtask'（ライフサイクル既定）| 'tool'（ツール活動配信）| 'lifecycle'（'subtask' の互換別名）
     url          TEXT NOT NULL,
-    events_json  TEXT,                          -- ["tool_call_started", ...] / NULL=全件
+    events_json  TEXT,                            -- ["tool_call_started", ...] / NULL=全件
     enabled      INTEGER NOT NULL DEFAULT 1,
+    name         TEXT,                            -- list/ensure 用の表示名。例: 'default-subtask-progress'
+    created_by   TEXT,
     -- 出力ポリシー（4章参照）
     output_mode  TEXT NOT NULL DEFAULT 'summary', -- 'summary' | 'off' | 'full'(opt-in)
     max_chars    INTEGER NOT NULL DEFAULT 1500,
     updated_at   TEXT NOT NULL,
-    PRIMARY KEY (agent_id, kind)
+    PRIMARY KEY (scope, agent_id, tool_name, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_webhook_agent ON agent_webhook_config(agent_id);
 ```
 
-`queries.rs` に追加: `AgentWebhookConfigRow` / `get_agent_webhook_config(agent_id, kind)` / `upsert_agent_webhook_config(...)`。
+> キー設計メモ: 一意キーは `(scope, agent_id, tool_name, kind)`。`tool_name` と `agent_id` は NULL を許さずセンチネル（未使用は `''`、global は `agent_id='*'`）で表し、NULL 同士が一意制約上は別物と扱われる SQLite の挙動を避ける。これにより上記スキーマはそのまま migration 可能（新テーブルのみ、既存テーブルは不変）。
+
+`queries.rs` に追加: `AgentWebhookConfigRow` / `get_agent_webhook_config(scope, agent_id, tool_name, kind)` / `upsert_agent_webhook_config(...)` / `list_agent_webhook_config(...)`。
 
 > 代替案（不採用）: `agents.metadata_json` に `{ "tool_webhook": {...} }` を埋める。スキーマ変更不要だが、構造化フィルタ・index・将来の複数 URL に弱く、ダッシュボード編集時の JSON 全置換リスクがある。最小実装を最優先するなら fallback として許容。
 
@@ -93,31 +101,29 @@ CREATE INDEX IF NOT EXISTS idx_agent_webhook_agent ON agent_webhook_config(agent
 
 解決順は以下で固定する。
 
-1. `spawn_subtask` 引数 `args["webhook"]` が指定されていれば、それを**ライフサイクル + ツール**両方の宛先として最優先（現行挙動を壊さない）。
+1. `spawn_subtask` 引数 `args["webhook"]` が指定されていれば、それをその run の**ライフサイクル + subtask 由来のツール観測イベント**の宛先として最優先（現行挙動を壊さない）。
 2. 引数指定が無い場合、agent/tool-specific の subtask Webhook 設定を参照する。例: `scope='agent'` + `agent_id` + `kind='subtask'`、または `scope='tool'` + `tool_name='spawn_subtask'`。
 3. agent/tool-specific が無い場合、global/default subtask Webhook を参照する。
 4. DB に有効な既定が無い場合のみ、既存の env/config fallback（`02940b7` の設定）を読む。
 5. どれも無い、または空/不正 URL の場合は Webhook なしで実行する。fallback の失敗で subtask 本体を止めない。
 
-明示指定と DB 既定を同時に送る挙動にはしない。`spawn_subtask.webhook` は「この run だけ宛先を上書きする」意味であり、重複通知を避ける。ツール活動 Webhook を別チャンネルへ流す既存設計は `events` / `kind` により複数 target を持てるが、subtask lifecycle の既定解決は上記の単一勝者を基本にする。
+明示指定と subtask default（`kind='subtask'` / `kind='lifecycle'`）を同時に送る挙動にはしない。`spawn_subtask.webhook` は「この run だけ subtask 通知先を上書きする」意味であり、重複通知を避ける。一方、全ツール活動 Webhook（`kind='tool'`）を別チャンネルへ流す既存設計は独立した観測ストリームとして維持し、同じ URL へ解決された場合だけ URL で de-dupe する。つまり上記の単一勝者ルールは subtask default 解決に適用し、恒久的な `kind='tool'` 配信を暗黙に無効化しない。
 
 実装上は `WebhookConfig` を拡張し「複数宛先 + 出力ポリシー」を表せる新型 `ResolvedWebhooks { targets: Vec<WebhookTarget> }` を導入。`WebhookTarget { url, events, output_mode, max_chars, source }`。`source` は `explicit` / `agent_default` / `tool_default` / `global_default` / `env_config` のいずれかで、ログや通常レスポンスには URL ではなく source と redacted URL のみを出す。`from_args` は引数由来の 1 ターゲットを返し、別関数 `resolve_for_agent(db, agent_id, tool_name, args)` が DB と env/config fallback を順に解決して `ResolvedWebhooks` を組む。既存 `WebhookConfig` は後方互換のため残置（内部で `WebhookTarget` に変換）。
 
 ### 2.3 既定 Webhook の永続化と再利用ポリシー
 
-subtask 既定値は `agent_webhook_config` を拡張して同じテーブルで表現する案を採用する。新規テーブルを増やすより、URL・イベントフィルタ・出力ポリシー・enabled・更新時刻を同じ API で扱えるため。ただし key は agent/tool/global を区別できるようにする。
+subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_config` でそのまま表現する。URL・イベントフィルタ・出力ポリシー・enabled・更新時刻を同じ API で扱えるためで、2.1 のスキーマは scope/agent/tool/global を区別する列（`scope` / `tool_name` / `name` / `created_by`）を最初から含む。
 
-概念スキーマ:
+キーの使い分けは 2.1 の `PRIMARY KEY (scope, agent_id, tool_name, kind)` に従う:
 
-```sql
--- 既存案への追加列（実装時は migration 方針に合わせて冪等追加）
-scope       TEXT NOT NULL DEFAULT 'agent', -- 'agent' | 'tool' | 'global'
-tool_name   TEXT,                          -- scope='tool' のとき使用
-name        TEXT,                          -- list/ensure 用の表示名。例: 'default-subtask-progress'
-created_by  TEXT,
-```
+- global: `scope='global'` / `agent_id='*'` / `tool_name=''`
+- agent-specific: `scope='agent'` / `agent_id=<agent>` / `tool_name=''`
+- tool-specific: `scope='tool'` / `agent_id=<agent>` / `tool_name='spawn_subtask'`
 
-主キーは将来実装で整理するが、概念上は `(scope, agent_id, tool_name, kind)` を一意にする。global は `agent_id='*'` / `tool_name=NULL`、agent-specific は `agent_id=<agent>`、tool-specific は `tool_name='spawn_subtask'` のように分ける。`kind='subtask'` は started/completed/failed/timed_out/aborted などライフサイクル既定、`kind='tool'` は本設計のツール活動配信、`kind='lifecycle'` は既存互換の別名として扱う。
+`kind` は配信対象を表し、`subtask`（started/completed/failed/timed_out/aborted のライフサイクル既定）、`tool`（本設計のツール活動配信）、`lifecycle`（`subtask` の既存互換別名）のいずれか。
+
+> 用語注意: `scope='tool'`（gateway action の `tool_name` で引く tool-specific 設定の粒度）と `kind='tool'`（ツール活動ストリーミングという配信種別）は別概念。`scope` は「どの粒度の設定か」、`kind` は「何を配信するか」を表す。
 
 再利用方針:
 
