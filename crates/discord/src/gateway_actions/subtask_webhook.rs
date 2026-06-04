@@ -9,6 +9,19 @@
 //! - `list_subtask_webhooks`: owner/trusted_user/co_agent。設定一覧を redacted で返す。
 //!
 //! いずれも raw url/token は決して返さない・記録しない（redact_webhook_url のみ）。
+//!
+//! # フォローアップ（意図的に本 PR の範囲外）
+//!
+//! 以下は活動 webhook の将来拡張として残す。安全に小さく出せる範囲ではないため、
+//! 別 PR で扱う:
+//! - **depth0 のツール活動ストリーミング**: 現状 `ToolEventSink` は spawn_subtask の
+//!   sub-engine（depth >= 1）にのみ挿す。メインエージェント自身（depth0）のツール
+//!   呼び出しは配送しない。実装には message_loop 側の executor 配線が必要。
+//! - **汎用 API 名のエイリアス**: `set_default_webhook` / `get_default_webhook` /
+//!   `ensure_webhook` / `list_webhooks`。現状は `*_subtask_webhook`（activity family を
+//!   `family='activity'` で包含）。汎用名はツール面を増やすため別途設計する。
+//! - **`output_mode` の適用**: DB には保存・list で返すが、整形側（build_tool_event_message）
+//!   は常に summary 相当。`full` ストリーミングは未実装。`max_chars` はクランプに適用済み。
 
 use opencrab_gateway::GatewayActionResult;
 use serde_json::json;
@@ -23,6 +36,31 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
         success: false,
         data: None,
         error: Some(msg.into()),
+    }
+}
+
+/// 権限ポリシーによる拒否（実行に到達しない）を構造的に表す。
+///
+/// 分類器（`opencrab_actions::is_rejection`）が安定して rejected と判定できるよう、
+/// 文言の先頭へ構造マーカー（`REJECTION_CODE_PREFIX`）を付ける。説明文はそのまま
+/// 残すので、`forbidden_scope` / `requires owner` 等の既存トークンも保持される。
+/// raw な機微情報（url/token）は決して載せない。実行に到達しないこの拒否を
+/// ログでも観測可能にする。
+fn reject(msg: impl Into<String>) -> GatewayActionResult {
+    let msg = msg.into();
+    tracing::debug!(
+        target: "webhook_audit",
+        reason = %msg,
+        "gateway action rejected by permission policy"
+    );
+    GatewayActionResult {
+        success: false,
+        data: None,
+        error: Some(format!(
+            "{}{}",
+            opencrab_actions::REJECTION_CODE_PREFIX,
+            msg
+        )),
     }
 }
 
@@ -61,7 +99,7 @@ impl DiscordGatewayActions {
             .and_then(|v| v.as_str())
             .unwrap_or("agent");
         if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
-            return err("redacted read requires owner/trusted_user/co_agent");
+            return reject("redacted read requires owner/trusted_user/co_agent");
         }
         if args
             .get("include_secret")
@@ -150,17 +188,17 @@ impl DiscordGatewayActions {
             .get("__caller")
             .and_then(|v| v.as_str())
             .unwrap_or("agent");
-        if caller != "owner" {
-            return err("this action is owner-only");
-        }
 
         let scope = match args.get("scope").and_then(|v| v.as_str()) {
             Some(s) if matches!(s, "agent" | "tool" | "global") => s.to_string(),
             _ => return err("scope is required: 'agent' | 'tool' | 'global'"),
         };
+        // `family` を優先し、後方互換で `kind` も受ける。既定は subtask（このアクションは
+        // subtask 系互換エイリアス）。activity family を設定したい場合は family='activity'。
         let kind = args
-            .get("kind")
+            .get("family")
             .and_then(|v| v.as_str())
+            .or_else(|| args.get("kind").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty())
             .unwrap_or("subtask")
             .to_string();
@@ -174,6 +212,30 @@ impl DiscordGatewayActions {
                 .unwrap_or(&self.agent_id)
                 .to_string()
         };
+
+        // 権限: owner は全 scope を set/disable できる。Agent は自分自身の agent scope
+        // （scope='agent' かつ agent_id が自分）のみ。それ以外（tool/global/他 agent）は拒否。
+        // trusted_user / co_agent は read-only（set/disable 不可）。
+        match caller {
+            "owner" => {}
+            "agent" => {
+                if scope != "agent" {
+                    return reject(
+                        "forbidden_scope: an agent may only set/disable its own agent-scope default webhook",
+                    );
+                }
+                if agent_id != self.agent_id {
+                    return reject(
+                        "forbidden_scope: an agent may only set/disable its own agent default webhook",
+                    );
+                }
+            }
+            _ => {
+                return reject(
+                    "set/disable requires owner (agents may manage only their own agent scope)",
+                );
+            }
+        }
         let tool_name =
             Self::default_tool_name(&scope, args.get("tool_name").and_then(|v| v.as_str()));
 
@@ -282,7 +344,7 @@ impl DiscordGatewayActions {
             .and_then(|v| v.as_str())
             .unwrap_or("agent");
         if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
-            return err("redacted read requires owner/trusted_user/co_agent");
+            return reject("redacted read requires owner/trusted_user/co_agent");
         }
 
         let scope = args
@@ -333,7 +395,7 @@ impl DiscordGatewayActions {
 
         // 作成が必要 → owner 限定 + channel_id 必須。
         if caller != "owner" {
-            return err("creating a webhook is owner-only");
+            return reject("creating a webhook is owner-only");
         }
         let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
             Some(c) if !c.is_empty() => c.to_string(),
@@ -429,7 +491,7 @@ impl DiscordGatewayActions {
             .and_then(|v| v.as_str())
             .unwrap_or("agent");
         if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
-            return err("redacted read requires owner/trusted_user/co_agent");
+            return reject("redacted read requires owner/trusted_user/co_agent");
         }
 
         let agent_id = args

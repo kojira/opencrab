@@ -347,7 +347,7 @@ impl SkillEngine {
 
                     let result = self
                         .executor
-                        .execute(&tool_call.name, &tool_call.arguments)
+                        .execute_with_id(&tool_call.name, &tool_call.arguments, &tool_call.id)
                         .await;
 
                     let result_json = serde_json::to_string(&result).unwrap_or_else(|_| {

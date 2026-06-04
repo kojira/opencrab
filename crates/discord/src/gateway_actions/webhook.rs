@@ -283,6 +283,207 @@ pub fn redact_webhook_url(url: &str) -> String {
     }
 }
 
+// ---- Secret redaction (Phase 1) ----
+
+const REDACTED: &str = "[REDACTED]";
+const SECRET_PREFIXES: [&str; 4] = ["sk-", "ghp_", "xoxb-", "AKIA"];
+const KV_MARKERS: [&str; 5] = ["TOKEN", "SECRET", "PASSWORD", "KEY", "API"];
+
+/// 既知のシークレットパターンを [REDACTED] に置換する。配送直前に全フィールドへ通す。
+/// 取りこぼし対策として保守的に倒す（長い base64/hex 連や Bearer トークンも redact）。
+/// 冪等: 既に redact 済みの文字列を再度通しても安全。
+pub fn redact_secrets(input: &str) -> String {
+    input
+        .split('\n')
+        .map(redact_secrets_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn redact_secrets_line(line: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut redact_next = false;
+    for tok in line.split_whitespace() {
+        if redact_next {
+            out.push(REDACTED.to_string());
+            redact_next = false;
+            continue;
+        }
+        if tok.eq_ignore_ascii_case("bearer") {
+            out.push(tok.to_string());
+            redact_next = true;
+            continue;
+        }
+        let (rendered, want_next) = redact_secret_token(tok);
+        out.push(rendered);
+        redact_next = want_next;
+    }
+    out.join(" ")
+}
+
+/// 1 トークンを検査し、(置換後文字列, 次トークンも redact すべきか) を返す。
+fn redact_secret_token(tok: &str) -> (String, bool) {
+    let core = tok.trim_matches(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | ',' | ';' | '(' | ')' | '`' | '[' | ']' | '{' | '}'
+        )
+    });
+    if core.is_empty() {
+        return (tok.to_string(), false);
+    }
+    // Discord webhook URL（ホスト不問）
+    if core.contains("/api/webhooks/") {
+        return (REDACTED.to_string(), false);
+    }
+    // KEY=VALUE / KEY:VALUE （キーに TOKEN/SECRET/PASSWORD/KEY/API を含む）
+    if let Some(idx) = core.find(|c: char| c == '=' || c == ':') {
+        let (k, rest) = core.split_at(idx);
+        let delim = &core[idx..idx + 1];
+        let value = &rest[1..];
+        let key_up = k.trim_matches('"').to_ascii_uppercase();
+        if KV_MARKERS.iter().any(|m| key_up.contains(m)) {
+            if value.trim().is_empty() {
+                // 値は次トークン側にある（例: `"token": "abc"`）
+                return (tok.to_string(), true);
+            }
+            return (format!("{k}{delim}{REDACTED}"), false);
+        }
+    }
+    // 既知プレフィックス
+    for p in SECRET_PREFIXES {
+        if core.starts_with(p) && core.len() > p.len() + 3 {
+            return (REDACTED.to_string(), false);
+        }
+    }
+    // 長い base64 / hex 連
+    if core.len() >= 32
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
+    {
+        return (REDACTED.to_string(), false);
+    }
+    (tok.to_string(), false)
+}
+
+// ---- Shell result summary (Phase 1) ----
+
+const SHELL_HEAD_TAIL: usize = 600;
+
+/// execute_shell の result data から抽出した安全なサマリ。
+#[derive(Clone, Debug, Default)]
+pub struct ShellResultSummary {
+    pub exit_code: Option<i64>,
+    pub stdout_summary: Option<String>,
+    pub stderr_summary: Option<String>,
+    pub truncated: bool,
+}
+
+/// execute_shell の ActionResult.data から exit_code / 出力サマリ / truncated を取り出す。
+/// 出力は先頭 N + 末尾 N にクランプし redact_secrets を通す（raw 出力を素通ししない）。
+pub fn summarize_shell_result(data: &serde_json::Value) -> ShellResultSummary {
+    let exit_code = data.get("exit_code").and_then(|v| v.as_i64());
+    let truncated = data
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let summarize_field = |key: &str| -> Option<String> {
+        let raw = data.get(key).and_then(|v| v.as_str())?;
+        if raw.is_empty() {
+            return None;
+        }
+        Some(redact_secrets(&head_tail_clamp(raw, SHELL_HEAD_TAIL)))
+    };
+    ShellResultSummary {
+        exit_code,
+        stdout_summary: summarize_field("stdout"),
+        stderr_summary: summarize_field("stderr"),
+        truncated,
+    }
+}
+
+/// 先頭 n + 末尾 n 文字に丸める（UTF-8 境界を壊さない。超過時は中央を省略表示）。
+fn head_tail_clamp(text: &str, n: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= n * 2 {
+        return text.to_string();
+    }
+    let head: String = chars[..n].iter().collect();
+    let tail: String = chars[chars.len() - n..].iter().collect();
+    let omitted = chars.len() - n * 2;
+    format!("{head}\n…[{omitted} chars omitted]…\n{tail}")
+}
+
+// ---- Tool event Discord formatting (Phase 1) ----
+
+/// ツールイベント 1 件の整形入力（payload 概念スキーマ 3.3 の Discord 整形版）。
+#[derive(Clone, Debug, Default)]
+pub struct ToolEventView {
+    pub event: String, // tool_call_started/completed/failed/rejected
+    pub tool_name: String,
+    pub tool_call_id: String,
+    pub depth: u32,
+    pub status: String, // started/completed/failed/rejected
+    pub duration_ms: Option<u64>,
+    pub args_summary: Option<String>,
+    pub result_summary: Option<String>,
+    pub exit_code: Option<i64>,
+    pub stdout_summary: Option<String>,
+    pub stderr_summary: Option<String>,
+    pub truncated: bool,
+    pub rejection_reason: Option<String>,
+    pub max_chars: usize, // 0 → default 1500
+}
+
+/// ツールイベントを Discord 用メッセージへ整形する。
+/// - URL/トークン/シークレットは載せない（全テキストへ redact_secrets を通す）。
+/// - max_chars（既定 1500、ハード上限 DISCORD_MESSAGE_LIMIT）でクランプする。
+pub fn build_tool_event_message(view: &ToolEventView) -> Vec<String> {
+    let emoji = match view.status.as_str() {
+        "started" => "▶️",
+        "completed" => "✅",
+        "failed" => "❌",
+        "rejected" => "🚫",
+        _ => "ℹ️",
+    };
+    let mut s = format!(
+        "{emoji} **{}**\ntool: `{}`\ncallId: `{}`\ndepth: {}",
+        view.event, view.tool_name, view.tool_call_id, view.depth
+    );
+    if let Some(d) = view.duration_ms {
+        s.push_str(&format!("\nduration: {d}ms"));
+    }
+    if let Some(code) = view.exit_code {
+        s.push_str(&format!("\nexit_code: `{code}`"));
+    }
+    if let Some(reason) = &view.rejection_reason {
+        s.push_str(&format!("\nrejection: {}", redact_secrets(reason)));
+    }
+    if let Some(args) = &view.args_summary {
+        s.push_str(&format!("\nargs: {}", redact_secrets(args)));
+    }
+    if let Some(res) = &view.result_summary {
+        s.push_str(&format!("\nresult: {}", redact_secrets(res)));
+    }
+    if let Some(out) = &view.stdout_summary {
+        s.push_str(&format!("\nstdout:\n{}", redact_secrets(out)));
+    }
+    if let Some(errout) = &view.stderr_summary {
+        s.push_str(&format!("\nstderr:\n{}", redact_secrets(errout)));
+    }
+    if view.truncated {
+        s.push_str("\n(truncated)");
+    }
+    let limit = if view.max_chars == 0 { 1500 } else { view.max_chars };
+    let hard = limit.min(DISCORD_MESSAGE_LIMIT);
+    if s.chars().count() > hard {
+        let kept: String = s.chars().take(hard.saturating_sub(1)).collect();
+        s = format!("{kept}…");
+    }
+    vec![s]
+}
+
 /// Discord webhook URL を検証する。空・パース不可・Discord webhook でない場合は Err(理由)。
 ///
 /// 理由文字列に raw URL は含めない。
@@ -403,14 +604,15 @@ struct AgentWebhookConfigRowLite {
     enabled: bool,
 }
 
-/// 1 つの scope について subtask 行（無ければ lifecycle alias）を取得する。
-fn fetch_scope_row(
+/// 1 つの scope について指定 kind 群を順に試し、最初に見つかった行を返す。
+fn fetch_scope_row_kinds(
     conn: &rusqlite::Connection,
     scope: &str,
     agent_id: &str,
     tool_name: &str,
+    kinds: &[&str],
 ) -> Option<AgentWebhookConfigRowLite> {
-    for kind in ["subtask", "lifecycle"] {
+    for kind in kinds {
         if let Ok(Some(r)) =
             opencrab_db::queries::get_agent_webhook_config(conn, scope, agent_id, tool_name, kind)
         {
@@ -422,6 +624,21 @@ fn fetch_scope_row(
         }
     }
     None
+}
+
+/// 1 つの scope について subtask lifecycle の宛先行を取得する。
+///
+/// 優先順位は `subtask > lifecycle > activity`。subtask 専用に設定された明示的な
+/// デフォルト（subtask/lifecycle kind）を、汎用 activity デフォルトより優先する。
+/// activity family は subtask ライフサイクルも包含するため、subtask 専用行が無い
+/// ときのフォールバックとして最後に見る。
+fn fetch_scope_row(
+    conn: &rusqlite::Connection,
+    scope: &str,
+    agent_id: &str,
+    tool_name: &str,
+) -> Option<AgentWebhookConfigRowLite> {
+    fetch_scope_row_kinds(conn, scope, agent_id, tool_name, &["subtask", "lifecycle", "activity"])
 }
 
 /// subtask webhook を固定順序で解決する。
@@ -486,6 +703,33 @@ pub fn resolve_subtask_webhook(
         },
         None => WebhookResolution::None,
     }
+}
+
+/// 一般ツール/コマンド活動（activity family）の宛先を固定順序で解決する。
+///
+/// 優先順位: tool-specific(activity) > agent(activity) > global(activity)。
+/// 明示 per-call webhook も env/config fallback も用いない（design 2.2: env/config は
+/// subtask ファミリ限定）。activity kind の DB 行のみを見る。
+/// disabled / 不正 URL は下位へ fall through しない（no-silent-fallback）。
+pub fn resolve_activity_webhook(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    tool_name: &str,
+) -> WebhookResolution {
+    if !tool_name.is_empty() {
+        if let Some(row) =
+            fetch_scope_row_kinds(conn, "tool", agent_id, tool_name, &["activity"])
+        {
+            return resolve_db_row(row, WebhookSource::ToolDefault);
+        }
+    }
+    if let Some(row) = fetch_scope_row_kinds(conn, "agent", agent_id, "", &["activity"]) {
+        return resolve_db_row(row, WebhookSource::AgentDefault);
+    }
+    if let Some(row) = fetch_scope_row_kinds(conn, "global", "*", "", &["activity"]) {
+        return resolve_db_row(row, WebhookSource::GlobalDefault);
+    }
+    WebhookResolution::None
 }
 
 /// webhook 配送が最終的に失敗したとき、親セッションログに 1 件記録する。
@@ -951,6 +1195,216 @@ mod tests {
         insert_row(&conn2, "tool", "a1", "spawn_subtask", "lifecycle", VALID_URL, true);
         let r2 = resolve_subtask_webhook(&conn2, "a1", "spawn_subtask", &json!({}), None);
         assert_eq!(use_source(&r2), WebhookSource::ToolDefault);
+    }
+
+    // ---- secret redaction ----
+
+    #[test]
+    fn test_redact_secrets_scrubs_known_patterns() {
+        let input = "key sk-ABCDEFGHIJKLMNOP and ghp_0123456789abcdefghij and AKIAABCDEFGHIJKLMNOP \
+                     Authorization: Bearer myreallylongtoken123456 \
+                     API_KEY=supersecretvalue \
+                     hook https://discord.com/api/webhooks/123/abcdefSECRETtoken \
+                     hex 0123456789abcdef0123456789abcdef0123";
+        let out = redact_secrets(input);
+        assert!(!out.contains("sk-ABCDEFGHIJKLMNOP"), "sk leaked: {out}");
+        assert!(!out.contains("ghp_0123456789abcdefghij"), "ghp leaked: {out}");
+        assert!(!out.contains("AKIAABCDEFGHIJKLMNOP"), "akia leaked: {out}");
+        assert!(!out.contains("myreallylongtoken123456"), "bearer leaked: {out}");
+        assert!(!out.contains("supersecretvalue"), "kv leaked: {out}");
+        assert!(!out.contains("abcdefSECRETtoken"), "webhook token leaked: {out}");
+        assert!(out.contains("[REDACTED]"));
+        // benign words preserved
+        assert!(out.contains("key"));
+        assert!(out.contains("Authorization:"));
+    }
+
+    #[test]
+    fn test_redact_secrets_kv_value_in_next_token() {
+        let out = redact_secrets("\"token\": \"abcdefghijklmnopqrstuvwx\"");
+        assert!(!out.contains("abcdefghijklmnopqrstuvwx"), "value leaked: {out}");
+        assert!(out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redact_secrets_idempotent_and_keeps_plain_text() {
+        let plain = "hello world exit=0 done";
+        assert_eq!(redact_secrets(plain), plain);
+        let once = redact_secrets("API_KEY=supersecretvalue");
+        let twice = redact_secrets(&once);
+        assert_eq!(once, twice);
+    }
+
+    // ---- shell result summary ----
+
+    #[test]
+    fn test_summarize_shell_result_extracts_and_redacts() {
+        let data = json!({
+            "exit_code": 0,
+            "stdout": "ok API_KEY=supersecretvalue done",
+            "stderr": "",
+            "truncated": false,
+        });
+        let s = summarize_shell_result(&data);
+        assert_eq!(s.exit_code, Some(0));
+        assert!(!s.truncated);
+        let out = s.stdout_summary.unwrap();
+        assert!(!out.contains("supersecretvalue"), "secret leaked: {out}");
+        assert!(s.stderr_summary.is_none());
+    }
+
+    #[test]
+    fn test_summarize_shell_result_clamps_long_output() {
+        let long = "x".repeat(5000);
+        let data = json!({ "exit_code": 1, "stdout": long, "truncated": true });
+        let s = summarize_shell_result(&data);
+        assert!(s.truncated);
+        let out = s.stdout_summary.unwrap();
+        assert!(out.chars().count() < 5000);
+        assert!(out.contains("omitted"));
+    }
+
+    // ---- tool event formatting ----
+
+    #[test]
+    fn test_build_tool_event_message_redacts_and_clamps() {
+        let view = ToolEventView {
+            event: "tool_call_completed".to_string(),
+            tool_name: "execute_shell".to_string(),
+            tool_call_id: "c1".to_string(),
+            depth: 1,
+            status: "completed".to_string(),
+            duration_ms: Some(42),
+            args_summary: Some("cmd: `echo API_KEY=supersecretvalue`".to_string()),
+            result_summary: None,
+            exit_code: Some(0),
+            stdout_summary: Some("token ghp_0123456789abcdefghij".to_string()),
+            stderr_summary: None,
+            truncated: false,
+            rejection_reason: None,
+            max_chars: 1500,
+        };
+        let msgs = build_tool_event_message(&view);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        assert!(m.contains("tool_call_completed"));
+        assert!(m.contains("execute_shell"));
+        assert!(m.contains("exit_code"));
+        assert!(!m.contains("supersecretvalue"), "secret in args leaked: {m}");
+        assert!(!m.contains("ghp_0123456789abcdefghij"), "secret in stdout leaked: {m}");
+        assert!(m.chars().count() <= 1500);
+    }
+
+    #[test]
+    fn test_build_tool_event_message_clamps_to_max_chars() {
+        let view = ToolEventView {
+            event: "tool_call_completed".to_string(),
+            tool_name: "x".to_string(),
+            tool_call_id: "c".to_string(),
+            depth: 1,
+            status: "completed".to_string(),
+            result_summary: Some("y".repeat(5000)),
+            max_chars: 300,
+            ..Default::default()
+        };
+        let msgs = build_tool_event_message(&view);
+        assert!(msgs[0].chars().count() <= 300);
+    }
+
+    // ---- activity-family resolution ----
+
+    #[test]
+    fn test_resolve_activity_tool_beats_agent_beats_global() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "global", "*", "", "activity", VALID_URL, true);
+        insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
+        insert_row(&conn, "tool", "a1", "execute_shell", "activity", VALID_URL, true);
+        let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
+        assert_eq!(use_source(&r), WebhookSource::ToolDefault);
+
+        let conn2 = opencrab_db::init_memory().unwrap();
+        insert_row(&conn2, "global", "*", "", "activity", VALID_URL, true);
+        insert_row(&conn2, "agent", "a1", "", "activity", VALID_URL, true);
+        let r2 = resolve_activity_webhook(&conn2, "a1", "execute_shell");
+        assert_eq!(use_source(&r2), WebhookSource::AgentDefault);
+
+        let conn3 = opencrab_db::init_memory().unwrap();
+        insert_row(&conn3, "global", "*", "", "activity", VALID_URL, true);
+        let r3 = resolve_activity_webhook(&conn3, "a1", "execute_shell");
+        assert_eq!(use_source(&r3), WebhookSource::GlobalDefault);
+    }
+
+    #[test]
+    fn test_resolve_activity_ignores_subtask_kind_and_has_no_env() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // only a subtask-kind agent row exists -> activity resolution must NOT use it.
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
+        assert!(matches!(r, WebhookResolution::None), "subtask kind must not serve activity");
+    }
+
+    #[test]
+    fn test_resolve_activity_disabled_no_fallthrough() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "tool", "a1", "execute_shell", "activity", VALID_URL, false);
+        insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
+        let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
+        assert!(matches!(r, WebhookResolution::Disabled { source: WebhookSource::ToolDefault }));
+    }
+
+    #[test]
+    fn test_resolve_activity_invalid_db_default_errors() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "activity", "http://bad", true);
+        let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
+        match r {
+            WebhookResolution::Error { code, source, .. } => {
+                assert_eq!(code, "invalid_default_webhook");
+                assert_eq!(source, WebhookSource::AgentDefault);
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_activity_also_serves_subtask_lifecycle() {
+        // An agent 'activity' default should also be picked up by resolve_subtask_webhook
+        // (activity family includes subtask lifecycle).
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
+    }
+
+    #[test]
+    fn test_resolve_subtask_prefers_explicit_subtask_over_activity_same_scope() {
+        // L3: 同一 scope に subtask 専用行と汎用 activity 行が両方あるとき、subtask 通知は
+        // 明示的な subtask 専用デフォルトへ送る（activity に奪われない）。
+        const SUBTASK_URL: &str = "https://discord.com/api/webhooks/111/subtasktoken";
+        const ACTIVITY_URL: &str = "https://discord.com/api/webhooks/222/activitytoken";
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "activity", ACTIVITY_URL, true);
+        insert_row(&conn, "agent", "a1", "", "subtask", SUBTASK_URL, true);
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        match r {
+            WebhookResolution::Use { config, source } => {
+                assert_eq!(source, WebhookSource::AgentDefault);
+                assert_eq!(
+                    config.url, SUBTASK_URL,
+                    "subtask-specific default must win over generic activity"
+                );
+            }
+            _ => panic!("expected Use"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_subtask_falls_back_to_activity_when_no_subtask_row() {
+        // subtask 専用行が無ければ activity 行へフォールバックする（family 包含）。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
     }
 
     // ---- delivery failure recording ----

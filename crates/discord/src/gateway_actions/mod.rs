@@ -1302,7 +1302,122 @@ mod tests {
             )
             .await;
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("owner-only"));
+        assert!(result.error.unwrap().contains("requires owner"));
+    }
+
+    #[tokio::test]
+    async fn test_set_default_subtask_webhook_agent_self_manage_allowed() {
+        let (actions, db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({
+                    "__caller": "agent",
+                    "scope": "agent",
+                    "family": "activity",
+                    "url": WH_VALID_URL,
+                }),
+            )
+            .await;
+        assert!(result.success, "agent self-manage should succeed: {:?}", result.error);
+        let data = result.data.unwrap();
+        assert_eq!(data["enabled"], true);
+
+        let conn = db.lock().unwrap();
+        let row = opencrab_db::queries::get_agent_webhook_config(
+            &conn, "agent", "test-agent", "", "activity",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(row.enabled);
+        assert_eq!(row.url, WH_VALID_URL);
+    }
+
+    #[tokio::test]
+    async fn test_set_default_subtask_webhook_agent_can_disable_own() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({
+                    "__caller": "agent",
+                    "scope": "agent",
+                    "url": "",
+                }),
+            )
+            .await;
+        assert!(result.success, "agent disable should succeed: {:?}", result.error);
+        assert_eq!(result.data.unwrap()["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn test_set_default_subtask_webhook_agent_cannot_set_tool_scope() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({
+                    "__caller": "agent",
+                    "scope": "tool",
+                    "tool_name": "execute_shell",
+                    "url": WH_VALID_URL,
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("forbidden_scope"));
+    }
+
+    #[tokio::test]
+    async fn test_set_default_subtask_webhook_agent_cannot_set_global() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({
+                    "__caller": "agent",
+                    "scope": "global",
+                    "url": WH_VALID_URL,
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("forbidden_scope"));
+    }
+
+    #[tokio::test]
+    async fn test_set_default_subtask_webhook_agent_cannot_set_other_agent() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({
+                    "__caller": "agent",
+                    "scope": "agent",
+                    "agent_id": "someone-else",
+                    "url": WH_VALID_URL,
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("forbidden_scope"));
+    }
+
+    #[tokio::test]
+    async fn test_set_default_subtask_webhook_trusted_user_cannot_set() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({
+                    "__caller": "trusted_user",
+                    "scope": "agent",
+                    "url": WH_VALID_URL,
+                }),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("requires owner"));
     }
 
     #[tokio::test]
