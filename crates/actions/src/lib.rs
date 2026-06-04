@@ -13,7 +13,7 @@ pub mod tools;
 pub mod traits;
 pub mod workspace;
 
-pub use bridge::BridgedExecutor;
+pub use bridge::{BridgedExecutor, ToolEvent, ToolEventSink, ToolEventStatus};
 pub use dispatcher::ActionDispatcher;
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;

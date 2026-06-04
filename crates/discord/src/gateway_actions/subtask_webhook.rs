@@ -150,17 +150,17 @@ impl DiscordGatewayActions {
             .get("__caller")
             .and_then(|v| v.as_str())
             .unwrap_or("agent");
-        if caller != "owner" {
-            return err("this action is owner-only");
-        }
 
         let scope = match args.get("scope").and_then(|v| v.as_str()) {
             Some(s) if matches!(s, "agent" | "tool" | "global") => s.to_string(),
             _ => return err("scope is required: 'agent' | 'tool' | 'global'"),
         };
+        // `family` を優先し、後方互換で `kind` も受ける。既定は subtask（このアクションは
+        // subtask 系互換エイリアス）。activity family を設定したい場合は family='activity'。
         let kind = args
-            .get("kind")
+            .get("family")
             .and_then(|v| v.as_str())
+            .or_else(|| args.get("kind").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty())
             .unwrap_or("subtask")
             .to_string();
@@ -174,6 +174,30 @@ impl DiscordGatewayActions {
                 .unwrap_or(&self.agent_id)
                 .to_string()
         };
+
+        // 権限: owner は全 scope を set/disable できる。Agent は自分自身の agent scope
+        // （scope='agent' かつ agent_id が自分）のみ。それ以外（tool/global/他 agent）は拒否。
+        // trusted_user / co_agent は read-only（set/disable 不可）。
+        match caller {
+            "owner" => {}
+            "agent" => {
+                if scope != "agent" {
+                    return err(
+                        "forbidden_scope: an agent may only set/disable its own agent-scope default webhook",
+                    );
+                }
+                if agent_id != self.agent_id {
+                    return err(
+                        "forbidden_scope: an agent may only set/disable its own agent default webhook",
+                    );
+                }
+            }
+            _ => {
+                return err(
+                    "set/disable requires owner (agents may manage only their own agent scope)",
+                );
+            }
+        }
         let tool_name =
             Self::default_tool_name(&scope, args.get("tool_name").and_then(|v| v.as_str()));
 

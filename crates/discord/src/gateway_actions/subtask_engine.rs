@@ -139,6 +139,31 @@ impl DiscordGatewayActions {
                 None
             };
 
+        // 一般ツール/コマンド活動（activity family）のデフォルト webhook があれば、
+        // sub-engine の executor に ToolEventSink を挿し tool_call_* を配送する。
+        // env/config fallback は使わない（activity kind の DB 行のみ）。
+        let has_activity = {
+            let conn = self.db.lock().unwrap();
+            opencrab_db::queries::list_agent_webhook_config(&conn, Some(&agent_id), false)
+                .map(|rows| rows.iter().any(|r| r.kind == "activity"))
+                .unwrap_or(false)
+        };
+        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> = if has_activity {
+            let tx = webhook_tx.clone().unwrap_or_else(|| {
+                webhook::spawn_run_worker_with_sink(self.webhook_client.clone(), None)
+            });
+            Some(Arc::new(WebhookToolEventSink {
+                db: self.db.clone(),
+                agent_id: agent_id.clone(),
+                tx,
+                max_chars: 1500,
+                counter: std::sync::atomic::AtomicUsize::new(0),
+                cap: 200,
+            }))
+        } else {
+            None
+        };
+
         // Create the sub-session in the DB.
         {
             let conn = self.db.lock().unwrap();
@@ -234,8 +259,14 @@ impl DiscordGatewayActions {
         let mut sub_dispatcher = opencrab_actions::ActionDispatcher::new();
         let tools_cfg = self.tools_config.read().unwrap().clone();
         opencrab_actions::register_tools_from_config(&tools_cfg, &mut sub_dispatcher);
-        let sub_executor =
-            opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx).with_depth(depth);
+        let sub_executor = {
+            let exec =
+                opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx).with_depth(depth);
+            match tool_event_sink {
+                Some(sink) => exec.with_tool_event_sink(sink),
+                None => exec,
+            }
+        };
 
         let mut sub_engine = opencrab_core::SkillEngine::new(
             Box::new(ArcLlmClient(llm_client)),
@@ -659,5 +690,212 @@ fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> Strin
         format!("calling {tools}")
     } else {
         format!("calling {tools}\n{preview}")
+    }
+}
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// activity family のデフォルト webhook へ tool_call_* を配送する sink。
+/// イベントごとに resolve_activity_webhook で宛先を解決（tool > agent > global）し、
+/// build_tool_event_message で redaction + クランプしてから送る。
+struct WebhookToolEventSink {
+    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    agent_id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
+    max_chars: usize,
+    counter: AtomicUsize,
+    cap: usize,
+}
+
+impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
+    fn on_event(&self, ev: &opencrab_actions::ToolEvent<'_>) {
+        use opencrab_actions::ToolEventStatus;
+        let (event_name, status) = match ev.status {
+            ToolEventStatus::Started => ("tool_call_started", "started"),
+            ToolEventStatus::Completed => ("tool_call_completed", "completed"),
+            ToolEventStatus::Failed => ("tool_call_failed", "failed"),
+            ToolEventStatus::Rejected => ("tool_call_rejected", "rejected"),
+        };
+        let resolution = {
+            let conn = match self.db.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            webhook::resolve_activity_webhook(&conn, &self.agent_id, ev.tool_name)
+        };
+        let cfg = match resolution {
+            WebhookResolution::Use { config, .. } => config,
+            _ => return,
+        };
+        if !cfg.wants(event_name) {
+            return;
+        }
+        // per-run の暴走ガード（超過分は 1 通だけ抑制サマリ）。
+        let n = self.counter.fetch_add(1, Ordering::Relaxed);
+        if n == self.cap {
+            let _ = self.tx.send(DeliveryBatch {
+                url: cfg.url.clone(),
+                messages: vec![format!(
+                    "(+ further tool events suppressed after {} this run)",
+                    self.cap
+                )],
+            });
+            return;
+        }
+        if n > self.cap {
+            return;
+        }
+        let mut view = webhook::ToolEventView {
+            event: event_name.to_string(),
+            tool_name: ev.tool_name.to_string(),
+            tool_call_id: ev.tool_call_id.to_string(),
+            depth: ev.depth,
+            status: status.to_string(),
+            duration_ms: ev.duration_ms,
+            max_chars: self.max_chars,
+            ..Default::default()
+        };
+        view.args_summary = summarize_tool_args(ev.tool_name, ev.args);
+        match ev.status {
+            ToolEventStatus::Completed | ToolEventStatus::Failed => {
+                if ev.tool_name == "execute_shell" {
+                    if let Some(data) = ev.result {
+                        let s = webhook::summarize_shell_result(data);
+                        view.exit_code = s.exit_code;
+                        view.stdout_summary = s.stdout_summary;
+                        view.stderr_summary = s.stderr_summary;
+                        view.truncated = s.truncated;
+                    }
+                } else if let Some(e) = ev.error {
+                    view.result_summary = Some(e.to_string());
+                } else if let Some(data) = ev.result {
+                    view.result_summary = Some(short_json_preview(data));
+                }
+            }
+            ToolEventStatus::Rejected => {
+                view.rejection_reason = ev.error.map(|s| s.to_string());
+            }
+            ToolEventStatus::Started => {}
+        }
+        let messages = webhook::build_tool_event_message(&view);
+        let _ = self.tx.send(DeliveryBatch {
+            url: cfg.url.clone(),
+            messages,
+        });
+    }
+}
+
+/// ツール引数の短い要約（execute_shell はコマンドを優先）。redaction は整形側で行う。
+fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    if tool_name == "execute_shell" {
+        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+            let short: String = cmd.chars().take(300).collect();
+            return Some(format!("cmd: `{short}`"));
+        }
+    }
+    let s = args.to_string();
+    if s == "null" || s == "{}" {
+        return None;
+    }
+    Some(s.chars().take(300).collect())
+}
+
+/// 非 shell ツールの result の短い preview。
+fn short_json_preview(data: &serde_json::Value) -> String {
+    data.to_string().chars().take(400).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insert_activity(conn: &rusqlite::Connection) {
+        let row = opencrab_db::queries::AgentWebhookConfigRow {
+            scope: "agent".to_string(),
+            agent_id: "a1".to_string(),
+            tool_name: String::new(),
+            kind: "activity".to_string(),
+            url: "https://discord.com/api/webhooks/1/tok".to_string(),
+            events_json: None,
+            enabled: true,
+            name: None,
+            created_by: Some("owner".to_string()),
+            output_mode: "summary".to_string(),
+            max_chars: 1500,
+            updated_at: String::new(),
+        };
+        opencrab_db::queries::upsert_agent_webhook_config(conn, &row).unwrap();
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_redacts_shell_output() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity(&conn);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = WebhookToolEventSink {
+            db,
+            agent_id: "a1".to_string(),
+            tx,
+            max_chars: 1500,
+            counter: AtomicUsize::new(0),
+            cap: 200,
+        };
+        let args = serde_json::json!({ "command": "echo hi" });
+        let result = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "leaked API_KEY=supersecretvalue here",
+            "truncated": false
+        });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 1,
+            status: opencrab_actions::ToolEventStatus::Completed,
+            started_at: "2026-01-01T00:00:00Z",
+            duration_ms: Some(5),
+            args: &args,
+            result: Some(&result),
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        let batch = rx.try_recv().expect("a batch should be sent");
+        let msg = &batch.messages[0];
+        assert!(msg.contains("tool_call_completed"));
+        assert!(msg.contains("exit_code"));
+        assert!(!msg.contains("supersecretvalue"), "secret leaked: {msg}");
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_no_activity_row_sends_nothing() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = WebhookToolEventSink {
+            db,
+            agent_id: "a1".to_string(),
+            tx,
+            max_chars: 1500,
+            counter: AtomicUsize::new(0),
+            cap: 200,
+        };
+        let args = serde_json::json!({});
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: None,
+            depth: 1,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args: &args,
+            result: None,
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        assert!(rx.try_recv().is_err(), "no activity row -> nothing sent");
     }
 }
