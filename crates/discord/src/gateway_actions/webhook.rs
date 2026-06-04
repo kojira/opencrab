@@ -61,20 +61,31 @@ impl WebhookConfig {
     pub fn wants(&self, event: &str) -> bool {
         match &self.events {
             Some(list) => {
-                if list.iter().any(|e| normalize_event_name(e) == event) {
+                // 比較は canonical な status 名で行う。depth0 sink は
+                // `tool_call_started`/`tool_call_completed`/... を、subtask path は
+                // `subtask.started`/`started`/... を渡してくるため、両辺を正規化して
+                // 同じ語彙（started/completed/failed/rejected/...）で突き合わせる。
+                let want = normalize_event_name(event);
+                if list.iter().any(|e| normalize_event_name(e) == want) {
                     return true;
                 }
                 // Backward compatibility for callers that created lifecycle streams before
                 // progress existed: started/completed streams should include tool progress too.
-                event == "progress" && list.iter().any(|e| normalize_event_name(e) == "started")
+                want == "progress" && list.iter().any(|e| normalize_event_name(e) == "started")
             }
             None => true,
         }
     }
 }
 
+/// イベント名を canonical な status 名へ正規化する。
+/// `subtask.` 接頭辞（subtask lifecycle）と `tool_call_` 接頭辞（depth0 tool sink）を剥がし、
+/// `started`/`completed`/`failed`/`rejected`/`timed_out`/`progress` 等の素の status に揃える。
 fn normalize_event_name(event: &str) -> &str {
-    event.strip_prefix("subtask.").unwrap_or(event)
+    event
+        .strip_prefix("subtask.")
+        .or_else(|| event.strip_prefix("tool_call_"))
+        .unwrap_or(event)
 }
 
 /// lifecycle イベントの共通メタ情報（payload 整形用）。
@@ -991,6 +1002,34 @@ mod tests {
             events: Some(vec!["subtask.started".to_string()]),
         };
         assert!(fully_qualified.wants("started"));
+
+        // Regression: depth0 sink emits `tool_call_*`; the stored allow-list uses the
+        // canonical status vocabulary. Both sides must normalize to the same token so
+        // activity events are not silently dropped before HTTP delivery.
+        let activity_legacy = WebhookConfig {
+            url: "u".to_string(),
+            events: Some(vec![
+                "started".to_string(),
+                "progress".to_string(),
+                "completed".to_string(),
+                "failed".to_string(),
+                "timed_out".to_string(),
+            ]),
+        };
+        assert!(activity_legacy.wants("tool_call_started"));
+        assert!(activity_legacy.wants("tool_call_completed"));
+        assert!(activity_legacy.wants("tool_call_failed"));
+        // `rejected` is a tool-only status absent from this legacy list, so it stays
+        // filtered here; an all-events (None) config delivers it.
+        assert!(!activity_legacy.wants("tool_call_rejected"));
+
+        let activity_explicit = WebhookConfig {
+            url: "u".to_string(),
+            events: Some(vec!["rejected".to_string(), "tool_call_failed".to_string()]),
+        };
+        assert!(activity_explicit.wants("tool_call_rejected"));
+        assert!(activity_explicit.wants("tool_call_failed"));
+        assert!(!activity_explicit.wants("tool_call_started"));
     }
 
     #[test]

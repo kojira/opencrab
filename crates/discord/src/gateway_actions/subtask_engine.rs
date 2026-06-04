@@ -943,6 +943,15 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
             }
         };
         if !cfg.wants(event_name) {
+            // events フィルタで落ちた場合も黙って捨てず、原因が追えるよう診断を残す
+            // （raw URL/token は載せない）。canonical な status 名で一致判定している。
+            tracing::debug!(
+                target: "webhook_audit",
+                agent_id = %self.agent_id,
+                tool = %ev.tool_name,
+                event = %event_name,
+                "activity tool event filtered out by configured events list; tool event dropped"
+            );
             return;
         }
         // per-run の暴走ガード（超過分は 1 通だけ抑制サマリ）。
