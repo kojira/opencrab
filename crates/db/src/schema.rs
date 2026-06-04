@@ -854,6 +854,26 @@ CREATE TABLE IF NOT EXISTS agent_discord_config (
 );
 
 -- ============================================
+-- Agent Webhook Config (subtask/tool/lifecycle webhook defaults)
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_webhook_config (
+    scope        TEXT NOT NULL DEFAULT 'agent',
+    agent_id     TEXT NOT NULL,
+    tool_name    TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'subtask',
+    url          TEXT NOT NULL,
+    events_json  TEXT,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    name         TEXT,
+    created_by   TEXT,
+    output_mode  TEXT NOT NULL DEFAULT 'summary',
+    max_chars    INTEGER NOT NULL DEFAULT 1500,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (scope, agent_id, tool_name, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_webhook_agent ON agent_webhook_config(agent_id);
+
+-- ============================================
 -- 記憶インデックス: 階層ツリーノード
 -- ============================================
 CREATE TABLE IF NOT EXISTS memory_index_nodes (

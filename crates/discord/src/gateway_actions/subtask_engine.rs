@@ -7,7 +7,9 @@ use opencrab_gateway::GatewayActionResult;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::webhook::{self, DeliveryBatch, LifecycleMeta, WebhookConfig};
+use super::webhook::{
+    self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
+};
 use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
 
 impl DiscordGatewayActions {
@@ -39,18 +41,86 @@ impl DiscordGatewayActions {
         let started_instant = std::time::Instant::now();
         let depth = parent_depth + 1;
 
-        // Subtask lifecycle webhook. 明示指定を優先し、省略時は gateway default を使う。
-        let webhook =
-            WebhookConfig::from_args(args).or_else(|| self.default_subtask_webhook.clone());
+        // Subtask lifecycle webhook を固定順序で解決する（explicit > tool > agent > global > env）。
+        // db lock は解決の間だけ握り、await をまたがない。
+        let resolution = {
+            let conn = self.db.lock().unwrap();
+            webhook::resolve_subtask_webhook(
+                &conn,
+                &agent_id,
+                "spawn_subtask",
+                args,
+                self.default_subtask_webhook.as_ref(),
+            )
+        };
+
+        // 解決結果を webhook 設定 + 可視性メタへ写像する。
+        let (webhook, webhook_source, webhook_status): (
+            Option<WebhookConfig>,
+            Option<WebhookSource>,
+            &'static str,
+        ) = match resolution {
+            WebhookResolution::Error {
+                code,
+                message,
+                source,
+            } => {
+                // 検証失敗 → spawn しない。raw url はどこにも出さない。
+                return GatewayActionResult {
+                    success: false,
+                    error: Some(format!("{code}: {message}")),
+                    data: Some(json!({
+                        "webhook_source": source.as_str(),
+                        "webhook_status": "error",
+                        "webhook_error": message,
+                    })),
+                };
+            }
+            WebhookResolution::Use { config, source } => (Some(config), Some(source), "ok"),
+            WebhookResolution::Disabled { source } => (None, Some(source), "disabled"),
+            WebhookResolution::None => (None, None, "none"),
+        };
+        let webhook_redacted_url = webhook
+            .as_ref()
+            .map(|cfg| webhook::redact_webhook_url(&cfg.url));
+        let webhook_source_str: Option<&'static str> = webhook_source.map(|s| s.as_str());
+
         let label = args["label"]
             .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| task.chars().take(50).collect::<String>());
 
+        // give-up 時に親セッションログへ 1 件記録する sink を構築する。
+        let giveup_sink: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> =
+            if webhook.is_some() && !parent_session_id.is_empty() {
+                let db_sink = self.db.clone();
+                let agent_sink = agent_id.clone();
+                let parent_sink = parent_session_id.clone();
+                let subtask_sink = subtask_id.clone();
+                let sub_session_sink = sub_session_id.clone();
+                let redacted_sink = webhook_redacted_url.clone().unwrap_or_default();
+                Some(std::sync::Arc::new(move |error: &str| {
+                    if let Ok(conn) = db_sink.lock() {
+                        webhook::record_webhook_delivery_failure(
+                            &conn,
+                            &agent_sink,
+                            &parent_sink,
+                            &subtask_sink,
+                            &sub_session_sink,
+                            &redacted_sink,
+                            error,
+                        );
+                    }
+                }))
+            } else {
+                None
+            };
+
         // 同一 run の lifecycle delivery を直列化する worker を起動し、started を送る。
         let webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>> =
             if let Some(cfg) = &webhook {
-                let tx = webhook::spawn_run_worker(self.webhook_client.clone());
+                let tx =
+                    webhook::spawn_run_worker_with_sink(self.webhook_client.clone(), giveup_sink);
                 if cfg.wants("started") {
                     let meta = LifecycleMeta {
                         label: label.clone(),
@@ -104,6 +174,9 @@ impl DiscordGatewayActions {
                         "subtask_id": subtask_id,
                         "session_id": sub_session_id,
                         "spawned_at": spawned_at,
+                        "webhook_source": webhook_source_str,
+                        "webhook_status": webhook_status,
+                        "webhook_redacted_url": webhook_redacted_url,
                     })
                     .to_string(),
                     speaker_id: None,
@@ -362,6 +435,10 @@ impl DiscordGatewayActions {
                 "subtask_id": subtask_id,
                 "session_id": sub_session_id,
                 "spawned_at": spawned_at,
+                "webhook_source": webhook_source_str,
+                "webhook_redacted_url": webhook_redacted_url,
+                "webhook_status": webhook_status,
+                "webhook_error": serde_json::Value::Null,
             })),
             error: None,
         }

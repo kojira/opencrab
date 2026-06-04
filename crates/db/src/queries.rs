@@ -1961,6 +1961,136 @@ pub fn list_enabled_agent_discord_configs(conn: &Connection) -> Result<Vec<Agent
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+// ============================================
+// Agent Webhook Config
+// ============================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentWebhookConfigRow {
+    pub scope: String,        // 'agent' | 'tool' | 'global'
+    pub agent_id: String,     // '*' for global
+    pub tool_name: String,    // '' when unused
+    pub kind: String,         // 'subtask' | 'tool' | 'lifecycle'
+    pub url: String,
+    pub events_json: Option<String>,
+    pub enabled: bool,
+    pub name: Option<String>,
+    pub created_by: Option<String>,
+    pub output_mode: String,
+    pub max_chars: i64,
+    pub updated_at: String,
+}
+
+pub fn get_agent_webhook_config(
+    conn: &Connection,
+    scope: &str,
+    agent_id: &str,
+    tool_name: &str,
+    kind: &str,
+) -> Result<Option<AgentWebhookConfigRow>> {
+    let result = conn.query_row(
+        "SELECT scope, agent_id, tool_name, kind, url, events_json, enabled, name, created_by, output_mode, max_chars, updated_at
+         FROM agent_webhook_config
+         WHERE scope = ?1 AND agent_id = ?2 AND tool_name = ?3 AND kind = ?4",
+        params![scope, agent_id, tool_name, kind],
+        |row| {
+            Ok(AgentWebhookConfigRow {
+                scope: row.get(0)?,
+                agent_id: row.get(1)?,
+                tool_name: row.get(2)?,
+                kind: row.get(3)?,
+                url: row.get(4)?,
+                events_json: row.get(5)?,
+                enabled: row.get(6)?,
+                name: row.get(7)?,
+                created_by: row.get(8)?,
+                output_mode: row.get(9)?,
+                max_chars: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(cfg) => Ok(Some(cfg)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn upsert_agent_webhook_config(conn: &Connection, row: &AgentWebhookConfigRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agent_webhook_config
+            (scope, agent_id, tool_name, kind, url, events_json, enabled, name, created_by, output_mode, max_chars, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(scope, agent_id, tool_name, kind) DO UPDATE SET
+            url = excluded.url,
+            events_json = excluded.events_json,
+            enabled = excluded.enabled,
+            name = excluded.name,
+            created_by = excluded.created_by,
+            output_mode = excluded.output_mode,
+            max_chars = excluded.max_chars,
+            updated_at = excluded.updated_at",
+        params![
+            row.scope,
+            row.agent_id,
+            row.tool_name,
+            row.kind,
+            row.url,
+            row.events_json,
+            row.enabled,
+            row.name,
+            row.created_by,
+            row.output_mode,
+            row.max_chars,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_agent_webhook_config(
+    conn: &Connection,
+    agent_id: Option<&str>,
+    include_disabled: bool,
+) -> Result<Vec<AgentWebhookConfigRow>> {
+    let mut sql = String::from(
+        "SELECT scope, agent_id, tool_name, kind, url, events_json, enabled, name, created_by, output_mode, max_chars, updated_at
+         FROM agent_webhook_config WHERE 1 = 1",
+    );
+    if agent_id.is_some() {
+        sql.push_str(" AND (agent_id = ?1 OR agent_id = '*')");
+    }
+    if !include_disabled {
+        sql.push_str(" AND enabled = 1");
+    }
+    sql.push_str(" ORDER BY scope, agent_id, tool_name, kind");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let map_row = |row: &rusqlite::Row| {
+        Ok(AgentWebhookConfigRow {
+            scope: row.get(0)?,
+            agent_id: row.get(1)?,
+            tool_name: row.get(2)?,
+            kind: row.get(3)?,
+            url: row.get(4)?,
+            events_json: row.get(5)?,
+            enabled: row.get(6)?,
+            name: row.get(7)?,
+            created_by: row.get(8)?,
+            output_mode: row.get(9)?,
+            max_chars: row.get(10)?,
+            updated_at: row.get(11)?,
+        })
+    };
+    let rows = match agent_id {
+        Some(a) => stmt.query_map(params![a], map_row)?.collect::<std::result::Result<_, _>>()?,
+        None => stmt.query_map([], map_row)?.collect::<std::result::Result<_, _>>()?,
+    };
+    Ok(rows)
+}
+
 /// チャンネルが読み取り可能か判定する。設定なし=true（デフォルト許可）。
 pub fn is_channel_readable(conn: &Connection, channel_id: &str) -> bool {
     get_channel_config(conn, channel_id)
@@ -3889,6 +4019,160 @@ mod tests {
 
         // Discord config should also be gone
         assert!(get_agent_discord_config(&conn, agent_id).unwrap().is_none());
+    }
+
+    // ============================================
+    // Agent Webhook Config tests
+    // ============================================
+
+    fn sample_webhook_row(agent_id: &str) -> AgentWebhookConfigRow {
+        AgentWebhookConfigRow {
+            scope: "agent".into(),
+            agent_id: agent_id.into(),
+            tool_name: "".into(),
+            kind: "subtask".into(),
+            url: "https://example.com/hook".into(),
+            events_json: Some(r#"["start","done"]"#.into()),
+            enabled: true,
+            name: Some("default hook".into()),
+            created_by: Some("tester".into()),
+            output_mode: "full".into(),
+            max_chars: 2000,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_agent_webhook_upsert_and_get_roundtrip() {
+        let conn = setup();
+        let row = sample_webhook_row("agent-1");
+        upsert_agent_webhook_config(&conn, &row).unwrap();
+
+        let fetched = get_agent_webhook_config(&conn, "agent", "agent-1", "", "subtask")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.scope, "agent");
+        assert_eq!(fetched.agent_id, "agent-1");
+        assert_eq!(fetched.tool_name, "");
+        assert_eq!(fetched.kind, "subtask");
+        assert_eq!(fetched.url, "https://example.com/hook");
+        assert_eq!(fetched.events_json, Some(r#"["start","done"]"#.to_string()));
+        assert!(fetched.enabled);
+        assert_eq!(fetched.name, Some("default hook".to_string()));
+        assert_eq!(fetched.created_by, Some("tester".to_string()));
+        assert_eq!(fetched.output_mode, "full");
+        assert_eq!(fetched.max_chars, 2000);
+        assert!(!fetched.updated_at.is_empty());
+    }
+
+    #[test]
+    fn test_agent_webhook_get_missing_returns_none() {
+        let conn = setup();
+        let result = get_agent_webhook_config(&conn, "agent", "nope", "", "subtask").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_agent_webhook_upsert_updates_not_duplicates() {
+        let conn = setup();
+        let mut row = sample_webhook_row("agent-1");
+        upsert_agent_webhook_config(&conn, &row).unwrap();
+
+        row.url = "https://example.com/updated".into();
+        upsert_agent_webhook_config(&conn, &row).unwrap();
+
+        let fetched = get_agent_webhook_config(&conn, "agent", "agent-1", "", "subtask")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.url, "https://example.com/updated");
+
+        // Only one row for this PK
+        let all = list_agent_webhook_config(&conn, Some("agent-1"), true).unwrap();
+        let count = all
+            .iter()
+            .filter(|r| {
+                r.scope == "agent" && r.agent_id == "agent-1" && r.tool_name.is_empty() && r.kind == "subtask"
+            })
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_agent_webhook_list_include_disabled_filter() {
+        let conn = setup();
+        let mut enabled_row = sample_webhook_row("agent-1");
+        enabled_row.kind = "subtask".into();
+        upsert_agent_webhook_config(&conn, &enabled_row).unwrap();
+
+        let mut disabled_row = sample_webhook_row("agent-1");
+        disabled_row.kind = "tool".into();
+        disabled_row.enabled = false;
+        upsert_agent_webhook_config(&conn, &disabled_row).unwrap();
+
+        let only_enabled = list_agent_webhook_config(&conn, Some("agent-1"), false).unwrap();
+        assert_eq!(only_enabled.len(), 1);
+        assert_eq!(only_enabled[0].kind, "subtask");
+
+        let with_disabled = list_agent_webhook_config(&conn, Some("agent-1"), true).unwrap();
+        assert_eq!(with_disabled.len(), 2);
+    }
+
+    #[test]
+    fn test_agent_webhook_list_agent_includes_global() {
+        let conn = setup();
+        upsert_agent_webhook_config(&conn, &sample_webhook_row("agent-1")).unwrap();
+
+        let mut global = sample_webhook_row("*");
+        global.scope = "global".into();
+        upsert_agent_webhook_config(&conn, &global).unwrap();
+
+        upsert_agent_webhook_config(&conn, &sample_webhook_row("agent-2")).unwrap();
+
+        let rows = list_agent_webhook_config(&conn, Some("agent-1"), true).unwrap();
+        let agent_ids: Vec<&str> = rows.iter().map(|r| r.agent_id.as_str()).collect();
+        assert!(agent_ids.contains(&"agent-1"));
+        assert!(agent_ids.contains(&"*"));
+        assert!(!agent_ids.contains(&"agent-2"));
+        assert_eq!(rows.len(), 2);
+
+        // None -> all rows
+        let all = list_agent_webhook_config(&conn, None, true).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_agent_webhook_distinct_pk_combos_coexist() {
+        let conn = setup();
+
+        let mut r1 = sample_webhook_row("agent-1");
+        r1.kind = "subtask".into();
+        let mut r2 = sample_webhook_row("agent-1");
+        r2.kind = "tool".into();
+        r2.tool_name = "my_tool".into();
+        let mut r3 = sample_webhook_row("agent-1");
+        r3.scope = "tool".into();
+        r3.kind = "lifecycle".into();
+
+        upsert_agent_webhook_config(&conn, &r1).unwrap();
+        upsert_agent_webhook_config(&conn, &r2).unwrap();
+        upsert_agent_webhook_config(&conn, &r3).unwrap();
+
+        let rows = list_agent_webhook_config(&conn, Some("agent-1"), true).unwrap();
+        assert_eq!(rows.len(), 3);
+
+        assert!(get_agent_webhook_config(&conn, "agent", "agent-1", "", "subtask")
+            .unwrap()
+            .is_some());
+        assert!(
+            get_agent_webhook_config(&conn, "agent", "agent-1", "my_tool", "tool")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            get_agent_webhook_config(&conn, "tool", "agent-1", "", "lifecycle")
+                .unwrap()
+                .is_some()
+        );
     }
 
     // ============================================

@@ -195,12 +195,25 @@ fn truncate_chars(text: &str, limit: usize) -> String {
 ///
 /// worker は受信した DeliveryBatch を順次処理し、各メッセージを Discord webhook へ
 /// 直列送信する。sender が全て drop されチャネルが閉じると worker は終了する。
+#[allow(dead_code)] // 後方互換のため公開 API として維持（spawn_run_worker_with_sink へ委譲）。
 pub fn spawn_run_worker(client: reqwest::Client) -> mpsc::UnboundedSender<DeliveryBatch> {
+    spawn_run_worker_with_sink(client, None)
+}
+
+/// 配送失敗時に give-up を通知するための sink を受け取れる版。
+///
+/// `on_giveup` は送信を最終的にあきらめたとき、短いエラー説明文字列で呼ばれる
+/// （raw url は渡さない）。`spawn_run_worker` は None を渡して従来挙動を保つ。
+#[allow(clippy::type_complexity)]
+pub fn spawn_run_worker_with_sink(
+    client: reqwest::Client,
+    on_giveup: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+) -> mpsc::UnboundedSender<DeliveryBatch> {
     let (tx, mut rx) = mpsc::unbounded_channel::<DeliveryBatch>();
     tokio::spawn(async move {
         while let Some(batch) = rx.recv().await {
             for msg in &batch.messages {
-                send_with_retry(&client, &batch.url, msg).await;
+                send_with_retry(&client, &batch.url, msg, on_giveup.as_ref()).await;
             }
         }
     });
@@ -209,11 +222,17 @@ pub fn spawn_run_worker(client: reqwest::Client) -> mpsc::UnboundedSender<Delive
 
 /// 1 メッセージを Discord webhook へ送る。429 は Retry-After を尊重し、
 /// その他失敗は best-effort backoff retry する。
-async fn send_with_retry(client: &reqwest::Client, url: &str, content: &str) {
+async fn send_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    content: &str,
+    on_giveup: Option<&std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+) {
     // 即時 / 2s / 10s / 30s / 120s
     const BACKOFFS: [u64; 5] = [0, 2, 10, 30, 120];
     let mut attempt = 0usize;
     let safe_url = redact_webhook_url(url);
+    let mut last_error;
     loop {
         let body = json!({ "content": content });
         match client.post(url).json(&body).send().await {
@@ -231,6 +250,7 @@ async fn send_with_retry(client: &reqwest::Client, url: &str, content: &str) {
                 }
                 let response_text = resp.text().await.unwrap_or_default();
                 let response_preview = truncate_chars(&response_text, 500);
+                last_error = format!("http {}", status.as_u16());
                 tracing::warn!(
                     url = %safe_url,
                     status = status.as_u16(),
@@ -239,23 +259,271 @@ async fn send_with_retry(client: &reqwest::Client, url: &str, content: &str) {
                 );
             }
             Err(e) => {
+                last_error = "request error".to_string();
                 tracing::warn!(url = %safe_url, error = %e, "discord webhook request error");
             }
         }
         attempt += 1;
         if attempt >= BACKOFFS.len() {
             tracing::error!(url = %safe_url, "discord webhook delivery gave up after retries");
+            if let Some(sink) = on_giveup {
+                sink(&last_error);
+            }
             return;
         }
         tokio::time::sleep(Duration::from_secs(BACKOFFS[attempt])).await;
     }
 }
 
-fn redact_webhook_url(url: &str) -> String {
+/// webhook URL のトークン（末尾セグメント）をマスクして返す。ログ・応答用。
+pub fn redact_webhook_url(url: &str) -> String {
     match url.rsplit_once('/') {
         Some((prefix, _)) => format!("{prefix}/[redacted]"),
         None => "[redacted]".to_string(),
     }
+}
+
+/// Discord webhook URL を検証する。空・パース不可・Discord webhook でない場合は Err(理由)。
+///
+/// 理由文字列に raw URL は含めない。
+pub fn validate_webhook_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("url is empty".to_string());
+    }
+    let rest = match url.strip_prefix("https://") {
+        Some(r) => r,
+        None => return Err("url must start with https://".to_string()),
+    };
+    // host = "https://" と最初の '/' の間の部分。
+    let (host, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => return Err("url has no path".to_string()),
+    };
+    const ALLOWED_HOSTS: [&str; 4] = [
+        "discord.com",
+        "discordapp.com",
+        "ptb.discord.com",
+        "canary.discord.com",
+    ];
+    if !ALLOWED_HOSTS.contains(&host) {
+        return Err("host is not a Discord webhook host".to_string());
+    }
+    let webhook_path = match path.strip_prefix("/api/webhooks/") {
+        Some(p) => p,
+        None => return Err("path must start with /api/webhooks/".to_string()),
+    };
+    // id / token の 2 つ以上の非空セグメントが必要。
+    let segments: Vec<&str> = webhook_path.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return Err("path is missing webhook id or token".to_string());
+    }
+    Ok(())
+}
+
+/// subtask webhook の解決元（優先順位）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebhookSource {
+    Explicit,
+    ToolDefault,
+    AgentDefault,
+    GlobalDefault,
+    EnvConfig,
+}
+
+impl WebhookSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WebhookSource::Explicit => "explicit",
+            WebhookSource::ToolDefault => "tool_default",
+            WebhookSource::AgentDefault => "agent_default",
+            WebhookSource::GlobalDefault => "global_default",
+            WebhookSource::EnvConfig => "env_config",
+        }
+    }
+}
+
+/// subtask webhook の解決結果。
+pub enum WebhookResolution {
+    /// 検証済みの webhook。ここへ配送する。
+    Use {
+        config: WebhookConfig,
+        source: WebhookSource,
+    },
+    /// 当選した scope で enabled=false。webhook 無効・fallthrough しない。
+    Disabled { source: WebhookSource },
+    /// どこにも設定が無い。
+    None,
+    /// 検証失敗 → spawn_subtask を失敗させる。
+    Error {
+        code: String,
+        message: String,
+        source: WebhookSource,
+    },
+}
+
+/// events_json (Option<String>) から events を解析する。
+fn parse_events_json(events_json: &Option<String>) -> Option<Vec<String>> {
+    let raw = events_json.as_ref()?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let arr = value.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|e| e.as_str().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+/// DB 行を WebhookResolution へ変換する（enabled/url 検証含む）。
+fn resolve_db_row(row: AgentWebhookConfigRowLite, source: WebhookSource) -> WebhookResolution {
+    if !row.enabled {
+        return WebhookResolution::Disabled { source };
+    }
+    if let Err(reason) = validate_webhook_url(&row.url) {
+        return WebhookResolution::Error {
+            code: "invalid_default_webhook".to_string(),
+            message: reason,
+            source,
+        };
+    }
+    let events = parse_events_json(&row.events_json);
+    WebhookResolution::Use {
+        config: WebhookConfig {
+            url: row.url,
+            events,
+        },
+        source,
+    }
+}
+
+/// resolve で必要な DB 行の最小フィールド。
+struct AgentWebhookConfigRowLite {
+    url: String,
+    events_json: Option<String>,
+    enabled: bool,
+}
+
+/// 1 つの scope について subtask 行（無ければ lifecycle alias）を取得する。
+fn fetch_scope_row(
+    conn: &rusqlite::Connection,
+    scope: &str,
+    agent_id: &str,
+    tool_name: &str,
+) -> Option<AgentWebhookConfigRowLite> {
+    for kind in ["subtask", "lifecycle"] {
+        if let Ok(Some(r)) =
+            opencrab_db::queries::get_agent_webhook_config(conn, scope, agent_id, tool_name, kind)
+        {
+            return Some(AgentWebhookConfigRowLite {
+                url: r.url,
+                events_json: r.events_json,
+                enabled: r.enabled,
+            });
+        }
+    }
+    None
+}
+
+/// subtask webhook を固定順序で解決する。
+///
+/// 優先順位: explicit > tool default > agent default > global default > env config。
+/// あるレベルで設定が見つかったら、それより下へは fall through しない
+/// （error/disabled も同様に止まる）。
+pub fn resolve_subtask_webhook(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+    env_config_default: Option<&WebhookConfig>,
+) -> WebhookResolution {
+    // 1. EXPLICIT
+    if let Some(wh) = args.get("webhook") {
+        if !wh.is_null() {
+            let url = wh
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Err(reason) = validate_webhook_url(&url) {
+                return WebhookResolution::Error {
+                    code: "invalid_webhook_url".to_string(),
+                    message: reason,
+                    source: WebhookSource::Explicit,
+                };
+            }
+            let events = wh.get("events").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            });
+            return WebhookResolution::Use {
+                config: WebhookConfig {
+                    url: url.trim().to_string(),
+                    events,
+                },
+                source: WebhookSource::Explicit,
+            };
+        }
+    }
+
+    // 2. DB defaults: tool > agent > global。最初に見つかった行で確定。
+    if let Some(row) = fetch_scope_row(conn, "tool", agent_id, "spawn_subtask") {
+        return resolve_db_row(row, WebhookSource::ToolDefault);
+    }
+    if let Some(row) = fetch_scope_row(conn, "agent", agent_id, "") {
+        return resolve_db_row(row, WebhookSource::AgentDefault);
+    }
+    if let Some(row) = fetch_scope_row(conn, "global", "*", "") {
+        return resolve_db_row(row, WebhookSource::GlobalDefault);
+    }
+
+    // 3. env/config 互換フォールバック。DB 行が皆無のときのみ。
+    let _ = tool_name;
+    match env_config_default {
+        Some(cfg) => WebhookResolution::Use {
+            config: cfg.clone(),
+            source: WebhookSource::EnvConfig,
+        },
+        None => WebhookResolution::None,
+    }
+}
+
+/// webhook 配送が最終的に失敗したとき、親セッションログに 1 件記録する。
+///
+/// raw url は決して渡さない（redacted_url のみ）。parent_session_id が空なら何もしない。
+pub fn record_webhook_delivery_failure(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    parent_session_id: &str,
+    subtask_id: &str,
+    sub_session_id: &str,
+    redacted_url: &str,
+    error: &str,
+) {
+    if parent_session_id.is_empty() {
+        return;
+    }
+    let content = json!({
+        "type": "subtask_progress",
+        "subtask_id": subtask_id,
+        "session_id": sub_session_id,
+        "webhook_status": "delivery_failed",
+        "webhook_redacted_url": redacted_url,
+        "webhook_error": error,
+    })
+    .to_string();
+    let log = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: agent_id.to_string(),
+        session_id: parent_session_id.to_string(),
+        log_type: "system".to_string(),
+        content,
+        speaker_id: None,
+        turn_number: None,
+        metadata_json: None,
+        created_at: None,
+    };
+    opencrab_db::queries::insert_session_log(conn, &log).ok();
 }
 
 /// Retry-After ヘッダ（秒）を読む。
@@ -474,5 +742,248 @@ mod tests {
         assert_eq!(exit_reason_to_status("stopped_by_limit"), "completed");
         assert_eq!(exit_reason_to_status("error"), "failed");
         assert_eq!(exit_reason_to_status("timeout"), "timed_out");
+    }
+
+    // ---- webhook URL validation ----
+
+    const VALID_URL: &str = "https://discord.com/api/webhooks/123456789/abcdefSECRETtoken";
+    const SECRET_TOKEN: &str = "abcdefSECRETtoken";
+
+    #[test]
+    fn test_validate_webhook_url_valid() {
+        assert!(validate_webhook_url(VALID_URL).is_ok());
+        assert!(
+            validate_webhook_url("https://canary.discord.com/api/webhooks/1/tok").is_ok()
+        );
+        assert!(validate_webhook_url("https://discordapp.com/api/webhooks/1/tok").is_ok());
+        assert!(validate_webhook_url("https://ptb.discord.com/api/webhooks/1/tok").is_ok());
+    }
+
+    #[test]
+    fn test_validate_webhook_url_invalid() {
+        assert!(validate_webhook_url("").is_err());
+        assert!(validate_webhook_url("   ").is_err());
+        assert!(validate_webhook_url("http://discord.com/api/webhooks/1/tok").is_err());
+        assert!(validate_webhook_url("https://evil.com/api/webhooks/1/tok").is_err());
+        // missing token segment
+        assert!(validate_webhook_url("https://discord.com/api/webhooks/123").is_err());
+        // wrong path
+        assert!(validate_webhook_url("https://discord.com/channels/1/2").is_err());
+        // no path
+        assert!(validate_webhook_url("https://discord.com").is_err());
+        // reason must not leak the raw url
+        let reason = validate_webhook_url("https://evil.com/api/webhooks/1/secrettok").unwrap_err();
+        assert!(!reason.contains("secrettok"));
+    }
+
+    // ---- redaction ----
+
+    #[test]
+    fn test_redact_webhook_url_hides_token() {
+        let redacted = redact_webhook_url(VALID_URL);
+        assert!(!redacted.contains(SECRET_TOKEN), "token leaked: {redacted}");
+        assert!(redacted.contains("[redacted]"));
+        assert!(redacted.contains("123456789"));
+    }
+
+    // ---- resolution ----
+
+    fn insert_row(
+        conn: &rusqlite::Connection,
+        scope: &str,
+        agent_id: &str,
+        tool_name: &str,
+        kind: &str,
+        url: &str,
+        enabled: bool,
+    ) {
+        let row = opencrab_db::queries::AgentWebhookConfigRow {
+            scope: scope.to_string(),
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            kind: kind.to_string(),
+            url: url.to_string(),
+            events_json: None,
+            enabled,
+            name: None,
+            created_by: Some("owner".to_string()),
+            output_mode: "summary".to_string(),
+            max_chars: 1500,
+            updated_at: String::new(),
+        };
+        opencrab_db::queries::upsert_agent_webhook_config(conn, &row).unwrap();
+    }
+
+    fn use_source(r: &WebhookResolution) -> WebhookSource {
+        match r {
+            WebhookResolution::Use { source, .. } => *source,
+            _ => panic!("expected Use"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_resolution_explicit_beats_db() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let args = json!({ "webhook": { "url": VALID_URL } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        assert_eq!(use_source(&r), WebhookSource::Explicit);
+    }
+
+    #[test]
+    fn test_webhook_resolution_tool_beats_agent_beats_global() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "global", "*", "", "subtask", VALID_URL, true);
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        insert_row(&conn, "tool", "a1", "spawn_subtask", "subtask", VALID_URL, true);
+        let args = json!({});
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        assert_eq!(use_source(&r), WebhookSource::ToolDefault);
+
+        // remove tool -> agent wins
+        let conn2 = opencrab_db::init_memory().unwrap();
+        insert_row(&conn2, "global", "*", "", "subtask", VALID_URL, true);
+        insert_row(&conn2, "agent", "a1", "", "subtask", VALID_URL, true);
+        let r2 = resolve_subtask_webhook(&conn2, "a1", "spawn_subtask", &args, None);
+        assert_eq!(use_source(&r2), WebhookSource::AgentDefault);
+
+        // only global
+        let conn3 = opencrab_db::init_memory().unwrap();
+        insert_row(&conn3, "global", "*", "", "subtask", VALID_URL, true);
+        let r3 = resolve_subtask_webhook(&conn3, "a1", "spawn_subtask", &args, None);
+        assert_eq!(use_source(&r3), WebhookSource::GlobalDefault);
+    }
+
+    #[test]
+    fn test_webhook_resolution_db_beats_env_config() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let env = WebhookConfig {
+            url: "https://discord.com/api/webhooks/9/envtok".to_string(),
+            events: None,
+        };
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), Some(&env));
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
+    }
+
+    #[test]
+    fn test_webhook_resolution_env_only_when_no_db_row() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let env = WebhookConfig {
+            url: VALID_URL.to_string(),
+            events: None,
+        };
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), Some(&env));
+        assert_eq!(use_source(&r), WebhookSource::EnvConfig);
+    }
+
+    #[test]
+    fn test_webhook_resolution_none() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        assert!(matches!(r, WebhookResolution::None));
+    }
+
+    #[test]
+    fn test_webhook_resolution_invalid_explicit() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let args = json!({ "webhook": { "url": "http://evil.com/x" } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        match r {
+            WebhookResolution::Error { code, source, .. } => {
+                assert_eq!(code, "invalid_webhook_url");
+                assert_eq!(source, WebhookSource::Explicit);
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_resolution_invalid_db_default_no_fallthrough() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // tool default invalid, agent default valid -> must NOT fall through.
+        insert_row(&conn, "tool", "a1", "spawn_subtask", "subtask", "http://bad", true);
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let env = WebhookConfig {
+            url: VALID_URL.to_string(),
+            events: None,
+        };
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), Some(&env));
+        match r {
+            WebhookResolution::Error { code, source, .. } => {
+                assert_eq!(code, "invalid_default_webhook");
+                assert_eq!(source, WebhookSource::ToolDefault);
+            }
+            _ => panic!("expected Error, got fallthrough"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_resolution_disabled_no_fallthrough() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // tool disabled, agent valid -> Disabled, no fallthrough.
+        insert_row(&conn, "tool", "a1", "spawn_subtask", "subtask", VALID_URL, false);
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let env = WebhookConfig {
+            url: VALID_URL.to_string(),
+            events: None,
+        };
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), Some(&env));
+        match r {
+            WebhookResolution::Disabled { source } => {
+                assert_eq!(source, WebhookSource::ToolDefault);
+            }
+            _ => panic!("expected Disabled, got fallthrough"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_resolution_lifecycle_alias() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // only a 'lifecycle' row at agent scope -> resolves like subtask.
+        insert_row(&conn, "agent", "a1", "", "lifecycle", VALID_URL, true);
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
+
+        // lifecycle at tool scope still beats agent-scope subtask row.
+        let conn2 = opencrab_db::init_memory().unwrap();
+        insert_row(&conn2, "agent", "a1", "", "subtask", VALID_URL, true);
+        insert_row(&conn2, "tool", "a1", "spawn_subtask", "lifecycle", VALID_URL, true);
+        let r2 = resolve_subtask_webhook(&conn2, "a1", "spawn_subtask", &json!({}), None);
+        assert_eq!(use_source(&r2), WebhookSource::ToolDefault);
+    }
+
+    // ---- delivery failure recording ----
+
+    #[test]
+    fn test_record_webhook_delivery_failure_writes_redacted_log() {
+        let conn = opencrab_db::init_memory().unwrap();
+
+        let redacted = redact_webhook_url(VALID_URL);
+        record_webhook_delivery_failure(
+            &conn,
+            "a1",
+            "parent-sess",
+            "st1",
+            "subtask-st1",
+            &redacted,
+            "http 500",
+        );
+
+        let logs =
+            opencrab_db::queries::list_session_logs_by_session(&conn, "parent-sess").unwrap();
+        let found = logs
+            .iter()
+            .find(|l| l.content.contains("delivery_failed"))
+            .expect("delivery_failed log should exist");
+        assert!(found.content.contains("[redacted]"));
+        assert!(
+            !found.content.contains(SECRET_TOKEN),
+            "raw token leaked into log: {}",
+            found.content
+        );
+
+        // empty parent_session_id -> no-op
+        record_webhook_delivery_failure(&conn, "a1", "", "st1", "s", &redacted, "x");
     }
 }
