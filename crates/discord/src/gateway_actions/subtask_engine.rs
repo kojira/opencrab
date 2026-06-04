@@ -1307,20 +1307,23 @@ mod tests {
     }
 
     #[test]
-    fn test_activity_diagnostic_batch_for_empty_explicit_webhook_url() {
+    fn test_activity_diagnostic_batch_for_invalid_explicit_webhook_url() {
+        // 非空の不正 explicit url は resolution Error を生み、その診断が activity default
+        // へ redacted で配送されることを担保する。空 url はもはや Error にならない
+        // （default へフォールバックする）ため、ここでは非空の不正 url を使う。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
         let db = Arc::new(std::sync::Mutex::new(conn));
         let args = serde_json::json!({
             "task": "do it",
-            "webhook": { "url": "" }
+            "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" }
         });
         let batch = build_activity_diagnostic_batch(
             &db,
             "a1",
             "spawn_subtask",
             "webhook_resolution_error",
-            "spawn_subtask webhook resolution failed before execution: invalid_webhook_url: url is empty (source: explicit)",
+            "spawn_subtask webhook resolution failed before execution: invalid_webhook_url: url must start with https:// (source: explicit)",
             &args,
         )
         .expect("diagnostic should route to activity default");

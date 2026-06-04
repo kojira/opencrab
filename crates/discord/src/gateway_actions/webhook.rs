@@ -35,11 +35,12 @@ impl WebhookConfig {
     /// ```json
     /// { "webhook": { "url": "https://...", "events": ["started", "completed"] } }
     /// ```
-    /// `events` は省略可能。`url` が無い/空なら無効として None を返す。
+    /// `events` は省略可能。`url` が無い / 空 / 空白のみなら「明示指定なし」として
+    /// None を返す（呼び出し側はデフォルトへフォールバックできる）。
     pub fn from_args(args: &serde_json::Value) -> Option<WebhookConfig> {
         let wh = args.get("webhook")?;
         let url = wh.get("url").and_then(|v| v.as_str())?.to_string();
-        if url.is_empty() {
+        if url.trim().is_empty() {
             return None;
         }
         let events = wh.get("events").and_then(|v| v.as_array()).map(|arr| {
@@ -665,6 +666,11 @@ pub fn resolve_subtask_webhook(
     env_config_default: Option<&WebhookConfig>,
 ) -> WebhookResolution {
     // 1. EXPLICIT
+    // webhook キーがあり、url が非空（trim 後）のときだけ明示指定として扱う。
+    // url が空文字 / 空白のみのときは「明示指定なし」とみなし、下位のデフォルト解決へ
+    // フォールバックさせる（明示的に空 url を渡しても通知が無効化されない）。これは DB の
+    // enabled=false による明示無効化（auditable disable）とは別物で、後者はその scope で
+    // 配送を止め fall through しない。
     if let Some(wh) = args.get("webhook") {
         if !wh.is_null() {
             let url = wh
@@ -672,25 +678,28 @@ pub fn resolve_subtask_webhook(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if let Err(reason) = validate_webhook_url(&url) {
-                return WebhookResolution::Error {
-                    code: "invalid_webhook_url".to_string(),
-                    message: reason,
+            if !url.trim().is_empty() {
+                if let Err(reason) = validate_webhook_url(&url) {
+                    return WebhookResolution::Error {
+                        code: "invalid_webhook_url".to_string(),
+                        message: reason,
+                        source: WebhookSource::Explicit,
+                    };
+                }
+                let events = wh.get("events").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                });
+                return WebhookResolution::Use {
+                    config: WebhookConfig {
+                        url: url.trim().to_string(),
+                        events,
+                    },
                     source: WebhookSource::Explicit,
                 };
             }
-            let events = wh.get("events").and_then(|v| v.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|e| e.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            });
-            return WebhookResolution::Use {
-                config: WebhookConfig {
-                    url: url.trim().to_string(),
-                    events,
-                },
-                source: WebhookSource::Explicit,
-            };
+            // url 空 / 空白のみ → 明示指定なし扱い。下の DB / env デフォルトへ続行する。
         }
     }
 
@@ -957,6 +966,8 @@ mod tests {
         assert!(WebhookConfig::from_args(&json!({})).is_none());
         assert!(WebhookConfig::from_args(&json!({ "webhook": {} })).is_none());
         assert!(WebhookConfig::from_args(&json!({ "webhook": { "url": "" } })).is_none());
+        // 空白のみの url も「指定なし」として None（フォールバック可能）。
+        assert!(WebhookConfig::from_args(&json!({ "webhook": { "url": "   " } })).is_none());
     }
 
     #[test]
@@ -1191,6 +1202,91 @@ mod tests {
                 assert_eq!(source, WebhookSource::Explicit);
             }
             _ => panic!("expected Error"),
+        }
+    }
+
+    // ---- empty / whitespace explicit url falls back to default (not an error) ----
+
+    #[test]
+    fn test_webhook_resolution_empty_explicit_url_falls_back_to_db_default() {
+        // 明示 webhook の url が空文字なら「指定なし」扱いとし、DB の agent デフォルトへ
+        // フォールバックする（Error にして配送をブロックしない）。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let args = json!({ "webhook": { "url": "" } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
+    }
+
+    #[test]
+    fn test_webhook_resolution_whitespace_explicit_url_falls_back_to_db_default() {
+        // 空白のみの url も「指定なし」扱い。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let args = json!({ "webhook": { "url": "   " } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
+    }
+
+    #[test]
+    fn test_webhook_resolution_empty_explicit_url_falls_back_to_env_config() {
+        // DB 行が無くても、空 url は env/config デフォルトへフォールバックする。
+        let conn = opencrab_db::init_memory().unwrap();
+        let env = WebhookConfig {
+            url: VALID_URL.to_string(),
+            events: None,
+        };
+        let args = json!({ "webhook": { "url": "" } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, Some(&env));
+        assert_eq!(use_source(&r), WebhookSource::EnvConfig);
+    }
+
+    #[test]
+    fn test_webhook_resolution_empty_explicit_url_with_no_default_is_none() {
+        // 空 url + デフォルト無し → None（Error ではない）。
+        let conn = opencrab_db::init_memory().unwrap();
+        let args = json!({ "webhook": { "url": "   " } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        assert!(matches!(r, WebhookResolution::None));
+    }
+
+    #[test]
+    fn test_webhook_resolution_empty_explicit_url_keeps_events_ignored_on_fallback() {
+        // 空 url のとき explicit events は使われず、フォールバック先（DB）の設定が勝つ。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let args = json!({ "webhook": { "url": "", "events": ["completed"] } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        match r {
+            WebhookResolution::Use { config, source } => {
+                assert_eq!(source, WebhookSource::AgentDefault);
+                assert_eq!(config.url, VALID_URL);
+                // DB 行は events_json=None なので全イベント送信。
+                assert_eq!(config.events, None);
+            }
+            _ => panic!("expected Use from DB default"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_resolution_nonempty_invalid_explicit_still_errors_over_default() {
+        // 非空の不正 url はデフォルトがあっても fall through せず Error（strict 維持）。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
+        let args = json!({ "webhook": { "url": "http://evil.com/x/secrettok" } });
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
+        match r {
+            WebhookResolution::Error {
+                code,
+                message,
+                source,
+            } => {
+                assert_eq!(code, "invalid_webhook_url");
+                assert_eq!(source, WebhookSource::Explicit);
+                // 診断メッセージに raw url/token は漏れない。
+                assert!(!message.contains("secrettok"), "token leaked: {message}");
+            }
+            _ => panic!("expected Error, got fallthrough"),
         }
     }
 
@@ -1491,5 +1587,105 @@ mod tests {
 
         // empty parent_session_id -> no-op
         record_webhook_delivery_failure(&conn, "a1", "", "st1", "s", &redacted, "x");
+    }
+
+    // ---- live E2E (env-gated, #[ignore] by default) ----
+    //
+    // 実 DB の agent 既定 webhook を使って、空 explicit url がフォールバックして実際の
+    // Discord webhook へ配送されることを確認する。raw url はコードに置かず、実行時に DB
+    // から解決して使う（secret はログにも出さない）。
+    //
+    // 実行例:
+    //   OPENCRAB_E2E_DB=data/opencrab.db \
+    //   OPENCRAB_E2E_AGENT_ID=c56f19e0-... \
+    //   cargo test -p opencrab-discord -- --ignored --nocapture e2e_empty_url_fallback_delivers
+    #[tokio::test]
+    #[ignore = "live: posts to a real Discord webhook; env-gated"]
+    async fn e2e_empty_url_fallback_delivers() {
+        let db_path = std::env::var("OPENCRAB_E2E_DB")
+            .expect("set OPENCRAB_E2E_DB to an absolute path to the live opencrab.db");
+        let agent_id = std::env::var("OPENCRAB_E2E_AGENT_ID")
+            .expect("set OPENCRAB_E2E_AGENT_ID to the agent with a configured default webhook");
+
+        // resolve_subtask_webhook は SELECT のみ（書き込まない）。WAL の live DB に対して
+        // read-only open は CannotOpen になり得るため通常 open する。
+        let conn = rusqlite::Connection::open(&db_path).expect("open real DB");
+
+        // (1) 空 explicit url → デフォルトへフォールバックして Use になる。
+        let empty_args = json!({ "webhook": { "url": "" } });
+        let resolved = resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &empty_args, None);
+        let (url, source) = match resolved {
+            WebhookResolution::Use { config, source } => (config.url, source),
+            other => panic!(
+                "empty url must fall back to a default Use; got {:?}",
+                match other {
+                    WebhookResolution::None => "None",
+                    WebhookResolution::Disabled { .. } => "Disabled",
+                    WebhookResolution::Error { .. } => "Error",
+                    WebhookResolution::Use { .. } => unreachable!(),
+                }
+            ),
+        };
+        assert!(
+            matches!(
+                source,
+                WebhookSource::AgentDefault
+                    | WebhookSource::ToolDefault
+                    | WebhookSource::GlobalDefault
+                    | WebhookSource::EnvConfig
+            ),
+            "fallback source should be a default, got {}",
+            source.as_str()
+        );
+        // raw url は出さない。redacted のみ。
+        eprintln!(
+            "[e2e] empty url -> fallback source={} url={}",
+            source.as_str(),
+            redact_webhook_url(&url)
+        );
+
+        // 実 Discord webhook へ started lifecycle を 1 通配送する（実 HTTP）。
+        let meta = LifecycleMeta {
+            label: "E2E empty-url fallback".to_string(),
+            run_id: "e2e-empty-url".to_string(),
+            session_key: "e2e".to_string(),
+        };
+        let messages = build_started_messages(
+            &meta,
+            "E2E: empty explicit webhook url fell back to default (this is a test message).",
+            DISCORD_CHUNK_LIMIT,
+        );
+        let client = reqwest::Client::new();
+        for msg in &messages {
+            let resp = client
+                .post(&url)
+                .json(&json!({ "content": msg }))
+                .send()
+                .await
+                .expect("discord webhook POST should complete");
+            assert!(
+                resp.status().is_success(),
+                "discord webhook should accept message: http {}",
+                resp.status().as_u16()
+            );
+        }
+        eprintln!("[e2e] delivered {} message(s) to the default webhook", messages.len());
+
+        // (2) 非空の不正 url はフォールバックせず Error（strict 維持）。
+        let bad_args = json!({ "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" } });
+        let bad = resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &bad_args, None);
+        match bad {
+            WebhookResolution::Error {
+                code,
+                message,
+                source,
+            } => {
+                assert_eq!(code, "invalid_webhook_url");
+                assert_eq!(source, WebhookSource::Explicit);
+                assert!(!message.contains("evil.example.com"), "raw url leaked: {message}");
+                eprintln!("[e2e] invalid explicit url -> Error (no fallback): {code}: {message}");
+            }
+            _ => panic!("non-empty invalid explicit url must Error, not fall back"),
+        }
     }
 }
