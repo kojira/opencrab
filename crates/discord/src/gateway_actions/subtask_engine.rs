@@ -1014,19 +1014,60 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
     }
 }
 
-/// ツール引数の短い要約（execute_shell はコマンドを優先）。redaction は整形側で行う。
+/// args 要約の最大文字数。メッセージ全体は build_tool_event_message が別途
+/// max_chars/Discord 上限でクランプするが、ここでも 1 フィールド分を短く保ち、
+/// completed/failed の stdout/stderr 等と同居しても収まる余地を残す。
+const ARGS_SUMMARY_LIMIT: usize = 300;
+
+/// ツール引数の短い要約（execute_shell はコマンドを優先）。
+///
+/// 重要: truncate の **前に** `redact_secrets` を通す。先に切り詰めると、長いトークン
+/// （Discord webhook URL / base64・hex のシークレット等）が途中で分断され、残った断片が
+/// redaction パターンに一致せず素通りして漏れる恐れがあるため。整形側
+/// （build_tool_event_message）も redaction を行うが冪等なので二重でも安全。
 fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> Option<String> {
     if tool_name == "execute_shell" {
         if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-            let short: String = cmd.chars().take(300).collect();
-            return Some(format!("cmd: `{short}`"));
+            // command 単体ではなく、実際に渡された引数（args 配列）と非シークレットな
+            // オプションも含めて要約する。これがないと `echo hello world` が `cmd: echo`
+            // としか表示されず、有用な引数が欠落する。
+            let mut parts = vec![format!("cmd: `{cmd}`")];
+            if let Some(arr) = args.get("args").and_then(|v| v.as_array()) {
+                let items: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                if !items.is_empty() {
+                    // JSON 配列として描画する（例: ["hello","webhook-args-test"]）。
+                    parts.push(format!("args: {}", serde_json::Value::from(items)));
+                }
+            }
+            // stdin は内容に秘密が入りうるため本文は出さず、存在とバイト数のみ示す。
+            if let Some(stdin) = args.get("stdin").and_then(|v| v.as_str()) {
+                if !stdin.is_empty() {
+                    parts.push(format!("stdin: {} bytes", stdin.len()));
+                }
+            }
+            // 重要: redaction は結合後・clamp 前にまとめて適用する（関数先頭コメント参照）。
+            let safe = webhook::redact_secrets(&parts.join(" "));
+            return Some(clamp_with_ellipsis(&safe, ARGS_SUMMARY_LIMIT));
         }
     }
     let s = args.to_string();
     if s == "null" || s == "{}" {
         return None;
     }
-    Some(s.chars().take(300).collect())
+    let safe = webhook::redact_secrets(&s);
+    Some(clamp_with_ellipsis(&safe, ARGS_SUMMARY_LIMIT))
+}
+
+/// 文字数を limit 以下にクランプし、切り詰めた場合は末尾に … を付ける（UTF-8 安全）。
+fn clamp_with_ellipsis(text: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 /// 非 shell ツールの result の短い preview。
@@ -1230,6 +1271,243 @@ mod tests {
             result: None,
             error: None,
         }
+    }
+
+    // ---- tool/command argument inclusion on activity webhook messages ----
+
+    #[test]
+    fn test_webhook_tool_event_sink_started_includes_command_args() {
+        // started イベントにコマンド引数が含まれること（depth0 を想定）。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({ "command": "git status --short" });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args: &args,
+            result: None,
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        let batch = rx.try_recv().expect("started batch should be sent");
+        let msg = &batch.messages[0];
+        assert!(msg.contains("tool_call_started"), "msg: {msg}");
+        assert!(msg.contains("args:"), "args line missing: {msg}");
+        assert!(msg.contains("git status --short"), "command missing: {msg}");
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_started_includes_command_and_args_array() {
+        // E2E 再現: command `echo` と args `["hello","webhook-args-test"]` が
+        // started イベントで両方描画されること（args 配列が欠落しない）。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({
+            "command": "echo",
+            "args": ["hello", "webhook-args-test"]
+        });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args: &args,
+            result: None,
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        let batch = rx.try_recv().expect("started batch should be sent");
+        let msg = &batch.messages[0];
+        assert!(msg.contains("tool_call_started"), "msg: {msg}");
+        assert!(msg.contains("echo"), "command missing: {msg}");
+        assert!(msg.contains("hello"), "first arg missing: {msg}");
+        assert!(
+            msg.contains("webhook-args-test"),
+            "second arg missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_started_includes_non_shell_args() {
+        // 非 shell ツールでも started に引数（JSON）が含まれる。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({ "path": "notes/todo.md", "limit": 10 });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "read_file",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args: &args,
+            result: None,
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        let batch = rx.try_recv().expect("started batch should be sent");
+        let msg = &batch.messages[0];
+        assert!(msg.contains("tool_call_started"), "msg: {msg}");
+        assert!(msg.contains("notes/todo.md"), "args missing: {msg}");
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_started_redacts_secret_args() {
+        // started の引数に含まれるシークレット（API キー / Discord webhook URL）は redact。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({
+            "command": "curl -H 'Authorization: Bearer sk-supersecretkeyvalue1234' https://discord.com/api/webhooks/999/leakedtokenvalue && export API_KEY=anothersupersecretvalue"
+        });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args: &args,
+            result: None,
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        let batch = rx.try_recv().expect("started batch should be sent");
+        let msg = &batch.messages[0];
+        assert!(msg.contains("tool_call_started"), "msg: {msg}");
+        assert!(msg.contains("[REDACTED]"), "expected redaction marker: {msg}");
+        assert!(!msg.contains("sk-supersecretkeyvalue1234"), "api key leaked: {msg}");
+        assert!(
+            !msg.contains("leakedtokenvalue"),
+            "webhook token leaked: {msg}"
+        );
+        assert!(
+            !msg.contains("anothersupersecretvalue"),
+            "API_KEY value leaked: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_clamps_long_args() {
+        // 長大な引数は安全長へクランプされ、メッセージは Discord 上限内に収まる。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        // 多数の短い語で長文を作る（長い英数字連は redact されてしまうため避ける）。
+        let long_cmd = format!("echo {}", "word ".repeat(2_000));
+        let args = serde_json::json!({ "command": long_cmd });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args: &args,
+            result: None,
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+        let batch = rx.try_recv().expect("started batch should be sent");
+        let msg = &batch.messages[0];
+        // メッセージ全体は Discord のハード上限(2000)内。
+        assert!(
+            msg.chars().count() <= 2000,
+            "message exceeds Discord limit: {}",
+            msg.chars().count()
+        );
+        // args フィールド自体もクランプされ、省略マーカが付く。
+        assert!(msg.contains('…'), "clamp ellipsis missing: {msg}");
+    }
+
+    // ---- summarize_tool_args: redact-before-truncate ----
+
+    #[test]
+    fn test_summarize_tool_args_redacts_before_truncation() {
+        // 長い前置き文字列のあとに base64 風シークレットを置く。先に切り詰めてから
+        // redact する実装だと断片が素通りしうるが、redact 先行なら完全に消える。
+        let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"; // 40 文字の英数字シークレット
+        // 先頭を redact 対象でない短い語で 290 文字埋め、その後にシークレットを置く。
+        // truncate を先にすると 300 文字目で secret が分断され断片が残るが、redact 先行なら
+        // トークン全体が一致して完全に消える。
+        let prefix = "a ".repeat(145); // 290 文字（"a " x145）
+        let cmd = format!("{prefix}{secret}");
+        let args = serde_json::json!({ "command": cmd });
+        let summary = summarize_tool_args("execute_shell", &args).unwrap();
+        assert!(summary.starts_with("cmd: `"), "summary: {summary}");
+        assert!(!summary.contains(secret), "secret survived: {summary}");
+        // 切り詰めても断片（先頭数文字）が残らないこと。
+        assert!(
+            !summary.contains("ABCDEFGHIJ"),
+            "secret fragment leaked: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_summarize_tool_args_execute_shell_includes_command_and_args() {
+        // execute_shell の実引数（command + args 配列）が両方描画されること。
+        let args = serde_json::json!({
+            "command": "echo",
+            "args": ["hello", "webhook-args-test"]
+        });
+        let summary = summarize_tool_args("execute_shell", &args).unwrap();
+        assert!(summary.contains("echo"), "command missing: {summary}");
+        assert!(summary.contains("hello"), "first arg missing: {summary}");
+        assert!(
+            summary.contains("webhook-args-test"),
+            "second arg missing: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_summarize_tool_args_execute_shell_marks_stdin_without_leaking() {
+        // stdin は本文を出さず、存在とバイト数のみ示す。
+        let args = serde_json::json!({
+            "command": "cat",
+            "stdin": "secret-stdin-body"
+        });
+        let summary = summarize_tool_args("execute_shell", &args).unwrap();
+        assert!(summary.contains("cat"), "command missing: {summary}");
+        assert!(summary.contains("stdin"), "stdin marker missing: {summary}");
+        assert!(
+            !summary.contains("secret-stdin-body"),
+            "stdin body leaked: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_summarize_tool_args_empty_is_none() {
+        assert!(summarize_tool_args("read_file", &serde_json::json!({})).is_none());
+        assert!(summarize_tool_args("read_file", &serde_json::Value::Null).is_none());
     }
 
     // ---- L1: disabled/invalid activity row drops events (no silent fallback) ----
