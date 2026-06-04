@@ -117,12 +117,11 @@ impl DiscordGatewayActions {
             };
 
         // 一般ツール/コマンド活動（activity family）のデフォルト webhook があるか。
-        // env/config fallback は使わない（activity kind の DB 行のみ）。
+        // 判定は webhook::has_activity_default に集約（resolve_activity_webhook と同じ
+        // scope 集合: tool/agent/global の enabled な activity 行。env/config fallback なし）。
         let has_activity = {
             let conn = self.db.lock().unwrap();
-            opencrab_db::queries::list_agent_webhook_config(&conn, Some(&agent_id), false)
-                .map(|rows| rows.iter().any(|r| r.kind == "activity"))
-                .unwrap_or(false)
+            webhook::has_activity_default(&conn, &agent_id)
         };
 
         // 同一 run の配送を直列化する worker を 1 つだけ起動する。lifecycle（started/
@@ -157,20 +156,18 @@ impl DiscordGatewayActions {
 
         // activity webhook があれば、sub-engine の executor に ToolEventSink を挿し
         // tool_call_* を共有 worker 経由で配送する。
-        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> = match (
-            has_activity,
-            &webhook_tx,
-        ) {
-            (true, Some(tx)) => Some(Arc::new(WebhookToolEventSink {
-                db: self.db.clone(),
-                agent_id: agent_id.clone(),
-                tx: tx.clone(),
-                max_chars: 1500,
-                counter: std::sync::atomic::AtomicUsize::new(0),
-                cap: 200,
-            })),
-            _ => None,
-        };
+        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> =
+            match (has_activity, &webhook_tx) {
+                (true, Some(tx)) => Some(Arc::new(WebhookToolEventSink {
+                    db: self.db.clone(),
+                    agent_id: agent_id.clone(),
+                    tx: tx.clone(),
+                    max_chars: 1500,
+                    counter: std::sync::atomic::AtomicUsize::new(0),
+                    cap: 200,
+                })),
+                _ => None,
+            };
 
         // Create the sub-session in the DB.
         {
@@ -703,6 +700,39 @@ fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> Strin
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// depth0/メインエージェントの executor に挿す activity ツールイベント sink を構築する。
+///
+/// `agent_id` に対する有効な activity 行（agent scope または global `*`）が無ければ
+/// `None` を返し、配送 worker も起動しない（best-effort・無駄なタスクを作らない）。
+/// 返した sink は spawn_subtask の sub-engine 用 sink と同じ実体で、イベントごとに
+/// `resolve_activity_webhook`（tool > agent > global）で宛先を解決し、
+/// `build_tool_event_message` で redaction/クランプしてから送る。disabled/不正 URL は
+/// 黙って下位へ fall through せず診断を残す（no-silent-fallback）。
+///
+/// メイン engine は spawn_subtask のような lifecycle webhook を持たないため、ここでは
+/// 専用の run worker を 1 本だけ起動して tool_call_* を直列配送する。
+pub fn spawn_activity_tool_event_sink(
+    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    agent_id: &str,
+) -> Option<Arc<dyn opencrab_actions::ToolEventSink>> {
+    let has_activity = {
+        let conn = db.lock().ok()?;
+        webhook::has_activity_default(&conn, agent_id)
+    };
+    if !has_activity {
+        return None;
+    }
+    let tx = webhook::spawn_run_worker_with_sink(reqwest::Client::new(), None);
+    Some(Arc::new(WebhookToolEventSink {
+        db,
+        agent_id: agent_id.to_string(),
+        tx,
+        max_chars: 1500,
+        counter: AtomicUsize::new(0),
+        cap: 200,
+    }))
+}
+
 /// activity family のデフォルト webhook へ tool_call_* を配送する sink。
 /// イベントごとに resolve_activity_webhook で宛先を解決（tool > agent > global）し、
 /// build_tool_event_message で redaction + クランプしてから送る。
@@ -1023,7 +1053,10 @@ mod tests {
         let sink = make_sink(db, tx);
         let args = serde_json::json!({});
         opencrab_actions::ToolEventSink::on_event(&sink, &started_event(&args));
-        assert!(rx.try_recv().is_err(), "invalid activity url -> nothing sent");
+        assert!(
+            rx.try_recv().is_err(),
+            "invalid activity url -> nothing sent"
+        );
     }
 
     // ---- L2: shared delivery path preserves lifecycle/tool_call ordering ----
@@ -1068,5 +1101,83 @@ mod tests {
         assert!(first.messages[0].contains("lifecycle: started"));
         let second = rx.try_recv().expect("tool_call batch");
         assert!(second.messages[0].contains("tool_call_completed"));
+    }
+
+    // ---- depth0/main executor sink wiring (factory) ----
+
+    /// activity 行が無いエージェントでは factory は None を返す（worker も起動しない）。
+    #[tokio::test]
+    async fn test_spawn_activity_sink_none_without_activity_row() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let sink = spawn_activity_tool_event_sink(db, "a1");
+        assert!(sink.is_none(), "no activity row -> no sink");
+    }
+
+    /// activity 行があれば factory は Some を返し、その sink は depth0 イベントを
+    /// activity webhook へ整形・redaction して配送する（生トークンは載らない）。
+    #[tokio::test]
+    async fn test_spawn_activity_sink_some_with_activity_row_and_delivers() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity(&conn);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let sink = spawn_activity_tool_event_sink(db, "a1");
+        assert!(sink.is_some(), "activity row -> sink present");
+
+        // depth0 のツールイベントを流すと配送される（worker が実際に送ろうとするが、
+        // ダミー URL なのでネットワークは best-effort で失敗する。ここでは on_event が
+        // パニックせず整形できることを確認する）。
+        let sink = sink.unwrap();
+        let args = serde_json::json!({ "command": "echo hi" });
+        let result = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "leaked API_KEY=supersecretvalue here",
+            "truncated": false
+        });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Completed,
+            started_at: "2026-01-01T00:00:00Z",
+            duration_ms: Some(5),
+            args: &args,
+            result: Some(&result),
+            error: None,
+        };
+        sink.on_event(&ev);
+    }
+
+    fn insert_global_activity(conn: &rusqlite::Connection) {
+        let row = opencrab_db::queries::AgentWebhookConfigRow {
+            scope: "global".to_string(),
+            agent_id: "*".to_string(),
+            tool_name: String::new(),
+            kind: "activity".to_string(),
+            url: "https://discord.com/api/webhooks/9/glob".to_string(),
+            events_json: None,
+            enabled: true,
+            name: None,
+            created_by: Some("owner".to_string()),
+            output_mode: "summary".to_string(),
+            max_chars: 1500,
+            updated_at: String::new(),
+        };
+        opencrab_db::queries::upsert_agent_webhook_config(conn, &row).unwrap();
+    }
+
+    /// global(`*`) のみの activity デフォルトでも factory は Some を返す
+    /// （list_agent_webhook_config が agent_id='*' を含むため）。depth0 イベントが
+    /// global 宛先へ stream され得ることを担保する。
+    #[tokio::test]
+    async fn test_spawn_activity_sink_some_with_global_only_activity_row() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_global_activity(&conn);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        // agent "a1" 固有の行は無いが、global 行があるので Some。
+        let sink = spawn_activity_tool_event_sink(db, "a1");
+        assert!(sink.is_some(), "global-only activity default -> sink present");
     }
 }

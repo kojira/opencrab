@@ -565,6 +565,16 @@ pub async fn run_agent_response(
             None => bridged,
         }
     };
+    // depth0/メインエージェント自身のツール/コマンド活動も activity webhook へ流す。
+    // spawn_subtask の sub-engine だけでなくメイン executor にも ToolEventSink を挿す。
+    // activity 行が無ければ factory は None を返し、配送 worker も起動しない（best-effort）。
+    // 無効/不正なデフォルトは sink 側で診断を残し、黙って fall through しない。
+    #[cfg(feature = "discord")]
+    let executor =
+        match opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id) {
+            Some(sink) => executor.with_tool_event_sink(sink),
+            None => executor,
+        };
 
     // Create LlmRouterAdapter with metrics recording.
     let metrics_ctx = MetricsContext {

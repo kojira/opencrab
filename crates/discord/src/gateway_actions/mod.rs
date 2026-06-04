@@ -24,6 +24,7 @@ mod subtask_webhook;
 mod ui;
 mod webhook;
 
+pub use subtask_engine::spawn_activity_tool_event_sink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 
@@ -625,6 +626,145 @@ impl GatewayActions for DiscordGatewayActions {
                 }),
             },
             GatewayActionDef {
+                name: "get_default_webhook".to_string(),
+                description: "実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "family": {
+                            "type": "string",
+                            "enum": ["activity", "subtask"],
+                            "description": "解決するファミリ（省略時 'activity'）。"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "tool scope を解決する際のツール名（省略可）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "set_default_webhook".to_string(),
+                description: "scope（agent/tool/global）ごとのデフォルト webhook を設定する（既定 family='activity'）。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner は全 scope、agent は自分の agent-scope のみ設定/無効化できる。応答にrawトークンは含まれない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "tool", "global"],
+                            "description": "agent=エージェント既定、tool=ツール既定、global=全体既定。"
+                        },
+                        "family": {
+                            "type": "string",
+                            "enum": ["activity", "subtask"],
+                            "description": "設定するファミリ（省略時 'activity'）。"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。global では '*' に強制）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "scope=tool のとき省略時 'spawn_subtask'。activity の特定ツール宛先はツール名を指定する。"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "Discord webhook URL。空/省略でそのscopeを無効化する。"
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "有効/無効（url指定時のデフォルトtrue）。"
+                        },
+                        "events": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "通知イベント（省略時は全て）。"
+                        },
+                        "output_mode": {
+                            "type": "string",
+                            "description": "出力モード（省略時 'summary'）。"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "最大文字数（省略時 1500）。"
+                        }
+                    },
+                    "required": ["scope"]
+                }),
+            },
+            GatewayActionDef {
+                name: "ensure_webhook".to_string(),
+                description: "使えるデフォルト webhook が既にあればそれを redacted で返す（既定 family='activity'、owner/trusted_user/co_agent）。無ければ owner かつ channel_id 指定時のみ webhook を新規作成して既定に登録する。rawトークンは返さない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "tool", "global"],
+                            "description": "登録先scope（省略時 'agent'）。"
+                        },
+                        "family": {
+                            "type": "string",
+                            "enum": ["activity", "subtask"],
+                            "description": "対象ファミリ（省略時 'activity'）。"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。global では '*'）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "scope=tool のとき省略時 'spawn_subtask'。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "新規作成時に必須。webhookを作るチャンネルの数値ID。"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "作成するwebhook名（省略可）。"
+                        },
+                        "events": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "通知イベント（省略時は全て）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "list_webhooks".to_string(),
+                description: "登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。globalも併せて返る）。"
+                        },
+                        "family": {
+                            "type": "string",
+                            "description": "family（kind）で絞り込み（省略可）。例: 'activity' / 'subtask'。"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "scopeで絞り込み（省略可）。"
+                        },
+                        "include_disabled": {
+                            "type": "boolean",
+                            "description": "無効化済みも含めるか（省略時 false）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
                 name: "send_ui".to_string(),
                 description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する。\n\n使用例（ボタン）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"選んでください\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"btn1\", \"btn2\"]}, {\"id\": \"btn1\", \"component\": \"Button\", \"text\": \"選択A\", \"style\": \"primary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"A\"}}}, {\"id\": \"btn2\", \"component\": \"Button\", \"text\": \"選択B\", \"style\": \"secondary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"B\"}}}]}\n\n使用例（セレクトメニュー）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"モデルを選択\"}, {\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"sel1\"]}, {\"id\": \"sel1\", \"component\": \"SelectMenu\", \"placeholder\": \"モデルを選んでください\", \"options\": [{\"label\": \"GPT-4\", \"value\": \"gpt-4\"}, {\"label\": \"Claude\", \"value\": \"claude\"}], \"action\": {\"name\": \"select_model\"}}]}\n\n使用例（フォーム/モーダル）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"row1\"]}, {\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"設定を変更\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"trigger_btn\"]}, {\"id\": \"trigger_btn\", \"component\": \"Button\", \"text\": \"設定を開く\", \"style\": \"primary\", \"action\": {\"name\": \"open_form\"}}, {\"id\": \"form1\", \"component\": \"Form\", \"title\": \"設定変更\", \"children\": [\"input_name\", \"input_desc\"], \"action\": {\"name\": \"submit_form\"}}, {\"id\": \"input_name\", \"component\": \"TextInput\", \"label\": \"名前\", \"placeholder\": \"名前を入力\", \"style\": \"short\", \"required\": true}, {\"id\": \"input_desc\", \"component\": \"TextInput\", \"label\": \"説明\", \"placeholder\": \"説明を入力\", \"style\": \"paragraph\", \"required\": false}]}\n\n注意: Rowのchildrenで参照するButton/SelectMenuはトップレベルのcomponents配列に定義する。各Buttonには一意のidとaction（name + context）を設定する。SelectMenuの選択結果はaction.contextにselected_valuesとして返される。Formはモーダル表示用でトリガーボタンが必要。".to_string(),
                 parameters: json!({
@@ -721,6 +861,11 @@ impl GatewayActions for DiscordGatewayActions {
             "set_default_subtask_webhook" => self.execute_set_default_subtask_webhook(args),
             "ensure_subtask_webhook" => self.execute_ensure_subtask_webhook(args).await,
             "list_subtask_webhooks" => self.execute_list_subtask_webhooks(args),
+            // 汎用名（既定 family='activity'）。
+            "get_default_webhook" => self.execute_get_default_webhook(args),
+            "set_default_webhook" => self.execute_set_default_webhook(args),
+            "ensure_webhook" => self.execute_ensure_webhook(args).await,
+            "list_webhooks" => self.execute_list_webhooks(args),
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -767,7 +912,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 23);
+        assert_eq!(defs.len(), 27);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"discord_list_guilds"));
@@ -793,6 +938,10 @@ mod tests {
         assert!(names.contains(&"set_default_subtask_webhook"));
         assert!(names.contains(&"ensure_subtask_webhook"));
         assert!(names.contains(&"list_subtask_webhooks"));
+        assert!(names.contains(&"get_default_webhook"));
+        assert!(names.contains(&"set_default_webhook"));
+        assert!(names.contains(&"ensure_webhook"));
+        assert!(names.contains(&"list_webhooks"));
     }
 
     #[test]
@@ -1319,13 +1468,21 @@ mod tests {
                 }),
             )
             .await;
-        assert!(result.success, "agent self-manage should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "agent self-manage should succeed: {:?}",
+            result.error
+        );
         let data = result.data.unwrap();
         assert_eq!(data["enabled"], true);
 
         let conn = db.lock().unwrap();
         let row = opencrab_db::queries::get_agent_webhook_config(
-            &conn, "agent", "test-agent", "", "activity",
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "activity",
         )
         .unwrap()
         .unwrap();
@@ -1346,7 +1503,11 @@ mod tests {
                 }),
             )
             .await;
-        assert!(result.success, "agent disable should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "agent disable should succeed: {:?}",
+            result.error
+        );
         assert_eq!(result.data.unwrap()["enabled"], false);
     }
 
@@ -1433,15 +1594,26 @@ mod tests {
                 }),
             )
             .await;
-        assert!(result.success, "owner set should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "owner set should succeed: {:?}",
+            result.error
+        );
         let data = result.data.unwrap();
         assert!(json_has_no_raw_token(&data), "raw token leaked in response");
-        assert!(data["redacted_url"].as_str().unwrap().contains("[redacted]"));
+        assert!(data["redacted_url"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted]"));
 
         // stored in DB
         let conn = db.lock().unwrap();
         let row = opencrab_db::queries::get_agent_webhook_config(
-            &conn, "agent", "test-agent", "", "subtask",
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "subtask",
         )
         .unwrap()
         .unwrap();
@@ -1478,7 +1650,11 @@ mod tests {
         assert!(result.success, "{:?}", result.error);
         let conn = db.lock().unwrap();
         let row = opencrab_db::queries::get_agent_webhook_config(
-            &conn, "agent", "test-agent", "", "subtask",
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "subtask",
         )
         .unwrap()
         .unwrap();
@@ -1637,5 +1813,187 @@ mod tests {
             .await;
         assert!(!no_channel.success);
         assert!(no_channel.error.unwrap().contains("channel_id"));
+    }
+
+    // ---- generic webhook action names / default family ----
+
+    /// 汎用 set_default_webhook は既定で family='activity' の行を upsert する。
+    #[tokio::test]
+    async fn test_generic_set_default_webhook_defaults_to_activity_family() {
+        let (actions, db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_webhook",
+                &json!({ "__caller": "owner", "scope": "agent", "url": WH_VALID_URL }),
+            )
+            .await;
+        assert!(
+            result.success,
+            "owner set should succeed: {:?}",
+            result.error
+        );
+        let data = result.data.unwrap();
+        assert_eq!(data["family"], "activity");
+        assert!(json_has_no_raw_token(&data), "raw token leaked in response");
+
+        let conn = db.lock().unwrap();
+        // activity 行が作られ、subtask 行は作られない。
+        let activity = opencrab_db::queries::get_agent_webhook_config(
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "activity",
+        )
+        .unwrap();
+        assert!(activity.is_some(), "activity row should exist");
+        assert_eq!(activity.unwrap().url, WH_VALID_URL);
+        let subtask = opencrab_db::queries::get_agent_webhook_config(
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "subtask",
+        )
+        .unwrap();
+        assert!(
+            subtask.is_none(),
+            "subtask row must not be created by generic name"
+        );
+    }
+
+    /// 後方互換 set_default_subtask_webhook は既定で family='subtask'。
+    #[tokio::test]
+    async fn test_subtask_named_set_defaults_to_subtask_family() {
+        let (actions, db) = make_test_actions();
+        let result = actions
+            .execute(
+                "set_default_subtask_webhook",
+                &json!({ "__caller": "owner", "scope": "agent", "url": WH_VALID_URL }),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.data.unwrap()["family"], "subtask");
+        let conn = db.lock().unwrap();
+        assert!(opencrab_db::queries::get_agent_webhook_config(
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "subtask",
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    /// agent 自身は汎用名でも自分の agent-scope のみ設定でき、他 scope は拒否される。
+    #[tokio::test]
+    async fn test_generic_set_default_webhook_agent_scope_permission() {
+        let (actions, _db) = make_test_actions();
+        // 自分の agent-scope は許可。
+        let ok = actions
+            .execute(
+                "set_default_webhook",
+                &json!({ "__caller": "agent", "scope": "agent", "url": WH_VALID_URL }),
+            )
+            .await;
+        assert!(
+            ok.success,
+            "agent self-manage should succeed: {:?}",
+            ok.error
+        );
+        // global は拒否。
+        let denied = actions
+            .execute(
+                "set_default_webhook",
+                &json!({ "__caller": "agent", "scope": "global", "url": WH_VALID_URL }),
+            )
+            .await;
+        assert!(!denied.success);
+        assert!(denied.error.unwrap().contains("forbidden_scope"));
+    }
+
+    /// 汎用 get_default_webhook は activity 行のみを解決する（subtask 行は使わない）。
+    #[tokio::test]
+    async fn test_generic_get_default_webhook_resolves_activity_only() {
+        let (actions, db) = make_test_actions();
+        {
+            let conn = db.lock().unwrap();
+            // subtask 行のみを seed。activity 行は無い。
+            let row = opencrab_db::queries::AgentWebhookConfigRow {
+                scope: "agent".to_string(),
+                agent_id: "test-agent".to_string(),
+                tool_name: String::new(),
+                kind: "subtask".to_string(),
+                url: WH_VALID_URL.to_string(),
+                events_json: None,
+                enabled: true,
+                name: None,
+                created_by: Some("owner".to_string()),
+                output_mode: "summary".to_string(),
+                max_chars: 1500,
+                updated_at: String::new(),
+            };
+            opencrab_db::queries::upsert_agent_webhook_config(&conn, &row).unwrap();
+        }
+        // activity family の解決では subtask 行に fall through しない → none。
+        let activity = actions
+            .execute("get_default_webhook", &json!({ "__caller": "owner" }))
+            .await;
+        assert!(activity.success);
+        let data = activity.data.unwrap();
+        assert_eq!(data["status"], "none");
+        assert_eq!(data["family"], "activity");
+        // subtask family（family 明示）なら解決できる。
+        let subtask = actions
+            .execute(
+                "get_default_webhook",
+                &json!({ "__caller": "owner", "family": "subtask" }),
+            )
+            .await;
+        assert_eq!(subtask.data.unwrap()["status"], "ok");
+    }
+
+    /// 汎用 list_webhooks は family で kind を絞り込める。
+    #[tokio::test]
+    async fn test_generic_list_webhooks_family_filter() {
+        let (actions, db) = make_test_actions();
+        {
+            let conn = db.lock().unwrap();
+            for kind in ["subtask", "activity"] {
+                let row = opencrab_db::queries::AgentWebhookConfigRow {
+                    scope: "agent".to_string(),
+                    agent_id: "test-agent".to_string(),
+                    tool_name: String::new(),
+                    kind: kind.to_string(),
+                    url: WH_VALID_URL.to_string(),
+                    events_json: None,
+                    enabled: true,
+                    name: None,
+                    created_by: Some("owner".to_string()),
+                    output_mode: "summary".to_string(),
+                    max_chars: 1500,
+                    updated_at: String::new(),
+                };
+                opencrab_db::queries::upsert_agent_webhook_config(&conn, &row).unwrap();
+            }
+        }
+        // 絞り込み無し → 両方。
+        let all = actions
+            .execute("list_webhooks", &json!({ "__caller": "owner" }))
+            .await;
+        assert_eq!(all.data.unwrap()["webhooks"].as_array().unwrap().len(), 2);
+        // family=activity → 1 件。
+        let filtered = actions
+            .execute(
+                "list_webhooks",
+                &json!({ "__caller": "owner", "family": "activity" }),
+            )
+            .await;
+        let hooks = filtered.data.unwrap();
+        let arr = hooks["webhooks"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["kind"], "activity");
+        assert!(json_has_no_raw_token(&hooks));
     }
 }

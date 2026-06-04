@@ -732,6 +732,19 @@ pub fn resolve_activity_webhook(
     WebhookResolution::None
 }
 
+/// agent に適用され得る有効な activity デフォルトが 1 つでも存在するか。
+///
+/// `resolve_activity_webhook` と同じ scope 集合（tool / agent / global の activity 行）を
+/// 見る。`list_agent_webhook_config` は `(agent_id = ? OR agent_id = '*') AND enabled = 1`
+/// で引くため、agent 自身の tool/agent scope 行と global(`*`) 行を enabled のみ含む。
+/// env/config fallback は使わない（activity kind の DB 行のみ）。
+/// 配送 sink を立てる価値があるか（best-effort）の単一判定点。
+pub fn has_activity_default(conn: &rusqlite::Connection, agent_id: &str) -> bool {
+    opencrab_db::queries::list_agent_webhook_config(conn, Some(agent_id), false)
+        .map(|rows| rows.iter().any(|r| r.kind == "activity"))
+        .unwrap_or(false)
+}
+
 /// webhook 配送が最終的に失敗したとき、親セッションログに 1 件記録する。
 ///
 /// raw url は決して渡さない（redacted_url のみ）。parent_session_id が空なら何もしない。
