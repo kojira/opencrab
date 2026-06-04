@@ -1862,9 +1862,10 @@ mod tests {
         );
     }
 
-    /// 後方互換 set_default_subtask_webhook は既定で family='subtask'。
+    /// 後方互換 set_default_subtask_webhook は既定で family='subtask' を返しつつ、
+    /// agent の通常 tool/command activity へも効くよう activity 行も mirror する。
     #[tokio::test]
-    async fn test_subtask_named_set_defaults_to_subtask_family() {
+    async fn test_subtask_named_set_defaults_to_subtask_and_activity_families() {
         let (actions, db) = make_test_actions();
         let result = actions
             .execute(
@@ -1884,6 +1885,30 @@ mod tests {
         )
         .unwrap()
         .is_some());
+        let activity = opencrab_db::queries::get_agent_webhook_config(
+            &conn,
+            "agent",
+            "test-agent",
+            "",
+            "activity",
+        )
+        .unwrap();
+        assert!(
+            activity.is_some(),
+            "compat subtask default should also enable activity streaming"
+        );
+        let resolved = crate::gateway_actions::webhook::resolve_activity_webhook(
+            &conn,
+            "test-agent",
+            "execute_shell",
+        );
+        assert!(
+            matches!(
+                resolved,
+                crate::gateway_actions::webhook::WebhookResolution::Use { .. }
+            ),
+            "activity default should resolve after set_default_subtask_webhook"
+        );
     }
 
     /// agent 自身は汎用名でも自分の agent-scope のみ設定でき、他 scope は拒否される。

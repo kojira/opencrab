@@ -243,6 +243,12 @@ impl DiscordGatewayActions {
         };
         // `family` を優先し、後方互換で `kind` も受ける。既定はこのアクションの family
         // （汎用名は activity、`*_subtask_webhook` 名は subtask）。明示上書きも可。
+        let family_was_explicit = args
+            .get("family")
+            .and_then(|v| v.as_str())
+            .or_else(|| args.get("kind").and_then(|v| v.as_str()))
+            .filter(|s| !s.is_empty())
+            .is_some();
         let kind = args
             .get("family")
             .and_then(|v| v.as_str())
@@ -345,7 +351,27 @@ impl DiscordGatewayActions {
 
         let result = {
             let conn = self.db.lock().unwrap();
-            opencrab_db::queries::upsert_agent_webhook_config(&conn, &row)
+            let mut result = opencrab_db::queries::upsert_agent_webhook_config(&conn, &row);
+            if result.is_ok() && default_family == "subtask" && !family_was_explicit {
+                let mut activity_row = row.clone();
+                activity_row.kind = "activity".to_string();
+                if let Err(e) =
+                    opencrab_db::queries::upsert_agent_webhook_config(&conn, &activity_row)
+                {
+                    tracing::warn!(
+                        target: "webhook_audit",
+                        caller = %caller,
+                        scope = %scope,
+                        agent_id = %agent_id,
+                        tool_name = %tool_name,
+                        result = "activity_mirror_failed",
+                        error = %e,
+                        "set_default_subtask_webhook failed to mirror activity default"
+                    );
+                    result = Err(e);
+                }
+            }
+            result
         };
 
         let redacted = redact_webhook_url(&url);

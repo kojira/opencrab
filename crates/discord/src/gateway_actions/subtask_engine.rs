@@ -65,6 +65,19 @@ impl DiscordGatewayActions {
                 message,
                 source,
             } => {
+                emit_activity_diagnostic(
+                    self.db.clone(),
+                    self.webhook_client.clone(),
+                    &agent_id,
+                    "spawn_subtask",
+                    "webhook_resolution_error",
+                    &format!(
+                        "spawn_subtask webhook resolution failed before execution: {code}: {message} (source: {})",
+                        source.as_str()
+                    ),
+                    args,
+                    None,
+                );
                 // 検証失敗 → spawn しない。raw url はどこにも出さない。
                 return GatewayActionResult {
                     success: false,
@@ -136,6 +149,22 @@ impl DiscordGatewayActions {
             } else {
                 None
             };
+
+        if webhook_status != "ok" {
+            emit_activity_diagnostic(
+                self.db.clone(),
+                self.webhook_client.clone(),
+                &agent_id,
+                "spawn_subtask",
+                "webhook_resolution_diagnostic",
+                &format!(
+                    "spawn_subtask lifecycle webhook status is {webhook_status}; source={}",
+                    webhook_source_str.unwrap_or("none")
+                ),
+                args,
+                webhook_tx.as_ref(),
+            );
+        }
 
         // lifecycle の started を送る（同じ共有 worker 経由）。
         if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
@@ -733,6 +762,115 @@ pub fn spawn_activity_tool_event_sink(
     }))
 }
 
+fn emit_activity_diagnostic(
+    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    client: reqwest::Client,
+    agent_id: &str,
+    tool_name: &str,
+    diagnostic_event: &str,
+    reason: &str,
+    args: &serde_json::Value,
+    existing_tx: Option<&tokio::sync::mpsc::UnboundedSender<DeliveryBatch>>,
+) {
+    let Some(batch) =
+        build_activity_diagnostic_batch(&db, agent_id, tool_name, diagnostic_event, reason, args)
+    else {
+        return;
+    };
+    if let Some(tx) = existing_tx {
+        let _ = tx.send(batch);
+    } else {
+        let tx = webhook::spawn_run_worker_with_sink(client, None);
+        let _ = tx.send(batch);
+    }
+}
+
+fn build_activity_diagnostic_batch(
+    db: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    agent_id: &str,
+    tool_name: &str,
+    diagnostic_event: &str,
+    reason: &str,
+    args: &serde_json::Value,
+) -> Option<DeliveryBatch> {
+    let resolution = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "webhook_audit",
+                    agent_id = %agent_id,
+                    tool = %tool_name,
+                    event = %diagnostic_event,
+                    error = %e,
+                    "activity webhook diagnostic could not lock db"
+                );
+                return None;
+            }
+        };
+        webhook::resolve_activity_webhook(&conn, agent_id, tool_name)
+    };
+    let cfg = match resolution {
+        WebhookResolution::Use { config, .. } => config,
+        WebhookResolution::Error {
+            code,
+            message,
+            source,
+        } => {
+            tracing::warn!(
+                target: "webhook_audit",
+                agent_id = %agent_id,
+                tool = %tool_name,
+                event = %diagnostic_event,
+                source = %source.as_str(),
+                code = %code,
+                reason = %message,
+                "activity webhook diagnostic dropped because default resolution failed"
+            );
+            return None;
+        }
+        WebhookResolution::Disabled { source } => {
+            tracing::warn!(
+                target: "webhook_audit",
+                agent_id = %agent_id,
+                tool = %tool_name,
+                event = %diagnostic_event,
+                source = %source.as_str(),
+                "activity webhook diagnostic dropped because default is disabled"
+            );
+            return None;
+        }
+        WebhookResolution::None => {
+            tracing::warn!(
+                target: "webhook_audit",
+                agent_id = %agent_id,
+                tool = %tool_name,
+                event = %diagnostic_event,
+                "activity webhook diagnostic dropped because no default is configured"
+            );
+            return None;
+        }
+    };
+    if !cfg.wants(diagnostic_event) && !cfg.wants("tool_call_failed") {
+        return None;
+    }
+    let view = webhook::ToolEventView {
+        event: diagnostic_event.to_string(),
+        tool_name: tool_name.to_string(),
+        tool_call_id: "diagnostic".to_string(),
+        depth: 0,
+        status: "failed".to_string(),
+        args_summary: summarize_tool_args(tool_name, args),
+        result_summary: Some(reason.to_string()),
+        max_chars: 1500,
+        ..Default::default()
+    };
+    Some(DeliveryBatch {
+        url: cfg.url,
+        messages: webhook::build_tool_event_message(&view),
+    })
+}
+
 /// activity family のデフォルト webhook へ tool_call_* を配送する sink。
 /// イベントごとに resolve_activity_webhook で宛先を解決（tool > agent > global）し、
 /// build_tool_event_message で redaction + クランプしてから送る。
@@ -951,6 +1089,62 @@ mod tests {
     }
 
     #[test]
+    fn test_webhook_tool_event_sink_sends_failed_and_rejected() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity(&conn);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({ "command": "denied" });
+        let failed_result = serde_json::json!({
+            "exit_code": 2,
+            "stderr": "API_KEY=supersecretvalue failed",
+            "truncated": false
+        });
+        let failed = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "failed-call",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Failed,
+            started_at: "2026-01-01T00:00:00Z",
+            duration_ms: Some(5),
+            args: &args,
+            result: Some(&failed_result),
+            error: Some("command failed"),
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &failed);
+        let rejected = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "rejected-call",
+            agent_id: "a1",
+            session_id: Some("s1"),
+            depth: 0,
+            status: opencrab_actions::ToolEventStatus::Rejected,
+            started_at: "2026-01-01T00:00:00Z",
+            duration_ms: Some(1),
+            args: &args,
+            result: None,
+            error: Some("permission denied"),
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &rejected);
+
+        let failed_batch = rx.try_recv().expect("failed batch");
+        let failed_msg = &failed_batch.messages[0];
+        assert!(failed_msg.contains("tool_call_failed"));
+        assert!(failed_msg.contains("exit_code"));
+        assert!(
+            !failed_msg.contains("supersecretvalue"),
+            "secret leaked: {failed_msg}"
+        );
+        let rejected_batch = rx.try_recv().expect("rejected batch");
+        let rejected_msg = &rejected_batch.messages[0];
+        assert!(rejected_msg.contains("tool_call_rejected"));
+        assert!(rejected_msg.contains("permission denied"));
+    }
+
+    #[test]
     fn test_webhook_tool_event_sink_no_activity_row_sends_nothing() {
         let conn = opencrab_db::init_memory().unwrap();
         let db = Arc::new(std::sync::Mutex::new(conn));
@@ -1103,6 +1297,32 @@ mod tests {
         assert!(second.messages[0].contains("tool_call_completed"));
     }
 
+    #[test]
+    fn test_activity_diagnostic_batch_for_empty_explicit_webhook_url() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let args = serde_json::json!({
+            "task": "do it",
+            "webhook": { "url": "" }
+        });
+        let batch = build_activity_diagnostic_batch(
+            &db,
+            "a1",
+            "spawn_subtask",
+            "webhook_resolution_error",
+            "spawn_subtask webhook resolution failed before execution: invalid_webhook_url: url is empty (source: explicit)",
+            &args,
+        )
+        .expect("diagnostic should route to activity default");
+        assert_eq!(batch.url, "https://discord.com/api/webhooks/1/tok");
+        let msg = &batch.messages[0];
+        assert!(msg.contains("webhook_resolution_error"));
+        assert!(msg.contains("invalid_webhook_url"));
+        assert!(msg.contains("source: explicit"));
+        assert!(!msg.contains("https://discord.com/api/webhooks/1/tok"));
+    }
+
     // ---- depth0/main executor sink wiring (factory) ----
 
     /// activity 行が無いエージェントでは factory は None を返す（worker も起動しない）。
@@ -1178,6 +1398,9 @@ mod tests {
         let db = Arc::new(std::sync::Mutex::new(conn));
         // agent "a1" 固有の行は無いが、global 行があるので Some。
         let sink = spawn_activity_tool_event_sink(db, "a1");
-        assert!(sink.is_some(), "global-only activity default -> sink present");
+        assert!(
+            sink.is_some(),
+            "global-only activity default -> sink present"
+        );
     }
 }
