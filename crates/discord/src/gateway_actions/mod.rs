@@ -835,7 +835,7 @@ mod tests {
 
         // DB確認
         let conn = db.lock().unwrap();
-        let cfg = opencrab_db::queries::get_channel_config(&conn, "ch-1")
+        let cfg = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch-1", "test-agent")
             .unwrap()
             .unwrap();
         assert!(cfg.readable);
@@ -878,7 +878,7 @@ mod tests {
         assert!(result.success);
 
         let conn = db.lock().unwrap();
-        let cfg = opencrab_db::queries::get_channel_config(&conn, "ch-1")
+        let cfg = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch-1", "test-agent")
             .unwrap()
             .unwrap();
         assert!(!cfg.readable);
@@ -932,7 +932,7 @@ mod tests {
         assert!(result.success);
 
         let conn = db.lock().unwrap();
-        let cfg = opencrab_db::queries::get_channel_config(&conn, "ch-1")
+        let cfg = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch-1", "test-agent")
             .unwrap()
             .unwrap();
         assert_eq!(cfg.channel_name, "");
