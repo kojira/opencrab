@@ -152,11 +152,17 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
   - 通常は raw URL を返さない。`include_secret=true` は原則拒否し、どうしても必要な場合は owner 専用の別 action と監査ログ付きで設計する（本フェーズでは非対応）。
 - `set_default_subtask_webhook(args)`:
   - 入力: `scope`, `agent_id?`, `tool_name?`, `url?`, `enabled?`, `events?`, `output_mode?`, `max_chars?`
-  - `CallerIdentity::Owner` のみ実行可。URL が空なら対象 scope の DB default を disabled にする（削除ではなく監査可能な無効化）。
-  - URL は保存前に parse/形式検証し、ログ・レスポンスには redacted URL だけを出す。
+  - 権限:
+    - `CallerIdentity::Owner` は全 scope（agent / tool / global、および任意の `agent_id`）を set/disable できる（従来どおり）。
+    - `CallerIdentity::Agent` は**自分自身の agent scope の default subtask webhook のみ** set/disable できる。すなわち `scope='agent'` かつ `agent_id` が呼び出し元 agent 自身の場合に限り許可する。`scope='tool'` / `scope='global'`、および自分以外の `agent_id` への set/disable は拒否する（`forbidden_scope` 等のエラーを返す）。
+    - `trusted_user` / `co_agent` は set/disable できない（読み取り redacted のみ。既存方針を維持）。
+  - 自身の agent scope を対象にする場合、`agent_id` 省略時は呼び出し元 agent を既定とし、明示指定時は呼び出し元 agent と一致することを検証する。
+  - URL が空なら対象 scope の DB default を disabled にする（削除ではなく監査可能な無効化）。Agent は自分の agent scope の default を、URL を渡して自分で設定でき、空 URL で自分で無効化もできる。
+  - URL は保存前に parse/形式検証し、ログ・レスポンスには redacted URL だけを出す。raw URL/token は通常レスポンスに含めない。
 - `ensure_subtask_webhook(args)`:
   - 入力: `scope?`, `agent_id?`, `tool_name?`, `channel_id?`, `name?`, `events?`
-  - 既存の有効な default があればそれを返す。無ければ `CallerIdentity::Owner` のみ `discord_create_webhook` を呼び、作成した URL を DB に保存して返す。
+  - **読み取り/再利用パス**: 既存の有効な default があればそれを返す。これは redacted-read 扱いで、当該 agent の owner / trusted_user / co_agent に許可する既存の読み取り権限のまま（raw URL/token は返さない）。`CallerIdentity::Agent` も自分の agent scope の既存 default を解決・再利用できる。
+  - **新規作成パス（Discord Webhook 作成）**: 有効な default が無く新たに `discord_create_webhook` を呼んで Discord 上に Webhook を作る場合は、`CallerIdentity::Owner` のみに限定する（owner-only）。`CallerIdentity::Agent` による Discord Webhook 自動作成は、別途チャンネル束縛つきの安全な作成ルールを設計するまで許可しない。Agent が自分の default を持ちたい場合は、URL を渡す `set_default_subtask_webhook`（agent scope の自己設定）を使う。
   - `channel_id` 無しで新規作成しない。既存再利用だけなら `channel_id` は不要。
 - `list_subtask_webhooks(args)`:
   - 入力: `agent_id?`, `scope?`, `include_disabled?=false`, `include_secret?=false`
@@ -166,8 +172,11 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 
 権限モデル:
 
-- 読み取り（redacted）は当該 agent の owner、trusted_user、co_agent に許可する。共有文脈では raw URL を返さない。
-- set/create/ensure の作成部分は `CallerIdentity::Owner` に限定する。通常 agent が勝手に別チャンネルへ Webhook を作らない。
+- 読み取り（redacted）は当該 agent の owner、trusted_user、co_agent に許可する。共有文脈では raw URL を返さない。`trusted_user` / `co_agent` は読み取り（redacted）のみで、set/disable/create はできない。
+- `CallerIdentity::Agent` は**自分自身の agent scope の default subtask webhook**（`scope='agent'` かつ `agent_id` が自分）を `set_default_subtask_webhook` で set/disable できる。URL を渡しての自己設定、空 URL での自己無効化を許可する。一方、`scope='tool'` の default、`scope='global'` の default、自分以外の agent の default は set/disable できない。
+- Discord Webhook の新規作成（`ensure_subtask_webhook` の `discord_create_webhook` 作成部分）は `CallerIdentity::Owner` に限定する。通常 agent が勝手に別チャンネルへ Webhook を作らない。Agent の自己作成は、安全なチャンネル束縛ルールを別途設計するまで許可しない。
+- `CallerIdentity::Owner` は全 scope（agent / tool / global、任意の agent）の set/disable/create を管理できる（従来どおり）。
+- 上記いずれの権限でも、通常の read/list/get/ensure レスポンスで raw webhook token を返さない。
 - すべての action は監査ログに `caller` / `scope` / `agent_id` / `tool_name` / `source` / `redacted_url` / `result` を記録し、raw URL/token は記録しない。
 
 ---
@@ -283,7 +292,8 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 
 **Phase 5 — Gateway actions / API 露出**
 - `get_default_subtask_webhook` / `set_default_subtask_webhook` / `ensure_subtask_webhook` / `list_subtask_webhooks` を追加。
-- `ensure_subtask_webhook` は既存 default 再利用を先に行い、Owner が明示的に呼んだ場合だけ `discord_create_webhook` を呼ぶ。`spawn_subtask` 解決中の暗黙作成は禁止。
+- `set_default_subtask_webhook` は権限分岐を実装する: `CallerIdentity::Owner` は全 scope を set/disable、`CallerIdentity::Agent` は自分自身の agent scope（`scope='agent'` かつ `agent_id` が自分）のみ set/disable、それ以外（tool/global/他 agent）は拒否。`trusted_user`/`co_agent` は read のみ。
+- `ensure_subtask_webhook` は既存 default 再利用を先に行い、新規 `discord_create_webhook` 作成は Owner が明示的に呼んだ場合だけに限定する。Agent の既存 default 再利用（読み取り）は許可するが、Agent による Discord Webhook 作成は許可しない。`spawn_subtask` 解決中の暗黙作成は禁止。
 - エージェント編集 UI から `agent_webhook_config` を CRUD する場合も、同じ権限・redaction・監査ログのルールを通す。
 
 ### テスト戦略
@@ -293,7 +303,12 @@ subtask 既定値は新規テーブルを増やさず、2.1 の `agent_webhook_c
 - 解決規則は in-memory DB（`init_memory`）で検証: `spawn_subtask.webhook` 省略時に default が使われる、明示 `spawn_subtask.webhook` が default より勝つ、tool-specific > agent-specific > global の順に勝つ、DB 行が無い時だけ env/config fallback が使われる。
 - 明示 `spawn_subtask.webhook` の空/不正 URL、DB default の空/不正 URL、`enabled=false` が下位 fallback で隠蔽されず、エージェントに識別可能なエラーまたは Webhook なし結果として返ることを検証。
 - `02940b7` の env/config fallback は、DB default が無い場合だけ使われること、DB default がある場合は上書きしないこと、fallback 使用時に `webhook_source='env_config'` が返ることを検証。
-- gateway actions は権限検証を必須にする: `CallerIdentity::Owner` だけが set/create 可能、通常 read は redacted URL のみ、raw token を返さない。
+- gateway actions は権限検証を必須にする:
+  - `CallerIdentity::Owner` は全 scope（agent/tool/global/任意 agent）を set/disable/create 可能。
+  - `CallerIdentity::Agent` は自分自身の agent scope の default subtask webhook のみ set/disable 可能（URL 指定で自己設定、空 URL で自己無効化）。`scope='tool'` / `scope='global'` / 他 agent への set/disable は拒否されることを検証する。
+  - `CallerIdentity::Agent` による Discord Webhook 新規作成（`ensure_subtask_webhook` の作成部分）が拒否され、Owner のみ作成できることを検証する。Agent は既存 default の再利用（redacted-read）だけ可能。
+  - `trusted_user` / `co_agent` は read（redacted）のみで set/disable/create 不可。
+  - 通常 read/list/get/ensure は redacted URL のみ、raw token を返さない。
 - webhook worker は解決済み default URL を受け取って配送できること、明示 webhook の started 配送失敗が `spawn_subtask` のエラーとして返ること、非同期配送失敗が親セッションログに warning/error として残ること、ログには raw URL/token が出ないことをモック HTTP とログ capture で確認する。
 
 ### Migration / 後方互換
