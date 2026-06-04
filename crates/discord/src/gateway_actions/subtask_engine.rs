@@ -116,31 +116,7 @@ impl DiscordGatewayActions {
                 None
             };
 
-        // 同一 run の lifecycle delivery を直列化する worker を起動し、started を送る。
-        let webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>> =
-            if let Some(cfg) = &webhook {
-                let tx =
-                    webhook::spawn_run_worker_with_sink(self.webhook_client.clone(), giveup_sink);
-                if cfg.wants("started") {
-                    let meta = LifecycleMeta {
-                        label: label.clone(),
-                        run_id: subtask_id.clone(),
-                        session_key: sub_session_id.clone(),
-                    };
-                    let messages =
-                        webhook::build_started_messages(&meta, &task, webhook::DISCORD_CHUNK_LIMIT);
-                    let _ = tx.send(DeliveryBatch {
-                        url: cfg.url.clone(),
-                        messages,
-                    });
-                }
-                Some(tx)
-            } else {
-                None
-            };
-
-        // 一般ツール/コマンド活動（activity family）のデフォルト webhook があれば、
-        // sub-engine の executor に ToolEventSink を挿し tool_call_* を配送する。
+        // 一般ツール/コマンド活動（activity family）のデフォルト webhook があるか。
         // env/config fallback は使わない（activity kind の DB 行のみ）。
         let has_activity = {
             let conn = self.db.lock().unwrap();
@@ -148,20 +124,52 @@ impl DiscordGatewayActions {
                 .map(|rows| rows.iter().any(|r| r.kind == "activity"))
                 .unwrap_or(false)
         };
-        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> = if has_activity {
-            let tx = webhook_tx.clone().unwrap_or_else(|| {
-                webhook::spawn_run_worker_with_sink(self.webhook_client.clone(), None)
-            });
-            Some(Arc::new(WebhookToolEventSink {
+
+        // 同一 run の配送を直列化する worker を 1 つだけ起動する。lifecycle（started/
+        // completed/...）と tool_call_*（activity）を同じ tx に流すことで、両系統の
+        // 送出順序を 1 本の worker で保証する（別 worker を立てて順序が崩れるのを防ぐ）。
+        let webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>> =
+            if webhook.is_some() || has_activity {
+                Some(webhook::spawn_run_worker_with_sink(
+                    self.webhook_client.clone(),
+                    giveup_sink,
+                ))
+            } else {
+                None
+            };
+
+        // lifecycle の started を送る（同じ共有 worker 経由）。
+        if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
+            if cfg.wants("started") {
+                let meta = LifecycleMeta {
+                    label: label.clone(),
+                    run_id: subtask_id.clone(),
+                    session_key: sub_session_id.clone(),
+                };
+                let messages =
+                    webhook::build_started_messages(&meta, &task, webhook::DISCORD_CHUNK_LIMIT);
+                let _ = tx.send(DeliveryBatch {
+                    url: cfg.url.clone(),
+                    messages,
+                });
+            }
+        }
+
+        // activity webhook があれば、sub-engine の executor に ToolEventSink を挿し
+        // tool_call_* を共有 worker 経由で配送する。
+        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> = match (
+            has_activity,
+            &webhook_tx,
+        ) {
+            (true, Some(tx)) => Some(Arc::new(WebhookToolEventSink {
                 db: self.db.clone(),
                 agent_id: agent_id.clone(),
-                tx,
+                tx: tx.clone(),
                 max_chars: 1500,
                 counter: std::sync::atomic::AtomicUsize::new(0),
                 cap: 200,
-            }))
-        } else {
-            None
+            })),
+            _ => None,
         };
 
         // Create the sub-session in the DB.
@@ -723,9 +731,48 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
             };
             webhook::resolve_activity_webhook(&conn, &self.agent_id, ev.tool_name)
         };
+        // Use 以外（Error/Disabled/None）はイベントを配送しない（no-silent-fallback）。
+        // 黙って捨てると原因が見えないため、raw URL/token を載せずに診断を残す。
         let cfg = match resolution {
             WebhookResolution::Use { config, .. } => config,
-            _ => return,
+            WebhookResolution::Error {
+                code,
+                message,
+                source,
+            } => {
+                tracing::warn!(
+                    target: "webhook_audit",
+                    agent_id = %self.agent_id,
+                    tool = %ev.tool_name,
+                    event = %event_name,
+                    source = %source.as_str(),
+                    code = %code,
+                    reason = %message,
+                    "activity webhook resolution error; tool event dropped"
+                );
+                return;
+            }
+            WebhookResolution::Disabled { source } => {
+                tracing::debug!(
+                    target: "webhook_audit",
+                    agent_id = %self.agent_id,
+                    tool = %ev.tool_name,
+                    event = %event_name,
+                    source = %source.as_str(),
+                    "activity webhook disabled; tool event dropped"
+                );
+                return;
+            }
+            WebhookResolution::None => {
+                tracing::trace!(
+                    target: "webhook_audit",
+                    agent_id = %self.agent_id,
+                    tool = %ev.tool_name,
+                    event = %event_name,
+                    "no activity webhook configured for this tool; tool event dropped"
+                );
+                return;
+            }
         };
         if !cfg.wants(event_name) {
             return;
@@ -773,7 +820,12 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
                 }
             }
             ToolEventStatus::Rejected => {
-                view.rejection_reason = ev.error.map(|s| s.to_string());
+                // 構造マーカー接頭辞は表示では落とし、人間可読の理由のみ残す。
+                view.rejection_reason = ev.error.map(|s| {
+                    s.strip_prefix(opencrab_actions::REJECTION_CODE_PREFIX)
+                        .unwrap_or(s)
+                        .to_string()
+                });
             }
             ToolEventStatus::Started => {}
         }
@@ -897,5 +949,124 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         assert!(rx.try_recv().is_err(), "no activity row -> nothing sent");
+    }
+
+    fn insert_activity_row(conn: &rusqlite::Connection, url: &str, enabled: bool) {
+        let row = opencrab_db::queries::AgentWebhookConfigRow {
+            scope: "agent".to_string(),
+            agent_id: "a1".to_string(),
+            tool_name: String::new(),
+            kind: "activity".to_string(),
+            url: url.to_string(),
+            events_json: None,
+            enabled,
+            name: None,
+            created_by: Some("owner".to_string()),
+            output_mode: "summary".to_string(),
+            max_chars: 1500,
+            updated_at: String::new(),
+        };
+        opencrab_db::queries::upsert_agent_webhook_config(conn, &row).unwrap();
+    }
+
+    fn make_sink(
+        db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+        tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
+    ) -> WebhookToolEventSink {
+        WebhookToolEventSink {
+            db,
+            agent_id: "a1".to_string(),
+            tx,
+            max_chars: 1500,
+            counter: AtomicUsize::new(0),
+            cap: 200,
+        }
+    }
+
+    fn started_event<'a>(args: &'a serde_json::Value) -> opencrab_actions::ToolEvent<'a> {
+        opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: None,
+            depth: 1,
+            status: opencrab_actions::ToolEventStatus::Started,
+            started_at: "t",
+            duration_ms: None,
+            args,
+            result: None,
+            error: None,
+        }
+    }
+
+    // ---- L1: disabled/invalid activity row drops events (no silent fallback) ----
+
+    #[test]
+    fn test_webhook_tool_event_sink_disabled_activity_sends_nothing() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", false);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({});
+        opencrab_actions::ToolEventSink::on_event(&sink, &started_event(&args));
+        assert!(rx.try_recv().is_err(), "disabled activity -> nothing sent");
+    }
+
+    #[test]
+    fn test_webhook_tool_event_sink_invalid_activity_sends_nothing() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // invalid (non-discord) url -> WebhookResolution::Error, must drop, no fallback.
+        insert_activity_row(&conn, "https://evil.example.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({});
+        opencrab_actions::ToolEventSink::on_event(&sink, &started_event(&args));
+        assert!(rx.try_recv().is_err(), "invalid activity url -> nothing sent");
+    }
+
+    // ---- L2: shared delivery path preserves lifecycle/tool_call ordering ----
+
+    #[test]
+    fn test_shared_worker_channel_preserves_order() {
+        // 単一の共有 tx を使うと、先に送った lifecycle batch のあとに tool_call event が
+        // 続き、FIFO 順序が保たれる（別 worker だと順序保証が崩れる）。
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
+        let db = Arc::new(std::sync::Mutex::new(conn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
+
+        // lifecycle 相当の batch を共有 tx へ先に送る。
+        tx.send(DeliveryBatch {
+            url: "https://discord.com/api/webhooks/1/tok".to_string(),
+            messages: vec!["lifecycle: started".to_string()],
+        })
+        .unwrap();
+
+        // 同じ tx を使う sink から tool_call event を送る。
+        let sink = make_sink(db, tx);
+        let args = serde_json::json!({ "command": "echo hi" });
+        let result = serde_json::json!({ "exit_code": 0, "stdout": "ok", "truncated": false });
+        let ev = opencrab_actions::ToolEvent {
+            tool_name: "execute_shell",
+            tool_call_id: "c1",
+            agent_id: "a1",
+            session_id: None,
+            depth: 1,
+            status: opencrab_actions::ToolEventStatus::Completed,
+            started_at: "t",
+            duration_ms: Some(1),
+            args: &args,
+            result: Some(&result),
+            error: None,
+        };
+        opencrab_actions::ToolEventSink::on_event(&sink, &ev);
+
+        // 受信順: lifecycle が先、tool_call が後。
+        let first = rx.try_recv().expect("lifecycle batch");
+        assert!(first.messages[0].contains("lifecycle: started"));
+        let second = rx.try_recv().expect("tool_call batch");
+        assert!(second.messages[0].contains("tool_call_completed"));
     }
 }

@@ -28,6 +28,17 @@ pub trait ActionExecutor: Send + Sync {
     /// Execute an action by name with the given arguments.
     async fn execute(&self, name: &str, args: &Value) -> ActionResult;
 
+    /// Execute an action, propagating the LLM-provided `tool_call_id` for
+    /// correlation (e.g. activity webhooks, tracing).
+    ///
+    /// The default implementation ignores the id and delegates to [`execute`],
+    /// so existing implementors keep working unchanged. Implementors that emit
+    /// observability events (like `BridgedExecutor`) override this to thread the
+    /// real tool-call id instead of synthesizing one.
+    async fn execute_with_id(&self, name: &str, args: &Value, _tool_call_id: &str) -> ActionResult {
+        self.execute(name, args).await
+    }
+
     /// List available action (tool) definitions for LLM function calling.
     fn list_tools(&self) -> Vec<ToolDefinition>;
 }

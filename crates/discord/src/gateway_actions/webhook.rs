@@ -626,15 +626,19 @@ fn fetch_scope_row_kinds(
     None
 }
 
-/// 1 つの scope について subtask 行を取得する（activity > subtask > lifecycle の順）。
-/// activity family は subtask ライフサイクルも包含するため最優先で見る。
+/// 1 つの scope について subtask lifecycle の宛先行を取得する。
+///
+/// 優先順位は `subtask > lifecycle > activity`。subtask 専用に設定された明示的な
+/// デフォルト（subtask/lifecycle kind）を、汎用 activity デフォルトより優先する。
+/// activity family は subtask ライフサイクルも包含するため、subtask 専用行が無い
+/// ときのフォールバックとして最後に見る。
 fn fetch_scope_row(
     conn: &rusqlite::Connection,
     scope: &str,
     agent_id: &str,
     tool_name: &str,
 ) -> Option<AgentWebhookConfigRowLite> {
-    fetch_scope_row_kinds(conn, scope, agent_id, tool_name, &["activity", "subtask", "lifecycle"])
+    fetch_scope_row_kinds(conn, scope, agent_id, tool_name, &["subtask", "lifecycle", "activity"])
 }
 
 /// subtask webhook を固定順序で解決する。
@@ -1366,6 +1370,37 @@ mod tests {
     fn test_resolve_activity_also_serves_subtask_lifecycle() {
         // An agent 'activity' default should also be picked up by resolve_subtask_webhook
         // (activity family includes subtask lifecycle).
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        assert_eq!(use_source(&r), WebhookSource::AgentDefault);
+    }
+
+    #[test]
+    fn test_resolve_subtask_prefers_explicit_subtask_over_activity_same_scope() {
+        // L3: 同一 scope に subtask 専用行と汎用 activity 行が両方あるとき、subtask 通知は
+        // 明示的な subtask 専用デフォルトへ送る（activity に奪われない）。
+        const SUBTASK_URL: &str = "https://discord.com/api/webhooks/111/subtasktoken";
+        const ACTIVITY_URL: &str = "https://discord.com/api/webhooks/222/activitytoken";
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_row(&conn, "agent", "a1", "", "activity", ACTIVITY_URL, true);
+        insert_row(&conn, "agent", "a1", "", "subtask", SUBTASK_URL, true);
+        let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
+        match r {
+            WebhookResolution::Use { config, source } => {
+                assert_eq!(source, WebhookSource::AgentDefault);
+                assert_eq!(
+                    config.url, SUBTASK_URL,
+                    "subtask-specific default must win over generic activity"
+                );
+            }
+            _ => panic!("expected Use"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_subtask_falls_back_to_activity_when_no_subtask_row() {
+        // subtask 専用行が無ければ activity 行へフォールバックする（family 包含）。
         let conn = opencrab_db::init_memory().unwrap();
         insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
         let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &json!({}), None);
