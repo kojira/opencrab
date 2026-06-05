@@ -24,7 +24,7 @@ impl Action for ShellToolAction {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command from the allowed list. Returns stdout, stderr, exit_code, and truncated flag."
+        "Execute a shell command from the allowed list. Returns full stdout, stderr, exit_code, and a truncated flag (always false; output is never truncated at the source)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -171,11 +171,17 @@ impl Action for ShellToolAction {
             }
         };
 
-        let max_bytes = self.config.max_output_bytes;
-
-        let (stdout_str, stdout_truncated) = truncate_bytes(&output.stdout, max_bytes);
-        let (stderr_str, stderr_truncated) = truncate_bytes(&output.stderr, max_bytes);
-        let truncated = stdout_truncated || stderr_truncated;
+        // No source-level truncation: stdout/stderr are passed through in full so that
+        // downstream consumers (the LLM and the webhook layer) receive every byte. The
+        // webhook layer performs lossless, ordered chunking (`build_tool_event_message`)
+        // to satisfy Discord size limits, so we must not drop the tail here.
+        // Only lossy step is `from_utf8_lossy`, which replaces invalid UTF-8 sequences
+        // rather than dropping bytes — no bytes are silently discarded.
+        let stdout_str = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr_str = String::from_utf8_lossy(&output.stderr).into_owned();
+        // `truncated` is retained for wire/consumer compatibility but is always false:
+        // full output is preserved, so it must never falsely advertise data loss.
+        let truncated = false;
         let exit_code = output.status.code().unwrap_or(-1);
 
         ActionResult::success(json!({
@@ -184,14 +190,6 @@ impl Action for ShellToolAction {
             "exit_code": exit_code,
             "truncated": truncated
         }))
-    }
-}
-
-fn truncate_bytes(bytes: &[u8], max: usize) -> (String, bool) {
-    if bytes.len() <= max {
-        (String::from_utf8_lossy(bytes).into_owned(), false)
-    } else {
-        (String::from_utf8_lossy(&bytes[..max]).into_owned(), true)
     }
 }
 
@@ -404,6 +402,120 @@ mod tests {
             stdout.contains("/tmp/opencrab-allowlist-agent.sock"),
             "allow-listed SSH_AUTH_SOCK-like var should reach child, got: {:?}",
             stdout
+        );
+    }
+
+    /// Build a config whose `max_output_bytes` is deliberately *smaller* than the
+    /// output we will generate, proving the value no longer governs truncation.
+    fn small_limit_config(cmd: &str) -> ShellToolConfig {
+        ShellToolConfig {
+            // Smaller than the old 64 KiB default and far smaller than test output,
+            // to prove this knob no longer truncates anything.
+            max_output_bytes: 1024,
+            commands: vec![CommandConfig {
+                name: cmd.to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stdout_longer_than_old_limit_is_preserved_with_tail() {
+        // Generate well over the old 64 KiB cap on stdout via a unique, checkable tail.
+        const OLD_LIMIT: usize = 65536;
+        let total = OLD_LIMIT + 4096;
+        // `printf` with a wide field of '#' plus a distinctive tail marker.
+        let head = "#".repeat(total - "TAIL_MARKER_END".len());
+        let payload = format!("{head}TAIL_MARKER_END");
+        let config = small_limit_config("printf");
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "printf", "args": ["%s", payload]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "printf should succeed: {:?}", result.error);
+        let data = result.data.as_ref().unwrap();
+        let stdout = data.get("stdout").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            stdout.len(),
+            payload.len(),
+            "full stdout must be preserved, no byte loss"
+        );
+        assert!(
+            stdout.len() > OLD_LIMIT,
+            "output must exceed the old 64 KiB limit to be meaningful"
+        );
+        assert!(
+            stdout.ends_with("TAIL_MARKER_END"),
+            "tail of stdout must survive (no head-only truncation)"
+        );
+        assert_eq!(
+            data.get("truncated").and_then(|v| v.as_bool()),
+            Some(false),
+            "truncated must be false when full output is preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stderr_longer_than_old_limit_is_preserved_with_tail() {
+        const OLD_LIMIT: usize = 65536;
+        let total = OLD_LIMIT + 4096;
+        let head = "E".repeat(total - "STDERR_TAIL_END".len());
+        let payload = format!("{head}STDERR_TAIL_END");
+        let config = small_limit_config("sh");
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        // Emit the payload to stderr only.
+        let script = format!("printf '%s' '{payload}' 1>&2");
+        let args = serde_json::json!({"command": "sh", "args": ["-c", script]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "sh should succeed: {:?}", result.error);
+        let data = result.data.as_ref().unwrap();
+        let stderr = data.get("stderr").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            stderr.len(),
+            payload.len(),
+            "full stderr must be preserved, no byte loss"
+        );
+        assert!(
+            stderr.len() > OLD_LIMIT,
+            "stderr must exceed the old 64 KiB limit to be meaningful"
+        );
+        assert!(
+            stderr.ends_with("STDERR_TAIL_END"),
+            "tail of stderr must survive (no head-only truncation)"
+        );
+        assert_eq!(
+            data.get("truncated").and_then(|v| v.as_bool()),
+            Some(false),
+            "truncated must be false when full output is preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_truncated_marker_for_ordinary_long_output() {
+        // Ordinary long output must never be flagged as truncated nor carry any
+        // "[truncated]" sentinel in the payload.
+        let payload = "L".repeat(200_000);
+        let config = small_limit_config("printf");
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "printf", "args": ["%s", payload]});
+        let result = action.execute(&args, &ctx).await;
+        assert!(result.success, "printf should succeed: {:?}", result.error);
+        let data = result.data.as_ref().unwrap();
+        let stdout = data.get("stdout").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(stdout.len(), payload.len(), "no byte loss for long output");
+        assert!(
+            !stdout.contains("[truncated]"),
+            "no [truncated] sentinel must be injected into the output"
+        );
+        assert_eq!(
+            data.get("truncated").and_then(|v| v.as_bool()),
+            Some(false),
+            "truncated flag must remain false for ordinary long output"
         );
     }
 

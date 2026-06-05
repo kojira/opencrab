@@ -45,6 +45,9 @@ pub struct ShellToolConfig {
     pub inherit_env: bool,
     #[serde(default = "default_allowed_env_vars")]
     pub allowed_env_vars: Vec<String>,
+    /// Deprecated / no longer enforced: execute_shell no longer truncates stdout/stderr
+    /// at the source. Full output is preserved and the webhook layer chunks losslessly.
+    /// Kept only for config backward-compatibility (existing TOML files keep parsing).
     #[serde(default = "default_max_output")]
     pub max_output_bytes: usize,
     // NEW: structured command list with permissions
