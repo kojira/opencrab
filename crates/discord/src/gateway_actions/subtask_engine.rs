@@ -735,7 +735,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// `None` を返し、配送 worker も起動しない（best-effort・無駄なタスクを作らない）。
 /// 返した sink は spawn_subtask の sub-engine 用 sink と同じ実体で、イベントごとに
 /// `resolve_activity_webhook`（tool > agent > global）で宛先を解決し、
-/// `build_tool_event_message` で redaction/クランプしてから送る。disabled/不正 URL は
+/// `build_tool_event_message` で整形（covered 経路ゆえ redaction せず、上限超過のみ
+/// ロスレス chunk）してから送る。disabled/不正 URL は
 /// 黙って下位へ fall through せず診断を残す（no-silent-fallback）。
 ///
 /// メイン engine は spawn_subtask のような lifecycle webhook を持たないため、ここでは
@@ -873,7 +874,8 @@ fn build_activity_diagnostic_batch(
 
 /// activity family のデフォルト webhook へ tool_call_* を配送する sink。
 /// イベントごとに resolve_activity_webhook で宛先を解決（tool > agent > global）し、
-/// build_tool_event_message で redaction + クランプしてから送る。
+/// build_tool_event_message で整形（covered 経路ゆえ unredacted、上限超過のみロスレス
+/// chunk）してから送る。
 struct WebhookToolEventSink {
     db: Arc<std::sync::Mutex<rusqlite::Connection>>,
     agent_id: String,
@@ -1014,23 +1016,16 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
     }
 }
 
-/// args 要約の最大文字数。メッセージ全体は build_tool_event_message が別途
-/// max_chars/Discord 上限でクランプするが、ここでも 1 フィールド分を短く保ち、
-/// completed/failed の stdout/stderr 等と同居しても収まる余地を残す。
-const ARGS_SUMMARY_LIMIT: usize = 300;
-
-/// ツール引数の短い要約（execute_shell はコマンドを優先）。
+/// ツール引数の要約（execute_shell はコマンドを優先）。
 ///
-/// 重要: truncate の **前に** `redact_secrets` を通す。先に切り詰めると、長いトークン
-/// （Discord webhook URL / base64・hex のシークレット等）が途中で分断され、残った断片が
-/// redaction パターンに一致せず素通りして漏れる恐れがあるため。整形側
-/// （build_tool_event_message）も redaction を行うが冪等なので二重でも安全。
+/// covered 経路（work-channel 出力）のため redaction も length クランプも行わず、
+/// command / args 配列をそのまま返す（docs/design-webhook-output-lossless.md §2 P4）。
+/// Discord のサイズ上限は `build_tool_event_message` がロスレス chunk で吸収する。
 fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> Option<String> {
     if tool_name == "execute_shell" {
         if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-            // command 単体ではなく、実際に渡された引数（args 配列）と非シークレットな
-            // オプションも含めて要約する。これがないと `echo hello world` が `cmd: echo`
-            // としか表示されず、有用な引数が欠落する。
+            // command 単体ではなく、実際に渡された引数（args 配列）も含めて要約する。
+            // これがないと `echo hello world` が `cmd: echo` としか表示されず欠落する。
             let mut parts = vec![format!("cmd: `{cmd}`")];
             if let Some(arr) = args.get("args").and_then(|v| v.as_array()) {
                 let items: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
@@ -1039,40 +1034,25 @@ fn summarize_tool_args(tool_name: &str, args: &serde_json::Value) -> Option<Stri
                     parts.push(format!("args: {}", serde_json::Value::from(items)));
                 }
             }
-            // stdin は内容に秘密が入りうるため本文は出さず、存在とバイト数のみ示す。
+            // stdin は本文を出さず、存在とバイト数のみ示す（出力ではなく入力の要約）。
             if let Some(stdin) = args.get("stdin").and_then(|v| v.as_str()) {
                 if !stdin.is_empty() {
                     parts.push(format!("stdin: {} bytes", stdin.len()));
                 }
             }
-            // 重要: redaction は結合後・clamp 前にまとめて適用する（関数先頭コメント参照）。
-            let safe = webhook::redact_secrets(&parts.join(" "));
-            return Some(clamp_with_ellipsis(&safe, ARGS_SUMMARY_LIMIT));
+            return Some(parts.join(" "));
         }
     }
     let s = args.to_string();
     if s == "null" || s == "{}" {
         return None;
     }
-    let safe = webhook::redact_secrets(&s);
-    Some(clamp_with_ellipsis(&safe, ARGS_SUMMARY_LIMIT))
+    Some(s)
 }
 
-/// 文字数を limit 以下にクランプし、切り詰めた場合は末尾に … を付ける（UTF-8 安全）。
-fn clamp_with_ellipsis(text: &str, limit: usize) -> String {
-    if limit == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
-    format!("{kept}…")
-}
-
-/// 非 shell ツールの result の短い preview。
+/// 非 shell ツールの result の preview（covered 経路: redact もクランプもしない）。
 fn short_json_preview(data: &serde_json::Value) -> String {
-    data.to_string().chars().take(400).collect()
+    data.to_string()
 }
 
 #[cfg(test)]
@@ -1098,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn test_webhook_tool_event_sink_redacts_shell_output() {
+    fn test_webhook_tool_event_sink_preserves_shell_output_unredacted() {
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity(&conn);
         let db = Arc::new(std::sync::Mutex::new(conn));
@@ -1132,10 +1112,12 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("a batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = batch.messages.join("");
         assert!(msg.contains("tool_call_completed"));
         assert!(msg.contains("exit_code"));
-        assert!(!msg.contains("supersecretvalue"), "secret leaked: {msg}");
+        // covered 経路: stdout の secret はそのまま届く（masking しない）。
+        assert!(msg.contains("API_KEY=supersecretvalue"), "secret stripped: {msg}");
+        assert!(!msg.contains("[REDACTED]"), "masking marker present: {msg}");
     }
 
     #[test]
@@ -1181,13 +1163,15 @@ mod tests {
         opencrab_actions::ToolEventSink::on_event(&sink, &rejected);
 
         let failed_batch = rx.try_recv().expect("failed batch");
-        let failed_msg = &failed_batch.messages[0];
+        let failed_msg = failed_batch.messages.join("");
         assert!(failed_msg.contains("tool_call_failed"));
         assert!(failed_msg.contains("exit_code"));
+        // covered 経路: stderr の secret はそのまま届く（masking しない）。
         assert!(
-            !failed_msg.contains("supersecretvalue"),
-            "secret leaked: {failed_msg}"
+            failed_msg.contains("API_KEY=supersecretvalue"),
+            "secret stripped: {failed_msg}"
         );
+        assert!(!failed_msg.contains("[REDACTED]"), "masking marker present: {failed_msg}");
         let rejected_batch = rx.try_recv().expect("rejected batch");
         let rejected_msg = &rejected_batch.messages[0];
         assert!(rejected_msg.contains("tool_call_rejected"));
@@ -1373,8 +1357,9 @@ mod tests {
     }
 
     #[test]
-    fn test_webhook_tool_event_sink_started_redacts_secret_args() {
-        // started の引数に含まれるシークレット（API キー / Discord webhook URL）は redact。
+    fn test_webhook_tool_event_sink_started_preserves_secret_args_unredacted() {
+        // covered 経路: started の引数に含まれるシークレット（API キー / Discord webhook
+        // URL）も masking せずそのまま届く（新要件 §2 P4 / AC4）。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
         let db = Arc::new(std::sync::Mutex::new(conn));
@@ -1398,29 +1383,30 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = batch.messages.join("");
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
-        assert!(msg.contains("[REDACTED]"), "expected redaction marker: {msg}");
-        assert!(!msg.contains("sk-supersecretkeyvalue1234"), "api key leaked: {msg}");
+        // every secret-like token survives unmodified, and no masking markers appear.
+        assert!(!msg.contains("[REDACTED]"), "REDACTED marker present: {msg}");
+        assert!(!msg.contains("[redacted]"), "redacted marker present: {msg}");
+        assert!(msg.contains("sk-supersecretkeyvalue1234"), "api key stripped: {msg}");
         assert!(
-            !msg.contains("leakedtokenvalue"),
-            "webhook token leaked: {msg}"
+            msg.contains("https://discord.com/api/webhooks/999/leakedtokenvalue"),
+            "webhook url stripped: {msg}"
         );
         assert!(
-            !msg.contains("anothersupersecretvalue"),
-            "API_KEY value leaked: {msg}"
+            msg.contains("API_KEY=anothersupersecretvalue"),
+            "API_KEY value stripped: {msg}"
         );
     }
 
     #[test]
-    fn test_webhook_tool_event_sink_clamps_long_args() {
-        // 長大な引数は安全長へクランプされ、メッセージは Discord 上限内に収まる。
+    fn test_webhook_tool_event_sink_long_args_chunked_losslessly() {
+        // 長大な引数はクランプ（…）せず、Discord 上限内の part X/N へロスレス分割する。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
         let db = Arc::new(std::sync::Mutex::new(conn));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
-        // 多数の短い語で長文を作る（長い英数字連は redact されてしまうため避ける）。
         let long_cmd = format!("echo {}", "word ".repeat(2_000));
         let args = serde_json::json!({ "command": long_cmd });
         let ev = opencrab_actions::ToolEvent {
@@ -1438,38 +1424,49 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
-        // メッセージ全体は Discord のハード上限(2000)内。
-        assert!(
-            msg.chars().count() <= 2000,
-            "message exceeds Discord limit: {}",
-            msg.chars().count()
-        );
-        // args フィールド自体もクランプされ、省略マーカが付く。
-        assert!(msg.contains('…'), "clamp ellipsis missing: {msg}");
+        assert!(batch.messages.len() > 1, "long args must split into parts");
+        // each part within Discord hard limit, labelled in order.
+        for (i, m) in batch.messages.iter().enumerate() {
+            assert!(m.chars().count() <= 2000, "part exceeds limit: {}", m.chars().count());
+            assert!(
+                m.starts_with(&format!("part {}/{}\n", i + 1, batch.messages.len())),
+                "part marker/order wrong: {m}"
+            );
+        }
+        // reconstruct -> all 2000 'word' tokens present, no ellipsis loss.
+        let reconstructed: String = batch
+            .messages
+            .iter()
+            .map(|m| m.splitn(2, '\n').nth(1).unwrap_or("").to_string())
+            .collect();
+        assert!(!reconstructed.contains('…'), "clamp ellipsis introduced");
+        assert_eq!(reconstructed.matches("word").count(), 2_000, "lost args");
     }
 
-    // ---- summarize_tool_args: redact-before-truncate ----
+    // ---- summarize_tool_args: unredacted, lossless ----
 
     #[test]
-    fn test_summarize_tool_args_redacts_before_truncation() {
-        // 長い前置き文字列のあとに base64 風シークレットを置く。先に切り詰めてから
-        // redact する実装だと断片が素通りしうるが、redact 先行なら完全に消える。
-        let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"; // 40 文字の英数字シークレット
-        // 先頭を redact 対象でない短い語で 290 文字埋め、その後にシークレットを置く。
-        // truncate を先にすると 300 文字目で secret が分断され断片が残るが、redact 先行なら
-        // トークン全体が一致して完全に消える。
-        let prefix = "a ".repeat(145); // 290 文字（"a " x145）
+    fn test_summarize_tool_args_preserves_secrets_unredacted() {
+        // covered 経路: 引数中の secret も masking/クランプせずそのまま残す。
+        let secret = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"; // 40 文字の英数字
+        let prefix = "a ".repeat(145); // 290 文字
         let cmd = format!("{prefix}{secret}");
         let args = serde_json::json!({ "command": cmd });
         let summary = summarize_tool_args("execute_shell", &args).unwrap();
         assert!(summary.starts_with("cmd: `"), "summary: {summary}");
-        assert!(!summary.contains(secret), "secret survived: {summary}");
-        // 切り詰めても断片（先頭数文字）が残らないこと。
-        assert!(
-            !summary.contains("ABCDEFGHIJ"),
-            "secret fragment leaked: {summary}"
-        );
+        assert!(summary.contains(secret), "secret stripped: {summary}");
+        assert!(!summary.contains("[REDACTED]"), "masking marker present: {summary}");
+        assert!(!summary.contains('…'), "clamp ellipsis introduced: {summary}");
+    }
+
+    #[test]
+    fn test_summarize_tool_args_preserves_webhook_url() {
+        // /api/webhooks/ を含む URL がそのまま残ること（バイト一致）。
+        let url = "https://discord.com/api/webhooks/123456789012345678/AbCdEf-XXXXXXXXXXXXXXXXXXXXXXXX";
+        let args = serde_json::json!({ "command": format!("curl {url}") });
+        let summary = summarize_tool_args("execute_shell", &args).unwrap();
+        assert!(summary.contains(url), "webhook url stripped: {summary}");
+        assert!(!summary.contains("[redacted]"), "url masking present: {summary}");
     }
 
     #[test]
@@ -1625,7 +1622,7 @@ mod tests {
     }
 
     /// activity 行があれば factory は Some を返し、その sink は depth0 イベントを
-    /// activity webhook へ整形・redaction して配送する（生トークンは載らない）。
+    /// activity webhook へ整形して配送する（covered 経路ゆえ unredacted で配送する）。
     #[tokio::test]
     async fn test_spawn_activity_sink_some_with_activity_row_and_delivers() {
         let conn = opencrab_db::init_memory().unwrap();

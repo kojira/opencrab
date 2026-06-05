@@ -243,7 +243,9 @@ async fn send_with_retry(
     // 即時 / 2s / 10s / 30s / 120s
     const BACKOFFS: [u64; 5] = [0, 2, 10, 30, 120];
     let mut attempt = 0usize;
-    let safe_url = redact_webhook_url(url);
+    // covered 経路（配送 debug/log）では webhook URL をマスクしない。URL がマスクされると
+    // 配送先の特定・障害切り分けが困難になりデバッグ性を損なうため、生 URL をそのまま記録する
+    // （docs/design-webhook-output-lossless.md §2 P4: 漏洩時は webhook を無効化して回復する）。
     let mut last_error;
     loop {
         let body = json!({ "content": content });
@@ -252,7 +254,7 @@ async fn send_with_retry(
                 let status = resp.status();
                 if status.as_u16() == 429 {
                     let retry_after = parse_retry_after(&resp).unwrap_or(1.0);
-                    tracing::warn!(url = %safe_url, retry_after, "discord webhook 429, respecting Retry-After");
+                    tracing::warn!(url = %url, retry_after, "discord webhook 429, respecting Retry-After");
                     tokio::time::sleep(Duration::from_secs_f64(retry_after)).await;
                     // 429 は同一メッセージを再送（attempt は進めない: ordering 維持）。
                     continue;
@@ -264,7 +266,7 @@ async fn send_with_retry(
                 let response_preview = truncate_chars(&response_text, 500);
                 last_error = format!("http {}", status.as_u16());
                 tracing::warn!(
-                    url = %safe_url,
+                    url = %url,
                     status = status.as_u16(),
                     response = %response_preview,
                     "discord webhook non-success"
@@ -272,12 +274,12 @@ async fn send_with_retry(
             }
             Err(e) => {
                 last_error = "request error".to_string();
-                tracing::warn!(url = %safe_url, error = %e, "discord webhook request error");
+                tracing::warn!(url = %url, error = %e, "discord webhook request error");
             }
         }
         attempt += 1;
         if attempt >= BACKOFFS.len() {
-            tracing::error!(url = %safe_url, "discord webhook delivery gave up after retries");
+            tracing::error!(url = %url, "discord webhook delivery gave up after retries");
             if let Some(sink) = on_giveup {
                 sink(&last_error);
             }
@@ -295,15 +297,25 @@ pub fn redact_webhook_url(url: &str) -> String {
     }
 }
 
-// ---- Secret redaction (Phase 1) ----
+// ---- Secret redaction (retained utility) ----
+//
+// 本設計（docs/design-webhook-output-lossless.md §2 P4）により、covered 経路
+// （work-channel 出力: command/stdout/stderr/args/result）からは redaction を完全に外した。
+// 以下の関数群はもはや配送経路では呼ばれないが、covered 経路外（別タスク・§8）で再利用しうる
+// 汎用ユーティリティとして残す。未使用でも警告を出さないため allow(dead_code) を付ける。
 
+#[allow(dead_code)]
 const REDACTED: &str = "[REDACTED]";
+#[allow(dead_code)]
 const SECRET_PREFIXES: [&str; 4] = ["sk-", "ghp_", "xoxb-", "AKIA"];
+#[allow(dead_code)]
 const KV_MARKERS: [&str; 5] = ["TOKEN", "SECRET", "PASSWORD", "KEY", "API"];
 
-/// 既知のシークレットパターンを [REDACTED] に置換する。配送直前に全フィールドへ通す。
+/// 既知のシークレットパターンを [REDACTED] に置換する汎用ユーティリティ。
 /// 取りこぼし対策として保守的に倒す（長い base64/hex 連や Bearer トークンも redact）。
 /// 冪等: 既に redact 済みの文字列を再度通しても安全。
+/// 注: covered 経路（webhook 出力）では **呼ばない**（§2 P4）。
+#[allow(dead_code)]
 pub fn redact_secrets(input: &str) -> String {
     input
         .split('\n')
@@ -312,6 +324,7 @@ pub fn redact_secrets(input: &str) -> String {
         .join("\n")
 }
 
+#[allow(dead_code)]
 fn redact_secrets_line(line: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut redact_next = false;
@@ -334,6 +347,7 @@ fn redact_secrets_line(line: &str) -> String {
 }
 
 /// 1 トークンを検査し、(置換後文字列, 次トークンも redact すべきか) を返す。
+#[allow(dead_code)]
 fn redact_secret_token(tok: &str) -> (String, bool) {
     let core = tok.trim_matches(|c: char| {
         matches!(
@@ -381,9 +395,7 @@ fn redact_secret_token(tok: &str) -> (String, bool) {
 
 // ---- Shell result summary (Phase 1) ----
 
-const SHELL_HEAD_TAIL: usize = 600;
-
-/// execute_shell の result data から抽出した安全なサマリ。
+/// execute_shell の result data から抽出した出力。
 #[derive(Clone, Debug, Default)]
 pub struct ShellResultSummary {
     pub exit_code: Option<i64>,
@@ -392,39 +404,31 @@ pub struct ShellResultSummary {
     pub truncated: bool,
 }
 
-/// execute_shell の ActionResult.data から exit_code / 出力サマリ / truncated を取り出す。
-/// 出力は先頭 N + 末尾 N にクランプし redact_secrets を通す（raw 出力を素通ししない）。
+/// execute_shell の ActionResult.data から exit_code / stdout / stderr / truncated を取り出す。
+///
+/// covered 経路（work-channel 出力）のため、redaction も head/tail クランプも一切行わず
+/// stdout/stderr を full のまま返す（docs/design-webhook-output-lossless.md §2 P4）。
+/// Discord のサイズ上限は `build_tool_event_message` がロスレス chunk で吸収する。
+/// `truncated`（上流 execute_shell が webhook 層より前に切り捨てた = L0）はそのまま伝える。
 pub fn summarize_shell_result(data: &serde_json::Value) -> ShellResultSummary {
     let exit_code = data.get("exit_code").and_then(|v| v.as_i64());
     let truncated = data
         .get("truncated")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let summarize_field = |key: &str| -> Option<String> {
+    let field = |key: &str| -> Option<String> {
         let raw = data.get(key).and_then(|v| v.as_str())?;
         if raw.is_empty() {
             return None;
         }
-        Some(redact_secrets(&head_tail_clamp(raw, SHELL_HEAD_TAIL)))
+        Some(raw.to_string())
     };
     ShellResultSummary {
         exit_code,
-        stdout_summary: summarize_field("stdout"),
-        stderr_summary: summarize_field("stderr"),
+        stdout_summary: field("stdout"),
+        stderr_summary: field("stderr"),
         truncated,
     }
-}
-
-/// 先頭 n + 末尾 n 文字に丸める（UTF-8 境界を壊さない。超過時は中央を省略表示）。
-fn head_tail_clamp(text: &str, n: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= n * 2 {
-        return text.to_string();
-    }
-    let head: String = chars[..n].iter().collect();
-    let tail: String = chars[chars.len() - n..].iter().collect();
-    let omitted = chars.len() - n * 2;
-    format!("{head}\n…[{omitted} chars omitted]…\n{tail}")
 }
 
 // ---- Tool event Discord formatting (Phase 1) ----
@@ -449,8 +453,12 @@ pub struct ToolEventView {
 }
 
 /// ツールイベントを Discord 用メッセージへ整形する。
-/// - URL/トークン/シークレットは載せない（全テキストへ redact_secrets を通す）。
-/// - max_chars（既定 1500、ハード上限 DISCORD_MESSAGE_LIMIT）でクランプする。
+/// - covered 経路（work-channel 出力）のため redaction/masking は一切行わない。
+///   command/args/result/stdout/stderr/rejection をそのまま載せる
+///   （docs/design-webhook-output-lossless.md §2 P4）。
+/// - Discord の 1 通上限に収まれば 1 通。超える場合のみ `part X/N` を付けて順序通りに
+///   分割し、ロスレスに送る（head/tail/midpoint の切り捨てはしない）。順序は配送 worker
+///   （単一 run = 単一 mpsc）が保証する。
 pub fn build_tool_event_message(view: &ToolEventView) -> Vec<String> {
     let emoji = match view.status.as_str() {
         "started" => "▶️",
@@ -470,30 +478,46 @@ pub fn build_tool_event_message(view: &ToolEventView) -> Vec<String> {
         s.push_str(&format!("\nexit_code: `{code}`"));
     }
     if let Some(reason) = &view.rejection_reason {
-        s.push_str(&format!("\nrejection: {}", redact_secrets(reason)));
+        s.push_str(&format!("\nrejection: {reason}"));
     }
     if let Some(args) = &view.args_summary {
-        s.push_str(&format!("\nargs: {}", redact_secrets(args)));
+        s.push_str(&format!("\nargs: {args}"));
     }
     if let Some(res) = &view.result_summary {
-        s.push_str(&format!("\nresult: {}", redact_secrets(res)));
+        s.push_str(&format!("\nresult: {res}"));
     }
     if let Some(out) = &view.stdout_summary {
-        s.push_str(&format!("\nstdout:\n{}", redact_secrets(out)));
+        s.push_str(&format!("\nstdout:\n{out}"));
     }
     if let Some(errout) = &view.stderr_summary {
-        s.push_str(&format!("\nstderr:\n{}", redact_secrets(errout)));
+        s.push_str(&format!("\nstderr:\n{errout}"));
     }
     if view.truncated {
-        s.push_str("\n(truncated)");
+        // 上流（execute_shell の max_output_bytes 等）が webhook 層より前に切り捨てた
+        // 部分出力。完全だと偽らず、partial であることを明示する（P5/AC5）。
+        s.push_str(
+            "\n⚠️ partial output: the tool truncated this before the webhook layer saw the \
+             full data (upstream source limit); the omitted bytes are not available here.",
+        );
     }
-    let limit = if view.max_chars == 0 { 1500 } else { view.max_chars };
-    let hard = limit.min(DISCORD_MESSAGE_LIMIT);
-    if s.chars().count() > hard {
-        let kept: String = s.chars().take(hard.saturating_sub(1)).collect();
-        s = format!("{kept}…");
+    // ロスレス配送: 1 通に収まればそのまま、Discord 上限を超える場合のみ順序分割する。
+    if s.chars().count() <= DISCORD_MESSAGE_LIMIT {
+        return vec![s];
     }
-    vec![s]
+    // chunk サイズは max_chars（プレビュー上限のヒント）を尊重しつつ Discord 安全長で頭打ち。
+    // どちらでもロスは発生しない（分割するだけ）。
+    let chunk_size = if view.max_chars == 0 {
+        DISCORD_CHUNK_LIMIT
+    } else {
+        view.max_chars.min(DISCORD_CHUNK_LIMIT).max(1)
+    };
+    let parts = chunk_text(&s, chunk_size);
+    let total = parts.len();
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("part {}/{}\n{}", i + 1, total, c))
+        .collect()
 }
 
 /// Discord webhook URL を検証する。空・パース不可・Discord webhook でない場合は Err(理由)。
@@ -1386,7 +1410,8 @@ mod tests {
     // ---- shell result summary ----
 
     #[test]
-    fn test_summarize_shell_result_extracts_and_redacts() {
+    fn test_summarize_shell_result_preserves_output_unredacted() {
+        // covered 経路: stdout は redact せずバイト一致で保持する（新要件 §2 P4）。
         let data = json!({
             "exit_code": 0,
             "stdout": "ok API_KEY=supersecretvalue done",
@@ -1397,25 +1422,29 @@ mod tests {
         assert_eq!(s.exit_code, Some(0));
         assert!(!s.truncated);
         let out = s.stdout_summary.unwrap();
-        assert!(!out.contains("supersecretvalue"), "secret leaked: {out}");
+        assert_eq!(out, "ok API_KEY=supersecretvalue done");
+        assert!(!out.contains("[REDACTED]"), "masking marker leaked: {out}");
         assert!(s.stderr_summary.is_none());
     }
 
     #[test]
-    fn test_summarize_shell_result_clamps_long_output() {
+    fn test_summarize_shell_result_does_not_clamp_long_output() {
+        // 長い出力は head/tail クランプせず full を保持する（ロスレス）。
         let long = "x".repeat(5000);
-        let data = json!({ "exit_code": 1, "stdout": long, "truncated": true });
+        let data = json!({ "exit_code": 1, "stdout": long.clone(), "truncated": true });
         let s = summarize_shell_result(&data);
         assert!(s.truncated);
         let out = s.stdout_summary.unwrap();
-        assert!(out.chars().count() < 5000);
-        assert!(out.contains("omitted"));
+        assert_eq!(out.chars().count(), 5000);
+        assert_eq!(out, long);
+        assert!(!out.contains("omitted"), "must not insert omission marker: {out}");
     }
 
     // ---- tool event formatting ----
 
     #[test]
-    fn test_build_tool_event_message_redacts_and_clamps() {
+    fn test_build_tool_event_message_preserves_secrets_unredacted() {
+        // covered 経路: args/stdout 中のシークレット・webhook URL はそのまま残す。
         let view = ToolEventView {
             event: "tool_call_completed".to_string(),
             tool_name: "execute_shell".to_string(),
@@ -1426,7 +1455,10 @@ mod tests {
             args_summary: Some("cmd: `echo API_KEY=supersecretvalue`".to_string()),
             result_summary: None,
             exit_code: Some(0),
-            stdout_summary: Some("token ghp_0123456789abcdefghij".to_string()),
+            stdout_summary: Some(
+                "token ghp_0123456789abcdefghij hook https://discord.com/api/webhooks/123/abcdefSECRETtoken"
+                    .to_string(),
+            ),
             stderr_summary: None,
             truncated: false,
             rejection_reason: None,
@@ -1438,25 +1470,72 @@ mod tests {
         assert!(m.contains("tool_call_completed"));
         assert!(m.contains("execute_shell"));
         assert!(m.contains("exit_code"));
-        assert!(!m.contains("supersecretvalue"), "secret in args leaked: {m}");
-        assert!(!m.contains("ghp_0123456789abcdefghij"), "secret in stdout leaked: {m}");
-        assert!(m.chars().count() <= 1500);
+        // unredacted: every secret-like string survives byte-for-byte.
+        assert!(m.contains("API_KEY=supersecretvalue"), "kv secret stripped: {m}");
+        assert!(m.contains("ghp_0123456789abcdefghij"), "prefix secret stripped: {m}");
+        assert!(
+            m.contains("https://discord.com/api/webhooks/123/abcdefSECRETtoken"),
+            "webhook url stripped: {m}"
+        );
+        // no OpenCrab masking markers anywhere.
+        assert!(!m.contains("[REDACTED]"), "REDACTED marker present: {m}");
+        assert!(!m.contains("[redacted]"), "redacted marker present: {m}");
     }
 
     #[test]
-    fn test_build_tool_event_message_clamps_to_max_chars() {
+    fn test_build_tool_event_message_chunks_long_output_losslessly() {
+        // 長い出力は head/tail/midpoint で捨てず、part X/N で順序分割して全文を運ぶ。
+        let stdout = "z".repeat(5000);
         let view = ToolEventView {
             event: "tool_call_completed".to_string(),
-            tool_name: "x".to_string(),
+            tool_name: "execute_shell".to_string(),
             tool_call_id: "c".to_string(),
             depth: 1,
             status: "completed".to_string(),
-            result_summary: Some("y".repeat(5000)),
-            max_chars: 300,
+            stdout_summary: Some(stdout.clone()),
+            max_chars: 1500,
             ..Default::default()
         };
         let msgs = build_tool_event_message(&view);
-        assert!(msgs[0].chars().count() <= 300);
+        assert!(msgs.len() > 1, "long output must be split into multiple parts");
+        // every part is within Discord's hard limit and labelled in order.
+        for (i, m) in msgs.iter().enumerate() {
+            assert!(m.chars().count() <= DISCORD_MESSAGE_LIMIT, "part too long: {}", m.len());
+            assert!(
+                m.starts_with(&format!("part {}/{}\n", i + 1, msgs.len())),
+                "part marker/order wrong: {m}"
+            );
+        }
+        // reconstruct: strip the one-line part marker from each, concat -> full message.
+        let reconstructed: String = msgs
+            .iter()
+            .map(|m| m.splitn(2, '\n').nth(1).unwrap_or("").to_string())
+            .collect();
+        assert!(reconstructed.contains(&stdout), "reconstruction lost stdout");
+        // no ellipsis/omission/masking introduced.
+        assert!(!reconstructed.contains('…'), "ellipsis introduced");
+        assert!(!reconstructed.contains("[REDACTED]"));
+        // the full 5000 chars are present.
+        assert_eq!(reconstructed.matches('z').count(), 5000);
+    }
+
+    #[test]
+    fn test_build_tool_event_message_surfaces_upstream_truncation() {
+        // 上流由来の切り捨ては「完全」と偽らず partial と明示する（AC5）。
+        let view = ToolEventView {
+            event: "tool_call_completed".to_string(),
+            tool_name: "execute_shell".to_string(),
+            tool_call_id: "c".to_string(),
+            depth: 1,
+            status: "completed".to_string(),
+            stdout_summary: Some("head".to_string()),
+            truncated: true,
+            max_chars: 1500,
+            ..Default::default()
+        };
+        let msgs = build_tool_event_message(&view);
+        let joined = msgs.join("");
+        assert!(joined.contains("partial output"), "must mark partial: {joined}");
     }
 
     // ---- activity-family resolution ----
