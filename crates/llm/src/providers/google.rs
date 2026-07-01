@@ -323,7 +323,13 @@ impl LlmProvider for GoogleProvider {
     ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
         debug!(model = %request.model, "Google Gemini streaming chat completion");
 
-        let url = self.endpoint_url(&request.model, "streamGenerateContent");
+        // `alt=sse` を付けると Gemini は SSE 形式（`data: {json}` 行）で返す。
+        // これを指定しないと pretty-print された1つの巨大JSON配列がチャンク分割されて届き、
+        // チャンク単体では有効なJSONにならず本文が取り出せない。
+        let url = format!(
+            "{}&alt=sse",
+            self.endpoint_url(&request.model, "streamGenerateContent")
+        );
         let body = self.build_request_body(&request);
 
         let resp = self
@@ -345,49 +351,57 @@ impl LlmProvider for GoogleProvider {
         }
 
         let model = request.model.clone();
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-            let model = model.clone();
-
-            // Gemini stream returns JSON array elements separated by commas
-            let trimmed = text
-                .trim()
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim_start_matches(',')
-                .trim();
-
-            let mut content_text = String::new();
-            if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                if let Some(parts) = parsed["candidates"][0]["content"]["parts"].as_array() {
-                    for part in parts {
-                        if let Some(t) = part["text"].as_str() {
-                            content_text.push_str(t);
+        // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
+        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
+            move |line_res| {
+                let model = model.clone();
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => {
+                        let line = line.trim();
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.trim();
+                            match serde_json::from_str::<Value>(data) {
+                                Ok(parsed) => {
+                                    let mut content_text = String::new();
+                                    if let Some(parts) = parsed["candidates"][0]["content"]["parts"]
+                                        .as_array()
+                                    {
+                                        for part in parts {
+                                            if let Some(t) = part["text"].as_str() {
+                                                content_text.push_str(t);
+                                            }
+                                        }
+                                    }
+                                    if content_text.is_empty() {
+                                        None
+                                    } else {
+                                        Some(Ok(ChatStreamDelta {
+                                            id: String::new(),
+                                            model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: Some(content_text),
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        }))
+                                    }
+                                }
+                                Err(_) => None,
+                            }
+                        } else {
+                            None
                         }
                     }
-                }
-            }
-
-            Ok(ChatStreamDelta {
-                id: uuid::Uuid::new_v4().to_string(),
-                model,
-                choices: vec![StreamChoice {
-                    index: 0,
-                    delta: DeltaMessage {
-                        role: None,
-                        content: if content_text.is_empty() {
-                            None
-                        } else {
-                            Some(content_text)
-                        },
-                        function_call: None,
-                        tool_calls: None,
-                    },
-                    finish_reason: None,
-                }],
-            })
-        });
+                };
+                futures::future::ready(out)
+            },
+        );
 
         Ok(Box::pin(stream))
     }

@@ -565,7 +565,8 @@ async fn main() -> anyhow::Result<()> {
                         subtask_registry,
                         completion_registry.clone(),
                         default_subtask_webhook,
-                    ));
+                    )
+                    .with_owner_discord_id(discord_cfg.owner_discord_id.clone()));
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
 

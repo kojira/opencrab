@@ -86,6 +86,9 @@ pub struct DiscordGatewayActions {
     default_subtask_webhook: Option<WebhookConfig>,
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
+    /// owner-only な A2UI インタラクションの権限判定に使う owner の Discord ユーザーID。
+    /// 空文字の場合は owner 判定が無効（誰でも操作可）になる点に注意。
+    pub owner_discord_id: String,
 }
 
 impl DiscordGatewayActions {
@@ -115,6 +118,7 @@ impl DiscordGatewayActions {
             default_subtask_webhook,
             pending_interaction_registry: None,
             event_tx: None,
+            owner_discord_id: String::new(),
         }
     }
 
@@ -126,6 +130,12 @@ impl DiscordGatewayActions {
     ) -> Self {
         self.pending_interaction_registry = Some(registry);
         self.event_tx = Some(event_tx);
+        self
+    }
+
+    /// Set the owner's Discord user id used to enforce owner-only A2UI interactions.
+    pub fn with_owner_discord_id(mut self, owner_discord_id: impl Into<String>) -> Self {
+        self.owner_discord_id = owner_discord_id.into();
         self
     }
 }

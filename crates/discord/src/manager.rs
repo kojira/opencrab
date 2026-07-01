@@ -96,7 +96,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 completion_registry.clone(),
                 None,
             )
-            .with_a2ui(pending_interaction_registry.clone(), event_tx.clone()),
+            .with_a2ui(pending_interaction_registry.clone(), event_tx.clone())
+            .with_owner_discord_id(owner_discord_id),
         );
 
         let loop_state = self.state.clone();

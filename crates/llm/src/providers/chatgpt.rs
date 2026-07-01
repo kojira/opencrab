@@ -721,79 +721,69 @@ impl LlmProvider for ChatGptProvider {
             )
         })?;
         let request_model = request.model.clone();
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-            let mut last_delta: Option<ChatStreamDelta> = None;
-            let mut current_event = String::new();
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(ev) = line.strip_prefix("event:") {
-                    current_event = ev.trim().to_string();
-                    continue;
-                }
-                let data = match line.strip_prefix("data:") {
-                    Some(d) => d.trim(),
-                    None => continue,
-                };
-                if data == "[DONE]" {
-                    current_event.clear();
-                    continue;
-                }
-                let parsed: Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        current_event.clear();
-                        continue;
-                    }
-                };
-                // Effective event type: prefer parsed["type"], fall back to current_event.
-                let effective_event = parsed["type"].as_str().unwrap_or(&current_event);
-                match effective_event {
-                    "response.output_text.delta" => {
-                        let delta_text = parsed["delta"].as_str().unwrap_or_default().to_string();
-                        last_delta = Some(ChatStreamDelta {
-                            id: String::new(),
-                            model: request_model.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta: DeltaMessage {
-                                    role: None,
-                                    content: Some(delta_text),
-                                    function_call: None,
-                                    tool_calls: None,
+        // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
+        // Responses API は data ペイロード自身に `type` を含むため、行を跨ぐ `event:` 状態には
+        // 依存しない。これにより、同一チャンク内で後続イベントが直前のテキストデルタを
+        // 上書きしてしまう問題を防ぐ。
+        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
+            move |line_res| {
+                let request_model = request_model.clone();
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => {
+                        let line = line.trim();
+                        match line.strip_prefix("data:").map(|d| d.trim()) {
+                            None => None,
+                            Some("[DONE]") => None,
+                            Some(data) => match serde_json::from_str::<Value>(data) {
+                                Err(_) => None,
+                                Ok(parsed) => match parsed["type"].as_str().unwrap_or_default() {
+                                    "response.output_text.delta" => {
+                                        let delta_text = parsed["delta"]
+                                            .as_str()
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        Some(Ok(ChatStreamDelta {
+                                            id: String::new(),
+                                            model: request_model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: Some(delta_text),
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        }))
+                                    }
+                                    "response.completed" | "response.done" => {
+                                        // Tool calls are ignored for now (future work).
+                                        Some(Ok(ChatStreamDelta {
+                                            id: String::new(),
+                                            model: request_model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: Some(String::new()),
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: Some(FinishReason::Stop),
+                                            }],
+                                        }))
+                                    }
+                                    _ => None,
                                 },
-                                finish_reason: None,
-                            }],
-                        });
+                            },
+                        }
                     }
-                    "response.completed" | "response.done" => {
-                        // Tool calls are ignored for now (future work).
-                        last_delta = Some(ChatStreamDelta {
-                            id: String::new(),
-                            model: request_model.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta: DeltaMessage {
-                                    role: None,
-                                    content: Some(String::new()),
-                                    function_call: None,
-                                    tool_calls: None,
-                                },
-                                finish_reason: Some(FinishReason::Stop),
-                            }],
-                        });
-                    }
-                    _ => {}
-                }
-                current_event.clear();
-            }
-            Ok(last_delta.unwrap_or(ChatStreamDelta {
-                id: String::new(),
-                model: request_model.clone(),
-                choices: vec![],
-            }))
-        });
+                };
+                futures::future::ready(out)
+            },
+        );
         Ok(Box::pin(stream))
     }
 

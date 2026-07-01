@@ -147,11 +147,9 @@ impl DiscordGatewayActions {
                 is_dm: false,
                 surface_id: surface_id.clone(),
                 a2ui_components: components.clone(),
-                owner_discord_id: args
-                    .get("__owner_discord_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                // owner の Discord ユーザーID は gateway action が保持する値を使う。
+                // （args 経由では注入されないため、以前は常に空文字で owner 判定が無効化されていた）
+                owner_discord_id: self.owner_discord_id.clone(),
                 created_at: chrono::Utc::now(),
                 timeout_secs,
                 rendered_message: rendered.clone(),

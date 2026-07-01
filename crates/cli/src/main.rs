@@ -96,8 +96,7 @@ async fn main() -> anyhow::Result<()> {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
                     .prepare(
-                        "SELECT i.agent_id, i.name, COALESCE(s.persona_name, '') \
-                         FROM identity i LEFT JOIN soul s ON i.agent_id = s.agent_id",
+                        "SELECT agent_id, name, COALESCE(persona_name, '') FROM agents",
                     )
                     .unwrap();
                 let rows = stmt
@@ -290,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
                 // List agents for participant selection
                 let agents: Vec<(String, String)> = {
                     let conn = db.lock().unwrap();
-                    let mut stmt = conn.prepare("SELECT agent_id, name FROM identity").unwrap();
+                    let mut stmt = conn.prepare("SELECT agent_id, name FROM agents").unwrap();
                     stmt.query_map([], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })

@@ -119,8 +119,18 @@ pub async fn send_message(
     };
 
     let log_id = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::insert_session_log(&conn, &log).unwrap()
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return Json(serde_json::json!({"error": "database unavailable"}));
+            }
+        };
+        match opencrab_db::queries::insert_session_log(&conn, &log) {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(serde_json::json!({"error": format!("failed to log message: {e}")}));
+            }
+        }
     };
 
     // 2. Check if LLM providers are available. If none, fall back to legacy behavior.
@@ -132,15 +142,26 @@ pub async fn send_message(
     }
 
     // 3. Get session and participant IDs.
-    let (participant_ids, session_theme) = {
-        let conn = state.db.lock().unwrap();
-        let session = opencrab_db::queries::get_session(&conn, &id)
-            .unwrap()
-            .unwrap();
-        let ids: Vec<String> =
-            serde_json::from_str(&session.participant_ids_json).unwrap_or_default();
-        (ids, session.theme)
+    let session = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return Json(serde_json::json!({"error": "database unavailable"}));
+            }
+        };
+        match opencrab_db::queries::get_session(&conn, &id) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return Json(serde_json::json!({"error": format!("session not found: {id}")}));
+            }
+            Err(e) => {
+                return Json(serde_json::json!({"error": format!("failed to load session: {e}")}));
+            }
+        }
     };
+    let participant_ids: Vec<String> =
+        serde_json::from_str(&session.participant_ids_json).unwrap_or_default();
+    let session_theme = session.theme;
 
     // 4. For each participant (except the sender), run SkillEngine.
     let mut responses = Vec::new();

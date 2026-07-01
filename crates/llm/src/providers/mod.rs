@@ -6,6 +6,7 @@ pub mod llamacpp;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
+pub mod sse;
 
 pub use anthropic::AnthropicProvider;
 pub use chatgpt::ChatGptProvider;

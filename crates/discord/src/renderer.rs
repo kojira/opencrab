@@ -191,9 +191,9 @@ impl DiscordRenderer {
             {
                 // custom_id: interaction:{uuid}:{button_id}:{action_name}
                 let custom_id = format!("interaction:{}:{}:{}", uuid_part, btn_id, action.name);
-                // Discord制限: custom_idは100文字まで
-                let custom_id = if custom_id.len() > 100 {
-                    custom_id[..100].to_string()
+                // Discord制限: custom_idは100文字まで（文字境界で切り詰めてpanicを回避）
+                let custom_id = if custom_id.chars().count() > 100 {
+                    custom_id.chars().take(100).collect::<String>()
                 } else {
                     custom_id
                 };
@@ -258,8 +258,8 @@ impl DiscordRenderer {
                 "interaction:{}:{}:{}",
                 uuid_part, component_id, action.name
             );
-            let custom_id = if custom_id.len() > 100 {
-                custom_id[..100].to_string()
+            let custom_id = if custom_id.chars().count() > 100 {
+                custom_id.chars().take(100).collect::<String>()
             } else {
                 custom_id
             };

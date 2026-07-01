@@ -31,6 +31,10 @@ pub struct RestGateway {
     tx_in: mpsc::Sender<IncomingMessage>,
     rx_in: Mutex<mpsc::Receiver<IncomingMessage>>,
     pending_responses: Arc<Mutex<HashMap<String, oneshot::Sender<OutgoingMessage>>>>,
+    /// `submit_message` で作成した receiver を `wait_response` まで保持する。
+    /// これにより `send()` が `wait_response` より先に発火しても、oneshot が値を
+    /// バッファするため応答を取りこぼさない（差し替えによる競合・ハングを防止）。
+    pending_receivers: Arc<Mutex<HashMap<String, oneshot::Receiver<OutgoingMessage>>>>,
 }
 
 impl RestGateway {
@@ -43,6 +47,7 @@ impl RestGateway {
             tx_in,
             rx_in: Mutex::new(rx_in),
             pending_responses: Arc::new(Mutex::new(HashMap::new())),
+            pending_receivers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -53,10 +58,15 @@ impl RestGateway {
     pub async fn submit_message(&self, message: IncomingMessage) -> Result<String> {
         let message_id = message.id.clone();
 
-        let (resp_tx, _resp_rx) = oneshot::channel();
+        let (resp_tx, resp_rx) = oneshot::channel();
         {
             let mut pending = self.pending_responses.lock().await;
             pending.insert(message_id.clone(), resp_tx);
+        }
+        {
+            // receiver を保持しておき、wait_response で await する。
+            let mut receivers = self.pending_receivers.lock().await;
+            receivers.insert(message_id.clone(), resp_rx);
         }
 
         self.tx_in
@@ -98,16 +108,17 @@ impl RestGateway {
     /// レスポンスを受信する。このメソッドは新たにoneshotレシーバーを
     /// 作成し直すため、`submit_and_wait` の使用を推奨する。
     pub async fn wait_response(&self, message_id: &str) -> Result<OutgoingMessage> {
-        // NOTE: submit_and_waitの利用を推奨。
-        // このメソッドはsubmit_messageで既にoneshotが登録されている前提で、
-        // 新しいoneshotに差し替える方式で動作する。
-        let (resp_tx, resp_rx) = oneshot::channel();
-        {
-            let mut pending = self.pending_responses.lock().await;
-            // 古いsenderを取り除いて新しいものに差し替え
-            pending.remove(message_id);
-            pending.insert(message_id.to_string(), resp_tx);
-        }
+        // submit_message が保持しておいた receiver を取り出して await する。
+        // sender は pending_responses に残したままなので、send() が本メソッドより
+        // 先に発火しても oneshot が値をバッファし、応答を取りこぼさない。
+        let resp_rx = {
+            let mut receivers = self.pending_receivers.lock().await;
+            receivers.remove(message_id)
+        };
+
+        let resp_rx = resp_rx.with_context(|| {
+            format!("No pending receiver for message '{message_id}' (submit_message not called or wait_response already consumed)")
+        })?;
 
         resp_rx
             .await
@@ -239,6 +250,29 @@ mod tests {
         assert_eq!(response.content.as_text(), Some("response text"));
 
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submit_then_send_before_wait_response() {
+        // 回帰テスト: send() が wait_response() より先に発火しても応答を取りこぼさない。
+        let gateway = RestGateway::new(32);
+        let msg = IncomingMessage::new(
+            MessageSource::Rest {
+                request_id: "req-race".to_string(),
+            },
+            MessageContent::text("request"),
+            Sender::user("user-1", "User One"),
+        );
+        let msg_id = gateway.submit_message(msg).await.unwrap();
+
+        // consume the incoming so the channel doesn't fill (not strictly needed here)
+        // fire the response BEFORE wait_response is called
+        let reply = OutgoingMessage::text_reply("response text", &msg_id);
+        gateway.send(reply).await.unwrap();
+
+        // now wait_response must still receive the buffered value
+        let response = gateway.wait_response(&msg_id).await.unwrap();
+        assert_eq!(response.content.as_text(), Some("response text"));
     }
 
     #[tokio::test]
