@@ -133,6 +133,10 @@ impl CodexProvider {
 
     fn build_base_command(&self, model: &str, agent_id: Option<&str>) -> Command {
         let mut cmd = Command::new(&self.codex_path);
+        // タイムアウトやストリーム破棄で future が drop されたとき、codex プロセスを
+        // 確実に kill する。これが無いと、タイムアウト後も codex が走り続けて
+        // 孤児プロセスが蓄積する（workspace-write サンドボックスでの書き込みも継続する）。
+        cmd.kill_on_drop(true);
         cmd.arg("exec")
             .arg("--ephemeral")
             .arg("--skip-git-repo-check")

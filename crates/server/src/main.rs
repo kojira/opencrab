@@ -450,23 +450,10 @@ async fn main() -> anyhow::Result<()> {
 
     let default_model = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
 
-    // DB内の許可コマンドをtools_configにマージ
-    let mut tools_cfg = cfg.tools.clone();
-    if let Ok(agents) = opencrab_db::queries::find_agents(&conn, "") {
-        for (agent_id, _name) in &agents {
-            if let Ok(db_commands) =
-                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
-            {
-                if let Some(ref mut shell) = tools_cfg.shell {
-                    for cmd in db_commands {
-                        if !shell.allowed_commands.contains(&cmd) {
-                            shell.allowed_commands.push(cmd);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // NOTE: エージェント個別の許可コマンド（DB管理）はグローバル tools_config に
+    // マージしない。全エージェントの許可が混ざり、あるエージェントの許可が他へ漏れるため。
+    // 個別コマンドは実行時に run_agent_response 内でそのエージェント分だけ適用する。
+    let tools_cfg = cfg.tools.clone();
 
     #[allow(unused_mut)]
     let mut state = AppState {

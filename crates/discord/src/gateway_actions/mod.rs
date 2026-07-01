@@ -89,6 +89,10 @@ pub struct DiscordGatewayActions {
     /// owner-only な A2UI インタラクションの権限判定に使う owner の Discord ユーザーID。
     /// 空文字の場合は owner 判定が無効（誰でも操作可）になる点に注意。
     pub owner_discord_id: String,
+    /// report_progress のデバウンス世代カウンタ（parent_session_id → 最新世代）。
+    /// 短時間に複数回 report_progress が呼ばれても、最後の1回のみメインエンジン再呼び出しを
+    /// 発火させるために使う。
+    progress_debounce: Arc<dashmap::DashMap<String, u64>>,
 }
 
 impl DiscordGatewayActions {
@@ -119,6 +123,7 @@ impl DiscordGatewayActions {
             pending_interaction_registry: None,
             event_tx: None,
             owner_discord_id: String::new(),
+            progress_debounce: Arc::new(dashmap::DashMap::new()),
         }
     }
 

@@ -5458,7 +5458,15 @@ pub fn get_index_node_by_short_or_id(
     );
     match result {
         Ok(node) => Ok(Some(node)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => get_index_node(conn, query),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // フルIDでのフォールバック検索も agent_id でスコープする。
+            // スコープしないと他エージェントのノード（非公開会話のタイトル/サマリ）が
+            // 予測可能なID経由で漏洩する。
+            match get_index_node(conn, query)? {
+                Some(node) if node.agent_id == agent_id => Ok(Some(node)),
+                _ => Ok(None),
+            }
+        }
         Err(e) => Err(e.into()),
     }
 }

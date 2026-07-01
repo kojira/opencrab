@@ -291,7 +291,25 @@ impl DiscordGatewayActions {
         };
 
         let mut sub_dispatcher = opencrab_actions::ActionDispatcher::new();
-        let tools_cfg = self.tools_config.read().unwrap().clone();
+        let mut tools_cfg = self.tools_config.read().unwrap().clone();
+        // このエージェント専用の許可コマンド（DB管理）をローカルコピーにのみマージする
+        // （グローバル config に足すと他エージェントへ漏れる）。
+        if let Ok(conn) = self.db.lock() {
+            if let Ok(agent_cmds) =
+                opencrab_db::queries::list_agent_allowed_commands(&conn, &agent_id)
+            {
+                if !agent_cmds.is_empty() {
+                    let shell = tools_cfg
+                        .shell
+                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
+                    for cmd in agent_cmds {
+                        if !shell.allowed_commands.contains(&cmd) {
+                            shell.allowed_commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
         opencrab_actions::register_tools_from_config(&tools_cfg, &mut sub_dispatcher);
         let sub_executor = {
             let exec =
@@ -395,7 +413,15 @@ impl DiscordGatewayActions {
         let webhook_clone = webhook.clone();
         let webhook_tx_clone = webhook_tx.clone();
 
+        // 開始ゲート: 親がレジストリへ insert し終えるまでタスク本体を走らせない。
+        // これが無いと、即座に失敗するサブタスクが親の insert より先に remove を実行し、
+        // その後 insert が着地して「running のまま」のエントリがリークする。
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+
         let join_handle = tokio::spawn(async move {
+            // insert 完了を待つ（送信側が drop された場合も先へ進む）。
+            let _ = start_rx.await;
+
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
                 sub_engine.run_with_model_override(
@@ -492,6 +518,9 @@ impl DiscordGatewayActions {
                 started_instant,
             },
         );
+
+        // insert が完了したのでタスク本体の実行を許可する。
+        let _ = start_tx.send(());
 
         GatewayActionResult {
             success: true,
@@ -683,13 +712,34 @@ impl DiscordGatewayActions {
             }
         }
 
-        // Debounce: wait 3 seconds then trigger main engine re-invocation via completion callback.
+        // Debounce: 3秒待ってからメインエンジン再呼び出しを1回だけ発火する。
+        // 世代カウンタで「最後の report_progress」だけが発火するようにし、バースト時に
+        // 同数のLLM再呼び出し（コスト増・チャンネルスパム・イベントループ長時間ブロック）が
+        // 起きるのを防ぐ。
+        let my_generation = {
+            let mut gen = self
+                .progress_debounce
+                .entry(parent_session_id.clone())
+                .or_insert(0);
+            *gen += 1;
+            *gen
+        };
         let completion_registry_clone = self.completion_registry.clone();
+        let progress_debounce_clone = self.progress_debounce.clone();
         let parent_session_clone = parent_session_id.clone();
         let subtask_id_clone = subtask_id.clone();
         let message_clone = message.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            // 自分より後に report_progress が来ていたら（世代が進んでいたら）発火しない。
+            let is_latest = progress_debounce_clone
+                .get(&parent_session_clone)
+                .map(|g| *g == my_generation)
+                .unwrap_or(false);
+            if !is_latest {
+                return;
+            }
+            progress_debounce_clone.remove(&parent_session_clone);
             if let Some(cb) = completion_registry_clone.get(&parent_session_clone) {
                 cb(subtask_id_clone, message_clone, "progress".to_string());
             }

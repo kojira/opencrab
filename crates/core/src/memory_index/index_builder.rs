@@ -134,8 +134,17 @@ impl IndexBuilder {
                 max_log_id = last_log_id;
             }
 
-            // 期間ノード（年月-週）を確保
-            let period_label = Utc::now().format("%Y-%m").to_string();
+            // 期間ノード（年月）を確保。
+            // ラベルはログ自身のタイムスタンプから導出する。インデックス実行時刻
+            // （Utc::now()）を使うと、rebuild や遅延インデックス時に過去のセッションが
+            // すべて実行月のバケットへ誤分類される。
+            let period_label = session_logs
+                .iter()
+                .filter_map(|l| l.created_at.as_deref())
+                .filter(|s| s.len() >= 7 && s.is_char_boundary(7))
+                .min()
+                .map(|s| s[..7].to_string())
+                .unwrap_or_else(|| Utc::now().format("%Y-%m").to_string());
             let period_id = format!("period-{agent_id}-{period_label}");
             {
                 let db = conn
@@ -239,7 +248,10 @@ impl IndexBuilder {
                 )
             };
 
-            tracing::debug!("index_builder: generated prompt (first 200 chars) = {:?}", &prompt[..prompt.len().min(200)]);
+            tracing::debug!(
+                "index_builder: generated prompt (first 200 chars) = {:?}",
+                prompt.chars().take(200).collect::<String>()
+            );
             let system_content = if let Some(p) = personality.filter(|s| !s.is_empty()) {
                 format!("あなたは {persona_name} です。\n{p}")
             } else {

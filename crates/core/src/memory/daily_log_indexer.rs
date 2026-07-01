@@ -38,6 +38,26 @@ pub struct DailyLogIndexer {
     personality: Option<String>,
 }
 
+/// `YYYY-MM-DD` 形式の日付文字列から `YYYY-MM` を安全に取り出す。
+///
+/// `date_str` は `memory_curated.category` の接尾辞や呼び出し側指定の文字列で、
+/// 形式が保証されない。無検証のバイトスライス（`&s[..7]`）は短い文字列や
+/// マルチバイト文字で panic し、indexer 全体を恒久的に停止させるため、
+/// ここで検証して不正なら `None` を返す。
+fn year_month_of(date_str: &str) -> Option<&str> {
+    let bytes = date_str.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    let digits_ok = |r: std::ops::Range<usize>| bytes[r].iter().all(|b| b.is_ascii_digit());
+    if digits_ok(0..4) && bytes[4] == b'-' && digits_ok(5..7) && bytes[7] == b'-' && digits_ok(8..10)
+    {
+        Some(&date_str[..7])
+    } else {
+        None
+    }
+}
+
 impl DailyLogIndexer {
     pub fn new(db: Arc<Mutex<Connection>>, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
         Self {
@@ -146,7 +166,13 @@ impl DailyLogIndexer {
                 opencrab_db::queries::get_daily_log_by_date(&db, agent_id, date_str)?
             };
             if let Some(entry) = entry {
-                let year_month = &date_str[..7];
+                let year_month = match year_month_of(date_str) {
+                    Some(ym) => ym,
+                    None => {
+                        tracing::warn!(agent_id = %agent_id, date_str = %date_str, "reindex_dates: invalid date string, skipping");
+                        continue;
+                    }
+                };
                 let period_id = self.ensure_period_node(agent_id, year_month, &root_id, &now)?;
                 let ((day_summary, topics), _) = self
                     .summarize_day_with_retry(date_str, &entry.content)
@@ -310,7 +336,9 @@ impl DailyLogIndexer {
         periods_seen: &mut HashSet<String>,
     ) -> Result<usize> {
         let date_str = &entry.date_str;
-        let year_month = &date_str[..7];
+        let year_month = year_month_of(date_str).ok_or_else(|| {
+            anyhow::anyhow!("invalid daily_log date string: {date_str:?} (expected YYYY-MM-DD)")
+        })?;
         let period_id = self.ensure_period_node(agent_id, year_month, root_id, now)?;
         periods_seen.insert(year_month.to_string());
 

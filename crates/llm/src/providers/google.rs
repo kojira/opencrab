@@ -43,16 +43,17 @@ impl GoogleProvider {
 
     /// Convert unified messages to Gemini API format.
     fn build_request_body(&self, request: &ChatRequest) -> Value {
-        let mut system_instruction: Option<Value> = None;
+        let mut system_texts: Vec<String> = Vec::new();
         let mut contents: Vec<Value> = Vec::new();
 
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
+                    // 複数の system メッセージは連結する（上書きすると先行指示が失われる）。
                     if let Some(text) = msg.text_content() {
-                        system_instruction = Some(serde_json::json!({
-                            "parts": [{"text": text}]
-                        }));
+                        if !text.is_empty() {
+                            system_texts.push(text.to_string());
+                        }
                     }
                 }
                 Role::User => {
@@ -92,8 +93,10 @@ impl GoogleProvider {
             "contents": contents,
         });
 
-        if let Some(si) = system_instruction {
-            body["systemInstruction"] = si;
+        if !system_texts.is_empty() {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{"text": system_texts.join("\n\n")}]
+            });
         }
 
         // Generation config

@@ -556,7 +556,27 @@ pub async fn run_agent_response(
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
     let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let tools_cfg = state.tools_config.read().unwrap().clone();
+    let mut tools_cfg = state.tools_config.read().unwrap().clone();
+    // このエージェント専用の許可コマンド（DB管理）を、ローカルコピーにのみマージする。
+    // グローバル config に足すと他エージェントにも許可が漏れる（per-agent スコープの担保）。
+    {
+        if let Ok(conn) = state.db.lock() {
+            if let Ok(agent_cmds) =
+                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
+            {
+                if !agent_cmds.is_empty() {
+                    let shell = tools_cfg
+                        .shell
+                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
+                    for cmd in agent_cmds {
+                        if !shell.allowed_commands.contains(&cmd) {
+                            shell.allowed_commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
     opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
@@ -716,7 +736,7 @@ pub async fn run_agent_response(
         let tr_db = state.db.clone();
         let tr_agent = agent_id.to_string();
         let tr_session = session_id.to_string();
-        let tr_workspace = state.workspace_base.clone();
+        let tr_workspace = state.workspace_base.replace("{agent_id}", agent_id);
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
                 const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
@@ -729,7 +749,12 @@ pub async fn run_agent_response(
                     if std::fs::write(&file_path, &result_json).is_ok() {
                         format!("[Tool Result: file://tmp/{}]", filename)
                     } else {
-                        result_json[..TOOL_RESULT_SIZE_LIMIT].to_string()
+                        // 文字境界を尊重して切り詰める（バイトスライスはUTF-8境界でpanicする）
+                        let mut end = TOOL_RESULT_SIZE_LIMIT.min(result_json.len());
+                        while !result_json.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        result_json[..end].to_string()
                     }
                 } else {
                     result_json.clone()

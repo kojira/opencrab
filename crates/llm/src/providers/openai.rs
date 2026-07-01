@@ -77,19 +77,16 @@ impl OpenAiProvider {
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
-                    let mut tool = serde_json::json!({
+                    // cache_control は Anthropic 固有のフィールドで、OpenAI は未知の
+                    // パラメータとして 400 で拒否するため、ここでは出力しない。
+                    serde_json::json!({
                         "type": "function",
                         "function": {
                             "name": f.name,
                             "description": f.description,
                             "parameters": f.parameters,
                         }
-                    });
-                    // cache_controlはAnthropicのツールトップレベルに置く
-                    if let Some(ref cc) = f.cache_control {
-                        tool["cache_control"] = cc.clone();
-                    }
-                    tool
+                    })
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);
@@ -165,9 +162,8 @@ impl OpenAiProvider {
             obj["tool_call_id"] = serde_json::json!(tool_call_id);
         }
 
-        if let Some(ref cc) = msg.cache_control {
-            obj["cache_control"] = cc.clone();
-        }
+        // cache_control は Anthropic 固有（OpenAI は未知パラメータとして 400 で拒否）
+        // のため出力しない。
 
         obj
     }

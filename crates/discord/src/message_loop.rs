@@ -422,6 +422,33 @@ async fn process_incoming_message<T: AgentRunner>(
                 );
                 continue; // skip this agent, not return
             }
+        } else {
+            // Per-agent DM trust check.
+            // 冒頭のDMゲートは「いずれかのエージェントが信頼していれば通す」判定なので、
+            // ここで各エージェント個別に信頼を確認しないと、あるエージェントにしか信頼
+            // 登録していないユーザーのDMに全エージェントが応答してしまう。
+            let dm_allowed = {
+                let sender_id = &incoming.sender.id;
+                if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
+                    true
+                } else {
+                    let conn = state.db().lock().unwrap();
+                    if opencrab_db::queries::trusted_user_count(&conn, agent_id) > 0 {
+                        opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
+                    } else {
+                        // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
+                        owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                    }
+                }
+            };
+            if !dm_allowed {
+                debug!(
+                    sender = %incoming.sender.id,
+                    agent = %agent_id,
+                    "Ignoring DM: sender not trusted for this agent"
+                );
+                continue; // skip this agent, not return
+            }
         }
 
         // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。

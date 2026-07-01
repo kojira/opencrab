@@ -118,6 +118,10 @@ impl Action for ShellToolAction {
             .map(|s| s.to_string());
 
         let mut cmd = tokio::process::Command::new(&command);
+        // タイムアウトで future が drop されたとき子プロセスを確実に kill する。
+        // これが無いとハングしたコマンドがタイムアウト後も走り続け、
+        // 孤児プロセスの蓄積やロック保持を招く。
+        cmd.kill_on_drop(true);
         cmd.args(&cmd_args);
         cmd.current_dir(ctx.workspace.root());
         cmd.stdout(Stdio::piped());
@@ -158,15 +162,17 @@ impl Action for ShellToolAction {
             }
         }
 
-        // Wait with timeout
-        let timeout_duration = std::time::Duration::from_secs(self.config.timeout_secs);
+        // Wait with timeout（コマンド個別の timeout_secs があればそれを優先）
+        let timeout_secs = cmd_config.timeout_secs.unwrap_or(self.config.timeout_secs);
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
         let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => return ActionResult::error(&format!("Command execution failed: {}", e)),
             Err(_) => {
+                // kill_on_drop により子プロセスはここで kill される。
                 return ActionResult::error(&format!(
                     "Command timed out after {} seconds",
-                    self.config.timeout_secs
+                    timeout_secs
                 ))
             }
         };

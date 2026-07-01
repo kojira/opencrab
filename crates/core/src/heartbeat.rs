@@ -147,8 +147,11 @@ pub async fn heartbeat_loop(
                     }
                 }
             }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
+            changed = shutdown_rx.changed() => {
+                // Sender が drop されると changed() は Err を返し続ける。これを無視すると
+                // select! が即座に解決し続けて sleep 分岐が飢餓状態になり、CPUを100%回して
+                // tick が止まる。チャンネルクローズはシャットダウンとして扱う。
+                if changed.is_err() || *shutdown_rx.borrow() {
                     tracing::info!(
                         agent_id = %agent_id,
                         ticks_completed = tick_count,

@@ -262,15 +262,31 @@ impl ChatGptProvider {
 
             if msg.role == Role::Assistant {
                 if let Some(tool_calls) = &msg.tool_calls {
-                    for tool_call in tool_calls {
-                        input.push(serde_json::json!({
-                            "type": "function_call",
-                            "call_id": tool_call.id,
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        }));
+                    if !tool_calls.is_empty() {
+                        // assistant がツールコールと同時にテキストを返した場合、そのテキストも
+                        // 履歴に残す（以前は continue で本文が欠落していた）。
+                        // 空テキストは追加しない。
+                        let has_text = msg.text_content().map_or(false, |t| !t.is_empty());
+                        if has_text {
+                            if let Some(content) = Self::message_content_value(&msg.content) {
+                                input.push(serde_json::json!({
+                                    "role": "assistant",
+                                    "content": content,
+                                }));
+                            }
+                        }
+                        for tool_call in tool_calls {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments,
+                            }));
+                        }
+                        continue;
                     }
-                    continue;
+                    // tool_calls が空 (Some(vec![])) の場合は通常の assistant メッセージ
+                    // として下の共通処理へフォールスルーする（メッセージ全体の消失を防ぐ）。
                 }
             }
 
@@ -974,6 +990,32 @@ mod tests {
             !contains_key(&body, "tool_call_id"),
             "tool_call_id must not be sent to the Responses API"
         );
+    }
+
+    #[test]
+    fn test_build_request_body_keeps_assistant_text_alongside_tool_calls() {
+        let provider = ChatGptProvider::new();
+        let mut assistant = Message::assistant("I'll check the weather");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Tokyo"}"#.to_string(),
+            },
+        }]);
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("hi"), assistant]);
+
+        let body = provider.build_request_body(&request, false);
+        let input = body["input"].as_array().expect("input must be an array");
+
+        // user, assistant-text, function_call の3要素になる。
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["role"], serde_json::json!("assistant"));
+        assert!(input[1]["content"]
+            .to_string()
+            .contains("I'll check the weather"));
+        assert_eq!(input[2]["type"], serde_json::json!("function_call"));
     }
 
     #[test]

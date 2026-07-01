@@ -52,8 +52,15 @@ impl AnthropicProvider {
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
+                    // 複数の system メッセージは改行で連結する（上書きすると
+                    // 先行する system 指示が失われる）。
                     if let Some(text) = msg.text_content() {
-                        system_prompt = Some(text.to_string());
+                        system_prompt = Some(match system_prompt.take() {
+                            Some(existing) if !existing.is_empty() => {
+                                format!("{existing}\n\n{text}")
+                            }
+                            _ => text.to_string(),
+                        });
                     }
                 }
                 Role::User => {
@@ -168,11 +175,16 @@ impl AnthropicProvider {
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
-                    serde_json::json!({
+                    let mut tool = serde_json::json!({
                         "name": f.name,
                         "description": f.description,
                         "input_schema": f.parameters,
-                    })
+                    });
+                    // Anthropic のプロンプトキャッシュ: ツール定義に cache_control を出力する。
+                    if let Some(ref cc) = f.cache_control {
+                        tool["cache_control"] = cc.clone();
+                    }
+                    tool
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);

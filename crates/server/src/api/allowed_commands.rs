@@ -46,15 +46,9 @@ pub async fn add_allowed_command(
         opencrab_db::queries::add_agent_allowed_command(&conn, &agent_id, &req.command, "owner")
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Update in-memory tools_config
-    drop(conn);
-    if let Ok(mut cfg) = state.tools_config.write() {
-        if let Some(ref mut shell) = cfg.shell {
-            if !shell.allowed_commands.contains(&req.command) {
-                shell.allowed_commands.push(req.command.clone());
-            }
-        }
-    }
+    // グローバル tools_config には反映しない（他エージェントへ漏れるため）。
+    // このエージェントの許可コマンドは DB を信頼できる情報源とし、
+    // run_agent_response が実行時に該当エージェント分だけ適用する。
 
     Ok(Json(serde_json::json!({
         "command": req.command,
@@ -70,13 +64,8 @@ pub async fn remove_allowed_command(
     let removed = opencrab_db::queries::remove_agent_allowed_command(&conn, &agent_id, &command)
         .unwrap_or(false);
 
-    // Update in-memory tools_config
-    drop(conn);
-    if let Ok(mut cfg) = state.tools_config.write() {
-        if let Some(ref mut shell) = cfg.shell {
-            shell.allowed_commands.retain(|c| c != &command);
-        }
-    }
+    // グローバル tools_config は変更しない（config 由来のコマンドを誤って消さないため）。
+    // このエージェントの許可は DB から削除済みで、実行時にはもう適用されない。
 
     Json(serde_json::json!({ "removed": removed }))
 }
