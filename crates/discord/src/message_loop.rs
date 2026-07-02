@@ -330,19 +330,22 @@ async fn process_incoming_message<T: AgentRunner>(
         if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
             // allow
         } else {
-            let allowed = {
-                let conn = state.db().lock().unwrap();
-                let any_trusted = agent_ids
-                    .iter()
-                    .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
-                let any_registered = agent_ids
-                    .iter()
-                    .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
-                if any_registered {
-                    any_trusted
-                } else {
-                    owner_discord_id.is_empty() || sender_id == &owner_discord_id
+            let allowed = match state.db().lock() {
+                Ok(conn) => {
+                    let any_trusted = agent_ids
+                        .iter()
+                        .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
+                    let any_registered = agent_ids
+                        .iter()
+                        .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
+                    if any_registered {
+                        any_trusted
+                    } else {
+                        owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                    }
                 }
+                // DB接続取得失敗時は fail-closed。
+                Err(_) => false,
             };
             if !allowed {
                 debug!(
@@ -374,11 +377,13 @@ async fn process_incoming_message<T: AgentRunner>(
         if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
             opencrab_actions::CallerIdentity::Owner
         } else {
-            let conn = state.db().lock().unwrap();
-            let trust_info = agent_ids
-                .iter()
-                .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid));
-            drop(conn);
+            // DB接続取得失敗時は trust_info=None（＝最小権限の Agent 扱い）。
+            let trust_info = match state.db().lock() {
+                Ok(conn) => agent_ids
+                    .iter()
+                    .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid)),
+                Err(_) => None,
+            };
             match trust_info {
                 Some(u) if u.permission == "co_agent" => {
                     opencrab_actions::CallerIdentity::CoAgent {
@@ -406,13 +411,14 @@ async fn process_incoming_message<T: AgentRunner>(
     for agent_id in &agent_ids {
         // Per-agent channel whitelist check
         if !is_dm {
-            let whitelisted = {
-                let conn = state.db().lock().unwrap();
-                opencrab_db::queries::is_channel_whitelisted_for_agent(
+            let whitelisted = match state.db().lock() {
+                Ok(conn) => opencrab_db::queries::is_channel_whitelisted_for_agent(
                     &conn,
                     &channel_id_str,
                     agent_id,
-                )
+                ),
+                // DB接続取得失敗時は fail-closed（このエージェントをスキップ）。
+                Err(_) => false,
             };
             if !whitelisted {
                 debug!(
@@ -432,12 +438,17 @@ async fn process_incoming_message<T: AgentRunner>(
                 if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
                     true
                 } else {
-                    let conn = state.db().lock().unwrap();
-                    if opencrab_db::queries::trusted_user_count(&conn, agent_id) > 0 {
-                        opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
-                    } else {
-                        // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
-                        owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                    // DB接続取得に失敗した場合は fail-closed（拒否）。
+                    match state.db().lock() {
+                        Ok(conn) => {
+                            if opencrab_db::queries::trusted_user_count(&conn, agent_id) > 0 {
+                                opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
+                            } else {
+                                // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
+                                owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                            }
+                        }
+                        Err(_) => false,
                     }
                 }
             };

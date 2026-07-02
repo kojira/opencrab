@@ -400,11 +400,24 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                                     .iter()
                                     .filter_map(|item| {
                                         let id = item.get("id")?.as_str()?;
-                                        let name = item.get("name")?.as_str()?;
-                                        let args = item
-                                            .get("arguments")
-                                            .map(|value| value.to_string())
-                                            .unwrap_or_default();
+                                        // 正準形状 {function:{name, arguments:"<json-string>"}} と
+                                        // 旧形状 {name, arguments:<object>} の両方に対応する。
+                                        let (name, args) = if let Some(func) = item.get("function") {
+                                            let name = func.get("name")?.as_str()?;
+                                            let args = func
+                                                .get("arguments")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                                .unwrap_or_default();
+                                            (name, args)
+                                        } else {
+                                            let name = item.get("name")?.as_str()?;
+                                            let args = item
+                                                .get("arguments")
+                                                .map(|value| value.to_string())
+                                                .unwrap_or_default();
+                                            (name, args)
+                                        };
                                         Some(format!("[id={}]: {}({})", id, name, args))
                                     })
                                     .collect();
@@ -911,4 +924,55 @@ pub async fn run_agent_response(
     }
 
     result
+}
+
+#[cfg(test)]
+mod format_log_tests {
+    use super::format_single_log;
+    use opencrab_db::queries::SessionLogRow;
+
+    fn tool_call_log(tool_calls_json: &str) -> SessionLogRow {
+        SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "s1".to_string(),
+            log_type: "tool_call".to_string(),
+            content: String::new(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({ "tool_calls_json": tool_calls_json }).to_string(),
+            ),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn renders_canonical_tool_call_shape() {
+        // 正準形状: {id, type, function:{name, arguments:"<json-string>"}}
+        let tcj = serde_json::json!([{
+            "id": "tc-1",
+            "type": "function",
+            "function": { "name": "search", "arguments": "{\"q\":\"rust\"}" }
+        }])
+        .to_string();
+        let out = format_single_log(&tool_call_log(&tcj));
+        assert!(out.contains("search"), "tool name must render: {out}");
+        assert!(out.contains("tc-1"), "tool id must render: {out}");
+        assert!(out.contains(r#"{"q":"rust"}"#), "arguments must render: {out}");
+    }
+
+    #[test]
+    fn renders_legacy_flat_tool_call_shape() {
+        // 旧形状（既存DB行の後方互換）: {id, name, arguments:<object>}
+        let tcj = serde_json::json!([{
+            "id": "tc-9",
+            "name": "old_tool",
+            "arguments": { "a": 1 }
+        }])
+        .to_string();
+        let out = format_single_log(&tool_call_log(&tcj));
+        assert!(out.contains("old_tool"), "legacy tool name must render: {out}");
+        assert!(out.contains("tc-9"), "legacy tool id must render: {out}");
+    }
 }

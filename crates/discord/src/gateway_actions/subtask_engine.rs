@@ -758,7 +758,13 @@ fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> Strin
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
         if let Some(calls) = value.as_array() {
             for call in calls {
-                if let Some(name) = call.get("name").and_then(|v| v.as_str()) {
+                // 正準形状 {function:{name}} と旧形状 {name} の両方に対応する。
+                let name = call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| call.get("name").and_then(|v| v.as_str()));
+                if let Some(name) = name {
                     names.push(format!("`{name}`"));
                 }
             }
