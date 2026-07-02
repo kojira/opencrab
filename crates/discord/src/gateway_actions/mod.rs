@@ -19,6 +19,7 @@ use crate::PendingInteractionRegistry;
 mod agent_management;
 mod discord_ops;
 mod heartbeat_instructions;
+mod peer_review;
 mod subtask_engine;
 mod subtask_webhook;
 mod ui;
@@ -848,6 +849,28 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["channel_id", "components"]
                 }),
             },
+            GatewayActionDef {
+                name: "request_peer_review".to_string(),
+                description: "自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼をDiscordチャンネルへ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "required": ["content", "channel_id"],
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限12000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "投稿先DiscordチャンネルのID（数値文字列）。現在のチャンネルIDは会話の[Discord context]にchannel_id=XXXXとして記載されている。"
+                        },
+                        "instructions": {
+                            "type": "string",
+                            "description": "レビュアーに重点的に見てほしい観点（省略可）。"
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -866,6 +889,7 @@ impl GatewayActions for DiscordGatewayActions {
             "rebuild_memory_index" => self.execute_rebuild_memory_index().await,
             "create_skill" => self.execute_create_skill(args),
             "discord_send_file" => self.execute_send_file(args).await,
+            "request_peer_review" => self.execute_request_peer_review(args).await,
             "spawn_subtask" => self.execute_spawn_subtask(args).await,
             "cancel_subtask" => self.execute_cancel_subtask(args),
             "report_progress" => self.execute_report_progress(args).await,
@@ -927,9 +951,10 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 27);
+        assert_eq!(defs.len(), 28);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"request_peer_review"));
         assert!(names.contains(&"discord_list_guilds"));
         assert!(names.contains(&"discord_list_channels"));
         assert!(names.contains(&"discord_channel_config"));
@@ -970,6 +995,50 @@ mod tests {
             );
             assert!(def.parameters["type"] == "object");
         }
+    }
+
+    // ---- request_peer_review (検証エラー系: HTTP呼び出し前に返る) ----
+
+    #[tokio::test]
+    async fn test_peer_review_missing_content() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute("request_peer_review", &json!({"channel_id": "123"}))
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("content"));
+    }
+
+    #[tokio::test]
+    async fn test_peer_review_missing_or_invalid_channel() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute("request_peer_review", &json!({"content": "diff"}))
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("channel_id"));
+
+        let result = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff", "channel_id": "not-a-number"}),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("無効なchannel_id"));
+    }
+
+    #[tokio::test]
+    async fn test_peer_review_content_too_long() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "x".repeat(12_001), "channel_id": "123"}),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("12000"));
     }
 
     // ---- channel_config ----

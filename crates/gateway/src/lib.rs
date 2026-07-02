@@ -10,7 +10,10 @@ pub use message::{
     MessageTarget, OutgoingMessage, Sender,
 };
 pub use traits::Gateway;
-pub use traits::{GatewayActionDef, GatewayActionResult, GatewayActions};
+pub use traits::{
+    GatewayActionDef, GatewayActionResult, GatewayActions, PEER_REVIEW_REPLY_MARKER,
+    PEER_REVIEW_REQUEST_MARKER,
+};
 
 #[cfg(feature = "discord")]
 pub use adapters::discord::DiscordGateway;

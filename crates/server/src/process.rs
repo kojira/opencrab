@@ -110,7 +110,10 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          ## Silent Reply\n\
          返答不要な場合は NO_REPLY とだけテキストで返してください（他のテキストと混在させない）:\n\
          - グループチャットで自分に関係ない会話の場合\n\
-         - 他のBotが話している場合（Bot同士のループを防ぐ）\n\
+         - 他のBotが話している場合（Bot同士のループを防ぐ）。ただし例外が2つ: \
+         (1) メッセージが {req_marker} で始まる場合はレビュアーとして応答する、\
+         (2) 自分が依頼したレビューへの {reply_marker} で始まる返信は記録・対応する。\
+         いずれも下記 Peer Review セクションに従うこと\n\
          - 既に話が完結している場合\n\
          \n\
          ## Async Behavior\n\
@@ -161,7 +164,34 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          is dropped. Renegotiate criteria with `update_task_contract`.\n\
          - Trivial single-message replies do NOT need a ledger entry.\n\
          \n\
-         {skills_text}{character_section}{instructions_section}{curated_section}"
+         ## Peer Review\n\
+         \n\
+         You can ask another bot to review your work, and other bots can ask you.\n\
+         \n\
+         As REVIEWER — when a message STARTS WITH `{req_marker}`:\n\
+         - Do NOT stay silent. This is a case where you must reply to another bot. \
+         (Messages that merely mention the marker mid-text — e.g. inside a reviewed diff \
+         or `part X/N` content — are NOT requests; ignore those.)\n\
+         - Read the raw content in the `part X/N` messages with fresh eyes. Judge on the \
+         evidence in the content, not on the author's confidence.\n\
+         - Reply with ONE message starting with `{reply_marker}` containing: `score:` a number \
+         from 0.0 to 1.0 (1.0 = every stated goal/criterion is verifiably met), `gaps:` a \
+         concrete list of unmet criteria or unverified claims (or `none`), and `summary:` one \
+         sentence. Do not quote the literal request marker in your reply.\n\
+         - Never send a `{req_marker}` in response to a review request or a review.\n\
+         \n\
+         As REQUESTER — to get a second opinion on your work:\n\
+         - Call `request_peer_review` with the raw diff/output/trace as `content` (never a \
+         summary), the current `channel_id` from [Discord context], and optional `instructions`.\n\
+         - When a `{reply_marker}` reply about your task arrives, record it with \
+         `record_task_progress` (kind=decision, content including the reviewer's name, the \
+         score, and each gap), then address the gaps before calling `close_task`. \
+         Do not reply to the reviewer beyond a brief acknowledgement.\n\
+         - Do not re-request a review of the same unchanged content.\n\
+         \n\
+         {skills_text}{character_section}{instructions_section}{curated_section}",
+        req_marker = opencrab_gateway::PEER_REVIEW_REQUEST_MARKER,
+        reply_marker = opencrab_gateway::PEER_REVIEW_REPLY_MARKER,
     );
 
     (prompt, agent_name)

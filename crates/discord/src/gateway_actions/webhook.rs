@@ -116,6 +116,21 @@ pub fn chunk_text(text: &str, limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// raw text を `part X/N` 付きメッセージ列に整形する。
+///
+/// この framing はピアレビュー等で「part X/N の生データを読め」という
+/// プロンプト規約とセットのプロトコルなので、変更時は全利用箇所と
+/// system prompt（server/process.rs）を同時に更新すること。
+pub fn build_part_messages(content: &str, limit: usize) -> Vec<String> {
+    let chunks = chunk_text(content, limit);
+    let part_count = chunks.len();
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("part {}/{}\n{}", i + 1, part_count, c))
+        .collect()
+}
+
 /// started 用のメッセージ列を組み立てる。
 ///
 /// 1 通目: メタ情報（label / runId / sessionKey / status / part count）
@@ -125,16 +140,13 @@ pub fn build_started_messages(
     raw_task_text: &str,
     limit: usize,
 ) -> Vec<String> {
-    let chunks = chunk_text(raw_task_text, limit);
-    let part_count = chunks.len();
-    let mut msgs = Vec::with_capacity(part_count + 1);
+    let parts = build_part_messages(raw_task_text, limit);
+    let mut msgs = Vec::with_capacity(parts.len() + 1);
     msgs.push(format!(
         "🟢 **subtask started**\nlabel: `{}`\nrunId: `{}`\nsessionKey: `{}`\nstatus: `started`\nparts: {}",
-        meta.label, meta.run_id, meta.session_key, part_count
+        meta.label, meta.run_id, meta.session_key, parts.len()
     ));
-    for (i, c) in chunks.iter().enumerate() {
-        msgs.push(format!("part {}/{}\n{}", i + 1, part_count, c));
-    }
+    msgs.extend(parts);
     msgs
 }
 

@@ -47,6 +47,32 @@ pub trait ToolEventSink: Send + Sync {
 /// するため使わない。
 pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
 
+/// Discord 送信系アクション: depth >= 1 の sub-engine からは**定義の非表示と実行の拒否の両方**で
+/// ブロックする（定義から隠すだけでは、モデルが親コンテキストの記憶で名前を呼んだ場合に素通しになる）。
+const DISCORD_ACTIONS: &[&str] = &[
+    "discord_send",
+    "discord_send_file",
+    "discord_react",
+    "discord_delete_message",
+    "discord_edit_message",
+    "discord_start_thread",
+    "discord_list_channels",
+    "discord_get_channel_info",
+    "discord_list_guilds",
+    "discord_set_channel_writable",
+    "discord_whitelist_channel",
+    "discord_add_reaction",
+    "discord_remove_reaction",
+    "discord_send_reply",
+    "discord_send_with_embed",
+    "discord_pin_message",
+    "discord_unpin_message",
+    "request_peer_review",
+];
+
+/// spawn_subtask のネスト上限。
+const MAX_DEPTH: u32 = 2;
+
 /// エラー文言から「権限拒否（実行されなかった）」を判定する。
 ///
 /// 優先: 構造的マーカー（`REJECTION_CODE_PREFIX`）。
@@ -123,6 +149,27 @@ impl BridgedExecutor {
 
         // Fallback to gateway actions.
         if let Some(ref gw) = self.gateway_actions {
+            // list_tools の depth ゲートを実行経路にも適用する。
+            if self.depth >= 1 && DISCORD_ACTIONS.contains(&name) {
+                return CoreActionResult {
+                    success: false,
+                    data: serde_json::Value::Null,
+                    error: Some(format!(
+                        "{REJECTION_CODE_PREFIX}action '{name}' is not available in sub-engines (depth {})",
+                        self.depth
+                    )),
+                };
+            }
+            if self.depth >= MAX_DEPTH && name == "spawn_subtask" {
+                return CoreActionResult {
+                    success: false,
+                    data: serde_json::Value::Null,
+                    error: Some(format!(
+                        "{REJECTION_CODE_PREFIX}spawn_subtask is not available at depth {} (max nesting: {MAX_DEPTH})",
+                        self.depth
+                    )),
+                };
+            }
             // Inject caller identity so gateway actions can do permission checks.
             let mut enriched_args = args.clone();
             if let serde_json::Value::Object(ref mut map) = enriched_args {
@@ -270,28 +317,6 @@ impl ActionExecutor for BridgedExecutor {
             })
             .collect();
 
-        // Discord-specific actions that are blocked at depth >= 1 (sub-engines cannot send to Discord directly)
-        const DISCORD_ACTIONS: &[&str] = &[
-            "discord_send",
-            "discord_send_file",
-            "discord_react",
-            "discord_delete_message",
-            "discord_edit_message",
-            "discord_start_thread",
-            "discord_list_channels",
-            "discord_get_channel_info",
-            "discord_list_guilds",
-            "discord_set_channel_writable",
-            "discord_whitelist_channel",
-            "discord_add_reaction",
-            "discord_remove_reaction",
-            "discord_send_reply",
-            "discord_send_with_embed",
-            "discord_pin_message",
-            "discord_unpin_message",
-        ];
-        const MAX_DEPTH: u32 = 2;
-
         // Merge gateway action definitions.
         if let Some(ref gw) = self.gateway_actions {
             // trusted-only gateway actions: excluded for non-trusted callers
@@ -390,6 +415,35 @@ mod tests {
                     data: None,
                     error: Some(format!("Unknown gateway action: {name}")),
                 },
+            }
+        }
+    }
+
+    /// Discord 送信系アクションを含むモック（depth ゲートの検証用）。
+    struct MockGatewayDiscord;
+
+    #[async_trait]
+    impl GatewayActions for MockGatewayDiscord {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            vec![
+                GatewayActionDef {
+                    name: "request_peer_review".to_string(),
+                    description: "peer review".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+                GatewayActionDef {
+                    name: "report_progress".to_string(),
+                    description: "progress".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+            ]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+            GatewayActionResult {
+                success: true,
+                data: None,
+                error: None,
             }
         }
     }
@@ -523,6 +577,44 @@ mod tests {
         let result = executor.execute("gw_action_a", &json!({})).await;
         assert!(result.success);
         assert_eq!(result.data["result"], "from_gateway");
+    }
+
+    #[test]
+    fn test_peer_review_visible_at_depth0_hidden_in_subengine() {
+        let (_dir, ctx) = test_context();
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayDiscord));
+        let names: Vec<String> = executor.list_tools().iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"request_peer_review".to_string()));
+        assert!(names.contains(&"report_progress".to_string()));
+
+        // depth >= 1 の sub-engine からはピアレビュー依頼が見えない
+        let (_dir2, sub_ctx) = test_context();
+        let sub = BridgedExecutor::new(ActionDispatcher::new(), sub_ctx)
+            .with_gateway_actions(Arc::new(MockGatewayDiscord))
+            .with_depth(1);
+        let names: Vec<String> = sub.list_tools().iter().map(|t| t.name.clone()).collect();
+        assert!(!names.contains(&"request_peer_review".to_string()));
+        assert!(names.contains(&"report_progress".to_string()));
+    }
+
+    /// 定義から隠すだけでなく、名前指定の実行も depth ゲートで拒否されること
+    /// （モデルは親コンテキストの記憶でツール名を呼ぶことがある）。
+    #[tokio::test]
+    async fn test_peer_review_execute_rejected_in_subengine() {
+        let (_dir, ctx) = test_context();
+        let sub = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayDiscord))
+            .with_depth(1);
+        let result = sub.execute("request_peer_review", &json!({})).await;
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.starts_with(REJECTION_CODE_PREFIX));
+        assert!(err.contains("not available in sub-engines"));
+
+        // ブロック対象外の gateway action は depth 1 でも実行できる
+        let result = sub.execute("report_progress", &json!({})).await;
+        assert!(result.success);
     }
 
     #[tokio::test]
