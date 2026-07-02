@@ -1,9 +1,15 @@
 use rusqlite::Connection;
 
 /// スキーマ初期化
+///
+/// スキーマ作成とマイグレーションを1つのトランザクションで実行する。
+/// 途中で失敗した場合は全体がロールバックされ、中途半端に適用された（例: 破壊的な
+/// テーブルリビルドが途中で止まった）状態のDBが残らないようにする。
 pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA_SQL)?;
-    migrate(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(SCHEMA_SQL)?;
+    migrate(&tx)?;
+    tx.commit()?;
     Ok(())
 }
 

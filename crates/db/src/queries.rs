@@ -378,7 +378,11 @@ pub struct SessionLogRow {
 }
 
 pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64> {
-    conn.execute(
+    // 本体テーブルとFTS影テーブルへの2書き込みをトランザクションで原子化する。
+    // 途中失敗で FTS と memory_sessions が恒久的に不整合になるのを防ぐ。
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute(
         "INSERT INTO memory_sessions (agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
@@ -393,10 +397,10 @@ pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64>
         ],
     )?;
 
-    let row_id = conn.last_insert_rowid();
+    let row_id = tx.last_insert_rowid();
 
     // FTSにも追加
-    conn.execute(
+    tx.execute(
         "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -407,6 +411,8 @@ pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64>
             log.log_type
         ],
     )?;
+
+    tx.commit()?;
 
     Ok(row_id)
 }
