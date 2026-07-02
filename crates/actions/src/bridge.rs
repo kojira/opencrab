@@ -289,6 +289,7 @@ impl ActionExecutor for BridgedExecutor {
             "discord_send_with_embed",
             "discord_pin_message",
             "discord_unpin_message",
+            "request_peer_review",
         ];
         const MAX_DEPTH: u32 = 2;
 
@@ -390,6 +391,35 @@ mod tests {
                     data: None,
                     error: Some(format!("Unknown gateway action: {name}")),
                 },
+            }
+        }
+    }
+
+    /// Discord 送信系アクションを含むモック（depth ゲートの検証用）。
+    struct MockGatewayDiscord;
+
+    #[async_trait]
+    impl GatewayActions for MockGatewayDiscord {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            vec![
+                GatewayActionDef {
+                    name: "request_peer_review".to_string(),
+                    description: "peer review".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+                GatewayActionDef {
+                    name: "report_progress".to_string(),
+                    description: "progress".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                },
+            ]
+        }
+
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+            GatewayActionResult {
+                success: true,
+                data: None,
+                error: None,
             }
         }
     }
@@ -523,6 +553,25 @@ mod tests {
         let result = executor.execute("gw_action_a", &json!({})).await;
         assert!(result.success);
         assert_eq!(result.data["result"], "from_gateway");
+    }
+
+    #[test]
+    fn test_peer_review_visible_at_depth0_hidden_in_subengine() {
+        let (_dir, ctx) = test_context();
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayDiscord));
+        let names: Vec<String> = executor.list_tools().iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"request_peer_review".to_string()));
+        assert!(names.contains(&"report_progress".to_string()));
+
+        // depth >= 1 の sub-engine からはピアレビュー依頼が見えない
+        let (_dir2, sub_ctx) = test_context();
+        let sub = BridgedExecutor::new(ActionDispatcher::new(), sub_ctx)
+            .with_gateway_actions(Arc::new(MockGatewayDiscord))
+            .with_depth(1);
+        let names: Vec<String> = sub.list_tools().iter().map(|t| t.name.clone()).collect();
+        assert!(!names.contains(&"request_peer_review".to_string()));
+        assert!(names.contains(&"report_progress".to_string()));
     }
 
     #[tokio::test]

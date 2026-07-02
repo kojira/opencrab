@@ -298,6 +298,17 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 }
 
 /// Discord添付ファイルが画像かどうかを判定する
+/// 受信メッセージの Sender を構築する。bot 投稿は `is_bot` が立った `Sender::bot` になる
+/// （message_loop 側の「bot 投稿には👀リアクションを付けない」分岐が機能するために必要）。
+fn build_sender(author_id: u64, author_name: &str, is_bot: bool, avatar_url: String) -> Sender {
+    let base = if is_bot {
+        Sender::bot(author_id.to_string(), author_name)
+    } else {
+        Sender::user(author_id.to_string(), author_name)
+    };
+    base.with_avatar(avatar_url)
+}
+
 fn is_image_attachment(a: &serenity::model::channel::Attachment) -> bool {
     a.content_type
         .as_deref()
@@ -372,8 +383,12 @@ impl EventHandler for DiscordHandler {
             crate::message::MessageContent::Multi(parts)
         };
 
-        let sender = Sender::user(msg.author.id.to_string(), &msg.author.name)
-            .with_avatar(msg.author.face());
+        let sender = build_sender(
+            msg.author.id.get(),
+            &msg.author.name,
+            msg.author.bot,
+            msg.author.face(),
+        );
 
         let mut incoming = IncomingMessage::new(
             MessageSource::Discord {
@@ -636,6 +651,18 @@ mod tests {
         };
         let _modal = CreateModal::new(&spec.modal_custom_id, &spec.title)
             .components(spec.components.clone());
+    }
+
+    #[test]
+    fn test_build_sender_bot_flag() {
+        let bot = build_sender(42, "peer-bot", true, "http://a/x.png".to_string());
+        assert!(bot.is_bot);
+        assert_eq!(bot.id, "42");
+        assert_eq!(bot.avatar_url.as_deref(), Some("http://a/x.png"));
+
+        let human = build_sender(7, "alice", false, String::new());
+        assert!(!human.is_bot);
+        assert_eq!(human.name, "alice");
     }
 
     #[test]
