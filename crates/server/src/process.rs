@@ -146,6 +146,21 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          \n\
          These tools let you access your full history even after compaction.\n\
          \n\
+         ## Task Ledger\n\
+         \n\
+         You have a persistent, DB-backed task ledger. Unlike this conversation, it survives \
+         context compaction and restarts. When a [Task Ledger] section appears in the \
+         conversation, it is the authoritative current working state — trust it over your own recall.\n\
+         \n\
+         - For any substantive multi-step task (needs several steps or tool calls, or may \
+         outlive this exchange), FIRST agree the goal and acceptance criteria with the user, \
+         then call `open_task` with both. Do not start executing before the contract is clear.\n\
+         - While working, call `record_task_progress` after each meaningful step; record \
+         decisions with kind=decision (include the WHY) and obstacles with kind=blocker.\n\
+         - Call `close_task` (status=done or abandoned) when the contract is met or the task \
+         is dropped. Renegotiate criteria with `update_task_contract`.\n\
+         - Trivial single-message replies do NOT need a ledger entry.\n\
+         \n\
          {skills_text}{character_section}{instructions_section}{curated_section}"
     );
 
@@ -183,6 +198,38 @@ fn estimate_tokens(s: &str) -> usize {
 /// 全文が予算内ならそのまま返す。超えたら memory_index の topic 要約で古い部分を置き換え、
 /// 最近のログを予算内で最大限保持する。
 pub fn build_conversation_string(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    context_budget_tokens: usize,
+) -> Result<String, anyhow::Error> {
+    // タスク台帳（前向きワーキング状態）を会話の先頭に前置する。
+    // system prompt 側は 1h キャッシュされるため、毎ターン変わる台帳状態はここに置く。
+    // 台帳の読み出し失敗で返信自体を殺さない（warn して台帳なしで続行）。
+    let ledger_section = match opencrab_core::task_ledger::build_ledger_section(
+        conn, agent_id, session_id,
+    ) {
+        Ok(section) => section,
+        Err(e) => {
+            tracing::warn!("failed to build task ledger section for session {session_id}: {e}");
+            None
+        }
+    };
+
+    let inner_budget = match &ledger_section {
+        Some(section) => context_budget_tokens.saturating_sub(estimate_tokens(section)),
+        None => context_budget_tokens,
+    };
+    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
+
+    Ok(match ledger_section {
+        Some(section) => format!("{section}\n\n{inner}"),
+        None => inner,
+    })
+}
+
+/// 会話文字列本体の構築（タスク台帳の前置は `build_conversation_string` 側で行う）。
+fn build_conversation_inner(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,

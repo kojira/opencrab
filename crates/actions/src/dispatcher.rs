@@ -10,6 +10,7 @@ use crate::memory_access::*;
 use crate::search::*;
 use crate::skill_management::*;
 use crate::soul::*;
+use crate::task_ledger::*;
 use crate::traits::*;
 use crate::workspace::*;
 
@@ -59,6 +60,13 @@ impl ActionDispatcher {
 
         // Soul関連アクション登録
         dispatcher.register(Arc::new(UpdateInstructionsAction));
+
+        // タスク台帳アクション登録
+        dispatcher.register(Arc::new(OpenTaskAction));
+        dispatcher.register(Arc::new(UpdateTaskContractAction));
+        dispatcher.register(Arc::new(RecordTaskProgressAction));
+        dispatcher.register(Arc::new(CloseTaskAction));
+        dispatcher.register(Arc::new(GetTaskAction));
 
         dispatcher
     }

@@ -22,6 +22,7 @@ pub mod memory;
 pub mod memory_index;
 pub mod skill;
 pub mod soul;
+pub mod task_ledger;
 pub mod workspace;
 
 // Re-export primary types for convenience.

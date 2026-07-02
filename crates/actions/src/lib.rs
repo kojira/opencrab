@@ -9,6 +9,7 @@ pub mod memory_access;
 pub mod search;
 pub mod skill_management;
 pub mod soul;
+pub mod task_ledger;
 pub mod tools;
 pub mod traits;
 pub mod workspace;
