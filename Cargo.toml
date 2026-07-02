@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/llm",
+    "crates/llm-types",
     "crates/gateway",
     "crates/actions",
     "crates/db",
@@ -63,6 +64,7 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 # Internal crates
 opencrab-core = { path = "crates/core" }
 opencrab-llm = { path = "crates/llm" }
+opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
