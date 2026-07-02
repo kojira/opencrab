@@ -142,7 +142,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(std::sync::Mutex::new(Some(metrics_id.clone()))),
             model_override: Arc::new(std::sync::Mutex::new(None)),

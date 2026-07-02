@@ -15,7 +15,7 @@ type DiscordHttpArc = Arc<Mutex<Option<()>>>;
 
 /// ハートビート用セッションを取得または作成する。
 fn get_or_create_heartbeat_session(
-    db: &Arc<Mutex<rusqlite::Connection>>,
+    db: &opencrab_db::Db,
     agent_id: &str,
     channel_id: &str,
 ) -> String {
@@ -46,7 +46,7 @@ fn get_or_create_heartbeat_session(
 /// ハートビートコールバックを生成する。
 /// 初期起動とhot-reload再起動の両方で使用。
 fn make_heartbeat_callback(
-    db: Arc<Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     agent_id_owned: String,
     discord_http: DiscordHttpArc,
     state: AppState,
@@ -442,8 +442,8 @@ async fn main() -> anyhow::Result<()> {
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
 
-    // DB初期化
-    let conn = opencrab_db::init_connection(&cfg.database.path)?;
+    // DB初期化（本番はコネクションプール）
+    let db = opencrab_db::Db::open(&cfg.database.path)?;
 
     // Build LLM router from config
     let llm_router = config::build_llm_router(&cfg.llm)?;
@@ -457,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[allow(unused_mut)]
     let mut state = AppState {
-        db: Arc::new(Mutex::new(conn)),
+        db,
         llm_router: Arc::new(llm_router),
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),

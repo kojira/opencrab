@@ -25,9 +25,9 @@ fn api_key() -> String {
 }
 
 /// Create a test app backed by a real OpenRouter LLM provider.
-fn create_real_llm_app() -> (Router, Arc<Mutex<rusqlite::Connection>>) {
+fn create_real_llm_app() -> (Router, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
 
     let provider = OpenRouterProvider::new(api_key()).with_title("OpenCrab E2E Test");
 

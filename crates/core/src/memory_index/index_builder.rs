@@ -4,11 +4,9 @@
 //! ツリー構造のインデックスノードとして保存する。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{ChatMessage, ChatRequestSimple, LlmClient};
@@ -40,7 +38,7 @@ pub struct IndexBuilder;
 impl IndexBuilder {
     /// 増分インデックス構築。未インデックスのログをLLMで要約してツリーに追加。
     pub async fn build_incremental(
-        conn: &Arc<Mutex<Connection>>,
+        conn: &opencrab_db::Db,
         agent_id: &str,
         llm: &dyn LlmClient,
         model: &str,
@@ -403,7 +401,7 @@ impl IndexBuilder {
     }
 
     /// エージェントのインデックス全体を削除する。
-    pub fn delete_index(conn: &Arc<Mutex<Connection>>, agent_id: &str) -> Result<()> {
+    pub fn delete_index(conn: &opencrab_db::Db, agent_id: &str) -> Result<()> {
         let db = conn
             .lock()
             .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
@@ -414,7 +412,7 @@ impl IndexBuilder {
 
     /// インデックスをゼロから再構築する（削除 → 増分ビルド）。
     pub async fn rebuild_index(
-        conn: &Arc<Mutex<Connection>>,
+        conn: &opencrab_db::Db,
         agent_id: &str,
         llm: &dyn LlmClient,
         model: &str,
@@ -430,7 +428,7 @@ impl IndexBuilder {
     ///
     /// topic数が max_topics_per_period を超えていたら、LLMでまとめて再要約し統合する。
     pub async fn merge_topics(
-        conn: &Arc<Mutex<Connection>>,
+        conn: &opencrab_db::Db,
         agent_id: &str,
         llm: &dyn LlmClient,
         model: &str,
@@ -619,6 +617,7 @@ impl IndexBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
     use async_trait::async_trait;
 
@@ -660,7 +659,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_incremental_empty() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -700,7 +699,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log2).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -750,7 +749,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let last_request = Arc::new(Mutex::new(None));
         let llm = RecordingMockLlm {
             last_request: last_request.clone(),
@@ -791,7 +790,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let last_request = Arc::new(Mutex::new(None));
         let llm = RecordingMockLlm {
             last_request: last_request.clone(),
@@ -834,7 +833,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let last_request = Arc::new(Mutex::new(None));
         let llm = RecordingMockLlm {
             last_request: last_request.clone(),
@@ -876,7 +875,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // First build
@@ -923,7 +922,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-b", 3);
         insert_logs(&db_conn, "agent-1", "session-c", 4);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -959,7 +958,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-1", 15);
         insert_logs(&db_conn, "agent-1", "session-2", 15);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // batch_size=10: 最初の10件のみ処理される
@@ -1012,7 +1011,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // 初回ビルド
@@ -1056,7 +1055,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-big", 100);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 200, "", None)
@@ -1089,7 +1088,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-1", 5);
         insert_logs(&db_conn, "agent-2", "session-2", 8);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // agent-1のみビルド
@@ -1127,7 +1126,7 @@ mod tests {
     async fn test_delete_index() {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // まずインデックスを構築
@@ -1164,7 +1163,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
         insert_logs(&db_conn, "agent-2", "session-2", 5);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1197,7 +1196,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
         insert_logs(&db_conn, "agent-1", "session-2", 3);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // 初回ビルド
@@ -1243,7 +1242,7 @@ mod tests {
     async fn test_rebuild_index_from_empty() {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 3);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // ビルドせずに再構築（初回rebuild）
@@ -1261,7 +1260,7 @@ mod tests {
         // 2セッション = 2topicノード
         insert_logs(&db_conn, "agent-1", "session-a", 3);
         insert_logs(&db_conn, "agent-1", "session-b", 3);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1302,7 +1301,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-b", 2);
         insert_logs(&db_conn, "agent-1", "session-c", 2);
         insert_logs(&db_conn, "agent-1", "session-d", 2);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1349,7 +1348,7 @@ mod tests {
         for i in 0..5 {
             insert_logs(&db_conn, "agent-1", &format!("session-{i}"), 3);
         }
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1413,7 +1412,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_date_same_day() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         {
@@ -1439,7 +1438,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_date_multi_day() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         {
@@ -1467,7 +1466,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_date_null_created_at() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         {

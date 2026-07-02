@@ -1,7 +1,6 @@
 //! システム全体のログラッパー。
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -49,7 +48,7 @@ pub fn set_log_level(level: LogLevel) {
 }
 
 pub fn agent_log(
-    db: &Arc<Mutex<rusqlite::Connection>>,
+    db: &opencrab_db::Db,
     agent_id: Option<&str>,
     level: LogLevel,
     context: &str,

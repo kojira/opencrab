@@ -59,7 +59,7 @@ pub struct ActionContext {
     pub agent_id: String,
     pub agent_name: String,
     pub session_id: Option<String>,
-    pub db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    pub db: opencrab_db::Db,
     pub workspace: Arc<opencrab_core::workspace::Workspace>,
     /// Shared last metrics ID, updated by LlmRouterAdapter after each LLM call.
     /// Used by evaluate_response to auto-link evaluations.

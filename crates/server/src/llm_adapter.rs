@@ -17,7 +17,7 @@ use opencrab_llm::router::LlmRouter;
 
 /// Configuration for metrics recording.
 pub struct MetricsContext {
-    pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub db: opencrab_db::Db,
     pub agent_id: String,
     pub session_id: Option<String>,
     pub pricing: PricingRegistry,

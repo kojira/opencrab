@@ -53,7 +53,7 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
-        db: Arc::new(Mutex::new(conn)),
+        db: opencrab_db::Db::from_connection(conn),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
         model_override: Arc::new(Mutex::new(None)),
@@ -73,7 +73,7 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
 fn setup_with_data() -> (
     tempfile::TempDir,
     BridgedExecutor,
-    Arc<Mutex<rusqlite::Connection>>,
+    opencrab_db::Db,
 ) {
     let conn = opencrab_db::init_memory().unwrap();
 
@@ -91,7 +91,7 @@ fn setup_with_data() -> (
     };
     opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
 
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
     let dir = tempfile::TempDir::new().unwrap();
     let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
 
@@ -100,7 +100,7 @@ fn setup_with_data() -> (
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
-        db: Arc::clone(&db),
+        db: db.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
         model_override: Arc::new(Mutex::new(None)),
@@ -278,7 +278,7 @@ async fn test_engine_lists_all_tools() {
 async fn setup_with_indexed_memory() -> (
     tempfile::TempDir,
     BridgedExecutor,
-    Arc<Mutex<rusqlite::Connection>>,
+    opencrab_db::Db,
 ) {
     let conn = opencrab_db::init_memory().unwrap();
 
@@ -374,7 +374,7 @@ async fn setup_with_indexed_memory() -> (
         }
     }
 
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
 
     // インデックス構築
     opencrab_core::memory_index::IndexBuilder::build_incremental(
@@ -397,7 +397,7 @@ async fn setup_with_indexed_memory() -> (
         agent_id: "agent-1".to_string(),
         agent_name: "Test Agent".to_string(),
         session_id: Some("session-1".to_string()),
-        db: Arc::clone(&db),
+        db: db.clone(),
         workspace: Arc::new(ws),
         last_metrics_id: Arc::new(Mutex::new(None)),
         model_override: Arc::new(Mutex::new(None)),

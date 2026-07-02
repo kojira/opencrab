@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
 
 fn prompt(label: &str) -> String {
     print!("{}: ", label);
@@ -57,9 +56,8 @@ async fn main() -> anyhow::Result<()> {
     // Load config
     let cfg = opencrab_server::config::load_config("config/default.toml")?;
 
-    // DB初期化
-    let conn = opencrab_db::init_connection(&cfg.database.path)?;
-    let db = Arc::new(Mutex::new(conn));
+    // DB初期化（コネクションプール）
+    let db = opencrab_db::Db::open(&cfg.database.path)?;
 
     // Build LLM router
     let _llm_router = opencrab_server::config::build_llm_router(&cfg.llm)?;

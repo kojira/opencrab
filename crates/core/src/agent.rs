@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
 
 use crate::heartbeat::HeartbeatConfig;
 use crate::identity::Identity;
@@ -105,7 +103,7 @@ impl Agent {
         id: impl Into<String>,
         soul: Soul,
         identity: Identity,
-        conn: Arc<Mutex<Connection>>,
+        conn: opencrab_db::Db,
         workspace_root: impl Into<std::path::PathBuf>,
         llm_config: AgentLlmConfig,
         heartbeat: HeartbeatConfig,
@@ -133,7 +131,7 @@ impl Agent {
     /// agent with managers for memory, skills, and workspace.
     pub fn load(
         agent_id: &str,
-        conn: Arc<Mutex<Connection>>,
+        conn: opencrab_db::Db,
         workspace_root: impl Into<std::path::PathBuf>,
         llm_config: AgentLlmConfig,
         heartbeat: HeartbeatConfig,
@@ -202,9 +200,9 @@ impl Agent {
 mod tests {
     use super::*;
 
-    fn test_conn() -> Arc<Mutex<Connection>> {
+    fn test_conn() -> opencrab_db::Db {
         let conn = opencrab_db::init_memory().unwrap();
-        Arc::new(Mutex::new(conn))
+        opencrab_db::Db::from_connection(conn)
     }
 
     #[test]

@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
@@ -31,7 +30,7 @@ struct TopicJson {
 }
 
 pub struct DailyLogIndexer {
-    db: Arc<Mutex<Connection>>,
+    db: opencrab_db::Db,
     llm_client: Arc<dyn LlmClient>,
     model: String,
     persona_name: String,
@@ -59,7 +58,7 @@ fn year_month_of(date_str: &str) -> Option<&str> {
 }
 
 impl DailyLogIndexer {
-    pub fn new(db: Arc<Mutex<Connection>>, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
+    pub fn new(db: opencrab_db::Db, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
         Self {
             db,
             llm_client,
@@ -539,6 +538,7 @@ impl DailyLogIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
     use async_trait::async_trait;
 
@@ -590,7 +590,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_empty() {
         let db = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let stats = indexer.run("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 0);
@@ -601,7 +601,7 @@ mod tests {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "2月1日のログ");
         insert_daily_log(&db, "agent-1", "2026-02-02", "2月2日のログ");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let stats = indexer.run("agent-1").await.unwrap();
@@ -630,7 +630,7 @@ mod tests {
     async fn test_run_idempotent() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let r1 = indexer.run("agent-1").await.unwrap();
@@ -643,7 +643,7 @@ mod tests {
     async fn test_rebuild_reindexes_all() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         indexer.run("agent-1").await.unwrap();
@@ -656,7 +656,7 @@ mod tests {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "エージェント1のログ");
         insert_daily_log(&db, "agent-2", "2026-02-01", "エージェント2のログ");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         indexer.run("agent-1").await.unwrap();
@@ -686,7 +686,7 @@ mod tests {
         let content = "あ".repeat(1500);
         assert!(content.len() > 4096);
         insert_daily_log(&db, "agent-1", "2026-02-03", &content);
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let last_request = Arc::new(Mutex::new(None));
         let indexer = DailyLogIndexer::new(
             conn,
@@ -713,7 +713,7 @@ mod tests {
     async fn test_daily_persona_prompt_contains_persona_info() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "kojiraとRustの設計を議論した");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let last_request = Arc::new(Mutex::new(None));
         let indexer = DailyLogIndexer::new(
             conn,
@@ -740,7 +740,7 @@ mod tests {
     async fn test_daily_persona_empty_works() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "テストログ");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer = DailyLogIndexer::new(
             conn.clone(),
             Arc::new(MockLlm),

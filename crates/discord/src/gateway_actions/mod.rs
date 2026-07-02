@@ -4,7 +4,7 @@
 //! ゲートウェイ固有アクションとして提供する。
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -72,7 +72,7 @@ impl opencrab_core::LlmClient for ArcLlmClient {
 /// Discord管理操作をGatewayActionsとして提供する。
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
-    db: Arc<Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     agent_id: String,
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
     llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
@@ -98,7 +98,7 @@ pub struct DiscordGatewayActions {
 impl DiscordGatewayActions {
     pub fn new(
         http: Arc<Http>,
-        db: Arc<Mutex<rusqlite::Connection>>,
+        db: opencrab_db::Db,
         agent_id: String,
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
         llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
@@ -897,8 +897,8 @@ mod tests {
 
     /// テスト用: serenity Httpは不要だがDiscordGatewayActionsの構築に必要。
     /// channel_config系テストではHTTP呼び出しは発生しないのでダミーでOK。
-    fn make_test_actions() -> (DiscordGatewayActions, Arc<Mutex<rusqlite::Connection>>) {
-        let db = Arc::new(Mutex::new(opencrab_db::init_memory().unwrap()));
+    fn make_test_actions() -> (DiscordGatewayActions, opencrab_db::Db) {
+        let db = opencrab_db::Db::memory().unwrap();
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
         let tools_config = Arc::new(std::sync::RwLock::new(

@@ -202,7 +202,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-1", 10);
         insert_logs(&db_conn, "agent-1", "session-2", 8);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -249,7 +249,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-2", 15);
         insert_logs(&db_conn, "agent-1", "session-3", 10);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // batch_size=15 で3回に分けてビルド
@@ -282,7 +282,7 @@ mod tests {
     async fn test_quality_incremental_coverage() {
         let db_conn = opencrab_db::init_memory().unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // フェーズ1: 初回ログ + ビルド
@@ -348,7 +348,7 @@ mod tests {
             insert_logs(&db_conn, "agent-1", &format!("session-{i:03}"), 25);
         }
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // batch_size=100 で5回ビルド
@@ -382,7 +382,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "s1", 10);
         insert_logs(&db_conn, "agent-2", "s2", 20);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)

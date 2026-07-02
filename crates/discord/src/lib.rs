@@ -9,7 +9,7 @@ pub mod manager;
 pub mod message_loop;
 pub mod renderer;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -67,7 +67,7 @@ pub struct FormData {
 #[async_trait]
 pub trait AgentRunner: Send + Sync + Clone + 'static {
     /// Access the shared database connection.
-    fn db(&self) -> &Arc<Mutex<rusqlite::Connection>>;
+    fn db(&self) -> &opencrab_db::Db;
 
     /// Access the shared tools configuration.
     fn tools_config(&self) -> &Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>;

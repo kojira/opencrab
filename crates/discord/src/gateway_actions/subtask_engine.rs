@@ -792,7 +792,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// メイン engine は spawn_subtask のような lifecycle webhook を持たないため、ここでは
 /// 専用の run worker を 1 本だけ起動して tool_call_* を直列配送する。
 pub fn spawn_activity_tool_event_sink(
-    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     agent_id: &str,
 ) -> Option<Arc<dyn opencrab_actions::ToolEventSink>> {
     let has_activity = {
@@ -814,7 +814,7 @@ pub fn spawn_activity_tool_event_sink(
 }
 
 fn emit_activity_diagnostic(
-    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     client: reqwest::Client,
     agent_id: &str,
     tool_name: &str,
@@ -837,7 +837,7 @@ fn emit_activity_diagnostic(
 }
 
 fn build_activity_diagnostic_batch(
-    db: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    db: &opencrab_db::Db,
     agent_id: &str,
     tool_name: &str,
     diagnostic_event: &str,
@@ -927,7 +927,7 @@ fn build_activity_diagnostic_batch(
 /// build_tool_event_message で整形（covered 経路ゆえ unredacted、上限超過のみロスレス
 /// chunk）してから送る。
 struct WebhookToolEventSink {
-    db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     agent_id: String,
     tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
     max_chars: usize,
@@ -1131,7 +1131,7 @@ mod tests {
     fn test_webhook_tool_event_sink_preserves_shell_output_unredacted() {
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity(&conn);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = WebhookToolEventSink {
             db,
@@ -1174,7 +1174,7 @@ mod tests {
     fn test_webhook_tool_event_sink_sends_failed_and_rejected() {
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity(&conn);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({ "command": "denied" });
@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn test_webhook_tool_event_sink_no_activity_row_sends_nothing() {
         let conn = opencrab_db::init_memory().unwrap();
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = WebhookToolEventSink {
             db,
@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     fn make_sink(
-        db: Arc<std::sync::Mutex<rusqlite::Connection>>,
+        db: opencrab_db::Db,
         tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
     ) -> WebhookToolEventSink {
         WebhookToolEventSink {
@@ -1314,7 +1314,7 @@ mod tests {
         // started イベントにコマンド引数が含まれること（depth0 を想定）。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({ "command": "git status --short" });
@@ -1345,7 +1345,7 @@ mod tests {
         // started イベントで両方描画されること（args 配列が欠落しない）。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({
@@ -1382,7 +1382,7 @@ mod tests {
         // 非 shell ツールでも started に引数（JSON）が含まれる。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({ "path": "notes/todo.md", "limit": 10 });
@@ -1412,7 +1412,7 @@ mod tests {
         // URL）も masking せずそのまま届く（新要件 §2 P4 / AC4）。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({
@@ -1454,7 +1454,7 @@ mod tests {
         // 長大な引数はクランプ（…）せず、Discord 上限内の part X/N へロスレス分割する。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let long_cmd = format!("echo {}", "word ".repeat(2_000));
@@ -1563,7 +1563,7 @@ mod tests {
     fn test_webhook_tool_event_sink_disabled_activity_sends_nothing() {
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", false);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({});
@@ -1576,7 +1576,7 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         // invalid (non-discord) url -> WebhookResolution::Error, must drop, no fallback.
         insert_activity_row(&conn, "https://evil.example.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
         let sink = make_sink(db, tx);
         let args = serde_json::json!({});
@@ -1595,7 +1595,7 @@ mod tests {
         // 続き、FIFO 順序が保たれる（別 worker だと順序保証が崩れる）。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryBatch>();
 
         // lifecycle 相当の batch を共有 tx へ先に送る。
@@ -1638,7 +1638,7 @@ mod tests {
         // （default へフォールバックする）ため、ここでは非空の不正 url を使う。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let args = serde_json::json!({
             "task": "do it",
             "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" }
@@ -1666,7 +1666,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_activity_sink_none_without_activity_row() {
         let conn = opencrab_db::init_memory().unwrap();
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let sink = spawn_activity_tool_event_sink(db, "a1");
         assert!(sink.is_none(), "no activity row -> no sink");
     }
@@ -1677,7 +1677,7 @@ mod tests {
     async fn test_spawn_activity_sink_some_with_activity_row_and_delivers() {
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity(&conn);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         let sink = spawn_activity_tool_event_sink(db, "a1");
         assert!(sink.is_some(), "activity row -> sink present");
 
@@ -1732,7 +1732,7 @@ mod tests {
     async fn test_spawn_activity_sink_some_with_global_only_activity_row() {
         let conn = opencrab_db::init_memory().unwrap();
         insert_global_activity(&conn);
-        let db = Arc::new(std::sync::Mutex::new(conn));
+        let db = opencrab_db::Db::from_connection(conn);
         // agent "a1" 固有の行は無いが、global 行があるので Some。
         let sink = spawn_activity_tool_event_sink(db, "a1");
         assert!(

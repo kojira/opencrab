@@ -3,7 +3,7 @@
 //! Bridges the discord crate's AgentRunner trait to the server's
 //! process module, breaking the circular dependency.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use opencrab_gateway::GatewayActions;
@@ -13,7 +13,7 @@ use crate::AppState;
 
 #[async_trait]
 impl opencrab_discord::AgentRunner for AppState {
-    fn db(&self) -> &Arc<Mutex<rusqlite::Connection>> {
+    fn db(&self) -> &opencrab_db::Db {
         &self.db
     }
 

@@ -214,7 +214,7 @@ mod tests {
             agent_id: "test-agent".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: None,
-            db: Arc::new(Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: Arc::new(ws),
             last_metrics_id: Arc::new(Mutex::new(None)),
             model_override: Arc::new(Mutex::new(None)),
