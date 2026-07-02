@@ -65,30 +65,7 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
         .map(|a| a.instructions.clone())
         .unwrap_or_default();
 
-    // ピアレビュアーのロスター: trusted_discord_users の permission='co_agent' 行。
-    // ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
-    let peer_reviewers_text = {
-        let reviewers: Vec<String> = opencrab_db::queries::list_trusted_users(conn, agent_id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|u| u.permission == "co_agent")
-            .map(|u| {
-                if u.display_name.is_empty() {
-                    format!("- <@{}>", u.discord_user_id)
-                } else {
-                    format!("- <@{}> {}", u.discord_user_id, u.display_name)
-                }
-            })
-            .collect();
-        if reviewers.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nYour registered peer reviewers (pass their display name or user id as `reviewer`):\n{}\n",
-                reviewers.join("\n")
-            )
-        }
-    };
+    let peer_reviewers_text = peer_reviewers_section(conn, agent_id);
 
     let skills_text = if skills.is_empty() {
         String::new()
@@ -209,8 +186,10 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          - Call `request_peer_review` with the raw diff/output/trace as `content` (never a \
          summary), the current `channel_id` from [Discord context], optional `instructions`, \
          and optionally `reviewer` to mention a specific registered reviewer.\n\
-         - A `{reply_marker}` reply about your task is automatically recorded into your task \
-         ledger — do not record it again manually. Address the gaps before calling `close_task`. \
+         - A Discord `{reply_marker}` reply from a registered reviewer about your task is \
+         automatically recorded into your task ledger — do not record those again. If review \
+         feedback reaches you any other way, record it with `record_task_progress` yourself. \
+         Address the gaps before calling `close_task`. \
          Do not reply to the reviewer beyond a brief acknowledgement.\n\
          - Do not re-request a review of the same unchanged content.\n\
          {peer_reviewers_text}\
@@ -221,6 +200,33 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
     );
 
     (prompt, agent_name)
+}
+
+/// ピアレビュアーのロスターセクションを組み立てる。
+///
+/// trusted_discord_users の permission='co_agent' 行（選定ロジックは
+/// `queries::list_co_agent_reviewers` に一元化 — reviewer 解決側と共有）。
+/// ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
+fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String {
+    let reviewers: Vec<String> = opencrab_db::queries::list_co_agent_reviewers(conn, agent_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| {
+            if u.display_name.is_empty() {
+                format!("- <@{}>", u.discord_user_id)
+            } else {
+                format!("- <@{}> {}", u.discord_user_id, u.display_name)
+            }
+        })
+        .collect();
+    if reviewers.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nYour registered peer reviewers (pass their display name or user id as `reviewer`):\n{}\n",
+            reviewers.join("\n")
+        )
+    }
 }
 
 /// `provider:model` 形式（またはモデル名のみ）を pricing 参照用に分割する。
@@ -1257,6 +1263,37 @@ pub async fn run_agent_response(
     }
 
     result
+}
+
+#[cfg(test)]
+mod peer_reviewers_section_tests {
+    use super::peer_reviewers_section;
+
+    #[test]
+    fn roster_lists_co_agents_only_and_handles_empty() {
+        let conn = opencrab_db::init_memory().unwrap();
+        assert_eq!(peer_reviewers_section(&conn, "a1"), "");
+
+        opencrab_db::queries::add_trusted_user(
+            &conn, "r1", "a1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+        )
+        .unwrap();
+        opencrab_db::queries::add_trusted_user(
+            &conn, "r2", "a1", "43", "co_agent", "owner", "2026-01-01", "",
+        )
+        .unwrap();
+        opencrab_db::queries::add_trusted_user(
+            &conn, "r3", "a1", "44", "trusted_user", "owner", "2026-01-01", "Human",
+        )
+        .unwrap();
+
+        let section = peer_reviewers_section(&conn, "a1");
+        assert!(section.contains("- <@42> Crab B"));
+        assert!(section.contains("- <@43>"));
+        assert!(!section.contains("Human"));
+        // 他エージェントのロスターには出ない
+        assert_eq!(peer_reviewers_section(&conn, "a2"), "");
+    }
 }
 
 #[cfg(test)]

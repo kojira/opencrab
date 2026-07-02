@@ -479,11 +479,13 @@ async fn process_incoming_message<T: AgentRunner>(
 
         // [Peer Review] 返信の自動記録（#58）: このエージェントの active タスクへ
         // score/gaps/summary を決定的に記録する（LLM のプロンプト規約任せにしない）。
+        // 送信者が登録済み co_agent で、未回収の依頼がある場合のみ記録される。
         // 追加処理であり、メッセージはこの後通常どおり LLM にも流れる。
         crate::gateway_actions::record_peer_review_reply(
             state.db(),
             agent_id,
             &session_id,
+            &incoming.sender.id,
             &incoming.sender.name,
             &text,
         );

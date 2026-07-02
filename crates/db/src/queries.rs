@@ -5067,6 +5067,21 @@ pub fn add_trusted_user(
     Ok(())
 }
 
+/// このエージェントのピアレビュアー（permission='co_agent' の trusted user）一覧。
+/// プロンプトのロスター表示と reviewer 解決の両方がこれを使う（選定ロジックの一元化）。
+pub fn list_co_agent_reviewers(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Vec<TrustedDiscordUserRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TRUSTED_USER_COLUMNS} \
+         FROM trusted_discord_users WHERE agent_id = ?1 AND permission = 'co_agent' \
+         ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map([agent_id], trusted_user_from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn update_trusted_user_display_name(
     conn: &Connection,
     id: &str,

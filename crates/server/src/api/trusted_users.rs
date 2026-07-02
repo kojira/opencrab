@@ -93,17 +93,25 @@ pub async fn update_trusted_user(
     Json(req): Json<UpdateTrustedUserRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = state.db.lock().unwrap();
-    let mut updated = false;
-    if let Some(ref permission) = req.permission {
-        updated |=
-            opencrab_db::queries::update_trusted_user_permission(&conn, &user_id, permission)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
-    if let Some(ref display_name) = req.display_name {
-        updated |=
-            opencrab_db::queries::update_trusted_user_display_name(&conn, &user_id, display_name)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
+    // 2フィールドの更新は不可分にする（片方だけ永続化されて 500 を返さない）
+    let update = || -> anyhow::Result<bool> {
+        let tx = conn.unchecked_transaction()?;
+        let mut updated = false;
+        if let Some(ref permission) = req.permission {
+            updated |=
+                opencrab_db::queries::update_trusted_user_permission(&tx, &user_id, permission)?;
+        }
+        if let Some(ref display_name) = req.display_name {
+            updated |= opencrab_db::queries::update_trusted_user_display_name(
+                &tx,
+                &user_id,
+                display_name,
+            )?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    };
+    let updated = update().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
 
