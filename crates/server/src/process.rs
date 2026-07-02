@@ -1093,13 +1093,20 @@ pub async fn run_agent_response(
     // 注: codex プロバイダはこのフォールバックに意図的に依存しているため、発火自体は異常ではない。
     if let Ok(ref engine_result) = result {
         if engine_result.xml_fallback_parses > 0 {
+            // run 中に set_model で切り替わっている可能性があるため、override の現在値を優先する
+            // （イテレーション単位の正確なモデルはエンジンの debug ログ側にある）。
+            let fired_model = verify_model_override
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| effective_model.clone());
             crate::agent_log::agent_log(
                 &state.db,
                 Some(agent_id),
                 crate::agent_log::LogLevel::Info,
                 "harness.xml_fallback",
                 &format!(
-                    "XML <function_calls> fallback fired {} time(s) (model: {effective_model})",
+                    "XML <function_calls> fallback fired {} time(s) (model: {fired_model})",
                     engine_result.xml_fallback_parses
                 ),
             );

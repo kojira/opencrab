@@ -275,10 +275,11 @@ impl SkillEngine {
                         let parsed = parse_xml_tool_calls(c);
                         if !parsed.is_empty() {
                             // 発火は harness 剪定の判断材料として計測する（EngineResult 経由で
-                            // agent_logs にも記録される）。native tool calling が安定した
-                            // モデル構成では 0 になるはず。
+                            // agent_logs にも記録される）。codex プロバイダは意図的にこの
+                            // フォールバックへ依存するため、発火＝異常ではない（毎イテレーション
+                            // 発火し得るのでログは debug に留め、run 単位の集計を agent_logs で見る）。
                             xml_fallback_parses += 1;
-                            tracing::info!(
+                            tracing::debug!(
                                 count = parsed.len(),
                                 model = %model,
                                 "Parsed XML function_calls from content (harness fallback fired)"

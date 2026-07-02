@@ -31,24 +31,28 @@
 
 - **場所**: `crates/llm/src/providers/codex.rs`（`render_tool_definitions` — ツール定義を XML ブロックとしてプロンプトに注入し、`<function_calls>` を出力させる）
 - **前提**: codex CLI に native tool calling が無い
-- **計測**: codex 経由の呼び出しがあるか（model 列は `provider:model` 形式）
-  ```sql
-  SELECT COUNT(*), MAX(created_at) FROM llm_logs WHERE model LIKE 'codex:%';
-  ```
-  および `config/default.toml` の `[llm.providers.codex]` / fallback chain の有無。
+- **計測**: **config を一次情報にする** — `config/default.toml` の `default_provider`、
+  `[llm.providers.codex]` の有無、fallback chain / aliases に codex が含まれるか。
+  注意: `llm_logs.model` には**ルーティング前のリクエスト文字列**がそのまま入る。
+  bare なモデル名（例 `gpt-5.5`）や alias は default provider に解決されるため、
+  `WHERE model LIKE 'codex:%'` の SQL では codex 経由の呼び出しを取りこぼす。
+  SQL で見るなら発火側（エントリ 1 の `harness.xml_fallback`）を使う。
 - **削除条件**: codex プロバイダを使わなくなった、または codex が native tool calling に対応した。削除時は 1 の削除可否も再評価する。
 
 ### 3. 旧形状 tool_calls JSON のパース互換
 
 - **場所**: `crates/server/src/process.rs::format_single_log`、`crates/discord/src/gateway_actions/subtask_engine.rs::summarize_tool_calls`（正準形状 `{function:{name,arguments}}` と旧形状 `{name,arguments}` の両対応）
 - **前提**: モデルの弱さではなく**過去データ互換**。#31 のメッセージモデル統一以前に session_logs へ保存された旧形状の行が残っている
-- **計測**:
+- **計測**: metadata_json の `tool_calls_json` は**エスケープされた JSON 文字列**として
+  格納される（正準行は `\"function\"` を含む）ため、パターンは引用符を含めない形にする:
   ```sql
   SELECT COUNT(*) FROM memory_sessions
   WHERE log_type = 'tool_call'
     AND metadata_json LIKE '%tool_calls_json%'
-    AND metadata_json NOT LIKE '%"function"%';
+    AND metadata_json NOT LIKE '%function%';
   ```
+  （arguments の中身に "function" という語が含まれる旧形状行は取りこぼすヒューリスティック。
+  0 に近づいたら個別確認する）
 - **削除条件**: 旧形状の行が実質参照されなくなった（保持期間経過 or 一括変換マイグレーション実施後）
 
 ### 4. LLM 応答の markdown フェンス除去
@@ -63,6 +67,15 @@
 - **場所**: `crates/core/src/engine/skill_engine.rs`（system prompt への 1h ephemeral cache_control）ほか provider 実装内の差異吸収
 - **前提**: 弱さの補填ではなく**最適化**（プロンプトキャッシュ）。剪定対象ではないが、プロバイダ仕様変更時に見直す
 - **削除条件**: 対象外（仕様変更追従のみ）
+
+### 6. JSON パース失敗時のブラインドリトライ
+
+- **場所**: `crates/core/src/memory/daily_log_indexer.rs::summarize_day_with_retry`
+  （serde パース失敗は `NON_RETRYABLE_PATTERNS` に該当せず最大3回リトライされる）
+- **前提**: 「JSON のみで応答せよ」の指示を無視するモデルがある（エントリ 4 と同根、
+  ただしこちらは最大3倍の LLM コスト増を伴う）
+- **計測**: 容易な自動計測なし。エントリ 4 と同時に再評価
+- **削除条件**: structured output / JSON mode への置き換え時にリトライも撤去
 
 ## 記載ルール
 
