@@ -256,13 +256,16 @@ impl LlmRouter {
     ///   - Non-retryable: all other 4xx (permanent client errors — retrying won't help)
     fn is_non_retryable_error(error: &anyhow::Error) -> bool {
         let msg = error.to_string();
-        // Error messages from HTTP providers embed the status as "(NNN)".
-        // Find any "(4xx)" pattern; 429 is the only 4xx we still retry.
-        if msg.contains("(429)") {
+        // Error messages from HTTP providers embed the status via reqwest StatusCode's
+        // Display, e.g. "OpenAI API error (400 Bad Request): ...". The code is followed
+        // by the canonical reason phrase, so match "(NNN " and "(NNN)" both.
+        // 429 is the only 4xx we still retry.
+        if msg.contains("(429 ") || msg.contains("(429)") {
             return false; // rate-limited — retryable
         }
-        // Match any "(4xx)" — 400..428, 430..499
-        (400u16..500).any(|code| msg.contains(&format!("({code})")))
+        // Match any "(4xx " or "(4xx)" — 400..428, 430..499
+        (400u16..500)
+            .any(|code| msg.contains(&format!("({code} ")) || msg.contains(&format!("({code})")))
     }
 
     /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
@@ -546,6 +549,28 @@ mod tests {
         let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
         let response = router.chat_completion(request).await;
         assert!(response.is_err());
+    }
+
+    #[test]
+    fn test_is_non_retryable_error_matches_real_provider_format() {
+        // プロバイダの実フォーマット: "... error (400 Bad Request): ..."
+        let e400 = anyhow::anyhow!("OpenAI API error (400 Bad Request): bad param");
+        assert!(LlmRouter::is_non_retryable_error(&e400));
+
+        let e401 = anyhow::anyhow!("Anthropic API error (401 Unauthorized): invalid key");
+        assert!(LlmRouter::is_non_retryable_error(&e401));
+
+        // 429 はリトライ対象
+        let e429 = anyhow::anyhow!("OpenAI API error (429 Too Many Requests): slow down");
+        assert!(!LlmRouter::is_non_retryable_error(&e429));
+
+        // 5xx はリトライ対象
+        let e500 = anyhow::anyhow!("OpenAI API error (500 Internal Server Error): oops");
+        assert!(!LlmRouter::is_non_retryable_error(&e500));
+
+        // ネットワークエラーはリトライ対象
+        let enet = anyhow::anyhow!("connection refused");
+        assert!(!LlmRouter::is_non_retryable_error(&enet));
     }
 
     #[test]

@@ -77,19 +77,16 @@ impl OpenAiProvider {
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
-                    let mut tool = serde_json::json!({
+                    // cache_control は Anthropic 固有のフィールドで、OpenAI は未知の
+                    // パラメータとして 400 で拒否するため、ここでは出力しない。
+                    serde_json::json!({
                         "type": "function",
                         "function": {
                             "name": f.name,
                             "description": f.description,
                             "parameters": f.parameters,
                         }
-                    });
-                    // cache_controlはAnthropicのツールトップレベルに置く
-                    if let Some(ref cc) = f.cache_control {
-                        tool["cache_control"] = cc.clone();
-                    }
-                    tool
+                    })
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);
@@ -165,9 +162,8 @@ impl OpenAiProvider {
             obj["tool_call_id"] = serde_json::json!(tool_call_id);
         }
 
-        if let Some(ref cc) = msg.cache_control {
-            obj["cache_control"] = cc.clone();
-        }
+        // cache_control は Anthropic 固有（OpenAI は未知パラメータとして 400 で拒否）
+        // のため出力しない。
 
         obj
     }
@@ -349,58 +345,90 @@ impl LlmProvider for OpenAiProvider {
             anyhow::bail!("OpenAI API error ({}): {}", status, msg);
         }
 
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-
-            let mut last_delta = None;
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line == "data: [DONE]" {
-                    continue;
-                }
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                        let id = parsed["id"].as_str().unwrap_or_default().to_string();
-                        let model = parsed["model"].as_str().unwrap_or_default().to_string();
-                        let choices = parsed["choices"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .map(|c| {
-                                        let delta = &c["delta"];
-                                        StreamChoice {
-                                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                                            delta: DeltaMessage {
-                                                role: delta.get("role").and_then(|r| {
-                                                    serde_json::from_value(r.clone()).ok()
-                                                }),
-                                                content: delta
-                                                    .get("content")
-                                                    .and_then(|v| v.as_str().map(String::from)),
-                                                function_call: delta.get("function_call").and_then(
-                                                    |fc| serde_json::from_value(fc.clone()).ok(),
-                                                ),
-                                                tool_calls: delta.get("tool_calls").and_then(
-                                                    |tc| serde_json::from_value(tc.clone()).ok(),
-                                                ),
-                                            },
-                                            finish_reason: c.get("finish_reason").and_then(|fr| {
-                                                serde_json::from_value(fr.clone()).ok()
-                                            }),
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        last_delta = Some(ChatStreamDelta { id, model, choices });
+        // チャンク境界を跨いでバッファし、完全な行ごとに1イベントとして処理する。
+        // 各 `data:` イベントを個別に emit し、`[DONE]` や keep-alive コメント等の
+        // 非データ行はエラーにせずスキップする。
+        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
+            move |line_res| {
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => {
+                        let line = line.trim();
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.trim();
+                            if data == "[DONE]" {
+                                None
+                            } else {
+                                match serde_json::from_str::<Value>(data) {
+                                    Ok(parsed) => {
+                                        let id =
+                                            parsed["id"].as_str().unwrap_or_default().to_string();
+                                        let model =
+                                            parsed["model"].as_str().unwrap_or_default().to_string();
+                                        let choices = parsed["choices"]
+                                            .as_array()
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .map(|c| {
+                                                        let delta = &c["delta"];
+                                                        StreamChoice {
+                                                            index: c["index"].as_u64().unwrap_or(0)
+                                                                as u32,
+                                                            delta: DeltaMessage {
+                                                                role: delta.get("role").and_then(
+                                                                    |r| {
+                                                                        serde_json::from_value(
+                                                                            r.clone(),
+                                                                        )
+                                                                        .ok()
+                                                                    },
+                                                                ),
+                                                                content: delta
+                                                                    .get("content")
+                                                                    .and_then(|v| {
+                                                                        v.as_str().map(String::from)
+                                                                    }),
+                                                                function_call: delta
+                                                                    .get("function_call")
+                                                                    .and_then(|fc| {
+                                                                        serde_json::from_value(
+                                                                            fc.clone(),
+                                                                        )
+                                                                        .ok()
+                                                                    }),
+                                                                tool_calls: delta
+                                                                    .get("tool_calls")
+                                                                    .and_then(|tc| {
+                                                                        serde_json::from_value(
+                                                                            tc.clone(),
+                                                                        )
+                                                                        .ok()
+                                                                    }),
+                                                            },
+                                                            finish_reason: c
+                                                                .get("finish_reason")
+                                                                .and_then(|fr| {
+                                                                    serde_json::from_value(fr.clone())
+                                                                        .ok()
+                                                                }),
+                                                        }
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                        Some(Ok(ChatStreamDelta { id, model, choices }))
+                                    }
+                                    Err(_) => None,
+                                }
+                            }
+                        } else {
+                            None
+                        }
                     }
-                }
-            }
-
-            last_delta.ok_or_else(|| anyhow::anyhow!("no parseable SSE data in chunk"))
-        });
+                };
+                futures::future::ready(out)
+            },
+        );
 
         Ok(Box::pin(stream))
     }

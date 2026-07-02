@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use crate::engine::{ChatMessage, ChatRequestSimple, LlmClient};
+use crate::engine::LlmClient;
+use opencrab_llm_types::{ChatRequest, Message};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyLogIndexStats {
@@ -31,15 +31,35 @@ struct TopicJson {
 }
 
 pub struct DailyLogIndexer {
-    db: Arc<Mutex<Connection>>,
+    db: opencrab_db::Db,
     llm_client: Arc<dyn LlmClient>,
     model: String,
     persona_name: String,
     personality: Option<String>,
 }
 
+/// `YYYY-MM-DD` 形式の日付文字列から `YYYY-MM` を安全に取り出す。
+///
+/// `date_str` は `memory_curated.category` の接尾辞や呼び出し側指定の文字列で、
+/// 形式が保証されない。無検証のバイトスライス（`&s[..7]`）は短い文字列や
+/// マルチバイト文字で panic し、indexer 全体を恒久的に停止させるため、
+/// ここで検証して不正なら `None` を返す。
+fn year_month_of(date_str: &str) -> Option<&str> {
+    let bytes = date_str.as_bytes();
+    if bytes.len() < 10 {
+        return None;
+    }
+    let digits_ok = |r: std::ops::Range<usize>| bytes[r].iter().all(|b| b.is_ascii_digit());
+    if digits_ok(0..4) && bytes[4] == b'-' && digits_ok(5..7) && bytes[7] == b'-' && digits_ok(8..10)
+    {
+        Some(&date_str[..7])
+    } else {
+        None
+    }
+}
+
 impl DailyLogIndexer {
-    pub fn new(db: Arc<Mutex<Connection>>, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
+    pub fn new(db: opencrab_db::Db, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
         Self {
             db,
             llm_client,
@@ -146,7 +166,13 @@ impl DailyLogIndexer {
                 opencrab_db::queries::get_daily_log_by_date(&db, agent_id, date_str)?
             };
             if let Some(entry) = entry {
-                let year_month = &date_str[..7];
+                let year_month = match year_month_of(date_str) {
+                    Some(ym) => ym,
+                    None => {
+                        tracing::warn!(agent_id = %agent_id, date_str = %date_str, "reindex_dates: invalid date string, skipping");
+                        continue;
+                    }
+                };
                 let period_id = self.ensure_period_node(agent_id, year_month, &root_id, &now)?;
                 let ((day_summary, topics), _) = self
                     .summarize_day_with_retry(date_str, &entry.content)
@@ -229,23 +255,11 @@ impl DailyLogIndexer {
                 date, content
             )
         };
-        let request = ChatRequestSimple {
-            model: self.model.clone(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-                tool_call_id: None,
-                tool_calls: vec![],
-                content_parts: vec![],
-                cache_control: None,
-            }],
-            tools: vec![],
-            temperature: Some(0.0),
-            max_tokens: Some(4096),
-            agent_id: None,
-        };
+        let request = ChatRequest::new(self.model.clone(), vec![Message::user(prompt)])
+            .with_temperature(0.0)
+            .with_max_tokens(4096);
         let resp = self.llm_client.chat(request).await?;
-        let text = resp.content.unwrap_or_default();
+        let text = resp.first_text().unwrap_or_default().to_string();
         let json_str = text
             .trim()
             .trim_start_matches("```json")
@@ -310,7 +324,9 @@ impl DailyLogIndexer {
         periods_seen: &mut HashSet<String>,
     ) -> Result<usize> {
         let date_str = &entry.date_str;
-        let year_month = &date_str[..7];
+        let year_month = year_month_of(date_str).ok_or_else(|| {
+            anyhow::anyhow!("invalid daily_log date string: {date_str:?} (expected YYYY-MM-DD)")
+        })?;
         let period_id = self.ensure_period_node(agent_id, year_month, root_id, now)?;
         periods_seen.insert(year_month.to_string());
 
@@ -511,37 +527,28 @@ impl DailyLogIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
+    use std::sync::{Arc, Mutex};
+    use crate::engine::{ChatRequest, ChatResponse, LlmClient};
     use async_trait::async_trait;
 
     struct MockLlm;
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn chat(&self, _req: ChatRequestSimple) -> Result<ChatResponseSimple> {
-            Ok(ChatResponseSimple {
-                content: Some(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()))
         }
     }
 
     struct RecordingMockLlm {
-        last_request: Arc<Mutex<Option<ChatRequestSimple>>>,
+        last_request: Arc<Mutex<Option<ChatRequest>>>,
     }
 
     #[async_trait]
     impl LlmClient for RecordingMockLlm {
-        async fn chat(&self, req: ChatRequestSimple) -> Result<ChatResponseSimple> {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
             *self.last_request.lock().unwrap() = Some(req);
-            Ok(ChatResponseSimple {
-                content: Some(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+            Ok(ChatResponse::text(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()))
         }
     }
 
@@ -562,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_empty() {
         let db = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let stats = indexer.run("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 0);
@@ -573,7 +580,7 @@ mod tests {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "2月1日のログ");
         insert_daily_log(&db, "agent-1", "2026-02-02", "2月2日のログ");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let stats = indexer.run("agent-1").await.unwrap();
@@ -602,7 +609,7 @@ mod tests {
     async fn test_run_idempotent() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         let r1 = indexer.run("agent-1").await.unwrap();
@@ -615,7 +622,7 @@ mod tests {
     async fn test_rebuild_reindexes_all() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         indexer.run("agent-1").await.unwrap();
@@ -628,7 +635,7 @@ mod tests {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "エージェント1のログ");
         insert_daily_log(&db, "agent-2", "2026-02-01", "エージェント2のログ");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer =
             DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
         indexer.run("agent-1").await.unwrap();
@@ -658,7 +665,7 @@ mod tests {
         let content = "あ".repeat(1500);
         assert!(content.len() > 4096);
         insert_daily_log(&db, "agent-1", "2026-02-03", &content);
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let last_request = Arc::new(Mutex::new(None));
         let indexer = DailyLogIndexer::new(
             conn,
@@ -676,7 +683,7 @@ mod tests {
         assert_eq!(stats.days_skipped, 0);
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = request.messages[0].text_content().unwrap_or("");
         assert!(prompt.contains(&content));
     }
 
@@ -685,7 +692,7 @@ mod tests {
     async fn test_daily_persona_prompt_contains_persona_info() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "kojiraとRustの設計を議論した");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let last_request = Arc::new(Mutex::new(None));
         let indexer = DailyLogIndexer::new(
             conn,
@@ -698,7 +705,7 @@ mod tests {
         assert_eq!(stats.days_indexed, 1);
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = request.messages[0].text_content().unwrap_or("");
         assert!(prompt.contains("のすたろう"), "プロンプトにpersona_nameが含まれるべき");
         assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
         assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸");
@@ -712,7 +719,7 @@ mod tests {
     async fn test_daily_persona_empty_works() {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "テストログ");
-        let conn = Arc::new(Mutex::new(db));
+        let conn = opencrab_db::Db::from_connection(db);
         let indexer = DailyLogIndexer::new(
             conn.clone(),
             Arc::new(MockLlm),

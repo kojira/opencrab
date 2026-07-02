@@ -4,7 +4,7 @@
 //! ゲートウェイ固有アクションとして提供する。
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -60,8 +60,8 @@ struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
 impl opencrab_core::LlmClient for ArcLlmClient {
     async fn chat(
         &self,
-        request: opencrab_core::ChatRequestSimple,
-    ) -> anyhow::Result<opencrab_core::ChatResponseSimple> {
+        request: opencrab_core::ChatRequest,
+    ) -> anyhow::Result<opencrab_core::ChatResponse> {
         self.0.chat(request).await
     }
 }
@@ -72,7 +72,7 @@ impl opencrab_core::LlmClient for ArcLlmClient {
 /// Discord管理操作をGatewayActionsとして提供する。
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
-    db: Arc<Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     agent_id: String,
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
     llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
@@ -86,12 +86,19 @@ pub struct DiscordGatewayActions {
     default_subtask_webhook: Option<WebhookConfig>,
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
+    /// owner-only な A2UI インタラクションの権限判定に使う owner の Discord ユーザーID。
+    /// 空文字の場合は owner 判定が無効（誰でも操作可）になる点に注意。
+    pub owner_discord_id: String,
+    /// report_progress のデバウンス世代カウンタ（parent_session_id → 最新世代）。
+    /// 短時間に複数回 report_progress が呼ばれても、最後の1回のみメインエンジン再呼び出しを
+    /// 発火させるために使う。
+    progress_debounce: Arc<dashmap::DashMap<String, u64>>,
 }
 
 impl DiscordGatewayActions {
     pub fn new(
         http: Arc<Http>,
-        db: Arc<Mutex<rusqlite::Connection>>,
+        db: opencrab_db::Db,
         agent_id: String,
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
         llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
@@ -115,6 +122,8 @@ impl DiscordGatewayActions {
             default_subtask_webhook,
             pending_interaction_registry: None,
             event_tx: None,
+            owner_discord_id: String::new(),
+            progress_debounce: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -126,6 +135,12 @@ impl DiscordGatewayActions {
     ) -> Self {
         self.pending_interaction_registry = Some(registry);
         self.event_tx = Some(event_tx);
+        self
+    }
+
+    /// Set the owner's Discord user id used to enforce owner-only A2UI interactions.
+    pub fn with_owner_discord_id(mut self, owner_discord_id: impl Into<String>) -> Self {
+        self.owner_discord_id = owner_discord_id.into();
         self
     }
 }
@@ -882,8 +897,8 @@ mod tests {
 
     /// テスト用: serenity Httpは不要だがDiscordGatewayActionsの構築に必要。
     /// channel_config系テストではHTTP呼び出しは発生しないのでダミーでOK。
-    fn make_test_actions() -> (DiscordGatewayActions, Arc<Mutex<rusqlite::Connection>>) {
-        let db = Arc::new(Mutex::new(opencrab_db::init_memory().unwrap()));
+    fn make_test_actions() -> (DiscordGatewayActions, opencrab_db::Db) {
+        let db = opencrab_db::Db::memory().unwrap();
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
         let tools_config = Arc::new(std::sync::RwLock::new(

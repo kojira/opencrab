@@ -15,7 +15,7 @@ use opencrab_server::{create_router, AppState};
 fn create_test_app() -> Router {
     let conn = opencrab_db::init_memory().unwrap();
     let state = AppState {
-        db: Arc::new(Mutex::new(conn)),
+        db: opencrab_db::Db::from_connection(conn),
         llm_router: Arc::new(LlmRouter::new()),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         default_model: "mock:test".to_string(),
@@ -678,14 +678,14 @@ impl LlmProvider for MockLlmProvider {
 // ==================== LLM-integrated helpers ====================
 
 /// Create test app with a MockLlmProvider registered in the LlmRouter.
-/// Returns (Router, Arc<Mutex<Connection>>, Arc<MockLlmProvider>).
+/// Returns (Router, opencrab_db::Db, Arc<MockLlmProvider>).
 fn create_test_app_with_llm() -> (
     Router,
-    Arc<Mutex<rusqlite::Connection>>,
+    opencrab_db::Db,
     Arc<MockLlmProvider>,
 ) {
     let conn = opencrab_db::init_memory().unwrap();
-    let db = Arc::new(Mutex::new(conn));
+    let db = opencrab_db::Db::from_connection(conn);
 
     let mock = Arc::new(MockLlmProvider::new());
     let mut router = LlmRouter::new();

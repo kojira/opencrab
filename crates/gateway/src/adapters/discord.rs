@@ -246,31 +246,50 @@ impl DiscordGateway {
 }
 
 /// Discordの2000文字制限に合わせてメッセージを分割する
+///
+/// 長さは文字数（コードポイント数）で数え、長い行は文字境界で分割する。
+/// バイト境界での分割はマルチバイトUTF-8（日本語等）を破壊するため行わない。
+/// 空のチャンクは生成しない（Discordは空メッセージを400で拒否する）。
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
+    let mut current_chars = 0usize;
 
     for line in text.lines() {
-        // 1行が制限を超える場合はさらに分割
-        if line.len() > max_len {
+        let line_chars = line.chars().count();
+
+        // 1行が制限を超える場合は文字境界でさらに分割
+        if line_chars > max_len {
             if !current.is_empty() {
-                chunks.push(current.clone());
-                current.clear();
+                chunks.push(std::mem::take(&mut current));
+                current_chars = 0;
             }
-            for chunk in line.as_bytes().chunks(max_len) {
-                chunks.push(String::from_utf8_lossy(chunk).to_string());
+            let mut piece = String::new();
+            let mut piece_chars = 0usize;
+            for ch in line.chars() {
+                piece.push(ch);
+                piece_chars += 1;
+                if piece_chars == max_len {
+                    chunks.push(std::mem::take(&mut piece));
+                    piece_chars = 0;
+                }
+            }
+            if !piece.is_empty() {
+                chunks.push(piece);
             }
             continue;
         }
 
-        if current.len() + line.len() + 1 > max_len {
-            chunks.push(current.clone());
-            current.clear();
+        if current_chars + line_chars + 1 > max_len && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_chars = 0;
         }
         if !current.is_empty() {
             current.push('\n');
+            current_chars += 1;
         }
         current.push_str(line);
+        current_chars += line_chars;
     }
     if !current.is_empty() {
         chunks.push(current);
@@ -631,6 +650,30 @@ mod tests {
         let chunks = split_message(&text, 2000);
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].len() <= 2000);
+    }
+
+    #[test]
+    fn test_split_message_long_japanese_no_corruption() {
+        // 2000文字超の日本語1行が文字境界で分割され、U+FFFDが混入しないこと。
+        let text = "あ".repeat(2500);
+        let chunks = split_message(&text, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chars().count(), 2000);
+        assert_eq!(chunks[1].chars().count(), 500);
+        for chunk in &chunks {
+            assert!(!chunk.contains('\u{FFFD}'), "no replacement characters");
+            assert!(!chunk.is_empty(), "no empty chunks");
+        }
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn test_split_message_exact_boundary_no_empty_chunk() {
+        // ちょうど max_len の行で空チャンクが生成されないこと。
+        let text = "a".repeat(200);
+        let chunks = split_message(&text, 200);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks.iter().all(|c| !c.is_empty()));
     }
 
     #[test]

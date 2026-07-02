@@ -52,8 +52,15 @@ impl AnthropicProvider {
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
+                    // 複数の system メッセージは改行で連結する（上書きすると
+                    // 先行する system 指示が失われる）。
                     if let Some(text) = msg.text_content() {
-                        system_prompt = Some(text.to_string());
+                        system_prompt = Some(match system_prompt.take() {
+                            Some(existing) if !existing.is_empty() => {
+                                format!("{existing}\n\n{text}")
+                            }
+                            _ => text.to_string(),
+                        });
                     }
                 }
                 Role::User => {
@@ -168,11 +175,16 @@ impl AnthropicProvider {
             let tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
-                    serde_json::json!({
+                    let mut tool = serde_json::json!({
                         "name": f.name,
                         "description": f.description,
                         "input_schema": f.parameters,
-                    })
+                    });
+                    // Anthropic のプロンプトキャッシュ: ツール定義に cache_control を出力する。
+                    if let Some(ref cc) = f.cache_control {
+                        tool["cache_control"] = cc.clone();
+                    }
+                    tool
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);
@@ -399,57 +411,69 @@ impl LlmProvider for AnthropicProvider {
         }
 
         let model = request.model.clone();
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-            let model = model.clone();
-
-            let mut content_text = String::new();
-            let mut msg_id = String::new();
-
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                        match parsed["type"].as_str() {
-                            Some("message_start") => {
-                                if let Some(id) = parsed["message"]["id"].as_str() {
-                                    msg_id = id.to_string();
-                                }
+        // チャンク境界を跨いでバッファし、SSEイベントを行単位で処理する。
+        // content_block_delta ごとに1デルタを emit する（チャンク内での結合はしない）。
+        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
+            move |line_res| {
+                let model = model.clone();
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => {
+                        let line = line.trim();
+                        if let Some(data) = line.strip_prefix("data:") {
+                            let data = data.trim();
+                            match serde_json::from_str::<Value>(data) {
+                                Ok(parsed) => match parsed["type"].as_str() {
+                                    Some("message_start") => {
+                                        let id = parsed["message"]["id"]
+                                            .as_str()
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        Some(Ok(ChatStreamDelta {
+                                            id,
+                                            model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: None,
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        }))
+                                    }
+                                    Some("content_block_delta") => parsed["delta"]["text"]
+                                        .as_str()
+                                        .map(|text| {
+                                            Ok(ChatStreamDelta {
+                                                id: String::new(),
+                                                model,
+                                                choices: vec![StreamChoice {
+                                                    index: 0,
+                                                    delta: DeltaMessage {
+                                                        role: None,
+                                                        content: Some(text.to_string()),
+                                                        function_call: None,
+                                                        tool_calls: None,
+                                                    },
+                                                    finish_reason: None,
+                                                }],
+                                            })
+                                        }),
+                                    _ => None,
+                                },
+                                Err(_) => None,
                             }
-                            Some("content_block_delta") => {
-                                if let Some(text) = parsed["delta"]["text"].as_str() {
-                                    content_text.push_str(text);
-                                }
-                            }
-                            _ => {}
+                        } else {
+                            None
                         }
                     }
-                }
-            }
-
-            Ok(ChatStreamDelta {
-                id: msg_id,
-                model: model.clone(),
-                choices: vec![StreamChoice {
-                    index: 0,
-                    delta: DeltaMessage {
-                        role: None,
-                        content: if content_text.is_empty() {
-                            None
-                        } else {
-                            Some(content_text)
-                        },
-                        function_call: None,
-                        tool_calls: None,
-                    },
-                    finish_reason: None,
-                }],
-            })
-        });
+                };
+                futures::future::ready(out)
+            },
+        );
 
         Ok(Box::pin(stream))
     }

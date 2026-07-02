@@ -262,15 +262,31 @@ impl ChatGptProvider {
 
             if msg.role == Role::Assistant {
                 if let Some(tool_calls) = &msg.tool_calls {
-                    for tool_call in tool_calls {
-                        input.push(serde_json::json!({
-                            "type": "function_call",
-                            "call_id": tool_call.id,
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        }));
+                    if !tool_calls.is_empty() {
+                        // assistant がツールコールと同時にテキストを返した場合、そのテキストも
+                        // 履歴に残す（以前は continue で本文が欠落していた）。
+                        // 空テキストは追加しない。
+                        let has_text = msg.text_content().map_or(false, |t| !t.is_empty());
+                        if has_text {
+                            if let Some(content) = Self::message_content_value(&msg.content) {
+                                input.push(serde_json::json!({
+                                    "role": "assistant",
+                                    "content": content,
+                                }));
+                            }
+                        }
+                        for tool_call in tool_calls {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments,
+                            }));
+                        }
+                        continue;
                     }
-                    continue;
+                    // tool_calls が空 (Some(vec![])) の場合は通常の assistant メッセージ
+                    // として下の共通処理へフォールスルーする（メッセージ全体の消失を防ぐ）。
                 }
             }
 
@@ -721,79 +737,69 @@ impl LlmProvider for ChatGptProvider {
             )
         })?;
         let request_model = request.model.clone();
-        let stream = resp.bytes_stream().map(move |chunk| {
-            let chunk = chunk.context("stream chunk error")?;
-            let text = String::from_utf8_lossy(&chunk);
-            let mut last_delta: Option<ChatStreamDelta> = None;
-            let mut current_event = String::new();
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(ev) = line.strip_prefix("event:") {
-                    current_event = ev.trim().to_string();
-                    continue;
-                }
-                let data = match line.strip_prefix("data:") {
-                    Some(d) => d.trim(),
-                    None => continue,
-                };
-                if data == "[DONE]" {
-                    current_event.clear();
-                    continue;
-                }
-                let parsed: Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        current_event.clear();
-                        continue;
-                    }
-                };
-                // Effective event type: prefer parsed["type"], fall back to current_event.
-                let effective_event = parsed["type"].as_str().unwrap_or(&current_event);
-                match effective_event {
-                    "response.output_text.delta" => {
-                        let delta_text = parsed["delta"].as_str().unwrap_or_default().to_string();
-                        last_delta = Some(ChatStreamDelta {
-                            id: String::new(),
-                            model: request_model.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta: DeltaMessage {
-                                    role: None,
-                                    content: Some(delta_text),
-                                    function_call: None,
-                                    tool_calls: None,
+        // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
+        // Responses API は data ペイロード自身に `type` を含むため、行を跨ぐ `event:` 状態には
+        // 依存しない。これにより、同一チャンク内で後続イベントが直前のテキストデルタを
+        // 上書きしてしまう問題を防ぐ。
+        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
+            move |line_res| {
+                let request_model = request_model.clone();
+                let out = match line_res {
+                    Err(e) => Some(Err(e)),
+                    Ok(line) => {
+                        let line = line.trim();
+                        match line.strip_prefix("data:").map(|d| d.trim()) {
+                            None => None,
+                            Some("[DONE]") => None,
+                            Some(data) => match serde_json::from_str::<Value>(data) {
+                                Err(_) => None,
+                                Ok(parsed) => match parsed["type"].as_str().unwrap_or_default() {
+                                    "response.output_text.delta" => {
+                                        let delta_text = parsed["delta"]
+                                            .as_str()
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        Some(Ok(ChatStreamDelta {
+                                            id: String::new(),
+                                            model: request_model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: Some(delta_text),
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: None,
+                                            }],
+                                        }))
+                                    }
+                                    "response.completed" | "response.done" => {
+                                        // Tool calls are ignored for now (future work).
+                                        Some(Ok(ChatStreamDelta {
+                                            id: String::new(),
+                                            model: request_model,
+                                            choices: vec![StreamChoice {
+                                                index: 0,
+                                                delta: DeltaMessage {
+                                                    role: None,
+                                                    content: Some(String::new()),
+                                                    function_call: None,
+                                                    tool_calls: None,
+                                                },
+                                                finish_reason: Some(FinishReason::Stop),
+                                            }],
+                                        }))
+                                    }
+                                    _ => None,
                                 },
-                                finish_reason: None,
-                            }],
-                        });
+                            },
+                        }
                     }
-                    "response.completed" | "response.done" => {
-                        // Tool calls are ignored for now (future work).
-                        last_delta = Some(ChatStreamDelta {
-                            id: String::new(),
-                            model: request_model.clone(),
-                            choices: vec![StreamChoice {
-                                index: 0,
-                                delta: DeltaMessage {
-                                    role: None,
-                                    content: Some(String::new()),
-                                    function_call: None,
-                                    tool_calls: None,
-                                },
-                                finish_reason: Some(FinishReason::Stop),
-                            }],
-                        });
-                    }
-                    _ => {}
-                }
-                current_event.clear();
-            }
-            Ok(last_delta.unwrap_or(ChatStreamDelta {
-                id: String::new(),
-                model: request_model.clone(),
-                choices: vec![],
-            }))
-        });
+                };
+                futures::future::ready(out)
+            },
+        );
         Ok(Box::pin(stream))
     }
 
@@ -984,6 +990,32 @@ mod tests {
             !contains_key(&body, "tool_call_id"),
             "tool_call_id must not be sent to the Responses API"
         );
+    }
+
+    #[test]
+    fn test_build_request_body_keeps_assistant_text_alongside_tool_calls() {
+        let provider = ChatGptProvider::new();
+        let mut assistant = Message::assistant("I'll check the weather");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"city":"Tokyo"}"#.to_string(),
+            },
+        }]);
+        let request = ChatRequest::new("gpt-5.5", vec![Message::user("hi"), assistant]);
+
+        let body = provider.build_request_body(&request, false);
+        let input = body["input"].as_array().expect("input must be an array");
+
+        // user, assistant-text, function_call の3要素になる。
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["role"], serde_json::json!("assistant"));
+        assert!(input[1]["content"]
+            .to_string()
+            .contains("I'll check the weather"));
+        assert_eq!(input[2]["type"], serde_json::json!("function_call"));
     }
 
     #[test]

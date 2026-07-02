@@ -1,7 +1,5 @@
 use anyhow::Result;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
 use tracing;
 use uuid::Uuid;
 
@@ -90,12 +88,12 @@ pub struct Skill {
 #[derive(Debug, Clone)]
 pub struct SkillManager {
     agent_id: String,
-    conn: Arc<Mutex<Connection>>,
+    conn: opencrab_db::Db,
 }
 
 impl SkillManager {
     /// Create a new SkillManager for the given agent.
-    pub fn new(agent_id: impl Into<String>, conn: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(agent_id: impl Into<String>, conn: opencrab_db::Db) -> Self {
         Self {
             agent_id: agent_id.into(),
             conn,
@@ -314,7 +312,7 @@ mod tests {
 
     fn test_sm() -> SkillManager {
         let conn = opencrab_db::init_memory().unwrap();
-        SkillManager::new("agent-test", Arc::new(Mutex::new(conn)))
+        SkillManager::new("agent-test", opencrab_db::Db::from_connection(conn))
     }
 
     #[test]

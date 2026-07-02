@@ -4,14 +4,13 @@
 //! ツリー構造のインデックスノードとして保存する。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{ChatMessage, ChatRequestSimple, LlmClient};
+use crate::engine::LlmClient;
+use opencrab_llm_types::{ChatRequest, Message};
 
 /// インデックス構築結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +39,7 @@ pub struct IndexBuilder;
 impl IndexBuilder {
     /// 増分インデックス構築。未インデックスのログをLLMで要約してツリーに追加。
     pub async fn build_incremental(
-        conn: &Arc<Mutex<Connection>>,
+        conn: &opencrab_db::Db,
         agent_id: &str,
         llm: &dyn LlmClient,
         model: &str,
@@ -134,8 +133,17 @@ impl IndexBuilder {
                 max_log_id = last_log_id;
             }
 
-            // 期間ノード（年月-週）を確保
-            let period_label = Utc::now().format("%Y-%m").to_string();
+            // 期間ノード（年月）を確保。
+            // ラベルはログ自身のタイムスタンプから導出する。インデックス実行時刻
+            // （Utc::now()）を使うと、rebuild や遅延インデックス時に過去のセッションが
+            // すべて実行月のバケットへ誤分類される。
+            let period_label = session_logs
+                .iter()
+                .filter_map(|l| l.created_at.as_deref())
+                .filter(|s| s.len() >= 7 && s.is_char_boundary(7))
+                .min()
+                .map(|s| s[..7].to_string())
+                .unwrap_or_else(|| Utc::now().format("%Y-%m").to_string());
             let period_id = format!("period-{agent_id}-{period_label}");
             {
                 let db = conn
@@ -239,41 +247,25 @@ impl IndexBuilder {
                 )
             };
 
-            tracing::debug!("index_builder: generated prompt (first 200 chars) = {:?}", &prompt[..prompt.len().min(200)]);
+            tracing::debug!(
+                "index_builder: generated prompt (first 200 chars) = {:?}",
+                prompt.chars().take(200).collect::<String>()
+            );
             let system_content = if let Some(p) = personality.filter(|s| !s.is_empty()) {
                 format!("あなたは {persona_name} です。\n{p}")
             } else {
                 "You are a helpful assistant.".to_string()
             };
-            let request = ChatRequestSimple {
-                model: model.to_string(),
-                messages: vec![
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: system_content,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                    ChatMessage {
-                        role: "user".to_string(),
-                        content: prompt,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                ],
-                tools: vec![],
-                temperature: Some(0.0),
-                max_tokens: Some(200),
-                agent_id: None,
-            };
+            let request = ChatRequest::new(
+                model.to_string(),
+                vec![Message::system(system_content), Message::user(prompt)],
+            )
+            .with_temperature(0.0)
+            .with_max_tokens(200);
 
             let summary = match llm.chat(request).await {
                 Ok(resp) => {
-                    let text = resp.content.unwrap_or_default();
+                    let text = resp.first_text().unwrap_or_default().to_string();
                     // JSON部分を抽出（マークダウンコードブロック対応）
                     let json_str = text
                         .trim()
@@ -391,7 +383,7 @@ impl IndexBuilder {
     }
 
     /// エージェントのインデックス全体を削除する。
-    pub fn delete_index(conn: &Arc<Mutex<Connection>>, agent_id: &str) -> Result<()> {
+    pub fn delete_index(conn: &opencrab_db::Db, agent_id: &str) -> Result<()> {
         let db = conn
             .lock()
             .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
@@ -402,7 +394,7 @@ impl IndexBuilder {
 
     /// インデックスをゼロから再構築する（削除 → 増分ビルド）。
     pub async fn rebuild_index(
-        conn: &Arc<Mutex<Connection>>,
+        conn: &opencrab_db::Db,
         agent_id: &str,
         llm: &dyn LlmClient,
         model: &str,
@@ -418,7 +410,7 @@ impl IndexBuilder {
     ///
     /// topic数が max_topics_per_period を超えていたら、LLMでまとめて再要約し統合する。
     pub async fn merge_topics(
-        conn: &Arc<Mutex<Connection>>,
+        conn: &opencrab_db::Db,
         agent_id: &str,
         llm: &dyn LlmClient,
         model: &str,
@@ -482,35 +474,16 @@ impl IndexBuilder {
             } else {
                 "You are a helpful assistant.".to_string()
             };
-            let request = ChatRequestSimple {
-                model: model.to_string(),
-                messages: vec![
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: system_content,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                    ChatMessage {
-                        role: "user".to_string(),
-                        content: prompt,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                ],
-                tools: vec![],
-                temperature: Some(0.0),
-                max_tokens: Some(300),
-                agent_id: None,
-            };
+            let request = ChatRequest::new(
+                model.to_string(),
+                vec![Message::system(system_content), Message::user(prompt)],
+            )
+            .with_temperature(0.0)
+            .with_max_tokens(300);
 
             let merged_summary = match llm.chat(request).await {
                 Ok(resp) => {
-                    let text = resp.content.unwrap_or_default();
+                    let text = resp.first_text().unwrap_or_default().to_string();
                     let json_str = text
                         .trim()
                         .trim_start_matches("```json")
@@ -607,48 +580,35 @@ impl IndexBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
+    use std::sync::{Arc, Mutex};
+    use crate::engine::{ChatRequest, ChatResponse, LlmClient};
     use async_trait::async_trait;
 
     struct MockLlm;
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn chat(&self, _request: ChatRequestSimple) -> Result<ChatResponseSimple> {
-            Ok(ChatResponseSimple {
-                content: Some(
-                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
-                ),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
         }
     }
 
     struct RecordingMockLlm {
-        last_request: Arc<Mutex<Option<ChatRequestSimple>>>,
+        last_request: Arc<Mutex<Option<ChatRequest>>>,
     }
 
     #[async_trait]
     impl LlmClient for RecordingMockLlm {
-        async fn chat(&self, req: ChatRequestSimple) -> Result<ChatResponseSimple> {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
             *self.last_request.lock().unwrap() = Some(req);
-            Ok(ChatResponseSimple {
-                content: Some(
-                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
-                ),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
         }
     }
 
     #[tokio::test]
     async fn test_build_incremental_empty() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -688,7 +648,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log2).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -738,7 +698,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let last_request = Arc::new(Mutex::new(None));
         let llm = RecordingMockLlm {
             last_request: last_request.clone(),
@@ -757,7 +717,7 @@ mod tests {
         .unwrap();
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[1].content;
+        let prompt = request.messages[1].text_content().unwrap_or("");
         assert!(prompt.contains("のすたろう"), "プロンプトにペルソナ名が含まれるべき");
         assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
     }
@@ -779,7 +739,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let last_request = Arc::new(Mutex::new(None));
         let llm = RecordingMockLlm {
             last_request: last_request.clone(),
@@ -798,7 +758,7 @@ mod tests {
         .unwrap();
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[1].content;
+        let prompt = request.messages[1].text_content().unwrap_or("");
         assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸が含まれるべき");
         assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸が含まれるべき");
         assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性・感情軸が含まれるべき");
@@ -822,7 +782,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let last_request = Arc::new(Mutex::new(None));
         let llm = RecordingMockLlm {
             last_request: last_request.clone(),
@@ -843,7 +803,7 @@ mod tests {
         assert!(result.nodes_created > 0, "ノードが生成されるべき");
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[1].content;
+        let prompt = request.messages[1].text_content().unwrap_or("");
         // Default prompt should still use 一人称
         assert!(prompt.contains("一人称"), "デフォルトプロンプトに一人称が含まれるべき");
     }
@@ -864,7 +824,7 @@ mod tests {
         };
         opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // First build
@@ -911,7 +871,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-b", 3);
         insert_logs(&db_conn, "agent-1", "session-c", 4);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -947,7 +907,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-1", 15);
         insert_logs(&db_conn, "agent-1", "session-2", 15);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // batch_size=10: 最初の10件のみ処理される
@@ -1000,7 +960,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // 初回ビルド
@@ -1044,7 +1004,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-big", 100);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 200, "", None)
@@ -1077,7 +1037,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-1", 5);
         insert_logs(&db_conn, "agent-2", "session-2", 8);
 
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // agent-1のみビルド
@@ -1115,7 +1075,7 @@ mod tests {
     async fn test_delete_index() {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // まずインデックスを構築
@@ -1152,7 +1112,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
         insert_logs(&db_conn, "agent-2", "session-2", 5);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1185,7 +1145,7 @@ mod tests {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 5);
         insert_logs(&db_conn, "agent-1", "session-2", 3);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // 初回ビルド
@@ -1231,7 +1191,7 @@ mod tests {
     async fn test_rebuild_index_from_empty() {
         let db_conn = opencrab_db::init_memory().unwrap();
         insert_logs(&db_conn, "agent-1", "session-1", 3);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         // ビルドせずに再構築（初回rebuild）
@@ -1249,7 +1209,7 @@ mod tests {
         // 2セッション = 2topicノード
         insert_logs(&db_conn, "agent-1", "session-a", 3);
         insert_logs(&db_conn, "agent-1", "session-b", 3);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1290,7 +1250,7 @@ mod tests {
         insert_logs(&db_conn, "agent-1", "session-b", 2);
         insert_logs(&db_conn, "agent-1", "session-c", 2);
         insert_logs(&db_conn, "agent-1", "session-d", 2);
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1337,7 +1297,7 @@ mod tests {
         for i in 0..5 {
             insert_logs(&db_conn, "agent-1", &format!("session-{i}"), 3);
         }
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
@@ -1401,7 +1361,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_date_same_day() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         {
@@ -1427,7 +1387,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_date_multi_day() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         {
@@ -1455,7 +1415,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_date_null_created_at() {
         let db_conn = opencrab_db::init_memory().unwrap();
-        let conn = Arc::new(Mutex::new(db_conn));
+        let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
         {

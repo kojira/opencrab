@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
 
 fn prompt(label: &str) -> String {
     print!("{}: ", label);
@@ -57,9 +56,8 @@ async fn main() -> anyhow::Result<()> {
     // Load config
     let cfg = opencrab_server::config::load_config("config/default.toml")?;
 
-    // DB初期化
-    let conn = opencrab_db::init_connection(&cfg.database.path)?;
-    let db = Arc::new(Mutex::new(conn));
+    // DB初期化（コネクションプール）
+    let db = opencrab_db::Db::open(&cfg.database.path)?;
 
     // Build LLM router
     let _llm_router = opencrab_server::config::build_llm_router(&cfg.llm)?;
@@ -96,8 +94,7 @@ async fn main() -> anyhow::Result<()> {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
                     .prepare(
-                        "SELECT i.agent_id, i.name, COALESCE(s.persona_name, '') \
-                         FROM identity i LEFT JOIN soul s ON i.agent_id = s.agent_id",
+                        "SELECT agent_id, name, COALESCE(persona_name, '') FROM agents",
                     )
                     .unwrap();
                 let rows = stmt
@@ -290,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
                 // List agents for participant selection
                 let agents: Vec<(String, String)> = {
                     let conn = db.lock().unwrap();
-                    let mut stmt = conn.prepare("SELECT agent_id, name FROM identity").unwrap();
+                    let mut stmt = conn.prepare("SELECT agent_id, name FROM agents").unwrap();
                     stmt.query_map([], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })

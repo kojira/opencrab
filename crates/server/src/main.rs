@@ -15,7 +15,7 @@ type DiscordHttpArc = Arc<Mutex<Option<()>>>;
 
 /// ハートビート用セッションを取得または作成する。
 fn get_or_create_heartbeat_session(
-    db: &Arc<Mutex<rusqlite::Connection>>,
+    db: &opencrab_db::Db,
     agent_id: &str,
     channel_id: &str,
 ) -> String {
@@ -46,7 +46,7 @@ fn get_or_create_heartbeat_session(
 /// ハートビートコールバックを生成する。
 /// 初期起動とhot-reload再起動の両方で使用。
 fn make_heartbeat_callback(
-    db: Arc<Mutex<rusqlite::Connection>>,
+    db: opencrab_db::Db,
     agent_id_owned: String,
     discord_http: DiscordHttpArc,
     state: AppState,
@@ -442,35 +442,22 @@ async fn main() -> anyhow::Result<()> {
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
 
-    // DB初期化
-    let conn = opencrab_db::init_connection(&cfg.database.path)?;
+    // DB初期化（本番はコネクションプール）
+    let db = opencrab_db::Db::open(&cfg.database.path)?;
 
     // Build LLM router from config
     let llm_router = config::build_llm_router(&cfg.llm)?;
 
     let default_model = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
 
-    // DB内の許可コマンドをtools_configにマージ
-    let mut tools_cfg = cfg.tools.clone();
-    if let Ok(agents) = opencrab_db::queries::find_agents(&conn, "") {
-        for (agent_id, _name) in &agents {
-            if let Ok(db_commands) =
-                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
-            {
-                if let Some(ref mut shell) = tools_cfg.shell {
-                    for cmd in db_commands {
-                        if !shell.allowed_commands.contains(&cmd) {
-                            shell.allowed_commands.push(cmd);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // NOTE: エージェント個別の許可コマンド（DB管理）はグローバル tools_config に
+    // マージしない。全エージェントの許可が混ざり、あるエージェントの許可が他へ漏れるため。
+    // 個別コマンドは実行時に run_agent_response 内でそのエージェント分だけ適用する。
+    let tools_cfg = cfg.tools.clone();
 
     #[allow(unused_mut)]
     let mut state = AppState {
-        db: Arc::new(Mutex::new(conn)),
+        db,
         llm_router: Arc::new(llm_router),
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
@@ -565,7 +552,8 @@ async fn main() -> anyhow::Result<()> {
                         subtask_registry,
                         completion_registry.clone(),
                         default_subtask_webhook,
-                    ));
+                    )
+                    .with_owner_discord_id(discord_cfg.owner_discord_id.clone()));
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
 

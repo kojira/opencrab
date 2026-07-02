@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/llm",
+    "crates/llm-types",
     "crates/gateway",
     "crates/actions",
     "crates/db",
@@ -36,6 +37,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
@@ -61,6 +64,7 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 # Internal crates
 opencrab-core = { path = "crates/core" }
 opencrab-llm = { path = "crates/llm" }
+opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }

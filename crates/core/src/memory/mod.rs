@@ -1,6 +1,4 @@
 use anyhow::Result;
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
 use tracing;
 
 use opencrab_db::queries;
@@ -15,12 +13,12 @@ pub use daily_log_indexer::{DailyLogIndexStats, DailyLogIndexer};
 #[derive(Debug, Clone)]
 pub struct MemoryManager {
     agent_id: String,
-    conn: Arc<Mutex<Connection>>,
+    conn: opencrab_db::Db,
 }
 
 impl MemoryManager {
     /// Create a new MemoryManager for the given agent.
-    pub fn new(agent_id: impl Into<String>, conn: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(agent_id: impl Into<String>, conn: opencrab_db::Db) -> Self {
         Self {
             agent_id: agent_id.into(),
             conn,
@@ -161,7 +159,7 @@ mod tests {
 
     fn test_mm() -> MemoryManager {
         let conn = opencrab_db::init_memory().unwrap();
-        MemoryManager::new("agent-test", Arc::new(Mutex::new(conn)))
+        MemoryManager::new("agent-test", opencrab_db::Db::from_connection(conn))
     }
 
     #[test]

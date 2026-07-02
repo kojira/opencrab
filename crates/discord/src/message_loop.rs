@@ -20,6 +20,12 @@ use opencrab_gateway::IncomingMessage;
 /// 同一(channel, sender)のメッセージをまとめるまでの待機時間。
 const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
 
+/// セッションID → 推論直列化ロック。
+///
+/// 同一セッションの推論を直列化し、割り込みメッセージによる履歴不整合（同じ内容の
+/// 二重回答）を防ぐために使う。
+type SessionLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
 use crate::gateway_actions::{CompletionRegistry, SubtaskCompletionFn};
 use crate::AgentRunner;
 
@@ -155,6 +161,12 @@ pub async fn run_discord_loop<T: AgentRunner>(
     let mut debounce_buffers: HashMap<(String, String), (Vec<IncomingMessage>, Instant)> =
         HashMap::new();
 
+    // セッション単位の推論直列化ロック。
+    // 同一セッションへの推論が並行実行されると、1つ目の応答がまだDBに記録されていない
+    // 状態で2つ目の会話履歴が構築され、同じ内容を二重回答してしまう。これを防ぐため、
+    // 会話履歴の構築・推論・応答ログをセッション単位で直列化する。
+    let session_locks: SessionLocks = Arc::new(dashmap::DashMap::new());
+
     loop {
         // 次にフラッシュすべきバッファのデッドラインを計算
         let next_deadline = debounce_buffers
@@ -267,6 +279,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         owner_discord_id.clone(),
                         completion_registry.clone(),
                         event_tx.clone(),
+                        session_locks.clone(),
                     )
                     .await;
                 }
@@ -289,6 +302,7 @@ async fn process_incoming_message<T: AgentRunner>(
     owner_discord_id: String,
     completion_registry: CompletionRegistry,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
+    session_locks: SessionLocks,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -316,19 +330,22 @@ async fn process_incoming_message<T: AgentRunner>(
         if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
             // allow
         } else {
-            let allowed = {
-                let conn = state.db().lock().unwrap();
-                let any_trusted = agent_ids
-                    .iter()
-                    .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
-                let any_registered = agent_ids
-                    .iter()
-                    .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
-                if any_registered {
-                    any_trusted
-                } else {
-                    owner_discord_id.is_empty() || sender_id == &owner_discord_id
+            let allowed = match state.db().lock() {
+                Ok(conn) => {
+                    let any_trusted = agent_ids
+                        .iter()
+                        .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
+                    let any_registered = agent_ids
+                        .iter()
+                        .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
+                    if any_registered {
+                        any_trusted
+                    } else {
+                        owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                    }
                 }
+                // DB接続取得失敗時は fail-closed。
+                Err(_) => false,
             };
             if !allowed {
                 debug!(
@@ -360,11 +377,13 @@ async fn process_incoming_message<T: AgentRunner>(
         if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
             opencrab_actions::CallerIdentity::Owner
         } else {
-            let conn = state.db().lock().unwrap();
-            let trust_info = agent_ids
-                .iter()
-                .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid));
-            drop(conn);
+            // DB接続取得失敗時は trust_info=None（＝最小権限の Agent 扱い）。
+            let trust_info = match state.db().lock() {
+                Ok(conn) => agent_ids
+                    .iter()
+                    .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid)),
+                Err(_) => None,
+            };
             match trust_info {
                 Some(u) if u.permission == "co_agent" => {
                     opencrab_actions::CallerIdentity::CoAgent {
@@ -392,19 +411,52 @@ async fn process_incoming_message<T: AgentRunner>(
     for agent_id in &agent_ids {
         // Per-agent channel whitelist check
         if !is_dm {
-            let whitelisted = {
-                let conn = state.db().lock().unwrap();
-                opencrab_db::queries::is_channel_whitelisted_for_agent(
+            let whitelisted = match state.db().lock() {
+                Ok(conn) => opencrab_db::queries::is_channel_whitelisted_for_agent(
                     &conn,
                     &channel_id_str,
                     agent_id,
-                )
+                ),
+                // DB接続取得失敗時は fail-closed（このエージェントをスキップ）。
+                Err(_) => false,
             };
             if !whitelisted {
                 debug!(
                     channel = %channel_id_str,
                     agent = %agent_id,
                     "Ignoring message from non-whitelisted channel for agent"
+                );
+                continue; // skip this agent, not return
+            }
+        } else {
+            // Per-agent DM trust check.
+            // 冒頭のDMゲートは「いずれかのエージェントが信頼していれば通す」判定なので、
+            // ここで各エージェント個別に信頼を確認しないと、あるエージェントにしか信頼
+            // 登録していないユーザーのDMに全エージェントが応答してしまう。
+            let dm_allowed = {
+                let sender_id = &incoming.sender.id;
+                if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
+                    true
+                } else {
+                    // DB接続取得に失敗した場合は fail-closed（拒否）。
+                    match state.db().lock() {
+                        Ok(conn) => {
+                            if opencrab_db::queries::trusted_user_count(&conn, agent_id) > 0 {
+                                opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
+                            } else {
+                                // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
+                                owner_discord_id.is_empty() || sender_id == &owner_discord_id
+                            }
+                        }
+                        Err(_) => false,
+                    }
+                }
+            };
+            if !dm_allowed {
+                debug!(
+                    sender = %incoming.sender.id,
+                    agent = %agent_id,
+                    "Ignoring DM: sender not trusted for this agent"
                 );
                 continue; // skip this agent, not return
             }
@@ -425,51 +477,15 @@ async fn process_incoming_message<T: AgentRunner>(
         let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
         ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
 
-        // ユーザーメッセージをDBにログ
-        {
-            let conn = state.db().lock().unwrap();
-            let mut log_meta = serde_json::json!({
-                "source": "discord",
-                "channel_id": channel_id_str,
-                "user_name": incoming.sender.name,
-            });
-            if let Some(ref avatar_url) = incoming.sender.avatar_url {
-                log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
-            }
-            if !image_urls.is_empty() {
-                log_meta["image_urls"] = serde_json::json!(&image_urls);
-            }
-            let log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: incoming.sender.id.clone(),
-                session_id: session_id.clone(),
-                log_type: "speech".to_string(),
-                content: text.clone(),
-                speaker_id: Some(incoming.sender.id.clone()),
-                turn_number: None,
-                metadata_json: Some(log_meta.to_string()),
-                created_at: None,
-            };
-            opencrab_db::queries::insert_session_log(&conn, &log).ok();
-        }
+        // NOTE: ユーザーメッセージのログと会話履歴の構築は、推論本体とともに
+        // セッション単位ロックの内側（spawn 内）で行う。これにより、割り込みメッセージが
+        // 直前の推論完了前に走って履歴が不整合になり、同じ内容を二重回答する問題を防ぐ。
 
         let (base_prompt, agent_name) = state.build_agent_context(agent_id);
         let system_prompt = format!(
             "{}\n\n{}",
             base_prompt,
             discord_context_line(&guild_id, &channel_id_str)
-        );
-        let conversation_raw = match state.build_conversation_string(&session_id, agent_id, state.context_budget_tokens(agent_id)) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
-                return;
-            }
-        };
-        let conversation = prepend_runtime_context_discord(
-            &conversation_raw,
-            "Discord conversation",
-            &discord_message_id,
         );
 
         // サブタスク完了コールバック: LoopEventを送信（P2: tokio::spawnではなくイベントで直列処理）
@@ -539,27 +555,87 @@ async fn process_incoming_message<T: AgentRunner>(
             }))
         };
 
-        // エージェント処理をバックグラウンドspawnで実行（P1: メインループをブロックしない）
+        // セッション単位ロックを取得（無ければ作成）。
+        let sess_lock = session_locks
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+
+        // エージェント処理をバックグラウンドspawnで実行（P1: メインループをブロックしない）。
+        // ただしセッション単位ロックで直列化し、履歴の構築→推論→応答ログを不可分にする。
         let state_spawn = state.clone();
         let ga_spawn = gateway_actions.clone();
         let agent_id_spawn = agent_id.clone();
         let agent_name_spawn = agent_name.clone();
         let session_id_spawn = session_id.clone();
         let system_prompt_spawn = system_prompt.clone();
-        let conversation_spawn = conversation.clone();
         let caller_spawn = caller.clone();
         let image_urls_spawn = image_urls.clone();
         let discord_message_id_spawn = discord_message_id.clone();
         let channel_id_str_spawn = channel_id_str.clone();
+        let sender_id_spawn = incoming.sender.id.clone();
+        let sender_name_spawn = incoming.sender.name.clone();
+        let sender_avatar_spawn = incoming.sender.avatar_url.clone();
+        let text_spawn = text.clone();
 
         tokio::spawn(async move {
+            // 同一セッションの推論が完了するまで待機（割り込み二重回答の防止）。
+            let _guard = sess_lock.lock().await;
+
+            // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
+            {
+                if let Ok(conn) = state_spawn.db().lock() {
+                    let mut log_meta = serde_json::json!({
+                        "source": "discord",
+                        "channel_id": channel_id_str_spawn,
+                        "user_name": sender_name_spawn,
+                    });
+                    if let Some(ref avatar_url) = sender_avatar_spawn {
+                        log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
+                    }
+                    if !image_urls_spawn.is_empty() {
+                        log_meta["image_urls"] = serde_json::json!(&image_urls_spawn);
+                    }
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: sender_id_spawn.clone(),
+                        session_id: session_id_spawn.clone(),
+                        log_type: "speech".to_string(),
+                        content: text_spawn.clone(),
+                        speaker_id: Some(sender_id_spawn.clone()),
+                        turn_number: None,
+                        metadata_json: Some(log_meta.to_string()),
+                        created_at: None,
+                    };
+                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                }
+            }
+
+            // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
+            let budget = state_spawn.context_budget_tokens(&agent_id_spawn);
+            let conversation = match state_spawn.build_conversation_string(
+                &session_id_spawn,
+                &agent_id_spawn,
+                budget,
+            ) {
+                Ok(raw) => prepend_runtime_context_discord(
+                    &raw,
+                    "Discord conversation",
+                    &discord_message_id_spawn,
+                ),
+                Err(e) => {
+                    tracing::error!(session_id = %session_id_spawn, agent_id = %agent_id_spawn, "build_conversation_string failed: {e}");
+                    return;
+                }
+            };
+
             let result = state_spawn
                 .run_agent_response(
                     &agent_id_spawn,
                     &agent_name_spawn,
                     &session_id_spawn,
                     &system_prompt_spawn,
-                    &conversation_spawn,
+                    &conversation,
                     "discord",
                     Some(ga_spawn),
                     caller_spawn,
@@ -568,7 +644,7 @@ async fn process_incoming_message<T: AgentRunner>(
                     if discord_message_id_spawn.is_empty() {
                         None
                     } else {
-                        Some(discord_message_id_spawn)
+                        Some(discord_message_id_spawn.clone())
                     },
                     on_response_text,
                 )
@@ -582,6 +658,7 @@ async fn process_incoming_message<T: AgentRunner>(
                 &state_spawn,
             )
             .await;
+            // _guard はここで解放され、次にキューされた同一セッションの推論が進む。
         });
     }
 }

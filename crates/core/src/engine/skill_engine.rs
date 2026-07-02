@@ -3,11 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing;
 
-use super::types::{
-    ActionExecutor, ActionResult, CacheControl, ChatContentPart, ChatMessage, ChatRequestSimple,
-    EngineResult, LlmCallLog, LlmClient,
-};
+use super::types::{ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient};
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
+use opencrab_llm_types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
 
 // ---------------------------------------------------------------------------
 // SkillEngine
@@ -136,48 +134,50 @@ impl SkillEngine {
         model_override: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
         image_urls: &[String],
     ) -> Result<EngineResult> {
+        let cache_control_1h =
+            || Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"}));
+
         let mut tools = self.executor.list_tools();
         // BP1: toolsの最後のツールにcache_control(1h)を付与
         if let Some(last_tool) = tools.last_mut() {
-            last_tool.cache_control = Some(CacheControl {
-                r#type: "ephemeral".to_string(),
-                ttl: Some("1h".to_string()),
-            });
+            last_tool.cache_control = cache_control_1h();
         }
 
-        let user_content_parts: Vec<ChatContentPart> = if image_urls.is_empty() {
-            vec![]
+        // ユーザーメッセージ本文（画像があればマルチパート）。
+        let user_content = if image_urls.is_empty() {
+            MessageContent::Text(user_message.to_string())
         } else {
-            let mut parts = vec![ChatContentPart::Text {
+            let mut parts = vec![ContentPart::Text {
                 text: user_message.to_string(),
             }];
             for url in image_urls {
-                parts.push(ChatContentPart::ImageUrl {
-                    url: url.clone(),
-                    detail: Some("auto".to_string()),
+                parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: url.clone(),
+                        detail: Some("auto".to_string()),
+                    },
                 });
             }
-            parts
+            MessageContent::Multi(parts)
         };
 
         let mut messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_context.to_string(),
+            Message {
+                role: Role::System,
+                content: Some(MessageContent::Text(system_context.to_string())),
+                name: None,
+                function_call: None,
+                tool_calls: None,
                 tool_call_id: None,
-                tool_calls: vec![],
-                content_parts: vec![],
-                cache_control: Some(CacheControl {
-                    r#type: "ephemeral".to_string(),
-                    ttl: Some("1h".to_string()),
-                }),
+                cache_control: cache_control_1h(),
             },
-            ChatMessage {
-                role: "user".to_string(),
-                content: user_message.to_string(),
+            Message {
+                role: Role::User,
+                content: Some(user_content),
+                name: None,
+                function_call: None,
+                tool_calls: None,
                 tool_call_id: None,
-                tool_calls: vec![],
-                content_parts: user_content_parts,
                 cache_control: None,
             },
         ];
@@ -210,12 +210,20 @@ impl SkillEngine {
 
             tracing::debug!(iteration = iterations, model = %model, "SkillEngine LLM call");
 
-            let request = ChatRequestSimple {
+            let request = ChatRequest {
                 model,
                 messages: messages.clone(),
-                tools: tools.clone(),
+                functions: if tools.is_empty() {
+                    None
+                } else {
+                    Some(tools.clone())
+                },
+                function_call: None,
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
+                stop: None,
+                stream: None,
+                metadata: Default::default(),
                 agent_id: None,
             };
 
@@ -249,23 +257,29 @@ impl SkillEngine {
 
             let response = llm_result?;
 
+            // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。
+            let mut content: Option<String> = response.first_text().map(|s| s.to_string());
+            let mut tool_calls: Vec<ToolCall> = response
+                .first_message()
+                .and_then(|m| m.tool_calls.clone())
+                .unwrap_or_default();
+
             // If the LLM returned no structured tool calls but embedded
             // <function_calls> XML in the content (e.g. DeepSeek via OpenRouter),
             // parse them out and treat them as normal tool calls.
-            let mut response = response;
-            if response.tool_calls.is_empty() {
-                if let Some(ref content) = response.content {
-                    if content.contains("<function_calls>") {
-                        let parsed = parse_xml_tool_calls(content);
+            if tool_calls.is_empty() {
+                if let Some(ref c) = content {
+                    if c.contains("<function_calls>") {
+                        let parsed = parse_xml_tool_calls(c);
                         if !parsed.is_empty() {
                             tracing::debug!(
                                 count = parsed.len(),
                                 "Parsed XML function_calls from content"
                             );
-                            response.tool_calls = parsed;
+                            tool_calls = parsed;
                             // Strip the XML block from content so it doesn't leak to the user.
-                            let cleaned = strip_function_calls_xml(content);
-                            response.content = if cleaned.is_empty() {
+                            let cleaned = strip_function_calls_xml(c);
+                            content = if cleaned.is_empty() {
                                 None
                             } else {
                                 Some(cleaned)
@@ -276,7 +290,7 @@ impl SkillEngine {
             }
 
             // Fire on_response_text for every LLM reply that has non-empty text.
-            if let Some(ref text) = response.content {
+            if let Some(ref text) = content {
                 if !text.trim().is_empty() {
                     if let Some(ref cb) = self.on_response_text {
                         tracing::warn!(
@@ -292,82 +306,68 @@ impl SkillEngine {
             }
 
             // If there are tool calls, execute them and continue the loop.
-            if !response.tool_calls.is_empty() {
-                // Add the assistant message with tool calls.
-                messages.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: response.content.clone().unwrap_or_default(),
+            if !tool_calls.is_empty() {
+                // Add the assistant message with tool calls (arguments already
+                // canonical Strings, so no Value->String conversion needed).
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: content.clone().map(MessageContent::Text),
+                    name: None,
+                    function_call: None,
+                    tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
-                    tool_calls: response.tool_calls.clone(),
-                    content_parts: vec![],
                     cache_control: None,
                 });
 
                 // Notify on_tool_call callback.
                 if let Some(ref cb) = self.on_tool_call {
-                    let calls_json =
-                        serde_json::to_string(&response.tool_calls).unwrap_or_default();
-                    cb(response.content.clone().unwrap_or_default(), calls_json);
+                    let calls_json = serde_json::to_string(&tool_calls).unwrap_or_default();
+                    cb(content.clone().unwrap_or_default(), calls_json);
                 }
 
-                for tool_call in &response.tool_calls {
+                for tool_call in &tool_calls {
                     total_tool_calls += 1;
+                    let tool_name = &tool_call.function.name;
 
                     tracing::debug!(
-                        tool = %tool_call.name,
+                        tool = %tool_name,
                         id = %tool_call.id,
                         "Executing tool call"
                     );
 
                     // Check if the action is declared by active skills.
-                    if !self.is_action_allowed(&tool_call.name) {
-                        let denied = Self::permission_denied(&tool_call.name);
+                    if !self.is_action_allowed(tool_name) {
+                        let denied = Self::permission_denied(tool_name);
                         let result_json = serde_json::to_string(&denied)
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
-                        messages.push(ChatMessage {
-                            role: "tool".to_string(),
-                            content: result_json.clone(),
-                            tool_call_id: Some(tool_call.id.clone()),
-                            tool_calls: vec![],
-                            content_parts: vec![],
-                            cache_control: None,
-                        });
+                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
 
                         // Notify on_tool_result callback for denied action.
                         if let Some(ref cb) = self.on_tool_result {
-                            cb(
-                                tool_call.id.clone(),
-                                tool_call.name.clone(),
-                                result_json.clone(),
-                                true,
-                            );
+                            cb(tool_call.id.clone(), tool_name.clone(), result_json.clone(), true);
                         }
                         continue;
                     }
 
+                    // Canonical tool-call arguments are a JSON string; parse to a
+                    // Value for the executor boundary (empty object on malformed).
+                    let args = tool_call.arguments_json();
                     let result = self
                         .executor
-                        .execute_with_id(&tool_call.name, &tool_call.arguments, &tool_call.id)
+                        .execute_with_id(tool_name, &args, &tool_call.id)
                         .await;
 
                     let result_json = serde_json::to_string(&result).unwrap_or_else(|_| {
                         r#"{"error": "Failed to serialize result"}"#.to_string()
                     });
 
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: result_json.clone(),
-                        tool_call_id: Some(tool_call.id.clone()),
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    });
+                    messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
 
                     // Notify on_tool_result callback.
                     if let Some(ref cb) = self.on_tool_result {
                         cb(
                             tool_call.id.clone(),
-                            tool_call.name.clone(),
+                            tool_name.clone(),
                             result_json.clone(),
                             !result.success,
                         );
@@ -378,7 +378,7 @@ impl SkillEngine {
             }
 
             // No tool calls: this is the final response.
-            let final_text = response.content.unwrap_or_default();
+            let final_text = content.unwrap_or_default();
 
             tracing::warn!(
                 iteration = iterations,
@@ -403,17 +403,62 @@ impl SkillEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{ChatResponseSimple, ToolCall, ToolDefinition};
     use super::*;
     use async_trait::async_trait;
+    use opencrab_llm_types::{
+        ChatResponse, Choice, FunctionCall, FunctionDefinition, MessageContent, Usage,
+    };
     use serde_json::Value;
 
+    /// Build a canonical tool call with JSON arguments (as a value, serialized).
+    fn tc(id: &str, name: &str, args: Value) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: serde_json::to_string(&args).unwrap(),
+            },
+        }
+    }
+
+    /// Build a single-choice ChatResponse with optional text and tool calls.
+    fn resp(text: Option<&str>, calls: Vec<ToolCall>) -> ChatResponse {
+        ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: text.map(|s| MessageContent::Text(s.to_string())),
+                    name: None,
+                    function_call: None,
+                    tool_calls: if calls.is_empty() { None } else { Some(calls) },
+                    tool_call_id: None,
+                    cache_control: None,
+                },
+                finish_reason: None,
+            }],
+            usage: Usage::default(),
+            created: 0,
+        }
+    }
+
+    fn text_response(text: &str) -> ChatResponse {
+        resp(Some(text), vec![])
+    }
+
+    fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponse {
+        resp(None, calls)
+    }
+
     struct MockLlm {
-        responses: std::sync::Mutex<Vec<ChatResponseSimple>>,
+        responses: std::sync::Mutex<Vec<ChatResponse>>,
     }
 
     impl MockLlm {
-        fn new(responses: Vec<ChatResponseSimple>) -> Self {
+        fn new(responses: Vec<ChatResponse>) -> Self {
             Self {
                 responses: std::sync::Mutex::new(responses),
             }
@@ -422,7 +467,7 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn chat(&self, _request: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
+        async fn chat(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 anyhow::bail!("no more mock responses");
@@ -456,31 +501,13 @@ mod tests {
                 error: Some(format!("Unknown action: {name}")),
             })
         }
-        fn list_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
+        fn list_tools(&self) -> Vec<FunctionDefinition> {
+            vec![FunctionDefinition {
                 name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
+                description: Some("A test tool".to_string()),
                 parameters: serde_json::json!({}),
                 cache_control: None,
             }]
-        }
-    }
-
-    fn text_response(text: &str) -> ChatResponseSimple {
-        ChatResponseSimple {
-            content: Some(text.to_string()),
-            tool_calls: vec![],
-            finish_reason: "stop".to_string(),
-            usage: None,
-        }
-    }
-
-    fn tool_call_response(calls: Vec<ToolCall>) -> ChatResponseSimple {
-        ChatResponseSimple {
-            content: None,
-            tool_calls: calls,
-            finish_reason: "tool_calls".to_string(),
-            usage: None,
         }
     }
 
@@ -500,11 +527,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_tool_call() {
         let llm = MockLlm::new(vec![
-            tool_call_response(vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "test_tool".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
+            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
             text_response("Done with tool call"),
         ]);
         let executor = MockExecutor::new().add_result(
@@ -529,16 +552,8 @@ mod tests {
     #[tokio::test]
     async fn test_max_iterations() {
         let llm = MockLlm::new(vec![
-            tool_call_response(vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "test_tool".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
-            tool_call_response(vec![ToolCall {
-                id: "tc-2".to_string(),
-                name: "test_tool".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
+            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
+            tool_call_response(vec![tc("tc-2", "test_tool", serde_json::json!({}))]),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -561,16 +576,8 @@ mod tests {
     async fn test_multiple_tool_calls() {
         let llm = MockLlm::new(vec![
             tool_call_response(vec![
-                ToolCall {
-                    id: "tc-1".to_string(),
-                    name: "test_tool".to_string(),
-                    arguments: serde_json::json!({}),
-                },
-                ToolCall {
-                    id: "tc-2".to_string(),
-                    name: "test_tool".to_string(),
-                    arguments: serde_json::json!({}),
-                },
+                tc("tc-1", "test_tool", serde_json::json!({})),
+                tc("tc-2", "test_tool", serde_json::json!({})),
             ]),
             text_response("Both tools done"),
         ]);
@@ -596,11 +603,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_result_feedback() {
         let llm = MockLlm::new(vec![
-            tool_call_response(vec![ToolCall {
-                id: "tc-1".to_string(),
-                name: "test_tool".to_string(),
-                arguments: serde_json::json!({"query": "test"}),
-            }]),
+            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({"query": "test"}))]),
             text_response("Received tool feedback"),
         ]);
         let executor = MockExecutor::new().add_result(
@@ -629,13 +632,13 @@ mod tests {
 
         // MockLlm that captures the model from each request.
         struct ModelCapturingLlm {
-            responses: Mutex<Vec<ChatResponseSimple>>,
+            responses: Mutex<Vec<ChatResponse>>,
             captured_models: Arc<Mutex<Vec<String>>>,
         }
 
         #[async_trait]
         impl LlmClient for ModelCapturingLlm {
-            async fn chat(&self, request: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
                 self.captured_models
                     .lock()
                     .unwrap()
@@ -652,11 +655,7 @@ mod tests {
         let llm = ModelCapturingLlm {
             responses: Mutex::new(vec![
                 // First call uses default model; after tool call, model override kicks in.
-                tool_call_response(vec![ToolCall {
-                    id: "tc-1".to_string(),
-                    name: "test_tool".to_string(),
-                    arguments: serde_json::json!({}),
-                }]),
+                tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
                 text_response("Done after model switch"),
             ]),
             captured_models: captured.clone(),
@@ -700,22 +699,11 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let llm = MockLlm::new(vec![
-            ChatResponseSimple {
-                content: Some("調べてみます".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tc-1".to_string(),
-                    name: "test_tool".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                finish_reason: "tool_calls".to_string(),
-                usage: None,
-            },
-            ChatResponseSimple {
-                content: Some("天気は20度です".to_string()),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            },
+            resp(
+                Some("調べてみます"),
+                vec![tc("tc-1", "test_tool", serde_json::json!({}))],
+            ),
+            resp(Some("天気は20度です"), vec![]),
         ]);
         let executor = MockExecutor::new().add_result(
             "test_tool",
@@ -750,13 +738,13 @@ mod tests {
 
         // MockLlm that captures the messages from each request
         struct MessageCapturingLlm {
-            responses: Mutex<Vec<ChatResponseSimple>>,
-            captured_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+            responses: Mutex<Vec<ChatResponse>>,
+            captured_messages: Arc<Mutex<Vec<Vec<Message>>>>,
         }
 
         #[async_trait]
         impl LlmClient for MessageCapturingLlm {
-            async fn chat(&self, request: ChatRequestSimple) -> anyhow::Result<ChatResponseSimple> {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
                 self.captured_messages
                     .lock()
                     .unwrap()
@@ -769,15 +757,11 @@ mod tests {
             }
         }
 
-        let captured = Arc::new(Mutex::new(Vec::<Vec<ChatMessage>>::new()));
+        let captured = Arc::new(Mutex::new(Vec::<Vec<Message>>::new()));
         let llm = MessageCapturingLlm {
             responses: Mutex::new(vec![
                 // First response: tool call
-                tool_call_response(vec![ToolCall {
-                    id: "tc-1".to_string(),
-                    name: "test_tool".to_string(),
-                    arguments: serde_json::json!({}),
-                }]),
+                tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
                 // Second response: final text
                 text_response("All done"),
             ]),
@@ -807,7 +791,7 @@ mod tests {
         // Should contain an assistant message with non-empty tool_calls
         let has_assistant_with_tool_calls = second_call_msgs
             .iter()
-            .any(|m| m.role == "assistant" && !m.tool_calls.is_empty());
+            .any(|m| m.role == Role::Assistant && m.tool_calls.as_ref().map_or(false, |t| !t.is_empty()));
         assert!(
             has_assistant_with_tool_calls,
             "Second LLM call must include an assistant message with tool_calls"
@@ -816,7 +800,7 @@ mod tests {
         // Should contain a tool message with tool_call_id set
         let has_tool_result = second_call_msgs
             .iter()
-            .any(|m| m.role == "tool" && m.tool_call_id.is_some());
+            .any(|m| m.role == Role::Tool && m.tool_call_id.is_some());
         assert!(
             has_tool_result,
             "Second LLM call must include a tool result message with tool_call_id"

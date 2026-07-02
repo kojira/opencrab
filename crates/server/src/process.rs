@@ -400,11 +400,24 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                                     .iter()
                                     .filter_map(|item| {
                                         let id = item.get("id")?.as_str()?;
-                                        let name = item.get("name")?.as_str()?;
-                                        let args = item
-                                            .get("arguments")
-                                            .map(|value| value.to_string())
-                                            .unwrap_or_default();
+                                        // 正準形状 {function:{name, arguments:"<json-string>"}} と
+                                        // 旧形状 {name, arguments:<object>} の両方に対応する。
+                                        let (name, args) = if let Some(func) = item.get("function") {
+                                            let name = func.get("name")?.as_str()?;
+                                            let args = func
+                                                .get("arguments")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                                .unwrap_or_default();
+                                            (name, args)
+                                        } else {
+                                            let name = item.get("name")?.as_str()?;
+                                            let args = item
+                                                .get("arguments")
+                                                .map(|value| value.to_string())
+                                                .unwrap_or_default();
+                                            (name, args)
+                                        };
                                         Some(format!("[id={}]: {}({})", id, name, args))
                                     })
                                     .collect();
@@ -556,7 +569,27 @@ pub async fn run_agent_response(
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
     let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let tools_cfg = state.tools_config.read().unwrap().clone();
+    let mut tools_cfg = state.tools_config.read().unwrap().clone();
+    // このエージェント専用の許可コマンド（DB管理）を、ローカルコピーにのみマージする。
+    // グローバル config に足すと他エージェントにも許可が漏れる（per-agent スコープの担保）。
+    {
+        if let Ok(conn) = state.db.lock() {
+            if let Ok(agent_cmds) =
+                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
+            {
+                if !agent_cmds.is_empty() {
+                    let shell = tools_cfg
+                        .shell
+                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
+                    for cmd in agent_cmds {
+                        if !shell.allowed_commands.contains(&cmd) {
+                            shell.allowed_commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
     opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
@@ -603,7 +636,7 @@ pub async fn run_agent_response(
         let (prompt_tokens, completion_tokens, total_tokens) = log
             .response
             .as_ref()
-            .and_then(|r| r.usage.as_ref())
+            .map(|r| &r.usage)
             .map(|u| {
                 (
                     Some(u.prompt_tokens as i64),
@@ -616,12 +649,12 @@ pub async fn run_agent_response(
         let cache_read_tokens = log
             .response
             .as_ref()
-            .and_then(|r| r.usage.as_ref())
+            .map(|r| &r.usage)
             .map(|u| u.cache_read_input_tokens as i64);
         let cache_creation_tokens = log
             .response
             .as_ref()
-            .and_then(|r| r.usage.as_ref())
+            .map(|r| &r.usage)
             .map(|u| u.cache_creation_input_tokens as i64);
 
         let response_str = log
@@ -640,8 +673,10 @@ pub async fn run_agent_response(
             tool_calls: log
                 .response
                 .as_ref()
-                .filter(|r| !r.tool_calls.is_empty())
-                .and_then(|r| serde_json::to_string(&r.tool_calls).ok()),
+                .and_then(|r| r.first_message())
+                .and_then(|m| m.tool_calls.as_ref())
+                .filter(|tc| !tc.is_empty())
+                .and_then(|tc| serde_json::to_string(tc).ok()),
             latency_ms: Some(log.latency_ms),
             prompt_tokens,
             completion_tokens,
@@ -716,7 +751,7 @@ pub async fn run_agent_response(
         let tr_db = state.db.clone();
         let tr_agent = agent_id.to_string();
         let tr_session = session_id.to_string();
-        let tr_workspace = state.workspace_base.clone();
+        let tr_workspace = state.workspace_base.replace("{agent_id}", agent_id);
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
                 const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
@@ -729,7 +764,12 @@ pub async fn run_agent_response(
                     if std::fs::write(&file_path, &result_json).is_ok() {
                         format!("[Tool Result: file://tmp/{}]", filename)
                     } else {
-                        result_json[..TOOL_RESULT_SIZE_LIMIT].to_string()
+                        // 文字境界を尊重して切り詰める（バイトスライスはUTF-8境界でpanicする）
+                        let mut end = TOOL_RESULT_SIZE_LIMIT.min(result_json.len());
+                        while !result_json.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        result_json[..end].to_string()
                     }
                 } else {
                     result_json.clone()
@@ -884,4 +924,55 @@ pub async fn run_agent_response(
     }
 
     result
+}
+
+#[cfg(test)]
+mod format_log_tests {
+    use super::format_single_log;
+    use opencrab_db::queries::SessionLogRow;
+
+    fn tool_call_log(tool_calls_json: &str) -> SessionLogRow {
+        SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "s1".to_string(),
+            log_type: "tool_call".to_string(),
+            content: String::new(),
+            speaker_id: Some("agent-1".to_string()),
+            turn_number: None,
+            metadata_json: Some(
+                serde_json::json!({ "tool_calls_json": tool_calls_json }).to_string(),
+            ),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn renders_canonical_tool_call_shape() {
+        // 正準形状: {id, type, function:{name, arguments:"<json-string>"}}
+        let tcj = serde_json::json!([{
+            "id": "tc-1",
+            "type": "function",
+            "function": { "name": "search", "arguments": "{\"q\":\"rust\"}" }
+        }])
+        .to_string();
+        let out = format_single_log(&tool_call_log(&tcj));
+        assert!(out.contains("search"), "tool name must render: {out}");
+        assert!(out.contains("tc-1"), "tool id must render: {out}");
+        assert!(out.contains(r#"{"q":"rust"}"#), "arguments must render: {out}");
+    }
+
+    #[test]
+    fn renders_legacy_flat_tool_call_shape() {
+        // 旧形状（既存DB行の後方互換）: {id, name, arguments:<object>}
+        let tcj = serde_json::json!([{
+            "id": "tc-9",
+            "name": "old_tool",
+            "arguments": { "a": 1 }
+        }])
+        .to_string();
+        let out = format_single_log(&tool_call_log(&tcj));
+        assert!(out.contains("old_tool"), "legacy tool name must render: {out}");
+        assert!(out.contains("tc-9"), "legacy tool id must render: {out}");
+    }
 }

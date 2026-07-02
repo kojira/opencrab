@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use axum::{
     routing::{delete, get, post, put},
@@ -21,7 +21,7 @@ use opencrab_llm::router::LlmRouter;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Arc<Mutex<rusqlite::Connection>>,
+    pub db: opencrab_db::Db,
     pub llm_router: Arc<LlmRouter>,
     pub workspace_base: String,
     pub default_model: String,

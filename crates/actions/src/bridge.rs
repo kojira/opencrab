@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opencrab_core::{ActionExecutor, ActionResult as CoreActionResult, ToolDefinition};
+use opencrab_core::{ActionExecutor, ActionResult as CoreActionResult, FunctionDefinition};
 use opencrab_gateway::GatewayActions;
 
 use crate::dispatcher::ActionDispatcher;
@@ -243,12 +243,15 @@ impl ActionExecutor for BridgedExecutor {
         self.execute_instrumented(name, args, Some(tool_call_id)).await
     }
 
-    fn list_tools(&self) -> Vec<ToolDefinition> {
+    fn list_tools(&self) -> Vec<FunctionDefinition> {
         let is_owner = matches!(self.context.caller, crate::traits::CallerIdentity::Owner);
         const OWNER_ONLY_ACTIONS: &[&str] =
             &["update_instructions", "update_heartbeat_instructions"];
 
-        let mut tools: Vec<ToolDefinition> = self
+        // 空 description は None にする（旧 to_function_def の挙動を踏襲）。
+        let opt_desc = |d: String| if d.is_empty() { None } else { Some(d) };
+
+        let mut tools: Vec<FunctionDefinition> = self
             .dispatcher
             .get_definitions(&[])
             .into_iter()
@@ -259,9 +262,9 @@ impl ActionExecutor for BridgedExecutor {
                 }
                 true
             })
-            .map(|d| ToolDefinition {
+            .map(|d| FunctionDefinition {
                 name: d.name,
-                description: d.description,
+                description: opt_desc(d.description),
                 parameters: d.parameters,
                 cache_control: None,
             })
@@ -318,9 +321,9 @@ impl ActionExecutor for BridgedExecutor {
                 if !is_owner && OWNER_ONLY_ACTIONS.contains(&def.name.as_str()) {
                     continue;
                 }
-                tools.push(ToolDefinition {
+                tools.push(FunctionDefinition {
                     name: def.name,
-                    description: def.description,
+                    description: opt_desc(def.description),
                     parameters: def.parameters,
                     cache_control: None,
                 });
@@ -429,7 +432,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -453,7 +456,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             agent_name: "Test Agent".to_string(),
             session_id: Some("session-1".to_string()),
-            db: std::sync::Arc::new(std::sync::Mutex::new(conn)),
+            db: opencrab_db::Db::from_connection(conn),
             workspace: std::sync::Arc::new(ws),
             last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),

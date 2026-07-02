@@ -24,11 +24,30 @@ pub struct Workspace {
     root: PathBuf,
 }
 
+/// Validate an agent id used as a path segment for a workspace root.
+///
+/// Rejects empty ids and any id containing characters that could be used for
+/// path traversal (path separators, `..`, NUL, etc.). Agent ids are UUIDs in
+/// practice, so we only allow `[A-Za-z0-9_-]`.
+pub fn validate_agent_id(agent_id: &str) -> Result<()> {
+    if agent_id.is_empty() {
+        bail!("invalid agent_id: must not be empty");
+    }
+    if !agent_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("invalid agent_id: contains disallowed characters");
+    }
+    Ok(())
+}
+
 impl Workspace {
     /// Create a new Workspace rooted at the given directory.
     ///
     /// The directory will be created if it does not exist.
     pub fn new(agent_id: &str, base_path: &str) -> Result<Self> {
+        validate_agent_id(agent_id)?;
         let root: PathBuf = Path::new(base_path).join("workspaces").join(agent_id);
         std::fs::create_dir_all(&root)
             .with_context(|| format!("Failed to create workspace directory: {}", root.display()))?;
