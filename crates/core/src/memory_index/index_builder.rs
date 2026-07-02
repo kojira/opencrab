@@ -9,7 +9,8 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{ChatMessage, ChatRequestSimple, LlmClient};
+use crate::engine::LlmClient;
+use opencrab_llm_types::{ChatRequest, Message};
 
 /// インデックス構築結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,35 +256,16 @@ impl IndexBuilder {
             } else {
                 "You are a helpful assistant.".to_string()
             };
-            let request = ChatRequestSimple {
-                model: model.to_string(),
-                messages: vec![
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: system_content,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                    ChatMessage {
-                        role: "user".to_string(),
-                        content: prompt,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                ],
-                tools: vec![],
-                temperature: Some(0.0),
-                max_tokens: Some(200),
-                agent_id: None,
-            };
+            let request = ChatRequest::new(
+                model.to_string(),
+                vec![Message::system(system_content), Message::user(prompt)],
+            )
+            .with_temperature(0.0)
+            .with_max_tokens(200);
 
             let summary = match llm.chat(request).await {
                 Ok(resp) => {
-                    let text = resp.content.unwrap_or_default();
+                    let text = resp.first_text().unwrap_or_default().to_string();
                     // JSON部分を抽出（マークダウンコードブロック対応）
                     let json_str = text
                         .trim()
@@ -492,35 +474,16 @@ impl IndexBuilder {
             } else {
                 "You are a helpful assistant.".to_string()
             };
-            let request = ChatRequestSimple {
-                model: model.to_string(),
-                messages: vec![
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: system_content,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                    ChatMessage {
-                        role: "user".to_string(),
-                        content: prompt,
-                        tool_call_id: None,
-                        tool_calls: vec![],
-                        content_parts: vec![],
-                        cache_control: None,
-                    },
-                ],
-                tools: vec![],
-                temperature: Some(0.0),
-                max_tokens: Some(300),
-                agent_id: None,
-            };
+            let request = ChatRequest::new(
+                model.to_string(),
+                vec![Message::system(system_content), Message::user(prompt)],
+            )
+            .with_temperature(0.0)
+            .with_max_tokens(300);
 
             let merged_summary = match llm.chat(request).await {
                 Ok(resp) => {
-                    let text = resp.content.unwrap_or_default();
+                    let text = resp.first_text().unwrap_or_default().to_string();
                     let json_str = text
                         .trim()
                         .trim_start_matches("```json")
@@ -618,41 +581,27 @@ impl IndexBuilder {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
+    use crate::engine::{ChatRequest, ChatResponse, LlmClient};
     use async_trait::async_trait;
 
     struct MockLlm;
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn chat(&self, _request: ChatRequestSimple) -> Result<ChatResponseSimple> {
-            Ok(ChatResponseSimple {
-                content: Some(
-                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
-                ),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
         }
     }
 
     struct RecordingMockLlm {
-        last_request: Arc<Mutex<Option<ChatRequestSimple>>>,
+        last_request: Arc<Mutex<Option<ChatRequest>>>,
     }
 
     #[async_trait]
     impl LlmClient for RecordingMockLlm {
-        async fn chat(&self, req: ChatRequestSimple) -> Result<ChatResponseSimple> {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
             *self.last_request.lock().unwrap() = Some(req);
-            Ok(ChatResponseSimple {
-                content: Some(
-                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
-                ),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
         }
     }
 
@@ -768,7 +717,7 @@ mod tests {
         .unwrap();
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[1].content;
+        let prompt = request.messages[1].text_content().unwrap_or("");
         assert!(prompt.contains("のすたろう"), "プロンプトにペルソナ名が含まれるべき");
         assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
     }
@@ -809,7 +758,7 @@ mod tests {
         .unwrap();
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[1].content;
+        let prompt = request.messages[1].text_content().unwrap_or("");
         assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸が含まれるべき");
         assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸が含まれるべき");
         assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性・感情軸が含まれるべき");
@@ -854,7 +803,7 @@ mod tests {
         assert!(result.nodes_created > 0, "ノードが生成されるべき");
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[1].content;
+        let prompt = request.messages[1].text_content().unwrap_or("");
         // Default prompt should still use 一人称
         assert!(prompt.contains("一人称"), "デフォルトプロンプトに一人称が含まれるべき");
     }

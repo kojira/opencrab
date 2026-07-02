@@ -623,7 +623,7 @@ pub async fn run_agent_response(
         let (prompt_tokens, completion_tokens, total_tokens) = log
             .response
             .as_ref()
-            .and_then(|r| r.usage.as_ref())
+            .map(|r| &r.usage)
             .map(|u| {
                 (
                     Some(u.prompt_tokens as i64),
@@ -636,12 +636,12 @@ pub async fn run_agent_response(
         let cache_read_tokens = log
             .response
             .as_ref()
-            .and_then(|r| r.usage.as_ref())
+            .map(|r| &r.usage)
             .map(|u| u.cache_read_input_tokens as i64);
         let cache_creation_tokens = log
             .response
             .as_ref()
-            .and_then(|r| r.usage.as_ref())
+            .map(|r| &r.usage)
             .map(|u| u.cache_creation_input_tokens as i64);
 
         let response_str = log
@@ -660,8 +660,10 @@ pub async fn run_agent_response(
             tool_calls: log
                 .response
                 .as_ref()
-                .filter(|r| !r.tool_calls.is_empty())
-                .and_then(|r| serde_json::to_string(&r.tool_calls).ok()),
+                .and_then(|r| r.first_message())
+                .and_then(|m| m.tool_calls.as_ref())
+                .filter(|tc| !tc.is_empty())
+                .and_then(|tc| serde_json::to_string(tc).ok()),
             latency_ms: Some(log.latency_ms),
             prompt_tokens,
             completion_tokens,

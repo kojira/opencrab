@@ -7,7 +7,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use crate::engine::{ChatMessage, ChatRequestSimple, LlmClient};
+use crate::engine::LlmClient;
+use opencrab_llm_types::{ChatRequest, Message};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyLogIndexStats {
@@ -254,23 +255,11 @@ impl DailyLogIndexer {
                 date, content
             )
         };
-        let request = ChatRequestSimple {
-            model: self.model.clone(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-                tool_call_id: None,
-                tool_calls: vec![],
-                content_parts: vec![],
-                cache_control: None,
-            }],
-            tools: vec![],
-            temperature: Some(0.0),
-            max_tokens: Some(4096),
-            agent_id: None,
-        };
+        let request = ChatRequest::new(self.model.clone(), vec![Message::user(prompt)])
+            .with_temperature(0.0)
+            .with_max_tokens(4096);
         let resp = self.llm_client.chat(request).await?;
-        let text = resp.content.unwrap_or_default();
+        let text = resp.first_text().unwrap_or_default().to_string();
         let json_str = text
             .trim()
             .trim_start_matches("```json")
@@ -539,37 +528,27 @@ impl DailyLogIndexer {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use crate::engine::{ChatRequestSimple, ChatResponseSimple, LlmClient};
+    use crate::engine::{ChatRequest, ChatResponse, LlmClient};
     use async_trait::async_trait;
 
     struct MockLlm;
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn chat(&self, _req: ChatRequestSimple) -> Result<ChatResponseSimple> {
-            Ok(ChatResponseSimple {
-                content: Some(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()))
         }
     }
 
     struct RecordingMockLlm {
-        last_request: Arc<Mutex<Option<ChatRequestSimple>>>,
+        last_request: Arc<Mutex<Option<ChatRequest>>>,
     }
 
     #[async_trait]
     impl LlmClient for RecordingMockLlm {
-        async fn chat(&self, req: ChatRequestSimple) -> Result<ChatResponseSimple> {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
             *self.last_request.lock().unwrap() = Some(req);
-            Ok(ChatResponseSimple {
-                content: Some(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+            Ok(ChatResponse::text(r#"{"day_summary":"テスト要約","topics":[{"title":"トピック1","summary":"トピック1の詳細"}]}"#.to_string()))
         }
     }
 
@@ -704,7 +683,7 @@ mod tests {
         assert_eq!(stats.days_skipped, 0);
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = request.messages[0].text_content().unwrap_or("");
         assert!(prompt.contains(&content));
     }
 
@@ -726,7 +705,7 @@ mod tests {
         assert_eq!(stats.days_indexed, 1);
 
         let request = last_request.lock().unwrap().clone().unwrap();
-        let prompt = &request.messages[0].content;
+        let prompt = request.messages[0].text_content().unwrap_or("");
         assert!(prompt.contains("のすたろう"), "プロンプトにpersona_nameが含まれるべき");
         assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
         assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸");

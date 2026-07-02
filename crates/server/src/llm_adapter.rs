@@ -4,14 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use opencrab_core::{
-    ChatMessage, ChatRequestSimple, ChatResponseSimple, LlmClient, ToolCall as CoreToolCall,
-    ToolDefinition, UsageInfo,
-};
-use opencrab_llm::message::{
-    ChatRequest, Choice, FinishReason, FunctionCall, FunctionDefinition, Message, MessageContent,
-    Role, ToolCall as LlmToolCall, Usage,
-};
+use opencrab_core::{ChatRequest, ChatResponse, LlmClient};
 use opencrab_llm::pricing::PricingRegistry;
 use opencrab_llm::router::LlmRouter;
 
@@ -28,10 +21,13 @@ pub struct MetricsContext {
     pub current_purpose: Arc<Mutex<String>>,
 }
 
-/// Adapter that wraps an `LlmRouter` and implements `LlmClient`
-/// so that `SkillEngine` can use it directly.
+/// Adapter that wraps an `LlmRouter` and implements `LlmClient` so that
+/// `SkillEngine` can use it directly.
 ///
-/// Optionally records usage metrics to the DB after each call.
+/// Since the engine and the provider/router layer now share one canonical
+/// message model (`opencrab-llm-types`), this adapter no longer converts
+/// between two representations — it forwards the request to the router and,
+/// optionally, records usage metrics to the DB.
 pub struct LlmRouterAdapter {
     router: Arc<LlmRouter>,
     metrics_ctx: Option<MetricsContext>,
@@ -60,19 +56,16 @@ impl LlmRouterAdapter {
 
 #[async_trait]
 impl LlmClient for LlmRouterAdapter {
-    async fn chat(&self, request: ChatRequestSimple) -> Result<ChatResponseSimple> {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         let model_requested = request.model.clone();
-        let mut llm_request = to_llm_request(request);
-
+        let mut request = request;
         if self.agent_id.is_some() {
-            llm_request.agent_id = self.agent_id.clone();
+            request.agent_id = self.agent_id.clone();
         }
 
         let start = std::time::Instant::now();
-        let llm_response = self.router.chat_completion(llm_request).await?;
+        let response = self.router.chat_completion(request).await?;
         let latency_ms = start.elapsed().as_millis() as i64;
-
-        let response = from_llm_response(llm_response);
 
         // Record metrics to DB if context is available.
         if let Some(ref ctx) = self.metrics_ctx {
@@ -84,17 +77,9 @@ impl LlmClient for LlmRouterAdapter {
                 .resolve_model(&model_requested)
                 .unwrap_or_else(|_| ("unknown".to_string(), model_requested.clone()));
 
-            let (input_tokens, output_tokens, total_tokens) = response
-                .usage
-                .as_ref()
-                .map(|u| {
-                    (
-                        u.prompt_tokens as i32,
-                        u.completion_tokens as i32,
-                        u.total_tokens as i32,
-                    )
-                })
-                .unwrap_or((0, 0, 0));
+            let input_tokens = response.usage.prompt_tokens as i32;
+            let output_tokens = response.usage.completion_tokens as i32;
+            let total_tokens = response.usage.total_tokens as i32;
 
             let estimated_cost = ctx
                 .pricing
@@ -136,313 +121,5 @@ impl LlmClient for LlmRouterAdapter {
         }
 
         Ok(response)
-    }
-}
-
-/// Convert core ChatRequestSimple → llm ChatRequest.
-fn to_llm_request(req: ChatRequestSimple) -> ChatRequest {
-    let messages: Vec<Message> = req.messages.into_iter().map(to_llm_message).collect();
-
-    let functions: Option<Vec<FunctionDefinition>> = if req.tools.is_empty() {
-        None
-    } else {
-        Some(req.tools.into_iter().map(to_function_def).collect())
-    };
-
-    ChatRequest {
-        model: req.model,
-        messages,
-        functions,
-        function_call: None,
-        temperature: req.temperature.map(|t| t as f64),
-        max_tokens: req.max_tokens,
-        stop: None,
-        stream: None,
-        metadata: Default::default(),
-        agent_id: req.agent_id,
-    }
-}
-
-/// Convert a core ChatMessage → llm Message.
-fn to_llm_message(msg: ChatMessage) -> Message {
-    let role = match msg.role.as_str() {
-        "system" => Role::System,
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
-        "tool" => Role::Tool,
-        _ => Role::User,
-    };
-
-    let tool_calls = if msg.tool_calls.is_empty() {
-        None
-    } else {
-        Some(
-            msg.tool_calls
-                .into_iter()
-                .map(|tc| LlmToolCall {
-                    id: tc.id,
-                    call_type: "function".to_string(),
-                    function: FunctionCall {
-                        name: tc.name,
-                        arguments: serde_json::to_string(&tc.arguments)
-                            .unwrap_or_else(|_| "{}".to_string()),
-                    },
-                })
-                .collect(),
-        )
-    };
-
-    // Build content: if content_parts is non-empty, use multimodal MessageContent::Multi
-    let content = if !msg.content_parts.is_empty() {
-        use opencrab_core::ChatContentPart;
-        use opencrab_llm::message::{ContentPart as LlmContentPart, ImageUrl};
-        let parts: Vec<LlmContentPart> = msg
-            .content_parts
-            .into_iter()
-            .map(|p| match p {
-                ChatContentPart::Text { text } => LlmContentPart::Text { text },
-                ChatContentPart::ImageUrl { url, detail } => LlmContentPart::ImageUrl {
-                    image_url: ImageUrl { url, detail },
-                },
-            })
-            .collect();
-        Some(MessageContent::Multi(parts))
-    } else if msg.content.is_empty() {
-        None
-    } else {
-        Some(MessageContent::Text(msg.content))
-    };
-
-    // Log the content type variant for system messages to help debug how the
-    // system prompt is being serialized (string vs. block array).
-    if role == Role::System {
-        let content_type = match &content {
-            None => "None",
-            Some(MessageContent::Text(_)) => "Text(String)",
-            Some(MessageContent::Image { .. }) => "Image",
-            Some(MessageContent::Multi(_)) => "Multi(Vec<ContentPart>)",
-        };
-        tracing::debug!(content_type, "to_llm_message: system message content type");
-
-        if content.is_none() {
-            tracing::warn!("to_llm_message: system message has None content - instructions will be missing in chatgpt request");
-        }
-    }
-
-    Message {
-        role,
-        content,
-        name: None,
-        function_call: None,
-        tool_calls,
-        tool_call_id: msg.tool_call_id,
-        cache_control: msg.cache_control.map(|cc| {
-            let mut obj = serde_json::json!({"type": cc.r#type});
-            if let Some(ttl) = cc.ttl {
-                obj["ttl"] = serde_json::json!(ttl);
-            }
-            obj
-        }),
-    }
-}
-
-/// Convert a core ToolDefinition → llm FunctionDefinition.
-fn to_function_def(td: ToolDefinition) -> FunctionDefinition {
-    FunctionDefinition {
-        name: td.name,
-        description: if td.description.is_empty() {
-            None
-        } else {
-            Some(td.description)
-        },
-        parameters: td.parameters,
-        cache_control: td.cache_control.map(|cc| {
-            let mut obj = serde_json::json!({"type": cc.r#type});
-            if let Some(ttl) = cc.ttl {
-                obj["ttl"] = serde_json::json!(ttl);
-            }
-            obj
-        }),
-    }
-}
-
-/// Convert llm ChatResponse → core ChatResponseSimple.
-fn from_llm_response(resp: opencrab_llm::message::ChatResponse) -> ChatResponseSimple {
-    let first_choice: Option<&Choice> = resp.choices.first();
-
-    let content = first_choice.and_then(|c| c.message.text_content().map(|s| s.to_string()));
-
-    let tool_calls: Vec<CoreToolCall> = first_choice
-        .and_then(|c| c.message.tool_calls.as_ref())
-        .map(|tcs| {
-            tcs.iter()
-                .map(|tc| CoreToolCall {
-                    id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    arguments: serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::Value::Object(Default::default())),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let finish_reason = first_choice
-        .and_then(|c| c.finish_reason.as_ref())
-        .map(|fr| match fr {
-            FinishReason::Stop => "stop".to_string(),
-            FinishReason::Length => "length".to_string(),
-            FinishReason::FunctionCall => "function_call".to_string(),
-            FinishReason::ToolCalls => "tool_calls".to_string(),
-            FinishReason::ContentFilter => "content_filter".to_string(),
-        })
-        .unwrap_or_else(|| "stop".to_string());
-
-    let usage = Usage {
-        prompt_tokens: resp.usage.prompt_tokens,
-        completion_tokens: resp.usage.completion_tokens,
-        total_tokens: resp.usage.total_tokens,
-        cache_read_input_tokens: resp.usage.cache_read_input_tokens,
-        cache_creation_input_tokens: resp.usage.cache_creation_input_tokens,
-    };
-
-    ChatResponseSimple {
-        content,
-        tool_calls,
-        finish_reason,
-        usage: Some(UsageInfo {
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-            total_tokens: usage.total_tokens,
-            cache_read_input_tokens: usage.cache_read_input_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens,
-        }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_to_llm_message_system() {
-        let msg = ChatMessage {
-            role: "system".to_string(),
-            content: "You are helpful.".to_string(),
-            tool_call_id: None,
-            tool_calls: vec![],
-            content_parts: vec![],
-            cache_control: None,
-        };
-        let llm_msg = to_llm_message(msg);
-        assert_eq!(llm_msg.role, Role::System);
-        assert_eq!(llm_msg.text_content(), Some("You are helpful."));
-    }
-
-    #[test]
-    fn test_to_llm_message_with_tool_calls() {
-        let msg = ChatMessage {
-            role: "assistant".to_string(),
-            content: String::new(),
-            tool_call_id: None,
-            tool_calls: vec![CoreToolCall {
-                id: "tc-1".to_string(),
-                name: "search".to_string(),
-                arguments: serde_json::json!({"query": "test"}),
-            }],
-            content_parts: vec![],
-            cache_control: None,
-        };
-        let llm_msg = to_llm_message(msg);
-        assert_eq!(llm_msg.role, Role::Assistant);
-        let tcs = llm_msg.tool_calls.unwrap();
-        assert_eq!(tcs.len(), 1);
-        assert_eq!(tcs[0].function.name, "search");
-        assert_eq!(tcs[0].function.arguments, r#"{"query":"test"}"#);
-    }
-
-    #[test]
-    fn test_from_llm_response_text() {
-        let resp = opencrab_llm::message::ChatResponse {
-            id: "r1".to_string(),
-            model: "test".to_string(),
-            choices: vec![Choice {
-                index: 0,
-                message: Message::assistant("Hello!"),
-                finish_reason: Some(FinishReason::Stop),
-            }],
-            usage: Usage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            created: 0,
-        };
-        let simple = from_llm_response(resp);
-        assert_eq!(simple.content, Some("Hello!".to_string()));
-        assert!(simple.tool_calls.is_empty());
-        assert_eq!(simple.finish_reason, "stop");
-    }
-
-    #[test]
-    fn test_from_llm_response_tool_calls() {
-        let mut msg = Message::assistant("");
-        msg.content = None;
-        msg.tool_calls = Some(vec![LlmToolCall {
-            id: "tc-1".to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: "learn".to_string(),
-                arguments: r#"{"skill":"test"}"#.to_string(),
-            },
-        }]);
-
-        let resp = opencrab_llm::message::ChatResponse {
-            id: "r2".to_string(),
-            model: "test".to_string(),
-            choices: vec![Choice {
-                index: 0,
-                message: msg,
-                finish_reason: Some(FinishReason::ToolCalls),
-            }],
-            usage: Usage::default(),
-            created: 0,
-        };
-        let simple = from_llm_response(resp);
-        assert!(simple.content.is_none());
-        assert_eq!(simple.tool_calls.len(), 1);
-        assert_eq!(simple.tool_calls[0].name, "learn");
-        assert_eq!(simple.tool_calls[0].arguments["skill"], "test");
-        assert_eq!(simple.finish_reason, "tool_calls");
-    }
-
-    #[test]
-    fn test_to_llm_message_with_image_parts() {
-        use opencrab_core::ChatContentPart;
-        let msg = ChatMessage {
-            role: "user".to_string(),
-            content: String::new(),
-            tool_call_id: None,
-            tool_calls: vec![],
-            content_parts: vec![
-                ChatContentPart::Text {
-                    text: "What is this?".to_string(),
-                },
-                ChatContentPart::ImageUrl {
-                    url: "https://cdn.discordapp.com/attachments/123/456/test.png".to_string(),
-                    detail: Some("auto".to_string()),
-                },
-            ],
-            cache_control: None,
-        };
-        let llm_msg = to_llm_message(msg);
-        assert_eq!(llm_msg.role, Role::User);
-        match llm_msg.content {
-            Some(MessageContent::Multi(parts)) => {
-                assert_eq!(parts.len(), 2);
-            }
-            other => panic!("Expected Multi content, got {:?}", other),
-        }
     }
 }

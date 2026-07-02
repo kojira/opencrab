@@ -60,8 +60,8 @@ struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
 impl opencrab_core::LlmClient for ArcLlmClient {
     async fn chat(
         &self,
-        request: opencrab_core::ChatRequestSimple,
-    ) -> anyhow::Result<opencrab_core::ChatResponseSimple> {
+        request: opencrab_core::ChatRequest,
+    ) -> anyhow::Result<opencrab_core::ChatResponse> {
         self.0.chat(request).await
     }
 }

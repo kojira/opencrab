@@ -151,7 +151,7 @@ impl IndexQualityMetrics {
 mod tests {
     use super::*;
     use crate::engine::LlmClient;
-    use crate::engine::{ChatRequestSimple, ChatResponseSimple};
+    use crate::engine::{ChatRequest, ChatResponse};
     use crate::memory_index::index_builder::IndexBuilder;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -183,15 +183,8 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for MockLlm {
-        async fn chat(&self, _request: ChatRequestSimple) -> Result<ChatResponseSimple> {
-            Ok(ChatResponseSimple {
-                content: Some(
-                    r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
-                ),
-                tool_calls: vec![],
-                finish_reason: "stop".to_string(),
-                usage: None,
-            })
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
         }
     }
 

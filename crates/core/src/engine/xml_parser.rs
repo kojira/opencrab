@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::types::ToolCall;
+use opencrab_llm_types::{FunctionCall, ToolCall};
 
 // ---------------------------------------------------------------------------
 // XML <function_calls> parser helpers
@@ -58,8 +58,12 @@ pub fn parse_xml_tool_calls(content: &str) -> Vec<ToolCall> {
 
                 calls.push(ToolCall {
                     id,
-                    name: tool_name,
-                    arguments,
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: tool_name,
+                        arguments: serde_json::to_string(&arguments)
+                            .unwrap_or_else(|_| "{}".to_string()),
+                    },
                 });
             }
 
@@ -175,11 +179,12 @@ mod tests {
 
         let calls = parse_xml_tool_calls(xml);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "execute_shell");
+        assert_eq!(calls[0].function.name, "execute_shell");
         assert_eq!(calls[0].id, "xml_tc_0");
-        assert_eq!(calls[0].arguments["command"], "curl");
+        let call_args = calls[0].arguments_json();
+        assert_eq!(call_args["command"], "curl");
         // args should be parsed as a JSON array
-        let args = &calls[0].arguments["args"];
+        let args = &call_args["args"];
         assert!(args.is_array());
         assert_eq!(args[0], "https://wttr.in/Hakata?format=%l:+%c+%t");
     }
@@ -194,9 +199,9 @@ mod tests {
 
         let calls = parse_xml_tool_calls(xml);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "send_message");
+        assert_eq!(calls[0].function.name, "send_message");
         // Single text param should be a JSON string
-        assert_eq!(calls[0].arguments["text"], "Hello world");
+        assert_eq!(calls[0].arguments_json()["text"], "Hello world");
     }
 
     #[test]
@@ -218,9 +223,9 @@ mod tests {
 
         let calls = parse_xml_tool_calls(xml);
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].name, "tool_a");
+        assert_eq!(calls[0].function.name, "tool_a");
         assert_eq!(calls[0].id, "xml_tc_0");
-        assert_eq!(calls[1].name, "tool_b");
+        assert_eq!(calls[1].function.name, "tool_b");
         assert_eq!(calls[1].id, "xml_tc_1");
     }
 
@@ -238,7 +243,7 @@ mod tests {
 
         let calls = parse_xml_tool_calls(xml);
         assert_eq!(calls.len(), 1);
-        let args = &calls[0].arguments;
+        let args = calls[0].arguments_json();
         assert!(args["arr"].is_array());
         assert_eq!(args["arr"][0], 1);
         assert!(args["obj"].is_object());

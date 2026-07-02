@@ -3,6 +3,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Canonical LLM message model shared with the provider/router layer.
+pub use opencrab_llm_types::{ChatRequest, ChatResponse, FunctionDefinition, ToolCall};
+
 // ---------------------------------------------------------------------------
 // Trait: ActionExecutor
 // ---------------------------------------------------------------------------
@@ -40,123 +43,20 @@ pub trait ActionExecutor: Send + Sync {
     }
 
     /// List available action (tool) definitions for LLM function calling.
-    fn list_tools(&self) -> Vec<ToolDefinition>;
+    fn list_tools(&self) -> Vec<FunctionDefinition>;
 }
 
 // ---------------------------------------------------------------------------
 // Trait: LlmClient
 // ---------------------------------------------------------------------------
 
-/// Content part for multimodal messages (vision support).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ChatContentPart {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "image_url")]
-    ImageUrl { url: String, detail: Option<String> },
-}
-
-/// Cache control directive for prompt caching.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheControl {
-    pub r#type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
-}
-
-/// A simplified chat message for the engine's LLM interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    /// Role: "system", "user", "assistant", or "tool".
-    pub role: String,
-    /// Text content.
-    pub content: String,
-    /// Tool call results (only for role = "tool").
-    pub tool_call_id: Option<String>,
-    /// Tool calls requested by the assistant (only for role = "assistant").
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
-    /// Multimodal content parts (vision). If non-empty, takes priority over `content`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content_parts: Vec<ChatContentPart>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-}
-
-/// A tool/function definition for LLM function calling.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    /// The name of the tool/function.
-    pub name: String,
-    /// Description of what the tool does.
-    pub description: String,
-    /// JSON Schema describing the parameters.
-    pub parameters: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-}
-
-/// A tool call requested by the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// Unique ID for this tool call (used to match results).
-    pub id: String,
-    /// The name of the function to call.
-    pub name: String,
-    /// The arguments to pass (as a JSON object).
-    pub arguments: Value,
-}
-
-/// A simplified chat request for the engine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatRequestSimple {
-    /// The model to use (provider-specific identifier).
-    pub model: String,
-    /// Conversation messages.
-    pub messages: Vec<ChatMessage>,
-    /// Available tools for function calling.
-    pub tools: Vec<ToolDefinition>,
-    /// Temperature for generation (0.0 to 2.0).
-    pub temperature: Option<f32>,
-    /// Maximum tokens to generate.
-    pub max_tokens: Option<u32>,
-    /// Identity of the agent making this request. Providers can derive
-    /// agent-specific context (e.g. a workspace path) from this.
-    #[serde(default)]
-    pub agent_id: Option<String>,
-}
-
-/// A simplified chat response from the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatResponseSimple {
-    /// Text content in the response (may be empty if only tool calls).
-    pub content: Option<String>,
-    /// Tool calls the LLM wants to make.
-    pub tool_calls: Vec<ToolCall>,
-    /// Whether the response is complete or was truncated.
-    pub finish_reason: String,
-    /// Token usage information.
-    pub usage: Option<UsageInfo>,
-}
-
-/// Token usage statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageInfo {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
-    pub cache_read_input_tokens: u32,
-    pub cache_creation_input_tokens: u32,
-}
-
 /// Log entry for a single LLM call, passed to the log callback.
 #[derive(Debug, Clone)]
 pub struct LlmCallLog {
     /// The full request sent to the LLM.
-    pub request: ChatRequestSimple,
+    pub request: ChatRequest,
     /// The response from the LLM (None if an error occurred).
-    pub response: Option<ChatResponseSimple>,
+    pub response: Option<ChatResponse>,
     /// Error message string if the LLM call failed.
     pub error_str: Option<String>,
     /// Latency of the LLM call in milliseconds.
@@ -170,11 +70,13 @@ pub struct LlmCallLog {
 /// Trait for LLM chat completion.
 ///
 /// Defined in `opencrab-core` so the engine can call the LLM without
-/// depending on `opencrab-llm` directly. The LLM crate implements this trait.
+/// depending on `opencrab-llm` (providers/router) directly. The server's
+/// router adapter and test mocks implement this trait over the canonical
+/// message model.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Send a chat request and receive a response.
-    async fn chat(&self, request: ChatRequestSimple) -> Result<ChatResponseSimple>;
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse>;
 }
 
 /// The result of an engine run.
