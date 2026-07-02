@@ -26,7 +26,55 @@ struct Migration {
 ///   番号付きマイグレーションもここへ追加する**こと。忘れると既存DBだけ列が欠ける。
 /// - 各 `up` は自身のトランザクション内で実行される（`run_migrations` 参照）。
 ///   `journal_mode`/`VACUUM` 等の非トランザクショナルな操作は `up` 内で行わない。
-const MIGRATIONS: &[Migration] = &[];
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 2,
+    description: "task ledger: goal/contract/progress (issue #50)",
+    up: |conn| conn.execute_batch(TASK_LEDGER_SQL),
+}];
+
+/// version 2: タスク台帳。
+///
+/// `SCHEMA_SQL` 末尾の同名ブロックと**文面を完全一致**させること
+/// （`task_ledger_schema_parity` テストが sqlite_master の SQL 文字列で比較する）。
+const TASK_LEDGER_SQL: &str = r#"
+-- ============================================
+-- TASK LEDGER: 前向きワーキング状態（goal/契約/進捗/決定）
+-- ============================================
+CREATE TABLE IF NOT EXISTS task_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    contract TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'done', 'abandoned')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_ledger_session
+    ON task_ledger(agent_id, session_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_ledger_one_active
+    ON task_ledger(agent_id, session_id) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS task_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES task_ledger(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'progress'
+        CHECK (kind IN ('progress', 'decision', 'blocker')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
+"#;
+
+/// このバイナリが知る最新スキーマバージョン。
+#[cfg(test)]
+fn latest_version() -> i64 {
+    MIGRATIONS
+        .last()
+        .map(|m| m.version)
+        .unwrap_or(BASELINE_VERSION)
+}
 
 /// 現在のスキーマバージョン（`PRAGMA user_version`）を読み取る。
 fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -1158,6 +1206,35 @@ CREATE INDEX IF NOT EXISTS idx_pending_interactions_session
     ON pending_interactions(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_pending_interactions_surface
     ON pending_interactions(surface_id);
+
+-- ============================================
+-- TASK LEDGER: 前向きワーキング状態（goal/契約/進捗/決定）
+-- ============================================
+CREATE TABLE IF NOT EXISTS task_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    contract TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'done', 'abandoned')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_ledger_session
+    ON task_ledger(agent_id, session_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_ledger_one_active
+    ON task_ledger(agent_id, session_id) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS task_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES task_ledger(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'progress'
+        CHECK (kind IN ('progress', 'decision', 'blocker')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_progress_task ON task_progress(task_id);
 "#;
 
 #[cfg(test)]
@@ -1170,7 +1247,7 @@ mod migration_tests {
     #[test]
     fn baseline_reconciles_pre_versioning_db() {
         let conn = crate::init_memory().expect("init");
-        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
         // 旧DBを模す: version を 0 に戻し、baseline が再追加する列を落とす。
         conn.execute_batch("PRAGMA user_version = 0").unwrap();
@@ -1178,10 +1255,10 @@ mod migration_tests {
             .unwrap();
         assert!(!column_exists(&conn, "skills", "archived").unwrap());
 
-        // 再初期化で baseline が走り、列が復活しスタンプされる。
+        // 再初期化で baseline + 番号付きマイグレーションが走り、列が復活し最新版にスタンプされる。
         initialize(&conn).expect("re-initialize");
         assert!(column_exists(&conn, "skills", "archived").unwrap());
-        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
     }
 
     /// B. 冪等性: baseline 済みDBで initialize を再実行しても破壊的再構築は走らず、
@@ -1195,7 +1272,7 @@ mod migration_tests {
         .unwrap();
 
         initialize(&conn).expect("second initialize");
-        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
         let n: i64 = conn
             .query_row(
@@ -1216,6 +1293,8 @@ mod migration_tests {
     #[test]
     fn run_migrations_applies_and_then_skips() {
         let conn = crate::init_memory().expect("init");
+        // 実 MIGRATIONS 適用済み（= 最新版）なので、fake v2 が未適用となる状態に戻す。
+        conn.execute_batch("PRAGMA user_version = 1").unwrap();
         let fake = &[Migration {
             version: 2,
             description: "add test_marker",
@@ -1241,6 +1320,8 @@ mod migration_tests {
     #[test]
     fn failed_migration_rolls_back_and_leaves_version() {
         let conn = crate::init_memory().expect("init");
+        // 実 MIGRATIONS 適用済みなので、fake v2 が適用対象となる状態に戻す。
+        conn.execute_batch("PRAGMA user_version = 1").unwrap();
         let fake = &[Migration {
             version: 2,
             description: "fails",
@@ -1264,6 +1345,57 @@ mod migration_tests {
             );
             prev = m.version;
         }
+    }
+
+    /// G. v1 DB が v2 マイグレーションでタスク台帳テーブルを獲得する。
+    #[test]
+    fn task_ledger_migration_upgrades_v1_db() {
+        let conn = crate::init_memory().expect("init");
+        // v1 相当の既存DBを模す: タスク台帳を落として version 1 に戻す。
+        conn.execute_batch(
+            "DROP TABLE task_progress; DROP TABLE task_ledger; PRAGMA user_version = 1",
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "task_ledger").unwrap());
+
+        initialize(&conn).expect("upgrade v1 -> v2");
+        assert!(table_exists(&conn, "task_ledger").unwrap());
+        assert!(table_exists(&conn, "task_progress").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), 2);
+    }
+
+    /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する
+    /// （両所への二重記載がドリフトしていないことの検証）。
+    #[test]
+    fn task_ledger_schema_parity() {
+        let dump = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE name IN ('task_ledger','task_progress',
+                                'idx_task_ledger_session','idx_task_ledger_one_active',
+                                'idx_task_progress_task')
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+
+        // 新規DB: SCHEMA_SQL 由来（baseline 時点でテーブルが出来ており、v2 は no-op）。
+        let fresh = crate::init_memory().expect("fresh");
+        // 既存DB: baseline 後に v2 マイグレーション由来で作成。
+        let migrated = crate::init_memory().expect("migrated");
+        migrated
+            .execute_batch(
+                "DROP TABLE task_progress; DROP TABLE task_ledger; PRAGMA user_version = 1",
+            )
+            .unwrap();
+        initialize(&migrated).expect("re-migrate");
+
+        assert_eq!(dump(&fresh), dump(&migrated));
+        assert_eq!(dump(&fresh).len(), 5, "expected 2 tables + 3 indexes");
     }
 
     /// F. ダウングレードガード: DB が既知の最新版より新しい場合はエラーにする。
