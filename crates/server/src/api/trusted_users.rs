@@ -15,6 +15,7 @@ pub struct TrustedUserDto {
     pub permission: String,
     pub created_by: String,
     pub created_at: String,
+    pub display_name: String,
 }
 
 fn row_to_dto(r: opencrab_db::queries::TrustedDiscordUserRow) -> TrustedUserDto {
@@ -25,6 +26,7 @@ fn row_to_dto(r: opencrab_db::queries::TrustedDiscordUserRow) -> TrustedUserDto 
         permission: r.permission,
         created_by: r.created_by,
         created_at: r.created_at,
+        display_name: r.display_name,
     }
 }
 
@@ -41,6 +43,8 @@ pub async fn list_trusted_users(
 pub struct AddTrustedUserRequest {
     pub discord_user_id: String,
     pub permission: Option<String>,
+    /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
+    pub display_name: Option<String>,
 }
 
 pub async fn add_trusted_user(
@@ -52,6 +56,7 @@ pub async fn add_trusted_user(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let permission = req.permission.unwrap_or_else(|| "user".to_string());
+    let display_name = req.display_name.unwrap_or_default();
 
     opencrab_db::queries::add_trusted_user(
         &conn,
@@ -61,6 +66,7 @@ pub async fn add_trusted_user(
         &permission,
         "owner",
         &now,
+        &display_name,
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -71,12 +77,14 @@ pub async fn add_trusted_user(
         permission,
         created_by: "owner".to_string(),
         created_at: now,
+        display_name,
     }))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateTrustedUserRequest {
-    pub permission: String,
+    pub permission: Option<String>,
+    pub display_name: Option<String>,
 }
 
 pub async fn update_trusted_user(
@@ -85,9 +93,17 @@ pub async fn update_trusted_user(
     Json(req): Json<UpdateTrustedUserRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = state.db.lock().unwrap();
-    let updated =
-        opencrab_db::queries::update_trusted_user_permission(&conn, &user_id, &req.permission)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut updated = false;
+    if let Some(ref permission) = req.permission {
+        updated |=
+            opencrab_db::queries::update_trusted_user_permission(&conn, &user_id, permission)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    if let Some(ref display_name) = req.display_name {
+        updated |=
+            opencrab_db::queries::update_trusted_user_display_name(&conn, &user_id, display_name)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     Ok(Json(serde_json::json!({ "updated": updated })))
 }
 

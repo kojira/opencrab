@@ -25,6 +25,7 @@ mod subtask_webhook;
 mod ui;
 mod webhook;
 
+pub(crate) use peer_review::record_peer_review_reply;
 pub use subtask_engine::spawn_activity_tool_event_sink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
@@ -867,6 +868,10 @@ impl GatewayActions for DiscordGatewayActions {
                         "instructions": {
                             "type": "string",
                             "description": "レビュアーに重点的に見てほしい観点（省略可）。"
+                        },
+                        "reviewer": {
+                            "type": "string",
+                            "description": "指名したいレビュアー（省略可）。システムプロンプトの Peer Reviewers 一覧にある表示名または Discord user id。指定するとヘッダにメンションが付く。"
                         }
                     }
                 }),

@@ -12,7 +12,7 @@ use serenity::all::{ChannelId, CreateMessage};
 use tracing::{error, warn};
 
 use opencrab_core::llm_text::truncate_chars;
-use opencrab_gateway::{GatewayActionResult, PEER_REVIEW_REQUEST_MARKER};
+use opencrab_gateway::{GatewayActionResult, PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER};
 
 use super::webhook::build_part_messages;
 use super::DiscordGatewayActions;
@@ -33,6 +33,8 @@ pub(crate) struct PeerReviewHeader<'a> {
     /// (task_id, goal, contract)
     pub task: Option<(i64, &'a str, Option<&'a str>)>,
     pub instructions: Option<&'a str>,
+    /// 指名レビュアーの Discord user id（メンション用）。
+    pub mention: Option<u64>,
 }
 
 /// 1通目 = ヘッダ、2通目以降 = `part X/N` + RAW content（切り詰めない）。
@@ -44,15 +46,20 @@ pub(crate) fn build_peer_review_messages(
     let parts = build_part_messages(content, limit);
     let part_count = parts.len();
 
-    // ヘッダは1通（2000 chars 上限）に収める: 可変長フィールドは切り詰める
+    // ヘッダは1通（2000 chars 上限）に収める: 可変長フィールドは切り詰める。
+    // メンションは marker の後ろに置く（レビュアー側の starts-with 判定を壊さない）。
+    let mention = header
+        .mention
+        .map(|id| format!(" <@{id}>"))
+        .unwrap_or_default();
     let mut head = String::new();
     match header.task {
         Some((task_id, _, _)) => head.push_str(&format!(
-            "{PEER_REVIEW_REQUEST_MARKER} from {} — task #{task_id}\n",
+            "{PEER_REVIEW_REQUEST_MARKER}{mention} from {} — task #{task_id}\n",
             truncate_chars(header.agent_name, 100),
         )),
         None => head.push_str(&format!(
-            "{PEER_REVIEW_REQUEST_MARKER} from {} — no active task\n",
+            "{PEER_REVIEW_REQUEST_MARKER}{mention} from {} — no active task\n",
             truncate_chars(header.agent_name, 100),
         )),
     }
@@ -84,6 +91,198 @@ pub(crate) fn build_peer_review_messages(
     msgs.push(head);
     msgs.extend(parts);
     msgs
+}
+
+/// `[Peer Review]` 返信のパース結果。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PeerReviewVerdict {
+    /// 0.0-1.0 に clamp 済み。抽出できなければ None。
+    pub score: Option<f64>,
+    pub gaps: Vec<String>,
+    pub summary: String,
+}
+
+/// `[Peer Review]` で始まるメッセージから score / gaps / summary を抽出する。
+///
+/// レビュアーは LLM なので形式ゆれに寛容にパースする（フィールド欠落でも Some を返す）。
+/// marker で始まらないメッセージは None。
+pub(crate) fn parse_peer_review_reply(text: &str) -> Option<PeerReviewVerdict> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with(PEER_REVIEW_REPLY_MARKER) {
+        return None;
+    }
+    let body = &trimmed[PEER_REVIEW_REPLY_MARKER.len()..];
+    let lower = body.to_ascii_lowercase();
+
+    // score: の後の最初の数値（"0.8", "0.8/1.0", "0.8 (…)" 等の先頭数値を拾う）
+    let score = lower.find("score").and_then(|pos| {
+        let after = &body[pos + "score".len()..];
+        let after = after.trim_start_matches([':', ' ', '=']);
+        let num: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        num.parse::<f64>().ok().map(|v| v.clamp(0.0, 1.0))
+    });
+
+    // gaps: から summary:（または末尾）まで
+    let gaps = match lower.find("gaps") {
+        Some(pos) => {
+            let after = &body[pos + "gaps".len()..];
+            let after = after.trim_start_matches([':', ' ']);
+            let end = after.to_ascii_lowercase().find("summary").unwrap_or(after.len());
+            // インライン形式（"Gaps: none, Summary: ..."）の区切りカンマ等を落とす
+            let strip = |s: &str| {
+                s.trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                    .to_string()
+            };
+            let section = strip(&after[..end]);
+            if section.eq_ignore_ascii_case("none") || section.is_empty() {
+                Vec::new()
+            } else {
+                // "- x" 行のリスト、または改行区切りのインライン
+                let items: Vec<String> = section
+                    .lines()
+                    .map(|l| strip(l.trim().trim_start_matches('-')))
+                    .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("none"))
+                    .collect();
+                items
+            }
+        }
+        None => Vec::new(),
+    };
+
+    // summary: の後（無ければ本文先頭 200 chars をフォールバック）
+    let summary = match lower.find("summary") {
+        Some(pos) => {
+            let after = &body[pos + "summary".len()..];
+            after.trim_start_matches([':', ' ']).trim().to_string()
+        }
+        None => truncate_chars(body.trim(), 200),
+    };
+
+    Some(PeerReviewVerdict {
+        score,
+        gaps,
+        summary,
+    })
+}
+
+/// reviewer 指定（display_name または Discord user id）を Discord user id に解決する。
+/// 未解決の場合は Err に登録済みレビュアーの一覧文字列を返す。
+pub(crate) fn resolve_reviewer(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    reviewer: &str,
+) -> Result<u64, String> {
+    let reviewer = reviewer.trim();
+    // `<@123>` / `123` の両形式を受け付ける
+    let bare = reviewer
+        .trim_start_matches("<@")
+        .trim_end_matches('>')
+        .trim();
+    if let Ok(id) = bare.parse::<u64>() {
+        return Ok(id);
+    }
+    let co_agents: Vec<_> = opencrab_db::queries::list_trusted_users(conn, agent_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|u| u.permission == "co_agent")
+        .collect();
+    if let Some(matched) = co_agents
+        .iter()
+        .find(|u| u.display_name.eq_ignore_ascii_case(reviewer))
+    {
+        if let Ok(id) = matched.discord_user_id.parse::<u64>() {
+            return Ok(id);
+        }
+    }
+    let available = if co_agents.is_empty() {
+        "(なし — trusted-users API で permission=co_agent + display_name を登録してください)".to_string()
+    } else {
+        co_agents
+            .iter()
+            .map(|u| {
+                if u.display_name.is_empty() {
+                    u.discord_user_id.clone()
+                } else {
+                    format!("{} (<@{}>)", u.display_name, u.discord_user_id)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(available)
+}
+
+/// パース済み verdict をタスク台帳の progress 文字列に整形する。
+pub(crate) fn format_peer_review_progress(verdict: &PeerReviewVerdict, reviewer: &str) -> String {
+    let score = verdict
+        .score
+        .map(|s| format!("{s:.2}"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let gaps = if verdict.gaps.is_empty() {
+        "none".to_string()
+    } else {
+        truncate_chars(&verdict.gaps.join("; "), 800)
+    };
+    format!(
+        "[peer review] score {score} (from {reviewer}): {}; gaps: {gaps}",
+        truncate_chars(&verdict.summary, 300),
+    )
+}
+
+/// 受信した `[Peer Review]` 返信を requester の active タスクへ自動記録する（#58）。
+///
+/// - marker で始まらないメッセージ / active タスクが無いセッションでは何もしない。
+/// - 記録は追加処理: メッセージ自体はこの後通常どおり LLM にも流れる（会話には speech として残る）。
+/// - session_logs には重ねて記録しない（返信自体が speech として会話に残るため二重描画を避ける。
+///   台帳経由で次ターンの [Task Ledger] に出る）。
+///
+/// 記録した場合 true を返す。
+pub(crate) fn record_peer_review_reply(
+    db: &opencrab_db::Db,
+    agent_id: &str,
+    session_id: &str,
+    reviewer_name: &str,
+    text: &str,
+) -> bool {
+    let Some(verdict) = parse_peer_review_reply(text) else {
+        return false;
+    };
+    let Ok(conn) = db.lock() else {
+        warn!("record_peer_review_reply: DB lock failed, review not recorded");
+        return false;
+    };
+    let Some(task) =
+        opencrab_db::queries::get_active_task_for_session(&conn, agent_id, session_id)
+            .ok()
+            .flatten()
+    else {
+        tracing::debug!(
+            agent_id = %agent_id,
+            session_id = %session_id,
+            "peer review reply received but no active task — skipping auto-record"
+        );
+        return false;
+    };
+    let content = format_peer_review_progress(&verdict, reviewer_name);
+    match opencrab_db::queries::insert_task_progress(&conn, task.id, "progress", &content) {
+        Ok(_) => {
+            tracing::info!(
+                agent_id = %agent_id,
+                task_id = task.id,
+                score = ?verdict.score,
+                reviewer = %reviewer_name,
+                "peer review reply auto-recorded to task ledger"
+            );
+            true
+        }
+        Err(e) => {
+            warn!("record_peer_review_reply: ledger record failed: {e}");
+            false
+        }
+    }
 }
 
 impl DiscordGatewayActions {
@@ -134,13 +333,17 @@ impl DiscordGatewayActions {
             .get("instructions")
             .and_then(|v| v.as_str())
             .filter(|i| !i.trim().is_empty());
+        let reviewer = args
+            .get("reviewer")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.trim().is_empty());
         let session_id = args
             .get("__session_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // agent 表示名と active タスクを1ロックスコープで解決（await 前に drop）
-        let (agent_name, task) = {
+        // agent 表示名・active タスク・レビュアー解決を1ロックスコープで（await 前に drop）
+        let (agent_name, task, mention) = {
             match self.db.lock() {
                 Ok(conn) => {
                     let name = opencrab_db::queries::get_agent(&conn, &self.agent_id)
@@ -159,11 +362,28 @@ impl DiscordGatewayActions {
                         .ok()
                         .flatten()
                     };
-                    (name, task)
+                    // reviewer 解決: 数値なら user id、それ以外は登録済み co_agent の
+                    // display_name 一致（大文字小文字無視）
+                    let mention = match reviewer {
+                        None => None,
+                        Some(r) => match resolve_reviewer(&conn, &self.agent_id, r) {
+                            Ok(id) => Some(id),
+                            Err(available) => {
+                                return GatewayActionResult {
+                                    success: false,
+                                    data: None,
+                                    error: Some(format!(
+                                        "reviewer '{r}' が見つかりません。登録済みのピアレビュアー: {available}"
+                                    )),
+                                }
+                            }
+                        },
+                    };
+                    (name, task, mention)
                 }
                 Err(e) => {
                     warn!("request_peer_review: DB lock failed, sending without task info: {e}");
-                    (self.agent_id.clone(), None)
+                    (self.agent_id.clone(), None, None)
                 }
             }
         };
@@ -174,6 +394,7 @@ impl DiscordGatewayActions {
                 .as_ref()
                 .map(|t| (t.id, t.goal.as_str(), t.contract.as_deref())),
             instructions,
+            mention,
         };
         let messages =
             build_peer_review_messages(&header, content, super::webhook::DISCORD_CHUNK_LIMIT);
@@ -249,6 +470,7 @@ mod tests {
             agent_name: "crab-a",
             task: Some((12, "ship feature", Some("tests green"))),
             instructions: Some("check the error handling"),
+            mention: None,
         };
         let msgs = build_peer_review_messages(&header, "diff content", DISCORD_CHUNK_LIMIT);
         assert_eq!(msgs.len(), 2);
@@ -268,6 +490,7 @@ mod tests {
             agent_name: "crab-a",
             task: None,
             instructions: None,
+            mention: None,
         };
         let msgs = build_peer_review_messages(&header, "x", DISCORD_CHUNK_LIMIT);
         assert!(msgs[0].contains("no active task"));
@@ -279,11 +502,142 @@ mod tests {
             agent_name: "crab-a",
             task: Some((3, "g", Some("  "))),
             instructions: None,
+            mention: None,
         };
         let msgs = build_peer_review_messages(&header, "x", DISCORD_CHUNK_LIMIT);
         assert!(msgs[0].contains("task #3"));
         assert!(msgs[0].contains("goal: g"));
         assert!(!msgs[0].contains("contract:"));
+    }
+
+    #[test]
+    fn header_includes_mention_after_marker() {
+        let header = PeerReviewHeader {
+            agent_name: "a",
+            task: None,
+            instructions: None,
+            mention: Some(1234567890),
+        };
+        let msgs = build_peer_review_messages(&header, "x", DISCORD_CHUNK_LIMIT);
+        // starts-with 判定を壊さないよう、メンションは marker の後ろ
+        assert!(msgs[0].starts_with("[Peer Review Request] <@1234567890> from a"));
+    }
+
+    #[test]
+    fn parse_reply_full_form() {
+        let v = parse_peer_review_reply(
+            "[Peer Review] score: 0.75\ngaps:\n- tests not run\n- no error handling\nsummary: solid but unverified",
+        )
+        .unwrap();
+        assert_eq!(v.score, Some(0.75));
+        assert_eq!(v.gaps, vec!["tests not run", "no error handling"]);
+        assert_eq!(v.summary, "solid but unverified");
+    }
+
+    #[test]
+    fn parse_reply_inline_and_variants() {
+        // インライン gaps、score にスラッシュ形式、大文字
+        let v = parse_peer_review_reply(
+            "  [Peer Review] Score: 0.9/1.0, Gaps: none, Summary: looks good",
+        )
+        .unwrap();
+        assert_eq!(v.score, Some(0.9));
+        assert!(v.gaps.is_empty());
+        assert_eq!(v.summary, "looks good");
+
+        // score 欠落 → None、summary 欠落 → 本文フォールバック
+        let v = parse_peer_review_reply("[Peer Review] this looks fine to me").unwrap();
+        assert_eq!(v.score, None);
+        assert!(v.summary.contains("looks fine"));
+
+        // 1.0 超は clamp
+        let v = parse_peer_review_reply("[Peer Review] score: 8.5 summary: s").unwrap();
+        assert_eq!(v.score, Some(1.0));
+    }
+
+    #[test]
+    fn parse_reply_rejects_non_marker() {
+        assert!(parse_peer_review_reply("just chatting about [Peer Review] stuff").is_none());
+        assert!(parse_peer_review_reply("[Peer Review Request] from a").is_none());
+    }
+
+    #[test]
+    fn format_progress_bounds_and_labels() {
+        let v = PeerReviewVerdict {
+            score: Some(0.4),
+            gaps: vec!["a".repeat(600), "b".to_string()],
+            summary: "needs work".to_string(),
+        };
+        let s = format_peer_review_progress(&v, "crab-b");
+        assert!(s.starts_with("[peer review] score 0.40 (from crab-b): needs work"));
+        assert!(s.chars().count() < 1300, "progress entry must stay bounded");
+
+        let v = PeerReviewVerdict {
+            score: None,
+            gaps: vec![],
+            summary: "s".to_string(),
+        };
+        assert!(format_peer_review_progress(&v, "r").contains("score n/a"));
+    }
+
+    #[test]
+    fn resolve_reviewer_by_id_name_and_error() {
+        let conn = opencrab_db::init_memory().unwrap();
+        opencrab_db::queries::add_trusted_user(
+            &conn, "row-1", "agent-1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+        )
+        .unwrap();
+        // 名前は co_agent だが display_name 無し
+        opencrab_db::queries::add_trusted_user(
+            &conn, "row-2", "agent-1", "43", "co_agent", "owner", "2026-01-01", "",
+        )
+        .unwrap();
+        // co_agent でない行はロスター外
+        opencrab_db::queries::add_trusted_user(
+            &conn, "row-3", "agent-1", "44", "trusted_user", "owner", "2026-01-01", "Human",
+        )
+        .unwrap();
+
+        // 数値 / <@id> 形式はそのまま
+        assert_eq!(resolve_reviewer(&conn, "agent-1", "999").unwrap(), 999);
+        assert_eq!(resolve_reviewer(&conn, "agent-1", "<@999>").unwrap(), 999);
+        // display_name 一致（大文字小文字無視）
+        assert_eq!(resolve_reviewer(&conn, "agent-1", "crab b").unwrap(), 42);
+        // 未解決はロスター一覧入りエラー
+        let err = resolve_reviewer(&conn, "agent-1", "Human").unwrap_err();
+        assert!(err.contains("Crab B"));
+        assert!(!err.contains("Human"));
+    }
+
+    #[test]
+    fn record_reply_writes_to_active_task() {
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        let task_id = {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::insert_task_ledger(&conn, "a1", "s1", "goal", None).unwrap()
+        };
+
+        // marker 無し → 記録しない
+        assert!(!record_peer_review_reply(&db, "a1", "s1", "crab-b", "hello"));
+        // active タスクの無いセッション → 記録しない
+        assert!(!record_peer_review_reply(
+            &db, "a1", "other", "crab-b", "[Peer Review] score: 1.0 summary: ok"
+        ));
+        // 正常系
+        assert!(record_peer_review_reply(
+            &db,
+            "a1",
+            "s1",
+            "crab-b",
+            "[Peer Review] score: 0.6\ngaps:\n- missing tests\nsummary: incomplete",
+        ));
+
+        let conn = db.lock().unwrap();
+        let progress =
+            opencrab_db::queries::list_recent_task_progress(&conn, task_id, 10).unwrap();
+        assert_eq!(progress.len(), 1);
+        assert!(progress[0].content.contains("[peer review] score 0.60 (from crab-b)"));
+        assert!(progress[0].content.contains("missing tests"));
     }
 
     #[test]
@@ -296,6 +650,7 @@ mod tests {
             agent_name: "very-long-agent-name-agent",
             task: Some((99, goal.as_str(), Some(contract.as_str()))),
             instructions: Some(instructions.as_str()),
+            mention: None,
         };
         let msgs = build_peer_review_messages(&header, "x", DISCORD_CHUNK_LIMIT);
         assert!(
@@ -314,6 +669,7 @@ mod tests {
             agent_name: "a",
             task: None,
             instructions: None,
+            mention: None,
         };
         let msgs = build_peer_review_messages(&header, &content, DISCORD_CHUNK_LIMIT);
         let parts = &msgs[1..];

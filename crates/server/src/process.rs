@@ -65,6 +65,31 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
         .map(|a| a.instructions.clone())
         .unwrap_or_default();
 
+    // ピアレビュアーのロスター: trusted_discord_users の permission='co_agent' 行。
+    // ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
+    let peer_reviewers_text = {
+        let reviewers: Vec<String> = opencrab_db::queries::list_trusted_users(conn, agent_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|u| u.permission == "co_agent")
+            .map(|u| {
+                if u.display_name.is_empty() {
+                    format!("- <@{}>", u.discord_user_id)
+                } else {
+                    format!("- <@{}> {}", u.discord_user_id, u.display_name)
+                }
+            })
+            .collect();
+        if reviewers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nYour registered peer reviewers (pass their display name or user id as `reviewer`):\n{}\n",
+                reviewers.join("\n")
+            )
+        }
+    };
+
     let skills_text = if skills.is_empty() {
         String::new()
     } else {
@@ -182,12 +207,13 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          \n\
          As REQUESTER — to get a second opinion on your work:\n\
          - Call `request_peer_review` with the raw diff/output/trace as `content` (never a \
-         summary), the current `channel_id` from [Discord context], and optional `instructions`.\n\
-         - When a `{reply_marker}` reply about your task arrives, record it with \
-         `record_task_progress` (kind=decision, content including the reviewer's name, the \
-         score, and each gap), then address the gaps before calling `close_task`. \
+         summary), the current `channel_id` from [Discord context], optional `instructions`, \
+         and optionally `reviewer` to mention a specific registered reviewer.\n\
+         - A `{reply_marker}` reply about your task is automatically recorded into your task \
+         ledger — do not record it again manually. Address the gaps before calling `close_task`. \
          Do not reply to the reviewer beyond a brief acknowledgement.\n\
          - Do not re-request a review of the same unchanged content.\n\
+         {peer_reviewers_text}\
          \n\
          {skills_text}{character_section}{instructions_section}{curated_section}",
         req_marker = opencrab_gateway::PEER_REVIEW_REQUEST_MARKER,
