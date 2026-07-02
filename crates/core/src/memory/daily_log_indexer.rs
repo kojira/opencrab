@@ -260,7 +260,7 @@ impl DailyLogIndexer {
             .with_max_tokens(4096);
         let resp = self.llm_client.chat(request).await?;
         let text = resp.first_text().unwrap_or_default().to_string();
-        let json_str = crate::evaluator::strip_code_fences(&text);
+        let json_str = crate::llm_text::strip_code_fences(&text);
         let parsed = serde_json::from_str::<DaySummaryJson>(json_str)?;
         Ok((parsed.day_summary, parsed.topics))
     }

@@ -19,6 +19,7 @@ pub mod evaluator;
 pub mod heartbeat;
 pub mod identity;
 pub mod import;
+pub mod llm_text;
 pub mod memory;
 pub mod memory_index;
 pub mod skill;

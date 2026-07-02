@@ -13,6 +13,8 @@ use anyhow::Result;
 use opencrab_db::queries;
 use rusqlite::Connection;
 
+use crate::llm_text::truncate_chars;
+
 /// セクションに含める直近進捗エントリの件数上限。
 pub const LEDGER_RECENT_ENTRIES: usize = 10;
 
@@ -32,14 +34,6 @@ fn short_timestamp(rfc3339: &str) -> String {
     }
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
-}
 
 /// セッションの active タスクから `[Task Ledger]` セクションを組み立てる。
 /// active タスクが無ければ `Ok(None)`。

@@ -557,37 +557,72 @@ pub fn prepend_runtime_context_discord(
     )
 }
 
-/// verify 段: 契約付き active タスクに対する evaluator 評価と、不合格時の再実行ループ。
+/// verify 段: 契約付き active タスクに対する evaluator 評価（record-only）。
 ///
 /// - 対象: depth 0 の run で、セッションに contract 非空の active タスクがあり、
 ///   かつこの run が実際にツールを実行した場合のみ（雑談/アイドル tick では評価しない）。
 /// - evaluator は生成 run とは別の新しい context（ツール無し・temperature 0）で呼ぶ。
-///   生のトレース（session_logs）を渡す — 要約を渡すのは自己採点と同義のため。
-/// - 評価は session_logs (log_type=evaluation) とタスク台帳 progress に記録される。
-/// - evaluator の失敗で返信は殺さない（warn して元の結果を返す）。
-#[allow(clippy::too_many_arguments)]
+///   生のトレース（session_logs、この agent の分のみ）を渡す — 要約を渡すのは自己採点と同義。
+/// - **記録専用**: 評価は session_logs (log_type=evaluation) とタスク台帳 progress に
+///   記録され、エージェントは次ターンの会話でそれを見て自己修正する。同一ターン内の
+///   強制再実行はしない — run の回答は評価前に配信済みのため、再実行は二重返信・
+///   セッションロック長期保持・context 超過を生む。
+/// - この run が契約タスクと無関係だった場合（relevant=false）は何も記録しない。
+/// - evaluator の失敗で返信は殺さない（warn してスキップ）。
 async fn run_verify_stage(
     state: &AppState,
     agent_id: &str,
     session_id: &str,
-    system_prompt: &str,
-    conversation: &str,
     effective_model: &str,
-    engine: &mut opencrab_core::SkillEngine,
-    mut engine_result: opencrab_core::EngineResult,
-    model_override: Arc<std::sync::Mutex<Option<String>>>,
-    image_urls: &[String],
+    model_override: &Arc<std::sync::Mutex<Option<String>>>,
+    engine_result: &opencrab_core::EngineResult,
     trace_checkpoint: i64,
-) -> opencrab_core::EngineResult {
+) {
     let cfg = &state.evaluator;
 
     // ツールを一切使っていない run は世界を変えていないので評価しない
     // （heartbeat のアイドル tick 等で毎回 evaluator を回さないためのガード）。
     if engine_result.tool_calls_made == 0 {
-        return engine_result;
+        return;
     }
 
-    let eval_model = cfg.model.clone().unwrap_or_else(|| effective_model.to_string());
+    // タスクとトレースを1ロックスコープで読む（read の一貫性 + ロック往復削減）
+    let (task, trace) = {
+        let Ok(conn) = state.db.lock() else { return };
+        let task = opencrab_db::queries::get_active_task_for_session(&conn, agent_id, session_id)
+            .ok()
+            .flatten();
+        let Some(task) = task else { return };
+        let trace = opencrab_db::queries::list_session_logs_after_id(
+            &conn,
+            session_id,
+            trace_checkpoint,
+        )
+        .map(|logs| {
+            // マルチエージェントセッションで他エージェントの作業を「証拠」に混ぜない
+            let own: Vec<_> = logs.into_iter().filter(|l| l.agent_id == agent_id).collect();
+            opencrab_core::evaluator::format_trace(&own)
+        })
+        .unwrap_or_default();
+        (task, trace)
+    };
+    let Some(contract) = task.contract.clone().filter(|c| !c.trim().is_empty()) else {
+        return;
+    };
+
+    // 設定 typo（threshold > 1.0 / NaN 等）で合格が数学的に不可能にならないよう防衛
+    let threshold = if cfg.threshold.is_finite() {
+        cfg.threshold.clamp(0.0, 1.0)
+    } else {
+        0.7
+    };
+
+    // 評価モデル: 設定 > run 中の set_model 切替 > エージェントの実効モデル
+    let eval_model = cfg
+        .model
+        .clone()
+        .or_else(|| model_override.lock().ok().and_then(|g| g.clone()))
+        .unwrap_or_else(|| effective_model.to_string());
     let eval_llm = LlmRouterAdapter::new(state.llm_router.clone())
         .with_metrics(MetricsContext {
             db: state.db.clone(),
@@ -599,151 +634,98 @@ async fn run_verify_stage(
         })
         .with_agent_id(agent_id);
 
-    for round in 0..=cfg.max_rounds {
-        // タスクは毎ラウンド取り直す（run 中に close/update されている可能性がある）
-        let task = match state.db.lock() {
-            Ok(conn) => opencrab_db::queries::get_active_task_for_session(
-                &conn, agent_id, session_id,
-            )
-            .ok()
-            .flatten(),
-            Err(_) => None,
-        };
-        let Some(task) = task else {
-            return engine_result;
-        };
-        let Some(contract) = task
-            .contract
-            .clone()
-            .filter(|c| !c.trim().is_empty())
-        else {
-            return engine_result;
-        };
+    let eval = match opencrab_core::evaluator::evaluate_against_contract(
+        &eval_llm,
+        &eval_model,
+        &task.goal,
+        &contract,
+        &engine_result.response,
+        &trace,
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "evaluator failed, skipping verify: {e}");
+            return;
+        }
+    };
 
-        let trace = match state.db.lock() {
-            Ok(conn) => opencrab_db::queries::list_session_logs_after_id(
-                &conn,
-                session_id,
-                trace_checkpoint,
-            )
-            .map(|logs| opencrab_core::evaluator::format_trace(&logs))
-            .unwrap_or_default(),
-            Err(_) => String::new(),
-        };
-
-        let eval = match opencrab_core::evaluator::evaluate_against_contract(
-            &eval_llm,
-            &eval_model,
-            &task.goal,
-            &contract,
-            &engine_result.response,
-            &trace,
-        )
-        .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(session_id = %session_id, "evaluator failed, skipping verify: {e}");
-                return engine_result;
-            }
-        };
-
-        let passed = eval.score >= cfg.threshold;
-        let gaps_text = if eval.gaps.is_empty() {
-            "(none)".to_string()
-        } else {
-            eval.gaps
-                .iter()
-                .map(|g| format!("- {g}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        tracing::info!(
+    if !eval.relevant {
+        tracing::debug!(
             session_id = %session_id,
             task_id = task.id,
-            round = round,
-            score = eval.score,
-            passed = passed,
-            "verify stage evaluation"
+            "verify stage: run not related to contract task, skipping record"
         );
+        return;
+    }
 
-        // トレースと台帳に評価を記録（原則 VII: 後から読める）
-        if let Ok(conn) = state.db.lock() {
-            let metadata = serde_json::json!({
-                "task_id": task.id,
-                "round": round,
-                "score": eval.score,
-                "threshold": cfg.threshold,
-                "passed": passed,
-                "gaps": eval.gaps,
-            });
-            let _ = opencrab_db::queries::insert_session_log(
-                &conn,
-                &opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.to_string(),
-                    session_id: session_id.to_string(),
-                    log_type: "evaluation".to_string(),
-                    content: format!(
-                        "score {:.2}/{:.2} ({}) — {}\ngaps:\n{gaps_text}",
-                        eval.score,
-                        cfg.threshold,
-                        if passed { "passed" } else { "not satisfied" },
-                        eval.summary,
-                    ),
-                    speaker_id: Some("evaluator".to_string()),
-                    turn_number: None,
-                    metadata_json: Some(metadata.to_string()),
-                    created_at: None,
-                },
-            );
-            let _ = opencrab_db::queries::insert_task_progress(
-                &conn,
-                task.id,
-                "progress",
-                &format!(
-                    "[evaluation round {round}] score {:.2} ({}): {}",
+    let passed = eval.score >= threshold;
+    let gaps_text = if eval.gaps.is_empty() {
+        "(none)".to_string()
+    } else {
+        eval.gaps
+            .iter()
+            .map(|g| format!("- {g}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    tracing::info!(
+        session_id = %session_id,
+        task_id = task.id,
+        score = eval.score,
+        passed = passed,
+        "verify stage evaluation"
+    );
+
+    // トレースと台帳に評価を記録（原則 VII: 後から読める）。
+    // このエントリは次ターンの会話再構築に [evaluation] として含まれ、
+    // エージェントが gaps を見て自己修正する（ターン跨ぎの verify ループ）。
+    if let Ok(conn) = state.db.lock() {
+        let metadata = serde_json::json!({
+            "task_id": task.id,
+            "score": eval.score,
+            "threshold": threshold,
+            "passed": passed,
+            "gaps": eval.gaps,
+        });
+        let next_step = if passed {
+            String::new()
+        } else {
+            "\nAddress these gaps in your next turn (claims without evidence in the trace do not count).".to_string()
+        };
+        let _ = opencrab_db::queries::insert_session_log(
+            &conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                log_type: "evaluation".to_string(),
+                content: format!(
+                    "score {:.2}/{:.2} ({}) — {}\ngaps:\n{gaps_text}{next_step}",
                     eval.score,
-                    if passed { "passed" } else { "below threshold" },
+                    threshold,
+                    if passed { "passed" } else { "not satisfied" },
                     eval.summary,
                 ),
-            );
-        }
-
-        if passed || round == cfg.max_rounds {
-            return engine_result;
-        }
-
-        // 不合格 → ギャップをフィードバックして再実行
-        let prev_response: String = engine_result.response.chars().take(8000).collect();
-        let feedback_conversation = format!(
-            "{conversation}\n\n[Your previous final response]\n{prev_response}\n\n\
-             [Evaluator verdict — contract NOT satisfied]\n\
-             Score: {:.2} (required >= {:.2})\n\
-             Contract: {contract}\n\
-             Gaps:\n{gaps_text}\n\n\
-             Address these gaps now. Use tools to actually close them (claims without \
-             evidence will fail evaluation again), then produce the corrected final result.",
-            eval.score, cfg.threshold,
+                speaker_id: Some("evaluator".to_string()),
+                turn_number: None,
+                metadata_json: Some(metadata.to_string()),
+                created_at: None,
+            },
         );
-        match engine
-            .run_with_model_override(
-                system_prompt,
-                &feedback_conversation,
-                effective_model,
-                Some(model_override.clone()),
-                image_urls,
-            )
-            .await
-        {
-            Ok(r) => engine_result = r,
-            Err(e) => {
-                tracing::warn!(session_id = %session_id, "verify re-run failed: {e}");
-                return engine_result;
-            }
-        }
+        let _ = opencrab_db::queries::insert_task_progress(
+            &conn,
+            task.id,
+            "progress",
+            &format!(
+                "[evaluation] score {:.2} ({}): {}",
+                eval.score,
+                if passed { "passed" } else { "below threshold" },
+                eval.summary,
+            ),
+        );
     }
-    engine_result
 }
 
 /// エージェントにメッセージを処理させ、応答テキストを返す。
@@ -1080,12 +1062,18 @@ pub async fn run_agent_response(
     };
 
     // verify 段用: この run が session_logs に残すトレースの開始位置を記録
-    let trace_checkpoint = match state.db.lock() {
-        Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, session_id, 1)
-            .ok()
-            .and_then(|v| v.first().and_then(|l| l.id))
-            .unwrap_or(0),
-        Err(_) => 0,
+    // （verify が走らない構成では余計なクエリを打たない）
+    let verify_enabled = depth == 0 && state.evaluator.enabled;
+    let trace_checkpoint = if verify_enabled {
+        match state.db.lock() {
+            Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, session_id, 1)
+                .ok()
+                .and_then(|v| v.first().and_then(|l| l.id))
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    } else {
+        0
     };
     let verify_model_override = model_override.clone();
 
@@ -1100,24 +1088,21 @@ pub async fn run_agent_response(
         .await;
 
     // verify 段 (evaluator): 契約付き active タスクがある場合、独立した context で
-    // rubric 評価し、閾値未満ならギャップをフィードバックして再実行する（LOOPS I/II/VI）。
-    let result = match result {
-        Ok(engine_result) if depth == 0 && state.evaluator.enabled => Ok(run_verify_stage(
-            state,
-            agent_id,
-            session_id,
-            system_prompt,
-            conversation,
-            &effective_model,
-            &mut engine,
-            engine_result,
-            verify_model_override,
-            &merged_image_urls,
-            trace_checkpoint,
-        )
-        .await),
-        other => other,
-    };
+    // rubric 評価して記録する（record-only、LOOPS I/II/VI）。
+    if verify_enabled {
+        if let Ok(ref engine_result) = result {
+            run_verify_stage(
+                state,
+                agent_id,
+                session_id,
+                &effective_model,
+                &verify_model_override,
+                engine_result,
+                trace_checkpoint,
+            )
+            .await;
+        }
+    }
 
     // インデックス自動構築チェック（バックグラウンド）
     {

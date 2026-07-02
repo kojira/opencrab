@@ -4,6 +4,10 @@
 //! タスク台帳の contract に照らして rubric 評価（score 0-1 + ギャップ説明）を返す。
 //! 生成した本人の context の続きで自己採点させない、が設計原則。
 //! 評価者には要約でなく**生のトレース**（session_logs の tool_call/tool_result/speech）を渡す。
+//!
+//! 評価は記録専用（record-only）: 結果は session_logs とタスク台帳に書かれ、
+//! エージェントは次ターンの会話でそれを見て自己修正する。同一ターン内での
+//! 強制再実行はしない（回答は評価前に配信済みのため、再実行は二重返信になる）。
 
 use anyhow::{anyhow, Result};
 use opencrab_db::queries::SessionLogRow;
@@ -11,45 +15,36 @@ use opencrab_llm_types::{ChatRequest, Message};
 use serde::Deserialize;
 
 use crate::engine::LlmClient;
+use crate::llm_text::{strip_code_fences, truncate_chars};
 
 /// 評価者に渡すトレースの1エントリ描画上限（chars）。
 const TRACE_ENTRY_MAX_CHARS: usize = 700;
+/// 評価者に渡すトレースの metadata 描画上限（chars）。tool 名/引数が読める程度。
+const TRACE_META_MAX_CHARS: usize = 500;
 /// 評価者に渡すトレースのエントリ数上限（直近優先）。
 const TRACE_MAX_ENTRIES: usize = 80;
 /// 評価者に渡す最終応答の描画上限（chars）。
 const RESPONSE_MAX_CHARS: usize = 8000;
+
+fn default_relevant() -> bool {
+    true
+}
 
 /// rubric 評価の結果。
 #[derive(Debug, Clone, Deserialize)]
 pub struct Evaluation {
     /// 契約の達成度 (0.0-1.0)。
     pub score: f64,
+    /// この run がそもそも契約タスクに取り組んだものか。
+    /// false = 無関係な run（別の質問への回答等）— 記録しない。
+    #[serde(default = "default_relevant")]
+    pub relevant: bool,
     /// 未達のギャップ（何が足りないか）。
     #[serde(default)]
     pub gaps: Vec<String>,
     /// 一行の講評。
     #[serde(default)]
     pub summary: String,
-}
-
-/// LLM 応答テキストからマークダウンコードフェンスを剥がす。
-///
-/// `memory_index`/`daily_log_indexer` 等で重複していたイディオムの共通化。
-pub fn strip_code_fences(text: &str) -> &str {
-    text.trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim()
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
 }
 
 /// session_logs の run トレースを評価者向けのプレーンテキストに整形する。
@@ -64,7 +59,7 @@ pub fn format_trace(logs: &[SessionLogRow]) -> String {
         let meta = log
             .metadata_json
             .as_deref()
-            .map(|m| format!(" meta={}", truncate_chars(m, 300)))
+            .map(|m| format!(" meta={}", truncate_chars(m, TRACE_META_MAX_CHARS)))
             .unwrap_or_default();
         out.push_str(&format!(
             "[{}]{} {}\n",
@@ -82,19 +77,22 @@ judge it strictly on the evidence, with fresh eyes.\n\
 \n\
 You will receive:\n\
 - the task goal and its contract (acceptance criteria agreed with the user)\n\
-- the raw execution trace (tool calls, tool results, messages)\n\
-- the worker's final response\n\
+- the raw execution trace of ONE run (tool calls, tool results, messages)\n\
+- the worker's final response for that run\n\
 \n\
-Score how completely the CONTRACT is satisfied, based on evidence in the trace — \
-not on how confident the final response sounds. Claims without supporting evidence \
-in the trace do not count.\n\
+First decide relevance: if this run was NOT an attempt to work on the stated \
+goal/contract (for example, the worker was answering an unrelated question in the \
+same session), set \"relevant\" to false and do not judge it against the contract.\n\
 \n\
-Respond with ONLY a JSON object, no prose:\n\
-{\n\
-  \"score\": 0.0-1.0,        // 1.0 = every acceptance criterion verifiably met\n\
-  \"gaps\": [\"...\"],         // concrete unmet criteria or unverified claims (empty if none)\n\
-  \"summary\": \"...\"          // one sentence\n\
-}";
+If relevant, score how completely the CONTRACT is satisfied, based on evidence in \
+the trace — not on how confident the final response sounds. Claims without \
+supporting evidence in the trace do not count.\n\
+\n\
+Respond with ONLY a JSON object, no prose, no comments, exactly these fields:\n\
+{\"relevant\": true, \"score\": 0.85, \"gaps\": [\"list of concrete unmet criteria or unverified claims\"], \"summary\": \"one sentence\"}\n\
+\n\
+\"score\" is a number from 0.0 to 1.0, where 1.0 means every acceptance criterion \
+is verifiably met. \"gaps\" is an empty array when nothing is missing.";
 
 /// 契約に照らして成果物を評価する（新しい context での1ショット呼び出し・ツール無し）。
 pub async fn evaluate_against_contract(
@@ -126,6 +124,9 @@ pub async fn evaluate_against_contract(
     let json_str = strip_code_fences(&text);
     let mut eval: Evaluation = serde_json::from_str(json_str)
         .map_err(|e| anyhow!("evaluator returned unparseable verdict: {e}: {json_str}"))?;
+    if !eval.score.is_finite() {
+        return Err(anyhow!("evaluator returned non-finite score"));
+    }
     eval.score = eval.score.clamp(0.0, 1.0);
     Ok(eval)
 }
@@ -153,38 +154,53 @@ mod tests {
         let eval = evaluate_against_contract(&llm, "m", "goal", "contract", "resp", "trace")
             .await
             .unwrap();
-        // 1.4 は 1.0 にクランプされる
+        // 1.4 は 1.0 にクランプ、relevant はデフォルト true
         assert_eq!(eval.score, 1.0);
+        assert!(eval.relevant);
         assert_eq!(eval.summary, "done");
     }
 
     #[tokio::test]
-    async fn evaluate_errors_on_garbage() {
+    async fn evaluate_parses_irrelevant_verdict() {
+        let llm = MockLlm(
+            r#"{"relevant": false, "score": 0.0, "gaps": [], "summary": "unrelated run"}"#
+                .to_string(),
+        );
+        let eval = evaluate_against_contract(&llm, "m", "goal", "contract", "resp", "trace")
+            .await
+            .unwrap();
+        assert!(!eval.relevant);
+    }
+
+    #[tokio::test]
+    async fn evaluate_errors_on_garbage_and_nan() {
         let llm = MockLlm("I think it looks fine!".to_string());
-        let result =
-            evaluate_against_contract(&llm, "m", "goal", "contract", "resp", "trace").await;
-        assert!(result.is_err());
+        assert!(
+            evaluate_against_contract(&llm, "m", "g", "c", "r", "t")
+                .await
+                .is_err()
+        );
+
+        let llm = MockLlm(r#"{"score": null}"#.to_string());
+        assert!(
+            evaluate_against_contract(&llm, "m", "g", "c", "r", "t")
+                .await
+                .is_err()
+        );
     }
 
     #[test]
-    fn strip_code_fences_variants() {
-        assert_eq!(strip_code_fences("{\"a\":1}"), "{\"a\":1}");
-        assert_eq!(strip_code_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
-        assert_eq!(strip_code_fences("```\n{\"a\":1}\n```"), "{\"a\":1}");
-        assert_eq!(strip_code_fences("  {\"a\":1}  "), "{\"a\":1}");
-    }
-
-    #[test]
-    fn evaluation_parses_and_clamps() {
+    fn evaluation_parses_and_defaults() {
         let e: Evaluation =
             serde_json::from_str(r#"{"score": 0.4, "gaps": ["tests not run"], "summary": "s"}"#)
                 .unwrap();
         assert_eq!(e.score, 0.4);
         assert_eq!(e.gaps.len(), 1);
 
-        // gaps/summary 省略でもパースできる
+        // gaps/summary/relevant 省略でもパースできる
         let e: Evaluation = serde_json::from_str(r#"{"score": 1.0}"#).unwrap();
         assert!(e.gaps.is_empty());
+        assert!(e.relevant);
     }
 
     #[test]

@@ -178,10 +178,10 @@ permission = "agent"
 description = "Python3スクリプト実行"
 
 # verify 段 (evaluator): 契約付き active タスクの run 終了時、独立した context の
-# LLM で rubric 評価し、閾値未満ならギャップをフィードバックして再実行する。
+# LLM で rubric 評価し、結果を session_logs とタスク台帳に記録する (record-only)。
+# エージェントは次ターンの会話で評価を見てギャップを自己修正する。
 # ツールを使わなかった run（アイドル tick 等）は評価しない。
 [evaluator]
 enabled = true
 threshold = 0.7
-max_rounds = 1
 # model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
