@@ -436,6 +436,27 @@ impl DiscordGatewayActions {
 
             let (exit_reason, result_text) = match result {
                 Ok(Ok(engine_result)) => {
+                    // harness 剪定メトリクス: sub-engine の run も XML フォールバック発火を
+                    // agent_logs に記録する（server 側と同じ context キー。subtask だけ
+                    // 計測から漏れると消し時の判断を誤る — docs/harness-inventory.md 参照）。
+                    if engine_result.xml_fallback_parses > 0 {
+                        if let Ok(conn) = db_clone.lock() {
+                            let _ = opencrab_db::queries::insert_agent_log(
+                                &conn,
+                                &opencrab_db::queries::AgentLogRow {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    agent_id: Some(agent_id_clone.clone()),
+                                    level: "info".to_string(),
+                                    context: "harness.xml_fallback".to_string(),
+                                    message: format!(
+                                        "XML <function_calls> fallback fired {} time(s) (model: {default_model_clone}, subtask: {subtask_id_clone})",
+                                        engine_result.xml_fallback_parses
+                                    ),
+                                    created_at: Some(chrono::Utc::now().to_rfc3339()),
+                                },
+                            );
+                        }
+                    }
                     let exit_reason = if engine_result.stopped_by_limit {
                         "stopped_by_limit"
                     } else {

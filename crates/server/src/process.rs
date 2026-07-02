@@ -1087,6 +1087,32 @@ pub async fn run_agent_response(
         )
         .await;
 
+    // harness 剪定メトリクス: XML <function_calls> フォールバックの発火を agent_logs に
+    // 記録する（context='harness.xml_fallback'）。「最後に発火したのはいつか・どのモデルか」を
+    // DB で照会でき、足場の消し時を判断できる。docs/harness-inventory.md 参照。
+    // 注: codex プロバイダはこのフォールバックに意図的に依存しているため、発火自体は異常ではない。
+    if let Ok(ref engine_result) = result {
+        if engine_result.xml_fallback_parses > 0 {
+            // run 中に set_model で切り替わっている可能性があるため、override の現在値を優先する
+            // （イテレーション単位の正確なモデルはエンジンの debug ログ側にある）。
+            let fired_model = verify_model_override
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| effective_model.clone());
+            crate::agent_log::agent_log(
+                &state.db,
+                Some(agent_id),
+                crate::agent_log::LogLevel::Info,
+                "harness.xml_fallback",
+                &format!(
+                    "XML <function_calls> fallback fired {} time(s) (model: {fired_model})",
+                    engine_result.xml_fallback_parses
+                ),
+            );
+        }
+    }
+
     // verify 段 (evaluator): 契約付き active タスクがある場合、独立した context で
     // rubric 評価して記録する（record-only、LOOPS I/II/VI）。
     if verify_enabled {
