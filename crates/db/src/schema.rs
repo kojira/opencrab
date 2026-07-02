@@ -1,19 +1,97 @@
 use rusqlite::Connection;
 
-/// スキーマ初期化
+/// スキーマのバージョン管理は `PRAGMA user_version` で行う。
 ///
-/// スキーマ作成とマイグレーションを1つのトランザクションで実行する。
-/// 途中で失敗した場合は全体がロールバックされ、中途半端に適用された（例: 破壊的な
-/// テーブルリビルドが途中で止まった）状態のDBが残らないようにする。
+/// 既存の冪等 `migrate()`（version 1 baseline）を凍結し、以降のスキーマ変更は
+/// [`MIGRATIONS`] に番号付きで追加する。既存DBは全て `user_version = 0` なので、
+/// 初回起動では baseline（`SCHEMA_SQL` + `migrate()`）を従来どおり適用してから
+/// version 1 をスタンプする。以降の起動では baseline をスキップし、番号付き
+/// マイグレーションのうち未適用のものだけを実行する。
+const BASELINE_VERSION: i64 = 1;
+
+/// 番号付きマイグレーション1件。
+struct Migration {
+    version: i64,
+    #[allow(dead_code)]
+    description: &'static str,
+    up: fn(&Connection) -> rusqlite::Result<()>,
+}
+
+/// version 2 以降のスキーマ変更をここに追記する（version は厳密増加）。
+///
+/// 重要な運用ルール:
+/// - `migrate()`（version 1 baseline）へは今後**追記しない**。新しい変更はここへ。
+/// - `SCHEMA_SQL`（新規インストール用）にテーブル/列を足したら、既存DB
+///   （baseline済み＝`SCHEMA_SQL` を再実行しない）にも届くよう、**必ず対応する
+///   番号付きマイグレーションもここへ追加する**こと。忘れると既存DBだけ列が欠ける。
+/// - 各 `up` は自身のトランザクション内で実行される（`run_migrations` 参照）。
+///   `journal_mode`/`VACUUM` 等の非トランザクショナルな操作は `up` 内で行わない。
+const MIGRATIONS: &[Migration] = &[];
+
+/// 現在のスキーマバージョン（`PRAGMA user_version`）を読み取る。
+fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+}
+
+/// スキーマ初期化。
+///
+/// - `user_version < BASELINE_VERSION`（新規DB / バージョン管理導入前の既存DB）の場合、
+///   `SCHEMA_SQL` + 凍結された `migrate()` を**1トランザクション**で適用し、version 1 を
+///   スタンプする。破壊的なテーブルリビルドや DROP を含むため一括ロールバック可能にする
+///   （途中失敗すれば version は 0 のままで、次回起動でクリーンに再試行される）。
+/// - その後、`MIGRATIONS` のうち未適用の番号付きマイグレーションを**各自のトランザクション**で
+///   適用する（途中失敗時は直前まで確定・再開可能）。
 pub fn initialize(conn: &Connection) -> rusqlite::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute_batch(SCHEMA_SQL)?;
-    migrate(&tx)?;
-    tx.commit()?;
+    let current = schema_version(conn)?;
+    if current < BASELINE_VERSION {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(SCHEMA_SQL)?;
+        migrate(&tx)?;
+        tx.execute_batch(&format!("PRAGMA user_version = {BASELINE_VERSION}"))?;
+        tx.commit()?;
+    }
+    run_migrations(conn, MIGRATIONS)?;
     Ok(())
 }
 
-/// 既存テーブルへのマイグレーション（カラム追加など）
+/// 番号付きマイグレーションを順に適用する。
+///
+/// `current` より大きい version の各マイグレーションを、それぞれ独自の
+/// トランザクション内で実行し、成功後に同一トランザクション内で `user_version` を
+/// スタンプする。`current` が既知の最新版より新しい（＝より新しいバイナリで作られたDBを
+/// 古いバイナリで開いた）場合は、破壊的な誤動作を避けるため明示的にエラーにする。
+fn run_migrations(conn: &Connection, migrations: &[Migration]) -> rusqlite::Result<()> {
+    let current = schema_version(conn)?;
+    let latest = migrations
+        .last()
+        .map(|m| m.version)
+        .unwrap_or(BASELINE_VERSION);
+    if current > latest {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "database schema version {current} is newer than this binary supports ({latest}); please upgrade the application"
+            )),
+        ));
+    }
+    for m in migrations {
+        if m.version > current {
+            let tx = conn.unchecked_transaction()?;
+            (m.up)(&tx)?;
+            tx.execute_batch(&format!("PRAGMA user_version = {}", m.version))?;
+            tx.commit()?;
+        }
+    }
+    Ok(())
+}
+
+/// FROZEN — schema version 1 baseline。
+///
+/// この関数へは**今後追記しないこと**。スキーマ変更は version 2 以降の番号付き
+/// [`MIGRATIONS`] エントリとして追加する。ここは version 1 として確定した履歴であり、
+/// `backfill_short_ids` 呼び出しや `migrate_soul_identity_to_agents` 含めて凍結する。
+///
+/// 既存テーブルへのマイグレーション（カラム追加など）。
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // sessions.metadata_json カラム追加（既存DBへの対応）
     let has_col: bool = conn
@@ -513,6 +591,20 @@ fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// テーブルに指定カラムが存在するか判定する（将来の番号付きマイグレーション用ヘルパー）。
+///
+/// version 1 baseline (`migrate`) 内の約30箇所のインライン `pragma_table_info` プローブは
+/// 凍結のためリファクタしないが、version 2 以降の `Migration::up` ではこのヘルパーを使う。
+#[allow(dead_code)]
+fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// 旧 soul / identity を agents に統合し、旧テーブルを削除する。
 fn migrate_soul_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
     if !table_exists(conn, "soul")? {
@@ -582,6 +674,12 @@ fn migrate_soul_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 新規インストール用のスキーマ定義（全て `CREATE ... IF NOT EXISTS`）。
+///
+/// 注意: baseline 済みの既存DB（`user_version >= 1`）では、この `SCHEMA_SQL` は
+/// **再実行されない**。したがってここにテーブル/列を追加しただけでは既存DBには反映されない。
+/// 新しいテーブル/列は、必ず対応する番号付きマイグレーションを [`MIGRATIONS`] にも追加して
+/// 既存DBへ届けること。
 const SCHEMA_SQL: &str = r#"
 -- ============================================
 -- AGENTS: soul + identity 統合 + エージェント別モデル
@@ -1061,3 +1159,125 @@ CREATE INDEX IF NOT EXISTS idx_pending_interactions_session
 CREATE INDEX IF NOT EXISTS idx_pending_interactions_surface
     ON pending_interactions(surface_id);
 "#;
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// A. バージョン管理導入前の旧DBを模して、baseline が再適用され version 1 に
+    /// スタンプされることを検証する。
+    #[test]
+    fn baseline_reconciles_pre_versioning_db() {
+        let conn = crate::init_memory().expect("init");
+        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+
+        // 旧DBを模す: version を 0 に戻し、baseline が再追加する列を落とす。
+        conn.execute_batch("PRAGMA user_version = 0").unwrap();
+        conn.execute_batch("ALTER TABLE skills DROP COLUMN archived")
+            .unwrap();
+        assert!(!column_exists(&conn, "skills", "archived").unwrap());
+
+        // 再初期化で baseline が走り、列が復活しスタンプされる。
+        initialize(&conn).expect("re-initialize");
+        assert!(column_exists(&conn, "skills", "archived").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+    }
+
+    /// B. 冪等性: baseline 済みDBで initialize を再実行しても破壊的再構築は走らず、
+    /// 既存データが保持される。
+    #[test]
+    fn initialize_is_idempotent_and_non_destructive() {
+        let conn = crate::init_memory().expect("init");
+        conn.execute_batch(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES ('sentinel', 'n', 'p')",
+        )
+        .unwrap();
+
+        initialize(&conn).expect("second initialize");
+        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agents WHERE agent_id = 'sentinel'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "sentinel row must survive (baseline not re-run)");
+    }
+
+    fn create_marker(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch("CREATE TABLE test_marker (id INTEGER)")
+    }
+
+    /// C. 番号付きマイグレーションのランナー: 未適用の version 2 を適用し、
+    /// 再実行では no-op になる（version gate）。
+    #[test]
+    fn run_migrations_applies_and_then_skips() {
+        let conn = crate::init_memory().expect("init");
+        let fake = &[Migration {
+            version: 2,
+            description: "add test_marker",
+            up: create_marker,
+        }];
+
+        run_migrations(&conn, fake).expect("apply v2");
+        assert!(table_exists(&conn, "test_marker").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), 2);
+
+        // 再実行は no-op（既に version 2）。
+        run_migrations(&conn, fake).expect("re-run no-op");
+        assert_eq!(schema_version(&conn).unwrap(), 2);
+    }
+
+    fn fail_after_marker(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch("CREATE TABLE test_marker (id INTEGER)")?;
+        Err(rusqlite::Error::InvalidQuery)
+    }
+
+    /// D. マイグレーション失敗時は、その up の変更と version スタンプが
+    /// トランザクションごとロールバックされる。
+    #[test]
+    fn failed_migration_rolls_back_and_leaves_version() {
+        let conn = crate::init_memory().expect("init");
+        let fake = &[Migration {
+            version: 2,
+            description: "fails",
+            up: fail_after_marker,
+        }];
+
+        let result = run_migrations(&conn, fake);
+        assert!(result.is_err());
+        assert!(!table_exists(&conn, "test_marker").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), BASELINE_VERSION);
+    }
+
+    /// E. 実 MIGRATIONS の version は厳密増加・全て baseline より大きい・重複なし。
+    #[test]
+    fn migrations_versions_are_strictly_increasing() {
+        let mut prev = BASELINE_VERSION;
+        for m in MIGRATIONS {
+            assert!(
+                m.version > prev,
+                "migration versions must be strictly increasing and > baseline"
+            );
+            prev = m.version;
+        }
+    }
+
+    /// F. ダウングレードガード: DB が既知の最新版より新しい場合はエラーにする。
+    #[test]
+    fn downgrade_is_rejected() {
+        let conn = crate::init_memory().expect("init");
+        conn.execute_batch("PRAGMA user_version = 999").unwrap();
+        let fake = &[Migration {
+            version: 2,
+            description: "v2",
+            up: create_marker,
+        }];
+        let result = run_migrations(&conn, fake);
+        assert!(result.is_err(), "newer-than-supported DB must be rejected");
+        assert!(!table_exists(&conn, "test_marker").unwrap());
+    }
+}
