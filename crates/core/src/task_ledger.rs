@@ -19,13 +19,16 @@ pub const LEDGER_RECENT_ENTRIES: usize = 10;
 /// 1エントリの描画上限（chars）。超過分は切り詰める。
 const LEDGER_ENTRY_MAX_CHARS: usize = 500;
 
+/// goal / contract の描画上限（chars）。action 層の入力上限より広い防衛的キャップ。
+const LEDGER_FIELD_MAX_CHARS: usize = 4000;
+
 /// RFC3339 タイムスタンプを表示用の `MM-DD HH:MM` に短縮する。
-fn short_timestamp(rfc3339: &str) -> &str {
-    // "2026-07-02T09:41:23.123+00:00" -> "07-02 09:41" 相当の範囲をスライス
-    if rfc3339.len() >= 16 {
-        &rfc3339[5..16]
-    } else {
-        rfc3339
+fn short_timestamp(rfc3339: &str) -> String {
+    // "2026-07-02T09:41:23.123+00:00" -> "07-02 09:41"
+    // get() で UTF-8 境界を安全に扱う（不正な値でも panic しない）
+    match rfc3339.get(5..16) {
+        Some(s) => s.replace('T', " "),
+        None => rfc3339.to_string(),
     }
 }
 
@@ -49,8 +52,13 @@ pub fn build_ledger_section(
         return Ok(None);
     };
 
-    let total = queries::count_task_progress(conn, task.id)?;
     let recent = queries::list_recent_task_progress(conn, task.id, LEDGER_RECENT_ENTRIES)?;
+    // COUNT はエントリが上限に達した時（= 切り詰めが起こり得る時）だけ払う
+    let total = if recent.len() == LEDGER_RECENT_ENTRIES {
+        queries::count_task_progress(conn, task.id)?
+    } else {
+        recent.len() as i64
+    };
 
     let mut out = String::new();
     out.push_str("[Task Ledger]\n");
@@ -60,9 +68,15 @@ pub fn build_ledger_section(
         short_timestamp(&task.created_at),
         short_timestamp(&task.updated_at),
     ));
-    out.push_str(&format!("Goal: {}\n", task.goal));
+    out.push_str(&format!(
+        "Goal: {}\n",
+        truncate_chars(&task.goal, LEDGER_FIELD_MAX_CHARS)
+    ));
     match task.contract.as_deref().filter(|c| !c.trim().is_empty()) {
-        Some(contract) => out.push_str(&format!("Contract (done when): {contract}\n")),
+        Some(contract) => out.push_str(&format!(
+            "Contract (done when): {}\n",
+            truncate_chars(contract, LEDGER_FIELD_MAX_CHARS)
+        )),
         None => out.push_str(
             "Contract (done when): (not agreed yet — negotiate acceptance criteria, then update_task_contract)\n",
         ),
@@ -109,6 +123,14 @@ mod tests {
     fn no_active_task_returns_none() {
         let conn = setup();
         assert!(build_ledger_section(&conn, "a1", "s1").unwrap().is_none());
+    }
+
+    #[test]
+    fn short_timestamp_drops_t_and_never_panics() {
+        assert_eq!(short_timestamp("2026-07-02T09:41:23+00:00"), "07-02 09:41");
+        assert_eq!(short_timestamp("short"), "short");
+        // 先頭16バイト内にマルチバイト文字があっても panic しない
+        assert_eq!(short_timestamp("2026年07月02日T09:41"), "2026年07月02日T09:41");
     }
 
     #[test]

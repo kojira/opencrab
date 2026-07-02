@@ -396,35 +396,10 @@ impl DiscordGatewayActions {
              - depth: {depth}\n\
              - Discordへの直接送信は禁止されています\n\
              - 進捗報告は report_progress を使ってください\n\
-             - タスク完了時はテキストで結果を返してください（Discord送信はメインエンジンが行います）\n\
-             - マルチステップの作業では open_task / record_task_progress / close_task の\
-             タスク台帳アクションが使えます（このサブタスク専用セッションに永続化されます）\n\n\
+             - タスク完了時はテキストで結果を返してください（Discord送信はメインエンジンが行います）\n\n\
              You are a sub-engine executing a delegated task.\
              {instructions_section}"
         );
-
-        // このサブセッションに既存のタスク台帳があれば task に前置する。
-        // 現状 sub_session_id は毎回新規 UUID のため通常 None（将来の resume 用フック）。
-        let task = match self.db.lock() {
-            Ok(conn) => match opencrab_core::task_ledger::build_ledger_section(
-                &conn,
-                &agent_id,
-                &sub_session_id,
-            ) {
-                Ok(Some(section)) => format!("{section}\n\n{task}"),
-                Ok(None) => task,
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to build task ledger section for subtask {subtask_id}: {e}"
-                    );
-                    task
-                }
-            },
-            Err(e) => {
-                tracing::warn!("failed to lock DB for subtask {subtask_id} ledger: {e}");
-                task
-            }
-        };
 
         // Clone for the spawned task.
         let db_clone = self.db.clone();

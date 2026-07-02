@@ -46,17 +46,21 @@ CREATE TABLE IF NOT EXISTS task_ledger (
     session_id TEXT NOT NULL,
     goal TEXT NOT NULL,
     contract TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'done', 'abandoned')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_ledger_session
     ON task_ledger(agent_id, session_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_ledger_one_active
+    ON task_ledger(agent_id, session_id) WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS task_progress (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES task_ledger(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL DEFAULT 'progress',
+    kind TEXT NOT NULL DEFAULT 'progress'
+        CHECK (kind IN ('progress', 'decision', 'blocker')),
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -1212,17 +1216,21 @@ CREATE TABLE IF NOT EXISTS task_ledger (
     session_id TEXT NOT NULL,
     goal TEXT NOT NULL,
     contract TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'done', 'abandoned')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_ledger_session
     ON task_ledger(agent_id, session_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_ledger_one_active
+    ON task_ledger(agent_id, session_id) WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS task_progress (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES task_ledger(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL DEFAULT 'progress',
+    kind TEXT NOT NULL DEFAULT 'progress'
+        CHECK (kind IN ('progress', 'decision', 'blocker')),
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -1364,7 +1372,8 @@ mod migration_tests {
             conn.prepare(
                 "SELECT sql FROM sqlite_master
                  WHERE name IN ('task_ledger','task_progress',
-                                'idx_task_ledger_session','idx_task_progress_task')
+                                'idx_task_ledger_session','idx_task_ledger_one_active',
+                                'idx_task_progress_task')
                  ORDER BY name",
             )
             .unwrap()
@@ -1386,7 +1395,7 @@ mod migration_tests {
         initialize(&migrated).expect("re-migrate");
 
         assert_eq!(dump(&fresh), dump(&migrated));
-        assert_eq!(dump(&fresh).len(), 4, "expected 2 tables + 2 indexes");
+        assert_eq!(dump(&fresh).len(), 5, "expected 2 tables + 3 indexes");
     }
 
     /// F. ダウングレードガード: DB が既知の最新版より新しい場合はエラーにする。

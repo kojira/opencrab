@@ -982,18 +982,25 @@ pub fn update_task_goal_contract(
 }
 
 /// 進捗エントリ（progress / decision / blocker）を追記し、採番された id を返す。
+/// 親タスクの updated_at も更新する。
 pub fn insert_task_progress(
     conn: &Connection,
     task_id: i64,
     kind: &str,
     content: &str,
 ) -> Result<i64> {
+    let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO task_progress (task_id, kind, content, created_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![task_id, kind, content, Utc::now().to_rfc3339()],
+        params![task_id, kind, content, now],
     )?;
-    Ok(conn.last_insert_rowid())
+    let progress_id = conn.last_insert_rowid();
+    conn.execute(
+        "UPDATE task_ledger SET updated_at = ?1 WHERE id = ?2",
+        params![now, task_id],
+    )?;
+    Ok(progress_id)
 }
 
 /// 直近 limit 件の進捗を**時系列順**で返す。
@@ -2824,6 +2831,29 @@ mod tests {
         let task = get_task_ledger(&conn, "a1", id).unwrap().unwrap();
         assert_eq!(task.goal, "new goal");
         assert_eq!(task.contract.as_deref(), Some("new contract"));
+    }
+
+    #[test]
+    fn test_task_ledger_second_active_insert_rejected_by_db() {
+        let conn = setup();
+        insert_task_ledger(&conn, "a1", "s1", "first", None).unwrap();
+        // 部分ユニークインデックスにより同一セッションの2件目の active は DB 層で拒否される
+        let err = insert_task_ledger(&conn, "a1", "s1", "second", None).unwrap_err();
+        assert!(err.to_string().contains("UNIQUE constraint failed"));
+        // close 後は再度 open できる
+        let first = get_active_task_for_session(&conn, "a1", "s1").unwrap().unwrap();
+        assert!(update_task_status(&conn, "a1", first.id, "done").unwrap());
+        insert_task_ledger(&conn, "a1", "s1", "second", None).unwrap();
+    }
+
+    #[test]
+    fn test_task_progress_bumps_ledger_updated_at() {
+        let conn = setup();
+        let id = insert_task_ledger(&conn, "a1", "s1", "g", None).unwrap();
+        let before = get_task_ledger(&conn, "a1", id).unwrap().unwrap().updated_at;
+        insert_task_progress(&conn, id, "progress", "step").unwrap();
+        let after = get_task_ledger(&conn, "a1", id).unwrap().unwrap().updated_at;
+        assert!(after > before, "updated_at must advance on progress append");
     }
 
     #[test]

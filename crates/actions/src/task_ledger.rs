@@ -9,6 +9,11 @@ use serde_json::json;
 
 use crate::traits::{Action, ActionContext, ActionResult};
 
+/// goal の入力上限（chars）。台帳セクションは毎ターン会話に前置されるため有界にする。
+const GOAL_MAX_CHARS: usize = 2000;
+/// contract の入力上限（chars）。
+const CONTRACT_MAX_CHARS: usize = 4000;
+
 /// ctx から (agent_id, session_id) を取り出す。session が無い文脈では台帳は使えない。
 fn session_scope(ctx: &ActionContext) -> Result<(&str, &str), ActionResult> {
     match ctx.session_id.as_deref() {
@@ -16,6 +21,34 @@ fn session_scope(ctx: &ActionContext) -> Result<(&str, &str), ActionResult> {
         None => Err(ActionResult::error(
             "task ledger requires a session context (no session_id available)",
         )),
+    }
+}
+
+/// セッションの active タスクを取得する。無い / 失敗は ActionResult エラーに変換。
+fn require_active_task(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<opencrab_db::queries::TaskLedgerRow, ActionResult> {
+    match opencrab_db::queries::get_active_task_for_session(conn, agent_id, session_id) {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => Err(ActionResult::error(
+            "no active task in this session — call open_task first",
+        )),
+        Err(e) => Err(ActionResult::error(&format!(
+            "Failed to get active task: {e}"
+        ))),
+    }
+}
+
+fn field_too_long(name: &str, value: &str, max: usize) -> Option<ActionResult> {
+    let len = value.chars().count();
+    if len > max {
+        Some(ActionResult::error(&format!(
+            "{name} is too long ({len} chars, max {max}) — the ledger is injected into every prompt, keep it concise and store details in workspace files instead"
+        )))
+    } else {
+        None
     }
 }
 
@@ -69,6 +102,13 @@ impl Action for OpenTaskAction {
             return ActionResult::error("goal is required");
         };
         let contract = args["contract"].as_str().filter(|c| !c.trim().is_empty());
+        if let Some(err) = field_too_long("goal", goal, GOAL_MAX_CHARS) {
+            return err;
+        }
+        if let Some(err) = contract.and_then(|c| field_too_long("contract", c, CONTRACT_MAX_CHARS))
+        {
+            return err;
+        }
 
         let conn = match ctx.db.lock() {
             Ok(c) => c,
@@ -94,6 +134,10 @@ impl Action for OpenTaskAction {
                 "contract": contract,
                 "status": "active",
             })),
+            // 部分ユニークインデックス（1セッション1 active）違反 = 並行 open の負け側
+            Err(e) if e.to_string().contains("UNIQUE constraint failed") => ActionResult::error(
+                "An active task already exists in this session (opened concurrently). Record progress on it or close it instead.",
+            ),
             Err(e) => ActionResult::error(&format!("Failed to open task: {e}")),
         }
     }
@@ -138,20 +182,22 @@ impl Action for UpdateTaskContractAction {
         if goal.is_none() && contract.is_none() {
             return ActionResult::error("at least one of goal / contract is required");
         }
+        if let Some(err) = goal.and_then(|g| field_too_long("goal", g, GOAL_MAX_CHARS)) {
+            return err;
+        }
+        if let Some(err) = contract.and_then(|c| field_too_long("contract", c, CONTRACT_MAX_CHARS))
+        {
+            return err;
+        }
 
         let conn = match ctx.db.lock() {
             Ok(c) => c,
             Err(e) => return ActionResult::error(&format!("Failed to acquire DB lock: {e}")),
         };
 
-        let task = match opencrab_db::queries::get_active_task_for_session(
-            &conn, agent_id, session_id,
-        ) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                return ActionResult::error("no active task in this session — call open_task first")
-            }
-            Err(e) => return ActionResult::error(&format!("Failed to get active task: {e}")),
+        let task = match require_active_task(&conn, agent_id, session_id) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
 
         match opencrab_db::queries::update_task_goal_contract(&conn, agent_id, task.id, goal, contract)
@@ -220,14 +266,9 @@ impl Action for RecordTaskProgressAction {
             Err(e) => return ActionResult::error(&format!("Failed to acquire DB lock: {e}")),
         };
 
-        let task = match opencrab_db::queries::get_active_task_for_session(
-            &conn, agent_id, session_id,
-        ) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                return ActionResult::error("no active task in this session — call open_task first")
-            }
-            Err(e) => return ActionResult::error(&format!("Failed to get active task: {e}")),
+        let task = match require_active_task(&conn, agent_id, session_id) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
 
         match opencrab_db::queries::insert_task_progress(&conn, task.id, kind, content) {
@@ -293,25 +334,25 @@ impl Action for CloseTaskAction {
             Err(e) => return ActionResult::error(&format!("Failed to acquire DB lock: {e}")),
         };
 
-        let task = match opencrab_db::queries::get_active_task_for_session(
-            &conn, agent_id, session_id,
-        ) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                return ActionResult::error("no active task in this session — nothing to close")
-            }
-            Err(e) => return ActionResult::error(&format!("Failed to get active task: {e}")),
+        let task = match require_active_task(&conn, agent_id, session_id) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
 
-        if let Some(summary) = summary {
-            if let Err(e) =
-                opencrab_db::queries::insert_task_progress(&conn, task.id, "progress", summary)
-            {
-                return ActionResult::error(&format!("Failed to record summary: {e}"));
+        // summary の追記と status 更新は不可分（途中失敗で summary だけ残さない）
+        let close = || -> anyhow::Result<bool> {
+            let tx = conn.unchecked_transaction()?;
+            if let Some(summary) = summary {
+                opencrab_db::queries::insert_task_progress(&tx, task.id, "progress", summary)?;
             }
-        }
+            let updated = opencrab_db::queries::update_task_status(&tx, agent_id, task.id, status)?;
+            if updated {
+                tx.commit()?;
+            }
+            Ok(updated)
+        };
 
-        match opencrab_db::queries::update_task_status(&conn, agent_id, task.id, status) {
+        match close() {
             Ok(true) => ActionResult::success(json!({
                 "task_id": task.id,
                 "goal": task.goal,
@@ -362,23 +403,33 @@ impl Action for GetTaskAction {
             Err(e) => return ActionResult::error(&format!("Failed to acquire DB lock: {e}")),
         };
 
-        let task = match args["task_id"].as_i64() {
+        // task_id が「渡されたのに整数でない」場合は黙って active にフォールバックしない
+        let task_id_arg = match args.get("task_id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => match v.as_i64() {
+                Some(id) => Some(id),
+                None => {
+                    return ActionResult::error(&format!(
+                        "task_id must be an integer, got: {v}"
+                    ))
+                }
+            },
+        };
+
+        let task = match task_id_arg {
             Some(task_id) => match opencrab_db::queries::get_task_ledger(&conn, agent_id, task_id)
             {
                 Ok(Some(t)) => t,
                 Ok(None) => return ActionResult::error(&format!("task #{task_id} not found")),
                 Err(e) => return ActionResult::error(&format!("Failed to get task: {e}")),
             },
-            None => match opencrab_db::queries::get_active_task_for_session(
-                &conn, agent_id, session_id,
-            ) {
-                Ok(Some(t)) => t,
-                Ok(None) => {
+            None => match require_active_task(&conn, agent_id, session_id) {
+                Ok(t) => t,
+                Err(_) => {
                     return ActionResult::error(
                         "no active task in this session — pass task_id or call open_task first",
                     )
                 }
-                Err(e) => return ActionResult::error(&format!("Failed to get active task: {e}")),
             },
         };
 
@@ -390,7 +441,10 @@ impl Action for GetTaskAction {
             Ok(p) => p,
             Err(e) => return ActionResult::error(&format!("Failed to list progress: {e}")),
         };
-        let total = opencrab_db::queries::count_task_progress(&conn, task.id).unwrap_or(-1);
+        let total = match opencrab_db::queries::count_task_progress(&conn, task.id) {
+            Ok(t) => t,
+            Err(e) => return ActionResult::error(&format!("Failed to count progress: {e}")),
+        };
 
         let mut result = task_json(&task);
         result["progress_total"] = json!(total);
@@ -530,6 +584,26 @@ mod tests {
         let data = upd.data.unwrap();
         assert_eq!(data["goal"], "g");
         assert_eq!(data["contract"], "CI green");
+    }
+
+    #[tokio::test]
+    async fn test_open_task_rejects_oversized_goal() {
+        let (_dir, ctx) = test_context();
+        let result = OpenTaskAction
+            .execute(&json!({"goal": "g".repeat(2001)}), &ctx)
+            .await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("too long"));
+    }
+
+    #[tokio::test]
+    async fn test_get_task_rejects_non_integer_task_id() {
+        let (_dir, ctx) = test_context();
+        OpenTaskAction.execute(&json!({"goal": "g"}), &ctx).await;
+        // 文字列の task_id は active へのフォールバックではなくエラー
+        let result = GetTaskAction.execute(&json!({"task_id": "1"}), &ctx).await;
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("must be an integer"));
     }
 
     #[tokio::test]
