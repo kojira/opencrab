@@ -2775,6 +2775,32 @@ mod tests {
     }
 
     #[test]
+    fn test_trusted_user_display_name_round_trip() {
+        let conn = setup();
+        add_trusted_user(
+            &conn, "id-1", "a1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+        )
+        .unwrap();
+        let row = get_trusted_user(&conn, "42", "a1").unwrap();
+        assert_eq!(row.display_name, "Crab B");
+        assert_eq!(row.permission, "co_agent");
+
+        assert!(update_trusted_user_display_name(&conn, "id-1", "Crab B2").unwrap());
+        let rows = list_trusted_users(&conn, "a1").unwrap();
+        assert_eq!(rows[0].display_name, "Crab B2");
+
+        // v3 以前の行（DEFAULT ''）も読み出せる
+        conn.execute(
+            "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at) \
+             VALUES ('id-2', '43', 'a1', 'user', 'owner', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        let row = get_trusted_user(&conn, "43", "a1").unwrap();
+        assert_eq!(row.display_name, "");
+    }
+
+    #[test]
     fn test_task_ledger_insert_and_get_active() {
         let conn = setup();
         let id = insert_task_ledger(&conn, "a1", "s1", "build feature", Some("tests pass"))
@@ -4978,7 +5004,24 @@ pub struct TrustedDiscordUserRow {
     pub permission: String,
     pub created_by: String,
     pub created_at: String,
+    /// ロスター表示用の名前（ピアレビュアー一覧等）。空文字可。
+    pub display_name: String,
 }
+
+fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedDiscordUserRow> {
+    Ok(TrustedDiscordUserRow {
+        id: row.get(0)?,
+        discord_user_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        permission: row.get(3)?,
+        created_by: row.get(4)?,
+        created_at: row.get(5)?,
+        display_name: row.get(6)?,
+    })
+}
+
+const TRUSTED_USER_COLUMNS: &str =
+    "id, discord_user_id, agent_id, permission, created_by, created_at, display_name";
 
 pub fn get_trusted_user(
     conn: &Connection,
@@ -4986,41 +5029,26 @@ pub fn get_trusted_user(
     agent_id: &str,
 ) -> Option<TrustedDiscordUserRow> {
     conn.query_row(
-        "SELECT id, discord_user_id, agent_id, permission, created_by, created_at \
-         FROM trusted_discord_users WHERE discord_user_id = ?1 AND agent_id = ?2",
+        &format!(
+            "SELECT {TRUSTED_USER_COLUMNS} \
+             FROM trusted_discord_users WHERE discord_user_id = ?1 AND agent_id = ?2"
+        ),
         [discord_user_id, agent_id],
-        |row| {
-            Ok(TrustedDiscordUserRow {
-                id: row.get(0)?,
-                discord_user_id: row.get(1)?,
-                agent_id: row.get(2)?,
-                permission: row.get(3)?,
-                created_by: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        },
+        trusted_user_from_row,
     )
     .ok()
 }
 
 pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedDiscordUserRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, discord_user_id, agent_id, permission, created_by, created_at \
-         FROM trusted_discord_users WHERE agent_id = ?1 ORDER BY created_at ASC",
-    )?;
-    let rows = stmt.query_map([agent_id], |row| {
-        Ok(TrustedDiscordUserRow {
-            id: row.get(0)?,
-            discord_user_id: row.get(1)?,
-            agent_id: row.get(2)?,
-            permission: row.get(3)?,
-            created_by: row.get(4)?,
-            created_at: row.get(5)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TRUSTED_USER_COLUMNS} \
+         FROM trusted_discord_users WHERE agent_id = ?1 ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map([agent_id], trusted_user_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_trusted_user(
     conn: &Connection,
     id: &str,
@@ -5029,13 +5057,41 @@ pub fn add_trusted_user(
     permission: &str,
     created_by: &str,
     created_at: &str,
+    display_name: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        [id, discord_user_id, agent_id, permission, created_by, created_at],
+        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at, display_name) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        [id, discord_user_id, agent_id, permission, created_by, created_at, display_name],
     )?;
     Ok(())
+}
+
+/// このエージェントのピアレビュアー（permission='co_agent' の trusted user）一覧。
+/// プロンプトのロスター表示と reviewer 解決の両方がこれを使う（選定ロジックの一元化）。
+pub fn list_co_agent_reviewers(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Vec<TrustedDiscordUserRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TRUSTED_USER_COLUMNS} \
+         FROM trusted_discord_users WHERE agent_id = ?1 AND permission = 'co_agent' \
+         ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map([agent_id], trusted_user_from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn update_trusted_user_display_name(
+    conn: &Connection,
+    id: &str,
+    display_name: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE trusted_discord_users SET display_name = ?2 WHERE id = ?1",
+        [id, display_name],
+    )?;
+    Ok(n > 0)
 }
 
 pub fn update_trusted_user_permission(

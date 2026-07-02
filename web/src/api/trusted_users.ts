@@ -7,6 +7,7 @@ export interface TrustedUserDto {
   permission: string;
   created_by: string;
   created_at: string;
+  display_name: string;
 }
 
 export function getTrustedUsers(agentId: string): Promise<TrustedUserDto[]> {
@@ -15,7 +16,7 @@ export function getTrustedUsers(agentId: string): Promise<TrustedUserDto[]> {
 
 export function addTrustedUser(
   agentId: string,
-  body: { discord_user_id: string; permission?: string }
+  body: { discord_user_id: string; permission?: string; display_name?: string }
 ): Promise<TrustedUserDto> {
   return api.post<TrustedUserDto>(`/agents/${agentId}/trusted-users`, body);
 }
@@ -23,7 +24,7 @@ export function addTrustedUser(
 export function updateTrustedUser(
   agentId: string,
   userId: string,
-  body: { permission: string }
+  body: { permission?: string; display_name?: string }
 ): Promise<{ updated: boolean }> {
   return api.patch<{ updated: boolean }>(
     `/agents/${agentId}/trusted-users/${userId}`,

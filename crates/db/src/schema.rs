@@ -26,11 +26,26 @@ struct Migration {
 ///   番号付きマイグレーションもここへ追加する**こと。忘れると既存DBだけ列が欠ける。
 /// - 各 `up` は自身のトランザクション内で実行される（`run_migrations` 参照）。
 ///   `journal_mode`/`VACUUM` 等の非トランザクショナルな操作は `up` 内で行わない。
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 2,
-    description: "task ledger: goal/contract/progress (issue #50)",
-    up: |conn| conn.execute_batch(TASK_LEDGER_SQL),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 2,
+        description: "task ledger: goal/contract/progress (issue #50)",
+        up: |conn| conn.execute_batch(TASK_LEDGER_SQL),
+    },
+    Migration {
+        version: 3,
+        description: "trusted_discord_users.display_name (peer reviewer roster, issue #57)",
+        // 新規DB は SCHEMA_SQL 側で列を持つため、column_exists でガードして冪等にする
+        up: |conn| {
+            if !column_exists(conn, "trusted_discord_users", "display_name")? {
+                conn.execute_batch(
+                    "ALTER TABLE trusted_discord_users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            Ok(())
+        },
+    },
+];
 
 /// version 2: タスク台帳。
 ///
@@ -1093,6 +1108,7 @@ CREATE TABLE IF NOT EXISTS trusted_discord_users (
   permission TEXT NOT NULL DEFAULT 'user',
   created_by TEXT NOT NULL DEFAULT 'owner',
   created_at TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
   UNIQUE (discord_user_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
@@ -1358,10 +1374,43 @@ mod migration_tests {
         .unwrap();
         assert!(!table_exists(&conn, "task_ledger").unwrap());
 
-        initialize(&conn).expect("upgrade v1 -> v2");
+        initialize(&conn).expect("upgrade v1 -> latest");
         assert!(table_exists(&conn, "task_ledger").unwrap());
         assert!(table_exists(&conn, "task_progress").unwrap());
-        assert_eq!(schema_version(&conn).unwrap(), 2);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    }
+
+    /// v3: display_name 列の付与。v2 相当 DB（列なし）からのアップグレードと、
+    /// 新規 DB（SCHEMA_SQL 由来で列あり）での冪等性の両方を確認する。
+    #[test]
+    fn display_name_migration_upgrades_v2_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）
+        assert!(column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
+
+        // v2 相当の既存 DB を模す: 列なしのテーブルに作り直して version 2 に戻す
+        conn.execute_batch(
+            "DROP TABLE trusted_discord_users;
+             CREATE TABLE trusted_discord_users (
+               id TEXT PRIMARY KEY,
+               discord_user_id TEXT NOT NULL,
+               agent_id TEXT NOT NULL,
+               permission TEXT NOT NULL DEFAULT 'user',
+               created_by TEXT NOT NULL DEFAULT 'owner',
+               created_at TEXT NOT NULL,
+               UNIQUE (discord_user_id, agent_id)
+             );
+             PRAGMA user_version = 2",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
+
+        initialize(&conn).expect("upgrade v2 -> v3");
+        assert!(column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 再実行しても冪等
+        initialize(&conn).expect("idempotent");
     }
 
     /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する
