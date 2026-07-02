@@ -297,7 +297,6 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
-/// Discord添付ファイルが画像かどうかを判定する
 /// 受信メッセージの Sender を構築する。bot 投稿は `is_bot` が立った `Sender::bot` になる
 /// （message_loop 側の「bot 投稿には👀リアクションを付けない」分岐が機能するために必要）。
 fn build_sender(author_id: u64, author_name: &str, is_bot: bool, avatar_url: String) -> Sender {
@@ -309,6 +308,7 @@ fn build_sender(author_id: u64, author_name: &str, is_bot: bool, avatar_url: Str
     base.with_avatar(avatar_url)
 }
 
+/// Discord添付ファイルが画像かどうかを判定する
 fn is_image_attachment(a: &serenity::model::channel::Attachment) -> bool {
     a.content_type
         .as_deref()

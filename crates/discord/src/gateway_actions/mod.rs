@@ -858,7 +858,7 @@ impl GatewayActions for DiscordGatewayActions {
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限30000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。"
+                            "description": "レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限12000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。"
                         },
                         "channel_id": {
                             "type": "string",
@@ -1034,11 +1034,11 @@ mod tests {
         let result = actions
             .execute(
                 "request_peer_review",
-                &json!({"content": "x".repeat(30_001), "channel_id": "123"}),
+                &json!({"content": "x".repeat(12_001), "channel_id": "123"}),
             )
             .await;
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("30000"));
+        assert!(result.error.unwrap().contains("12000"));
     }
 
     // ---- channel_config ----

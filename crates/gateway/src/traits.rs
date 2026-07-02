@@ -69,3 +69,12 @@ pub trait Gateway: Send + Sync {
     /// リソースのクリーンアップを行う。
     async fn disconnect(&mut self) -> Result<()>;
 }
+
+/// ピアレビュー依頼メッセージのマーカー（プロトコル定数）。
+///
+/// discord 側のヘッダ組み立てと server 側の system prompt 規約の両方がこれを参照する。
+/// 文字列がズレると Silent Reply の例外判定が発火せず、レビューが silent に死ぬため
+/// 必ずこの定数を使うこと。
+pub const PEER_REVIEW_REQUEST_MARKER: &str = "[Peer Review Request]";
+/// ピアレビュー返信メッセージのマーカー（プロトコル定数）。
+pub const PEER_REVIEW_REPLY_MARKER: &str = "[Peer Review]";

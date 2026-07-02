@@ -11,13 +11,21 @@ use serde_json::json;
 use serenity::all::{ChannelId, CreateMessage};
 use tracing::{error, warn};
 
-use opencrab_gateway::GatewayActionResult;
+use opencrab_core::llm_text::truncate_chars;
+use opencrab_gateway::{GatewayActionResult, PEER_REVIEW_REQUEST_MARKER};
 
-use super::webhook::chunk_text;
+use super::webhook::build_part_messages;
 use super::DiscordGatewayActions;
 
-/// content の上限（chars）。超える場合はワークスペースに保存して discord_send_file を使う。
-pub(crate) const MAX_REVIEW_CONTENT_CHARS: usize = 30_000;
+/// content の上限（chars）。Discord のレート制限（~5通/5秒/チャンネル）の1ウィンドウに
+/// 収まる分割数（ヘッダ+6 part 程度）に抑える。超える場合はワークスペースに保存して
+/// discord_send_file を使う。
+pub(crate) const MAX_REVIEW_CONTENT_CHARS: usize = 12_000;
+
+/// ヘッダに描画する goal / contract / instructions の上限（chars）。
+/// ヘッダは1通に収める必要がある（Discord 上限 2000 chars）ため、フィールドを切り詰める。
+/// 全文はレビュー対象の content 側や台帳にあるので、ここは案内で足りる。
+const HEADER_FIELD_MAX_CHARS: usize = 300;
 
 /// レビュー依頼ヘッダの構成要素。
 pub(crate) struct PeerReviewHeader<'a> {
@@ -33,28 +41,38 @@ pub(crate) fn build_peer_review_messages(
     content: &str,
     limit: usize,
 ) -> Vec<String> {
-    let chunks = chunk_text(content, limit);
-    let part_count = chunks.len();
+    let parts = build_part_messages(content, limit);
+    let part_count = parts.len();
 
+    // ヘッダは1通（2000 chars 上限）に収める: 可変長フィールドは切り詰める
     let mut head = String::new();
     match header.task {
         Some((task_id, _, _)) => head.push_str(&format!(
-            "[Peer Review Request] from {} — task #{task_id}\n",
-            header.agent_name
+            "{PEER_REVIEW_REQUEST_MARKER} from {} — task #{task_id}\n",
+            truncate_chars(header.agent_name, 100),
         )),
         None => head.push_str(&format!(
-            "[Peer Review Request] from {} — no active task\n",
-            header.agent_name
+            "{PEER_REVIEW_REQUEST_MARKER} from {} — no active task\n",
+            truncate_chars(header.agent_name, 100),
         )),
     }
     if let Some((_, goal, contract)) = header.task {
-        head.push_str(&format!("goal: {goal}\n"));
+        head.push_str(&format!(
+            "goal: {}\n",
+            truncate_chars(goal, HEADER_FIELD_MAX_CHARS)
+        ));
         if let Some(contract) = contract.filter(|c| !c.trim().is_empty()) {
-            head.push_str(&format!("contract: {contract}\n"));
+            head.push_str(&format!(
+                "contract: {}\n",
+                truncate_chars(contract, HEADER_FIELD_MAX_CHARS)
+            ));
         }
     }
     if let Some(instructions) = header.instructions.filter(|i| !i.trim().is_empty()) {
-        head.push_str(&format!("instructions: {instructions}\n"));
+        head.push_str(&format!(
+            "instructions: {}\n",
+            truncate_chars(instructions, HEADER_FIELD_MAX_CHARS)
+        ));
     }
     head.push_str(&format!(
         "Please review the raw content in the following part 1/{part_count}..{part_count}/{part_count} messages with fresh eyes.\n\
@@ -64,9 +82,7 @@ pub(crate) fn build_peer_review_messages(
 
     let mut msgs = Vec::with_capacity(part_count + 1);
     msgs.push(head);
-    for (i, chunk) in chunks.iter().enumerate() {
-        msgs.push(format!("part {}/{}\n{}", i + 1, part_count, chunk));
-    }
+    msgs.extend(parts);
     msgs
 }
 
@@ -162,18 +178,22 @@ impl DiscordGatewayActions {
         let messages =
             build_peer_review_messages(&header, content, super::webhook::DISCORD_CHUNK_LIMIT);
         let total = messages.len();
+        let parts = total - 1;
 
         for (i, message) in messages.iter().enumerate() {
             if let Err(e) = ChannelId::new(channel_id)
                 .send_message(&self.http, CreateMessage::new().content(message))
                 .await
             {
-                error!("request_peer_review: send failed at part {}/{}: {e}", i, total);
+                error!(
+                    "request_peer_review: send failed after {i}/{total} messages sent: {e}"
+                );
                 return GatewayActionResult {
                     success: false,
                     data: None,
                     error: Some(format!(
-                        "ピアレビュー依頼の送信に失敗 (message {i}/{total}): {e}"
+                        "ピアレビュー依頼の送信に失敗（{i}/{total} 通送信済みの時点で失敗）: {e}。\
+                         投稿済みの依頼は不完全です。チャンネルに取り消しの一言を送ってから、必要なら再依頼してください。"
                     )),
                 };
             }
@@ -190,8 +210,7 @@ impl DiscordGatewayActions {
                     task.id,
                     "progress",
                     &format!(
-                        "[peer review requested] posted to channel {channel_id} ({} parts){focus}",
-                        total - 1
+                        "[peer review requested] posted to channel {channel_id} ({parts} parts){focus}"
                     ),
                 )
                 .map(|_| true)
@@ -209,7 +228,7 @@ impl DiscordGatewayActions {
             success: true,
             data: Some(json!({
                 "channel_id": channel_id_str,
-                "parts": total - 1,
+                "parts": parts,
                 "task_id": task.as_ref().map(|t| t.id),
                 "ledger_recorded": ledger_recorded,
                 "message": "ピアレビュー依頼を投稿しました。[Peer Review] で始まる返信を待ってください。",
@@ -265,6 +284,27 @@ mod tests {
         assert!(msgs[0].contains("task #3"));
         assert!(msgs[0].contains("goal: g"));
         assert!(!msgs[0].contains("contract:"));
+    }
+
+    #[test]
+    fn header_stays_within_discord_limit_with_long_fields() {
+        // goal 2000 / contract 4000 / instructions 無制限でもヘッダは1通(2000 chars)に収まる
+        let goal = "g".repeat(2000);
+        let contract = "c".repeat(4000);
+        let instructions = "i".repeat(5000);
+        let header = PeerReviewHeader {
+            agent_name: "very-long-agent-name-agent",
+            task: Some((99, goal.as_str(), Some(contract.as_str()))),
+            instructions: Some(instructions.as_str()),
+        };
+        let msgs = build_peer_review_messages(&header, "x", DISCORD_CHUNK_LIMIT);
+        assert!(
+            msgs[0].chars().count() <= 2000,
+            "header must fit one Discord message, got {}",
+            msgs[0].chars().count()
+        );
+        // 切り詰めが起きていることの確認
+        assert!(msgs[0].contains("…"));
     }
 
     #[test]
