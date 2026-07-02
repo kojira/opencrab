@@ -23,6 +23,50 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub tools: opencrab_actions::tools::ToolsConfig,
+    #[serde(default)]
+    pub evaluator: EvaluatorConfig,
+}
+
+/// verify 段（evaluator）の設定。
+///
+/// active タスクに contract（受け入れ条件）があるセッションの run 終了時、
+/// 新しい context の LLM 呼び出しで rubric 評価し、閾値未満なら
+/// ギャップをフィードバックして run を再実行する。
+#[derive(Debug, Deserialize, Clone)]
+pub struct EvaluatorConfig {
+    /// verify 段を有効にするか。
+    #[serde(default = "default_evaluator_enabled")]
+    pub enabled: bool,
+    /// 合格スコア閾値 (0.0-1.0)。
+    #[serde(default = "default_evaluator_threshold")]
+    pub threshold: f64,
+    /// 不合格時の再実行回数の上限。
+    #[serde(default = "default_evaluator_max_rounds")]
+    pub max_rounds: usize,
+    /// 評価に使うモデル（省略時はそのエージェントの実効モデル）。
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl Default for EvaluatorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_evaluator_enabled(),
+            threshold: default_evaluator_threshold(),
+            max_rounds: default_evaluator_max_rounds(),
+            model: None,
+        }
+    }
+}
+
+fn default_evaluator_enabled() -> bool {
+    true
+}
+fn default_evaluator_threshold() -> f64 {
+    0.7
+}
+fn default_evaluator_max_rounds() -> usize {
+    1
 }
 
 #[derive(Debug, Deserialize)]

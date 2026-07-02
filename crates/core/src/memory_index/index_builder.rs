@@ -267,12 +267,7 @@ impl IndexBuilder {
                 Ok(resp) => {
                     let text = resp.first_text().unwrap_or_default().to_string();
                     // JSON部分を抽出（マークダウンコードブロック対応）
-                    let json_str = text
-                        .trim()
-                        .trim_start_matches("```json")
-                        .trim_start_matches("```")
-                        .trim_end_matches("```")
-                        .trim();
+                    let json_str = crate::evaluator::strip_code_fences(&text);
                     serde_json::from_str::<LlmSummary>(json_str).unwrap_or(LlmSummary {
                         title: format!("Topic (logs {first_log_id}-{last_log_id})"),
                         summary: session_logs
@@ -484,12 +479,7 @@ impl IndexBuilder {
             let merged_summary = match llm.chat(request).await {
                 Ok(resp) => {
                     let text = resp.first_text().unwrap_or_default().to_string();
-                    let json_str = text
-                        .trim()
-                        .trim_start_matches("```json")
-                        .trim_start_matches("```")
-                        .trim_end_matches("```")
-                        .trim();
+                    let json_str = crate::evaluator::strip_code_fences(&text);
                     serde_json::from_str::<LlmSummary>(json_str).unwrap_or(LlmSummary {
                         title: format!("Merged topics for {}", period.title),
                         summary: "Merged summary".to_string(),

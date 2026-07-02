@@ -15,6 +15,7 @@
 pub mod a2ui;
 pub mod agent;
 pub mod engine;
+pub mod evaluator;
 pub mod heartbeat;
 pub mod identity;
 pub mod import;

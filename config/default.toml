@@ -176,3 +176,12 @@ description = "テキスト検索"
 name = "python3"
 permission = "agent"
 description = "Python3スクリプト実行"
+
+# verify 段 (evaluator): 契約付き active タスクの run 終了時、独立した context の
+# LLM で rubric 評価し、閾値未満ならギャップをフィードバックして再実行する。
+# ツールを使わなかった run（アイドル tick 等）は評価しない。
+[evaluator]
+enabled = true
+threshold = 0.7
+max_rounds = 1
+# model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
