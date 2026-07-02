@@ -23,6 +23,7 @@ fn create_test_app() -> Router {
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
+        evaluator: opencrab_server::config::EvaluatorConfig::default(),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };
@@ -704,6 +705,7 @@ fn create_test_app_with_llm() -> (
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
+        evaluator: opencrab_server::config::EvaluatorConfig::default(),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };

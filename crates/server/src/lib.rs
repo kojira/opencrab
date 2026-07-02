@@ -28,6 +28,8 @@ pub struct AppState {
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
     pub compaction_ratio: f64,
+    /// verify 段（evaluator）の設定。
+    pub evaluator: config::EvaluatorConfig,
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
 }

@@ -463,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         compaction_ratio: cfg.llm.compaction_ratio,
+        evaluator: cfg.evaluator.clone(),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };

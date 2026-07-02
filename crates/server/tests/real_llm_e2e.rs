@@ -51,6 +51,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
             opencrab_actions::tools::ToolsConfig::default(),
         )),
         compaction_ratio: 0.5,
+        evaluator: opencrab_server::config::EvaluatorConfig::default(),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };
