@@ -184,6 +184,7 @@ impl SkillEngine {
 
         let mut iterations = 0;
         let mut total_tool_calls = 0;
+        let mut xml_fallback_parses = 0;
 
         loop {
             iterations += 1;
@@ -199,6 +200,7 @@ impl SkillEngine {
                     iterations,
                     tool_calls_made: total_tool_calls,
                     stopped_by_limit: true,
+                    xml_fallback_parses,
                 });
             }
 
@@ -211,7 +213,7 @@ impl SkillEngine {
             tracing::debug!(iteration = iterations, model = %model, "SkillEngine LLM call");
 
             let request = ChatRequest {
-                model,
+                model: model.clone(),
                 messages: messages.clone(),
                 functions: if tools.is_empty() {
                     None
@@ -272,9 +274,14 @@ impl SkillEngine {
                     if c.contains("<function_calls>") {
                         let parsed = parse_xml_tool_calls(c);
                         if !parsed.is_empty() {
-                            tracing::debug!(
+                            // 発火は harness 剪定の判断材料として計測する（EngineResult 経由で
+                            // agent_logs にも記録される）。native tool calling が安定した
+                            // モデル構成では 0 になるはず。
+                            xml_fallback_parses += 1;
+                            tracing::info!(
                                 count = parsed.len(),
-                                "Parsed XML function_calls from content"
+                                model = %model,
+                                "Parsed XML function_calls from content (harness fallback fired)"
                             );
                             tool_calls = parsed;
                             // Strip the XML block from content so it doesn't leak to the user.
@@ -396,6 +403,7 @@ impl SkillEngine {
                 iterations,
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
+                xml_fallback_parses,
             });
         }
     }

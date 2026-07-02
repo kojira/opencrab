@@ -90,4 +90,8 @@ pub struct EngineResult {
     pub tool_calls_made: usize,
     /// Whether the engine stopped due to hitting the iteration limit.
     pub stopped_by_limit: bool,
+    /// XML `<function_calls>` フォールバックで tool calls を復元した回数。
+    /// harness 剪定の判断材料（native tool calling で不要になれば 0 になる）。
+    #[serde(default)]
+    pub xml_fallback_parses: usize,
 }
