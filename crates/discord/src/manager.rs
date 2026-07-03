@@ -55,9 +55,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         ));
         gateway.start().await?;
 
-        let workspace_path = self.state.workspace_base().replace("{agent_id}", agent_id);
-        let workspace_root = std::path::PathBuf::from(workspace_path);
-
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
 
         // Create event channel for A2UI and other async events
@@ -73,23 +70,14 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             }
         }
 
-        let eff_model = {
-            let conn = self.state.db().lock().unwrap();
-            opencrab_db::queries::effective_model_for_agent(
-                &conn,
-                agent_id,
-                &self.state.default_model(),
-            )
-            .unwrap_or_else(|_| self.state.default_model())
-        };
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
             crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
                 self.state.db().clone(),
                 self.state.tools_config().clone(),
                 Some(self.state.create_llm_client()),
-                eff_model,
-                workspace_root,
+                self.state.default_model(),
+                self.state.workspace_base().to_string(),
                 subtask_registry,
                 None,
             )

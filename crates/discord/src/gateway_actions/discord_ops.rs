@@ -624,7 +624,11 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) async fn execute_send_file(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) async fn execute_send_file(
+        &self,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
         let channel_id_str = match args.get("channel_id").and_then(|v| v.as_str()) {
             Some(id) => id,
             None => {
@@ -660,7 +664,7 @@ impl DiscordGatewayActions {
         };
 
         // Workspace path validation (security: prevent path traversal)
-        let workspace_root = match self.workspace_root.canonicalize() {
+        let workspace_root = match self.agent_workspace_root(&ctx.agent_id).canonicalize() {
             Ok(p) => p,
             Err(e) => {
                 return GatewayActionResult {

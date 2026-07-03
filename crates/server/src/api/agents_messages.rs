@@ -115,26 +115,15 @@ pub async fn send_agent_message(
         if let Some(ref dm) = state.discord_manager {
             if let Some(http) = dm.get_http_for_agent(&id).await {
                 let tools_cfg = state.tools_config.read().unwrap().clone();
-                let workspace_path = state.workspace_base.replace("{agent_id}", &id);
-                let workspace_root = std::path::PathBuf::from(workspace_path);
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     std::sync::Arc::new(dashmap::DashMap::new());
-                let eff_model = {
-                    let conn = state.db.lock().unwrap();
-                    opencrab_db::queries::effective_model_for_agent(
-                        &conn,
-                        &id,
-                        &state.default_model,
-                    )
-                    .unwrap_or_else(|_| state.default_model.clone())
-                };
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
                     Arc::new(std::sync::RwLock::new(tools_cfg)),
                     None,
-                    eff_model,
-                    workspace_root,
+                    state.default_model.clone(),
+                    state.workspace_base.clone(),
                     subtask_registry,
                     None,
                 );

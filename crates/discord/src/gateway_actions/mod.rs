@@ -75,8 +75,13 @@ pub struct DiscordGatewayActions {
     db: opencrab_db::Db,
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
     llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
+    /// サーバのグローバル default model（フォールバック）。エージェント実効モデルは
+    /// 呼び出しごとに `effective_model(&ctx.agent_id)` で解決する（#68: 共有ゲート
+    /// ウェイで first agent のモデルに固定されるのを防ぐ）。
     default_model: String,
-    workspace_root: PathBuf,
+    /// ワークスペースのベーステンプレート（例: "/data/workspace/{agent_id}"）。
+    /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
+    workspace_base: String,
     subtask_registry: SubtaskRegistry,
     /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
     webhook_client: reqwest::Client,
@@ -100,7 +105,7 @@ impl DiscordGatewayActions {
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
         llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
         default_model: String,
-        workspace_root: PathBuf,
+        workspace_base: String,
         subtask_registry: SubtaskRegistry,
         default_subtask_webhook: Option<WebhookConfig>,
     ) -> Self {
@@ -110,7 +115,7 @@ impl DiscordGatewayActions {
             tools_config,
             llm_client,
             default_model,
-            workspace_root,
+            workspace_base,
             subtask_registry,
             webhook_client: reqwest::Client::new(),
             default_subtask_webhook,
@@ -119,6 +124,24 @@ impl DiscordGatewayActions {
             owner_discord_id: String::new(),
             progress_debounce: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// エージェントの実効モデルを解決する（per-agent 設定 > グローバル default）。
+    fn effective_model(&self, agent_id: &str) -> String {
+        match self.db.lock() {
+            Ok(conn) => opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                agent_id,
+                &self.default_model,
+            )
+            .unwrap_or_else(|_| self.default_model.clone()),
+            Err(_) => self.default_model.clone(),
+        }
+    }
+
+    /// エージェントのワークスペース root（ベーステンプレートの {agent_id} を展開）。
+    fn agent_workspace_root(&self, agent_id: &str) -> PathBuf {
+        PathBuf::from(self.workspace_base.replace("{agent_id}", agent_id))
     }
 
     /// Set the event sender only (no A2UI pending-interaction registry).
@@ -903,7 +926,7 @@ impl GatewayActions for DiscordGatewayActions {
             "remove_allowed_command" => self.execute_remove_allowed_command(args, ctx),
             "rebuild_memory_index" => self.execute_rebuild_memory_index(ctx).await,
             "create_skill" => self.execute_create_skill(args, ctx),
-            "discord_send_file" => self.execute_send_file(args).await,
+            "discord_send_file" => self.execute_send_file(args, ctx).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
             "spawn_subtask" => self.execute_spawn_subtask(args, ctx).await,
             "cancel_subtask" => self.execute_cancel_subtask(args, ctx),
@@ -953,7 +976,7 @@ mod tests {
             tools_config,
             None,
             String::new(),
-            std::path::PathBuf::from("/tmp"),
+            "/tmp".to_string(),
             subtask_registry,
             None,
         );

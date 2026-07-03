@@ -512,18 +512,6 @@ async fn main() -> anyhow::Result<()> {
                 let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
                 gateway.start().await?;
 
-                let first_agent_id = valid_agent_ids.first().cloned().unwrap_or_default();
-                let eff_model = {
-                    let conn = state.db.lock().unwrap();
-                    opencrab_db::queries::effective_model_for_agent(
-                        &conn,
-                        &first_agent_id,
-                        &state.default_model,
-                    )
-                    .unwrap_or_else(|_| state.default_model.clone())
-                };
-                let workspace_path = state.workspace_base.replace("{agent_id}", &first_agent_id);
-                let workspace_root = std::path::PathBuf::from(workspace_path);
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     Arc::new(dashmap::DashMap::new());
                 // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
@@ -548,8 +536,8 @@ async fn main() -> anyhow::Result<()> {
                                 state.llm_router.clone(),
                             ),
                         )),
-                        eff_model,
-                        workspace_root,
+                        state.default_model.clone(),
+                        state.workspace_base.clone(),
                         subtask_registry,
                         default_subtask_webhook,
                     )

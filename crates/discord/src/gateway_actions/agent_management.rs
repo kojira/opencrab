@@ -110,7 +110,7 @@ impl DiscordGatewayActions {
             &self.db,
             &ctx.agent_id,
             llm_client.as_ref(),
-            &self.default_model,
+            &self.effective_model(&ctx.agent_id),
             config.batch_size as usize,
             &persona_name,
             personality.as_deref(),
