@@ -252,20 +252,20 @@ impl LlmRouter {
     /// Returns true if the error represents a non-retryable client-side HTTP error.
     ///
     /// Retry policy:
-    ///   - Retryable:     429 (rate-limit), 500, 502, 503, 504 (transient server errors)
-    ///   - Non-retryable: all other 4xx (permanent client errors — retrying won't help)
+    ///   - Retryable:     429 (rate-limit), 5xx (transient server errors),
+    ///                    ステータス不明のエラー（ネットワーク・サブプロセス等）
+    ///   - Non-retryable: other 4xx (permanent client errors — retrying won't help)
+    ///
+    /// 分類は型付き [`LlmError`] の downcast で行う（anyhow は context チェーンを
+    /// 遡って downcast する）。Display 文字列の部分一致には依存しない（#35）。
     fn is_non_retryable_error(error: &anyhow::Error) -> bool {
-        let msg = error.to_string();
-        // Error messages from HTTP providers embed the status via reqwest StatusCode's
-        // Display, e.g. "OpenAI API error (400 Bad Request): ...". The code is followed
-        // by the canonical reason phrase, so match "(NNN " and "(NNN)" both.
-        // 429 is the only 4xx we still retry.
-        if msg.contains("(429 ") || msg.contains("(429)") {
-            return false; // rate-limited — retryable
+        match error.downcast_ref::<crate::LlmError>() {
+            Some(crate::LlmError::Http { status, .. }) => {
+                *status != 429 && (400..500).contains(status)
+            }
+            // ステータスを運ばないエラーは retryable（従来挙動を維持）
+            None => false,
         }
-        // Match any "(4xx " or "(4xx)" — 400..428, 430..499
-        (400u16..500)
-            .any(|code| msg.contains(&format!("({code} ")) || msg.contains(&format!("({code})")))
     }
 
     /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
@@ -552,25 +552,35 @@ mod tests {
     }
 
     #[test]
-    fn test_is_non_retryable_error_matches_real_provider_format() {
-        // プロバイダの実フォーマット: "... error (400 Bad Request): ..."
-        let e400 = anyhow::anyhow!("OpenAI API error (400 Bad Request): bad param");
-        assert!(LlmRouter::is_non_retryable_error(&e400));
+    fn test_is_non_retryable_error_classifies_typed_errors() {
+        use crate::error::api_error;
+        use reqwest::StatusCode;
 
-        let e401 = anyhow::anyhow!("Anthropic API error (401 Unauthorized): invalid key");
+        // 4xx（429以外）は non-retryable
+        let e400 = api_error("OpenAI", StatusCode::BAD_REQUEST, "bad param");
+        assert!(LlmRouter::is_non_retryable_error(&e400));
+        let e401 = api_error("Anthropic", StatusCode::UNAUTHORIZED, "invalid key");
         assert!(LlmRouter::is_non_retryable_error(&e401));
 
         // 429 はリトライ対象
-        let e429 = anyhow::anyhow!("OpenAI API error (429 Too Many Requests): slow down");
+        let e429 = api_error("OpenAI", StatusCode::TOO_MANY_REQUESTS, "slow down");
         assert!(!LlmRouter::is_non_retryable_error(&e429));
 
         // 5xx はリトライ対象
-        let e500 = anyhow::anyhow!("OpenAI API error (500 Internal Server Error): oops");
+        let e500 = api_error("OpenAI", StatusCode::INTERNAL_SERVER_ERROR, "oops");
         assert!(!LlmRouter::is_non_retryable_error(&e500));
 
-        // ネットワークエラーはリトライ対象
+        // context で包まれても downcast で分類できる（anyhow はチェーンを遡る）
+        let wrapped = api_error("Gemini", StatusCode::FORBIDDEN, "denied")
+            .context("while calling chat_completion");
+        assert!(LlmRouter::is_non_retryable_error(&wrapped));
+
+        // 型付きでないエラー（ネットワーク・サブプロセス等）はリトライ対象
         let enet = anyhow::anyhow!("connection refused");
         assert!(!LlmRouter::is_non_retryable_error(&enet));
+        // 旧形式の文字列だけを持つエラーも（もう文字列は見ないので）リトライ対象側に落ちる
+        let legacy = anyhow::anyhow!("OpenAI API error (400 Bad Request): bad param");
+        assert!(!LlmRouter::is_non_retryable_error(&legacy));
     }
 
     #[test]

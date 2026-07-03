@@ -58,7 +58,7 @@ impl OpenAiProvider {
     fn build_request_body(&self, request: &ChatRequest) -> Value {
         let mut body = serde_json::json!({
             "model": request.model,
-            "messages": self.convert_messages(&request.messages),
+            "messages": super::openai_compat::messages_to_json(&request.messages),
         });
 
         if let Some(temp) = request.temperature {
@@ -108,151 +108,6 @@ impl OpenAiProvider {
         body
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<Value> {
-        messages.iter().map(|m| self.convert_message(m)).collect()
-    }
-
-    fn convert_message(&self, msg: &Message) -> Value {
-        let mut obj = serde_json::json!({
-            "role": msg.role,
-        });
-
-        if let Some(ref content) = msg.content {
-            match content {
-                MessageContent::Text(text) => {
-                    obj["content"] = serde_json::json!(text);
-                }
-                MessageContent::Image { image_url, .. } => {
-                    obj["content"] = serde_json::json!([
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url.url,
-                            }
-                        }
-                    ]);
-                }
-                MessageContent::Multi(parts) => {
-                    let parts_json: Vec<Value> = parts
-                        .iter()
-                        .map(|p| match p {
-                            ContentPart::Text { text } => {
-                                serde_json::json!({"type": "text", "text": text})
-                            }
-                            ContentPart::ImageUrl { image_url } => {
-                                serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": {"url": image_url.url}
-                                })
-                            }
-                        })
-                        .collect();
-                    obj["content"] = serde_json::json!(parts_json);
-                }
-            }
-        }
-
-        if let Some(ref name) = msg.name {
-            obj["name"] = serde_json::json!(name);
-        }
-        if let Some(ref tool_calls) = msg.tool_calls {
-            obj["tool_calls"] = serde_json::to_value(tool_calls).unwrap_or_default();
-        }
-        if let Some(ref tool_call_id) = msg.tool_call_id {
-            obj["tool_call_id"] = serde_json::json!(tool_call_id);
-        }
-
-        // cache_control は Anthropic 固有（OpenAI は未知パラメータとして 400 で拒否）
-        // のため出力しない。
-
-        obj
-    }
-
-    /// Parse the OpenAI API response into our unified format.
-    fn parse_response(&self, body: Value) -> Result<ChatResponse> {
-        let id = body["id"].as_str().unwrap_or_default().to_string();
-        let model = body["model"].as_str().unwrap_or_default().to_string();
-        let created = body["created"].as_i64().unwrap_or(0);
-
-        let usage = if let Some(u) = body.get("usage") {
-            Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-                cache_read_input_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32,
-                cache_creation_input_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0)
-                    as u32,
-            }
-        } else {
-            Usage::default()
-        };
-
-        let choices = body["choices"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|c| {
-                        let msg = &c["message"];
-                        let role = match msg["role"].as_str().unwrap_or("assistant") {
-                            "system" => Role::System,
-                            "user" => Role::User,
-                            "assistant" => Role::Assistant,
-                            "tool" => Role::Tool,
-                            _ => Role::Assistant,
-                        };
-
-                        let content = msg
-                            .get("content")
-                            .and_then(|v| v.as_str().map(|s| MessageContent::Text(s.to_string())));
-
-                        let function_call = msg
-                            .get("function_call")
-                            .and_then(|fc| serde_json::from_value::<FunctionCall>(fc.clone()).ok());
-
-                        let tool_calls = msg.get("tool_calls").and_then(|tc| {
-                            serde_json::from_value::<Vec<ToolCall>>(tc.clone()).ok()
-                        });
-
-                        let tool_call_id = msg
-                            .get("tool_call_id")
-                            .and_then(|v| v.as_str().map(String::from));
-
-                        let finish_reason =
-                            c.get("finish_reason").and_then(|fr| match fr.as_str()? {
-                                "stop" => Some(FinishReason::Stop),
-                                "length" => Some(FinishReason::Length),
-                                "function_call" => Some(FinishReason::FunctionCall),
-                                "tool_calls" => Some(FinishReason::ToolCalls),
-                                "content_filter" => Some(FinishReason::ContentFilter),
-                                _ => None,
-                            });
-
-                        Choice {
-                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                            message: Message {
-                                role,
-                                content,
-                                name: None,
-                                function_call,
-                                tool_calls,
-                                tool_call_id,
-                                cache_control: None,
-                            },
-                            finish_reason,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(ChatResponse {
-            id,
-            model,
-            choices,
-            usage,
-            created,
-        })
-    }
 }
 
 #[async_trait]
@@ -314,10 +169,10 @@ impl LlmProvider for OpenAiProvider {
             let error_msg = resp_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("OpenAI API error ({}): {}", status, error_msg);
+            return Err(crate::error::api_error("OpenAI", status, error_msg));
         }
 
-        self.parse_response(resp_body)
+        Ok(super::openai_compat::parse_chat_response(&resp_body))
     }
 
     async fn chat_completion_stream(
@@ -342,89 +197,16 @@ impl LlmProvider for OpenAiProvider {
             let msg = err_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("OpenAI API error ({}): {}", status, msg);
+            return Err(crate::error::api_error("OpenAI", status, msg));
         }
 
         // チャンク境界を跨いでバッファし、完全な行ごとに1イベントとして処理する。
-        // 各 `data:` イベントを個別に emit し、`[DONE]` や keep-alive コメント等の
-        // 非データ行はエラーにせずスキップする。
+        // `data:` 行の delta 抽出は openai_compat に一本化（[DONE]/コメント行はスキップ）。
         let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
             move |line_res| {
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
-                    Ok(line) => {
-                        let line = line.trim();
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if data == "[DONE]" {
-                                None
-                            } else {
-                                match serde_json::from_str::<Value>(data) {
-                                    Ok(parsed) => {
-                                        let id =
-                                            parsed["id"].as_str().unwrap_or_default().to_string();
-                                        let model =
-                                            parsed["model"].as_str().unwrap_or_default().to_string();
-                                        let choices = parsed["choices"]
-                                            .as_array()
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .map(|c| {
-                                                        let delta = &c["delta"];
-                                                        StreamChoice {
-                                                            index: c["index"].as_u64().unwrap_or(0)
-                                                                as u32,
-                                                            delta: DeltaMessage {
-                                                                role: delta.get("role").and_then(
-                                                                    |r| {
-                                                                        serde_json::from_value(
-                                                                            r.clone(),
-                                                                        )
-                                                                        .ok()
-                                                                    },
-                                                                ),
-                                                                content: delta
-                                                                    .get("content")
-                                                                    .and_then(|v| {
-                                                                        v.as_str().map(String::from)
-                                                                    }),
-                                                                function_call: delta
-                                                                    .get("function_call")
-                                                                    .and_then(|fc| {
-                                                                        serde_json::from_value(
-                                                                            fc.clone(),
-                                                                        )
-                                                                        .ok()
-                                                                    }),
-                                                                tool_calls: delta
-                                                                    .get("tool_calls")
-                                                                    .and_then(|tc| {
-                                                                        serde_json::from_value(
-                                                                            tc.clone(),
-                                                                        )
-                                                                        .ok()
-                                                                    }),
-                                                            },
-                                                            finish_reason: c
-                                                                .get("finish_reason")
-                                                                .and_then(|fr| {
-                                                                    serde_json::from_value(fr.clone())
-                                                                        .ok()
-                                                                }),
-                                                        }
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default();
-                                        Some(Ok(ChatStreamDelta { id, model, choices }))
-                                    }
-                                    Err(_) => None,
-                                }
-                            }
-                        } else {
-                            None
-                        }
-                    }
+                    Ok(line) => super::openai_compat::delta_from_sse_line(&line).map(Ok),
                 };
                 futures::future::ready(out)
             },

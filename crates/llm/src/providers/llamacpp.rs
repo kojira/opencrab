@@ -92,79 +92,6 @@ impl LlamaCppProvider {
         body
     }
 
-    /// Parse OpenAI-compatible response from llama.cpp server.
-    fn parse_response(&self, body: Value) -> Result<ChatResponse> {
-        let id = body["id"].as_str().unwrap_or_default().to_string();
-        let model = body["model"].as_str().unwrap_or("local").to_string();
-        let created = body["created"]
-            .as_i64()
-            .unwrap_or_else(|| chrono::Utc::now().timestamp());
-
-        let usage = if let Some(u) = body.get("usage") {
-            Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            }
-        } else {
-            Usage::default()
-        };
-
-        let choices = body["choices"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|c| {
-                        let msg = &c["message"];
-                        let role = match msg["role"].as_str().unwrap_or("assistant") {
-                            "system" => Role::System,
-                            "user" => Role::User,
-                            "assistant" => Role::Assistant,
-                            "tool" => Role::Tool,
-                            _ => Role::Assistant,
-                        };
-
-                        let content = msg
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(|s| MessageContent::Text(s.to_string()));
-
-                        let finish_reason =
-                            c.get("finish_reason").and_then(|fr| match fr.as_str()? {
-                                "stop" => Some(FinishReason::Stop),
-                                "length" => Some(FinishReason::Length),
-                                _ => None,
-                            });
-
-                        Choice {
-                            index: c["index"].as_u64().unwrap_or(0) as u32,
-                            message: Message {
-                                role,
-                                content,
-                                name: None,
-                                function_call: None,
-                                tool_calls: None,
-                                tool_call_id: None,
-                                cache_control: None,
-                            },
-                            finish_reason,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        Ok(ChatResponse {
-            id,
-            model,
-            choices,
-            usage,
-            created,
-        })
-    }
 }
 
 impl Default for LlamaCppProvider {
@@ -238,14 +165,14 @@ impl LlmProvider for LlamaCppProvider {
         let status = resp.status();
         if !status.is_success() {
             let err_text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp API error ({}): {}", status, err_text);
+            return Err(crate::error::api_error("llama.cpp", status, err_text));
         }
 
         let resp_body: Value = resp
             .json()
             .await
             .context("failed to parse llama.cpp response")?;
-        self.parse_response(resp_body)
+        Ok(super::openai_compat::parse_chat_response(&resp_body))
     }
 
     async fn chat_completion_stream(
@@ -269,73 +196,16 @@ impl LlmProvider for LlamaCppProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let err_text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("llama.cpp API error ({}): {}", status, err_text);
+            return Err(crate::error::api_error("llama.cpp", status, err_text));
         }
 
         // チャンク境界を跨いでバッファし、完全な行ごとに1イベントとして処理する。
+        // `data:` 行の delta 抽出は openai_compat に一本化（[DONE]/コメント行はスキップ）。
         let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
             move |line_res| {
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
-                    Ok(line) => {
-                        let line = line.trim();
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if data == "[DONE]" {
-                                None
-                            } else {
-                                match serde_json::from_str::<Value>(data) {
-                                    Ok(parsed) => {
-                                        let id =
-                                            parsed["id"].as_str().unwrap_or_default().to_string();
-                                        let model =
-                                            parsed["model"].as_str().unwrap_or("local").to_string();
-                                        let choices = parsed["choices"]
-                                            .as_array()
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .map(|c| {
-                                                        let delta = &c["delta"];
-                                                        StreamChoice {
-                                                            index: c["index"].as_u64().unwrap_or(0)
-                                                                as u32,
-                                                            delta: DeltaMessage {
-                                                                role: delta.get("role").and_then(
-                                                                    |r| {
-                                                                        serde_json::from_value(
-                                                                            r.clone(),
-                                                                        )
-                                                                        .ok()
-                                                                    },
-                                                                ),
-                                                                content: delta
-                                                                    .get("content")
-                                                                    .and_then(|v| {
-                                                                        v.as_str().map(String::from)
-                                                                    }),
-                                                                function_call: None,
-                                                                tool_calls: None,
-                                                            },
-                                                            finish_reason: c
-                                                                .get("finish_reason")
-                                                                .and_then(|fr| {
-                                                                    serde_json::from_value(fr.clone())
-                                                                        .ok()
-                                                                }),
-                                                        }
-                                                    })
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default();
-                                        Some(Ok(ChatStreamDelta { id, model, choices }))
-                                    }
-                                    Err(_) => None,
-                                }
-                            }
-                        } else {
-                            None
-                        }
-                    }
+                    Ok(line) => super::openai_compat::delta_from_sse_line(&line).map(Ok),
                 };
                 futures::future::ready(out)
             },

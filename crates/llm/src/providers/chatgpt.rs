@@ -639,7 +639,7 @@ impl LlmProvider for ChatGptProvider {
                 tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
                 // Don't retry on 4xx client errors (except 429)
                 if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
-                    anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+                    return Err(crate::error::api_error("ChatGPT", status, text));
                 }
                 continue;
             }
@@ -714,7 +714,7 @@ impl LlmProvider for ChatGptProvider {
                         tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
                         if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429
                         {
-                            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+                            return Err(crate::error::api_error("ChatGPT", status, text));
                         }
                         continue;
                     }
