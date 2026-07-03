@@ -134,6 +134,11 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing chat completion");
 
+        // 最後のプロバイダエラーを保持する: 汎用文字列で握りつぶすと、型付き
+        // LlmError（ステータス）が router の外に出ず、下流の分類（downcast）が
+        // 全滅するため（#35）。
+        let mut last_error: Option<anyhow::Error> = None;
+
         // Try the resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
             match self
@@ -147,6 +152,7 @@ impl LlmRouter {
                         error = %e,
                         "Primary provider failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
+                    last_error = Some(e);
                 }
             }
         } else {
@@ -175,17 +181,21 @@ impl LlmRouter {
                             error = %e,
                             "Fallback provider failed after {MAX_RETRIES} attempts"
                         );
+                        last_error = Some(e);
                     }
                 }
             }
         }
 
-        anyhow::bail!(
+        let summary = format!(
             "All providers failed for model '{}'. Tried: {} + fallback chain {:?}",
-            request.model,
-            provider_name,
-            self.fallback_chain
-        )
+            request.model, provider_name, self.fallback_chain
+        );
+        Err(match last_error {
+            // 最後のエラーを chain の根に残す（LlmError の downcast を生かす）
+            Some(e) => e.context(summary),
+            None => anyhow::anyhow!(summary),
+        })
     }
 
     /// Route a streaming chat completion request.
@@ -197,6 +207,8 @@ impl LlmRouter {
         request.model = model_name;
 
         debug!(provider = %provider_name, model = %request.model, "Routing streaming chat completion");
+
+        let mut last_error: Option<anyhow::Error> = None;
 
         // Try resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
@@ -211,6 +223,7 @@ impl LlmRouter {
                         error = %e,
                         "Primary provider stream failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
+                    last_error = Some(e);
                 }
             }
         }
@@ -236,36 +249,37 @@ impl LlmRouter {
                             error = %e,
                             "Fallback provider stream failed after {MAX_RETRIES} attempts"
                         );
+                        last_error = Some(e);
                     }
                 }
             }
         }
 
-        anyhow::bail!(
+        let summary = format!(
             "All providers failed for streaming model '{}'. Tried: {} + fallback chain {:?}",
-            request.model,
-            provider_name,
-            self.fallback_chain
-        )
+            request.model, provider_name, self.fallback_chain
+        );
+        Err(match last_error {
+            Some(e) => e.context(summary),
+            None => anyhow::anyhow!(summary),
+        })
     }
 
     /// Returns true if the error represents a non-retryable client-side HTTP error.
     ///
     /// Retry policy:
-    ///   - Retryable:     429 (rate-limit), 500, 502, 503, 504 (transient server errors)
-    ///   - Non-retryable: all other 4xx (permanent client errors — retrying won't help)
+    ///   - Retryable:     429 (rate-limit), 5xx (transient server errors),
+    ///                    ステータス不明のエラー（ネットワーク・サブプロセス等）
+    ///   - Non-retryable: other 4xx (permanent client errors — retrying won't help)
+    ///
+    /// 分類は型付き [`LlmError`] の downcast で行う（anyhow は context チェーンを
+    /// 遡って downcast する）。Display 文字列の部分一致には依存しない（#35）。
     fn is_non_retryable_error(error: &anyhow::Error) -> bool {
-        let msg = error.to_string();
-        // Error messages from HTTP providers embed the status via reqwest StatusCode's
-        // Display, e.g. "OpenAI API error (400 Bad Request): ...". The code is followed
-        // by the canonical reason phrase, so match "(NNN " and "(NNN)" both.
-        // 429 is the only 4xx we still retry.
-        if msg.contains("(429 ") || msg.contains("(429)") {
-            return false; // rate-limited — retryable
+        match error.downcast_ref::<crate::LlmError>() {
+            Some(llm_error) => llm_error.is_non_retryable(),
+            // ステータスを運ばないエラーは retryable（従来挙動を維持）
+            None => false,
         }
-        // Match any "(4xx " or "(4xx)" — 400..428, 430..499
-        (400u16..500)
-            .any(|code| msg.contains(&format!("({code} ")) || msg.contains(&format!("({code})")))
     }
 
     /// Try a provider with exponential backoff retry (up to MAX_RETRIES attempts).
@@ -465,6 +479,46 @@ mod tests {
         }
     }
 
+    /// 常に型付き 400 を返すモック（非リトライ分類とエラー伝播の検証用）。
+    struct Http400Provider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for Http400Provider {
+        fn name(&self) -> &str {
+            "http400"
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<crate::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            Err(crate::error::api_error(
+                "Mock",
+                reqwest::StatusCode::BAD_REQUEST,
+                "context length exceeded",
+            ))
+        }
+    }
+
+    /// フォールバック枯渇時に最後のプロバイダエラー（型付き LlmError）が
+    /// 汎用文字列に握りつぶされず downcast 可能なまま返ること（#35 の end-to-end）。
+    #[tokio::test]
+    async fn test_exhausted_router_error_preserves_typed_status() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(Http400Provider));
+        router.set_default_provider("http400");
+
+        let request = ChatRequest::new("http400:some-model", vec![Message::user("hello")]);
+        let err = router.chat_completion(request).await.unwrap_err();
+
+        // サマリ context は付くが、根の LlmError は downcast で取り出せる
+        assert!(err.to_string().contains("All providers failed"));
+        let llm = err
+            .downcast_ref::<crate::LlmError>()
+            .expect("typed error must survive router exhaustion");
+        assert_eq!(llm.status(), Some(400));
+        assert!(llm.is_non_retryable());
+    }
+
     #[test]
     fn test_resolve_model_default() {
         let mut router = LlmRouter::new();
@@ -552,25 +606,35 @@ mod tests {
     }
 
     #[test]
-    fn test_is_non_retryable_error_matches_real_provider_format() {
-        // プロバイダの実フォーマット: "... error (400 Bad Request): ..."
-        let e400 = anyhow::anyhow!("OpenAI API error (400 Bad Request): bad param");
-        assert!(LlmRouter::is_non_retryable_error(&e400));
+    fn test_is_non_retryable_error_classifies_typed_errors() {
+        use crate::error::api_error;
+        use reqwest::StatusCode;
 
-        let e401 = anyhow::anyhow!("Anthropic API error (401 Unauthorized): invalid key");
+        // 4xx（429以外）は non-retryable
+        let e400 = api_error("OpenAI", StatusCode::BAD_REQUEST, "bad param");
+        assert!(LlmRouter::is_non_retryable_error(&e400));
+        let e401 = api_error("Anthropic", StatusCode::UNAUTHORIZED, "invalid key");
         assert!(LlmRouter::is_non_retryable_error(&e401));
 
         // 429 はリトライ対象
-        let e429 = anyhow::anyhow!("OpenAI API error (429 Too Many Requests): slow down");
+        let e429 = api_error("OpenAI", StatusCode::TOO_MANY_REQUESTS, "slow down");
         assert!(!LlmRouter::is_non_retryable_error(&e429));
 
         // 5xx はリトライ対象
-        let e500 = anyhow::anyhow!("OpenAI API error (500 Internal Server Error): oops");
+        let e500 = api_error("OpenAI", StatusCode::INTERNAL_SERVER_ERROR, "oops");
         assert!(!LlmRouter::is_non_retryable_error(&e500));
 
-        // ネットワークエラーはリトライ対象
+        // context で包まれても downcast で分類できる（anyhow はチェーンを遡る）
+        let wrapped = api_error("Gemini", StatusCode::FORBIDDEN, "denied")
+            .context("while calling chat_completion");
+        assert!(LlmRouter::is_non_retryable_error(&wrapped));
+
+        // 型付きでないエラー（ネットワーク・サブプロセス等）はリトライ対象
         let enet = anyhow::anyhow!("connection refused");
         assert!(!LlmRouter::is_non_retryable_error(&enet));
+        // 旧形式の文字列だけを持つエラーも（もう文字列は見ないので）リトライ対象側に落ちる
+        let legacy = anyhow::anyhow!("OpenAI API error (400 Bad Request): bad param");
+        assert!(!LlmRouter::is_non_retryable_error(&legacy));
     }
 
     #[test]

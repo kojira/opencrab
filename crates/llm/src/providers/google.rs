@@ -314,7 +314,7 @@ impl LlmProvider for GoogleProvider {
             let error_msg = resp_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("Gemini API error ({}): {}", status, error_msg);
+            return Err(crate::error::api_error("Gemini", status, error_msg));
         }
 
         self.parse_response(resp_body, &request.model)
@@ -350,7 +350,7 @@ impl LlmProvider for GoogleProvider {
             let msg = err_body["error"]["message"]
                 .as_str()
                 .unwrap_or("unknown error");
-            anyhow::bail!("Gemini API error ({}): {}", status, msg);
+            return Err(crate::error::api_error("Gemini", status, msg));
         }
 
         let model = request.model.clone();

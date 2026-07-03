@@ -357,6 +357,54 @@ pub struct DeltaMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
+/// LLM プロバイダの型付きエラー（#35）。
+///
+/// リトライ/フォールバック方針や「このエラーは恒久的か」の判断が Display 文字列の
+/// 部分一致に依存しないよう、HTTP ステータスを型として運ぶ。leaf crate に置くことで
+/// llm（router）と core（daily_log_indexer 等）の両方が downcast できる。
+/// anyhow は context チェーンを遡って downcast する。
+#[derive(Debug)]
+pub enum LlmError {
+    /// HTTP ステータス付きの API エラー。
+    Http {
+        provider: &'static str,
+        status: u16,
+        message: String,
+    },
+}
+
+impl LlmError {
+    /// HTTP ステータス（あれば）。
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            LlmError::Http { status, .. } => Some(*status),
+        }
+    }
+
+    /// リトライしても無駄な恒久エラー（429 以外の 4xx）か。
+    /// ステータス不明のエラー種別が増えた場合は false（retryable）に倒す。
+    pub fn is_non_retryable(&self) -> bool {
+        match self.status() {
+            Some(status) => status != 429 && (400..500).contains(&status),
+            None => false,
+        }
+    }
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::Http {
+                provider,
+                status,
+                message,
+            } => write!(f, "{provider} API error ({status}): {message}"),
+        }
+    }
+}
+
+impl std::error::Error for LlmError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

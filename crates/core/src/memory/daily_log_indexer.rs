@@ -286,11 +286,18 @@ impl DailyLogIndexer {
             match self.summarize_day(date, content).await {
                 Ok(result) => return Ok((result, attempts)),
                 Err(err) => {
+                    // まず型付きエラー（HTTP ステータス）で分類する（#35）。
+                    // 型が取れないエラー（JSON パース失敗等）のみ文字列パターンで補完。
+                    let typed_non_retryable = err
+                        .downcast_ref::<opencrab_llm_types::LlmError>()
+                        .map(|e| e.is_non_retryable())
+                        .unwrap_or(false);
                     let err_text = err.to_string();
                     let err_lower = err_text.to_lowercase();
-                    let should_skip = NON_RETRYABLE_PATTERNS
-                        .iter()
-                        .any(|pattern| err_lower.contains(pattern));
+                    let should_skip = typed_non_retryable
+                        || NON_RETRYABLE_PATTERNS
+                            .iter()
+                            .any(|pattern| err_lower.contains(pattern));
 
                     if should_skip || attempts >= 3 {
                         return Err(err);

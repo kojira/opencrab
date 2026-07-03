@@ -594,6 +594,7 @@ impl LlmProvider for ChatGptProvider {
         );
         let max_retries = 3u32;
         let mut last_error = String::new();
+        let mut last_status: Option<reqwest::StatusCode> = None;
 
         for attempt in 0..max_retries {
             if attempt > 0 {
@@ -636,10 +637,11 @@ impl LlmProvider for ChatGptProvider {
 
             if !status.is_success() {
                 last_error = format!("HTTP {}: (body_len={})", status, text.len());
+                last_status = Some(status);
                 tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
                 // Don't retry on 4xx client errors (except 429)
                 if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
-                    anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+                    return Err(crate::error::api_error("ChatGPT", status, text));
                 }
                 continue;
             }
@@ -656,11 +658,14 @@ impl LlmProvider for ChatGptProvider {
             return result;
         }
 
-        anyhow::bail!(
-            "ChatGPT API request failed after {} attempts: {}",
-            max_retries,
-            last_error
-        )
+        // 枯渇時もステータスが分かっていれば型付きで返す（router 側の分類を生かす）
+        let message = format!(
+            "ChatGPT API request failed after {max_retries} attempts: {last_error}"
+        );
+        Err(match last_status {
+            Some(status) => crate::error::api_error("ChatGPT", status, message),
+            None => anyhow::anyhow!(message),
+        })
     }
 
     async fn chat_completion_stream(
@@ -685,6 +690,7 @@ impl LlmProvider for ChatGptProvider {
         let max_retries = 3u32;
         let mut resp = None;
         let mut last_error = String::new();
+        let mut last_status: Option<reqwest::StatusCode> = None;
 
         for attempt in 0..max_retries {
             if attempt > 0 {
@@ -711,10 +717,11 @@ impl LlmProvider for ChatGptProvider {
                     if !status.is_success() {
                         let text = r.text().await.unwrap_or_default();
                         last_error = format!("HTTP {}: (body_len={})", status, text.len());
+                        last_status = Some(status);
                         tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
                         if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429
                         {
-                            anyhow::bail!("ChatGPT API error ({}): {}", status, text);
+                            return Err(crate::error::api_error("ChatGPT", status, text));
                         }
                         continue;
                     }
@@ -729,13 +736,19 @@ impl LlmProvider for ChatGptProvider {
             }
         }
 
-        let resp = resp.ok_or_else(|| {
-            anyhow::anyhow!(
-                "ChatGPT streaming request failed after {} attempts: {}",
-                max_retries,
-                last_error
-            )
-        })?;
+        let resp = match resp {
+            Some(r) => r,
+            None => {
+                // 枯渇時もステータスが分かっていれば型付きで返す（router 側の分類を生かす）
+                let message = format!(
+                    "ChatGPT streaming request failed after {max_retries} attempts: {last_error}"
+                );
+                return Err(match last_status {
+                    Some(status) => crate::error::api_error("ChatGPT", status, message),
+                    None => anyhow::anyhow!(message),
+                });
+            }
+        };
         let request_model = request.model.clone();
         // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
         // Responses API は data ペイロード自身に `type` を含むため、行を跨ぐ `event:` 状態には
