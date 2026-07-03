@@ -200,8 +200,9 @@ impl Action for UpdateTaskContractAction {
             Err(e) => return e,
         };
 
-        match opencrab_db::queries::update_task_goal_contract(&conn, agent_id, task.id, goal, contract)
-        {
+        match opencrab_db::queries::update_task_goal_contract(
+            &conn, agent_id, task.id, goal, contract,
+        ) {
             Ok(true) => match opencrab_db::queries::get_task_ledger(&conn, agent_id, task.id) {
                 Ok(Some(updated)) => ActionResult::success(task_json(&updated)),
                 _ => ActionResult::success(json!({ "task_id": task.id })),
@@ -409,20 +410,19 @@ impl Action for GetTaskAction {
             Some(v) => match v.as_i64() {
                 Some(id) => Some(id),
                 None => {
-                    return ActionResult::error(&format!(
-                        "task_id must be an integer, got: {v}"
-                    ))
+                    return ActionResult::error(&format!("task_id must be an integer, got: {v}"))
                 }
             },
         };
 
         let task = match task_id_arg {
-            Some(task_id) => match opencrab_db::queries::get_task_ledger(&conn, agent_id, task_id)
-            {
-                Ok(Some(t)) => t,
-                Ok(None) => return ActionResult::error(&format!("task #{task_id} not found")),
-                Err(e) => return ActionResult::error(&format!("Failed to get task: {e}")),
-            },
+            Some(task_id) => {
+                match opencrab_db::queries::get_task_ledger(&conn, agent_id, task_id) {
+                    Ok(Some(t)) => t,
+                    Ok(None) => return ActionResult::error(&format!("task #{task_id} not found")),
+                    Err(e) => return ActionResult::error(&format!("Failed to get task: {e}")),
+                }
+            }
             None => match require_active_task(&conn, agent_id, session_id) {
                 Ok(t) => t,
                 Err(_) => {
@@ -500,7 +500,9 @@ mod tests {
         let task_id = result.data.unwrap()["task_id"].as_i64().unwrap();
 
         // 2つ目の open は既存タスク情報付きで拒否
-        let dup = OpenTaskAction.execute(&json!({"goal": "another"}), &ctx).await;
+        let dup = OpenTaskAction
+            .execute(&json!({"goal": "another"}), &ctx)
+            .await;
         assert!(!dup.success);
         let msg = dup.error.unwrap();
         assert!(msg.contains(&format!("#{task_id}")));
@@ -535,7 +537,10 @@ mod tests {
         assert!(open.success);
 
         let rec = RecordTaskProgressAction
-            .execute(&json!({"content": "decided X because Y", "kind": "decision"}), &ctx)
+            .execute(
+                &json!({"content": "decided X because Y", "kind": "decision"}),
+                &ctx,
+            )
             .await;
         assert!(rec.success);
 

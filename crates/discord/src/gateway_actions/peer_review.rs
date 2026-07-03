@@ -12,7 +12,9 @@ use serenity::all::{ChannelId, CreateMessage};
 use tracing::{error, warn};
 
 use opencrab_core::llm_text::truncate_chars;
-use opencrab_gateway::{GatewayActionResult, PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER};
+use opencrab_gateway::{
+    GatewayActionResult, GatewayCallContext, PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER,
+};
 
 use super::webhook::build_part_messages;
 use super::DiscordGatewayActions;
@@ -147,7 +149,10 @@ pub(crate) fn parse_peer_review_reply(text: &str) -> Option<PeerReviewVerdict> {
         Some(pos) => {
             let after = &body[pos + "gaps:".len()..];
             let after = after.trim_start_matches(' ');
-            let end = after.to_ascii_lowercase().find("summary:").unwrap_or(after.len());
+            let end = after
+                .to_ascii_lowercase()
+                .find("summary:")
+                .unwrap_or(after.len());
             // インライン形式（"Gaps: none, Summary: ..."）の区切りカンマ等を落とす
             let strip = |s: &str| {
                 s.trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
@@ -200,7 +205,9 @@ pub(crate) fn resolve_reviewer(
         Ok(rows) => rows,
         Err(e) => {
             warn!("resolve_reviewer: roster query failed: {e}");
-            return Err("(レビュアー一覧の取得に失敗しました — 後で再試行してください)".to_string());
+            return Err(
+                "(レビュアー一覧の取得に失敗しました — 後で再試行してください)".to_string(),
+            );
         }
     };
     // 表示名一致を優先（数値の表示名が id 解釈に食われないように）
@@ -225,7 +232,8 @@ pub(crate) fn resolve_reviewer(
         }
     }
     let available = if co_agents.is_empty() {
-        "(なし — trusted-users API で permission=co_agent + display_name を登録してください)".to_string()
+        "(なし — trusted-users API で permission=co_agent + display_name を登録してください)"
+            .to_string()
     } else {
         co_agents
             .iter()
@@ -266,12 +274,9 @@ pub(crate) fn format_peer_review_progress(verdict: &PeerReviewVerdict, reviewer:
 /// - 依頼していないタスクには第三者間のレビューが記録されない
 ///   （同一チャンネルの別 bot 同士のレビューを誤記録しない）
 /// - 1依頼につき1件だけ記録される（同文の連投は2件目以降スキップ）
-fn has_outstanding_review_request(
-    conn: &rusqlite::Connection,
-    task_id: i64,
-) -> bool {
-    let recent = opencrab_db::queries::list_recent_task_progress(conn, task_id, 30)
-        .unwrap_or_default();
+fn has_outstanding_review_request(conn: &rusqlite::Connection, task_id: i64) -> bool {
+    let recent =
+        opencrab_db::queries::list_recent_task_progress(conn, task_id, 30).unwrap_or_default();
     for entry in recent.iter().rev() {
         if entry.content.starts_with("[peer review requested]") {
             return true;
@@ -320,10 +325,9 @@ pub(crate) fn record_peer_review_reply(
         );
         return false;
     }
-    let Some(task) =
-        opencrab_db::queries::get_active_task_for_session(&conn, agent_id, session_id)
-            .ok()
-            .flatten()
+    let Some(task) = opencrab_db::queries::get_active_task_for_session(&conn, agent_id, session_id)
+        .ok()
+        .flatten()
     else {
         tracing::debug!(
             agent_id = %agent_id,
@@ -363,14 +367,31 @@ impl DiscordGatewayActions {
     pub(crate) async fn execute_request_peer_review(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
+        // セッション必須（fail-closed）: 台帳記録・返信回収がセッションに紐づくため、
+        // セッション文脈の無い実行は "" で黙って進まず明示エラーにする（#36）。
+        let session_id =
+            match ctx.session_id.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "request_peer_review はセッション文脈でのみ実行できます（session_id 不明）"
+                            .to_string(),
+                    ),
+                },
+            };
         let content = match args.get("content").and_then(|v| v.as_str()) {
             Some(c) if !c.trim().is_empty() => c,
             _ => {
                 return GatewayActionResult {
                     success: false,
                     data: None,
-                    error: Some("contentパラメータが必要です（レビュー対象のRAWコンテンツ）".to_string()),
+                    error: Some(
+                        "contentパラメータが必要です（レビュー対象のRAWコンテンツ）".to_string(),
+                    ),
                 }
             }
         };
@@ -411,11 +432,6 @@ impl DiscordGatewayActions {
             .get("reviewer")
             .and_then(|v| v.as_str())
             .filter(|r| !r.trim().is_empty());
-        let session_id = args
-            .get("__session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
         // agent 表示名・active タスク・レビュアー解決を1ロックスコープで（await 前に drop）
         let (agent_name, task, mention) = {
             match self.db.lock() {
@@ -425,9 +441,7 @@ impl DiscordGatewayActions {
                         .flatten()
                         .map(|a| a.name)
                         .unwrap_or_else(|| self.agent_id.clone());
-                    let task = if session_id.is_empty() {
-                        None
-                    } else {
+                    let task = {
                         opencrab_db::queries::get_active_task_for_session(
                             &conn,
                             &self.agent_id,
@@ -480,9 +494,7 @@ impl DiscordGatewayActions {
                 .send_message(&self.http, CreateMessage::new().content(message))
                 .await
             {
-                error!(
-                    "request_peer_review: send failed after {i}/{total} messages sent: {e}"
-                );
+                error!("request_peer_review: send failed after {i}/{total} messages sent: {e}");
                 return GatewayActionResult {
                     success: false,
                     data: None,
@@ -649,9 +661,7 @@ mod tests {
         assert_eq!(v.score, Some(0.5));
 
         // 行の途中の言及は依然として無視
-        assert!(
-            parse_peer_review_reply("the diff mentions [Peer Review] in prose").is_none()
-        );
+        assert!(parse_peer_review_reply("the diff mentions [Peer Review] in prose").is_none());
 
         // 本文中の "gaps" という単語をフィールド開始と誤認しない（コロン必須）
         let v = parse_peer_review_reply("[Peer Review] score: 1.0 summary: no gaps found").unwrap();
@@ -682,17 +692,38 @@ mod tests {
     fn resolve_reviewer_registered_only() {
         let conn = opencrab_db::init_memory().unwrap();
         opencrab_db::queries::add_trusted_user(
-            &conn, "row-1", "agent-1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+            &conn,
+            "row-1",
+            "agent-1",
+            "42",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "Crab B",
         )
         .unwrap();
         // 数値の display_name（id 解釈に食われないこと）
         opencrab_db::queries::add_trusted_user(
-            &conn, "row-2", "agent-1", "77", "co_agent", "owner", "2026-01-01", "2026",
+            &conn,
+            "row-2",
+            "agent-1",
+            "77",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "2026",
         )
         .unwrap();
         // co_agent でない行はロスター外
         opencrab_db::queries::add_trusted_user(
-            &conn, "row-3", "agent-1", "44", "trusted_user", "owner", "2026-01-01", "Human",
+            &conn,
+            "row-3",
+            "agent-1",
+            "44",
+            "trusted_user",
+            "owner",
+            "2026-01-01",
+            "Human",
         )
         .unwrap();
 
@@ -718,7 +749,14 @@ mod tests {
             let conn = db.lock().unwrap();
             // 送信者 "42" をこのエージェントの co_agent として登録
             opencrab_db::queries::add_trusted_user(
-                &conn, "row-1", "a1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+                &conn,
+                "row-1",
+                "a1",
+                "42",
+                "co_agent",
+                "owner",
+                "2026-01-01",
+                "Crab B",
             )
             .unwrap();
             let task_id =
@@ -736,21 +774,32 @@ mod tests {
         let reply = "[Peer Review] score: 0.6\ngaps:\n- missing tests\nsummary: incomplete";
 
         // marker 無し → 記録しない
-        assert!(!record_peer_review_reply(&db, "a1", "s1", "42", "crab-b", "hello"));
+        assert!(!record_peer_review_reply(
+            &db, "a1", "s1", "42", "crab-b", "hello"
+        ));
         // 未登録送信者（co_agent でない）→ 記録しない
-        assert!(!record_peer_review_reply(&db, "a1", "s1", "99", "stranger", reply));
+        assert!(!record_peer_review_reply(
+            &db, "a1", "s1", "99", "stranger", reply
+        ));
         // active タスクの無いセッション → 記録しない
-        assert!(!record_peer_review_reply(&db, "a1", "other", "42", "crab-b", reply));
+        assert!(!record_peer_review_reply(
+            &db, "a1", "other", "42", "crab-b", reply
+        ));
         // 正常系
-        assert!(record_peer_review_reply(&db, "a1", "s1", "42", "crab-b", reply));
+        assert!(record_peer_review_reply(
+            &db, "a1", "s1", "42", "crab-b", reply
+        ));
         // 依頼が回収済みになったので、追加の返信は記録しない（1依頼1記録）
-        assert!(!record_peer_review_reply(&db, "a1", "s1", "42", "crab-b", reply));
+        assert!(!record_peer_review_reply(
+            &db, "a1", "s1", "42", "crab-b", reply
+        ));
 
         let conn = db.lock().unwrap();
-        let progress =
-            opencrab_db::queries::list_recent_task_progress(&conn, task_id, 10).unwrap();
+        let progress = opencrab_db::queries::list_recent_task_progress(&conn, task_id, 10).unwrap();
         assert_eq!(progress.len(), 2); // requested + received
-        assert!(progress[1].content.contains("[peer review] score 0.60 (from crab-b)"));
+        assert!(progress[1]
+            .content
+            .contains("[peer review] score 0.60 (from crab-b)"));
         assert!(progress[1].content.contains("missing tests"));
     }
 

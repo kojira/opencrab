@@ -75,6 +75,15 @@ impl ActionDispatcher {
         self.actions.insert(action.name().to_string(), action);
     }
 
+    /// 指定名のアクションが登録されているか。
+    ///
+    /// bridge の gateway フォールバック判定に使う（"Unknown action: {name}" という
+    /// エラー文言の文字列比較で判定すると、実アクションが同文を返した場合に
+    /// 誤ルートするため）。
+    pub fn has_action(&self, name: &str) -> bool {
+        self.actions.contains_key(name)
+    }
+
     /// アクションを実行
     pub async fn execute(
         &self,

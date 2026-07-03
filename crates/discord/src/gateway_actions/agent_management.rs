@@ -3,7 +3,7 @@
 use serde_json::json;
 use tracing::error;
 
-use opencrab_gateway::GatewayActionResult;
+use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 
 use super::DiscordGatewayActions;
 
@@ -141,12 +141,9 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_add_allowed_command(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if caller != "owner" {
+        if ctx.caller != GatewayCaller::Owner {
             return GatewayActionResult {
                 success: false,
                 data: None,
@@ -257,12 +254,9 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_remove_allowed_command(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if caller != "owner" {
+        if ctx.caller != GatewayCaller::Owner {
             return GatewayActionResult {
                 success: false,
                 data: None,
@@ -322,12 +316,13 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) fn execute_create_skill(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if caller != "owner" && caller != "co_agent" && caller != "trusted_user" {
+    pub(crate) fn execute_create_skill(
+        &self,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        // owner / co_agent / trusted_user のみ（素の agent は拒否）。
+        if ctx.caller == GatewayCaller::Agent {
             return GatewayActionResult {
                 success: false,
                 data: None,

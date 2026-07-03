@@ -120,7 +120,11 @@ impl Action for RetrieveMemoryNodesAction {
         let mut results: Vec<serde_json::Value> = Vec::new();
 
         for node_id in &node_ids {
-            let node = match opencrab_db::queries::get_index_node_by_short_or_id(&conn, &ctx.agent_id, node_id) {
+            let node = match opencrab_db::queries::get_index_node_by_short_or_id(
+                &conn,
+                &ctx.agent_id,
+                node_id,
+            ) {
                 Ok(Some(n)) => n,
                 Ok(None) => {
                     results.push(json!({

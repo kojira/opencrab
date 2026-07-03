@@ -45,7 +45,7 @@
   - 権限拒否時も `on_tool_result(..., is_error=true)` を呼ぶ。
   - **重要な制約**: 現コールバックは「開始＝ターン単位（個別 args/開始時刻なし）」「完了＝個別 call 単位（id/name/result/is_error のみ、duration なし）」。個別ツールの**開始時刻・所要時間・呼び出し引数**を厳密に取りたければ executor 層が必要。
 - **executor ブリッジ**: `crates/actions/src/bridge.rs`
-  - `BridgedExecutor::execute(name, args)` は `ActionDispatcher` を先に試し、未知なら `GatewayActions` にフォールバック。フォールバック時に `__caller` / `__session_id` / `__depth` / `__agent_id` を args に注入。
+  - `BridgedExecutor::execute(name, args)` は `ActionDispatcher` を先に試し（登録有無で判定）、未登録なら `GatewayActions` にフォールバック。フォールバック時は型付きの `GatewayCallContext`（caller / session_id / depth / agent_id）を第3引数として渡す（#36 で `__caller` 等の args 注入から移行。LLM 由来の args に実行コンテキストは混ざらない）。
   - **ここが per-tool 計測の最適点**: `execute` の前後で開始/完了/失敗（id・name・args・duration・exit code）を一元的に instrument できる。depth も `self.depth` で保持済み。`spawn_subtask` もここを通る 1 ツールである。
 
 ### 1.3 ツール定義
@@ -262,7 +262,7 @@ agent default・tool-specific・global の各値は、2.1 の `agent_webhook_con
 
 **推奨: `BridgedExecutor::execute` での instrument**。理由:
 - 個別ツールの**開始時刻・所要時間・args・exit code** を 1 箇所で正確に取得できる（`on_tool_call` はターン単位で個別計測不可）。
-- depth / `__agent_id` / `__session_id` が既に揃っている。
+- depth / agent_id / session_id が `GatewayCallContext` として既に揃っている。
 - shell の `exit_code` / `truncated` は `ActionResult.data` から構造的に読める。
 - `spawn_subtask` も同じ executor を通るので、ツール活動と subtask 起動イベントを**同一機構**で出せる（spawn_subtask 統合の要）。
 

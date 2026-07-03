@@ -686,7 +686,13 @@ fn fetch_scope_row(
     agent_id: &str,
     tool_name: &str,
 ) -> Option<AgentWebhookConfigRowLite> {
-    fetch_scope_row_kinds(conn, scope, agent_id, tool_name, &["subtask", "lifecycle", "activity"])
+    fetch_scope_row_kinds(
+        conn,
+        scope,
+        agent_id,
+        tool_name,
+        &["subtask", "lifecycle", "activity"],
+    )
 }
 
 /// subtask webhook を固定順序で解決する。
@@ -773,9 +779,7 @@ pub fn resolve_activity_webhook(
     tool_name: &str,
 ) -> WebhookResolution {
     if !tool_name.is_empty() {
-        if let Some(row) =
-            fetch_scope_row_kinds(conn, "tool", agent_id, tool_name, &["activity"])
-        {
+        if let Some(row) = fetch_scope_row_kinds(conn, "tool", agent_id, tool_name, &["activity"]) {
             return resolve_db_row(row, WebhookSource::ToolDefault);
         }
     }
@@ -1095,9 +1099,7 @@ mod tests {
     #[test]
     fn test_validate_webhook_url_valid() {
         assert!(validate_webhook_url(VALID_URL).is_ok());
-        assert!(
-            validate_webhook_url("https://canary.discord.com/api/webhooks/1/tok").is_ok()
-        );
+        assert!(validate_webhook_url("https://canary.discord.com/api/webhooks/1/tok").is_ok());
         assert!(validate_webhook_url("https://discordapp.com/api/webhooks/1/tok").is_ok());
         assert!(validate_webhook_url("https://ptb.discord.com/api/webhooks/1/tok").is_ok());
     }
@@ -1178,7 +1180,15 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         insert_row(&conn, "global", "*", "", "subtask", VALID_URL, true);
         insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
-        insert_row(&conn, "tool", "a1", "spawn_subtask", "subtask", VALID_URL, true);
+        insert_row(
+            &conn,
+            "tool",
+            "a1",
+            "spawn_subtask",
+            "subtask",
+            VALID_URL,
+            true,
+        );
         let args = json!({});
         let r = resolve_subtask_webhook(&conn, "a1", "spawn_subtask", &args, None);
         assert_eq!(use_source(&r), WebhookSource::ToolDefault);
@@ -1330,7 +1340,15 @@ mod tests {
     fn test_webhook_resolution_invalid_db_default_no_fallthrough() {
         let conn = opencrab_db::init_memory().unwrap();
         // tool default invalid, agent default valid -> must NOT fall through.
-        insert_row(&conn, "tool", "a1", "spawn_subtask", "subtask", "http://bad", true);
+        insert_row(
+            &conn,
+            "tool",
+            "a1",
+            "spawn_subtask",
+            "subtask",
+            "http://bad",
+            true,
+        );
         insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
         let env = WebhookConfig {
             url: VALID_URL.to_string(),
@@ -1350,7 +1368,15 @@ mod tests {
     fn test_webhook_resolution_disabled_no_fallthrough() {
         let conn = opencrab_db::init_memory().unwrap();
         // tool disabled, agent valid -> Disabled, no fallthrough.
-        insert_row(&conn, "tool", "a1", "spawn_subtask", "subtask", VALID_URL, false);
+        insert_row(
+            &conn,
+            "tool",
+            "a1",
+            "spawn_subtask",
+            "subtask",
+            VALID_URL,
+            false,
+        );
         insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
         let env = WebhookConfig {
             url: VALID_URL.to_string(),
@@ -1376,7 +1402,15 @@ mod tests {
         // lifecycle at tool scope still beats agent-scope subtask row.
         let conn2 = opencrab_db::init_memory().unwrap();
         insert_row(&conn2, "agent", "a1", "", "subtask", VALID_URL, true);
-        insert_row(&conn2, "tool", "a1", "spawn_subtask", "lifecycle", VALID_URL, true);
+        insert_row(
+            &conn2,
+            "tool",
+            "a1",
+            "spawn_subtask",
+            "lifecycle",
+            VALID_URL,
+            true,
+        );
         let r2 = resolve_subtask_webhook(&conn2, "a1", "spawn_subtask", &json!({}), None);
         assert_eq!(use_source(&r2), WebhookSource::ToolDefault);
     }
@@ -1385,18 +1419,28 @@ mod tests {
 
     #[test]
     fn test_redact_secrets_scrubs_known_patterns() {
-        let input = "key sk-ABCDEFGHIJKLMNOP and ghp_0123456789abcdefghij and AKIAABCDEFGHIJKLMNOP \
+        let input =
+            "key sk-ABCDEFGHIJKLMNOP and ghp_0123456789abcdefghij and AKIAABCDEFGHIJKLMNOP \
                      Authorization: Bearer myreallylongtoken123456 \
                      API_KEY=supersecretvalue \
                      hook https://discord.com/api/webhooks/123/abcdefSECRETtoken \
                      hex 0123456789abcdef0123456789abcdef0123";
         let out = redact_secrets(input);
         assert!(!out.contains("sk-ABCDEFGHIJKLMNOP"), "sk leaked: {out}");
-        assert!(!out.contains("ghp_0123456789abcdefghij"), "ghp leaked: {out}");
+        assert!(
+            !out.contains("ghp_0123456789abcdefghij"),
+            "ghp leaked: {out}"
+        );
         assert!(!out.contains("AKIAABCDEFGHIJKLMNOP"), "akia leaked: {out}");
-        assert!(!out.contains("myreallylongtoken123456"), "bearer leaked: {out}");
+        assert!(
+            !out.contains("myreallylongtoken123456"),
+            "bearer leaked: {out}"
+        );
         assert!(!out.contains("supersecretvalue"), "kv leaked: {out}");
-        assert!(!out.contains("abcdefSECRETtoken"), "webhook token leaked: {out}");
+        assert!(
+            !out.contains("abcdefSECRETtoken"),
+            "webhook token leaked: {out}"
+        );
         assert!(out.contains("[REDACTED]"));
         // benign words preserved
         assert!(out.contains("key"));
@@ -1406,7 +1450,10 @@ mod tests {
     #[test]
     fn test_redact_secrets_kv_value_in_next_token() {
         let out = redact_secrets("\"token\": \"abcdefghijklmnopqrstuvwx\"");
-        assert!(!out.contains("abcdefghijklmnopqrstuvwx"), "value leaked: {out}");
+        assert!(
+            !out.contains("abcdefghijklmnopqrstuvwx"),
+            "value leaked: {out}"
+        );
         assert!(out.contains("[REDACTED]"));
     }
 
@@ -1449,7 +1496,10 @@ mod tests {
         let out = s.stdout_summary.unwrap();
         assert_eq!(out.chars().count(), 5000);
         assert_eq!(out, long);
-        assert!(!out.contains("omitted"), "must not insert omission marker: {out}");
+        assert!(
+            !out.contains("omitted"),
+            "must not insert omission marker: {out}"
+        );
     }
 
     // ---- tool event formatting ----
@@ -1483,8 +1533,14 @@ mod tests {
         assert!(m.contains("execute_shell"));
         assert!(m.contains("exit_code"));
         // unredacted: every secret-like string survives byte-for-byte.
-        assert!(m.contains("API_KEY=supersecretvalue"), "kv secret stripped: {m}");
-        assert!(m.contains("ghp_0123456789abcdefghij"), "prefix secret stripped: {m}");
+        assert!(
+            m.contains("API_KEY=supersecretvalue"),
+            "kv secret stripped: {m}"
+        );
+        assert!(
+            m.contains("ghp_0123456789abcdefghij"),
+            "prefix secret stripped: {m}"
+        );
         assert!(
             m.contains("https://discord.com/api/webhooks/123/abcdefSECRETtoken"),
             "webhook url stripped: {m}"
@@ -1509,10 +1565,17 @@ mod tests {
             ..Default::default()
         };
         let msgs = build_tool_event_message(&view);
-        assert!(msgs.len() > 1, "long output must be split into multiple parts");
+        assert!(
+            msgs.len() > 1,
+            "long output must be split into multiple parts"
+        );
         // every part is within Discord's hard limit and labelled in order.
         for (i, m) in msgs.iter().enumerate() {
-            assert!(m.chars().count() <= DISCORD_MESSAGE_LIMIT, "part too long: {}", m.len());
+            assert!(
+                m.chars().count() <= DISCORD_MESSAGE_LIMIT,
+                "part too long: {}",
+                m.len()
+            );
             assert!(
                 m.starts_with(&format!("part {}/{}\n", i + 1, msgs.len())),
                 "part marker/order wrong: {m}"
@@ -1523,7 +1586,10 @@ mod tests {
             .iter()
             .map(|m| m.splitn(2, '\n').nth(1).unwrap_or("").to_string())
             .collect();
-        assert!(reconstructed.contains(&stdout), "reconstruction lost stdout");
+        assert!(
+            reconstructed.contains(&stdout),
+            "reconstruction lost stdout"
+        );
         // no ellipsis/omission/masking introduced.
         assert!(!reconstructed.contains('…'), "ellipsis introduced");
         assert!(!reconstructed.contains("[REDACTED]"));
@@ -1547,7 +1613,10 @@ mod tests {
         };
         let msgs = build_tool_event_message(&view);
         let joined = msgs.join("");
-        assert!(joined.contains("partial output"), "must mark partial: {joined}");
+        assert!(
+            joined.contains("partial output"),
+            "must mark partial: {joined}"
+        );
     }
 
     // ---- activity-family resolution ----
@@ -1557,7 +1626,15 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         insert_row(&conn, "global", "*", "", "activity", VALID_URL, true);
         insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
-        insert_row(&conn, "tool", "a1", "execute_shell", "activity", VALID_URL, true);
+        insert_row(
+            &conn,
+            "tool",
+            "a1",
+            "execute_shell",
+            "activity",
+            VALID_URL,
+            true,
+        );
         let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
         assert_eq!(use_source(&r), WebhookSource::ToolDefault);
 
@@ -1579,16 +1656,32 @@ mod tests {
         // only a subtask-kind agent row exists -> activity resolution must NOT use it.
         insert_row(&conn, "agent", "a1", "", "subtask", VALID_URL, true);
         let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
-        assert!(matches!(r, WebhookResolution::None), "subtask kind must not serve activity");
+        assert!(
+            matches!(r, WebhookResolution::None),
+            "subtask kind must not serve activity"
+        );
     }
 
     #[test]
     fn test_resolve_activity_disabled_no_fallthrough() {
         let conn = opencrab_db::init_memory().unwrap();
-        insert_row(&conn, "tool", "a1", "execute_shell", "activity", VALID_URL, false);
+        insert_row(
+            &conn,
+            "tool",
+            "a1",
+            "execute_shell",
+            "activity",
+            VALID_URL,
+            false,
+        );
         insert_row(&conn, "agent", "a1", "", "activity", VALID_URL, true);
         let r = resolve_activity_webhook(&conn, "a1", "execute_shell");
-        assert!(matches!(r, WebhookResolution::Disabled { source: WebhookSource::ToolDefault }));
+        assert!(matches!(
+            r,
+            WebhookResolution::Disabled {
+                source: WebhookSource::ToolDefault
+            }
+        ));
     }
 
     #[test]
@@ -1704,7 +1797,8 @@ mod tests {
 
         // (1) 空 explicit url → デフォルトへフォールバックして Use になる。
         let empty_args = json!({ "webhook": { "url": "" } });
-        let resolved = resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &empty_args, None);
+        let resolved =
+            resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &empty_args, None);
         let (url, source) = match resolved {
             WebhookResolution::Use { config, source } => (config.url, source),
             other => panic!(
@@ -1760,10 +1854,14 @@ mod tests {
                 resp.status().as_u16()
             );
         }
-        eprintln!("[e2e] delivered {} message(s) to the default webhook", messages.len());
+        eprintln!(
+            "[e2e] delivered {} message(s) to the default webhook",
+            messages.len()
+        );
 
         // (2) 非空の不正 url はフォールバックせず Error（strict 維持）。
-        let bad_args = json!({ "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" } });
+        let bad_args =
+            json!({ "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" } });
         let bad = resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &bad_args, None);
         match bad {
             WebhookResolution::Error {
@@ -1773,7 +1871,10 @@ mod tests {
             } => {
                 assert_eq!(code, "invalid_webhook_url");
                 assert_eq!(source, WebhookSource::Explicit);
-                assert!(!message.contains("evil.example.com"), "raw url leaked: {message}");
+                assert!(
+                    !message.contains("evil.example.com"),
+                    "raw url leaked: {message}"
+                );
                 eprintln!("[e2e] invalid explicit url -> Error (no fallback): {code}: {message}");
             }
             _ => panic!("non-empty invalid explicit url must Error, not fall back"),

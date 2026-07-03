@@ -50,11 +50,13 @@ pub fn resolve_form_modal_for_button(
         return None;
     }
 
-    let form = pending.a2ui_components.iter().find(|c| {
-        matches!(&c.component_type, A2uiComponentType::Form { .. })
-    })?;
+    let form = pending
+        .a2ui_components
+        .iter()
+        .find(|c| matches!(&c.component_type, A2uiComponentType::Form { .. }))?;
     let A2uiComponentType::Form {
-        action: form_action, ..
+        action: form_action,
+        ..
     } = &form.component_type
     else {
         return None;
@@ -112,15 +114,8 @@ mod tests {
     #[test]
     fn resolve_returns_none_without_form_data() {
         let reg = test_registry();
-        reg.insert(
-            "uuid-abc".into(),
-            dummy_pending(None),
-        );
-        let r = resolve_form_modal_for_button(
-            &reg,
-            "interaction:uuid-abc:btn1:submit",
-            "user1",
-        );
+        reg.insert("uuid-abc".into(), dummy_pending(None));
+        let r = resolve_form_modal_for_button(&reg, "interaction:uuid-abc:btn1:submit", "user1");
         assert!(r.is_none());
     }
 
@@ -168,12 +163,8 @@ mod tests {
         let reg = test_registry();
         reg.insert("uuid-abc".into(), pending);
 
-        let spec = resolve_form_modal_for_button(
-            &reg,
-            "interaction:uuid-abc:btn1:submit",
-            "user1",
-        )
-        .expect("modal spec");
+        let spec = resolve_form_modal_for_button(&reg, "interaction:uuid-abc:btn1:submit", "user1")
+            .expect("modal spec");
         assert_eq!(spec.modal_custom_id, "interaction:uuid-abc:modal:submit");
         assert_eq!(spec.title, "My form");
         assert_eq!(spec.components.len(), 1);
@@ -184,9 +175,11 @@ mod tests {
         let form_data = FormData {
             modal_custom_id: "interaction:uuid-abc:modal:go".into(),
             title: "T".into(),
-            action_rows: vec![CreateActionRow::InputText(
-                CreateInputText::new(InputTextStyle::Short, "L", "i1"),
-            )],
+            action_rows: vec![CreateActionRow::InputText(CreateInputText::new(
+                InputTextStyle::Short,
+                "L",
+                "i1",
+            ))],
             action: A2uiAction {
                 name: "go".into(),
                 context: None,
@@ -224,12 +217,8 @@ mod tests {
         reg.insert("uuid-abc".into(), pending);
 
         assert!(
-            resolve_form_modal_for_button(
-                &reg,
-                "interaction:uuid-abc:b1:go",
-                "other_user",
-            )
-            .is_none()
+            resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", "other_user",)
+                .is_none()
         );
     }
 }

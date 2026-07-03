@@ -173,7 +173,7 @@ impl Action for ShellToolAction {
                 return ActionResult::error(&format!(
                     "Command timed out after {} seconds",
                     timeout_secs
-                ))
+                ));
             }
         };
 
@@ -297,8 +297,17 @@ mod tests {
         let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
         let args = serde_json::json!({"command": "printenv", "args": ["OPENCRAB_TEST_CUSTOM_VAR"]});
         let result = action.execute(&args, &ctx).await;
-        assert!(result.success, "printenv should succeed: {:?}", result.error);
-        let stdout = result.data.as_ref().and_then(|d| d.get("stdout")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            result.success,
+            "printenv should succeed: {:?}",
+            result.error
+        );
+        let stdout = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("stdout"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             stdout.contains("hello123"),
             "child should see inherited custom var, got: {:?}",
@@ -324,8 +333,17 @@ mod tests {
         let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
         let args = serde_json::json!({"command": "printenv", "args": ["SSH_AUTH_SOCK"]});
         let result = action.execute(&args, &ctx).await;
-        assert!(result.success, "printenv should succeed: {:?}", result.error);
-        let stdout = result.data.as_ref().and_then(|d| d.get("stdout")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            result.success,
+            "printenv should succeed: {:?}",
+            result.error
+        );
+        let stdout = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("stdout"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             stdout.contains("/tmp/opencrab-test-agent.sock"),
             "child should inherit SSH_AUTH_SOCK, got: {:?}",
@@ -355,7 +373,12 @@ mod tests {
         let args = serde_json::json!({"command": "env"});
         let result = action.execute(&args, &ctx).await;
         assert!(result.success, "env should succeed: {:?}", result.error);
-        let stdout = result.data.as_ref().and_then(|d| d.get("stdout")).and_then(|v| v.as_str()).unwrap_or("");
+        let stdout = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("stdout"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             stdout.contains("OPENCRAB_TEST_ALLOWED=yes-allowed"),
             "allow-listed var should be passed through, got: {:?}",
@@ -397,7 +420,11 @@ mod tests {
         let args =
             serde_json::json!({"command": "printenv", "args": ["OPENCRAB_TEST_SSH_AUTH_SOCK"]});
         let result = action.execute(&args, &ctx).await;
-        assert!(result.success, "printenv should succeed: {:?}", result.error);
+        assert!(
+            result.success,
+            "printenv should succeed: {:?}",
+            result.error
+        );
         let stdout = result
             .data
             .as_ref()

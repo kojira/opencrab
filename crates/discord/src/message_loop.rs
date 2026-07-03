@@ -547,11 +547,18 @@ async fn process_incoming_message<T: AgentRunner>(
                 }
                 let gateway_cb = gateway_for_cb.clone();
                 tokio::spawn(async move {
-                    tracing::warn!(channel_id = channel_id, text_len = text.len(), "on_response_text: sending to Discord channel");
+                    tracing::warn!(
+                        channel_id = channel_id,
+                        text_len = text.len(),
+                        "on_response_text: sending to Discord channel"
+                    );
                     if let Err(e) = gateway_cb.send_to_channel(channel_id, &text).await {
                         tracing::error!("on_response_text Discord send failed: {e}");
                     } else {
-                        tracing::warn!(channel_id = channel_id, "on_response_text: Discord send succeeded");
+                        tracing::warn!(
+                            channel_id = channel_id,
+                            "on_response_text: Discord send succeeded"
+                        );
                     }
                 });
             }))
@@ -781,7 +788,11 @@ async fn process_subtask_completed<T: AgentRunner>(
         task_description,
         exit_reason
     );
-    let conversation_raw = match state.build_conversation_string(&session_id, &agent_id, state.context_budget_tokens(&agent_id)) {
+    let conversation_raw = match state.build_conversation_string(
+        &session_id,
+        &agent_id,
+        state.context_budget_tokens(&agent_id),
+    ) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
@@ -898,8 +909,7 @@ async fn handle_component_interaction(
         match pending_ref {
             Some(ref pending) => {
                 // Owner-only check
-                if !pending.owner_discord_id.is_empty()
-                    && data.user_id != pending.owner_discord_id
+                if !pending.owner_discord_id.is_empty() && data.user_id != pending.owner_discord_id
                 {
                     debug!(
                         user_id = %data.user_id,

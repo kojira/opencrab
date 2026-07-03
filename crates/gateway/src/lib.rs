@@ -11,8 +11,8 @@ pub use message::{
 };
 pub use traits::Gateway;
 pub use traits::{
-    GatewayActionDef, GatewayActionResult, GatewayActions, PEER_REVIEW_REPLY_MARKER,
-    PEER_REVIEW_REQUEST_MARKER,
+    GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
+    PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER,
 };
 
 #[cfg(feature = "discord")]

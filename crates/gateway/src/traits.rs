@@ -7,6 +7,72 @@ use crate::message::{IncomingMessage, OutgoingMessage};
 // GatewayActions: ゲートウェイ固有アクション
 // ============================================
 
+/// ゲートウェイアクション呼び出し元の型付きアイデンティティ（#36）。
+///
+/// 以前は bridge が `__caller` 文字列をツール引数 JSON に混ぜ込み、gateway 側が
+/// `unwrap_or("agent")` で再解釈していた。LLM 由来の引数と実行コンテキストを
+/// 同じ JSON に混ぜない・文字列比較で権限判定しないために型で渡す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayCaller {
+    Owner,
+    Agent,
+    CoAgent { agent_id: String },
+    TrustedUser,
+}
+
+impl GatewayCaller {
+    /// 監査ログ・表示用の正準ラベル（権限判定には enum match を使うこと）。
+    pub fn label(&self) -> &'static str {
+        match self {
+            GatewayCaller::Owner => "owner",
+            GatewayCaller::Agent => "agent",
+            GatewayCaller::CoAgent { .. } => "co_agent",
+            GatewayCaller::TrustedUser => "trusted_user",
+        }
+    }
+}
+
+/// ゲートウェイアクション実行時の呼び出しコンテキスト（#36）。
+///
+/// bridge（実行境界）が構築し、gateway 実装へ型付きで渡す。ツール引数 JSON には
+/// 実行コンテキストを一切混ぜない。
+#[derive(Debug, Clone)]
+pub struct GatewayCallContext {
+    pub caller: GatewayCaller,
+    /// 呼び出し元エンジンのセッションID。セッション文脈の無い実行（直接呼び出し等）
+    /// では None。セッション必須のアクションは None を明示エラーにする（fail-closed）。
+    pub session_id: Option<String>,
+    /// sub-engine のネスト深さ（メインエンジン = 0）。
+    pub depth: u32,
+    pub agent_id: String,
+}
+
+impl GatewayCallContext {
+    pub fn new(caller: GatewayCaller, agent_id: impl Into<String>) -> Self {
+        Self {
+            caller,
+            session_id: None,
+            depth: 0,
+            agent_id: agent_id.into(),
+        }
+    }
+
+    /// 素の agent 権限のコンテキスト（テスト・最小権限のデフォルト用）。
+    pub fn for_agent(agent_id: impl Into<String>) -> Self {
+        Self::new(GatewayCaller::Agent, agent_id)
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
+    }
+}
+
 /// ゲートウェイが提供する固有アクションのトレイト。
 ///
 /// ゲートウェイ（例: Discord）が自身の管理コマンドをエージェントに
@@ -15,8 +81,14 @@ use crate::message::{IncomingMessage, OutgoingMessage};
 pub trait GatewayActions: Send + Sync {
     /// このゲートウェイが提供するツール定義一覧
     fn definitions(&self) -> Vec<GatewayActionDef>;
-    /// ツールを実行する
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> GatewayActionResult;
+    /// ツールを実行する。`args` は LLM 由来のツール引数のみ（実行コンテキストは
+    /// `ctx` で渡され、JSON には混ざらない）。
+    async fn execute(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult;
 }
 
 /// ゲートウェイアクションの定義

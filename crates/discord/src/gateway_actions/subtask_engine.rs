@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use opencrab_gateway::GatewayActionResult;
+use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -63,6 +63,7 @@ impl DiscordGatewayActions {
     pub(crate) async fn execute_spawn_subtask(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         let task = match args["task"].as_str() {
             Some(t) => t.to_string(),
@@ -75,12 +76,23 @@ impl DiscordGatewayActions {
             }
         };
         let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(1800) as u64;
-        let parent_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
-        let parent_depth = args["__depth"].as_u64().unwrap_or(0) as u32;
-        let agent_id = args["__agent_id"]
-            .as_str()
-            .unwrap_or(&self.agent_id)
-            .to_string();
+        // セッション必須（fail-closed）: 完了通知・親ログの宛先が session_id に
+        // 依存するため、不明なまま "" で進まず明示エラーにする（#36）。
+        let parent_session_id = match ctx.session_id.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "spawn_subtask はセッション文脈でのみ実行できます（session_id 不明）"
+                            .to_string(),
+                    ),
+                };
+            }
+        };
+        let parent_depth = ctx.depth;
+        let agent_id = ctx.agent_id.clone();
 
         let subtask_id = Uuid::new_v4().to_string();
         let sub_session_id = format!("subtask-{}", subtask_id);
@@ -700,6 +712,7 @@ impl DiscordGatewayActions {
     pub(crate) async fn execute_report_progress(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         let message = match args["message"].as_str() {
             Some(m) => m.to_string(),
@@ -711,16 +724,26 @@ impl DiscordGatewayActions {
                 };
             }
         };
-        let current_session_id = args["__session_id"].as_str().unwrap_or("").to_string();
+        // セッション必須（fail-closed）: 親セッションの解決が session_id に依存する（#36）。
+        let current_session_id = match ctx.session_id.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "report_progress はセッション文脈でのみ実行できます（session_id 不明）"
+                            .to_string(),
+                    ),
+                };
+            }
+        };
         let subtask_id_arg = args
             .get("subtask_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let agent_id = args["__agent_id"]
-            .as_str()
-            .unwrap_or(&self.agent_id)
-            .to_string();
+        let agent_id = ctx.agent_id.clone();
 
         let subtask_entry = if !subtask_id_arg.is_empty() {
             self.subtask_registry
@@ -1247,7 +1270,10 @@ mod tests {
         assert!(msg.contains("tool_call_completed"));
         assert!(msg.contains("exit_code"));
         // covered 経路: stdout の secret はそのまま届く（masking しない）。
-        assert!(msg.contains("API_KEY=supersecretvalue"), "secret stripped: {msg}");
+        assert!(
+            msg.contains("API_KEY=supersecretvalue"),
+            "secret stripped: {msg}"
+        );
         assert!(!msg.contains("[REDACTED]"), "masking marker present: {msg}");
     }
 
@@ -1302,7 +1328,10 @@ mod tests {
             failed_msg.contains("API_KEY=supersecretvalue"),
             "secret stripped: {failed_msg}"
         );
-        assert!(!failed_msg.contains("[REDACTED]"), "masking marker present: {failed_msg}");
+        assert!(
+            !failed_msg.contains("[REDACTED]"),
+            "masking marker present: {failed_msg}"
+        );
         let rejected_batch = rx.try_recv().expect("rejected batch");
         let rejected_msg = &rejected_batch.messages[0];
         assert!(rejected_msg.contains("tool_call_rejected"));
@@ -1517,9 +1546,18 @@ mod tests {
         let msg = batch.messages.join("");
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         // every secret-like token survives unmodified, and no masking markers appear.
-        assert!(!msg.contains("[REDACTED]"), "REDACTED marker present: {msg}");
-        assert!(!msg.contains("[redacted]"), "redacted marker present: {msg}");
-        assert!(msg.contains("sk-supersecretkeyvalue1234"), "api key stripped: {msg}");
+        assert!(
+            !msg.contains("[REDACTED]"),
+            "REDACTED marker present: {msg}"
+        );
+        assert!(
+            !msg.contains("[redacted]"),
+            "redacted marker present: {msg}"
+        );
+        assert!(
+            msg.contains("sk-supersecretkeyvalue1234"),
+            "api key stripped: {msg}"
+        );
         assert!(
             msg.contains("https://discord.com/api/webhooks/999/leakedtokenvalue"),
             "webhook url stripped: {msg}"
@@ -1558,7 +1596,11 @@ mod tests {
         assert!(batch.messages.len() > 1, "long args must split into parts");
         // each part within Discord hard limit, labelled in order.
         for (i, m) in batch.messages.iter().enumerate() {
-            assert!(m.chars().count() <= 2000, "part exceeds limit: {}", m.chars().count());
+            assert!(
+                m.chars().count() <= 2000,
+                "part exceeds limit: {}",
+                m.chars().count()
+            );
             assert!(
                 m.starts_with(&format!("part {}/{}\n", i + 1, batch.messages.len())),
                 "part marker/order wrong: {m}"
@@ -1586,18 +1628,28 @@ mod tests {
         let summary = summarize_tool_args("execute_shell", &args).unwrap();
         assert!(summary.starts_with("cmd: `"), "summary: {summary}");
         assert!(summary.contains(secret), "secret stripped: {summary}");
-        assert!(!summary.contains("[REDACTED]"), "masking marker present: {summary}");
-        assert!(!summary.contains('…'), "clamp ellipsis introduced: {summary}");
+        assert!(
+            !summary.contains("[REDACTED]"),
+            "masking marker present: {summary}"
+        );
+        assert!(
+            !summary.contains('…'),
+            "clamp ellipsis introduced: {summary}"
+        );
     }
 
     #[test]
     fn test_summarize_tool_args_preserves_webhook_url() {
         // /api/webhooks/ を含む URL がそのまま残ること（バイト一致）。
-        let url = "https://discord.com/api/webhooks/123456789012345678/AbCdEf-XXXXXXXXXXXXXXXXXXXXXXXX";
+        let url =
+            "https://discord.com/api/webhooks/123456789012345678/AbCdEf-XXXXXXXXXXXXXXXXXXXXXXXX";
         let args = serde_json::json!({ "command": format!("curl {url}") });
         let summary = summarize_tool_args("execute_shell", &args).unwrap();
         assert!(summary.contains(url), "webhook url stripped: {summary}");
-        assert!(!summary.contains("[redacted]"), "url masking present: {summary}");
+        assert!(
+            !summary.contains("[redacted]"),
+            "url masking present: {summary}"
+        );
     }
 
     #[test]

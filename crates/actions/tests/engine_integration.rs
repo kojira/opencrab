@@ -106,11 +106,7 @@ fn setup() -> (tempfile::TempDir, BridgedExecutor) {
     (dir, executor)
 }
 
-fn setup_with_data() -> (
-    tempfile::TempDir,
-    BridgedExecutor,
-    opencrab_db::Db,
-) {
+fn setup_with_data() -> (tempfile::TempDir, BridgedExecutor, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
 
     // Seed a session log so search_my_history can find it
@@ -164,17 +160,36 @@ async fn test_engine_search_then_create_skill() {
 
     let llm = MockLlm::new(vec![
         // Step 1: LLM calls search_my_history
-        resp(None, vec![tc("tc-1", "search_my_history", serde_json::json!({"query": "Rust"}))]),
+        resp(
+            None,
+            vec![tc(
+                "tc-1",
+                "search_my_history",
+                serde_json::json!({"query": "Rust"}),
+            )],
+        ),
         // Step 2: LLM calls create_my_skill based on search results
-        resp(None, vec![tc("tc-2", "create_my_skill", serde_json::json!({
+        resp(
+            None,
+            vec![tc(
+                "tc-2",
+                "create_my_skill",
+                serde_json::json!({
                     "name": "Rust Expertise",
                     "description": "Knowledge about Rust programming",
                     "situation_pattern": "when discussing Rust",
                     "guidance": "Share detailed Rust knowledge"
-                }))]),
+                }),
+            )],
+        ),
         // Step 3: Final text response
-        resp(Some("I searched my history and created a new skill based on my Rust knowledge."
-                    .to_string()), vec![]),
+        resp(
+            Some(
+                "I searched my history and created a new skill based on my Rust knowledge."
+                    .to_string(),
+            ),
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -206,15 +221,25 @@ async fn test_engine_learn_from_experience() {
     let (_dir, executor, db) = setup_with_data();
 
     let llm = MockLlm::new(vec![
-        resp(None, vec![tc("tc-1", "learn_from_experience", serde_json::json!({
+        resp(
+            None,
+            vec![tc(
+                "tc-1",
+                "learn_from_experience",
+                serde_json::json!({
                     "experience": "Helped user debug a complex issue",
                     "outcome": "success",
                     "lesson": "Ask for error messages first",
                     "skill_name": "debug_workflow",
                     "situation_pattern": "when user reports a bug",
                     "guidance": "Request stack trace before suggesting fixes"
-                }))]),
-        resp(Some("I've learned a new debugging workflow skill.".to_string()), vec![]),
+                }),
+            )],
+        ),
+        resp(
+            Some("I've learned a new debugging workflow skill.".to_string()),
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -272,11 +297,7 @@ async fn test_engine_lists_all_tools() {
 // ---------------------------------------------------------------------------
 
 /// ログ投入 + インデックス構築のセットアップヘルパー（async版）
-async fn setup_with_indexed_memory() -> (
-    tempfile::TempDir,
-    BridgedExecutor,
-    opencrab_db::Db,
-) {
+async fn setup_with_indexed_memory() -> (tempfile::TempDir, BridgedExecutor, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
 
     // 3つのセッションに異なるトピックのログを投入
@@ -464,11 +485,24 @@ async fn test_agentic_rag_empty_index() {
 
     let llm = MockLlm::new(vec![
         // LLMがbrowseを呼ぶ
-        resp(None, vec![tc("tc-1", "browse_memory_index", serde_json::json!({}))]),
+        resp(
+            None,
+            vec![tc("tc-1", "browse_memory_index", serde_json::json!({}))],
+        ),
         // 空のツリーを受け取り、FTS検索にフォールバック
-        resp(None, vec![tc("tc-2", "search_my_history", serde_json::json!({"query": "Rust"}))]),
+        resp(
+            None,
+            vec![tc(
+                "tc-2",
+                "search_my_history",
+                serde_json::json!({"query": "Rust"}),
+            )],
+        ),
         // 最終回答
-        resp(Some("記憶インデックスに該当する情報がありませんでした。".to_string()), vec![]),
+        resp(
+            Some("記憶インデックスに該当する情報がありませんでした。".to_string()),
+            vec![],
+        ),
     ]);
 
     let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
@@ -580,7 +614,10 @@ async fn test_engine_unknown_action_handled() {
     let (_dir, executor) = setup();
 
     let llm = MockLlm::new(vec![
-        resp(None, vec![tc("tc-1", "nonexistent_action", serde_json::json!({}))]),
+        resp(
+            None,
+            vec![tc("tc-1", "nonexistent_action", serde_json::json!({}))],
+        ),
         resp(Some("That action was not found.".to_string()), vec![]),
     ]);
 

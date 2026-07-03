@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions};
+use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use serde_json::json;
 use serenity::http::Http;
 use tokio::task::AbortHandle;
@@ -882,7 +882,12 @@ impl GatewayActions for DiscordGatewayActions {
         ]
     }
 
-    async fn execute(&self, name: &str, args: &serde_json::Value) -> GatewayActionResult {
+    async fn execute(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
         match name {
             "discord_list_guilds" => self.execute_list_guilds().await,
             "discord_list_channels" => self.execute_list_channels(args).await,
@@ -891,28 +896,30 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "discord_create_channel" => self.execute_discord_create_channel(args).await,
             "update_memory_index_config" => self.execute_update_memory_index_config(args),
-            "add_allowed_command" => self.execute_add_allowed_command(args),
+            "add_allowed_command" => self.execute_add_allowed_command(args, ctx),
             "list_allowed_commands" => self.execute_list_allowed_commands(),
-            "remove_allowed_command" => self.execute_remove_allowed_command(args),
+            "remove_allowed_command" => self.execute_remove_allowed_command(args, ctx),
             "rebuild_memory_index" => self.execute_rebuild_memory_index().await,
-            "create_skill" => self.execute_create_skill(args),
+            "create_skill" => self.execute_create_skill(args, ctx),
             "discord_send_file" => self.execute_send_file(args).await,
-            "request_peer_review" => self.execute_request_peer_review(args).await,
-            "spawn_subtask" => self.execute_spawn_subtask(args).await,
+            "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
+            "spawn_subtask" => self.execute_spawn_subtask(args, ctx).await,
             "cancel_subtask" => self.execute_cancel_subtask(args),
-            "report_progress" => self.execute_report_progress(args).await,
-            "send_ui" => self.execute_send_ui(args).await,
-            "update_heartbeat_instructions" => self.execute_update_heartbeat_instructions(args),
-            "read_heartbeat_instructions" => self.execute_read_heartbeat_instructions(args),
-            "get_default_subtask_webhook" => self.execute_get_default_subtask_webhook(args),
-            "set_default_subtask_webhook" => self.execute_set_default_subtask_webhook(args),
-            "ensure_subtask_webhook" => self.execute_ensure_subtask_webhook(args).await,
-            "list_subtask_webhooks" => self.execute_list_subtask_webhooks(args),
+            "report_progress" => self.execute_report_progress(args, ctx).await,
+            "send_ui" => self.execute_send_ui(args, ctx).await,
+            "update_heartbeat_instructions" => {
+                self.execute_update_heartbeat_instructions(args, ctx)
+            }
+            "read_heartbeat_instructions" => self.execute_read_heartbeat_instructions(args, ctx),
+            "get_default_subtask_webhook" => self.execute_get_default_subtask_webhook(args, ctx),
+            "set_default_subtask_webhook" => self.execute_set_default_subtask_webhook(args, ctx),
+            "ensure_subtask_webhook" => self.execute_ensure_subtask_webhook(args, ctx).await,
+            "list_subtask_webhooks" => self.execute_list_subtask_webhooks(args, ctx),
             // 汎用名（既定 family='activity'）。
-            "get_default_webhook" => self.execute_get_default_webhook(args),
-            "set_default_webhook" => self.execute_set_default_webhook(args),
-            "ensure_webhook" => self.execute_ensure_webhook(args).await,
-            "list_webhooks" => self.execute_list_webhooks(args),
+            "get_default_webhook" => self.execute_get_default_webhook(args, ctx),
+            "set_default_webhook" => self.execute_set_default_webhook(args, ctx),
+            "ensure_webhook" => self.execute_ensure_webhook(args, ctx).await,
+            "list_webhooks" => self.execute_list_webhooks(args, ctx),
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -925,6 +932,7 @@ impl GatewayActions for DiscordGatewayActions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrab_gateway::GatewayCaller;
     use serde_json::json;
 
     /// テスト用: serenity Httpは不要だがDiscordGatewayActionsの構築に必要。
@@ -949,6 +957,44 @@ mod tests {
             None,
         );
         (actions, db)
+    }
+
+    /// テスト用の呼び出しコンテキスト。旧テストは `__caller` を JSON に混ぜていたが、
+    /// #36 で型付き GatewayCallContext に移行した。session_id は Discord 形式の
+    /// ダミーを既定で持たせる（セッション必須アクションの検証テストを通すため）。
+    fn tctx(caller: GatewayCaller) -> GatewayCallContext {
+        GatewayCallContext::new(caller, "test-agent").with_session_id("discord-test-agent-111-222")
+    }
+
+    // ---- #36: セッション必須アクションの fail-closed ----
+
+    /// セッション文脈の無い実行（session_id: None）では、session に依存する
+    /// アクションが "" で黙って進まず明示エラーになること。
+    #[tokio::test]
+    async fn test_session_required_actions_fail_closed_without_session() {
+        let (actions, _db) = make_test_actions();
+        let no_session = GatewayCallContext::new(GatewayCaller::Owner, "test-agent");
+        // 各アクションの他の必須引数は満たしておき、session 検査だけで落ちることを見る。
+        let args = json!({
+            "content": "diff",
+            "channel_id": "123",
+            "message": "m",
+            "components": [],
+            "task": "t",
+        });
+        for name in [
+            "request_peer_review",
+            "report_progress",
+            "send_ui",
+            "spawn_subtask",
+        ] {
+            let result = actions.execute(name, &args, &no_session).await;
+            assert!(!result.success, "{name} should fail without session");
+            assert!(
+                result.error.unwrap().contains("セッション"),
+                "{name} should mention missing session context"
+            );
+        }
     }
 
     // ---- definitions ----
@@ -1009,7 +1055,11 @@ mod tests {
     async fn test_peer_review_missing_content() {
         let (actions, _db) = make_test_actions();
         let result = actions
-            .execute("request_peer_review", &json!({"channel_id": "123"}))
+            .execute(
+                "request_peer_review",
+                &json!({"channel_id": "123"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("content"));
@@ -1019,7 +1069,11 @@ mod tests {
     async fn test_peer_review_missing_or_invalid_channel() {
         let (actions, _db) = make_test_actions();
         let result = actions
-            .execute("request_peer_review", &json!({"content": "diff"}))
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("channel_id"));
@@ -1028,6 +1082,7 @@ mod tests {
             .execute(
                 "request_peer_review",
                 &json!({"content": "diff", "channel_id": "not-a-number"}),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1041,6 +1096,7 @@ mod tests {
             .execute(
                 "request_peer_review",
                 &json!({"content": "x".repeat(12_001), "channel_id": "123"}),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1062,6 +1118,7 @@ mod tests {
                     "readable": true,
                     "writable": false,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(result.success);
@@ -1098,6 +1155,7 @@ mod tests {
                     "readable": true,
                     "writable": true,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
 
@@ -1112,6 +1170,7 @@ mod tests {
                     "readable": false,
                     "writable": false,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(result.success);
@@ -1130,7 +1189,11 @@ mod tests {
 
         // channel_idのみ → guild_idが欠けてエラー
         let result = actions
-            .execute("discord_channel_config", &json!({"channel_id": "ch-1"}))
+            .execute(
+                "discord_channel_config",
+                &json!({"channel_id": "ch-1"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("guild_id"));
@@ -1147,6 +1210,7 @@ mod tests {
                     "guild_id": "guild-1",
                     "writable": true,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1166,6 +1230,7 @@ mod tests {
                     "readable": true,
                     "writable": true,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(result.success);
@@ -1182,7 +1247,9 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_gateway_action() {
         let (actions, _db) = make_test_actions();
-        let result = actions.execute("nonexistent", &json!({})).await;
+        let result = actions
+            .execute("nonexistent", &json!({}), &tctx(GatewayCaller::Agent))
+            .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("Unknown gateway action"));
     }
@@ -1192,7 +1259,13 @@ mod tests {
     #[tokio::test]
     async fn test_list_channels_missing_guild_id() {
         let (actions, _db) = make_test_actions();
-        let result = actions.execute("discord_list_channels", &json!({})).await;
+        let result = actions
+            .execute(
+                "discord_list_channels",
+                &json!({}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("guild_id"));
     }
@@ -1204,6 +1277,7 @@ mod tests {
             .execute(
                 "discord_list_channels",
                 &json!({"guild_id": "not-a-number"}),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1219,10 +1293,11 @@ mod tests {
             .execute(
                 "create_skill",
                 &json!({
-                    "__caller": "owner",
+
                     "name": "天気確認",
                     "description": "curl wttr.inで天気を確認する"
                 }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(result.success, "create_skill should succeed");
@@ -1238,20 +1313,22 @@ mod tests {
             .execute(
                 "create_skill",
                 &json!({
-                    "__caller": "owner",
+
                     "name": "天気確認",
                     "description": "first version"
                 }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         let result2 = actions
             .execute(
                 "create_skill",
                 &json!({
-                    "__caller": "owner",
+
                     "name": "天気確認",
                     "description": "updated version"
                 }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(result2.success, "second create should succeed (dedup)");
@@ -1267,6 +1344,7 @@ mod tests {
                     "name": "test",
                     "description": "test"
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1285,6 +1363,7 @@ mod tests {
                     "channel_id": "12345678901234567",
                     "file_path": "/etc/passwd",
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1298,7 +1377,11 @@ mod tests {
     async fn test_send_file_missing_params() {
         let (actions, _db) = make_test_actions();
         let result = actions
-            .execute("discord_send_file", &json!({"channel_id": "123"}))
+            .execute(
+                "discord_send_file",
+                &json!({"channel_id": "123"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("file_path"));
@@ -1331,7 +1414,11 @@ mod tests {
     async fn test_create_channel_missing_guild_id() {
         let (actions, _db) = make_test_actions();
         let result = actions
-            .execute("discord_create_channel", &json!({"name": "general"}))
+            .execute(
+                "discord_create_channel",
+                &json!({"name": "general"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("guild_id"));
@@ -1344,6 +1431,7 @@ mod tests {
             .execute(
                 "discord_create_channel",
                 &json!({"guild_id": "not-a-number", "name": "general"}),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1354,7 +1442,11 @@ mod tests {
     async fn test_create_channel_missing_name() {
         let (actions, _db) = make_test_actions();
         let result = actions
-            .execute("discord_create_channel", &json!({"guild_id": "123456789"}))
+            .execute(
+                "discord_create_channel",
+                &json!({"guild_id": "123456789"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("name"));
@@ -1367,6 +1459,7 @@ mod tests {
             .execute(
                 "discord_create_channel",
                 &json!({"guild_id": "123456789", "name": "a"}),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1382,10 +1475,11 @@ mod tests {
             .execute(
                 "update_heartbeat_instructions",
                 &json!({
-                    "__caller": "trusted_user",
+
                     "scope": "agent",
                     "instructions": "話題があるときだけ話す",
                 }),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(!result.success);
@@ -1422,11 +1516,12 @@ mod tests {
             .execute(
                 "update_heartbeat_instructions",
                 &json!({
-                    "__caller": "owner",
+
                     "scope": "agent",
                     "instructions": "NEW指示",
                     "reason": "オーナー依頼",
                 }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(
@@ -1473,7 +1568,8 @@ mod tests {
         let result = actions
             .execute(
                 "read_heartbeat_instructions",
-                &json!({"scope": "effective", "channel_id": "ch1", "__caller": "trusted_user"}),
+                &json!({"scope": "effective", "channel_id": "ch1", }),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(result.success);
@@ -1485,9 +1581,13 @@ mod tests {
     #[tokio::test]
     async fn test_read_heartbeat_instructions_rejected_for_plain_agent() {
         let (actions, _db) = make_test_actions();
-        // __caller 未指定（=素のagent扱い）は拒否される。
+        // 素の agent 権限は拒否される。
         let result = actions
-            .execute("read_heartbeat_instructions", &json!({"scope": "agent"}))
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "agent"}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!result.success);
 
@@ -1495,7 +1595,10 @@ mod tests {
         let allowed = actions
             .execute(
                 "read_heartbeat_instructions",
-                &json!({"scope": "agent", "__caller": "co_agent"}),
+                &json!({"scope": "agent", }),
+                &tctx(GatewayCaller::CoAgent {
+                    agent_id: "co-agent-1".to_string(),
+                }),
             )
             .await;
         assert!(allowed.success);
@@ -1512,6 +1615,7 @@ mod tests {
                     "name": "general",
                     "parent_id": "not-a-number",
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1534,10 +1638,11 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "trusted_user",
+
                     "scope": "agent",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(!result.success);
@@ -1551,11 +1656,12 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "agent",
+
                     "scope": "agent",
                     "family": "activity",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(
@@ -1587,10 +1693,11 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "agent",
+
                     "scope": "agent",
                     "url": "",
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(
@@ -1608,11 +1715,12 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "agent",
+
                     "scope": "tool",
                     "tool_name": "execute_shell",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1626,10 +1734,11 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "agent",
+
                     "scope": "global",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1643,11 +1752,12 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "agent",
+
                     "scope": "agent",
                     "agent_id": "someone-else",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!result.success);
@@ -1661,10 +1771,11 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "trusted_user",
+
                     "scope": "agent",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(!result.success);
@@ -1678,10 +1789,11 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "owner",
+
                     "scope": "agent",
                     "url": WH_VALID_URL,
                 }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(
@@ -1718,10 +1830,11 @@ mod tests {
             .execute(
                 "set_default_subtask_webhook",
                 &json!({
-                    "__caller": "owner",
+
                     "scope": "agent",
                     "url": "http://evil.com/x",
                 }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(!result.success);
@@ -1734,7 +1847,8 @@ mod tests {
         let result = actions
             .execute(
                 "set_default_subtask_webhook",
-                &json!({ "__caller": "owner", "scope": "agent" }),
+                &json!({  "scope": "agent" }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(result.success, "{:?}", result.error);
@@ -1776,7 +1890,11 @@ mod tests {
 
         // bare agent denied
         let denied = actions
-            .execute("get_default_subtask_webhook", &json!({}))
+            .execute(
+                "get_default_subtask_webhook",
+                &json!({}),
+                &tctx(GatewayCaller::Agent),
+            )
             .await;
         assert!(!denied.success);
 
@@ -1784,7 +1902,8 @@ mod tests {
         let allowed = actions
             .execute(
                 "get_default_subtask_webhook",
-                &json!({ "__caller": "trusted_user" }),
+                &json!({}),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(allowed.success);
@@ -1800,7 +1919,8 @@ mod tests {
         let result = actions
             .execute(
                 "get_default_subtask_webhook",
-                &json!({ "__caller": "owner", "include_secret": true }),
+                &json!({  "include_secret": true }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(!result.success);
@@ -1830,11 +1950,23 @@ mod tests {
         }
 
         // bare agent denied
-        let denied = actions.execute("list_subtask_webhooks", &json!({})).await;
+        let denied = actions
+            .execute(
+                "list_subtask_webhooks",
+                &json!({}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
         assert!(!denied.success);
 
         let allowed = actions
-            .execute("list_subtask_webhooks", &json!({ "__caller": "co_agent" }))
+            .execute(
+                "list_subtask_webhooks",
+                &json!({}),
+                &tctx(GatewayCaller::CoAgent {
+                    agent_id: "co-agent-1".to_string(),
+                }),
+            )
             .await;
         assert!(allowed.success);
         let data = allowed.data.unwrap();
@@ -1872,7 +2004,8 @@ mod tests {
         let result = actions
             .execute(
                 "ensure_subtask_webhook",
-                &json!({ "__caller": "trusted_user", "scope": "agent" }),
+                &json!({  "scope": "agent" }),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(result.success, "{:?}", result.error);
@@ -1888,7 +2021,8 @@ mod tests {
         let non_owner = actions
             .execute(
                 "ensure_subtask_webhook",
-                &json!({ "__caller": "trusted_user", "scope": "agent" }),
+                &json!({  "scope": "agent" }),
+                &tctx(GatewayCaller::TrustedUser),
             )
             .await;
         assert!(!non_owner.success);
@@ -1898,7 +2032,8 @@ mod tests {
         let no_channel = actions
             .execute(
                 "ensure_subtask_webhook",
-                &json!({ "__caller": "owner", "scope": "agent" }),
+                &json!({  "scope": "agent" }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(!no_channel.success);
@@ -1914,7 +2049,8 @@ mod tests {
         let result = actions
             .execute(
                 "set_default_webhook",
-                &json!({ "__caller": "owner", "scope": "agent", "url": WH_VALID_URL }),
+                &json!({  "scope": "agent", "url": WH_VALID_URL }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(
@@ -1960,7 +2096,8 @@ mod tests {
         let result = actions
             .execute(
                 "set_default_subtask_webhook",
-                &json!({ "__caller": "owner", "scope": "agent", "url": WH_VALID_URL }),
+                &json!({  "scope": "agent", "url": WH_VALID_URL }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(result.success, "{:?}", result.error);
@@ -2009,7 +2146,8 @@ mod tests {
         let ok = actions
             .execute(
                 "set_default_webhook",
-                &json!({ "__caller": "agent", "scope": "agent", "url": WH_VALID_URL }),
+                &json!({  "scope": "agent", "url": WH_VALID_URL }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(
@@ -2021,7 +2159,8 @@ mod tests {
         let denied = actions
             .execute(
                 "set_default_webhook",
-                &json!({ "__caller": "agent", "scope": "global", "url": WH_VALID_URL }),
+                &json!({  "scope": "global", "url": WH_VALID_URL }),
+                &tctx(GatewayCaller::Agent),
             )
             .await;
         assert!(!denied.success);
@@ -2053,7 +2192,11 @@ mod tests {
         }
         // activity family の解決では subtask 行に fall through しない → none。
         let activity = actions
-            .execute("get_default_webhook", &json!({ "__caller": "owner" }))
+            .execute(
+                "get_default_webhook",
+                &json!({}),
+                &tctx(GatewayCaller::Owner),
+            )
             .await;
         assert!(activity.success);
         let data = activity.data.unwrap();
@@ -2063,7 +2206,8 @@ mod tests {
         let subtask = actions
             .execute(
                 "get_default_webhook",
-                &json!({ "__caller": "owner", "family": "subtask" }),
+                &json!({  "family": "subtask" }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         assert_eq!(subtask.data.unwrap()["status"], "ok");
@@ -2095,14 +2239,15 @@ mod tests {
         }
         // 絞り込み無し → 両方。
         let all = actions
-            .execute("list_webhooks", &json!({ "__caller": "owner" }))
+            .execute("list_webhooks", &json!({}), &tctx(GatewayCaller::Owner))
             .await;
         assert_eq!(all.data.unwrap()["webhooks"].as_array().unwrap().len(), 2);
         // family=activity → 1 件。
         let filtered = actions
             .execute(
                 "list_webhooks",
-                &json!({ "__caller": "owner", "family": "activity" }),
+                &json!({  "family": "activity" }),
+                &tctx(GatewayCaller::Owner),
             )
             .await;
         let hooks = filtered.data.unwrap();

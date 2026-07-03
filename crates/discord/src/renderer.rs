@@ -6,8 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serenity::all::{
     ActionRowComponent, ButtonKind, ButtonStyle, ChannelId, CreateActionRow, CreateButton,
-    CreateInputText, CreateMessage, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, EditMessage, Http, InputTextStyle, MessageId, ReactionType,
+    CreateInputText, CreateMessage, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption,
+    EditMessage, Http, InputTextStyle, MessageId, ReactionType,
 };
 use tracing::debug;
 
@@ -254,10 +254,7 @@ impl DiscordRenderer {
                 .strip_prefix("interaction:")
                 .unwrap_or(surface_id);
 
-            let custom_id = format!(
-                "interaction:{}:{}:{}",
-                uuid_part, component_id, action.name
-            );
+            let custom_id = format!("interaction:{}:{}:{}", uuid_part, component_id, action.name);
             let custom_id = if custom_id.chars().count() > 100 {
                 custom_id.chars().take(100).collect::<String>()
             } else {
@@ -267,14 +264,12 @@ impl DiscordRenderer {
             let menu_options: Vec<CreateSelectMenuOption> = options
                 .iter()
                 .map(|opt| {
-                    let mut menu_opt =
-                        CreateSelectMenuOption::new(&opt.label, &opt.value);
+                    let mut menu_opt = CreateSelectMenuOption::new(&opt.label, &opt.value);
                     if let Some(desc) = &opt.description {
                         menu_opt = menu_opt.description(desc);
                     }
                     if let Some(emoji_str) = &opt.emoji {
-                        menu_opt =
-                            menu_opt.emoji(ReactionType::Unicode(emoji_str.clone()));
+                        menu_opt = menu_opt.emoji(ReactionType::Unicode(emoji_str.clone()));
                     }
                     if opt.default {
                         menu_opt = menu_opt.default_selection(true);
@@ -349,8 +344,7 @@ impl DiscordRenderer {
                     _ => InputTextStyle::Short,
                 };
 
-                let mut input =
-                    CreateInputText::new(input_style, label, &comp.id);
+                let mut input = CreateInputText::new(input_style, label, &comp.id);
                 input = input.required(*required);
                 if let Some(ph) = placeholder {
                     input = input.placeholder(ph);
@@ -412,9 +406,8 @@ impl DiscordRenderer {
                 match comp {
                     ActionRowComponent::Button(btn) => {
                         if let ButtonKind::NonLink { custom_id, style } = &btn.data {
-                            let mut new_btn = CreateButton::new(custom_id)
-                                .style(*style)
-                                .disabled(true);
+                            let mut new_btn =
+                                CreateButton::new(custom_id).style(*style).disabled(true);
                             if let Some(label) = &btn.label {
                                 new_btn = new_btn.label(label);
                             }
@@ -431,10 +424,7 @@ impl DiscordRenderer {
                                 .options
                                 .iter()
                                 .map(|opt| {
-                                    let mut o = CreateSelectMenuOption::new(
-                                        &opt.label,
-                                        &opt.value,
-                                    );
+                                    let mut o = CreateSelectMenuOption::new(&opt.label, &opt.value);
                                     if let Some(ref desc) = opt.description {
                                         o = o.description(desc);
                                     }
@@ -812,7 +802,10 @@ mod tests {
         let components = json["components"].as_array().unwrap();
         let id1 = components[0]["custom_id"].as_str().unwrap();
         let id2 = components[1]["custom_id"].as_str().unwrap();
-        assert_ne!(id1, id2, "custom_ids must be unique even with same action name");
+        assert_ne!(
+            id1, id2,
+            "custom_ids must be unique even with same action name"
+        );
         // b1 and b2 button ids make them unique
         assert!(id1.contains(":b1:"));
         assert!(id2.contains(":b2:"));
@@ -840,10 +833,7 @@ mod tests {
         // 6 rows × 1 button each = 6 action rows → error
         let row_ids: Vec<String> = (0..6).map(|i| format!("r{}", i)).collect();
         let children: Vec<&str> = row_ids.iter().map(|s| s.as_str()).collect();
-        let mut comps = vec![column(
-            "root",
-            children.clone(),
-        )];
+        let mut comps = vec![column("root", children.clone())];
         for (i, rid) in row_ids.iter().enumerate() {
             let btn_id = format!("b{}", i);
             comps.push(row(rid, vec![&btn_id]));
@@ -859,11 +849,7 @@ mod tests {
 
     // ── Phase 2: SelectMenu テスト ─────────────────────────
 
-    fn select_menu(
-        id: &str,
-        options: Vec<(&str, &str)>,
-        action_name: &str,
-    ) -> A2uiComponent {
+    fn select_menu(id: &str, options: Vec<(&str, &str)>, action_name: &str) -> A2uiComponent {
         A2uiComponent {
             id: id.into(),
             component_type: A2uiComponentType::SelectMenu {
@@ -888,12 +874,7 @@ mod tests {
         }
     }
 
-    fn text_input(
-        id: &str,
-        label: &str,
-        style: Option<&str>,
-        required: bool,
-    ) -> A2uiComponent {
+    fn text_input(id: &str, label: &str, style: Option<&str>, required: bool) -> A2uiComponent {
         A2uiComponent {
             id: id.into(),
             component_type: A2uiComponentType::TextInput {
@@ -1112,12 +1093,7 @@ mod tests {
     #[test]
     fn build_modal_action_rows_missing_child() {
         let r = test_renderer();
-        let comps = vec![form(
-            "form1",
-            "Test",
-            vec!["missing_input"],
-            "submit",
-        )];
+        let comps = vec![form("form1", "Test", vec!["missing_input"], "submit")];
         let result = r.build_modal_action_rows(&comps[0], &comps);
         assert!(result.is_err());
         assert!(matches!(
@@ -1168,7 +1144,10 @@ mod tests {
             A2uiComponentType::TextInput { .. }
         ));
         if let A2uiComponentType::TextInput {
-            label, required, style, ..
+            label,
+            required,
+            style,
+            ..
         } = &parsed.component_type
         {
             assert_eq!(label, "Enter name");
