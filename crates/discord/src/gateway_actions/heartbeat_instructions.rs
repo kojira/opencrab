@@ -184,8 +184,11 @@ impl DiscordGatewayActions {
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         // 実行時にも呼び出し元権限を強制する（多層防御）。
-        // owner / trusted_user / co_agent は許可、素のagentは拒否。
-        if ctx.caller == GatewayCaller::Agent {
+        // owner / trusted_user / co_agent の許可リスト（将来 variant が増えても fail-closed）。
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return GatewayActionResult {
                 success: false,
                 data: None,

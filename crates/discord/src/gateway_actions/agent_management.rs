@@ -321,8 +321,11 @@ impl DiscordGatewayActions {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        // owner / co_agent / trusted_user のみ（素の agent は拒否）。
-        if ctx.caller == GatewayCaller::Agent {
+        // owner / co_agent / trusted_user の許可リスト（将来 variant が増えても fail-closed）。
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return GatewayActionResult {
                 success: false,
                 data: None,

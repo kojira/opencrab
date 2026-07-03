@@ -116,7 +116,10 @@ impl DiscordGatewayActions {
         ctx: &GatewayCallContext,
         default_family: &str,
     ) -> GatewayActionResult {
-        if ctx.caller == GatewayCaller::Agent {
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return reject("redacted read requires owner/trusted_user/co_agent");
         }
         if args
@@ -438,7 +441,10 @@ impl DiscordGatewayActions {
         ctx: &GatewayCallContext,
         default_family: &str,
     ) -> GatewayActionResult {
-        if ctx.caller == GatewayCaller::Agent {
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return reject("redacted read requires owner/trusted_user/co_agent");
         }
 
@@ -604,7 +610,10 @@ impl DiscordGatewayActions {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        if ctx.caller == GatewayCaller::Agent {
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return reject("redacted read requires owner/trusted_user/co_agent");
         }
 
