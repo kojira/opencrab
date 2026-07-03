@@ -165,12 +165,18 @@ impl OllamaProvider {
 
 /// Ollama の NDJSON 1行（`sse::line_stream` が yield した完全行）から delta を組み立てる。
 /// 空行・パース不能な行は None（keep-alive 等）。
-fn delta_from_ndjson_line(line: &str, model: &str) -> Option<ChatStreamDelta> {
+/// Ollama の mid-stream エラーオブジェクト（`{"error": "..."}` ）は Err として表面化させる
+/// （握りつぶすと、生成が途中で落ちたのに finish_reason 無しでストリームが終わり、
+/// 消費側が「正常完了した短い応答」と誤認する）。
+fn delta_from_ndjson_line(line: &str, model: &str) -> Option<Result<ChatStreamDelta>> {
     let line = line.trim();
     if line.is_empty() {
         return None;
     }
     let parsed = serde_json::from_str::<Value>(line).ok()?;
+    if let Some(err) = parsed["error"].as_str() {
+        return Some(Err(anyhow::anyhow!("Ollama stream error: {err}")));
+    }
     let content = parsed["message"]["content"]
         .as_str()
         .filter(|c| !c.is_empty())
@@ -179,7 +185,7 @@ fn delta_from_ndjson_line(line: &str, model: &str) -> Option<ChatStreamDelta> {
     if content.is_none() && !done {
         return None;
     }
-    Some(ChatStreamDelta {
+    Some(Ok(ChatStreamDelta {
         id: uuid::Uuid::new_v4().to_string(),
         model: model.to_string(),
         choices: vec![StreamChoice {
@@ -192,7 +198,7 @@ fn delta_from_ndjson_line(line: &str, model: &str) -> Option<ChatStreamDelta> {
             },
             finish_reason: if done { Some(FinishReason::Stop) } else { None },
         }],
-    })
+    }))
 }
 
 impl Default for OllamaProvider {
@@ -300,7 +306,7 @@ impl LlmProvider for OllamaProvider {
             move |line_res| {
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
-                    Ok(line) => delta_from_ndjson_line(&line, &model).map(Ok),
+                    Ok(line) => delta_from_ndjson_line(&line, &model),
                 };
                 futures::future::ready(out)
             },
@@ -334,12 +340,15 @@ mod tests {
     #[test]
     fn ndjson_line_variants() {
         let d = delta_from_ndjson_line(r#"{"message":{"content":"こん"},"done":false}"#, "m")
+            .unwrap()
             .unwrap();
         assert_eq!(d.choices[0].delta.content.as_deref(), Some("こん"));
         assert_eq!(d.choices[0].finish_reason, None);
 
         // done 行（content 空でも emit され finish_reason が付く）
-        let d = delta_from_ndjson_line(r#"{"message":{"content":""},"done":true}"#, "m").unwrap();
+        let d = delta_from_ndjson_line(r#"{"message":{"content":""},"done":true}"#, "m")
+            .unwrap()
+            .unwrap();
         assert_eq!(d.choices[0].delta.content, None);
         assert_eq!(d.choices[0].finish_reason, Some(FinishReason::Stop));
 
@@ -347,6 +356,12 @@ mod tests {
         assert!(delta_from_ndjson_line("", "m").is_none());
         assert!(delta_from_ndjson_line("{broken", "m").is_none());
         assert!(delta_from_ndjson_line(r#"{"noise":1}"#, "m").is_none());
+
+        // mid-stream エラーオブジェクトは Err として表面化（黙って握りつぶさない）
+        let err = delta_from_ndjson_line(r#"{"error":"model runner stopped"}"#, "m")
+            .unwrap()
+            .unwrap_err();
+        assert!(err.to_string().contains("model runner stopped"));
     }
 
     /// チャンク境界で JSON オブジェクト・マルチバイト UTF-8 が分断されても
@@ -363,7 +378,7 @@ mod tests {
         ];
         let byte_stream = futures::stream::iter(chunks);
         let deltas: Vec<ChatStreamDelta> = crate::providers::sse::line_stream(byte_stream)
-            .filter_map(|r| futures::future::ready(delta_from_ndjson_line(&r.unwrap(), "m").map(Ok::<_, ()>)))
+            .filter_map(|r| futures::future::ready(delta_from_ndjson_line(&r.unwrap(), "m")))
             .map(|r| r.unwrap())
             .collect()
             .await;

@@ -134,6 +134,11 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing chat completion");
 
+        // 最後のプロバイダエラーを保持する: 汎用文字列で握りつぶすと、型付き
+        // LlmError（ステータス）が router の外に出ず、下流の分類（downcast）が
+        // 全滅するため（#35）。
+        let mut last_error: Option<anyhow::Error> = None;
+
         // Try the resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
             match self
@@ -147,6 +152,7 @@ impl LlmRouter {
                         error = %e,
                         "Primary provider failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
+                    last_error = Some(e);
                 }
             }
         } else {
@@ -175,17 +181,21 @@ impl LlmRouter {
                             error = %e,
                             "Fallback provider failed after {MAX_RETRIES} attempts"
                         );
+                        last_error = Some(e);
                     }
                 }
             }
         }
 
-        anyhow::bail!(
+        let summary = format!(
             "All providers failed for model '{}'. Tried: {} + fallback chain {:?}",
-            request.model,
-            provider_name,
-            self.fallback_chain
-        )
+            request.model, provider_name, self.fallback_chain
+        );
+        Err(match last_error {
+            // 最後のエラーを chain の根に残す（LlmError の downcast を生かす）
+            Some(e) => e.context(summary),
+            None => anyhow::anyhow!(summary),
+        })
     }
 
     /// Route a streaming chat completion request.
@@ -197,6 +207,8 @@ impl LlmRouter {
         request.model = model_name;
 
         debug!(provider = %provider_name, model = %request.model, "Routing streaming chat completion");
+
+        let mut last_error: Option<anyhow::Error> = None;
 
         // Try resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
@@ -211,6 +223,7 @@ impl LlmRouter {
                         error = %e,
                         "Primary provider stream failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
+                    last_error = Some(e);
                 }
             }
         }
@@ -236,17 +249,20 @@ impl LlmRouter {
                             error = %e,
                             "Fallback provider stream failed after {MAX_RETRIES} attempts"
                         );
+                        last_error = Some(e);
                     }
                 }
             }
         }
 
-        anyhow::bail!(
+        let summary = format!(
             "All providers failed for streaming model '{}'. Tried: {} + fallback chain {:?}",
-            request.model,
-            provider_name,
-            self.fallback_chain
-        )
+            request.model, provider_name, self.fallback_chain
+        );
+        Err(match last_error {
+            Some(e) => e.context(summary),
+            None => anyhow::anyhow!(summary),
+        })
     }
 
     /// Returns true if the error represents a non-retryable client-side HTTP error.
@@ -260,9 +276,7 @@ impl LlmRouter {
     /// 遡って downcast する）。Display 文字列の部分一致には依存しない（#35）。
     fn is_non_retryable_error(error: &anyhow::Error) -> bool {
         match error.downcast_ref::<crate::LlmError>() {
-            Some(crate::LlmError::Http { status, .. }) => {
-                *status != 429 && (400..500).contains(status)
-            }
+            Some(llm_error) => llm_error.is_non_retryable(),
             // ステータスを運ばないエラーは retryable（従来挙動を維持）
             None => false,
         }
@@ -463,6 +477,46 @@ mod tests {
                 created: 0,
             })
         }
+    }
+
+    /// 常に型付き 400 を返すモック（非リトライ分類とエラー伝播の検証用）。
+    struct Http400Provider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for Http400Provider {
+        fn name(&self) -> &str {
+            "http400"
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<crate::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+            Err(crate::error::api_error(
+                "Mock",
+                reqwest::StatusCode::BAD_REQUEST,
+                "context length exceeded",
+            ))
+        }
+    }
+
+    /// フォールバック枯渇時に最後のプロバイダエラー（型付き LlmError）が
+    /// 汎用文字列に握りつぶされず downcast 可能なまま返ること（#35 の end-to-end）。
+    #[tokio::test]
+    async fn test_exhausted_router_error_preserves_typed_status() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(Http400Provider));
+        router.set_default_provider("http400");
+
+        let request = ChatRequest::new("http400:some-model", vec![Message::user("hello")]);
+        let err = router.chat_completion(request).await.unwrap_err();
+
+        // サマリ context は付くが、根の LlmError は downcast で取り出せる
+        assert!(err.to_string().contains("All providers failed"));
+        let llm = err
+            .downcast_ref::<crate::LlmError>()
+            .expect("typed error must survive router exhaustion");
+        assert_eq!(llm.status(), Some(400));
+        assert!(llm.is_non_retryable());
     }
 
     #[test]

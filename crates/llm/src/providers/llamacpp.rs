@@ -172,7 +172,7 @@ impl LlmProvider for LlamaCppProvider {
             .json()
             .await
             .context("failed to parse llama.cpp response")?;
-        Ok(super::openai_compat::parse_chat_response(&resp_body))
+        Ok(super::openai_compat::parse_chat_response(&resp_body, "local"))
     }
 
     async fn chat_completion_stream(

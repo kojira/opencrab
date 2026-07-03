@@ -80,12 +80,17 @@ fn parse_finish_reason(fr: &Value) -> Option<FinishReason> {
 }
 
 /// OpenAI 互換の chat completion レスポンス（`choices[]` 形状）を統一形式にパースする。
-pub fn parse_chat_response(body: &Value) -> ChatResponse {
+///
+/// `fallback_model` はレスポンスに `model` が無い場合の値（openai/openrouter は ""、
+/// llamacpp はメトリクス集計用に "local" — 統合前の各プロバイダの挙動を保存）。
+pub fn parse_chat_response(body: &Value, fallback_model: &str) -> ChatResponse {
     let id = body["id"].as_str().unwrap_or_default().to_string();
-    let model = body["model"].as_str().unwrap_or_default().to_string();
-    let created = body["created"]
-        .as_i64()
-        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let model = body["model"]
+        .as_str()
+        .unwrap_or(fallback_model)
+        .to_string();
+    // created 欠落は 0 センチネル（統合前の openai/openrouter の挙動を保存）
+    let created = body["created"].as_i64().unwrap_or(0);
 
     let usage = if let Some(u) = body.get("usage") {
         Usage {
@@ -114,9 +119,13 @@ pub fn parse_chat_response(body: &Value) -> ChatResponse {
                         _ => Role::Assistant,
                     };
 
+                    // 空文字 content は None にする（tool-call 応答等。history に
+                    // 明示的な "content": "" を再送しないため — 旧 llamacpp の挙動に統一）
                     let content = msg
                         .get("content")
-                        .and_then(|v| v.as_str().map(|s| MessageContent::Text(s.to_string())));
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| MessageContent::Text(s.to_string()));
 
                     let function_call = msg
                         .get("function_call")
@@ -230,7 +239,7 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        let resp = parse_chat_response(&body);
+        let resp = parse_chat_response(&body, "");
         assert_eq!(resp.id, "chatcmpl-1");
         assert_eq!(resp.usage.total_tokens, 15);
         assert_eq!(resp.usage.cache_read_input_tokens, 3);
@@ -242,7 +251,7 @@ mod tests {
 
     #[test]
     fn parse_response_missing_fields_defaults() {
-        let resp = parse_chat_response(&json!({}));
+        let resp = parse_chat_response(&json!({}), "");
         assert!(resp.choices.is_empty());
         assert_eq!(resp.usage.total_tokens, 0);
     }

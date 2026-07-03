@@ -199,7 +199,7 @@ impl LlmProvider for OpenRouterProvider {
             return Err(crate::error::api_error("OpenRouter", status, error_msg));
         }
 
-        Ok(super::openai_compat::parse_chat_response(&resp_body))
+        Ok(super::openai_compat::parse_chat_response(&resp_body, ""))
     }
 
     async fn chat_completion_stream(

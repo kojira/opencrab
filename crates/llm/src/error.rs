@@ -1,33 +1,11 @@
 //! LLM プロバイダの型付きエラー（#35）。
 //!
-//! リトライ/フォールバック方針の判断（router の `is_non_retryable_error`）が、
-//! プロバイダの Display 文字列の部分一致に依存しないよう、HTTP ステータスを
-//! 型として運ぶ。トレイトは anyhow::Result のままで、router 側は
-//! `error.downcast_ref::<LlmError>()`（anyhow は context チェーンを遡って
-//! downcast する）で分類する。
+//! 実体は leaf crate の [`opencrab_llm_types::LlmError`]（llm と core の両方が
+//! downcast できるようにするため）。ここではプロバイダ実装向けの構築ヘルパーを提供する。
+
+pub use opencrab_llm_types::LlmError;
 
 use reqwest::StatusCode;
-
-/// プロバイダ層のエラー。リトライ分類の根拠になる情報を型で持つ。
-#[derive(Debug, thiserror::Error)]
-pub enum LlmError {
-    /// HTTP ステータス付きの API エラー。
-    #[error("{provider} API error ({status}): {message}")]
-    Http {
-        provider: &'static str,
-        status: u16,
-        message: String,
-    },
-}
-
-impl LlmError {
-    /// HTTP ステータス（あれば）。
-    pub fn status(&self) -> Option<u16> {
-        match self {
-            LlmError::Http { status, .. } => Some(*status),
-        }
-    }
-}
 
 /// プロバイダの `bail!("... API error ({status}): {msg}")` 置き換え用ヘルパー。
 ///
@@ -61,5 +39,6 @@ mod tests {
             .context("while calling chat_completion");
         let llm = err.downcast_ref::<LlmError>().expect("downcast through context");
         assert_eq!(llm.status(), Some(429));
+        assert!(!llm.is_non_retryable());
     }
 }
