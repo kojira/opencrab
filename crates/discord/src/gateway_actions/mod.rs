@@ -46,13 +46,6 @@ pub struct SpawnedSubtask {
     pub started_instant: std::time::Instant,
 }
 
-/// Callback invoked when a subtask completes.
-/// Args: (subtask_id: String, result: String, exit_reason: String)
-pub type SubtaskCompletionFn = Arc<dyn Fn(String, String, String) + Send + Sync>;
-
-/// Registry of completion callbacks keyed by parent_session_id.
-pub type CompletionRegistry = Arc<DashMap<String, SubtaskCompletionFn>>;
-
 /// Registry of active subtasks keyed by subtask_id.
 pub type SubtaskRegistry = Arc<DashMap<String, SpawnedSubtask>>;
 
@@ -81,7 +74,6 @@ pub struct DiscordGatewayActions {
     default_model: String,
     workspace_root: PathBuf,
     subtask_registry: SubtaskRegistry,
-    completion_registry: CompletionRegistry,
     /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
     webhook_client: reqwest::Client,
     /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook。
@@ -107,7 +99,6 @@ impl DiscordGatewayActions {
         default_model: String,
         workspace_root: PathBuf,
         subtask_registry: SubtaskRegistry,
-        completion_registry: CompletionRegistry,
         default_subtask_webhook: Option<WebhookConfig>,
     ) -> Self {
         Self {
@@ -119,7 +110,6 @@ impl DiscordGatewayActions {
             default_model,
             workspace_root,
             subtask_registry,
-            completion_registry,
             webhook_client: reqwest::Client::new(),
             default_subtask_webhook,
             pending_interaction_registry: None,
@@ -127,6 +117,19 @@ impl DiscordGatewayActions {
             owner_discord_id: String::new(),
             progress_debounce: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// Set the event sender only (no A2UI pending-interaction registry).
+    ///
+    /// subtask 完了/進捗の通知はこの sender 経由でイベントループへ届くため、
+    /// run_discord_loop と組む構築では必ずどちらか（with_a2ui / with_event_tx）で
+    /// event_tx を配線すること（未配線だと通知が発火しない）。
+    pub fn with_event_tx(
+        mut self,
+        event_tx: tokio::sync::mpsc::UnboundedSender<LoopEvent>,
+    ) -> Self {
+        self.event_tx = Some(event_tx);
+        self
     }
 
     /// Set the pending interaction registry and event sender for A2UI support.
@@ -934,7 +937,6 @@ mod tests {
             opencrab_actions::tools::ToolsConfig::default(),
         ));
         let subtask_registry: SubtaskRegistry = Arc::new(DashMap::new());
-        let completion_registry: CompletionRegistry = Arc::new(DashMap::new());
         let actions = DiscordGatewayActions::new(
             http,
             db.clone(),
@@ -944,7 +946,6 @@ mod tests {
             String::new(),
             std::path::PathBuf::from("/tmp"),
             subtask_registry,
-            completion_registry,
             None,
         );
         (actions, db)

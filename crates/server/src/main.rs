@@ -526,8 +526,9 @@ async fn main() -> anyhow::Result<()> {
                 let workspace_root = std::path::PathBuf::from(workspace_path);
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     Arc::new(dashmap::DashMap::new());
-                let completion_registry: opencrab_discord::CompletionRegistry =
-                    Arc::new(dashmap::DashMap::new());
+                // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
+                // gateway_actions とループで同じチャンネルを共有する必要がある。
+                let (event_tx, event_rx) = opencrab_discord::message_loop::create_event_channel();
                 let default_subtask_webhook = discord_cfg
                     .default_subtask_webhook
                     .as_ref()
@@ -551,9 +552,9 @@ async fn main() -> anyhow::Result<()> {
                         eff_model,
                         workspace_root,
                         subtask_registry,
-                        completion_registry.clone(),
                         default_subtask_webhook,
                     )
+                    .with_event_tx(event_tx.clone())
                     .with_owner_discord_id(discord_cfg.owner_discord_id.clone()));
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
@@ -567,9 +568,8 @@ async fn main() -> anyhow::Result<()> {
                         valid_agent_ids,
                         gateway_actions,
                         owner_discord_id,
-                        completion_registry,
                         None, // pending_registry
-                        None, // event_channel
+                        Some((event_tx, event_rx)),
                     )
                     .await;
                 });
