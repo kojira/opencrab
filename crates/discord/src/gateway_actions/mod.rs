@@ -442,7 +442,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "cancel_subtask".to_string(),
-                description: "実行中のサブタスクをキャンセルします。".to_string(),
+                description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
