@@ -9,7 +9,7 @@ use serenity::model::id::{GuildId, MessageId};
 use serenity::model::prelude::ChannelType;
 use tracing::{debug, error};
 
-use opencrab_gateway::GatewayActionResult;
+use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
 
 use super::DiscordGatewayActions;
 
@@ -54,6 +54,7 @@ impl DiscordGatewayActions {
     pub(crate) async fn execute_list_channels(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         let guild_id = match args.get("guild_id").and_then(|v| v.as_str()) {
             Some(id) => id,
@@ -121,7 +122,7 @@ impl DiscordGatewayActions {
                 // エージェント固有設定を優先、なければグローバル設定（agent_id=""）
                 let db_cfg = db_configs
                     .iter()
-                    .find(|c| c.channel_id == ch_id && c.agent_id == self.agent_id)
+                    .find(|c| c.channel_id == ch_id && c.agent_id == ctx.agent_id)
                     .or_else(|| {
                         db_configs
                             .iter()
@@ -157,6 +158,7 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_discord_channel_config(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
             Some(id) => id,
@@ -219,13 +221,13 @@ impl DiscordGatewayActions {
             let existing = opencrab_db::queries::get_channel_config_for_agent(
                 &conn,
                 channel_id,
-                &self.agent_id,
+                &ctx.agent_id,
             )
             .ok()
             .flatten();
             let cfg = opencrab_db::queries::ChannelConfigRow {
                 channel_id: channel_id.to_string(),
-                agent_id: self.agent_id.clone(),
+                agent_id: ctx.agent_id.clone(),
                 guild_id: guild_id.to_string(),
                 channel_name: channel_name.to_string(),
                 readable,

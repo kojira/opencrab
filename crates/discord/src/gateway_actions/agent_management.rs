@@ -11,6 +11,7 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_update_memory_index_config(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         let batch_size = args.get("batch_size").and_then(|v| v.as_i64());
         let threshold = args.get("threshold").and_then(|v| v.as_i64());
@@ -25,7 +26,7 @@ impl DiscordGatewayActions {
 
         let conn = self.db.lock().unwrap();
 
-        let current = opencrab_db::queries::get_memory_index_config(&conn, &self.agent_id);
+        let current = opencrab_db::queries::get_memory_index_config(&conn, &ctx.agent_id);
         let (current_batch_size, current_threshold) = match &current {
             Ok(cfg) => (cfg.batch_size, cfg.threshold),
             Err(_) => (
@@ -39,14 +40,14 @@ impl DiscordGatewayActions {
 
         match opencrab_db::queries::upsert_memory_index_config(
             &conn,
-            &self.agent_id,
+            &ctx.agent_id,
             new_batch_size,
             new_threshold,
         ) {
             Ok(updated) => GatewayActionResult {
                 success: true,
                 data: Some(json!({
-                    "agent_id": self.agent_id,
+                    "agent_id": ctx.agent_id,
                     "previous": {
                         "batch_size": current_batch_size,
                         "threshold": current_threshold,
@@ -69,7 +70,10 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) async fn execute_rebuild_memory_index(&self) -> GatewayActionResult {
+    pub(crate) async fn execute_rebuild_memory_index(
+        &self,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
         let llm_client = match &self.llm_client {
             Some(client) => client.clone(),
             None => {
@@ -83,9 +87,9 @@ impl DiscordGatewayActions {
 
         let config = {
             let conn = self.db.lock().unwrap();
-            opencrab_db::queries::get_memory_index_config(&conn, &self.agent_id).unwrap_or_else(
+            opencrab_db::queries::get_memory_index_config(&conn, &ctx.agent_id).unwrap_or_else(
                 |_| opencrab_db::queries::AgentMemoryIndexConfig {
-                    agent_id: self.agent_id.clone(),
+                    agent_id: ctx.agent_id.clone(),
                     batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
                     threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
                     updated_at: String::new(),
@@ -95,7 +99,7 @@ impl DiscordGatewayActions {
 
         let (persona_name, personality) = {
             let conn = self.db.lock().unwrap();
-            opencrab_db::queries::get_agent(&conn, &self.agent_id)
+            opencrab_db::queries::get_agent(&conn, &ctx.agent_id)
                 .ok()
                 .flatten()
                 .map(|a| (a.persona_name, a.personality))
@@ -104,7 +108,7 @@ impl DiscordGatewayActions {
 
         match opencrab_core::memory_index::IndexBuilder::rebuild_index(
             &self.db,
-            &self.agent_id,
+            &ctx.agent_id,
             llm_client.as_ref(),
             &self.default_model,
             config.batch_size as usize,
@@ -116,7 +120,7 @@ impl DiscordGatewayActions {
             Ok(result) => GatewayActionResult {
                 success: true,
                 data: Some(serde_json::json!({
-                    "agent_id": self.agent_id,
+                    "agent_id": ctx.agent_id,
                     "logs_indexed": result.logs_indexed,
                     "nodes_created": result.nodes_created,
                     "message": format!(
@@ -179,7 +183,7 @@ impl DiscordGatewayActions {
         let conn = self.db.lock().unwrap();
         match opencrab_db::queries::add_agent_allowed_command(
             &conn,
-            &self.agent_id,
+            &ctx.agent_id,
             command,
             "owner",
         ) {
@@ -198,7 +202,7 @@ impl DiscordGatewayActions {
                     success: true,
                     data: Some(json!({
                         "command": command,
-                        "agent_id": self.agent_id,
+                        "agent_id": ctx.agent_id,
                         "message": format!("`{}` を許可コマンドに追加しました", command),
                     })),
                     error: None,
@@ -208,7 +212,7 @@ impl DiscordGatewayActions {
                 success: true,
                 data: Some(json!({
                     "command": command,
-                    "agent_id": self.agent_id,
+                    "agent_id": ctx.agent_id,
                     "message": format!("`{}` はすでに許可コマンドに登録されています", command),
                     "already_exists": true,
                 })),
@@ -225,9 +229,12 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) fn execute_list_allowed_commands(&self) -> GatewayActionResult {
+    pub(crate) fn execute_list_allowed_commands(
+        &self,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
         let conn = self.db.lock().unwrap();
-        match opencrab_db::queries::list_agent_allowed_commands(&conn, &self.agent_id) {
+        match opencrab_db::queries::list_agent_allowed_commands(&conn, &ctx.agent_id) {
             Ok(commands) => {
                 let count = commands.len();
                 GatewayActionResult {
@@ -235,7 +242,7 @@ impl DiscordGatewayActions {
                     data: Some(json!({
                         "commands": commands,
                         "count": count,
-                        "agent_id": self.agent_id,
+                        "agent_id": ctx.agent_id,
                     })),
                     error: None,
                 }
@@ -276,7 +283,7 @@ impl DiscordGatewayActions {
         };
 
         let conn = self.db.lock().unwrap();
-        match opencrab_db::queries::remove_agent_allowed_command(&conn, &self.agent_id, command) {
+        match opencrab_db::queries::remove_agent_allowed_command(&conn, &ctx.agent_id, command) {
             Ok(true) => {
                 // Update in-memory tools_config
                 drop(conn);
@@ -289,7 +296,7 @@ impl DiscordGatewayActions {
                     success: true,
                     data: Some(json!({
                         "command": command,
-                        "agent_id": self.agent_id,
+                        "agent_id": ctx.agent_id,
                         "message": format!("`{}` を許可コマンドから削除しました", command),
                     })),
                     error: None,
@@ -299,7 +306,7 @@ impl DiscordGatewayActions {
                 success: true,
                 data: Some(json!({
                     "command": command,
-                    "agent_id": self.agent_id,
+                    "agent_id": ctx.agent_id,
                     "message": format!("`{}` は許可コマンドに登録されていませんでした", command),
                     "not_found": true,
                 })),
@@ -358,7 +365,7 @@ impl DiscordGatewayActions {
 
         // Deduplication: check if skill with same name exists (non-archived)
         if let Ok(Some(existing)) =
-            opencrab_db::queries::find_skill_by_name(&conn, &self.agent_id, name)
+            opencrab_db::queries::find_skill_by_name(&conn, &ctx.agent_id, name)
         {
             let mut updated = existing;
             updated.description = description.to_string();
@@ -383,7 +390,7 @@ impl DiscordGatewayActions {
 
         // Check archived skills
         if let Ok(Some(existing)) =
-            opencrab_db::queries::find_skill_by_name_any(&conn, &self.agent_id, name)
+            opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name)
         {
             let mut updated = existing;
             updated.archived = false;
@@ -411,7 +418,7 @@ impl DiscordGatewayActions {
         let id = uuid::Uuid::new_v4().to_string();
         let row = opencrab_db::queries::SkillRow {
             id: id.clone(),
-            agent_id: self.agent_id.clone(),
+            agent_id: ctx.agent_id.clone(),
             name: name.to_string(),
             description: description.to_string(),
             situation_pattern: String::new(),

@@ -58,7 +58,7 @@ impl DiscordGatewayActions {
 
         match scope {
             "agent" => {
-                let old_value = opencrab_db::queries::get_agent(&conn, &self.agent_id)
+                let old_value = opencrab_db::queries::get_agent(&conn, &ctx.agent_id)
                     .ok()
                     .flatten()
                     .map(|a| a.heartbeat_instructions);
@@ -66,7 +66,7 @@ impl DiscordGatewayActions {
                     heartbeat_instructions: Some(instructions.clone()),
                     ..Default::default()
                 };
-                match opencrab_db::queries::apply_agent_patch(&conn, &self.agent_id, &patch) {
+                match opencrab_db::queries::apply_agent_patch(&conn, &ctx.agent_id, &patch) {
                     Ok(true) => {}
                     Ok(false) => {
                         return GatewayActionResult {
@@ -85,6 +85,7 @@ impl DiscordGatewayActions {
                 }
                 self.record_audit(
                     &conn,
+                    &ctx.agent_id,
                     "agent",
                     None,
                     ctx.caller.label(),
@@ -108,7 +109,7 @@ impl DiscordGatewayActions {
                 let existing = opencrab_db::queries::get_channel_config_for_agent(
                     &conn,
                     channel_id,
-                    &self.agent_id,
+                    &ctx.agent_id,
                 )
                 .ok()
                 .flatten();
@@ -140,7 +141,7 @@ impl DiscordGatewayActions {
                     }
                     None => opencrab_db::queries::ChannelConfigRow {
                         channel_id: channel_id.to_string(),
-                        agent_id: self.agent_id.clone(),
+                        agent_id: ctx.agent_id.clone(),
                         guild_id,
                         channel_name: String::new(),
                         readable: true,
@@ -161,6 +162,7 @@ impl DiscordGatewayActions {
                 }
                 self.record_audit(
                     &conn,
+                    &ctx.agent_id,
                     "channel",
                     Some(channel_id),
                     ctx.caller.label(),
@@ -204,7 +206,7 @@ impl DiscordGatewayActions {
 
         match scope {
             "agent" => {
-                let text = opencrab_db::queries::get_agent(&conn, &self.agent_id)
+                let text = opencrab_db::queries::get_agent(&conn, &ctx.agent_id)
                     .ok()
                     .flatten()
                     .map(|a| a.heartbeat_instructions)
@@ -230,7 +232,7 @@ impl DiscordGatewayActions {
                     let text = opencrab_db::queries::get_channel_config_for_agent(
                         &conn,
                         channel_id,
-                        &self.agent_id,
+                        &ctx.agent_id,
                     )
                     .ok()
                     .flatten()
@@ -246,7 +248,7 @@ impl DiscordGatewayActions {
                 } else {
                     let resolved = opencrab_db::queries::resolve_heartbeat_instructions(
                         &conn,
-                        &self.agent_id,
+                        &ctx.agent_id,
                         channel_id,
                     );
                     GatewayActionResult {
@@ -275,6 +277,7 @@ impl DiscordGatewayActions {
     fn record_audit(
         &self,
         conn: &rusqlite::Connection,
+        agent_id: &str,
         scope: &str,
         channel_id: Option<&str>,
         caller: &str,
@@ -283,7 +286,7 @@ impl DiscordGatewayActions {
         reason: Option<&str>,
     ) {
         let audit = opencrab_db::queries::HeartbeatInstructionsAuditRow {
-            agent_id: self.agent_id.clone(),
+            agent_id: agent_id.to_string(),
             scope: scope.to_string(),
             channel_id: channel_id.map(|s| s.to_string()),
             caller_identity: caller.to_string(),

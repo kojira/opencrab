@@ -73,7 +73,6 @@ impl opencrab_core::LlmClient for ArcLlmClient {
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
     db: opencrab_db::Db,
-    agent_id: String,
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
     llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
     default_model: String,
@@ -98,7 +97,6 @@ impl DiscordGatewayActions {
     pub fn new(
         http: Arc<Http>,
         db: opencrab_db::Db,
-        agent_id: String,
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
         llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
         default_model: String,
@@ -109,7 +107,6 @@ impl DiscordGatewayActions {
         Self {
             http,
             db,
-            agent_id,
             tools_config,
             llm_client,
             default_model,
@@ -895,16 +892,16 @@ impl GatewayActions for DiscordGatewayActions {
     ) -> GatewayActionResult {
         match name {
             "discord_list_guilds" => self.execute_list_guilds().await,
-            "discord_list_channels" => self.execute_list_channels(args).await,
-            "discord_channel_config" => self.execute_discord_channel_config(args),
+            "discord_list_channels" => self.execute_list_channels(args, ctx).await,
+            "discord_channel_config" => self.execute_discord_channel_config(args, ctx),
             "discord_add_reaction" => self.execute_discord_add_reaction(args).await,
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "discord_create_channel" => self.execute_discord_create_channel(args).await,
-            "update_memory_index_config" => self.execute_update_memory_index_config(args),
+            "update_memory_index_config" => self.execute_update_memory_index_config(args, ctx),
             "add_allowed_command" => self.execute_add_allowed_command(args, ctx),
-            "list_allowed_commands" => self.execute_list_allowed_commands(),
+            "list_allowed_commands" => self.execute_list_allowed_commands(ctx),
             "remove_allowed_command" => self.execute_remove_allowed_command(args, ctx),
-            "rebuild_memory_index" => self.execute_rebuild_memory_index().await,
+            "rebuild_memory_index" => self.execute_rebuild_memory_index(ctx).await,
             "create_skill" => self.execute_create_skill(args, ctx),
             "discord_send_file" => self.execute_send_file(args).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
@@ -953,7 +950,6 @@ mod tests {
         let actions = DiscordGatewayActions::new(
             http,
             db.clone(),
-            "test-agent".to_string(),
             tools_config,
             None,
             String::new(),
