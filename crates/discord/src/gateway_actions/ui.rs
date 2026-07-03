@@ -1,7 +1,7 @@
 //! A2UI send_ui アクション
 
 use opencrab_core::a2ui::*;
-use opencrab_gateway::GatewayActionResult;
+use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
 use serde_json::json;
 use tracing::{debug, error, info};
 
@@ -9,7 +9,25 @@ use super::DiscordGatewayActions;
 use crate::renderer::DiscordRenderer;
 
 impl DiscordGatewayActions {
-    pub(crate) async fn execute_send_ui(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) async fn execute_send_ui(
+        &self,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        // セッション必須（fail-closed）: インタラクション応答のルーティングが
+        // session_id に依存するため、不明なまま "" で登録しない（#36）。
+        let session_id = match ctx.session_id.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "send_ui はセッション文脈でのみ実行できます（session_id 不明）".to_string(),
+                    ),
+                }
+            }
+        };
         let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
             Some(id) => id,
             None => {
@@ -133,11 +151,7 @@ impl DiscordGatewayActions {
             let form_data = self.build_form_data(&surface_id, &interaction_id, &components);
 
             let pending = crate::PendingInteraction {
-                session_id: args
-                    .get("__session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                session_id: session_id.clone(),
                 agent_id: self.agent_id.clone(),
                 channel_id: channel_id_num,
                 channel_id_str: channel_id.to_string(),
@@ -223,9 +237,9 @@ impl DiscordGatewayActions {
         components: &[A2uiComponent],
     ) -> Option<crate::FormData> {
         // Find the first Form component
-        let form = components.iter().find(|c| {
-            matches!(&c.component_type, A2uiComponentType::Form { .. })
-        })?;
+        let form = components
+            .iter()
+            .find(|c| matches!(&c.component_type, A2uiComponentType::Form { .. }))?;
 
         let (title, _children, action) = match &form.component_type {
             A2uiComponentType::Form {

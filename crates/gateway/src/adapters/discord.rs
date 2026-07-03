@@ -9,8 +9,8 @@ use tracing::{debug, error, info, warn};
 
 use serenity::all::{
     ChannelId, Client, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EventHandler, GatewayIntents, Interaction, Message as SerenityMessage, MessageId,
-    ReactionType, Ready,
+    EventHandler, GatewayIntents, Interaction, Message as SerenityMessage, MessageId, ReactionType,
+    Ready,
 };
 use serenity::http::Http;
 
@@ -199,12 +199,7 @@ impl DiscordGateway {
     ///
     /// 受信メッセージを処理対象として認識したことを示す 👀 などに使う。
     /// 呼び出し側は失敗を非致命的に扱うこと（権限不足・削除済みメッセージ等で失敗しうる）。
-    pub async fn add_reaction(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        emoji: &str,
-    ) -> Result<()> {
+    pub async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) -> Result<()> {
         ChannelId::new(channel_id)
             .create_reaction(
                 &self.http,
@@ -456,28 +451,19 @@ impl EventHandler for DiscordHandler {
                     ComponentInteractionDataKind::StringSelect { values } => {
                         (InteractionKind::SelectMenu, Some(values.clone()))
                     }
-                    ComponentInteractionDataKind::Button => {
-                        (InteractionKind::Button, None)
-                    }
+                    ComponentInteractionDataKind::Button => (InteractionKind::Button, None),
                     _ => (InteractionKind::Button, None),
                 };
 
                 // Form トリガー: モーダルで応答（UpdateMessage だとモーダルが開けない）
                 if interaction_kind == InteractionKind::Button {
                     if let Some(ref resolver) = self.form_modal_resolver {
-                        if let Some(spec) =
-                            resolver(&custom_id, &component.user.id.to_string())
-                        {
-                            let modal = CreateModal::new(
-                                spec.modal_custom_id.clone(),
-                                spec.title.clone(),
-                            )
-                            .components(spec.components.clone());
+                        if let Some(spec) = resolver(&custom_id, &component.user.id.to_string()) {
+                            let modal =
+                                CreateModal::new(spec.modal_custom_id.clone(), spec.title.clone())
+                                    .components(spec.components.clone());
                             let _ = component
-                                .create_response(
-                                    &ctx.http,
-                                    CreateInteractionResponse::Modal(modal),
-                                )
+                                .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
                                 .await;
                             return;
                         }
@@ -524,10 +510,7 @@ impl EventHandler for DiscordHandler {
                     "Discord modal submit received"
                 );
 
-                let guild_id = modal
-                    .guild_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default();
+                let guild_id = modal.guild_id.map(|id| id.to_string()).unwrap_or_default();
                 let channel_id = modal.channel_id.to_string();
                 let user_id = modal.user.id.to_string();
                 let user_name = modal.user.name.clone();

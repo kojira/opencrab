@@ -25,7 +25,7 @@
 //! - **`output_mode` の適用**: DB には保存・list で返すが、整形側（build_tool_event_message）
 //!   は常に summary 相当。`full` ストリーミングは未実装。`max_chars` はクランプに適用済み。
 
-use opencrab_gateway::GatewayActionResult;
+use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 use serde_json::json;
 
 use super::webhook::{
@@ -96,28 +96,30 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_get_default_subtask_webhook(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_get_default_webhook_impl(args, "subtask")
+        self.execute_get_default_webhook_impl(args, ctx, "subtask")
     }
 
     /// 汎用: 既定 activity family の get。
     pub(crate) fn execute_get_default_webhook(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_get_default_webhook_impl(args, "activity")
+        self.execute_get_default_webhook_impl(args, ctx, "activity")
     }
 
     fn execute_get_default_webhook_impl(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
         default_family: &str,
     ) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return reject("redacted read requires owner/trusted_user/co_agent");
         }
         if args
@@ -215,28 +217,26 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_set_default_subtask_webhook(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_set_default_webhook_impl(args, "subtask")
+        self.execute_set_default_webhook_impl(args, ctx, "subtask")
     }
 
     /// 汎用: 既定 activity family の set。
     pub(crate) fn execute_set_default_webhook(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_set_default_webhook_impl(args, "activity")
+        self.execute_set_default_webhook_impl(args, ctx, "activity")
     }
 
     fn execute_set_default_webhook_impl(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
         default_family: &str,
     ) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-
         let scope = match args.get("scope").and_then(|v| v.as_str()) {
             Some(s) if matches!(s, "agent" | "tool" | "global") => s.to_string(),
             _ => return err("scope is required: 'agent' | 'tool' | 'global'"),
@@ -270,9 +270,9 @@ impl DiscordGatewayActions {
         // 権限: owner は全 scope を set/disable できる。Agent は自分自身の agent scope
         // （scope='agent' かつ agent_id が自分）のみ。それ以外（tool/global/他 agent）は拒否。
         // trusted_user / co_agent は read-only（set/disable 不可）。
-        match caller {
-            "owner" => {}
-            "agent" => {
+        match &ctx.caller {
+            GatewayCaller::Owner => {}
+            GatewayCaller::Agent => {
                 if scope != "agent" {
                     return reject(
                         "forbidden_scope: an agent may only set/disable its own agent-scope default webhook",
@@ -343,7 +343,7 @@ impl DiscordGatewayActions {
                 .get("name")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            created_by: Some(caller.to_string()),
+            created_by: Some(ctx.caller.label().to_string()),
             output_mode,
             max_chars,
             updated_at: String::new(),
@@ -360,7 +360,7 @@ impl DiscordGatewayActions {
                 {
                     tracing::warn!(
                         target: "webhook_audit",
-                        caller = %caller,
+                        caller = %ctx.caller.label(),
                         scope = %scope,
                         agent_id = %agent_id,
                         tool_name = %tool_name,
@@ -379,7 +379,7 @@ impl DiscordGatewayActions {
             Ok(()) => {
                 tracing::info!(
                     target: "webhook_audit",
-                    caller = %caller,
+                    caller = %ctx.caller.label(),
                     scope = %scope,
                     agent_id = %agent_id,
                     tool_name = %tool_name,
@@ -403,7 +403,7 @@ impl DiscordGatewayActions {
             Err(e) => {
                 tracing::info!(
                     target: "webhook_audit",
-                    caller = %caller,
+                    caller = %ctx.caller.label(),
                     scope = %scope,
                     agent_id = %agent_id,
                     tool_name = %tool_name,
@@ -420,28 +420,31 @@ impl DiscordGatewayActions {
     pub(crate) async fn execute_ensure_subtask_webhook(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_ensure_webhook_impl(args, "subtask").await
+        self.execute_ensure_webhook_impl(args, ctx, "subtask").await
     }
 
     /// 汎用: 既定 activity family の ensure。
     pub(crate) async fn execute_ensure_webhook(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_ensure_webhook_impl(args, "activity").await
+        self.execute_ensure_webhook_impl(args, ctx, "activity")
+            .await
     }
 
     async fn execute_ensure_webhook_impl(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
         default_family: &str,
     ) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return reject("redacted read requires owner/trusted_user/co_agent");
         }
 
@@ -503,7 +506,7 @@ impl DiscordGatewayActions {
         }
 
         // 作成が必要 → owner 限定 + channel_id 必須。
-        if caller != "owner" {
+        if ctx.caller != GatewayCaller::Owner {
             return reject("creating a webhook is owner-only");
         }
         let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
@@ -550,7 +553,7 @@ impl DiscordGatewayActions {
             events_json,
             enabled: true,
             name,
-            created_by: Some(caller.to_string()),
+            created_by: Some(ctx.caller.label().to_string()),
             output_mode: "summary".to_string(),
             max_chars: 1500,
             updated_at: String::new(),
@@ -566,7 +569,7 @@ impl DiscordGatewayActions {
             Ok(()) => {
                 tracing::info!(
                     target: "webhook_audit",
-                    caller = %caller,
+                    caller = %ctx.caller.label(),
                     scope = %scope,
                     agent_id = %agent_id,
                     tool_name = %tool_name,
@@ -596,17 +599,21 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_list_subtask_webhooks(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        self.execute_list_webhooks(args)
+        self.execute_list_webhooks(args, ctx)
     }
 
     /// 汎用: webhook 設定の一覧。`family`/`kind` 引数で kind を絞り込める（既定は全件）。
-    pub(crate) fn execute_list_webhooks(&self, args: &serde_json::Value) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
+    pub(crate) fn execute_list_webhooks(
+        &self,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return reject("redacted read requires owner/trusted_user/co_agent");
         }
 

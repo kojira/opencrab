@@ -7,7 +7,7 @@
 //! 権限境界は [`crate::gateway_actions`] のディスパッチに加え、`bridge.rs` のフィルタ
 //! （owner_only_actions / trusted_only_actions）でも強制される（多層防御）。
 
-use opencrab_gateway::GatewayActionResult;
+use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 use serde_json::json;
 
 use super::DiscordGatewayActions;
@@ -16,12 +16,9 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_update_heartbeat_instructions(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if caller != "owner" {
+        if ctx.caller != GatewayCaller::Owner {
             return GatewayActionResult {
                 success: false,
                 data: None,
@@ -56,10 +53,6 @@ impl DiscordGatewayActions {
         }
         let instructions = opencrab_db::queries::sanitize_heartbeat_instructions(raw_instructions);
         let reason = args.get("reason").and_then(|v| v.as_str());
-        // bridge.rs のenrichmentパターンに従い `__caller_discord_id` を読む。
-        // ActionContext に discord_id フィールドが無い現状ではbridgeはこれを注入しないため、
-        // 通常はNoneになる（外部から明示指定された場合のみ記録される）。
-        let caller_discord_id = args.get("__caller_discord_id").and_then(|v| v.as_str());
 
         let conn = self.db.lock().unwrap();
 
@@ -94,8 +87,7 @@ impl DiscordGatewayActions {
                     &conn,
                     "agent",
                     None,
-                    caller,
-                    caller_discord_id,
+                    ctx.caller.label(),
                     old_value.as_deref(),
                     &instructions,
                     reason,
@@ -171,8 +163,7 @@ impl DiscordGatewayActions {
                     &conn,
                     "channel",
                     Some(channel_id),
-                    caller,
-                    caller_discord_id,
+                    ctx.caller.label(),
                     old_value.as_deref(),
                     &instructions,
                     reason,
@@ -190,14 +181,14 @@ impl DiscordGatewayActions {
     pub(crate) fn execute_read_heartbeat_instructions(
         &self,
         args: &serde_json::Value,
+        ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         // 実行時にも呼び出し元権限を強制する（多層防御）。
-        // owner / trusted_user / co_agent は許可、素のagentは拒否。
-        let caller = args
-            .get("__caller")
-            .and_then(|v| v.as_str())
-            .unwrap_or("agent");
-        if !matches!(caller, "owner" | "trusted_user" | "co_agent") {
+        // owner / trusted_user / co_agent の許可リスト（将来 variant が増えても fail-closed）。
+        if !matches!(
+            ctx.caller,
+            GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+        ) {
             return GatewayActionResult {
                 success: false,
                 data: None,
@@ -287,7 +278,6 @@ impl DiscordGatewayActions {
         scope: &str,
         channel_id: Option<&str>,
         caller: &str,
-        caller_discord_id: Option<&str>,
         old_value: Option<&str>,
         new_value: &str,
         reason: Option<&str>,
@@ -297,7 +287,9 @@ impl DiscordGatewayActions {
             scope: scope.to_string(),
             channel_id: channel_id.map(|s| s.to_string()),
             caller_identity: caller.to_string(),
-            caller_discord_id: caller_discord_id.map(|s| s.to_string()),
+            // bridge は Discord ユーザーIDを持たないため常に None（旧 __caller_discord_id
+            // 読みは注入元が存在しない死にコードだったので削除 — #36）。
+            caller_discord_id: None,
             old_value: old_value.map(|s| s.to_string()),
             new_value: Some(new_value.to_string()),
             reason: reason.map(|s| s.to_string()),

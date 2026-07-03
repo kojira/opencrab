@@ -138,13 +138,41 @@ impl BridgedExecutor {
         self
     }
 
+    /// dispatcher の CallerIdentity を gateway 境界の型付き caller に写像する。
+    /// CoAgent の agent_id は保存する（旧 `__caller` 文字列注入では落ちていた）。
+    fn gateway_call_context(&self) -> opencrab_gateway::GatewayCallContext {
+        let caller = match &self.context.caller {
+            crate::traits::CallerIdentity::Owner => opencrab_gateway::GatewayCaller::Owner,
+            crate::traits::CallerIdentity::Agent => opencrab_gateway::GatewayCaller::Agent,
+            crate::traits::CallerIdentity::CoAgent { agent_id } => {
+                opencrab_gateway::GatewayCaller::CoAgent {
+                    agent_id: agent_id.clone(),
+                }
+            }
+            crate::traits::CallerIdentity::TrustedUser => {
+                opencrab_gateway::GatewayCaller::TrustedUser
+            }
+        };
+        opencrab_gateway::GatewayCallContext {
+            caller,
+            session_id: self.context.session_id.clone(),
+            depth: self.depth,
+            agent_id: self.context.agent_id.clone(),
+        }
+    }
+
     /// 実際のディスパッチ本体（dispatcher → gateway fallback）。
     /// instrumentation は `ActionExecutor::execute` 側で wrap する。
     async fn dispatch_inner(&self, name: &str, args: &serde_json::Value) -> CoreActionResult {
-        // Try dispatcher first.
-        let actions_result = self.dispatcher.execute(name, args, &self.context).await;
-        if actions_result.error.as_deref() != Some(&format!("Unknown action: {name}")) {
-            return actions_result.into();
+        // Try dispatcher first. フォールバック判定は登録有無で行う
+        // （"Unknown action" エラー文言の文字列比較は、実アクションが同文を
+        // 返した場合に gateway へ誤ルートするため廃止 — #36）。
+        if self.dispatcher.has_action(name) {
+            return self
+                .dispatcher
+                .execute(name, args, &self.context)
+                .await
+                .into();
         }
 
         // Fallback to gateway actions.
@@ -170,26 +198,9 @@ impl BridgedExecutor {
                     )),
                 };
             }
-            // Inject caller identity so gateway actions can do permission checks.
-            let mut enriched_args = args.clone();
-            if let serde_json::Value::Object(ref mut map) = enriched_args {
-                let caller_str = match &self.context.caller {
-                    crate::traits::CallerIdentity::Owner => "owner",
-                    crate::traits::CallerIdentity::Agent => "agent",
-                    crate::traits::CallerIdentity::CoAgent { .. } => "co_agent",
-                    crate::traits::CallerIdentity::TrustedUser => "trusted_user",
-                };
-                map.insert("__caller".to_string(), serde_json::json!(caller_str));
-                if let Some(ref session_id) = self.context.session_id {
-                    map.insert("__session_id".to_string(), serde_json::json!(session_id));
-                }
-                map.insert("__depth".to_string(), serde_json::json!(self.depth));
-                map.insert(
-                    "__agent_id".to_string(),
-                    serde_json::json!(&self.context.agent_id),
-                );
-            }
-            let gw_result = gw.execute(name, &enriched_args).await;
+            // 実行コンテキストは型付きで渡す。LLM 由来の args には混ぜない（#36）。
+            let ctx = self.gateway_call_context();
+            let gw_result = gw.execute(name, args, &ctx).await;
             return CoreActionResult {
                 success: gw_result.success,
                 data: gw_result.data.unwrap_or(serde_json::Value::Null),
@@ -197,7 +208,12 @@ impl BridgedExecutor {
             };
         }
 
-        actions_result.into()
+        // dispatcher にも gateway にも無い。
+        CoreActionResult {
+            success: false,
+            data: serde_json::Value::Null,
+            error: Some(format!("Unknown action: {name}")),
+        }
     }
 }
 
@@ -287,7 +303,8 @@ impl ActionExecutor for BridgedExecutor {
         args: &serde_json::Value,
         tool_call_id: &str,
     ) -> CoreActionResult {
-        self.execute_instrumented(name, args, Some(tool_call_id)).await
+        self.execute_instrumented(name, args, Some(tool_call_id))
+            .await
     }
 
     fn list_tools(&self) -> Vec<FunctionDefinition> {
@@ -403,7 +420,12 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             match name {
                 "gw_action_a" => GatewayActionResult {
                     success: true,
@@ -439,7 +461,12 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             GatewayActionResult {
                 success: true,
                 data: None,
@@ -468,7 +495,12 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             GatewayActionResult {
                 success: true,
                 data: None,
@@ -584,7 +616,11 @@ mod tests {
         let (_dir, ctx) = test_context();
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayDiscord));
-        let names: Vec<String> = executor.list_tools().iter().map(|t| t.name.clone()).collect();
+        let names: Vec<String> = executor
+            .list_tools()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
         assert!(names.contains(&"request_peer_review".to_string()));
         assert!(names.contains(&"report_progress".to_string()));
 
@@ -665,7 +701,12 @@ mod tests {
             ]
         }
 
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             GatewayActionResult {
                 success: true,
                 data: None,
@@ -793,6 +834,117 @@ mod tests {
         );
     }
 
+    // ---- #36: typed GatewayCallContext ----
+
+    /// gateway に渡った ctx / args を記録するモック。
+    struct CtxRecordingGateway {
+        last_ctx: Mutex<Option<opencrab_gateway::GatewayCallContext>>,
+        last_args: Mutex<Option<serde_json::Value>>,
+    }
+
+    #[async_trait]
+    impl GatewayActions for CtxRecordingGateway {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            vec![GatewayActionDef {
+                name: "ctx_probe".to_string(),
+                description: "probe".to_string(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }]
+        }
+        async fn execute(
+            &self,
+            _name: &str,
+            args: &serde_json::Value,
+            ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
+            *self.last_ctx.lock().unwrap() = Some(ctx.clone());
+            *self.last_args.lock().unwrap() = Some(args.clone());
+            GatewayActionResult {
+                success: true,
+                data: None,
+                error: None,
+            }
+        }
+    }
+
+    /// CoAgent の agent_id が境界を越えて保存されること（旧 `__caller` 文字列注入では
+    /// "co_agent" に落ちていた）と、LLM 由来 args に実行コンテキストが混ざらないこと。
+    #[tokio::test]
+    async fn test_gateway_receives_typed_context_preserving_coagent_id() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::CoAgent {
+            agent_id: "co-agent-42".to_string(),
+        });
+        let gw = Arc::new(CtxRecordingGateway {
+            last_ctx: Mutex::new(None),
+            last_args: Mutex::new(None),
+        });
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(gw.clone())
+            .with_depth(1);
+
+        let result = executor.execute("ctx_probe", &json!({"x": 1})).await;
+        assert!(result.success);
+
+        let seen = gw.last_ctx.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            seen.caller,
+            opencrab_gateway::GatewayCaller::CoAgent {
+                agent_id: "co-agent-42".to_string()
+            }
+        );
+        assert_eq!(seen.session_id.as_deref(), Some("session-1"));
+        assert_eq!(seen.depth, 1);
+        assert_eq!(seen.agent_id, "agent-1");
+
+        // args は LLM 由来のものがそのまま渡り、__* キーは注入されない。
+        let args = gw.last_args.lock().unwrap().clone().unwrap();
+        assert_eq!(args, json!({"x": 1}));
+    }
+
+    /// "Unknown action: {name}" と同文のエラーを返す実アクションが gateway に
+    /// 誤ルートされないこと（旧実装はエラー文言の文字列比較で判定していた）。
+    struct UnknownEchoAction;
+    #[async_trait]
+    impl crate::traits::Action for UnknownEchoAction {
+        fn name(&self) -> &str {
+            "unknown_echo"
+        }
+        fn description(&self) -> &str {
+            "returns an error that mimics the dispatcher's unknown-action message"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &crate::traits::ActionContext,
+        ) -> crate::traits::ActionResult {
+            crate::traits::ActionResult::error("Unknown action: unknown_echo")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_registered_action_with_unknown_action_error_not_misrouted() {
+        let (_dir, ctx) = test_context();
+        let mut dispatcher = ActionDispatcher::new();
+        dispatcher.register(Arc::new(UnknownEchoAction));
+        let gw = Arc::new(CtxRecordingGateway {
+            last_ctx: Mutex::new(None),
+            last_args: Mutex::new(None),
+        });
+        let executor = BridgedExecutor::new(dispatcher, ctx).with_gateway_actions(gw.clone());
+
+        let result = executor.execute("unknown_echo", &json!({})).await;
+        // dispatcher の結果がそのまま返り、gateway へはフォールバックしない。
+        assert!(!result.success);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Unknown action: unknown_echo")
+        );
+        assert!(gw.last_ctx.lock().unwrap().is_none());
+    }
+
     // ---- ToolEventSink ----
 
     struct RecordingSink {
@@ -824,7 +976,12 @@ mod tests {
                 parameters: json!({"type": "object", "properties": {}}),
             }]
         }
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             GatewayActionResult {
                 success: false,
                 data: None,
@@ -836,9 +993,11 @@ mod tests {
     #[tokio::test]
     async fn test_tool_event_sink_started_then_completed() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
-        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-            .with_tool_event_sink(sink.clone());
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
         let r = executor
             .execute("generate_inner_voice", &json!({"thought": "hi"}))
             .await;
@@ -854,9 +1013,11 @@ mod tests {
     #[tokio::test]
     async fn test_tool_event_sink_failed_on_unknown() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
-        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-            .with_tool_event_sink(sink.clone());
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
         let _ = executor.execute("nonexistent_tool", &json!({})).await;
         let evs = sink.events.lock().unwrap();
         assert_eq!(evs.len(), 2);
@@ -866,7 +1027,9 @@ mod tests {
     #[tokio::test]
     async fn test_tool_event_sink_rejected_on_permission_error() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayRejecting))
             .with_tool_event_sink(sink.clone());
@@ -888,7 +1051,12 @@ mod tests {
                 parameters: json!({"type": "object", "properties": {}}),
             }]
         }
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             GatewayActionResult {
                 success: false,
                 data: None,
@@ -910,7 +1078,12 @@ mod tests {
                 parameters: json!({"type": "object", "properties": {}}),
             }]
         }
-        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> GatewayActionResult {
+        async fn execute(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
             GatewayActionResult {
                 success: false,
                 data: None,
@@ -947,7 +1120,9 @@ mod tests {
     #[tokio::test]
     async fn test_tool_event_sink_rejected_on_structured_marker() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayStructuredReject))
             .with_tool_event_sink(sink.clone());
@@ -959,7 +1134,9 @@ mod tests {
     #[tokio::test]
     async fn test_tool_event_sink_ordinary_permission_failure_is_failed_not_rejected() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
         let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
             .with_gateway_actions(Arc::new(MockGatewayOrdinaryPermFailure))
             .with_tool_event_sink(sink.clone());
@@ -973,11 +1150,17 @@ mod tests {
     #[tokio::test]
     async fn test_execute_with_id_propagates_tool_call_id() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
-        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-            .with_tool_event_sink(sink.clone());
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
         let r = executor
-            .execute_with_id("generate_inner_voice", &json!({"thought": "hi"}), "llm-call-42")
+            .execute_with_id(
+                "generate_inner_voice",
+                &json!({"thought": "hi"}),
+                "llm-call-42",
+            )
             .await;
         assert!(r.success);
         let evs = sink.events.lock().unwrap();
@@ -990,9 +1173,11 @@ mod tests {
     #[tokio::test]
     async fn test_execute_without_id_synthesizes_stable_pair() {
         let (_dir, ctx) = test_context();
-        let sink = Arc::new(RecordingSink { events: Mutex::new(Vec::new()) });
-        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-            .with_tool_event_sink(sink.clone());
+        let sink = Arc::new(RecordingSink {
+            events: Mutex::new(Vec::new()),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
         // id 無し: 合成 UUID だが start/terminal で一致する。
         let _ = executor
             .execute("generate_inner_voice", &json!({"thought": "hi"}))
