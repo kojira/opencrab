@@ -94,7 +94,7 @@ impl DiscordGatewayActions {
             if let Err(e) = opencrab_db::queries::insert_pending_interaction(
                 &conn,
                 &interaction_id,
-                &self.agent_id,
+                &ctx.agent_id,
                 "", // session_id - will be set from context
                 channel_id,
                 None,
@@ -152,7 +152,7 @@ impl DiscordGatewayActions {
 
             let pending = crate::PendingInteraction {
                 session_id: session_id.clone(),
-                agent_id: self.agent_id.clone(),
+                agent_id: ctx.agent_id.clone(),
                 channel_id: channel_id_num,
                 channel_id_str: channel_id.to_string(),
                 // send_ui時点ではguild_idを確実に取得できないため空。

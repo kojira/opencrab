@@ -86,7 +86,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
                 self.state.db().clone(),
-                agent_id.to_string(),
                 self.state.tools_config().clone(),
                 Some(self.state.create_llm_client()),
                 eff_model,

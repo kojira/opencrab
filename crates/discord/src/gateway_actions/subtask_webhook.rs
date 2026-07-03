@@ -139,7 +139,7 @@ impl DiscordGatewayActions {
             .get("agent_id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(&self.agent_id)
+            .unwrap_or(&ctx.agent_id)
             .to_string();
         let tool_name = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -263,7 +263,7 @@ impl DiscordGatewayActions {
             args.get("agent_id")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .unwrap_or(&self.agent_id)
+                .unwrap_or(&ctx.agent_id)
                 .to_string()
         };
 
@@ -278,7 +278,7 @@ impl DiscordGatewayActions {
                         "forbidden_scope: an agent may only set/disable its own agent-scope default webhook",
                     );
                 }
-                if agent_id != self.agent_id {
+                if agent_id != ctx.agent_id {
                     return reject(
                         "forbidden_scope: an agent may only set/disable its own agent default webhook",
                     );
@@ -466,7 +466,7 @@ impl DiscordGatewayActions {
             args.get("agent_id")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .unwrap_or(&self.agent_id)
+                .unwrap_or(&ctx.agent_id)
                 .to_string()
         };
         let tool_name =
@@ -621,7 +621,7 @@ impl DiscordGatewayActions {
             .get("agent_id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(&self.agent_id)
+            .unwrap_or(&ctx.agent_id)
             .to_string();
         let scope_filter = args
             .get("scope")

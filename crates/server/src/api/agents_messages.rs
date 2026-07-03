@@ -131,7 +131,6 @@ pub async fn send_agent_message(
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
-                    id.clone(),
                     Arc::new(std::sync::RwLock::new(tools_cfg)),
                     None,
                     eff_model,

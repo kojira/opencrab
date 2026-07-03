@@ -436,15 +436,15 @@ impl DiscordGatewayActions {
         let (agent_name, task, mention) = {
             match self.db.lock() {
                 Ok(conn) => {
-                    let name = opencrab_db::queries::get_agent(&conn, &self.agent_id)
+                    let name = opencrab_db::queries::get_agent(&conn, &ctx.agent_id)
                         .ok()
                         .flatten()
                         .map(|a| a.name)
-                        .unwrap_or_else(|| self.agent_id.clone());
+                        .unwrap_or_else(|| ctx.agent_id.clone());
                     let task = {
                         opencrab_db::queries::get_active_task_for_session(
                             &conn,
-                            &self.agent_id,
+                            &ctx.agent_id,
                             session_id,
                         )
                         .ok()
@@ -454,7 +454,7 @@ impl DiscordGatewayActions {
                     // display_name 一致（大文字小文字無視）
                     let mention = match reviewer {
                         None => None,
-                        Some(r) => match resolve_reviewer(&conn, &self.agent_id, r) {
+                        Some(r) => match resolve_reviewer(&conn, &ctx.agent_id, r) {
                             Ok(id) => Some(id),
                             Err(available) => {
                                 return GatewayActionResult {
@@ -471,7 +471,7 @@ impl DiscordGatewayActions {
                 }
                 Err(e) => {
                     warn!("request_peer_review: DB lock failed, sending without task info: {e}");
-                    (self.agent_id.clone(), None, None)
+                    (ctx.agent_id.clone(), None, None)
                 }
             }
         };

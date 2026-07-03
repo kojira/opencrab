@@ -538,11 +538,10 @@ async fn main() -> anyhow::Result<()> {
                             cfg.events.clone(),
                         )
                     });
-                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
-                    Arc::new(opencrab_discord::DiscordGatewayActions::new(
+                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
+                    opencrab_discord::DiscordGatewayActions::new(
                         gateway.http().clone(),
                         state.db.clone(),
-                        first_agent_id,
                         state.tools_config.clone(),
                         Some(Arc::new(
                             opencrab_server::llm_adapter::LlmRouterAdapter::new(
@@ -555,7 +554,8 @@ async fn main() -> anyhow::Result<()> {
                         default_subtask_webhook,
                     )
                     .with_event_tx(event_tx.clone())
-                    .with_owner_discord_id(discord_cfg.owner_discord_id.clone()));
+                    .with_owner_discord_id(discord_cfg.owner_discord_id.clone()),
+                );
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
 
