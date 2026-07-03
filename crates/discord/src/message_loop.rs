@@ -26,7 +26,6 @@ const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
 /// 二重回答）を防ぐために使う。
 type SessionLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-use crate::gateway_actions::{CompletionRegistry, SubtaskCompletionFn};
 use crate::AgentRunner;
 
 /// メッセージループへの内部イベント。
@@ -73,6 +72,27 @@ fn discord_context_line(guild_id: &str, channel_id: &str) -> String {
     }
 }
 
+/// Discord セッションID `discord-{agent_id}-{guild_id}-{channel_id}` から
+/// `(guild_id, channel_id)` を復元する。DM は guild_id が空文字列。
+///
+/// agent_id はハイフンを含みうるため**右から**パースする（channel は数値、
+/// guild は数値 or 空、という不変条件を利用）。形式が合わない場合は None。
+pub(crate) fn parse_discord_session(session_id: &str) -> Option<(String, u64)> {
+    // rsplitn は右から: [channel, guild, "discord-{agent_id}"]
+    let mut parts = session_id.rsplitn(3, '-');
+    let channel_str = parts.next()?;
+    let guild = parts.next()?;
+    let rest = parts.next()?;
+    if !rest.starts_with("discord-") || rest.len() <= "discord-".len() {
+        return None;
+    }
+    let channel_id: u64 = channel_str.parse().ok()?;
+    if !guild.is_empty() && !guild.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((guild.to_string(), channel_id))
+}
+
 /// Discordメッセージの受信→エージェント処理→応答送信のEvent-Drivenループ。
 ///
 /// バックグラウンドタスクとして`tokio::spawn`から呼ばれることを想定。
@@ -93,7 +113,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    completion_registry: CompletionRegistry,
     pending_registry: Option<crate::PendingInteractionRegistry>,
     event_channel: Option<(
         mpsc::UnboundedSender<LoopEvent>,
@@ -277,8 +296,6 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         agent_ids.clone(),
                         gateway_actions.clone(),
                         owner_discord_id.clone(),
-                        completion_registry.clone(),
-                        event_tx.clone(),
                         session_locks.clone(),
                     )
                     .await;
@@ -300,8 +317,6 @@ async fn process_incoming_message<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    completion_registry: CompletionRegistry,
-    event_tx: mpsc::UnboundedSender<LoopEvent>,
     session_locks: SessionLocks,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
@@ -501,32 +516,6 @@ async fn process_incoming_message<T: AgentRunner>(
             discord_context_line(&guild_id, &channel_id_str)
         );
 
-        // サブタスク完了コールバック: LoopEventを送信（P2: tokio::spawnではなくイベントで直列処理）
-        {
-            let cb_event_tx = event_tx.clone();
-            let agent_id_cb = agent_id.clone();
-            let session_id_cb = session_id.clone();
-            let channel_id_str_cb = channel_id_str.clone();
-            let guild_id_cb = guild_id.clone();
-
-            let completion_cb: SubtaskCompletionFn = Arc::new(
-                move |subtask_id: String, result: String, exit_reason: String| {
-                    let _ = cb_event_tx.send(LoopEvent::SubtaskCompleted {
-                        session_id: session_id_cb.clone(),
-                        agent_id: agent_id_cb.clone(),
-                        subtask_id,
-                        result,
-                        exit_reason,
-                        channel_id,
-                        channel_id_str: channel_id_str_cb.clone(),
-                        guild_id: guild_id_cb.clone(),
-                        is_dm,
-                    });
-                },
-            );
-            completion_registry.insert(session_id.clone(), completion_cb);
-        }
-
         let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
             let state_db = state.db().clone();
             let gateway_for_cb = gateway.clone();
@@ -590,6 +579,7 @@ async fn process_incoming_message<T: AgentRunner>(
         let sender_name_spawn = incoming.sender.name.clone();
         let sender_avatar_spawn = incoming.sender.avatar_url.clone();
         let text_spawn = text.clone();
+        let session_locks_spawn = session_locks.clone();
 
         tokio::spawn(async move {
             // 同一セッションの推論が完了するまで待機（割り込み二重回答の防止）。
@@ -625,53 +615,65 @@ async fn process_incoming_message<T: AgentRunner>(
             }
 
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
+            // 失敗しても early-return せず、末尾のロック回収を必ず通す。
             let budget = state_spawn.context_budget_tokens(&agent_id_spawn);
             let conversation = match state_spawn.build_conversation_string(
                 &session_id_spawn,
                 &agent_id_spawn,
                 budget,
             ) {
-                Ok(raw) => prepend_runtime_context_discord(
+                Ok(raw) => Some(prepend_runtime_context_discord(
                     &raw,
                     "Discord conversation",
                     &discord_message_id_spawn,
-                ),
+                )),
                 Err(e) => {
                     tracing::error!(session_id = %session_id_spawn, agent_id = %agent_id_spawn, "build_conversation_string failed: {e}");
-                    return;
+                    None
                 }
             };
 
-            let result = state_spawn
-                .run_agent_response(
+            if let Some(conversation) = conversation {
+                let result = state_spawn
+                    .run_agent_response(
+                        &agent_id_spawn,
+                        &agent_name_spawn,
+                        &session_id_spawn,
+                        &system_prompt_spawn,
+                        &conversation,
+                        "discord",
+                        Some(ga_spawn),
+                        caller_spawn,
+                        &image_urls_spawn,
+                        0,
+                        if discord_message_id_spawn.is_empty() {
+                            None
+                        } else {
+                            Some(discord_message_id_spawn.clone())
+                        },
+                        on_response_text,
+                    )
+                    .await;
+
+                handle_agent_response(
+                    result,
                     &agent_id_spawn,
-                    &agent_name_spawn,
                     &session_id_spawn,
-                    &system_prompt_spawn,
-                    &conversation,
-                    "discord",
-                    Some(ga_spawn),
-                    caller_spawn,
-                    &image_urls_spawn,
-                    0,
-                    if discord_message_id_spawn.is_empty() {
-                        None
-                    } else {
-                        Some(discord_message_id_spawn.clone())
-                    },
-                    on_response_text,
+                    &channel_id_str_spawn,
+                    &state_spawn,
                 )
                 .await;
+            }
 
-            handle_agent_response(
-                result,
-                &agent_id_spawn,
-                &session_id_spawn,
-                &channel_id_str_spawn,
-                &state_spawn,
-            )
-            .await;
-            // _guard はここで解放され、次にキューされた同一セッションの推論が進む。
+            // ロックを解放し、待機者がいなければ map からエントリを回収する（#39:
+            // session_locks はプロセス生存中に単調増加していた）。remove_if は
+            // DashMap の shard 書き込みロック下で述語を評価し、entry() も同じ shard
+            // ロックを取るため、「strong_count == 1（= map 以外に保持者なし）」の判定と
+            // 削除の間に新しい clone が割り込むことはない。待機者がいれば残す。
+            drop(_guard);
+            drop(sess_lock);
+            session_locks_spawn
+                .remove_if(&session_id_spawn, |_, lock| Arc::strong_count(lock) == 1);
         });
     }
 }
@@ -1486,7 +1488,44 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{discord_context_line, parse_seen_message_id};
+    use super::{discord_context_line, parse_discord_session, parse_seen_message_id};
+
+    #[test]
+    fn parse_discord_session_guild_channel() {
+        assert_eq!(
+            parse_discord_session("discord-crab-111-222"),
+            Some(("111".to_string(), 222))
+        );
+    }
+
+    #[test]
+    fn parse_discord_session_dm_has_empty_guild() {
+        assert_eq!(
+            parse_discord_session("discord-crab--222"),
+            Some((String::new(), 222))
+        );
+    }
+
+    #[test]
+    fn parse_discord_session_agent_id_with_hyphens() {
+        // agent_id はハイフンを含みうる → 右からのパースで channel/guild を確定する
+        assert_eq!(
+            parse_discord_session("discord-my-cool-agent-987-654"),
+            Some(("987".to_string(), 654))
+        );
+    }
+
+    #[test]
+    fn parse_discord_session_rejects_invalid() {
+        // channel が数値でない
+        assert_eq!(parse_discord_session("discord-crab-111-abc"), None);
+        // guild が数値でも空でもない（agent_id 末尾との混同を防ぐ）
+        assert_eq!(parse_discord_session("discord-crab-xyz-222"), None);
+        // discord- プレフィックスが無い / セグメント不足
+        assert_eq!(parse_discord_session("subtask-1234"), None);
+        assert_eq!(parse_discord_session("discord--222"), None);
+        assert_eq!(parse_discord_session(""), None);
+    }
 
     #[test]
     fn context_line_includes_guild_id_when_present() {

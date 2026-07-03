@@ -11,6 +11,53 @@ use super::webhook::{
     self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
 };
 use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
+use crate::message_loop::{parse_discord_session, LoopEvent};
+
+/// parent_session_id から routing 情報を復元して SubtaskCompleted イベントを送る（#39）。
+///
+/// 旧 completion_registry はメッセージごとに完了クロージャを登録していたが、
+/// クロージャのキャプチャ値は全て session_id（`discord-{agent}-{guild}-{channel}`）から
+/// 導出可能だったため、パーサ + イベントループへの直接送信に置き換えた。
+/// event_tx 未設定（イベントループの無い構築、例: 一発呼びの API 経路）や
+/// Discord 形式でない session は、旧実装でレジストリ未登録だった場合と同様に
+/// 発火しない（warn のみ）。
+fn send_subtask_completed_event(
+    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
+    parent_session_id: &str,
+    agent_id: &str,
+    subtask_id: String,
+    result: String,
+    exit_reason: String,
+) {
+    let Some(tx) = event_tx else {
+        tracing::debug!(
+            session_id = %parent_session_id,
+            "subtask completion: event_tx not configured, skipping main-engine notification"
+        );
+        return;
+    };
+    let Some((guild_id, channel_id)) = parse_discord_session(parent_session_id) else {
+        // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
+        // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
+        tracing::debug!(
+            session_id = %parent_session_id,
+            "subtask completion: parent session is not a discord session, skipping main-engine notification"
+        );
+        return;
+    };
+    let is_dm = guild_id.is_empty();
+    let _ = tx.send(LoopEvent::SubtaskCompleted {
+        session_id: parent_session_id.to_string(),
+        agent_id: agent_id.to_string(),
+        subtask_id,
+        result,
+        exit_reason,
+        channel_id,
+        channel_id_str: channel_id.to_string(),
+        guild_id,
+        is_dm,
+    });
+}
 
 impl DiscordGatewayActions {
     pub(crate) async fn execute_spawn_subtask(
@@ -407,7 +454,7 @@ impl DiscordGatewayActions {
         let subtask_id_clone = subtask_id.clone();
         let sub_session_id_clone = sub_session_id.clone();
         let agent_id_clone = agent_id.clone();
-        let completion_registry_clone = self.completion_registry.clone();
+        let event_tx_clone = self.event_tx.clone();
         let subtask_registry_clone = self.subtask_registry.clone();
         let default_model_clone = self.default_model.clone();
         let webhook_clone = webhook.clone();
@@ -515,14 +562,15 @@ impl DiscordGatewayActions {
             // Remove from registry.
             subtask_registry_clone.remove(&subtask_id_clone);
 
-            // Call completion callback if registered.
-            if let Some(cb) = completion_registry_clone.get(&parent_session_clone) {
-                cb(
-                    subtask_id_clone.clone(),
-                    result_text.clone(),
-                    exit_reason.clone(),
-                );
-            }
+            // メインエンジンへの完了通知（イベントループへ直接送信）。
+            send_subtask_completed_event(
+                event_tx_clone.as_ref(),
+                &parent_session_clone,
+                &agent_id_clone,
+                subtask_id_clone,
+                result_text,
+                exit_reason,
+            );
         });
 
         let abort_handle = join_handle.abort_handle();
@@ -745,10 +793,11 @@ impl DiscordGatewayActions {
             *gen += 1;
             *gen
         };
-        let completion_registry_clone = self.completion_registry.clone();
+        let event_tx_clone = self.event_tx.clone();
         let progress_debounce_clone = self.progress_debounce.clone();
         let parent_session_clone = parent_session_id.clone();
         let subtask_id_clone = subtask_id.clone();
+        let agent_id_clone = agent_id.clone();
         let message_clone = message.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -761,9 +810,14 @@ impl DiscordGatewayActions {
                 return;
             }
             progress_debounce_clone.remove(&parent_session_clone);
-            if let Some(cb) = completion_registry_clone.get(&parent_session_clone) {
-                cb(subtask_id_clone, message_clone, "progress".to_string());
-            }
+            send_subtask_completed_event(
+                event_tx_clone.as_ref(),
+                &parent_session_clone,
+                &agent_id_clone,
+                subtask_id_clone,
+                message_clone,
+                "progress".to_string(),
+            );
         });
 
         GatewayActionResult {

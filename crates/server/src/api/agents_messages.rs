@@ -119,8 +119,6 @@ pub async fn send_agent_message(
                 let workspace_root = std::path::PathBuf::from(workspace_path);
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     std::sync::Arc::new(dashmap::DashMap::new());
-                let completion_registry: opencrab_discord::CompletionRegistry =
-                    std::sync::Arc::new(dashmap::DashMap::new());
                 let eff_model = {
                     let conn = state.db.lock().unwrap();
                     opencrab_db::queries::effective_model_for_agent(
@@ -139,7 +137,6 @@ pub async fn send_agent_message(
                     eff_model,
                     workspace_root,
                     subtask_registry,
-                    completion_registry,
                     None,
                 );
                 Some(Arc::new(ga) as Arc<dyn opencrab_gateway::GatewayActions>)

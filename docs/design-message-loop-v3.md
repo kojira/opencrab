@@ -1,5 +1,12 @@
 # opencrab メッセージループ再設計書 v3
 
+> **更新（2026-07, #39）:** 本書に登場する `completion_registry` /
+> `CompletionRegistry` / `SubtaskCompletionFn` は削除済み。サブタスクの完了・進捗
+> 通知は、`DiscordGatewayActions.event_tx` から `LoopEvent::SubtaskCompleted` を
+> イベントループへ直接送信する方式に置き換えられた（routing 情報は
+> `parse_discord_session()` が session_id から復元する）。イベント駆動の
+> アーキテクチャ自体（LoopEvent / 直列イベント処理）は本書のまま有効。
+
 **作成日:** 2026-03-23  
 **ステータス:** 設計確定（実装待ち）  
 **前バージョン:** `docs/design-message-loop-v2.md`（CancellationToken方式、905行）  

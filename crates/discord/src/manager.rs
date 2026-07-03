@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use opencrab_gateway::DiscordGateway;
 
-use crate::gateway_actions::{CompletionRegistry, SubtaskRegistry};
+use crate::gateway_actions::SubtaskRegistry;
 use crate::AgentRunner;
 use crate::PendingInteractionRegistry;
 
@@ -59,7 +59,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let workspace_root = std::path::PathBuf::from(workspace_path);
 
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
-        let completion_registry: CompletionRegistry = Arc::new(dashmap::DashMap::new());
 
         // Create event channel for A2UI and other async events
         let (event_tx, event_rx) = crate::message_loop::create_event_channel();
@@ -93,7 +92,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 eff_model,
                 workspace_root,
                 subtask_registry,
-                completion_registry.clone(),
                 None,
             )
             .with_a2ui(pending_interaction_registry.clone(), event_tx.clone())
@@ -112,7 +110,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 agent_ids,
                 gateway_actions,
                 owner,
-                completion_registry,
                 Some(pending_interaction_registry),
                 Some((event_tx, event_rx)),
             )
