@@ -37,7 +37,9 @@ fn send_subtask_completed_event(
         return;
     };
     let Some((guild_id, channel_id)) = parse_discord_session(parent_session_id) else {
-        tracing::warn!(
+        // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
+        // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
+        tracing::debug!(
             session_id = %parent_session_id,
             "subtask completion: parent session is not a discord session, skipping main-engine notification"
         );

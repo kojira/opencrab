@@ -615,52 +615,55 @@ async fn process_incoming_message<T: AgentRunner>(
             }
 
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
+            // 失敗しても early-return せず、末尾のロック回収を必ず通す。
             let budget = state_spawn.context_budget_tokens(&agent_id_spawn);
             let conversation = match state_spawn.build_conversation_string(
                 &session_id_spawn,
                 &agent_id_spawn,
                 budget,
             ) {
-                Ok(raw) => prepend_runtime_context_discord(
+                Ok(raw) => Some(prepend_runtime_context_discord(
                     &raw,
                     "Discord conversation",
                     &discord_message_id_spawn,
-                ),
+                )),
                 Err(e) => {
                     tracing::error!(session_id = %session_id_spawn, agent_id = %agent_id_spawn, "build_conversation_string failed: {e}");
-                    return;
+                    None
                 }
             };
 
-            let result = state_spawn
-                .run_agent_response(
+            if let Some(conversation) = conversation {
+                let result = state_spawn
+                    .run_agent_response(
+                        &agent_id_spawn,
+                        &agent_name_spawn,
+                        &session_id_spawn,
+                        &system_prompt_spawn,
+                        &conversation,
+                        "discord",
+                        Some(ga_spawn),
+                        caller_spawn,
+                        &image_urls_spawn,
+                        0,
+                        if discord_message_id_spawn.is_empty() {
+                            None
+                        } else {
+                            Some(discord_message_id_spawn.clone())
+                        },
+                        on_response_text,
+                    )
+                    .await;
+
+                handle_agent_response(
+                    result,
                     &agent_id_spawn,
-                    &agent_name_spawn,
                     &session_id_spawn,
-                    &system_prompt_spawn,
-                    &conversation,
-                    "discord",
-                    Some(ga_spawn),
-                    caller_spawn,
-                    &image_urls_spawn,
-                    0,
-                    if discord_message_id_spawn.is_empty() {
-                        None
-                    } else {
-                        Some(discord_message_id_spawn.clone())
-                    },
-                    on_response_text,
+                    &channel_id_str_spawn,
+                    &state_spawn,
                 )
                 .await;
-
-            handle_agent_response(
-                result,
-                &agent_id_spawn,
-                &session_id_spawn,
-                &channel_id_str_spawn,
-                &state_spawn,
-            )
-            .await;
+            }
 
             // ロックを解放し、待機者がいなければ map からエントリを回収する（#39:
             // session_locks はプロセス生存中に単調増加していた）。remove_if は
