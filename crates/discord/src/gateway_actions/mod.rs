@@ -65,6 +65,11 @@ impl opencrab_core::LlmClient for ArcLlmClient {
 ///
 /// serenityのHTTPクライアントとDB接続を保持し、
 /// Discord管理操作をGatewayActionsとして提供する。
+///
+/// Clone は全フィールドが Arc/ハンドルの共有クローンで、subtask_registry /
+/// progress_debounce / event_tx / db を**共有**する（sub-engine 用の
+/// `SubEngineGatewayActions` が同じ registry を見るための前提）。
+#[derive(Clone)]
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
     db: opencrab_db::Db,
@@ -437,7 +442,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "cancel_subtask".to_string(),
-                description: "実行中のサブタスクをキャンセルします。".to_string(),
+                description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -904,7 +909,7 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_send_file" => self.execute_send_file(args).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
             "spawn_subtask" => self.execute_spawn_subtask(args, ctx).await,
-            "cancel_subtask" => self.execute_cancel_subtask(args),
+            "cancel_subtask" => self.execute_cancel_subtask(args, ctx),
             "report_progress" => self.execute_report_progress(args, ctx).await,
             "send_ui" => self.execute_send_ui(args, ctx).await,
             "update_heartbeat_instructions" => {
@@ -964,6 +969,260 @@ mod tests {
     /// ダミーを既定で持たせる（セッション必須アクションの検証テストを通すため）。
     fn tctx(caller: GatewayCaller) -> GatewayCallContext {
         GatewayCallContext::new(caller, "test-agent").with_session_id("discord-test-agent-111-222")
+    }
+
+    /// テスト用: registry に偽の実行中サブタスクを登録する。
+    /// abort_handle は pending future の spawn から取得（テスト終了時に破棄される）。
+    fn insert_fake_subtask(
+        actions: &DiscordGatewayActions,
+        id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        actions.subtask_registry.insert(
+            id.to_string(),
+            SpawnedSubtask {
+                abort_handle: handle.abort_handle(),
+                session_id: session_id.to_string(),
+                parent_session_id: parent_session_id.to_string(),
+                spawned_at: "2026-01-01T00:00:00Z".to_string(),
+                agent_id: "test-agent".to_string(),
+                webhook: None,
+                webhook_tx: None,
+                started_instant: std::time::Instant::now(),
+            },
+        );
+        handle
+    }
+
+    fn count_session_logs(db: &opencrab_db::Db, session_id: &str) -> i64 {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    // ---- #64a: report_progress の所有権ゲート ----
+
+    #[tokio::test]
+    async fn test_report_progress_rejects_foreign_subtask_id() {
+        let (actions, db) = make_test_actions();
+        let _h = insert_fake_subtask(&actions, "st-victim", "subtask-v1", "discord-victim-9-9");
+
+        // 呼び出し元セッション（tctx の discord-test-agent-111-222）と無関係な subtask_id
+        let result = actions
+            .execute(
+                "report_progress",
+                &json!({"message": "hijack", "subtask_id": "st-victim"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
+        // 被害セッションに進捗ログが書かれていないこと
+        assert_eq!(count_session_logs(&db, "discord-victim-9-9"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_report_progress_allows_own_subtask_self_report() {
+        // sub-engine の自己報告: ctx.session == entry.session_id（subtask-*）
+        let (actions, db) = make_test_actions();
+        let parent = "discord-test-agent-111-222";
+        let _h = insert_fake_subtask(&actions, "st-self", "subtask-self1", parent);
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "test-agent")
+            .with_session_id("subtask-self1")
+            .with_depth(1);
+        let result = actions
+            .execute(
+                "report_progress",
+                &json!({"message": "halfway", "subtask_id": "st-self"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        // 進捗は親セッションのログに書かれる
+        assert_eq!(count_session_logs(&db, parent), 1);
+    }
+
+    #[tokio::test]
+    async fn test_report_progress_allows_parent_reporting_child() {
+        // メインエンジンが自分の子について報告: ctx.session == entry.parent_session_id
+        let (actions, db) = make_test_actions();
+        let parent = "discord-test-agent-111-222";
+        let _h = insert_fake_subtask(&actions, "st-child", "subtask-c1", parent);
+
+        let result = actions
+            .execute(
+                "report_progress",
+                &json!({"message": "checking in", "subtask_id": "st-child"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(count_session_logs(&db, parent), 1);
+    }
+
+    // ---- #64b: cancel_subtask の認可 ----
+
+    #[tokio::test]
+    async fn test_cancel_subtask_not_found_is_plain_error() {
+        let (actions, _db) = make_test_actions();
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "no-such"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("not found"));
+        // 不在は権限拒否ではない
+        assert!(!err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_subtask_rejects_foreign_session() {
+        let (actions, _db) = make_test_actions();
+        let _h = insert_fake_subtask(&actions, "st-x", "subtask-x1", "discord-other-1-2");
+
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-x"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
+        // エントリは残っている（abort されていない）
+        assert!(actions.subtask_registry.contains_key("st-x"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_subtask_allows_parent_session() {
+        let (actions, _db) = make_test_actions();
+        let handle = insert_fake_subtask(
+            &actions,
+            "st-mine",
+            "subtask-m1",
+            "discord-test-agent-111-222",
+        );
+
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-mine"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert!(!actions.subtask_registry.contains_key("st-mine"));
+        // 実際に abort されたこと
+        assert!(handle.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_subtask_owner_bypasses_session_check() {
+        let (actions, _db) = make_test_actions();
+        let _h = insert_fake_subtask(&actions, "st-any", "subtask-a1", "discord-other-1-2");
+
+        // owner は無関係なセッション文脈からでもキャンセルできる
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-any"}),
+                &tctx(GatewayCaller::Owner),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert!(!actions.subtask_registry.contains_key("st-any"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_subtask_rejects_agent_without_session() {
+        let (actions, _db) = make_test_actions();
+        let _h = insert_fake_subtask(&actions, "st-ns", "subtask-n1", "discord-other-1-2");
+
+        let no_session = GatewayCallContext::new(GatewayCaller::Agent, "test-agent");
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-ns"}),
+                &no_session,
+            )
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
+    }
+
+    // ---- #63: SubEngineGatewayActions 許可リスト ----
+
+    #[tokio::test]
+    async fn test_sub_engine_gateway_allowlist() {
+        use crate::gateway_actions::subtask_engine::SubEngineGatewayActions;
+
+        let (actions, db) = make_test_actions();
+        let parent = "discord-test-agent-111-222";
+        let _h = insert_fake_subtask(&actions, "st-sub", "subtask-s1", parent);
+        let sub_gw = SubEngineGatewayActions::new(actions.clone());
+
+        // definitions は report_progress のみ
+        let names: Vec<String> = sub_gw.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names, vec!["report_progress".to_string()]);
+
+        let sub_ctx = GatewayCallContext::new(GatewayCaller::Agent, "test-agent")
+            .with_session_id("subtask-s1")
+            .with_depth(1);
+
+        // 実在するが許可外 → rejected: マーカー
+        for name in ["cancel_subtask", "send_ui", "discord_channel_config"] {
+            let result = sub_gw.execute(name, &json!({}), &sub_ctx).await;
+            assert!(!result.success, "{name} should be blocked");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .starts_with(opencrab_actions::REJECTION_CODE_PREFIX),
+                "{name} should be a policy rejection"
+            );
+        }
+
+        // 未知の名前 → 通常の失敗（Unknown gateway action）
+        let result = sub_gw.execute("no_such_tool", &json!({}), &sub_ctx).await;
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.contains("Unknown gateway action"));
+        assert!(!err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
+
+        // report_progress は委譲され、共有 registry で解決される（自己報告形）
+        let result = sub_gw
+            .execute(
+                "report_progress",
+                &json!({"message": "sub progress"}),
+                &sub_ctx,
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(count_session_logs(&db, parent), 1);
     }
 
     // ---- #36: セッション必須アクションの fail-closed ----

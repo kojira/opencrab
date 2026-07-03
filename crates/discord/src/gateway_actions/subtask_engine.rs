@@ -7,11 +7,73 @@ use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
 use serde_json::json;
 use uuid::Uuid;
 
+use super::subtask_webhook::reject;
 use super::webhook::{
     self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
 };
 use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
 use crate::message_loop::{parse_discord_session, LoopEvent};
+
+/// sub-engine に許可する gateway アクションの許可リスト（#63）。
+///
+/// bridge の DISCORD_ACTIONS depth ゲートは 28 アクション中 5 つしかブロックしないため、
+/// 素の DiscordGatewayActions を接続すると、ハンドラ側ゲートの無いアクション
+/// （send_ui / discord_channel_config / discord_create_channel / update_memory_index_config
+/// 等）が depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可した
+/// アクションだけを sub-engine から到達可能にする。
+///
+/// spawn_subtask は意図的に含めない: ネスト spawn は従来も（gateway 未接続のため）
+/// 不可能だった現状維持。ネストを有効化する場合は bridge の MAX_DEPTH ゲートではなく
+/// この許可リストが実効ゲートである点に注意。
+const SUB_ENGINE_ALLOWED_ACTIONS: &[&str] = &["report_progress"];
+
+/// sub-engine 専用の最小権限 gateway。許可リストのアクションだけを親実装へ委譲する。
+///
+/// `inner` は DiscordGatewayActions の共有クローン（subtask_registry / progress_debounce /
+/// event_tx / db を親と共有）なので、report_progress の registry 照合・デバウンス・
+/// 完了イベント送信は親経由の呼び出しと同一に動く。
+pub(crate) struct SubEngineGatewayActions {
+    inner: DiscordGatewayActions,
+}
+
+impl SubEngineGatewayActions {
+    pub(crate) fn new(inner: DiscordGatewayActions) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl opencrab_gateway::GatewayActions for SubEngineGatewayActions {
+    fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
+        self.inner
+            .definitions()
+            .into_iter()
+            .filter(|d| SUB_ENGINE_ALLOWED_ACTIONS.contains(&d.name.as_str()))
+            .collect()
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        if SUB_ENGINE_ALLOWED_ACTIONS.contains(&name) {
+            return self.inner.execute(name, args, ctx).await;
+        }
+        // 実在するが許可外 → 権限拒否（rejected: マーカー）。
+        // 未知の名前 → 通常の失敗（幻覚ツール名を Rejected に誤分類させない）。
+        if self.inner.definitions().iter().any(|d| d.name == name) {
+            reject(format!("action '{name}' is not available in sub-engines"))
+        } else {
+            GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!("Unknown gateway action: {name}")),
+            }
+        }
+    }
+}
 
 /// parent_session_id から routing 情報を復元して SubtaskCompleted イベントを送る（#39）。
 ///
@@ -371,8 +433,13 @@ impl DiscordGatewayActions {
         }
         opencrab_actions::register_tools_from_config(&tools_cfg, &mut sub_dispatcher);
         let sub_executor = {
-            let exec =
-                opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx).with_depth(depth);
+            // 許可リストラッパ経由で gateway を接続する（#63）。これが無いと
+            // system prompt が指示する report_progress が "Unknown action" で失敗する。
+            let sub_gateway: Arc<dyn opencrab_gateway::GatewayActions> =
+                Arc::new(SubEngineGatewayActions::new(self.clone()));
+            let exec = opencrab_actions::BridgedExecutor::new(sub_dispatcher, sub_ctx)
+                .with_depth(depth)
+                .with_gateway_actions(sub_gateway);
             match tool_event_sink {
                 Some(sink) => exec.with_tool_event_sink(sink),
                 None => exec,
@@ -454,7 +521,7 @@ impl DiscordGatewayActions {
              - subtask_id: {subtask_id}\n\
              - depth: {depth}\n\
              - Discordへの直接送信は禁止されています\n\
-             - 進捗報告は report_progress を使ってください\n\
+             - 進捗報告は report_progress を使ってください（subtask_id 引数は省略可。省略時はこのサブタスクとして報告されます）\n\
              - タスク完了時はテキストで結果を返してください（Discord送信はメインエンジンが行います）\n\n\
              You are a sub-engine executing a delegated task.\
              {instructions_section}"
@@ -619,7 +686,11 @@ impl DiscordGatewayActions {
         }
     }
 
-    pub(crate) fn execute_cancel_subtask(&self, args: &serde_json::Value) -> GatewayActionResult {
+    pub(crate) fn execute_cancel_subtask(
+        &self,
+        args: &serde_json::Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
         let subtask_id = match args["subtask_id"].as_str() {
             Some(id) => id.to_string(),
             None => {
@@ -631,7 +702,22 @@ impl DiscordGatewayActions {
             }
         };
 
-        match self.subtask_registry.remove(&subtask_id) {
+        // 認可（#64）: owner は常に許可。それ以外は「呼び出し元セッションが親」の
+        // サブタスクのみキャンセルできる（自己/兄弟/他セッションのものは不可）。
+        let authorized = |subtask: &SpawnedSubtask| -> bool {
+            if ctx.caller == opencrab_gateway::GatewayCaller::Owner {
+                return true;
+            }
+            matches!(ctx.session_id.as_deref(),
+                Some(s) if !s.is_empty() && subtask.parent_session_id == s)
+        };
+
+        // remove_if は shard ロック下で述語を評価するため、「認可確認→削除」の間に
+        // エントリが差し替わる TOCTOU が無い（所有権フィールドは insert 後不変）。
+        match self
+            .subtask_registry
+            .remove_if(&subtask_id, |_, subtask| authorized(subtask))
+        {
             Some((_, subtask)) => {
                 subtask.abort_handle.abort();
 
@@ -698,14 +784,24 @@ impl DiscordGatewayActions {
                     error: None,
                 }
             }
-            None => GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!(
-                    "cancel_subtask: subtask '{}' not found",
-                    subtask_id
-                )),
-            },
+            None => {
+                // remove_if の None は「不在」と「権限なし」の両方。エントリの所有権
+                // フィールドは不変なので contains_key で区別できる。
+                if self.subtask_registry.contains_key(&subtask_id) {
+                    reject(format!(
+                        "cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
+                    ))
+                } else {
+                    GatewayActionResult {
+                        success: false,
+                        data: None,
+                        error: Some(format!(
+                            "cancel_subtask: subtask '{}' not found",
+                            subtask_id
+                        )),
+                    }
+                }
+            }
         }
     }
 
@@ -755,6 +851,21 @@ impl DiscordGatewayActions {
                 .find(|entry| entry.session_id == current_session_id)
                 .map(|entry| (entry.key().clone(), entry.value().clone()))
         };
+
+        // 所有権ゲート（#64）: subtask_id は LLM 由来の引数なので、呼び出し元セッションの
+        // サブタスク（自分自身 = entry.session_id 一致、または自分の子 =
+        // entry.parent_session_id 一致）以外は拒否する。無検証だと他セッションへの
+        // 進捗ログ書き込み・webhook 配送・メインエンジン再呼び出しを誘発できてしまう。
+        if let Some((id, entry)) = &subtask_entry {
+            if entry.session_id != current_session_id
+                && entry.parent_session_id != current_session_id
+            {
+                return reject(format!(
+                    "report_progress: subtask '{id}' は呼び出し元セッションのサブタスクではありません"
+                ));
+            }
+        }
+
         let subtask_id = subtask_entry
             .as_ref()
             .map(|(id, _)| id.clone())
