@@ -48,7 +48,7 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
 /// 残すので、`forbidden_scope` / `requires owner` 等の既存トークンも保持される。
 /// raw な機微情報（url/token）は決して載せない。実行に到達しないこの拒否を
 /// ログでも観測可能にする。
-fn reject(msg: impl Into<String>) -> GatewayActionResult {
+pub(crate) fn reject(msg: impl Into<String>) -> GatewayActionResult {
     let msg = msg.into();
     tracing::debug!(
         target: "webhook_audit",
