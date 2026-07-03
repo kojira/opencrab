@@ -380,7 +380,7 @@ impl DiscordGatewayActions {
             }
         };
 
-        let ws_path = self.workspace_root.join(&agent_id);
+        let ws_path = self.agent_workspace_root(&agent_id).join(&agent_id);
         std::fs::create_dir_all(&ws_path).ok();
         let workspace = match opencrab_core::workspace::Workspace::from_root(&ws_path) {
             Ok(w) => w,
@@ -404,7 +404,7 @@ impl DiscordGatewayActions {
             model_override: Arc::new(std::sync::Mutex::new(None)),
             current_purpose: Arc::new(std::sync::Mutex::new("subtask".to_string())),
             runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
-                default_model: self.default_model.clone(),
+                default_model: self.effective_model(&agent_id),
                 active_model: None,
                 available_providers: vec![],
                 gateway: "subtask".to_string(),
@@ -535,7 +535,7 @@ impl DiscordGatewayActions {
         let agent_id_clone = agent_id.clone();
         let event_tx_clone = self.event_tx.clone();
         let subtask_registry_clone = self.subtask_registry.clone();
-        let default_model_clone = self.default_model.clone();
+        let default_model_clone = self.effective_model(&agent_id);
         let webhook_clone = webhook.clone();
         let webhook_tx_clone = webhook_tx.clone();
 
