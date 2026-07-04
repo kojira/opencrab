@@ -15,7 +15,8 @@ pub mod traits;
 pub mod workspace;
 
 pub use bridge::{
-    BridgedExecutor, ToolEvent, ToolEventSink, ToolEventStatus, REJECTION_CODE_PREFIX,
+    tool_policy, BridgedExecutor, ToolEvent, ToolEventSink, ToolEventStatus, ToolPolicy,
+    DISCORD_ACTIONS, OWNER_ONLY_ACTIONS, REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
 pub use dispatcher::ActionDispatcher;
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
