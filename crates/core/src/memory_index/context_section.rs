@@ -114,8 +114,10 @@ pub fn build_memory_index_section(
     // リストは新しい順なので take_within_budget は新しい記憶を優先して残す。
     let mut month_lines = take_within_budget(month_lines, MONTH_BLOCK_MAX_CHARS);
     let hidden_months = past_periods.len().saturating_sub(month_lines.len());
-    // 表示は時系列（古い→新しい）: 会話ログの流れと揃い、月の追加が常に
-    // セクション下側の変更になるためプロンプトキャッシュのプレフィックスも安定する。
+    // 表示は時系列（古い→新しい）: 会話ログの流れと揃う。副次効果として、
+    // 表示月数が上限内の間は月の追加がセクション下側の変更になり、プロンプト
+    // キャッシュのプレフィックスが安定する（畳み行が出る >12 か月の定常状態では
+    // 畳み行の件数が先頭側で更新されるため、この恩恵は月替わり時のみ弱まる）。
     month_lines.reverse();
 
     let mut topic_lines: Vec<String> = Vec::new();
@@ -137,7 +139,9 @@ pub fn build_memory_index_section(
     );
     if !month_lines.is_empty() {
         out.push_str("Months:\n");
-        // 畳んだ月は最も古い側 = 先頭に置く
+        // 畳んだ月は最も古い側 = 先頭に置く。
+        // （月行 1 本は最大 ~310 chars < 予算 2750 なので、past_periods が
+        // 非空なら month_lines も必ず非空 — 「畳み行だけ」の状態は起きない）
         if hidden_months > 0 {
             out.push_str(&format!(
                 "  …and {hidden_months} older months (browse_memory_index)\n"
@@ -147,10 +151,6 @@ pub fn build_memory_index_section(
             out.push_str(l);
             out.push('\n');
         }
-    } else if hidden_months > 0 {
-        out.push_str(&format!(
-            "  …and {hidden_months} older months (browse_memory_index)\n"
-        ));
     }
     if !topic_lines.is_empty() {
         out.push_str("This month's topics (other sessions):\n");
