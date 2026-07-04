@@ -396,8 +396,11 @@ impl IndexBuilder {
         let db = conn
             .lock()
             .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
-        opencrab_db::queries::delete_index_nodes_for_agent(&db, agent_id)?;
-        opencrab_db::queries::delete_index_watermark_for_agent(&db, agent_id)?;
+        // ノード削除と watermark 削除を原子化する（片方だけ消えた中間状態を残さない — #41）。
+        let tx = db.unchecked_transaction()?;
+        opencrab_db::queries::delete_index_nodes_for_agent(&tx, agent_id)?;
+        opencrab_db::queries::delete_index_watermark_for_agent(&tx, agent_id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -412,7 +415,11 @@ impl IndexBuilder {
         personality: Option<&str>,
     ) -> Result<IndexBuildResult> {
         Self::delete_index(conn, agent_id)?;
-        Self::build_incremental(
+        // ビルドは LLM 呼び出しを挟むため1トランザクションにできない。失敗時は
+        // 部分的に構築されたツリーを残さず空に戻す（空 = 一貫した再実行可能状態。
+        // 部分ツリーが残ると次回 build_incremental が INSERT OR IGNORE で
+        // 中途半端に継ぎ足してしまう — #41）。
+        let result = Self::build_incremental(
             conn,
             agent_id,
             llm,
@@ -421,7 +428,14 @@ impl IndexBuilder {
             persona_name,
             personality,
         )
-        .await
+        .await;
+        if let Err(ref e) = result {
+            tracing::warn!(agent_id = %agent_id, error = %e, "index rebuild failed — cleaning partial tree back to empty");
+            if let Err(cleanup_err) = Self::delete_index(conn, agent_id) {
+                tracing::error!(agent_id = %agent_id, error = %cleanup_err, "failed to clean partial index tree after rebuild failure");
+            }
+        }
+        result
     }
 
     /// 既存のtopicノードをperiodレベルでLLM再要約・統合する（深さ調整）。
@@ -537,7 +551,7 @@ impl IndexBuilder {
             }
 
             let merged_id = format!("merged-topic-{agent_id}-{}", Utc::now().timestamp_millis());
-            let merged_node = opencrab_db::queries::IndexNodeRow {
+            let mut merged_node = opencrab_db::queries::IndexNodeRow {
                 id: merged_id,
                 agent_id: agent_id.to_string(),
                 parent_id: Some(parent_session_id),
@@ -561,6 +575,10 @@ impl IndexBuilder {
                 let db = conn
                     .lock()
                     .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
+                // short_id は挿入時に必ず割り当てる（None のまま挿入すると
+                // 旧 backfill 頼みになり、short_id 無しの窓が生じる — #41）。
+                merged_node.short_id =
+                    Some(opencrab_db::queries::next_short_id(&db, agent_id, "t")?);
                 opencrab_db::queries::insert_index_node(&db, &merged_node)?;
             }
             merged_count += 1;

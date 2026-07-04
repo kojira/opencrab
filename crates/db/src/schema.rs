@@ -77,6 +77,64 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 5,
+        description: "memory_index_nodes: FK(parent_id, CASCADE) + CHECK(node_type) (issue #41)",
+        // テーブル再構築（SQLite は既存テーブルへの FK/CHECK 追加不可）。
+        // メモリインデックスは session_logs から再構築可能な派生データなので、
+        // 整合しない行（不正 node_type）はコピー対象から外し、孤児 parent_id は
+        // NULL に落とす（次回 rebuild で正しいツリーに戻る）。
+        // FK 検査はトランザクション内で切り替え可能な defer_foreign_keys で
+        // commit 時まで遅延させる（コピー順序に依存しない）。
+        up: |conn| {
+            // 冪等ガード: 新規DBは SCHEMA_SQL 側で FK/CHECK を持つ。
+            let has_fk: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('memory_index_nodes')",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_fk > 0 {
+                return Ok(());
+            }
+            conn.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+            conn.execute_batch(
+                "CREATE TABLE memory_index_nodes_new (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    parent_id TEXT REFERENCES memory_index_nodes_new(id) ON DELETE CASCADE,
+                    node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')),
+                    source_type TEXT NOT NULL DEFAULT 'session_log',
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    start_log_id INTEGER,
+                    end_log_id INTEGER,
+                    source_session_id TEXT,
+                    date_from TEXT,
+                    date_to TEXT,
+                    depth INTEGER NOT NULL DEFAULT 0,
+                    child_count INTEGER NOT NULL DEFAULT 0,
+                    token_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    short_id TEXT
+                );
+                INSERT INTO memory_index_nodes_new
+                    SELECT * FROM memory_index_nodes
+                    WHERE node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly');
+                UPDATE memory_index_nodes_new SET parent_id = NULL
+                    WHERE parent_id IS NOT NULL
+                      AND parent_id NOT IN (SELECT id FROM memory_index_nodes_new);
+                DROP TABLE memory_index_nodes;
+                ALTER TABLE memory_index_nodes_new RENAME TO memory_index_nodes;
+                CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
+                CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
+                CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_memory_index_nodes_source_type ON memory_index_nodes(agent_id, source_type);",
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// version 2: タスク台帳。
@@ -1078,8 +1136,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_webhook_agent ON agent_webhook_config(agent
 CREATE TABLE IF NOT EXISTS memory_index_nodes (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
-    parent_id TEXT,
-    node_type TEXT NOT NULL,
+    parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
+    node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')),
     source_type TEXT NOT NULL DEFAULT 'session_log',
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
@@ -1414,6 +1472,95 @@ mod migration_tests {
             crate::queries::count_sessions_for_agent(&conn, "a").unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn memory_index_fk_cascade_and_check_enforced() {
+        let conn = crate::init_memory().expect("init");
+        conn.execute_batch(
+            "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, created_at, updated_at)
+             VALUES ('r', 'a1', NULL, 'root', 't', 's', '2026-01-01', '2026-01-01'),
+                    ('c', 'a1', 'r', 'topic', 't', 's', '2026-01-01', '2026-01-01')",
+        )
+        .unwrap();
+        // CHECK: 不正 node_type は拒否
+        assert!(conn
+            .execute_batch(
+                "INSERT INTO memory_index_nodes (id, agent_id, node_type, title, summary, created_at, updated_at)
+                 VALUES ('x', 'a1', 'bogus', 't', 's', '2026-01-01', '2026-01-01')",
+            )
+            .is_err());
+        // FK: 存在しない親は拒否
+        assert!(conn
+            .execute_batch(
+                "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, created_at, updated_at)
+                 VALUES ('y', 'a1', 'nope', 'topic', 't', 's', '2026-01-01', '2026-01-01')",
+            )
+            .is_err());
+        // CASCADE: 親削除で子も消える
+        conn.execute("DELETE FROM memory_index_nodes WHERE id = 'r'", [])
+            .unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_index_nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn memory_index_rebuild_migration_v5_upgrades_legacy_table() {
+        let conn = crate::init_memory().expect("init");
+        // v4 時点の旧テーブル形（FK/CHECK なし）を再現する
+        conn.execute_batch("PRAGMA user_version = 4").unwrap();
+        conn.execute_batch(
+            "DROP TABLE memory_index_nodes;
+             CREATE TABLE memory_index_nodes (
+                id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, parent_id TEXT,
+                node_type TEXT NOT NULL, source_type TEXT NOT NULL DEFAULT 'session_log',
+                title TEXT NOT NULL, summary TEXT NOT NULL,
+                start_log_id INTEGER, end_log_id INTEGER, source_session_id TEXT,
+                date_from TEXT, date_to TEXT,
+                depth INTEGER NOT NULL DEFAULT 0, child_count INTEGER NOT NULL DEFAULT 0,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, short_id TEXT
+             );
+             INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, created_at, updated_at)
+             VALUES ('r', 'a1', NULL, 'root', 't', 's', '2026-01-01', '2026-01-01'),
+                    ('c', 'a1', 'r', 'topic', 't', 's', '2026-01-01', '2026-01-01'),
+                    ('orphan', 'a1', 'ghost', 'topic', 't', 's', '2026-01-01', '2026-01-01'),
+                    ('junk', 'a1', NULL, 'bogus_type', 't', 's', '2026-01-01', '2026-01-01')",
+        )
+        .unwrap();
+
+        run_migrations(&conn, MIGRATIONS).expect("v5 migration");
+
+        // FK が付与され、正常行は保存、孤児は parent NULL 化、不正 node_type は除外
+        let fk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('memory_index_nodes')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fk_count, 1);
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM memory_index_nodes ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            ids,
+            vec!["c".to_string(), "orphan".to_string(), "r".to_string()]
+        );
+        let orphan_parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_id FROM memory_index_nodes WHERE id = 'orphan'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_parent, None);
     }
 
     #[test]

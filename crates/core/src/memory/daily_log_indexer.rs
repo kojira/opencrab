@@ -434,7 +434,8 @@ impl DailyLogIndexer {
                 token_count: 0,
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
-                short_id: None,
+                // 挿入時に割当（#41: backfill 頼みの short_id 無し窓を作らない）
+                short_id: Some(opencrab_db::queries::next_short_id(&db, agent_id, "r")?),
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &root)?;
         }
@@ -474,7 +475,8 @@ impl DailyLogIndexer {
                 token_count: 0,
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
-                short_id: None,
+                // 挿入時に割当（#41）
+                short_id: Some(opencrab_db::queries::next_short_id(&db, agent_id, "p")?),
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &period)?;
         }
