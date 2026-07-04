@@ -181,26 +181,16 @@ pub async fn send_agent_message(
     match result {
         Ok(engine_result) => {
             // Log agent response.
-            let response_log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: id.clone(),
-                session_id: session_id.clone(),
-                log_type: "speech".to_string(),
-                content: engine_result.response.clone(),
-                speaker_id: Some(id.clone()),
-                turn_number: None,
-                metadata_json: Some(
-                    serde_json::json!({
-                        "iterations": engine_result.iterations,
-                        "tool_calls_made": engine_result.tool_calls_made,
-                    })
-                    .to_string(),
-                ),
-                created_at: None,
-            };
             {
                 let conn = state.db.lock().unwrap();
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &response_log);
+                crate::transcript::record_rest_agent_reply(
+                    &conn,
+                    &id,
+                    &session_id,
+                    &engine_result.response,
+                    engine_result.iterations,
+                    engine_result.tool_calls_made,
+                );
             }
 
             // Mark session as completed after agent responds

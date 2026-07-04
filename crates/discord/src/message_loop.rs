@@ -339,37 +339,13 @@ async fn process_incoming_message<T: AgentRunner>(
 
     let is_dm = guild_id.is_empty();
 
-    // DM whitelist check
-    if is_dm {
-        let sender_id = &incoming.sender.id;
-        if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
-            // allow
-        } else {
-            let allowed = match state.db().lock() {
-                Ok(conn) => {
-                    let any_trusted = agent_ids
-                        .iter()
-                        .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
-                    let any_registered = agent_ids
-                        .iter()
-                        .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
-                    if any_registered {
-                        any_trusted
-                    } else {
-                        owner_discord_id.is_empty() || sender_id == &owner_discord_id
-                    }
-                }
-                // DB接続取得失敗時は fail-closed。
-                Err(_) => false,
-            };
-            if !allowed {
-                debug!(
-                    sender = %incoming.sender.id,
-                    "Ignoring DM from non-whitelisted user"
-                );
-                return;
-            }
-        }
+    // DM whitelist check（いずれかのエージェントが信頼していれば通す事前ゲート）
+    if is_dm && !state.dm_allowed_any(&incoming.sender.id, &agent_ids, &owner_discord_id) {
+        debug!(
+            sender = %incoming.sender.id,
+            "Ignoring DM from non-whitelisted user"
+        );
+        return;
     }
 
     // Channel whitelist check はエージェントごとに行う（agent loop 内）
@@ -386,31 +362,8 @@ async fn process_incoming_message<T: AgentRunner>(
         return;
     }
 
-    // 呼び出し元のアイデンティティを決定
-    let caller = {
-        let sender_id = &incoming.sender.id;
-        if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
-            opencrab_actions::CallerIdentity::Owner
-        } else {
-            // DB接続取得失敗時は trust_info=None（＝最小権限の Agent 扱い）。
-            let trust_info = match state.db().lock() {
-                Ok(conn) => agent_ids
-                    .iter()
-                    .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid)),
-                Err(_) => None,
-            };
-            match trust_info {
-                Some(u) if u.permission == "co_agent" => {
-                    opencrab_actions::CallerIdentity::CoAgent {
-                        agent_id: sender_id.clone(),
-                    }
-                }
-                Some(u) if u.permission == "owner" => opencrab_actions::CallerIdentity::Owner,
-                Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
-                None => opencrab_actions::CallerIdentity::Agent,
-            }
-        }
-    };
+    // 呼び出し元のアイデンティティを決定（owner > trusted_users.permission > Agent）
+    let caller = state.resolve_caller(&incoming.sender.id, &agent_ids, &owner_discord_id);
 
     let discord_message_id = incoming
         .metadata
@@ -426,16 +379,7 @@ async fn process_incoming_message<T: AgentRunner>(
     for agent_id in &agent_ids {
         // Per-agent channel whitelist check
         if !is_dm {
-            let whitelisted = match state.db().lock() {
-                Ok(conn) => opencrab_db::queries::is_channel_whitelisted_for_agent(
-                    &conn,
-                    &channel_id_str,
-                    agent_id,
-                ),
-                // DB接続取得失敗時は fail-closed（このエージェントをスキップ）。
-                Err(_) => false,
-            };
-            if !whitelisted {
+            if !state.is_channel_whitelisted_for_agent(&channel_id_str, agent_id) {
                 debug!(
                     channel = %channel_id_str,
                     agent = %agent_id,
@@ -448,26 +392,7 @@ async fn process_incoming_message<T: AgentRunner>(
             // 冒頭のDMゲートは「いずれかのエージェントが信頼していれば通す」判定なので、
             // ここで各エージェント個別に信頼を確認しないと、あるエージェントにしか信頼
             // 登録していないユーザーのDMに全エージェントが応答してしまう。
-            let dm_allowed = {
-                let sender_id = &incoming.sender.id;
-                if !owner_discord_id.is_empty() && sender_id == &owner_discord_id {
-                    true
-                } else {
-                    // DB接続取得に失敗した場合は fail-closed（拒否）。
-                    match state.db().lock() {
-                        Ok(conn) => {
-                            if opencrab_db::queries::trusted_user_count(&conn, agent_id) > 0 {
-                                opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
-                            } else {
-                                // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
-                                owner_discord_id.is_empty() || sender_id == &owner_discord_id
-                            }
-                        }
-                        Err(_) => false,
-                    }
-                }
-            };
-            if !dm_allowed {
+            if !state.dm_allowed(&incoming.sender.id, agent_id, &owner_discord_id) {
                 debug!(
                     sender = %incoming.sender.id,
                     agent = %agent_id,
@@ -517,7 +442,7 @@ async fn process_incoming_message<T: AgentRunner>(
         );
 
         let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
-            let state_db = state.db().clone();
+            let state_for_cb = state.clone();
             let gateway_for_cb = gateway.clone();
             let channel_id_str_for_cb = channel_id_str.clone();
             let is_dm_for_cb = is_dm;
@@ -531,16 +456,8 @@ async fn process_incoming_message<T: AgentRunner>(
                 if text.is_empty() || text.trim() == "NO_REPLY" {
                     return;
                 }
-                let writable = if is_dm_for_cb {
-                    true
-                } else {
-                    state_db
-                        .lock()
-                        .map(|conn| {
-                            opencrab_db::queries::is_channel_writable(&conn, &channel_id_str_for_cb)
-                        })
-                        .unwrap_or(false)
-                };
+                let writable =
+                    is_dm_for_cb || state_for_cb.is_channel_writable(&channel_id_str_for_cb);
                 if !writable {
                     tracing::warn!(channel_id_str = %channel_id_str_for_cb, "on_response_text: channel not writable, skipping Discord send");
                     return;
@@ -593,33 +510,15 @@ async fn process_incoming_message<T: AgentRunner>(
             let _guard = sess_lock.lock().await;
 
             // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
-            {
-                if let Ok(conn) = state_spawn.db().lock() {
-                    let mut log_meta = serde_json::json!({
-                        "source": "discord",
-                        "channel_id": channel_id_str_spawn,
-                        "user_name": sender_name_spawn,
-                    });
-                    if let Some(ref avatar_url) = sender_avatar_spawn {
-                        log_meta["user_avatar_url"] = serde_json::json!(avatar_url);
-                    }
-                    if !image_urls_spawn.is_empty() {
-                        log_meta["image_urls"] = serde_json::json!(&image_urls_spawn);
-                    }
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: sender_id_spawn.clone(),
-                        session_id: session_id_spawn.clone(),
-                        log_type: "speech".to_string(),
-                        content: text_spawn.clone(),
-                        speaker_id: Some(sender_id_spawn.clone()),
-                        turn_number: None,
-                        metadata_json: Some(log_meta.to_string()),
-                        created_at: None,
-                    };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                }
-            }
+            state_spawn.record_user_message(
+                &session_id_spawn,
+                &sender_id_spawn,
+                &sender_name_spawn,
+                sender_avatar_spawn.as_deref(),
+                &channel_id_str_spawn,
+                &text_spawn,
+                &image_urls_spawn,
+            );
 
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
             // 失敗しても early-return せず、末尾のロック回収を必ず通す。
@@ -700,44 +599,18 @@ async fn handle_agent_response<T: AgentRunner>(
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
                 debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
-                if let Ok(conn) = state.db().lock() {
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: agent_id.to_string(),
-                        session_id: session_id.to_string(),
-                        log_type: "speech".to_string(),
-                        content: "NO_REPLY".to_string(),
-                        speaker_id: Some(agent_id.to_string()),
-                        turn_number: None,
-                        metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
-                        created_at: None,
-                    };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                }
+                state.record_agent_no_reply(agent_id, session_id);
                 return;
             }
-
-            if let Ok(conn) = state.db().lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.to_string(),
-                    session_id: session_id.to_string(),
-                    log_type: "speech".to_string(),
-                    content: engine_result.response.clone(),
-                    speaker_id: Some(agent_id.to_string()),
-                    turn_number: None,
-                    metadata_json: Some(
-                        serde_json::json!({
-                            "source": "discord_response",
-                            "channel_id": channel_id_str,
-                            "tool_calls_made": engine_result.tool_calls_made,
-                        })
-                        .to_string(),
-                    ),
-                    created_at: None,
-                };
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-            }
+            state.record_agent_reply(
+                agent_id,
+                session_id,
+                channel_id_str,
+                &engine_result.response,
+                crate::DiscordReplyContext::Direct {
+                    tool_calls_made: engine_result.tool_calls_made,
+                },
+            );
         }
         Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
         Err(e) => error!(agent_id = %agent_id, error = %e, "SkillEngine failed"),
@@ -765,19 +638,12 @@ async fn process_subtask_completed<T: AgentRunner>(
     let task_description = {
         let sub_session_id = format!("subtask-{}", subtask_id);
         state
-            .db()
-            .lock()
-            .ok()
-            .and_then(|conn| {
-                opencrab_db::queries::get_session(&conn, &sub_session_id)
-                    .ok()
-                    .flatten()
-            })
-            .map(|s| {
+            .session_theme(&sub_session_id)
+            .map(|theme| {
                 // theme is "Subtask: {task}", strip the prefix
-                s.theme
+                theme
                     .strip_prefix("Subtask: ")
-                    .unwrap_or(&s.theme)
+                    .unwrap_or(&theme)
                     .to_string()
             })
             .unwrap_or_default()
@@ -822,32 +688,11 @@ async fn process_subtask_completed<T: AgentRunner>(
     {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
-                // NO_REPLY をsession_logに記録
-                if let Ok(conn) = state.db().lock() {
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: agent_id.to_string(),
-                        session_id: session_id.clone(),
-                        log_type: "speech".to_string(),
-                        content: "NO_REPLY".to_string(),
-                        speaker_id: Some(agent_id.to_string()),
-                        turn_number: None,
-                        metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
-                        created_at: None,
-                    };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                }
+                state.record_agent_no_reply(&agent_id, &session_id);
                 return;
             }
-            if !is_dm {
-                let writable = state
-                    .db()
-                    .lock()
-                    .map(|conn| opencrab_db::queries::is_channel_writable(&conn, &channel_id_str))
-                    .unwrap_or(false);
-                if !writable {
-                    return;
-                }
+            if !is_dm && !state.is_channel_writable(&channel_id_str) {
+                return;
             }
             if let Err(e) = gateway
                 .send_to_channel(channel_id, &engine_result.response)
@@ -855,28 +700,13 @@ async fn process_subtask_completed<T: AgentRunner>(
             {
                 error!("Subtask completion Discord send failed: {e}");
             }
-            // DBにログ
-            if let Ok(conn) = state.db().lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.clone(),
-                    session_id: session_id.clone(),
-                    log_type: "speech".to_string(),
-                    content: engine_result.response,
-                    speaker_id: Some(agent_id.clone()),
-                    turn_number: None,
-                    metadata_json: Some(
-                        serde_json::json!({
-                            "source": "discord_response",
-                            "channel_id": channel_id_str,
-                            "triggered_by": "subtask_completed",
-                        })
-                        .to_string(),
-                    ),
-                    created_at: None,
-                };
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-            }
+            state.record_agent_reply(
+                &agent_id,
+                &session_id,
+                &channel_id_str,
+                &engine_result.response,
+                crate::DiscordReplyContext::SubtaskCompleted,
+            );
         }
         _ => {}
     }
@@ -1092,56 +922,41 @@ async fn process_interaction_response<T: AgentRunner>(
 
     // 1. Update DB
     {
-        if let Ok(conn) = state.db().lock() {
-            let response_json = serde_json::to_string(&response).ok();
-            opencrab_db::queries::update_pending_interaction_status(
-                &conn,
-                &interaction_id,
-                if response.action_name == "timeout" {
-                    "timeout"
-                } else {
-                    "responded"
-                },
-                response_json.as_deref(),
-                Some(&response.responder_id),
-            )
-            .ok();
-        }
+        let response_json = serde_json::to_string(&response).ok();
+        state.mark_interaction_status(
+            &interaction_id,
+            if response.action_name == "timeout" {
+                "timeout"
+            } else {
+                "responded"
+            },
+            response_json.as_deref(),
+            Some(&response.responder_id),
+        );
     }
 
     // 2. Record in session_log
     {
-        if let Ok(conn) = state.db().lock() {
-            let log_content = format!(
-                "[interaction_response] ユーザーがUIに応答しました。\nsurface_id: {}\ncomponent_id: {}\naction: {}\ncontext: {}\nresponder: {}",
-                response.surface_id,
-                response.component_id,
-                response.action_name,
-                response.context.as_ref().map(|c| c.to_string()).unwrap_or_default(),
-                response.responder_id,
-            );
-            let log = opencrab_db::queries::SessionLogRow {
-                id: None,
-                agent_id: agent_id.clone(),
-                session_id: session_id.clone(),
-                log_type: "interaction_response".to_string(),
-                content: log_content,
-                speaker_id: Some("system".to_string()),
-                turn_number: None,
-                metadata_json: Some(
-                    serde_json::json!({
-                        "interaction_id": interaction_id,
-                        "surface_id": response.surface_id,
-                        "action_name": response.action_name,
-                        "component_id": response.component_id,
-                        "responder_id": response.responder_id,
-                    })
-                    .to_string(),
-                ),
-                created_at: None,
-            };
-            opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-        }
+        let log_content = format!(
+            "[interaction_response] ユーザーがUIに応答しました。\nsurface_id: {}\ncomponent_id: {}\naction: {}\ncontext: {}\nresponder: {}",
+            response.surface_id,
+            response.component_id,
+            response.action_name,
+            response.context.as_ref().map(|c| c.to_string()).unwrap_or_default(),
+            response.responder_id,
+        );
+        state.record_interaction_response(
+            &agent_id,
+            &session_id,
+            crate::InteractionRecord {
+                interaction_id: &interaction_id,
+                surface_id: &response.surface_id,
+                action_name: &response.action_name,
+                component_id: &response.component_id,
+                responder_id: &response.responder_id,
+                content: &log_content,
+            },
+        );
     }
 
     // 3. Re-invoke agent (same pattern as SubtaskCompleted)
@@ -1190,31 +1005,11 @@ async fn process_interaction_response<T: AgentRunner>(
     {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
-                if let Ok(conn) = state.db().lock() {
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: agent_id.to_string(),
-                        session_id: session_id.clone(),
-                        log_type: "speech".to_string(),
-                        content: "NO_REPLY".to_string(),
-                        speaker_id: Some(agent_id.to_string()),
-                        turn_number: None,
-                        metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
-                        created_at: None,
-                    };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                }
+                state.record_agent_no_reply(&agent_id, &session_id);
                 return;
             }
-            if !is_dm {
-                let writable = state
-                    .db()
-                    .lock()
-                    .map(|conn| opencrab_db::queries::is_channel_writable(&conn, &channel_id_str))
-                    .unwrap_or(false);
-                if !writable {
-                    return;
-                }
+            if !is_dm && !state.is_channel_writable(&channel_id_str) {
+                return;
             }
             if let Err(e) = gateway
                 .send_to_channel(channel_id, &engine_result.response)
@@ -1222,29 +1017,15 @@ async fn process_interaction_response<T: AgentRunner>(
             {
                 error!("Interaction response Discord send failed: {e}");
             }
-            // DBにログ
-            if let Ok(conn) = state.db().lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.clone(),
-                    session_id: session_id.clone(),
-                    log_type: "speech".to_string(),
-                    content: engine_result.response,
-                    speaker_id: Some(agent_id.clone()),
-                    turn_number: None,
-                    metadata_json: Some(
-                        serde_json::json!({
-                            "source": "discord_response",
-                            "channel_id": channel_id_str,
-                            "triggered_by": "interaction_response",
-                            "interaction_id": interaction_id,
-                        })
-                        .to_string(),
-                    ),
-                    created_at: None,
-                };
-                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-            }
+            state.record_agent_reply(
+                &agent_id,
+                &session_id,
+                &channel_id_str,
+                &engine_result.response,
+                crate::DiscordReplyContext::InteractionResponse {
+                    interaction_id: &interaction_id,
+                },
+            );
         }
         _ => {}
     }
@@ -1316,47 +1097,15 @@ fn build_discord_session_metadata(incoming: &IncomingMessage) -> (String, String
 }
 
 /// Discordチャンネル用のセッションが存在しなければ作成する。
+/// theme/metadata の組み立ては discord 固有、永続化は AgentRunner の意図メソッド。
 fn ensure_discord_session<T: AgentRunner>(
     state: &T,
     session_id: &str,
     agent_ids: &[String],
     incoming: &IncomingMessage,
 ) {
-    let conn = state.db().lock().unwrap();
-
-    if let Some(existing) = opencrab_db::queries::get_session(&conn, session_id)
-        .ok()
-        .flatten()
-    {
-        if existing.metadata_json.is_none() {
-            let (theme, metadata_json) = build_discord_session_metadata(incoming);
-            opencrab_db::queries::update_session_metadata(
-                &conn,
-                session_id,
-                &metadata_json,
-                &theme,
-            )
-            .ok();
-        }
-        return;
-    }
-
     let (theme, metadata_json) = build_discord_session_metadata(incoming);
-
-    let session = opencrab_db::queries::SessionRow {
-        id: session_id.to_string(),
-        mode: "discord".to_string(),
-        theme,
-        phase: "active".to_string(),
-        turn_number: 0,
-        status: "active".to_string(),
-        participant_ids_json: serde_json::to_string(agent_ids).unwrap_or_default(),
-        facilitator_id: None,
-        done_count: 0,
-        max_turns: None,
-        metadata_json: Some(metadata_json),
-    };
-    opencrab_db::queries::insert_session(&conn, &session).ok();
+    state.ensure_session(session_id, agent_ids, &theme, &metadata_json);
 }
 
 /// Discord用: message_idを含む変動コンテキストを前置するヘルパー。

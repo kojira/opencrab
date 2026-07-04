@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use opencrab_gateway::DiscordGateway;
 
@@ -61,14 +61,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         let (event_tx, event_rx) = crate::message_loop::create_event_channel();
 
         // Cleanup stale pending interactions from previous runs
-        {
-            let conn = self.state.db().lock().unwrap();
-            if let Ok(count) = opencrab_db::queries::cleanup_stale_pending_interactions(&conn) {
-                if count > 0 {
-                    info!(agent_id = %agent_id, count = count, "Cleaned up stale pending interactions");
-                }
-            }
-        }
+        self.state.cleanup_stale_interactions();
 
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
             crate::DiscordGatewayActions::new(
@@ -141,28 +134,16 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
 
     /// Restore all enabled agent Discord configs from DB and start their gateways.
     pub async fn restore_from_db(&self) {
-        let configs = {
-            let conn = self.state.db().lock().unwrap();
-            opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
-        };
-
-        match configs {
-            Ok(configs) => {
-                for cfg in configs {
-                    if let Err(e) = self
-                        .start_agent_gateway(&cfg.agent_id, &cfg.bot_token, &cfg.owner_discord_id)
-                        .await
-                    {
-                        error!(
-                            agent_id = %cfg.agent_id,
-                            error = %e,
-                            "Failed to restore per-agent Discord gateway"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to load agent discord configs from DB");
+        for cfg in self.state.list_enabled_discord_configs() {
+            if let Err(e) = self
+                .start_agent_gateway(&cfg.agent_id, &cfg.bot_token, &cfg.owner_discord_id)
+                .await
+            {
+                error!(
+                    agent_id = %cfg.agent_id,
+                    error = %e,
+                    "Failed to restore per-agent Discord gateway"
+                );
             }
         }
     }
