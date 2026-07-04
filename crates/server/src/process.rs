@@ -8,7 +8,6 @@ use std::sync::{Arc, OnceLock};
 use tiktoken_rs::CoreBPE;
 
 use opencrab_core::LlmCallLog;
-use opencrab_gateway::GatewayActions;
 use opencrab_llm::pricing::PricingRegistry;
 
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};
@@ -802,129 +801,14 @@ async fn run_verify_stage(
     }
 }
 
-/// エージェントにメッセージを処理させ、応答テキストを返す。
-///
-/// SkillEngine + BridgedExecutor + LlmRouterAdapter のフルパイプラインを実行する。
-pub async fn run_agent_response(
-    state: &AppState,
-    agent_id: &str,
-    agent_name: &str,
-    session_id: &str,
-    system_prompt: &str,
-    conversation: &str,
-    gateway: &str,
-    gateway_actions: Option<Arc<dyn GatewayActions>>,
-    caller: opencrab_actions::CallerIdentity,
-    image_urls: &[String],
-    depth: u32,
-    trigger_message_id: Option<String>,
-    on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
-) -> anyhow::Result<opencrab_core::EngineResult> {
-    // Build workspace path for this agent.
-    let ws_path =
-        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
-    std::fs::create_dir_all(&ws_path).ok();
-    let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
-
-    let effective_model = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-            .unwrap_or_else(|_| state.default_model.clone())
-    };
-
-    // Create BridgedExecutor with ActionContext.
-    let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
-    let model_override = Arc::new(std::sync::Mutex::new(None));
-    let current_purpose = Arc::new(std::sync::Mutex::new("conversation".to_string()));
-
-    let runtime_info = opencrab_actions::RuntimeInfo {
-        default_model: state.default_model.clone(),
-        active_model: Some(effective_model.clone()),
-        available_providers: state
-            .llm_router
-            .provider_names()
-            .into_iter()
-            .map(String::from)
-            .collect(),
-        gateway: gateway.to_string(),
-    };
-
-    let ctx = opencrab_actions::ActionContext {
-        caller,
-        agent_id: agent_id.to_string(),
-        agent_name: agent_name.to_string(),
-        session_id: Some(session_id.to_string()),
-        db: state.db.clone(),
-        workspace: Arc::new(workspace),
-        last_metrics_id: last_metrics_id.clone(),
-        model_override: model_override.clone(),
-        current_purpose: current_purpose.clone(),
-        runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
-    };
-    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let mut tools_cfg = state.tools_config.read().unwrap().clone();
-    // このエージェント専用の許可コマンド（DB管理）を、ローカルコピーにのみマージする。
-    // グローバル config に足すと他エージェントにも許可が漏れる（per-agent スコープの担保）。
-    {
-        if let Ok(conn) = state.db.lock() {
-            if let Ok(agent_cmds) =
-                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
-            {
-                if !agent_cmds.is_empty() {
-                    let shell = tools_cfg
-                        .shell
-                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
-                    for cmd in agent_cmds {
-                        if !shell.allowed_commands.contains(&cmd) {
-                            shell.allowed_commands.push(cmd);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
-    let executor = {
-        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
-        match gateway_actions {
-            Some(ga) => bridged.with_gateway_actions(ga),
-            None => bridged,
-        }
-    };
-    // depth0/メインエージェント自身のツール/コマンド活動も activity webhook へ流す。
-    // spawn_subtask の sub-engine だけでなくメイン executor にも ToolEventSink を挿す。
-    // activity 行が無ければ factory は None を返し、配送 worker も起動しない（best-effort）。
-    // 無効/不正なデフォルトは sink 側で診断を残し、黙って fall through しない。
-    #[cfg(feature = "discord")]
-    let executor =
-        match opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id) {
-            Some(sink) => executor.with_tool_event_sink(sink),
-            None => executor,
-        };
-
-    // Create LlmRouterAdapter with metrics recording.
-    let metrics_ctx = MetricsContext {
-        db: state.db.clone(),
-        agent_id: agent_id.to_string(),
-        session_id: Some(session_id.to_string()),
-        pricing: PricingRegistry::default(),
-        last_metrics_id: last_metrics_id.clone(),
-        current_purpose: current_purpose.clone(),
-    };
-    let llm_client = LlmRouterAdapter::new(state.llm_router.clone())
-        .with_metrics(metrics_ctx)
-        .with_agent_id(agent_id);
-
-    // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
-    let max_iterations = if depth == 0 { 30 } else { usize::MAX };
-    let mut engine =
-        opencrab_core::SkillEngine::new(Box::new(llm_client), Box::new(executor), max_iterations);
-
-    // LLMログ記録のコールバックを設定
-    let log_db = state.db.clone();
-    let log_agent_id = agent_id.to_string();
-    let log_session_id = session_id.to_string();
-    let log_trigger_message_id = trigger_message_id.clone();
+/// LLM 呼び出しログ（llm_logs テーブル）記録コールバックの配線（#33: 段の分解）。
+fn set_llm_log_callback(
+    engine: &mut opencrab_core::SkillEngine,
+    log_db: opencrab_db::Db,
+    log_agent_id: String,
+    log_session_id: String,
+    log_trigger_message_id: Option<String>,
+) {
     engine.set_log_callback(move |log: &LlmCallLog| {
         let (prompt_tokens, completion_tokens, total_tokens) = log
             .response
@@ -989,17 +873,21 @@ pub async fn run_agent_response(
             }
         }
     });
+}
 
-    // Set optional response-text callback (for immediate Discord acknowledgment).
-    if let Some(cb) = on_response_text {
-        engine.set_on_response_text(move |text: String| cb(text));
-    }
-
-    // on_tool_call callback: save tool_call to DB.
+/// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
+/// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
+fn set_turn_log_callbacks(
+    engine: &mut opencrab_core::SkillEngine,
+    db: opencrab_db::Db,
+    agent_id: String,
+    session_id: String,
+    tool_result_workspace: std::path::PathBuf,
+) {
     {
-        let tc_db = state.db.clone();
-        let tc_agent = agent_id.to_string();
-        let tc_session = session_id.to_string();
+        let tc_db = db.clone();
+        let tc_agent = agent_id.clone();
+        let tc_session = session_id.clone();
         engine.set_on_tool_call(move |content: String, tool_calls_json: String| {
             if let Ok(conn) = tc_db.lock() {
                 // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する
@@ -1041,11 +929,10 @@ pub async fn run_agent_response(
 
     // on_tool_result callback: save tool_result to DB.
     {
-        let tr_db = state.db.clone();
-        let tr_agent = agent_id.to_string();
-        let tr_session = session_id.to_string();
-        let tr_workspace =
-            opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
+        let tr_db = db;
+        let tr_agent = agent_id;
+        let tr_session = session_id;
+        let tr_workspace = tool_result_workspace;
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
                 const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
@@ -1095,10 +982,18 @@ pub async fn run_agent_response(
             },
         );
     }
+}
 
-    // Collect image_urls: merge passed-in args with any stored in the latest user log metadata_json.
-    let merged_image_urls: Vec<String> = {
-        let mut urls: Vec<String> = image_urls.to_vec();
+/// 引数の image_urls と、直近ユーザーログ metadata の image_urls をマージする
+/// （#33: 段の分解）。
+fn merge_image_urls(
+    state: &AppState,
+    session_id: &str,
+    agent_id: &str,
+    base: &[String],
+) -> Vec<String> {
+    {
+        let mut urls: Vec<String> = base.to_vec();
         if let Ok(conn) = state.db.lock() {
             if let Ok(logs) = opencrab_db::queries::list_session_logs_by_session(&conn, session_id)
             {
@@ -1135,7 +1030,219 @@ pub async fn run_agent_response(
             );
         }
         urls
+    }
+}
+
+/// 未インデックスのログが閾値を超えていたら、バックグラウンドでメモリインデックスを
+/// 構築する（#33: 段の分解。run の応答は待たせない）。
+fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_model: &str) {
+    {
+        let index_db = state.db.clone();
+        let index_agent_id = agent_id.to_string();
+        let index_llm_router = state.llm_router.clone();
+        let index_model = effective_model.to_string();
+        let (index_persona_name, index_personality) = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::get_agent(&conn, &index_agent_id)
+                .ok()
+                .flatten()
+                .map(|a| (a.persona_name, a.personality))
+                .unwrap_or_default()
+        };
+        tokio::spawn(async move {
+            let (unindexed, config) = {
+                let Ok(conn) = index_db.lock() else { return };
+                let unindexed =
+                    opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
+                        .unwrap_or(0);
+                let config = opencrab_db::queries::get_memory_index_config(&conn, &index_agent_id)
+                    .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
+                        agent_id: index_agent_id.clone(),
+                        batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
+                        threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
+                        updated_at: String::new(),
+                    });
+                (unindexed, config)
+            };
+            if unindexed < config.threshold {
+                return;
+            }
+            tracing::info!(
+                agent_id = %index_agent_id,
+                unindexed = unindexed,
+                threshold = config.threshold,
+                batch_size = config.batch_size,
+                "Starting background memory index build"
+            );
+            let llm_adapter = LlmRouterAdapter::new(index_llm_router);
+            match opencrab_core::memory_index::IndexBuilder::build_incremental(
+                &index_db,
+                &index_agent_id,
+                &llm_adapter,
+                &index_model,
+                config.batch_size as usize,
+                &index_persona_name,
+                index_personality.as_deref(),
+            )
+            .await
+            {
+                Ok(result) => {
+                    tracing::info!(
+                        agent_id = %index_agent_id,
+                        nodes_created = result.nodes_created,
+                        logs_indexed = result.logs_indexed,
+                        "Background memory index build completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        agent_id = %index_agent_id,
+                        error = %e,
+                        "Background memory index build FAILED"
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// エージェントにメッセージを処理させ、応答テキストを返す。
+///
+/// SkillEngine + BridgedExecutor + LlmRouterAdapter のフルパイプラインを実行する。
+/// 実行要求は `RunRequest`（#33: 13位置引数の置き換え）で受ける。
+pub async fn run_agent_response(
+    state: &AppState,
+    req: opencrab_actions::RunRequest,
+) -> anyhow::Result<opencrab_core::EngineResult> {
+    let agent_id = req.agent_id.as_str();
+    let agent_name = req.agent_name.as_str();
+    let session_id = req.session_id.as_str();
+    let system_prompt = req.system_prompt.as_str();
+    let conversation = req.conversation.as_str();
+    let gateway = req.gateway.as_str();
+    let depth = req.depth;
+    // Build workspace path for this agent.
+    let ws_path =
+        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
+    std::fs::create_dir_all(&ws_path).ok();
+    let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
+
+    let effective_model = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone())
     };
+
+    // Create BridgedExecutor with ActionContext.
+    let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
+    let model_override = Arc::new(std::sync::Mutex::new(None));
+    let current_purpose = Arc::new(std::sync::Mutex::new("conversation".to_string()));
+
+    let runtime_info = opencrab_actions::RuntimeInfo {
+        default_model: state.default_model.clone(),
+        active_model: Some(effective_model.clone()),
+        available_providers: state
+            .llm_router
+            .provider_names()
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        gateway: gateway.to_string(),
+    };
+
+    let ctx = opencrab_actions::ActionContext {
+        caller: req.caller,
+        agent_id: agent_id.to_string(),
+        agent_name: agent_name.to_string(),
+        session_id: Some(session_id.to_string()),
+        db: state.db.clone(),
+        workspace: Arc::new(workspace),
+        last_metrics_id: last_metrics_id.clone(),
+        model_override: model_override.clone(),
+        current_purpose: current_purpose.clone(),
+        runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
+    };
+    let mut dispatcher = opencrab_actions::ActionDispatcher::new();
+    let mut tools_cfg = state.tools_config.read().unwrap().clone();
+    // このエージェント専用の許可コマンド（DB管理）を、ローカルコピーにのみマージする。
+    // グローバル config に足すと他エージェントにも許可が漏れる（per-agent スコープの担保）。
+    {
+        if let Ok(conn) = state.db.lock() {
+            if let Ok(agent_cmds) =
+                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
+            {
+                if !agent_cmds.is_empty() {
+                    let shell = tools_cfg
+                        .shell
+                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
+                    for cmd in agent_cmds {
+                        if !shell.allowed_commands.contains(&cmd) {
+                            shell.allowed_commands.push(cmd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
+    let executor = {
+        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
+        match req.gateway_actions {
+            Some(ga) => bridged.with_gateway_actions(ga),
+            None => bridged,
+        }
+    };
+    // depth0/メインエージェント自身のツール/コマンド活動も activity webhook へ流す。
+    // spawn_subtask の sub-engine だけでなくメイン executor にも ToolEventSink を挿す。
+    // activity 行が無ければ factory は None を返し、配送 worker も起動しない（best-effort）。
+    // 無効/不正なデフォルトは sink 側で診断を残し、黙って fall through しない。
+    #[cfg(feature = "discord")]
+    let executor =
+        match opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id) {
+            Some(sink) => executor.with_tool_event_sink(sink),
+            None => executor,
+        };
+
+    // Create LlmRouterAdapter with metrics recording.
+    let metrics_ctx = MetricsContext {
+        db: state.db.clone(),
+        agent_id: agent_id.to_string(),
+        session_id: Some(session_id.to_string()),
+        pricing: PricingRegistry::default(),
+        last_metrics_id: last_metrics_id.clone(),
+        current_purpose: current_purpose.clone(),
+    };
+    let llm_client = LlmRouterAdapter::new(state.llm_router.clone())
+        .with_metrics(metrics_ctx)
+        .with_agent_id(agent_id);
+
+    // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
+    let max_iterations = if depth == 0 { 30 } else { usize::MAX };
+    let mut engine =
+        opencrab_core::SkillEngine::new(Box::new(llm_client), Box::new(executor), max_iterations);
+
+    set_llm_log_callback(
+        &mut engine,
+        state.db.clone(),
+        agent_id.to_string(),
+        session_id.to_string(),
+        req.trigger_message_id.clone(),
+    );
+
+    // Set optional response-text callback (for immediate Discord acknowledgment).
+    if let Some(cb) = req.on_response_text {
+        engine.set_on_response_text(move |text: String| cb(text));
+    }
+
+    set_turn_log_callbacks(
+        &mut engine,
+        state.db.clone(),
+        agent_id.to_string(),
+        session_id.to_string(),
+        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?,
+    );
+
+    let merged_image_urls = merge_image_urls(state, session_id, agent_id, &req.image_urls);
 
     // verify 段用: この run が session_logs に残すトレースの開始位置を記録
     // （verify が走らない構成では余計なクエリを打たない）
@@ -1206,75 +1313,7 @@ pub async fn run_agent_response(
         }
     }
 
-    // インデックス自動構築チェック（バックグラウンド）
-    {
-        let index_db = state.db.clone();
-        let index_agent_id = agent_id.to_string();
-        let index_llm_router = state.llm_router.clone();
-        let index_model = effective_model.clone();
-        let (index_persona_name, index_personality) = {
-            let conn = state.db.lock().unwrap();
-            opencrab_db::queries::get_agent(&conn, &index_agent_id)
-                .ok()
-                .flatten()
-                .map(|a| (a.persona_name, a.personality))
-                .unwrap_or_default()
-        };
-        tokio::spawn(async move {
-            let (unindexed, config) = {
-                let Ok(conn) = index_db.lock() else { return };
-                let unindexed =
-                    opencrab_db::queries::get_unindexed_log_count(&conn, &index_agent_id)
-                        .unwrap_or(0);
-                let config = opencrab_db::queries::get_memory_index_config(&conn, &index_agent_id)
-                    .unwrap_or_else(|_| opencrab_db::queries::AgentMemoryIndexConfig {
-                        agent_id: index_agent_id.clone(),
-                        batch_size: opencrab_db::queries::BATCH_SIZE_DEFAULT,
-                        threshold: opencrab_db::queries::THRESHOLD_DEFAULT,
-                        updated_at: String::new(),
-                    });
-                (unindexed, config)
-            };
-            if unindexed < config.threshold {
-                return;
-            }
-            tracing::info!(
-                agent_id = %index_agent_id,
-                unindexed = unindexed,
-                threshold = config.threshold,
-                batch_size = config.batch_size,
-                "Starting background memory index build"
-            );
-            let llm_adapter = LlmRouterAdapter::new(index_llm_router);
-            match opencrab_core::memory_index::IndexBuilder::build_incremental(
-                &index_db,
-                &index_agent_id,
-                &llm_adapter,
-                &index_model,
-                config.batch_size as usize,
-                &index_persona_name,
-                index_personality.as_deref(),
-            )
-            .await
-            {
-                Ok(result) => {
-                    tracing::info!(
-                        agent_id = %index_agent_id,
-                        nodes_created = result.nodes_created,
-                        logs_indexed = result.logs_indexed,
-                        "Background memory index build completed"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        agent_id = %index_agent_id,
-                        error = %e,
-                        "Background memory index build FAILED"
-                    );
-                }
-            }
-        });
-    }
+    spawn_background_index_build(state, agent_id, &effective_model);
 
     result
 }

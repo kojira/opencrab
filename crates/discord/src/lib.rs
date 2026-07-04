@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use opencrab_gateway::GatewayActions;
 
 pub use gateway_actions::DiscordGatewayActions;
 pub use gateway_actions::{
@@ -88,20 +87,10 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     ) -> Result<String, anyhow::Error>;
 
     /// Run the full agent response pipeline (SkillEngine + LLM).
+    /// 実行要求は `RunRequest`（#33）で受ける。
     async fn run_agent_response(
         &self,
-        agent_id: &str,
-        agent_name: &str,
-        session_id: &str,
-        system_prompt: &str,
-        conversation: &str,
-        gateway_name: &str,
-        gateway_actions: Option<Arc<dyn GatewayActions>>,
-        caller: opencrab_actions::CallerIdentity,
-        image_urls: &[String],
-        depth: u32,
-        trigger_message_id: Option<String>,
-        on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        req: opencrab_actions::RunRequest,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 
     /// エージェントのLLMクライアントを生成する。

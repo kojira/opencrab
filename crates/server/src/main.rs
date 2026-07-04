@@ -226,18 +226,15 @@ fn make_heartbeat_callback(
                 // 5. run_agent_response を呼び出す
                 let engine_result = opencrab_server::process::run_agent_response(
                     &state,
-                    &agent_id_owned,
-                    &agent_name,
-                    &session_id,
-                    &system_prompt,
-                    &conversation,
-                    "heartbeat",
-                    None,
-                    opencrab_actions::CallerIdentity::Owner,
-                    &[],
-                    0,
-                    None, // trigger_message_id
-                    None,
+                    opencrab_actions::RunRequest::new(
+                        &agent_id_owned,
+                        &agent_name,
+                        &session_id,
+                        &system_prompt,
+                        &conversation,
+                        "heartbeat",
+                        opencrab_actions::CallerIdentity::Owner,
+                    ),
                 )
                 .await;
 

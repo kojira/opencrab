@@ -163,22 +163,19 @@ pub async fn send_agent_message(
     };
 
     // 8. Run agent response.
-    let result = process::run_agent_response(
-        &state,
+    let mut run_req = opencrab_actions::RunRequest::new(
         &id,
         &agent_name,
         &session_id,
         &system_prompt,
         &conversation,
         "rest",
-        gateway_actions,
         caller,
-        &[],
-        0,
-        None, // trigger_message_id
-        None,
-    )
-    .await;
+    );
+    if let Some(ga) = gateway_actions {
+        run_req = run_req.with_gateway_actions(ga);
+    }
+    let result = process::run_agent_response(&state, run_req).await;
 
     // 9. Handle result.
     match result {

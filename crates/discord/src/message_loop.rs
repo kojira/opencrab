@@ -642,24 +642,27 @@ async fn process_incoming_message<T: AgentRunner>(
 
             if let Some(conversation) = conversation {
                 let result = state_spawn
-                    .run_agent_response(
-                        &agent_id_spawn,
-                        &agent_name_spawn,
-                        &session_id_spawn,
-                        &system_prompt_spawn,
-                        &conversation,
-                        "discord",
-                        Some(ga_spawn),
-                        caller_spawn,
-                        &image_urls_spawn,
-                        0,
-                        if discord_message_id_spawn.is_empty() {
-                            None
-                        } else {
-                            Some(discord_message_id_spawn.clone())
-                        },
-                        on_response_text,
-                    )
+                    .run_agent_response({
+                        let mut run_req = opencrab_actions::RunRequest::new(
+                            &agent_id_spawn,
+                            &agent_name_spawn,
+                            &session_id_spawn,
+                            &system_prompt_spawn,
+                            &conversation,
+                            "discord",
+                            caller_spawn,
+                        )
+                        .with_gateway_actions(ga_spawn)
+                        .with_image_urls(image_urls_spawn.clone());
+                        if !discord_message_id_spawn.is_empty() {
+                            run_req =
+                                run_req.with_trigger_message_id(discord_message_id_spawn.clone());
+                        }
+                        if let Some(cb) = on_response_text {
+                            run_req = run_req.with_on_response_text(cb);
+                        }
+                        run_req
+                    })
                     .await;
 
                 handle_agent_response(
@@ -804,18 +807,16 @@ async fn process_subtask_completed<T: AgentRunner>(
 
     match state
         .run_agent_response(
-            &agent_id,
-            &agent_name,
-            &session_id,
-            &system_prompt,
-            &conversation,
-            "discord",
-            Some(gateway_actions),
-            opencrab_actions::CallerIdentity::Agent,
-            &[],
-            0,
-            None,
-            None,
+            opencrab_actions::RunRequest::new(
+                &agent_id,
+                &agent_name,
+                &session_id,
+                &system_prompt,
+                &conversation,
+                "discord",
+                opencrab_actions::CallerIdentity::Agent,
+            )
+            .with_gateway_actions(gateway_actions),
         )
         .await
     {
@@ -1174,18 +1175,16 @@ async fn process_interaction_response<T: AgentRunner>(
 
     match state
         .run_agent_response(
-            &agent_id,
-            &agent_name,
-            &session_id,
-            &system_prompt,
-            &conversation,
-            "discord",
-            Some(gateway_actions),
-            opencrab_actions::CallerIdentity::Agent,
-            &[],
-            0,
-            None,
-            None,
+            opencrab_actions::RunRequest::new(
+                &agent_id,
+                &agent_name,
+                &session_id,
+                &system_prompt,
+                &conversation,
+                "discord",
+                opencrab_actions::CallerIdentity::Agent,
+            )
+            .with_gateway_actions(gateway_actions),
         )
         .await
     {
