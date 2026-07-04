@@ -15,8 +15,10 @@ use rusqlite::Connection;
 
 use crate::llm_text::truncate_chars;
 
-/// セクション全体の文字数上限（≈1k tokens）。ブロック別予算の合計 + ヘッダで
-/// この値を超えない構成にしてある。
+/// セクション全体の文字数上限。ブロック別予算の合計 + ヘッダでこの値を超えない。
+/// 注意: 日本語はおよそ 0.7 tokens/char なので、フルサイズで **最大 ~2.5k tokens**
+/// になる（英語なら ~1k）。小さいコンテキスト予算での圧迫は注入側
+/// （build_conversation_string）が予算比ガードで防ぐ。
 pub const MEMORY_INDEX_MAX_CHARS: usize = 3600;
 /// 月行ブロックの文字数予算。月次要約がこのセクションの中心なので大半を割く。
 /// 超過時は古い月から落とし、`…and N older months` の 1 行に畳む。
@@ -61,26 +63,37 @@ pub fn build_memory_index_section(
     current_session_id: &str,
 ) -> Result<Option<String>> {
     let periods = opencrab_db::queries::list_period_nodes(conn, agent_id)?;
-    // 「現在月」はノード側の最新月とする（クロック非依存でレンダリングが決定的。
-    // 最新月 = まだ増え続けている月なので topic 粒度で見せる）。
-    let Some(current_month) = periods.first().map(|p| p.title.clone()) else {
+    if periods.is_empty() {
         return Ok(None);
-    };
+    }
+    // 「現在月」はノード側の最新月とする（クロック非依存でレンダリングが決定的。
+    // 最新月 = まだ増え続けている月なので topic 粒度で見せる）。ただし最新月が
+    // 既にロールアップ済みなら、それは暦上の過去月（エージェントが月を跨いで
+    // 非アクティブだった場合）なので月行として出し、topic ブロックは省く —
+    // 生成済みの月次要約を埋もれさせない。
+    let current_month = periods
+        .first()
+        .filter(|p| p.summary_refreshed_at.is_none())
+        .map(|p| p.title.clone());
 
-    let topics = opencrab_db::queries::list_topic_nodes_for_month(
-        conn,
-        agent_id,
-        &current_month,
-        current_session_id,
-        MEMORY_INDEX_MAX_TOPICS,
-    )?;
+    let topics = match &current_month {
+        Some(month) => opencrab_db::queries::list_topic_nodes_for_month(
+            conn,
+            agent_id,
+            month,
+            current_session_id,
+            MEMORY_INDEX_MAX_TOPICS,
+        )?,
+        None => Vec::new(),
+    };
     let past_periods: Vec<_> = periods
         .iter()
-        .filter(|p| p.title != current_month)
+        .filter(|p| Some(&p.title) != current_month.as_ref())
         .collect();
     if past_periods.is_empty() && topics.is_empty() {
         return Ok(None);
     }
+    let topic_counts = opencrab_db::queries::count_topics_per_period(conn, agent_id)?;
 
     let mut month_lines: Vec<String> = Vec::new();
     for p in past_periods.iter().take(MEMORY_INDEX_MAX_MONTHS) {
@@ -90,9 +103,11 @@ pub fn build_memory_index_section(
         } else {
             "(summary pending)".to_string()
         };
+        // child_count は直下の session 数なので topic 総数は別クエリで引く
+        let n_topics = topic_counts.get(&p.id).copied().unwrap_or(0);
         month_lines.push(format!(
-            "- [{sid}] {} ({} topics): {summary}",
-            p.title, p.child_count
+            "- [{sid}] {} ({n_topics} topics): {summary}",
+            p.title
         ));
     }
     // ブロック別予算で古い側から刈る（月と topic が互いを締め出さない）
@@ -256,6 +271,44 @@ mod tests {
         assert!(!section.contains("daily由来"));
         // 全行に short_id
         assert!(section.contains("[t1]") && section.contains("[p1]"));
+    }
+
+    #[test]
+    fn rolled_up_newest_month_renders_as_month_line() {
+        // 月を跨いで非アクティブだったエージェント: 最新 period が既にロールアップ
+        // 済みなら、それは暦上の過去月 — topic 粒度ではなく月行として要約を見せる
+        let conn = opencrab_db::init_memory().unwrap();
+        use opencrab_db::queries::*;
+        insert_index_node(&conn, &mk_node("r1", "root", None, "root", None, None)).unwrap();
+        insert_index_node(
+            &conn,
+            &mk_node("p1", "period", Some("r1"), "2026-03", None, None),
+        )
+        .unwrap();
+        update_period_rollup(&conn, "p1", "3月の月次要約。", "[]").unwrap();
+        insert_index_node(
+            &conn,
+            &mk_node("s1", "session", Some("p1"), "S", None, None),
+        )
+        .unwrap();
+        insert_index_node(
+            &conn,
+            &mk_node(
+                "t1",
+                "topic",
+                Some("s1"),
+                "3月の話",
+                Some("other"),
+                Some("2026-03-05"),
+            ),
+        )
+        .unwrap();
+
+        let section = build_memory_index_section(&conn, "a1", "s")
+            .unwrap()
+            .unwrap();
+        assert!(section.contains("[p1] 2026-03 (1 topics): 3月の月次要約。"));
+        assert!(!section.contains("This month's topics"));
     }
 
     #[test]

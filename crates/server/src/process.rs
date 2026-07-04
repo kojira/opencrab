@@ -296,6 +296,23 @@ pub fn build_conversation_string(
                 None
             }
         };
+    // 予算比ガード: セクションはフルサイズで ~2.5k tokens（日本語 ≈0.7 tok/char）に
+    // なりうる。小さいコンテキスト予算（小型モデル）では会話本文を圧迫するため、
+    // 予算の 1/4 を超えるなら注入しない（100k 級の既定予算では常に通る）。
+    let memory_index_section = memory_index_section.filter(|s| {
+        let cost = estimate_tokens(s);
+        if cost * 4 > context_budget_tokens {
+            tracing::debug!(
+                session_id = %session_id,
+                section_tokens = cost,
+                budget = context_budget_tokens,
+                "skipping [Memory Index] section: exceeds 1/4 of context budget"
+            );
+            false
+        } else {
+            true
+        }
+    });
 
     let mut inner_budget = context_budget_tokens;
     for section in [&ledger_section, &memory_index_section]
@@ -1774,7 +1791,7 @@ mod memory_index_section_injection_tests {
                     agent_id: "a1".to_string(),
                     session_id: "cur-sess".to_string(),
                     log_type: "speech".to_string(),
-                    content: format!("メッセージ {i} の内容がここに入る。"),
+                    content: format!("メッセージ {i} の内容がここに入る。{}", "詳細".repeat(40)),
                     speaker_id: Some("a1".to_string()),
                     turn_number: None,
                     metadata_json: None,
@@ -1810,6 +1827,16 @@ mod memory_index_section_injection_tests {
     }
 
     #[test]
+    fn tiny_budget_skips_section() {
+        // 予算比ガード: セクションが予算の 1/4 を超えるなら注入しない（小型モデル保護）
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_index(&conn);
+        seed_logs(&conn, 3);
+        let out = build_conversation_string(&conn, "cur-sess", "a1", 100).unwrap();
+        assert!(!out.contains("[Memory Index]"));
+    }
+
+    #[test]
     fn compaction_path_keeps_short_id_sets_disjoint() {
         let conn = opencrab_db::init_memory().unwrap();
         seed_index(&conn);
@@ -1821,8 +1848,9 @@ mod memory_index_section_injection_tests {
             [],
         )
         .unwrap();
-        // 小さい予算でコンパクションを強制
-        let out = build_conversation_string(&conn, "cur-sess", "a1", 300).unwrap();
+        // セクションの予算比ガード（1/4）は通しつつ、会話本文はコンパクションを
+        // 強制する中間サイズの予算
+        let out = build_conversation_string(&conn, "cur-sess", "a1", 900).unwrap();
         assert_eq!(out.matches("[Memory Index]").count(), 1);
         assert_eq!(out.matches("[Past context summary").count(), 1);
         // 現セッション topic は Past context summary 側のみ、他セッション topic は

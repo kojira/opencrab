@@ -65,10 +65,19 @@ pub async fn backfill_topic_keywords(
             serde_json::from_str(crate::llm_text::strip_code_fences(&text)).unwrap_or_default()
         }
         Err(e) => {
-            tracing::warn!(agent_id = %agent_id, error = %e, "keyword backfill LLM call failed; using title fallback");
-            BackfillMap::new()
+            // 障害時は何も書かずに次 tick で再試行する（ここでフォールバックを
+            // 書き込むと、LLM 停止中の tick ごとに最大 10 ノードへタイトル由来の
+            // 低品質キーワードが恒久確定してしまう）。
+            tracing::warn!(agent_id = %agent_id, error = %e, "keyword backfill LLM call failed; will retry next tick");
+            return Ok(0);
         }
     };
+    if extracted.is_empty() {
+        // パース不能な応答も障害扱い（フォールバックは「成功応答から個別に漏れた
+        // ノード」にのみ適用する）。
+        tracing::warn!(agent_id = %agent_id, "keyword backfill response unparsable; will retry next tick");
+        return Ok(0);
+    }
 
     let db = conn
         .lock()
@@ -234,6 +243,15 @@ mod tests {
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ChatResponse::text(self.response.clone()))
+        }
+    }
+
+    struct FailingLlm;
+
+    #[async_trait]
+    impl LlmClient for FailingLlm {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Err(anyhow::anyhow!("provider down"))
         }
     }
 
@@ -415,5 +433,46 @@ mod tests {
             .unwrap();
         assert_eq!(updated, 0);
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn backfill_outage_stamps_nothing_and_retries() {
+        // LLM 障害時にタイトル由来フォールバックを恒久確定させない（次 tick 再試行）
+        let conn = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        seed_past_month(&conn);
+        let updated = backfill_topic_keywords(&conn, "a1", &FailingLlm, "m")
+            .await
+            .unwrap();
+        assert_eq!(updated, 0);
+        {
+            let db = conn.lock().unwrap();
+            let t1 = opencrab_db::queries::get_index_node(&db, "t1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(t1.keywords_json, "[]");
+            // 対象リストに残っている = 次 tick で再試行される
+            assert_eq!(
+                opencrab_db::queries::list_topics_missing_keywords(&db, "a1", 10)
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+        // パース不能応答も同様（何も確定しない）
+        let garbage = CountingLlm {
+            calls: AtomicUsize::new(0),
+            response: "not json".to_string(),
+        };
+        let updated = backfill_topic_keywords(&conn, "a1", &garbage, "m")
+            .await
+            .unwrap();
+        assert_eq!(updated, 0);
+        let db = conn.lock().unwrap();
+        assert_eq!(
+            opencrab_db::queries::list_topics_missing_keywords(&db, "a1", 10)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

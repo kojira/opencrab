@@ -713,6 +713,25 @@ pub fn update_period_rollup(
     })
 }
 
+/// period ノード id → 配下（period→session→topic）の topic 総数。
+/// period.child_count は直下の **session** 数なので、月行の「N topics」表示には
+/// こちらを使う。
+pub fn count_topics_per_period(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.parent_id, COUNT(*) FROM memory_index_nodes t
+         JOIN memory_index_nodes s ON t.parent_id = s.id
+         WHERE t.agent_id = ?1 AND t.node_type = 'topic' AND s.parent_id IS NOT NULL
+         GROUP BY s.parent_id",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// session_log ツリーの period（月）ノード一覧を新しい月から順に返す。
 pub fn list_period_nodes(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(&format!(
