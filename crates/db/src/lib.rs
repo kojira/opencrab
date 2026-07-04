@@ -128,7 +128,9 @@ impl Db {
     }
 
     /// 既存の `Connection` から単一接続ハンドルを構築する。
+    /// 本番経路と同じく外部キーを有効化する（適用失敗は無視 — 既存挙動の互換）。
     pub fn from_connection(conn: Connection) -> Db {
+        let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
         Db {
             inner: DbInner::Single(Arc::new(Mutex::new(conn))),
         }
@@ -163,8 +165,12 @@ pub fn init_connection(path: &str) -> Result<Connection> {
 }
 
 /// インメモリDB（テスト用の生 `Connection`）。
+///
+/// 本番（pool/file）と同様に外部キーを有効化する（#41: テストが FK/CASCADE を
+/// 実際に検証できるように。有効化しないと FK 付きスキーマがテストで素通りする）。
 pub fn init_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     schema::initialize(&conn)?;
     Ok(conn)
 }
