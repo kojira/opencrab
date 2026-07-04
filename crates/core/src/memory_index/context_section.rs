@@ -110,9 +110,13 @@ pub fn build_memory_index_section(
             p.title
         ));
     }
-    // ブロック別予算で古い側から刈る（月と topic が互いを締め出さない）
-    let month_lines = take_within_budget(month_lines, MONTH_BLOCK_MAX_CHARS);
+    // ブロック別予算で古い側から刈る（月と topic が互いを締め出さない）。
+    // リストは新しい順なので take_within_budget は新しい記憶を優先して残す。
+    let mut month_lines = take_within_budget(month_lines, MONTH_BLOCK_MAX_CHARS);
     let hidden_months = past_periods.len().saturating_sub(month_lines.len());
+    // 表示は時系列（古い→新しい）: 会話ログの流れと揃い、月の追加が常に
+    // セクション下側の変更になるためプロンプトキャッシュのプレフィックスも安定する。
+    month_lines.reverse();
 
     let mut topic_lines: Vec<String> = Vec::new();
     for t in &topics {
@@ -124,7 +128,8 @@ pub fn build_memory_index_section(
             .unwrap_or("");
         topic_lines.push(format!("- [{sid}] {date} {}", t.title));
     }
-    let topic_lines = take_within_budget(topic_lines, TOPIC_BLOCK_MAX_CHARS);
+    let mut topic_lines = take_within_budget(topic_lines, TOPIC_BLOCK_MAX_CHARS);
+    topic_lines.reverse();
 
     let mut out = String::new();
     out.push_str(
@@ -132,12 +137,17 @@ pub fn build_memory_index_section(
     );
     if !month_lines.is_empty() {
         out.push_str("Months:\n");
+        // 畳んだ月は最も古い側 = 先頭に置く
+        if hidden_months > 0 {
+            out.push_str(&format!(
+                "  …and {hidden_months} older months (browse_memory_index)\n"
+            ));
+        }
         for l in &month_lines {
             out.push_str(l);
             out.push('\n');
         }
-    }
-    if hidden_months > 0 {
+    } else if hidden_months > 0 {
         out.push_str(&format!(
             "  …and {hidden_months} older months (browse_memory_index)\n"
         ));
@@ -257,10 +267,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(section.starts_with("[Memory Index]"));
-        // 月行: 新しい順（2026-05 が先）、現在月 2026-06 は月行に出ない
+        // 月行: 時系列（古い 2026-04 が上）、現在月 2026-06 は月行に出ない
         let pos_may = section.find("[p2] 2026-05").unwrap();
         let pos_apr = section.find("[p1] 2026-04").unwrap();
-        assert!(pos_may < pos_apr);
+        assert!(pos_apr < pos_may);
         assert!(!section.contains("[p3] 2026-06"));
         // ロールアップ済みは要約、未ロールアップは pending
         assert!(section.contains("4月はDiscord連携に集中した。"));
@@ -366,5 +376,15 @@ mod tests {
         // topic ブロック: 月と独立の予算を持ち、新しい topic は必ず残る
         assert!(section.contains("[t9]"), "newest topic must survive");
         assert!(!section.contains("[t0]"), "oldest topic must be dropped");
+        // 表示は時系列: 畳み行が最上部、残存する最古の月 → 最新の月の順、
+        // topic も古い→新しい
+        let pos_fold = section.find("older months").unwrap();
+        let pos_oldest_kept = section.find("[p2] 2025-03").unwrap_or(usize::MAX - 1);
+        let pos_dec = section.find("[p11] 2025-12").unwrap();
+        assert!(pos_fold < pos_dec);
+        assert!(pos_oldest_kept < pos_dec || pos_oldest_kept == usize::MAX - 1);
+        let pos_t5 = section.find("[t5]").unwrap();
+        let pos_t9 = section.find("[t9]").unwrap();
+        assert!(pos_t5 < pos_t9, "topics must render oldest-first");
     }
 }
