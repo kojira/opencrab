@@ -1,7 +1,4 @@
-use anyhow::Result;
-use chrono::Utc;
-use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
+use rusqlite::params;
 
 #[allow(unused_imports)]
 use super::*;
@@ -33,7 +30,6 @@ fn insert_session_dual_writes_agent_sessions() {
     assert_eq!(row.participant_ids_json, "[\"agent-x\",\"agent-y\"]");
 }
 
-use super::*;
 
 fn setup() -> Connection {
     crate::init_memory().expect("failed to init in-memory DB")
