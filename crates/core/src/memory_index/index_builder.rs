@@ -235,7 +235,11 @@ impl IndexBuilder {
             let token_count = (chunk_text.len() / 3) as i32;
 
             // LLM呼び出しでサマリー生成
-            tracing::debug!("index_builder: LLM call start - persona_name={:?}, has_personality={}", persona_name, personality.as_ref().map(|p| !p.is_empty()).unwrap_or(false));
+            tracing::debug!(
+                "index_builder: LLM call start - persona_name={:?}, has_personality={}",
+                persona_name,
+                personality.as_ref().map(|p| !p.is_empty()).unwrap_or(false)
+            );
             tracing::debug!("index_builder: personality content = {:?}", personality);
             let prompt = if let Some(p) = personality.filter(|s| !s.is_empty()) {
                 format!(
@@ -300,8 +304,18 @@ impl IndexBuilder {
 
             // topicノード作成
             let topic_id = format!("topic-{agent_id}-{session_id}-{first_log_id}-{last_log_id}");
-            let date_from = session_logs.iter().filter_map(|l| l.created_at.as_deref()).filter(|s| s.len() >= 10).min().map(|s| s[..10].to_string());
-            let date_to = session_logs.iter().filter_map(|l| l.created_at.as_deref()).filter(|s| s.len() >= 10).max().map(|s| s[..10].to_string());
+            let date_from = session_logs
+                .iter()
+                .filter_map(|l| l.created_at.as_deref())
+                .filter(|s| s.len() >= 10)
+                .min()
+                .map(|s| s[..10].to_string());
+            let date_to = session_logs
+                .iter()
+                .filter_map(|l| l.created_at.as_deref())
+                .filter(|s| s.len() >= 10)
+                .max()
+                .map(|s| s[..10].to_string());
             let mut topic = opencrab_db::queries::IndexNodeRow {
                 id: topic_id.clone(),
                 agent_id: agent_id.to_string(),
@@ -398,7 +412,16 @@ impl IndexBuilder {
         personality: Option<&str>,
     ) -> Result<IndexBuildResult> {
         Self::delete_index(conn, agent_id)?;
-        Self::build_incremental(conn, agent_id, llm, model, batch_size, persona_name, personality).await
+        Self::build_incremental(
+            conn,
+            agent_id,
+            llm,
+            model,
+            batch_size,
+            persona_name,
+            personality,
+        )
+        .await
     }
 
     /// 既存のtopicノードをperiodレベルでLLM再要約・統合する（深さ調整）。
@@ -570,16 +593,18 @@ impl IndexBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
     use crate::engine::{ChatRequest, ChatResponse, LlmClient};
     use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
 
     struct MockLlm;
 
     #[async_trait]
     impl LlmClient for MockLlm {
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
-            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
+            Ok(ChatResponse::text(
+                r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
+            ))
         }
     }
 
@@ -591,7 +616,9 @@ mod tests {
     impl LlmClient for RecordingMockLlm {
         async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
             *self.last_request.lock().unwrap() = Some(req);
-            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
+            Ok(ChatResponse::text(
+                r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
+            ))
         }
     }
 
@@ -601,9 +628,10 @@ mod tests {
         let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(result.nodes_created, 0);
         assert_eq!(result.logs_indexed, 0);
     }
@@ -641,9 +669,10 @@ mod tests {
         let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
 
         // root + period + session + topic = 4 nodes
         assert_eq!(result.nodes_created, 4);
@@ -708,8 +737,14 @@ mod tests {
 
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = request.messages[1].text_content().unwrap_or("");
-        assert!(prompt.contains("のすたろう"), "プロンプトにペルソナ名が含まれるべき");
-        assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
+        assert!(
+            prompt.contains("のすたろう"),
+            "プロンプトにペルソナ名が含まれるべき"
+        );
+        assert!(
+            prompt.contains("17歳のオタク高校生"),
+            "プロンプトにpersonalityが含まれるべき"
+        );
     }
 
     /// T-2.2: 注目ポイント4軸がプロンプトに含まれる
@@ -749,10 +784,22 @@ mod tests {
 
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = request.messages[1].text_content().unwrap_or("");
-        assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸が含まれるべき");
-        assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸が含まれるべき");
-        assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性・感情軸が含まれるべき");
-        assert!(prompt.contains("失敗") || prompt.contains("教訓"), "失敗・教訓軸が含まれるべき");
+        assert!(
+            prompt.contains("学んだこと") || prompt.contains("技術知見"),
+            "技術知見軸が含まれるべき"
+        );
+        assert!(
+            prompt.contains("判断の理由") || prompt.contains("判断"),
+            "判断軸が含まれるべき"
+        );
+        assert!(
+            prompt.contains("関係性") || prompt.contains("感情"),
+            "関係性・感情軸が含まれるべき"
+        );
+        assert!(
+            prompt.contains("失敗") || prompt.contains("教訓"),
+            "失敗・教訓軸が含まれるべき"
+        );
     }
 
     /// T-2.5: ペルソナが空でもエラーにならずデフォルト一人称で要約される
@@ -778,24 +825,20 @@ mod tests {
             last_request: last_request.clone(),
         };
 
-        let result = IndexBuilder::build_incremental(
-            &conn,
-            "agent-1",
-            &llm,
-            "test-model",
-            50,
-            "",
-            None,
-        )
-        .await
-        .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
 
         assert!(result.nodes_created > 0, "ノードが生成されるべき");
 
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = request.messages[1].text_content().unwrap_or("");
         // Default prompt should still use 一人称
-        assert!(prompt.contains("一人称"), "デフォルトプロンプトに一人称が含まれるべき");
+        assert!(
+            prompt.contains("一人称"),
+            "デフォルトプロンプトに一人称が含まれるべき"
+        );
     }
 
     #[tokio::test]
@@ -818,15 +861,17 @@ mod tests {
         let llm = MockLlm;
 
         // First build
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r1 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert!(r1.nodes_created > 0);
 
         // Second build should create no new nodes (no new logs)
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r2 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(r2.nodes_created, 0);
         assert_eq!(r2.logs_indexed, 0);
     }
@@ -864,9 +909,10 @@ mod tests {
         let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
 
         assert_eq!(result.logs_indexed, 12); // 5+3+4
 
@@ -901,9 +947,10 @@ mod tests {
         let llm = MockLlm;
 
         // batch_size=10: 最初の10件のみ処理される
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
-            .await
-            .unwrap();
+        let r1 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
+                .await
+                .unwrap();
         assert_eq!(r1.logs_indexed, 10);
 
         // ウォーターマークは10件目まで進んでいる
@@ -916,21 +963,24 @@ mod tests {
         }
 
         // 2回目: 次の10件
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
-            .await
-            .unwrap();
+        let r2 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
+                .await
+                .unwrap();
         assert_eq!(r2.logs_indexed, 10);
 
         // 3回目: 残り10件
-        let r3 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
-            .await
-            .unwrap();
+        let r3 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
+                .await
+                .unwrap();
         assert_eq!(r3.logs_indexed, 10);
 
         // 4回目: もう残りなし
-        let r4 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
-            .await
-            .unwrap();
+        let r4 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 10, "", None)
+                .await
+                .unwrap();
         assert_eq!(r4.logs_indexed, 0);
         assert_eq!(r4.nodes_created, 0);
 
@@ -954,9 +1004,10 @@ mod tests {
         let llm = MockLlm;
 
         // 初回ビルド
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r1 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(r1.logs_indexed, 5);
         let first_node_count = r1.nodes_created;
 
@@ -967,9 +1018,10 @@ mod tests {
         }
 
         // 2回目ビルド — 新ログのみ処理、session-2のノードが追加される
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r2 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(r2.logs_indexed, 3);
         // session + topic = 2 new nodes (root/periodは既存を再利用)
         assert_eq!(r2.nodes_created, 2);
@@ -997,9 +1049,10 @@ mod tests {
         let conn = opencrab_db::Db::from_connection(db_conn);
         let llm = MockLlm;
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 200, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 200, "", None)
+                .await
+                .unwrap();
 
         assert_eq!(result.logs_indexed, 100);
 
@@ -1031,15 +1084,17 @@ mod tests {
         let llm = MockLlm;
 
         // agent-1のみビルド
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r1 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(r1.logs_indexed, 5);
 
         // agent-2のみビルド
-        let r2 = IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r2 =
+            IndexBuilder::build_incremental(&conn, "agent-2", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(r2.logs_indexed, 8);
 
         // 各エージェントのツリーが独立
@@ -1139,9 +1194,10 @@ mod tests {
         let llm = MockLlm;
 
         // 初回ビルド
-        let r1 = IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let r1 =
+            IndexBuilder::build_incremental(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         let first_tree_len = {
             let db = conn.lock().unwrap();
             opencrab_db::queries::get_index_tree(&db, "agent-1")
@@ -1295,15 +1351,17 @@ mod tests {
             .unwrap();
 
         // まずマージ
-        let merge_result = IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 2, "", None)
-            .await
-            .unwrap();
+        let merge_result =
+            IndexBuilder::merge_topics(&conn, "agent-1", &llm, "test-model", 2, "", None)
+                .await
+                .unwrap();
         assert!(merge_result.topics_merged > 0);
 
         // その後rebuildすると完全にリフレッシュされる
-        let rebuild_result = IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50, "", None)
-            .await
-            .unwrap();
+        let rebuild_result =
+            IndexBuilder::rebuild_index(&conn, "agent-1", &llm, "test-model", 50, "", None)
+                .await
+                .unwrap();
         assert_eq!(
             rebuild_result.logs_indexed, 15,
             "5セッション×3ログ=15件が再インデックス"
@@ -1356,17 +1414,33 @@ mod tests {
 
         {
             let c = conn.lock().unwrap();
-            insert_log_with_date(&c, "agent-d", "sess-d", 0, "Morning msg", "2026-04-01 09:00:00");
-            insert_log_with_date(&c, "agent-d", "sess-d", 1, "Afternoon msg", "2026-04-01 15:00:00");
+            insert_log_with_date(
+                &c,
+                "agent-d",
+                "sess-d",
+                0,
+                "Morning msg",
+                "2026-04-01 09:00:00",
+            );
+            insert_log_with_date(
+                &c,
+                "agent-d",
+                "sess-d",
+                1,
+                "Afternoon msg",
+                "2026-04-01 15:00:00",
+            );
         }
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-d", &llm, "test-model", 2, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-d", &llm, "test-model", 2, "", None)
+                .await
+                .unwrap();
         assert!(result.nodes_created > 0);
 
         let c = conn.lock().unwrap();
-        let topics = opencrab_db::queries::get_topic_nodes_for_session(&c, "agent-d", "sess-d").unwrap();
+        let topics =
+            opencrab_db::queries::get_topic_nodes_for_session(&c, "agent-d", "sess-d").unwrap();
         assert!(!topics.is_empty());
         let t = &topics[0];
         assert_eq!(t.date_from.as_deref(), Some("2026-04-01"));
@@ -1382,17 +1456,33 @@ mod tests {
 
         {
             let c = conn.lock().unwrap();
-            insert_log_with_date(&c, "agent-m", "sess-m", 0, "Day 1 msg", "2026-04-01 10:00:00");
-            insert_log_with_date(&c, "agent-m", "sess-m", 1, "Day 3 msg", "2026-04-03 14:00:00");
+            insert_log_with_date(
+                &c,
+                "agent-m",
+                "sess-m",
+                0,
+                "Day 1 msg",
+                "2026-04-01 10:00:00",
+            );
+            insert_log_with_date(
+                &c,
+                "agent-m",
+                "sess-m",
+                1,
+                "Day 3 msg",
+                "2026-04-03 14:00:00",
+            );
         }
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-m", &llm, "test-model", 2, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-m", &llm, "test-model", 2, "", None)
+                .await
+                .unwrap();
         assert!(result.nodes_created > 0);
 
         let c = conn.lock().unwrap();
-        let topics = opencrab_db::queries::get_topic_nodes_for_session(&c, "agent-m", "sess-m").unwrap();
+        let topics =
+            opencrab_db::queries::get_topic_nodes_for_session(&c, "agent-m", "sess-m").unwrap();
         assert!(!topics.is_empty());
         let t = &topics[0];
         assert_eq!(t.date_from.as_deref(), Some("2026-04-01"));
@@ -1413,17 +1503,22 @@ mod tests {
             // Use the existing insert_logs helper which sets created_at to now()
             insert_logs(&c, "agent-n", "sess-n", 3);
             // Set created_at to empty string to simulate missing/invalid date
-            c.execute_batch("UPDATE memory_sessions SET created_at = '' WHERE agent_id = 'agent-n'").unwrap();
+            c.execute_batch(
+                "UPDATE memory_sessions SET created_at = '' WHERE agent_id = 'agent-n'",
+            )
+            .unwrap();
         }
 
-        let result = IndexBuilder::build_incremental(&conn, "agent-n", &llm, "test-model", 3, "", None)
-            .await
-            .unwrap();
+        let result =
+            IndexBuilder::build_incremental(&conn, "agent-n", &llm, "test-model", 3, "", None)
+                .await
+                .unwrap();
         // Should not panic, nodes should still be created
         assert!(result.nodes_created > 0);
 
         let c = conn.lock().unwrap();
-        let topics = opencrab_db::queries::get_topic_nodes_for_session(&c, "agent-n", "sess-n").unwrap();
+        let topics =
+            opencrab_db::queries::get_topic_nodes_for_session(&c, "agent-n", "sess-n").unwrap();
         assert!(!topics.is_empty());
         let t = &topics[0];
         // date_from/date_to should be None when all logs have empty created_at

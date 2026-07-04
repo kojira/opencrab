@@ -49,7 +49,7 @@ impl Action for GenerateInnerVoiceAction {
                 created_at: None,
             };
             if let Ok(conn) = ctx.db.lock() {
-                let _ = opencrab_db::queries::insert_session_log(&conn, &log);
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
 

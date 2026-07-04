@@ -203,7 +203,7 @@ pub async fn send_agent_message(
             };
             {
                 let conn = state.db.lock().unwrap();
-                opencrab_db::queries::insert_session_log(&conn, &response_log).ok();
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &response_log);
             }
 
             // Mark session as completed after agent responds

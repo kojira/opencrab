@@ -680,11 +680,7 @@ impl LlmProvider for MockLlmProvider {
 
 /// Create test app with a MockLlmProvider registered in the LlmRouter.
 /// Returns (Router, opencrab_db::Db, Arc<MockLlmProvider>).
-fn create_test_app_with_llm() -> (
-    Router,
-    opencrab_db::Db,
-    Arc<MockLlmProvider>,
-) {
+fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
 

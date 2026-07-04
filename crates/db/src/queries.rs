@@ -377,6 +377,21 @@ pub struct SessionLogRow {
     pub created_at: Option<String>,
 }
 
+/// `insert_session_log` の best-effort 版: 失敗を握り潰さず warn を残す（#47）。
+///
+/// 会話履歴のクリティカル経路では挿入失敗が「無言の履歴欠落」になる。伝播すると
+/// 応答フロー自体を止めてしまう場所（ログは副作用）で使う想定なので、エラーは
+/// 返さずログのみ。戻り値が要る/失敗を伝播すべき場所では `insert_session_log` を使うこと。
+pub fn insert_session_log_best_effort(conn: &Connection, log: &SessionLogRow) {
+    if let Err(e) = insert_session_log(conn, log) {
+        tracing::warn!(
+            session_id = %log.session_id,
+            log_type = %log.log_type,
+            "session log insert failed (best-effort path): {e}"
+        );
+    }
+}
+
 pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64> {
     // 本体テーブルとFTS影テーブルへの2書き込みをトランザクションで原子化する。
     // 途中失敗で FTS と memory_sessions が恒久的に不整合になるのを防ぐ。
@@ -2147,10 +2162,10 @@ pub fn list_enabled_agent_discord_configs(conn: &Connection) -> Result<Vec<Agent
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentWebhookConfigRow {
-    pub scope: String,        // 'agent' | 'tool' | 'global'
-    pub agent_id: String,     // '*' for global
-    pub tool_name: String,    // '' when unused
-    pub kind: String,         // 'subtask' | 'tool' | 'lifecycle'
+    pub scope: String,     // 'agent' | 'tool' | 'global'
+    pub agent_id: String,  // '*' for global
+    pub tool_name: String, // '' when unused
+    pub kind: String,      // 'subtask' | 'tool' | 'lifecycle'
     pub url: String,
     pub events_json: Option<String>,
     pub enabled: bool,
@@ -2265,8 +2280,12 @@ pub fn list_agent_webhook_config(
         })
     };
     let rows = match agent_id {
-        Some(a) => stmt.query_map(params![a], map_row)?.collect::<std::result::Result<_, _>>()?,
-        None => stmt.query_map([], map_row)?.collect::<std::result::Result<_, _>>()?,
+        Some(a) => stmt
+            .query_map(params![a], map_row)?
+            .collect::<std::result::Result<_, _>>()?,
+        None => stmt
+            .query_map([], map_row)?
+            .collect::<std::result::Result<_, _>>()?,
     };
     Ok(rows)
 }
@@ -2778,7 +2797,14 @@ mod tests {
     fn test_trusted_user_display_name_round_trip() {
         let conn = setup();
         add_trusted_user(
-            &conn, "id-1", "a1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+            &conn,
+            "id-1",
+            "a1",
+            "42",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "Crab B",
         )
         .unwrap();
         let row = get_trusted_user(&conn, "42", "a1").unwrap();
@@ -2867,7 +2893,9 @@ mod tests {
         let err = insert_task_ledger(&conn, "a1", "s1", "second", None).unwrap_err();
         assert!(err.to_string().contains("UNIQUE constraint failed"));
         // close 後は再度 open できる
-        let first = get_active_task_for_session(&conn, "a1", "s1").unwrap().unwrap();
+        let first = get_active_task_for_session(&conn, "a1", "s1")
+            .unwrap()
+            .unwrap();
         assert!(update_task_status(&conn, "a1", first.id, "done").unwrap());
         insert_task_ledger(&conn, "a1", "s1", "second", None).unwrap();
     }
@@ -2876,9 +2904,15 @@ mod tests {
     fn test_task_progress_bumps_ledger_updated_at() {
         let conn = setup();
         let id = insert_task_ledger(&conn, "a1", "s1", "g", None).unwrap();
-        let before = get_task_ledger(&conn, "a1", id).unwrap().unwrap().updated_at;
+        let before = get_task_ledger(&conn, "a1", id)
+            .unwrap()
+            .unwrap()
+            .updated_at;
         insert_task_progress(&conn, id, "progress", "step").unwrap();
-        let after = get_task_ledger(&conn, "a1", id).unwrap().unwrap().updated_at;
+        let after = get_task_ledger(&conn, "a1", id)
+            .unwrap()
+            .unwrap()
+            .updated_at;
         assert!(after > before, "updated_at must advance on progress append");
     }
 
@@ -4408,7 +4442,10 @@ mod tests {
         let count = all
             .iter()
             .filter(|r| {
-                r.scope == "agent" && r.agent_id == "agent-1" && r.tool_name.is_empty() && r.kind == "subtask"
+                r.scope == "agent"
+                    && r.agent_id == "agent-1"
+                    && r.tool_name.is_empty()
+                    && r.kind == "subtask"
             })
             .count();
         assert_eq!(count, 1);
@@ -4477,9 +4514,11 @@ mod tests {
         let rows = list_agent_webhook_config(&conn, Some("agent-1"), true).unwrap();
         assert_eq!(rows.len(), 3);
 
-        assert!(get_agent_webhook_config(&conn, "agent", "agent-1", "", "subtask")
-            .unwrap()
-            .is_some());
+        assert!(
+            get_agent_webhook_config(&conn, "agent", "agent-1", "", "subtask")
+                .unwrap()
+                .is_some()
+        );
         assert!(
             get_agent_webhook_config(&conn, "agent", "agent-1", "my_tool", "tool")
                 .unwrap()

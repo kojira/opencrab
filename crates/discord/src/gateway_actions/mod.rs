@@ -140,8 +140,9 @@ impl DiscordGatewayActions {
     }
 
     /// エージェントのワークスペース root（ベーステンプレートの {agent_id} を展開）。
-    fn agent_workspace_root(&self, agent_id: &str) -> PathBuf {
-        PathBuf::from(self.workspace_base.replace("{agent_id}", agent_id))
+    fn agent_workspace_root(&self, agent_id: &str) -> anyhow::Result<PathBuf> {
+        // 展開は core の型付きリゾルバに一本化（agent_id 検証込み — #48）。
+        opencrab_core::workspace::resolve_agent_workspace(&self.workspace_base, agent_id)
     }
 
     /// Set the event sender only (no A2UI pending-interaction registry).

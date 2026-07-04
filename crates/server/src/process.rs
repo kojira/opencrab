@@ -18,7 +18,9 @@ use crate::AppState;
 ///
 /// 返り値: (system_prompt, agent_name)
 pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (String, String) {
-    let agent = opencrab_db::queries::get_agent(conn, agent_id).ok().flatten();
+    let agent = opencrab_db::queries::get_agent(conn, agent_id)
+        .ok()
+        .flatten();
     let skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
     let curated_categories = ["long_term", "user_profile", "agent_rules"];
     let curated_sections: Vec<String> = curated_categories
@@ -268,15 +270,14 @@ pub fn build_conversation_string(
     // タスク台帳（前向きワーキング状態）を会話の先頭に前置する。
     // system prompt 側は 1h キャッシュされるため、毎ターン変わる台帳状態はここに置く。
     // 台帳の読み出し失敗で返信自体を殺さない（warn して台帳なしで続行）。
-    let ledger_section = match opencrab_core::task_ledger::build_ledger_section(
-        conn, agent_id, session_id,
-    ) {
-        Ok(section) => section,
-        Err(e) => {
-            tracing::warn!("failed to build task ledger section for session {session_id}: {e}");
-            None
-        }
-    };
+    let ledger_section =
+        match opencrab_core::task_ledger::build_ledger_section(conn, agent_id, session_id) {
+            Ok(section) => section,
+            Err(e) => {
+                tracing::warn!("failed to build task ledger section for session {session_id}: {e}");
+                None
+            }
+        };
 
     let inner_budget = match &ledger_section {
         Some(section) => context_budget_tokens.saturating_sub(estimate_tokens(section)),
@@ -314,13 +315,19 @@ fn build_conversation_inner(
     {
         Ok(t) => t,
         Err(e) => {
-            return Err(anyhow::anyhow!("Failed to get topic nodes for session {session_id}: {e}"));
+            return Err(anyhow::anyhow!(
+                "Failed to get topic nodes for session {session_id}: {e}"
+            ));
         }
     };
 
     if topics.is_empty() {
         // フォールバック: 要約がない場合は最新ログを予算内で切り詰め
-        return Ok(build_truncated_conversation(conn, session_id, context_budget_tokens));
+        return Ok(build_truncated_conversation(
+            conn,
+            session_id,
+            context_budget_tokens,
+        ));
     }
 
     // [Past context summary] セクション構築
@@ -365,22 +372,24 @@ fn build_conversation_inner(
     ) {
         Ok(logs) => logs,
         Err(e) => {
-            return Err(anyhow::anyhow!("Failed to list session logs after id for session {session_id}: {e}"));
+            return Err(anyhow::anyhow!(
+                "Failed to list session logs after id for session {session_id}: {e}"
+            ));
         }
     };
 
     // ログが少なければ追加取得（最低 RECENT_MIN_LOGS 件は確保）
     if recent_logs.len() < RECENT_MIN_LOGS {
-        let mut logs = match opencrab_db::queries::list_recent_session_logs(
-            conn,
-            session_id,
-            RECENT_MIN_LOGS,
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to list recent session logs for session {session_id}: {e}"));
-            }
-        };
+        let mut logs =
+            match opencrab_db::queries::list_recent_session_logs(conn, session_id, RECENT_MIN_LOGS)
+            {
+                Ok(l) => l,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to list recent session logs for session {session_id}: {e}"
+                    ));
+                }
+            };
         logs.reverse();
         recent_logs = logs;
     }
@@ -388,7 +397,9 @@ fn build_conversation_inner(
     // 予算内に収まるようにログを後ろから詰める
     let recent_text = fit_logs_to_budget(&recent_logs, remaining_budget);
 
-    Ok(format!("{summary_header}{summary_section}{recent_header}{recent_text}"))
+    Ok(format!(
+        "{summary_header}{summary_section}{recent_header}{recent_text}"
+    ))
 }
 
 /// context_budget_tokens を呼び出し元で計算するヘルパー。
@@ -511,7 +522,8 @@ fn format_single_log(log: &opencrab_db::queries::SessionLogRow) -> String {
                                         let id = item.get("id")?.as_str()?;
                                         // 正準形状 {function:{name, arguments:"<json-string>"}} と
                                         // 旧形状 {name, arguments:<object>} の両方に対応する。
-                                        let (name, args) = if let Some(func) = item.get("function") {
+                                        let (name, args) = if let Some(func) = item.get("function")
+                                        {
                                             let name = func.get("name")?.as_str()?;
                                             let args = func
                                                 .get("arguments")
@@ -655,17 +667,17 @@ async fn run_verify_stage(
             .ok()
             .flatten();
         let Some(task) = task else { return };
-        let trace = opencrab_db::queries::list_session_logs_after_id(
-            &conn,
-            session_id,
-            trace_checkpoint,
-        )
-        .map(|logs| {
-            // マルチエージェントセッションで他エージェントの作業を「証拠」に混ぜない
-            let own: Vec<_> = logs.into_iter().filter(|l| l.agent_id == agent_id).collect();
-            opencrab_core::evaluator::format_trace(&own)
-        })
-        .unwrap_or_default();
+        let trace =
+            opencrab_db::queries::list_session_logs_after_id(&conn, session_id, trace_checkpoint)
+                .map(|logs| {
+                    // マルチエージェントセッションで他エージェントの作業を「証拠」に混ぜない
+                    let own: Vec<_> = logs
+                        .into_iter()
+                        .filter(|l| l.agent_id == agent_id)
+                        .collect();
+                    opencrab_core::evaluator::format_trace(&own)
+                })
+                .unwrap_or_default();
         (task, trace)
     };
     let Some(contract) = task.contract.clone().filter(|c| !c.trim().is_empty()) else {
@@ -756,7 +768,7 @@ async fn run_verify_stage(
         } else {
             "\nAddress these gaps in your next turn (claims without evidence in the trace do not count).".to_string()
         };
-        let _ = opencrab_db::queries::insert_session_log(
+        opencrab_db::queries::insert_session_log_best_effort(
             &conn,
             &opencrab_db::queries::SessionLogRow {
                 id: None,
@@ -809,7 +821,8 @@ pub async fn run_agent_response(
     on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
 ) -> anyhow::Result<opencrab_core::EngineResult> {
     // Build workspace path for this agent.
-    let ws_path = state.workspace_base.replace("{agent_id}", agent_id);
+    let ws_path =
+        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
     std::fs::create_dir_all(&ws_path).ok();
     let workspace = opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))?;
 
@@ -1031,7 +1044,8 @@ pub async fn run_agent_response(
         let tr_db = state.db.clone();
         let tr_agent = agent_id.to_string();
         let tr_session = session_id.to_string();
-        let tr_workspace = state.workspace_base.replace("{agent_id}", agent_id);
+        let tr_workspace =
+            opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
                 const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
@@ -1275,15 +1289,36 @@ mod peer_reviewers_section_tests {
         assert_eq!(peer_reviewers_section(&conn, "a1"), "");
 
         opencrab_db::queries::add_trusted_user(
-            &conn, "r1", "a1", "42", "co_agent", "owner", "2026-01-01", "Crab B",
+            &conn,
+            "r1",
+            "a1",
+            "42",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "Crab B",
         )
         .unwrap();
         opencrab_db::queries::add_trusted_user(
-            &conn, "r2", "a1", "43", "co_agent", "owner", "2026-01-01", "",
+            &conn,
+            "r2",
+            "a1",
+            "43",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "",
         )
         .unwrap();
         opencrab_db::queries::add_trusted_user(
-            &conn, "r3", "a1", "44", "trusted_user", "owner", "2026-01-01", "Human",
+            &conn,
+            "r3",
+            "a1",
+            "44",
+            "trusted_user",
+            "owner",
+            "2026-01-01",
+            "Human",
         )
         .unwrap();
 
@@ -1329,7 +1364,10 @@ mod format_log_tests {
         let out = format_single_log(&tool_call_log(&tcj));
         assert!(out.contains("search"), "tool name must render: {out}");
         assert!(out.contains("tc-1"), "tool id must render: {out}");
-        assert!(out.contains(r#"{"q":"rust"}"#), "arguments must render: {out}");
+        assert!(
+            out.contains(r#"{"q":"rust"}"#),
+            "arguments must render: {out}"
+        );
     }
 
     #[test]
@@ -1342,7 +1380,10 @@ mod format_log_tests {
         }])
         .to_string();
         let out = format_single_log(&tool_call_log(&tcj));
-        assert!(out.contains("old_tool"), "legacy tool name must render: {out}");
+        assert!(
+            out.contains("old_tool"),
+            "legacy tool name must render: {out}"
+        );
         assert!(out.contains("tc-9"), "legacy tool id must render: {out}");
     }
 }

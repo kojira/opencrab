@@ -840,7 +840,7 @@ pub fn record_webhook_delivery_failure(
         metadata_json: None,
         created_at: None,
     };
-    opencrab_db::queries::insert_session_log(conn, &log).ok();
+    opencrab_db::queries::insert_session_log_best_effort(conn, &log);
 }
 
 /// Retry-After ヘッダ（秒）を読む。

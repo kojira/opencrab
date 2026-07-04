@@ -184,7 +184,9 @@ mod tests {
     #[async_trait]
     impl LlmClient for MockLlm {
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
-            Ok(ChatResponse::text(r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string()))
+            Ok(ChatResponse::text(
+                r#"{"title": "テストトピック", "summary": "テスト要約です。"}"#.to_string(),
+            ))
         }
     }
 

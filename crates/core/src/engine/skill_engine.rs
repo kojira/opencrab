@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing;
 
-use super::types::{ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient};
+use super::types::{
+    ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient,
+};
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
 use opencrab_llm_types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
 
@@ -134,8 +136,7 @@ impl SkillEngine {
         model_override: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
         image_urls: &[String],
     ) -> Result<EngineResult> {
-        let cache_control_1h =
-            || Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"}));
+        let cache_control_1h = || Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"}));
 
         let mut tools = self.executor.list_tools();
         // BP1: toolsの最後のツールにcache_control(1h)を付与
@@ -352,7 +353,12 @@ impl SkillEngine {
 
                         // Notify on_tool_result callback for denied action.
                         if let Some(ref cb) = self.on_tool_result {
-                            cb(tool_call.id.clone(), tool_name.clone(), result_json.clone(), true);
+                            cb(
+                                tool_call.id.clone(),
+                                tool_name.clone(),
+                                result_json.clone(),
+                                true,
+                            );
                         }
                         continue;
                     }
@@ -612,7 +618,11 @@ mod tests {
     #[tokio::test]
     async fn test_tool_result_feedback() {
         let llm = MockLlm::new(vec![
-            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({"query": "test"}))]),
+            tool_call_response(vec![tc(
+                "tc-1",
+                "test_tool",
+                serde_json::json!({"query": "test"}),
+            )]),
             text_response("Received tool feedback"),
         ]);
         let executor = MockExecutor::new().add_result(
@@ -798,9 +808,9 @@ mod tests {
         let second_call_msgs = &all_messages[1];
 
         // Should contain an assistant message with non-empty tool_calls
-        let has_assistant_with_tool_calls = second_call_msgs
-            .iter()
-            .any(|m| m.role == Role::Assistant && m.tool_calls.as_ref().map_or(false, |t| !t.is_empty()));
+        let has_assistant_with_tool_calls = second_call_msgs.iter().any(|m| {
+            m.role == Role::Assistant && m.tool_calls.as_ref().map_or(false, |t| !t.is_empty())
+        });
         assert!(
             has_assistant_with_tool_calls,
             "Second LLM call must include an assistant message with tool_calls"

@@ -364,7 +364,7 @@ impl DiscordGatewayActions {
                     metadata_json: None,
                     created_at: None,
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
 
@@ -383,7 +383,16 @@ impl DiscordGatewayActions {
         // 実効モデルは1回だけ解決する（runtime_info と run_with_model_override で
         // 同じ値を使う — 呼び出し間に設定が変わっても不整合にしない）。
         let effective_model = self.effective_model(&agent_id);
-        let ws_path = self.agent_workspace_root(&agent_id).join(&agent_id);
+        let ws_path = match self.agent_workspace_root(&agent_id) {
+            Ok(root) => root.join(&agent_id),
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(format!("spawn_subtask: workspace error: {e}")),
+                };
+            }
+        };
         std::fs::create_dir_all(&ws_path).ok();
         let workspace = match opencrab_core::workspace::Workspace::from_root(&ws_path) {
             Ok(w) => w,
@@ -618,7 +627,7 @@ impl DiscordGatewayActions {
                         metadata_json: None,
                         created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                 }
             }
 
@@ -777,7 +786,7 @@ impl DiscordGatewayActions {
                             ),
                             created_at: None,
                         };
-                        opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                        opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                     }
                 }
 
@@ -898,7 +907,7 @@ impl DiscordGatewayActions {
                     metadata_json: None,
                     created_at: None,
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
 

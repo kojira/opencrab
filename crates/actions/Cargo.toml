@@ -23,3 +23,6 @@ indexmap = "2"
 tempfile = { workspace = true }
 tokio = { workspace = true }
 opencrab-llm-types = { workspace = true }
+
+[lints]
+workspace = true

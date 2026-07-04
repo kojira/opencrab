@@ -85,8 +85,9 @@ impl opencrab_discord::AgentRunner for AppState {
 
     fn context_budget_tokens(&self, agent_id: &str) -> usize {
         let conn = self.db.lock().unwrap();
-        let eff = opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &self.default_model)
-            .unwrap_or_else(|_| self.default_model.clone());
+        let eff =
+            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &self.default_model)
+                .unwrap_or_else(|_| self.default_model.clone());
         let (prov, mdl) = process::split_llm_model_spec(&eff);
         process::compute_context_budget(&conn, prov, mdl, self.compaction_ratio)
     }

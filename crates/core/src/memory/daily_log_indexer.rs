@@ -50,7 +50,11 @@ fn year_month_of(date_str: &str) -> Option<&str> {
         return None;
     }
     let digits_ok = |r: std::ops::Range<usize>| bytes[r].iter().all(|b| b.is_ascii_digit());
-    if digits_ok(0..4) && bytes[4] == b'-' && digits_ok(5..7) && bytes[7] == b'-' && digits_ok(8..10)
+    if digits_ok(0..4)
+        && bytes[4] == b'-'
+        && digits_ok(5..7)
+        && bytes[7] == b'-'
+        && digits_ok(8..10)
     {
         Some(&date_str[..7])
     } else {
@@ -59,7 +63,13 @@ fn year_month_of(date_str: &str) -> Option<&str> {
 }
 
 impl DailyLogIndexer {
-    pub fn new(db: opencrab_db::Db, llm_client: Arc<dyn LlmClient>, model: String, persona_name: String, personality: Option<String>) -> Self {
+    pub fn new(
+        db: opencrab_db::Db,
+        llm_client: Arc<dyn LlmClient>,
+        model: String,
+        persona_name: String,
+        personality: Option<String>,
+    ) -> Self {
         Self {
             db,
             llm_client,
@@ -529,9 +539,9 @@ impl DailyLogIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
     use crate::engine::{ChatRequest, ChatResponse, LlmClient};
     use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
 
     struct MockLlm;
 
@@ -572,7 +582,13 @@ mod tests {
     async fn test_run_empty() {
         let db = opencrab_db::init_memory().unwrap();
         let conn = opencrab_db::Db::from_connection(db);
-        let indexer = DailyLogIndexer::new(conn, Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
+        let indexer = DailyLogIndexer::new(
+            conn,
+            Arc::new(MockLlm),
+            "test-model".to_string(),
+            String::new(),
+            None,
+        );
         let stats = indexer.run("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 0);
     }
@@ -583,8 +599,13 @@ mod tests {
         insert_daily_log(&db, "agent-1", "2026-02-01", "2月1日のログ");
         insert_daily_log(&db, "agent-1", "2026-02-02", "2月2日のログ");
         let conn = opencrab_db::Db::from_connection(db);
-        let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
+        let indexer = DailyLogIndexer::new(
+            conn.clone(),
+            Arc::new(MockLlm),
+            "test-model".to_string(),
+            String::new(),
+            None,
+        );
         let stats = indexer.run("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 2);
         assert_eq!(stats.periods_updated, 1);
@@ -612,8 +633,13 @@ mod tests {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
         let conn = opencrab_db::Db::from_connection(db);
-        let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
+        let indexer = DailyLogIndexer::new(
+            conn.clone(),
+            Arc::new(MockLlm),
+            "test-model".to_string(),
+            String::new(),
+            None,
+        );
         let r1 = indexer.run("agent-1").await.unwrap();
         assert_eq!(r1.days_indexed, 1);
         let r2 = indexer.run("agent-1").await.unwrap();
@@ -625,8 +651,13 @@ mod tests {
         let db = opencrab_db::init_memory().unwrap();
         insert_daily_log(&db, "agent-1", "2026-02-01", "ログ内容");
         let conn = opencrab_db::Db::from_connection(db);
-        let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
+        let indexer = DailyLogIndexer::new(
+            conn.clone(),
+            Arc::new(MockLlm),
+            "test-model".to_string(),
+            String::new(),
+            None,
+        );
         indexer.run("agent-1").await.unwrap();
         let stats = indexer.rebuild("agent-1").await.unwrap();
         assert_eq!(stats.days_indexed, 1);
@@ -638,8 +669,13 @@ mod tests {
         insert_daily_log(&db, "agent-1", "2026-02-01", "エージェント1のログ");
         insert_daily_log(&db, "agent-2", "2026-02-01", "エージェント2のログ");
         let conn = opencrab_db::Db::from_connection(db);
-        let indexer =
-            DailyLogIndexer::new(conn.clone(), Arc::new(MockLlm), "test-model".to_string(), String::new(), None);
+        let indexer = DailyLogIndexer::new(
+            conn.clone(),
+            Arc::new(MockLlm),
+            "test-model".to_string(),
+            String::new(),
+            None,
+        );
         indexer.run("agent-1").await.unwrap();
         indexer.run("agent-2").await.unwrap();
 
@@ -698,7 +734,9 @@ mod tests {
         let last_request = Arc::new(Mutex::new(None));
         let indexer = DailyLogIndexer::new(
             conn,
-            Arc::new(RecordingMockLlm { last_request: last_request.clone() }),
+            Arc::new(RecordingMockLlm {
+                last_request: last_request.clone(),
+            }),
             "test-model".to_string(),
             "のすたろう".to_string(),
             Some("17歳のオタク高校生。クールに振る舞うけど根はオタク。".to_string()),
@@ -708,12 +746,30 @@ mod tests {
 
         let request = last_request.lock().unwrap().clone().unwrap();
         let prompt = request.messages[0].text_content().unwrap_or("");
-        assert!(prompt.contains("のすたろう"), "プロンプトにpersona_nameが含まれるべき");
-        assert!(prompt.contains("17歳のオタク高校生"), "プロンプトにpersonalityが含まれるべき");
-        assert!(prompt.contains("学んだこと") || prompt.contains("技術知見"), "技術知見軸");
-        assert!(prompt.contains("判断の理由") || prompt.contains("判断"), "判断軸");
-        assert!(prompt.contains("関係性") || prompt.contains("感情"), "関係性軸");
-        assert!(prompt.contains("失敗") || prompt.contains("教訓"), "失敗・教訓軸");
+        assert!(
+            prompt.contains("のすたろう"),
+            "プロンプトにpersona_nameが含まれるべき"
+        );
+        assert!(
+            prompt.contains("17歳のオタク高校生"),
+            "プロンプトにpersonalityが含まれるべき"
+        );
+        assert!(
+            prompt.contains("学んだこと") || prompt.contains("技術知見"),
+            "技術知見軸"
+        );
+        assert!(
+            prompt.contains("判断の理由") || prompt.contains("判断"),
+            "判断軸"
+        );
+        assert!(
+            prompt.contains("関係性") || prompt.contains("感情"),
+            "関係性軸"
+        );
+        assert!(
+            prompt.contains("失敗") || prompt.contains("教訓"),
+            "失敗・教訓軸"
+        );
     }
 
     /// T-2.4: DailyLogIndexer でペルソナなしでも動作する

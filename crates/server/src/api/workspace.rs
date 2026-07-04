@@ -17,10 +17,9 @@ fn open_agent_workspace(
     state: &AppState,
     id: &str,
 ) -> Result<opencrab_core::workspace::Workspace, String> {
-    opencrab_core::workspace::validate_agent_id(id).map_err(|e| e.to_string())?;
-    let ws_path = state.workspace_base.replace("{agent_id}", id);
-    opencrab_core::workspace::Workspace::from_root(std::path::Path::new(&ws_path))
-        .map_err(|e| e.to_string())
+    let ws_path = opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, id)
+        .map_err(|e| e.to_string())?;
+    opencrab_core::workspace::Workspace::from_root(&ws_path).map_err(|e| e.to_string())
 }
 
 pub async fn list_workspace(

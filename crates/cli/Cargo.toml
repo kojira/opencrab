@@ -19,3 +19,6 @@ rusqlite = { workspace = true }
 opencrab-server = { path = "../server" }
 dotenvy = { workspace = true }
 uuid = { workspace = true }
+
+[lints]
+workspace = true

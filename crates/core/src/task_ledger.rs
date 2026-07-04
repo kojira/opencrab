@@ -34,7 +34,6 @@ fn short_timestamp(rfc3339: &str) -> String {
     }
 }
 
-
 /// セッションの active タスクから `[Task Ledger]` セクションを組み立てる。
 /// active タスクが無ければ `Ok(None)`。
 pub fn build_ledger_section(
@@ -124,7 +123,10 @@ mod tests {
         assert_eq!(short_timestamp("2026-07-02T09:41:23+00:00"), "07-02 09:41");
         assert_eq!(short_timestamp("short"), "short");
         // 先頭16バイト内にマルチバイト文字があっても panic しない
-        assert_eq!(short_timestamp("2026年07月02日T09:41"), "2026年07月02日T09:41");
+        assert_eq!(
+            short_timestamp("2026年07月02日T09:41"),
+            "2026年07月02日T09:41"
+        );
     }
 
     #[test]
@@ -155,8 +157,8 @@ mod tests {
     #[test]
     fn renders_contract_and_short_progress() {
         let conn = setup();
-        let id =
-            queries::insert_task_ledger(&conn, "a1", "s1", "goal", Some("all tests green")).unwrap();
+        let id = queries::insert_task_ledger(&conn, "a1", "s1", "goal", Some("all tests green"))
+            .unwrap();
         queries::insert_task_progress(&conn, id, "blocker", &"x".repeat(600)).unwrap();
 
         let section = build_ledger_section(&conn, "a1", "s1").unwrap().unwrap();

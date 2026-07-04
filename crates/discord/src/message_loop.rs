@@ -617,7 +617,7 @@ async fn process_incoming_message<T: AgentRunner>(
                         metadata_json: Some(log_meta.to_string()),
                         created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                 }
             }
 
@@ -709,7 +709,7 @@ async fn handle_agent_response<T: AgentRunner>(
                         metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
                         created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                 }
                 return;
             }
@@ -733,7 +733,7 @@ async fn handle_agent_response<T: AgentRunner>(
                     ),
                     created_at: None,
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
         Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
@@ -834,7 +834,7 @@ async fn process_subtask_completed<T: AgentRunner>(
                         metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
                         created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                 }
                 return;
             }
@@ -874,7 +874,7 @@ async fn process_subtask_completed<T: AgentRunner>(
                     ),
                     created_at: None,
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
         _ => {}
@@ -1139,7 +1139,7 @@ async fn process_interaction_response<T: AgentRunner>(
                 ),
                 created_at: None,
             };
-            opencrab_db::queries::insert_session_log(&conn, &log).ok();
+            opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
         }
     }
 
@@ -1203,7 +1203,7 @@ async fn process_interaction_response<T: AgentRunner>(
                         metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
                         created_at: None,
                     };
-                    opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                 }
                 return;
             }
@@ -1244,7 +1244,7 @@ async fn process_interaction_response<T: AgentRunner>(
                     ),
                     created_at: None,
                 };
-                opencrab_db::queries::insert_session_log(&conn, &log).ok();
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
             }
         }
         _ => {}
