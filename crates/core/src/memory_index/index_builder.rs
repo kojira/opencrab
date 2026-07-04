@@ -32,6 +32,31 @@ pub struct MergeResult {
 struct LlmSummary {
     title: String,
     summary: String,
+    /// 検索用キーワード（逆引き）。旧形式の応答（keywords なし）も許容する。
+    #[serde(default)]
+    keywords: Vec<String>,
+}
+
+/// キーワードの正規化: 空白トリム・空要素除去・重複除去・最大8個。
+/// LLM 出力が空/欠落の場合は title を空白分割したフォールバックを返す
+/// （恒久的に keyword-less なノードを作らない — バックフィル対象判定が
+/// `keywords_json = '[]'` のため、空のまま insert すると毎 tick 再抽出対象になる）。
+fn normalize_keywords(keywords: Vec<String>, fallback_title: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = keywords
+        .into_iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty() && seen.insert(k.clone()))
+        .take(8)
+        .collect();
+    if out.is_empty() {
+        out = fallback_title
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .take(8)
+            .collect();
+    }
+    out
 }
 
 pub struct IndexBuilder;
@@ -119,6 +144,8 @@ impl IndexBuilder {
                     created_at: now.clone(),
                     updated_at: now.clone(),
                     short_id: Some("r0".to_string()),
+                    keywords_json: "[]".to_string(),
+                    summary_refreshed_at: None,
                 };
                 opencrab_db::queries::insert_index_node(&db, &root)?;
                 nodes_created += 1;
@@ -170,6 +197,8 @@ impl IndexBuilder {
                         created_at: now.clone(),
                         updated_at: now.clone(),
                         short_id: Some(period_short_id),
+                        keywords_json: "[]".to_string(),
+                        summary_refreshed_at: None,
                     };
                     opencrab_db::queries::insert_index_node(&db, &period)?;
                     nodes_created += 1;
@@ -215,6 +244,8 @@ impl IndexBuilder {
                         created_at: now.clone(),
                         updated_at: now.clone(),
                         short_id: Some(session_short_id),
+                        keywords_json: "[]".to_string(),
+                        summary_refreshed_at: None,
                     };
                     opencrab_db::queries::insert_index_node(&db, &session_node)?;
                     nodes_created += 1;
@@ -243,11 +274,11 @@ impl IndexBuilder {
             tracing::debug!("index_builder: personality content = {:?}", personality);
             let prompt = if let Some(p) = personality.filter(|s| !s.is_empty()) {
                 format!(
-                    "あなたは {persona_name} です。\n{p}\n\n以下はあなたが体験した会話のログです。\nあなた自身の記憶として、以下の観点を含めて要約してください:\n\n1. 学んだこと・技術知見（新しく知ったこと、理解が深まったこと）\n2. 判断の理由（なぜそうしたか、どういう選択肢があったか）\n3. 関係性・感情（誰と何をしたか、どう感じたか）\n4. 失敗と教訓（うまくいかなかったこと、次回への学び）\n\n一人称で書いてください。客観的なイベントログではなく、あなたの記憶として。\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\"}}\n\nログ:\n{chunk_text}"
+                    "あなたは {persona_name} です。\n{p}\n\n以下はあなたが体験した会話のログです。\nあなた自身の記憶として、以下の観点を含めて要約してください:\n\n1. 学んだこと・技術知見（新しく知ったこと、理解が深まったこと）\n2. 判断の理由（なぜそうしたか、どういう選択肢があったか）\n3. 関係性・感情（誰と何をしたか、どう感じたか）\n4. 失敗と教訓（うまくいかなかったこと、次回への学び）\n\n一人称で書いてください。客観的なイベントログではなく、あなたの記憶として。\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\", \"keywords\": [\"3〜8個の検索用キーワード（人物・技術・固有名詞）\"]}}\n\nログ:\n{chunk_text}"
                 )
             } else {
                 format!(
-                    "以下の会話のログについて、一人称視点で記憶として要約してください。\n\n1. 学んだこと・技術知見\n2. 判断の理由\n3. 関係性・感情\n4. 失敗と教訓\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\"}}\n\nログ:\n{chunk_text}"
+                    "以下の会話のログについて、一人称視点で記憶として要約してください。\n\n1. 学んだこと・技術知見\n2. 判断の理由\n3. 関係性・感情\n4. 失敗と教訓\n\nJSON形式で出力:\n{{\"title\": \"20字以内\", \"summary\": \"200字以内\", \"keywords\": [\"3〜8個の検索用キーワード（人物・技術・固有名詞）\"]}}\n\nログ:\n{chunk_text}"
                 )
             };
 
@@ -265,7 +296,7 @@ impl IndexBuilder {
                 vec![Message::system(system_content), Message::user(prompt)],
             )
             .with_temperature(0.0)
-            .with_max_tokens(200);
+            .with_max_tokens(320);
 
             let summary = match llm.chat(request).await {
                 Ok(resp) => {
@@ -285,6 +316,7 @@ impl IndexBuilder {
                                 }
                             })
                             .unwrap_or_default(),
+                        keywords: Vec::new(),
                     })
                 }
                 Err(e) => {
@@ -298,9 +330,11 @@ impl IndexBuilder {
                     LlmSummary {
                         title: format!("Topic (logs {first_log_id}-{last_log_id})"),
                         summary: "Summary generation failed".to_string(),
+                        keywords: Vec::new(),
                     }
                 }
             };
+            let keywords = normalize_keywords(summary.keywords, &summary.title);
 
             // topicノード作成
             let topic_id = format!("topic-{agent_id}-{session_id}-{first_log_id}-{last_log_id}");
@@ -335,6 +369,9 @@ impl IndexBuilder {
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 short_id: None,
+                keywords_json: serde_json::to_string(&keywords)
+                    .unwrap_or_else(|_| "[]".to_string()),
+                summary_refreshed_at: None,
             };
 
             {
@@ -520,12 +557,25 @@ impl IndexBuilder {
                     serde_json::from_str::<LlmSummary>(json_str).unwrap_or(LlmSummary {
                         title: format!("Merged topics for {}", period.title),
                         summary: "Merged summary".to_string(),
+                        keywords: Vec::new(),
                     })
                 }
                 Err(_) => LlmSummary {
                     title: format!("Merged topics for {}", period.title),
                     summary: "Merge failed".to_string(),
+                    keywords: Vec::new(),
                 },
+            };
+            // マージ後の keywords: 元トピック群の和集合（上限8）。LLM の再抽出はしない
+            // （要約プロンプトは title/summary のみ返す想定のままにして安く保つ）。
+            let merged_keywords: Vec<String> = {
+                let from_topics: Vec<String> = topic_nodes
+                    .iter()
+                    .flat_map(|t| {
+                        serde_json::from_str::<Vec<String>>(&t.keywords_json).unwrap_or_default()
+                    })
+                    .collect();
+                normalize_keywords(from_topics, &merged_summary.title)
             };
 
             let start_log = topic_nodes.iter().filter_map(|t| t.start_log_id).min();
@@ -542,10 +592,8 @@ impl IndexBuilder {
                     .lock()
                     .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;
                 for topic in &topic_nodes {
-                    db.execute(
-                        "DELETE FROM memory_index_nodes WHERE id = ?1",
-                        rusqlite::params![topic.id],
-                    )?;
+                    // 生 SQL DELETE は FTS 影テーブルに孤児を残すため禁止。
+                    opencrab_db::queries::delete_index_node(&db, &topic.id)?;
                     deleted_count += 1;
                 }
             }
@@ -570,6 +618,9 @@ impl IndexBuilder {
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 short_id: None,
+                keywords_json: serde_json::to_string(&merged_keywords)
+                    .unwrap_or_else(|_| "[]".to_string()),
+                summary_refreshed_at: None,
             };
             {
                 let db = conn
@@ -716,6 +767,98 @@ mod tests {
         let topic = tree.iter().find(|n| n.node_type == "topic").unwrap();
         assert_eq!(topic.title, "テストトピック");
         assert_eq!(topic.summary, "テスト要約です。");
+        // keywords 無しの旧形式応答 → title フォールバック（空にはしない）
+        assert_eq!(topic.keywords_json, r#"["テストトピック"]"#);
+    }
+
+    struct KeywordMockLlm;
+
+    #[async_trait]
+    impl LlmClient for KeywordMockLlm {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(
+                r#"{"title": "Rust勉強会", "summary": "所有権を学んだ。", "keywords": ["Rust", "所有権", " Rust ", ""]}"#
+                    .to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_topic_keywords_from_llm_normalized_and_searchable() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: "Rust ownership discussion".to_string(),
+            speaker_id: Some("user-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+
+        let conn = opencrab_db::Db::from_connection(db_conn);
+        IndexBuilder::build_incremental(&conn, "agent-1", &KeywordMockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        let topic = tree.iter().find(|n| n.node_type == "topic").unwrap();
+        // トリム・空要素除去・重複除去される
+        assert_eq!(topic.keywords_json, r#"["Rust","所有権"]"#);
+        // FTS 逆引きでキーワードから引ける
+        let hits =
+            opencrab_db::queries::search_index_nodes(&db, "agent-1", "所有権", 10, None).unwrap();
+        assert!(hits.iter().any(|h| h.node_id == topic.id));
+    }
+
+    #[tokio::test]
+    async fn test_merge_topics_leaves_no_fts_orphans() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        // 同一月に 3 セッション分のログ → topic 3 個
+        for s in 1..=3 {
+            let log = opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: "agent-1".to_string(),
+                session_id: format!("session-{s}"),
+                log_type: "message".to_string(),
+                content: format!("unique-marker-{s} content"),
+                speaker_id: Some("user-1".to_string()),
+                turn_number: Some(1),
+                metadata_json: None,
+                created_at: None,
+            };
+            opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+        }
+        let conn = opencrab_db::Db::from_connection(db_conn);
+        IndexBuilder::build_incremental(&conn, "agent-1", &KeywordMockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let merge = IndexBuilder::merge_topics(&conn, "agent-1", &KeywordMockLlm, "m", 1, "", None)
+            .await
+            .unwrap();
+        assert!(merge.topics_deleted >= 2);
+
+        let db = conn.lock().unwrap();
+        // FTS 行数 = ノード行数（孤児なし）
+        let fts: i64 = db
+            .query_row("SELECT COUNT(*) FROM memory_index_fts", [], |r| r.get(0))
+            .unwrap();
+        let nodes: i64 = db
+            .query_row("SELECT COUNT(*) FROM memory_index_nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts, nodes);
+        // マージノードは元トピックの keywords を引き継ぐ
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        let merged = tree
+            .iter()
+            .find(|n| n.id.starts_with("merged-topic-"))
+            .unwrap();
+        assert!(merged.keywords_json.contains("Rust"));
     }
 
     /// T-2.1: ペルソナ情報が要約プロンプトに含まれる

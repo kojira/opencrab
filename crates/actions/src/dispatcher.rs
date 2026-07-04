@@ -50,6 +50,7 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(CreateMySkillAction));
         dispatcher.register(Arc::new(BrowseMemoryIndexAction));
         dispatcher.register(Arc::new(RetrieveMemoryNodesAction));
+        dispatcher.register(Arc::new(SearchMemoryIndexAction));
 
         // LLM関連アクション登録
         dispatcher.register(Arc::new(SelectLlmAction));

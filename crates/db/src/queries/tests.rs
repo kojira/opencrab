@@ -1830,6 +1830,8 @@ fn test_next_short_id_sequential() {
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: Some(format!("t{i}")),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -1864,6 +1866,8 @@ fn test_next_short_id_independent_prefix() {
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: Some(format!("{prefix}{num}")),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -1898,6 +1902,8 @@ fn test_next_short_id_independent_agent() {
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: Some(format!("t{i}")),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -1923,6 +1929,8 @@ fn test_next_short_id_independent_agent() {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             short_id: Some("t1".to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
         },
     )
     .unwrap();
@@ -1956,6 +1964,8 @@ fn test_next_short_id_with_gaps() {
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: Some(format!("t{num}")),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -2004,6 +2014,8 @@ fn test_backfill_short_ids_basic() {
                 created_at: format!("2026-01-01T00:0{i}:00Z"),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: None,
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -2030,6 +2042,8 @@ fn test_backfill_short_ids_basic() {
                 created_at: format!("2026-01-01T01:0{i}:00Z"),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: None,
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -2073,6 +2087,8 @@ fn test_backfill_short_ids_skip_existing() {
                 created_at: format!("2026-01-01T00:0{i}:00Z"),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: Some(format!("t{i}")),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -2099,6 +2115,8 @@ fn test_backfill_short_ids_skip_existing() {
                 created_at: format!("2026-01-01T00:0{i}:00Z"),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
                 short_id: None,
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             },
         )
         .unwrap();
@@ -2158,6 +2176,8 @@ fn test_get_index_node_by_short_id() {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             short_id: Some("t42".to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
         },
     )
     .unwrap();
@@ -2194,6 +2214,8 @@ fn test_get_index_node_by_full_id() {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             short_id: Some("t42".to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
         },
     )
     .unwrap();
@@ -2213,4 +2235,247 @@ fn test_get_index_node_by_short_id_not_found() {
     let conn = setup();
     let result = get_index_node_by_short_or_id(&conn, "a1", "t99999").unwrap();
     assert!(result.is_none());
+}
+
+// ============================================
+// memory_index_fts / キーワード逆引きテスト
+// ============================================
+
+fn mk_topic_node(
+    id: &str,
+    agent_id: &str,
+    title: &str,
+    summary: &str,
+    keywords: &[&str],
+) -> IndexNodeRow {
+    IndexNodeRow {
+        id: id.to_string(),
+        agent_id: agent_id.to_string(),
+        parent_id: None,
+        node_type: "topic".to_string(),
+        source_type: "session_log".to_string(),
+        title: title.to_string(),
+        summary: summary.to_string(),
+        start_log_id: None,
+        end_log_id: None,
+        source_session_id: None,
+        date_from: Some("2026-06-01".to_string()),
+        date_to: Some("2026-06-02".to_string()),
+        depth: 3,
+        child_count: 0,
+        token_count: 0,
+        created_at: "2026-06-01T00:00:00Z".to_string(),
+        updated_at: "2026-06-01T00:00:00Z".to_string(),
+        short_id: Some(id.to_string()),
+        keywords_json: serde_json::to_string(keywords).unwrap(),
+        summary_refreshed_at: None,
+    }
+}
+
+fn fts_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM memory_index_fts", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn nodes_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM memory_index_nodes", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn test_index_fts_consistency_through_write_paths() {
+    let conn = setup();
+    insert_index_node(
+        &conn,
+        &mk_topic_node(
+            "t1",
+            "a1",
+            "Discord連携",
+            "botの実装",
+            &["Discord", "serenity"],
+        ),
+    )
+    .unwrap();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t2", "a1", "料理の話", "カレーを作った", &["カレー"]),
+    )
+    .unwrap();
+    assert_eq!(fts_count(&conn), nodes_count(&conn));
+
+    // キーワードでヒット
+    let hits = search_index_nodes(&conn, "a1", "serenity", 10, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].node_id, "t1");
+
+    // summary 更新が検索に反映される
+    update_index_node_summary(&conn, "t2", "料理の話", "肉じゃがを作った").unwrap();
+    assert!(
+        search_index_nodes(&conn, "a1", "肉じゃが", 10, None)
+            .unwrap()
+            .len()
+            == 1
+    );
+    assert!(search_index_nodes(&conn, "a1", "カレーを作った", 10, None)
+        .unwrap()
+        .is_empty());
+    assert_eq!(fts_count(&conn), nodes_count(&conn));
+
+    // keywords 更新が検索に反映される
+    update_index_node_keywords(&conn, "t2", "[\"肉じゃが\",\"じゃがいも\"]").unwrap();
+    let hits = search_index_nodes(&conn, "a1", "じゃがいも", 10, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].node_id, "t2");
+
+    // 単体削除で FTS も消える
+    delete_index_node(&conn, "t1").unwrap();
+    assert!(search_index_nodes(&conn, "a1", "serenity", 10, None)
+        .unwrap()
+        .is_empty());
+    assert_eq!(fts_count(&conn), nodes_count(&conn));
+
+    // agent 単位 purge で FTS も消える
+    delete_index_nodes_for_agent(&conn, "a1").unwrap();
+    assert_eq!(fts_count(&conn), 0);
+    assert_eq!(nodes_count(&conn), 0);
+}
+
+#[test]
+fn test_index_fts_insert_or_ignore_keeps_existing() {
+    let conn = setup();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t1", "a1", "元タイトル", "元要約", &["元"]),
+    )
+    .unwrap();
+    // 同一 id の再 insert は OR IGNORE で無視され、FTS も元のまま
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t1", "a1", "新タイトル", "新要約", &["新"]),
+    )
+    .unwrap();
+    assert_eq!(fts_count(&conn), 1);
+    assert_eq!(
+        search_index_nodes(&conn, "a1", "元要約", 10, None)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(search_index_nodes(&conn, "a1", "新要約", 10, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_search_index_nodes_scoping_and_filters() {
+    let conn = setup();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t1", "a1", "Rust勉強会", "所有権の話", &["Rust"]),
+    )
+    .unwrap();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t2", "a2", "Rust輪読", "他人の記憶", &["Rust"]),
+    )
+    .unwrap();
+    let mut period = mk_topic_node("p1", "a1", "2026-05", "5月のRustまとめ", &[]);
+    period.node_type = "period".to_string();
+    insert_index_node(&conn, &period).unwrap();
+
+    // agent 分離: a1 からは a2 のノードが見えない
+    let hits = search_index_nodes(&conn, "a1", "Rust", 10, None).unwrap();
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|h| h.node_id != "t2"));
+
+    // node_type フィルタ
+    let hits = search_index_nodes(&conn, "a1", "Rust", 10, Some("period")).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].node_id, "p1");
+
+    // AND で 0 件 → OR フォールバックで拾う
+    let hits = search_index_nodes(&conn, "a1", "所有権 存在しない語", 10, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].node_id, "t1");
+
+    // 空クエリは空結果
+    assert!(search_index_nodes(&conn, "a1", "   ", 10, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_list_topics_missing_keywords() {
+    let conn = setup();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t1", "a1", "キーワードなし", "s", &[]),
+    )
+    .unwrap();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t2", "a1", "キーワードあり", "s", &["kw"]),
+    )
+    .unwrap();
+    let mut daily = mk_topic_node("d1", "a1", "daily由来", "s", &[]);
+    daily.source_type = "daily_log".to_string();
+    insert_index_node(&conn, &daily).unwrap();
+
+    let missing = list_topics_missing_keywords(&conn, "a1", 10).unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].id, "t1");
+}
+
+#[test]
+fn test_search_index_nodes_short_query_like_fallback() {
+    // trigram は 3 文字未満の語に当たらない → LIKE フォールバックで拾う
+    let conn = setup();
+    insert_index_node(
+        &conn,
+        &mk_topic_node("t1", "a1", "AI導入の相談", "LLMの選定", &["AI"]),
+    )
+    .unwrap();
+    let hits = search_index_nodes(&conn, "a1", "AI", 10, None).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].node_id, "t1");
+    // LIKE フォールバックでも agent 分離は効く
+    assert!(search_index_nodes(&conn, "a2", "AI", 10, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_delete_index_node_cascades_fts_for_subtree() {
+    // parent_id の ON DELETE CASCADE で子孫ノードが消えるとき、FTS も部分木ごと消える
+    let conn = setup();
+    let mut parent = mk_topic_node("s1", "a1", "親セッション", "親要約", &[]);
+    parent.node_type = "session".to_string();
+    insert_index_node(&conn, &parent).unwrap();
+    let mut child = mk_topic_node("t1", "a1", "子トピック", "子要約ユニーク", &["子kw"]);
+    child.parent_id = Some("s1".to_string());
+    insert_index_node(&conn, &child).unwrap();
+    assert_eq!(nodes_count(&conn), 2);
+    assert_eq!(fts_count(&conn), 2);
+
+    delete_index_node(&conn, "s1").unwrap();
+    // CASCADE で子も消え、FTS に孤児が残らない
+    assert_eq!(nodes_count(&conn), 0);
+    assert_eq!(fts_count(&conn), 0);
+    assert!(search_index_nodes(&conn, "a1", "子要約ユニーク", 10, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_index_write_helpers_work_inside_outer_transaction() {
+    // index_builder::delete_index はトランザクション内から delete_index_nodes_for_agent
+    // を呼ぶ。SAVEPOINT 方式なので外側 tx があっても動くこと（BEGIN の入れ子は不可）。
+    let conn = setup();
+    insert_index_node(&conn, &mk_topic_node("t1", "a1", "T", "S", &["kw"])).unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    delete_index_nodes_for_agent(&tx, "a1").unwrap();
+    insert_index_node(&tx, &mk_topic_node("t2", "a1", "T2", "S2", &["kw2"])).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(nodes_count(&conn), 1);
+    assert_eq!(fts_count(&conn), 1);
 }

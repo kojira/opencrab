@@ -219,31 +219,10 @@ pub fn get_topic_nodes_for_session(
     agent_id: &str,
     session_id: &str,
 ) -> Result<Vec<IndexNodeRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id
-         FROM memory_index_nodes WHERE agent_id = ?1 AND source_session_id = ?2 AND node_type = 'topic' ORDER BY start_log_id ASC",
-    )?;
-    let rows = stmt.query_map(params![agent_id, session_id], |row| {
-        Ok(IndexNodeRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            parent_id: row.get(2)?,
-            node_type: row.get(3)?,
-            source_type: row.get(4)?,
-            title: row.get(5)?,
-            summary: row.get(6)?,
-            start_log_id: row.get(7)?,
-            end_log_id: row.get(8)?,
-            source_session_id: row.get(9)?,
-            date_from: row.get(10)?,
-            date_to: row.get(11)?,
-            depth: row.get(12)?,
-            child_count: row.get(13)?,
-            token_count: row.get(14)?,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
-            short_id: row.get(17)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INDEX_NODE_COLUMNS}
+         FROM memory_index_nodes WHERE agent_id = ?1 AND source_session_id = ?2 AND node_type = 'topic' ORDER BY start_log_id ASC"
+    ))?;
+    let rows = stmt.query_map(params![agent_id, session_id], index_node_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }

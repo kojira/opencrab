@@ -214,6 +214,8 @@ impl DailyLogIndexer {
                         created_at: now.clone(),
                         updated_at: now.clone(),
                         short_id: Some(daily_short_id),
+                        keywords_json: "[]".to_string(),
+                        summary_refreshed_at: None,
                     };
                     opencrab_db::queries::upsert_daily_log_index_node(&db, &daily_node)?;
                 }
@@ -244,6 +246,8 @@ impl DailyLogIndexer {
                         created_at: now.clone(),
                         updated_at: now.clone(),
                         short_id: Some(topic_short_id),
+                        keywords_json: "[]".to_string(),
+                        summary_refreshed_at: None,
                     };
                     opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
                 }
@@ -372,6 +376,8 @@ impl DailyLogIndexer {
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
                 short_id: Some(daily_short_id),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &daily_node)?;
         }
@@ -402,6 +408,8 @@ impl DailyLogIndexer {
                 created_at: now.to_string(),
                 updated_at: now.to_string(),
                 short_id: Some(topic_short_id),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &topic_node)?;
         }
@@ -436,6 +444,8 @@ impl DailyLogIndexer {
                 updated_at: now.to_string(),
                 // 挿入時に割当（#41: backfill 頼みの short_id 無し窓を作らない）
                 short_id: Some(opencrab_db::queries::next_short_id(&db, agent_id, "r")?),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &root)?;
         }
@@ -477,6 +487,8 @@ impl DailyLogIndexer {
                 updated_at: now.to_string(),
                 // 挿入時に割当（#41）
                 short_id: Some(opencrab_db::queries::next_short_id(&db, agent_id, "p")?),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::upsert_daily_log_index_node(&db, &period)?;
         }
@@ -528,9 +540,11 @@ impl DailyLogIndexer {
                 .db
                 .lock()
                 .map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-            db.execute(
-                "DELETE FROM memory_index_nodes WHERE agent_id=?1 AND source_type='daily_log'",
-                rusqlite::params![agent_id],
+            // 生 SQL DELETE は FTS 影テーブルに孤児を残すため、クエリ層の同期削除を使う。
+            opencrab_db::queries::delete_index_nodes_for_agent_by_source(
+                &db,
+                agent_id,
+                "daily_log",
             )?;
             opencrab_db::queries::delete_daily_log_watermark(&db, agent_id)?;
         }
