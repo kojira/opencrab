@@ -92,6 +92,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 owner,
                 Some(pending_interaction_registry),
                 Some((event_tx, event_rx)),
+                // per-agent ゲートウェイは enabled な設定から起動される側なので
+                // 専用設定スキップは無効（true にすると自分自身を skip してしまう）。
+                false,
             )
             .await;
         });

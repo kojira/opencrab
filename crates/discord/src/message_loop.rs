@@ -118,6 +118,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
         mpsc::UnboundedSender<LoopEvent>,
         mpsc::UnboundedReceiver<LoopEvent>,
     )>,
+    // 共有（TOML）ゲートウェイのループなら true: enabled な per-agent Discord 設定を
+    // 持つエージェントをメッセージ処理時にスキップする（#40 — DB 優先の二重処理防止）。
+    // per-agent ゲートウェイ（manager.rs）は enabled な設定**から**起動されるので必ず false。
+    skip_agents_with_dedicated_gateway: bool,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
         Some((tx, rx)) => (tx, rx),
@@ -297,6 +301,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         gateway_actions.clone(),
                         owner_discord_id.clone(),
                         session_locks.clone(),
+                        skip_agents_with_dedicated_gateway,
                     )
                     .await;
                 }
@@ -310,6 +315,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
 /// 受信メッセージを処理する。
 ///
 /// バリデーション・セッション設定・エージェント処理のスポーンを行い、即座にリターン（P1）。
+#[allow(clippy::too_many_arguments)]
 async fn process_incoming_message<T: AgentRunner>(
     incoming: IncomingMessage,
     gateway: Arc<DiscordGateway>,
@@ -318,6 +324,7 @@ async fn process_incoming_message<T: AgentRunner>(
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
     session_locks: SessionLocks,
+    skip_agents_with_dedicated_gateway: bool,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -377,6 +384,17 @@ async fn process_incoming_message<T: AgentRunner>(
     let mut reaction_added = incoming.sender.is_bot;
 
     for agent_id in &agent_ids {
+        // #40: DB の per-agent Discord 設定（専用ゲートウェイ）が enabled なら、共有
+        // ゲートウェイ側では処理しない（DB 優先）。ランタイムに enable された場合も
+        // per-message チェックなのでここで即座に効く。
+        if skip_agents_with_dedicated_gateway && state.has_enabled_discord_config(agent_id) {
+            debug!(
+                agent = %agent_id,
+                "Skipping agent on shared gateway: enabled per-agent Discord config takes precedence"
+            );
+            continue;
+        }
+
         // Per-agent channel whitelist check
         if !is_dm {
             if !state.is_channel_whitelisted_for_agent(&channel_id_str, agent_id) {

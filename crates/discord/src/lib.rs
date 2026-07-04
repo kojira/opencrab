@@ -227,4 +227,12 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
 
     /// 有効な per-agent Discord 設定の一覧。
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow>;
+
+    /// このエージェントに enabled な per-agent Discord 設定（専用ゲートウェイ）があるか。
+    ///
+    /// 共有（TOML）ゲートウェイ側の二重処理防止（#40）に使う。DB=per-agent 設定が
+    /// TOML より優先される、が優先順位ルール（docs/config-precedence.md）。
+    /// DB 不可時は false（= 共有側が処理を続ける。専用ゲートウェイも同じ DB に
+    /// 依存するため、DB 断で両方が沈黙するより可用性を取る）。
+    fn has_enabled_discord_config(&self, agent_id: &str) -> bool;
 }

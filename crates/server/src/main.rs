@@ -500,6 +500,21 @@ async fn main() -> anyhow::Result<()> {
                             }
                         },
                     )
+                    // #40: enabled な per-agent Discord 設定（DB）を持つエージェントは
+                    // 専用ゲートウェイ側で処理されるため、共有（TOML）ゲートウェイから外す。
+                    .filter(|agent_id| {
+                        match opencrab_db::queries::get_agent_discord_config(&conn, agent_id) {
+                            Ok(Some(cfg)) if cfg.enabled => {
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    "Agent has an enabled per-agent Discord config in DB; \
+                                     skipping on shared TOML gateway (DB config takes precedence)"
+                                );
+                                false
+                            }
+                            _ => true,
+                        }
+                    })
                     .collect()
             };
 
@@ -555,6 +570,9 @@ async fn main() -> anyhow::Result<()> {
                         owner_discord_id,
                         None, // pending_registry
                         Some((event_tx, event_rx)),
+                        // 共有（TOML）ゲートウェイ: ランタイムに per-agent 設定が
+                        // enable されたエージェントはメッセージ処理時にスキップ（#40）。
+                        true,
                     )
                     .await;
                 });

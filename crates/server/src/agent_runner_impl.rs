@@ -313,4 +313,22 @@ impl opencrab_discord::AgentRunner for AppState {
             }
         }
     }
+
+    fn has_enabled_discord_config(&self, agent_id: &str) -> bool {
+        let Ok(conn) = self.db.lock() else {
+            return false;
+        };
+        match opencrab_db::queries::get_agent_discord_config(&conn, agent_id) {
+            Ok(Some(cfg)) => cfg.enabled,
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "Failed to check per-agent discord config; assuming none"
+                );
+                false
+            }
+        }
+    }
 }
