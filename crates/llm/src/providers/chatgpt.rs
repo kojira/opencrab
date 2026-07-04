@@ -13,6 +13,19 @@ use crate::traits::{LlmProvider, ModelInfo};
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 
+/// OAuth トークンリフレッシュのエンドポイント（codex CLI と同じ）。
+const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+/// codex CLI の公開 OAuth client_id（openai/codex リポジトリの定数と同一。
+/// 秘密情報ではない — PKCE フローのパブリッククライアント識別子）。
+const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// access_token の失効をこの秒数だけ前倒しで判定する（リクエスト飛行中の失効を防ぐ）。
+const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+
+/// リフレッシュの直列化（同時多発の 401 で refresh_token を並行消費しない）。
+/// OpenAI はリフレッシュでトークンをローテーションするため、並行リフレッシュは
+/// 古い refresh_token の再利用 = 失敗になりうる。プロセス全体で 1 本に絞る。
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Expand a leading `~` in a path to the value of the `HOME` environment variable.
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -55,8 +68,8 @@ fn base64url_decode(input: &str) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Extract the `chatgpt_account_id` from a JWT access token's claims.
-fn extract_account_id(token: &str) -> anyhow::Result<String> {
+/// JWT のペイロード部（2 番目のセグメント）を JSON として取り出す。
+fn jwt_payload(token: &str) -> anyhow::Result<serde_json::Value> {
     use anyhow::Context;
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() < 2 {
@@ -64,13 +77,34 @@ fn extract_account_id(token: &str) -> anyhow::Result<String> {
     }
     let payload_bytes =
         base64url_decode(parts[1]).context("failed to base64url-decode JWT payload")?;
-    let payload: serde_json::Value =
-        serde_json::from_slice(&payload_bytes).context("failed to parse JWT payload JSON")?;
+    serde_json::from_slice(&payload_bytes).context("failed to parse JWT payload JSON")
+}
+
+/// Extract the `chatgpt_account_id` from a JWT access token's claims.
+fn extract_account_id(token: &str) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let payload = jwt_payload(token)?;
     let account_id = payload["https://api.openai.com/auth"]["chatgpt_account_id"]
         .as_str()
         .context("chatgpt_account_id not found in JWT claims")?
         .to_string();
     Ok(account_id)
+}
+
+/// access_token が失効している（または間もなく失効する）か。
+/// exp クレームが読めない場合は false（判定不能なら 401 リトライ側に任せる）。
+fn token_expired(token: &str) -> bool {
+    let Ok(payload) = jwt_payload(token) else {
+        return false;
+    };
+    let Some(exp) = payload["exp"].as_i64() else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    exp - TOKEN_EXPIRY_MARGIN_SECS <= now
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +113,8 @@ pub struct ChatGptProvider {
     /// Path to auth.json file (default: ~/.codex/auth.json)
     auth_file: String,
     base_url: String,
+    /// OAuth トークンリフレッシュ先（テストで差し替え可能）。
+    oauth_token_url: String,
     default_model: String,
     reasoning_effort: Option<String>,
     include_encrypted_content: bool,
@@ -101,10 +137,17 @@ impl ChatGptProvider {
                 .unwrap_or_default(),
             auth_file: format!("{}/.codex/auth.json", home),
             base_url: CHATGPT_BASE_URL.to_string(),
+            oauth_token_url: OAUTH_TOKEN_URL.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
         }
+    }
+
+    /// テスト用: OAuth トークンエンドポイントを差し替える。
+    pub fn with_oauth_token_url(mut self, url: impl Into<String>) -> Self {
+        self.oauth_token_url = url.into();
+        self
     }
 
     pub fn with_auth_file(mut self, path: impl Into<String>) -> Self {
@@ -136,14 +179,146 @@ impl ChatGptProvider {
 
     /// Read access_token from auth_file
     fn load_access_token(&self) -> Result<String> {
-        let content = std::fs::read_to_string(&self.auth_file)
-            .with_context(|| format!("Failed to read auth file: {}", self.auth_file))?;
-        let parsed: Value = serde_json::from_str(&content).context("Failed to parse auth.json")?;
-        let token = parsed["tokens"]["access_token"]
+        let token = self.load_auth_json()?["tokens"]["access_token"]
             .as_str()
             .context("tokens.access_token not found in auth.json")?
             .to_string();
         Ok(token)
+    }
+
+    fn load_auth_json(&self) -> Result<Value> {
+        let content = std::fs::read_to_string(&self.auth_file)
+            .with_context(|| format!("Failed to read auth file: {}", self.auth_file))?;
+        serde_json::from_str(&content).context("Failed to parse auth.json")
+    }
+
+    /// 有効な access_token を返す。失効している（60 秒以内に失効する）場合は
+    /// リフレッシュしてから返す。
+    ///
+    /// これまでは auth.json を読むだけだったため、codex CLI を手動実行して
+    /// auth.json が書き換わらない限り、access_token の失効とともに全呼び出しが
+    /// 401 で沈黙していた（bot はリアクションだけ返して返信しない症状になる）。
+    async fn fresh_access_token(&self) -> Result<String> {
+        let token = self.load_access_token()?;
+        if !token_expired(&token) {
+            return Ok(token);
+        }
+        tracing::info!("ChatGPT access token expired; refreshing");
+        self.refresh_access_token(Some(&token)).await
+    }
+
+    /// refresh_token で access_token を更新し、auth.json へ永続化して新トークンを返す。
+    ///
+    /// `stale_token` は「使えないと分かっているトークン」（exp 失効 or 401 を返した
+    /// トークン）。auth.json の現在値がこれと**異なり**かつ exp 有効なら、他タスク/
+    /// 他プロセスが更新済みなのでそれを返す。同一なら exp 上は有効でも（サーバ側
+    /// 取り消し等）実リフレッシュへ進む。
+    ///
+    /// codex CLI と同じ auth.json を更新するため、書き込みは同一ディレクトリの
+    /// 一意な一時ファイル + rename で原子的に行い、パーミッションは元ファイルを
+    /// 引き継ぐ（トークンを含むファイルを 0644 に緩めない）。
+    async fn refresh_access_token(&self, stale_token: Option<&str>) -> Result<String> {
+        let _guard = REFRESH_LOCK.lock().await;
+
+        // ロック待ちの間に他タスク/他プロセスがリフレッシュ済みかもしれない — 再読して確認
+        let mut auth = self.load_auth_json()?;
+        let started_with = auth["tokens"]["access_token"]
+            .as_str()
+            .map(|s| s.to_string());
+        if let Some(current) = started_with.as_deref() {
+            if !token_expired(current) && stale_token != Some(current) {
+                return Ok(current.to_string());
+            }
+        }
+        let refresh_token = auth["tokens"]["refresh_token"]
+            .as_str()
+            .context("tokens.refresh_token not found in auth.json — run `codex login` once")?
+            .to_string();
+
+        let resp = self
+            .client
+            .post(&self.oauth_token_url)
+            .json(&serde_json::json!({
+                "client_id": CODEX_OAUTH_CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "scope": "openid profile email",
+            }))
+            .send()
+            .await
+            .context("ChatGPT token refresh request failed")?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .context("ChatGPT token refresh: failed to read response body")?;
+        if !status.is_success() {
+            // codex CLI 等の別プロセスが並行リフレッシュして refresh_token を
+            // ローテーション済みだと invalid_grant になる。auth.json が外部更新
+            // されていればそれで自己回復する（誤った「codex login せよ」を出さない）。
+            if let Ok(latest) = self.load_auth_json() {
+                if let Some(current) = latest["tokens"]["access_token"].as_str() {
+                    if Some(current) != started_with.as_deref() && !token_expired(current) {
+                        tracing::info!(
+                            "ChatGPT token refresh failed but auth.json was updated externally; using the new token"
+                        );
+                        return Ok(current.to_string());
+                    }
+                }
+            }
+            // refresh_token 自体が失効/取り消しされたケース。自動では復旧できない。
+            anyhow::bail!(
+                "ChatGPT token refresh failed ({status}): {text} — run `codex login` to re-authenticate"
+            );
+        }
+        let parsed: Value =
+            serde_json::from_str(&text).context("ChatGPT token refresh: invalid JSON response")?;
+        let new_access = parsed["access_token"]
+            .as_str()
+            .context("ChatGPT token refresh: access_token missing in response")?
+            .to_string();
+
+        // トークン一式を auth.json に書き戻す（他のフィールドは保存）。
+        auth["tokens"]["access_token"] = Value::String(new_access.clone());
+        if let Some(new_refresh) = parsed["refresh_token"].as_str() {
+            auth["tokens"]["refresh_token"] = Value::String(new_refresh.to_string());
+        }
+        if let Some(new_id) = parsed["id_token"].as_str() {
+            auth["tokens"]["id_token"] = Value::String(new_id.to_string());
+        }
+        auth["last_refresh"] = Value::String(chrono::Utc::now().to_rfc3339());
+
+        let serialized = serde_json::to_string_pretty(&auth)
+            .context("ChatGPT token refresh: failed to serialize auth.json")?;
+        let auth_path = std::path::Path::new(&self.auth_file);
+        let dir = auth_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        // tempfile は一意名 + 0600 で作られる（固定名 .tmp のプロセス間衝突と
+        // umask 由来の 0644 化を両方回避）。元ファイルのモードがあれば引き継ぐ。
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)
+            .with_context(|| format!("failed to create temp file in {}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(auth_path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0o600);
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(mode))
+                .context("failed to set temp file permissions")?;
+        }
+        {
+            use std::io::Write as _;
+            tmp.write_all(serialized.as_bytes())
+                .context("failed to write refreshed auth.json")?;
+        }
+        tmp.persist(auth_path)
+            .with_context(|| format!("failed to replace {}", auth_path.display()))?;
+
+        tracing::info!("ChatGPT access token refreshed and persisted to auth.json");
+        Ok(new_access)
     }
 
     fn request_builder(
@@ -558,8 +733,8 @@ impl LlmProvider for ChatGptProvider {
 
     async fn chat_completion(&self, request: ChatRequest) -> Result<ChatResponse> {
         debug!(model = %request.model, "ChatGPT chat completion");
-        let token = self.load_access_token()?;
-        let account_id = extract_account_id(&token)?;
+        let mut token = self.fresh_access_token().await?;
+        let mut account_id = extract_account_id(&token)?;
         let body = self.build_request_body(&request, true);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         tracing::warn!(
@@ -575,20 +750,34 @@ impl LlmProvider for ChatGptProvider {
         // リトライは router が所有する（#46）。以前はここで独自に3回リトライしており、
         // router の同一プロバイダ3回リトライと重なって最大9回の HTTP 試行になっていた。
         // 429/5xx は型付き api_error で返せば router が retryable と分類して再試行する。
-        let resp = self
-            .request_builder("codex/responses", &token, &account_id)
-            .json(&body)
-            .send()
-            .await
-            .context("ChatGPT API request failed")?;
+        // 例外: 401 だけはトークンリフレッシュがプロバイダの能力なので、ここで
+        // 1回だけリフレッシュ→再送する（router は auth エラーをリトライしない）。
+        let mut refreshed = false;
+        let (status, text) = loop {
+            let resp = self
+                .request_builder("codex/responses", &token, &account_id)
+                .json(&body)
+                .send()
+                .await
+                .context("ChatGPT API request failed")?;
 
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .context("ChatGPT: failed to read response body")?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .context("ChatGPT: failed to read response body")?;
 
-        tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
+            tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
+
+            if status == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+                refreshed = true;
+                tracing::info!("ChatGPT returned 401; refreshing token and retrying once");
+                token = self.refresh_access_token(Some(&token)).await?;
+                account_id = extract_account_id(&token)?;
+                continue;
+            }
+            break (status, text);
+        };
 
         if !status.is_success() {
             tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
@@ -608,8 +797,8 @@ impl LlmProvider for ChatGptProvider {
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatStreamDelta>>> {
         debug!(model = %request.model, "ChatGPT streaming chat completion");
-        let token = self.load_access_token()?;
-        let account_id = extract_account_id(&token)?;
+        let mut token = self.fresh_access_token().await?;
+        let mut account_id = extract_account_id(&token)?;
         let body = self.build_request_body(&request, true);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         tracing::warn!(
@@ -624,20 +813,32 @@ impl LlmProvider for ChatGptProvider {
         );
         // リトライは router が所有する（#46: 内部リトライとの重なりで最大9試行に
         // なっていた）。エラーは型付き api_error で返し、router の分類に委ねる。
-        let resp = self
-            .request_builder("codex/responses", &token, &account_id)
-            .json(&body)
-            .send()
-            .await
-            .context("ChatGPT streaming request failed")?;
+        // 例外: 401 のみプロバイダ責務としてリフレッシュ→1回だけ再送（非ストリーム側と同じ）。
+        let mut refreshed = false;
+        let resp = loop {
+            let resp = self
+                .request_builder("codex/responses", &token, &account_id)
+                .json(&body)
+                .send()
+                .await
+                .context("ChatGPT streaming request failed")?;
 
-        let status = resp.status();
-        tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
-            return Err(crate::error::api_error("ChatGPT", status, text));
-        }
+            let status = resp.status();
+            tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
+            if status == reqwest::StatusCode::UNAUTHORIZED && !refreshed {
+                refreshed = true;
+                tracing::info!("ChatGPT returned 401 (stream); refreshing token and retrying once");
+                token = self.refresh_access_token(Some(&token)).await?;
+                account_id = extract_account_id(&token)?;
+                continue;
+            }
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
+                return Err(crate::error::api_error("ChatGPT", status, text));
+            }
+            break resp;
+        };
         let request_model = request.model.clone();
         // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
         // Responses API は data ペイロード自身に `type` を含むため、行を跨ぐ `event:` 状態には
@@ -1413,5 +1614,212 @@ mod tests {
                 .and_then(|c| c.finish_reason.clone())
         );
         println!("Continuation final text: {}", text);
+    }
+
+    // ---- トークンリフレッシュ（#失効で bot が沈黙する問題の修正）----
+
+    /// テスト用 JWT を作る（署名は検証しないので偽物で良い）。
+    fn fake_jwt(exp_offset_secs: i64) -> String {
+        fn b64url(data: &[u8]) -> String {
+            const CHARS: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut out = String::new();
+            for chunk in data.chunks(3) {
+                let b = [
+                    chunk[0],
+                    chunk.get(1).copied().unwrap_or(0),
+                    chunk.get(2).copied().unwrap_or(0),
+                ];
+                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+                out.push(CHARS[(n >> 18) as usize & 63] as char);
+                out.push(CHARS[(n >> 12) as usize & 63] as char);
+                if chunk.len() > 1 {
+                    out.push(CHARS[(n >> 6) as usize & 63] as char);
+                }
+                if chunk.len() > 2 {
+                    out.push(CHARS[n as usize & 63] as char);
+                }
+            }
+            out
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let payload = serde_json::json!({
+            "exp": now + exp_offset_secs,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-test"},
+        });
+        format!(
+            "{}.{}.{}",
+            b64url(b"{\"alg\":\"none\"}"),
+            b64url(payload.to_string().as_bytes()),
+            b64url(b"sig")
+        )
+    }
+
+    #[test]
+    fn test_token_expired_by_exp_claim() {
+        assert!(token_expired(&fake_jwt(-3600)), "past exp must be expired");
+        // マージン（60s）内も失効扱い
+        assert!(token_expired(&fake_jwt(30)));
+        assert!(!token_expired(&fake_jwt(3600)));
+        // exp が読めないトークンは false（401 リトライ側に任せる）
+        assert!(!token_expired("not-a-jwt"));
+    }
+
+    /// 1 接続だけ受けて固定レスポンスを返す極小 HTTP モック。
+    async fn spawn_oauth_mock(status_line: &'static str, body: String) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/oauth/token")
+    }
+
+    fn write_auth_file(dir: &tempfile::TempDir, access: &str, refresh: &str) -> String {
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "OPENAI_API_KEY": "keep-me",
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": refresh,
+                    "id_token": "old-id",
+                    "account_id": "acct-test",
+                },
+                "last_refresh": "2020-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn test_refresh_on_expired_token_persists_auth_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_token = fake_jwt(3600);
+        let mock_url = spawn_oauth_mock(
+            "200 OK",
+            serde_json::json!({
+                "access_token": new_token,
+                "refresh_token": "rotated-rt",
+                "id_token": "new-id",
+            })
+            .to_string(),
+        )
+        .await;
+        let auth_file = write_auth_file(&dir, &fake_jwt(-3600), "old-rt");
+        let provider = ChatGptProvider::new()
+            .with_auth_file(&auth_file)
+            .with_oauth_token_url(mock_url);
+
+        let got = provider.fresh_access_token().await.unwrap();
+        assert_eq!(got, new_token);
+
+        // auth.json が更新され、無関係フィールドは保存される
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&auth_file).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["access_token"].as_str().unwrap(), new_token);
+        assert_eq!(saved["tokens"]["refresh_token"], "rotated-rt");
+        assert_eq!(saved["tokens"]["id_token"], "new-id");
+        assert_eq!(saved["OPENAI_API_KEY"], "keep-me");
+        assert_eq!(saved["tokens"]["account_id"], "acct-test");
+        assert_ne!(saved["last_refresh"], "2020-01-01T00:00:00Z");
+
+        // 2 回目は失効していないのでリフレッシュ不要（モックに触らず即返る）
+        let again = provider.fresh_access_token().await.unwrap();
+        assert_eq!(again, new_token);
+    }
+
+    #[tokio::test]
+    async fn test_fresh_token_skips_refresh_when_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = fake_jwt(3600);
+        // OAuth モックを立てない = リフレッシュが呼ばれたら接続エラーで失敗する
+        let auth_file = write_auth_file(&dir, &valid, "rt");
+        let provider = ChatGptProvider::new()
+            .with_auth_file(&auth_file)
+            .with_oauth_token_url("http://127.0.0.1:1/unreachable".to_string());
+        assert_eq!(provider.fresh_access_token().await.unwrap(), valid);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_failure_mentions_codex_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock_url = spawn_oauth_mock(
+            "400 Bad Request",
+            r#"{"error":"invalid_grant"}"#.to_string(),
+        )
+        .await;
+        let auth_file = write_auth_file(&dir, &fake_jwt(-3600), "revoked-rt");
+        let provider = ChatGptProvider::new()
+            .with_auth_file(&auth_file)
+            .with_oauth_token_url(mock_url);
+        let err = provider.fresh_access_token().await.unwrap_err().to_string();
+        assert!(err.contains("codex login"), "err was: {err}");
+        // 失敗時は auth.json を書き換えない
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&auth_file).unwrap()).unwrap();
+        assert_eq!(saved["tokens"]["refresh_token"], "revoked-rt");
+    }
+
+    #[tokio::test]
+    async fn test_reactive_refresh_works_for_revoked_but_unexpired_token() {
+        // exp 上は有効でもサーバに拒否された（401 経路の）トークンは、stale 指定で
+        // 実リフレッシュに進む（double-check の早期 return で素通りしない）
+        let dir = tempfile::tempdir().unwrap();
+        let revoked = fake_jwt(3600); // まだ exp 有効
+        let new_token = fake_jwt(7200);
+        let mock_url = spawn_oauth_mock(
+            "200 OK",
+            serde_json::json!({"access_token": new_token}).to_string(),
+        )
+        .await;
+        let auth_file = write_auth_file(&dir, &revoked, "rt");
+        let provider = ChatGptProvider::new()
+            .with_auth_file(&auth_file)
+            .with_oauth_token_url(mock_url);
+
+        let got = provider.refresh_access_token(Some(&revoked)).await.unwrap();
+        assert_eq!(got, new_token);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_refresh_preserves_auth_json_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mock_url = spawn_oauth_mock(
+            "200 OK",
+            serde_json::json!({"access_token": fake_jwt(3600)}).to_string(),
+        )
+        .await;
+        let auth_file = write_auth_file(&dir, &fake_jwt(-3600), "rt");
+        std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let provider = ChatGptProvider::new()
+            .with_auth_file(&auth_file)
+            .with_oauth_token_url(mock_url);
+
+        provider.fresh_access_token().await.unwrap();
+        let mode = std::fs::metadata(&auth_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "auth.json permissions must not be loosened");
     }
 }
