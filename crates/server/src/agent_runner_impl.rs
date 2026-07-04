@@ -297,10 +297,20 @@ impl opencrab_discord::AgentRunner for AppState {
     }
 
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow> {
-        self.db
+        match self
+            .db
             .lock()
-            .ok()
-            .and_then(|conn| opencrab_db::queries::list_enabled_agent_discord_configs(&conn).ok())
-            .unwrap_or_default()
+            .map_err(anyhow::Error::from)
+            .and_then(|conn| {
+                opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
+                    .map_err(anyhow::Error::from)
+            }) {
+            Ok(configs) => configs,
+            Err(e) => {
+                // 起動時の復元経路で使われるため、失敗を黙って空にしない。
+                tracing::warn!(error = %e, "Failed to load agent discord configs from DB");
+                Vec::new()
+            }
+        }
     }
 }
