@@ -462,6 +462,7 @@ async fn main() -> anyhow::Result<()> {
         compaction_ratio: cfg.llm.compaction_ratio,
         evaluator: cfg.evaluator.clone(),
         loop_restart_enabled: cfg.agent.loop_restart_enabled,
+        index_build_inflight: Arc::new(dashmap::DashMap::new()),
         #[cfg(feature = "discord")]
         discord_manager: None,
     };
@@ -622,6 +623,15 @@ async fn main() -> anyhow::Result<()> {
         }
 
         tracing::info!("Per-agent Discord gateway manager initialized");
+    }
+
+    // メモリインデックスのアイドル時メンテナンス（増分ビルドの取りこぼし回収 /
+    // キーワードバックフィル / 月次ロールアップ）。全エージェントを毎 tick 巡回。
+    if cfg.agent.memory_maintenance_enabled {
+        opencrab_server::memory_maintenance::spawn_memory_maintenance_loop(
+            state.clone(),
+            cfg.agent.memory_maintenance_interval_secs,
+        );
     }
 
     // ハートビートの初期設定

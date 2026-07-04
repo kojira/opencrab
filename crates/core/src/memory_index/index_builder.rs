@@ -598,6 +598,11 @@ impl IndexBuilder {
                 }
             }
 
+            // date_from/date_to は元トピック群の範囲を引き継ぐ（NULL のままだと
+            // [Memory Index] の現在月ブロック（date_from LIKE 前方一致）から
+            // マージ後のトピックが消えてしまう）。
+            let merged_date_from = topic_nodes.iter().filter_map(|t| t.date_from.clone()).min();
+            let merged_date_to = topic_nodes.iter().filter_map(|t| t.date_to.clone()).max();
             let merged_id = format!("merged-topic-{agent_id}-{}", Utc::now().timestamp_millis());
             let mut merged_node = opencrab_db::queries::IndexNodeRow {
                 id: merged_id,
@@ -610,8 +615,8 @@ impl IndexBuilder {
                 start_log_id: start_log,
                 end_log_id: end_log,
                 source_session_id: None,
-                date_from: None,
-                date_to: None,
+                date_from: merged_date_from,
+                date_to: merged_date_to,
                 depth: 3,
                 child_count: 0,
                 token_count: token_total,

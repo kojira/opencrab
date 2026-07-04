@@ -614,6 +614,174 @@ pub fn update_index_node_summary(
 }
 
 // ============================================
+// 月次ロールアップ / 常時注入セクション用クエリ
+// ============================================
+
+/// INDEX_NODE_COLUMNS にテーブルエイリアスの接頭辞を付ける（JOIN 用）。
+fn prefixed_index_node_columns(alias: &str) -> String {
+    format!(
+        "{alias}.{}",
+        INDEX_NODE_COLUMNS.replace(", ", &format!(", {alias}."))
+    )
+}
+
+/// ロールアップが必要な過去月の period ノードを 1 件返す（最古優先）。
+///
+/// stale の定義: 配下（period→session→topic）に topic があり、かつ
+/// 「未ロールアップ（summary_refreshed_at IS NULL）」または
+/// 「ロールアップ後に作られた topic がある（topic.created_at > refreshed_at）」。
+/// updated_at ではなく created_at 基準にするのは、keywords バックフィルの
+/// UPDATE で再ロールアップを発火させないため。現在月は対象外（注入側で
+/// topic 粒度のまま見せるため、ロールアップは無駄撃ちになる）。
+pub fn find_stale_period(conn: &Connection, agent_id: &str) -> Result<Option<IndexNodeRow>> {
+    let sql = format!(
+        "SELECT {cols} FROM memory_index_nodes p
+         WHERE p.agent_id = ?1 AND p.node_type = 'period' AND p.source_type = 'session_log'
+           AND p.title < strftime('%Y-%m', 'now')
+           AND EXISTS (
+               SELECT 1 FROM memory_index_nodes s
+               JOIN memory_index_nodes t ON t.parent_id = s.id
+               WHERE s.parent_id = p.id AND t.node_type = 'topic'
+           )
+           AND (
+               p.summary_refreshed_at IS NULL
+               OR EXISTS (
+                   SELECT 1 FROM memory_index_nodes s2
+                   JOIN memory_index_nodes t2 ON t2.parent_id = s2.id
+                   WHERE s2.parent_id = p.id AND t2.node_type = 'topic'
+                     AND t2.created_at > p.summary_refreshed_at
+               )
+           )
+         ORDER BY p.title ASC LIMIT 1",
+        cols = prefixed_index_node_columns("p"),
+    );
+    let result = conn.query_row(&sql, params![agent_id], index_node_from_row);
+    match result {
+        Ok(node) => Ok(Some(node)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// period 配下の topic 一覧（period→session→topic の孫）を時系列順で返す。
+pub fn list_topics_for_period(
+    conn: &Connection,
+    agent_id: &str,
+    period_id: &str,
+) -> Result<Vec<IndexNodeRow>> {
+    let sql = format!(
+        "SELECT {cols} FROM memory_index_nodes t
+         JOIN memory_index_nodes s ON t.parent_id = s.id
+         WHERE t.agent_id = ?1 AND t.node_type = 'topic' AND s.parent_id = ?2
+         ORDER BY t.created_at ASC",
+        cols = prefixed_index_node_columns("t"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![agent_id, period_id], index_node_from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 月次ロールアップの結果を period ノードへ書き込む（FTS 同期込み）。
+/// summary_refreshed_at を刻むことで find_stale_period の対象から外れる。
+pub fn update_period_rollup(
+    conn: &Connection,
+    node_id: &str,
+    summary: &str,
+    keywords_json: &str,
+) -> Result<()> {
+    with_index_savepoint(conn, |tx| {
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE memory_index_nodes
+             SET summary = ?1, keywords_json = ?2, summary_refreshed_at = ?3, updated_at = ?3
+             WHERE id = ?4",
+            params![summary, keywords_json, now, node_id],
+        )?;
+        if let Some(node) = get_index_node(tx, node_id)? {
+            fts_upsert_node(
+                tx,
+                &node.id,
+                &node.agent_id,
+                &node.node_type,
+                &node.source_type,
+                &node.title,
+                &node.summary,
+                &node.keywords_json,
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// period ノード id → 配下（period→session→topic）の topic 総数。
+/// period.child_count は直下の **session** 数なので、月行の「N topics」表示には
+/// こちらを使う。
+pub fn count_topics_per_period(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.parent_id, COUNT(*) FROM memory_index_nodes t
+         JOIN memory_index_nodes s ON t.parent_id = s.id
+         WHERE t.agent_id = ?1 AND t.node_type = 'topic' AND s.parent_id IS NOT NULL
+         GROUP BY s.parent_id",
+    )?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// session_log ツリーの period（月）ノード一覧を新しい月から順に返す。
+pub fn list_period_nodes(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
+         WHERE agent_id = ?1 AND node_type = 'period' AND source_type = 'session_log'
+         ORDER BY title DESC"
+    ))?;
+    let rows = stmt.query_map(params![agent_id], index_node_from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 指定月（date_from が `YYYY-MM` 始まり）の topic を新しい順に返す。
+/// `exclude_session_id` のセッション由来 topic は除外（現セッションの topic は
+/// コンパクション時の [Past context summary] が担当 — short_id の重複を避ける）。
+/// source_session_id が NULL の topic（merge_topics 産）は含める。
+pub fn list_topic_nodes_for_month(
+    conn: &Connection,
+    agent_id: &str,
+    month_prefix: &str,
+    exclude_session_id: &str,
+    limit: usize,
+) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
+         WHERE agent_id = ?1 AND node_type = 'topic' AND source_type = 'session_log'
+           AND date_from LIKE ?2 || '%'
+           AND (source_session_id IS NULL OR source_session_id != ?3)
+         ORDER BY created_at DESC LIMIT ?4"
+    ))?;
+    let rows = stmt.query_map(
+        params![agent_id, month_prefix, exclude_session_id, limit as i64],
+        index_node_from_row,
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 未インデックスログの件数と最新ログの created_at を返す（メンテナンスの
+/// アイドルゲート用: 「会話が続いている最中」のビルドを避ける）。
+pub fn get_unindexed_stats(conn: &Connection, agent_id: &str) -> Result<(i64, Option<String>)> {
+    let last_id = get_index_watermark(conn, agent_id)?
+        .map(|wm| wm.last_indexed_log_id)
+        .unwrap_or(0);
+    Ok(conn.query_row(
+        "SELECT COUNT(*), MAX(created_at) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        params![agent_id, last_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
+// ============================================
 // エージェント別メモリインデックス設定
 // ============================================
 
