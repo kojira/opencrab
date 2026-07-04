@@ -1276,6 +1276,48 @@ mod tests {
         }
     }
 
+    // ---- #45: bridge ポリシー表と gateway 定義のドリフト検出 ----
+
+    /// bridge のポリシー表（owner-only / trusted-only / discord depth ゲート）が
+    /// 指す gateway 側の名前が実在すること。表が死に名を指したまま実アクションが
+    /// ゲート漏れする事故を検出する。
+    #[test]
+    fn test_bridge_policy_names_are_live_gateway_actions() {
+        let (actions, _db) = make_test_actions();
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+
+        // owner-only（gateway 側）
+        assert!(names.contains(&"update_heartbeat_instructions".to_string()));
+        // trusted-only（gateway 側。execute_skill は防御的エントリで実装なし）
+        for n in opencrab_actions::TRUSTED_ONLY_ACTIONS {
+            if *n == "execute_skill" {
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "execute_skill は未実装のはず"
+                );
+            } else {
+                assert!(names.contains(&n.to_string()), "{n} が definitions に無い");
+            }
+        }
+        // DISCORD_ACTIONS のうち現行 gateway に実在する集合（depth ゲートの実効対象）。
+        // 定義追加時にこのテストが落ちたら、ゲート対象かどうかを判断して更新すること。
+        let gated_live: Vec<&str> = opencrab_actions::DISCORD_ACTIONS
+            .iter()
+            .filter(|n| names.contains(&n.to_string()))
+            .copied()
+            .collect();
+        assert_eq!(
+            gated_live,
+            vec![
+                "discord_send_file",
+                "discord_list_channels",
+                "discord_list_guilds",
+                "discord_add_reaction",
+                "request_peer_review",
+            ]
+        );
+    }
+
     // ---- definitions ----
 
     #[test]

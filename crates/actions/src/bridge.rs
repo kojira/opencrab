@@ -49,7 +49,7 @@ pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
 
 /// Discord 送信系アクション: depth >= 1 の sub-engine からは**定義の非表示と実行の拒否の両方**で
 /// ブロックする（定義から隠すだけでは、モデルが親コンテキストの記憶で名前を呼んだ場合に素通しになる）。
-const DISCORD_ACTIONS: &[&str] = &[
+pub const DISCORD_ACTIONS: &[&str] = &[
     "discord_send",
     "discord_send_file",
     "discord_react",
@@ -72,6 +72,43 @@ const DISCORD_ACTIONS: &[&str] = &[
 
 /// spawn_subtask のネスト上限。
 const MAX_DEPTH: u32 = 2;
+
+/// owner のみが可視・実行できるアクション（#45）。
+pub const OWNER_ONLY_ACTIONS: &[&str] = &["update_instructions", "update_heartbeat_instructions"];
+
+/// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
+/// `execute_skill` は現行の gateway に実装が無い防御的エントリ（将来追加時に
+/// 最初からゲートされるように残している）。
+pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
+    "create_skill",
+    "execute_skill",
+    "read_heartbeat_instructions",
+];
+
+/// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
+///
+/// 以前は可視性（`list_tools`）だけがこれらのリストを参照し、実行
+/// （`dispatch_inner`）は depth 系しか強制していなかったため、「一覧から
+/// 隠したツールをモデルが名前指定で実行できる」食い違いがあった。
+/// 可視性と実行時強制は必ずこの関数を参照すること（discord 側ハンドラの
+/// typed gate は多層防御としてそのまま残る）。
+pub struct ToolPolicy {
+    pub owner_only: bool,
+    pub trusted_only: bool,
+    /// depth >= 1 の sub-engine からブロック（Discord 送信系）。
+    pub blocked_in_subengine: bool,
+    /// depth >= MAX_DEPTH でブロック（ネスト上限）。
+    pub depth_capped: bool,
+}
+
+pub fn tool_policy(name: &str) -> ToolPolicy {
+    ToolPolicy {
+        owner_only: OWNER_ONLY_ACTIONS.contains(&name),
+        trusted_only: TRUSTED_ONLY_ACTIONS.contains(&name),
+        blocked_in_subengine: DISCORD_ACTIONS.contains(&name),
+        depth_capped: name == "spawn_subtask",
+    }
+}
 
 /// エラー文言から「権限拒否（実行されなかった）」を判定する。
 ///
@@ -161,9 +198,70 @@ impl BridgedExecutor {
         }
     }
 
+    fn caller_is_owner(&self) -> bool {
+        matches!(self.context.caller, crate::traits::CallerIdentity::Owner)
+    }
+
+    fn caller_is_trusted(&self) -> bool {
+        matches!(
+            self.context.caller,
+            crate::traits::CallerIdentity::Owner
+                | crate::traits::CallerIdentity::CoAgent { .. }
+                | crate::traits::CallerIdentity::TrustedUser
+        )
+    }
+
+    /// このコンテキスト（caller/depth）で name が可視・実行可能か（#45）。
+    /// list_tools と dispatch_inner が同一のポリシー判定を共有するための述語。
+    fn policy_allows(&self, name: &str) -> bool {
+        let policy = tool_policy(name);
+        if policy.owner_only && !self.caller_is_owner() {
+            return false;
+        }
+        if policy.trusted_only && !self.caller_is_trusted() {
+            return false;
+        }
+        if self.depth >= 1 && policy.blocked_in_subengine {
+            return false;
+        }
+        if self.depth >= MAX_DEPTH && policy.depth_capped {
+            return false;
+        }
+        true
+    }
+
     /// 実際のディスパッチ本体（dispatcher → gateway fallback）。
     /// instrumentation は `ActionExecutor::execute` 側で wrap する。
     async fn dispatch_inner(&self, name: &str, args: &serde_json::Value) -> CoreActionResult {
+        // 可視性（list_tools）と同じポリシー表を実行時にも強制する（#45）。
+        // 一覧から隠しただけでは、モデルが名前を記憶で呼んだ場合に素通しになる。
+        let reject = |msg: String| CoreActionResult {
+            success: false,
+            data: serde_json::Value::Null,
+            error: Some(format!("{REJECTION_CODE_PREFIX}{msg}")),
+        };
+        let policy = tool_policy(name);
+        if policy.owner_only && !self.caller_is_owner() {
+            return reject(format!("action '{name}' requires owner"));
+        }
+        if policy.trusted_only && !self.caller_is_trusted() {
+            return reject(format!(
+                "action '{name}' requires a trusted caller (owner/co_agent/trusted_user)"
+            ));
+        }
+        if self.depth >= 1 && policy.blocked_in_subengine {
+            return reject(format!(
+                "action '{name}' is not available in sub-engines (depth {})",
+                self.depth
+            ));
+        }
+        if self.depth >= MAX_DEPTH && policy.depth_capped {
+            return reject(format!(
+                "{name} is not available at depth {} (max nesting: {MAX_DEPTH})",
+                self.depth
+            ));
+        }
+
         // Try dispatcher first. フォールバック判定は登録有無で行う
         // （"Unknown action" エラー文言の文字列比較は、実アクションが同文を
         // 返した場合に gateway へ誤ルートするため廃止 — #36）。
@@ -177,27 +275,6 @@ impl BridgedExecutor {
 
         // Fallback to gateway actions.
         if let Some(ref gw) = self.gateway_actions {
-            // list_tools の depth ゲートを実行経路にも適用する。
-            if self.depth >= 1 && DISCORD_ACTIONS.contains(&name) {
-                return CoreActionResult {
-                    success: false,
-                    data: serde_json::Value::Null,
-                    error: Some(format!(
-                        "{REJECTION_CODE_PREFIX}action '{name}' is not available in sub-engines (depth {})",
-                        self.depth
-                    )),
-                };
-            }
-            if self.depth >= MAX_DEPTH && name == "spawn_subtask" {
-                return CoreActionResult {
-                    success: false,
-                    data: serde_json::Value::Null,
-                    error: Some(format!(
-                        "{REJECTION_CODE_PREFIX}spawn_subtask is not available at depth {} (max nesting: {MAX_DEPTH})",
-                        self.depth
-                    )),
-                };
-            }
             // 実行コンテキストは型付きで渡す。LLM 由来の args には混ぜない（#36）。
             let ctx = self.gateway_call_context();
             let gw_result = gw.execute(name, args, &ctx).await;
@@ -308,10 +385,6 @@ impl ActionExecutor for BridgedExecutor {
     }
 
     fn list_tools(&self) -> Vec<FunctionDefinition> {
-        let is_owner = matches!(self.context.caller, crate::traits::CallerIdentity::Owner);
-        const OWNER_ONLY_ACTIONS: &[&str] =
-            &["update_instructions", "update_heartbeat_instructions"];
-
         // 空 description は None にする（旧 to_function_def の挙動を踏襲）。
         let opt_desc = |d: String| if d.is_empty() { None } else { Some(d) };
 
@@ -319,13 +392,7 @@ impl ActionExecutor for BridgedExecutor {
             .dispatcher
             .get_definitions(&[])
             .into_iter()
-            .filter(|d| {
-                // owner_only_actions はOwnerのみに見せる
-                if !is_owner && OWNER_ONLY_ACTIONS.contains(&d.name.as_str()) {
-                    return false;
-                }
-                true
-            })
+            .filter(|d| self.policy_allows(&d.name))
             .map(|d| FunctionDefinition {
                 name: d.name,
                 description: opt_desc(d.description),
@@ -334,33 +401,10 @@ impl ActionExecutor for BridgedExecutor {
             })
             .collect();
 
-        // Merge gateway action definitions.
+        // Merge gateway action definitions（同じポリシー述語でフィルタ）。
         if let Some(ref gw) = self.gateway_actions {
-            // trusted-only gateway actions: excluded for non-trusted callers
-            let trusted_only_actions = [
-                "create_skill",
-                "execute_skill",
-                "read_heartbeat_instructions",
-            ];
-            let is_trusted = matches!(
-                self.context.caller,
-                crate::traits::CallerIdentity::Owner
-                    | crate::traits::CallerIdentity::CoAgent { .. }
-                    | crate::traits::CallerIdentity::TrustedUser
-            );
             for def in gw.definitions() {
-                // At depth >= 1: block Discord-specific actions (sub-engines cannot directly send to Discord)
-                if self.depth >= 1 && DISCORD_ACTIONS.contains(&def.name.as_str()) {
-                    continue;
-                }
-                // At depth >= MAX_DEPTH: block spawn_subtask (prevent infinite nesting)
-                if self.depth >= MAX_DEPTH && def.name == "spawn_subtask" {
-                    continue;
-                }
-                if !is_trusted && trusted_only_actions.contains(&def.name.as_str()) {
-                    continue;
-                }
-                if !is_owner && OWNER_ONLY_ACTIONS.contains(&def.name.as_str()) {
+                if !self.policy_allows(&def.name) {
                     continue;
                 }
                 tools.push(FunctionDefinition {
@@ -943,6 +987,76 @@ mod tests {
             Some("Unknown action: unknown_echo")
         );
         assert!(gw.last_ctx.lock().unwrap().is_none());
+    }
+
+    // ---- #45: 実行時ポリシー強制（可視性と対称） ----
+
+    /// owner-only の dispatcher アクションは、一覧から隠れるだけでなく
+    /// 名前指定の実行も bridge で拒否されること。
+    #[tokio::test]
+    async fn test_owner_only_dispatcher_action_rejected_at_execute_for_agent() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        let result = executor
+            .execute("update_instructions", &json!({"instructions": "x"}))
+            .await;
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.starts_with(REJECTION_CODE_PREFIX));
+        assert!(err.contains("requires owner"));
+    }
+
+    #[tokio::test]
+    async fn test_owner_only_action_executes_for_owner() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Owner);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        // owner はポリシーを通過して dispatcher 本体に到達する（結果の成否は本体次第）。
+        let result = executor
+            .execute("update_instructions", &json!({"instructions": "x"}))
+            .await;
+        if let Some(err) = &result.error {
+            assert!(
+                !err.starts_with(REJECTION_CODE_PREFIX),
+                "owner must not be policy-rejected: {err}"
+            );
+        }
+    }
+
+    /// trusted-only の gateway アクションは、素の Agent からの名前指定実行が
+    /// gateway に到達する前に bridge で拒否されること（旧実装はモックまで素通し）。
+    #[tokio::test]
+    async fn test_trusted_only_gateway_action_rejected_at_execute_for_agent() {
+        let (_dir, ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
+        let result = executor.execute("create_skill", &json!({})).await;
+        assert!(!result.success);
+        let err = result.error.unwrap();
+        assert!(err.starts_with(REJECTION_CODE_PREFIX));
+        assert!(err.contains("trusted"));
+
+        // trusted_user は通過してモック（success）に到達する
+        let (_dir2, ctx2) = test_context_with_caller(CallerIdentity::TrustedUser);
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx2)
+            .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
+        let result = executor.execute("create_skill", &json!({})).await;
+        assert!(result.success);
+    }
+
+    /// ポリシー表のドリフト検出: dispatcher 側の owner-only 名は実在する
+    /// アクションであること（表が死に名を指したまま実アクションが野放しになる事故の防止）。
+    #[test]
+    fn test_policy_owner_only_dispatcher_names_are_live() {
+        let dispatcher = ActionDispatcher::new();
+        let names = dispatcher.action_names();
+        assert!(
+            names.iter().any(|n| n == "update_instructions"),
+            "update_instructions must exist in dispatcher"
+        );
+        // update_heartbeat_instructions / create_skill / read_heartbeat_instructions は
+        // gateway 側（discord crate のテストで実在性を検証）。execute_skill は防御的
+        // エントリ（実装なし）であることをここで明文化する。
+        assert!(!names.iter().any(|n| n == "execute_skill"));
     }
 
     // ---- ToolEventSink ----
