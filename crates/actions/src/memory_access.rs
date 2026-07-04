@@ -52,6 +52,7 @@ impl Action for BrowseMemoryIndexAction {
                     "node_type": n.node_type,
                     "title": n.title,
                     "summary": n.summary,
+                    "keywords": parse_keywords(&n.keywords_json),
                     "depth": n.depth,
                     "child_count": n.child_count,
                     "start_log_id": n.start_log_id,
@@ -171,12 +172,105 @@ impl Action for RetrieveMemoryNodesAction {
                 "title": node.title,
                 "summary": node.summary,
                 "node_type": node.node_type,
+                "keywords": parse_keywords(&node.keywords_json),
                 "messages": messages,
             }));
         }
 
         ActionResult::success(json!({
             "nodes": results,
+        }))
+    }
+}
+
+/// keywords_json（JSON 配列文字列）を Vec<String> にほどく（壊れていれば空）。
+fn parse_keywords(keywords_json: &str) -> Vec<String> {
+    serde_json::from_str(keywords_json).unwrap_or_default()
+}
+
+/// 記憶インデックスをキーワードで逆引き検索するアクション
+pub struct SearchMemoryIndexAction;
+
+#[async_trait]
+impl Action for SearchMemoryIndexAction {
+    fn name(&self) -> &str {
+        "search_memory_index"
+    }
+
+    fn description(&self) -> &str {
+        "記憶インデックスをキーワードで検索する（タイトル・要約・キーワードの全文検索）。ヒットしたノードの short_id を retrieve_memory_nodes に渡すと当時の生ログまで遡れる。生ログ自体を直接検索したい場合は search_my_history を使う。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "検索キーワード（空白区切りで複数可）"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最大件数（デフォルト: 10、最大: 25）",
+                    "default": 10
+                },
+                "node_type": {
+                    "type": "string",
+                    "description": "ノード種別で絞り込む（topic / period / session / daily など。省略時は全種別）"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let query = match args["query"].as_str() {
+            Some(q) if !q.trim().is_empty() => q.trim(),
+            _ => return ActionResult::error("query is required"),
+        };
+        let limit = args["limit"].as_i64().unwrap_or(10).clamp(1, 25) as usize;
+        let node_type = args["node_type"].as_str().filter(|s| !s.is_empty());
+
+        let results = {
+            let conn = match ctx.db.lock() {
+                Ok(c) => c,
+                Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+            };
+            match opencrab_db::queries::search_index_nodes(
+                &conn,
+                &ctx.agent_id,
+                query,
+                limit,
+                node_type,
+            ) {
+                Ok(r) => r,
+                Err(e) => return ActionResult::error(&format!("Search failed: {e}")),
+            }
+        };
+
+        let nodes: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                json!({
+                    "short_id": r.short_id,
+                    "node_id": r.node_id,
+                    "node_type": r.node_type,
+                    "source_type": r.source_type,
+                    "title": r.title,
+                    "summary": r.summary,
+                    "keywords": parse_keywords(&r.keywords_json),
+                    "date_from": r.date_from,
+                    "date_to": r.date_to,
+                    "child_count": r.child_count,
+                    "score": r.score,
+                })
+            })
+            .collect();
+
+        ActionResult::success(json!({
+            "query": query,
+            "count": nodes.len(),
+            "nodes": nodes,
         }))
     }
 }
@@ -247,6 +341,8 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 short_id: None,
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::insert_index_node(&conn, &node).unwrap();
             let topic = opencrab_db::queries::IndexNodeRow {
@@ -268,6 +364,8 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
                 short_id: None,
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::insert_index_node(&conn, &topic).unwrap();
         }
@@ -340,6 +438,8 @@ mod tests {
                 created_at: now.clone(),
                 updated_at: now,
                 short_id: None,
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
             };
             opencrab_db::queries::insert_index_node(&conn, &node).unwrap();
         }

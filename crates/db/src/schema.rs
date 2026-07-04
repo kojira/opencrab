@@ -155,6 +155,43 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 7,
+        description: "memory index: keywords + rollup timestamp + node FTS (reverse lookup)",
+        // キーワード逆引きと月次ロールアップの土台。新規DBも SCHEMA_SQL は触らず
+        // ここで ALTER する（v6 前例）。FTS バックフィルは影テーブルが空のときだけ
+        // 実行するので冪等。
+        up: |conn| {
+            if !column_exists(conn, "memory_index_nodes", "keywords_json")? {
+                conn.execute_batch(
+                    "ALTER TABLE memory_index_nodes ADD COLUMN keywords_json TEXT NOT NULL DEFAULT '[]'",
+                )?;
+            }
+            if !column_exists(conn, "memory_index_nodes", "summary_refreshed_at")? {
+                conn.execute_batch(
+                    "ALTER TABLE memory_index_nodes ADD COLUMN summary_refreshed_at TEXT",
+                )?;
+            }
+            // tokenize=trigram: 日本語は空白で区切られないため、既定の unicode61 だと
+            // 文全体が 1 トークンになり部分語で当たらない。trigram は 3 文字以上の
+            // 部分文字列マッチを可能にする（2 文字以下はクエリ層の LIKE フォールバック）。
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memory_index_fts USING fts5(
+                    title, summary, keywords,
+                    node_id UNINDEXED, agent_id UNINDEXED, node_type UNINDEXED, source_type UNINDEXED,
+                    tokenize='trigram')",
+            )?;
+            let fts_rows: i64 =
+                conn.query_row("SELECT COUNT(*) FROM memory_index_fts", [], |r| r.get(0))?;
+            if fts_rows == 0 {
+                conn.execute_batch(
+                    "INSERT INTO memory_index_fts (title, summary, keywords, node_id, agent_id, node_type, source_type)
+                     SELECT title, summary, '', id, agent_id, node_type, source_type FROM memory_index_nodes",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// version 2: タスク台帳。
@@ -1614,6 +1651,61 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    }
+
+    #[test]
+    fn memory_index_keywords_migration_v7() {
+        // 新規DB: init 直後から列と FTS 表がある。
+        let conn = crate::init_memory().expect("init");
+        assert!(column_exists(&conn, "memory_index_nodes", "keywords_json").unwrap());
+        assert!(column_exists(&conn, "memory_index_nodes", "summary_refreshed_at").unwrap());
+        assert!(table_exists(&conn, "memory_index_fts").unwrap());
+
+        // 既存DB（v6 時点 = 列も FTS も無い）からの upgrade。
+        conn.execute_batch(
+            "DROP TABLE memory_index_fts;
+             DROP TABLE memory_index_nodes;
+             CREATE TABLE memory_index_nodes (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
+                node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')),
+                source_type TEXT NOT NULL DEFAULT 'session_log',
+                title TEXT NOT NULL, summary TEXT NOT NULL,
+                start_log_id INTEGER, end_log_id INTEGER, source_session_id TEXT,
+                date_from TEXT, date_to TEXT,
+                depth INTEGER NOT NULL DEFAULT 0, child_count INTEGER NOT NULL DEFAULT 0,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, short_id TEXT
+             );
+             INSERT INTO memory_index_nodes (id, agent_id, node_type, title, summary, created_at, updated_at)
+             VALUES ('t-legacy', 'a1', 'topic', '旧トピック', '旧要約テキスト', '2026-01-01', '2026-01-01');
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "memory_index_nodes", "keywords_json").unwrap());
+
+        run_migrations(&conn, MIGRATIONS).expect("v7 migration");
+        assert!(column_exists(&conn, "memory_index_nodes", "keywords_json").unwrap());
+        assert!(column_exists(&conn, "memory_index_nodes", "summary_refreshed_at").unwrap());
+        // 既存行が FTS にバックフィルされ、trigram で部分一致検索できる
+        let fts_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_index_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_rows, 1);
+        let hits = crate::queries::search_index_nodes(&conn, "a1", "旧要約", 10, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node_id, "t-legacy");
+        // keywords_json は DEFAULT '[]' で読める
+        assert_eq!(hits[0].keywords_json, "[]");
+        // 再実行してもバックフィルは重複しない
+        conn.execute_batch("PRAGMA user_version = 6").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v7 rerun");
+        let fts_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_index_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_rows, 1);
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
     }
 

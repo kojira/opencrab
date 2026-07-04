@@ -149,6 +149,8 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          1. Look at [Past context summary] for topic titles and node IDs (e.g. [topic-xxx-1-20])\n\
          2. Use `retrieve_memory_nodes` with the node_id to get the full conversation text\n\
          3. Use `browse_memory_index` to explore all past topics beyond what's shown in the summary\n\
+         4. Use `search_memory_index` to search past topics by keyword (reverse lookup), \
+         then `retrieve_memory_nodes` on a hit to read the original logs\n\
          \n\
          These tools let you access your full history even after compaction.\n\
          \n\
