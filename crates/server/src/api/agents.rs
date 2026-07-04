@@ -60,6 +60,11 @@ pub async fn create_agent(
     Json(req): Json<CreateAgentRequest>,
 ) -> Json<serde_json::Value> {
     let agent_id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // workspace リゾルバ（resolve_agent_workspace）が実行時に hard-fail する id を
+    // 登録時点で弾く（#48: 拒否は作成時、初回応答時ではなく）。
+    if let Err(e) = opencrab_core::workspace::validate_agent_id(&agent_id) {
+        return Json(serde_json::json!({"error": format!("invalid agent id: {e}")}));
+    }
     let conn = state.db.lock().unwrap();
 
     let row = opencrab_db::queries::AgentRow {

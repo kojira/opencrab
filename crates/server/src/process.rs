@@ -768,7 +768,7 @@ async fn run_verify_stage(
         } else {
             "\nAddress these gaps in your next turn (claims without evidence in the trace do not count).".to_string()
         };
-        let _ = opencrab_db::queries::insert_session_log(
+        opencrab_db::queries::insert_session_log_best_effort(
             &conn,
             &opencrab_db::queries::SessionLogRow {
                 id: None,
