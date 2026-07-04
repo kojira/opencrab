@@ -240,12 +240,7 @@ impl LlmProvider for CodexProvider {
 
         let output = tokio::time::timeout(self.timeout, child.wait_with_output())
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "codex CLI timed out after {}s",
-                    self.timeout.as_secs()
-                )
-            })?
+            .map_err(|_| anyhow::anyhow!("codex CLI timed out after {}s", self.timeout.as_secs()))?
             .context("failed to wait for codex CLI")?;
 
         // Read response from the output file (-o flag).
@@ -299,7 +294,6 @@ impl LlmProvider for CodexProvider {
                     function_call: None,
                     tool_calls: None,
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
             }],
@@ -329,7 +323,9 @@ impl LlmProvider for CodexProvider {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
-        let mut child = cmd.spawn().context("failed to spawn codex CLI for streaming")?;
+        let mut child = cmd
+            .spawn()
+            .context("failed to spawn codex CLI for streaming")?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
@@ -338,10 +334,7 @@ impl LlmProvider for CodexProvider {
                 .context("failed to write prompt to codex stdin")?;
         }
 
-        let stdout = child
-            .stdout
-            .take()
-            .context("failed to get codex stdout")?;
+        let stdout = child.stdout.take().context("failed to get codex stdout")?;
 
         let reader = BufReader::new(stdout);
         let lines = reader.lines();
@@ -406,8 +399,7 @@ fn render_tool_definitions(tools: &[FunctionDefinition]) -> String {
             out.push_str(&format!("<description>{desc}</description>\n"));
         }
         // Embed the raw JSON Schema for the parameters.
-        let params = serde_json::to_string(&tool.parameters)
-            .unwrap_or_else(|_| "{}".to_string());
+        let params = serde_json::to_string(&tool.parameters).unwrap_or_else(|_| "{}".to_string());
         out.push_str(&format!("<parameters>{params}</parameters>\n"));
         out.push_str("</tool>\n");
     }
@@ -440,7 +432,10 @@ fn render_tool_calls(tool_calls: &[ToolCall]) -> String {
             }
             // Fall back to emitting the raw arguments if they are not an object.
             _ => {
-                out.push_str(&format!("<arguments>{}</arguments>\n", call.function.arguments));
+                out.push_str(&format!(
+                    "<arguments>{}</arguments>\n",
+                    call.function.arguments
+                ));
             }
         }
         out.push_str("</invoke>\n");
@@ -554,7 +549,6 @@ mod tests {
                     function_call: None,
                     tool_calls: None,
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 Message {
                     role: Role::User,
@@ -563,7 +557,6 @@ mod tests {
                     function_call: None,
                     tool_calls: None,
                     tool_call_id: None,
-                    cache_control: None,
                 },
             ],
             functions: None,
@@ -594,7 +587,6 @@ mod tests {
                     "type": "object",
                     "properties": {"prompt": {"type": "string"}}
                 }),
-                cache_control: None,
             }]),
             function_call: None,
             temperature: None,
@@ -634,7 +626,6 @@ mod tests {
                         },
                     }]),
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 Message {
                     role: Role::Tool,
@@ -643,7 +634,6 @@ mod tests {
                     function_call: None,
                     tool_calls: None,
                     tool_call_id: Some("call_1".to_string()),
-                    cache_control: None,
                 },
             ],
             functions: None,
@@ -695,8 +685,7 @@ mod tests {
 
     #[test]
     fn test_extra_models() {
-        let provider = CodexProvider::new()
-            .with_extra_models(vec![("gpt-5".to_string(), 128_000)]);
+        let provider = CodexProvider::new().with_extra_models(vec![("gpt-5".to_string(), 128_000)]);
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -710,7 +699,10 @@ mod tests {
     fn test_parse_jsonl_event_agent_message() {
         let line = r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Hello world"}}"#;
         let delta = parse_jsonl_event(line, "o4-mini").unwrap();
-        assert_eq!(delta.choices[0].delta.content.as_deref(), Some("Hello world"));
+        assert_eq!(
+            delta.choices[0].delta.content.as_deref(),
+            Some("Hello world")
+        );
     }
 
     #[test]

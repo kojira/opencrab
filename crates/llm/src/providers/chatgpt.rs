@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::StreamExt;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
@@ -82,7 +82,6 @@ pub struct ChatGptProvider {
     default_model: String,
     reasoning_effort: Option<String>,
     include_encrypted_content: bool,
-    max_output_tokens: Option<u32>,
 }
 
 impl Default for ChatGptProvider {
@@ -105,7 +104,6 @@ impl ChatGptProvider {
             default_model: DEFAULT_MODEL.to_string(),
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
-            max_output_tokens: Some(8192),
         }
     }
 
@@ -127,28 +125,12 @@ impl ChatGptProvider {
 
     pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
         let s: String = effort.into();
-        if s.is_empty() {
-            self.reasoning_effort = None;
-        } else {
-            // Higher reasoning effort produces more reasoning tokens, so size the
-            // output budget accordingly. An explicit `with_max_output_tokens` call
-            // (e.g. from config) applied afterwards still overrides this.
-            self.max_output_tokens = Some(match s.as_str() {
-                "high" => 32000,
-                _ => 25000, // "low" / "medium" / anything else
-            });
-            self.reasoning_effort = Some(s);
-        }
+        self.reasoning_effort = if s.is_empty() { None } else { Some(s) };
         self
     }
 
     pub fn with_include_encrypted_content(mut self, v: bool) -> Self {
         self.include_encrypted_content = v;
-        self
-    }
-
-    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
-        self.max_output_tokens = Some(tokens);
         self
     }
 
@@ -510,7 +492,6 @@ impl ChatGptProvider {
                     function_call: None,
                     tool_calls,
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 finish_reason: Some(finish_reason),
             }],
@@ -592,80 +573,35 @@ impl LlmProvider for ChatGptProvider {
             body_len = body_str.len(),
             "ChatGPT chat_completion: sending request"
         );
-        let max_retries = 3u32;
-        let mut last_error = String::new();
-        let mut last_status: Option<reqwest::StatusCode> = None;
+        // リトライは router が所有する（#46）。以前はここで独自に3回リトライしており、
+        // router の同一プロバイダ3回リトライと重なって最大9回の HTTP 試行になっていた。
+        // 429/5xx は型付き api_error で返せば router が retryable と分類して再試行する。
+        let resp = self
+            .request_builder("codex/responses", &token, &account_id)
+            .json(&body)
+            .send()
+            .await
+            .context("ChatGPT API request failed")?;
 
-        for attempt in 0..max_retries {
-            if attempt > 0 {
-                let backoff_secs = 1u64 << (attempt - 1); // 1, 2, 4
-                tracing::warn!(
-                    attempt,
-                    backoff_secs,
-                    last_error = %last_error,
-                    "ChatGPT chat_completion: retrying after error"
-                );
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-            }
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .context("ChatGPT: failed to read response body")?;
 
-            let resp_result = self
-                .request_builder("codex/responses", &token, &account_id)
-                .json(&body)
-                .send()
-                .await;
+        tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
 
-            let resp = match resp_result {
-                Ok(r) => r,
-                Err(e) => {
-                    last_error = format!("request failed: {e}");
-                    tracing::warn!(attempt, error = %e, "ChatGPT chat_completion: network error");
-                    continue;
-                }
-            };
-
-            let status = resp.status();
-            let text = match resp.text().await {
-                Ok(t) => t,
-                Err(e) => {
-                    last_error = format!("failed to read body: {e}");
-                    tracing::warn!(attempt, error = %e, "ChatGPT chat_completion: body read error");
-                    continue;
-                }
-            };
-
-            tracing::warn!(status = %status, body_len = text.len(), "ChatGPT chat_completion response received");
-
-            if !status.is_success() {
-                last_error = format!("HTTP {}: (body_len={})", status, text.len());
-                last_status = Some(status);
-                tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
-                // Don't retry on 4xx client errors (except 429)
-                if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429 {
-                    return Err(crate::error::api_error("ChatGPT", status, text));
-                }
-                continue;
-            }
-
-            tracing::warn!(
-                body_len = text.len(),
-                "ChatGPT chat_completion parsing response"
-            );
-            let result = self.parse_response(&text, &request.model);
-            tracing::warn!(
-                success = result.is_ok(),
-                "ChatGPT chat_completion parse result"
-            );
-            return result;
+        if !status.is_success() {
+            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion error response");
+            return Err(crate::error::api_error("ChatGPT", status, text));
         }
 
-        // 枯渇時もステータスが分かっていれば型付きで返す（router 側の分類を生かす）
-        let message = format!(
-            "ChatGPT API request failed after {max_retries} attempts: {last_error}"
+        let result = self.parse_response(&text, &request.model);
+        tracing::warn!(
+            success = result.is_ok(),
+            "ChatGPT chat_completion parse result"
         );
-        Err(match last_status {
-            Some(status) => crate::error::api_error("ChatGPT", status, message),
-            None => anyhow::anyhow!(message),
-        })
+        result
     }
 
     async fn chat_completion_stream(
@@ -687,75 +623,29 @@ impl LlmProvider for ChatGptProvider {
             body_len = body_str.len(),
             "ChatGPT chat_completion_stream: sending request"
         );
-        let max_retries = 3u32;
-        let mut resp = None;
-        let mut last_error = String::new();
-        let mut last_status: Option<reqwest::StatusCode> = None;
+        // リトライは router が所有する（#46: 内部リトライとの重なりで最大9試行に
+        // なっていた）。エラーは型付き api_error で返し、router の分類に委ねる。
+        let resp = self
+            .request_builder("codex/responses", &token, &account_id)
+            .json(&body)
+            .send()
+            .await
+            .context("ChatGPT streaming request failed")?;
 
-        for attempt in 0..max_retries {
-            if attempt > 0 {
-                let backoff_secs = 1u64 << (attempt - 1);
-                tracing::warn!(
-                    attempt,
-                    backoff_secs,
-                    last_error = %last_error,
-                    "ChatGPT chat_completion_stream: retrying after error"
-                );
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-            }
-
-            let resp_result = self
-                .request_builder("codex/responses", &token, &account_id)
-                .json(&body)
-                .send()
-                .await;
-
-            match resp_result {
-                Ok(r) => {
-                    let status = r.status();
-                    tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
-                    if !status.is_success() {
-                        let text = r.text().await.unwrap_or_default();
-                        last_error = format!("HTTP {}: (body_len={})", status, text.len());
-                        last_status = Some(status);
-                        tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
-                        if status.as_u16() >= 400 && status.as_u16() < 500 && status.as_u16() != 429
-                        {
-                            return Err(crate::error::api_error("ChatGPT", status, text));
-                        }
-                        continue;
-                    }
-                    resp = Some(r);
-                    break;
-                }
-                Err(e) => {
-                    last_error = format!("request failed: {e}");
-                    tracing::warn!(attempt, error = %e, "ChatGPT chat_completion_stream: network error");
-                    continue;
-                }
-            }
+        let status = resp.status();
+        tracing::warn!(status = %status, "ChatGPT chat_completion_stream response received");
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(status = %status, body = %text, "ChatGPT chat_completion_stream error response");
+            return Err(crate::error::api_error("ChatGPT", status, text));
         }
-
-        let resp = match resp {
-            Some(r) => r,
-            None => {
-                // 枯渇時もステータスが分かっていれば型付きで返す（router 側の分類を生かす）
-                let message = format!(
-                    "ChatGPT streaming request failed after {max_retries} attempts: {last_error}"
-                );
-                return Err(match last_status {
-                    Some(status) => crate::error::api_error("ChatGPT", status, message),
-                    None => anyhow::anyhow!(message),
-                });
-            }
-        };
         let request_model = request.model.clone();
         // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
         // Responses API は data ペイロード自身に `type` を含むため、行を跨ぐ `event:` 状態には
         // 依存しない。これにより、同一チャンク内で後続イベントが直前のテキストデルタを
         // 上書きしてしまう問題を防ぐ。
-        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
-            move |line_res| {
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
                 let request_model = request_model.clone();
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
@@ -811,8 +701,7 @@ impl LlmProvider for ChatGptProvider {
                     }
                 };
                 futures::future::ready(out)
-            },
-        );
+            });
         Ok(Box::pin(stream))
     }
 
@@ -962,8 +851,8 @@ mod tests {
                 arguments: r#"{"city":"Tokyo"}"#.to_string(),
             },
         }]);
-        let request = ChatRequest::new("gpt-5.5", vec![Message::user("hi"), assistant])
-            .with_max_tokens(256);
+        let request =
+            ChatRequest::new("gpt-5.5", vec![Message::user("hi"), assistant]).with_max_tokens(256);
 
         let body = provider.build_request_body(&request, false);
 
@@ -1337,7 +1226,6 @@ mod tests {
                     function_call: None,
                     tool_calls: None,
                     tool_call_id: None,
-                    cache_control: None,
                 },
             ],
             functions: None,
@@ -1374,7 +1262,6 @@ mod tests {
                 "required": ["city"],
                 "additionalProperties": false
             }),
-            cache_control: None,
         }
     }
 
@@ -1430,7 +1317,12 @@ mod tests {
             "unexpected tool name"
         );
         let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
-            .unwrap_or_else(|e| panic!("tool arguments must be valid JSON ({e}): {}", call.function.arguments));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "tool arguments must be valid JSON ({e}): {}",
+                    call.function.arguments
+                )
+            });
         assert!(
             args.get("city").is_some(),
             "expected a 'city' argument, got: {}",
@@ -1516,7 +1408,10 @@ mod tests {
         assert!(
             !text.is_empty(),
             "final continuation text must not be empty; finish_reason={:?}",
-            final_resp.choices.first().and_then(|c| c.finish_reason.clone())
+            final_resp
+                .choices
+                .first()
+                .and_then(|c| c.finish_reason.clone())
         );
         println!("Continuation final text: {}", text);
     }

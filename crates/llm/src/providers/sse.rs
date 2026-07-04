@@ -80,10 +80,7 @@ mod tests {
             Ok(b"data: [DONE]\n".to_vec()),
         ];
         let byte_stream = futures::stream::iter(chunks);
-        let lines: Vec<String> = line_stream(byte_stream)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let lines: Vec<String> = line_stream(byte_stream).map(|r| r.unwrap()).collect().await;
         assert_eq!(
             lines,
             vec![
@@ -100,13 +97,9 @@ mod tests {
         // 日本語「あ」(E3 81 82) がチャンク境界で分断されても壊れない。
         let full = "data: あい\n".as_bytes().to_vec();
         let (first, second) = full.split_at(7); // 途中で分割
-        let chunks: Vec<reqwest::Result<Vec<u8>>> =
-            vec![Ok(first.to_vec()), Ok(second.to_vec())];
+        let chunks: Vec<reqwest::Result<Vec<u8>>> = vec![Ok(first.to_vec()), Ok(second.to_vec())];
         let byte_stream = futures::stream::iter(chunks);
-        let lines: Vec<String> = line_stream(byte_stream)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let lines: Vec<String> = line_stream(byte_stream).map(|r| r.unwrap()).collect().await;
         assert_eq!(lines, vec!["data: あい".to_string()]);
     }
 
@@ -114,10 +107,7 @@ mod tests {
     async fn flushes_trailing_line_without_newline() {
         let chunks: Vec<reqwest::Result<Vec<u8>>> = vec![Ok(b"data: X".to_vec())];
         let byte_stream = futures::stream::iter(chunks);
-        let lines: Vec<String> = line_stream(byte_stream)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let lines: Vec<String> = line_stream(byte_stream).map(|r| r.unwrap()).collect().await;
         assert_eq!(lines, vec!["data: X".to_string()]);
     }
 }

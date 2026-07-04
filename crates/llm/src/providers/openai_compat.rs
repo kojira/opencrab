@@ -85,10 +85,7 @@ fn parse_finish_reason(fr: &Value) -> Option<FinishReason> {
 /// llamacpp はメトリクス集計用に "local" — 統合前の各プロバイダの挙動を保存）。
 pub fn parse_chat_response(body: &Value, fallback_model: &str) -> ChatResponse {
     let id = body["id"].as_str().unwrap_or_default().to_string();
-    let model = body["model"]
-        .as_str()
-        .unwrap_or(fallback_model)
-        .to_string();
+    let model = body["model"].as_str().unwrap_or(fallback_model).to_string();
     // created 欠落は 0 センチネル（統合前の openai/openrouter の挙動を保存）
     let created = body["created"].as_i64().unwrap_or(0);
 
@@ -148,7 +145,6 @@ pub fn parse_chat_response(body: &Value, fallback_model: &str) -> ChatResponse {
                             function_call,
                             tool_calls,
                             tool_call_id,
-                            cache_control: None,
                         },
                         finish_reason: c.get("finish_reason").and_then(parse_finish_reason),
                     }
@@ -191,7 +187,9 @@ pub fn delta_from_sse_line(line: &str) -> Option<ChatStreamDelta> {
                             role: delta
                                 .get("role")
                                 .and_then(|r| serde_json::from_value(r.clone()).ok()),
-                            content: delta.get("content").and_then(|v| v.as_str().map(String::from)),
+                            content: delta
+                                .get("content")
+                                .and_then(|v| v.as_str().map(String::from)),
                             function_call: delta
                                 .get("function_call")
                                 .and_then(|fc| serde_json::from_value(fc.clone()).ok()),
@@ -245,7 +243,10 @@ mod tests {
         assert_eq!(resp.usage.cache_read_input_tokens, 3);
         let choice = &resp.choices[0];
         assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
-        assert_eq!(choice.message.tool_calls.as_ref().unwrap()[0].function.name, "f");
+        assert_eq!(
+            choice.message.tool_calls.as_ref().unwrap()[0].function.name,
+            "f"
+        );
         assert_eq!(resp.first_text(), Some("hello"));
     }
 

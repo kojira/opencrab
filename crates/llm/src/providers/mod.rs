@@ -4,8 +4,8 @@ pub mod codex;
 pub mod google;
 pub mod llamacpp;
 pub mod ollama;
-pub mod openai_compat;
 pub mod openai;
+pub mod openai_compat;
 pub mod openrouter;
 pub mod sse;
 
