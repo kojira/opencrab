@@ -12,32 +12,45 @@ opencrab の設定は 2 系統ある。どちらが勝つかの規則をここ�
   許可コマンド（`agent_allowed_commands`）、heartbeat 指示など。API / Discord
   アクション経由で実行中に変更でき、再起動不要で反映される。
 - **粒度が細かい方が勝つ**: effective = channel 設定 ?? agent 設定 ?? グローバル既定。
-  例: heartbeat 指示の解決順は channel(agent) > channel(全体) > agent > 組み込み既定
-  （`resolve_heartbeat_instructions`）。
+  例: heartbeat 指示の channel 設定は channel(agent) > channel(全体) の順で解決され、
+  agent 設定と channel 設定の両方があるときは**連結**される（channel が agent を
+  上書きするのではない。`resolve_heartbeat_instructions` 参照）。どちらも無ければ
+  組み込み既定。
 
 ## Discord ゲートウェイの二重起動防止（DB 優先）
 
 同一エージェントが「TOML の共有ゲートウェイ（`[gateway.discord].agent_ids`）」と
 「DB の per-agent ゲートウェイ（`agent_discord_config` で enabled）」の両方に載ると、
-1 つの発言に二重応答しうる。**DB の per-agent 設定が優先**され、次の 2 層で防ぐ:
+1 つの発言に二重応答しうる。**専用（per-agent）ゲートウェイが優先**され、共有
+ゲートウェイのループがメッセージ処理のたびに
+`AgentRunner::served_by_dedicated_gateway`（= `DiscordGatewayManager::is_running`）
+を確認して、専用ゲートウェイが**実際に稼働中**のエージェントをスキップする
+（`crates/discord/src/message_loop.rs`）。
 
-1. **起動時**（`crates/server/src/main.rs`）: 共有ゲートウェイの対象エージェントを
-   組み立てる際、enabled な `agent_discord_config` 行を持つエージェントを warn ログ
-   付きで除外する。
-2. **ランタイム**（`crates/discord/src/message_loop.rs`）: 共有ゲートウェイのループは
-   メッセージ処理のたびに `AgentRunner::has_enabled_discord_config` を確認し、enabled
-   な per-agent 設定を持つエージェントをスキップする。稼働中に per-agent 設定を
-   enable した場合も、再起動なしで即座に共有側が処理をやめる。
-   per-agent ゲートウェイ側のループ（`manager.rs`）はこのチェックを行わない
-   （enabled な設定**から**起動されるため、チェックすると自分自身を skip してしまう）。
+判定を DB の enabled フラグではなく**ゲートウェイの生死**で行うのが要点:
+
+- **enable/disable が対称に効く**: 稼働中に per-agent 設定を enable → 専用ゲートウェイ
+  が上がった時点で共有側が処理をやめる。disable / stop → 専用側が止まった時点で
+  共有側が処理を再開する。どちらも再起動不要。
+- **「誰も応答しない」状態を作らない**: enabled=1 でも専用ゲートウェイが起動失敗
+  （無効トークン、Discord 障害）していれば、共有側がフォールバックとして応答を
+  続ける。起動時に enabled な per-agent 設定を持つエージェントを共有リストから
+  **除外しない**のも同じ理由（info ログのみ）。
+- スキップ判定は agent ループの前にリストごと絞る形で行い、trust 判定
+  （`dm_allowed_any` / `resolve_caller`）にもスキップ対象エージェントの
+  trusted_users を混入させない。
+
+per-agent ゲートウェイ側のループ（`manager.rs`）はこのチェックを行わない
+（enabled な設定**から**起動されるため、チェックすると自分自身を skip してしまう）。
 
 **対象外**: この dedupe は「同一エージェントの二重処理」を防ぐものであって、
 別々の Bot トークンを持つ 2 つの bot が同じチャンネルに同居すること自体は制限しない
 （それは正当な構成でありうる）。
 
-DB 参照に失敗した場合、ランタイムチェックは false（= 共有側が処理を続行）に倒す。
-per-agent ゲートウェイも同じ DB に依存しているため、DB 断で両方が沈黙するより
-可用性を優先する。まれに二重応答する可能性はあるが、DB 断時の縮退として許容する。
+**既知の縮退**: 専用ゲートウェイの起動直後・停止直前の短い窓では、共有側と専用側の
+どちらが処理するかがメッセージ単位で切り替わる。Discord ゲートウェイは接続前の
+メッセージを再配信しないため二重応答にはならないが、応答する bot アカウントが
+一時的に揺れることはある。
 
 ## hot-reload と DB 設定が衝突しない理由
 

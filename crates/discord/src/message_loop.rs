@@ -118,9 +118,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
         mpsc::UnboundedSender<LoopEvent>,
         mpsc::UnboundedReceiver<LoopEvent>,
     )>,
-    // 共有（TOML）ゲートウェイのループなら true: enabled な per-agent Discord 設定を
-    // 持つエージェントをメッセージ処理時にスキップする（#40 — DB 優先の二重処理防止）。
-    // per-agent ゲートウェイ（manager.rs）は enabled な設定**から**起動されるので必ず false。
+    // 共有（TOML）ゲートウェイのループなら true: 専用（per-agent）ゲートウェイが
+    // **稼働中**のエージェントをメッセージ処理時にスキップする（#40 — 二重処理防止）。
+    // 判定は liveness ベースなので、専用側が停止/起動失敗していれば共有側が
+    // フォールバックとして処理を続ける。per-agent ゲートウェイ自身のループ
+    // （manager.rs）は必ず false（true にすると自分自身を skip してしまう）。
     skip_agents_with_dedicated_gateway: bool,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
@@ -346,6 +348,33 @@ async fn process_incoming_message<T: AgentRunner>(
 
     let is_dm = guild_id.is_empty();
 
+    // #40: 専用（per-agent）ゲートウェイが稼働中のエージェントは共有ループでは処理しない。
+    // ここでリストごと絞るのは、後段の trust 判定（dm_allowed_any / resolve_caller）にも
+    // スキップ対象エージェントの trusted_users を混入させないため。専用ゲートウェイが
+    // 停止/起動失敗していれば絞られず、共有側がフォールバックとして処理を続ける。
+    let agent_ids: Vec<String> = if skip_agents_with_dedicated_gateway {
+        let filtered: Vec<String> = agent_ids
+            .into_iter()
+            .filter(|agent_id| {
+                if state.served_by_dedicated_gateway(agent_id) {
+                    debug!(
+                        agent = %agent_id,
+                        "Skipping agent on shared gateway: dedicated per-agent gateway is running"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        filtered
+    } else {
+        agent_ids
+    };
+
     // DM whitelist check（いずれかのエージェントが信頼していれば通す事前ゲート）
     if is_dm && !state.dm_allowed_any(&incoming.sender.id, &agent_ids, &owner_discord_id) {
         debug!(
@@ -384,17 +413,6 @@ async fn process_incoming_message<T: AgentRunner>(
     let mut reaction_added = incoming.sender.is_bot;
 
     for agent_id in &agent_ids {
-        // #40: DB の per-agent Discord 設定（専用ゲートウェイ）が enabled なら、共有
-        // ゲートウェイ側では処理しない（DB 優先）。ランタイムに enable された場合も
-        // per-message チェックなのでここで即座に効く。
-        if skip_agents_with_dedicated_gateway && state.has_enabled_discord_config(agent_id) {
-            debug!(
-                agent = %agent_id,
-                "Skipping agent on shared gateway: enabled per-agent Discord config takes precedence"
-            );
-            continue;
-        }
-
         // Per-agent channel whitelist check
         if !is_dm {
             if !state.is_channel_whitelisted_for_agent(&channel_id_str, agent_id) {

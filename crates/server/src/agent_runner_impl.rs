@@ -314,21 +314,13 @@ impl opencrab_discord::AgentRunner for AppState {
         }
     }
 
-    fn has_enabled_discord_config(&self, agent_id: &str) -> bool {
-        let Ok(conn) = self.db.lock() else {
-            return false;
-        };
-        match opencrab_db::queries::get_agent_discord_config(&conn, agent_id) {
-            Ok(Some(cfg)) => cfg.enabled,
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    error = %e,
-                    "Failed to check per-agent discord config; assuming none"
-                );
-                false
-            }
-        }
+    fn served_by_dedicated_gateway(&self, agent_id: &str) -> bool {
+        // DB の enabled フラグではなく manager の liveness で判定する（#40）。
+        // enabled=1 でもゲートウェイが起動失敗/停止していれば false → 共有側が
+        // フォールバックとして処理を続け、「誰も応答しない」状態を作らない。
+        self.discord_manager
+            .as_ref()
+            .map(|m| m.is_running(agent_id))
+            .unwrap_or(false)
     }
 }

@@ -4,9 +4,8 @@
 //! `DiscordGatewayManager` handles lifecycle (start/stop) for all per-agent gateways.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -22,6 +21,8 @@ struct AgentGatewayEntry {
 }
 
 pub struct DiscordGatewayManager<T: AgentRunner> {
+    // std RwLock（tokio ではない）: is_running を同期メソッドにするため。
+    // ガードを await 跨ぎで保持しないこと（各メソッドでスコープを閉じる）。
     gateways: RwLock<HashMap<String, AgentGatewayEntry>>,
     state: T,
 }
@@ -99,8 +100,10 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             .await;
         });
 
-        let mut gateways = self.gateways.write().await;
-        gateways.insert(agent_id.to_string(), AgentGatewayEntry { gateway, handle });
+        {
+            let mut gateways = self.gateways.write().unwrap();
+            gateways.insert(agent_id.to_string(), AgentGatewayEntry { gateway, handle });
+        }
 
         info!(agent_id = %agent_id, "Per-agent Discord gateway started");
         Ok(())
@@ -109,7 +112,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
     /// Stop a per-agent Discord gateway.
     pub async fn stop_agent_gateway(&self, agent_id: &str) {
         let entry = {
-            let mut gateways = self.gateways.write().await;
+            let mut gateways = self.gateways.write().unwrap();
             gateways.remove(agent_id)
         };
 
@@ -121,8 +124,11 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
     }
 
     /// Check if a per-agent gateway is running.
-    pub async fn is_running(&self, agent_id: &str) -> bool {
-        let gateways = self.gateways.read().await;
+    ///
+    /// 同期メソッド: 共有ゲートウェイのメッセージループが per-message で
+    /// 「専用ゲートウェイが実際に稼働しているか」を判定するのに使う（#40）。
+    pub fn is_running(&self, agent_id: &str) -> bool {
+        let gateways = self.gateways.read().unwrap();
         gateways
             .get(agent_id)
             .map(|e| !e.handle.is_finished())
@@ -130,8 +136,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
     }
 
     /// Get the HTTP client for a per-agent gateway.
-    pub async fn get_http_for_agent(&self, agent_id: &str) -> Option<Arc<serenity::http::Http>> {
-        let gateways = self.gateways.read().await;
+    pub fn get_http_for_agent(&self, agent_id: &str) -> Option<Arc<serenity::http::Http>> {
+        let gateways = self.gateways.read().unwrap();
         gateways.get(agent_id).map(|e| e.gateway.http().clone())
     }
 
@@ -154,7 +160,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
     /// Shutdown all per-agent gateways.
     pub async fn shutdown_all(&self) {
         let entries: Vec<(String, AgentGatewayEntry)> = {
-            let mut gateways = self.gateways.write().await;
+            let mut gateways = self.gateways.write().unwrap();
             gateways.drain().collect()
         };
 

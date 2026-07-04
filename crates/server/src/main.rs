@@ -475,6 +475,12 @@ async fn main() -> anyhow::Result<()> {
     // Start Discord gateway if configured and feature is enabled.
     #[cfg(feature = "discord")]
     {
+        // Per-agent Discord gateway manager（#40: 共有ループが「専用ゲートウェイが
+        // 稼働中か」を参照できるよう、共有ゲートウェイへ渡す AppState clone より
+        // **前に**生成して配線する。実際の復元は共有ゲートウェイ起動後に行う）。
+        let manager = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        state.discord_manager = Some(manager.clone());
+
         let discord_cfg = &cfg.gateway.discord;
 
         // Fallback: config-based shared gateway (existing behavior).
@@ -484,7 +490,7 @@ async fn main() -> anyhow::Result<()> {
             // Validate agent IDs against the database
             let valid_agent_ids: Vec<String> = {
                 let conn = state.db.lock().unwrap();
-                discord_cfg
+                let ids: Vec<String> = discord_cfg
                     .agent_ids
                     .iter()
                     .map(|agent_id| resolve_agent_id(&conn, agent_id))
@@ -500,22 +506,24 @@ async fn main() -> anyhow::Result<()> {
                             }
                         },
                     )
-                    // #40: enabled な per-agent Discord 設定（DB）を持つエージェントは
-                    // 専用ゲートウェイ側で処理されるため、共有（TOML）ゲートウェイから外す。
-                    .filter(|agent_id| {
-                        match opencrab_db::queries::get_agent_discord_config(&conn, agent_id) {
-                            Ok(Some(cfg)) if cfg.enabled => {
-                                tracing::warn!(
-                                    agent_id = %agent_id,
-                                    "Agent has an enabled per-agent Discord config in DB; \
-                                     skipping on shared TOML gateway (DB config takes precedence)"
-                                );
-                                false
-                            }
-                            _ => true,
-                        }
-                    })
-                    .collect()
+                    .collect();
+                // #40: enabled な per-agent Discord 設定を持つエージェントは、専用
+                // ゲートウェイの**稼働中**は共有ループが per-message でスキップする
+                // （liveness ベース）。ここでリストから除外はしない: 専用側が起動失敗
+                // した場合に共有側がフォールバックとして応答を続けるため。
+                for agent_id in &ids {
+                    if matches!(
+                        opencrab_db::queries::get_agent_discord_config(&conn, agent_id),
+                        Ok(Some(cfg)) if cfg.enabled
+                    ) {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            "Agent has an enabled per-agent Discord config; shared gateway \
+                             will defer to it while its dedicated gateway is running"
+                        );
+                    }
+                }
+                ids
             };
 
             if valid_agent_ids.is_empty() {
@@ -588,8 +596,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Per-agent Discord gateway manager.
-        let manager = opencrab_discord::DiscordGatewayManager::new(state.clone());
+        // DB から per-agent ゲートウェイを復元する（manager 自体はこのブロック冒頭で
+        // 生成・配線済み。復元は共有ゲートウェイ起動後: 起動直後の短い窓では共有側が
+        // メッセージを処理し、専用ゲートウェイが上がり次第 per-message スキップが効く）。
         manager.restore_from_db().await;
 
         // Per-agentゲートウェイのHTTPクライアントをheartbeatに設定
@@ -602,10 +611,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(|id| resolve_agent_id(&conn, id))
                 .unwrap_or_default()
         };
-        if let Some(http) = manager
-            .get_http_for_agent(&heartbeat_agent_id_for_http)
-            .await
-        {
+        if let Some(http) = manager.get_http_for_agent(&heartbeat_agent_id_for_http) {
             *heartbeat_discord_http.lock().unwrap() = Some(http);
             tracing::info!(agent_id = %heartbeat_agent_id_for_http, "Set heartbeat Discord HTTP from per-agent gateway");
         }
@@ -613,8 +619,6 @@ async fn main() -> anyhow::Result<()> {
             *heartbeat_channel_id_arc.lock().unwrap() = Some(ch_id);
             tracing::info!(channel_id = %ch_id, "Set heartbeat channel ID from config");
         }
-
-        state.discord_manager = Some(Arc::new(manager));
 
         tracing::info!("Per-agent Discord gateway manager initialized");
     }
