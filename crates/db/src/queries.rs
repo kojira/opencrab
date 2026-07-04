@@ -1545,8 +1545,10 @@ pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
 
 /// セッションの参加エージェント一覧（agent_sessions テーブルが正 — #37）。
 pub fn list_session_participants(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    // rowid 順 = 挿入順 = participant_ids_json の配列順（send_message の応答順・
+    // 発話順という observable な意味論を旧 JSON 実装から保存する）。
     let mut stmt = conn
-        .prepare("SELECT agent_id FROM agent_sessions WHERE session_id = ?1 ORDER BY agent_id")?;
+        .prepare("SELECT agent_id FROM agent_sessions WHERE session_id = ?1 ORDER BY rowid")?;
     let ids = stmt
         .query_map(params![session_id], |row| row.get(0))?
         .collect::<std::result::Result<Vec<String>, _>>()?;
