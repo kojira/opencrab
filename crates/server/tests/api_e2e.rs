@@ -24,6 +24,7 @@ fn create_test_app() -> Router {
         )),
         compaction_ratio: 0.5,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        loop_restart_enabled: false,
         #[cfg(feature = "discord")]
         discord_manager: None,
     };
@@ -701,6 +702,7 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
         )),
         compaction_ratio: 0.5,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        loop_restart_enabled: false,
         #[cfg(feature = "discord")]
         discord_manager: None,
     };

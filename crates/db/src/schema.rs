@@ -141,6 +141,20 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 6,
+        description: "task_ledger.restart_count (loop restart v1, issue #52)",
+        // 新規/既存DBとも ALTER で追加する（SCHEMA_SQL 側の task_ledger ブロックは
+        // TASK_LEDGER_SQL との文面パリティ制約があるため変更しない）。
+        up: |conn| {
+            if !column_exists(conn, "task_ledger", "restart_count")? {
+                conn.execute_batch(
+                    "ALTER TABLE task_ledger ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// version 2: タスク台帳。
@@ -1567,6 +1581,40 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(orphan_parent, None);
+    }
+
+    #[test]
+    fn task_ledger_restart_count_migration_v6() {
+        // 新規DB: init 直後から列がある（v6 適用済み）。
+        let conn = crate::init_memory().expect("init");
+        assert!(column_exists(&conn, "task_ledger", "restart_count").unwrap());
+
+        // 既存DB（v5 時点 = 列なし）からの upgrade。
+        conn.execute_batch(
+            "DROP TABLE task_progress; DROP TABLE task_ledger; PRAGMA user_version = 1",
+        )
+        .unwrap();
+        conn.execute_batch(TASK_LEDGER_SQL).unwrap();
+        conn.execute_batch("PRAGMA user_version = 5").unwrap();
+        conn.execute_batch(
+            "INSERT INTO task_ledger (agent_id, session_id, goal, status, created_at, updated_at)
+             VALUES ('a1', 's1', 'g', 'active', '2026-01-01', '2026-01-01')",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "task_ledger", "restart_count").unwrap());
+
+        run_migrations(&conn, MIGRATIONS).expect("v6 migration");
+        assert!(column_exists(&conn, "task_ledger", "restart_count").unwrap());
+        // 既存行は DEFAULT 0 で読める
+        let count: i64 = conn
+            .query_row(
+                "SELECT restart_count FROM task_ledger WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
     }
 
     #[test]
