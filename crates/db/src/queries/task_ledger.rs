@@ -20,6 +20,8 @@ pub struct TaskLedgerRow {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// ループ再起動 v1（#52）: このタスクで自動再実行した回数。
+    pub restart_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +34,7 @@ pub struct TaskProgressRow {
 }
 
 const TASK_LEDGER_COLUMNS: &str =
-    "id, agent_id, session_id, goal, contract, status, created_at, updated_at";
+    "id, agent_id, session_id, goal, contract, status, created_at, updated_at, restart_count";
 
 fn task_ledger_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLedgerRow> {
     Ok(TaskLedgerRow {
@@ -44,6 +46,7 @@ fn task_ledger_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLedgerR
         status: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        restart_count: row.get(8)?,
     })
 }
 
@@ -121,6 +124,23 @@ pub fn update_task_goal_contract(
             updated_at = ?3
          WHERE agent_id = ?4 AND id = ?5",
         params![goal, contract, Utc::now().to_rfc3339(), agent_id, task_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// restart_count を +1 する（ループ再起動 v1、#52）。該当行が無ければ Ok(false)。
+///
+/// 再実行の**前に**呼ぶこと: 先にカウントを永続化しておけば、再実行中の
+/// クラッシュ後も上限判定が効き、無限再起動ループにならない。
+pub fn increment_task_restart_count(
+    conn: &Connection,
+    agent_id: &str,
+    task_id: i64,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE task_ledger SET restart_count = restart_count + 1, updated_at = ?1
+         WHERE agent_id = ?2 AND id = ?3",
+        params![Utc::now().to_rfc3339(), agent_id, task_id],
     )?;
     Ok(n > 0)
 }

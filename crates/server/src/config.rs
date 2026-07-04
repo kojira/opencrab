@@ -73,6 +73,11 @@ pub struct AgentConfig {
     pub heartbeat_enabled: bool,
     #[serde(default = "default_max_workspace_size")]
     pub max_workspace_size_mb: u64,
+    /// ループ再起動 v1（#52）: depth 0 の run が反復上限で停止し、セッションに
+    /// active タスクが残っている場合に、1回だけクリーンな context で自動再実行する。
+    /// セッションロックを run1+verify+run2 の間保持し続けるため、既定は無効。
+    #[serde(default)]
+    pub loop_restart_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -82,6 +87,7 @@ impl Default for AgentConfig {
             heartbeat_interval_secs: default_heartbeat_interval(),
             heartbeat_enabled: default_heartbeat_enabled(),
             max_workspace_size_mb: default_max_workspace_size(),
+            loop_restart_enabled: false,
         }
     }
 }

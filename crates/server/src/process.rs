@@ -1244,78 +1244,295 @@ pub async fn run_agent_response(
 
     let merged_image_urls = merge_image_urls(state, session_id, agent_id, &req.image_urls);
 
-    // verify 段用: この run が session_logs に残すトレースの開始位置を記録
-    // （verify が走らない構成では余計なクエリを打たない）
     let verify_enabled = depth == 0 && state.evaluator.enabled;
-    let trace_checkpoint = if verify_enabled {
-        match state.db.lock() {
-            Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, session_id, 1)
-                .ok()
-                .and_then(|v| v.first().and_then(|l| l.id))
-                .unwrap_or(0),
-            Err(_) => 0,
-        }
-    } else {
-        0
-    };
     let verify_model_override = model_override.clone();
 
-    let result = engine
-        .run_with_model_override(
-            system_prompt,
-            conversation,
-            &effective_model,
-            Some(model_override),
-            &merged_image_urls,
-        )
-        .await;
+    // ループ再起動 v1（#52）: depth 0 の run が反復上限（stopped_by_limit）で停止し、
+    // セッションに active タスクが残っている場合、restart_count 上限まで（v1 では 1 回）
+    // クリーンな context でエンジンを再実行する。会話は再構築するため、run-1 中に
+    // session_logs へ記録されたトレース + verify の evaluation + 下で記録する
+    // [restart] decision エントリ（台帳 prompt section 経由）が run-2 に見える。
+    // 注意: 呼び出し元（message_loop）のセッションロックは run1 + verify + run2 の
+    // 全期間保持される。既定無効（agent.loop_restart_enabled）。
+    let mut conversation_override: Option<String> = None;
+    let mut restarts_this_call: i64 = 0;
+    let result = loop {
+        // verify 段用: この run が session_logs に残すトレースの開始位置を記録
+        // （verify が走らない構成では余計なクエリを打たない）
+        let trace_checkpoint = if verify_enabled {
+            match state.db.lock() {
+                Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, session_id, 1)
+                    .ok()
+                    .and_then(|v| v.first().and_then(|l| l.id))
+                    .unwrap_or(0),
+                Err(_) => 0,
+            }
+        } else {
+            0
+        };
 
-    // harness 剪定メトリクス: XML <function_calls> フォールバックの発火を agent_logs に
-    // 記録する（context='harness.xml_fallback'）。「最後に発火したのはいつか・どのモデルか」を
-    // DB で照会でき、足場の消し時を判断できる。docs/harness-inventory.md 参照。
-    // 注: codex プロバイダはこのフォールバックに意図的に依存しているため、発火自体は異常ではない。
-    if let Ok(ref engine_result) = result {
-        if engine_result.xml_fallback_parses > 0 {
-            // run 中に set_model で切り替わっている可能性があるため、override の現在値を優先する
-            // （イテレーション単位の正確なモデルはエンジンの debug ログ側にある）。
-            let fired_model = verify_model_override
-                .lock()
-                .ok()
-                .and_then(|g| g.clone())
-                .unwrap_or_else(|| effective_model.clone());
-            crate::agent_log::agent_log(
-                &state.db,
-                Some(agent_id),
-                crate::agent_log::LogLevel::Info,
-                "harness.xml_fallback",
-                &format!(
-                    "XML <function_calls> fallback fired {} time(s) (model: {fired_model})",
-                    engine_result.xml_fallback_parses
-                ),
-            );
-        }
-    }
-
-    // verify 段 (evaluator): 契約付き active タスクがある場合、独立した context で
-    // rubric 評価して記録する（record-only、LOOPS I/II/VI）。
-    if verify_enabled {
-        if let Ok(ref engine_result) = result {
-            run_verify_stage(
-                state,
-                agent_id,
-                session_id,
+        let result = engine
+            .run_with_model_override(
+                system_prompt,
+                conversation_override.as_deref().unwrap_or(conversation),
                 &effective_model,
-                &verify_model_override,
-                engine_result,
-                trace_checkpoint,
+                Some(model_override.clone()),
+                &merged_image_urls,
             )
             .await;
+
+        // harness 剪定メトリクス: XML <function_calls> フォールバックの発火を agent_logs に
+        // 記録する（context='harness.xml_fallback'）。「最後に発火したのはいつか・どのモデルか」を
+        // DB で照会でき、足場の消し時を判断できる。docs/harness-inventory.md 参照。
+        // 注: codex プロバイダはこのフォールバックに意図的に依存しているため、発火自体は異常ではない。
+        if let Ok(ref engine_result) = result {
+            if engine_result.xml_fallback_parses > 0 {
+                // run 中に set_model で切り替わっている可能性があるため、override の現在値を優先する
+                // （イテレーション単位の正確なモデルはエンジンの debug ログ側にある）。
+                let fired_model = verify_model_override
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_else(|| effective_model.clone());
+                crate::agent_log::agent_log(
+                    &state.db,
+                    Some(agent_id),
+                    crate::agent_log::LogLevel::Info,
+                    "harness.xml_fallback",
+                    &format!(
+                        "XML <function_calls> fallback fired {} time(s) (model: {fired_model})",
+                        engine_result.xml_fallback_parses
+                    ),
+                );
+            }
         }
-    }
+
+        // verify 段 (evaluator): 契約付き active タスクがある場合、独立した context で
+        // rubric 評価して記録する（record-only、LOOPS I/II/VI）。再実行 run にも各自かかる。
+        if verify_enabled {
+            if let Ok(ref engine_result) = result {
+                run_verify_stage(
+                    state,
+                    agent_id,
+                    session_id,
+                    &effective_model,
+                    &verify_model_override,
+                    engine_result,
+                    trace_checkpoint,
+                )
+                .await;
+            }
+        }
+
+        // 再起動判定。継続しないケースは全て result を返して抜ける。
+        match prepare_loop_restart(
+            state,
+            agent_id,
+            session_id,
+            depth,
+            restarts_this_call,
+            req.trigger_message_id.as_deref(),
+            &result,
+        ) {
+            Some(conversation) => {
+                restarts_this_call += 1;
+                conversation_override = Some(conversation);
+            }
+            None => break result,
+        }
+    };
 
     spawn_background_index_build(state, agent_id, &effective_model);
 
     result
+}
+
+/// ループ再起動 v1（#52）の判定と準備。
+///
+/// 再実行すべきなら「再構築した会話文字列」を返す（[restart] decision の記録と
+/// restart_count のインクリメントは済ませてある）。それ以外は None。
+///
+/// - 対象: depth 0、`loop_restart_enabled`、run が Ok かつ stopped_by_limit、
+///   セッションに active タスクが残っている場合のみ。
+/// - 上限は二重: per-task（restart_count、永続）+ per-call（restarts_this_call）。
+///   per-call 上限が無いと、再実行中にエージェントがタスクを close/open して
+///   差し替えた場合に新タスク（restart_count=0）で再々実行が始まり非有界になる。
+/// - 記録順序: decision → 会話再構築 → increment → 再実行。decision を先に書くのは
+///   再構築される会話（台帳セクション）に載せて run-2 へ見せるため。increment は
+///   再構築の**後**（失敗時に per-task 予算を消費しない）かつ再実行の**前**
+///   （再実行中にクラッシュしても、次回の上限判定が効いて無限再起動しない。
+///   decision〜increment 間のクラッシュは「予算未消費のまま decision が残る」だけで
+///   無害 — 次の再起動判定はフルの run を経てしか到達しない）。
+/// - per-task 予算枯渇時の abandoned 遷移は「この呼び出しで実際に再実行した」
+///   （= run-2 も上限で停止した）場合のみ。過去ターンで予算を使い切ったタスクを、
+///   後日の上限停止で突然殺さない。abandoned は session_logs にも記録する: 台帳
+///   セクションは active タスクしか描画しないため、blocker エントリだけでは次ターン
+///   以降のエージェント/ユーザーから不可視になる。
+fn prepare_loop_restart(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    depth: u32,
+    restarts_this_call: i64,
+    trigger_message_id: Option<&str>,
+    result: &anyhow::Result<opencrab_core::EngineResult>,
+) -> Option<String> {
+    /// v1 の再実行上限（per-task / per-call 共通）。
+    const LOOP_RESTART_MAX: i64 = 1;
+
+    if depth != 0 || !state.loop_restart_enabled {
+        return None;
+    }
+    if !matches!(result, Ok(er) if er.stopped_by_limit) {
+        return None;
+    }
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "loop restart skipped (db lock): {e}");
+            return None;
+        }
+    };
+    let task = opencrab_db::queries::get_active_task_for_session(&conn, agent_id, session_id)
+        .ok()
+        .flatten()?;
+
+    if task.restart_count >= LOOP_RESTART_MAX {
+        // per-task 予算枯渇。この呼び出しで実際に再実行していた場合のみ abandoned に
+        // 落とす（= 再実行後もまた上限で停止した）。そうでなければ何もしない
+        // （機能導入前と同じ「上限で止まって終わり」— 過去ターンで予算を使い切った
+        // タスクを後日の上限停止で突然殺さない）。
+        if restarts_this_call > 0 {
+            tracing::warn!(
+                session_id = %session_id,
+                task_id = task.id,
+                restart_count = task.restart_count,
+                "loop restart budget exhausted; abandoning task"
+            );
+            let _ = opencrab_db::queries::insert_task_progress(
+                &conn,
+                task.id,
+                "blocker",
+                &format!(
+                    "[restart] 自動再実行後も反復上限で停止した（restart 上限 {LOOP_RESTART_MAX} 回に到達）。\
+                     タスクを abandoned にする。再開には goal/contract の再交渉か人手の介入が必要。"
+                ),
+            );
+            let _ = opencrab_db::queries::update_task_status(&conn, agent_id, task.id, "abandoned");
+            // 台帳セクションは active タスクしか描画しない → session_logs 側にも
+            // 残して、次ターンの会話から見えるようにする（詳細は get_task で辿れる）。
+            opencrab_db::queries::insert_session_log_best_effort(
+                &conn,
+                &opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    log_type: "task_event".to_string(),
+                    content: format!(
+                        "Task #{} was abandoned automatically: the run hit the iteration \
+                         limit again right after an automatic restart. Goal: {}. Renegotiate \
+                         the goal/contract with the user or ask for help before reopening \
+                         (full history: get_task).",
+                        task.id,
+                        task.goal.chars().take(200).collect::<String>(),
+                    ),
+                    speaker_id: Some("system".to_string()),
+                    turn_number: None,
+                    metadata_json: Some(
+                        serde_json::json!({
+                            "task_id": task.id,
+                            "event": "abandoned_by_loop_restart",
+                        })
+                        .to_string(),
+                    ),
+                    created_at: None,
+                },
+            );
+        }
+        return None;
+    }
+    if restarts_this_call >= LOOP_RESTART_MAX {
+        // per-call 安全弁: 再実行中にタスクが差し替わっていても（新タスクは
+        // restart_count=0）、この呼び出し内ではこれ以上再実行しない。
+        // 新タスクの per-task 予算は消費しない。
+        tracing::warn!(
+            session_id = %session_id,
+            task_id = task.id,
+            "loop restart per-call cap reached; not restarting again in this call"
+        );
+        return None;
+    }
+
+    // decision を先に記録する: 直後に再構築する会話へ台帳セクション経由で載り、
+    // run-2 が「これは再実行である」ことと埋めるべき gaps の在処を知る。
+    // 停止時の EngineResult.response は定型文（"I've reached the maximum..."）で
+    // 情報が無いため記録しない — run-1 の実質的な結論はツール実行時の speech ログに
+    // 残っており、再構築した会話に含まれる。
+    let _ = opencrab_db::queries::insert_task_progress(
+        &conn,
+        task.id,
+        "decision",
+        &format!(
+            "[restart] 反復上限で停止したため、クリーンな context で自動再実行する（{} 回目 / 上限 {LOOP_RESTART_MAX}）。\
+             直近の [evaluation] エントリの gaps を優先的に埋め、この再実行で完了できなければ blocker を記録すること。",
+            task.restart_count + 1
+        ),
+    );
+
+    // 会話を再構築: run-1 のトレース・evaluation（gaps 全文）・上の decision が入る。
+    // 呼び出し元が付けていた [Context] 前置（日時 / テーマ / Discord message_id）も
+    // ここで再現する（無いと run-2 が現在日時を失い、message_id 依存のゲートウェイ
+    // 操作ができなくなる）。
+    let (prov, mdl) = {
+        let eff =
+            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+                .unwrap_or_else(|_| state.default_model.clone());
+        let (p, m) = split_llm_model_spec(&eff);
+        (p.to_string(), m.to_string())
+    };
+    let budget = compute_context_budget(&conn, &prov, &mdl, state.compaction_ratio);
+    let rebuilt = match build_conversation_string(&conn, session_id, agent_id, budget) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                "loop restart aborted (conversation rebuild failed): {e}"
+            );
+            let _ = opencrab_db::queries::insert_task_progress(
+                &conn,
+                task.id,
+                "progress",
+                "[restart] 会話の再構築に失敗したため自動再実行を中止した（予算は未消費）。",
+            );
+            return None;
+        }
+    };
+    let theme = opencrab_db::queries::get_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.theme)
+        .unwrap_or_default();
+    let rebuilt = match trigger_message_id {
+        Some(message_id) if !message_id.is_empty() => {
+            prepend_runtime_context_discord(&rebuilt, &theme, message_id)
+        }
+        _ => prepend_runtime_context(&rebuilt, &theme),
+    };
+
+    // 再実行の直前にカウントを永続化（再実行中にクラッシュしても上限判定が効く）。
+    match opencrab_db::queries::increment_task_restart_count(&conn, agent_id, task.id) {
+        Ok(true) => {}
+        _ => return None,
+    }
+
+    tracing::info!(
+        session_id = %session_id,
+        task_id = task.id,
+        restart_count = task.restart_count + 1,
+        "restarting engine run after iteration limit (loop restart v1)"
+    );
+    Some(rebuilt)
 }
 
 #[cfg(test)]

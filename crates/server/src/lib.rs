@@ -31,6 +31,8 @@ pub struct AppState {
     pub compaction_ratio: f64,
     /// verify 段（evaluator）の設定。
     pub evaluator: config::EvaluatorConfig,
+    /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
+    pub loop_restart_enabled: bool,
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
 }

@@ -30,7 +30,6 @@ fn insert_session_dual_writes_agent_sessions() {
     assert_eq!(row.participant_ids_json, "[\"agent-x\",\"agent-y\"]");
 }
 
-
 fn setup() -> Connection {
     crate::init_memory().expect("failed to init in-memory DB")
 }
@@ -107,6 +106,27 @@ fn test_task_ledger_status_update() {
     // 未知の id / 他エージェントは Ok(false)
     assert!(!update_task_status(&conn, "a1", 9999, "done").unwrap());
     assert!(!update_task_status(&conn, "a2", id, "abandoned").unwrap());
+}
+
+#[test]
+fn test_task_ledger_restart_count_increment() {
+    let conn = setup();
+    let id = insert_task_ledger(&conn, "a1", "s1", "g", None).unwrap();
+
+    // 新規タスクは 0 から始まる
+    let task = get_task_ledger(&conn, "a1", id).unwrap().unwrap();
+    assert_eq!(task.restart_count, 0);
+
+    assert!(increment_task_restart_count(&conn, "a1", id).unwrap());
+    assert!(increment_task_restart_count(&conn, "a1", id).unwrap());
+    let task = get_task_ledger(&conn, "a1", id).unwrap().unwrap();
+    assert_eq!(task.restart_count, 2);
+
+    // 未知の id / 他エージェントは Ok(false)（カウントは動かない）
+    assert!(!increment_task_restart_count(&conn, "a1", 9999).unwrap());
+    assert!(!increment_task_restart_count(&conn, "a2", id).unwrap());
+    let task = get_task_ledger(&conn, "a1", id).unwrap().unwrap();
+    assert_eq!(task.restart_count, 2);
 }
 
 #[test]
