@@ -2443,3 +2443,39 @@ fn test_search_index_nodes_short_query_like_fallback() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn test_delete_index_node_cascades_fts_for_subtree() {
+    // parent_id の ON DELETE CASCADE で子孫ノードが消えるとき、FTS も部分木ごと消える
+    let conn = setup();
+    let mut parent = mk_topic_node("s1", "a1", "親セッション", "親要約", &[]);
+    parent.node_type = "session".to_string();
+    insert_index_node(&conn, &parent).unwrap();
+    let mut child = mk_topic_node("t1", "a1", "子トピック", "子要約ユニーク", &["子kw"]);
+    child.parent_id = Some("s1".to_string());
+    insert_index_node(&conn, &child).unwrap();
+    assert_eq!(nodes_count(&conn), 2);
+    assert_eq!(fts_count(&conn), 2);
+
+    delete_index_node(&conn, "s1").unwrap();
+    // CASCADE で子も消え、FTS に孤児が残らない
+    assert_eq!(nodes_count(&conn), 0);
+    assert_eq!(fts_count(&conn), 0);
+    assert!(search_index_nodes(&conn, "a1", "子要約ユニーク", 10, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_index_write_helpers_work_inside_outer_transaction() {
+    // index_builder::delete_index はトランザクション内から delete_index_nodes_for_agent
+    // を呼ぶ。SAVEPOINT 方式なので外側 tx があっても動くこと（BEGIN の入れ子は不可）。
+    let conn = setup();
+    insert_index_node(&conn, &mk_topic_node("t1", "a1", "T", "S", &["kw"])).unwrap();
+    let tx = conn.unchecked_transaction().unwrap();
+    delete_index_nodes_for_agent(&tx, "a1").unwrap();
+    insert_index_node(&tx, &mk_topic_node("t2", "a1", "T2", "S2", &["kw2"])).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(nodes_count(&conn), 1);
+    assert_eq!(fts_count(&conn), 1);
+}

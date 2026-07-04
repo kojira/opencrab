@@ -65,6 +65,30 @@ pub(crate) fn index_node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<I
     })
 }
 
+/// node 本体と FTS 影テーブルへの複数書き込みを SAVEPOINT で原子化する。
+///
+/// `unchecked_transaction`（BEGIN）ではなく SAVEPOINT を使うのは、呼び出し元が
+/// 既にトランザクション内のことがあるため（例: index_builder::delete_index が
+/// tx 内から delete_index_nodes_for_agent を呼ぶ）。BEGIN の入れ子は SQLite が
+/// 拒否するが、SAVEPOINT は外側 tx の有無どちらでも動く。
+fn with_index_savepoint<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch("SAVEPOINT memory_index_write")?;
+    match f(conn) {
+        Ok(v) => {
+            conn.execute_batch("RELEASE memory_index_write")?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ =
+                conn.execute_batch("ROLLBACK TO memory_index_write; RELEASE memory_index_write");
+            Err(e)
+        }
+    }
+}
+
 /// keywords_json（JSON 配列）を FTS 用の空白区切りテキストに変換する。
 fn keywords_fts_text(keywords_json: &str) -> String {
     serde_json::from_str::<Vec<String>>(keywords_json)
@@ -133,7 +157,11 @@ pub struct DailyLogEntry {
 }
 
 pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
-    let inserted = conn.execute(
+    // 本体と FTS の 2 書き込みを原子化する（insert_session_log と同じ理由:
+    // 途中失敗で FTS が恒久欠損すると、OR IGNORE ガードにより二度と修復されない
+    // — 検索から見えないノードが残る）。
+    with_index_savepoint(conn, |tx| {
+        let inserted = tx.execute(
         "INSERT OR IGNORE INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id, keywords_json, summary_refreshed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
@@ -159,36 +187,48 @@ pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
             node.summary_refreshed_at,
         ],
     )?;
-    // OR IGNORE で既存行が残った場合は FTS も既存のまま（上書きしない）。
-    if inserted > 0 {
-        fts_upsert_node(
-            conn,
-            &node.id,
-            &node.agent_id,
-            &node.node_type,
-            &node.source_type,
-            &node.title,
-            &node.summary,
-            &node.keywords_json,
-        )?;
-    }
-    Ok(())
+        // OR IGNORE で既存行が残った場合は FTS も既存のまま（上書きしない）。
+        if inserted > 0 {
+            fts_upsert_node(
+                tx,
+                &node.id,
+                &node.agent_id,
+                &node.node_type,
+                &node.source_type,
+                &node.title,
+                &node.summary,
+                &node.keywords_json,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// ノードを1件削除する（FTS 影テーブルも同期削除）。
 ///
 /// memory_index_nodes への生 SQL DELETE は FTS 孤児を残すため禁止 —
 /// 必ずこの関数（または `delete_index_nodes_for_agent`）を使うこと。
+///
+/// parent_id の ON DELETE CASCADE で子孫ノードも一緒に消えるため、FTS 側は
+/// 削除**前に**再帰 CTE で部分木全体の id を集めて同期削除する（非 leaf に
+/// 対して呼んでも FTS 孤児を残さない）。
 pub fn delete_index_node(conn: &Connection, node_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM memory_index_nodes WHERE id = ?1",
-        params![node_id],
-    )?;
-    conn.execute(
-        "DELETE FROM memory_index_fts WHERE node_id = ?1",
-        params![node_id],
-    )?;
-    Ok(())
+    with_index_savepoint(conn, |tx| {
+        tx.execute(
+            "WITH RECURSIVE subtree(id) AS (
+                SELECT id FROM memory_index_nodes WHERE id = ?1
+                UNION ALL
+                SELECT n.id FROM memory_index_nodes n JOIN subtree s ON n.parent_id = s.id
+             )
+             DELETE FROM memory_index_fts WHERE node_id IN (SELECT id FROM subtree)",
+            params![node_id],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_index_nodes WHERE id = ?1",
+            params![node_id],
+        )?;
+        Ok(())
+    })
 }
 
 /// ノードの keywords_json を更新する（FTS 同期込み）。
@@ -197,23 +237,25 @@ pub fn update_index_node_keywords(
     node_id: &str,
     keywords_json: &str,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE memory_index_nodes SET keywords_json = ?1, updated_at = ?2 WHERE id = ?3",
-        params![keywords_json, Utc::now().to_rfc3339(), node_id],
-    )?;
-    if let Some(node) = get_index_node(conn, node_id)? {
-        fts_upsert_node(
-            conn,
-            &node.id,
-            &node.agent_id,
-            &node.node_type,
-            &node.source_type,
-            &node.title,
-            &node.summary,
-            &node.keywords_json,
+    with_index_savepoint(conn, |tx| {
+        tx.execute(
+            "UPDATE memory_index_nodes SET keywords_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![keywords_json, Utc::now().to_rfc3339(), node_id],
         )?;
-    }
-    Ok(())
+        if let Some(node) = get_index_node(tx, node_id)? {
+            fts_upsert_node(
+                tx,
+                &node.id,
+                &node.agent_id,
+                &node.node_type,
+                &node.source_type,
+                &node.title,
+                &node.summary,
+                &node.keywords_json,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 pub fn update_index_node_child_count(conn: &Connection, node_id: &str, count: i32) -> Result<()> {
@@ -347,7 +389,8 @@ pub fn get_daily_log_by_date(
 }
 
 pub fn upsert_daily_log_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
-    conn.execute(
+    with_index_savepoint(conn, |tx| {
+        tx.execute(
         "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, start_log_id, end_log_id, source_session_id, date_from, date_to, depth, child_count, token_count, created_at, updated_at, short_id, keywords_json, summary_refreshed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(id) DO UPDATE SET
@@ -378,21 +421,22 @@ pub fn upsert_daily_log_index_node(conn: &Connection, node: &IndexNodeRow) -> Re
             node.summary_refreshed_at,
         ],
     )?;
-    // upsert は title/summary が置き換わりうるので FTS を常に最新へ
-    // （既存行の keywords は据え置かれるため現在値を読み直して同期する）。
-    if let Some(current) = get_index_node(conn, &node.id)? {
-        fts_upsert_node(
-            conn,
-            &current.id,
-            &current.agent_id,
-            &current.node_type,
-            &current.source_type,
-            &current.title,
-            &current.summary,
-            &current.keywords_json,
-        )?;
-    }
-    Ok(())
+        // upsert は title/summary が置き換わりうるので FTS を常に最新へ
+        // （既存行の keywords は据え置かれるため現在値を読み直して同期する）。
+        if let Some(current) = get_index_node(tx, &node.id)? {
+            fts_upsert_node(
+                tx,
+                &current.id,
+                &current.agent_id,
+                &current.node_type,
+                &current.source_type,
+                &current.title,
+                &current.summary,
+                &current.keywords_json,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 pub fn get_session_logs_by_id_range(
@@ -495,33 +539,41 @@ pub fn get_unindexed_session_logs(
 
 /// エージェントの特定 source_type のインデックスノードを削除する（FTS も同期削除）。
 /// daily_log ツリーの rebuild 用。
+///
+/// 前提: 部分木は source_type を跨がない（daily_log ツリーの子孫は全て
+/// daily_log）。この前提が崩れると CASCADE で消えた別 source_type の子の
+/// FTS 行が残る。
 pub fn delete_index_nodes_for_agent_by_source(
     conn: &Connection,
     agent_id: &str,
     source_type: &str,
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM memory_index_nodes WHERE agent_id = ?1 AND source_type = ?2",
-        params![agent_id, source_type],
-    )?;
-    conn.execute(
-        "DELETE FROM memory_index_fts WHERE agent_id = ?1 AND source_type = ?2",
-        params![agent_id, source_type],
-    )?;
-    Ok(())
+    with_index_savepoint(conn, |tx| {
+        tx.execute(
+            "DELETE FROM memory_index_nodes WHERE agent_id = ?1 AND source_type = ?2",
+            params![agent_id, source_type],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_index_fts WHERE agent_id = ?1 AND source_type = ?2",
+            params![agent_id, source_type],
+        )?;
+        Ok(())
+    })
 }
 
 /// エージェントの全インデックスノードを削除する（FTS 影テーブルも同期削除）
 pub fn delete_index_nodes_for_agent(conn: &Connection, agent_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM memory_index_nodes WHERE agent_id = ?1",
-        params![agent_id],
-    )?;
-    conn.execute(
-        "DELETE FROM memory_index_fts WHERE agent_id = ?1",
-        params![agent_id],
-    )?;
-    Ok(())
+    with_index_savepoint(conn, |tx| {
+        tx.execute(
+            "DELETE FROM memory_index_nodes WHERE agent_id = ?1",
+            params![agent_id],
+        )?;
+        tx.execute(
+            "DELETE FROM memory_index_fts WHERE agent_id = ?1",
+            params![agent_id],
+        )?;
+        Ok(())
+    })
 }
 
 /// エージェントのインデックスウォーターマークを削除する
@@ -540,23 +592,25 @@ pub fn update_index_node_summary(
     title: &str,
     summary: &str,
 ) -> Result<()> {
-    conn.execute(
-        "UPDATE memory_index_nodes SET title = ?1, summary = ?2, updated_at = ?3 WHERE id = ?4",
-        params![title, summary, Utc::now().to_rfc3339(), node_id],
-    )?;
-    if let Some(node) = get_index_node(conn, node_id)? {
-        fts_upsert_node(
-            conn,
-            &node.id,
-            &node.agent_id,
-            &node.node_type,
-            &node.source_type,
-            &node.title,
-            &node.summary,
-            &node.keywords_json,
+    with_index_savepoint(conn, |tx| {
+        tx.execute(
+            "UPDATE memory_index_nodes SET title = ?1, summary = ?2, updated_at = ?3 WHERE id = ?4",
+            params![title, summary, Utc::now().to_rfc3339(), node_id],
         )?;
-    }
-    Ok(())
+        if let Some(node) = get_index_node(tx, node_id)? {
+            fts_upsert_node(
+                tx,
+                &node.id,
+                &node.agent_id,
+                &node.node_type,
+                &node.source_type,
+                &node.title,
+                &node.summary,
+                &node.keywords_json,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 // ============================================
