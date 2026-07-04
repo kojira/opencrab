@@ -45,6 +45,38 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 4,
+        description: "agent_sessions backfill from sessions.participant_ids_json (issue #37)",
+        // participant の関係を agent_sessions テーブルに昇格する（#37）。
+        // 既存 sessions の JSON 配列から backfill。壊れた JSON / 非文字列要素は
+        // 行単位で skip（sessions 側の表示は participant_ids_json を読み続けるため
+        // 情報は失われない）。INSERT OR IGNORE で再実行にも冪等。
+        up: |conn| {
+            let mut stmt = conn.prepare("SELECT id, participant_ids_json FROM sessions")?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            drop(stmt);
+            for (session_id, participants_json) in rows {
+                let Ok(serde_json::Value::Array(ids)) =
+                    serde_json::from_str::<serde_json::Value>(&participants_json)
+                else {
+                    // 壊れた JSON は skip（マイグレーション全体は落とさない）
+                    continue;
+                };
+                for id in ids {
+                    if let Some(agent_id) = id.as_str() {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO agent_sessions (agent_id, session_id) VALUES (?1, ?2)",
+                            rusqlite::params![agent_id, session_id],
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// version 2: タスク台帳。
@@ -1351,6 +1383,39 @@ mod migration_tests {
     }
 
     /// E. 実 MIGRATIONS の version は厳密増加・全て baseline より大きい・重複なし。
+    #[test]
+    fn agent_sessions_backfill_migration_v4() {
+        let conn = crate::init_memory().expect("init");
+        // v3 状態に戻し、v4 の backfill 対象となる sessions 行を用意する
+        // （うち1件は壊れた JSON — skip され、他の行は影響を受けないこと）。
+        conn.execute_batch("PRAGMA user_version = 3").unwrap();
+        conn.execute_batch("DELETE FROM agent_sessions").unwrap();
+        conn.execute_batch(
+            "INSERT INTO sessions (id, mode, theme, phase, turn_number, status, participant_ids_json, done_count, created_at, updated_at)
+             VALUES ('s1', 'discord', 't', 'active', 0, 'active', '[\"a1\",\"a2\"]', 0, '2026-01-01', '2026-01-01'),
+                    ('s2', 'discord', 't', 'active', 0, 'active', 'not-json', 0, '2026-01-01', '2026-01-01'),
+                    ('s3', 'discord', 't', 'active', 0, 'active', '[\"a1\"]', 0, '2026-01-01', '2026-01-01')",
+        )
+        .unwrap();
+
+        run_migrations(&conn, MIGRATIONS).expect("v4 migration");
+
+        let participants = crate::queries::list_session_participants(&conn, "s1").unwrap();
+        assert_eq!(participants, vec!["a1".to_string(), "a2".to_string()]);
+        assert!(crate::queries::list_session_participants(&conn, "s2")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            crate::queries::count_sessions_for_agent(&conn, "a1").unwrap(),
+            2
+        );
+        // 部分一致の誤マッチが無いこと（旧 LIKE 実装は "a" が "a1" にもマッチした）
+        assert_eq!(
+            crate::queries::count_sessions_for_agent(&conn, "a").unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn migrations_versions_are_strictly_increasing() {
         let mut prev = BASELINE_VERSION;

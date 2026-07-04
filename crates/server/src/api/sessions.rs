@@ -166,8 +166,14 @@ pub async fn send_message(
             }
         }
     };
-    let participant_ids: Vec<String> =
-        serde_json::from_str(&session.participant_ids_json).unwrap_or_default();
+    // 参加者は agent_sessions テーブルが正（#37）。JSON 列は wire 契約用の投影。
+    let participant_ids: Vec<String> = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => return Json(serde_json::json!({"error": "database unavailable"})),
+        };
+        opencrab_db::queries::list_session_participants(&conn, &id).unwrap_or_default()
+    };
     let session_theme = session.theme;
 
     // 4. For each participant (except the sender), run SkillEngine.

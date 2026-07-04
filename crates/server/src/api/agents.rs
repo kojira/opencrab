@@ -23,7 +23,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentSummary
         .prepare(
             "SELECT a.agent_id, a.name, a.persona_name, a.image_url,
                     (SELECT COUNT(*) FROM skills WHERE agent_id = a.agent_id) as skill_count,
-                    (SELECT COUNT(*) FROM sessions WHERE participant_ids_json LIKE '%' || a.agent_id || '%') as session_count
+                    (SELECT COUNT(*) FROM agent_sessions WHERE agent_id = a.agent_id) as session_count
              FROM agents a
              ORDER BY a.name",
         )
