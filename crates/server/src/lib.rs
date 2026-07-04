@@ -16,6 +16,7 @@ pub mod process;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
+pub mod transcript;
 
 use opencrab_llm::router::LlmRouter;
 
