@@ -118,6 +118,12 @@ pub async fn run_discord_loop<T: AgentRunner>(
         mpsc::UnboundedSender<LoopEvent>,
         mpsc::UnboundedReceiver<LoopEvent>,
     )>,
+    // 共有（TOML）ゲートウェイのループなら true: 専用（per-agent）ゲートウェイが
+    // **稼働中**のエージェントをメッセージ処理時にスキップする（#40 — 二重処理防止）。
+    // 判定は liveness ベースなので、専用側が停止/起動失敗していれば共有側が
+    // フォールバックとして処理を続ける。per-agent ゲートウェイ自身のループ
+    // （manager.rs）は必ず false（true にすると自分自身を skip してしまう）。
+    skip_agents_with_dedicated_gateway: bool,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
         Some((tx, rx)) => (tx, rx),
@@ -297,6 +303,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         gateway_actions.clone(),
                         owner_discord_id.clone(),
                         session_locks.clone(),
+                        skip_agents_with_dedicated_gateway,
                     )
                     .await;
                 }
@@ -310,6 +317,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
 /// 受信メッセージを処理する。
 ///
 /// バリデーション・セッション設定・エージェント処理のスポーンを行い、即座にリターン（P1）。
+#[allow(clippy::too_many_arguments)]
 async fn process_incoming_message<T: AgentRunner>(
     incoming: IncomingMessage,
     gateway: Arc<DiscordGateway>,
@@ -318,6 +326,7 @@ async fn process_incoming_message<T: AgentRunner>(
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
     session_locks: SessionLocks,
+    skip_agents_with_dedicated_gateway: bool,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -338,6 +347,33 @@ async fn process_incoming_message<T: AgentRunner>(
     };
 
     let is_dm = guild_id.is_empty();
+
+    // #40: 専用（per-agent）ゲートウェイが稼働中のエージェントは共有ループでは処理しない。
+    // ここでリストごと絞るのは、後段の trust 判定（dm_allowed_any / resolve_caller）にも
+    // スキップ対象エージェントの trusted_users を混入させないため。専用ゲートウェイが
+    // 停止/起動失敗していれば絞られず、共有側がフォールバックとして処理を続ける。
+    let agent_ids: Vec<String> = if skip_agents_with_dedicated_gateway {
+        let filtered: Vec<String> = agent_ids
+            .into_iter()
+            .filter(|agent_id| {
+                if state.served_by_dedicated_gateway(agent_id) {
+                    debug!(
+                        agent = %agent_id,
+                        "Skipping agent on shared gateway: dedicated per-agent gateway is running"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if filtered.is_empty() {
+            return;
+        }
+        filtered
+    } else {
+        agent_ids
+    };
 
     // DM whitelist check（いずれかのエージェントが信頼していれば通す事前ゲート）
     if is_dm && !state.dm_allowed_any(&incoming.sender.id, &agent_ids, &owner_discord_id) {

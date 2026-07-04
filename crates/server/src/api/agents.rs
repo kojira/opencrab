@@ -261,7 +261,7 @@ pub async fn get_discord_config(
             let mut running = false;
             #[cfg(feature = "discord")]
             if let Some(ref manager) = state.discord_manager {
-                running = manager.is_running(&id).await;
+                running = manager.is_running(&id);
             }
 
             Json(serde_json::json!({

@@ -113,7 +113,7 @@ pub async fn send_agent_message(
     #[cfg(feature = "discord")]
     let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = {
         if let Some(ref dm) = state.discord_manager {
-            if let Some(http) = dm.get_http_for_agent(&id).await {
+            if let Some(http) = dm.get_http_for_agent(&id) {
                 let tools_cfg = state.tools_config.read().unwrap().clone();
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     std::sync::Arc::new(dashmap::DashMap::new());
