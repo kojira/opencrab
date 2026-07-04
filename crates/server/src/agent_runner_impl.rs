@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opencrab_gateway::GatewayActions;
 
 use crate::process;
 use crate::AppState;
@@ -42,35 +41,9 @@ impl opencrab_discord::AgentRunner for AppState {
 
     async fn run_agent_response(
         &self,
-        agent_id: &str,
-        agent_name: &str,
-        session_id: &str,
-        system_prompt: &str,
-        conversation: &str,
-        gateway_name: &str,
-        gateway_actions: Option<Arc<dyn GatewayActions>>,
-        caller: opencrab_actions::CallerIdentity,
-        image_urls: &[String],
-        depth: u32,
-        trigger_message_id: Option<String>,
-        on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+        req: opencrab_actions::RunRequest,
     ) -> anyhow::Result<opencrab_core::EngineResult> {
-        process::run_agent_response(
-            self,
-            agent_id,
-            agent_name,
-            session_id,
-            system_prompt,
-            conversation,
-            gateway_name,
-            gateway_actions,
-            caller,
-            image_urls,
-            depth,
-            trigger_message_id,
-            on_response_text,
-        )
-        .await
+        process::run_agent_response(self, req).await
     }
 
     fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient> {

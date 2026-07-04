@@ -208,18 +208,15 @@ pub async fn send_message(
         // Run agent through the shared pipeline.
         let result = process::run_agent_response(
             &state,
-            agent_id,
-            &agent_name,
-            &id,
-            &system_prompt,
-            &conversation,
-            "rest",
-            None,
-            opencrab_actions::CallerIdentity::Owner,
-            &[],
-            0,
-            None, // trigger_message_id
-            None,
+            opencrab_actions::RunRequest::new(
+                agent_id,
+                &agent_name,
+                &id,
+                &system_prompt,
+                &conversation,
+                "rest",
+                opencrab_actions::CallerIdentity::Owner,
+            ),
         )
         .await;
 
