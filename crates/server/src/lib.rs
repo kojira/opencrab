@@ -12,6 +12,7 @@ pub mod api;
 pub mod config;
 pub mod hot_reload;
 pub mod llm_adapter;
+pub mod memory_maintenance;
 pub mod process;
 
 #[cfg(feature = "discord")]
@@ -33,6 +34,9 @@ pub struct AppState {
     pub evaluator: config::EvaluatorConfig,
     /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
     pub loop_restart_enabled: bool,
+    /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
+    /// メンテナンスループの二重 LLM 支出防止）。
+    pub index_build_inflight: memory_maintenance::IndexBuildInflight,
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
 }

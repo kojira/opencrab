@@ -78,6 +78,15 @@ pub struct AgentConfig {
     /// セッションロックを run1+verify+run2 の間保持し続けるため、既定は無効。
     #[serde(default)]
     pub loop_restart_enabled: bool,
+    /// メモリインデックスのアイドル時メンテナンス（増分ビルドの取りこぼし回収 /
+    /// キーワードバックフィル / 月次ロールアップ）。既定 true — 増分ビルドの費用は
+    /// post-run トリガーで既に受容済みで、純増は一時的なバックフィルと月1回程度の
+    /// ロールアップのみ。
+    #[serde(default = "default_memory_maintenance_enabled")]
+    pub memory_maintenance_enabled: bool,
+    /// メンテナンス tick の間隔（秒）。無処理 tick は SQL 数本で終わる。
+    #[serde(default = "default_memory_maintenance_interval")]
+    pub memory_maintenance_interval_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -88,8 +97,17 @@ impl Default for AgentConfig {
             heartbeat_enabled: default_heartbeat_enabled(),
             max_workspace_size_mb: default_max_workspace_size(),
             loop_restart_enabled: false,
+            memory_maintenance_enabled: default_memory_maintenance_enabled(),
+            memory_maintenance_interval_secs: default_memory_maintenance_interval(),
         }
     }
+}
+
+fn default_memory_maintenance_enabled() -> bool {
+    true
+}
+fn default_memory_maintenance_interval() -> u64 {
+    600
 }
 
 fn default_workspace_path() -> String {

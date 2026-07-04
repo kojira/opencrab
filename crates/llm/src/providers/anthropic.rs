@@ -152,7 +152,34 @@ impl AnthropicProvider {
                 merged.push(msg);
             }
         }
-        let messages = merged;
+        let mut messages = merged;
+
+        // プロンプトキャッシュ: 最後のメッセージの最終ブロックにもマーカーを置く
+        // （incremental caching）。ツールループの各イテレーションは「直前までの
+        // 会話全体 + 新しい tool_result」を再送するため、ここに無マーカーだと
+        // 会話本文（常時注入される [Memory Index] / 台帳を含む）が毎イテレーション
+        // 非キャッシュで再処理される。ブレークポイントは system + 最終ツール +
+        // ここの 3 つ（Anthropic の上限 4 以内）。TTL は既定の 5m — イテレーション
+        // 間隔は秒オーダーで十分、1h 指定より安い。
+        if let Some(last_msg) = messages.last_mut() {
+            match &mut last_msg["content"] {
+                Value::String(text) if !text.is_empty() => {
+                    // 文字列 content はブロック配列に変換してマーカーを付ける
+                    let text = std::mem::take(text);
+                    last_msg["content"] = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": {"type": "ephemeral"},
+                    }]);
+                }
+                Value::Array(blocks) => {
+                    if let Some(last_block) = blocks.last_mut() {
+                        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                    }
+                }
+                _ => {}
+            }
+        }
 
         let max_tokens = request.max_tokens.unwrap_or(4096);
 
@@ -555,6 +582,27 @@ mod tests {
         let tools = body["tools"].as_array().unwrap();
         assert!(tools[0].get("cache_control").is_none());
         assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+
+        // 最後のメッセージの最終ブロックに incremental cache マーカーが付く
+        // （文字列 content はブロック配列へ変換される）。
+        let messages = body["messages"].as_array().unwrap();
+        let last = messages.last().unwrap();
+        let blocks = last["content"].as_array().expect("last content is blocks");
+        let last_block = blocks.last().unwrap();
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+        // 5m 既定 TTL（ttl キー無し）— 1h を明示するのは system/tools のみ
+        assert!(last_block["cache_control"].get("ttl").is_none());
+        // 先行メッセージにはマーカーが無い
+        for msg in &messages[..messages.len() - 1] {
+            match &msg["content"] {
+                serde_json::Value::Array(blocks) => {
+                    for b in blocks {
+                        assert!(b.get("cache_control").is_none());
+                    }
+                }
+                v => assert!(v.is_string()),
+            }
+        }
     }
 
     /// 複数 system メッセージは連結して1ブロックになる（旧挙動の保存）。

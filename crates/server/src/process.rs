@@ -280,16 +280,41 @@ pub fn build_conversation_string(
             }
         };
 
-    let inner_budget = match &ledger_section {
-        Some(section) => context_budget_tokens.saturating_sub(estimate_tokens(section)),
-        None => context_budget_tokens,
-    };
+    // [Memory Index]: 長期記憶のコンパクトな目次を常時前置する（月次要約 + 現在月
+    // topic、short_id 付き）。台帳と同じく「動的状態は会話側」（system は 1h
+    // キャッシュ）。best-effort — 失敗しても返信は殺さない。
+    // コンパクション時の [Past context summary]（build_conversation_inner 内、
+    // 現セッションの topic のみ）とは役割が異なり、こちらは現セッション由来の
+    // topic を除外するため short_id が両方に出ることはない（invariant）。
+    let memory_index_section =
+        match opencrab_core::memory_index::build_memory_index_section(conn, agent_id, session_id) {
+            Ok(section) => section,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to build memory index section for session {session_id}: {e}"
+                );
+                None
+            }
+        };
+
+    let mut inner_budget = context_budget_tokens;
+    for section in [&ledger_section, &memory_index_section]
+        .into_iter()
+        .flatten()
+    {
+        inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
+    }
     let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
 
-    Ok(match ledger_section {
-        Some(section) => format!("{section}\n\n{inner}"),
-        None => inner,
-    })
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = ledger_section {
+        parts.push(s);
+    }
+    if let Some(s) = memory_index_section {
+        parts.push(s);
+    }
+    parts.push(inner);
+    Ok(parts.join("\n\n"))
 }
 
 /// 会話文字列本体の構築（タスク台帳の前置は `build_conversation_string` 側で行う）。
@@ -1043,6 +1068,7 @@ fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_mode
         let index_agent_id = agent_id.to_string();
         let index_llm_router = state.llm_router.clone();
         let index_model = effective_model.to_string();
+        let inflight = state.index_build_inflight.clone();
         let (index_persona_name, index_personality) = {
             let conn = state.db.lock().unwrap();
             opencrab_db::queries::get_agent(&conn, &index_agent_id)
@@ -1069,6 +1095,18 @@ fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_mode
             if unindexed < config.threshold {
                 return;
             }
+            // メンテナンスループとの二重ビルド防止（watermark 冪等が正しさの本線、
+            // このフラグは同じバッチへの重複 LLM 支出を防ぐだけ）。
+            let _guard = match crate::memory_maintenance::try_acquire_build_slot(
+                &inflight,
+                &index_agent_id,
+            ) {
+                Some(g) => g,
+                None => {
+                    tracing::debug!(agent_id = %index_agent_id, "index build already in flight; skipping post-run build");
+                    return;
+                }
+            };
             tracing::info!(
                 agent_id = %index_agent_id,
                 unindexed = unindexed,
@@ -1643,5 +1681,160 @@ mod format_log_tests {
             "legacy tool name must render: {out}"
         );
         assert!(out.contains("tc-9"), "legacy tool id must render: {out}");
+    }
+}
+
+#[cfg(test)]
+mod memory_index_section_injection_tests {
+    use super::build_conversation_string;
+
+    fn mk_node(
+        id: &str,
+        node_type: &str,
+        parent: Option<&str>,
+        title: &str,
+        source_session_id: Option<&str>,
+        date_from: Option<&str>,
+    ) -> opencrab_db::queries::IndexNodeRow {
+        opencrab_db::queries::IndexNodeRow {
+            id: id.to_string(),
+            agent_id: "a1".to_string(),
+            parent_id: parent.map(String::from),
+            node_type: node_type.to_string(),
+            source_type: "session_log".to_string(),
+            title: title.to_string(),
+            summary: format!("{title} の要約"),
+            start_log_id: None,
+            end_log_id: None,
+            source_session_id: source_session_id.map(String::from),
+            date_from: date_from.map(String::from),
+            date_to: None,
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            short_id: Some(id.to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        }
+    }
+
+    fn seed_index(conn: &rusqlite::Connection) {
+        use opencrab_db::queries::*;
+        insert_index_node(conn, &mk_node("r1", "root", None, "root", None, None)).unwrap();
+        insert_index_node(
+            conn,
+            &mk_node("pmay", "period", Some("r1"), "2026-05", None, None),
+        )
+        .unwrap();
+        insert_index_node(
+            conn,
+            &mk_node("pjun", "period", Some("r1"), "2026-06", None, None),
+        )
+        .unwrap();
+        update_period_rollup(conn, "pmay", "5月は逆引き辞書を設計した。", "[\"FTS\"]").unwrap();
+        insert_index_node(
+            conn,
+            &mk_node("s1", "session", Some("pjun"), "S", None, None),
+        )
+        .unwrap();
+        insert_index_node(
+            conn,
+            &mk_node(
+                "t-other",
+                "topic",
+                Some("s1"),
+                "他セッション話題",
+                Some("other-sess"),
+                Some("2026-06-10"),
+            ),
+        )
+        .unwrap();
+        insert_index_node(
+            conn,
+            &mk_node(
+                "t-cur",
+                "topic",
+                Some("s1"),
+                "現セッション話題",
+                Some("cur-sess"),
+                Some("2026-06-11"),
+            ),
+        )
+        .unwrap();
+    }
+
+    fn seed_logs(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            opencrab_db::queries::insert_session_log(
+                conn,
+                &opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: "a1".to_string(),
+                    session_id: "cur-sess".to_string(),
+                    log_type: "speech".to_string(),
+                    content: format!("メッセージ {i} の内容がここに入る。"),
+                    speaker_id: Some("a1".to_string()),
+                    turn_number: None,
+                    metadata_json: None,
+                    created_at: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn injects_memory_index_exactly_once_under_budget() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_index(&conn);
+        seed_logs(&conn, 3);
+        let out = build_conversation_string(&conn, "cur-sess", "a1", 100_000).unwrap();
+        assert_eq!(out.matches("[Memory Index]").count(), 1);
+        // 月次要約が会話履歴に載る（中心要件）
+        assert!(out.contains("5月は逆引き辞書を設計した。"));
+        // 現在月 topic: 他セッションのみ
+        assert!(out.contains("[t-other]"));
+        assert!(!out.contains("[t-cur]"));
+        // 予算内なので通常の全文会話が続く
+        assert!(out.contains("メッセージ 2 の内容"));
+    }
+
+    #[test]
+    fn no_index_means_no_section() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_logs(&conn, 2);
+        let out = build_conversation_string(&conn, "cur-sess", "a1", 100_000).unwrap();
+        assert!(!out.contains("[Memory Index]"));
+    }
+
+    #[test]
+    fn compaction_path_keeps_short_id_sets_disjoint() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_index(&conn);
+        // 現セッション topic に log 範囲を持たせ、コンパクション時の
+        // [Past context summary] に出るようにする
+        seed_logs(&conn, 40);
+        conn.execute(
+            "UPDATE memory_index_nodes SET start_log_id = 1, end_log_id = 20 WHERE id = 't-cur'",
+            [],
+        )
+        .unwrap();
+        // 小さい予算でコンパクションを強制
+        let out = build_conversation_string(&conn, "cur-sess", "a1", 300).unwrap();
+        assert_eq!(out.matches("[Memory Index]").count(), 1);
+        assert_eq!(out.matches("[Past context summary").count(), 1);
+        // 現セッション topic は Past context summary 側のみ、他セッション topic は
+        // Memory Index 側のみ（short_id 集合が素）
+        assert_eq!(out.matches("[t-cur]").count(), 1);
+        assert_eq!(out.matches("[t-other]").count(), 1);
+        let mi_pos = out.find("[Memory Index]").unwrap();
+        let pcs_pos = out.find("[Past context summary").unwrap();
+        let tcur_pos = out.find("[t-cur]").unwrap();
+        let tother_pos = out.find("[t-other]").unwrap();
+        assert!(mi_pos < pcs_pos);
+        assert!(tother_pos > mi_pos && tother_pos < pcs_pos);
+        assert!(tcur_pos > pcs_pos);
     }
 }

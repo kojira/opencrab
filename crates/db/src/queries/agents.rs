@@ -251,6 +251,13 @@ pub fn delete_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
     Ok(deleted > 0)
 }
 
+/// 全エージェントの agent_id を返す（メンテナンスループの巡回用）。
+pub fn list_agent_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT agent_id FROM agents ORDER BY agent_id")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Find agents by partial ID prefix or name (case-insensitive).
 pub fn find_agents(conn: &Connection, query: &str) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
