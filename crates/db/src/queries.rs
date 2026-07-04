@@ -1502,7 +1502,13 @@ pub struct SessionRow {
 }
 
 pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
-    conn.execute(
+    // participant の関係は agent_sessions テーブルが正（#37: インデックス可能・
+    // 参照整合な関係表現）。participant_ids_json は web の wire 契約として残す
+    // 直列化された投影で、両者はこの単一の挿入点で1トランザクションに書く。
+    // 前提: participants は insert 後に変更されない（変更 API は存在しない）。
+    // 変更を導入する場合は agent_sessions と JSON の両方を更新すること。
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO sessions (id, mode, theme, phase, turn_number, status, participant_ids_json, facilitator_id, done_count, max_turns, metadata_json, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
@@ -1521,7 +1527,42 @@ pub fn insert_session(conn: &Connection, session: &SessionRow) -> Result<()> {
             Utc::now().to_rfc3339(),
         ],
     )?;
+    if let Ok(serde_json::Value::Array(ids)) =
+        serde_json::from_str::<serde_json::Value>(&session.participant_ids_json)
+    {
+        for id in ids {
+            if let Some(agent_id) = id.as_str() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO agent_sessions (agent_id, session_id) VALUES (?1, ?2)",
+                    params![agent_id, session.id],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
     Ok(())
+}
+
+/// セッションの参加エージェント一覧（agent_sessions テーブルが正 — #37）。
+pub fn list_session_participants(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    // rowid 順 = 挿入順 = participant_ids_json の配列順（send_message の応答順・
+    // 発話順という observable な意味論を旧 JSON 実装から保存する）。
+    let mut stmt = conn
+        .prepare("SELECT agent_id FROM agent_sessions WHERE session_id = ?1 ORDER BY rowid")?;
+    let ids = stmt
+        .query_map(params![session_id], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(ids)
+}
+
+/// エージェントが参加しているセッション数（agent_sessions テーブルで数える — #37。
+/// 旧実装の participant_ids_json への LIKE 部分一致は "a" が "abc" にもマッチした）。
+pub fn count_sessions_for_agent(conn: &Connection, agent_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM agent_sessions WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get(0),
+    )?)
 }
 
 pub fn get_session(conn: &Connection, session_id: &str) -> Result<Option<SessionRow>> {
@@ -2787,6 +2828,33 @@ pub fn update_index_node_summary(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn insert_session_dual_writes_agent_sessions() {
+        let conn = crate::init_memory().unwrap();
+        let session = SessionRow {
+            id: "sess-dw".to_string(),
+            mode: "discord".to_string(),
+            theme: "t".to_string(),
+            phase: "active".to_string(),
+            turn_number: 0,
+            status: "active".to_string(),
+            participant_ids_json: "[\"agent-x\",\"agent-y\"]".to_string(),
+            facilitator_id: None,
+            done_count: 0,
+            max_turns: None,
+            metadata_json: None,
+        };
+        insert_session(&conn, &session).unwrap();
+        assert_eq!(
+            list_session_participants(&conn, "sess-dw").unwrap(),
+            vec!["agent-x".to_string(), "agent-y".to_string()]
+        );
+        assert_eq!(count_sessions_for_agent(&conn, "agent-x").unwrap(), 1);
+        // JSON 投影も従来どおり保存されている（wire 契約）
+        let row = get_session(&conn, "sess-dw").unwrap().unwrap();
+        assert_eq!(row.participant_ids_json, "[\"agent-x\",\"agent-y\"]");
+    }
+
     use super::*;
 
     fn setup() -> Connection {
