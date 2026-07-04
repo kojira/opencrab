@@ -147,7 +147,6 @@ impl OllamaProvider {
                     function_call: None,
                     tool_calls,
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 finish_reason,
             }],
@@ -302,15 +301,14 @@ impl LlmProvider for OllamaProvider {
         // 捨てられる / マルチバイト UTF-8 が per-chunk lossy デコードで壊れる、
         // という修正済みバグの再実装をしない（#38）。
         let model = request.model.clone();
-        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
-            move |line_res| {
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
                     Ok(line) => delta_from_ndjson_line(&line, &model),
                 };
                 futures::future::ready(out)
-            },
-        );
+            });
 
         Ok(Box::pin(stream))
     }
@@ -372,7 +370,7 @@ mod tests {
         let full = "{\"message\":{\"content\":\"あい\"},\"done\":false}\n{\"message\":{\"content\":\"うえ\"},\"done\":true}\n";
         let bytes = full.as_bytes();
         let chunks: Vec<reqwest::Result<Vec<u8>>> = vec![
-            Ok(bytes[..25].to_vec()),  // 「あ」のバイト途中
+            Ok(bytes[..25].to_vec()),   // 「あ」のバイト途中
             Ok(bytes[25..50].to_vec()), // 1つ目のオブジェクト途中〜2つ目の先頭
             Ok(bytes[50..].to_vec()),
         ];

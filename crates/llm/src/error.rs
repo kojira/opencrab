@@ -37,7 +37,9 @@ mod tests {
     fn downcast_survives_context_chain() {
         let err = api_error("Ollama", StatusCode::TOO_MANY_REQUESTS, "slow down")
             .context("while calling chat_completion");
-        let llm = err.downcast_ref::<LlmError>().expect("downcast through context");
+        let llm = err
+            .downcast_ref::<LlmError>()
+            .expect("downcast through context");
         assert_eq!(llm.status(), Some(429));
         assert!(!llm.is_non_retryable());
     }

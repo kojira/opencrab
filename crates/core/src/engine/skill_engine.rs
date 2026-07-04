@@ -136,13 +136,11 @@ impl SkillEngine {
         model_override: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
         image_urls: &[String],
     ) -> Result<EngineResult> {
-        let cache_control_1h = || Some(serde_json::json!({"type": "ephemeral", "ttl": "1h"}));
-
-        let mut tools = self.executor.list_tools();
-        // BP1: toolsの最後のツールにcache_control(1h)を付与
-        if let Some(last_tool) = tools.last_mut() {
-            last_tool.cache_control = cache_control_1h();
-        }
+        // プロンプトキャッシュはプロバイダの能力としてプロバイダ側が適用する（#44）。
+        // 以前はここで Anthropic 固有の cache_control を全リクエストに無条件付与して
+        // いたが、読むのは anthropic だけ・system 分は黙って落ちる偽ユニバーサル
+        // 抽象だった。エンジンはプロバイダ非依存のリクエストだけを組む。
+        let tools = self.executor.list_tools();
 
         // ユーザーメッセージ本文（画像があればマルチパート）。
         let user_content = if image_urls.is_empty() {
@@ -170,7 +168,6 @@ impl SkillEngine {
                 function_call: None,
                 tool_calls: None,
                 tool_call_id: None,
-                cache_control: cache_control_1h(),
             },
             Message {
                 role: Role::User,
@@ -179,7 +176,6 @@ impl SkillEngine {
                 function_call: None,
                 tool_calls: None,
                 tool_call_id: None,
-                cache_control: None,
             },
         ];
 
@@ -325,7 +321,6 @@ impl SkillEngine {
                     function_call: None,
                     tool_calls: Some(tool_calls.clone()),
                     tool_call_id: None,
-                    cache_control: None,
                 });
 
                 // Notify on_tool_call callback.
@@ -451,7 +446,6 @@ mod tests {
                     function_call: None,
                     tool_calls: if calls.is_empty() { None } else { Some(calls) },
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 finish_reason: None,
             }],
@@ -521,7 +515,6 @@ mod tests {
                 name: "test_tool".to_string(),
                 description: Some("A test tool".to_string()),
                 parameters: serde_json::json!({}),
-                cache_control: None,
             }]
         }
     }

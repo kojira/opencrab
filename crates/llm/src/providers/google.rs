@@ -220,7 +220,6 @@ impl GoogleProvider {
                         Some(tool_calls)
                     },
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 finish_reason,
             });
@@ -355,8 +354,8 @@ impl LlmProvider for GoogleProvider {
 
         let model = request.model.clone();
         // チャンク境界を跨いでバッファし、SSEの `data:` 行ごとに1デルタを emit する。
-        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
-            move |line_res| {
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
                 let model = model.clone();
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
@@ -367,8 +366,8 @@ impl LlmProvider for GoogleProvider {
                             match serde_json::from_str::<Value>(data) {
                                 Ok(parsed) => {
                                     let mut content_text = String::new();
-                                    if let Some(parts) = parsed["candidates"][0]["content"]["parts"]
-                                        .as_array()
+                                    if let Some(parts) =
+                                        parsed["candidates"][0]["content"]["parts"].as_array()
                                     {
                                         for part in parts {
                                             if let Some(t) = part["text"].as_str() {
@@ -403,8 +402,7 @@ impl LlmProvider for GoogleProvider {
                     }
                 };
                 futures::future::ready(out)
-            },
-        );
+            });
 
         Ok(Box::pin(stream))
     }

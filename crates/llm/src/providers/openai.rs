@@ -107,7 +107,6 @@ impl OpenAiProvider {
 
         body
     }
-
 }
 
 #[async_trait]
@@ -202,15 +201,14 @@ impl LlmProvider for OpenAiProvider {
 
         // チャンク境界を跨いでバッファし、完全な行ごとに1イベントとして処理する。
         // `data:` 行の delta 抽出は openai_compat に一本化（[DONE]/コメント行はスキップ）。
-        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
-            move |line_res| {
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
                     Ok(line) => super::openai_compat::delta_from_sse_line(&line).map(Ok),
                 };
                 futures::future::ready(out)
-            },
-        );
+            });
 
         Ok(Box::pin(stream))
     }

@@ -39,7 +39,6 @@ fn resp(text: Option<String>, calls: Vec<ToolCall>) -> ChatResponse {
                 function_call: None,
                 tool_calls: if calls.is_empty() { None } else { Some(calls) },
                 tool_call_id: None,
-                cache_control: None,
             },
             finish_reason: None,
         }],

@@ -397,7 +397,6 @@ impl ActionExecutor for BridgedExecutor {
                 name: d.name,
                 description: opt_desc(d.description),
                 parameters: d.parameters,
-                cache_control: None,
             })
             .collect();
 
@@ -411,7 +410,6 @@ impl ActionExecutor for BridgedExecutor {
                     name: def.name,
                     description: opt_desc(def.description),
                     parameters: def.parameters,
-                    cache_control: None,
                 });
             }
         }

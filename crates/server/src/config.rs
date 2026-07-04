@@ -170,8 +170,6 @@ pub struct ProviderConfig {
     pub reasoning_effort: String,
     #[serde(default)]
     pub include_reasoning_encrypted_content: bool,
-    #[serde(default)]
-    pub max_output_tokens: u32,
 }
 
 fn default_codex_timeout() -> u64 {
@@ -416,9 +414,6 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                     p = p.with_reasoning_effort(&pconfig.reasoning_effort);
                 }
                 p = p.with_include_encrypted_content(pconfig.include_reasoning_encrypted_content);
-                if pconfig.max_output_tokens > 0 {
-                    p = p.with_max_output_tokens(pconfig.max_output_tokens);
-                }
                 Some(Arc::new(p))
             }
             "bonsai" => {

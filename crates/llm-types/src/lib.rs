@@ -90,8 +90,6 @@ pub struct Message {
     /// For tool role messages, the tool_call_id this is responding to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<serde_json::Value>,
 }
 
 impl Message {
@@ -104,7 +102,6 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: None,
-            cache_control: None,
         }
     }
 
@@ -117,7 +114,6 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: None,
-            cache_control: None,
         }
     }
 
@@ -130,7 +126,6 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: None,
-            cache_control: None,
         }
     }
 
@@ -143,7 +138,6 @@ impl Message {
             function_call: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
-            cache_control: None,
         }
     }
 
@@ -163,8 +157,6 @@ pub struct FunctionDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub parameters: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<serde_json::Value>,
 }
 
 /// Controls how the model calls functions.
@@ -317,7 +309,6 @@ impl ChatResponse {
                     function_call: None,
                     tool_calls: Some(tool_calls),
                     tool_call_id: None,
-                    cache_control: None,
                 },
                 finish_reason: Some(FinishReason::ToolCalls),
             }],
@@ -486,7 +477,12 @@ mod tests {
         let resp = ChatResponse::with_tool_calls(vec![tc]);
         assert!(resp.first_text().is_none());
         assert_eq!(
-            resp.first_message().unwrap().tool_calls.as_ref().unwrap().len(),
+            resp.first_message()
+                .unwrap()
+                .tool_calls
+                .as_ref()
+                .unwrap()
+                .len(),
             1
         );
     }

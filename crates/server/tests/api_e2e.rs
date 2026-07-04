@@ -639,7 +639,6 @@ impl MockLlmProvider {
             function_call: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
-            cache_control: None,
         };
         let _ = &mut msg; // suppress unused_mut
 

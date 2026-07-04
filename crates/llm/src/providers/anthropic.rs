@@ -163,7 +163,15 @@ impl AnthropicProvider {
         });
 
         if let Some(system) = system_prompt {
-            body["system"] = serde_json::json!(system);
+            // プロンプトキャッシュはこのプロバイダの能力としてここで適用する（#44）。
+            // system はキャッシュマーカー付きの text ブロック配列で送る（旧実装は
+            // エンジンが Message.cache_control を付けても plain string に潰して
+            // 黙って落としていた — これで system プレフィックスのキャッシュが実際に効く）。
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }]);
         }
         if let Some(temp) = request.temperature {
             body["temperature"] = serde_json::json!(temp);
@@ -172,21 +180,21 @@ impl AnthropicProvider {
             body["stop_sequences"] = serde_json::json!(stop);
         }
         if let Some(ref functions) = request.functions {
-            let tools: Vec<Value> = functions
+            let mut tools: Vec<Value> = functions
                 .iter()
                 .map(|f| {
-                    let mut tool = serde_json::json!({
+                    serde_json::json!({
                         "name": f.name,
                         "description": f.description,
                         "input_schema": f.parameters,
-                    });
-                    // Anthropic のプロンプトキャッシュ: ツール定義に cache_control を出力する。
-                    if let Some(ref cc) = f.cache_control {
-                        tool["cache_control"] = cc.clone();
-                    }
-                    tool
+                    })
                 })
                 .collect();
+            // プロンプトキャッシュ: ツール定義ブロックの末尾にマーカーを置く
+            //（ツール列全体がキャッシュ prefix になる。従来のエンジン注入と同じ wire 形）。
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral", "ttl": "1h"});
+            }
             body["tools"] = serde_json::json!(tools);
         }
 
@@ -301,7 +309,6 @@ impl AnthropicProvider {
                 Some(tool_calls)
             },
             tool_call_id: None,
-            cache_control: None,
         };
 
         Ok(ChatResponse {
@@ -413,8 +420,8 @@ impl LlmProvider for AnthropicProvider {
         let model = request.model.clone();
         // チャンク境界を跨いでバッファし、SSEイベントを行単位で処理する。
         // content_block_delta ごとに1デルタを emit する（チャンク内での結合はしない）。
-        let stream = crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(
-            move |line_res| {
+        let stream =
+            crate::providers::sse::line_stream(resp.bytes_stream()).filter_map(move |line_res| {
                 let model = model.clone();
                 let out = match line_res {
                     Err(e) => Some(Err(e)),
@@ -444,9 +451,8 @@ impl LlmProvider for AnthropicProvider {
                                             }],
                                         }))
                                     }
-                                    Some("content_block_delta") => parsed["delta"]["text"]
-                                        .as_str()
-                                        .map(|text| {
+                                    Some("content_block_delta") => {
+                                        parsed["delta"]["text"].as_str().map(|text| {
                                             Ok(ChatStreamDelta {
                                                 id: String::new(),
                                                 model,
@@ -461,7 +467,8 @@ impl LlmProvider for AnthropicProvider {
                                                     finish_reason: None,
                                                 }],
                                             })
-                                        }),
+                                        })
+                                    }
                                     _ => None,
                                 },
                                 Err(_) => None,
@@ -472,8 +479,7 @@ impl LlmProvider for AnthropicProvider {
                     }
                 };
                 futures::future::ready(out)
-            },
-        );
+            });
 
         Ok(Box::pin(stream))
     }
@@ -499,5 +505,67 @@ impl LlmProvider for AnthropicProvider {
 
         // 200 or 401 both mean the endpoint is reachable
         Ok(resp.status().is_success() || resp.status().as_u16() == 401)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_request() -> ChatRequest {
+        ChatRequest {
+            model: "claude-x".to_string(),
+            messages: vec![Message::system("sys prompt"), Message::user("hi")],
+            temperature: None,
+            max_tokens: Some(100),
+            stop: None,
+            stream: None,
+            agent_id: None,
+            metadata: Default::default(),
+            functions: Some(vec![
+                FunctionDefinition {
+                    name: "a".to_string(),
+                    description: Some("d".to_string()),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                FunctionDefinition {
+                    name: "b".to_string(),
+                    description: Some("d".to_string()),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ]),
+            function_call: None,
+        }
+    }
+
+    /// プロンプトキャッシュはプロバイダの能力（#44）: system は cache_control 付き
+    /// text ブロック配列、tools は最後の定義にのみ cache_control が付くこと。
+    #[test]
+    fn cache_policy_applied_by_provider() {
+        let provider = AnthropicProvider::new("k");
+        let body = provider.build_request_body(&base_request());
+
+        let system = body["system"].as_array().expect("system must be blocks");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], "sys prompt");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[0]["cache_control"]["ttl"], "1h");
+
+        let tools = body["tools"].as_array().unwrap();
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// 複数 system メッセージは連結して1ブロックになる（旧挙動の保存）。
+    #[test]
+    fn multiple_system_messages_concatenated() {
+        let mut req = base_request();
+        req.messages.insert(1, Message::system("second sys"));
+        let provider = AnthropicProvider::new("k");
+        let body = provider.build_request_body(&req);
+        let system = body["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "sys prompt\n\nsecond sys");
     }
 }
