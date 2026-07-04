@@ -18,6 +18,11 @@ type BackfillMap = std::collections::HashMap<String, Vec<String>>;
 /// keywords 未付与（`keywords_json = '[]'`）の topic ノードに、title/summary から
 /// キーワードを一括抽出して付与する。処理した件数を返す（対象なしなら 0、LLM ゼロコール）。
 ///
+/// キーワード抽出も**エージェントの人格を通す**（方針: 人格のベクトルを最大限
+/// 反映する。何を手がかりに思い出すかも人格の一部であり、中立タグの精度より
+/// 人格の一貫性を優先する。逆引きのリコールは title/summary も検索対象なので
+/// 表記揺れは仕組み側で吸収される）。ビルド時・月次ロールアップの抽出と同じ扱い。
+///
 /// LLM 応答に含まれなかったノードには title 由来のフォールバックを書き込む
 /// （`[]` のまま残すと毎 tick 再抽出対象になり永久ループするため、必ず前進する）。
 pub async fn backfill_topic_keywords(
@@ -25,6 +30,8 @@ pub async fn backfill_topic_keywords(
     agent_id: &str,
     llm: &dyn LlmClient,
     model: &str,
+    persona_name: &str,
+    personality: Option<&str>,
 ) -> Result<usize> {
     let targets = {
         let db = conn
@@ -44,17 +51,23 @@ pub async fn backfill_topic_keywords(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let persona_header = match personality.filter(|p| !p.is_empty()) {
+        Some(p) => format!("あなたは {persona_name} です。\n{p}\n\n"),
+        None => String::new(),
+    };
     let prompt = format!(
-        "以下は過去の記憶トピックの一覧です（形式: id | タイトル | 要約）。\n\
-         各トピックに検索用キーワードを 3〜8 個付けてください（人物・技術・固有名詞を優先）。\n\
+        "{persona_header}以下はあなたの過去の記憶トピックの一覧です（形式: id | タイトル | 要約）。\n\
+         それぞれの記憶に、あなたが後で思い出すときの手がかりになるキーワードを 3〜8 個付けてください\n\
+         （人物・技術・出来事・そのとき感じたことなど、あなたにとって重要なもの）。\n\
          JSON形式で出力: {{\"<id>\": [\"kw1\", \"kw2\"], ...}}\n\n{listing}"
     );
+    let system_content = match personality.filter(|p| !p.is_empty()) {
+        Some(p) => format!("あなたは {persona_name} です。\n{p}"),
+        None => "You are a helpful assistant.".to_string(),
+    };
     let request = ChatRequest::new(
         model.to_string(),
-        vec![
-            Message::system("You are a helpful assistant.".to_string()),
-            Message::user(prompt),
-        ],
+        vec![Message::system(system_content), Message::user(prompt)],
     )
     .with_temperature(0.0)
     .with_max_tokens(1024);
@@ -167,6 +180,7 @@ pub async fn rollup_stale_period(
         "{persona_header}以下は {month} のあなたの記憶（トピック要約の一覧）です。\n\
          この月に何があったかを一人称の記憶として300字以内でまとめてください。\n\
          重要な学び・出来事・関係性・失敗と教訓を優先してください。\n\
+         keywords には、あなたがこの月を思い出すときの手がかりになる言葉を選んでください。\n\
          JSON形式で出力: {{\"summary\": \"300字以内\", \"keywords\": [\"3〜8個\"]}}\n\n\
          トピック一覧:\n{listing}"
     );
@@ -252,6 +266,19 @@ mod tests {
     impl LlmClient for FailingLlm {
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
             Err(anyhow::anyhow!("provider down"))
+        }
+    }
+
+    struct RecordingLlm {
+        last_request: std::sync::Mutex<Option<ChatRequest>>,
+        response: String,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingLlm {
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+            *self.last_request.lock().unwrap() = Some(request);
+            Ok(ChatResponse::text(self.response.clone()))
         }
     }
 
@@ -411,7 +438,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             response: r#"{"t1": ["Rust", "所有権"]}"#.to_string(),
         };
-        let updated = backfill_topic_keywords(&conn, "a1", &llm, "m")
+        let updated = backfill_topic_keywords(&conn, "a1", &llm, "m", "テスト", None)
             .await
             .unwrap();
         assert_eq!(updated, 2);
@@ -428,7 +455,7 @@ mod tests {
             assert_eq!(t2.keywords_json, r#"["Discord連携"]"#);
         }
         // 2 回目: 対象なし → LLM ゼロコール（フォールバックにより前進保証）
-        let updated = backfill_topic_keywords(&conn, "a1", &llm, "m")
+        let updated = backfill_topic_keywords(&conn, "a1", &llm, "m", "テスト", None)
             .await
             .unwrap();
         assert_eq!(updated, 0);
@@ -436,11 +463,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backfill_prompt_carries_persona() {
+        // 方針: キーワード抽出も人格を通す — persona_name / personality が
+        // system と user プロンプトの両方に届くこと
+        let conn = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        seed_past_month(&conn);
+        let llm = RecordingLlm {
+            last_request: std::sync::Mutex::new(None),
+            response: r#"{"t1": ["Rust"], "t2": ["Discord"]}"#.to_string(),
+        };
+        backfill_topic_keywords(
+            &conn,
+            "a1",
+            &llm,
+            "m",
+            "モモ",
+            Some("好奇心旺盛で少しおっちょこちょい"),
+        )
+        .await
+        .unwrap();
+        let req = llm.last_request.lock().unwrap().take().expect("LLM called");
+        let system = req.messages[0]
+            .text_content()
+            .unwrap_or_default()
+            .to_string();
+        let user = req.messages[1]
+            .text_content()
+            .unwrap_or_default()
+            .to_string();
+        assert!(system.contains("モモ"));
+        assert!(system.contains("好奇心旺盛"));
+        assert!(user.contains("モモ"));
+        assert!(user.contains("思い出すときの手がかり"));
+    }
+
+    #[tokio::test]
     async fn backfill_outage_stamps_nothing_and_retries() {
         // LLM 障害時にタイトル由来フォールバックを恒久確定させない（次 tick 再試行）
         let conn = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
         seed_past_month(&conn);
-        let updated = backfill_topic_keywords(&conn, "a1", &FailingLlm, "m")
+        let updated = backfill_topic_keywords(&conn, "a1", &FailingLlm, "m", "テスト", None)
             .await
             .unwrap();
         assert_eq!(updated, 0);
@@ -463,7 +525,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             response: "not json".to_string(),
         };
-        let updated = backfill_topic_keywords(&conn, "a1", &garbage, "m")
+        let updated = backfill_topic_keywords(&conn, "a1", &garbage, "m", "テスト", None)
             .await
             .unwrap();
         assert_eq!(updated, 0);

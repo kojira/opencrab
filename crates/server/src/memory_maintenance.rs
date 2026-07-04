@@ -182,12 +182,15 @@ pub async fn run_maintenance_tick(
         }
     }
 
-    // ② キーワードバックフィル（≤1 コール、対象が無ければゼロコール）
+    // ② キーワードバックフィル（≤1 コール、対象が無ければゼロコール）。
+    // キーワード抽出も人格を通す（方針: 人格のベクトルを最大限反映する）。
     match opencrab_core::memory_index::maintenance::backfill_topic_keywords(
         &state.db,
         agent_id,
         &llm,
         &effective_model,
+        &persona_name,
+        personality.as_deref(),
     )
     .await
     {
