@@ -42,6 +42,18 @@ pub fn validate_agent_id(agent_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// ワークスペースのベーステンプレート（例: `data/agents/{agent_id}/workspace`）を
+/// agent_id で展開する唯一の入口（#48）。
+///
+/// agent_id は必ず `validate_agent_id` を通す。naive な `.replace("{agent_id}", ..)`
+/// を呼び出し元に散在させると、検証を忘れた経路がパストラバーサル（`../` 入りの
+/// agent_id）を招き、置換を忘れた経路がリテラル `{agent_id}` ディレクトリを生む。
+/// テンプレート展開はこの関数に一本化すること。
+pub fn resolve_agent_workspace(base_template: &str, agent_id: &str) -> Result<PathBuf> {
+    validate_agent_id(agent_id)?;
+    Ok(PathBuf::from(base_template.replace("{agent_id}", agent_id)))
+}
+
 impl Workspace {
     /// Create a new Workspace rooted at the given directory.
     ///
@@ -299,6 +311,22 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolve_agent_workspace_expands_and_validates() {
+        let p =
+            super::resolve_agent_workspace("data/agents/{agent_id}/workspace", "crab-1").unwrap();
+        assert_eq!(p, std::path::PathBuf::from("data/agents/crab-1/workspace"));
+
+        // 検証を必ず通す: トラバーサル/空は拒否
+        assert!(super::resolve_agent_workspace("data/{agent_id}", "../evil").is_err());
+        assert!(super::resolve_agent_workspace("data/{agent_id}", "a/b").is_err());
+        assert!(super::resolve_agent_workspace("data/{agent_id}", "").is_err());
+
+        // テンプレートに {agent_id} が無い場合は素通し（共有ベース運用）
+        let p = super::resolve_agent_workspace("/tmp", "crab-1").unwrap();
+        assert_eq!(p, std::path::PathBuf::from("/tmp"));
+    }
+
     use super::*;
 
     fn temp_workspace() -> (tempfile::TempDir, Workspace) {

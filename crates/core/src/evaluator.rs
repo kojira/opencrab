@@ -175,18 +175,14 @@ mod tests {
     #[tokio::test]
     async fn evaluate_errors_on_garbage_and_nan() {
         let llm = MockLlm("I think it looks fine!".to_string());
-        assert!(
-            evaluate_against_contract(&llm, "m", "g", "c", "r", "t")
-                .await
-                .is_err()
-        );
+        assert!(evaluate_against_contract(&llm, "m", "g", "c", "r", "t")
+            .await
+            .is_err());
 
         let llm = MockLlm(r#"{"score": null}"#.to_string());
-        assert!(
-            evaluate_against_contract(&llm, "m", "g", "c", "r", "t")
-                .await
-                .is_err()
-        );
+        assert!(evaluate_against_contract(&llm, "m", "g", "c", "r", "t")
+            .await
+            .is_err());
     }
 
     #[test]

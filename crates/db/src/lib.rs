@@ -18,9 +18,7 @@ pub type PooledConn = r2d2::PooledConnection<SqliteConnectionManager>;
 /// `init_connection` とプール customizer の双方から共有する。`busy_timeout` は
 /// プール化で初めて発生しうる同時ライタの `SQLITE_BUSY` を待機・再試行で吸収する。
 fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-    )
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
 }
 
 /// DB ハンドルのエラー。
@@ -110,8 +108,7 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let manager = SqliteConnectionManager::file(path)
-            .with_init(|c| configure_connection(c));
+        let manager = SqliteConnectionManager::file(path).with_init(|c| configure_connection(c));
         let pool = r2d2::Pool::builder().max_size(8).build(manager)?;
 
         // スキーマ初期化は1接続で1回だけ、並行チェックアウト前に。
@@ -209,7 +206,10 @@ mod db_tests {
     #[test]
     fn file_open_pooled_and_schema_initialized_once() {
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("opencrab_db_pool_test_{}.sqlite", std::process::id()));
+        let path = dir.join(format!(
+            "opencrab_db_pool_test_{}.sqlite",
+            std::process::id()
+        ));
         let path_str = path.to_str().unwrap();
         let _ = std::fs::remove_file(&path);
 
@@ -217,9 +217,13 @@ mod db_tests {
         // foreign_keys が接続ごとに ON になっている（customizer 検証）。
         {
             let c = db.lock().unwrap();
-            let fk: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+            let fk: i64 = c
+                .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(fk, 1);
-            let uv: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            let uv: i64 = c
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
             assert!(uv >= 1, "schema should be initialized");
         }
         // 2回目の open も冪等（schema init 再実行なし・エラーなし）。
@@ -269,7 +273,10 @@ mod db_tests {
         let n: i64 = c
             .query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 16, "all concurrent writes must land (no SQLITE_BUSY loss)");
+        assert_eq!(
+            n, 16,
+            "all concurrent writes must land (no SQLITE_BUSY loss)"
+        );
         drop(c);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));

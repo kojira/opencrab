@@ -12,6 +12,11 @@ members = [
     "crates/cli",
 ]
 
+[workspace.lints.clippy]
+# ガードを .await 跨ぎで保持する事故の将来保険（#32）。DB は DbGuard が !Send で
+# 構造的に防がれているが、他の std::sync::Mutex には型の防波堤が無い。
+await_holding_lock = "deny"
+
 [workspace.package]
 version = "0.2.17"
 edition = "2021"

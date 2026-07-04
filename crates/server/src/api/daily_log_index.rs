@@ -56,8 +56,13 @@ pub async fn rebuild(
     };
     tokio::spawn(async move {
         let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
-        let indexer =
-            opencrab_core::memory::DailyLogIndexer::new(db_clone, Arc::new(adapter), model_clone, daily_persona_name, daily_personality);
+        let indexer = opencrab_core::memory::DailyLogIndexer::new(
+            db_clone,
+            Arc::new(adapter),
+            model_clone,
+            daily_persona_name,
+            daily_personality,
+        );
         if let Err(e) = indexer.rebuild(&agent_id).await {
             tracing::warn!("daily_log rebuild failed: {}", e);
         }
@@ -86,8 +91,13 @@ pub async fn run(
     };
     tokio::spawn(async move {
         let adapter = crate::llm_adapter::LlmRouterAdapter::new(llm_clone);
-        let indexer =
-            opencrab_core::memory::DailyLogIndexer::new(db_clone, Arc::new(adapter), model_clone, daily_persona_name, daily_personality);
+        let indexer = opencrab_core::memory::DailyLogIndexer::new(
+            db_clone,
+            Arc::new(adapter),
+            model_clone,
+            daily_persona_name,
+            daily_personality,
+        );
         if let Err(e) = indexer.run(&agent_id).await {
             tracing::warn!("daily_log run failed: {}", e);
         }

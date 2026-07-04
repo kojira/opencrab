@@ -664,7 +664,10 @@ impl DiscordGatewayActions {
         };
 
         // Workspace path validation (security: prevent path traversal)
-        let workspace_root = match self.agent_workspace_root(&ctx.agent_id).canonicalize() {
+        let workspace_root = match self
+            .agent_workspace_root(&ctx.agent_id)
+            .and_then(|p| p.canonicalize().map_err(anyhow::Error::from))
+        {
             Ok(p) => p,
             Err(e) => {
                 return GatewayActionResult {

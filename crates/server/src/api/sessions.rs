@@ -38,7 +38,14 @@ pub async fn send_mentor_instruction(
         created_at: None,
     };
     let conn = state.db.lock().unwrap();
-    let log_id = opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
+    let log_id = match opencrab_db::queries::insert_session_log(&conn, &log) {
+        Ok(id) => id,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "error": format!("Failed to record mentor instruction: {e}")
+            }));
+        }
+    };
     Json(serde_json::json!({"id": log_id}))
 }
 
@@ -238,7 +245,7 @@ pub async fn send_message(
                 };
                 {
                     let conn = state.db.lock().unwrap();
-                    opencrab_db::queries::insert_session_log(&conn, &response_log).ok();
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &response_log);
                 }
 
                 responses.push(serde_json::json!({

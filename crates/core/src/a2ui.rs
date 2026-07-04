@@ -148,10 +148,7 @@ pub trait UiRenderer: Send + Sync {
         response: &UserActionResponse,
     ) -> Result<(), RenderError>;
 
-    async fn update_on_timeout(
-        &self,
-        rendered: &RenderedMessage,
-    ) -> Result<(), RenderError>;
+    async fn update_on_timeout(&self, rendered: &RenderedMessage) -> Result<(), RenderError>;
 }
 
 /// 確認ダイアログ用のA2UIコンポーネントを生成するヘルパー
