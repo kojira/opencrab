@@ -119,7 +119,13 @@ const MIGRATIONS: &[Migration] = &[
                     short_id TEXT
                 );
                 INSERT INTO memory_index_nodes_new
-                    SELECT * FROM memory_index_nodes
+                    (id, agent_id, parent_id, node_type, source_type, title, summary,
+                     start_log_id, end_log_id, source_session_id, date_from, date_to,
+                     depth, child_count, token_count, created_at, updated_at, short_id)
+                    SELECT id, agent_id, parent_id, node_type, source_type, title, summary,
+                           start_log_id, end_log_id, source_session_id, date_from, date_to,
+                           depth, child_count, token_count, created_at, updated_at, short_id
+                    FROM memory_index_nodes
                     WHERE node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly');
                 UPDATE memory_index_nodes_new SET parent_id = NULL
                     WHERE parent_id IS NOT NULL
