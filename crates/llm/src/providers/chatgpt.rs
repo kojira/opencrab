@@ -315,8 +315,7 @@ impl ChatGptProvider {
         }
 
         // NOTE: max_output_tokens is NOT supported by the chatgpt Responses API
-        // (returns 400 "Unsupported parameter: max_output_tokens"). Omit from body.
-        // The field is kept internally for potential future use.
+        // (returns 400 "Unsupported parameter: max_output_tokens") — never sent.
 
         if self.include_encrypted_content {
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
@@ -819,8 +818,8 @@ mod tests {
     }
 
     #[test]
-    fn test_with_reasoning_effort_sets_max_output_tokens() {
-        // The internal field is set but must NOT appear in the serialized body.
+    fn test_reasoning_effort_never_emits_max_output_tokens() {
+        // max_output_tokens は Responses API 非対応のため、いかなる設定でも body に現れない。
         let low = ChatGptProvider::new().with_reasoning_effort("low");
         let body_low = low.build_request_body(
             &ChatRequest::new("gpt-5.5", vec![Message::user("hi")]),
