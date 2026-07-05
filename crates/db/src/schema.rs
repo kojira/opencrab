@@ -192,7 +192,30 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 8,
+        description: "provider settings overrides (dashboard-managed LLM/voice providers)",
+        up: |conn| conn.execute_batch(PROVIDER_SETTINGS_SQL),
+    },
 ];
+
+/// ダッシュボードから編集する LLM/voice プロバイダー設定のオーバーライド。
+/// TOML を土台に、行/フィールドが存在するものだけ上書きする。
+const PROVIDER_SETTINGS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS llm_provider_overrides (
+    provider TEXT PRIMARY KEY,
+    enabled INTEGER,
+    api_key TEXT,
+    base_url TEXT,
+    default_model TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS voice_config_override (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
 
 /// version 2: タスク台帳。
 ///

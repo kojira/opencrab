@@ -48,13 +48,21 @@ struct ActiveSession {
     agent_id: String,
 }
 
-/// VC セッションの管理と TTS 再生。
-pub struct VoiceSessionManager {
-    songbird: Arc<songbird::Songbird>,
+/// STT/TTS プロバイダと設定の束。ダッシュボードからの設定変更で
+/// まとめて差し替える（`VoiceRuntime::apply_settings`）。
+struct ProviderSet {
     stt: Arc<dyn SttProvider>,
     tts: Arc<dyn TtsProvider>,
     tts_cfg: opencrab_voice::TtsConfig,
     stt_language: Option<String>,
+}
+
+/// VC セッションの管理と TTS 再生。
+pub struct VoiceSessionManager {
+    songbird: Arc<songbird::Songbird>,
+    /// 現在のプロバイダ束。読みは短命ロック → Arc clone。
+    /// await をまたいで guard を保持しないこと。
+    providers: std::sync::RwLock<Arc<ProviderSet>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     http: Arc<serenity::http::Http>,
     /// guild_id → セッション。1 ギルドにつき同時 1 VC。
@@ -75,15 +83,22 @@ impl VoiceSessionManager {
     ) -> Arc<Self> {
         Arc::new(Self {
             songbird,
-            stt,
-            tts,
-            tts_cfg,
-            stt_language,
+            providers: std::sync::RwLock::new(Arc::new(ProviderSet {
+                stt,
+                tts,
+                tts_cfg,
+                stt_language,
+            })),
             event_tx,
             http,
             sessions: dashmap::DashMap::new(),
             user_cache: dashmap::DashMap::new(),
         })
+    }
+
+    /// 現在のプロバイダ束のスナップショット。
+    fn providers(&self) -> Arc<ProviderSet> {
+        self.providers.read().unwrap().clone()
     }
 
     /// VC に参加して受信を開始する。
@@ -175,8 +190,9 @@ impl VoiceSessionManager {
 
     /// TTS 合成して VC で再生する。
     async fn speak(&self, guild_id: u64, agent_id: &str, text: &str) -> Result<()> {
-        let voice = self.tts_cfg.voice_for_agent(agent_id).to_string();
-        let wav = self
+        let providers = self.providers();
+        let voice = providers.tts_cfg.voice_for_agent(agent_id).to_string();
+        let wav = providers
             .tts
             .synthesize(text, &voice)
             .await
@@ -234,9 +250,10 @@ impl VoiceSessionManager {
             return;
         }
         let wav = pcm_to_wav(&mono, 16_000, 1);
-        let text = match self
+        let providers = self.providers();
+        let text = match providers
             .stt
-            .transcribe(&wav, self.stt_language.as_deref())
+            .transcribe(&wav, providers.stt_language.as_deref())
             .await
         {
             Ok(t) => t,
@@ -268,6 +285,24 @@ impl VoiceSessionManager {
             serde_json::Value::String("discord_voice".to_string()),
         );
         let _ = self.event_tx.send(LoopEvent::IncomingMessage(msg));
+    }
+}
+
+impl opencrab_voice::VoiceRuntime for VoiceSessionManager {
+    fn apply_settings(
+        &self,
+        stt: Arc<dyn SttProvider>,
+        tts: Arc<dyn TtsProvider>,
+        tts_cfg: opencrab_voice::TtsConfig,
+        stt_language: Option<String>,
+    ) {
+        *self.providers.write().unwrap() = Arc::new(ProviderSet {
+            stt,
+            tts,
+            tts_cfg,
+            stt_language,
+        });
+        info!("voice providers hot-swapped");
     }
 }
 

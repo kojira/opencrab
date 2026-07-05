@@ -31,8 +31,25 @@ pub trait TtsProvider: Send + Sync {
     async fn synthesize(&self, text: &str, voice: &str) -> Result<Vec<u8>>;
 }
 
+/// 稼働中の音声ランタイム（VC セッション管理側）が実装するトレイト。
+///
+/// ダッシュボードのプロバイダー設定変更を再起動なしで反映するための
+/// 差し替え口。サーバ本体は discord クレートに依存しないため、
+/// このトレイト経由で疎結合に更新を届ける。
+pub trait VoiceRuntime: Send + Sync {
+    /// STT/TTS プロバイダと設定を差し替える。進行中の発話処理は
+    /// 古いプロバイダで完走してよい（非破壊的スワップ）。
+    fn apply_settings(
+        &self,
+        stt: std::sync::Arc<dyn SttProvider>,
+        tts: std::sync::Arc<dyn TtsProvider>,
+        tts_cfg: TtsConfig,
+        stt_language: Option<String>,
+    );
+}
+
 /// STT/TTS の実行設定（config.toml の [voice] から構築される）。
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct VoiceConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -42,7 +59,7 @@ pub struct VoiceConfig {
     pub tts: TtsConfig,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SttConfig {
     /// "openai"（互換サーバ含む）
     #[serde(default = "default_stt_provider")]
@@ -72,7 +89,7 @@ impl Default for SttConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TtsConfig {
     /// "voicevox" | "openai"
     #[serde(default = "default_tts_provider")]

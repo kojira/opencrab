@@ -126,7 +126,7 @@ fn default_heartbeat_enabled() -> bool {
     false
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct LlmConfig {
     #[serde(default = "default_provider")]
     pub default_provider: String,
@@ -203,13 +203,13 @@ fn default_codex_timeout() -> u64 {
     300
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct FallbackConfig {
     #[serde(default)]
     pub chain: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct AliasConfig {
     pub provider: String,
     pub model: String,
@@ -321,6 +321,41 @@ pub(crate) fn expand_env_vars(input: &str) -> String {
         result = format!("{}{}{}", &result[..start], value, &result[end + 1..]);
     }
     result
+}
+
+// ---------- Provider overrides (dashboard-managed) ----------
+
+/// TOML の LlmConfig に DB のプロバイダーオーバーライドを適用した実効設定を返す。
+///
+/// マージ規則:
+/// - `enabled == Some(false)`: プロバイダーを実効設定から**除外**する
+///   （TOML にキーがあっても登録されない）。
+/// - `enabled == Some(true)` で TOML に無いプロバイダー: 空の ProviderConfig を
+///   作ってオーバーライドを適用する（ollama 等のローカル系を UI から有効化する経路）。
+/// - `api_key` / `base_url` / `default_model` は Some のフィールドだけ上書き。
+///   Some("") は「TOML 値の消去」として扱う。
+pub fn apply_llm_overrides(
+    base: &LlmConfig,
+    overrides: &[opencrab_db::queries::LlmProviderOverrideRow],
+) -> LlmConfig {
+    let mut cfg = base.clone();
+    for row in overrides {
+        if row.enabled == Some(false) {
+            cfg.providers.remove(&row.provider);
+            continue;
+        }
+        let entry = cfg.providers.entry(row.provider.clone()).or_default();
+        if let Some(key) = &row.api_key {
+            entry.api_key = key.clone();
+        }
+        if let Some(url) = &row.base_url {
+            entry.base_url = url.clone();
+        }
+        if let Some(model) = &row.default_model {
+            entry.default_model = model.clone();
+        }
+    }
+    cfg
 }
 
 // ---------- LLM Router builder ----------
@@ -524,6 +559,74 @@ mod tests {
         assert_eq!(result, "aaa and bbb");
         std::env::remove_var("TEST_A");
         std::env::remove_var("TEST_B");
+    }
+
+    #[test]
+    fn test_apply_llm_overrides() {
+        use opencrab_db::queries::LlmProviderOverrideRow;
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: "toml-key".to_string(),
+                base_url: "https://toml.example".to_string(),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                api_key: "ant-key".to_string(),
+                ..Default::default()
+            },
+        );
+        let base = LlmConfig {
+            providers,
+            ..toml::from_str("").unwrap()
+        };
+
+        let overrides = vec![
+            // openai: キーだけ DB 側で差し替え
+            LlmProviderOverrideRow {
+                provider: "openai".to_string(),
+                api_key: Some("db-key".to_string()),
+                ..Default::default()
+            },
+            // anthropic: 強制無効
+            LlmProviderOverrideRow {
+                provider: "anthropic".to_string(),
+                enabled: Some(false),
+                ..Default::default()
+            },
+            // ollama: TOML に無いが UI から有効化（base_url のみ）
+            LlmProviderOverrideRow {
+                provider: "ollama".to_string(),
+                enabled: Some(true),
+                base_url: Some("http://localhost:11434".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let merged = apply_llm_overrides(&base, &overrides);
+        assert_eq!(merged.providers["openai"].api_key, "db-key");
+        // 上書きしていないフィールドは TOML 値を維持
+        assert_eq!(merged.providers["openai"].base_url, "https://toml.example");
+        assert!(
+            !merged.providers.contains_key("anthropic"),
+            "disabled provider must be removed"
+        );
+        assert_eq!(
+            merged.providers["ollama"].base_url,
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn test_apply_llm_overrides_empty_is_identity() {
+        let base: LlmConfig = toml::from_str("").unwrap();
+        let merged = apply_llm_overrides(&base, &[]);
+        assert_eq!(merged.providers.len(), base.providers.len());
+        assert_eq!(merged.default_provider, base.default_provider);
     }
 
     #[test]

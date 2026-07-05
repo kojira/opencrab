@@ -6,7 +6,6 @@ use chrono::Utc;
 
 use opencrab_core::{ChatRequest, ChatResponse, LlmClient};
 use opencrab_llm::pricing::PricingRegistry;
-use opencrab_llm::router::LlmRouter;
 
 /// Configuration for metrics recording.
 pub struct MetricsContext {
@@ -29,13 +28,16 @@ pub struct MetricsContext {
 /// between two representations — it forwards the request to the router and,
 /// optionally, records usage metrics to the DB.
 pub struct LlmRouterAdapter {
-    router: Arc<LlmRouter>,
+    /// ホットスワップ対応の共有ハンドル。リクエストごとに `get()` で
+    /// その時点のルーターを取るため、ダッシュボードでのプロバイダー
+    /// 設定変更が長寿命のアダプタ（Discord ループ等）にも反映される。
+    router: crate::SharedLlmRouter,
     metrics_ctx: Option<MetricsContext>,
     agent_id: Option<String>,
 }
 
 impl LlmRouterAdapter {
-    pub fn new(router: Arc<LlmRouter>) -> Self {
+    pub fn new(router: crate::SharedLlmRouter) -> Self {
         Self {
             router,
             metrics_ctx: None,
@@ -64,7 +66,8 @@ impl LlmClient for LlmRouterAdapter {
         }
 
         let start = std::time::Instant::now();
-        let response = self.router.chat_completion(request).await?;
+        let router = self.router.get();
+        let response = router.chat_completion(request).await?;
         let latency_ms = start.elapsed().as_millis() as i64;
 
         // Record metrics to DB if context is available.
@@ -72,8 +75,7 @@ impl LlmClient for LlmRouterAdapter {
             let metrics_id = uuid::Uuid::new_v4().to_string();
 
             // Resolve provider and model from the alias.
-            let (provider, model) = self
-                .router
+            let (provider, model) = router
                 .resolve_model(&model_requested)
                 .unwrap_or_else(|_| ("unknown".to_string(), model_requested.clone()));
 

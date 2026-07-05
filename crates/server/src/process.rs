@@ -1200,6 +1200,7 @@ pub async fn run_agent_response(
         active_model: Some(effective_model.clone()),
         available_providers: state
             .llm_router
+            .get()
             .provider_names()
             .into_iter()
             .map(String::from)

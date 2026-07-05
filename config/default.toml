@@ -186,6 +186,10 @@ enabled = true
 threshold = 0.7
 # model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
 
+# ─ プロバイダー設定はダッシュボード（システム設定ページ）からも編集できます。
+#   ダッシュボードでの変更は DB に保存され、この TOML より優先されます。
+#   LLM プロバイダーの変更は再起動なしで反映されます。
+
 # VC（ボイスチャンネル）対話。有効化すると join_voice_channel /
 # leave_voice_channel アクションが使えるようになる（owner/trusted_user の依頼時）。
 # 音声は Discord がユーザーごとに分離して送ってくるため、話者の識別は

@@ -16,7 +16,10 @@ fn create_test_app() -> Router {
     let conn = opencrab_db::init_memory().unwrap();
     let state = AppState {
         db: opencrab_db::Db::from_connection(conn),
-        llm_router: Arc::new(LlmRouter::new()),
+        llm_router: opencrab_server::SharedLlmRouter::new(LlmRouter::new()),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
@@ -692,7 +695,10 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
 
     let state = AppState {
         db: db.clone(),
-        llm_router: Arc::new(router),
+        llm_router: opencrab_server::SharedLlmRouter::new(router),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir()
             .join("opencrab_test")
             .to_string_lossy()
@@ -1208,4 +1214,125 @@ async fn test_import_execute_full() {
     let (status, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["name"], "ImportBot");
+}
+
+// ==================== Provider Settings (dashboard) ====================
+
+#[tokio::test]
+async fn test_list_llm_providers() {
+    let app = create_test_app();
+    let (status, json) = send_request(app, "GET", "/api/llm/providers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let providers = json["providers"].as_array().unwrap();
+    // 既知プロバイダーは TOML/DB に無くても列挙される
+    let names: Vec<&str> = providers
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"openai"));
+    assert!(names.contains(&"ollama"));
+    // 未設定なのでキーは none / 非稼働
+    let openai = providers.iter().find(|p| p["name"] == "openai").unwrap();
+    assert_eq!(openai["api_key_source"], "none");
+    assert_eq!(openai["active"], false);
+}
+
+#[tokio::test]
+async fn test_update_provider_sets_key_and_reloads() {
+    let app = create_test_app();
+    // API キーを設定 → ルーター再構築で openai が稼働状態になる
+    let (status, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/openai",
+        Some(serde_json::json!({"api_key": "sk-test-dashboard-key", "default_model": "gpt-4o"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["reloaded"], true);
+    let p = &json["provider"];
+    assert_eq!(
+        p["active"], true,
+        "provider should be live after key set: {p}"
+    );
+    assert_eq!(p["api_key_source"], "db");
+    // 平文キーは応答に含まれない（マスクのみ）
+    assert!(!json.to_string().contains("sk-test-dashboard-key"));
+    assert_eq!(p["api_key_masked"], "••••-key");
+
+    // オーバーライド削除 → 非稼働に戻る
+    let (status, json) = send_request(
+        app.clone(),
+        "DELETE",
+        "/api/llm/providers/openai/override",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (_, json) = send_request(app, "GET", "/api/llm/providers", None).await;
+    let openai = json["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "openai")
+        .unwrap()
+        .clone();
+    assert_eq!(openai["active"], false);
+    assert_eq!(openai["has_override"], false);
+}
+
+#[tokio::test]
+async fn test_update_provider_disable_and_reject_bad_name() {
+    let app = create_test_app();
+    let (status, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/ollama",
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["provider"]["enabled_override"], false);
+
+    // 不正なプロバイダー名は 400
+    let (status, _) = send_request(
+        app,
+        "PUT",
+        "/api/llm/providers/bad%2Fname",
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_voice_config_roundtrip() {
+    let app = create_test_app();
+    // 初期状態: TOML 由来（テストでは Default = disabled）
+    let (status, json) = send_request(app.clone(), "GET", "/api/voice/config", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["source"], "toml");
+    assert_eq!(json["config"]["enabled"], false);
+    assert_eq!(json["runtime_active"], false);
+
+    // 保存（ランタイム停止中なので restart_required）
+    let mut config = json["config"].clone();
+    config["enabled"] = serde_json::json!(true);
+    config["tts"]["default_voice"] = serde_json::json!("1");
+    let (status, json) = send_request(app.clone(), "PUT", "/api/voice/config", Some(config)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["saved"], true);
+    assert_eq!(json["applied_live"], false);
+    assert_eq!(json["restart_required"], true);
+
+    // 読み直すと DB 由来になっている
+    let (_, json) = send_request(app.clone(), "GET", "/api/voice/config", None).await;
+    assert_eq!(json["source"], "db");
+    assert_eq!(json["config"]["tts"]["default_voice"], "1");
+
+    // リセットで TOML に戻る
+    let (status, _) = send_request(app.clone(), "DELETE", "/api/voice/config", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, json) = send_request(app, "GET", "/api/voice/config", None).await;
+    assert_eq!(json["source"], "toml");
 }

@@ -141,7 +141,7 @@ pub async fn send_message(
     };
 
     // 2. Check if LLM providers are available. If none, fall back to legacy behavior.
-    if state.llm_router.provider_names().is_empty() {
+    if state.llm_router.get().provider_names().is_empty() {
         return Json(serde_json::json!({
             "id": log_id,
             "session_id": id,

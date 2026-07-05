@@ -442,8 +442,25 @@ async fn main() -> anyhow::Result<()> {
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
-    // Build LLM router from config
-    let llm_router = config::build_llm_router(&cfg.llm)?;
+    // Build LLM router from config + DB のダッシュボード設定オーバーライド
+    let llm_overrides = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_llm_provider_overrides(&conn).unwrap_or_default()
+    };
+    let effective_llm = config::apply_llm_overrides(&cfg.llm, &llm_overrides);
+    let llm_router = config::build_llm_router(&effective_llm)?;
+
+    // 実効 voice 設定: DB オーバーライド（完全置換）> TOML
+    let effective_voice: opencrab_voice::VoiceConfig = {
+        let conn = db.lock().unwrap();
+        match opencrab_db::queries::get_voice_config_override(&conn) {
+            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|e| {
+                tracing::warn!("voice_config_override JSON is broken; using TOML: {e}");
+                cfg.voice.clone()
+            }),
+            _ => cfg.voice.clone(),
+        }
+    };
 
     let default_model = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
 
@@ -455,7 +472,10 @@ async fn main() -> anyhow::Result<()> {
     #[allow(unused_mut)]
     let mut state = AppState {
         db,
-        llm_router: Arc::new(llm_router),
+        llm_router: opencrab_server::SharedLlmRouter::new(llm_router),
+        llm_config: Arc::new(cfg.llm.clone()),
+        voice_config: Arc::new(effective_voice.clone()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
@@ -550,28 +570,33 @@ async fn main() -> anyhow::Result<()> {
                     });
                 // VC 対話（STT/TTS）: config の [voice] が有効なときだけ構築する。
                 // プロバイダ構築失敗（未知の provider 等）は起動を止めず警告して無効化。
+                let voice_cfg = state.voice_config.as_ref();
                 let voice_manager: Option<
                     Arc<opencrab_discord::voice_session::VoiceSessionManager>,
-                > = if cfg.voice.enabled {
+                > = if voice_cfg.enabled {
                     match (
-                        opencrab_voice::build_stt(&cfg.voice.stt),
-                        opencrab_voice::build_tts(&cfg.voice.tts),
+                        opencrab_voice::build_stt(&voice_cfg.stt),
+                        opencrab_voice::build_tts(&voice_cfg.tts),
                     ) {
                         (Ok(stt), Ok(tts)) => {
                             tracing::info!(
-                                stt = %cfg.voice.stt.provider,
-                                tts = %cfg.voice.tts.provider,
+                                stt = %voice_cfg.stt.provider,
+                                tts = %voice_cfg.tts.provider,
                                 "voice (VC) conversation enabled"
                             );
-                            Some(opencrab_discord::voice_session::VoiceSessionManager::new(
+                            let mgr = opencrab_discord::voice_session::VoiceSessionManager::new(
                                 gateway.voice(),
                                 stt,
                                 tts,
-                                cfg.voice.tts.clone(),
-                                cfg.voice.stt.language.clone(),
+                                voice_cfg.tts.clone(),
+                                voice_cfg.stt.language.clone(),
                                 event_tx.clone(),
                                 gateway.http().clone(),
-                            ))
+                            );
+                            // ダッシュボードからの設定変更をホットスワップで受ける
+                            *state.voice_runtime.lock().unwrap() =
+                                Some(mgr.clone() as Arc<dyn opencrab_voice::VoiceRuntime>);
+                            Some(mgr)
                         }
                         (stt, tts) => {
                             if let Err(e) = stt {
