@@ -26,7 +26,7 @@ export default function SessionLogItem({ logType, content, speakerId, createdAt 
           <span className="text-body-sm text-on-surface-variant">{createdAt}</span>
         </div>
       </div>
-      <p className="text-body-lg text-on-surface whitespace-pre-wrap pl-8">{content}</p>
+      <p className="text-body-lg text-on-surface whitespace-pre-wrap break-words pl-8">{content}</p>
     </div>
   );
 }
