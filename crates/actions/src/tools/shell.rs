@@ -165,10 +165,26 @@ impl Action for ShellToolAction {
         // Wait with timeout。優先順位: 呼び出し時の timeout_secs 引数（最も具体的）>
         // コマンド個別設定 > グローバル既定。呼び出し時指定は LLM 由来なので
         // [1, max_timeout_secs] にクランプする（無制限の占有を防ぐ）。
-        let requested_timeout = args
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .map(|t| t.clamp(1, self.config.max_timeout_secs));
+        // - max_timeout_secs=0 という誤設定でも panic しない（clamp は min>max で assert）
+        // - LLM は数値を文字列で送ることがあるため数字文字列も受け付ける
+        // - 存在するのに解釈できない値は黙って既定にフォールバックせずエラーで返す
+        //   （既定で走ってタイムアウト死するより、即時修正できる失敗のほうが良い）
+        let requested_timeout = match args.get("timeout_secs") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => {
+                let parsed = v
+                    .as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()));
+                match parsed {
+                    Some(t) => Some(t.clamp(1, self.config.max_timeout_secs.max(1))),
+                    None => {
+                        return ActionResult::error(&format!(
+                            "Invalid timeout_secs: {v} (expected a positive integer number of seconds)"
+                        ));
+                    }
+                }
+            }
+        };
         let timeout_secs = requested_timeout
             .or(cmd_config.timeout_secs)
             .unwrap_or(self.config.timeout_secs);
@@ -683,6 +699,77 @@ mod tests {
         let parsed: ShellToolConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
         assert_eq!(parsed.timeout_secs, 120);
         assert_eq!(parsed.max_timeout_secs, 1800);
+    }
+
+    #[tokio::test]
+    async fn test_max_timeout_zero_does_not_panic() {
+        // max_timeout_secs=0 の誤設定 + LLM の timeout_secs 指定で clamp(1,0) が
+        // panic していた（レビュー指摘 HIGH）。1s に丸めて動作すること。
+        let config = ShellToolConfig {
+            max_timeout_secs: 0,
+            ..sleep_config()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "sleep", "args": ["3"], "timeout_secs": 5});
+        let result = action.execute(&args, &ctx).await;
+        assert!(
+            !result.success,
+            "should time out (clamped to 1s), not panic"
+        );
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1 seconds"),
+            "must clamp to 1s without panicking: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_secs_as_digit_string_is_accepted() {
+        // LLM は数値引数を文字列で送ることがある（レビュー指摘 MED）。
+        let action = ShellToolAction::new(sleep_config());
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "sleep", "args": ["5"], "timeout_secs": "1"});
+        let result = action.execute(&args, &ctx).await;
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1 seconds"),
+            "digit string must be coerced, not silently dropped: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timeout_secs_invalid_value_is_rejected() {
+        // 解釈できない値は黙ってフォールバックせずエラーで返す。
+        let action = ShellToolAction::new(sleep_config());
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        for bad in [
+            serde_json::json!("soon"),
+            serde_json::json!(-5),
+            serde_json::json!(1.5),
+        ] {
+            let args = serde_json::json!({"command": "sleep", "args": ["0"], "timeout_secs": bad});
+            let result = action.execute(&args, &ctx).await;
+            assert!(!result.success, "invalid timeout_secs must be an error");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("Invalid timeout_secs"),
+                "error must name the problem: {:?}",
+                result.error
+            );
+        }
     }
 
     #[test]
