@@ -101,7 +101,7 @@ function SessionLogItem({
           <span className="badge-neutral text-label-sm">{logType}</span>
         </div>
       </div>
-      <p className="text-body-lg text-on-surface whitespace-pre-wrap pl-8">
+      <p className="text-body-lg text-on-surface whitespace-pre-wrap break-words pl-8">
         {content}
       </p>
     </div>
@@ -165,12 +165,12 @@ export default function SessionDetail() {
         <div className="card-elevated mb-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-4 min-w-0">
-              <Link to="/sessions" className="btn-text p-1 flex items-center gap-1">
+              <Link to="/sessions" className="btn-text p-1 flex items-center gap-1 shrink-0 whitespace-nowrap">
                 <span className="material-symbols-outlined">arrow_back</span>
                 <span className="text-sm hidden sm:inline">{t('sessions.backToList')}</span>
               </Link>
-              <div>
-                <h1 className="text-title-lg text-on-surface">
+              <div className="min-w-0">
+                <h1 className="text-title-lg text-on-surface break-words">
                   {session.theme}
                 </h1>
                 <div className="flex items-center gap-2 flex-wrap text-body-sm text-on-surface-variant mt-0.5">

@@ -119,10 +119,10 @@ export default function AgentLayout() {
         />
       )}
 
-      {/* Tab navigation */}
+      {/* Tab navigation。横スクロール+フェードだと後半のタブ（LLMログ・分析等）が
+          デスクトップ幅でも隠れて存在に気づけないため、折り返して全タブを常時表示する。 */}
       {!isEditRoute && (
-        <div className="relative overflow-hidden">
-        <div className="flex overflow-x-auto flex-nowrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1" style={{ scrollbarWidth: 'thin' }}>
+        <div className="flex flex-wrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1">
           {tabs.map((tab) => {
             const tabPath = `${basePath}${tab.path}`;
             const active =
@@ -133,7 +133,8 @@ export default function AgentLayout() {
               <Link
                 key={tab.key}
                 to={tabPath}
-                className={`flex flex-col sm:flex-row items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-2 text-label-sm sm:text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap flex-shrink-0 ${
+                title={t(tab.labelKey)}
+                className={`flex flex-col sm:flex-row items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-2 text-label-sm sm:text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap ${
                   active
                     ? 'bg-surface-container shadow-elevation-1 text-primary font-semibold'
                     : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container/60'
@@ -144,8 +145,6 @@ export default function AgentLayout() {
               </Link>
             );
           })}
-        </div>
-        <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-surface-container-high to-transparent pointer-events-none rounded-r-xl" />
         </div>
       )}
 

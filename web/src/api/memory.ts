@@ -1,10 +1,20 @@
 import { api } from './client';
 import type { CuratedMemoryDto, SessionLogResult } from './types';
 
-export function getCuratedMemories(
+interface CuratedMemoryListResponse {
+  items: CuratedMemoryDto[];
+  total: number;
+}
+
+export async function getCuratedMemories(
   agentId: string,
 ): Promise<CuratedMemoryDto[]> {
-  return api.get<CuratedMemoryDto[]>(`/agents/${agentId}/memory/curated`);
+  // API は {items, total} 封筒で返す。以前は配列と誤って型付けしており、
+  // curated.map が TypeError になってアプリ全体が白画面になっていた。
+  const res = await api.get<CuratedMemoryListResponse>(
+    `/agents/${agentId}/memory/curated`,
+  );
+  return res.items ?? [];
 }
 
 interface SearchMemoryResponse {

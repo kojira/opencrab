@@ -5,14 +5,11 @@
   "nav.memory": "メモリ",
   "nav.sessions": "セッション",
   "nav.analytics": "分析",
-
   "brand.name": "OpenCrab",
   "brand.subtitle": "エージェントフレームワーク",
   "brand.version": "OpenCrab v0.1.0",
-
   "header.searchPlaceholder": "エージェント、セッション、メモリを検索...",
   "header.dbConnected": "DB 接続済み",
-
   "common.loading": "読み込み中...",
   "common.error": "エラー: {{message}}",
   "common.save": "保存",
@@ -29,17 +26,13 @@
   "common.selectAgent": "エージェントを選択",
   "common.selectAgentPlaceholder": "-- エージェントを選択 --",
   "common.up": "上へ",
-
   "agentCard.skills": "{{count}} スキル",
   "agentCard.sessions": "{{count}} セッション",
-
   "skillEditor.usedTimes": "{{count}} 回使用",
   "skillEditor.effectiveness": "効果: {{pct}}%",
-
   "sessionCard.turn": "ターン {{number}}",
   "sessionCard.dm": "DM",
   "sessionCard.channel": "チャンネル",
-
   "home.title": "ダッシュボード",
   "home.totalAgents": "総エージェント数",
   "home.totalSessions": "総セッション数",
@@ -49,21 +42,16 @@
   "home.sessionMonitor": "セッション",
   "home.memoryExplorer": "メモリ",
   "home.analyticsMetrics": "分析",
-
   "agents.title": "エージェント",
   "agents.newAgent": "新規エージェント",
   "agents.noAgents": "エージェントが見つかりません。",
   "agents.createFirstAgent": "最初のエージェントを作成して始めましょう。",
-
   "agentCreate.title": "新規エージェント作成",
   "agentCreate.nameLabel": "名前 *",
   "agentCreate.namePlaceholder": "例: カイ",
   "agentCreate.personaNameLabel": "ペルソナ名",
   "agentCreate.personaNamePlaceholder": "例: 実用的なエンジニア（デフォルトは名前）",
   "agentCreate.nameRequired": "名前は必須です。",
-
-
-
   "agentDetail.deleteTitle": "エージェントを削除しますか？",
   "agentDetail.deleteMessage": "エージェントと関連するすべてのデータ（ソウル、スキル、メモリ）が完全に削除されます。",
   "agentDetail.editPersona": "ペルソナ編集",
@@ -100,7 +88,6 @@
   "agentDetail.manageAnalyticsDesc": "使用メトリクスを表示",
   "identityEdit.title": "アイデンティティ編集",
   "identityEdit.nameLabel": "名前",
-
   "agentNav.overview": "概要",
   "agentNav.skills": "スキル",
   "agentNav.memory": "メモリ",
@@ -121,12 +108,9 @@
   "coAgents.description": "このエージェントの代わりに操作できる信頼済みco-agentの管理。",
   "trustedUsers.title": "信頼ユーザー",
   "trustedUsers.description": "このエージェントにDMで話しかけられるDiscordユーザーの管理。",
-
   "agentSessions.noSessions": "このエージェントのセッションはありません。",
-
   "sessions.title": "セッション",
   "sessions.noSessions": "セッションが見つかりません。",
-
   "sessionDetail.mode": "モード: {{value}}",
   "sessionDetail.phase": "フェーズ: {{value}}",
   "sessionDetail.turn": "ターン: {{value}}",
@@ -134,7 +118,6 @@
   "sessionDetail.loadingLogs": "ログ読み込み中...",
   "sessionDetail.noLogs": "ログがまだありません。",
   "sessionDetail.ownerPlaceholder": "オーナー指示を入力...",
-
   "memory.title": "メモリエクスプローラー",
   "memory.curatedMemory": "キュレーションメモリ",
   "memory.searchLogs": "ログ検索",
@@ -143,7 +126,6 @@
   "memory.noResults": "結果が見つかりません。",
   "memory.resultCount": "{{count}} 件の結果",
   "memory.selectAgent": "エージェントを選択してメモリを探索",
-
   "personaEdit.title": "ペルソナ編集",
   "personaEdit.personaName": "ペルソナ名",
   "personaEdit.personality": "性格 (ビッグファイブ)",
@@ -169,12 +151,10 @@
   "personaEdit.applyConfirm": "このプリセットを適用しますか？現在の編集内容は上書きされます。",
   "personaEdit.noPresets": "保存済みプリセットはありません。",
   "personaEdit.savedSuccess": "保存しました！",
-
   "thinkingStyles.analytical": "分析的",
   "thinkingStyles.intuitive": "直感的",
   "thinkingStyles.practical": "実践的",
   "thinkingStyles.creative": "創造的",
-
   "analytics.title": "分析 & メトリクス",
   "analytics.agent": "エージェント",
   "analytics.period": "期間",
@@ -194,12 +174,10 @@
   "analytics.tokens": "トークン",
   "analytics.cost": "コスト",
   "analytics.selectAgent": "エージェントを選択してメトリクスを表示",
-
   "skills.title": "スキル管理",
   "skills.loadingSkills": "スキル読み込み中...",
   "skills.noSkills": "このエージェントにスキルが見つかりません。",
   "skills.selectAgent": "エージェントを選択してスキルを管理",
-
   "workspace.title": "ワークスペース",
   "workspace.agent": "エージェント:",
   "workspace.emptyDirectory": "空のディレクトリ",
@@ -265,5 +243,13 @@
   "sessions.filterActive": "アクティブ",
   "sessions.filterCompleted": "完了",
   "sessions.count": "{{count}}件",
-  "sessions.backToList": "← セッションに戻る"
+  "sessions.backToList": "← セッションに戻る",
+  "nav.settings": "設定",
+  "agentDetail.llmModel": "LLMモデル",
+  "agentDetail.llmModelDesc": "このエージェントの応答に使うモデル（サーバー既定: {{default}}）",
+  "agentDetail.modelSelect": "モデル",
+  "agentDetail.useServerDefault": "サーバー既定を使用",
+  "agentDetail.modelSaved": "モデル設定を保存しました",
+  "agentDetail.modelSaveFailed": "モデル設定の保存に失敗しました",
+  "agentDetail.effectiveModel": "モデル"
 }

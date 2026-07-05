@@ -5,14 +5,11 @@
   "nav.memory": "Memory",
   "nav.sessions": "Sessions",
   "nav.analytics": "Analytics",
-
   "brand.name": "OpenCrab",
   "brand.subtitle": "Agent Framework",
   "brand.version": "OpenCrab v0.1.0",
-
   "header.searchPlaceholder": "Search agents, sessions, memories...",
   "header.dbConnected": "DB Connected",
-
   "common.loading": "Loading...",
   "common.error": "Error: {{message}}",
   "common.save": "Save",
@@ -29,17 +26,13 @@
   "common.selectAgent": "Select Agent",
   "common.selectAgentPlaceholder": "-- Select an agent --",
   "common.up": "Up",
-
   "agentCard.skills": "{{count}} skills",
   "agentCard.sessions": "{{count}} sessions",
-
   "skillEditor.usedTimes": "Used {{count}} times",
   "skillEditor.effectiveness": "Effectiveness: {{pct}}%",
-
   "sessionCard.turn": "Turn {{number}}",
   "sessionCard.dm": "DM",
   "sessionCard.channel": "Channel",
-
   "home.title": "Dashboard",
   "home.totalAgents": "Total Agents",
   "home.totalSessions": "Total Sessions",
@@ -49,21 +42,16 @@
   "home.sessionMonitor": "Sessions",
   "home.memoryExplorer": "Memory",
   "home.analyticsMetrics": "Analytics",
-
   "agents.title": "Agents",
   "agents.newAgent": "New Agent",
   "agents.noAgents": "No agents found.",
   "agents.createFirstAgent": "Create your first agent to get started.",
-
   "agentCreate.title": "Create New Agent",
   "agentCreate.nameLabel": "Name *",
   "agentCreate.namePlaceholder": "e.g. Kai",
   "agentCreate.personaNameLabel": "Persona Name",
   "agentCreate.personaNamePlaceholder": "e.g. Pragmatic Engineer (defaults to name)",
   "agentCreate.nameRequired": "Name is required.",
-
-
-
   "agentDetail.deleteTitle": "Delete Agent?",
   "agentDetail.deleteMessage": "This will permanently delete the agent and all associated data (soul, skills, memories).",
   "agentDetail.editPersona": "Edit Persona",
@@ -100,7 +88,6 @@
   "agentDetail.manageAnalyticsDesc": "View usage metrics",
   "identityEdit.title": "Edit Identity",
   "identityEdit.nameLabel": "Name",
-
   "agentNav.overview": "Overview",
   "agentNav.skills": "Skills",
   "agentNav.memory": "Memory",
@@ -121,12 +108,9 @@
   "coAgents.description": "Trusted co-agents that can act on behalf of this agent.",
   "trustedUsers.title": "Trusted Users",
   "trustedUsers.description": "Discord users who can interact with this agent via DM.",
-
   "agentSessions.noSessions": "No sessions found for this agent.",
-
   "sessions.title": "Sessions",
   "sessions.noSessions": "No sessions found.",
-
   "sessionDetail.mode": "Mode: {{value}}",
   "sessionDetail.phase": "Phase: {{value}}",
   "sessionDetail.turn": "Turn: {{value}}",
@@ -134,7 +118,6 @@
   "sessionDetail.loadingLogs": "Loading logs...",
   "sessionDetail.noLogs": "No logs yet.",
   "sessionDetail.ownerPlaceholder": "Type owner instruction...",
-
   "memory.title": "Memory Explorer",
   "memory.curatedMemory": "Curated Memory",
   "memory.searchLogs": "Search Logs",
@@ -143,7 +126,6 @@
   "memory.noResults": "No results found.",
   "memory.resultCount": "{{count}} result(s) found",
   "memory.selectAgent": "Select an agent to explore memories",
-
   "personaEdit.title": "Edit Persona",
   "personaEdit.personaName": "Persona Name",
   "personaEdit.personality": "Personality (Big Five)",
@@ -169,12 +151,10 @@
   "personaEdit.applyConfirm": "Apply this preset? Current edits will be overwritten.",
   "personaEdit.noPresets": "No presets saved yet.",
   "personaEdit.savedSuccess": "Saved successfully!",
-
   "thinkingStyles.analytical": "Analytical",
   "thinkingStyles.intuitive": "Intuitive",
   "thinkingStyles.practical": "Practical",
   "thinkingStyles.creative": "Creative",
-
   "analytics.title": "Analytics & Metrics",
   "analytics.agent": "Agent",
   "analytics.period": "Period",
@@ -194,12 +174,10 @@
   "analytics.tokens": "Tokens",
   "analytics.cost": "Cost",
   "analytics.selectAgent": "Select an agent to view metrics",
-
   "skills.title": "Skills Management",
   "skills.loadingSkills": "Loading skills...",
   "skills.noSkills": "No skills found for this agent.",
   "skills.selectAgent": "Select an agent to manage skills",
-
   "workspace.title": "Workspace",
   "workspace.agent": "Agent:",
   "workspace.emptyDirectory": "Empty directory",
@@ -265,5 +243,13 @@
   "sessions.filterActive": "Active",
   "sessions.filterCompleted": "Completed",
   "sessions.count": "{{count}} items",
-  "sessions.backToList": "← Back to Sessions"
+  "sessions.backToList": "← Back to Sessions",
+  "nav.settings": "Settings",
+  "agentDetail.llmModel": "LLM Model",
+  "agentDetail.llmModelDesc": "Model used for this agent's responses (server default: {{default}})",
+  "agentDetail.modelSelect": "Model",
+  "agentDetail.useServerDefault": "Use server default",
+  "agentDetail.modelSaved": "Model setting saved",
+  "agentDetail.modelSaveFailed": "Failed to save model setting",
+  "agentDetail.effectiveModel": "Model"
 }
