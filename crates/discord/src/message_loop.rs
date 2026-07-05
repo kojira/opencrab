@@ -5,6 +5,12 @@
 //! - P0修正: on_response_textコールバックでストリーミング応答を送信
 //! - P1修正: 処理をtokio::spawnで非同期化、メインループをブロックしない
 //! - P2修正: SubtaskCompleted callbackをLoopEvent送信に変更、イベントループで直列処理
+//!
+//! v3.1: P2 の「イベントループで直列処理」は廃止。SubtaskCompleted /
+//! InteractionResponse の推論をループ内で await すると、その間**全チャンネル・
+//! 全エージェント**の受信処理が停止する（サブタスクが report_progress するたびに
+//! メインが無応答になる）。現在は全イベントを spawn + セッション単位ロック
+//! （`spawn_serialized_on_session`）で処理し、直列化の範囲を同一セッションに限定する。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -221,21 +227,32 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         guild_id,
                         is_dm,
                     }) => {
-                        process_subtask_completed(
-                            session_id,
-                            agent_id,
-                            subtask_id,
-                            result,
-                            exit_reason,
-                            channel_id,
-                            channel_id_str,
-                            guild_id,
-                            is_dm,
-                            gateway.clone(),
-                            state.clone(),
-                            gateway_actions.clone(),
-                        )
-                        .await;
+                        // 推論をイベントループ内で await しない。以前はここでフル推論を
+                        // 直列実行していたため、サブタスクの report_progress / 完了のたびに
+                        // 全チャンネル・全エージェントの受信処理が推論終了まで止まっていた
+                        // （= サブ実行中メインが無応答になる）。同一セッションの直列化は
+                        // セッションロックが引き続き担保する。
+                        let gateway_c = gateway.clone();
+                        let state_c = state.clone();
+                        let ga_c = gateway_actions.clone();
+                        let sess = session_id.clone();
+                        spawn_serialized_on_session(session_locks.clone(), sess, async move {
+                            process_subtask_completed(
+                                session_id,
+                                agent_id,
+                                subtask_id,
+                                result,
+                                exit_reason,
+                                channel_id,
+                                channel_id_str,
+                                guild_id,
+                                is_dm,
+                                gateway_c,
+                                state_c,
+                                ga_c,
+                            )
+                            .await;
+                        });
                     }
                     Some(LoopEvent::InteractionResponse {
                         interaction_id,
@@ -247,20 +264,27 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         response,
                         is_dm,
                     }) => {
-                        process_interaction_response(
-                            interaction_id,
-                            session_id,
-                            agent_id,
-                            channel_id,
-                            channel_id_str,
-                            guild_id,
-                            response,
-                            is_dm,
-                            gateway.clone(),
-                            state.clone(),
-                            gateway_actions.clone(),
-                        )
-                        .await;
+                        // SubtaskCompleted と同じ理由でループ内では await しない。
+                        let gateway_c = gateway.clone();
+                        let state_c = state.clone();
+                        let ga_c = gateway_actions.clone();
+                        let sess = session_id.clone();
+                        spawn_serialized_on_session(session_locks.clone(), sess, async move {
+                            process_interaction_response(
+                                interaction_id,
+                                session_id,
+                                agent_id,
+                                channel_id,
+                                channel_id_str,
+                                guild_id,
+                                response,
+                                is_dm,
+                                gateway_c,
+                                state_c,
+                                ga_c,
+                            )
+                            .await;
+                        });
                     }
                     None => break,
                 }
@@ -517,12 +541,6 @@ async fn process_incoming_message<T: AgentRunner>(
             }))
         };
 
-        // セッション単位ロックを取得（無ければ作成）。
-        let sess_lock = session_locks
-            .entry(session_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-
         // エージェント処理をバックグラウンドspawnで実行（P1: メインループをブロックしない）。
         // ただしセッション単位ロックで直列化し、履歴の構築→推論→応答ログを不可分にする。
         let state_spawn = state.clone();
@@ -539,12 +557,8 @@ async fn process_incoming_message<T: AgentRunner>(
         let sender_name_spawn = incoming.sender.name.clone();
         let sender_avatar_spawn = incoming.sender.avatar_url.clone();
         let text_spawn = text.clone();
-        let session_locks_spawn = session_locks.clone();
 
-        tokio::spawn(async move {
-            // 同一セッションの推論が完了するまで待機（割り込み二重回答の防止）。
-            let _guard = sess_lock.lock().await;
-
+        spawn_serialized_on_session(session_locks.clone(), session_id.clone(), async move {
             // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
             state_spawn.record_user_message(
                 &session_id_spawn,
@@ -609,18 +623,36 @@ async fn process_incoming_message<T: AgentRunner>(
                 )
                 .await;
             }
-
-            // ロックを解放し、待機者がいなければ map からエントリを回収する（#39:
-            // session_locks はプロセス生存中に単調増加していた）。remove_if は
-            // DashMap の shard 書き込みロック下で述語を評価し、entry() も同じ shard
-            // ロックを取るため、「strong_count == 1（= map 以外に保持者なし）」の判定と
-            // 削除の間に新しい clone が割り込むことはない。待機者がいれば残す。
-            drop(_guard);
-            drop(sess_lock);
-            session_locks_spawn
-                .remove_if(&session_id_spawn, |_, lock| Arc::strong_count(lock) == 1);
         });
     }
+}
+
+/// セッション単位ロックの下で `fut` を実行するタスクを spawn する。
+///
+/// イベントループを推論でブロックしないための共通経路（受信メッセージ = P1、
+/// サブタスク完了/進捗・A2UI 応答 = 旧 P2 直列実行の置き換え）:
+/// - ループ自体は即座に次のイベントへ進む（全チャンネル・全エージェントが停止しない）
+/// - 同一セッションの履歴構築→推論→応答ログはロックで直列化される（割り込み二重回答の防止）
+/// - 終了時に待機者がいなければ map からロックエントリを回収する（#39:
+///   session_locks はプロセス生存中に単調増加していた）。remove_if は DashMap の
+///   shard 書き込みロック下で述語を評価し、entry() も同じ shard ロックを取るため、
+///   「strong_count == 1（= map 以外に保持者なし）」の判定と削除の間に新しい clone が
+///   割り込むことはない。待機者がいれば残す。
+fn spawn_serialized_on_session<F>(session_locks: SessionLocks, session_id: String, fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let sess_lock = session_locks
+        .entry(session_id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    tokio::spawn(async move {
+        let guard = sess_lock.lock().await;
+        fut.await;
+        drop(guard);
+        drop(sess_lock);
+        session_locks.remove_if(&session_id, |_, lock| Arc::strong_count(lock) == 1);
+    });
 }
 
 /// エージェント応答結果を処理してDiscordに送信する。
@@ -1282,7 +1314,11 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{discord_context_line, parse_discord_session, parse_seen_message_id};
+    use super::{
+        discord_context_line, parse_discord_session, parse_seen_message_id,
+        spawn_serialized_on_session, SessionLocks,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn parse_discord_session_guild_channel() {
@@ -1355,5 +1391,77 @@ mod tests {
     fn parse_seen_message_id_rejects_non_numeric() {
         assert_eq!(parse_seen_message_id("not-a-number"), None);
         assert_eq!(parse_seen_message_id("123abc"), None);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_serialized_on_session_does_not_block_caller() {
+        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // 完了までブロックする future を渡しても、spawn 呼び出し自体は即座に返る
+        spawn_serialized_on_session(locks.clone(), "s1".to_string(), async move {
+            let _ = rx.await;
+        });
+        // caller 側はブロックされていない（この行に到達できることが検証）
+        let _ = tx.send(());
+        // 完了後にロックエントリが回収される
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while locks.contains_key("s1") {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("lock entry must be reclaimed after completion");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_serialized_same_session_serializes() {
+        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
+        let concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..5 {
+            let c = concurrent.clone();
+            let m = max_seen.clone();
+            let d = done.clone();
+            spawn_serialized_on_session(locks.clone(), "same".to_string(), async move {
+                let now = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                m.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                d.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while done.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("all serialized tasks must finish");
+        assert_eq!(
+            max_seen.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "same-session futures must never run concurrently"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_serialized_different_sessions_run_concurrently() {
+        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
+        // s-block は保持したまま、s-free が完了できることを確認する
+        // （旧実装 = イベントループ直列 await では s-block が全体を塞いでいた）。
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        spawn_serialized_on_session(locks.clone(), "s-block".to_string(), async move {
+            let _ = hold_rx.await;
+        });
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        spawn_serialized_on_session(locks.clone(), "s-free".to_string(), async move {
+            let _ = done_tx.send(());
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
+            .await
+            .expect("other sessions must not be blocked by a long-running session")
+            .unwrap();
+        let _ = hold_tx.send(());
     }
 }
