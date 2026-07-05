@@ -11,6 +11,10 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 rusqlite = { workspace = true }
 serenity = { workspace = true }
+songbird = { workspace = true }
+# songbird の symphonia レジストリに wav/pcm デコーダを有効化する（TTS 再生用）
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
+opencrab-voice = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-actions = { workspace = true }
 opencrab-gateway = { workspace = true, features = ["discord"] }

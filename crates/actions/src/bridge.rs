@@ -68,6 +68,9 @@ pub const DISCORD_ACTIONS: &[&str] = &[
     "discord_pin_message",
     "discord_unpin_message",
     "request_peer_review",
+    // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
+    "join_voice_channel",
+    "leave_voice_channel",
 ];
 
 /// spawn_subtask のネスト上限。

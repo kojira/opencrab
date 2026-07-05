@@ -25,6 +25,9 @@ pub struct AppConfig {
     pub tools: opencrab_actions::tools::ToolsConfig,
     #[serde(default)]
     pub evaluator: EvaluatorConfig,
+    /// VC 対話（STT/TTS）。既定は無効。
+    #[serde(default)]
+    pub voice: opencrab_voice::VoiceConfig,
 }
 
 /// verify 段（evaluator）の設定。
@@ -521,6 +524,39 @@ mod tests {
         assert_eq!(result, "aaa and bbb");
         std::env::remove_var("TEST_A");
         std::env::remove_var("TEST_B");
+    }
+
+    #[test]
+    fn test_voice_config_parses() {
+        let toml_str = r#"
+[voice]
+enabled = true
+
+[voice.stt]
+provider = "openai"
+language = "ja"
+
+[voice.tts]
+provider = "voicevox"
+default_voice = "3"
+
+[voice.tts.agent_voices]
+crab = "3"
+rabomi = "1"
+"#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("voice config must parse");
+        assert!(cfg.voice.enabled);
+        assert_eq!(cfg.voice.stt.provider, "openai");
+        assert_eq!(cfg.voice.stt.language.as_deref(), Some("ja"));
+        assert_eq!(cfg.voice.tts.voice_for_agent("crab"), "3");
+        assert_eq!(cfg.voice.tts.voice_for_agent("rabomi"), "1");
+        assert_eq!(cfg.voice.tts.voice_for_agent("unknown"), "3");
+    }
+
+    #[test]
+    fn test_voice_disabled_by_default() {
+        let cfg: AppConfig = toml::from_str("").expect("empty config must parse");
+        assert!(!cfg.voice.enabled);
     }
 
     #[test]

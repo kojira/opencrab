@@ -185,3 +185,26 @@ description = "Python3スクリプト実行"
 enabled = true
 threshold = 0.7
 # model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
+
+# VC（ボイスチャンネル）対話。有効化すると join_voice_channel /
+# leave_voice_channel アクションが使えるようになる（owner/trusted_user の依頼時）。
+# 音声は Discord がユーザーごとに分離して送ってくるため、話者の識別は
+# プロトコルレベルで確定する（声紋推定ではない）。
+# [voice]
+# enabled = true
+#
+# [voice.stt]
+# provider = "openai"            # OpenAI 互換 API（faster-whisper-server 等のローカルも可）
+# # base_url = "http://localhost:8000/v1"  # ローカル Whisper サーバを使う場合
+# model = "whisper-1"
+# api_key_env = "OPENAI_API_KEY"
+# language = "ja"
+#
+# [voice.tts]
+# provider = "voicevox"          # "voicevox"（ローカル・無料） or "openai"
+# # base_url = "http://localhost:50021"
+# default_voice = "3"            # VOICEVOX スタイルID（3 = ずんだもん ノーマル）
+# # エージェントごとに声を分ける（agent_id = スタイルID）
+# [voice.tts.agent_voices]
+# # crab = "3"
+# # rabomi = "1"

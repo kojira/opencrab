@@ -98,6 +98,9 @@ pub struct DiscordGateway {
     interaction_tx: mpsc::Sender<ComponentInteractionData>,
     /// Form トリガーボタン → モーダル応答（未設定時は従来どおり UpdateMessage ACK のみ）
     form_modal_resolver: Option<A2uiFormModalResolver>,
+    /// Voice (songbird) マネージャ。start() 時に serenity クライアントへ登録される。
+    /// 受信 PCM をデコードする DecodeMode::Decode で構築する（VC 対話の STT 用）。
+    voice: Arc<songbird::Songbird>,
 }
 
 impl DiscordGateway {
@@ -123,6 +126,9 @@ impl DiscordGateway {
             interaction_rx: Mutex::new(interaction_rx),
             interaction_tx,
             form_modal_resolver,
+            voice: songbird::Songbird::serenity_from_config(
+                songbird::Config::default().decode_mode(songbird::driver::DecodeMode::Decode),
+            ),
         }
     }
 
@@ -131,12 +137,18 @@ impl DiscordGateway {
         &self.http
     }
 
+    /// Voice (songbird) マネージャを返す（VC 参加・受信・再生用）。
+    pub fn voice(&self) -> Arc<songbird::Songbird> {
+        self.voice.clone()
+    }
+
     /// Bot接続を開始する（バックグラウンドタスクとして起動）
     pub async fn start(&self) -> Result<()> {
         let intents = GatewayIntents::GUILD_MESSAGES
             | GatewayIntents::DIRECT_MESSAGES
             | GatewayIntents::MESSAGE_CONTENT
-            | GatewayIntents::GUILDS;
+            | GatewayIntents::GUILDS
+            | GatewayIntents::GUILD_VOICE_STATES;
 
         let handler = DiscordHandler {
             tx: self.tx.clone(),
@@ -147,6 +159,7 @@ impl DiscordGateway {
 
         let mut client = Client::builder(&self.token, intents)
             .event_handler(handler)
+            .voice_manager_arc(self.voice.clone())
             .await
             .context("Failed to create Discord client")?;
 

@@ -548,24 +548,66 @@ async fn main() -> anyhow::Result<()> {
                             cfg.events.clone(),
                         )
                     });
-                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-                    opencrab_discord::DiscordGatewayActions::new(
-                        gateway.http().clone(),
-                        state.db.clone(),
-                        state.tools_config.clone(),
-                        Some(Arc::new(
-                            opencrab_server::llm_adapter::LlmRouterAdapter::new(
-                                state.llm_router.clone(),
-                            ),
-                        )),
-                        state.default_model.clone(),
-                        state.workspace_base.clone(),
-                        subtask_registry,
-                        default_subtask_webhook,
-                    )
-                    .with_event_tx(event_tx.clone())
-                    .with_owner_discord_id(discord_cfg.owner_discord_id.clone()),
-                );
+                // VC 対話（STT/TTS）: config の [voice] が有効なときだけ構築する。
+                // プロバイダ構築失敗（未知の provider 等）は起動を止めず警告して無効化。
+                let voice_manager: Option<
+                    Arc<opencrab_discord::voice_session::VoiceSessionManager>,
+                > = if cfg.voice.enabled {
+                    match (
+                        opencrab_voice::build_stt(&cfg.voice.stt),
+                        opencrab_voice::build_tts(&cfg.voice.tts),
+                    ) {
+                        (Ok(stt), Ok(tts)) => {
+                            tracing::info!(
+                                stt = %cfg.voice.stt.provider,
+                                tts = %cfg.voice.tts.provider,
+                                "voice (VC) conversation enabled"
+                            );
+                            Some(opencrab_discord::voice_session::VoiceSessionManager::new(
+                                gateway.voice(),
+                                stt,
+                                tts,
+                                cfg.voice.tts.clone(),
+                                cfg.voice.stt.language.clone(),
+                                event_tx.clone(),
+                                gateway.http().clone(),
+                            ))
+                        }
+                        (stt, tts) => {
+                            if let Err(e) = stt {
+                                tracing::warn!("voice STT provider init failed: {e}");
+                            }
+                            if let Err(e) = tts {
+                                tracing::warn!("voice TTS provider init failed: {e}");
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let gateway_actions_base = opencrab_discord::DiscordGatewayActions::new(
+                    gateway.http().clone(),
+                    state.db.clone(),
+                    state.tools_config.clone(),
+                    Some(Arc::new(
+                        opencrab_server::llm_adapter::LlmRouterAdapter::new(
+                            state.llm_router.clone(),
+                        ),
+                    )),
+                    state.default_model.clone(),
+                    state.workspace_base.clone(),
+                    subtask_registry,
+                    default_subtask_webhook,
+                )
+                .with_event_tx(event_tx.clone())
+                .with_owner_discord_id(discord_cfg.owner_discord_id.clone());
+                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
+                    Arc::new(match &voice_manager {
+                        Some(v) => gateway_actions_base.with_voice(v.clone()),
+                        None => gateway_actions_base,
+                    });
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
 
@@ -583,6 +625,7 @@ async fn main() -> anyhow::Result<()> {
                         // 共有（TOML）ゲートウェイ: ランタイムに per-agent 設定が
                         // enable されたエージェントはメッセージ処理時にスキップ（#40）。
                         true,
+                        voice_manager,
                     )
                     .await;
                 });

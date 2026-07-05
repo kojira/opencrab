@@ -10,6 +10,7 @@ members = [
     "crates/discord",
     "crates/server",
     "crates/cli",
+    "crates/voice",
 ]
 
 [workspace.lints.clippy]
@@ -33,7 +34,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
@@ -64,11 +65,13 @@ toml = "0.8"
 tempfile = "3"
 dashmap = "6"
 dotenvy = "0.15"
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend", "voice"] }
+songbird = { version = "0.4", default-features = false, features = ["serenity", "driver", "gateway", "receive", "rustls", "builtin-queue"] }
 
 # Internal crates
 opencrab-core = { path = "crates/core" }
 opencrab-llm = { path = "crates/llm" }
+opencrab-voice = { path = "crates/voice" }
 opencrab-llm-types = { path = "crates/llm-types" }
 opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }

@@ -23,6 +23,7 @@ mod peer_review;
 mod subtask_engine;
 mod subtask_webhook;
 mod ui;
+mod voice_actions;
 mod webhook;
 
 pub(crate) use peer_review::record_peer_review_reply;
@@ -96,6 +97,8 @@ pub struct DiscordGatewayActions {
     /// 短時間に複数回 report_progress が呼ばれても、最後の1回のみメインエンジン再呼び出しを
     /// 発火させるために使う。
     progress_debounce: Arc<dashmap::DashMap<String, u64>>,
+    /// VC 対話（STT/TTS）。config の [voice] が有効なときのみ Some。
+    pub voice: Option<Arc<crate::voice_session::VoiceSessionManager>>,
 }
 
 impl DiscordGatewayActions {
@@ -123,6 +126,7 @@ impl DiscordGatewayActions {
             event_tx: None,
             owner_discord_id: String::new(),
             progress_debounce: Arc::new(dashmap::DashMap::new()),
+            voice: None,
         }
     }
 
@@ -172,6 +176,12 @@ impl DiscordGatewayActions {
     /// Set the owner's Discord user id used to enforce owner-only A2UI interactions.
     pub fn with_owner_discord_id(mut self, owner_discord_id: impl Into<String>) -> Self {
         self.owner_discord_id = owner_discord_id.into();
+        self
+    }
+
+    /// VC 対話マネージャを接続する（config の [voice] が有効なとき）。
+    pub fn with_voice(mut self, voice: Arc<crate::voice_session::VoiceSessionManager>) -> Self {
+        self.voice = Some(voice);
         self
     }
 }
@@ -417,6 +427,33 @@ impl GatewayActions for DiscordGatewayActions {
                             "description": "Discord上で表示されるファイル名（省略時は元のファイル名）"
                         }
                     }
+                }),
+            },
+            GatewayActionDef {
+                name: "join_voice_channel".to_string(),
+                description: "ボイスチャンネル（VC）に参加して音声対話を開始する。参加後、VC内の発話はユーザーごとに文字起こしされてこのチャンネルの会話として届き、返信は自動で読み上げられる。owner/trusted_userの依頼時のみ使用可。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "channel_id": {
+                            "type": "string",
+                            "description": "参加するボイスチャンネルのID（数値文字列）"
+                        },
+                        "text_channel_id": {
+                            "type": "string",
+                            "description": "文字起こしの注入先テキストチャンネルID（省略時はこの会話のチャンネル）"
+                        }
+                    },
+                    "required": ["channel_id"]
+                }),
+            },
+            GatewayActionDef {
+                name: "leave_voice_channel".to_string(),
+                description: "現在参加中のボイスチャンネルから退出する。owner/trusted_userの依頼時のみ使用可。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
                 }),
             },
             GatewayActionDef {
@@ -930,6 +967,8 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_send_file" => self.execute_send_file(args, ctx).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
             "spawn_subtask" => self.execute_spawn_subtask(args, ctx).await,
+            "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
+            "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
             "cancel_subtask" => self.execute_cancel_subtask(args, ctx),
             "report_progress" => self.execute_report_progress(args, ctx).await,
             "send_ui" => self.execute_send_ui(args, ctx).await,
@@ -1314,6 +1353,8 @@ mod tests {
                 "discord_list_guilds",
                 "discord_add_reaction",
                 "request_peer_review",
+                "join_voice_channel",
+                "leave_voice_channel",
             ]
         );
     }
@@ -1324,7 +1365,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 28);
+        assert_eq!(defs.len(), 30);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -1342,6 +1383,8 @@ mod tests {
         assert!(names.contains(&"create_skill"));
         assert!(names.contains(&"discord_send_file"));
         assert!(names.contains(&"spawn_subtask"));
+        assert!(names.contains(&"join_voice_channel"));
+        assert!(names.contains(&"leave_voice_channel"));
         assert!(names.contains(&"cancel_subtask"));
         assert!(names.contains(&"report_progress"));
         assert!(names.contains(&"send_ui"));

@@ -96,6 +96,8 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 // per-agent ゲートウェイは enabled な設定から起動される側なので
                 // 専用設定スキップは無効（true にすると自分自身を skip してしまう）。
                 false,
+                // VC 対話 v1 は共有（TOML）ゲートウェイのみ対応。per-agent 側は未配線。
+                None,
             )
             .await;
         });
