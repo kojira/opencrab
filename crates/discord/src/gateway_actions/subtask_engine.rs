@@ -547,6 +547,7 @@ impl DiscordGatewayActions {
         let agent_id_clone = agent_id.clone();
         let event_tx_clone = self.event_tx.clone();
         let subtask_registry_clone = self.subtask_registry.clone();
+        let progress_debounce_clone = self.progress_debounce.clone();
         let default_model_clone = effective_model.clone();
         let webhook_clone = webhook.clone();
         let webhook_tx_clone = webhook_tx.clone();
@@ -652,6 +653,14 @@ impl DiscordGatewayActions {
 
             // Remove from registry.
             subtask_registry_clone.remove(&subtask_id_clone);
+
+            // 保留中の progress デバウンスを無効化する。エントリが消えると、まだ
+            // sleep 中のデバウンスタスクは is_latest=false 扱いになり発火しない。
+            // これが無いと、終了イベントの後に遅延 progress（0〜3秒窓）が届いて
+            // 完了返信の直後に余計な推論・重複返信が走ることがある（#86 レビュー指摘。
+            // 同一親セッションの兄弟サブタスクの保留 progress も巻き添えで消えるが、
+            // progress は advisory であり次の report_progress で再アームされる）。
+            progress_debounce_clone.remove(&parent_session_clone);
 
             // メインエンジンへの完了通知（イベントループへ直接送信）。
             send_subtask_completed_event(
