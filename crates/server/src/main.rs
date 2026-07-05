@@ -450,7 +450,9 @@ async fn main() -> anyhow::Result<()> {
     let effective_llm = config::apply_llm_overrides(&cfg.llm, &llm_overrides);
     let llm_router = config::build_llm_router(&effective_llm)?;
 
-    // 実効 voice 設定: DB オーバーライド（完全置換）> TOML
+    // 実効 voice 設定: DB オーバーライド（完全置換）> TOML。
+    // 起動時の VC ランタイム構築にのみ使う（discord feature 無効時は未使用）。
+    #[cfg_attr(not(feature = "discord"), allow(unused_variables))]
     let effective_voice: opencrab_voice::VoiceConfig = {
         let conn = db.lock().unwrap();
         match opencrab_db::queries::get_voice_config_override(&conn) {
@@ -474,7 +476,10 @@ async fn main() -> anyhow::Result<()> {
         db,
         llm_router: opencrab_server::SharedLlmRouter::new(llm_router),
         llm_config: Arc::new(cfg.llm.clone()),
-        voice_config: Arc::new(effective_voice.clone()),
+        // 純 TOML を保持する（DB オーバーライド適用前の土台）。API の GET は
+        // DB 行が無いときこれを "toml" として返すため、リセット後に古い実効値を
+        // TOML と誤表示しないよう effective ではなく cfg.voice を入れる（レビュー指摘）。
+        voice_config: Arc::new(cfg.voice.clone()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
@@ -568,9 +573,9 @@ async fn main() -> anyhow::Result<()> {
                             cfg.events.clone(),
                         )
                     });
-                // VC 対話（STT/TTS）: config の [voice] が有効なときだけ構築する。
+                // VC 対話（STT/TTS）: 実効設定（DB オーバーライド適用済み）で構築する。
                 // プロバイダ構築失敗（未知の provider 等）は起動を止めず警告して無効化。
-                let voice_cfg = state.voice_config.as_ref();
+                let voice_cfg = &effective_voice;
                 let voice_manager: Option<
                     Arc<opencrab_discord::voice_session::VoiceSessionManager>,
                 > = if voice_cfg.enabled {

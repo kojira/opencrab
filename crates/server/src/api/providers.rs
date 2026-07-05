@@ -11,7 +11,6 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::AppState;
@@ -115,47 +114,47 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
     }))
 }
 
-/// PUT /api/llm/providers/{name} のボディ。
+/// 三値セマンティクスの解釈: キー欠落 = 変更しない / `null` = 解除 / 値 = 上書き。
 ///
-/// 三値セマンティクス: フィールド省略 = 変更しない / null = オーバーライド解除
-/// （TOML に戻す）/ 値あり = 上書き。serde_json::Value で欠落と null を区別する。
-/// `api_key` の平文は保存後は返さない。
-#[derive(Deserialize)]
-pub struct UpdateProviderBody {
-    #[serde(default)]
-    pub enabled: Option<serde_json::Value>,
-    #[serde(default)]
-    pub api_key: Option<serde_json::Value>,
-    #[serde(default)]
-    pub base_url: Option<serde_json::Value>,
-    #[serde(default)]
-    pub default_model: Option<serde_json::Value>,
-}
-
-/// 三値フィールドの解釈: None = 変更なし / Some(None) = 解除 / Some(Some(v)) = 設定
-fn tri_bool(v: &Option<serde_json::Value>) -> Result<Option<Option<bool>>, String> {
-    match v {
+/// serde の `Option<T>` は JSON の `null` を `None` に潰してしまい「欠落」と
+/// 区別できない（`Some(Value::Null)` にはならない）。そのため PUT ボディは
+/// `serde_json::Map` で受け、**キーの有無**で三値を判定する。
+///
+/// `map.get(key)` が返すのは:
+/// - `None`           → キー欠落（変更しない）
+/// - `Some(Null)`     → 解除
+/// - `Some(Bool/Str)` → 上書き
+fn tri_bool(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<Option<bool>>, String> {
+    match map.get(key) {
         None => Ok(None),
         Some(serde_json::Value::Null) => Ok(Some(None)),
         Some(serde_json::Value::Bool(b)) => Ok(Some(Some(*b))),
-        Some(other) => Err(format!("expected bool or null, got: {other}")),
+        Some(other) => Err(format!("{key}: expected bool or null, got: {other}")),
     }
 }
 
-fn tri_string(v: &Option<serde_json::Value>) -> Result<Option<Option<String>>, String> {
-    match v {
+fn tri_string(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<Option<String>>, String> {
+    match map.get(key) {
         None => Ok(None),
         Some(serde_json::Value::Null) => Ok(Some(None)),
         Some(serde_json::Value::String(s)) => Ok(Some(Some(s.clone()))),
-        Some(other) => Err(format!("expected string or null, got: {other}")),
+        Some(other) => Err(format!("{key}: expected string or null, got: {other}")),
     }
 }
 
 /// PUT /api/llm/providers/{name} — オーバーライド保存 + ルーター再構築
+///
+/// ボディはキー有無で三値を判定するため `serde_json::Map` で受ける（上記参照）。
 pub async fn update_provider(
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Json(body): Json<UpdateProviderBody>,
+    Json(body): Json<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !name
         .chars()
@@ -168,7 +167,7 @@ pub async fn update_provider(
 
     {
         let conn = state.db.lock().unwrap();
-        // 既存行をベースに部分更新（省略フィールドは維持）
+        // 既存行をベースに部分更新（欠落フィールドは維持）
         let mut row = opencrab_db::queries::get_llm_provider_override(&conn, &name)
             .map_err(internal)?
             .unwrap_or(opencrab_db::queries::LlmProviderOverrideRow {
@@ -176,17 +175,17 @@ pub async fn update_provider(
                 ..Default::default()
             });
         let bad = |e: String| (StatusCode::BAD_REQUEST, e);
-        if let Some(v) = tri_bool(&body.enabled).map_err(bad)? {
+        if let Some(v) = tri_bool(&body, "enabled").map_err(bad)? {
             row.enabled = v;
         }
-        if let Some(v) = tri_string(&body.api_key).map_err(bad)? {
+        if let Some(v) = tri_string(&body, "api_key").map_err(bad)? {
             // 空文字は「解除」として None に正規化
             row.api_key = v.filter(|s| !s.is_empty());
         }
-        if let Some(v) = tri_string(&body.base_url).map_err(bad)? {
+        if let Some(v) = tri_string(&body, "base_url").map_err(bad)? {
             row.base_url = v;
         }
-        if let Some(v) = tri_string(&body.default_model).map_err(bad)? {
+        if let Some(v) = tri_string(&body, "default_model").map_err(bad)? {
             row.default_model = v;
         }
         // 全フィールドが None ならオーバーライド行ごと削除
@@ -290,36 +289,47 @@ pub async fn update_voice_config(
     State(state): State<AppState>,
     Json(config): Json<opencrab_voice::VoiceConfig>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 保存**前**にプロバイダを検証する（enabled のときのみ）。壊れた設定を
+    // DB に残したまま 400 を返すと、GET が db 由来として壊れた値を表示し、
+    // 次回起動で voice が黙って無効化される（レビュー指摘）。検証を通った
+    // Arc をそのまま apply に再利用する。
+    let built = if config.enabled {
+        match (
+            opencrab_voice::build_stt(&config.stt),
+            opencrab_voice::build_tts(&config.tts),
+        ) {
+            (Ok(stt), Ok(tts)) => Some((stt, tts)),
+            (stt, tts) => {
+                let mut errs = Vec::new();
+                if let Err(e) = stt {
+                    errs.push(format!("STT: {e}"));
+                }
+                if let Err(e) = tts {
+                    errs.push(format!("TTS: {e}"));
+                }
+                return Err((StatusCode::BAD_REQUEST, errs.join(" / ")));
+            }
+        }
+    } else {
+        None
+    };
+
+    // 検証通過後に永続化
     let json_str = serde_json::to_string(&config).map_err(internal)?;
     {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::set_voice_config_override(&conn, &json_str).map_err(internal)?;
     }
 
-    // 稼働中ランタイムがあればプロバイダを即時差し替え
+    // 稼働中ランタイムがあれば検証済みプロバイダを即時差し替え
     let mut applied_live = false;
-    let runtime = state.voice_runtime.lock().unwrap().clone();
-    if let Some(rt) = runtime {
-        if config.enabled {
-            match (
-                opencrab_voice::build_stt(&config.stt),
-                opencrab_voice::build_tts(&config.tts),
-            ) {
-                (Ok(stt), Ok(tts)) => {
-                    rt.apply_settings(stt, tts, config.tts.clone(), config.stt.language.clone());
-                    applied_live = true;
-                }
-                (stt, tts) => {
-                    let mut errs = Vec::new();
-                    if let Err(e) = stt {
-                        errs.push(format!("STT: {e}"));
-                    }
-                    if let Err(e) = tts {
-                        errs.push(format!("TTS: {e}"));
-                    }
-                    return Err((StatusCode::BAD_REQUEST, errs.join(" / ")));
-                }
-            }
+    if let Some((stt, tts)) = built {
+        // guard は clone してすぐ手放す（apply は別の内部ロックを取るため
+        // ここで voice_runtime mutex を保持したまま await/apply しない）
+        let runtime = state.voice_runtime.lock().unwrap().clone();
+        if let Some(rt) = runtime {
+            rt.apply_settings(stt, tts, config.tts.clone(), config.stt.language.clone());
+            applied_live = true;
         }
     }
 

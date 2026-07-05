@@ -1306,6 +1306,81 @@ async fn test_update_provider_disable_and_reject_bad_name() {
 }
 
 #[tokio::test]
+async fn test_update_provider_null_clears_field_keeps_others() {
+    let app = create_test_app();
+    // まずキーと無効化を両方設定
+    let (status, _) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/openai",
+        Some(serde_json::json!({"api_key": "sk-keep-me", "enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 三値: enabled:null は「無効化を解除」= TOML に戻す。api_key は維持されること。
+    // （旧実装では serde が null を None に潰し、この解除が無反応だった）
+    let (status, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/openai",
+        Some(serde_json::json!({ "enabled": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let p = &json["provider"];
+    assert_eq!(
+        p["enabled_override"],
+        serde_json::Value::Null,
+        "enabled must be cleared"
+    );
+    // キー設定は維持 → 稼働状態のまま
+    assert_eq!(p["api_key_source"], "db");
+    assert_eq!(p["active"], true);
+    assert_eq!(p["has_override"], true);
+
+    // base_url:null は base_url オーバーライドだけを消す（キーは残る）
+    let (_, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/openai",
+        Some(serde_json::json!({ "base_url": "https://x.example" })),
+    )
+    .await;
+    assert_eq!(json["provider"]["base_url"], "https://x.example");
+    let (_, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/openai",
+        Some(serde_json::json!({ "base_url": null })),
+    )
+    .await;
+    assert_eq!(json["provider"]["base_url"], "");
+    assert_eq!(
+        json["provider"]["api_key_source"], "db",
+        "key must survive base_url clear"
+    );
+}
+
+#[tokio::test]
+async fn test_voice_config_invalid_provider_not_persisted() {
+    let app = create_test_app();
+    // enabled + 未知の STT プロバイダ → 400、かつ DB に保存されないこと
+    let bad = serde_json::json!({
+        "enabled": true,
+        "stt": { "provider": "nonexistent", "model": "x", "api_key_env": "X" },
+        "tts": { "provider": "voicevox", "default_voice": "3" }
+    });
+    let (status, _) = send_request(app.clone(), "PUT", "/api/voice/config", Some(bad)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // GET は依然 TOML 由来（壊れた値が db として残っていない）
+    let (_, json) = send_request(app, "GET", "/api/voice/config", None).await;
+    assert_eq!(json["source"], "toml");
+    assert_eq!(json["config"]["enabled"], false);
+}
+
+#[tokio::test]
 async fn test_voice_config_roundtrip() {
     let app = create_test_app();
     // 初期状態: TOML 由来（テストでは Default = disabled）
