@@ -165,7 +165,10 @@ timeout_secs = 60
    `sh -c "..."` 形式ではなく、コマンド名と引数配列を直接 `Command::new(cmd).args(args)` で渡す。シェルのメタ文字が引数に混入しても展開されない。
 
 3. **タイムアウト強制**  
-   `timeout_secs` で指定した時間を超えたプロセスは強制終了。デフォルト30秒。
+   `timeout_secs` で指定した時間を超えたプロセスは強制終了。デフォルト120秒。
+   優先順位は「ツール呼び出し時の `timeout_secs` 引数 > コマンド個別の
+   `timeout_secs` > グローバル `timeout_secs`」。呼び出し時指定は LLM 由来の
+   ため `max_timeout_secs`（デフォルト1800秒）でクランプされる。
 
 4. **環境変数の制限**  
    `inherit_env = false`（デフォルト）の場合、`allowed_env_vars` で明示したもののみ引き継ぐ。秘密情報（APIキー等）が子プロセスに漏れない。
