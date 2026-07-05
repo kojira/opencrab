@@ -39,6 +39,10 @@ pub struct ShellToolConfig {
     pub allowed_commands: Vec<String>,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// 呼び出し時の `timeout_secs` 引数で指定できる上限（秒）。
+    /// LLM 由来の引数を無制限に信用しない（イベント/リソースの占有防止）。
+    #[serde(default = "default_max_timeout")]
+    pub max_timeout_secs: u64,
     #[serde(default)]
     pub working_dir: Option<String>,
     #[serde(default)]
@@ -78,7 +82,8 @@ impl Default for ShellToolConfig {
         Self {
             enabled: true,
             allowed_commands: vec![],
-            timeout_secs: 30,
+            timeout_secs: 120,
+            max_timeout_secs: 1800,
             working_dir: None,
             inherit_env: false,
             allowed_env_vars: vec!["PATH".to_string(), "HOME".to_string(), "LANG".to_string()],
@@ -92,7 +97,15 @@ fn default_true() -> bool {
     true
 }
 fn default_timeout() -> u64 {
-    30
+    // 30 は git clone / cargo build / npm install 等の実用コマンドに短すぎ、
+    // かつ呼び出し側から延ばす手段が無かった（バックグラウンド起動+ポーリングの
+    // 回避策を強いていた）。イベントループはもうブロックされない（#86）ので、
+    // 余裕を持たせる。
+    120
+}
+fn default_max_timeout() -> u64 {
+    // spawn_subtask の既定 timeout_secs=1800 と揃える。
+    1800
 }
 fn default_max_output() -> usize {
     65536

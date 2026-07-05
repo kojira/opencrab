@@ -50,6 +50,15 @@ impl Action for ShellToolAction {
                 "stdin": {
                     "type": "string",
                     "description": "Optional stdin input"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": format!(
+                        "Optional timeout in seconds for this call (default: {}, max: {}). \
+                         Use a larger value for long-running commands instead of \
+                         backgrounding them.",
+                        self.config.timeout_secs, self.config.max_timeout_secs
+                    )
                 }
             },
             "required": ["command"]
@@ -153,19 +162,38 @@ impl Action for ShellToolAction {
             Err(e) => return ActionResult::error(&format!("Failed to spawn command: {}", e)),
         };
 
-        // Write stdin if provided
-        if let Some(input) = stdin_input {
-            if let Some(mut stdin_handle) = child.stdin.take() {
-                if let Err(e) = stdin_handle.write_all(input.as_bytes()).await {
-                    tracing::warn!("Failed to write stdin: {}", e);
-                }
-            }
-        }
-
-        // Wait with timeout（コマンド個別の timeout_secs があればそれを優先）
-        let timeout_secs = cmd_config.timeout_secs.unwrap_or(self.config.timeout_secs);
+        // Wait with timeout。優先順位: 呼び出し時の timeout_secs 引数（最も具体的）>
+        // コマンド個別設定 > グローバル既定。呼び出し時指定は LLM 由来なので
+        // [1, max_timeout_secs] にクランプする（無制限の占有を防ぐ）。
+        let requested_timeout = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .map(|t| t.clamp(1, self.config.max_timeout_secs));
+        let timeout_secs = requested_timeout
+            .or(cmd_config.timeout_secs)
+            .unwrap_or(self.config.timeout_secs);
         let timeout_duration = std::time::Duration::from_secs(timeout_secs);
-        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+
+        // stdin の書き込みは出力読み取りと**並行**に行い、全体をタイムアウトで包む。
+        // 以前は「stdin を全部書いてから wait_with_output」だったため、
+        // (1) 子が stdout を書き始めてパイプバッファ（64KB）が埋まると、stdin 待ちの
+        //     子と stdin 書き込み中の親が相互待ちでデッドロックし、
+        // (2) タイムアウトは wait 側にしか掛かっていなかったので永遠にハングした
+        //     （stdin がパイプバッファ超の場合に確実に発生）。
+        let stdin_handle = child.stdin.take();
+        let io_fut = async {
+            let write_stdin = async {
+                if let (Some(input), Some(mut handle)) = (stdin_input, stdin_handle) {
+                    if let Err(e) = handle.write_all(input.as_bytes()).await {
+                        tracing::warn!("Failed to write stdin: {}", e);
+                    }
+                    // drop で閉じられ子に EOF が伝わる
+                }
+            };
+            let (out, ()) = tokio::join!(child.wait_with_output(), write_stdin);
+            out
+        };
+        let output = match tokio::time::timeout(timeout_duration, io_fut).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => return ActionResult::error(&format!("Command execution failed: {}", e)),
             Err(_) => {
@@ -531,13 +559,16 @@ mod tests {
     async fn test_no_truncated_marker_for_ordinary_long_output() {
         // Ordinary long output must never be flagged as truncated nor carry any
         // "[truncated]" sentinel in the payload.
+        // 200KB を argv で渡すと ARG_MAX の小さい環境（サンドボックス CI 等）で
+        // E2BIG になるため、stdin 経由で cat に流す（テストの意図は「長い出力が
+        // 切られない」ことなので同等）。
         let payload = "L".repeat(200_000);
-        let config = small_limit_config("printf");
+        let config = small_limit_config("cat");
         let action = ShellToolAction::new(config);
         let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
-        let args = serde_json::json!({"command": "printf", "args": ["%s", payload]});
+        let args = serde_json::json!({"command": "cat", "stdin": payload});
         let result = action.execute(&args, &ctx).await;
-        assert!(result.success, "printf should succeed: {:?}", result.error);
+        assert!(result.success, "cat should succeed: {:?}", result.error);
         let data = result.data.as_ref().unwrap();
         let stdout = data.get("stdout").and_then(|v| v.as_str()).unwrap();
         assert_eq!(stdout.len(), payload.len(), "no byte loss for long output");
@@ -549,6 +580,118 @@ mod tests {
             data.get("truncated").and_then(|v| v.as_bool()),
             Some(false),
             "truncated flag must remain false for ordinary long output"
+        );
+    }
+
+    /// sleep を許可した config（タイムアウト系テスト用）。
+    fn sleep_config() -> ShellToolConfig {
+        ShellToolConfig {
+            commands: vec![CommandConfig {
+                name: "sleep".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: None,
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_per_call_timeout_secs_is_honored() {
+        let action = ShellToolAction::new(sleep_config());
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        // グローバル既定（120s）では待たされるところを、呼び出し時 1s 指定で切る
+        let args = serde_json::json!({"command": "sleep", "args": ["5"], "timeout_secs": 1});
+        let start = std::time::Instant::now();
+        let result = action.execute(&args, &ctx).await;
+        assert!(!result.success, "must time out");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1 seconds"),
+            "error should mention the effective 1s timeout: {:?}",
+            result.error
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(4),
+            "should return promptly after the 1s timeout, not the global default"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_per_call_timeout_clamped_to_max() {
+        let config = ShellToolConfig {
+            max_timeout_secs: 1,
+            ..sleep_config()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        // 上限 1s の構成で 9999s を要求 → 1s にクランプされて切れる
+        let args = serde_json::json!({"command": "sleep", "args": ["5"], "timeout_secs": 9999});
+        let result = action.execute(&args, &ctx).await;
+        assert!(!result.success, "must time out at the clamped maximum");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1 seconds"),
+            "requested timeout must be clamped to max_timeout_secs: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_per_call_timeout_overrides_per_command_timeout() {
+        // コマンド個別 60s 設定より呼び出し時 1s が優先される
+        let config = ShellToolConfig {
+            commands: vec![CommandConfig {
+                name: "sleep".to_string(),
+                permission: CommandPermission::Agent,
+                timeout_secs: Some(60),
+                description: None,
+            }],
+            ..ShellToolConfig::default()
+        };
+        let action = ShellToolAction::new(config);
+        let (_dir, ctx) = make_ctx(CallerIdentity::Owner);
+        let args = serde_json::json!({"command": "sleep", "args": ["5"], "timeout_secs": 1});
+        let result = action.execute(&args, &ctx).await;
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out after 1 seconds"),
+            "per-call timeout must take precedence over per-command config: {:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn test_default_timeouts_raised() {
+        let config = ShellToolConfig::default();
+        assert_eq!(config.timeout_secs, 120, "default raised from 30s");
+        assert_eq!(
+            config.max_timeout_secs, 1800,
+            "cap aligned with spawn_subtask default"
+        );
+        // 既存設定（新フィールド無し）がデシリアライズできて既定が入ること
+        let parsed: ShellToolConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(parsed.timeout_secs, 120);
+        assert_eq!(parsed.max_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_schema_exposes_timeout_secs() {
+        let action = ShellToolAction::new(ShellToolConfig::default());
+        let schema = action.parameters();
+        assert!(
+            schema["properties"]["timeout_secs"].is_object(),
+            "timeout_secs must be a declared parameter so the LLM can use it"
         );
     }
 
