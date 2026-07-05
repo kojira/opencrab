@@ -251,5 +251,7 @@
   "agentDetail.useServerDefault": "Use server default",
   "agentDetail.modelSaved": "Model setting saved",
   "agentDetail.modelSaveFailed": "Failed to save model setting",
-  "agentDetail.effectiveModel": "Model"
+  "agentDetail.effectiveModel": "Model",
+  "errorBoundary.title": "An error occurred while rendering this page",
+  "errorBoundary.retry": "Retry"
 }

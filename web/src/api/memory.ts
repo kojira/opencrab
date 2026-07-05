@@ -18,9 +18,11 @@ export async function getCuratedMemories(
 }
 
 interface SearchMemoryResponse {
-  query: string;
-  count: number;
-  results: SessionLogResult[];
+  query?: string;
+  count?: number;
+  results?: SessionLogResult[];
+  /** サーバは DB エラー時も HTTP 200 で {"error": ...} を返す */
+  error?: string;
 }
 
 export async function searchMemory(
@@ -32,5 +34,10 @@ export async function searchMemory(
     `/agents/${agentId}/memory/search`,
     { query, limit },
   );
+  // results 欠落（エラー封筒）をそのまま返すと呼び出し側の .map が落ちる。
+  // throw すればページ側の searchError 表示経路に乗る。
+  if (!res.results) {
+    throw new Error(res.error ?? 'memory search failed');
+  }
   return res.results;
 }

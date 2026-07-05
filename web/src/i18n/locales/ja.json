@@ -251,5 +251,7 @@
   "agentDetail.useServerDefault": "サーバー既定を使用",
   "agentDetail.modelSaved": "モデル設定を保存しました",
   "agentDetail.modelSaveFailed": "モデル設定の保存に失敗しました",
-  "agentDetail.effectiveModel": "モデル"
+  "agentDetail.effectiveModel": "モデル",
+  "errorBoundary.title": "このページの表示中にエラーが発生しました",
+  "errorBoundary.retry": "再試行"
 }

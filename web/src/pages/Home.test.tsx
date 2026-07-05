@@ -119,6 +119,9 @@ describe('Home', () => {
     });
     expect(screen.getByText('Bob')).toBeInTheDocument();
     expect(screen.getByText('agents.newAgent')).toBeInTheDocument();
+    // 直近セッションのプレビュー（SessionCard がテーマを表示する）
+    expect(screen.getByText('AI')).toBeInTheDocument();
+    expect(screen.getByText('Ethics')).toBeInTheDocument();
   });
 
   it('renders stat labels', () => {

@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react';
+import i18n from '../../i18n';
 
 interface Props {
   children: ReactNode;
@@ -31,7 +32,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             <span className="material-symbols-outlined text-error">error</span>
             <div className="min-w-0">
               <p className="text-title-md text-error-on-container mb-1">
-                このページの表示中にエラーが発生しました
+                {i18n.t('errorBoundary.title')}
               </p>
               <pre className="text-body-sm text-on-surface-variant whitespace-pre-wrap break-words font-mono">
                 {this.state.error.message}
@@ -40,7 +41,7 @@ export default class ErrorBoundary extends Component<Props, State> {
                 className="btn-tonal mt-3"
                 onClick={() => this.setState({ error: null })}
               >
-                再試行
+                {i18n.t('errorBoundary.retry')}
               </button>
             </div>
           </div>
