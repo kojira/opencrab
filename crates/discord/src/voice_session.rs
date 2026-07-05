@@ -124,8 +124,13 @@ impl VoiceSessionManager {
         };
         {
             let mut call = call.lock().await;
+            // 再 join（VC 移動・注入先変更）時、songbird は同一ギルドの Call を
+            // 再利用するため、古い VoiceReceiver が残ると STT が多重実行され
+            // 旧チャンネルへ注入され続ける。必ず張り替える。
+            call.remove_all_global_events();
             call.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
-            call.add_global_event(CoreEvent::VoiceTick.into(), receiver);
+            call.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
+            call.add_global_event(CoreEvent::ClientDisconnect.into(), receiver);
         }
         info!(guild_id, vc_channel_id, agent_id, "joined voice channel");
         Ok(())
@@ -182,7 +187,9 @@ impl VoiceSessionManager {
             .get(gid)
             .context("VC セッションがありません")?;
         let mut call = call.lock().await;
-        let _handle = call.play_input(songbird::input::Input::from(wav));
+        // play_input は即時ミックス（同時再生で音が重なる）。連続する返信が
+        // 重ならないよう builtin-queue で直列再生する。
+        let _handle = call.enqueue_input(songbird::input::Input::from(wav)).await;
         Ok(())
     }
 
@@ -284,6 +291,26 @@ impl VoiceReceiver {
         }
     }
 
+    /// ユーザーの VC 切断時、溜まっている発話を強制確定する。
+    /// 切断された SSRC は以後 speaking にも silent にも現れなくなるため、
+    /// これが無いと「言い残して即退出」した発話が失われる。
+    fn on_client_disconnect(&self, user_id: u64) {
+        let ssrcs: Vec<u32> = self
+            .ssrc_users
+            .iter()
+            .filter(|e| *e.value() == user_id)
+            .map(|e| *e.key())
+            .collect();
+        for ssrc in ssrcs {
+            if let Some(seg) = self.segmenters.get(&ssrc) {
+                let finalized = seg.lock().unwrap().flush();
+                if let Some(segment) = finalized {
+                    self.dispatch(ssrc, segment.pcm_48k_stereo);
+                }
+            }
+        }
+    }
+
     fn on_voice_tick(&self, tick: &VoiceTick) {
         // 発話中の SSRC: フレームを蓄積
         for (ssrc, data) in &tick.speaking {
@@ -329,6 +356,7 @@ impl SongbirdEventHandler for VoiceReceiver {
         match ctx {
             EventContext::SpeakingStateUpdate(s) => self.on_speaking_update(s),
             EventContext::VoiceTick(tick) => self.on_voice_tick(tick),
+            EventContext::ClientDisconnect(d) => self.on_client_disconnect(d.user_id.0),
             _ => {}
         }
         None
