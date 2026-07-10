@@ -72,6 +72,9 @@ base_url = "http://localhost:8080"
 default_model = "o4-mini"
 sandbox = "danger-full-access"
 timeout_secs = 300
+# 推論（thinking）強度の上書き（low|medium|high|xhigh）。空/未指定はモデル既定。
+# gpt-5.6-sol は既定 high で遅い/高コスト。ダッシュボード（システム設定）からも変更可。
+# reasoning_effort = "medium"
 # ダッシュボードに表示するモデル一覧（Codex サブスクで利用可能なもの）
 models = ["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）

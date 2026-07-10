@@ -13,6 +13,8 @@ export interface LlmProviderInfo {
   api_key_masked: string;
   base_url: string;
   default_model: string;
+  /** 推論（thinking）強度。空はモデル既定。 */
+  reasoning_effort: string;
 }
 
 export interface LlmProvidersResponse {
@@ -29,6 +31,7 @@ export interface UpdateProviderBody {
   api_key?: string | null;
   base_url?: string | null;
   default_model?: string | null;
+  reasoning_effort?: string | null;
 }
 
 export function getLlmProviders(): Promise<LlmProvidersResponse> {

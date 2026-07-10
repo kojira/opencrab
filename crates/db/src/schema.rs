@@ -197,6 +197,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "provider settings overrides (dashboard-managed LLM/voice providers)",
         up: |conn| conn.execute_batch(PROVIDER_SETTINGS_SQL),
     },
+    Migration {
+        version: 9,
+        description: "llm_provider_overrides.reasoning_effort (dashboard-editable thinking level)",
+        up: |conn| {
+            if !column_exists(conn, "llm_provider_overrides", "reasoning_effort")? {
+                conn.execute_batch(
+                    "ALTER TABLE llm_provider_overrides ADD COLUMN reasoning_effort TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// ダッシュボードから編集する LLM/voice プロバイダー設定のオーバーライド。
@@ -208,6 +220,7 @@ CREATE TABLE IF NOT EXISTS llm_provider_overrides (
     api_key TEXT,
     base_url TEXT,
     default_model TEXT,
+    reasoning_effort TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS voice_config_override (

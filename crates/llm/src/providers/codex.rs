@@ -35,6 +35,9 @@ pub struct CodexProvider {
     working_dir: Option<String>,
     timeout: Duration,
     extra_models: Vec<(String, u32)>,
+    /// `-c model_reasoning_effort=<low|medium|high|xhigh>` の上書き。
+    /// 空/未設定なら送らずモデル既定に従う。gpt-5.6-sol は既定 high。
+    reasoning_effort: Option<String>,
 }
 
 impl CodexProvider {
@@ -46,11 +49,20 @@ impl CodexProvider {
             working_dir: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             extra_models: Vec::new(),
+            reasoning_effort: None,
         }
     }
 
     pub fn with_codex_path(mut self, path: impl Into<String>) -> Self {
         self.codex_path = path.into();
+        self
+    }
+
+    /// codex の reasoning effort を上書きする（"low"|"medium"|"high"|"xhigh"）。
+    /// 空文字は「未設定」として扱う。
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        let s = effort.into();
+        self.reasoning_effort = if s.trim().is_empty() { None } else { Some(s) };
         self
     }
 
@@ -154,6 +166,13 @@ impl CodexProvider {
             // Never prompt for approval (non-interactive).
             .arg("-c")
             .arg("approval=never");
+
+        // reasoning effort の上書き（設定時のみ）。gpt-5.6-sol 等は既定 high で
+        // 遅い/高コストなので、明示指定で下げ/上げできる。
+        if let Some(effort) = &self.reasoning_effort {
+            cmd.arg("-c")
+                .arg(format!("model_reasoning_effort={effort}"));
+        }
 
         // Derive a per-agent workspace path from the agent identity. Falls back
         // to the provider-configured working_dir when no agent_id is supplied.
@@ -729,6 +748,22 @@ mod tests {
         assert_eq!(provider.sandbox, "workspace-write");
         assert_eq!(provider.working_dir.as_deref(), Some("/home/user/project"));
         assert_eq!(provider.timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_reasoning_effort_builder() {
+        assert!(CodexProvider::new().reasoning_effort.is_none());
+        assert!(CodexProvider::new()
+            .with_reasoning_effort("")
+            .reasoning_effort
+            .is_none());
+        assert_eq!(
+            CodexProvider::new()
+                .with_reasoning_effort("medium")
+                .reasoning_effort
+                .as_deref(),
+            Some("medium")
+        );
     }
 
     #[test]
