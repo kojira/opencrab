@@ -16,6 +16,12 @@ const navItems: NavItem[] = [
     match: (p) => p === '/',
   },
   {
+    to: '/setup',
+    labelKey: 'nav.setup',
+    icon: 'rocket_launch',
+    match: (p) => p === '/setup',
+  },
+  {
     to: '/agents',
     labelKey: 'nav.agents',
     icon: 'smart_toy',

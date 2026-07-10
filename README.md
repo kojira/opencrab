@@ -80,11 +80,25 @@ cd opencrab
 cargo build
 ```
 
-### 2. Set environment variables
+### 2. Create the config file
+
+Copy the neutral template. You do **not** need to hand-edit it — first-time setup
+is done entirely from the dashboard (see [First-time setup](#first-time-setup-recommended) below).
+
+```bash
+cp config/default.toml.example config/default.toml
+```
+
+> **Security note:** the dashboard has no authentication. Since first-time setup
+> handles secrets like Discord bot tokens, only expose the dashboard on a trusted
+> network (e.g. localhost or behind a VPN/reverse proxy with auth).
+
+### 3. Set environment variables (optional)
 
 By default, OpenCrab uses [hermit-shell](https://github.com/kojira/hermit-shell) (`localhost:8765`) as the LLM backend. hermit-shell is a macOS-native OpenAI-compatible proxy for Anthropic that retrieves API keys from the macOS Keychain automatically.
 
-If not using hermit-shell, set provider API keys directly:
+You can configure LLM providers from the dashboard instead of setting these. If you
+prefer environment variables, set provider API keys directly:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -95,7 +109,7 @@ export OPENROUTER_API_KEY="..."
 export DISCORD_TOKEN="..."
 ```
 
-### 3. Development (recommended)
+### 4. Development (recommended)
 
 ```bash
 ./dev.sh start     # Build + start backend & frontend → http://localhost:3000
@@ -105,7 +119,7 @@ export DISCORD_TOKEN="..."
 ./dev.sh logs      # Tail server log
 ```
 
-### 4. Manual startup
+### 5. Manual startup
 
 ```bash
 # Backend (with Discord support)
@@ -117,11 +131,33 @@ cd web && ./dev.sh
 # Proxies /api to :8080 → http://localhost:3000
 ```
 
-### 5. CLI
+### 6. CLI
 
 ```bash
 cargo run -p opencrab-cli
 ```
+
+## First-time setup (recommended)
+
+Once the server and dashboard are running, open `http://localhost:3000` and go to
+**Setup** (`/setup`). The guided wizard walks you through everything needed to get a
+working agent — no `config/default.toml` editing required:
+
+1. **LLM provider** — enable a provider and set its API key (saved to the DB, hot-reloaded)
+2. **Agent** — create an agent; the standard skills in `skills/*.skill.md` are seeded automatically
+3. **Discord** — set a per-agent bot token; the gateway starts immediately (no restart)
+4. **Channel** — whitelist the channel where the agent should respond
+
+The Home page also shows a **Setup checklist** card that tracks your progress and links
+back into the wizard until every step is done.
+
+Standard skills are seeded from `skills/*.skill.md` (resolved relative to the server's
+working directory). If you run the server from a different directory, point it at the
+skills folder with `OPENCRAB_SKILLS_DIR=/path/to/skills` so step 2 can seed them.
+
+A few settings still require editing `config/default.toml` and restarting: the REST
+port, the database path, and the initial `[tools]` allowed-command list (agents can add
+their own commands at runtime via gateway actions).
 
 ## API Endpoints
 

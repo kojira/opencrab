@@ -5,6 +5,7 @@ import { getAgents } from '../api/agents';
 import { getSessions } from '../api/sessions';
 import AgentCard from '../components/ui/AgentCard';
 import SessionCard from '../components/ui/SessionCard';
+import SetupChecklist from '../components/setup/SetupChecklist';
 import type { AgentSummary, SessionDto } from '../api/types';
 
 export default function Home() {
@@ -28,6 +29,9 @@ export default function Home() {
         <h1 className="text-xl text-on-surface font-bold">{t('home.title')}</h1>
         <p className="text-xs text-on-surface-variant mt-0.5">{t('home.subtitle')}</p>
       </div>
+
+      {/* Onboarding checklist (未完なら導線、完了なら控えめ表示) */}
+      <SetupChecklist />
 
       {/* Stat bar */}
       <div className="flex items-center gap-4 px-4 py-2.5 rounded-xl bg-surface-container border border-outline-variant/50 flex-wrap">

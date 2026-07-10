@@ -1498,3 +1498,83 @@ async fn test_voice_config_roundtrip() {
     let (_, json) = send_request(app, "GET", "/api/voice/config", None).await;
     assert_eq!(json["source"], "toml");
 }
+
+// ==================== Onboarding / Setup ====================
+
+#[tokio::test]
+async fn test_setup_status_fresh_and_after_agent() {
+    let app = create_test_app();
+
+    // フレッシュ DB + プロバイダ無しのルーター: 全ステップ未完。
+    let (status, json) = send_request(app.clone(), "GET", "/api/setup/status", None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["complete"], false);
+    assert_eq!(json["next_step"], "llm_provider");
+    assert_eq!(json["steps"]["llm_provider"]["done"], false);
+    assert_eq!(json["steps"]["agent"]["done"], false);
+    assert_eq!(json["steps"]["agent"]["count"], 0);
+    assert_eq!(json["steps"]["discord"]["done"], false);
+    assert_eq!(json["steps"]["channel"]["done"], false);
+
+    // エージェントを作ると agent ステップが done + count=1 になる。
+    let (_agent_id, app) = create_test_agent(app).await;
+    let (status, json) = send_request(app, "GET", "/api/setup/status", None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["steps"]["agent"]["done"], true);
+    assert_eq!(json["steps"]["agent"]["count"], 1);
+    // LLM が未設定なので next_step は依然 llm_provider。
+    assert_eq!(json["next_step"], "llm_provider");
+}
+
+#[tokio::test]
+async fn test_setup_seed_standard_skills() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+
+    // OPENCRAB_SKILLS_DIR を一時ディレクトリに向け、1 件のスキルファイルを置く。
+    let dir = std::env::temp_dir().join(format!("opencrab-seed-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("demo.skill.md"),
+        "---\nname: demo\ndescription: \"デモスキル\"\nversion: 1\npermission: agent\nactions:\n  - send_speech\n---\n\n# デモ\n\nガイダンス。\n",
+    )
+    .unwrap();
+    // テスト内でのみ使う（この 2 テストは env を共有しないよう別ディレクトリ）。
+    std::env::set_var("OPENCRAB_SKILLS_DIR", &dir);
+
+    let (status, json) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/skills/seed-standard"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["seeded_count"], 1);
+    assert_eq!(json["seeded"][0], "demo");
+
+    // 2 回目は冪等（同名スキップ）。
+    let (status, json) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/skills/seed-standard"),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["seeded_count"], 0);
+    assert_eq!(json["skipped"][0], "demo");
+
+    // シードしたスキルが一覧に出る。
+    let (_, json) = send_request(app, "GET", &format!("/api/agents/{agent_id}/skills"), None).await;
+    let names: Vec<String> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.contains(&"demo".to_string()), "skills: {names:?}");
+
+    std::env::remove_var("OPENCRAB_SKILLS_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}

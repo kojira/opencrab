@@ -12,6 +12,7 @@ pub mod llm_logs;
 pub mod memory;
 pub mod providers;
 pub mod sessions;
+pub mod setup;
 pub mod skills;
 pub mod system;
 pub mod trusted_users;

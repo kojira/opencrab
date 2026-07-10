@@ -89,6 +89,12 @@ pub fn create_router(state: AppState) -> Router {
                 .patch(api::agents::patch_agent)
                 .delete(api::agents::delete_agent),
         )
+        // オンボーディング（初回セットアップ進捗の集約）
+        .route("/api/setup/status", get(api::setup::get_setup_status))
+        .route(
+            "/api/agents/{id}/skills/seed-standard",
+            post(api::setup::seed_standard_skills),
+        )
         .route("/api/llm/model-choices", get(api::llm::model_choices))
         // プロバイダー設定（ダッシュボード編集 + ホットリロード）
         .route("/api/llm/providers", get(api::providers::list_providers))
