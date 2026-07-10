@@ -53,6 +53,21 @@ export function reloadLlmProviders(): Promise<{ reloaded: boolean; active_provid
   return api.post('/llm/providers/reload');
 }
 
+export interface CodexDiagnostics {
+  /** config で指定したパス（"codex" は PATH 検索） */
+  configured_path: string;
+  /** サーバー環境で実際に解決される絶対パス（which）。null = 見つからない */
+  resolved_path: string | null;
+  /** `<codex> --version` の出力。null = 実行失敗 */
+  version: string | null;
+  /** 実行失敗時のエラー文 */
+  error: string | null;
+}
+
+export function getCodexDiagnostics(): Promise<CodexDiagnostics> {
+  return api.get<CodexDiagnostics>('/llm/codex/diagnostics');
+}
+
 // ============ Voice (VC) 設定 ============
 
 export interface VoiceSttConfig {

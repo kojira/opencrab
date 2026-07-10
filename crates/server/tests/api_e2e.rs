@@ -1306,6 +1306,19 @@ async fn test_update_provider_disable_and_reject_bad_name() {
 }
 
 #[tokio::test]
+async fn test_codex_diagnostics_returns_fields() {
+    let app = create_test_app();
+    let (status, json) = send_request(app, "GET", "/api/llm/codex/diagnostics", None).await;
+    assert_eq!(status, StatusCode::OK);
+    // テスト設定には codex プロバイダーが無いので configured_path は既定の "codex"
+    assert_eq!(json["configured_path"], "codex");
+    // version/resolved_path/error のキーが存在すること（値は環境依存）
+    assert!(json.get("version").is_some());
+    assert!(json.get("resolved_path").is_some());
+    assert!(json.get("error").is_some());
+}
+
+#[tokio::test]
 async fn test_update_provider_reasoning_effort_roundtrip() {
     let app = create_test_app();
     // 推論強度を設定

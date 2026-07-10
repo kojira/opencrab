@@ -96,6 +96,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/llm/providers/reload",
             post(api::providers::reload_providers),
         )
+        // codex 診断（サーバーが使う codex のパス/バージョン）
+        .route(
+            "/api/llm/codex/diagnostics",
+            get(api::providers::codex_diagnostics),
+        )
         .route(
             "/api/llm/providers/{name}",
             put(api::providers::update_provider),

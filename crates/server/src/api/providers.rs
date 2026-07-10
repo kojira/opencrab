@@ -251,6 +251,75 @@ pub async fn reload_providers(
     })))
 }
 
+/// GET /api/llm/codex/diagnostics — サーバープロセスが実際に使う codex の
+/// バイナリパスとバージョンを返す。シェルの codex と別物（古い）だと
+/// 新しいモデル（gpt-5.6 系）が弾かれるため、その切り分け用。
+pub async fn codex_diagnostics(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // config の binary_path（空なら PATH 上の "codex"）。サーバーの環境で解決される。
+    let configured = state
+        .llm_config
+        .providers
+        .get("codex")
+        .map(|c| c.binary_path.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "codex".to_string());
+
+    let resolved_path = resolve_binary_path(&configured).await;
+    let (version, error) = match run_codex_version(&configured).await {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e)),
+    };
+
+    Json(json!({
+        // config で指定したパス（"codex" は PATH 検索）
+        "configured_path": configured,
+        // サーバー環境で実際に解決される絶対パス（which）
+        "resolved_path": resolved_path,
+        // `<codex> --version` の出力（例: "codex-cli 0.144.1"）
+        "version": version,
+        "error": error,
+    }))
+}
+
+/// `<cmd> --version` を実行して出力を返す。cmd は config 由来（リクエスト
+/// 入力ではない）なのでコマンドインジェクションの懸念はない。
+async fn run_codex_version(cmd: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new(cmd)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| format!("codex を実行できませんでした（{cmd}）: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "`{cmd} --version` が失敗しました（{}）: {}",
+            out.status,
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// サーバー環境で cmd が解決される絶対パスを返す（`which`）。
+/// 既に絶対/相対パス指定ならそのまま返す。
+async fn resolve_binary_path(cmd: &str) -> Option<String> {
+    if cmd.contains('/') {
+        return Some(cmd.to_string());
+    }
+    let out = tokio::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .await
+        .ok()?;
+    if out.status.success() {
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// TOML + DB オーバーライドからルーターを再構築してスワップする。
 fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
     let overrides = {
