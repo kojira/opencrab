@@ -156,7 +156,7 @@ fn make_heartbeat_callback(
 
                 // 2. ハートビートプロンプトをsession_logsに挿入
                 //    指示部分（方針・頻度・トーン）は設定可能、出力形式の規約はランタイム固定。
-                let mut hb_source = "default";
+                let hb_source;
                 {
                     let conn = db.lock().unwrap();
                     let resolved = opencrab_db::queries::resolve_heartbeat_instructions(
