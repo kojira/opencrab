@@ -40,10 +40,12 @@ fn is_placeholder_key(key: &str) -> bool {
 /// 既定プロバイダが「実際に使える状態か」を判定する。
 ///
 /// 単なるルーター登録の有無ではなく、エージェントが実際に使う既定プロバイダ 1 つが
-/// 使える構成になっているかを見る。次のいずれかを満たせば ready:
-/// - キー不要プロバイダ（[`KEYLESS_PROVIDERS`]）
-/// - ダッシュボードでオーバーライドが有効化されている（`enabled = Some(true)`）
-/// - 実効 API キー（DB オーバーライド > TOML）が非プレースホルダ
+/// 使える構成になっているかを見る。判定順:
+/// - `enabled = Some(false)` で明示的に無効化 → **not ready**（`apply_llm_overrides`
+///   がルーターから除外するため実際に使えない）
+/// - キー不要プロバイダ（[`KEYLESS_PROVIDERS`]）→ ready
+/// - `enabled = Some(true)` で有効化 → ready
+/// - 実効 API キー（DB オーバーライド > TOML）が非プレースホルダ → ready
 fn llm_provider_ready(
     default_provider: &str,
     llm_config: &crate::config::LlmConfig,
@@ -52,10 +54,14 @@ fn llm_provider_ready(
     if default_provider.is_empty() {
         return false;
     }
+    let ov = overrides.iter().find(|r| r.provider == default_provider);
+    // 明示的に無効化されていれば、キー有無やプロバイダ種別に関わらず使えない。
+    if ov.and_then(|o| o.enabled) == Some(false) {
+        return false;
+    }
     if KEYLESS_PROVIDERS.contains(&default_provider) {
         return true;
     }
-    let ov = overrides.iter().find(|r| r.provider == default_provider);
     if ov.and_then(|o| o.enabled) == Some(true) {
         return true;
     }
@@ -479,5 +485,29 @@ mod tests {
     fn empty_default_provider_is_not_ready() {
         let cfg = LlmConfig::default();
         assert!(!llm_provider_ready("", &cfg, &[]));
+    }
+
+    #[test]
+    fn explicitly_disabled_default_is_not_ready() {
+        // enabled=Some(false) はルーターから除外される（apply_llm_overrides）ため、
+        // 実効キーがあっても・キー不要プロバイダでも ready にしてはいけない。
+        let cfg = cfg_with("openai", "sk-realkey");
+        let disabled = vec![LlmProviderOverrideRow {
+            provider: "openai".to_string(),
+            enabled: Some(false),
+            ..Default::default()
+        }];
+        assert!(!llm_provider_ready("openai", &cfg, &disabled));
+
+        let keyless_disabled = vec![LlmProviderOverrideRow {
+            provider: "codex".to_string(),
+            enabled: Some(false),
+            ..Default::default()
+        }];
+        assert!(!llm_provider_ready(
+            "codex",
+            &LlmConfig::default(),
+            &keyless_disabled
+        ));
     }
 }
