@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::message::*;
 use crate::traits::{LlmProvider, ModelInfo};
@@ -250,34 +250,20 @@ impl LlmProvider for CodexProvider {
             .map_err(|_| anyhow::anyhow!("codex CLI timed out after {}s", self.timeout.as_secs()))?
             .context("failed to wait for codex CLI")?;
 
-        // Read response from the output file (-o flag).
-        let response_text = match tokio::fs::read_to_string(&output_path).await {
-            Ok(text) => {
-                if !output.status.success() {
-                    anyhow::bail!(
-                        "codex exited with {} despite producing output",
-                        output.status
-                    );
-                }
-                text
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if !output.status.success() {
-                    anyhow::bail!(
-                        "codex exec failed (exit {}): {}{}",
-                        output.status,
-                        stderr,
-                        stdout
-                    );
-                }
-                stdout.to_string()
-            }
-            Err(e) => {
-                return Err(e).context("failed to read codex output file");
-            }
+        // Read the final message from the output file (-o flag). NotFound は None
+        // に畳んで resolve_codex_output で判断する（それ以外の I/O エラーは即返す）。
+        let file_text: Option<String> = match tokio::fs::read_to_string(&output_path).await {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).context("failed to read codex output file"),
         };
+        let response_text = resolve_codex_output(
+            &format!("{}", output.status),
+            output.status.success(),
+            file_text,
+            &output.stdout,
+            &output.stderr,
+        )?;
         // output_file (NamedTempFile) is dropped here, auto-deleting the file.
 
         let content = if response_text.trim().is_empty() {
@@ -450,6 +436,61 @@ fn render_tool_calls(tool_calls: &[ToolCall]) -> String {
 
     out.push_str("</function_calls>");
     out
+}
+
+/// codex の終了状態と出力から最終応答テキストを決める。
+///
+/// codex は最終メッセージ（`-o` ファイル）を書き出したのに非ゼロ終了することが
+/// ある（gpt-5.6 系の agentic な後処理・サンドボックス動作の失敗など）。その場合
+/// でも**応答本文が非空なら捨てずに使う**（総失敗 → フォールバックより有用）。
+/// 原因究明のため exit code と stderr は warn に必ず残す（握りつぶさない）。
+///
+/// - `-o` ファイルあり（`file_text` = Some）:
+///   - 非ゼロ終了 かつ 本文空 → 失敗（stderr 付きで返す）
+///   - 非ゼロ終了 かつ 本文あり → warn を出して本文を採用
+///   - 正常終了 → 本文を採用
+/// - `-o` ファイル無し（`file_text` = None、古い codex 等）:
+///   - 非ゼロ終了 → 失敗（stderr + stdout 付きで返す）
+///   - 正常終了 → stdout を採用
+fn resolve_codex_output(
+    exit_display: &str,
+    success: bool,
+    file_text: Option<String>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<String> {
+    let stderr_s = String::from_utf8_lossy(stderr);
+    match file_text {
+        Some(text) => {
+            if !success {
+                if text.trim().is_empty() {
+                    anyhow::bail!(
+                        "codex exec failed (exit {}) with empty output: {}",
+                        exit_display,
+                        stderr_s.trim()
+                    );
+                }
+                warn!(
+                    exit = %exit_display,
+                    stderr = %stderr_s.trim(),
+                    "codex exited non-zero but produced a response; using the response"
+                );
+            }
+            Ok(text)
+        }
+        None => {
+            let stdout_s = String::from_utf8_lossy(stdout);
+            if !success {
+                anyhow::bail!(
+                    "codex exec failed (exit {}): {}{}",
+                    exit_display,
+                    stderr_s,
+                    stdout_s
+                );
+            }
+            Ok(stdout_s.to_string())
+        }
+    }
 }
 
 /// Parse a JSONL event line from `codex exec --json` and extract streaming content.
@@ -688,6 +729,57 @@ mod tests {
         assert_eq!(provider.sandbox, "workspace-write");
         assert_eq!(provider.working_dir.as_deref(), Some("/home/user/project"));
         assert_eq!(provider.timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_resolve_codex_output_nonzero_exit_keeps_response() {
+        // 非ゼロ終了でも本文があれば捨てずに使う（gpt-5.6-sol の exit 1 問題）
+        let out = resolve_codex_output(
+            "exit status: 1",
+            false,
+            Some("Hi! 👋".to_string()),
+            b"",
+            b"some agentic warning",
+        )
+        .expect("non-empty output must be kept even on non-zero exit");
+        assert_eq!(out, "Hi! 👋");
+    }
+
+    #[test]
+    fn test_resolve_codex_output_nonzero_empty_is_error_with_stderr() {
+        // 非ゼロ終了 かつ 本文空 は失敗。stderr を握りつぶさないこと。
+        let err = resolve_codex_output(
+            "exit status: 1",
+            false,
+            Some("  ".to_string()),
+            b"",
+            b"boom: real reason",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("boom: real reason"), "{err}");
+        assert!(err.contains("exit status: 1"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_codex_output_success_uses_file() {
+        let out =
+            resolve_codex_output("exit status: 0", true, Some("answer".to_string()), b"", b"")
+                .unwrap();
+        assert_eq!(out, "answer");
+    }
+
+    #[test]
+    fn test_resolve_codex_output_no_file_falls_back_to_stdout() {
+        // -o ファイルが無い場合は stdout を使う（正常終了）
+        let out =
+            resolve_codex_output("exit status: 0", true, None, b"stdout answer", b"").unwrap();
+        assert_eq!(out, "stdout answer");
+        // 非ゼロ終了 かつ ファイル無し は失敗（stderr+stdout 付き）
+        let err = resolve_codex_output("exit status: 1", false, None, b"partial", b"why it died")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("why it died"), "{err}");
     }
 
     #[test]
