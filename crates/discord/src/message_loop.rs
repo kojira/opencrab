@@ -696,7 +696,9 @@ async fn handle_agent_response<T: AgentRunner>(
             );
         }
         Ok(_) => debug!(agent_id = %agent_id, "Agent produced empty response"),
-        Err(e) => error!(agent_id = %agent_id, error = %e, "SkillEngine failed"),
+        // {:#} で anyhow のコンテキストチェーン全体を出す（プロバイダの生エラーを
+        // 握りつぶさない）。Display（%e）だと最外側の要約しか出ない。
+        Err(e) => error!(agent_id = %agent_id, error = format!("{e:#}"), "SkillEngine failed"),
     }
 }
 
