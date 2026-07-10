@@ -7,9 +7,11 @@ import {
   getVoiceConfig,
   updateVoiceConfig,
   resetVoiceConfig,
+  getCodexDiagnostics,
   LlmProviderInfo,
   UpdateProviderBody,
   VoiceConfig,
+  CodexDiagnostics,
 } from '../api/providers';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
@@ -241,6 +243,80 @@ function ProviderRow({
           }}
           onCancel={() => setEditing(false)}
         />
+      )}
+    </div>
+  );
+}
+
+// ============ Codex 診断 ============
+
+function CodexDiagnosticsCard() {
+  const [diag, setDiag] = useState<CodexDiagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setDiag(await getCodexDiagnostics());
+    } catch (e) {
+      setDiag({
+        configured_path: '',
+        resolved_path: null,
+        version: null,
+        error: String(e),
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <div className="card-elevated space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-semibold text-on-surface">Codex 診断</h2>
+        <button onClick={load} disabled={loading} className={btnGhost}>
+          {loading ? '確認中...' : '再確認'}
+        </button>
+      </div>
+      <p className="text-xs text-on-surface-variant">
+        opencrab の<strong>サーバープロセスが実際に使う</strong> codex のパスとバージョンです。
+        ターミナルの <code className="font-mono">codex --version</code> と食い違う場合、
+        サーバーが古い codex を拾っています（新しいモデルが弾かれる原因）。
+        その時は <code className="font-mono">which codex</code> の絶対パスを
+        <code className="font-mono">[llm.providers.codex] binary_path</code> に設定してください。
+      </p>
+      {diag && (
+        <div className="space-y-1 text-sm">
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">バージョン</span>
+            {diag.version ? (
+              <span className="font-mono text-on-surface">{diag.version}</span>
+            ) : (
+              <span className="text-red-500">取得できませんでした</span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">解決パス</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.resolved_path ?? '（PATH 上に見つからない）'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">設定パス</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.configured_path || 'codex（PATH 検索）'}
+            </span>
+          </div>
+          {diag.error && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-red-500">
+              {diag.error}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -566,6 +642,8 @@ export default function SystemSettings() {
           )}
         </div>
       </div>
+
+      <CodexDiagnosticsCard />
 
       <VoiceSettings />
 
