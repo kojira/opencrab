@@ -378,6 +378,10 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                     if !pconfig.organization.is_empty() {
                         p = p.with_org_id(&pconfig.organization);
                     }
+                    // GPT-5 系 / o シリーズを使うときの reasoning_effort（任意）。
+                    if !pconfig.reasoning_effort.is_empty() {
+                        p = p.with_reasoning_effort(&pconfig.reasoning_effort);
+                    }
                     Some(Arc::new(p))
                 }
             }

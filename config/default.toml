@@ -28,10 +28,15 @@ allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap", "
 chain = ["anthropic", "ollama"]
 
 # hermit-shell経由でAnthropicを使う（OpenAI互換プロキシ）
+# 本物の OpenAI API を使う場合は base_url を空にし、api_key に実キーを入れる。
+# GPT-5.6 系（gpt-5.6 / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna）と o シリーズは
+# 推論モデルとして自動判定され、temperature は送らず max_completion_tokens を使う。
+# reasoning_effort（minimal|low|medium|high）を指定すると各リクエストに付与される。
 [llm.providers.openai]
 api_key = "dummy"
 base_url = "http://localhost:8765/v1"
 organization = ""
+# reasoning_effort = "medium"   # GPT-5系/oシリーズ利用時の推論強度（任意）
 
 # Anthropic設定
 [llm.providers.anthropic]
