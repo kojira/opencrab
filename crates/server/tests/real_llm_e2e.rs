@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 use opencrab_llm::providers::openrouter::OpenRouterProvider;

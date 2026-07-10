@@ -63,6 +63,7 @@ describe('getAgent', () => {
       personality: '{"style":"analytical"}',
       instructions: 'Be helpful',
       model: 'anthropic:claude-sonnet-4-20250514',
+      reasoning_effort: null,
       metadata_json: null,
     });
   });
