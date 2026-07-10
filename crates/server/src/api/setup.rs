@@ -27,22 +27,64 @@ fn skills_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("skills"))
 }
 
+/// API キー不要で使えるプロバイダ種別（ローカル / サブスク / OAuth ファイル等）。
+/// これらは既定に設定されていれば、キー未設定でも「用意済み」とみなす。
+const KEYLESS_PROVIDERS: &[&str] = &["codex", "chatgpt", "ollama", "llamacpp", "bonsai"];
+
+/// 実効 API キーが雛形プレースホルダか（空 or `dummy`）。
+fn is_placeholder_key(key: &str) -> bool {
+    let k = key.trim();
+    k.is_empty() || k.eq_ignore_ascii_case("dummy")
+}
+
+/// 既定プロバイダが「実際に使える状態か」を判定する。
+///
+/// 単なるルーター登録の有無ではなく、エージェントが実際に使う既定プロバイダ 1 つが
+/// 使える構成になっているかを見る。次のいずれかを満たせば ready:
+/// - キー不要プロバイダ（[`KEYLESS_PROVIDERS`]）
+/// - ダッシュボードでオーバーライドが有効化されている（`enabled = Some(true)`）
+/// - 実効 API キー（DB オーバーライド > TOML）が非プレースホルダ
+fn llm_provider_ready(
+    default_provider: &str,
+    llm_config: &crate::config::LlmConfig,
+    overrides: &[opencrab_db::queries::LlmProviderOverrideRow],
+) -> bool {
+    if default_provider.is_empty() {
+        return false;
+    }
+    if KEYLESS_PROVIDERS.contains(&default_provider) {
+        return true;
+    }
+    let ov = overrides.iter().find(|r| r.provider == default_provider);
+    if ov.and_then(|o| o.enabled) == Some(true) {
+        return true;
+    }
+    let key = ov
+        .and_then(|o| o.api_key.clone())
+        .or_else(|| {
+            llm_config
+                .providers
+                .get(default_provider)
+                .map(|c| c.api_key.clone())
+        })
+        .unwrap_or_default();
+    !is_placeholder_key(&key)
+}
+
 /// GET /api/setup/status — オンボーディング進捗の集約。
 ///
 /// 各ステップは `done`（完了したか）と補助情報（件数など）を持つ。`complete` は
 /// 全ステップ完了、`next_step` は未完の最初のステップ（全完了なら null）。
 pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // --- LLM プロバイダ: 現在のルーターに使えるプロバイダが 1 つ以上あるか ---
-    // ルーターは TOML + DB オーバーライドから構築済み。登録がある = 実際に
-    // LLM を呼べる状態。既定（hermit-shell 等）だけでも done になる。
     let router = state.llm_router.get();
     let active_providers = router.provider_names();
-    let llm_done = !active_providers.is_empty();
     let llm_detail = active_providers.join(", ");
 
     // 以降は DB 参照。ロックは 1 度だけ取ってまとめて読む。
-    let (agent_count, discord_configured, discord_enabled, channel_count) = {
+    let (agent_count, discord_configured, discord_enabled, channel_count, overrides) = {
         let conn = state.db.lock().unwrap();
+        let overrides =
+            opencrab_db::queries::list_llm_provider_overrides(&conn).unwrap_or_default();
         let agent_ids = opencrab_db::queries::list_agent_ids(&conn).unwrap_or_default();
         let agent_count = agent_ids.len();
 
@@ -69,8 +111,19 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
             discord_configured,
             discord_enabled,
             channel_count,
+            overrides,
         )
     };
+
+    // --- LLM プロバイダ: 「既定プロバイダが実際に使える状態か」で判定する ---
+    // 単に「ルーターに登録がある」だと、default.toml.example の openai=dummy の
+    // ような雛形プレースホルダでも緑になってしまう（＝見せかけの完了）。そこで
+    // エージェントが実際に使う既定プロバイダ 1 つに絞り、次のいずれかで done とする:
+    //   - キー不要プロバイダ（codex / chatgpt / ollama / llamacpp / bonsai）である
+    //   - 実効 API キーが設定済み（空でも "dummy" でもない）
+    //   - ダッシュボードでオーバーライドが有効化されている
+    let default_provider = state.llm_config.default_provider.as_str();
+    let llm_done = llm_provider_ready(default_provider, &state.llm_config, &overrides);
 
     let agent_done = agent_count > 0;
     let discord_done = discord_configured > 0;
@@ -92,7 +145,12 @@ pub async fn get_setup_status(State(state): State<AppState>) -> Json<serde_json:
 
     Json(json!({
         "steps": {
-            "llm_provider": { "done": llm_done, "detail": llm_detail, "count": active_providers.len() },
+            "llm_provider": {
+                "done": llm_done,
+                "detail": llm_detail,
+                "count": active_providers.len(),
+                "default_provider": default_provider,
+            },
             "agent":        { "done": agent_done, "count": agent_count },
             "discord":      { "done": discord_done, "count": discord_configured, "enabled": discord_enabled },
             "channel":      { "done": channel_done, "count": channel_count },
@@ -359,5 +417,67 @@ mod tests {
         let p = parse_skill_md(md).unwrap();
         assert_eq!(p.permission_db, "\"agent\"");
         assert!(p.actions.is_empty());
+    }
+
+    use crate::config::{LlmConfig, ProviderConfig};
+    use opencrab_db::queries::LlmProviderOverrideRow;
+
+    fn cfg_with(provider: &str, api_key: &str) -> LlmConfig {
+        let mut c = LlmConfig::default();
+        c.providers.insert(
+            provider.to_string(),
+            ProviderConfig {
+                api_key: api_key.to_string(),
+                ..Default::default()
+            },
+        );
+        c
+    }
+
+    #[test]
+    fn placeholder_openai_is_not_ready() {
+        // default.toml.example の openai=dummy は「見せかけの完了」にしない。
+        let cfg = cfg_with("openai", "dummy");
+        assert!(!llm_provider_ready("openai", &cfg, &[]));
+        let empty = cfg_with("openai", "");
+        assert!(!llm_provider_ready("openai", &empty, &[]));
+    }
+
+    #[test]
+    fn real_key_is_ready() {
+        let cfg = cfg_with("openai", "sk-realkey");
+        assert!(llm_provider_ready("openai", &cfg, &[]));
+    }
+
+    #[test]
+    fn keyless_default_provider_is_ready() {
+        // codex はキー不要。既定なら未設定でも ready。
+        let cfg = LlmConfig::default();
+        assert!(llm_provider_ready("codex", &cfg, &[]));
+        assert!(llm_provider_ready("ollama", &cfg, &[]));
+    }
+
+    #[test]
+    fn dashboard_override_enables_ready() {
+        let cfg = cfg_with("openai", "dummy");
+        let ov = vec![LlmProviderOverrideRow {
+            provider: "openai".to_string(),
+            enabled: Some(true),
+            ..Default::default()
+        }];
+        assert!(llm_provider_ready("openai", &cfg, &ov));
+        // override の api_key が実キーでも ready。
+        let ov2 = vec![LlmProviderOverrideRow {
+            provider: "openai".to_string(),
+            api_key: Some("sk-x".to_string()),
+            ..Default::default()
+        }];
+        assert!(llm_provider_ready("openai", &cfg, &ov2));
+    }
+
+    #[test]
+    fn empty_default_provider_is_not_ready() {
+        let cfg = LlmConfig::default();
+        assert!(!llm_provider_ready("", &cfg, &[]));
     }
 }

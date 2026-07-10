@@ -151,6 +151,10 @@ working agent — no `config/default.toml` editing required:
 The Home page also shows a **Setup checklist** card that tracks your progress and links
 back into the wizard until every step is done.
 
+Standard skills are seeded from `skills/*.skill.md` (resolved relative to the server's
+working directory). If you run the server from a different directory, point it at the
+skills folder with `OPENCRAB_SKILLS_DIR=/path/to/skills` so step 2 can seed them.
+
 A few settings still require editing `config/default.toml` and restarting: the REST
 port, the database path, and the initial `[tools]` allowed-command list (agents can add
 their own commands at runtime via gateway actions).

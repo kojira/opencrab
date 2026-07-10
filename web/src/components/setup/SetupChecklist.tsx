@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { getSetupStatus, type SetupStatus } from '../../api/setup';
-
-type StepKey = 'llm_provider' | 'agent' | 'discord' | 'channel';
-const STEP_ORDER: StepKey[] = ['llm_provider', 'agent', 'discord', 'channel'];
+import { getSetupStatus, STEP_ORDER, type SetupStatus } from '../../api/setup';
 
 /**
  * Home に常設するオンボーディング進捗カード。

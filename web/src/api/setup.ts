@@ -2,11 +2,18 @@ import { api } from './client';
 
 // ============ オンボーディング（初回セットアップ）============
 
+export type StepKey = 'llm_provider' | 'agent' | 'discord' | 'channel';
+
+/** ウィザード / チェックリスト共通のステップ順。 */
+export const STEP_ORDER: StepKey[] = ['llm_provider', 'agent', 'discord', 'channel'];
+
 export interface SetupStep {
   done: boolean;
   count?: number;
   detail?: string;
   enabled?: number;
+  /** llm_provider のみ: 既定プロバイダ名。 */
+  default_provider?: string;
 }
 
 export interface SetupStatus {
@@ -18,7 +25,7 @@ export interface SetupStatus {
   };
   complete: boolean;
   /** 未完の最初のステップ。全完了なら null。 */
-  next_step: 'llm_provider' | 'agent' | 'discord' | 'channel' | null;
+  next_step: StepKey | null;
 }
 
 export function getSetupStatus(): Promise<SetupStatus> {
