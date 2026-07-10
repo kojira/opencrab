@@ -5,8 +5,9 @@ use crate::AppState;
 /// ダッシュボードのモデルセレクタ用: 既定モデルと各プロバイダの利用可能モデル一覧。
 pub async fn model_choices(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut choices: Vec<String> = Vec::new();
-    for pname in state.llm_router.provider_names() {
-        let Some(prov) = state.llm_router.get_provider(pname) else {
+    let router = state.llm_router.get();
+    for pname in router.provider_names() {
+        let Some(prov) = router.get_provider(pname) else {
             continue;
         };
         let prov = prov.clone();

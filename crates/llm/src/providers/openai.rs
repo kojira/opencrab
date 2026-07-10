@@ -9,6 +9,22 @@ use tracing::debug;
 use crate::message::*;
 use crate::traits::{LlmProvider, ModelInfo};
 
+/// GPT-5 系 / o シリーズ（推論モデル）を chat/completions で呼ぶときの制約を
+/// 判定する。これらのモデルは:
+/// - `temperature` は既定値 (1) のみ受け付け、他の値は 400 を返す
+/// - `max_tokens` は不可で `max_completion_tokens` を使う（推論トークンも消費）
+/// - `reasoning_effort` を受け付ける
+///
+/// `*-chat*` 変種（例: gpt-5-chat-latest）は非推論で従来どおり temperature/
+/// max_tokens を受け付けるため除外する。
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("chat") {
+        return false;
+    }
+    m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+
 /// OpenAI API provider.
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
@@ -16,6 +32,9 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     org_id: Option<String>,
+    /// GPT-5 系 / o シリーズに付与する reasoning_effort（"minimal"|"low"|"medium"
+    /// |"high"）。空/未設定なら送らない（サーバ既定 = medium）。
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -25,6 +44,7 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             base_url: "https://api.openai.com/v1".to_string(),
             org_id: None,
+            reasoning_effort: None,
         }
     }
 
@@ -35,6 +55,14 @@ impl OpenAiProvider {
 
     pub fn with_org_id(mut self, org_id: impl Into<String>) -> Self {
         self.org_id = Some(org_id.into());
+        self
+    }
+
+    /// GPT-5 系 / o シリーズに付与する reasoning_effort を設定する。
+    /// 空文字は「未設定」として扱う。
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        let s = effort.into();
+        self.reasoning_effort = if s.is_empty() { None } else { Some(s) };
         self
     }
 
@@ -61,11 +89,30 @@ impl OpenAiProvider {
             "messages": super::openai_compat::messages_to_json(&request.messages),
         });
 
+        let reasoning = is_reasoning_model(&request.model);
+
         if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::json!(temp);
+            // GPT-5 系 / o シリーズは temperature 既定値 (1) 以外を 400 で拒否する。
+            // エンジンは 0.7/0.0 を送ってくるため、推論モデルでは温度を送らない
+            // （サーバ既定にフォールバック）。それ以外は従来どおり。
+            if !reasoning {
+                body["temperature"] = serde_json::json!(temp);
+            }
         }
         if let Some(max) = request.max_tokens {
-            body["max_tokens"] = serde_json::json!(max);
+            // 推論モデルは max_tokens 不可 → max_completion_tokens を使う。
+            // 注: 内部推論トークンもこの予算を消費するため、小さすぎると出力が
+            // 途中で切れうる（呼び出し側の予算設定の問題で、リクエストは成功する）。
+            if reasoning {
+                body["max_completion_tokens"] = serde_json::json!(max);
+            } else {
+                body["max_tokens"] = serde_json::json!(max);
+            }
+        }
+        if reasoning {
+            if let Some(effort) = &self.reasoning_effort {
+                body["reasoning_effort"] = serde_json::json!(effort);
+            }
         }
         if let Some(ref stop) = request.stop {
             body["stop"] = serde_json::json!(stop);
@@ -230,5 +277,58 @@ impl LlmProvider for OpenAiProvider {
             .send()
             .await?;
         Ok(resp.status().is_success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_reasoning_model() {
+        assert!(is_reasoning_model("gpt-5.6"));
+        assert!(is_reasoning_model("gpt-5.6-sol"));
+        assert!(is_reasoning_model("gpt-5.6-terra"));
+        assert!(is_reasoning_model("gpt-5.5"));
+        assert!(is_reasoning_model("o1"));
+        assert!(is_reasoning_model("o3-mini"));
+        // chat 変種と従来モデルは非推論扱い
+        assert!(!is_reasoning_model("gpt-5-chat-latest"));
+        assert!(!is_reasoning_model("gpt-4o"));
+        assert!(!is_reasoning_model("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_gpt5_body_omits_temperature_uses_max_completion_tokens() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("high");
+        let req = ChatRequest::new("gpt-5.6", vec![Message::user("hi")])
+            .with_temperature(0.7)
+            .with_max_tokens(4096);
+        let body = p.build_request_body(&req);
+        // GPT-5 系: temperature は送らない、max は max_completion_tokens に
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted for gpt-5"
+        );
+        assert!(
+            body.get("max_tokens").is_none(),
+            "max_tokens must not be sent for gpt-5"
+        );
+        assert_eq!(body["max_completion_tokens"], 4096);
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_gpt4o_body_keeps_temperature_and_max_tokens() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("high");
+        let req = ChatRequest::new("gpt-4o", vec![Message::user("hi")])
+            .with_temperature(0.7)
+            .with_max_tokens(4096);
+        let body = p.build_request_body(&req);
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 4096);
+        // 非推論モデルには reasoning_effort を付けない
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
     }
 }

@@ -93,9 +93,7 @@ async fn main() -> anyhow::Result<()> {
             ["agents", "list"] => {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
-                    .prepare(
-                        "SELECT agent_id, name, COALESCE(persona_name, '') FROM agents",
-                    )
+                    .prepare("SELECT agent_id, name, COALESCE(persona_name, '') FROM agents")
                     .unwrap();
                 let rows = stmt
                     .query_map([], |row| {

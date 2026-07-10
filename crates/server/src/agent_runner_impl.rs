@@ -21,7 +21,7 @@ impl opencrab_discord::AgentRunner for AppState {
     }
 
     fn has_llm_providers(&self) -> bool {
-        !self.llm_router.provider_names().is_empty()
+        !self.llm_router.get().provider_names().is_empty()
     }
 
     fn build_agent_context(&self, agent_id: &str) -> (String, String) {

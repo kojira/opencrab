@@ -1,0 +1,97 @@
+import { api } from './client';
+
+// ============ LLM プロバイダー設定 ============
+
+export interface LlmProviderInfo {
+  name: string;
+  /** 現在のルーターに登録済み（= 実際に使える状態） */
+  active: boolean;
+  in_toml: boolean;
+  has_override: boolean;
+  enabled_override: boolean | null;
+  api_key_source: 'db' | 'toml' | 'none';
+  api_key_masked: string;
+  base_url: string;
+  default_model: string;
+}
+
+export interface LlmProvidersResponse {
+  providers: LlmProviderInfo[];
+  default_model: string;
+}
+
+/**
+ * PUT ボディの三値セマンティクス:
+ * フィールド省略 = 変更しない / null = オーバーライド解除（TOMLに戻す）/ 値 = 上書き
+ */
+export interface UpdateProviderBody {
+  enabled?: boolean | null;
+  api_key?: string | null;
+  base_url?: string | null;
+  default_model?: string | null;
+}
+
+export function getLlmProviders(): Promise<LlmProvidersResponse> {
+  return api.get<LlmProvidersResponse>('/llm/providers');
+}
+
+export function updateLlmProvider(
+  name: string,
+  body: UpdateProviderBody,
+): Promise<{ provider: LlmProviderInfo; reloaded: boolean }> {
+  return api.put(`/llm/providers/${encodeURIComponent(name)}`, body);
+}
+
+export function resetLlmProvider(name: string): Promise<{ deleted: boolean; reloaded: boolean }> {
+  return api.del(`/llm/providers/${encodeURIComponent(name)}/override`);
+}
+
+export function reloadLlmProviders(): Promise<{ reloaded: boolean; active_providers: string[] }> {
+  return api.post('/llm/providers/reload');
+}
+
+// ============ Voice (VC) 設定 ============
+
+export interface VoiceSttConfig {
+  provider: string;
+  base_url?: string;
+  model?: string;
+  api_key_env?: string;
+  language?: string | null;
+}
+
+export interface VoiceTtsConfig {
+  provider: string;
+  base_url?: string;
+  model?: string;
+  api_key_env?: string;
+  default_voice?: string;
+  agent_voices?: Record<string, string>;
+}
+
+export interface VoiceConfig {
+  enabled: boolean;
+  stt: VoiceSttConfig;
+  tts: VoiceTtsConfig;
+}
+
+export interface VoiceConfigResponse {
+  config: VoiceConfig;
+  source: 'db' | 'toml';
+  /** true なら STT/TTS の変更は保存と同時に反映される */
+  runtime_active: boolean;
+}
+
+export function getVoiceConfig(): Promise<VoiceConfigResponse> {
+  return api.get<VoiceConfigResponse>('/voice/config');
+}
+
+export function updateVoiceConfig(
+  config: VoiceConfig,
+): Promise<{ saved: boolean; applied_live: boolean; restart_required: boolean }> {
+  return api.put('/voice/config', config);
+}
+
+export function resetVoiceConfig(): Promise<{ deleted: boolean; restart_required: boolean }> {
+  return api.del('/voice/config');
+}

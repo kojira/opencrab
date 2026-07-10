@@ -100,7 +100,7 @@ pub async fn send_agent_message(
     }
 
     // 4. Check LLM availability.
-    if state.llm_router.provider_names().is_empty() {
+    if state.llm_router.get().provider_names().is_empty() {
         return Json(serde_json::json!({
             "session_id": session_id,
             "caller_type": caller_type,

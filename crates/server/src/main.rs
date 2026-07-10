@@ -442,8 +442,27 @@ async fn main() -> anyhow::Result<()> {
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
-    // Build LLM router from config
-    let llm_router = config::build_llm_router(&cfg.llm)?;
+    // Build LLM router from config + DB のダッシュボード設定オーバーライド
+    let llm_overrides = {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_llm_provider_overrides(&conn).unwrap_or_default()
+    };
+    let effective_llm = config::apply_llm_overrides(&cfg.llm, &llm_overrides);
+    let llm_router = config::build_llm_router(&effective_llm)?;
+
+    // 実効 voice 設定: DB オーバーライド（完全置換）> TOML。
+    // 起動時の VC ランタイム構築にのみ使う（discord feature 無効時は未使用）。
+    #[cfg_attr(not(feature = "discord"), allow(unused_variables))]
+    let effective_voice: opencrab_voice::VoiceConfig = {
+        let conn = db.lock().unwrap();
+        match opencrab_db::queries::get_voice_config_override(&conn) {
+            Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|e| {
+                tracing::warn!("voice_config_override JSON is broken; using TOML: {e}");
+                cfg.voice.clone()
+            }),
+            _ => cfg.voice.clone(),
+        }
+    };
 
     let default_model = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
 
@@ -455,7 +474,13 @@ async fn main() -> anyhow::Result<()> {
     #[allow(unused_mut)]
     let mut state = AppState {
         db,
-        llm_router: Arc::new(llm_router),
+        llm_router: opencrab_server::SharedLlmRouter::new(llm_router),
+        llm_config: Arc::new(cfg.llm.clone()),
+        // 純 TOML を保持する（DB オーバーライド適用前の土台）。API の GET は
+        // DB 行が無いときこれを "toml" として返すため、リセット後に古い実効値を
+        // TOML と誤表示しないよう effective ではなく cfg.voice を入れる（レビュー指摘）。
+        voice_config: Arc::new(cfg.voice.clone()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
@@ -548,24 +573,71 @@ async fn main() -> anyhow::Result<()> {
                             cfg.events.clone(),
                         )
                     });
-                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
-                    opencrab_discord::DiscordGatewayActions::new(
-                        gateway.http().clone(),
-                        state.db.clone(),
-                        state.tools_config.clone(),
-                        Some(Arc::new(
-                            opencrab_server::llm_adapter::LlmRouterAdapter::new(
-                                state.llm_router.clone(),
-                            ),
-                        )),
-                        state.default_model.clone(),
-                        state.workspace_base.clone(),
-                        subtask_registry,
-                        default_subtask_webhook,
-                    )
-                    .with_event_tx(event_tx.clone())
-                    .with_owner_discord_id(discord_cfg.owner_discord_id.clone()),
-                );
+                // VC 対話（STT/TTS）: 実効設定（DB オーバーライド適用済み）で構築する。
+                // プロバイダ構築失敗（未知の provider 等）は起動を止めず警告して無効化。
+                let voice_cfg = &effective_voice;
+                let voice_manager: Option<
+                    Arc<opencrab_discord::voice_session::VoiceSessionManager>,
+                > = if voice_cfg.enabled {
+                    match (
+                        opencrab_voice::build_stt(&voice_cfg.stt),
+                        opencrab_voice::build_tts(&voice_cfg.tts),
+                    ) {
+                        (Ok(stt), Ok(tts)) => {
+                            tracing::info!(
+                                stt = %voice_cfg.stt.provider,
+                                tts = %voice_cfg.tts.provider,
+                                "voice (VC) conversation enabled"
+                            );
+                            let mgr = opencrab_discord::voice_session::VoiceSessionManager::new(
+                                gateway.voice(),
+                                stt,
+                                tts,
+                                voice_cfg.tts.clone(),
+                                voice_cfg.stt.language.clone(),
+                                event_tx.clone(),
+                                gateway.http().clone(),
+                            );
+                            // ダッシュボードからの設定変更をホットスワップで受ける
+                            *state.voice_runtime.lock().unwrap() =
+                                Some(mgr.clone() as Arc<dyn opencrab_voice::VoiceRuntime>);
+                            Some(mgr)
+                        }
+                        (stt, tts) => {
+                            if let Err(e) = stt {
+                                tracing::warn!("voice STT provider init failed: {e}");
+                            }
+                            if let Err(e) = tts {
+                                tracing::warn!("voice TTS provider init failed: {e}");
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let gateway_actions_base = opencrab_discord::DiscordGatewayActions::new(
+                    gateway.http().clone(),
+                    state.db.clone(),
+                    state.tools_config.clone(),
+                    Some(Arc::new(
+                        opencrab_server::llm_adapter::LlmRouterAdapter::new(
+                            state.llm_router.clone(),
+                        ),
+                    )),
+                    state.default_model.clone(),
+                    state.workspace_base.clone(),
+                    subtask_registry,
+                    default_subtask_webhook,
+                )
+                .with_event_tx(event_tx.clone())
+                .with_owner_discord_id(discord_cfg.owner_discord_id.clone());
+                let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> =
+                    Arc::new(match &voice_manager {
+                        Some(v) => gateway_actions_base.with_voice(v.clone()),
+                        None => gateway_actions_base,
+                    });
 
                 *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
 
@@ -583,6 +655,7 @@ async fn main() -> anyhow::Result<()> {
                         // 共有（TOML）ゲートウェイ: ランタイムに per-agent 設定が
                         // enable されたエージェントはメッセージ処理時にスキップ（#40）。
                         true,
+                        voice_manager,
                     )
                     .await;
                 });

@@ -130,6 +130,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // フォールバックとして処理を続ける。per-agent ゲートウェイ自身のループ
     // （manager.rs）は必ず false（true にすると自分自身を skip してしまう）。
     skip_agents_with_dedicated_gateway: bool,
+    // VC 対話が有効なとき Some。エージェント返信を対応する VC で読み上げる。
+    voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
         Some((tx, rx)) => (tx, rx),
@@ -235,6 +237,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let gateway_c = gateway.clone();
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
+                        let voice_c = voice.clone();
                         let sess = session_id.clone();
                         spawn_serialized_on_session(session_locks.clone(), sess, async move {
                             process_subtask_completed(
@@ -250,6 +253,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 gateway_c,
                                 state_c,
                                 ga_c,
+                                voice_c,
                             )
                             .await;
                         });
@@ -328,6 +332,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         owner_discord_id.clone(),
                         session_locks.clone(),
                         skip_agents_with_dedicated_gateway,
+                        voice.clone(),
                     )
                     .await;
                 }
@@ -351,6 +356,7 @@ async fn process_incoming_message<T: AgentRunner>(
     owner_discord_id: String,
     session_locks: SessionLocks,
     skip_agents_with_dedicated_gateway: bool,
+    voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -506,6 +512,8 @@ async fn process_incoming_message<T: AgentRunner>(
             let gateway_for_cb = gateway.clone();
             let channel_id_str_for_cb = channel_id_str.clone();
             let is_dm_for_cb = is_dm;
+            let voice_for_cb = voice.clone();
+            let agent_id_for_cb = agent_id.clone();
             Some(std::sync::Arc::new(move |text: String| {
                 tracing::warn!(
                     channel_id = channel_id,
@@ -523,6 +531,9 @@ async fn process_incoming_message<T: AgentRunner>(
                     return;
                 }
                 let gateway_cb = gateway_for_cb.clone();
+                let voice_cb = voice_for_cb.clone();
+                let channel_id_str_cb = channel_id_str_for_cb.clone();
+                let agent_id_cb = agent_id_for_cb.clone();
                 tokio::spawn(async move {
                     tracing::warn!(
                         channel_id = channel_id,
@@ -536,6 +547,10 @@ async fn process_incoming_message<T: AgentRunner>(
                             channel_id = channel_id,
                             "on_response_text: Discord send succeeded"
                         );
+                        // VC セッションがこのチャンネルに紐づいていれば読み上げる
+                        if let Some(v) = &voice_cb {
+                            v.maybe_speak(&channel_id_str_cb, &agent_id_cb, &text);
+                        }
                     }
                 });
             }))
@@ -699,6 +714,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+    voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
 ) {
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
 
@@ -767,6 +783,8 @@ async fn process_subtask_completed<T: AgentRunner>(
                 .await
             {
                 error!("Subtask completion Discord send failed: {e}");
+            } else if let Some(v) = &voice {
+                v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
             }
             state.record_agent_reply(
                 &agent_id,

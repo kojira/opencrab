@@ -7,7 +7,9 @@ max_workspace_size_mb = 100
 # デフォルトLLM設定
 [llm]
 default_provider = "codex"
-default_model = "gpt-5.5"
+# Codex サブスク経由で GPT-5.6（Sol にエイリアス）を使う。
+# 5.5 に戻す場合は "gpt-5.5"、変種は "gpt-5.6-terra" / "gpt-5.6-luna" を指定。
+default_model = "gpt-5.6"
 
 # 用途別モデル設定（オプション）
 [llm.models]
@@ -28,10 +30,15 @@ allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap", "
 chain = ["anthropic", "ollama"]
 
 # hermit-shell経由でAnthropicを使う（OpenAI互換プロキシ）
+# 本物の OpenAI API を使う場合は base_url を空にし、api_key に実キーを入れる。
+# GPT-5.6 系（gpt-5.6 / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna）と o シリーズは
+# 推論モデルとして自動判定され、temperature は送らず max_completion_tokens を使う。
+# reasoning_effort（minimal|low|medium|high）を指定すると各リクエストに付与される。
 [llm.providers.openai]
 api_key = "dummy"
 base_url = "http://localhost:8765/v1"
 organization = ""
+# reasoning_effort = "medium"   # GPT-5系/oシリーズ利用時の推論強度（任意）
 
 # Anthropic設定
 [llm.providers.anthropic]
@@ -65,7 +72,8 @@ base_url = "http://localhost:8080"
 default_model = "o4-mini"
 sandbox = "danger-full-access"
 timeout_secs = 300
-models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示するモデル一覧
+# ダッシュボードに表示するモデル一覧（Codex サブスクで利用可能なもの）
+models = ["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）
 # working_dir = ""                        # Codex の作業ディレクトリ
 
@@ -185,3 +193,30 @@ description = "Python3スクリプト実行"
 enabled = true
 threshold = 0.7
 # model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
+
+# ─ プロバイダー設定はダッシュボード（システム設定ページ）からも編集できます。
+#   ダッシュボードでの変更は DB に保存され、この TOML より優先されます。
+#   LLM プロバイダーの変更は再起動なしで反映されます。
+
+# VC（ボイスチャンネル）対話。有効化すると join_voice_channel /
+# leave_voice_channel アクションが使えるようになる（owner/trusted_user の依頼時）。
+# 音声は Discord がユーザーごとに分離して送ってくるため、話者の識別は
+# プロトコルレベルで確定する（声紋推定ではない）。
+# [voice]
+# enabled = true
+#
+# [voice.stt]
+# provider = "openai"            # OpenAI 互換 API（faster-whisper-server 等のローカルも可）
+# # base_url = "http://localhost:8000/v1"  # ローカル Whisper サーバを使う場合
+# model = "whisper-1"
+# api_key_env = "OPENAI_API_KEY"
+# language = "ja"
+#
+# [voice.tts]
+# provider = "voicevox"          # "voicevox"（ローカル・無料） or "openai"
+# # base_url = "http://localhost:50021"
+# default_voice = "3"            # VOICEVOX スタイルID（3 = ずんだもん ノーマル）
+# # エージェントごとに声を分ける（agent_id = スタイルID）
+# [voice.tts.agent_voices]
+# # crab = "3"
+# # rabomi = "1"

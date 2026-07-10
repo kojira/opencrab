@@ -44,7 +44,10 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
 
     let state = AppState {
         db: db.clone(),
-        llm_router: Arc::new(router),
+        llm_router: opencrab_server::SharedLlmRouter::new(router),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base,
         default_model: "openrouter:openai/gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(

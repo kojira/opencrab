@@ -8,6 +8,7 @@ pub mod gateway_actions;
 pub mod manager;
 pub mod message_loop;
 pub mod renderer;
+pub mod voice_session;
 
 use std::sync::Arc;
 

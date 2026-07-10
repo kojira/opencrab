@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = ["discord"]
-discord = ["serenity"]
+discord = ["serenity", "songbird"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 serenity = { workspace = true, optional = true }
+songbird = { workspace = true, optional = true }
 
 [lints]
 workspace = true

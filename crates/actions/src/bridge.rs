@@ -68,6 +68,9 @@ pub const DISCORD_ACTIONS: &[&str] = &[
     "discord_pin_message",
     "discord_unpin_message",
     "request_peer_review",
+    // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
+    "join_voice_channel",
+    "leave_voice_channel",
 ];
 
 /// spawn_subtask のネスト上限。
@@ -83,6 +86,11 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "create_skill",
     "execute_skill",
     "read_heartbeat_instructions",
+    // VC 参加/退出。可視性 == 強制の対称化（#45）: 非 trusted の Agent には
+    // 一覧にも出さない。ハンドラ側はさらに厳しく owner/trusted_user のみ許可
+    // （co_agent は一覧に見えても実行は拒否される）。
+    "join_voice_channel",
+    "leave_voice_channel",
 ];
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。

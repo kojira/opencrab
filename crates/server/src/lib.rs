@@ -21,10 +21,42 @@ pub mod transcript;
 
 use opencrab_llm::router::LlmRouter;
 
+/// ホットスワップ可能な LlmRouter の共有ハンドル。
+///
+/// ダッシュボードのプロバイダー設定変更時に、再起動なしでルーターを
+/// 差し替えるために使う。読み手は `get()` でその時点のスナップショットを
+/// 取得する（実行中のリクエストは古いルーターで完走する — 破壊的でない）。
+#[derive(Clone)]
+pub struct SharedLlmRouter(Arc<std::sync::RwLock<Arc<LlmRouter>>>);
+
+impl SharedLlmRouter {
+    pub fn new(router: LlmRouter) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(Arc::new(router))))
+    }
+
+    /// 現在のルーターのスナップショットを返す。
+    pub fn get(&self) -> Arc<LlmRouter> {
+        self.0.read().unwrap().clone()
+    }
+
+    /// ルーターを差し替える（プロバイダー設定変更時）。
+    pub fn swap(&self, router: LlmRouter) {
+        *self.0.write().unwrap() = Arc::new(router);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: opencrab_db::Db,
-    pub llm_router: Arc<LlmRouter>,
+    pub llm_router: SharedLlmRouter,
+    /// 起動時に読んだ TOML の [llm] 設定（DB オーバーライド適用前の土台）。
+    /// プロバイダー設定変更時のルーター再構築に使う。
+    pub llm_config: Arc<config::LlmConfig>,
+    /// 起動時に読んだ TOML の [voice] 設定（DB オーバーライド適用前の土台）。
+    pub voice_config: Arc<opencrab_voice::VoiceConfig>,
+    /// 稼働中の VC 対話ランタイム（discord 起動後にセットされる）。
+    /// プロバイダー設定変更を再起動なしで反映するために使う。
+    pub voice_runtime: Arc<std::sync::Mutex<Option<Arc<dyn opencrab_voice::VoiceRuntime>>>>,
     pub workspace_base: String,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
@@ -58,6 +90,26 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(api::agents::delete_agent),
         )
         .route("/api/llm/model-choices", get(api::llm::model_choices))
+        // プロバイダー設定（ダッシュボード編集 + ホットリロード）
+        .route("/api/llm/providers", get(api::providers::list_providers))
+        .route(
+            "/api/llm/providers/reload",
+            post(api::providers::reload_providers),
+        )
+        .route(
+            "/api/llm/providers/{name}",
+            put(api::providers::update_provider),
+        )
+        .route(
+            "/api/llm/providers/{name}/override",
+            delete(api::providers::delete_provider_override),
+        )
+        .route(
+            "/api/voice/config",
+            get(api::providers::get_voice_config)
+                .put(api::providers::update_voice_config)
+                .delete(api::providers::delete_voice_config),
+        )
         // ペルソナプリセット
         .route(
             "/api/agents/{id}/soul/presets",
