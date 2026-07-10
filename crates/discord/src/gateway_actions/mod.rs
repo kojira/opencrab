@@ -1872,6 +1872,7 @@ mod tests {
                 instructions: String::new(),
                 heartbeat_instructions: "OLD".to_string(),
                 model: None,
+                reasoning_effort: None,
                 metadata_json: None,
             };
             opencrab_db::queries::upsert_agent(&conn, &agent).unwrap();

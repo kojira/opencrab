@@ -110,7 +110,12 @@ impl OpenAiProvider {
             }
         }
         if reasoning {
-            if let Some(effort) = &self.reasoning_effort {
+            // per-request（エージェント個別）を優先し、無ければ構築時の既定。
+            if let Some(effort) = request
+                .reasoning_effort
+                .as_deref()
+                .or(self.reasoning_effort.as_deref())
+            {
                 body["reasoning_effort"] = serde_json::json!(effort);
             }
         }
@@ -316,6 +321,21 @@ mod tests {
         );
         assert_eq!(body["max_completion_tokens"], 4096);
         assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn test_per_request_reasoning_effort_overrides_provider_default() {
+        let p = OpenAiProvider::new("k").with_reasoning_effort("low");
+        // request 側（エージェント個別）が provider 既定より優先される
+        let mut req = ChatRequest::new("gpt-5.6", vec![Message::user("hi")]);
+        req.reasoning_effort = Some("high".to_string());
+        let body = p.build_request_body(&req);
+        assert_eq!(body["reasoning_effort"], "high");
+
+        // request 側が無ければ provider 既定
+        let req2 = ChatRequest::new("gpt-5.6", vec![Message::user("hi")]);
+        let body2 = p.build_request_body(&req2);
+        assert_eq!(body2["reasoning_effort"], "low");
     }
 
     #[test]

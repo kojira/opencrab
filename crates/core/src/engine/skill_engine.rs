@@ -41,6 +41,9 @@ pub struct SkillEngine {
     on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
     /// Optional callback invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
     on_tool_result: Option<Arc<dyn Fn(String, String, String, bool) + Send + Sync>>,
+    /// Per-run reasoning (thinking) effort. Attached to every ChatRequest so
+    /// providers can override their construction-time default per agent.
+    reasoning_effort: Option<String>,
 }
 
 impl SkillEngine {
@@ -59,7 +62,15 @@ impl SkillEngine {
             on_response_text: None,
             on_tool_call: None,
             on_tool_result: None,
+            reasoning_effort: None,
         }
+    }
+
+    /// Set the per-run reasoning (thinking) effort attached to each request.
+    /// 空文字は「未設定」として扱う。
+    pub fn set_reasoning_effort(&mut self, effort: impl Into<String>) {
+        let s = effort.into();
+        self.reasoning_effort = if s.trim().is_empty() { None } else { Some(s) };
     }
 
     /// Set the LLM log callback, invoked after each LLM call.
@@ -224,6 +235,7 @@ impl SkillEngine {
                 stream: None,
                 metadata: Default::default(),
                 agent_id: None,
+                reasoning_effort: self.reasoning_effort.clone(),
             };
 
             let request_for_log = request.clone();

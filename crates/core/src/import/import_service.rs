@@ -62,6 +62,7 @@ pub fn execute_import(
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         });
 

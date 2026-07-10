@@ -554,6 +554,7 @@ mod tests {
             stop: None,
             stream: None,
             agent_id: None,
+            reasoning_effort: None,
             metadata: Default::default(),
             functions: Some(vec![
                 FunctionDefinition {

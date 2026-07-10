@@ -221,6 +221,7 @@ fn test_agent_upsert_and_get() {
         instructions: String::new(),
         heartbeat_instructions: String::new(),
         model: None,
+        reasoning_effort: None,
         metadata_json: Some(r#"{"lang":"en"}"#.to_string()),
     };
 
@@ -265,6 +266,7 @@ fn test_effective_model_for_agent() {
         instructions: String::new(),
         heartbeat_instructions: String::new(),
         model: Some("openai:gpt-4o".to_string()),
+        reasoning_effort: None,
         metadata_json: None,
     };
     upsert_agent(&conn, &agent).unwrap();
@@ -284,6 +286,7 @@ fn test_effective_model_for_agent() {
         instructions: String::new(),
         heartbeat_instructions: String::new(),
         model: None,
+        reasoning_effort: None,
         metadata_json: None,
     };
     upsert_agent(&conn, &agent2).unwrap();
@@ -968,6 +971,7 @@ fn test_delete_agent() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )
@@ -1021,6 +1025,7 @@ fn test_find_agents_by_id_prefix() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )
@@ -1038,6 +1043,7 @@ fn test_find_agents_by_id_prefix() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )
@@ -1074,6 +1080,7 @@ fn test_find_agents_partial_name() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )
@@ -1107,6 +1114,7 @@ fn test_agent_crud_full_cycle() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )
@@ -1129,6 +1137,7 @@ fn test_agent_crud_full_cycle() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )
@@ -1307,6 +1316,7 @@ fn hb_agent(id: &str, heartbeat: &str) -> AgentRow {
         instructions: String::new(),
         heartbeat_instructions: heartbeat.to_string(),
         model: None,
+        reasoning_effort: None,
         metadata_json: None,
     }
 }
@@ -1607,6 +1617,7 @@ fn test_delete_agent_also_removes_discord_config() {
             instructions: String::new(),
             heartbeat_instructions: String::new(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         },
     )

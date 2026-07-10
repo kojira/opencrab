@@ -193,6 +193,11 @@ pub struct ChatRequest {
     /// agent-specific context (e.g. a workspace path) from this.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Per-request reasoning (thinking) effort override ("minimal"|"low"|
+    /// "medium"|"high"|"xhigh"). Providers prefer this over their
+    /// construction-time value. None = provider/model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl ChatRequest {
@@ -209,6 +214,7 @@ impl ChatRequest {
             stream: None,
             metadata: HashMap::new(),
             agent_id: None,
+            reasoning_effort: None,
         }
     }
 

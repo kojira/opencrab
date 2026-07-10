@@ -1222,6 +1222,11 @@ pub async fn run_agent_response(
         opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
             .unwrap_or_else(|_| state.default_model.clone())
     };
+    // per-agent の推論（thinking）強度。空/未設定なら None（プロバイダー既定に従う）。
+    let agent_reasoning_effort = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::effective_reasoning_effort_for_agent(&conn, agent_id).unwrap_or(None)
+    };
 
     // Create BridgedExecutor with ActionContext.
     let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
@@ -1311,6 +1316,11 @@ pub async fn run_agent_response(
     let max_iterations = if depth == 0 { 30 } else { usize::MAX };
     let mut engine =
         opencrab_core::SkillEngine::new(Box::new(llm_client), Box::new(executor), max_iterations);
+
+    // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
+    if let Some(effort) = &agent_reasoning_effort {
+        engine.set_reasoning_effort(effort.clone());
+    }
 
     set_llm_log_callback(
         &mut engine,

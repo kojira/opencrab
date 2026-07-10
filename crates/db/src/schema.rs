@@ -209,6 +209,16 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 10,
+        description: "agents.reasoning_effort (per-agent thinking level)",
+        up: |conn| {
+            if !column_exists(conn, "agents", "reasoning_effort")? {
+                conn.execute_batch("ALTER TABLE agents ADD COLUMN reasoning_effort TEXT")?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// ダッシュボードから編集する LLM/voice プロバイダー設定のオーバーライド。
@@ -941,6 +951,7 @@ CREATE TABLE IF NOT EXISTS agents (
     instructions TEXT NOT NULL DEFAULT '',
     heartbeat_instructions TEXT NOT NULL DEFAULT '',
     model TEXT,
+    reasoning_effort TEXT,
     metadata_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))

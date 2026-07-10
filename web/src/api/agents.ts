@@ -27,6 +27,7 @@ function mapAgentRow(
       personality: null,
       instructions: '',
       model: null,
+      reasoning_effort: null,
       metadata_json: null,
     };
   }
@@ -40,6 +41,7 @@ function mapAgentRow(
     personality: (row.personality as string | null) ?? null,
     instructions: (row.instructions as string) ?? '',
     model: (row.model as string | null) ?? null,
+    reasoning_effort: (row.reasoning_effort as string | null) ?? null,
     metadata_json: (row.metadata_json as string | null) ?? null,
   };
 }

@@ -25,6 +25,9 @@ pub struct AgentRow {
     #[serde(default)]
     pub heartbeat_instructions: String,
     pub model: Option<String>,
+    /// 推論（thinking）強度。None/空 = 既定に従う。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     pub metadata_json: Option<String>,
 }
 
@@ -40,14 +43,15 @@ pub struct AgentPatch {
     pub instructions: Option<String>,
     pub heartbeat_instructions: Option<String>,
     pub model: Option<Option<String>>,
+    pub reasoning_effort: Option<Option<String>>,
     pub metadata_json: Option<Option<String>>,
 }
 
 pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, metadata_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name,
             job_title = excluded.job_title,
@@ -58,6 +62,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             instructions = excluded.instructions,
             heartbeat_instructions = excluded.heartbeat_instructions,
             model = excluded.model,
+            reasoning_effort = excluded.reasoning_effort,
             metadata_json = excluded.metadata_json,
             updated_at = excluded.updated_at",
         params![
@@ -71,6 +76,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             agent.instructions,
             agent.heartbeat_instructions,
             agent.model,
+            agent.reasoning_effort,
             agent.metadata_json,
             now,
             now,
@@ -81,7 +87,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
 
 pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, metadata_json
+        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, metadata_json
          FROM agents WHERE agent_id = ?1",
         params![agent_id],
         |row| {
@@ -96,7 +102,8 @@ pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> 
                 instructions: row.get(7)?,
                 heartbeat_instructions: row.get(8)?,
                 model: row.get(9)?,
-                metadata_json: row.get(10)?,
+                reasoning_effort: row.get(10)?,
+                metadata_json: row.get(11)?,
             })
         },
     );
@@ -117,6 +124,17 @@ pub fn effective_model_for_agent(
         .and_then(|a| a.model)
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| default_model.to_string()))
+}
+
+/// `agents.reasoning_effort` が空でなければそれを返す（per-agent の thinking 強度）。
+/// 未設定なら None（プロバイダー/モデル既定に従う）。
+pub fn effective_reasoning_effort_for_agent(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Option<String>> {
+    Ok(get_agent(conn, agent_id)?
+        .and_then(|a| a.reasoning_effort)
+        .filter(|s| !s.trim().is_empty()))
 }
 
 pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) -> Result<bool> {
@@ -149,6 +167,12 @@ pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) 
     }
     if let Some(ref v) = patch.model {
         row.model = v.clone();
+    }
+    if let Some(ref v) = patch.reasoning_effort {
+        // 空文字は「未設定」に正規化して NULL 保存（UI は既定選択時に "" を送る）。
+        // serde の Option<Option<_>> は JSON null を「変更なし」に潰すため、
+        // クリアは null ではなく空文字で表現する。
+        row.reasoning_effort = v.clone().filter(|s| !s.trim().is_empty());
     }
     if let Some(ref v) = patch.metadata_json {
         row.metadata_json = v.clone();

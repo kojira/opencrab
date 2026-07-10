@@ -302,6 +302,7 @@ function LlmModelSection({ agentId }: { agentId: string }) {
   const [defaultModel, setDefaultModel] = useState('');
   const [choices, setChoices] = useState<string[]>([]);
   const [selection, setSelection] = useState('');
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -321,12 +322,19 @@ function LlmModelSection({ agentId }: { agentId: string }) {
     setSelection(agent?.model ?? '');
   }, [agent?.model]);
 
+  useEffect(() => {
+    setReasoningEffort(agent?.reasoning_effort ?? '');
+  }, [agent?.reasoning_effort]);
+
   const save = async () => {
     setSaving(true);
     setMessage(null);
     try {
       const res = await patchAgent(agentId, {
         model: selection === '' ? null : selection,
+        // 既定選択時は空文字を送る（サーバー側で NULL に正規化）。null は
+        // serde の都合で「変更なし」に潰れてクリアできないため。
+        reasoning_effort: reasoningEffort,
       });
       if (res.updated) {
         setMessage(t('agentDetail.modelSaved'));
@@ -368,6 +376,23 @@ function LlmModelSection({ agentId }: { agentId: string }) {
                 {m}
               </option>
             ))}
+          </select>
+        </div>
+        <div className="sm:w-48">
+          <label className="text-label-lg text-on-surface-variant block mb-1">
+            {t('agentDetail.thinkingLevel')}
+          </label>
+          <select
+            className="input w-full"
+            value={reasoningEffort}
+            onChange={(e) => setReasoningEffort(e.target.value)}
+          >
+            <option value="">{t('agentDetail.thinkingDefault')}</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
           </select>
         </div>
         <button

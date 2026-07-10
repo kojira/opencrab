@@ -248,6 +248,8 @@
   "agentDetail.llmModel": "LLM Model",
   "agentDetail.llmModelDesc": "Model used for this agent's responses (server default: {{default}})",
   "agentDetail.modelSelect": "Model",
+  "agentDetail.thinkingLevel": "Thinking effort",
+  "agentDetail.thinkingDefault": "Model default",
   "agentDetail.useServerDefault": "Use server default",
   "agentDetail.modelSaved": "Model setting saved",
   "agentDetail.modelSaveFailed": "Failed to save model setting",
