@@ -1,0 +1,158 @@
+# OpenCrab 設定テンプレート
+#
+# このファイルを `config/default.toml` にコピーしてサーバーを起動してください。
+#   cp config/default.toml.example config/default.toml
+#
+# 初回セットアップ（LLM プロバイダ / エージェント作成 / Discord 接続 /
+# チャンネル許可）は、サーバー起動後にダッシュボードの `/setup` から
+# すべて完結できます。このファイルを手で編集する必要はありません。
+#
+# ダッシュボードで変更した設定は DB に保存され、この TOML より優先されます。
+# LLM プロバイダーの変更は再起動なしで反映されます。
+#
+# `${VAR}` は環境変数に展開されます（未定義なら空文字）。
+
+[agent]
+heartbeat_interval_secs = 1800
+heartbeat_enabled = false
+workspace_path = "data/agents/{agent_id}/workspace"
+max_workspace_size_mb = 100
+
+# ===== LLM =====
+# 既定は hermit-shell（localhost:8765 の OpenAI 互換 Anthropic プロキシ、macOS 向け）。
+# それ以外を使う場合は、ダッシュボードの `/setup` または「システム設定」から
+# プロバイダーを有効化して API キーを設定してください（TOML 編集は不要）。
+[llm]
+default_provider = "openai"
+default_model = "claude-sonnet-4-6"
+
+[llm.self_selection]
+enabled = false
+allowed_aliases = ["fast", "smart", "reasoning", "creative", "local", "cheap"]
+
+[llm.fallback]
+chain = ["anthropic", "ollama"]
+
+# hermit-shell 経由（OpenAI 互換）。本物の OpenAI を使う場合は base_url を空にし、
+# api_key に実キーを入れる（またはダッシュボードから設定）。
+[llm.providers.openai]
+api_key = "dummy"
+base_url = "http://localhost:8765/v1"
+organization = ""
+# reasoning_effort = "medium"   # GPT-5 系/o シリーズ利用時の推論強度（任意）
+
+[llm.providers.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+base_url = "https://api.anthropic.com"
+
+[llm.providers.google]
+api_key = "${GOOGLE_API_KEY}"
+
+[llm.providers.openrouter]
+api_key = "${OPENROUTER_API_KEY}"
+base_url = "https://openrouter.ai/api/v1"
+site_url = ""
+app_name = "OpenCrab"
+
+[llm.providers.ollama]
+base_url = "http://localhost:11434"
+default_model = "llama3.1:8b"
+
+[llm.providers.llamacpp]
+base_url = "http://localhost:8080"
+
+# Codex CLI（ローカル。codex サブスク利用時）。binary_path 省略時は PATH から検索。
+[llm.providers.codex]
+default_model = "o4-mini"
+sandbox = "danger-full-access"
+timeout_secs = 300
+models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
+# reasoning_effort = "medium"
+# binary_path = "/usr/local/bin/codex"
+
+# ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）
+[llm.providers.chatgpt]
+enabled = false
+auth_file = "~/.codex/auth.json"
+default_model = "gpt-5.5"
+reasoning_effort = "low"
+
+[llm.aliases]
+fast = { provider = "openai", model = "claude-haiku" }
+smart = { provider = "openai", model = "claude-sonnet-4-6" }
+reasoning = { provider = "openai", model = "claude-sonnet-4-6" }
+creative = { provider = "openai", model = "claude-sonnet-4-6" }
+local = { provider = "ollama", model = "llama3.1:8b" }
+cheap = { provider = "openai", model = "claude-haiku" }
+
+# ===== Gateway =====
+[gateway.rest]
+enabled = true
+port = 8080
+
+# 全体（共有）Discord ゲートウェイ。オンボーディングでは **エージェント個別** の
+# Discord 設定（ダッシュボード `/setup` の「Discord 接続」）を推奨するため、
+# ここは既定で無効。個人 ID は含めない。
+[gateway.discord]
+enabled = false
+token = "${DISCORD_TOKEN}"
+guild_ids = []
+agent_ids = []           # 応答させるエージェント ID（per-agent 設定を使う場合は空でよい）
+owner_discord_id = ""    # DM に応答するオーナーの Discord ユーザー ID
+
+[gateway.cli]
+enabled = true
+
+[dashboard]
+enabled = true
+port = 3000
+
+[database]
+path = "data/opencrab.db"
+
+# ===== ツール設定 =====
+[tools]
+enabled = true
+
+[tools.shell]
+enabled = true
+allowed_commands = []
+timeout_secs = 30
+inherit_env = true
+allowed_env_vars = ["PATH", "HOME", "LANG", "USER", "LOGNAME", "SHELL", "SSH_AUTH_SOCK"]
+max_output_bytes = 65536
+
+[[tools.shell.commands]]
+name = "echo"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "date"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "ls"
+permission = "agent"
+
+[[tools.shell.commands]]
+name = "cat"
+permission = "agent"
+
+# verify 段（evaluator）: 契約付き active タスクの run 終了時に独立 context で評価。
+[evaluator]
+enabled = true
+threshold = 0.7
+
+# VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
+# [voice]
+# enabled = true
+#
+# [voice.stt]
+# provider = "openai"
+# model = "whisper-1"
+# api_key_env = "OPENAI_API_KEY"
+# language = "ja"
+#
+# [voice.tts]
+# provider = "voicevox"
+# default_voice = "3"

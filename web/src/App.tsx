@@ -21,6 +21,7 @@ import AgentChannels from './pages/AgentChannels';
 import AgentAllowedCommands from './pages/AgentAllowedCommands';
 import AgentLlmLogs from './pages/AgentLlmLogs';
 import SystemSettings from './pages/SystemSettings';
+import Setup from './pages/Setup';
 
 const queryClient = new QueryClient();
 
@@ -31,6 +32,7 @@ export default function App() {
       <Routes>
         <Route element={<AppLayout />}>
           <Route path="/" element={<Home />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/agents/new" element={<AgentCreate />} />
           <Route path="/agents/:id" element={<AgentLayout />}>
