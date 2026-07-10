@@ -134,10 +134,12 @@ impl LlmRouter {
 
         debug!(provider = %provider_name, model = %request.model, "Routing chat completion");
 
-        // 最後のプロバイダエラーを保持する: 汎用文字列で握りつぶすと、型付き
-        // LlmError（ステータス）が router の外に出ず、下流の分類（downcast）が
-        // 全滅するため（#35）。
-        let mut last_error: Option<anyhow::Error> = None;
+        // 試した全プロバイダのエラーを保持する。last_error だけだと、primary
+        // （例: codex）が失敗して fallback（例: ollama）も失敗したとき、最後の
+        // fallback のエラーで primary のエラーが上書きされて消える。原因究明に
+        // 必要なのは大抵 primary のエラーなので、全て残して要約文へ畳み込む。
+        // 型付き LlmError の downcast（#35）は最後のエラーを chain の根に残して生かす。
+        let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
 
         // Try the resolved provider first (with retries)
         if let Some(provider) = self.providers.get(&provider_name) {
@@ -149,10 +151,10 @@ impl LlmRouter {
                 Err(e) => {
                     warn!(
                         provider = %provider_name,
-                        error = %e,
+                        error = format!("{e:#}"),
                         "Primary provider failed after {MAX_RETRIES} attempts, trying fallback chain"
                     );
-                    last_error = Some(e);
+                    errors.push((provider_name.clone(), e));
                 }
             }
         } else {
@@ -178,22 +180,39 @@ impl LlmRouter {
                     Err(e) => {
                         warn!(
                             provider = %fallback_name,
-                            error = %e,
+                            error = format!("{e:#}"),
                             "Fallback provider failed after {MAX_RETRIES} attempts"
                         );
-                        last_error = Some(e);
+                        errors.push((fallback_name.clone(), e));
                     }
                 }
             }
         }
 
-        let summary = format!(
-            "All providers failed for model '{}'. Tried: {} + fallback chain {:?}",
-            request.model, provider_name, self.fallback_chain
-        );
-        Err(match last_error {
-            // 最後のエラーを chain の根に残す（LlmError の downcast を生かす）
-            Some(e) => e.context(summary),
+        // 各プロバイダの完全なエラーチェーン（{:#}）を要約文へ畳み込む。こうすると
+        // 表示側が Display（{})でも全プロバイダの原因が見え、生エラーが消えない。
+        let detail = errors
+            .iter()
+            .map(|(name, e)| format!("  [{name}] {e:#}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = if errors.is_empty() {
+            format!(
+                "No providers available for model '{}'. Resolved provider: {}, fallback chain: {:?}",
+                request.model, provider_name, self.fallback_chain
+            )
+        } else {
+            format!(
+                "All providers failed for model '{}' ({} tried):\n{}",
+                request.model,
+                errors.len(),
+                detail
+            )
+        };
+        // 最後のエラーを chain の根に残す（型付き LlmError の downcast を生かす — #35）。
+        // 要約文には全プロバイダのエラーが既に含まれる。
+        Err(match errors.pop() {
+            Some((_, e)) => e.context(summary),
             None => anyhow::anyhow!(summary),
         })
     }
@@ -590,6 +609,31 @@ mod tests {
         let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
         let response = router.chat_completion(request).await;
         assert!(response.is_err());
+    }
+
+    /// primary と fallback の両方が失敗したとき、集約エラーに**両方**のプロバイダの
+    /// エラーが残ること（last_error だけ残すと primary=codex の原因が消えていた）。
+    #[tokio::test]
+    async fn test_aggregated_error_keeps_all_provider_errors() {
+        let mut router = LlmRouter::new();
+        router.add_provider(Arc::new(MockProvider::new("primary", true)));
+        router.add_provider(Arc::new(MockProvider::new("fallback", true)));
+        router.set_default_provider("primary");
+        router.set_fallback_chain(vec!["fallback".to_string()]);
+
+        let request = ChatRequest::new("some-model", vec![Message::user("hello")]);
+        let err = router.chat_completion(request).await.unwrap_err();
+        // Display（{})だけでも両プロバイダの原因が見える
+        let shown = format!("{err}");
+        assert!(
+            shown.contains("[primary]"),
+            "primary エラーが消えている: {shown}"
+        );
+        assert!(
+            shown.contains("[fallback]"),
+            "fallback エラーが消えている: {shown}"
+        );
+        assert!(shown.contains("2 tried"), "{shown}");
     }
 
     #[tokio::test]
