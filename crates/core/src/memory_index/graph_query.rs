@@ -155,7 +155,6 @@ mod tests {
     use crate::memory_index::index_builder::IndexBuilder;
     use anyhow::Result;
     use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
 
     /// ヘルパー: 指定セッションにN件のログを投入
     fn insert_logs(conn: &rusqlite::Connection, agent_id: &str, session_id: &str, count: usize) {

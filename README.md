@@ -8,6 +8,12 @@
   An autonomous AI agent framework built in Rust.
 </p>
 
+<p align="center">
+  <a href="https://github.com/kojira/opencrab/actions/workflows/ci.yml">
+    <img src="https://github.com/kojira/opencrab/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+</p>
+
 ---
 
 **OpenCrab** lets you create, manage, and run AI agents that actually remember what happened. Most agent frameworks discard conversation history once the context window fills up — OpenCrab doesn't.
