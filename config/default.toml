@@ -7,7 +7,9 @@ max_workspace_size_mb = 100
 # デフォルトLLM設定
 [llm]
 default_provider = "codex"
-default_model = "gpt-5.5"
+# Codex サブスク経由で GPT-5.6（Sol にエイリアス）を使う。
+# 5.5 に戻す場合は "gpt-5.5"、変種は "gpt-5.6-terra" / "gpt-5.6-luna" を指定。
+default_model = "gpt-5.6"
 
 # 用途別モデル設定（オプション）
 [llm.models]
@@ -70,7 +72,8 @@ base_url = "http://localhost:8080"
 default_model = "o4-mini"
 sandbox = "danger-full-access"
 timeout_secs = 300
-models = ["o4-mini", "o3", "codex-mini"]  # ダッシュボードに表示するモデル一覧
+# ダッシュボードに表示するモデル一覧（Codex サブスクで利用可能なもの）
+models = ["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # binary_path = "/usr/local/bin/codex"   # カスタムパス（省略時はPATHから検索）
 # working_dir = ""                        # Codex の作業ディレクトリ
 

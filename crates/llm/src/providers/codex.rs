@@ -15,6 +15,13 @@ const DEFAULT_MODEL: &str = "o4-mini";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 static DEFAULT_MODELS: &[(&str, u32)] = &[
+    // GPT-5.6 family（Codex サブスクで `codex exec -m gpt-5.6` として利用可。
+    // gpt-5.6 は Sol にエイリアス。コンテキストは 1,050,000）。
+    ("gpt-5.6", 1_050_000),
+    ("gpt-5.6-sol", 1_050_000),
+    ("gpt-5.6-terra", 1_050_000),
+    ("gpt-5.6-luna", 1_050_000),
+    ("gpt-5.5", 400_000),
     ("o4-mini", 200_000),
     ("o3", 200_000),
     ("codex-mini", 200_000),
@@ -693,6 +700,19 @@ mod tests {
         let models = rt.block_on(provider.available_models()).unwrap();
         assert!(models.iter().any(|m| m.id == "gpt-5"));
         assert!(models.iter().any(|m| m.id == "o4-mini"));
+    }
+
+    #[test]
+    fn test_gpt56_in_default_models() {
+        let provider = CodexProvider::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let models = rt.block_on(provider.available_models()).unwrap();
+        // Codex サブスクでも GPT-5.6 系が選択肢に出ること
+        for id in ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert!(models.iter().any(|m| m.id == id), "{id} が候補に無い");
+        }
     }
 
     #[test]
