@@ -1079,6 +1079,39 @@ fn merge_image_urls(
 
 /// 未インデックスのログが閾値を超えていたら、バックグラウンドでメモリインデックスを
 /// 構築する（#33: 段の分解。run の応答は待たせない）。
+/// スキル名が応答本文で言及される最低文字数。短い名前は他語の部分一致で
+/// 誤カウントしやすいので閾値でノイズを抑える。
+const MIN_SKILL_NAME_LEN_FOR_MATCH: usize = 4;
+
+/// 応答本文に skill 名が現れているか（大文字小文字無視の部分一致）。
+/// `response_lower` は呼び出し側で小文字化済みを渡す。ツール名ベースの
+/// 確実な信号が server 経路に無いため、これが「実際に使った」の実用的な検出。
+fn skill_mentioned(response_lower: &str, skill_name: &str) -> bool {
+    let name = skill_name.trim().to_lowercase();
+    name.chars().count() >= MIN_SKILL_NAME_LEN_FOR_MATCH && response_lower.contains(&name)
+}
+
+/// depth 0 の run 完了時、応答で言及された有効スキルの利用回数を +1 する。
+/// 「実際に使った時だけ」カウントするための best-effort（名前言及ベース）。
+fn record_used_skills(state: &AppState, agent_id: &str, response: &str) {
+    if response.trim().is_empty() {
+        return;
+    }
+    let response_lower = response.to_lowercase();
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let skills = opencrab_db::queries::list_skills(&conn, agent_id, true).unwrap_or_default();
+    for s in &skills {
+        if skill_mentioned(&response_lower, &s.name) {
+            if let Err(e) = opencrab_db::queries::increment_skill_usage(&conn, &s.id) {
+                tracing::warn!(skill = %s.name, error = %e, "failed to increment skill usage");
+            }
+        }
+    }
+}
+
 fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_model: &str) {
     {
         let index_db = state.db.clone();
@@ -1402,6 +1435,14 @@ pub async fn run_agent_response(
 
     spawn_background_index_build(state, agent_id, &effective_model);
 
+    // スキル利用回数: depth 0 の run 完了時、応答で言及された有効スキルを +1。
+    // sub-engine の内部 run は数えない（メインの返答のみを対象）。
+    if depth == 0 {
+        if let Ok(ref engine_result) = result {
+            record_used_skills(state, agent_id, &engine_result.response);
+        }
+    }
+
     result
 }
 
@@ -1591,6 +1632,31 @@ fn prepare_loop_restart(
         "restarting engine run after iteration limit (loop restart v1)"
     );
     Some(rebuilt)
+}
+
+#[cfg(test)]
+mod skill_mentioned_tests {
+    use super::skill_mentioned;
+
+    #[test]
+    fn matches_name_case_insensitively() {
+        let resp = "この件は Deploy Runbook に従って対応しました。".to_lowercase();
+        assert!(skill_mentioned(&resp, "Deploy Runbook"));
+        assert!(skill_mentioned(&resp, "deploy runbook"));
+    }
+
+    #[test]
+    fn ignores_short_names() {
+        // 3文字以下は誤マッチ防止で対象外
+        let resp = "abc の話".to_lowercase();
+        assert!(!skill_mentioned(&resp, "abc"));
+    }
+
+    #[test]
+    fn no_match_when_absent() {
+        let resp = "普通の返答です".to_lowercase();
+        assert!(!skill_mentioned(&resp, "translation-helper"));
+    }
 }
 
 #[cfg(test)]
