@@ -21,6 +21,8 @@ export interface AgentDetail {
   instructions: string;
   /** null = サーバー既定の default_model を使用 */
   model: string | null;
+  /** 推論（thinking）強度。null/空 = プロバイダー既定。 */
+  reasoning_effort: string | null;
   metadata_json: string | null;
 }
 
@@ -34,6 +36,7 @@ export interface AgentPatchBody {
   personality?: string | null;
   instructions?: string;
   model?: string | null;
+  reasoning_effort?: string | null;
   metadata_json?: string | null;
 }
 

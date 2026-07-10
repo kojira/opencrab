@@ -485,7 +485,12 @@ impl ChatGptProvider {
             "parallel_tool_calls": true,
         });
 
-        if let Some(value) = &self.reasoning_effort {
+        // per-request（エージェント個別）を優先し、無ければ構築時の既定。
+        if let Some(value) = request
+            .reasoning_effort
+            .as_deref()
+            .or(self.reasoning_effort.as_deref())
+        {
             body["reasoning"] = serde_json::json!({"effort": value});
         }
 
@@ -1436,6 +1441,7 @@ mod tests {
             stream: Some(false),
             metadata: std::collections::HashMap::new(),
             agent_id: None,
+            reasoning_effort: None,
         };
         let response = provider.chat_completion(request).await;
         assert!(response.is_ok(), "API call failed: {:?}", response.err());
@@ -1490,6 +1496,7 @@ mod tests {
             stream: Some(false),
             metadata: std::collections::HashMap::new(),
             agent_id: None,
+            reasoning_effort: None,
         };
         let response = provider.chat_completion(request).await;
         // On 400 the provider bails with the full HTTP body — surface it here.
@@ -1560,6 +1567,7 @@ mod tests {
             stream: Some(false),
             metadata: std::collections::HashMap::new(),
             agent_id: None,
+            reasoning_effort: None,
         };
         let first_resp = provider
             .chat_completion(first)
@@ -1596,6 +1604,7 @@ mod tests {
             stream: Some(false),
             metadata: std::collections::HashMap::new(),
             agent_id: None,
+            reasoning_effort: None,
         };
         let response = provider.chat_completion(second).await;
         assert!(

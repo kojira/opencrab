@@ -1306,6 +1306,41 @@ async fn test_update_provider_disable_and_reject_bad_name() {
 }
 
 #[tokio::test]
+async fn test_agent_reasoning_effort_patch_roundtrip() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+
+    // 既定は未設定（null）
+    let (_, resp) =
+        send_request(app.clone(), "GET", &format!("/api/agents/{agent_id}"), None).await;
+    assert!(resp["reasoning_effort"].is_null());
+
+    // PATCH で設定
+    let (status, _) = send_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
+        Some(serde_json::json!({ "reasoning_effort": "high" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, resp) =
+        send_request(app.clone(), "GET", &format!("/api/agents/{agent_id}"), None).await;
+    assert_eq!(resp["reasoning_effort"], "high");
+
+    // 空文字で解除 → NULL に正規化される（null は serde の都合でクリア不可のため）
+    let (_, _) = send_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
+        Some(serde_json::json!({ "reasoning_effort": "" })),
+    )
+    .await;
+    let (_, resp) = send_request(app, "GET", &format!("/api/agents/{agent_id}"), None).await;
+    assert!(resp["reasoning_effort"].is_null());
+}
+
+#[tokio::test]
 async fn test_codex_diagnostics_returns_fields() {
     let app = create_test_app();
     let (status, json) = send_request(app, "GET", "/api/llm/codex/diagnostics", None).await;

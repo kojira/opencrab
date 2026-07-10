@@ -150,7 +150,13 @@ impl CodexProvider {
         parts.join("\n\n")
     }
 
-    fn build_base_command(&self, model: &str, agent_id: Option<&str>) -> Command {
+    /// `effort` は per-request（エージェント個別）優先の実効 reasoning effort。
+    fn build_base_command(
+        &self,
+        model: &str,
+        agent_id: Option<&str>,
+        effort: Option<&str>,
+    ) -> Command {
         let mut cmd = Command::new(&self.codex_path);
         // タイムアウトやストリーム破棄で future が drop されたとき、codex プロセスを
         // 確実に kill する。これが無いと、タイムアウト後も codex が走り続けて
@@ -169,7 +175,7 @@ impl CodexProvider {
 
         // reasoning effort の上書き（設定時のみ）。gpt-5.6-sol 等は既定 high で
         // 遅い/高コストなので、明示指定で下げ/上げできる。
-        if let Some(effort) = &self.reasoning_effort {
+        if let Some(effort) = effort {
             cmd.arg("-c")
                 .arg(format!("model_reasoning_effort={effort}"));
         }
@@ -246,7 +252,11 @@ impl LlmProvider for CodexProvider {
             .context("failed to create temp file for codex output")?;
         let output_path = output_file.path().to_string_lossy().to_string();
 
-        let mut cmd = self.build_base_command(model, request.agent_id.as_deref());
+        let effort = request
+            .reasoning_effort
+            .as_deref()
+            .or(self.reasoning_effort.as_deref());
+        let mut cmd = self.build_base_command(model, request.agent_id.as_deref(), effort);
         cmd.arg("-o")
             .arg(&output_path)
             // Read prompt from stdin to avoid ARG_MAX limits and /proc exposure.
@@ -327,7 +337,11 @@ impl LlmProvider for CodexProvider {
 
         let prompt = self.build_prompt(&request);
 
-        let mut cmd = self.build_base_command(&model, request.agent_id.as_deref());
+        let effort = request
+            .reasoning_effort
+            .as_deref()
+            .or(self.reasoning_effort.as_deref());
+        let mut cmd = self.build_base_command(&model, request.agent_id.as_deref(), effort);
         cmd.arg("--json")
             // Read prompt from stdin.
             .arg("-")
@@ -634,6 +648,7 @@ mod tests {
             stream: None,
             metadata: Default::default(),
             agent_id: None,
+            reasoning_effort: None,
         };
 
         let prompt = provider.build_prompt(&request);
@@ -662,6 +677,7 @@ mod tests {
             stream: None,
             metadata: Default::default(),
             agent_id: None,
+            reasoning_effort: None,
         };
 
         let prompt = provider.build_prompt(&request);
@@ -711,6 +727,7 @@ mod tests {
             stream: None,
             metadata: Default::default(),
             agent_id: None,
+            reasoning_effort: None,
         };
 
         let prompt = provider.build_prompt(&request);

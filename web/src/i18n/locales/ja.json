@@ -248,6 +248,8 @@
   "agentDetail.llmModel": "LLMモデル",
   "agentDetail.llmModelDesc": "このエージェントの応答に使うモデル（サーバー既定: {{default}}）",
   "agentDetail.modelSelect": "モデル",
+  "agentDetail.thinkingLevel": "推論（thinking）強度",
+  "agentDetail.thinkingDefault": "モデル既定",
   "agentDetail.useServerDefault": "サーバー既定を使用",
   "agentDetail.modelSaved": "モデル設定を保存しました",
   "agentDetail.modelSaveFailed": "モデル設定の保存に失敗しました",

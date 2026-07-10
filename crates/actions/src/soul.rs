@@ -93,6 +93,7 @@ mod tests {
             instructions: "".to_string(),
             heartbeat_instructions: "".to_string(),
             model: None,
+            reasoning_effort: None,
             metadata_json: None,
         };
         upsert_agent(&conn, &agent).unwrap();
