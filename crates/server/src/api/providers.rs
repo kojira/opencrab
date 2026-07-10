@@ -66,6 +66,11 @@ fn provider_entry(
         .and_then(|o| o.default_model.clone())
         .or_else(|| toml_cfg.map(|c| c.default_model.clone()))
         .unwrap_or_default();
+    // 推論（thinking）強度: DB > TOML > 空（モデル既定）
+    let reasoning_effort = ov
+        .and_then(|o| o.reasoning_effort.clone())
+        .or_else(|| toml_cfg.map(|c| c.reasoning_effort.clone()))
+        .unwrap_or_default();
 
     json!({
         "name": name,
@@ -78,6 +83,7 @@ fn provider_entry(
         "api_key_masked": api_key_masked,
         "base_url": base_url,
         "default_model": default_model,
+        "reasoning_effort": reasoning_effort,
     })
 }
 
@@ -188,11 +194,16 @@ pub async fn update_provider(
         if let Some(v) = tri_string(&body, "default_model").map_err(bad)? {
             row.default_model = v;
         }
+        if let Some(v) = tri_string(&body, "reasoning_effort").map_err(bad)? {
+            // 空文字は「解除」として None に正規化
+            row.reasoning_effort = v.filter(|s| !s.is_empty());
+        }
         // 全フィールドが None ならオーバーライド行ごと削除
         if row.enabled.is_none()
             && row.api_key.is_none()
             && row.base_url.is_none()
             && row.default_model.is_none()
+            && row.reasoning_effort.is_none()
         {
             opencrab_db::queries::delete_llm_provider_override(&conn, &name).map_err(internal)?;
         } else {

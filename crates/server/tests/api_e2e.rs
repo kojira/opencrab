@@ -1306,6 +1306,45 @@ async fn test_update_provider_disable_and_reject_bad_name() {
 }
 
 #[tokio::test]
+async fn test_update_provider_reasoning_effort_roundtrip() {
+    let app = create_test_app();
+    // 推論強度を設定
+    let (status, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/codex",
+        Some(serde_json::json!({ "reasoning_effort": "medium" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["provider"]["reasoning_effort"], "medium");
+    assert_eq!(json["provider"]["has_override"], true);
+
+    // GET でも反映
+    let (_, json) = send_request(app.clone(), "GET", "/api/llm/providers", None).await;
+    let codex = json["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "codex")
+        .unwrap()
+        .clone();
+    assert_eq!(codex["reasoning_effort"], "medium");
+
+    // null で解除 → モデル既定（空）に戻り、他フィールドが無ければ行ごと消える
+    let (status, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/providers/codex",
+        Some(serde_json::json!({ "reasoning_effort": null })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["provider"]["reasoning_effort"], "");
+    assert_eq!(json["provider"]["has_override"], false);
+}
+
+#[tokio::test]
 async fn test_update_provider_null_clears_field_keeps_others() {
     let app = create_test_app();
     // まずキーと無効化を両方設定

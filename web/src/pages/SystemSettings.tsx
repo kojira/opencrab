@@ -35,6 +35,7 @@ function ProviderEditor({
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [defaultModel, setDefaultModel] = useState(provider.default_model);
+  const [reasoningEffort, setReasoningEffort] = useState(provider.reasoning_effort);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,6 +48,8 @@ function ProviderEditor({
     if (baseUrl !== provider.base_url) body.base_url = baseUrl === '' ? null : baseUrl;
     if (defaultModel !== provider.default_model)
       body.default_model = defaultModel === '' ? null : defaultModel;
+    if (reasoningEffort !== provider.reasoning_effort)
+      body.reasoning_effort = reasoningEffort === '' ? null : reasoningEffort;
     try {
       await updateLlmProvider(provider.name, body);
       onSaved(`${provider.name} を保存し、ルーターを再構築しました（再起動不要）`);
@@ -97,6 +100,23 @@ function ProviderEditor({
             placeholder="例: gpt-4o"
             className={inputCls}
           />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+            推論（thinking）強度
+          </label>
+          <select
+            value={reasoningEffort}
+            onChange={(e) => setReasoningEffort(e.target.value)}
+            className={inputCls}
+          >
+            <option value="">モデル既定</option>
+            <option value="minimal">minimal</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
         </div>
       </div>
       {error && <p className="text-sm text-red-500">エラー: {error}</p>}
@@ -199,11 +219,17 @@ function ProviderRow({
           )}
         </div>
       </div>
-      {(provider.base_url || provider.default_model) && (
+      {(provider.base_url || provider.default_model || provider.reasoning_effort) && (
         <p className="mt-1 truncate pl-5 text-xs text-on-surface-variant">
           {provider.base_url && <span className="font-mono">{provider.base_url}</span>}
           {provider.base_url && provider.default_model && ' ・ '}
           {provider.default_model && <span>既定: {provider.default_model}</span>}
+          {provider.reasoning_effort && (
+            <span>
+              {(provider.base_url || provider.default_model) && ' ・ '}
+              thinking: {provider.reasoning_effort}
+            </span>
+          )}
         </p>
       )}
       {editing && (

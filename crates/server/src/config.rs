@@ -354,6 +354,9 @@ pub fn apply_llm_overrides(
         if let Some(model) = &row.default_model {
             entry.default_model = model.clone();
         }
+        if let Some(effort) = &row.reasoning_effort {
+            entry.reasoning_effort = effort.clone();
+        }
     }
     cfg
 }
@@ -454,6 +457,10 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 }
                 if pconfig.timeout_secs > 0 {
                     p = p.with_timeout_secs(pconfig.timeout_secs);
+                }
+                // reasoning effort の上書き（gpt-5.6 系の既定 high を下げる等）。
+                if !pconfig.reasoning_effort.is_empty() {
+                    p = p.with_reasoning_effort(&pconfig.reasoning_effort);
                 }
                 if !pconfig.models.is_empty() {
                     let extra: Vec<(String, u32)> = pconfig

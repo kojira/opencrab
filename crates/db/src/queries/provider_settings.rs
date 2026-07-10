@@ -23,18 +23,21 @@ pub struct LlmProviderOverrideRow {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
+    /// 推論（thinking）強度。None = TOML/モデル既定。"low"|"medium"|"high"|"xhigh" 等。
+    pub reasoning_effort: Option<String>,
 }
 
 pub fn upsert_llm_provider_override(conn: &Connection, row: &LlmProviderOverrideRow) -> Result<()> {
     conn.execute(
         "INSERT INTO llm_provider_overrides
-            (provider, enabled, api_key, base_url, default_model, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            (provider, enabled, api_key, base_url, default_model, reasoning_effort, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(provider) DO UPDATE SET
             enabled = excluded.enabled,
             api_key = excluded.api_key,
             base_url = excluded.base_url,
             default_model = excluded.default_model,
+            reasoning_effort = excluded.reasoning_effort,
             updated_at = excluded.updated_at",
         params![
             row.provider,
@@ -42,6 +45,7 @@ pub fn upsert_llm_provider_override(conn: &Connection, row: &LlmProviderOverride
             row.api_key,
             row.base_url,
             row.default_model,
+            row.reasoning_effort,
             Utc::now().to_rfc3339(),
         ],
     )?;
@@ -53,7 +57,7 @@ pub fn get_llm_provider_override(
     provider: &str,
 ) -> Result<Option<LlmProviderOverrideRow>> {
     let result = conn.query_row(
-        "SELECT provider, enabled, api_key, base_url, default_model
+        "SELECT provider, enabled, api_key, base_url, default_model, reasoning_effort
          FROM llm_provider_overrides WHERE provider = ?1",
         params![provider],
         map_override_row,
@@ -67,7 +71,7 @@ pub fn get_llm_provider_override(
 
 pub fn list_llm_provider_overrides(conn: &Connection) -> Result<Vec<LlmProviderOverrideRow>> {
     let mut stmt = conn.prepare(
-        "SELECT provider, enabled, api_key, base_url, default_model
+        "SELECT provider, enabled, api_key, base_url, default_model, reasoning_effort
          FROM llm_provider_overrides ORDER BY provider",
     )?;
     let rows = stmt
@@ -91,6 +95,7 @@ fn map_override_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LlmProviderOver
         api_key: row.get(2)?,
         base_url: row.get(3)?,
         default_model: row.get(4)?,
+        reasoning_effort: row.get(5)?,
     })
 }
 
