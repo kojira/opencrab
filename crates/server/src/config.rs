@@ -25,9 +25,60 @@ pub struct AppConfig {
     pub tools: opencrab_actions::tools::ToolsConfig,
     #[serde(default)]
     pub evaluator: EvaluatorConfig,
+    /// スリープ時スキル棚卸し（自己 curation ループ）。
+    #[serde(default)]
+    pub skill_consolidation: SkillConsolidationConfig,
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
+}
+
+/// スリープ時スキル棚卸しの設定（design-sleep-skill-consolidation.md §10）。
+#[derive(Debug, Deserialize, Clone)]
+pub struct SkillConsolidationConfig {
+    /// ループ全体の on/off。
+    #[serde(default = "default_sc_enabled")]
+    pub enabled: bool,
+    /// 発火する新規活動（未処理セッション）数 N。
+    #[serde(default = "default_sc_trigger")]
+    pub trigger_new_sessions: i64,
+    /// 保険トリガの時間キャップ（時間）。
+    #[serde(default = "default_sc_time_cap")]
+    pub time_cap_hours: i64,
+    /// 最短間隔フロア（秒）。
+    #[serde(default = "default_sc_min_interval")]
+    pub min_interval_secs: i64,
+    /// 棚卸しパケットに含める archived スキル数（再検討用）。
+    #[serde(default = "default_sc_include_archived")]
+    pub include_archived_in_review: i64,
+}
+
+impl Default for SkillConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_sc_enabled(),
+            trigger_new_sessions: default_sc_trigger(),
+            time_cap_hours: default_sc_time_cap(),
+            min_interval_secs: default_sc_min_interval(),
+            include_archived_in_review: default_sc_include_archived(),
+        }
+    }
+}
+
+fn default_sc_enabled() -> bool {
+    false
+}
+fn default_sc_trigger() -> i64 {
+    10
+}
+fn default_sc_time_cap() -> i64 {
+    24
+}
+fn default_sc_min_interval() -> i64 {
+    3600
+}
+fn default_sc_include_archived() -> i64 {
+    3
 }
 
 /// verify 段（evaluator）の設定。

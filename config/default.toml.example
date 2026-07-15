@@ -143,6 +143,16 @@ permission = "agent"
 enabled = true
 threshold = 0.7
 
+# スリープ時スキル棚卸し（自己 curation ループ）。エージェントがアイドル時に自分の人格で
+# スキルを keep/retire/refine/create する。LLM を消費するため既定は無効（opt-in）。
+# 詳細: docs/design-sleep-skill-consolidation.md
+[skill_consolidation]
+enabled = false           # 有効化で opt-in
+trigger_new_sessions = 10 # この件数の新規セッションが溜まったら発火
+time_cap_hours = 24       # あるいは前回からこの時間経過で発火（活動が1件以上ある時）
+min_interval_secs = 3600  # 最短間隔
+include_archived_in_review = 3  # 棚卸し時に再検討する引退済みスキル数
+
 # VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
 # [voice]
 # enabled = true

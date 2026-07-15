@@ -27,6 +27,7 @@ fn create_test_app() -> Router {
         )),
         compaction_ratio: 0.5,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
         #[cfg(feature = "discord")]
@@ -709,6 +710,7 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
         )),
         compaction_ratio: 0.5,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
         #[cfg(feature = "discord")]
@@ -1577,4 +1579,160 @@ async fn test_setup_seed_standard_skills() {
 
     std::env::remove_var("OPENCRAB_SKILLS_DIR");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ==================== Skill consolidation (sleep curation) ====================
+
+fn state_with_consolidation(
+    db: opencrab_db::Db,
+    mock: Arc<MockLlmProvider>,
+    cfg: opencrab_server::config::SkillConsolidationConfig,
+) -> AppState {
+    let mut router = LlmRouter::new();
+    router.add_provider(mock as Arc<dyn LlmProvider>);
+    router.set_default_provider("mock");
+    AppState {
+        db,
+        llm_router: opencrab_server::SharedLlmRouter::new(router),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
+        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        default_model: "mock:gpt-4o".to_string(),
+        tools_config: Arc::new(std::sync::RwLock::new(
+            opencrab_actions::tools::ToolsConfig::default(),
+        )),
+        compaction_ratio: 0.5,
+        evaluator: opencrab_server::config::EvaluatorConfig::default(),
+        skill_consolidation: cfg,
+        loop_restart_enabled: false,
+        index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
+        #[cfg(feature = "discord")]
+        discord_manager: None,
+    }
+}
+
+#[tokio::test]
+async fn test_skill_consolidation_disabled_is_noop() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let db = opencrab_db::Db::from_connection(conn);
+    let mock = Arc::new(MockLlmProvider::new());
+    // enabled=false（既定）→ 何もせず false
+    let state = state_with_consolidation(
+        db,
+        mock,
+        opencrab_server::config::SkillConsolidationConfig::default(),
+    );
+    let ran = opencrab_server::skill_consolidation::maybe_run_skill_consolidation(&state, "a1")
+        .await
+        .unwrap();
+    assert!(!ran);
+}
+
+#[tokio::test]
+async fn test_skill_consolidation_curates_and_audits() {
+    let conn = opencrab_db::init_memory().unwrap();
+    let db = opencrab_db::Db::from_connection(conn);
+    let mock = Arc::new(MockLlmProvider::new());
+    // 本人が「Old を retire、New を create」する判断を返す
+    mock.push_text_response(
+        r#"[{"name":"Old","action":"retire","reason":"もう使わない"},
+            {"name":"New","action":"create","reason":"最近こう動きたい","description":"新スキル","guidance":"こうする"}]"#,
+    );
+
+    let cfg = opencrab_server::config::SkillConsolidationConfig {
+        enabled: true,
+        trigger_new_sessions: 1,
+        time_cap_hours: 1,
+        min_interval_secs: 0,
+        include_archived_in_review: 3,
+    };
+    let state = state_with_consolidation(db.clone(), mock, cfg);
+
+    {
+        let conn = db.lock().unwrap();
+        // エージェント + 既存スキル Old
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &opencrab_db::queries::AgentRow {
+                agent_id: "a1".into(),
+                name: "A".into(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "Persona".into(),
+                personality: Some("好奇心旺盛".into()),
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+        opencrab_db::queries::insert_skill(
+            &conn,
+            &opencrab_db::queries::SkillRow {
+                id: "sk-old".into(),
+                agent_id: "a1".into(),
+                name: "Old".into(),
+                description: "d".into(),
+                situation_pattern: String::new(),
+                guidance: "g".into(),
+                source_type: "self_created".into(),
+                source_context: None,
+                file_path: None,
+                effectiveness: None,
+                usage_count: 0,
+                is_active: true,
+                permission: "\"agent\"".into(),
+                archived: false,
+            },
+        )
+        .unwrap();
+        // 過去に棚卸し済み（cold-start シードを回避してすぐ発火させる）
+        opencrab_db::queries::set_last_skill_consolidation_at(
+            &conn,
+            "a1",
+            "2020-01-01T00:00:00+00:00",
+        )
+        .unwrap();
+        // 新規活動（トリガの母数）
+        opencrab_db::queries::insert_session_log(
+            &conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: "a1".into(),
+                session_id: "sess-1".into(),
+                log_type: "speech".into(),
+                content: "hi".into(),
+                speaker_id: Some("a1".into()),
+                turn_number: Some(1),
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let ran = opencrab_server::skill_consolidation::maybe_run_skill_consolidation(&state, "a1")
+        .await
+        .unwrap();
+    assert!(ran, "consolidation should have fired");
+
+    let conn = db.lock().unwrap();
+    // Old は archived（active から消える）、New は作成されて active
+    let active = opencrab_db::queries::list_skills(&conn, "a1", true).unwrap();
+    let names: Vec<_> = active.iter().map(|s| s.name.as_str()).collect();
+    assert!(!names.contains(&"Old"), "Old should be retired: {names:?}");
+    assert!(names.contains(&"New"), "New should be created: {names:?}");
+    // 監査ログ層1（agent_logs, context=sleep）
+    let logs = opencrab_db::queries::list_agent_logs(&conn, Some("a1"), None, 10).unwrap();
+    assert!(
+        logs.iter().any(|l| l.context == "sleep"),
+        "sleep audit log missing"
+    );
+    // last_at が前進している
+    let last = opencrab_db::queries::get_last_skill_consolidation_at(&conn, "a1").unwrap();
+    assert!(last.is_some() && last.as_deref() != Some("2020-01-01T00:00:00+00:00"));
 }

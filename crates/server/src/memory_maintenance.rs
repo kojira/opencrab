@@ -60,11 +60,15 @@ pub struct MaintenanceReport {
     pub logs_indexed: usize,
     pub keywords_backfilled: usize,
     pub rolled_up_month: Option<String>,
+    pub skill_consolidated: bool,
 }
 
 impl MaintenanceReport {
     pub fn did_anything(&self) -> bool {
-        self.logs_indexed > 0 || self.keywords_backfilled > 0 || self.rolled_up_month.is_some()
+        self.logs_indexed > 0
+            || self.keywords_backfilled > 0
+            || self.rolled_up_month.is_some()
+            || self.skill_consolidated
     }
 }
 
@@ -215,6 +219,15 @@ pub async fn run_maintenance_tick(
         Ok(month) => report.rolled_up_month = month,
         Err(e) => {
             tracing::warn!(agent_id = %agent_id, error = %e, "monthly rollup failed");
+        }
+    }
+
+    // ④ スキル棚卸し（自己 curation）。メモリ統合の後に走らせる（設計: 統合→振り返り）。
+    // 既定は無効（config skill_consolidation.enabled）。トリガ未達なら即 return。
+    match crate::skill_consolidation::maybe_run_skill_consolidation(state, agent_id).await {
+        Ok(ran) => report.skill_consolidated = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "skill consolidation failed");
         }
     }
 
