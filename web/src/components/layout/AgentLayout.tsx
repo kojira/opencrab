@@ -8,6 +8,7 @@ import ConfirmDialog from '../ui/ConfirmDialog';
 const tabs = [
   { key: 'overview', path: '', icon: 'info', labelKey: 'agentNav.overview' },
   { key: 'skills', path: '/skills', icon: 'psychology', labelKey: 'agentNav.skills' },
+  { key: 'sleep', path: '/sleep', icon: 'bedtime', labelKey: 'agentNav.sleep' },
   { key: 'memory', path: '/memory', icon: 'memory', labelKey: 'agentNav.memory' },
   { key: 'sessions', path: '/sessions', icon: 'forum', labelKey: 'agentNav.sessions' },
   { key: 'co-agents', path: '/co-agents', icon: 'group', labelKey: 'agentNav.coAgents' },

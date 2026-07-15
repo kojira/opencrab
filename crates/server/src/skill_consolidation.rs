@@ -123,6 +123,23 @@ pub async fn maybe_run_skill_consolidation(
         Ok(resp) => resp.first_text().unwrap_or_default().to_string(),
         Err(e) => {
             tracing::warn!(agent_id, error = %e, "skill consolidation LLM call failed");
+            // 失敗も監査に残す（last_at だけ進むと DB から追えないため, レビュー#6）。
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+            let _ = opencrab_db::queries::insert_agent_log(
+                &conn,
+                &opencrab_db::queries::AgentLogRow {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: Some(agent_id.to_string()),
+                    level: "warn".to_string(),
+                    context: "sleep".to_string(),
+                    message: json!({ "trigger": "activity", "error": e.to_string() }).to_string(),
+                    created_at: Some(now.to_rfc3339()),
+                },
+            );
+            drop(conn);
             // 失敗しても last_at は進める（同じ活動で無限リトライしない）
             persist_last_at(state, agent_id, &now)?;
             return Ok(false);
@@ -361,9 +378,11 @@ fn apply_decisions(
         .db
         .lock()
         .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    let _ = active_names; // 将来の絞り込み用（現状は全判断を監査に残す）
     for d in decisions {
         let action = d.action.to_lowercase();
         let mut effective = "kept";
+        let mut skill_id: Option<String> = None;
         match action.as_str() {
             "retire" => {
                 if let Ok(Some(s)) =
@@ -371,6 +390,7 @@ fn apply_decisions(
                 {
                     if opencrab_db::queries::archive_skill(&conn, &s.id, true).is_ok() {
                         effective = "retired";
+                        skill_id = Some(s.id);
                     }
                 }
             }
@@ -387,8 +407,10 @@ fn apply_decisions(
                     }
                     s.archived = false; // refine は復活も兼ねる
                     s.is_active = true;
+                    let sid = s.id.clone();
                     if opencrab_db::queries::update_skill(&conn, &s).is_ok() {
                         effective = "refined";
+                        skill_id = Some(sid);
                     }
                 }
             }
@@ -399,8 +421,9 @@ fn apply_decisions(
                     .flatten()
                     .is_some();
                 if !exists {
+                    let new_id = uuid::Uuid::new_v4().to_string();
                     let row = opencrab_db::queries::SkillRow {
-                        id: uuid::Uuid::new_v4().to_string(),
+                        id: new_id.clone(),
                         agent_id: agent_id.to_string(),
                         name: d.name.clone(),
                         description: d.description.clone().unwrap_or_default(),
@@ -417,15 +440,15 @@ fn apply_decisions(
                     };
                     if opencrab_db::queries::insert_skill(&conn, &row).is_ok() {
                         effective = "created";
+                        skill_id = Some(new_id);
                     }
                 }
             }
             _ => {} // keep / 未知 → 変更なし
         }
-        // 存在しない active スキルへの keep 等はノイズなので記録は実効アクションのみ絞る
-        let _ = active_names;
         summary.push(json!({
             "skill": d.name,
+            "skill_id": skill_id,
             "action": effective,
             "reason": d.reason,
         }));

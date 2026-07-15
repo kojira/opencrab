@@ -93,6 +93,10 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(api::agents::delete_agent),
         )
         // オンボーディング（初回セットアップ進捗の集約）
+        .route(
+            "/api/agents/{id}/sleep-logs",
+            get(api::sleep::get_sleep_logs),
+        )
         .route("/api/setup/status", get(api::setup::get_setup_status))
         .route(
             "/api/agents/{id}/skills/seed-standard",

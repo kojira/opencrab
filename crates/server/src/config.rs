@@ -66,6 +66,8 @@ impl Default for SkillConsolidationConfig {
 }
 
 fn default_sc_enabled() -> bool {
+    // 設計 doc の既定は true だが、LLM を消費する自律ループのため安全側に倒して
+    // opt-in（既定 false）とする。運営者が config で明示的に有効化する。
     false
 }
 fn default_sc_trigger() -> i64 {
