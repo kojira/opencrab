@@ -1939,6 +1939,7 @@ dependencies = [
  "opencrab-discord",
  "opencrab-gateway",
  "opencrab-llm",
+ "opencrab-llm-types",
  "opencrab-voice",
  "rusqlite",
  "serde",

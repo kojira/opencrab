@@ -25,6 +25,7 @@ dashmap = { workspace = true }
 rusqlite = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-llm = { workspace = true }
+opencrab-llm-types = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-actions = { workspace = true }
 opencrab-db = { workspace = true }

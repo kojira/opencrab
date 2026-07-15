@@ -248,6 +248,56 @@ pub fn archive_skill(conn: &Connection, skill_id: &str, archived: bool) -> Resul
     Ok(())
 }
 
+// ============================================
+// Skill usage log (スリープ棚卸しの弱い利用ヒント)
+// ============================================
+
+/// スキルが使われた（応答に名前が出た）ことをセッション単位で記録する。
+/// 名前一致ベースなのでノイズがあり、棚卸しでは弱いヒントとしてのみ使う。
+pub fn insert_skill_usage(
+    conn: &Connection,
+    agent_id: &str,
+    skill_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO skill_usage_log (agent_id, skill_id, session_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![agent_id, skill_id, session_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// 指定時刻以降に当該スキルが使われた distinct セッション ID を返す（弱い利用ヒント）。
+/// `since` が None なら全期間。
+pub fn list_skill_used_sessions(
+    conn: &Connection,
+    skill_id: &str,
+    since: Option<&str>,
+) -> Result<Vec<String>> {
+    let collect =
+        |stmt: &mut rusqlite::Statement, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<String>> {
+            let rows = stmt.query_map(p, |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        };
+    match since {
+        Some(ts) => {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT session_id FROM skill_usage_log
+                 WHERE skill_id = ?1 AND created_at >= ?2 ORDER BY created_at DESC",
+            )?;
+            collect(&mut stmt, params![skill_id, ts])
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT session_id FROM skill_usage_log
+                 WHERE skill_id = ?1 ORDER BY created_at DESC",
+            )?;
+            collect(&mut stmt, params![skill_id])
+        }
+    }
+}
+
 pub fn find_unused_skills(
     conn: &Connection,
     agent_id: &str,

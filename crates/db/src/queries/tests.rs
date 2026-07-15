@@ -2490,3 +2490,44 @@ fn test_index_write_helpers_work_inside_outer_transaction() {
     assert_eq!(nodes_count(&conn), 1);
     assert_eq!(fts_count(&conn), 1);
 }
+
+#[test]
+fn test_skill_usage_log_and_last_consolidation() {
+    let conn = setup();
+    // スキル利用のセッション単位記録
+    insert_skill_usage(&conn, "a1", "sk1", "sess-A").unwrap();
+    insert_skill_usage(&conn, "a1", "sk1", "sess-B").unwrap();
+    insert_skill_usage(&conn, "a1", "sk2", "sess-A").unwrap();
+    let mut sk1 = list_skill_used_sessions(&conn, "sk1", None).unwrap();
+    sk1.sort();
+    assert_eq!(sk1, vec!["sess-A".to_string(), "sess-B".to_string()]);
+    assert_eq!(
+        list_skill_used_sessions(&conn, "sk2", None).unwrap().len(),
+        1
+    );
+    // since フィルタ（未来時刻なら0件）
+    let future = "2999-01-01T00:00:00+00:00";
+    assert!(list_skill_used_sessions(&conn, "sk1", Some(future))
+        .unwrap()
+        .is_empty());
+
+    // last_skill_consolidation_at: 行が無ければ None、UPSERT で行を作って永続化
+    assert!(get_last_skill_consolidation_at(&conn, "a1")
+        .unwrap()
+        .is_none());
+    set_last_skill_consolidation_at(&conn, "a1", "2026-07-01T00:00:00+00:00").unwrap();
+    assert_eq!(
+        get_last_skill_consolidation_at(&conn, "a1")
+            .unwrap()
+            .as_deref(),
+        Some("2026-07-01T00:00:00+00:00")
+    );
+    // 2回目はフィールドのみ更新
+    set_last_skill_consolidation_at(&conn, "a1", "2026-07-02T00:00:00+00:00").unwrap();
+    assert_eq!(
+        get_last_skill_consolidation_at(&conn, "a1")
+            .unwrap()
+            .as_deref(),
+        Some("2026-07-02T00:00:00+00:00")
+    );
+}

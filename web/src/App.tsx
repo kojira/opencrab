@@ -9,6 +9,7 @@ import AgentOverview from './pages/AgentOverview';
 import AgentIdentityEdit from './pages/AgentIdentityEdit';
 import PersonaEdit from './pages/PersonaEdit';
 import AgentSkills from './pages/AgentSkills';
+import AgentSleep from './pages/AgentSleep';
 import AgentMemory from './pages/AgentMemory';
 import AgentSessions from './pages/AgentSessions';
 import AgentAnalytics from './pages/AgentAnalytics';
@@ -40,6 +41,7 @@ export default function App() {
             <Route path="edit" element={<AgentIdentityEdit />} />
             <Route path="persona" element={<PersonaEdit />} />
             <Route path="skills" element={<AgentSkills />} />
+            <Route path="sleep" element={<AgentSleep />} />
             <Route path="memory" element={<AgentMemory />} />
             <Route path="sessions" element={<AgentSessions />} />
             <Route path="co-agents" element={<AgentCoAgents />} />

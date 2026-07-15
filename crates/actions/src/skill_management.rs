@@ -156,6 +156,93 @@ impl Action for CreateMySkillAction {
     }
 }
 
+/// 自分のスキルを引退（archive）するアクション。
+/// スリープ棚卸しと対称の、wake 時にも使える手動整理手段。可逆（restore_my_skill で戻せる）。
+pub struct RetireMySkillAction;
+
+#[async_trait]
+impl Action for RetireMySkillAction {
+    fn name(&self) -> &str {
+        "retire_my_skill"
+    }
+
+    fn description(&self) -> &str {
+        "使わなくなった自分のスキルを引退させる（archive、後で restore_my_skill で戻せる）"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "description": "引退させるスキル名" }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        set_skill_archived(ctx, args, true).await
+    }
+}
+
+/// 引退させたスキルを復活（un-archive）するアクション。retire_my_skill と対称。
+pub struct RestoreMySkillAction;
+
+#[async_trait]
+impl Action for RestoreMySkillAction {
+    fn name(&self) -> &str {
+        "restore_my_skill"
+    }
+
+    fn description(&self) -> &str {
+        "引退させた自分のスキルを復活させる（un-archive）"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "description": "復活させるスキル名" }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        set_skill_archived(ctx, args, false).await
+    }
+}
+
+/// 名前でスキルを解決し archived フラグを設定する（retire/restore 共通）。
+/// archive は DB フラグのみで、ファイル操作は不要。
+async fn set_skill_archived(
+    ctx: &ActionContext,
+    args: &serde_json::Value,
+    archived: bool,
+) -> ActionResult {
+    let name = match args["name"].as_str() {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => return ActionResult::error("name is required"),
+    };
+    let conn = match ctx.db.lock() {
+        Ok(c) => c,
+        Err(_) => return ActionResult::error("db lock failed"),
+    };
+    // archived 含めて名前で解決（restore は archived スキルを対象にするため _any を使う）
+    let skill = match opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name) {
+        Ok(Some(s)) => s,
+        Ok(None) => return ActionResult::error(&format!("skill not found: {name}")),
+        Err(e) => return ActionResult::error(&e.to_string()),
+    };
+    match opencrab_db::queries::archive_skill(&conn, &skill.id, archived) {
+        Ok(()) => {
+            let key = if archived { "retired" } else { "restored" };
+            ActionResult::success(json!({ key: true, "skill_id": skill.id, "name": name }))
+        }
+        Err(e) => ActionResult::error(&e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +310,58 @@ mod tests {
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "Test Skill");
         assert_eq!(skills[0].source_type, "self_created");
+    }
+
+    #[tokio::test]
+    async fn test_retire_and_restore_my_skill() {
+        let (_dir, ctx) = test_context();
+        // スキルを1つ作成
+        CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": "Retirable",
+                    "description": "d",
+                    "situation_pattern": "s",
+                    "guidance": "g"
+                }),
+                &ctx,
+            )
+            .await;
+
+        // 引退 → active から消える
+        let r = RetireMySkillAction
+            .execute(&json!({ "name": "Retirable" }), &ctx)
+            .await;
+        assert!(r.success);
+        assert!(r.data.unwrap()["retired"].as_bool().unwrap());
+        {
+            let conn = ctx.db.lock().unwrap();
+            assert!(opencrab_db::queries::list_skills(&conn, "agent-1", true)
+                .unwrap()
+                .is_empty());
+        }
+
+        // 復活 → active に戻る（可逆）
+        let r = RestoreMySkillAction
+            .execute(&json!({ "name": "Retirable" }), &ctx)
+            .await;
+        assert!(r.success);
+        assert!(r.data.unwrap()["restored"].as_bool().unwrap());
+        {
+            let conn = ctx.db.lock().unwrap();
+            assert_eq!(
+                opencrab_db::queries::list_skills(&conn, "agent-1", true)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        // 存在しないスキルはエラー
+        let r = RetireMySkillAction
+            .execute(&json!({ "name": "nope" }), &ctx)
+            .await;
+        assert!(!r.success);
     }
 
     #[tokio::test]

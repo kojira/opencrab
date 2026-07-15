@@ -226,3 +226,43 @@ pub fn get_topic_nodes_for_session(
     let rows = stmt.query_map(params![agent_id, session_id], index_node_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
+
+/// スリープ棚卸しトリガ用: 指定時刻以降にログを持つ distinct セッション数（新規活動量）。
+/// `since` が None なら全期間。採点済み件数ではなく「未処理の活動量」を数える。
+pub fn count_active_sessions_since(
+    conn: &Connection,
+    agent_id: &str,
+    since: Option<&str>,
+) -> Result<i64> {
+    let n: i64 = match since {
+        Some(ts) => conn.query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM memory_sessions
+             WHERE agent_id = ?1 AND created_at > ?2",
+            params![agent_id, ts],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM memory_sessions WHERE agent_id = ?1",
+            params![agent_id],
+            |r| r.get(0),
+        )?,
+    };
+    Ok(n)
+}
+
+/// スリープ棚卸しの結末素材: エージェント単位で直近の verify 評価を新しい順に返す。
+/// 戻り値は (session_id, content)。棚卸しではセッション単位の結末として提示する。
+pub fn list_recent_evaluations_by_agent(
+    conn: &Connection,
+    agent_id: &str,
+    limit: i64,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, content FROM memory_sessions
+         WHERE agent_id = ?1 AND log_type = 'evaluation' ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![agent_id, limit], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}

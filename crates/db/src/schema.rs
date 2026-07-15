@@ -219,7 +219,37 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 11,
+        description: "sleep skill consolidation: skill_usage_log + agent_memory_index_config.last_skill_consolidation_at",
+        up: |conn| {
+            conn.execute_batch(SKILL_USAGE_LOG_SQL)?;
+            // 棚卸しの最終実行時刻。SQLite の ADD COLUMN DEFAULT は定数のみで
+            // datetime('now') を使えないため NULL 許容で追加し、初回シード/実行後に
+            // 明示 UPSERT で now を刻む（design-sleep-skill-consolidation.md §5/§8.3）。
+            if !column_exists(conn, "agent_memory_index_config", "last_skill_consolidation_at")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN last_skill_consolidation_at TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
+
+/// スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）。
+/// 注入時ではなく「利用が検出された時」に記録する（名前一致ベース, ノイズあり）。
+const SKILL_USAGE_LOG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS skill_usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    skill_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_log_skill ON skill_usage_log(skill_id);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_log_session ON skill_usage_log(session_id);
+";
 
 /// ダッシュボードから編集する LLM/voice プロバイダー設定のオーバーライド。
 /// TOML を土台に、行/フィールドが存在するものだけ上書きする。
@@ -1314,8 +1344,20 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     agent_id TEXT PRIMARY KEY,
     batch_size INTEGER NOT NULL DEFAULT 50,
     threshold INTEGER NOT NULL DEFAULT 20,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_skill_consolidation_at TEXT
 );
+
+-- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
+CREATE TABLE IF NOT EXISTS skill_usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    skill_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_log_skill ON skill_usage_log(skill_id);
+CREATE INDEX IF NOT EXISTS idx_skill_usage_log_session ON skill_usage_log(session_id);
 
 -- ============================================
 -- エージェント別許可コマンド（動的追加）

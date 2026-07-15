@@ -14,6 +14,7 @@ pub mod hot_reload;
 pub mod llm_adapter;
 pub mod memory_maintenance;
 pub mod process;
+pub mod skill_consolidation;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
@@ -64,6 +65,8 @@ pub struct AppState {
     pub compaction_ratio: f64,
     /// verify 段（evaluator）の設定。
     pub evaluator: config::EvaluatorConfig,
+    /// スリープ時スキル棚卸し（自己 curation ループ）の設定。
+    pub skill_consolidation: config::SkillConsolidationConfig,
     /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
     pub loop_restart_enabled: bool,
     /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
@@ -90,6 +93,10 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(api::agents::delete_agent),
         )
         // オンボーディング（初回セットアップ進捗の集約）
+        .route(
+            "/api/agents/{id}/sleep-logs",
+            get(api::sleep::get_sleep_logs),
+        )
         .route("/api/setup/status", get(api::setup::get_setup_status))
         .route(
             "/api/agents/{id}/skills/seed-standard",
