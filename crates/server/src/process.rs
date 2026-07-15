@@ -1093,7 +1093,7 @@ fn skill_mentioned(response_lower: &str, skill_name: &str) -> bool {
 
 /// depth 0 の run 完了時、応答で言及された有効スキルの利用回数を +1 する。
 /// 「実際に使った時だけ」カウントするための best-effort（名前言及ベース）。
-fn record_used_skills(state: &AppState, agent_id: &str, response: &str) {
+fn record_used_skills(state: &AppState, agent_id: &str, session_id: &str, response: &str) {
     if response.trim().is_empty() {
         return;
     }
@@ -1107,6 +1107,12 @@ fn record_used_skills(state: &AppState, agent_id: &str, response: &str) {
         if skill_mentioned(&response_lower, &s.name) {
             if let Err(e) = opencrab_db::queries::increment_skill_usage(&conn, &s.id) {
                 tracing::warn!(skill = %s.name, error = %e, "failed to increment skill usage");
+            }
+            // スリープ棚卸しの弱い利用ヒント: セッション単位でも記録する（名前一致ベース）。
+            if let Err(e) =
+                opencrab_db::queries::insert_skill_usage(&conn, agent_id, &s.id, session_id)
+            {
+                tracing::warn!(skill = %s.name, error = %e, "failed to log skill usage session");
             }
         }
     }
@@ -1449,7 +1455,7 @@ pub async fn run_agent_response(
     // sub-engine の内部 run は数えない（メインの返答のみを対象）。
     if depth == 0 {
         if let Ok(ref engine_result) = result {
-            record_used_skills(state, agent_id, &engine_result.response);
+            record_used_skills(state, agent_id, session_id, &engine_result.response);
         }
     }
 

@@ -858,6 +858,47 @@ pub fn upsert_memory_index_config(
     })
 }
 
+/// スリープ棚卸しの最終実行時刻を取得する。行が無い/NULL なら `None`。
+///
+/// `get_memory_index_config` は行が無いとき非永続デフォルトを返す（行を作らない）ため、
+/// 棚卸し状態はこの専用 getter/setter で明示的に読み書きする
+/// （design-sleep-skill-consolidation.md §5/§8.3）。
+pub fn get_last_skill_consolidation_at(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT last_skill_consolidation_at FROM agent_memory_index_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// スリープ棚卸しの最終実行時刻を UPSERT で永続化する（行が無ければ作る）。
+/// config 行は自動生成されないため、初回シード/実行後にこれで明示的に刻む。
+pub fn set_last_skill_consolidation_at(conn: &Connection, agent_id: &str, ts: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agent_memory_index_config
+             (agent_id, batch_size, threshold, updated_at, last_skill_consolidation_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             last_skill_consolidation_at = excluded.last_skill_consolidation_at",
+        params![
+            agent_id,
+            BATCH_SIZE_DEFAULT,
+            THRESHOLD_DEFAULT,
+            chrono::Utc::now().to_rfc3339(),
+            ts,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn next_short_id(conn: &Connection, agent_id: &str, prefix: &str) -> Result<String> {
     let max: Option<i64> = conn
         .query_row(

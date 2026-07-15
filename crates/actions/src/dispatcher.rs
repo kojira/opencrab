@@ -48,6 +48,8 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(SearchMyHistoryAction));
         dispatcher.register(Arc::new(SummarizeAndSaveAction));
         dispatcher.register(Arc::new(CreateMySkillAction));
+        dispatcher.register(Arc::new(RetireMySkillAction));
+        dispatcher.register(Arc::new(RestoreMySkillAction));
         dispatcher.register(Arc::new(BrowseMemoryIndexAction));
         dispatcher.register(Arc::new(RetrieveMemoryNodesAction));
         dispatcher.register(Arc::new(SearchMemoryIndexAction));
