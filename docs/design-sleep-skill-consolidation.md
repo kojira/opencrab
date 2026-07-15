@@ -1,6 +1,6 @@
 # 設計: スリープ時スキル棚卸し（エージェント自己 curation ループ）
 
-> Status: 設計（未実装） / rev.4（第三者レビュー #100 の1〜3回目指摘を反映）
+> Status: 設計（未実装, 実装着手可） / rev.5（第三者レビュー #100 の1〜4回目指摘を反映）
 > 関連: `docs/design-skill-system-v2.md`, `docs/design-memory-rollup-v2.md`
 > 着想元: Behrouz et al. "Language Models Need Sleep: Learning to Self-Modify and Consolidate Memories" (arXiv:2606.03979, 2026)
 
@@ -110,15 +110,17 @@ workspace も無い**（渡っているのは `LlmRouterAdapter`・persona の�
 - **「新規活動」の定義（1回目 #7 の循環修正）**: 「前回 `last_skill_consolidation_at` 以降に新規
   ログ/終了を持つセッション数」。採点はパス内部でやるので「採点済み件数」で数えると常に0で
   発火しない循環に陥る → **未処理の活動量**で数える
-- **cold-start 暴発の完全修正（2回目#3 + 3回目#4）**: SQLite は `ALTER TABLE ADD COLUMN` の DEFAULT に
-  `datetime('now')` を**許さない**（定数のみ）。かつ保存先 `agent_memory_index_config` は行が
-  **遅延生成**で既存エージェントは行が無いことが多い（`memory_maintenance.rs:138`）。よって3経路を
-  すべて仕様化する:
-  1. マイグレーション: カラムを NULL 許容で追加 → 直後に `UPDATE ... SET last_..._at =
-     datetime('now') WHERE last_..._at IS NULL`（既存**行がある**エージェントを now でシード）
-  2. 遅延生成の既定値も `now`（行が無かったエージェントも、生成時に now で刻む）
-  3. トリガ評価時に `last_..._at IS NULL` を見たら「初回：活動0扱いで now を刻んで return」
-  → 履歴持ちの既存エージェント導入時に全履歴が「新規活動」に見える一斉暴発を防ぐ
+- **cold-start 暴発の完全修正（2回目#3 + 3回目#4 + 4回目#1）**: 重要な事実 —
+  `get_memory_index_config` は行が無いとき**非永続のメモリ内デフォルトを返すだけで行を作らない**
+  （`memory_index.rs:822`）。したがって rev.4 が書いた「遅延生成で now を刻む」は**成立しない
+  （誤り）**。config 行の永続化は**明示 UPSERT のみ**。正しい機構は:
+  1. `last_skill_consolidation_at` を NULL 許容で追加（SQLite の ADD COLUMN DEFAULT は定数のみ
+     なので初期 NULL）＋専用 getter/setter を持つ（§8.3）
+  2. **初回遭遇時（行なし or NULL）= シード**: 活動0扱いで **`set_last_skill_consolidation_at(now)`
+     を UPSERT して行を作り**、return する（既存履歴を「新規活動」に数えない＝一斉暴発を防ぐ）
+  3. **棚卸し実行後も必ず `last_..._at = now` を UPSERT** して永続化（次 tick の基準にする）
+  → config 行は自動生成されないので、永続化を明示 UPSERT に一本化するのが肝（`memory_maintenance.rs:138`
+  の `unwrap_or_else` は破棄されるメモリ内フォールバックであり「行を刻む」ではない）
 - `N` 初期値目安 = 10 セッション。すべて config 化（§10）
 
 ## 6. 棚卸しの中身
@@ -128,8 +130,10 @@ workspace も無い**（渡っているのは `LlmRouterAdapter`・persona の�
 本人に渡すのは、**metric ではなく生の経験と結末**:
 
 - **スキル一覧**: 各スキルの `guidance` / 説明 / 作成経緯（source）
-- **直近セッションの要約**: 既存のメモリ索引（`build_memory_index_section`, `memory_index/`）が
-  すでに生成している月次要約・topic を流用。「最近どんな会話・行動をしたか」の文脈
+- **直近セッションの要約**: 既存のメモリ索引（`build_memory_index_section`, `context_section.rs:60`）が
+  生成済みの月次要約・topic を流用。「最近どんな会話・行動をしたか」の文脈。スリープからは
+  `session_id` に空文字を渡せばエージェント全体の要約が得られる（4回目#2 で確認）。ただし索引未構築の
+  若いエージェントは `Ok(None)` で文脈が薄く、**初回棚卸しは素材が少ない**点は許容する
 - **セッション単位の結末**: そのセッションが良かったか — verify 段評価
   （`session_logs.log_type=evaluation` の score）や `evaluate_response` の
   `llm_usage_metrics.quality_score`。**セッション単位で提示**（per-skill に按分・計算しない）
@@ -156,8 +160,10 @@ workspace も無い**（渡っているのは `LlmRouterAdapter`・persona の�
   挙動と同じで、DB/workspace 乖離を新たに生まない
 - **`situation_pattern` の扱い（3回目#3）**: このフィールドは実装上、二重の意味を持つ地雷
   （`create_my_skill` は状況パターン散文を入れ、`row_to_skill` は actions JSON として解釈する）。
-  スリープ生成物は **`acquire_skill` と同じく `situation_pattern=""`** にして解釈衝突を避ける
-  （actions は元々 DB で使えないので欠落は許容。§6.1 の限界と整合）
+  スリープ**新規生成**物は **`acquire_skill` と同じく `situation_pattern=""`** にして解釈衝突を避ける
+  （actions は元々 DB で使えないので欠落は許容）。**ただし refine（既存スキルの `update_skill`）では
+  既存 `situation_pattern` を保持し `""` で上書きしない**（外部由来の状況記述散文を消す副作用を防ぐ,
+  4回目#3）。空にするのは新規生成スキルのみ
 - 排他: 既存 `try_acquire_build_slot`（`memory_maintenance.rs:40`, agent_id 素キー）を、増分ビルドと
   相互排他しないよう **名前空間キー**（例 `skillcuration:{agent_id}`）で流用する
 - 冪等/衝突: 古さ7日ゲート（`find_unused_skills`）は実際には archive せずログのみ（`skill.rs:221`）なので
@@ -205,13 +211,20 @@ CREATE INDEX idx_skill_usage_log_skill ON skill_usage_log(skill_id);
 - `restore_my_skill`（id で `archive_skill(false)`, 対称化）
 
 ### 8.3 per-agent 状態: `last_skill_consolidation_at`
-`agent_memory_index_config` に NULL 許容カラム追加 + §5 の3経路（migration UPDATE / 遅延生成既定 now /
-NULL 初回 now 刻み）。
+`agent_memory_index_config` に NULL 許容カラム追加。`AgentMemoryIndexConfig` 構造体・SELECT を拡張し、
+**専用 setter `set_last_skill_consolidation_at`（行が無ければ作る UPSERT）** を新設する。
+`get_memory_index_config` は行が無いとき**非永続デフォルトを返す**（`memory_index.rs:822`）ため、
+**永続化は明示 UPSERT に一本化**（§5: 初回シード＋実行後 UPSERT）。既存
+`upsert_memory_index_config`（`memory_index.rs:833`, ON CONFLICT DO UPDATE）と同型で実装できる。
 
 ### 8.4 既存の活用
 - `archive_skill`/`insert_skill`/`update_skill`/`find_skill_by_name_any`（`skills.rs`）＝ DB 直反映
 - `build_memory_index_section`（`memory_index/`）＝ 直近セッション要約の素材
-- verify段評価（`session_logs`）/ `llm_usage_metrics.quality_score`（session_id 付）＝ 結末素材
+- verify段評価（`session_logs`）/ `llm_usage_metrics.quality_score`（session_id 付）＝ 結末素材の**元データ**。
+  **注（4回目#2・正直）**: 列は存在するが「直近セッション群の結末を **agent 単位**でまとめて引く」関数は
+  無い（`list_recent_session_logs` は単一 session keyed, `get_recent_evaluations` は session_id を返さない）。
+  → **新規クエリ2本が必要**: ①`memory_sessions WHERE agent_id AND log_type='evaluation' ORDER BY id DESC
+  LIMIT n` ②`quality_score` を session_id 付きで束ねる。列は揃っており実装は自明だが「既存の活用」ではない
 - `insert_llm_log`（`llm_logs.rs:35`, `session_id: Option`）＝ 生ログ（§9）
 - マイグレーションは `MIGRATIONS`（`schema.rs:333`）に次番号で追加
 
@@ -303,5 +316,8 @@ retain_days = 90   # 生 prompt/response 保持日数（0=無期限）
 | 1(3) 成果ラベルの帰属不能 | per-skill 計算を全廃、帰属は本人 judgment（§1.2, §6.1）＝ 根本転換 |
 | 2(3) actions ⋈ tool_call 不能 | 突合を採用しない（`skills.actions` は DB 非保存）（§6.1） |
 | 3(3) situation_pattern 破壊 | スリープ生成物は `situation_pattern=""`（§6.2） |
-| 4(3) now シード未閉 | migration UPDATE + 遅延既定 now + NULL初回刻みの3経路（§5, §8.3） |
+| 4(3) now シード未閉 | rev.4 は「遅延生成で刻む」と誤り→rev.5 で明示 UPSERT に一本化（§5, §8.3） |
 | 5(3) 既存利用検出無視 | `record_used_skills` の脆弱性を明記し弱いヒント化（§6.1, §8.1） |
+| 1(4) cold-start が非永続で発火せず | config 行は自動生成されない。初回シード＋実行後 UPSERT で永続化（§5, §8.3） |
+| 2(4) 結末素材は「既存の活用」でなく新規クエリ2本 | §8.4 で正直に格下げ＋初回は素材薄と明記（§6.1, §8.4） |
+| 3(4) refine で situation_pattern 散文消去 | refine は既存を保持、空は新規生成のみ（§6.2） |
