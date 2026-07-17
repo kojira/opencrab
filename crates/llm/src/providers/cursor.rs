@@ -1,9 +1,14 @@
 //! Cursor CLI（headless agent）を LLM プロバイダとして扱う。
 //!
-//! subprocess で `cursor-agent -p --output-format json -m <model> --force` を実行し、
-//! 出力 JSON の `result` フィールドを応答本文として取り出す。ネイティブ function
-//! calling が無いため、tool 定義はプロンプトに XML で載せる（codex と共通の
+//! subprocess で `cursor-agent -p --output-format json -m <model> --force <prompt>`
+//! を実行し、出力 JSON の `result` フィールドを応答本文として取り出す。ネイティブ
+//! function calling が無いため、tool 定義はプロンプトに XML で載せる（codex と共通の
 //! [`build_cli_prompt`] を使う）。
+//!
+//! プロンプトは **positional 引数**で渡す。cursor-agent の headless（`-p`）は positional
+//! を主インターフェースにしており、positional 無し（stdin 待ち）だと入力終端を待って
+//! ハングする既知の不具合がある（公式フォーラム報告）。codex は `-` で stdin を明示
+//! 指定できるが cursor-agent にその契約は無いため、確実な positional を採る。
 //!
 //! コマンド名はインストールによりゆれる（`cursor-agent` / `agent` / `cursor`）ため
 //! `binary_path` で設定可能にしている。認証は `CURSOR_API_KEY`（config の api_key を
@@ -13,7 +18,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
@@ -101,8 +105,8 @@ impl CursorProvider {
         self
     }
 
-    fn build_command(&self, model: &str, agent_id: Option<&str>) -> Command {
-        let mut cmd = Command::new(&self.binary_path);
+    fn build_command(&self, model: &str, prompt: &str, agent_id: Option<&str>) -> Command {
+        let mut cmd = Command::new(resolve_binary(&self.binary_path));
         // タイムアウト/ドロップ時に子プロセスを確実に kill（孤児 agent を残さない）。
         cmd.kill_on_drop(true);
         cmd.arg("-p") // print / headless
@@ -111,7 +115,11 @@ impl CursorProvider {
             .arg("-m")
             .arg(model)
             // 非対話で承認待ちしないよう自動承認（ファイル編集等でハングさせない）。
-            .arg("--force");
+            .arg("--force")
+            // プロンプトは positional で渡す（stdin 待ちハング回避）。OpenCrab の
+            // プロンプトは常に `[Available Tools]`/`[System]` 等で始まりオプション
+            // （`-` 始まり）と衝突しない。
+            .arg(prompt);
 
         if let Some(key) = &self.api_key {
             cmd.env("CURSOR_API_KEY", key);
@@ -127,6 +135,19 @@ impl CursorProvider {
         }
 
         cmd
+    }
+}
+
+/// `binary_path` を spawn 用に解決する。ディレクトリ付き相対パス（例 `bin/cursor-agent`）
+/// は、child の `current_dir` を per-agent workspace に切り替えると解決できなくなるため、
+/// サーバー cwd 基準で絶対パス化しておく。単なるコマンド名（PATH 検索）や絶対パスは
+/// そのまま返す。
+fn resolve_binary(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if path.contains('/') && p.is_relative() {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    } else {
+        p.to_path_buf()
     }
 }
 
@@ -177,28 +198,19 @@ impl LlmProvider for CursorProvider {
 
         let prompt = build_cli_prompt(&request);
 
-        let mut cmd = self.build_command(model, request.agent_id.as_deref());
-        // プロンプトは stdin で渡す（ARG_MAX / MAX_ARG_STRLEN 回避）。
-        cmd.stdin(std::process::Stdio::piped())
+        let mut cmd = self.build_command(model, &prompt, request.agent_id.as_deref());
+        // stdin は不要（プロンプトは positional）。閉じておき agent が入力を待たない
+        // ようにする。stdout/stderr は取り込む。
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().context("failed to spawn cursor-agent CLI")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .context("failed to write prompt to cursor-agent stdin")?;
-            // stdin を閉じて EOF を伝える（agent が入力終端を待ってハングしないよう）。
-            drop(stdin);
-        }
-
-        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
+        let output = tokio::time::timeout(self.timeout, cmd.output())
             .await
             .map_err(|_| {
                 anyhow::anyhow!("cursor-agent timed out after {}s", self.timeout.as_secs())
             })?
-            .context("failed to wait for cursor-agent CLI")?;
+            .context("failed to run cursor-agent CLI")?;
 
         let response_text = resolve_cursor_output(
             &format!("{}", output.status),
