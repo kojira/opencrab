@@ -68,6 +68,21 @@ export function getCodexDiagnostics(): Promise<CodexDiagnostics> {
   return api.get<CodexDiagnostics>('/llm/codex/diagnostics');
 }
 
+export interface CursorDiagnostics {
+  /** config で指定したパス（"cursor-agent" は PATH 検索） */
+  configured_path: string;
+  /** サーバー環境で実際に解決される絶対パス（which）。null = 見つからない */
+  resolved_path: string | null;
+  /** `<cursor> --version` の出力。null = 実行失敗 */
+  version: string | null;
+  /** 実行失敗時のエラー文 */
+  error: string | null;
+}
+
+export function getCursorDiagnostics(): Promise<CursorDiagnostics> {
+  return api.get<CursorDiagnostics>('/llm/cursor/diagnostics');
+}
+
 // ============ Voice (VC) 設定 ============
 
 export interface VoiceSttConfig {

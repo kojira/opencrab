@@ -25,6 +25,7 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "ollama",
     "llamacpp",
     "codex",
+    "cursor",
     "chatgpt",
 ];
 
@@ -289,6 +290,56 @@ async fn run_codex_version(cmd: &str) -> Result<String, String> {
         .output()
         .await
         .map_err(|e| format!("codex を実行できませんでした（{cmd}）: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "`{cmd} --version` が失敗しました（{}）: {}",
+            out.status,
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// GET /api/llm/cursor/diagnostics — サーバープロセスが実際に使う cursor CLI の
+/// バイナリパスとバージョンを返す。コマンド名がインストールでゆれる
+/// （`cursor-agent` / `agent` / `cursor`）ため、config の binary_path が
+/// サーバー環境で解決できているかの切り分け用。
+pub async fn cursor_diagnostics(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // config の binary_path（空なら既定の "cursor-agent"）。
+    let configured = state
+        .llm_config
+        .providers
+        .get("cursor")
+        .map(|c| c.binary_path.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cursor-agent".to_string());
+
+    let resolved_path = resolve_binary_path(&configured).await;
+    let (version, error) = match run_cursor_version(&configured).await {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e)),
+    };
+
+    Json(json!({
+        // config で指定したパス（"cursor-agent" は PATH 検索）
+        "configured_path": configured,
+        // サーバー環境で実際に解決される絶対パス（which）
+        "resolved_path": resolved_path,
+        // `<cursor> --version` の出力
+        "version": version,
+        "error": error,
+    }))
+}
+
+/// `<cmd> --version` を実行して出力を返す（cursor CLI 用）。cmd は config 由来
+/// （リクエスト入力ではない）なのでコマンドインジェクションの懸念はない。
+async fn run_cursor_version(cmd: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new(cmd)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| format!("cursor を実行できませんでした（{cmd}）: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!(

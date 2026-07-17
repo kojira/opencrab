@@ -20,6 +20,6 @@ pub use traits::{LlmProvider, ModelInfo};
 
 // Re-export providers.
 pub use providers::{
-    AnthropicProvider, CodexProvider, GoogleProvider, LlamaCppProvider, OllamaProvider,
-    OpenAiProvider, OpenRouterProvider,
+    AnthropicProvider, CodexProvider, CursorProvider, GoogleProvider, LlamaCppProvider,
+    OllamaProvider, OpenAiProvider, OpenRouterProvider,
 };

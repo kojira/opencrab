@@ -70,6 +70,16 @@ models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # reasoning_effort = "medium"
 # binary_path = "/usr/local/bin/codex"
 
+# Cursor CLI（ローカル。headless agent）。コマンド名はインストールでゆれる
+# （cursor-agent / agent / cursor）ため binary_path で設定可能。既定 cursor-agent。
+[llm.providers.cursor]
+default_model = "gpt-5"
+timeout_secs = 300
+models = ["gpt-5", "sonnet-4.5", "opus-4.1", "auto"]
+# binary_path = "cursor-agent"
+# 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
+# api_key = "${CURSOR_API_KEY}"
+
 # ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）
 [llm.providers.chatgpt]
 enabled = false

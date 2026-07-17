@@ -525,6 +525,35 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 }
                 Some(Arc::new(p))
             }
+            "cursor" => {
+                let mut p = opencrab_llm::CursorProvider::new();
+                if !pconfig.default_model.is_empty() {
+                    p = p.with_default_model(&pconfig.default_model);
+                }
+                if !pconfig.binary_path.is_empty() {
+                    p = p.with_binary_path(&pconfig.binary_path);
+                }
+                if !pconfig.working_dir.is_empty() {
+                    p = p.with_working_dir(&pconfig.working_dir);
+                }
+                if pconfig.timeout_secs > 0 {
+                    p = p.with_timeout_secs(pconfig.timeout_secs);
+                }
+                // config に api_key があれば CURSOR_API_KEY として渡す。
+                // 無ければ `cursor-agent login` 済みのアンビエント認証に任せる。
+                if !pconfig.api_key.is_empty() {
+                    p = p.with_api_key(&pconfig.api_key);
+                }
+                if !pconfig.models.is_empty() {
+                    let extra: Vec<(String, u32)> = pconfig
+                        .models
+                        .iter()
+                        .map(|m| (m.clone(), 200_000u32))
+                        .collect();
+                    p = p.with_extra_models(extra);
+                }
+                Some(Arc::new(p))
+            }
             "chatgpt" => {
                 let mut p = ChatGptProvider::new();
                 if !pconfig.auth_file.is_empty() {
