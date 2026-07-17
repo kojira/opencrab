@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod chatgpt;
 pub mod codex;
+pub mod cursor;
 pub mod google;
 pub mod llamacpp;
 pub mod ollama;
@@ -12,6 +13,7 @@ pub mod sse;
 pub use anthropic::AnthropicProvider;
 pub use chatgpt::ChatGptProvider;
 pub use codex::CodexProvider;
+pub use cursor::CursorProvider;
 pub use google::GoogleProvider;
 pub use llamacpp::LlamaCppProvider;
 pub use ollama::OllamaProvider;

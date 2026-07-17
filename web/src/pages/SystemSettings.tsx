@@ -8,10 +8,12 @@ import {
   updateVoiceConfig,
   resetVoiceConfig,
   getCodexDiagnostics,
+  getCursorDiagnostics,
   LlmProviderInfo,
   UpdateProviderBody,
   VoiceConfig,
   CodexDiagnostics,
+  CursorDiagnostics,
 } from '../api/providers';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
@@ -309,6 +311,82 @@ function CodexDiagnosticsCard() {
             <span className="w-32 shrink-0 text-on-surface-variant">設定パス</span>
             <span className="font-mono text-on-surface break-all">
               {diag.configured_path || 'codex（PATH 検索）'}
+            </span>
+          </div>
+          {diag.error && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-red-500">
+              {diag.error}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============ Cursor 診断 ============
+
+function CursorDiagnosticsCard() {
+  const [diag, setDiag] = useState<CursorDiagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setDiag(await getCursorDiagnostics());
+    } catch (e) {
+      setDiag({
+        configured_path: '',
+        resolved_path: null,
+        version: null,
+        error: String(e),
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <div className="card-elevated space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-semibold text-on-surface">Cursor 診断</h2>
+        <button onClick={load} disabled={loading} className={btnGhost}>
+          {loading ? '確認中...' : '再確認'}
+        </button>
+      </div>
+      <p className="text-xs text-on-surface-variant">
+        opencrab の<strong>サーバープロセスが実際に使う</strong> Cursor CLI のパスとバージョンです。
+        コマンド名はインストールでゆれます（<code className="font-mono">cursor-agent</code> /{' '}
+        <code className="font-mono">agent</code> / <code className="font-mono">cursor</code>）。
+        解決パスが空なら <code className="font-mono">which cursor-agent</code> の絶対パスを
+        <code className="font-mono">[llm.providers.cursor] binary_path</code> に設定してください。
+        認証は <code className="font-mono">CURSOR_API_KEY</code> か{' '}
+        <code className="font-mono">cursor-agent login</code> 済みのアンビエント認証です。
+      </p>
+      {diag && (
+        <div className="space-y-1 text-sm">
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">バージョン</span>
+            {diag.version ? (
+              <span className="font-mono text-on-surface">{diag.version}</span>
+            ) : (
+              <span className="text-red-500">取得できませんでした</span>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">解決パス</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.resolved_path ?? '（PATH 上に見つからない）'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">設定パス</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.configured_path || 'cursor-agent（PATH 検索）'}
             </span>
           </div>
           {diag.error && (
@@ -644,6 +722,7 @@ export default function SystemSettings() {
       </div>
 
       <CodexDiagnosticsCard />
+      <CursorDiagnosticsCard />
 
       <VoiceSettings />
 

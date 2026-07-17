@@ -114,6 +114,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/llm/codex/diagnostics",
             get(api::providers::codex_diagnostics),
         )
+        // cursor 診断（サーバーが使う cursor CLI のパス/バージョン）
+        .route(
+            "/api/llm/cursor/diagnostics",
+            get(api::providers::cursor_diagnostics),
+        )
         .route(
             "/api/llm/providers/{name}",
             put(api::providers::update_provider),
