@@ -339,30 +339,44 @@ impl ChatGptProvider {
     }
 
     /// Convert a message's content into the Responses API content value.
+    ///
+    /// Responses API のマルチモーダル型は `input_text` / `input_image` で、`image_url` は
+    /// **文字列**（URL か data URI）である点に注意（Chat Completions の
+    /// `{"type":"image_url","image_url":{"url":...}}` とは別物）。以前は Chat
+    /// Completions 形式を送っており、codex/responses バックエンドでは画像が無視/拒否
+    /// されていた。テキスト単体は文字列コンテンツとして送れるため従来どおり。
     fn message_content_value(content: &Option<MessageContent>) -> Option<Value> {
         match content {
             Some(MessageContent::Text(text)) => Some(serde_json::json!(text)),
-            Some(MessageContent::Image { image_url, .. }) => Some(serde_json::json!([{
-                "type": "image_url",
-                "image_url": {"url": image_url.url}
-            }])),
+            Some(MessageContent::Image { image_url, .. }) => {
+                Some(serde_json::json!([Self::input_image_part(image_url),]))
+            }
             Some(MessageContent::Multi(parts)) => {
                 let parts_json: Vec<Value> = parts
                     .iter()
                     .map(|p| match p {
                         ContentPart::Text { text } => {
-                            serde_json::json!({"type": "text", "text": text})
+                            serde_json::json!({"type": "input_text", "text": text})
                         }
-                        ContentPart::ImageUrl { image_url } => serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {"url": image_url.url}
-                        }),
+                        ContentPart::ImageUrl { image_url } => Self::input_image_part(image_url),
                     })
                     .collect();
                 Some(serde_json::json!(parts_json))
             }
             None => None,
         }
+    }
+
+    /// Responses API の `input_image` パートを組む。`image_url` は文字列（URL / data URI）。
+    fn input_image_part(image_url: &ImageUrl) -> Value {
+        let mut part = serde_json::json!({
+            "type": "input_image",
+            "image_url": image_url.url,
+        });
+        if let Some(detail) = &image_url.detail {
+            part["detail"] = serde_json::json!(detail);
+        }
+        part
     }
 
     /// Build the request body in the Responses API format.
@@ -960,6 +974,33 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// マルチモーダル（画像）ユーザーメッセージが Responses API 形式
+    /// （input_text / input_image・image_url は文字列）で組まれること。
+    /// 以前は Chat Completions 形式（type:image_url, image_url:{url}）で、
+    /// codex/responses バックエンドでは画像が無視/拒否されていた。
+    #[test]
+    fn test_message_content_value_multimodal_uses_responses_format() {
+        let content = Some(MessageContent::Multi(vec![
+            ContentPart::Text {
+                text: "この画像を見て".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://cdn.discordapp.com/x.png".to_string(),
+                    detail: Some("auto".to_string()),
+                },
+            },
+        ]));
+        let v = ChatGptProvider::message_content_value(&content).unwrap();
+        let arr = v.as_array().expect("content is an array");
+        assert_eq!(arr[0]["type"], "input_text");
+        assert_eq!(arr[0]["text"], "この画像を見て");
+        assert_eq!(arr[1]["type"], "input_image");
+        // image_url は文字列（オブジェクトではない）。
+        assert_eq!(arr[1]["image_url"], "https://cdn.discordapp.com/x.png");
+        assert_eq!(arr[1]["detail"], "auto");
+    }
 
     /// Model used by the real-API (`--ignored`) tests. ChatGPT/Codex accounts
     /// reject `gpt-4o`, so we use the provider default path (`gpt-5.5`).
