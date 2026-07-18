@@ -148,7 +148,13 @@ fn is_global_ip(ip: std::net::IpAddr) -> bool {
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || (s[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
-                || (s[0] & 0xffc0) == 0xfe80) // fe80::/10 link-local
+                || (s[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                // 埋め込み v4 で内部アドレスを指しうる遷移レンジは一律非公開扱い
+                // （::a.b.c.d 互換 / 6to4 / Teredo / NAT64。正当な画像ホストは通常来ない）。
+                || (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0) // ::/96 IPv4-compatible
+                || s[0] == 0x2002 // 6to4 2002::/16
+                || (s[0] == 0x2001 && s[1] == 0x0000) // Teredo 2001:0000::/32
+                || (s[0] == 0x0064 && s[1] == 0xff9b)) // NAT64 64:ff9b::/96
         }
     }
 }
@@ -1239,6 +1245,10 @@ mod tests {
             "::ffff:169.254.169.254",
             "fe80::1",
             "fc00::1",
+            "::7f00:1",           // ::127.0.0.1 (IPv4-compatible, deprecated)
+            "2002:7f00:1::",      // 6to4 embedding 127.0.0.1
+            "2001:0:0:0:0:0:0:1", // Teredo 2001:0000::/32
+            "64:ff9b::7f00:1",    // NAT64 embedding 127.0.0.1
         ];
         for s in bad {
             let ip: IpAddr = s.parse().unwrap();
