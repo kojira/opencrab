@@ -23,6 +23,8 @@ export interface AgentDetail {
   model: string | null;
   /** 推論（thinking）強度。null/空 = プロバイダー既定。 */
   reasoning_effort: string | null;
+  /** 本文URL読取り（provider native web_search / url_context）。null = 無効。 */
+  web_search: boolean | null;
   metadata_json: string | null;
 }
 
@@ -37,6 +39,7 @@ export interface AgentPatchBody {
   instructions?: string;
   model?: string | null;
   reasoning_effort?: string | null;
+  web_search?: boolean | null;
   metadata_json?: string | null;
 }
 

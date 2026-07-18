@@ -303,6 +303,7 @@ function LlmModelSection({ agentId }: { agentId: string }) {
   const [choices, setChoices] = useState<string[]>([]);
   const [selection, setSelection] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
+  const [webSearch, setWebSearch] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -326,6 +327,10 @@ function LlmModelSection({ agentId }: { agentId: string }) {
     setReasoningEffort(agent?.reasoning_effort ?? '');
   }, [agent?.reasoning_effort]);
 
+  useEffect(() => {
+    setWebSearch(agent?.web_search ?? false);
+  }, [agent?.web_search]);
+
   const save = async () => {
     setSaving(true);
     setMessage(null);
@@ -335,6 +340,7 @@ function LlmModelSection({ agentId }: { agentId: string }) {
         // 既定選択時は空文字を送る（サーバー側で NULL に正規化）。null は
         // serde の都合で「変更なし」に潰れてクリアできないため。
         reasoning_effort: reasoningEffort,
+        web_search: webSearch,
       });
       if (res.updated) {
         setMessage(t('agentDetail.modelSaved'));
@@ -404,6 +410,22 @@ function LlmModelSection({ agentId }: { agentId: string }) {
           {saving ? t('common.saving') : t('common.save')}
         </button>
       </div>
+      <label className="mt-3 flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={webSearch}
+          onChange={(e) => setWebSearch(e.target.checked)}
+        />
+        <span>
+          <span className="text-label-lg text-on-surface block">
+            {t('agentDetail.webSearch')}
+          </span>
+          <span className="text-body-sm text-on-surface-variant">
+            {t('agentDetail.webSearchDesc')}
+          </span>
+        </span>
+      </label>
     </div>
   );
 }

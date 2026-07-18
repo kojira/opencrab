@@ -298,6 +298,7 @@ async fn test_three_agent_with_db_and_session() {
                 heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
+                web_search: None,
                 metadata_json: None,
             },
         )

@@ -1233,6 +1233,11 @@ pub async fn run_agent_response(
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::effective_reasoning_effort_for_agent(&conn, agent_id).unwrap_or(None)
     };
+    // per-agent の本文URL読取り（provider native web_search / url_context）。既定は無効。
+    let agent_web_search = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::web_search_enabled_for_agent(&conn, agent_id).unwrap_or(false)
+    };
 
     // Create BridgedExecutor with ActionContext.
     let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
@@ -1326,6 +1331,10 @@ pub async fn run_agent_response(
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
     if let Some(effort) = &agent_reasoning_effort {
         engine.set_reasoning_effort(effort.clone());
+    }
+    // 本文URL読取り（オプトイン）。対応プロバイダだけがツールを有効化し、他は無視する。
+    if agent_web_search {
+        engine.set_web_search(true);
     }
 
     set_llm_log_callback(

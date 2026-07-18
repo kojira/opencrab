@@ -248,6 +248,7 @@ mod tests {
                     heartbeat_instructions: String::new(),
                     model: None,
                     reasoning_effort: None,
+                    web_search: None,
                     metadata_json: None,
                 },
             )

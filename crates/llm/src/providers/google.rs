@@ -115,6 +115,7 @@ impl GoogleProvider {
         }
 
         // Tools (function declarations)
+        let mut tools: Vec<Value> = Vec::new();
         if let Some(ref functions) = request.functions {
             let declarations: Vec<Value> = functions
                 .iter()
@@ -126,12 +127,42 @@ impl GoogleProvider {
                     })
                 })
                 .collect();
-            body["tools"] = serde_json::json!([{
+            tools.push(serde_json::json!({
                 "functionDeclarations": declarations,
-            }]);
+            }));
+        }
+        // 本文URL読取り（エージェント単位オプトイン）: プロンプト中の URL を自動取得
+        // する url_context を有効化（HTML/JSON/画像/PDF 対応）。function calling との
+        // 併用は Gemini 3 系以降で公式サポート。それ以前（1.x/2.x）は併用が 400 に
+        // なりうるため、フラグONでも付与せずスキップする（エージェントを壊さない）。
+        if request
+            .metadata
+            .get("web_search")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            if Self::url_context_supported_model(&request.model) {
+                tools.push(serde_json::json!({"url_context": {}}));
+            } else {
+                debug!(
+                    model = %request.model,
+                    "url_context skipped: model predates Gemini 3 (tool combination unsupported)"
+                );
+            }
+        }
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
         }
 
         body
+    }
+
+    /// url_context を function calling と併用できるモデルか。
+    /// Gemini 1.x/2.x は併用非対応（400 になりうる）ため除外し、それ以外
+    /// （gemini-3 以降・将来系列）は許可する（allow-list より前方互換）。
+    fn url_context_supported_model(model: &str) -> bool {
+        let m = model.to_ascii_lowercase();
+        !(m.starts_with("gemini-1") || m.starts_with("gemini-2"))
     }
 
     fn convert_parts(&self, msg: &Message) -> Vec<Value> {
@@ -419,5 +450,73 @@ impl LlmProvider for GoogleProvider {
         let url = format!("{}/models?key={}", self.base_url, self.api_key);
         let resp = self.client.get(&url).send().await?;
         Ok(resp.status().is_success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// metadata の web_search=true で url_context ツールが tools に載ること。
+    /// 未設定なら載らない（function declarations のみ/無し）。
+    #[test]
+    fn test_build_request_body_url_context_tool() {
+        let provider = GoogleProvider::new("test-key");
+
+        let mut request = ChatRequest::new("gemini-3-pro", vec![Message::user("このURLを見て")]);
+        request
+            .metadata
+            .insert("web_search".to_string(), serde_json::json!(true));
+        request.functions = Some(vec![FunctionDefinition {
+            name: "my_tool".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]);
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(tools
+            .iter()
+            .any(|t| t.get("functionDeclarations").is_some()));
+        assert!(
+            tools.iter().any(|t| t.get("url_context").is_some()),
+            "url_context tool present"
+        );
+
+        let plain = ChatRequest::new("gemini-3-pro", vec![Message::user("hi")]);
+        let body = provider.build_request_body(&plain);
+        assert!(body.get("tools").is_none());
+    }
+
+    /// Gemini 1.x/2.x は function calling との併用が 400 になりうるため、フラグON
+    /// でも url_context を付与しない（エージェントを壊さない側に倒す）。
+    #[test]
+    fn test_url_context_skipped_on_pre_gemini3_models() {
+        let provider = GoogleProvider::new("test-key");
+        let mut request = ChatRequest::new("gemini-2.5-pro", vec![Message::user("URLを見て")]);
+        request
+            .metadata
+            .insert("web_search".to_string(), serde_json::json!(true));
+        request.functions = Some(vec![FunctionDefinition {
+            name: "my_tool".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]);
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(
+            !tools.iter().any(|t| t.get("url_context").is_some()),
+            "url_context must be skipped on gemini-2.x"
+        );
+
+        assert!(GoogleProvider::url_context_supported_model("gemini-3-pro"));
+        assert!(GoogleProvider::url_context_supported_model(
+            "gemini-4-flash"
+        ));
+        assert!(!GoogleProvider::url_context_supported_model(
+            "gemini-2.5-flash"
+        ));
+        assert!(!GoogleProvider::url_context_supported_model(
+            "gemini-1.5-pro"
+        ));
     }
 }
