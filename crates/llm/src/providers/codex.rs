@@ -356,6 +356,48 @@ impl LlmProvider for CodexProvider {
     }
 }
 
+/// メッセージ本文を CLI プロンプト用テキストに落とす。
+///
+/// マルチパート（画像添付）メッセージでも Text 部分は必ず拾い、画像は「このモデルは
+/// 直接読めない」旨を注記する。以前は `text_content()` を使っており、Multi/Image だと
+/// `None` を返すため **本文ごと丸ごと落ちていた**（画像を貼ると発言が消える）。codex /
+/// cursor は画像を直接扱えないが、少なくともユーザーの言葉と「画像がある」事実は
+/// モデルに届ける（gpt-5.6 系で画像を読むなら chatgpt プロバイダ経由を使う）。
+fn cli_message_text(msg: &Message) -> String {
+    match &msg.content {
+        Some(MessageContent::Text(s)) => s.clone(),
+        Some(MessageContent::Multi(parts)) => {
+            let mut text = String::new();
+            let mut images = 0usize;
+            for part in parts {
+                match part {
+                    ContentPart::Text { text: t } => {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(t);
+                    }
+                    ContentPart::ImageUrl { .. } => images += 1,
+                }
+            }
+            if images > 0 {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&format!(
+                    "[注記: 画像が {images} 枚添付されていますが、このモデルは画像を\
+                     直接読めません。必要なら送信者に内容の説明を求めてください。]"
+                ));
+            }
+            text
+        }
+        Some(MessageContent::Image { .. }) => "[注記: 画像が添付されていますが、このモデルは\
+             画像を直接読めません。必要なら送信者に内容の説明を求めてください。]"
+            .to_string(),
+        None => String::new(),
+    }
+}
+
 /// CLI 系プロバイダ（codex / cursor）共通のプロンプト組み立て。
 /// ネイティブ function calling が無いため、tool 定義を XML でプロンプトに載せ、
 /// 会話履歴を `[System]`/`[User]`/`[Assistant]`/`[Tool Result]` で連結する。
@@ -369,7 +411,8 @@ pub(crate) fn build_cli_prompt(request: &ChatRequest) -> String {
     }
 
     for msg in &request.messages {
-        let content = msg.text_content().unwrap_or("");
+        let content_owned = cli_message_text(msg);
+        let content = content_owned.as_str();
         match msg.role {
             Role::System => {
                 if !content.is_empty() {
@@ -656,6 +699,50 @@ mod tests {
         let prompt = provider.build_prompt(&request);
         assert!(prompt.contains("[System]\nYou are helpful."));
         assert!(prompt.contains("[User]\nHello"));
+    }
+
+    /// 回帰: 画像添付（マルチパート）でも本文が消えないこと。以前は
+    /// text_content() が Multi に対し None を返すため、画像を貼ると発言が
+    /// 丸ごと落ちて「何も届かない」状態になっていた。
+    #[test]
+    fn test_build_prompt_multipart_preserves_text_and_notes_image() {
+        let request = ChatRequest {
+            model: "gpt-5.6-sol".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Multi(vec![
+                    ContentPart::Text {
+                        text: "この画像を見て".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://cdn.discordapp.com/x.png".to_string(),
+                            detail: None,
+                        },
+                    },
+                ])),
+                name: None,
+                function_call: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            functions: None,
+            function_call: None,
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            stream: None,
+            metadata: Default::default(),
+            agent_id: None,
+            reasoning_effort: None,
+        };
+
+        let prompt = build_cli_prompt(&request);
+        // 本文は残る（以前は空になっていた）。
+        assert!(prompt.contains("この画像を見て"), "text dropped: {prompt}");
+        // 画像がある事実は注記される（モデルが状況を把握できる）。
+        assert!(prompt.contains("画像"), "image note missing: {prompt}");
+        assert!(prompt.contains("[User]"), "user turn missing: {prompt}");
     }
 
     #[test]

@@ -712,6 +712,38 @@ impl LlmProvider for ChatGptProvider {
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
         Ok(vec![
+            // GPT-5.6 系（gpt-5.6 は Sol にエイリアス）。codex CLI と同じ
+            // codex/responses バックエンドを叩くため、同じサブスクで利用できる。
+            // codex サブプロセスと違い画像（image_url）とネイティブ function
+            // calling に対応するので、画像を読ませたいエージェントはこちらを使う。
+            ModelInfo {
+                id: "gpt-5.6".to_string(),
+                name: "GPT-5.6 (Sol)".to_string(),
+                context_window: 400_000,
+                supports_function_calling: true,
+                supports_vision: true,
+            },
+            ModelInfo {
+                id: "gpt-5.6-sol".to_string(),
+                name: "GPT-5.6 Sol".to_string(),
+                context_window: 400_000,
+                supports_function_calling: true,
+                supports_vision: true,
+            },
+            ModelInfo {
+                id: "gpt-5.6-terra".to_string(),
+                name: "GPT-5.6 Terra".to_string(),
+                context_window: 400_000,
+                supports_function_calling: true,
+                supports_vision: true,
+            },
+            ModelInfo {
+                id: "gpt-5.6-luna".to_string(),
+                name: "GPT-5.6 Luna".to_string(),
+                context_window: 400_000,
+                supports_function_calling: true,
+                supports_vision: true,
+            },
             ModelInfo {
                 id: "gpt-5.5".to_string(),
                 name: "GPT-5.5".to_string(),
