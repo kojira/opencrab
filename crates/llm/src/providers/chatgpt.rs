@@ -68,6 +68,46 @@ fn base64url_decode(input: &str) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// バイト列を標準 base64（`+/`・パディングあり）で符号化する。data URI 用。
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHA[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHA[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHA[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// URL の拡張子から画像 MIME を推測する（Content-Type が無い/不正なときのフォールバック）。
+fn guess_image_mime(url: &str) -> String {
+    // クエリ以降を落として拡張子を見る。
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "image/png", // 不明時は png 扱い（多くの backend が受ける）
+    }
+    .to_string()
+}
+
 /// JWT のペイロード部（2 番目のセグメント）を JSON として取り出す。
 fn jwt_payload(token: &str) -> anyhow::Result<serde_json::Value> {
     use anyhow::Context;
@@ -336,6 +376,76 @@ impl ChatGptProvider {
             .header("originator", "pi")
             .header("accept", "text/event-stream")
             .header("Content-Type", "application/json")
+    }
+
+    /// リクエスト中の http(s) 画像URLを取得して base64 data URI に置き換えた
+    /// コピーを返す。
+    ///
+    /// Discord の添付画像URL（cdn.discordapp.com）は、LLM バックエンドから直接
+    /// 取得しようとすると bot 判定・署名付きURLの都合で弾かれることがある。こちらで
+    /// 取得して data URI として埋め込めば、外部取得に依存せず確実に読ませられる。
+    /// 既に data URI のもの・非 http のものは触らない。取得失敗時は元のURLのまま
+    /// 残す（送信自体は試みる）。
+    async fn inline_remote_images(&self, request: &ChatRequest) -> ChatRequest {
+        let mut req = request.clone();
+        for msg in &mut req.messages {
+            match &mut msg.content {
+                Some(MessageContent::Multi(parts)) => {
+                    for part in parts.iter_mut() {
+                        if let ContentPart::ImageUrl { image_url } = part {
+                            self.inline_one_image(image_url).await;
+                        }
+                    }
+                }
+                Some(MessageContent::Image { image_url, .. }) => {
+                    self.inline_one_image(image_url).await;
+                }
+                _ => {}
+            }
+        }
+        req
+    }
+
+    async fn inline_one_image(&self, image_url: &mut ImageUrl) {
+        let url = image_url.url.trim();
+        if url.starts_with("data:") {
+            return; // 既に data URI
+        }
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return; // 相対/未知スキームは触らない
+        }
+        match self.download_image_data_uri(url).await {
+            Ok(data_uri) => image_url.url = data_uri,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to inline image as data URI; keeping original url")
+            }
+        }
+    }
+
+    /// 画像URLをダウンロードして `data:<mime>;base64,<...>` を返す。上限 10MB。
+    async fn download_image_data_uri(&self, url: &str) -> Result<String> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("image download request failed")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("image download HTTP {}", resp.status());
+        }
+        let header_mime = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+            .filter(|c| c.starts_with("image/"));
+        let bytes = resp.bytes().await.context("failed to read image body")?;
+        const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            anyhow::bail!("image too large ({} bytes, max 10MB)", bytes.len());
+        }
+        let mime = header_mime.unwrap_or_else(|| guess_image_mime(url));
+        Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
     }
 
     /// Convert a message's content into the Responses API content value.
@@ -786,6 +896,8 @@ impl LlmProvider for ChatGptProvider {
         debug!(model = %request.model, "ChatGPT chat completion");
         let mut token = self.fresh_access_token().await?;
         let mut account_id = extract_account_id(&token)?;
+        // http(s) 画像は自分で取得して data URI 化してから送る（後述）。
+        let request = self.inline_remote_images(&request).await;
         let body = self.build_request_body(&request, true);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         tracing::warn!(
@@ -850,6 +962,7 @@ impl LlmProvider for ChatGptProvider {
         debug!(model = %request.model, "ChatGPT streaming chat completion");
         let mut token = self.fresh_access_token().await?;
         let mut account_id = extract_account_id(&token)?;
+        let request = self.inline_remote_images(&request).await;
         let body = self.build_request_body(&request, true);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
         tracing::warn!(
@@ -1000,6 +1113,49 @@ mod tests {
         // image_url は文字列（オブジェクトではない）。
         assert_eq!(arr[1]["image_url"], "https://cdn.discordapp.com/x.png");
         assert_eq!(arr[1]["detail"], "auto");
+    }
+
+    /// RFC 4648 のテストベクタで base64 符号化を検証（壊れると画像が壊れる）。
+    #[test]
+    fn test_base64_encode_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // 非 ASCII バイト（0xFF 等）も正しく符号化。
+        assert_eq!(base64_encode(&[0xff, 0xff, 0xff]), "////");
+        assert_eq!(base64_encode(&[0x00]), "AA==");
+    }
+
+    #[test]
+    fn test_guess_image_mime() {
+        assert_eq!(guess_image_mime("https://x/y.png"), "image/png");
+        assert_eq!(guess_image_mime("https://x/y.JPG?ex=1&is=2"), "image/jpeg");
+        assert_eq!(guess_image_mime("https://x/y.webp"), "image/webp");
+        assert_eq!(guess_image_mime("https://x/y.gif#frag"), "image/gif");
+        assert_eq!(guess_image_mime("https://x/noext"), "image/png");
+    }
+
+    /// data: URI と非 http はダウンロードを試みず素通しすること（ネットワーク不要）。
+    #[tokio::test]
+    async fn test_inline_one_image_skips_data_and_non_http() {
+        let p = ChatGptProvider::new();
+        let mut data = ImageUrl {
+            url: "data:image/png;base64,AAAA".to_string(),
+            detail: None,
+        };
+        p.inline_one_image(&mut data).await;
+        assert_eq!(data.url, "data:image/png;base64,AAAA");
+
+        let mut rel = ImageUrl {
+            url: "file/local.png".to_string(),
+            detail: None,
+        };
+        p.inline_one_image(&mut rel).await;
+        assert_eq!(rel.url, "file/local.png");
     }
 
     /// Model used by the real-API (`--ignored`) tests. ChatGPT/Codex accounts
