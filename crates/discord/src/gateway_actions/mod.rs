@@ -3,6 +3,7 @@
 //! Discord管理操作（サーバー一覧、チャンネル一覧、チャンネル設定）を
 //! ゲートウェイ固有アクションとして提供する。
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -184,6 +185,48 @@ impl DiscordGatewayActions {
         self.voice = Some(voice);
         self
     }
+}
+
+/// キー名が Discord ID を表すか（`channel_id` / `guild_id` / `message_id` など）。
+fn is_id_key(key: &str) -> bool {
+    key.ends_with("_id")
+}
+
+/// JSON 整数値を精度を保ったまま文字列へ。Discord のスノーフレークは 18–19 桁で
+/// 2^53 を超えるため f64 では壊れるが、serde_json は整数リテラルを i64/u64 として
+/// 保持するので `as_u64`/`as_i64` 経由なら正確。非整数（文字列・小数・真偽）は None。
+fn id_number_to_string(v: &serde_json::Value) -> Option<String> {
+    v.as_u64()
+        .map(|u| u.to_string())
+        .or_else(|| v.as_i64().map(|i| i.to_string()))
+}
+
+/// 実行前に `*_id` の整数値を文字列へ正規化する。
+///
+/// モデルは Discord ID を JSON 文字列ではなく JSON 数値で渡すことが多いが、各
+/// ハンドラは `as_str()` だけを見ているため「channel_id パラメータが必要です」と
+/// 誤って失敗していた。ここで数値 ID を文字列化して吸収する（変換が不要なら
+/// 借用のまま返し、余計なコピーをしない）。トップレベルのオブジェクトのみ対象
+/// （Discord アクションの ID 引数はすべてフラット）。
+fn normalize_id_args(args: &serde_json::Value) -> Cow<'_, serde_json::Value> {
+    let serde_json::Value::Object(map) = args else {
+        return Cow::Borrowed(args);
+    };
+    let needs = map
+        .iter()
+        .any(|(k, v)| is_id_key(k) && id_number_to_string(v).is_some());
+    if !needs {
+        return Cow::Borrowed(args);
+    }
+    let mut out = map.clone();
+    for (k, v) in out.iter_mut() {
+        if is_id_key(k) {
+            if let Some(s) = id_number_to_string(v) {
+                *v = serde_json::Value::String(s);
+            }
+        }
+    }
+    Cow::Owned(serde_json::Value::Object(out))
 }
 
 #[async_trait]
@@ -951,6 +994,11 @@ impl GatewayActions for DiscordGatewayActions {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
+        // Discord のスノーフレーク ID をモデルが JSON 数値で渡してきても受け付ける
+        // ため、実行前に `*_id` の整数値を文字列へ正規化する（各ハンドラは as_str
+        // だけを見ており、数値だと「ID がありません」と誤って失敗していた）。
+        let normalized = normalize_id_args(args);
+        let args = normalized.as_ref();
         match name {
             "discord_list_guilds" => self.execute_list_guilds().await,
             "discord_list_channels" => self.execute_list_channels(args, ctx).await,
@@ -1604,6 +1652,65 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(cfg.channel_name, "");
+    }
+
+    /// 回帰: モデルが Discord スノーフレーク ID を JSON 数値で渡しても通ること。
+    /// 以前は各ハンドラが as_str だけを見ており「channel_id パラメータが必要です」と
+    /// 誤って失敗していた（2^53 超の 19 桁 ID も精度を保って文字列化される）。
+    #[tokio::test]
+    async fn test_channel_config_numeric_ids() {
+        let (actions, db) = make_test_actions();
+        let result = actions
+            .execute(
+                "discord_channel_config",
+                &json!({
+                    "channel_id": 1479115942293409942u64,
+                    "guild_id": 1465697209541726362u64,
+                    "readable": true,
+                    "writable": true,
+                    "whitelisted": false,
+                }),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(
+            result.success,
+            "numeric ids should be accepted: {:?}",
+            result.error
+        );
+
+        // DB には文字列化した ID が精度そのままで入る。
+        let conn = db.lock().unwrap();
+        let cfg = opencrab_db::queries::get_channel_config_for_agent(
+            &conn,
+            "1479115942293409942",
+            "test-agent",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(cfg.readable);
+        assert!(cfg.writable);
+        assert_eq!(cfg.guild_id, "1465697209541726362");
+    }
+
+    #[test]
+    fn test_normalize_id_args_stringifies_only_id_numbers() {
+        // *_id の整数は文字列化、それ以外（真偽・非 id 数値・既に文字列）は不変。
+        let input = json!({
+            "channel_id": 1479115942293409942u64,
+            "guild_id": "already-str",
+            "readable": true,
+            "count": 5,
+        });
+        let out = normalize_id_args(&input);
+        assert_eq!(out["channel_id"], json!("1479115942293409942"));
+        assert_eq!(out["guild_id"], json!("already-str"));
+        assert_eq!(out["readable"], json!(true));
+        assert_eq!(out["count"], json!(5));
+
+        // 変換不要ならコピーしない（借用のまま）。
+        let noop = json!({"readable": true, "count": 1});
+        assert!(matches!(normalize_id_args(&noop), Cow::Borrowed(_)));
     }
 
     // ---- unknown action ----
