@@ -94,6 +94,7 @@ mod tests {
             heartbeat_instructions: "".to_string(),
             model: None,
             reasoning_effort: None,
+            web_search: None,
             metadata_json: None,
         };
         upsert_agent(&conn, &agent).unwrap();

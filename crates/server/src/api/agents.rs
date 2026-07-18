@@ -79,6 +79,7 @@ pub async fn create_agent(
         heartbeat_instructions: String::new(),
         model: None,
         reasoning_effort: None,
+        web_search: None,
         metadata_json: None,
     };
     opencrab_db::queries::upsert_agent(&conn, &row).unwrap();
@@ -120,12 +121,11 @@ pub async fn put_agent(
     Json(body): Json<PutAgentBody>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
-    // reasoning_effort は PUT ボディに無い。thinking 強度は AgentOverview の
+    // reasoning_effort / web_search は PUT ボディに無い。これらは AgentOverview の
     // PATCH で管理するため、identity 編集の PUT では既存値を保持する（消さない）。
-    let existing_effort = opencrab_db::queries::get_agent(&conn, &id)
-        .ok()
-        .flatten()
-        .and_then(|a| a.reasoning_effort);
+    let existing = opencrab_db::queries::get_agent(&conn, &id).ok().flatten();
+    let existing_effort = existing.as_ref().and_then(|a| a.reasoning_effort.clone());
+    let existing_web_search = existing.as_ref().and_then(|a| a.web_search);
     let row = opencrab_db::queries::AgentRow {
         agent_id: id,
         name: body.name,
@@ -138,6 +138,7 @@ pub async fn put_agent(
         heartbeat_instructions: body.heartbeat_instructions,
         model: body.model,
         reasoning_effort: existing_effort,
+        web_search: existing_web_search,
         metadata_json: body.metadata_json,
     };
     opencrab_db::queries::upsert_agent(&conn, &row).unwrap();

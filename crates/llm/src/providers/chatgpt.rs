@@ -739,18 +739,34 @@ impl ChatGptProvider {
             body["instructions"] = serde_json::json!(system_prompts.join("\n\n"));
         }
 
+        let mut tools: Vec<Value> = Vec::new();
         if let Some(ref functions) = request.functions {
-            let tools: Vec<Value> = functions
-                .iter()
-                .map(|f| {
-                    serde_json::json!({
-                        "type": "function",
-                        "name": f.name,
-                        "description": f.description,
-                        "parameters": f.parameters,
-                    })
+            tools.extend(functions.iter().map(|f| {
+                serde_json::json!({
+                    "type": "function",
+                    "name": f.name,
+                    "description": f.description,
+                    "parameters": f.parameters,
                 })
-                .collect();
+            }));
+        }
+        // 本文URL読取り（エージェント単位オプトイン）: native web_search を有効化。
+        // codex CLI が同じ codex/responses バックエンドへ送るのと同じツール形
+        // （external_web_access=true で live 取得、text+image 対応）。モデルが
+        // search / open_page アクションでリンク先を読める。
+        if request
+            .metadata
+            .get("web_search")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            tools.push(serde_json::json!({
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text", "image"],
+            }));
+        }
+        if !tools.is_empty() {
             body["tools"] = serde_json::json!(tools);
         }
 
@@ -1412,6 +1428,41 @@ mod tests {
             false,
         );
         assert!(body_high.get("max_output_tokens").is_none());
+    }
+
+    /// metadata の web_search=true で native web_search ツールが tools に載ること
+    /// （codex CLI が同じバックエンドへ送るのと同じ形）。未設定なら載らない。
+    #[test]
+    fn test_build_request_body_web_search_tool() {
+        let provider = ChatGptProvider::new();
+
+        // 有効時: function ツールと併存して web_search が入る。
+        let mut request = ChatRequest::new("gpt-5.6-sol", vec![Message::user("このURLを見て")]);
+        request
+            .metadata
+            .insert("web_search".to_string(), serde_json::json!(true));
+        request.functions = Some(vec![FunctionDefinition {
+            name: "my_tool".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]);
+        let body = provider.build_request_body(&request, false);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(tools.iter().any(|t| t["type"] == "function"));
+        let ws = tools
+            .iter()
+            .find(|t| t["type"] == "web_search")
+            .expect("web_search tool present");
+        assert_eq!(ws["external_web_access"], true);
+        assert_eq!(
+            ws["search_content_types"],
+            serde_json::json!(["text", "image"])
+        );
+
+        // 未設定時: web_search は載らない（functions 無しなら tools 自体無し）。
+        let plain = ChatRequest::new("gpt-5.6-sol", vec![Message::user("hi")]);
+        let body = provider.build_request_body(&plain, false);
+        assert!(body.get("tools").is_none());
     }
 
     #[test]

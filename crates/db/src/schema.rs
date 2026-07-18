@@ -235,6 +235,16 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 12,
+        description: "agents.web_search (per-agent URL読取り: provider native web_search/url_context)",
+        up: |conn| {
+            if !column_exists(conn, "agents", "web_search")? {
+                conn.execute_batch("ALTER TABLE agents ADD COLUMN web_search INTEGER")?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）。
@@ -982,6 +992,7 @@ CREATE TABLE IF NOT EXISTS agents (
     heartbeat_instructions TEXT NOT NULL DEFAULT '',
     model TEXT,
     reasoning_effort TEXT,
+    web_search INTEGER,
     metadata_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))

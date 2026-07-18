@@ -64,6 +64,7 @@ describe('getAgent', () => {
       instructions: 'Be helpful',
       model: 'anthropic:claude-sonnet-4-20250514',
       reasoning_effort: null,
+      web_search: null,
       metadata_json: null,
     });
   });

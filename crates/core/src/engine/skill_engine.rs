@@ -44,6 +44,11 @@ pub struct SkillEngine {
     /// Per-run reasoning (thinking) effort. Attached to every ChatRequest so
     /// providers can override their construction-time default per agent.
     reasoning_effort: Option<String>,
+    /// 本文中の URL をプロバイダのネイティブ機能で読ませるか（エージェント単位の
+    /// オプトイン）。true なら各 ChatRequest の metadata に `web_search: true` を
+    /// 載せ、対応プロバイダ（chatgpt=web_search / google=url_context）がツールを
+    /// 有効化する。非対応プロバイダは単に無視する。
+    web_search: bool,
 }
 
 impl SkillEngine {
@@ -63,6 +68,7 @@ impl SkillEngine {
             on_tool_call: None,
             on_tool_result: None,
             reasoning_effort: None,
+            web_search: false,
         }
     }
 
@@ -71,6 +77,11 @@ impl SkillEngine {
     pub fn set_reasoning_effort(&mut self, effort: impl Into<String>) {
         let s = effort.into();
         self.reasoning_effort = if s.trim().is_empty() { None } else { Some(s) };
+    }
+
+    /// 本文URL読取り（プロバイダネイティブの web_search / url_context）を有効化する。
+    pub fn set_web_search(&mut self, enabled: bool) {
+        self.web_search = enabled;
     }
 
     /// Set the LLM log callback, invoked after each LLM call.
@@ -233,7 +244,14 @@ impl SkillEngine {
                 max_tokens: Some(4096),
                 stop: None,
                 stream: None,
-                metadata: Default::default(),
+                metadata: {
+                    let mut m: std::collections::HashMap<String, serde_json::Value> =
+                        Default::default();
+                    if self.web_search {
+                        m.insert("web_search".to_string(), serde_json::json!(true));
+                    }
+                    m
+                },
                 agent_id: None,
                 reasoning_effort: self.reasoning_effort.clone(),
             };

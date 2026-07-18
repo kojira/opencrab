@@ -28,6 +28,7 @@ function mapAgentRow(
       instructions: '',
       model: null,
       reasoning_effort: null,
+      web_search: null,
       metadata_json: null,
     };
   }
@@ -42,6 +43,7 @@ function mapAgentRow(
     instructions: (row.instructions as string) ?? '',
     model: (row.model as string | null) ?? null,
     reasoning_effort: (row.reasoning_effort as string | null) ?? null,
+    web_search: (row.web_search as boolean | null) ?? null,
     metadata_json: (row.metadata_json as string | null) ?? null,
   };
 }

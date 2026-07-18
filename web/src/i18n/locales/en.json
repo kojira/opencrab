@@ -258,6 +258,8 @@
   "agentDetail.modelSelect": "Model",
   "agentDetail.thinkingLevel": "Thinking effort",
   "agentDetail.thinkingDefault": "Model default",
+  "agentDetail.webSearch": "Read URLs in messages (web search)",
+  "agentDetail.webSearchDesc": "Let the model read linked pages via its native capability (chatgpt=web_search / gemini=url_context; ignored by unsupported providers)",
   "agentDetail.useServerDefault": "Use server default",
   "agentDetail.modelSaved": "Model setting saved",
   "agentDetail.modelSaveFailed": "Failed to save model setting",

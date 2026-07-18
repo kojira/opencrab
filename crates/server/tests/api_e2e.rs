@@ -1666,6 +1666,7 @@ async fn test_skill_consolidation_curates_and_audits() {
                 heartbeat_instructions: String::new(),
                 model: None,
                 reasoning_effort: None,
+                web_search: None,
                 metadata_json: None,
             },
         )

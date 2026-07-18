@@ -115,6 +115,7 @@ impl GoogleProvider {
         }
 
         // Tools (function declarations)
+        let mut tools: Vec<Value> = Vec::new();
         if let Some(ref functions) = request.functions {
             let declarations: Vec<Value> = functions
                 .iter()
@@ -126,9 +127,23 @@ impl GoogleProvider {
                     })
                 })
                 .collect();
-            body["tools"] = serde_json::json!([{
+            tools.push(serde_json::json!({
                 "functionDeclarations": declarations,
-            }]);
+            }));
+        }
+        // 本文URL読取り（エージェント単位オプトイン）: プロンプト中の URL を自動取得
+        // する url_context を有効化（HTML/JSON/画像/PDF 対応）。function calling との
+        // 併用は Gemini 3 系で公式サポート。
+        if request
+            .metadata
+            .get("web_search")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            tools.push(serde_json::json!({"url_context": {}}));
+        }
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
         }
 
         body
@@ -419,5 +434,40 @@ impl LlmProvider for GoogleProvider {
         let url = format!("{}/models?key={}", self.base_url, self.api_key);
         let resp = self.client.get(&url).send().await?;
         Ok(resp.status().is_success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// metadata の web_search=true で url_context ツールが tools に載ること。
+    /// 未設定なら載らない（function declarations のみ/無し）。
+    #[test]
+    fn test_build_request_body_url_context_tool() {
+        let provider = GoogleProvider::new("test-key");
+
+        let mut request = ChatRequest::new("gemini-2.5-pro", vec![Message::user("このURLを見て")]);
+        request
+            .metadata
+            .insert("web_search".to_string(), serde_json::json!(true));
+        request.functions = Some(vec![FunctionDefinition {
+            name: "my_tool".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }]);
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().expect("tools array");
+        assert!(tools
+            .iter()
+            .any(|t| t.get("functionDeclarations").is_some()));
+        assert!(
+            tools.iter().any(|t| t.get("url_context").is_some()),
+            "url_context tool present"
+        );
+
+        let plain = ChatRequest::new("gemini-2.5-pro", vec![Message::user("hi")]);
+        let body = provider.build_request_body(&plain);
+        assert!(body.get("tools").is_none());
     }
 }

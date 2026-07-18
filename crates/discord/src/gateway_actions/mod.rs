@@ -1980,6 +1980,7 @@ mod tests {
                 heartbeat_instructions: "OLD".to_string(),
                 model: None,
                 reasoning_effort: None,
+                web_search: None,
                 metadata_json: None,
             };
             opencrab_db::queries::upsert_agent(&conn, &agent).unwrap();

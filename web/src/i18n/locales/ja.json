@@ -258,6 +258,8 @@
   "agentDetail.modelSelect": "モデル",
   "agentDetail.thinkingLevel": "推論（thinking）強度",
   "agentDetail.thinkingDefault": "モデル既定",
+  "agentDetail.webSearch": "本文URL読取り（Web検索）",
+  "agentDetail.webSearchDesc": "メッセージ本文のリンク先をモデルのネイティブ機能で読めるようにします（chatgpt=web_search / gemini=url_context。対応プロバイダのみ・非対応は無視）",
   "agentDetail.useServerDefault": "サーバー既定を使用",
   "agentDetail.modelSaved": "モデル設定を保存しました",
   "agentDetail.modelSaveFailed": "モデル設定の保存に失敗しました",

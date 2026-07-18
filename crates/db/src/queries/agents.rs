@@ -28,6 +28,10 @@ pub struct AgentRow {
     /// 推論（thinking）強度。None/空 = 既定に従う。
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// 本文URL読取り（プロバイダネイティブの web_search / url_context）。
+    /// None = 無効（オプトイン）。
+    #[serde(default)]
+    pub web_search: Option<bool>,
     pub metadata_json: Option<String>,
 }
 
@@ -44,14 +48,15 @@ pub struct AgentPatch {
     pub heartbeat_instructions: Option<String>,
     pub model: Option<Option<String>>,
     pub reasoning_effort: Option<Option<String>>,
+    pub web_search: Option<Option<bool>>,
     pub metadata_json: Option<Option<String>>,
 }
 
 pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, metadata_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "INSERT INTO agents (agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, web_search, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name,
             job_title = excluded.job_title,
@@ -63,6 +68,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             heartbeat_instructions = excluded.heartbeat_instructions,
             model = excluded.model,
             reasoning_effort = excluded.reasoning_effort,
+            web_search = excluded.web_search,
             metadata_json = excluded.metadata_json,
             updated_at = excluded.updated_at",
         params![
@@ -77,6 +83,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
             agent.heartbeat_instructions,
             agent.model,
             agent.reasoning_effort,
+            agent.web_search,
             agent.metadata_json,
             now,
             now,
@@ -87,7 +94,7 @@ pub fn upsert_agent(conn: &Connection, agent: &AgentRow) -> Result<()> {
 
 pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> {
     let result = conn.query_row(
-        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, metadata_json
+        "SELECT agent_id, name, job_title, organization, image_url, persona_name, personality, instructions, heartbeat_instructions, model, reasoning_effort, web_search, metadata_json
          FROM agents WHERE agent_id = ?1",
         params![agent_id],
         |row| {
@@ -103,7 +110,8 @@ pub fn get_agent(conn: &Connection, agent_id: &str) -> Result<Option<AgentRow>> 
                 heartbeat_instructions: row.get(8)?,
                 model: row.get(9)?,
                 reasoning_effort: row.get(10)?,
-                metadata_json: row.get(11)?,
+                web_search: row.get(11)?,
+                metadata_json: row.get(12)?,
             })
         },
     );
@@ -135,6 +143,13 @@ pub fn effective_reasoning_effort_for_agent(
     Ok(get_agent(conn, agent_id)?
         .and_then(|a| a.reasoning_effort)
         .filter(|s| !s.trim().is_empty()))
+}
+
+/// `agents.web_search` が true なら本文URL読取り（provider native）を有効にする。
+pub fn web_search_enabled_for_agent(conn: &Connection, agent_id: &str) -> Result<bool> {
+    Ok(get_agent(conn, agent_id)?
+        .and_then(|a| a.web_search)
+        .unwrap_or(false))
 }
 
 pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) -> Result<bool> {
@@ -173,6 +188,9 @@ pub fn apply_agent_patch(conn: &Connection, agent_id: &str, patch: &AgentPatch) 
         // serde の Option<Option<_>> は JSON null を「変更なし」に潰すため、
         // クリアは null ではなく空文字で表現する。
         row.reasoning_effort = v.clone().filter(|s| !s.trim().is_empty());
+    }
+    if let Some(ref v) = patch.web_search {
+        row.web_search = *v;
     }
     if let Some(ref v) = patch.metadata_json {
         row.metadata_json = v.clone();
