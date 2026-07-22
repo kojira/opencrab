@@ -15,6 +15,7 @@ import {
   getNostrConfig,
   updateNostrConfig,
   deleteNostrConfig,
+  generateNostrKey,
   type NostrConfigDto,
 } from '../api/nostr';
 import type { DiscordConfigDto } from '../api/types';
@@ -517,6 +518,7 @@ function NostrSection({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const [cfg, setCfg] = useState<NostrConfigDto | null>(null);
   const [secretKey, setSecretKey] = useState('');
+  const [vanityPrefix, setVanityPrefix] = useState('');
   const [relays, setRelays] = useState('');
   const [authors, setAuthors] = useState('');
   const [keywords, setKeywords] = useState('');
@@ -587,6 +589,30 @@ function NostrSection({ agentId }: { agentId: string }) {
     }
   };
 
+  const generate = async () => {
+    // 既存鍵があるなら上書き確認（アイデンティティ喪失を防ぐ）。
+    const overwrite = Boolean(cfg?.has_secret_key);
+    if (overwrite && !window.confirm(t('agentDetail.nostrGenerateOverwriteConfirm'))) {
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await generateNostrKey(agentId, {
+        prefix: vanityPrefix.trim() === '' ? undefined : vanityPrefix.trim(),
+        overwrite,
+      });
+      setVanityPrefix('');
+      setSecretKey('');
+      setMessage(t('agentDetail.nostrGenerated', { npub: res.npub }));
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="card-outlined mt-6">
       <h2 className="section-title flex items-center gap-2">
@@ -612,6 +638,25 @@ function NostrSection({ agentId }: { agentId: string }) {
             value={secretKey}
             onChange={(e) => setSecretKey(e.target.value)}
           />
+          <p className="text-body-sm text-on-surface-variant mt-2">
+            {t('agentDetail.nostrGenerateHint')}
+          </p>
+          <div className="flex flex-wrap items-center gap-2 mt-1">
+            <input
+              className="input flex-1 min-w-[8rem]"
+              placeholder={t('agentDetail.nostrVanityPlaceholder')}
+              value={vanityPrefix}
+              onChange={(e) => setVanityPrefix(e.target.value)}
+            />
+            <button
+              type="button"
+              className="btn-outlined"
+              disabled={saving}
+              onClick={() => void generate()}
+            >
+              {t('agentDetail.nostrGenerate')}
+            </button>
+          </div>
         </div>
         <div>
           <label className="text-label-lg text-on-surface-variant block mb-1">

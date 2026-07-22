@@ -28,6 +28,9 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     gateways: RwLock<HashMap<String, JoinHandle<()>>>,
     runner: R,
     cli: NostaroCli,
+    // vanity 鍵生成の同時実行を 1 に制限する（各生成は最大 timeout ぶん nostaro プロセスを
+    // 抱えるため、並列リクエストでプロセスを溢れさせない = DoS/資源枯渇の防止）。
+    vanity_gate: tokio::sync::Semaphore,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -36,12 +39,27 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             gateways: RwLock::new(HashMap::new()),
             runner,
             cli: NostaroCli::new(),
+            vanity_gate: tokio::sync::Semaphore::new(1),
         }
     }
 
     pub fn with_cli(mut self, cli: NostaroCli) -> Self {
         self.cli = cli;
         self
+    }
+
+    /// 内部の nostaro CLI ラッパー（gateway 起動を伴わない操作用）。
+    pub fn cli(&self) -> &NostaroCli {
+        &self.cli
+    }
+
+    /// vanity で新規鍵を生成する。同時実行は 1 に制限し、既に進行中なら即エラーを返す
+    /// （長時間の nostaro プロセスを並列に溢れさせない）。
+    pub async fn generate_key(&self, prefix: &str) -> anyhow::Result<crate::GeneratedKey> {
+        let _permit = self.vanity_gate.try_acquire().map_err(|_| {
+            anyhow::anyhow!("鍵生成が既に進行中です。完了を待って再試行してください")
+        })?;
+        self.cli.vanity(prefix).await
     }
 
     /// エージェントの Nostr ゲートウェイを起動する。

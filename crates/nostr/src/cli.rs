@@ -18,12 +18,52 @@ use crate::config::NostrConfig;
 
 const DEFAULT_NOSTARO_PATH: &str = "nostaro";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// vanity 生成は探索に時間がかかるため、通常操作より長い timeout を使う。
+const DEFAULT_VANITY_TIMEOUT_SECS: u64 = 60;
+
+/// vanity prefix に使える文字集合（bech32 小文字。npub の `npub1` 以降に現れる）。
+/// `1` `b` `i` `o` は bech32 に存在しないので除外される。
+const BECH32_CHARSET: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/// vanity prefix の最大長。探索コストは 32^len で指数的に増える。同期リクエストを
+/// 長くブロックしないよう保守的に 3 文字（期待 ~32^3≈3万試行＝ほぼ即時）に制限する。
+/// より長い vanity は nostaro を直接使う。
+pub const MAX_VANITY_PREFIX_LEN: usize = 3;
+
+/// 新規生成された鍵。nsec は DB に保存し config へ materialize する。
+#[derive(Debug, Clone)]
+pub struct GeneratedKey {
+    pub nsec: String,
+    pub npub: String,
+    /// hex pubkey（任意。nostaro が返さなければ空）。
+    pub pubkey: String,
+}
+
+/// vanity prefix を検証する（bech32 charset・長さ）。呼び出し前に弾いて、
+/// 無効 prefix で nostaro を無駄に spawn したり探索が終わらないのを防ぐ。
+pub fn validate_vanity_prefix(prefix: &str) -> Result<()> {
+    if prefix.chars().count() > MAX_VANITY_PREFIX_LEN {
+        anyhow::bail!(
+            "vanity prefix が長すぎます（最大 {} 文字）。長い prefix は探索が終わりません",
+            MAX_VANITY_PREFIX_LEN
+        );
+    }
+    for c in prefix.chars() {
+        if !BECH32_CHARSET.contains(c) {
+            anyhow::bail!(
+                "vanity prefix に使えない文字 '{c}' があります（bech32 charset のみ: {BECH32_CHARSET}）"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// nostaro CLI ラッパー。
 #[derive(Debug, Clone)]
 pub struct NostaroCli {
     binary_path: String,
     timeout: Duration,
+    vanity_timeout: Duration,
 }
 
 impl Default for NostaroCli {
@@ -37,6 +77,7 @@ impl NostaroCli {
         Self {
             binary_path: DEFAULT_NOSTARO_PATH.to_string(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            vanity_timeout: Duration::from_secs(DEFAULT_VANITY_TIMEOUT_SECS),
         }
     }
 
@@ -79,14 +120,19 @@ impl NostaroCli {
         Ok(cmd)
     }
 
-    /// 一発実行系（post/reply/dm/zap/upload）を timeout 付きで走らせ stdout を返す。
-    async fn run(&self, mut cmd: Command) -> Result<String> {
+    /// 一発実行系（post/reply/dm/zap/upload）を既定 timeout 付きで走らせ stdout を返す。
+    async fn run(&self, cmd: Command) -> Result<String> {
+        self.run_with_timeout(cmd, self.timeout).await
+    }
+
+    /// 指定 timeout でコマンドを走らせ stdout を返す（vanity 等の長時間処理用）。
+    async fn run_with_timeout(&self, mut cmd: Command, timeout: Duration) -> Result<String> {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = tokio::time::timeout(self.timeout, cmd.output())
+        let output = tokio::time::timeout(timeout, cmd.output())
             .await
-            .map_err(|_| anyhow::anyhow!("nostaro timed out after {}s", self.timeout.as_secs()))?
+            .map_err(|_| anyhow::anyhow!("nostaro timed out after {}s", timeout.as_secs()))?
             .context("failed to run nostaro")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -152,6 +198,26 @@ impl NostaroCli {
         let mut cmd = self.base_command(agent_id)?;
         cmd.arg("pubkey");
         self.run(cmd).await
+    }
+
+    /// `nostaro vanity --json [--prefix=<p>]` — 新規鍵を生成して返す。
+    ///
+    /// prefix は npub の `npub1` 以降に前置される bech32 文字列。空なら通常のランダム鍵。
+    /// **config を読まない**（新規鍵生成なので既存 nsec に依存しない）ため `--config` は
+    /// 付けない。探索が終わらないよう prefix を検証し、長めの vanity_timeout を使う。
+    pub async fn vanity(&self, prefix: &str) -> Result<GeneratedKey> {
+        let prefix = prefix.trim().to_lowercase();
+        validate_vanity_prefix(&prefix)?;
+        // config 非依存なので base_command は使わず素で組む。
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.kill_on_drop(true);
+        cmd.arg("vanity").arg("--json");
+        if !prefix.is_empty() {
+            // `-` 始まりはあり得ない（bech32 charset 検証済み）が = 形式で束ねる。
+            cmd.arg(format!("--prefix={prefix}"));
+        }
+        let out = self.run_with_timeout(cmd, self.vanity_timeout).await?;
+        parse_generated_key(&out)
     }
 
     /// per-agent の nostaro config.toml を DB 由来の秘密鍵/リレーから materialize する。
@@ -241,6 +307,39 @@ impl NostaroCli {
     }
 }
 
+/// `nostaro vanity --json` の stdout から鍵を取り出す。進捗ログが混ざりうるので
+/// **最後の JSON 行**（`{` 始まり）を採用する。`{"nsec","npub","pubkey"}` を想定。
+///
+/// **重要**: エラーメッセージに stdout / JSON 行を絶対に載せない。それらは nsec 平文を
+/// 含みうる（例: `--json` 非対応版が生鍵を吐く / JSON 破損）。載せると 500 応答やログに
+/// 秘密鍵が漏れる。失敗時は固定文言のみを返す。
+fn parse_generated_key(stdout: &str) -> Result<GeneratedKey> {
+    let line = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with('{'))
+        .ok_or_else(|| anyhow::anyhow!("nostaro vanity: JSON 出力を解釈できません"))?;
+    let v: serde_json::Value = serde_json::from_str(line)
+        .map_err(|_| anyhow::anyhow!("nostaro vanity: JSON を解釈できません"))?;
+    let get = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let nsec = get("nsec");
+    if nsec.is_empty() {
+        anyhow::bail!("nostaro vanity: nsec が空です");
+    }
+    Ok(GeneratedKey {
+        nsec,
+        npub: get("npub"),
+        pubkey: get("pubkey"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +361,43 @@ mod tests {
         assert!(NostaroCli::agent_nostr_dir("../etc").is_err());
         assert!(NostaroCli::agent_nostr_dir("a/b").is_err());
         assert!(NostaroCli::agent_nostr_dir("").is_err());
+    }
+
+    #[test]
+    fn test_validate_vanity_prefix() {
+        // 空 = ランダム鍵（OK）。
+        assert!(validate_vanity_prefix("").is_ok());
+        assert!(validate_vanity_prefix("cat").is_ok());
+        // bech32 に無い文字（`1` `b` `i` `o`）は拒否。
+        assert!(validate_vanity_prefix("1ac").is_err());
+        assert!(validate_vanity_prefix("bob").is_err());
+        assert!(validate_vanity_prefix("cab").is_err()); // 'b' は bech32 に無い
+                                                         // 長すぎ（探索が終わらない）は拒否（cap=3）。
+        assert!(validate_vanity_prefix("cafe").is_err());
+    }
+
+    #[test]
+    fn test_parse_generated_key() {
+        // 進捗ログが前に混ざっても最後の JSON 行を採る。
+        let out = "searching...\nfound after 1234 tries\n{\"nsec\":\"nsec1abc\",\"npub\":\"npub1crab\",\"pubkey\":\"deadbeef\"}";
+        let k = parse_generated_key(out).unwrap();
+        assert_eq!(k.nsec, "nsec1abc");
+        assert_eq!(k.npub, "npub1crab");
+        assert_eq!(k.pubkey, "deadbeef");
+        // nsec 空 or JSON 無しはエラー。
+        assert!(parse_generated_key("no json here").is_err());
+        assert!(parse_generated_key("{\"npub\":\"npub1x\"}").is_err());
+    }
+
+    #[test]
+    fn test_parse_error_never_leaks_secret() {
+        // `--json` 非対応版が生鍵を吐く / JSON 破損時でも、エラー文言に nsec を載せない。
+        let leaky_plain = "nsec1supersecretkey npub1pub";
+        let e = parse_generated_key(leaky_plain).unwrap_err().to_string();
+        assert!(!e.contains("nsec1supersecret"), "plain stdout leaked: {e}");
+        let leaky_json = "{\"nsec\":\"nsec1supersecretkey\", BROKEN";
+        let e = parse_generated_key(leaky_json).unwrap_err().to_string();
+        assert!(!e.contains("nsec1supersecret"), "json line leaked: {e}");
     }
 
     #[test]

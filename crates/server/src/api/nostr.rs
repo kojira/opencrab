@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use opencrab_db::queries::AgentNostrConfigRow;
-use opencrab_nostr::{config_from_row, NostrFilter};
+use opencrab_nostr::{config_from_row, validate_vanity_prefix, NostrFilter};
 
 use crate::AppState;
 
@@ -161,6 +161,100 @@ pub async fn update_nostr_config(
     }
 
     Ok(Json(json!({"updated": true, "enabled": body.enabled})))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateNostrBody {
+    /// vanity prefix（npub の `npub1` 以降）。空なら通常のランダム鍵。
+    #[serde(default)]
+    pub prefix: String,
+    /// 既存の秘密鍵を上書きするか。既定 false（既存があれば 409 で拒否する）。
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// POST /api/agents/{id}/nostr/generate — nostaro の vanity で新規鍵を生成し保存する。
+///
+/// **operator 向け**（LLM ツールではない）。生成鍵はエージェントの Nostr アイデンティティ
+/// になる。既存鍵は誤って潰さないよう、上書きは `overwrite=true` を要求する。生成後は
+/// enabled=false（鍵を差し替えたら停止し、フィルタ確認後に operator が再有効化する）。
+/// nsec は応答で返さない（既存の完全マスク方針に合わせ、平文を外へ出さない）。
+pub async fn generate_nostr_key(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<GenerateNostrBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // prefix を先に検証して不正なら 400（無効 prefix で nostaro を spawn しない）。
+    let prefix = body.prefix.trim();
+    validate_vanity_prefix(prefix).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let existing = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_nostr_config(&conn, &id).unwrap_or(None)
+    };
+    // 既存鍵を誤って潰さない（アイデンティティ喪失を防ぐ）。
+    if let Some(e) = existing.as_ref() {
+        if !e.secret_key.is_empty() && !body.overwrite {
+            return Err((
+                StatusCode::CONFLICT,
+                "既に秘密鍵が設定されています。上書きするには overwrite=true を指定してください"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let Some(manager) = state.nostr_manager.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Nostr マネージャが無効です".to_string(),
+        ));
+    };
+
+    // 生成（nostaro vanity）。同時実行は 1 に制限。失敗（未インストール/timeout/
+    // 既に進行中 等）は 500。エラー文言に秘密鍵が載らないことは parse 側で担保済み
+    // （生成失敗の経路には鍵が存在しない）。
+    let generated = manager
+        .generate_key(prefix)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 鍵を差し替えるので、稼働中なら止める（新アイデンティティで黙って走らせない）。
+    manager.stop_agent_gateway(&id).await;
+
+    // 生成中（最大 timeout ぶん）に別リクエストが鍵を書き込む TOCTOU を避けるため、
+    // 「既存鍵の再確認 → relays/filter 保持 → upsert」を**同一ロック内**で原子的に行う。
+    {
+        let conn = state.db.lock().unwrap();
+        let current = opencrab_db::queries::get_agent_nostr_config(&conn, &id).unwrap_or(None);
+        if let Some(c) = current.as_ref() {
+            if !c.secret_key.is_empty() && !body.overwrite {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "既に秘密鍵が設定されています。上書きするには overwrite=true を指定してください"
+                        .to_string(),
+                ));
+            }
+        }
+        let (relays_json, filter_json) = current
+            .as_ref()
+            .map(|c| (c.relays_json.clone(), c.filter_json.clone()))
+            .unwrap_or_else(|| ("[]".to_string(), "{}".to_string()));
+        let row = AgentNostrConfigRow {
+            agent_id: id.clone(),
+            secret_key: generated.nsec,
+            relays_json,
+            filter_json,
+            enabled: false,
+        };
+        opencrab_db::queries::upsert_agent_nostr_config(&conn, &row)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    Ok(Json(json!({
+        "generated": true,
+        "npub": generated.npub,
+        "pubkey": generated.pubkey,
+    })))
 }
 
 /// POST /api/agents/{id}/nostr/start

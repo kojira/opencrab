@@ -35,6 +35,20 @@ export function updateNostrConfig(
   return api.put(`/agents/${agentId}/nostr`, body);
 }
 
+export interface GenerateNostrResult {
+  generated: boolean;
+  npub: string;
+  pubkey: string;
+}
+
+/** nostaro の vanity で新規鍵を生成して保存する（operator 操作）。 */
+export function generateNostrKey(
+  agentId: string,
+  body: { prefix?: string; overwrite?: boolean },
+): Promise<GenerateNostrResult> {
+  return api.post(`/agents/${agentId}/nostr/generate`, body);
+}
+
 export function startNostrGateway(agentId: string): Promise<{ started: boolean }> {
   return api.post(`/agents/${agentId}/nostr/start`);
 }

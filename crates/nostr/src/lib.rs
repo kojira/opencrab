@@ -22,7 +22,7 @@ pub mod manager;
 pub mod runner;
 
 pub use actions::NostrGatewayActions;
-pub use cli::NostaroCli;
+pub use cli::{validate_vanity_prefix, GeneratedKey, NostaroCli, MAX_VANITY_PREFIX_LEN};
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
 pub use event::{parse_watch_line, NostrEvent};
 pub use manager::NostrGatewayManager;
