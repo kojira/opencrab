@@ -255,6 +255,25 @@ const MIGRATIONS: &[Migration] = &[
         description: "agent_mcp_config (per-agent MCP サーバ: command/args/env, 1エージェント複数)",
         up: |conn| conn.execute_batch(AGENT_MCP_CONFIG_SQL),
     },
+    Migration {
+        version: 15,
+        description: "llm_provider_overrides に起動系（binary_path/args_json/working_dir/timeout_secs）を追加",
+        up: |conn| {
+            for (col, ty) in [
+                ("binary_path", "TEXT"),
+                ("args_json", "TEXT"),
+                ("working_dir", "TEXT"),
+                ("timeout_secs", "INTEGER"),
+            ] {
+                if !column_exists(conn, "llm_provider_overrides", col)? {
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE llm_provider_overrides ADD COLUMN {col} {ty}"
+                    ))?;
+                }
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
