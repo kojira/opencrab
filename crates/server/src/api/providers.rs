@@ -30,6 +30,14 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "chatgpt",
 ];
 
+/// subprocess 型（CLI を spawn する）プロバイダ。起動設定 binary_path/args 等を持ち、
+/// health_check がローカルの `--version` 実行で完結する（外部ネットワーク呼び出しをしない）。
+const SUBPROCESS_PROVIDERS: &[&str] = &["codex", "cursor", "acp"];
+
+fn is_subprocess_provider(name: &str) -> bool {
+    SUBPROCESS_PROVIDERS.contains(&name)
+}
+
 /// API キーのマスク表示。末尾 4 文字だけ見せる（短いキーは伏せ字のみ）。
 fn mask_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
@@ -275,7 +283,14 @@ pub async fn update_provider(
 
     // 保存後に起動確認（health_check）して結果を返す（ダッシュボードは自動差し戻しせず、
     // 繋がったか可視化するだけ。自動ロールバックはエージェント経由の変更で行う）。
-    let test = test_provider(&state, &name).await;
+    // subprocess 型のみ自動テストする。API キー型（openai 等）の health_check は
+    // 外部への認証付きネットワーク呼び出しになり、保存のたびに発火・ブロックするのを避ける
+    // （明示的な接続テストは /test エンドポイント経由で行える）。
+    let test = if is_subprocess_provider(&name) {
+        Some(test_provider(&state, &name).await)
+    } else {
+        None
+    };
 
     // 更新後の状態を返す
     let overrides = {

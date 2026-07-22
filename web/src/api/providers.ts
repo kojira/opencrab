@@ -53,7 +53,7 @@ export function getLlmProviders(): Promise<LlmProvidersResponse> {
 export function updateLlmProvider(
   name: string,
   body: UpdateProviderBody,
-): Promise<{ provider: LlmProviderInfo; reloaded: boolean; test_ok: boolean }> {
+): Promise<{ provider: LlmProviderInfo; reloaded: boolean; test_ok: boolean | null }> {
   return api.put(`/llm/providers/${encodeURIComponent(name)}`, body);
 }
 

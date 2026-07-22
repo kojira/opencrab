@@ -74,8 +74,11 @@ function ProviderEditor({
         .split(/\s+/)
         .filter((s) => s.length > 0);
       if (args.trim() !== provider.args.join(' ')) body.args = argsList.length ? argsList : null;
-      const tNum = timeoutSecs === '' ? null : parseInt(timeoutSecs, 10);
-      if ((provider.timeout_secs || 0) !== (tNum || 0)) body.timeout_secs = tNum;
+      // 空欄 = オーバーライド解除(null)。非数値は誤ってクリアしないよう変更なし扱い。
+      const parsed = parseInt(timeoutSecs, 10);
+      const tNum = timeoutSecs.trim() === '' ? null : Number.isNaN(parsed) ? undefined : parsed;
+      if (tNum !== undefined && (provider.timeout_secs || 0) !== (tNum || 0))
+        body.timeout_secs = tNum;
     }
     try {
       const res = await updateLlmProvider(provider.name, body);
