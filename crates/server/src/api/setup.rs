@@ -427,6 +427,20 @@ mod tests {
         assert!(p.actions.is_empty());
     }
 
+    /// OpenCrab ハンドブック（#122）が標準スキルとして正しく seed 可能なことを
+    /// コンパイル時に埋め込んだ実ファイルで検証する（drift ガード）。
+    #[test]
+    fn opencrab_handbook_skill_parses() {
+        let content = include_str!("../../../../skills/opencrab-handbook.skill.md");
+        let p = parse_skill_md(content).expect("handbook must parse as a standard skill");
+        assert_eq!(p.name, "opencrab-handbook");
+        assert!(!p.description.is_empty());
+        assert!(p.permission_db.contains("agent"));
+        // 本文（read_skill で開かれる中身）が空でないこと。
+        assert!(p.body.len() > 200, "handbook body should be substantial");
+        assert!(p.body.contains("権限モデル"));
+    }
+
     use crate::config::{LlmConfig, ProviderConfig};
     use opencrab_db::queries::LlmProviderOverrideRow;
 
