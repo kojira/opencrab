@@ -380,7 +380,11 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
         let new_pubkey = match self.cli.pubkey(agent_id).await {
             Ok(pk) if !pk.trim().is_empty() => pk.trim().to_string(),
             _ => {
-                let _ = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None);
+                if let Err(re) =
+                    NostaroCli::materialize_config(agent_id, &old_secret, &relays, None)
+                {
+                    error!(agent_id, error = %re, "nostr: identity 切替のロールバック（config復元）に失敗");
+                }
                 anyhow::bail!(
                     "新しい鍵の pubkey を取得できませんでした。自己返信ループ防止のため切替を中止しました（設定は元に戻しました）"
                 );
@@ -393,7 +397,9 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
         // 4) DB を最後に更新。失敗したら config/セルを旧状態へ巻き戻す（DB=旧 / config=新
         //    の不整合＝再起動で勝手に切替完了する事故を防ぐ）。
         if let Err(e) = self.runner.set_nostr_secret_key(agent_id, &nsec) {
-            let _ = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None);
+            if let Err(re) = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None) {
+                error!(agent_id, error = %re, "nostr: identity 切替のロールバック（config復元）に失敗");
+            }
             *self.self_pubkey.write().unwrap() = old_pubkey;
             return Err(e).context("DB の本鍵更新に失敗（設定を元に戻しました）");
         }
