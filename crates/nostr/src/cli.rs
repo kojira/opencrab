@@ -95,28 +95,33 @@ impl NostaroCli {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// `nostaro post "<text>"` — 新規ノート投稿。
+    /// `nostaro post -- "<text>"` — 新規ノート投稿。
+    ///
+    /// 全ての positional 引数の前に `--`（オプション終端）を置く。target/text/recipient
+    /// 等はモデル/受信イベント由来で、`-` 始まりの値をフラグと誤解釈させない
+    /// （引数インジェクション対策）。
     pub async fn post(&self, agent_id: &str, text: &str) -> Result<String> {
         let mut cmd = self.base_command(agent_id)?;
-        cmd.arg("post").arg(text);
+        cmd.arg("post").arg("--").arg(text);
         self.run(cmd).await
     }
 
-    /// `nostaro reply <target> "<text>"` — 返信。target は note1.../hex id。
+    /// `nostaro reply -- <target> "<text>"` — 返信。target は note1.../hex id。
     pub async fn reply(&self, agent_id: &str, target: &str, text: &str) -> Result<String> {
         let mut cmd = self.base_command(agent_id)?;
-        cmd.arg("reply").arg(target).arg(text);
+        cmd.arg("reply").arg("--").arg(target).arg(text);
         self.run(cmd).await
     }
 
-    /// `nostaro dm send <recipient> "<text>"`（既定 NIP-17）。
+    /// `nostaro dm send -- <recipient> "<text>"`（既定 NIP-17）。
     pub async fn dm(&self, agent_id: &str, recipient: &str, text: &str) -> Result<String> {
         let mut cmd = self.base_command(agent_id)?;
-        cmd.arg("dm").arg("send").arg(recipient).arg(text);
+        cmd.arg("dm").arg("send").arg("--").arg(recipient).arg(text);
         self.run(cmd).await
     }
 
-    /// `nostaro zap <recipient> <amount> -m "<message>"`。
+    /// `nostaro zap -m <message> -- <recipient> <amount>`。
+    /// `-m` は positional の前（`--` 後に置くと value 扱いされるため）。
     pub async fn zap(
         &self,
         agent_id: &str,
@@ -125,17 +130,19 @@ impl NostaroCli {
         message: Option<&str>,
     ) -> Result<String> {
         let mut cmd = self.base_command(agent_id)?;
-        cmd.arg("zap").arg(recipient).arg(amount.to_string());
+        cmd.arg("zap");
         if let Some(m) = message.filter(|s| !s.is_empty()) {
-            cmd.arg("-m").arg(m);
+            // 値も = 形式で確実に束ねる（`-` 始まりのメッセージ対策）。
+            cmd.arg(format!("-m={m}"));
         }
+        cmd.arg("--").arg(recipient).arg(amount.to_string());
         self.run(cmd).await
     }
 
-    /// `nostaro upload <path>` — Blossom アップロード。返り値は URL。
+    /// `nostaro upload -- <path>` — Blossom アップロード。返り値は URL。
     pub async fn upload(&self, agent_id: &str, path: &str) -> Result<String> {
         let mut cmd = self.base_command(agent_id)?;
-        cmd.arg("upload").arg(path);
+        cmd.arg("upload").arg("--").arg(path);
         self.run(cmd).await
     }
 
@@ -162,8 +169,13 @@ impl NostaroCli {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create nostr dir: {}", parent.display()))?;
         }
-        // 値はクォートを含まない前提（nsec/URL）。念のため二重引用符は除去する。
-        let esc = |s: &str| s.replace('"', "");
+        // TOML 文字列を壊す/追記させない文字（`"` `\` 改行）を除去する（値は
+        // nsec/URL 前提なので本来含まれない。防御的にサニタイズ）。
+        let esc = |s: &str| {
+            s.chars()
+                .filter(|c| !matches!(c, '"' | '\\' | '\n' | '\r'))
+                .collect::<String>()
+        };
         let relay_list = relays
             .iter()
             .map(|r| format!("\"{}\"", esc(r)))
@@ -177,12 +189,26 @@ impl NostaroCli {
         if let Some(b) = blossom_server.filter(|s| !s.is_empty()) {
             toml.push_str(&format!("blossom_server = \"{}\"\n", esc(b)));
         }
-        std::fs::write(&path, toml)
-            .with_context(|| format!("failed to write nostaro config: {}", path.display()))?;
+        // nsec を含むので、作成時から 0600 で開く（chmod 前の world-readable 窓を作らない）。
+        // 失敗は握りつぶさない。
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .with_context(|| format!("failed to open nostaro config: {}", path.display()))?;
+            f.write_all(toml.as_bytes())
+                .with_context(|| format!("failed to write nostaro config: {}", path.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&path, toml)
+                .with_context(|| format!("failed to write nostaro config: {}", path.display()))?;
         }
         Ok(path)
     }
@@ -194,17 +220,19 @@ impl NostaroCli {
     pub fn build_watch_command(&self, agent_id: &str, config: &NostrConfig) -> Result<Command> {
         let mut cmd = self.base_command(agent_id)?;
         cmd.arg("watch").arg("--json");
+        // フラグ値は `--flag=value` の = 形式で束ねる（`-` 始まりの author/keyword を
+        // 別フラグと誤解釈させない = 引数インジェクション対策）。
         for relay in config.effective_relays() {
-            cmd.arg("--relay").arg(relay);
+            cmd.arg(format!("--relay={relay}"));
         }
         for author in &config.filter.authors {
-            cmd.arg("--author").arg(author);
+            cmd.arg(format!("--author={author}"));
         }
         for keyword in &config.filter.keywords {
-            cmd.arg("--keyword").arg(keyword);
+            cmd.arg(format!("--keyword={keyword}"));
         }
         for kind in config.effective_kinds() {
-            cmd.arg("--kind").arg(kind.to_string());
+            cmd.arg(format!("--kind={kind}"));
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -253,21 +281,13 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        // 既定リレー2つがフラグで渡る（config の default に依存しない）。
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--relay" && w[1] == "wss://yabu.me"));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--relay" && w[1] == "wss://r.kojira.io"));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--author" && w[1] == "npub1abc"));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--keyword" && w[1] == "opencrab"));
+        // 既定リレー2つが = 形式のフラグで渡る（config の default に依存しない）。
+        assert!(args.contains(&"--relay=wss://yabu.me".to_string()));
+        assert!(args.contains(&"--relay=wss://r.kojira.io".to_string()));
+        assert!(args.contains(&"--author=npub1abc".to_string()));
+        assert!(args.contains(&"--keyword=opencrab".to_string()));
         // kind 未指定 → 既定 1。
-        assert!(args.windows(2).any(|w| w[0] == "--kind" && w[1] == "1"));
+        assert!(args.contains(&"--kind=1".to_string()));
         assert!(args.contains(&"--json".to_string()));
         // per-agent config が渡る。
         assert!(args

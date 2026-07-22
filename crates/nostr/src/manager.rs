@@ -54,19 +54,35 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         secret_key: &str,
         config: NostrConfig,
     ) -> anyhow::Result<()> {
+        // 全ノート購読（author も keyword も無い）は洪水/資源浪費になるため、
+        // ここ（単一チョークポイント）で拒否する（PUT enabled=false→/start バイパス封じ）。
+        if config.filter_is_unbounded() {
+            anyhow::bail!(
+                "Nostr フィルタが空です。author か keyword を最低1つ指定してください（全ノート購読は不可）"
+            );
+        }
+
         self.stop_agent_gateway(agent_id).await;
 
         // nsec を含む config を 0600 で書き出す。
         NostaroCli::materialize_config(agent_id, secret_key, &config.effective_relays(), None)?;
 
-        // 自分の pubkey（best-effort: 取れなくても続行するが自己フィルタは効かない）。
-        let self_pubkey = match self.cli.pubkey(agent_id).await {
-            Ok(pk) => Some(pk.trim().to_string()).filter(|s| !s.is_empty()),
-            Err(e) => {
-                warn!(agent_id, error = %e, "nostr: could not resolve own pubkey; self-reply filter disabled");
-                None
-            }
-        };
+        // 自分の pubkey は自己返信ループ防止に必須。取得できなければ **起動しない**
+        // （fail-closed: 自己フィルタ無しで走ると keyword フィルタ時に自分の返信を
+        // 拾って無限ループ＋LLM 支出になる）。
+        let self_pubkey = self
+            .cli
+            .pubkey(agent_id)
+            .await
+            .map(|pk| pk.trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "自分の pubkey を取得できませんでした（`nostaro pubkey` 必須）。\
+                     自己返信ループ防止のため起動を中止します"
+                )
+            })?;
 
         let runner = self.runner.clone();
         let cli = self.cli.clone();
@@ -124,22 +140,52 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     }
 }
 
+/// 処理済み event.id の bounded FIFO セット（watch 再購読時の再処理 = 二重返信を防ぐ）。
+struct SeenEvents {
+    order: std::collections::VecDeque<String>,
+    set: std::collections::HashSet<String>,
+    cap: usize,
+}
+
+impl SeenEvents {
+    fn new(cap: usize) -> Self {
+        Self {
+            order: std::collections::VecDeque::new(),
+            set: std::collections::HashSet::new(),
+            cap,
+        }
+    }
+
+    /// 新規なら true を返して記録。既知なら false。
+    fn check_and_insert(&mut self, id: &str) -> bool {
+        if self.set.contains(id) {
+            return false;
+        }
+        self.set.insert(id.to_string());
+        self.order.push_back(id.to_string());
+        if self.order.len() > self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
 /// watch ループ本体。watch が落ちてもバックオフして再購読する（abort されるまで）。
+/// dedup セットはループ寿命で保持する（再購読時の replay を跨いで効かせる）。
 async fn run_nostr_loop<R: NostrAgentRunner>(
     runner: R,
     cli: NostaroCli,
     agent_id: String,
     config: NostrConfig,
-    self_pubkey: Option<String>,
+    self_pubkey: String,
 ) {
+    let mut seen = SeenEvents::new(512);
     loop {
-        match run_watch_once(&runner, &cli, &agent_id, &config, self_pubkey.as_deref()).await {
-            Ok(()) => {
-                warn!(agent_id, "nostr watch exited; restarting after backoff");
-            }
-            Err(e) => {
-                error!(agent_id, error = %e, "nostr watch error; restarting after backoff");
-            }
+        match run_watch_once(&runner, &cli, &agent_id, &config, &self_pubkey, &mut seen).await {
+            Ok(()) => warn!(agent_id, "nostr watch exited; restarting after backoff"),
+            Err(e) => error!(agent_id, error = %e, "nostr watch error; restarting after backoff"),
         }
         tokio::time::sleep(WATCH_RESTART_DELAY).await;
     }
@@ -151,7 +197,8 @@ async fn run_watch_once<R: NostrAgentRunner>(
     cli: &NostaroCli,
     agent_id: &str,
     config: &NostrConfig,
-    self_pubkey: Option<&str>,
+    self_pubkey: &str,
+    seen: &mut SeenEvents,
 ) -> anyhow::Result<()> {
     let mut cmd = cli.build_watch_command(agent_id, config)?;
     let mut child = cmd.spawn().map_err(|e| {
@@ -169,8 +216,13 @@ async fn run_watch_once<R: NostrAgentRunner>(
             continue;
         };
         // 自分の投稿はスキップ（自己返信ループ防止）。
-        if self_pubkey.is_some_and(|pk| pk == event.pubkey) {
+        if self_pubkey == event.pubkey {
             debug!(agent_id, "nostr: skipping own event");
+            continue;
+        }
+        // 再処理防止（replay/重複）。
+        if !seen.check_and_insert(&event.id) {
+            debug!(agent_id, "nostr: skipping already-processed event");
             continue;
         }
         handle_event(runner, cli, agent_id, &event).await;
@@ -212,7 +264,9 @@ async fn handle_event<R: NostrAgentRunner>(
         .build_conversation_string(&session_id, agent_id, budget)
         .unwrap_or_default();
 
-    let actions: Arc<dyn GatewayActions> = Arc::new(NostrGatewayActions::new(cli.clone()));
+    let gw = NostrGatewayActions::new(cli.clone());
+    let sent = gw.sent_flag();
+    let actions: Arc<dyn GatewayActions> = Arc::new(gw);
     let req = RunRequest::new(
         agent_id,
         agent_name,
@@ -233,12 +287,40 @@ async fn handle_event<R: NostrAgentRunner>(
                 debug!(agent_id, "nostr: agent chose silence");
                 return;
             }
-            // 明示的に nostr_reply を呼んでいない場合の暗黙返信。
-            match cli.reply(agent_id, event.reply_target(), reply).await {
-                Ok(_) => runner.record_nostr_agent_reply(agent_id, &session_id, reply),
-                Err(e) => warn!(agent_id, error = %e, "nostr implicit reply failed"),
+            // 最終応答テキストを転記（会話履歴の継続性）。
+            runner.record_nostr_agent_reply(agent_id, &session_id, reply);
+            // モデルが既に nostr_* で送信していれば暗黙返信しない（二重送信防止）。
+            if sent.load(std::sync::atomic::Ordering::SeqCst) {
+                debug!(
+                    agent_id,
+                    "nostr: explicit send already occurred; skipping implicit reply"
+                );
+                return;
+            }
+            if let Err(e) = cli.reply(agent_id, event.reply_target(), reply).await {
+                warn!(agent_id, error = %e, "nostr implicit reply failed");
             }
         }
         Err(e) => error!(agent_id, error = %e, "nostr agent run failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SeenEvents;
+
+    #[test]
+    fn test_seen_events_dedup_and_eviction() {
+        let mut seen = SeenEvents::new(2);
+        assert!(seen.check_and_insert("a")); // 新規
+        assert!(!seen.check_and_insert("a")); // 既知
+        assert!(seen.check_and_insert("b"));
+        // cap=2 を超えると最古（a）を追い出す。
+        assert!(seen.check_and_insert("c"));
+        // a は追い出されたので再び新規扱い（replay 耐性は cap ぶん）。
+        assert!(seen.check_and_insert("a"));
+        // b はまだ保持（直近）… ではなく a 追加で b が最古になり追い出される可能性。
+        // 少なくとも直近の c は既知のまま。
+        assert!(!seen.check_and_insert("c"));
     }
 }

@@ -25,6 +25,21 @@ OpenCrab が起動時に DB の per-agent 設定からこのファイルを mate
 `--config <path>`（または `NOSTARO_CONFIG` env）を全サブコマンドに追加する。
 指定時はそのファイルを config として読む。複数アカウントの運用一般に有用。
 
+### 改造 1b: `nostaro pubkey`（必須・汎用）
+
+`nostaro --config <p> pubkey` で、その config の**公開鍵（hex）を stdout に出力**する。
+OpenCrab は起動時にこれを取得し、**自分の投稿を受信ループでスキップ**する（自己返信
+無限ループ＋LLM 支出の防止）。取得できないと OpenCrab はゲートウェイを**起動しない**
+（fail-closed）ので、実機接続にはこのコマンドが必須。
+
+### 引数の渡し方（OpenCrab 側の防御・nostaro は通常のパーサでよい）
+
+OpenCrab は positional を取るサブコマンド（post/reply/dm/zap/upload）で **`--`
+（オプション終端）を挟み**、watch のフラグ値は **`--flag=value` の = 形式**で渡す。
+target/text/recipient は受信イベント/モデル由来（`-` 始まりの値がフラグに化ける
+引数インジェクションを防ぐため）。nostaro 側は `--` と `--flag=value` を通常どおり
+解釈すればよい（特別対応不要）。
+
 ## 送信（既存サブコマンドをそのまま利用）
 
 OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要:

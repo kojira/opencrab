@@ -2,6 +2,9 @@
 //! `nostr_dm` / `nostr_zap` / `nostr_upload`）。`GatewayActions` 実装なので
 //! `BridgedExecutor` がツール一覧にマージし、LLM から呼べる。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use serde_json::{json, Value};
@@ -9,13 +12,29 @@ use serde_json::{json, Value};
 use crate::cli::NostaroCli;
 
 /// Nostr 送信アクション群。実際の送信は nostaro CLI（per-agent 鍵）へ委譲する。
+///
+/// `sent` は「このターンで明示的に送信（post/reply/dm/zap）した」フラグ。ループ側が
+/// これを見て暗黙返信の二重送信を防ぐ。
 pub struct NostrGatewayActions {
     cli: NostaroCli,
+    sent: Arc<AtomicBool>,
 }
 
 impl NostrGatewayActions {
     pub fn new(cli: NostaroCli) -> Self {
-        Self { cli }
+        Self {
+            cli,
+            sent: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// 「送信済み」フラグを共有取得する（ループが暗黙返信の抑制に使う）。
+    pub fn sent_flag(&self) -> Arc<AtomicBool> {
+        self.sent.clone()
+    }
+
+    fn mark_sent(&self) {
+        self.sent.store(true, Ordering::SeqCst);
     }
 }
 
@@ -120,7 +139,10 @@ impl GatewayActions for NostrGatewayActions {
                     return err("text パラメータが必要です");
                 };
                 match self.cli.post(agent_id, text).await {
-                    Ok(out) => ok(json!({"result": out})),
+                    Ok(out) => {
+                        self.mark_sent();
+                        ok(json!({"result": out}))
+                    }
                     Err(e) => err(format!("nostr_post 失敗: {e}")),
                 }
             }
@@ -130,7 +152,10 @@ impl GatewayActions for NostrGatewayActions {
                     return err("target と text パラメータが必要です");
                 };
                 match self.cli.reply(agent_id, target, text).await {
-                    Ok(out) => ok(json!({"result": out})),
+                    Ok(out) => {
+                        self.mark_sent();
+                        ok(json!({"result": out}))
+                    }
                     Err(e) => err(format!("nostr_reply 失敗: {e}")),
                 }
             }
@@ -141,7 +166,10 @@ impl GatewayActions for NostrGatewayActions {
                     return err("recipient と text パラメータが必要です");
                 };
                 match self.cli.dm(agent_id, recipient, text).await {
-                    Ok(out) => ok(json!({"result": out})),
+                    Ok(out) => {
+                        self.mark_sent();
+                        ok(json!({"result": out}))
+                    }
                     Err(e) => err(format!("nostr_dm 失敗: {e}")),
                 }
             }
@@ -154,7 +182,10 @@ impl GatewayActions for NostrGatewayActions {
                 };
                 let message = arg_str(args, "message");
                 match self.cli.zap(agent_id, recipient, amount, message).await {
-                    Ok(out) => ok(json!({"result": out})),
+                    Ok(out) => {
+                        self.mark_sent();
+                        ok(json!({"result": out}))
+                    }
                     Err(e) => err(format!("nostr_zap 失敗: {e}")),
                 }
             }

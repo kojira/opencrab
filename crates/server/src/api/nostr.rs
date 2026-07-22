@@ -14,18 +14,12 @@ use opencrab_nostr::{config_from_row, NostrFilter};
 
 use crate::AppState;
 
-/// nsec のマスク（末尾4文字だけ見せる）。
+/// nsec は秘密鍵なので**完全マスク**（末尾も見せない）。設定有無は has_secret_key で示す。
 fn mask_secret(key: &str) -> String {
-    let chars: Vec<char> = key.chars().collect();
-    if chars.len() >= 8 {
-        format!(
-            "••••{}",
-            chars[chars.len() - 4..].iter().collect::<String>()
-        )
-    } else if key.is_empty() {
+    if key.is_empty() {
         String::new()
     } else {
-        "••••".to_string()
+        "••••••••".to_string()
     }
 }
 

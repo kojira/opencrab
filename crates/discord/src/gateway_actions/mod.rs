@@ -1382,6 +1382,10 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "execute_skill は未実装のはず"
                 );
+            } else if n.starts_with("nostr_") {
+                // nostr_zap / nostr_dm は Nostr ゲートウェイ側のアクション（この
+                // Discord gateway の definitions には出ない）。ここでは検証対象外。
+                continue;
             } else {
                 assert!(names.contains(&n.to_string()), "{n} が definitions に無い");
             }

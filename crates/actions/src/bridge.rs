@@ -91,6 +91,12 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // （co_agent は一覧に見えても実行は拒否される）。
     "join_voice_channel",
     "leave_voice_channel",
+    // Nostr の送金（zap）と任意宛先 DM。Nostr 受信イベントは外部ユーザー由来で
+    // caller=Agent（最小権限）のため、これらは inbound では見えず実行もされない
+    // （プロンプトインジェクションで資金流出/なりすまし DM されるのを防ぐ）。
+    // owner/trusted_user が起点のターン（ダッシュボード等）でのみ使える。
+    "nostr_zap",
+    "nostr_dm",
 ];
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
