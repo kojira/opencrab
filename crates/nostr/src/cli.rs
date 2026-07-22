@@ -270,27 +270,42 @@ impl NostaroCli {
         if let Some(b) = blossom_server.filter(|s| !s.is_empty()) {
             toml.push_str(&format!("blossom_server = \"{}\"\n", esc(b)));
         }
-        // nsec を含むので、作成時から 0600 で開く（chmod 前の world-readable 窓を作らない）。
-        // 失敗は握りつぶさない。
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)
-                .with_context(|| format!("failed to open nostaro config: {}", path.display()))?;
-            f.write_all(toml.as_bytes())
-                .with_context(|| format!("failed to write nostaro config: {}", path.display()))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(&path, toml)
-                .with_context(|| format!("failed to write nostaro config: {}", path.display()))?;
-        }
+        // nsec を含むので 0600 で書く（chmod 前の world-readable 窓を作らない）。
+        write_secret_file(&path, &toml)?;
+        Ok(path)
+    }
+
+    /// LLM が生成した鍵の nsec を**サーバ内に 0600 で保存**する（LLM には返さない）。
+    ///
+    /// 保存先は per-agent の `data/agents/{id}/nostr/generated-keys/<npub>.nsec`。
+    /// ファイル名は npub（無ければ pubkey）を bech32/hex 文字に限定して安全化する
+    /// （パストラバーサル/インジェクション防止）。返り値は保存パス。
+    pub fn save_generated_key(agent_id: &str, key: &GeneratedKey) -> Result<PathBuf> {
+        let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create key dir: {}", dir.display()))?;
+        // ファイル名は英数字のみ（bech32/hex は満たす）。空や異物は fallback。
+        let stem: String = key
+            .npub
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        let stem = if stem.is_empty() {
+            let hexed: String = key
+                .pubkey
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if hexed.is_empty() {
+                "key".to_string()
+            } else {
+                hexed
+            }
+        } else {
+            stem
+        };
+        let path = dir.join(format!("{stem}.nsec"));
+        write_secret_file(&path, &key.nsec)?;
         Ok(path)
     }
 
@@ -320,6 +335,31 @@ impl NostaroCli {
             .stderr(Stdio::piped());
         Ok(cmd)
     }
+}
+
+/// 秘密（nsec 等）を含むファイルを**作成時から 0600**で書く（chmod 前の
+/// world-readable 窓を作らない）。unix 以外は通常書き込み。失敗は握りつぶさない。
+fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to open secret file: {}", path.display()))?;
+        f.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write secret file: {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+            .with_context(|| format!("failed to write secret file: {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// `nostaro vanity --json` の stdout から鍵を取り出す。進捗ログが混ざりうるので
@@ -389,6 +429,30 @@ mod tests {
         assert!(validate_vanity_prefix("cab").is_err()); // 'b' は bech32 に無い
                                                          // 長すぎ（探索が終わらない）は拒否（cap=3）。
         assert!(validate_vanity_prefix("cafe").is_err());
+    }
+
+    #[test]
+    fn test_save_generated_key_writes_0600_and_sanitizes_name() {
+        let key = GeneratedKey {
+            nsec: "nsec1secret".to_string(),
+            npub: "npub1cat/../x".to_string(), // 異物入り → 英数字のみに安全化
+            pubkey: "deadbeef".to_string(),
+        };
+        let path = NostaroCli::save_generated_key("agent-gen-test", &key).unwrap();
+        // ファイル名は英数字のみ（`/` や `.` は落ちる）。
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(name, "npub1catx.nsec");
+        assert!(path.ends_with("data/agents/agent-gen-test/nostr/generated-keys/npub1catx.nsec"));
+        // 中身は nsec、パーミッションは 0600（unix）。
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "nsec1secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

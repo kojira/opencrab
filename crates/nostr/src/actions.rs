@@ -125,11 +125,11 @@ impl GatewayActions for NostrGatewayActions {
             },
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
-                description: "新しい Nostr 鍵（keypair）を生成して返す。任意で vanity prefix（npub の \
-                              npub1 以降・bech32 文字のみ・最大3文字）を指定できる。返り値の nsec は\
-                              **秘密鍵**なので、公開ノートには絶対に投稿せず、必要な相手にだけ DM 等で\
-                              安全に渡すこと。これは新規 keypair を作るユーティリティであり、あなた自身の\
-                              アイデンティティ（送信に使う鍵）は変更しない。".to_string(),
+                description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
+                              npub1 以降・bech32 文字のみ・最大3文字）を指定できる。返るのは公開情報の \
+                              npub / pubkey のみ。**秘密鍵(nsec)はサーバ内に安全に保存され、あなた（LLM）\
+                              には渡されない**（セキュリティのため）。これは新規 keypair を作るユーティリティ\
+                              であり、あなた自身の送信用アイデンティティは変更しない。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -216,14 +216,18 @@ impl GatewayActions for NostrGatewayActions {
                 // prefix は任意。未指定/空ならランダム鍵。検証は cli.vanity 側で行う。
                 let prefix = arg_str(args, "prefix").unwrap_or("");
                 match self.cli.vanity(prefix).await {
-                    // nsec は秘密鍵。結果に含めて返すが、モデルへ強く警告する
-                    // （公開投稿しないよう）。mark_sent は呼ばない（送信ではない）。
-                    Ok(k) => ok(json!({
-                        "nsec": k.nsec,
-                        "npub": k.npub,
-                        "pubkey": k.pubkey,
-                        "warning": "nsec は秘密鍵です。公開ノートに投稿せず、必要な相手にだけ DM 等で安全に渡してください。",
-                    })),
+                    Ok(k) => {
+                        // 秘密鍵(nsec)は**LLM に返さない**。サーバ内に 0600 で保存し、
+                        // npub/pubkey のみ返す（mark_sent は呼ばない＝送信ではない）。
+                        match NostaroCli::save_generated_key(agent_id, &k) {
+                            Ok(_) => ok(json!({
+                                "npub": k.npub,
+                                "pubkey": k.pubkey,
+                                "note": "新しい鍵を生成しました。秘密鍵(nsec)はサーバ内に安全に保存済みで、セキュリティ上あなた（LLM）には渡していません。共有・言及してよいのは npub までです。",
+                            })),
+                            Err(e) => err(format!("鍵は生成しましたが保存に失敗しました: {e}")),
+                        }
+                    }
                     Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
                 }
             }
