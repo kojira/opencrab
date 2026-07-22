@@ -30,13 +30,6 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "chatgpt",
 ];
 
-/// subprocess 型（CLI を spawn する）プロバイダ。起動設定 binary_path/args 等を持つ。
-const SUBPROCESS_PROVIDERS: &[&str] = &["codex", "cursor", "acp"];
-
-fn is_subprocess_provider(name: &str) -> bool {
-    SUBPROCESS_PROVIDERS.contains(&name)
-}
-
 /// 保存時の自動起動確認（health_check）と、失敗時の自動ロールバックの対象。
 ///
 /// health_check がローカルの `<binary> --version` で完結し高速・確定的な
@@ -809,15 +802,6 @@ mod tests {
         let conn = db.lock().unwrap();
         assert!(build_override_row(&conn, "acp", &body(json!({"timeout_secs": "nope"}))).is_err());
         assert!(build_override_row(&conn, "acp", &body(json!({"args": "nope"}))).is_err());
-    }
-
-    #[test]
-    fn subprocess_classification() {
-        assert!(is_subprocess_provider("acp"));
-        assert!(is_subprocess_provider("codex"));
-        assert!(is_subprocess_provider("cursor"));
-        assert!(!is_subprocess_provider("openai"));
-        assert!(!is_subprocess_provider("anthropic"));
     }
 
     /// 自動 health_check/ロールバックの対象は codex/cursor のみ。acp は
