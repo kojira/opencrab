@@ -100,6 +100,23 @@ export function getCursorDiagnostics(): Promise<CursorDiagnostics> {
   return api.get<CursorDiagnostics>('/llm/cursor/diagnostics');
 }
 
+export interface AcpDiagnostics {
+  /** config で指定した起動バイナリ（PATH 検索されうる）。空 = 未設定 */
+  configured_path: string;
+  /** 起動引数（ACP 本体の指定を含む） */
+  args: string[];
+  /** サーバー環境で実際に解決される絶対パス（which）。null = 見つからない */
+  resolved_path: string | null;
+  /** `<binary> --version` の出力（npx 等では起動バイナリ自身）。null = 実行失敗 */
+  version: string | null;
+  /** 実行失敗/未設定時のエラー文 */
+  error: string | null;
+}
+
+export function getAcpDiagnostics(): Promise<AcpDiagnostics> {
+  return api.get<AcpDiagnostics>('/llm/acp/diagnostics');
+}
+
 // ============ Voice (VC) 設定 ============
 
 export interface VoiceSttConfig {
