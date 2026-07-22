@@ -84,6 +84,12 @@ impl McpConnection {
         self
     }
 
+    /// 接続がまだ生きているか。読み取りタスクは stdout の EOF/エラー（＝サーバ終了・
+    /// クラッシュ）で終了するため、`reader_task` の完了＝接続断とみなす。
+    pub fn is_alive(&self) -> bool {
+        !self.reader_task.is_finished()
+    }
+
     async fn write_message(&self, msg: &Value) -> Result<()> {
         let mut line = serde_json::to_string(msg)?;
         line.push('\n');
@@ -148,6 +154,13 @@ impl McpConnection {
         let params = json!({"name": name, "arguments": arguments});
         let result = self.request("tools/call", params).await?;
         Ok(parse_tool_result(&result))
+    }
+}
+
+impl McpClient {
+    /// 接続が生きているか（サーバがクラッシュ/終了していないか）。
+    pub fn is_alive(&self) -> bool {
+        self.conn.is_alive()
     }
 }
 
@@ -436,5 +449,24 @@ mod tests {
         let res = conn.call_tool("echo", json!({"msg": "hi"})).await.unwrap();
         assert_eq!(res.text, "echo:hi");
         assert!(!res.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_is_alive_flips_on_disconnect() {
+        let (client_w, _server_r) = tokio::io::duplex(1024);
+        let (server_w, client_r) = tokio::io::duplex(1024);
+        let conn = McpConnection::new(Box::new(client_w), client_r);
+        // 相手（サーバ側 writer）が生きている間は alive。
+        assert!(conn.is_alive());
+        // サーバ側 writer を drop → client_r が EOF → read_loop 終了 → dead。
+        drop(server_w);
+        // read_loop がEOFを検知して終了するのを待つ。
+        for _ in 0..50 {
+            if !conn.is_alive() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!conn.is_alive(), "接続断で is_alive は false になる");
     }
 }

@@ -206,17 +206,19 @@ impl McpClientManager {
     /// 本ターン用の MCP ツール源を返す。`caller_is_trusted` で trusted_only サーバの
     /// 出し分けを行う。接続が無ければ空プロバイダ（ツール0件）。
     pub fn provider_for(&self, agent_id: &str, caller_is_trusted: bool) -> McpToolProvider {
-        let servers = self
+        // 死んだ接続（サーバがクラッシュ/終了）は除外する。使えないツールを LLM に
+        // 出し続けない（`reconnect_dead` の自己修復までの間の一貫性）。
+        let servers: Vec<ConnectedServer> = self
             .agents
             .read()
             .unwrap()
             .get(agent_id)
-            .cloned()
+            .map(|v| v.iter().filter(|s| s.server.is_alive()).cloned().collect())
             .unwrap_or_default();
         McpToolProvider::new(servers, caller_is_trusted)
     }
 
-    /// 接続済みサーバの (name, tools 数) 一覧（ダッシュボード表示用）。
+    /// 接続済み（かつ生存中）サーバの (name, tools 数) 一覧（ダッシュボード表示用）。
     pub fn connected_status(&self, agent_id: &str) -> Vec<(String, usize)> {
         self.agents
             .read()
@@ -224,20 +226,46 @@ impl McpClientManager {
             .get(agent_id)
             .map(|v| {
                 v.iter()
+                    .filter(|s| s.server.is_alive())
                     .map(|s| (s.server.server_name().to_string(), s.server.tools().len()))
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// 何らかのサーバに接続済みか。
+    /// 何らかの生存中サーバに接続済みか。
     pub fn has_connections(&self, agent_id: &str) -> bool {
         self.agents
             .read()
             .unwrap()
             .get(agent_id)
-            .map(|v| !v.is_empty())
+            .map(|v| v.iter().any(|s| s.server.is_alive()))
             .unwrap_or(false)
+    }
+
+    /// 切断されたサーバ（クラッシュ/終了）を抱えるエージェントを再接続する（自己修復）。
+    /// dead が無ければ何もしない。起動時に spawn した周期スイープから呼ぶ。
+    ///
+    /// 再接続は必ず reload 調停（`reload_agent` = `mark_reload_requested`→`run_reload`）
+    /// 経由で行う。`start_agent` を直接呼ぶと、設定編集の reload と競合したとき
+    /// スイープが読んだ**古い設定で上書き**してしまう（世代チェックで、より新しい
+    /// 編集が来ていればスイープ側はスキップされ、編集が勝つ）。
+    ///
+    /// 注意: 1台でも dead なら該当エージェントの全サーバを張り直す（健全なサーバも
+    /// 一旦切って再接続）。稀な事象かつ 60s に1回に律速されるため許容する。
+    pub async fn reconnect_dead(&self) {
+        // dead を持つエージェントを収集（ロックは同期・await を跨がない）。
+        let stale: Vec<String> = {
+            let map = self.agents.read().unwrap();
+            map.iter()
+                .filter(|(_, servers)| servers.iter().any(|s| !s.server.is_alive()))
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for agent_id in stale {
+            warn!(agent_id, "MCP: 切断されたサーバを検出、再接続します");
+            self.reload_agent(&agent_id).await;
+        }
     }
 
     pub fn shutdown_all(&self) {
