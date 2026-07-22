@@ -61,6 +61,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         #[cfg(feature = "discord")]
         discord_manager: None,
         nostr_manager: None,
+        mcp_manager: None,
     };
     let app = create_router(state);
     (app, db)

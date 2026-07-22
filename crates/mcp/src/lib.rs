@@ -11,11 +11,15 @@
 //! ツール名は `mcp__<server>__<tool>` で名前空間化して組み込みツールと衝突させない
 //! （[`config::qualified_tool_name`] / [`config::split_tool_name`]）。
 
+pub mod actions;
 pub mod client;
 pub mod config;
+pub mod manager;
 
+pub use actions::{ConnectedServer, McpToolProvider};
 pub use client::{McpClient, McpConnection, McpTool, McpToolResult};
 pub use config::{
     config_from_row, is_valid_server_name, qualified_tool_name, split_tool_name, McpServerConfig,
     MCP_TOOL_PREFIX,
 };
+pub use manager::McpClientManager;

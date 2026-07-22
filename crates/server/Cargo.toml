@@ -30,6 +30,7 @@ opencrab-gateway = { workspace = true }
 opencrab-actions = { workspace = true }
 opencrab-db = { workspace = true }
 opencrab-nostr = { workspace = true }
+opencrab-mcp = { workspace = true }
 dotenvy = { workspace = true }
 toml = { workspace = true }
 opencrab-discord = { workspace = true, optional = true }

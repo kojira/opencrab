@@ -174,10 +174,17 @@ fn is_rejection(error: Option<&str>) -> bool {
 ///
 /// Holds both the dispatcher and a pre-configured `ActionContext`.
 /// Optionally holds `GatewayActions` to merge gateway-specific tools.
+/// MCP ツール名の名前空間プレフィックス（`opencrab_mcp::MCP_TOOL_PREFIX` と一致させる。
+/// actions は mcp に依存できない＝依存循環になるため定数で持つ）。
+const MCP_TOOL_PREFIX: &str = "mcp__";
+
 pub struct BridgedExecutor {
     dispatcher: ActionDispatcher,
     context: ActionContext,
     gateway_actions: Option<Arc<dyn GatewayActions>>,
+    /// MCP ツール源（`GatewayActions` 実装）。gateway_actions とは別スロット
+    /// （MCP は全ターンで利用可、gateway は transport 毎で単数のため）。
+    mcp_actions: Option<Arc<dyn GatewayActions>>,
     depth: u32,
     tool_event_sink: Option<Arc<dyn ToolEventSink>>,
 }
@@ -188,6 +195,7 @@ impl BridgedExecutor {
             dispatcher,
             context,
             gateway_actions: None,
+            mcp_actions: None,
             depth: 0,
             tool_event_sink: None,
         }
@@ -200,6 +208,12 @@ impl BridgedExecutor {
 
     pub fn with_gateway_actions(mut self, actions: Arc<dyn GatewayActions>) -> Self {
         self.gateway_actions = Some(actions);
+        self
+    }
+
+    /// MCP ツール源を注入する（`mcp__<server>__<tool>` を提供する `GatewayActions`）。
+    pub fn with_mcp_actions(mut self, actions: Arc<dyn GatewayActions>) -> Self {
+        self.mcp_actions = Some(actions);
         self
     }
 
@@ -293,6 +307,20 @@ impl BridgedExecutor {
                 "{name} is not available at depth {} (max nesting: {MAX_DEPTH})",
                 self.depth
             ));
+        }
+
+        // MCP ツール（mcp__ プレフィックス）は MCP プロバイダへ振り分ける。gateway が
+        // unknown を返す前に処理する（名前空間は dispatcher/gateway と重ならない）。
+        if name.starts_with(MCP_TOOL_PREFIX) {
+            if let Some(ref mcp) = self.mcp_actions {
+                let ctx = self.gateway_call_context();
+                let r = mcp.execute(name, args, &ctx).await;
+                return CoreActionResult {
+                    success: r.success,
+                    data: r.data.unwrap_or(serde_json::Value::Null),
+                    error: r.error,
+                };
+            }
         }
 
         // Try dispatcher first. フォールバック判定は登録有無で行う
@@ -445,6 +473,21 @@ impl ActionExecutor for BridgedExecutor {
         // Merge gateway action definitions（同じポリシー述語でフィルタ）。
         if let Some(ref gw) = self.gateway_actions {
             for def in gw.definitions() {
+                if !self.policy_allows(&def.name) {
+                    continue;
+                }
+                tools.push(FunctionDefinition {
+                    name: def.name,
+                    description: opt_desc(def.description),
+                    parameters: def.parameters,
+                });
+            }
+        }
+
+        // Merge MCP tool definitions。MCP 側の trusted_only ゲートはプロバイダが
+        // caller で既にフィルタ済み（本ターンの caller で構築される）。静的 policy も一応適用。
+        if let Some(ref mcp) = self.mcp_actions {
+            for def in mcp.definitions() {
                 if !self.policy_allows(&def.name) {
                     continue;
                 }

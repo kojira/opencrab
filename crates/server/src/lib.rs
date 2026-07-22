@@ -24,6 +24,9 @@ pub mod transcript;
 /// per-agent Nostr sub-gateway マネージャの共有ハンドル。
 pub type SharedNostrManager = Arc<opencrab_nostr::NostrGatewayManager<AppState>>;
 
+/// per-agent MCP 接続マネージャの共有ハンドル。
+pub type SharedMcpManager = Arc<opencrab_mcp::McpClientManager>;
+
 use opencrab_llm::router::LlmRouter;
 
 /// ホットスワップ可能な LlmRouter の共有ハンドル。
@@ -80,6 +83,7 @@ pub struct AppState {
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
     /// per-agent Nostr sub-gateway マネージャ（main で構築してセットされる）。
     pub nostr_manager: Option<SharedNostrManager>,
+    pub mcp_manager: Option<SharedMcpManager>,
 }
 
 pub fn create_router(state: AppState) -> Router {

@@ -1974,6 +1974,7 @@ dependencies = [
  "opencrab-gateway",
  "opencrab-llm",
  "opencrab-llm-types",
+ "opencrab-mcp",
  "opencrab-nostr",
  "opencrab-voice",
  "rusqlite",

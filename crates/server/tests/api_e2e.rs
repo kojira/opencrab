@@ -33,6 +33,7 @@ fn create_test_app() -> Router {
         #[cfg(feature = "discord")]
         discord_manager: None,
         nostr_manager: None,
+        mcp_manager: None,
     };
     create_router(state)
 }
@@ -717,6 +718,7 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
         #[cfg(feature = "discord")]
         discord_manager: None,
         nostr_manager: None,
+        mcp_manager: None,
     };
     let app = create_router(state);
     (app, db, mock)
@@ -1612,6 +1614,7 @@ fn state_with_consolidation(
         #[cfg(feature = "discord")]
         discord_manager: None,
         nostr_manager: None,
+        mcp_manager: None,
     }
 }
 

@@ -1339,10 +1339,25 @@ pub async fn run_agent_response(
         }
     }
     opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
+    // MCP の trusted_only サーバは信頼された呼び出し元のターンでのみ露出する。
+    let caller_is_trusted = matches!(
+        ctx.caller,
+        opencrab_actions::CallerIdentity::Owner
+            | opencrab_actions::CallerIdentity::CoAgent { .. }
+            | opencrab_actions::CallerIdentity::TrustedUser
+    );
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
-        match req.gateway_actions {
+        let bridged = match req.gateway_actions {
             Some(ga) => bridged.with_gateway_actions(ga),
+            None => bridged,
+        };
+        // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
+        match state.mcp_manager.as_ref() {
+            Some(m) => {
+                let provider = m.provider_for(agent_id, caller_is_trusted);
+                bridged.with_mcp_actions(std::sync::Arc::new(provider))
+            }
             None => bridged,
         }
     };
