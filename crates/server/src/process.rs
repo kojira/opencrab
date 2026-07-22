@@ -920,19 +920,37 @@ fn set_llm_log_callback(
 }
 
 /// tool_result JSON から秘密鍵フィールド（`nsec`）をマスクする。永続化前に呼ぶ。
+///
+/// ここに渡るのは `ActionResult` ラッパ全体の serialize
+/// （`{"success":..,"data":{..},"error":..}`）で、`nsec` は `data` の**中**にある。
+/// トップレベルだけ見ると素通りするため、object を再帰的に辿って `nsec` を潰す。
 /// JSON として解釈できない場合は生の中身に秘密鍵が残りうるため、固定の placeholder に
 /// 置き換える（生保存で漏らさない）。
 fn redact_secret_fields_json(result_json: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(result_json) {
-        Ok(mut v) => {
-            if let Some(obj) = v.as_object_mut() {
+    fn redact(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(obj) => {
                 if obj.contains_key("nsec") {
                     obj.insert(
                         "nsec".to_string(),
                         serde_json::Value::String("[redacted]".to_string()),
                     );
                 }
+                for (_, child) in obj.iter_mut() {
+                    redact(child);
+                }
             }
+            serde_json::Value::Array(arr) => {
+                for child in arr.iter_mut() {
+                    redact(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(mut v) => {
+            redact(&mut v);
             v.to_string()
         }
         Err(_) => "{\"note\":\"[redacted secret result]\"}".to_string(),
@@ -1986,5 +2004,31 @@ mod memory_index_section_injection_tests {
         assert!(mi_pos < pcs_pos);
         assert!(tother_pos > mi_pos && tother_pos < pcs_pos);
         assert!(tcur_pos > pcs_pos);
+    }
+}
+
+#[cfg(test)]
+mod redact_secret_fields_tests {
+    use super::redact_secret_fields_json;
+
+    #[test]
+    fn test_redacts_nsec_nested_in_actionresult_wrapper() {
+        // set_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
+        // nsec は data の中にネストする。
+        let wrapper = r#"{"success":true,"data":{"nsec":"nsec1supersecret","npub":"npub1abc","pubkey":"hex","warning":"w"},"error":null}"#;
+        let out = redact_secret_fields_json(wrapper);
+        assert!(!out.contains("supersecret"), "nsec leaked: {out}");
+        assert!(out.contains("[redacted]"));
+        // 非秘密は保持。
+        assert!(out.contains("npub1abc"));
+        assert!(out.contains("hex"));
+        // トップレベル nsec も潰す。
+        let top = r#"{"nsec":"nsec1x","npub":"npub1y"}"#;
+        assert!(!redact_secret_fields_json(top).contains("nsec1x"));
+        // JSON 不能は placeholder に。
+        let bad = "nsec1raw npub1 not-json";
+        let out = redact_secret_fields_json(bad);
+        assert!(!out.contains("nsec1raw"));
+        assert!(out.contains("redacted"));
     }
 }
