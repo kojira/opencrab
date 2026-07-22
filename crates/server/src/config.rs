@@ -236,6 +236,9 @@ pub struct ProviderConfig {
     pub default_model: String,
     #[serde(default)]
     pub binary_path: String,
+    /// 起動引数（ACP 等、コマンド + フラグでプロバイダを起こすもの向け）。
+    #[serde(default)]
+    pub args: Vec<String>,
     #[serde(default)]
     pub sandbox: String,
     #[serde(default)]
@@ -543,6 +546,35 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 // 無ければ `cursor-agent login` 済みのアンビエント認証に任せる。
                 if !pconfig.api_key.is_empty() {
                     p = p.with_api_key(&pconfig.api_key);
+                }
+                if !pconfig.models.is_empty() {
+                    let extra: Vec<(String, u32)> = pconfig
+                        .models
+                        .iter()
+                        .map(|m| (m.clone(), 200_000u32))
+                        .collect();
+                    p = p.with_extra_models(extra);
+                }
+                Some(Arc::new(p))
+            }
+            "acp" => {
+                // ACP（Agent Client Protocol）エージェントを JSON-RPC/stdio で駆動する。
+                // 起動コマンド/引数はエージェント毎に異なるため binary_path + args で指定。
+                let mut p = opencrab_llm::AcpProvider::new();
+                if !pconfig.default_model.is_empty() {
+                    p = p.with_default_model(&pconfig.default_model);
+                }
+                if !pconfig.binary_path.is_empty() {
+                    p = p.with_binary_path(&pconfig.binary_path);
+                }
+                if !pconfig.args.is_empty() {
+                    p = p.with_args(pconfig.args.clone());
+                }
+                if !pconfig.working_dir.is_empty() {
+                    p = p.with_working_dir(&pconfig.working_dir);
+                }
+                if pconfig.timeout_secs > 0 {
+                    p = p.with_timeout_secs(pconfig.timeout_secs);
                 }
                 if !pconfig.models.is_empty() {
                     let extra: Vec<(String, u32)> = pconfig

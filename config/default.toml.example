@@ -80,6 +80,13 @@ models = ["gpt-5", "sonnet-4.5", "opus-4.1", "auto"]
 # 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
 # api_key = "${CURSOR_API_KEY}"
 
+# ACP (Agent Client Protocol) エージェント（stdio JSON-RPC）。binary_path + args で起動。
+# [llm.providers.acp]
+# default_model = "default"
+# binary_path = "gemini"
+# args = ["--experimental-acp"]
+# models = ["default"]
+
 # ChatGPT direct API（~/.codex/auth.json の OAuth トークンを使用）
 [llm.providers.chatgpt]
 enabled = false

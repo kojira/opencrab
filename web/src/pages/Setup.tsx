@@ -250,7 +250,7 @@ function LlmStep({
           value={name}
           onChange={(e) => setName(e.target.value)}
         >
-          {['openai', 'anthropic', 'google', 'openrouter', 'ollama', 'llamacpp', 'codex', 'cursor', 'chatgpt'].map(
+          {['openai', 'anthropic', 'google', 'openrouter', 'ollama', 'llamacpp', 'codex', 'cursor', 'acp', 'chatgpt'].map(
             (p) => (
               <option key={p} value={p}>
                 {p}

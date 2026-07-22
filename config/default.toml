@@ -92,6 +92,19 @@ models = ["gpt-5", "sonnet-4.5", "opus-4.1", "auto"]
 # 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
 # api_key = "${CURSOR_API_KEY}"
 
+# ACP (Agent Client Protocol) エージェントを stdio JSON-RPC で駆動する。
+# エージェントが自前でツールループを回すワンショット型（codex/cursor と同型）。
+# 起動コマンド + args は使うエージェントに合わせて設定する（既定では無効）。
+# [llm.providers.acp]
+# default_model = "default"                 # ACP はモデルをエージェント設定で決める（名目値）
+# timeout_secs = 300
+# 例1: Gemini CLI  → binary_path="gemini",  args=["--experimental-acp"]
+# 例2: Claude Code → binary_path="npx",     args=["-y","@zed-industries/claude-code-acp"]
+# binary_path = "gemini"
+# args = ["--experimental-acp"]
+# working_dir = ""                          # 省略時は per-agent workspace
+# models = ["default"]                      # ダッシュボード表示用（名目）
+
 # ChatGPT direct API (uses ~/.codex/auth.json OAuth token)
 [llm.providers.chatgpt]
 enabled = true

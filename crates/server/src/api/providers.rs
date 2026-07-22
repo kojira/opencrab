@@ -26,6 +26,7 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "llamacpp",
     "codex",
     "cursor",
+    "acp",
     "chatgpt",
 ];
 

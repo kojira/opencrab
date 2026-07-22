@@ -29,7 +29,9 @@ fn skills_dir() -> PathBuf {
 
 /// API キー不要で使えるプロバイダ種別（ローカル / サブスク / OAuth ファイル等）。
 /// これらは既定に設定されていれば、キー未設定でも「用意済み」とみなす。
-const KEYLESS_PROVIDERS: &[&str] = &["codex", "cursor", "chatgpt", "ollama", "llamacpp", "bonsai"];
+const KEYLESS_PROVIDERS: &[&str] = &[
+    "codex", "cursor", "acp", "chatgpt", "ollama", "llamacpp", "bonsai",
+];
 
 /// 実効 API キーが雛形プレースホルダか（空 or `dummy`）。
 fn is_placeholder_key(key: &str) -> bool {
