@@ -222,6 +222,23 @@ mod tests {
         }
     }
 
+    /// ドリフト検出: `TRUSTED_ONLY_ACTIONS` の nostr_* は実在の nostr アクションを
+    /// 指していること（片方をリネームするとゲートが死に名を指して黙って無効化される）。
+    #[test]
+    fn test_trusted_only_nostr_names_are_live() {
+        let a = NostrGatewayActions::new(NostaroCli::new());
+        let names: Vec<String> = a.definitions().into_iter().map(|d| d.name).collect();
+        for n in opencrab_actions::TRUSTED_ONLY_ACTIONS
+            .iter()
+            .filter(|n| n.starts_with("nostr_"))
+        {
+            assert!(
+                names.contains(&n.to_string()),
+                "{n} は TRUSTED_ONLY だが nostr gateway definitions に無い"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_missing_args_rejected_without_spawning() {
         let a = NostrGatewayActions::new(NostaroCli::new());

@@ -125,6 +125,8 @@ pub async fn update_nostr_config(
         ));
     }
 
+    // まず enabled=false で保存する。起動が成功して初めて enabled=true にする
+    // （起動失敗時に「enabled だが未稼働」の不整合を残さない）。
     let row = AgentNostrConfigRow {
         agent_id: id.clone(),
         secret_key,
@@ -135,7 +137,7 @@ pub async fn update_nostr_config(
             "kinds": filter.kinds,
         }))
         .unwrap_or_else(|_| "{}".to_string()),
-        enabled: body.enabled,
+        enabled: false,
     };
     {
         let conn = state.db.lock().unwrap();
@@ -151,6 +153,8 @@ pub async fn update_nostr_config(
                 .start_agent_gateway(&id, &row.secret_key, config)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_agent_nostr_config_enabled(&conn, &id, true).ok();
         } else {
             manager.stop_agent_gateway(&id).await;
         }
@@ -171,16 +175,18 @@ pub async fn start_nostr_gateway(
     let Some(row) = row else {
         return Err((StatusCode::NOT_FOUND, "Nostr 設定がありません".to_string()));
     };
-    {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, &id, true).ok();
-    }
+    // 起動が成功してから enabled=true にする（失敗時に「enabled だが未稼働」の
+    // 不整合を残さない）。
     if let Some(manager) = state.nostr_manager.as_ref() {
         let config = config_from_row(&row);
         manager
             .start_agent_gateway(&id, &row.secret_key, config)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, &id, true).ok();
     }
     Ok(Json(json!({"started": true})))
 }
