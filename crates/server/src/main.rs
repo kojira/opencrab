@@ -870,6 +870,16 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(opencrab_mcp::McpClientManager::new(state.db.clone()));
         state.mcp_manager = Some(manager.clone());
         manager.restore_from_db().await;
+        // 自己修復: 切断された（クラッシュ/終了した）サーバを周期的に再接続する。
+        let sweeper = manager.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.tick().await; // 最初の即時発火を捨てる
+            loop {
+                tick.tick().await;
+                sweeper.reconnect_dead().await;
+            }
+        });
     }
 
     let app = create_router(state);

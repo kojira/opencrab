@@ -24,6 +24,11 @@ pub trait McpServer: Send + Sync {
     fn tools(&self) -> &[McpTool];
     async fn call_tool(&self, name: &str, args: serde_json::Value)
         -> anyhow::Result<McpToolResult>;
+    /// 接続が生きているか。実接続はサーバのクラッシュ/終了を検知する。
+    /// デフォルト true（テスト用モック等は常に生存扱い）。
+    fn is_alive(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -40,6 +45,9 @@ impl McpServer for McpClient {
         args: serde_json::Value,
     ) -> anyhow::Result<McpToolResult> {
         McpClient::call_tool(self, name, args).await
+    }
+    fn is_alive(&self) -> bool {
+        McpClient::is_alive(self)
     }
 }
 
