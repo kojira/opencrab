@@ -1017,11 +1017,10 @@ fn set_turn_log_callbacks(
         let tr_workspace = tool_result_workspace;
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
-                // 秘密鍵はセッションログに永続化しない。tool_result は後続ターンで
-                // build_conversation_string により会話へ再注入されるため、nsec を含む結果
-                // （nostr_generate_key）を生のまま保存すると、DB 保存時漏洩＋プロンプト
-                // インジェクションでの持ち出し対象になる。ライブのモデル向け結果には nsec が
-                // 残るが、永続化前にここでマスクする。
+                // 防御的マスク（defense-in-depth）。nostr_generate_key は既に nsec を
+                // 返さない設計だが、tool_result は後続ターンで build_conversation_string に
+                // より会話へ再注入されるため、万一 nsec フィールドが混ざっても永続化前に
+                // ここで潰す（DB 保存時漏洩＋プロンプトインジェクション持ち出しの防止）。
                 let result_json = if tool_name == "nostr_generate_key" {
                     redact_secret_fields_json(&result_json)
                 } else {
