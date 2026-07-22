@@ -582,7 +582,19 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 5. subprocess は起動確認。成功ならそのまま。
+    // 5. subprocess でも、再構築後にルーターへ登録されていない場合（enabled=false での
+    //    無効化やオーバーライド削除で TOML でも無効等）は、起動確認の対象が存在しない。
+    //    これを health_check 失敗と混同するとロールバックが暴発し「無効化できない」
+    //    バグになるため、意図した非登録は適用成功として扱う。
+    if state.llm_router.get().get_provider(name).is_none() {
+        return Ok(ApplyOutcome {
+            applied: true,
+            test_ok: None,
+            rolled_back: false,
+        });
+    }
+
+    // 6. 登録済み subprocess は起動確認。成功ならそのまま。
     if test_provider(state, name).await {
         return Ok(ApplyOutcome {
             applied: true,
@@ -591,9 +603,16 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 6. 失敗 → 元の状態へロールバックして再構築。
+    // 7. 失敗 → 元の状態へロールバックして再構築。DB は previous に戻す（永続状態は正）。
+    //    復元後の再構築は元は正常だった設定なので成功するはずだが、失敗しても best-effort
+    //    でログのみ（ここで Err を返すと DB=previous と実行中 router が食い違う報告になる）。
     restore_previous().map_err(internal)?;
-    reload_router(state)?;
+    if reload_router(state).is_err() {
+        tracing::error!(
+            provider = %name,
+            "rolled back DB to previous settings but router rebuild failed; restart may be needed"
+        );
+    }
     tracing::warn!(
         provider = %name,
         "provider configuration failed health_check; rolled back to previous settings"
@@ -784,5 +803,37 @@ mod tests {
         assert!(is_subprocess_provider("cursor"));
         assert!(!is_subprocess_provider("openai"));
         assert!(!is_subprocess_provider("anthropic"));
+    }
+
+    /// レビュー Finding 1 の回帰ガード: subprocess プロバイダを enabled=false で
+    /// 無効化するとルーターから消える（get_provider が None）。
+    /// `apply_provider_override_with_rollback` はこの「意図した非登録」を
+    /// health_check 失敗と混同してロールバックしてはならない（＝適用成功で返す）。
+    #[test]
+    fn disabling_subprocess_provider_removes_it_from_router() {
+        use crate::config::{apply_llm_overrides, build_llm_router, LlmConfig, ProviderConfig};
+        let mut cfg = LlmConfig::default();
+        cfg.providers.insert(
+            "acp".to_string(),
+            ProviderConfig {
+                binary_path: "/bin/true".to_string(),
+                ..Default::default()
+            },
+        );
+        // enabled 無指定 → acp は登録される（build は I/O せず成功）。
+        let router = build_llm_router(&cfg).unwrap();
+        assert!(router.get_provider("acp").is_some());
+        // enabled=false override を適用 → acp はルーターから消える。
+        let overrides = vec![opencrab_db::queries::LlmProviderOverrideRow {
+            provider: "acp".to_string(),
+            enabled: Some(false),
+            ..Default::default()
+        }];
+        let merged = apply_llm_overrides(&cfg, &overrides);
+        let router2 = build_llm_router(&merged).unwrap();
+        assert!(
+            router2.get_provider("acp").is_none(),
+            "disabled subprocess provider must be absent from the router"
+        );
     }
 }
