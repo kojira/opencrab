@@ -145,6 +145,27 @@ impl SystemGatewayActions {
                     }
                 }),
             },
+            GatewayActionDef {
+                name: "configure_self".to_string(),
+                description:
+                    "自分（このエージェント）の人格・モデル・推論強度・web 検索などの設定を変更する\
+                （owner 限定）。model/reasoning_effort/web_search の変更は次ターン以降に反映される。\
+                指示文の変更は update_instructions / update_heartbeat_instructions を使う。\
+                省略したフィールドは変更しない。null で解除（既定に戻す。persona_name は解除不可）。"
+                        .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "persona_name": {"type": "string", "description": "ペルソナ名。"},
+                        "personality": {"type": ["string", "null"], "description": "性格・思考スタイル。"},
+                        "job_title": {"type": ["string", "null"], "description": "肩書き。"},
+                        "organization": {"type": ["string", "null"], "description": "所属。"},
+                        "model": {"type": ["string", "null"], "description": "既定モデル（provider:model）。次ターン以降に反映。"},
+                        "reasoning_effort": {"type": ["string", "null"], "description": "推論強度（low/medium/high 等）。"},
+                        "web_search": {"type": ["boolean", "null"], "description": "本文URL読取り/web 検索の有効化。"}
+                    }
+                }),
+            },
         ]
     }
 
@@ -370,6 +391,64 @@ impl SystemGatewayActions {
             Err((_code, msg)) => err(msg),
         }
     }
+
+    async fn configure_self(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
+        if ctx.caller != GatewayCaller::Owner {
+            return err("configure_self requires owner".to_string());
+        }
+        let agent_id = ctx.agent_id.clone();
+
+        // 三値: キー欠落=変更しない / null=解除（Some(None）) / 値=設定（Some(Some(v))）。
+        let tri_string = |k: &str| -> Option<Option<String>> {
+            match args.get(k) {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(Value::String(s)) => Some(Some(s.clone())),
+                _ => None,
+            }
+        };
+        let tri_bool = |k: &str| -> Option<Option<bool>> {
+            match args.get(k) {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(Value::Bool(b)) => Some(Some(*b)),
+                _ => None,
+            }
+        };
+
+        let patch = opencrab_db::queries::AgentPatch {
+            // persona_name は Option<String>（解除不可）。文字列指定時のみ設定。
+            persona_name: args
+                .get("persona_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            personality: tri_string("personality"),
+            job_title: tri_string("job_title"),
+            organization: tri_string("organization"),
+            model: tri_string("model"),
+            reasoning_effort: tri_string("reasoning_effort"),
+            web_search: tri_bool("web_search"),
+            ..Default::default()
+        };
+
+        let result = {
+            let conn = match self.state.db.lock() {
+                Ok(c) => c,
+                Err(_) => return err("db lock failed".to_string()),
+            };
+            opencrab_db::queries::apply_agent_patch(&conn, &agent_id, &patch)
+        };
+        match result {
+            Ok(true) => GatewayActionResult {
+                success: true,
+                data: Some(json!({ "agent_id": agent_id, "updated": true })),
+                error: None,
+            },
+            Ok(false) => err(format!("agent not found: {agent_id}")),
+            Err(e) => err(e.to_string()),
+        }
+    }
 }
 
 fn err(msg: String) -> GatewayActionResult {
@@ -400,6 +479,7 @@ impl GatewayActions for SystemGatewayActions {
             "configure_llm_provider" => self.configure_llm_provider(args, ctx).await,
             "manage_allowed_commands" => self.manage_allowed_commands(args, ctx).await,
             "configure_nostr" => self.configure_nostr(args, ctx).await,
+            "configure_self" => self.configure_self(args, ctx).await,
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
