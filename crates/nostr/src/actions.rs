@@ -10,14 +10,17 @@ use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, Ga
 use serde_json::{json, Value};
 
 use crate::cli::NostaroCli;
+use crate::identity::NostrIdentityAdmin;
 
 /// Nostr 送信アクション群。実際の送信は nostaro CLI（per-agent 鍵）へ委譲する。
 ///
 /// `sent` は「このターンで明示的に送信（post/reply/dm/zap）した」フラグ。ループ側が
-/// これを見て暗黙返信の二重送信を防ぐ。
+/// これを見て暗黙返信の二重送信を防ぐ。`admin` は identity 切替（本鍵採用）の実体で、
+/// watch ループ稼働時のみ Some（owner 限定ツール `nostr_switch_identity` から使う）。
 pub struct NostrGatewayActions {
     cli: NostaroCli,
     sent: Arc<AtomicBool>,
+    admin: Option<Arc<dyn NostrIdentityAdmin>>,
 }
 
 impl NostrGatewayActions {
@@ -25,7 +28,14 @@ impl NostrGatewayActions {
         Self {
             cli,
             sent: Arc::new(AtomicBool::new(false)),
+            admin: None,
         }
+    }
+
+    /// identity 切替の実体を注入する（watch ループが稼働時に渡す）。
+    pub fn with_admin(mut self, admin: Arc<dyn NostrIdentityAdmin>) -> Self {
+        self.admin = Some(admin);
+        self
     }
 
     /// 「送信済み」フラグを共有取得する（ループが暗黙返信の抑制に使う）。
@@ -151,6 +161,21 @@ impl GatewayActions for NostrGatewayActions {
                     }
                 }),
             },
+            GatewayActionDef {
+                name: "nostr_switch_identity".to_string(),
+                description: "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの\
+                              **本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿は\
+                              その鍵で行われる。npub には generated_key で作った鍵の npub を渡す。\
+                              重要な操作なので owner（信頼ユーザー）からの依頼時のみ実行される。\
+                              秘密鍵は扱わない（npub 参照のみ）。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "npub": {"type": "string", "description": "本鍵に採用する、生成済み鍵の npub。"}
+                    },
+                    "required": ["npub"]
+                }),
+            },
         ]
     }
 
@@ -257,6 +282,23 @@ impl GatewayActions for NostrGatewayActions {
                     Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
                 }
             }
+            "nostr_switch_identity" => {
+                let Some(npub) = arg_str(args, "npub") else {
+                    return err("npub パラメータが必要です");
+                };
+                let Some(admin) = self.admin.as_ref() else {
+                    return err(
+                        "この環境では identity 切替は利用できません（ゲートウェイ稼働時のみ）",
+                    );
+                };
+                match admin.adopt_generated_identity(agent_id, npub).await {
+                    Ok(adopted) => ok(json!({
+                        "npub": adopted,
+                        "note": "この鍵を本鍵として採用しました。以後の投稿はこの identity で行われます。秘密鍵は扱っていません。",
+                    })),
+                    Err(e) => err(format!("nostr_switch_identity 失敗: {e}")),
+                }
+            }
             other => err(format!("unknown nostr action: {other}")),
         }
     }
@@ -277,9 +319,25 @@ mod tests {
             "nostr_zap",
             "nostr_upload",
             "nostr_generate_key",
+            "nostr_switch_identity",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    #[tokio::test]
+    async fn test_switch_identity_without_admin_is_rejected() {
+        // admin 未注入（＝ゲートウェイ非稼働）では切替不可。npub があってもエラー。
+        let a = NostrGatewayActions::new(NostaroCli::new());
+        let ctx = GatewayCallContext::for_agent("agent-1");
+        let r = a
+            .execute("nostr_switch_identity", &json!({"npub": "npub1x"}), &ctx)
+            .await;
+        assert!(!r.success);
+        // npub 欠落も即エラー（spawn しない）。
+        let r = a.execute("nostr_switch_identity", &json!({}), &ctx).await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("npub"));
     }
 
     /// ドリフト検出: `TRUSTED_ONLY_ACTIONS` の nostr_* は実在の nostr アクションを

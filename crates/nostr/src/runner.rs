@@ -53,4 +53,10 @@ pub trait NostrAgentRunner: Send + Sync + Clone + 'static {
 
     /// enabled な per-agent Nostr 設定一覧（起動時 restore 用）。
     fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow>;
+
+    /// エージェントの Nostr 設定行を取得する（identity 切替で relays 継承に使う）。
+    fn get_nostr_config(&self, agent_id: &str) -> Option<AgentNostrConfigRow>;
+
+    /// 本鍵（secret_key）だけを差し替える（identity 切替。relays/filter/enabled は保持）。
+    fn set_nostr_secret_key(&self, agent_id: &str, secret_key: &str) -> Result<()>;
 }

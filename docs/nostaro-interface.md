@@ -82,6 +82,14 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 
+### identity 切替（`nostr_switch_identity`・owner 限定）
+
+`nostr_switch_identity(npub=...)` で、`nostr_generate_key` で生成した鍵をゲートウェイの
+**本鍵**に採用する。OpenCrab 側は DB の secret_key を差し替え、`config.toml` を新鍵で
+再生成（0600・アトミック）し、自己返信スキップ用の pubkey を `nostaro --config <p> pubkey`
+で取り直して更新する（**watch は鍵非依存なのでプロセス再起動は不要**）。owner/trusted の
+ターンでのみ実行される（外部ユーザーによるなりすまし乗っ取りを防ぐ）。nostaro 側の改造は不要。
+
 ### マルチ identity 送信（`from` 指定）
 
 送信ツールの任意 `from`（npub）を指定すると、本鍵ではなく **`nostr_generate_key` で

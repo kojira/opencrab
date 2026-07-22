@@ -93,6 +93,19 @@ pub fn set_agent_nostr_config_enabled(
     Ok(updated > 0)
 }
 
+/// 本鍵（secret_key）だけを差し替える（identity 切替）。他の列は保持する。
+pub fn set_agent_nostr_config_secret_key(
+    conn: &Connection,
+    agent_id: &str,
+    secret_key: &str,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE agent_nostr_config SET secret_key = ?1, updated_at = ?2 WHERE agent_id = ?3",
+        params![secret_key, Utc::now().to_rfc3339(), agent_id],
+    )?;
+    Ok(updated > 0)
+}
+
 pub fn list_enabled_agent_nostr_configs(conn: &Connection) -> Result<Vec<AgentNostrConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, secret_key, relays_json, filter_json, enabled
@@ -166,5 +179,27 @@ mod tests {
 
         assert!(delete_agent_nostr_config(&conn, "agent-1").unwrap());
         assert!(get_agent_nostr_config(&conn, "agent-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_set_secret_key_preserves_other_columns() {
+        let conn = mem();
+        let cfg = AgentNostrConfigRow {
+            agent_id: "a1".to_string(),
+            secret_key: "nsec1old".to_string(),
+            relays_json: r#"["wss://yabu.me"]"#.to_string(),
+            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
+            enabled: true,
+        };
+        upsert_agent_nostr_config(&conn, &cfg).unwrap();
+        // 本鍵だけ差し替え、relays/filter/enabled は保持。
+        assert!(set_agent_nostr_config_secret_key(&conn, "a1", "nsec1new").unwrap());
+        let got = get_agent_nostr_config(&conn, "a1").unwrap().unwrap();
+        assert_eq!(got.secret_key, "nsec1new");
+        assert_eq!(got.relays_json, r#"["wss://yabu.me"]"#);
+        assert_eq!(got.filter_json, r#"{"keywords":["opencrab"]}"#);
+        assert!(got.enabled);
+        // 未知 agent は false。
+        assert!(!set_agent_nostr_config_secret_key(&conn, "missing", "x").unwrap());
     }
 }
