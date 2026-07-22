@@ -6,6 +6,7 @@
 
 mod agent_discord_config;
 mod agent_logs;
+mod agent_nostr_config;
 mod agents;
 mod allowed_commands;
 mod channel_config;
@@ -28,6 +29,7 @@ mod webhook_config;
 
 pub use agent_discord_config::*;
 pub use agent_logs::*;
+pub use agent_nostr_config::*;
 pub use agents::*;
 pub use allowed_commands::*;
 pub use channel_config::*;

@@ -491,6 +491,7 @@ async fn main() -> anyhow::Result<()> {
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
         #[cfg(feature = "discord")]
         discord_manager: None,
+        nostr_manager: None,
     };
 
     #[cfg(feature = "discord")]
@@ -852,6 +853,15 @@ async fn main() -> anyhow::Result<()> {
         state.tools_config.clone(),
         heartbeat_config_tx,
     );
+
+    // Per-agent Nostr sub-gateway マネージャ（discord と同様に、state clone より前に
+    // 生成して配線する。nostr は重い依存が無いので feature ゲート無しの常時配線）。
+    {
+        let manager: opencrab_server::SharedNostrManager =
+            Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.nostr_manager = Some(manager.clone());
+        manager.restore_from_db().await;
+    }
 
     let app = create_router(state);
 

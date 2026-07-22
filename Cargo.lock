@@ -1919,6 +1919,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencrab-nostr"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "opencrab-actions",
+ "opencrab-core",
+ "opencrab-db",
+ "opencrab-gateway",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "opencrab-server"
 version = "0.2.17"
 dependencies = [
@@ -1940,6 +1957,7 @@ dependencies = [
  "opencrab-gateway",
  "opencrab-llm",
  "opencrab-llm-types",
+ "opencrab-nostr",
  "opencrab-voice",
  "rusqlite",
  "serde",

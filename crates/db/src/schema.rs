@@ -245,7 +245,24 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 13,
+        description: "agent_nostr_config (per-agent Nostr sub-gateway: 隔離鍵 + relays + filter)",
+        up: |conn| conn.execute_batch(AGENT_NOSTR_CONFIG_SQL),
+    },
 ];
+
+/// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
+const AGENT_NOSTR_CONFIG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS agent_nostr_config (
+    agent_id TEXT PRIMARY KEY,
+    secret_key TEXT NOT NULL,
+    relays_json TEXT NOT NULL DEFAULT '[]',
+    filter_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+";
 
 /// スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）。
 /// 注入時ではなく「利用が検出された時」に記録する（名前一致ベース, ノイズあり）。
@@ -1252,6 +1269,18 @@ CREATE TABLE IF NOT EXISTS agent_discord_config (
     bot_token TEXT NOT NULL,
     owner_discord_id TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+
+-- ============================================
+-- エージェント別 Nostr sub-gateway 設定（秘密鍵は per-agent 隔離）
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_nostr_config (
+    agent_id TEXT PRIMARY KEY,
+    secret_key TEXT NOT NULL,
+    relays_json TEXT NOT NULL DEFAULT '[]',
+    filter_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
 
