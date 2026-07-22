@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod anthropic;
 pub mod chatgpt;
 pub mod codex;
@@ -10,6 +11,7 @@ pub mod openai_compat;
 pub mod openrouter;
 pub mod sse;
 
+pub use acp::AcpProvider;
 pub use anthropic::AnthropicProvider;
 pub use chatgpt::ChatGptProvider;
 pub use codex::CodexProvider;
