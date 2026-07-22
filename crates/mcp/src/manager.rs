@@ -6,6 +6,7 @@
 //! subprocess を起こさない）。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tracing::{info, warn};
@@ -16,10 +17,22 @@ use crate::actions::{ConnectedServer, McpToolProvider};
 use crate::client::McpClient;
 use crate::config::{config_from_row, McpServerConfig};
 
+/// per-agent の reload 調停。`latest` は「最後に要求された世代」、`lock` は per-agent の
+/// 直列化用。要求は同期的（リクエスト順）に `latest` を進め、実行タスクは自分の世代が
+/// まだ最新のときだけ再接続する（連続編集のコアレッシング＝古い設定が勝つ競合と
+/// subprocess の同時多発を防ぐ）。
+#[derive(Clone)]
+struct ReloadCtl {
+    latest: u64,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
 pub struct McpClientManager {
     db: Db,
     // agent_id → 接続済みサーバ群。ガードは await を跨がない。
     agents: RwLock<HashMap<String, Vec<ConnectedServer>>>,
+    reload_gen: AtomicU64,
+    reload_ctl: std::sync::Mutex<HashMap<String, ReloadCtl>>,
 }
 
 impl McpClientManager {
@@ -27,7 +40,51 @@ impl McpClientManager {
         Self {
             db,
             agents: RwLock::new(HashMap::new()),
+            reload_gen: AtomicU64::new(0),
+            reload_ctl: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// reload 要求を登録する（**同期・リクエスト順**）。返した世代を [`run_reload`] に渡す。
+    /// 直後に spawn する呼び出し側が使う。
+    pub fn mark_reload_requested(&self, agent_id: &str) -> u64 {
+        let gen = self.reload_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut ctl = self.reload_ctl.lock().unwrap();
+        let entry = ctl
+            .entry(agent_id.to_string())
+            .or_insert_with(|| ReloadCtl {
+                latest: gen,
+                lock: Arc::new(tokio::sync::Mutex::new(())),
+            });
+        entry.latest = gen;
+        gen
+    }
+
+    /// [`mark_reload_requested`] で得た世代で再接続する。per-agent 直列化し、自分が
+    /// もう最新世代でなければ（より新しい要求が来ている）何もしない＝連続編集を畳む。
+    pub async fn run_reload(&self, agent_id: &str, gen: u64) {
+        let lock = {
+            let ctl = self.reload_ctl.lock().unwrap();
+            match ctl.get(agent_id) {
+                Some(c) => c.lock.clone(),
+                None => return,
+            }
+        };
+        let _guard = lock.lock().await;
+        // 自分が最新でなければ、後続の要求が（今か直後に）反映するのでスキップ。
+        if self
+            .reload_ctl
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .map(|c| c.latest)
+            .unwrap_or(0)
+            != gen
+        {
+            return;
+        }
+        let configs = self.agent_configs(agent_id);
+        self.start_agent(agent_id, configs).await;
     }
 
     /// 全エージェントの enabled 設定を DB から復元して接続する（起動時）。
@@ -83,10 +140,12 @@ impl McpClientManager {
             .insert(agent_id.to_string(), connected);
     }
 
-    /// DB から該当エージェントの設定を読み直して再接続する（設定変更後に呼ぶ）。
+    /// DB から該当エージェントの設定を読み直して再接続する（インライン用の便宜メソッド）。
+    /// spawn して使う場合は `mark_reload_requested`（同期）→ `run_reload` を使うこと
+    /// （リクエスト順を保つため）。
     pub async fn reload_agent(&self, agent_id: &str) {
-        let configs = self.agent_configs(agent_id);
-        self.start_agent(agent_id, configs).await;
+        let gen = self.mark_reload_requested(agent_id);
+        self.run_reload(agent_id, gen).await;
     }
 
     fn agent_configs(&self, agent_id: &str) -> Vec<McpServerConfig> {
@@ -149,5 +208,36 @@ impl McpClientManager {
 
     pub fn shutdown_all(&self) {
         self.agents.write().unwrap().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mark_reload_requested_monotonic() {
+        let m = McpClientManager::new(opencrab_db::Db::memory().unwrap());
+        let a = m.mark_reload_requested("agent-1");
+        let b = m.mark_reload_requested("agent-1");
+        assert!(b > a);
+        // agent 間でも単調（グローバル世代）。
+        let c = m.mark_reload_requested("agent-2");
+        assert!(c > b);
+    }
+
+    #[tokio::test]
+    async fn test_run_reload_skips_stale_generation() {
+        let m = McpClientManager::new(opencrab_db::Db::memory().unwrap());
+        // 古い要求 → 直後に新しい要求で latest を進める。
+        let stale = m.mark_reload_requested("agent-1");
+        let _newer = m.mark_reload_requested("agent-1");
+        // 古い世代で run_reload しても、latest ではないので何もしない
+        // （agent_configs/start_agent に到達せず＝接続を張らない）。DB は空なので
+        //   仮に到達しても servers は空になるが、ここでは「未接続のまま」を確認する。
+        m.run_reload("agent-1", stale).await;
+        assert!(!m.has_connections("agent-1"));
+        // 未登録の world で run_reload しても panic しない（ctl が無ければ即 return）。
+        m.run_reload("no-such-agent", 999).await;
     }
 }

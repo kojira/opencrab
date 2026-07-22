@@ -638,6 +638,9 @@ function McpSection({ agentId }: { agentId: string }) {
             <code className="text-body-sm text-on-surface-variant">
               {s.command} {s.args.join(' ')}
             </code>
+            {s.env_keys.length > 0 && (
+              <code className="text-body-sm text-tertiary">env: {s.env_keys.join(', ')}</code>
+            )}
             {s.trusted_only && (
               <span className="text-label-sm px-1.5 py-0.5 rounded bg-surface-variant">
                 {t('agentDetail.mcpTrustedOnly')}
@@ -701,6 +704,7 @@ function McpSection({ agentId }: { agentId: string }) {
           value={env}
           onChange={(e) => setEnv(e.target.value)}
         />
+        <p className="text-body-sm text-on-surface-variant">{t('agentDetail.mcpEnvWarning')}</p>
         <label className="flex items-center gap-2 text-body-sm text-on-surface-variant">
           <input
             type="checkbox"

@@ -288,6 +288,7 @@
   "agentDetail.mcpCommandPlaceholder": "command (e.g. npx)",
   "agentDetail.mcpArgsPlaceholder": "args (space-separated, e.g. -y @modelcontextprotocol/server-filesystem /path)",
   "agentDetail.mcpEnvPlaceholder": "env vars (one per line, KEY=value). Tokens etc.",
+  "agentDetail.mcpEnvWarning": "When updating an existing server, any env you enter REPLACES all env (empty keeps existing). Values are not shown, so re-enter every key you want to keep.",
   "agentDetail.mcpTrustedOnlyHint": "Only trusted callers may use (trusted_only)",
   "agentDetail.mcpAddEnable": "Add & enable",
   "agentDetail.mcpAddDisabled": "Add disabled",

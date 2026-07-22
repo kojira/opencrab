@@ -288,6 +288,7 @@
   "agentDetail.mcpCommandPlaceholder": "コマンド（例: npx）",
   "agentDetail.mcpArgsPlaceholder": "引数（空白区切り。例: -y @modelcontextprotocol/server-filesystem /path）",
   "agentDetail.mcpEnvPlaceholder": "環境変数（1行1つ、KEY=value）。トークン等。",
+  "agentDetail.mcpEnvWarning": "既存サーバの更新で env を入力すると、env は入力内容で全置換されます（空なら既存を保持）。値は表示されないので、変更時は必要なキーを全て入れ直してください。",
   "agentDetail.mcpTrustedOnlyHint": "信頼された呼び出し元のみ利用可（trusted_only）",
   "agentDetail.mcpAddEnable": "追加して有効化",
   "agentDetail.mcpAddDisabled": "無効で追加",

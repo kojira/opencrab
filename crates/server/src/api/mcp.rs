@@ -22,10 +22,15 @@ fn default_true() -> bool {
 
 /// 設定変更後、該当エージェントの MCP 接続をバックグラウンドで貼り直す。
 /// connect は subprocess 起動 + initialize を伴い時間がかかりうるため、HTTP は待たせない。
+///
+/// 世代は**同期的（リクエスト順）**に採番してから spawn する。連続編集は run_reload 側で
+/// コアレッシングされ、最新世代の1回だけが実際に再接続する（古い設定が勝つ競合と
+/// subprocess の同時多発を防ぐ）。
 fn spawn_reload(state: &AppState, agent_id: String) {
     if let Some(manager) = state.mcp_manager.clone() {
+        let gen = manager.mark_reload_requested(&agent_id);
         tokio::spawn(async move {
-            manager.reload_agent(&agent_id).await;
+            manager.run_reload(&agent_id, gen).await;
         });
     }
 }
@@ -162,11 +167,16 @@ pub async fn set_mcp_enabled(
 pub async fn delete_mcp_server(
     State(state): State<AppState>,
     Path((id, name)): Path<(String, String)>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let deleted = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::delete_agent_mcp_server(&conn, &id, &name).unwrap_or(false)
+        opencrab_db::queries::delete_agent_mcp_server(&conn, &id, &name)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
+    if !deleted {
+        return Err((StatusCode::NOT_FOUND, "サーバが見つかりません".to_string()));
+    }
+    // 実削除時のみ再接続（削除したサーバは reload で落ちる）。
     spawn_reload(&state, id);
-    Json(json!({ "deleted": deleted }))
+    Ok(Json(json!({ "deleted": true })))
 }
