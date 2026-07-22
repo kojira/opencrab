@@ -1,0 +1,25 @@
+//! OpenCrab の Nostr sub-gateway。
+//!
+//! Discord ゲートウェイと同型の「外部メッセージ受信 → エージェント実行 → 返信」を
+//! Nostr で行う。Nostr プロトコルの実処理は自作 CLI **nostaro** に subprocess で委譲し
+//! （[`cli::NostaroCli`]）、OpenCrab は購読・イベント配送・送信ツールの配線を担う。
+//!
+//! - [`config::NostrConfig`]: リレー（既定 yabu.me / r.kojira.io・ダッシュボードで変更可）
+//!   と購読フィルタ（author / keyword / kind）。
+//! - [`event::NostrEvent`]: `nostaro watch --json` の1件（JSONL）。
+//! - [`actions::NostrGatewayActions`]: `nostr_post`/`reply`/`dm`/`zap`/`upload` ツール。
+//!
+//! 鍵はエージェント毎に `data/agents/{id}/nostr/config.toml` に隔離する
+//! （[`cli::NostaroCli::agent_config_path`]、`validate_agent_id` 経由）。
+//!
+//! nostaro 側の JSON watch インターフェース契約は `docs/nostaro-interface.md`。
+
+pub mod actions;
+pub mod cli;
+pub mod config;
+pub mod event;
+
+pub use actions::NostrGatewayActions;
+pub use cli::NostaroCli;
+pub use config::{NostrConfig, NostrFilter, DEFAULT_RELAYS};
+pub use event::{parse_watch_line, NostrEvent};

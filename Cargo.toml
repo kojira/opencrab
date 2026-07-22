@@ -8,6 +8,7 @@ members = [
     "crates/actions",
     "crates/db",
     "crates/discord",
+    "crates/nostr",
     "crates/server",
     "crates/cli",
     "crates/voice",
@@ -77,6 +78,7 @@ opencrab-gateway = { path = "crates/gateway" }
 opencrab-actions = { path = "crates/actions" }
 opencrab-db = { path = "crates/db" }
 opencrab-discord = { path = "crates/discord" }
+opencrab-nostr = { path = "crates/nostr" }
 
 # 開発ビルド高速化: デバッグ情報を減らしてリンク時間とバイナリサイズを削減。
 # debug=1 は行番号のみ（backtrace は出る）。依存は debug 無し。split で本体から分離。
