@@ -492,6 +492,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "discord")]
         discord_manager: None,
         nostr_manager: None,
+        mcp_manager: None,
     };
 
     #[cfg(feature = "discord")]
@@ -860,6 +861,14 @@ async fn main() -> anyhow::Result<()> {
         let manager: opencrab_server::SharedNostrManager =
             Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
         state.nostr_manager = Some(manager.clone());
+        manager.restore_from_db().await;
+    }
+
+    // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
+    {
+        let manager: opencrab_server::SharedMcpManager =
+            Arc::new(opencrab_mcp::McpClientManager::new(state.db.clone()));
+        state.mcp_manager = Some(manager.clone());
         manager.restore_from_db().await;
     }
 
