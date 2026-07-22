@@ -127,6 +127,48 @@ impl NostaroCli {
         Ok(cmd)
     }
 
+    /// 送信系の command を組む。`from` が None なら本鍵（config.toml）、Some(npub) なら
+    /// **そのエージェントが生成した鍵**（`generated-keys/<npub>.nsec`）で投稿する。
+    fn command_for(&self, agent_id: &str, from: Option<&str>) -> Result<Command> {
+        match from.map(str::trim).filter(|s| !s.is_empty()) {
+            None => self.base_command(agent_id),
+            Some(npub) => self.generated_key_command(agent_id, npub),
+        }
+    }
+
+    /// generated key（`from`）用の一時 config を用意して `--config` 付き Command を返す。
+    ///
+    /// `from` に使えるのは**このエージェントが生成した鍵のみ**（`generated-keys/<npub>.nsec`
+    /// が存在するもの）。本設定 config.toml の relays/blossom を継承し、secret_key 行だけを
+    /// 生成鍵に差し替えた from-config を 0600 で作る（本設定と同じリレーへ publish する）。
+    fn generated_key_command(&self, agent_id: &str, from_npub: &str) -> Result<Command> {
+        let stem = sanitize_key_stem(from_npub);
+        if stem.is_empty() {
+            anyhow::bail!("from の npub が不正です");
+        }
+        let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
+        let nsec_path = dir.join(format!("{stem}.nsec"));
+        let nsec = std::fs::read_to_string(&nsec_path).map_err(|_| {
+            anyhow::anyhow!(
+                "指定 npub の鍵が見つかりません（from に指定できるのは、このエージェントが \
+                 nostr_generate_key で生成した鍵だけです）"
+            )
+        })?;
+        let nsec = nsec.trim();
+        // 本設定を読み、secret_key 行だけ差し替える（relays/blossom を継承）。
+        let main_path = Self::agent_config_path(agent_id)?;
+        let main_toml = std::fs::read_to_string(&main_path).map_err(|_| {
+            anyhow::anyhow!("本設定 (config.toml) がありません。先に Nostr を設定してください")
+        })?;
+        let from_toml = replace_secret_key_line(&main_toml, nsec);
+        let from_config = dir.join(format!("{stem}.config.toml"));
+        write_secret_file(&from_config, &from_toml)?;
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.kill_on_drop(true);
+        cmd.arg("--config").arg(&from_config);
+        Ok(cmd)
+    }
+
     /// 一発実行系（post/reply/dm/zap/upload）を既定 timeout 付きで走らせ stdout を返す。
     async fn run(&self, cmd: Command) -> Result<String> {
         self.run_with_timeout(cmd, self.timeout).await
@@ -153,22 +195,34 @@ impl NostaroCli {
     /// 全ての positional 引数の前に `--`（オプション終端）を置く。target/text/recipient
     /// 等はモデル/受信イベント由来で、`-` 始まりの値をフラグと誤解釈させない
     /// （引数インジェクション対策）。
-    pub async fn post(&self, agent_id: &str, text: &str) -> Result<String> {
-        let mut cmd = self.base_command(agent_id)?;
+    pub async fn post(&self, agent_id: &str, text: &str, from: Option<&str>) -> Result<String> {
+        let mut cmd = self.command_for(agent_id, from)?;
         cmd.arg("post").arg("--").arg(text);
         self.run(cmd).await
     }
 
     /// `nostaro reply -- <target> "<text>"` — 返信。target は note1.../hex id。
-    pub async fn reply(&self, agent_id: &str, target: &str, text: &str) -> Result<String> {
-        let mut cmd = self.base_command(agent_id)?;
+    pub async fn reply(
+        &self,
+        agent_id: &str,
+        target: &str,
+        text: &str,
+        from: Option<&str>,
+    ) -> Result<String> {
+        let mut cmd = self.command_for(agent_id, from)?;
         cmd.arg("reply").arg("--").arg(target).arg(text);
         self.run(cmd).await
     }
 
     /// `nostaro dm send -- <recipient> "<text>"`（既定 NIP-17）。
-    pub async fn dm(&self, agent_id: &str, recipient: &str, text: &str) -> Result<String> {
-        let mut cmd = self.base_command(agent_id)?;
+    pub async fn dm(
+        &self,
+        agent_id: &str,
+        recipient: &str,
+        text: &str,
+        from: Option<&str>,
+    ) -> Result<String> {
+        let mut cmd = self.command_for(agent_id, from)?;
         cmd.arg("dm").arg("send").arg("--").arg(recipient).arg(text);
         self.run(cmd).await
     }
@@ -181,8 +235,9 @@ impl NostaroCli {
         recipient: &str,
         amount: u64,
         message: Option<&str>,
+        from: Option<&str>,
     ) -> Result<String> {
-        let mut cmd = self.base_command(agent_id)?;
+        let mut cmd = self.command_for(agent_id, from)?;
         cmd.arg("zap");
         if let Some(m) = message.filter(|s| !s.is_empty()) {
             // 値も = 形式で確実に束ねる（`-` 始まりのメッセージ対策）。
@@ -193,8 +248,8 @@ impl NostaroCli {
     }
 
     /// `nostaro upload -- <path>` — Blossom アップロード。返り値は URL。
-    pub async fn upload(&self, agent_id: &str, path: &str) -> Result<String> {
-        let mut cmd = self.base_command(agent_id)?;
+    pub async fn upload(&self, agent_id: &str, path: &str, from: Option<&str>) -> Result<String> {
+        let mut cmd = self.command_for(agent_id, from)?;
         cmd.arg("upload").arg("--").arg(path);
         self.run(cmd).await
     }
@@ -285,17 +340,9 @@ impl NostaroCli {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create key dir: {}", dir.display()))?;
         // ファイル名は英数字のみ（bech32/hex は満たす）。空や異物は fallback。
-        let stem: String = key
-            .npub
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
+        let stem = sanitize_key_stem(&key.npub);
         let stem = if stem.is_empty() {
-            let hexed: String = key
-                .pubkey
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect();
+            let hexed = sanitize_key_stem(&key.pubkey);
             if hexed.is_empty() {
                 "key".to_string()
             } else {
@@ -337,9 +384,51 @@ impl NostaroCli {
     }
 }
 
-/// 秘密（nsec 等）を含むファイルを**作成時から 0600**で書く（chmod 前の
-/// world-readable 窓を作らない）。unix 以外は通常書き込み。失敗は握りつぶさない。
+/// 鍵ファイル名の stem を英数字のみに安全化する（bech32 npub / hex pubkey は満たす）。
+/// パストラバーサル/インジェクション防止。空文字は呼び出し側で fallback/拒否する。
+fn sanitize_key_stem(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// config TOML の `secret_key = "..."` 行だけを差し替える（relays/blossom 等は保つ）。
+/// 該当行が無ければ先頭に追加する。値は TOML を壊す文字を除去してから埋め込む。
+fn replace_secret_key_line(toml: &str, nsec: &str) -> String {
+    let esc: String = nsec
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\\' | '\n' | '\r'))
+        .collect();
+    let mut replaced = false;
+    let mut out: Vec<String> = toml
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("secret_key") {
+                replaced = true;
+                format!("secret_key = \"{esc}\"")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !replaced {
+        out.insert(0, format!("secret_key = \"{esc}\""));
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
+}
+
+/// 一意な temp path 用のプロセス内カウンタ（同一 pid の並行書き込みでの temp 衝突防止）。
+static SECRET_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 秘密（nsec 等）を含むファイルを**作成時から 0600**で、かつ**アトミックに**書く。
+///
+/// 一意な temp（同ディレクトリ・0600）へ書いてから `rename` で差し替える。これにより
+/// 読み手（nostaro）が**部分書き込みの config を絶対に読まない**（partial read → 既定
+/// リレーへ publish のような事故を防ぐ）。同一 config への並行書き込みも、最終パスは
+/// 常に完全なファイルを指す（内容は決定的で同一）。unix 以外は通常書き込み。
 fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    let n = SECRET_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), n));
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -349,15 +438,21 @@ fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(path)
-            .with_context(|| format!("failed to open secret file: {}", path.display()))?;
+            .open(&tmp)
+            .with_context(|| format!("failed to open secret temp: {}", tmp.display()))?;
         f.write_all(contents.as_bytes())
-            .with_context(|| format!("failed to write secret file: {}", path.display()))?;
+            .with_context(|| format!("failed to write secret temp: {}", tmp.display()))?;
+        f.sync_all().ok();
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, contents)
-            .with_context(|| format!("failed to write secret file: {}", path.display()))?;
+        std::fs::write(&tmp, contents)
+            .with_context(|| format!("failed to write secret temp: {}", tmp.display()))?;
+    }
+    // アトミックに差し替え。失敗したら temp を掃除する。
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("failed to place secret file: {}", path.display()));
     }
     Ok(())
 }
@@ -453,6 +548,60 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replace_secret_key_line() {
+        let main =
+            "secret_key = \"nsec1old\"\nrelays = [\"wss://a\"]\nblossom_server = \"https://b\"\n";
+        let out = replace_secret_key_line(main, "nsec1new");
+        assert!(out.contains("secret_key = \"nsec1new\""));
+        assert!(!out.contains("nsec1old"));
+        // relays/blossom は保持。
+        assert!(out.contains("relays = [\"wss://a\"]"));
+        assert!(out.contains("blossom_server = \"https://b\""));
+        // secret_key 行が無ければ先頭に追加。
+        let out2 = replace_secret_key_line("relays = [\"wss://a\"]\n", "nsec1x");
+        assert!(out2.starts_with("secret_key = \"nsec1x\""));
+        assert!(out2.contains("relays"));
+    }
+
+    #[test]
+    fn test_from_command_uses_generated_key_config() {
+        let cli = NostaroCli::new();
+        let agent = "agent-from-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        // 本設定（relays を継承させる）と生成鍵を用意。
+        NostaroCli::materialize_config(agent, "nsec1main", &["wss://yabu.me".to_string()], None)
+            .unwrap();
+        let key = GeneratedKey {
+            nsec: "nsec1gen".into(),
+            npub: "npub1genkey".into(),
+            pubkey: "hex".into(),
+        };
+        NostaroCli::save_generated_key(agent, &key).unwrap();
+
+        let cmd = cli.generated_key_command(agent, "npub1genkey").unwrap();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        // --config が from-config を指す。
+        assert!(args
+            .iter()
+            .any(|a| a.contains("generated-keys/npub1genkey.config.toml")));
+        // from-config は生成鍵 + 継承リレー。本鍵は含まない。
+        let from_cfg = NostaroCli::agent_nostr_dir(agent)
+            .unwrap()
+            .join("generated-keys/npub1genkey.config.toml");
+        let content = std::fs::read_to_string(&from_cfg).unwrap();
+        assert!(content.contains("secret_key = \"nsec1gen\""));
+        assert!(content.contains("wss://yabu.me"));
+        assert!(!content.contains("nsec1main"));
+        // 存在しない npub は拒否（自分が生成した鍵のみ from 指定可）。
+        assert!(cli.generated_key_command(agent, "npub1missing").is_err());
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     #[test]
