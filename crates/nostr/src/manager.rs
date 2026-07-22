@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use anyhow::Context;
 use opencrab_actions::{CallerIdentity, RunRequest};
 use opencrab_gateway::GatewayActions;
 
@@ -364,23 +365,37 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
         let row = self.runner.get_nostr_config(agent_id).ok_or_else(|| {
             anyhow::anyhow!("Nostr 未設定です。先に Nostr を設定してから本鍵を切り替えてください")
         })?;
-        // DB の本鍵を差し替え、config.toml を新鍵で再生成（0600・アトミック）。
-        self.runner.set_nostr_secret_key(agent_id, &nsec)?;
         let config = crate::config_from_row(&row);
-        NostaroCli::materialize_config(agent_id, &nsec, &config.effective_relays(), None)?;
-        // 新 pubkey を取得して自己スキップ用セルを更新（watch 再起動不要）。取得
-        // 失敗時はセルを据え置く（古い pubkey のままでも「自分の旧投稿」を拾わないだけで
-        // 実害は小さい。ここで起動を止める必要はない）。
-        match self.cli.pubkey(agent_id).await {
-            Ok(pk) => {
-                let pk = pk.trim().to_string();
-                if !pk.is_empty() {
-                    *self.self_pubkey.write().unwrap() = pk;
-                }
+        let relays = config.effective_relays();
+        // ロールバック用に旧状態を控える。
+        let old_secret = row.secret_key.clone();
+        let old_pubkey = self.self_pubkey.read().unwrap().clone();
+
+        // 1) config.toml を新鍵で再生成（0600・アトミック）。send/pubkey はこれを読む。
+        NostaroCli::materialize_config(agent_id, &nsec, &relays, None)?;
+
+        // 2) 新 pubkey を取得。**fail-closed**: 取れないと自己スキップが旧 pubkey のまま
+        //    になり、新 identity の自分の投稿を拾って自己返信無限ループ＋LLM 課金になる
+        //    （起動時ガードと同じ危険）。config を旧鍵へ巻き戻して中止する。
+        let new_pubkey = match self.cli.pubkey(agent_id).await {
+            Ok(pk) if !pk.trim().is_empty() => pk.trim().to_string(),
+            _ => {
+                let _ = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None);
+                anyhow::bail!(
+                    "新しい鍵の pubkey を取得できませんでした。自己返信ループ防止のため切替を中止しました（設定は元に戻しました）"
+                );
             }
-            Err(e) => {
-                warn!(agent_id, error = %e, "nostr: 新 pubkey 取得に失敗（self-skip は据え置き）")
-            }
+        };
+
+        // 3) 自己スキップ用セルを更新（以後の自己スキップが新 identity 追従）。
+        *self.self_pubkey.write().unwrap() = new_pubkey;
+
+        // 4) DB を最後に更新。失敗したら config/セルを旧状態へ巻き戻す（DB=旧 / config=新
+        //    の不整合＝再起動で勝手に切替完了する事故を防ぐ）。
+        if let Err(e) = self.runner.set_nostr_secret_key(agent_id, &nsec) {
+            let _ = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None);
+            *self.self_pubkey.write().unwrap() = old_pubkey;
+            return Err(e).context("DB の本鍵更新に失敗（設定を元に戻しました）");
         }
         Ok(npub.to_string())
     }

@@ -294,7 +294,7 @@ impl GatewayActions for NostrGatewayActions {
                 match admin.adopt_generated_identity(agent_id, npub).await {
                     Ok(adopted) => ok(json!({
                         "npub": adopted,
-                        "note": "この鍵を本鍵として採用しました。以後の投稿はこの identity で行われます。秘密鍵は扱っていません。",
+                        "note": "この鍵を本鍵として採用しました。以後の投稿・公開ノート受信はこの identity で行われます。秘密鍵は扱っていません。なお暗号化DMの受信を新 identity で行うにはゲートウェイの再起動が必要です。",
                     })),
                     Err(e) => err(format!("nostr_switch_identity 失敗: {e}")),
                 }
