@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
+use anyhow::Context;
 use opencrab_actions::{CallerIdentity, RunRequest};
 use opencrab_gateway::GatewayActions;
 
@@ -18,7 +19,11 @@ use crate::actions::NostrGatewayActions;
 use crate::cli::NostaroCli;
 use crate::config::NostrConfig;
 use crate::event::{parse_watch_line, NostrEvent};
+use crate::identity::NostrIdentityAdmin;
 use crate::runner::NostrAgentRunner;
+
+/// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
+type SelfPubkey = Arc<RwLock<String>>;
 
 /// watch が落ちたときの再接続バックオフ。
 const WATCH_RESTART_DELAY: Duration = Duration::from_secs(5);
@@ -98,8 +103,18 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         let runner = self.runner.clone();
         let cli = self.cli.clone();
         let agent = agent_id.to_string();
+        // self_pubkey は共有セル。identity 切替（本鍵採用）時に新 pubkey へ更新できる
+        // ようにする（watch は鍵非依存なのでプロセス再起動不要。セル更新だけで自己
+        // スキップが新 identity に追従する）。
+        let self_pubkey_cell = Arc::new(RwLock::new(self_pubkey));
+        // identity 切替の実体（runner+cli+セルを capture）。ツールから呼ばれる。
+        let admin: Arc<dyn NostrIdentityAdmin> = Arc::new(LoopIdentityAdmin {
+            runner: runner.clone(),
+            cli: cli.clone(),
+            self_pubkey: self_pubkey_cell.clone(),
+        });
         let handle = tokio::spawn(async move {
-            run_nostr_loop(runner, cli, agent, config, self_pubkey).await;
+            run_nostr_loop(runner, cli, agent, config, self_pubkey_cell, admin).await;
         });
 
         self.gateways
@@ -190,11 +205,22 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
     cli: NostaroCli,
     agent_id: String,
     config: NostrConfig,
-    self_pubkey: String,
+    self_pubkey: SelfPubkey,
+    admin: Arc<dyn NostrIdentityAdmin>,
 ) {
     let mut seen = SeenEvents::new(512);
     loop {
-        match run_watch_once(&runner, &cli, &agent_id, &config, &self_pubkey, &mut seen).await {
+        match run_watch_once(
+            &runner,
+            &cli,
+            &agent_id,
+            &config,
+            &self_pubkey,
+            &admin,
+            &mut seen,
+        )
+        .await
+        {
             Ok(()) => warn!(agent_id, "nostr watch exited; restarting after backoff"),
             Err(e) => error!(agent_id, error = %e, "nostr watch error; restarting after backoff"),
         }
@@ -203,12 +229,14 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
 }
 
 /// 1 回分の watch 購読（プロセス寿命ぶん）。
+#[allow(clippy::too_many_arguments)]
 async fn run_watch_once<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
     config: &NostrConfig,
-    self_pubkey: &str,
+    self_pubkey: &SelfPubkey,
+    admin: &Arc<dyn NostrIdentityAdmin>,
     seen: &mut SeenEvents,
 ) -> anyhow::Result<()> {
     let mut cmd = cli.build_watch_command(agent_id, config)?;
@@ -226,8 +254,9 @@ async fn run_watch_once<R: NostrAgentRunner>(
         let Some(event) = parse_watch_line(&line) else {
             continue;
         };
-        // 自分の投稿はスキップ（自己返信ループ防止）。
-        if self_pubkey == event.pubkey {
+        // 自分の投稿はスキップ（自己返信ループ防止）。identity 切替に追従するため
+        // 共有セルから毎回読む。
+        if *self_pubkey.read().unwrap() == event.pubkey {
             debug!(agent_id, "nostr: skipping own event");
             continue;
         }
@@ -236,7 +265,7 @@ async fn run_watch_once<R: NostrAgentRunner>(
             debug!(agent_id, "nostr: skipping already-processed event");
             continue;
         }
-        handle_event(runner, cli, agent_id, &event).await;
+        handle_event(runner, cli, agent_id, admin, &event).await;
     }
     // stdout EOF → プロセス終了を回収。
     let _ = child.wait().await;
@@ -248,6 +277,7 @@ async fn handle_event<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
+    admin: &Arc<dyn NostrIdentityAdmin>,
     event: &NostrEvent,
 ) {
     // author 単位のセッション（1 相手 = 1 会話）。
@@ -275,7 +305,7 @@ async fn handle_event<R: NostrAgentRunner>(
         .build_conversation_string(&session_id, agent_id, budget)
         .unwrap_or_default();
 
-    let gw = NostrGatewayActions::new(cli.clone());
+    let gw = NostrGatewayActions::new(cli.clone()).with_admin(admin.clone());
     let sent = gw.sent_flag();
     let actions: Arc<dyn GatewayActions> = Arc::new(gw);
     let req = RunRequest::new(
@@ -313,6 +343,67 @@ async fn handle_event<R: NostrAgentRunner>(
             }
         }
         Err(e) => error!(agent_id, error = %e, "nostr agent run failed"),
+    }
+}
+
+/// watch ループが握る identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、
+/// 生成鍵を本鍵に採用する。**watch プロセスは再起動しない**（鍵非依存）。self_pubkey セルを
+/// 新 pubkey へ更新するだけで、以後の自己スキップが新 identity に追従する。
+struct LoopIdentityAdmin<R: NostrAgentRunner> {
+    runner: R,
+    cli: NostaroCli,
+    self_pubkey: SelfPubkey,
+}
+
+#[async_trait::async_trait]
+impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
+    async fn adopt_generated_identity(&self, agent_id: &str, npub: &str) -> anyhow::Result<String> {
+        // 生成鍵（自分が作ったもの）の nsec をサーバ内から読む。存在チェックで
+        // 「自分が生成した鍵のみ採用可」を担保。秘密鍵は外へ出さない。
+        let nsec = NostaroCli::read_generated_key(agent_id, npub)?;
+        // 既存設定（relays/filter を継承）。未設定なら採用しない。
+        let row = self.runner.get_nostr_config(agent_id).ok_or_else(|| {
+            anyhow::anyhow!("Nostr 未設定です。先に Nostr を設定してから本鍵を切り替えてください")
+        })?;
+        let config = crate::config_from_row(&row);
+        let relays = config.effective_relays();
+        // ロールバック用に旧状態を控える。
+        let old_secret = row.secret_key.clone();
+        let old_pubkey = self.self_pubkey.read().unwrap().clone();
+
+        // 1) config.toml を新鍵で再生成（0600・アトミック）。send/pubkey はこれを読む。
+        NostaroCli::materialize_config(agent_id, &nsec, &relays, None)?;
+
+        // 2) 新 pubkey を取得。**fail-closed**: 取れないと自己スキップが旧 pubkey のまま
+        //    になり、新 identity の自分の投稿を拾って自己返信無限ループ＋LLM 課金になる
+        //    （起動時ガードと同じ危険）。config を旧鍵へ巻き戻して中止する。
+        let new_pubkey = match self.cli.pubkey(agent_id).await {
+            Ok(pk) if !pk.trim().is_empty() => pk.trim().to_string(),
+            _ => {
+                if let Err(re) =
+                    NostaroCli::materialize_config(agent_id, &old_secret, &relays, None)
+                {
+                    error!(agent_id, error = %re, "nostr: identity 切替のロールバック（config復元）に失敗");
+                }
+                anyhow::bail!(
+                    "新しい鍵の pubkey を取得できませんでした。自己返信ループ防止のため切替を中止しました（設定は元に戻しました）"
+                );
+            }
+        };
+
+        // 3) 自己スキップ用セルを更新（以後の自己スキップが新 identity 追従）。
+        *self.self_pubkey.write().unwrap() = new_pubkey;
+
+        // 4) DB を最後に更新。失敗したら config/セルを旧状態へ巻き戻す（DB=旧 / config=新
+        //    の不整合＝再起動で勝手に切替完了する事故を防ぐ）。
+        if let Err(e) = self.runner.set_nostr_secret_key(agent_id, &nsec) {
+            if let Err(re) = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None) {
+                error!(agent_id, error = %re, "nostr: identity 切替のロールバック（config復元）に失敗");
+            }
+            *self.self_pubkey.write().unwrap() = old_pubkey;
+            return Err(e).context("DB の本鍵更新に失敗（設定を元に戻しました）");
+        }
+        Ok(npub.to_string())
     }
 }
 

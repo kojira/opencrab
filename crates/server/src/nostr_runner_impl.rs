@@ -107,4 +107,18 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         let conn = self.db.lock().unwrap();
         opencrab_db::queries::list_enabled_agent_nostr_configs(&conn).unwrap_or_default()
     }
+
+    fn get_nostr_config(
+        &self,
+        agent_id: &str,
+    ) -> Option<opencrab_db::queries::AgentNostrConfigRow> {
+        let conn = self.db.lock().unwrap();
+        opencrab_db::queries::get_agent_nostr_config(&conn, agent_id).unwrap_or(None)
+    }
+
+    fn set_nostr_secret_key(&self, agent_id: &str, secret_key: &str) -> anyhow::Result<()> {
+        let conn = self.db.lock().unwrap();
+        opencrab_db::queries::set_agent_nostr_config_secret_key(&conn, agent_id, secret_key)?;
+        Ok(())
+    }
 }

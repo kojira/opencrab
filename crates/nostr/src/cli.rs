@@ -169,6 +169,24 @@ impl NostaroCli {
         Ok(cmd)
     }
 
+    /// generated key の nsec をサーバ内から読む（**サーバ側専用**。LLM には渡さない）。
+    /// identity 乗り換え（本鍵採用）で使う。存在チェック＝「自分が生成した鍵のみ」を担保。
+    pub fn read_generated_key(agent_id: &str, npub: &str) -> Result<String> {
+        let stem = sanitize_key_stem(npub);
+        if stem.is_empty() {
+            anyhow::bail!("npub が不正です");
+        }
+        let path = Self::agent_nostr_dir(agent_id)?
+            .join("generated-keys")
+            .join(format!("{stem}.nsec"));
+        let nsec = std::fs::read_to_string(&path).map_err(|_| {
+            anyhow::anyhow!(
+                "指定 npub の生成鍵が見つかりません（このエージェントが生成した鍵のみ採用できます）"
+            )
+        })?;
+        Ok(nsec.trim().to_string())
+    }
+
     /// 一発実行系（post/reply/dm/zap/upload）を既定 timeout 付きで走らせ stdout を返す。
     async fn run(&self, cmd: Command) -> Result<String> {
         self.run_with_timeout(cmd, self.timeout).await

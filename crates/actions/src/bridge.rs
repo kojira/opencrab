@@ -97,6 +97,9 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // owner/trusted_user が起点のターン（ダッシュボード等）でのみ使える。
     "nostr_zap",
     "nostr_dm",
+    // 本鍵（アイデンティティ）の切替。外部ユーザーが勝手に乗っ取れないよう owner/
+    // trusted のみ（inbound=Agent には一覧にも出さず実行もしない）。
+    "nostr_switch_identity",
 ];
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
