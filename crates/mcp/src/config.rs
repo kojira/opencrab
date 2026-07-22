@@ -11,7 +11,10 @@ pub const MCP_TOOL_PREFIX: &str = "mcp__";
 pub const MCP_TOOL_SEP: &str = "__";
 
 /// エージェント1体が使う MCP サーバ1つの設定（stdio subprocess）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` は手動実装で **env の値をマスク**する（トークン/API キーが `{:?}` やログに
+/// 漏れないように）。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// 論理名（ツール名プレフィックスに使う）。英数字・`_`・`-` のみ。
     pub name: String,
@@ -36,10 +39,28 @@ fn default_true() -> bool {
     true
 }
 
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            // env の値はマスク（秘匿情報を含みうる）。件数だけ示す。
+            .field("env", &format_args!("<{} vars redacted>", self.env.len()))
+            .field("trusted_only", &self.trusted_only)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
 /// サーバ名が安全か（英数字・`_`・`-`、1〜64 文字）。ツール名生成に使うため制限する。
+///
+/// **`__`（区切り記号）を含む名前は禁止**する。含むと `mcp__<server>__<tool>` の分解が
+/// 曖昧になり（`a__b` が `a`+`b__…` に誤分解し、別の (server,tool) と衝突する）ため。
 pub fn is_valid_server_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
+        && !name.contains(MCP_TOOL_SEP)
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -91,6 +112,11 @@ mod tests {
         assert!(!is_valid_server_name("a b"));
         assert!(!is_valid_server_name("a.b"));
         assert!(!is_valid_server_name(&"x".repeat(65)));
+        // `__`（区切り）を含む名前は禁止（分解が曖昧になり衝突するため）。
+        assert!(!is_valid_server_name("a__b"));
+        assert!(!is_valid_server_name("__"));
+        // 単一 `_` は OK。
+        assert!(is_valid_server_name("a_b"));
     }
 
     #[test]

@@ -245,6 +245,8 @@ where
                 let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
                     continue; // JSON でない行（ログ等）はスキップ
                 };
+                // 本クライアントは id を u64 でしか送らないので u64 一致で十分。
+                // 万一サーバが文字列 id 等を返すと待ち手には届かず timeout で解消する。
                 let Some(id) = msg.get("id").and_then(|v| v.as_u64()) else {
                     continue; // 通知（id 無し）はスキップ
                 };
@@ -286,8 +288,11 @@ fn parse_tools(result: &Value) -> Result<Vec<McpTool>> {
         .ok_or_else(|| anyhow!("tools/list: 'tools' 配列がありません"))?;
     let mut out = Vec::with_capacity(arr.len());
     for t in arr {
-        let raw: RawTool = serde_json::from_value(t.clone())
-            .map_err(|e| anyhow!("tools/list: ツール定義の解釈に失敗: {e}"))?;
+        // 不正な1エントリ（name 欠落等）で全滅させない。壊れたものは飛ばして続行する。
+        let Ok(raw) = serde_json::from_value::<RawTool>(t.clone()) else {
+            tracing::warn!("tools/list: 不正なツール定義をスキップしました");
+            continue;
+        };
         out.push(McpTool {
             name: raw.name,
             description: raw.description.unwrap_or_default(),
@@ -343,9 +348,11 @@ mod tests {
     fn test_parse_tools() {
         let v = json!({"tools": [
             {"name": "read_file", "description": "read", "inputSchema": {"type":"object","properties":{"path":{"type":"string"}}}},
-            {"name": "noschema"}
+            {"name": "noschema"},
+            {"description": "no name → skip"}
         ]});
         let tools = parse_tools(&v).unwrap();
+        // 不正な1件（name 欠落）はスキップし、残り2件を返す。
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name, "read_file");
         assert_eq!(
@@ -353,6 +360,7 @@ mod tests {
             "string"
         );
         // schema/description 無しはフォールバック。
+        assert_eq!(tools[1].name, "noschema");
         assert_eq!(tools[1].description, "");
         assert_eq!(tools[1].input_schema["type"], "object");
         // 'tools' が無ければエラー。
