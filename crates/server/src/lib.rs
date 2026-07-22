@@ -299,6 +299,19 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/nostr/stop",
             post(api::nostr::stop_nostr_gateway),
         )
+        // MCP サーバ per-agent 設定
+        .route(
+            "/api/agents/{id}/mcp",
+            get(api::mcp::list_mcp_servers).put(api::mcp::put_mcp_server),
+        )
+        .route(
+            "/api/agents/{id}/mcp/{name}",
+            axum::routing::delete(api::mcp::delete_mcp_server),
+        )
+        .route(
+            "/api/agents/{id}/mcp/{name}/enabled",
+            post(api::mcp::set_mcp_enabled),
+        )
         // Co-Agent管理
         .route(
             "/api/agents/{id}/co-agents",
