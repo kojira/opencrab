@@ -87,6 +87,8 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "manage_allowed_commands",
     // Nostr 連携設定（購読リレー/フィルタ/有効化）。外部発信・アイデンティティに関わるため owner のみ。
     "configure_nostr",
+    // 自分の人格/モデル/推論強度/web 検索の変更。挙動を左右するため owner のみ。
+    "configure_self",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
@@ -1011,6 +1013,7 @@ mod tests {
             "configure_llm_provider",
             "manage_allowed_commands",
             "configure_nostr",
+            "configure_self",
         ] {
             let p = tool_policy(name);
             assert!(p.owner_only, "{name} must be owner_only");
