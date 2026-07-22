@@ -9,6 +9,7 @@ members = [
     "crates/db",
     "crates/discord",
     "crates/nostr",
+    "crates/mcp",
     "crates/server",
     "crates/cli",
     "crates/voice",
