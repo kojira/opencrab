@@ -89,6 +89,8 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "configure_nostr",
     // 自分の人格/モデル/推論強度/web 検索の変更。挙動を左右するため owner のみ。
     "configure_self",
+    // MCP サーバ設定の管理（外部プロセス起動・env に秘密を含みうる）。owner のみ。
+    "configure_mcp_server",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
@@ -1014,6 +1016,7 @@ mod tests {
             "manage_allowed_commands",
             "configure_nostr",
             "configure_self",
+            "configure_mcp_server",
         ] {
             let p = tool_policy(name);
             assert!(p.owner_only, "{name} must be owner_only");

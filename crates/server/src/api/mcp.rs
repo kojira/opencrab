@@ -26,7 +26,7 @@ fn default_true() -> bool {
 /// 世代は**同期的（リクエスト順）**に採番してから spawn する。連続編集は run_reload 側で
 /// コアレッシングされ、最新世代の1回だけが実際に再接続する（古い設定が勝つ競合と
 /// subprocess の同時多発を防ぐ）。
-fn spawn_reload(state: &AppState, agent_id: String) {
+pub(crate) fn spawn_reload(state: &AppState, agent_id: String) {
     if let Some(manager) = state.mcp_manager.clone() {
         let gen = manager.mark_reload_requested(&agent_id);
         tokio::spawn(async move {
