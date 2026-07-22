@@ -250,6 +250,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "agent_nostr_config (per-agent Nostr sub-gateway: 隔離鍵 + relays + filter)",
         up: |conn| conn.execute_batch(AGENT_NOSTR_CONFIG_SQL),
     },
+    Migration {
+        version: 14,
+        description: "agent_mcp_config (per-agent MCP サーバ: command/args/env, 1エージェント複数)",
+        up: |conn| conn.execute_batch(AGENT_MCP_CONFIG_SQL),
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -261,6 +266,21 @@ CREATE TABLE IF NOT EXISTS agent_nostr_config (
     filter_json TEXT NOT NULL DEFAULT '{}',
     enabled INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
+);
+";
+
+/// per-agent の MCP サーバ設定。1 エージェント × 複数サーバ（主キー (agent_id, name)）。
+const AGENT_MCP_CONFIG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS agent_mcp_config (
+    agent_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    command TEXT NOT NULL,
+    args_json TEXT NOT NULL DEFAULT '[]',
+    env_json TEXT NOT NULL DEFAULT '{}',
+    trusted_only INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, name)
 );
 ";
 
