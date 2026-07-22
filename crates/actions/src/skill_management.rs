@@ -213,6 +213,61 @@ impl Action for RestoreMySkillAction {
     }
 }
 
+/// スキルの本文（行動指針）を名前で取得するアクション（段階的開示 #119）。
+///
+/// システムプロンプトにはスキルの index（名前 + 説明）だけを載せ、詳細な本文
+/// （guidance）はプロンプトに常時展開しない。エージェントは必要になったときだけ
+/// この `read_skill` で本文を取得して掘り下げる（memory_index の browse/retrieve と
+/// 同じパターン）。archived なスキルも読める（_any で解決）。
+pub struct ReadSkillAction;
+
+#[async_trait]
+impl Action for ReadSkillAction {
+    fn name(&self) -> &str {
+        "read_skill"
+    }
+
+    fn description(&self) -> &str {
+        "スキルの本文（行動指針の全文）を名前で取得する。プロンプトには index（名前+説明）\
+         しか出ていないので、詳細な手順が必要になったらこれで掘り下げる。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string", "description": "読みたいスキル名" }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let name = match args["name"].as_str() {
+            Some(n) if !n.trim().is_empty() => n.trim(),
+            _ => return ActionResult::error("name is required"),
+        };
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("db lock failed"),
+        };
+        match opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name) {
+            Ok(Some(s)) => ActionResult::success(json!({
+                "name": s.name,
+                "description": s.description,
+                "situation_pattern": s.situation_pattern,
+                "guidance": s.guidance,
+                "source_type": s.source_type,
+                "is_active": s.is_active,
+                "archived": s.archived,
+                "usage_count": s.usage_count,
+            })),
+            Ok(None) => ActionResult::error(&format!("skill not found: {name}")),
+            Err(e) => ActionResult::error(&e.to_string()),
+        }
+    }
+}
+
 /// 名前でスキルを解決し archived フラグを設定する（retire/restore 共通）。
 /// archive は DB フラグのみで、ファイル操作は不要。
 async fn set_skill_archived(
@@ -372,6 +427,54 @@ mod tests {
             .await;
         assert!(!result.success);
         assert!(result.error.as_ref().unwrap().contains("name is required"));
+    }
+
+    #[tokio::test]
+    async fn test_read_skill_returns_body() {
+        let (_dir, ctx) = test_context();
+        CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": "Deploy Steps",
+                    "description": "how to deploy",
+                    "situation_pattern": "when deploying",
+                    "guidance": "1) build 2) push 3) verify",
+                    "actions": ["ws_read"]
+                }),
+                &ctx,
+            )
+            .await;
+
+        // 本文（guidance）が取得できる。
+        let r = ReadSkillAction
+            .execute(&json!({ "name": "Deploy Steps" }), &ctx)
+            .await;
+        assert!(r.success);
+        let d = r.data.unwrap();
+        assert_eq!(d["name"], "Deploy Steps");
+        assert_eq!(d["guidance"], "1) build 2) push 3) verify");
+        assert_eq!(d["situation_pattern"], "when deploying");
+
+        // 引退（archived）でも読める（_any 解決）。
+        RetireMySkillAction
+            .execute(&json!({ "name": "Deploy Steps" }), &ctx)
+            .await;
+        let r2 = ReadSkillAction
+            .execute(&json!({ "name": "Deploy Steps" }), &ctx)
+            .await;
+        assert!(r2.success);
+        assert_eq!(r2.data.unwrap()["archived"], true);
+
+        // 存在しないスキルはエラー。
+        let r3 = ReadSkillAction
+            .execute(&json!({ "name": "nope" }), &ctx)
+            .await;
+        assert!(!r3.success);
+        assert!(r3.error.unwrap().contains("not found"));
+
+        // name 必須。
+        let r4 = ReadSkillAction.execute(&json!({}), &ctx).await;
+        assert!(!r4.success);
     }
 
     #[tokio::test]

@@ -75,7 +75,11 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
             .iter()
             .map(|s| format!("- {}: {}", s.name, s.description))
             .collect();
-        format!("\n\nYour skills:\n{}", list.join("\n"))
+        // index（名前 + 説明）だけを載せ、本文は read_skill で必要時に掘り下げさせる（#119）。
+        format!(
+            "\n\nYour skills (index only — call read_skill(name) to get a skill's full body):\n{}",
+            list.join("\n")
+        )
     };
 
     let character_section = if custom_traits.is_empty() {
