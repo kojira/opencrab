@@ -5,7 +5,8 @@ OpenCrab の Nostr sub-gateway（`crates/nostr`）は、Nostr プロトコルの
 呼び出し契約と、そのために nostaro 側へ必要な**汎用的な**改造を定義する。
 
 OpenCrab 側は本契約の I/O をモックしてユニットテスト済み（`crates/nostr`）。実機で
-繋ぐには nostaro 側に下記 3 点の改造が必要（いずれも一般の Nostr ツールとして有用な機能）。
+繋ぐには nostaro 側に下記の改造が必要（`--config` / `pubkey` / `vanity --json` /
+`watch` フィルタ+`--json`。いずれも一般の Nostr ツールとして有用な機能）。
 
 ## 前提: 鍵の隔離
 
@@ -55,7 +56,7 @@ nostaro vanity --json [--prefix=<bech32prefix>]
 - `nsec` は必須。`npub`/`pubkey` は任意（あれば表示・自己ループ防止に使える）。
 - 進捗を出す場合は stderr へ（OpenCrab は stdout の最後の JSON 行を採用する）。
 
-OpenCrab 側の防御: prefix は bech32 charset かつ最大 4 文字に制限してから渡す（探索コストは
+OpenCrab 側の防御: prefix は bech32 charset かつ最大 3 文字に制限してから渡す（探索コストは
 `32^len` で増えるため、同期リクエストがハングしないよう保守的に制限）。nostaro 側は通常の
 生成でよい。
 

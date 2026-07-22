@@ -210,30 +210,42 @@ pub async fn generate_nostr_key(
         ));
     };
 
-    // 生成（nostaro vanity）。失敗（未インストール/timeout 等）は 500。
+    // 生成（nostaro vanity）。同時実行は 1 に制限。失敗（未インストール/timeout/
+    // 既に進行中 等）は 500。エラー文言に秘密鍵が載らないことは parse 側で担保済み
+    // （生成失敗の経路には鍵が存在しない）。
     let generated = manager
-        .cli()
-        .vanity(prefix)
+        .generate_key(prefix)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // 鍵を差し替えるので、稼働中なら止める（新アイデンティティで黙って走らせない）。
     manager.stop_agent_gateway(&id).await;
 
-    // 既存の relays/filter は保持しつつ秘密鍵だけ差し替え、enabled=false で保存する。
-    let (relays_json, filter_json) = existing
-        .as_ref()
-        .map(|e| (e.relays_json.clone(), e.filter_json.clone()))
-        .unwrap_or_else(|| ("[]".to_string(), "{}".to_string()));
-    let row = AgentNostrConfigRow {
-        agent_id: id.clone(),
-        secret_key: generated.nsec,
-        relays_json,
-        filter_json,
-        enabled: false,
-    };
+    // 生成中（最大 timeout ぶん）に別リクエストが鍵を書き込む TOCTOU を避けるため、
+    // 「既存鍵の再確認 → relays/filter 保持 → upsert」を**同一ロック内**で原子的に行う。
     {
         let conn = state.db.lock().unwrap();
+        let current = opencrab_db::queries::get_agent_nostr_config(&conn, &id).unwrap_or(None);
+        if let Some(c) = current.as_ref() {
+            if !c.secret_key.is_empty() && !body.overwrite {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "既に秘密鍵が設定されています。上書きするには overwrite=true を指定してください"
+                        .to_string(),
+                ));
+            }
+        }
+        let (relays_json, filter_json) = current
+            .as_ref()
+            .map(|c| (c.relays_json.clone(), c.filter_json.clone()))
+            .unwrap_or_else(|| ("[]".to_string(), "{}".to_string()));
+        let row = AgentNostrConfigRow {
+            agent_id: id.clone(),
+            secret_key: generated.nsec,
+            relays_json,
+            filter_json,
+            enabled: false,
+        };
         opencrab_db::queries::upsert_agent_nostr_config(&conn, &row)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
