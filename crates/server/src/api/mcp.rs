@@ -50,6 +50,12 @@ pub async fn list_mcp_servers(
         .as_ref()
         .map(|m| m.connected_status(&id).into_iter().collect())
         .unwrap_or_default();
+    // サーバ名 → 直近の接続失敗理由（operator が原因を診断できるよう surface）。
+    let errors: HashMap<String, String> = state
+        .mcp_manager
+        .as_ref()
+        .map(|m| m.connect_errors(&id))
+        .unwrap_or_default();
 
     let servers: Vec<serde_json::Value> = rows
         .iter()
@@ -68,11 +74,36 @@ pub async fn list_mcp_servers(
                 "enabled": r.enabled,
                 "connected": connected.contains_key(&r.name),
                 "tools": connected.get(&r.name).copied(),
+                // 未接続かつ理由がある場合に表示（接続成功なら None）。
+                "connect_error": errors.get(&r.name),
             })
         })
         .collect();
 
     Json(json!({ "servers": servers }))
+}
+
+/// POST /api/agents/{id}/mcp/{name}/test — 現在の設定で使い捨て接続を試み、
+/// 繋がるか・ツール数・失敗理由を返す（LLM プロバイダの /test と対称）。
+pub async fn test_mcp_server(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let row = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_mcp_server(&conn, &id, &name).unwrap_or(None)
+    };
+    let Some(row) = row else {
+        return Json(
+            json!({ "ok": false, "error": format!("MCP サーバが見つかりません: {name}") }),
+        );
+    };
+    let cfg = opencrab_mcp::config_from_row(&row);
+    match opencrab_mcp::McpClient::connect(&cfg).await {
+        Ok(client) => Json(json!({ "ok": true, "tools": client.tools().len() })),
+        // 接続はここで drop され kill される（使い捨て）。
+        Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -31,6 +31,9 @@ pub struct McpClientManager {
     db: Db,
     // agent_id → 接続済みサーバ群。ガードは await を跨がない。
     agents: RwLock<HashMap<String, Vec<ConnectedServer>>>,
+    // agent_id → (server_name → 直近の接続失敗理由)。接続成功したサーバは載らない。
+    // operator/agent が「なぜ繋がらないか」を見られるよう surface する。
+    connect_errors: RwLock<HashMap<String, HashMap<String, String>>>,
     reload_gen: AtomicU64,
     reload_ctl: std::sync::Mutex<HashMap<String, ReloadCtl>>,
 }
@@ -40,9 +43,21 @@ impl McpClientManager {
         Self {
             db,
             agents: RwLock::new(HashMap::new()),
+            connect_errors: RwLock::new(HashMap::new()),
             reload_gen: AtomicU64::new(0),
             reload_ctl: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 指定エージェントの直近の接続失敗理由（server_name → error）。接続に成功した
+    /// サーバは含まれない。
+    pub fn connect_errors(&self, agent_id: &str) -> HashMap<String, String> {
+        self.connect_errors
+            .read()
+            .unwrap()
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// reload 要求を登録する（**同期・リクエスト順**）。返した世代を [`run_reload`] に渡す。
@@ -116,6 +131,7 @@ impl McpClientManager {
     /// サーバはスキップして他を活かす（fail-soft）。
     pub async fn start_agent(&self, agent_id: &str, configs: Vec<McpServerConfig>) {
         let mut connected = Vec::new();
+        let mut errors: HashMap<String, String> = HashMap::new();
         for cfg in configs {
             if !cfg.enabled {
                 continue;
@@ -130,6 +146,8 @@ impl McpClientManager {
                 }
                 Err(e) => {
                     warn!(agent_id, server = %cfg.name, error = %e, "MCP サーバ接続に失敗（このサーバはスキップ）");
+                    // operator/agent が診断できるよう理由を保持する。
+                    errors.insert(cfg.name.clone(), e.to_string());
                 }
             }
         }
@@ -138,6 +156,11 @@ impl McpClientManager {
             .write()
             .unwrap()
             .insert(agent_id.to_string(), connected);
+        // このエージェントの失敗理由を最新の start 結果で置き換える（成功したものは消える）。
+        self.connect_errors
+            .write()
+            .unwrap()
+            .insert(agent_id.to_string(), errors);
     }
 
     /// DB から該当エージェントの設定を読み直して再接続する（インライン用の便宜メソッド）。
@@ -239,5 +262,26 @@ mod tests {
         assert!(!m.has_connections("agent-1"));
         // 未登録の world で run_reload しても panic しない（ctl が無ければ即 return）。
         m.run_reload("no-such-agent", 999).await;
+    }
+
+    #[tokio::test]
+    async fn connect_error_is_surfaced_on_failure() {
+        let m = McpClientManager::new(opencrab_db::Db::memory().unwrap());
+        // 存在しないコマンド → 接続失敗。理由が connect_errors に surface される。
+        let cfg = McpServerConfig {
+            name: "bad".to_string(),
+            command: "/nonexistent/definitely-not-a-real-binary".to_string(),
+            args: vec![],
+            env: Default::default(),
+            trusted_only: false,
+            enabled: true,
+        };
+        m.start_agent("agent-x", vec![cfg]).await;
+        assert!(!m.has_connections("agent-x"));
+        let errs = m.connect_errors("agent-x");
+        assert!(errs.contains_key("bad"), "failure reason must be surfaced");
+        // 成功時（設定なし）は理由が消える。
+        m.start_agent("agent-x", vec![]).await;
+        assert!(m.connect_errors("agent-x").is_empty());
     }
 }

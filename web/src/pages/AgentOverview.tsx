@@ -23,6 +23,7 @@ import {
   putMcpServer,
   setMcpEnabled,
   deleteMcpServer,
+  testMcpServer,
   type McpServerDto,
 } from '../api/mcp';
 import type { DiscordConfigDto } from '../api/types';
@@ -548,6 +549,20 @@ function McpSection({ agentId }: { agentId: string }) {
     void load();
   }, [load]);
 
+  const runTest = async (s: McpServerDto) => {
+    setMessage(`${s.name}: テスト中...`);
+    try {
+      const r = await testMcpServer(agentId, s.name);
+      setMessage(
+        r.ok
+          ? `${s.name}: ✅ 接続OK（ツール ${r.tools ?? 0}）`
+          : `${s.name}: ❌ 接続失敗 — ${r.error ?? '不明'}`,
+      );
+    } catch (e) {
+      setMessage(`${s.name}: ❌ ${String(e)}`);
+    }
+  };
+
   // "KEY=value" 行を { KEY: value } に。値の無い行は無視。
   const parseEnv = (s: string): Record<string, string> => {
     const out: Record<string, string> = {};
@@ -654,7 +669,18 @@ function McpSection({ agentId }: { agentId: string }) {
             {s.enabled && !s.connected && (
               <span className="text-label-sm text-error">● {t('agentDetail.mcpDisconnected')}</span>
             )}
+            {!s.connected && s.connect_error && (
+              <code
+                className="text-label-sm text-error max-w-full truncate"
+                title={s.connect_error}
+              >
+                {s.connect_error}
+              </code>
+            )}
             <span className="flex-1" />
+            <button type="button" className="btn-text" disabled={busy} onClick={() => void runTest(s)}>
+              接続テスト
+            </button>
             <button
               type="button"
               className="btn-text"
