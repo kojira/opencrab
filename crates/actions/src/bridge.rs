@@ -83,6 +83,8 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     // LLM プロバイダ設定の即時変更（ルーターのホットスワップ）。外部ユーザー由来の
     // ターン（caller=Agent）からは一覧にも出さず実行もしない。owner のみ。
     "configure_llm_provider",
+    // 許可コマンド（execute_shell のホワイトリスト）の管理。実行範囲を広げるため owner のみ。
+    "manage_allowed_commands",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
@@ -998,6 +1000,19 @@ mod tests {
             .await;
         assert!(r2.success, "Owner execution should reach the gateway");
         assert_eq!(r2.data["reached_gateway"], true);
+    }
+
+    /// 設定変更系（#116）は owner 限定であること（ポリシー表の権威）。
+    #[test]
+    fn test_settings_tools_are_owner_only() {
+        for name in ["configure_llm_provider", "manage_allowed_commands"] {
+            let p = tool_policy(name);
+            assert!(p.owner_only, "{name} must be owner_only");
+            assert!(
+                !p.trusted_only,
+                "{name} should be gated by owner_only, not trusted_only"
+            );
+        }
     }
 
     #[test]

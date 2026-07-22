@@ -33,59 +33,84 @@ impl SystemGatewayActions {
 
     /// 本ツール源が直接提供するツール定義。
     fn own_definitions() -> Vec<GatewayActionDef> {
-        vec![GatewayActionDef {
-            name: "configure_llm_provider".to_string(),
-            description: "LLM プロバイダの設定を即時適用する（owner 限定）。DB オーバーライドに\
+        vec![
+            GatewayActionDef {
+                name: "configure_llm_provider".to_string(),
+                description:
+                    "LLM プロバイダの設定を即時適用する（owner 限定）。DB オーバーライドに\
                 保存してルーターをホットスワップするため再起動は不要。codex/cursor/acp などの\
                 subprocess プロバイダは適用後に起動確認（health_check）を行い、失敗した場合は\
                 自動的に直前の設定へロールバックし、その旨を結果で通知する。各フィールドは\
                 三値: 省略=変更しない / null=オーバーライド解除（TOML に戻す）/ 値=上書き。\
                 api_key はこのツールでは変更できない（ダッシュボードから設定する）。"
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "provider": {
-                        "type": "string",
-                        "description": "対象プロバイダ名（例: acp, codex, cursor, openai）。"
+                        .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "description": "対象プロバイダ名（例: acp, codex, cursor, openai）。"
+                        },
+                        "enabled": {
+                            "type": ["boolean", "null"],
+                            "description": "有効/無効。null で解除。"
+                        },
+                        "default_model": {
+                            "type": ["string", "null"],
+                            "description": "既定モデル。null で解除。"
+                        },
+                        "binary_path": {
+                            "type": ["string", "null"],
+                            "description": "起動バイナリ（subprocess）。空文字/null で解除。"
+                        },
+                        "args": {
+                            "type": ["array", "null"],
+                            "items": { "type": "string" },
+                            "description": "起動引数（subprocess）。null で解除。"
+                        },
+                        "working_dir": {
+                            "type": ["string", "null"],
+                            "description": "作業ディレクトリ。空文字/null で解除。"
+                        },
+                        "timeout_secs": {
+                            "type": ["integer", "null"],
+                            "description": "タイムアウト秒。null で解除。"
+                        },
+                        "reasoning_effort": {
+                            "type": ["string", "null"],
+                            "description": "推論強度（low/medium/high 等）。空文字/null で解除。"
+                        },
+                        "base_url": {
+                            "type": ["string", "null"],
+                            "description": "API ベース URL。null で解除。"
+                        }
                     },
-                    "enabled": {
-                        "type": ["boolean", "null"],
-                        "description": "有効/無効。null で解除。"
+                    "required": ["provider"]
+                }),
+            },
+            GatewayActionDef {
+                name: "manage_allowed_commands".to_string(),
+                description:
+                    "自分（このエージェント）が execute_shell で実行できる許可コマンドを\
+                管理する（owner 限定）。許可コマンドの追加はシェル実行範囲を広げるため owner のみ。"
+                        .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "add", "remove"],
+                            "description": "list=一覧 / add=追加 / remove=削除。"
+                        },
+                        "command": {
+                            "type": "string",
+                            "description": "add/remove 対象のコマンド（例: git, cargo）。list では不要。"
+                        }
                     },
-                    "default_model": {
-                        "type": ["string", "null"],
-                        "description": "既定モデル。null で解除。"
-                    },
-                    "binary_path": {
-                        "type": ["string", "null"],
-                        "description": "起動バイナリ（subprocess）。空文字/null で解除。"
-                    },
-                    "args": {
-                        "type": ["array", "null"],
-                        "items": { "type": "string" },
-                        "description": "起動引数（subprocess）。null で解除。"
-                    },
-                    "working_dir": {
-                        "type": ["string", "null"],
-                        "description": "作業ディレクトリ。空文字/null で解除。"
-                    },
-                    "timeout_secs": {
-                        "type": ["integer", "null"],
-                        "description": "タイムアウト秒。null で解除。"
-                    },
-                    "reasoning_effort": {
-                        "type": ["string", "null"],
-                        "description": "推論強度（low/medium/high 等）。空文字/null で解除。"
-                    },
-                    "base_url": {
-                        "type": ["string", "null"],
-                        "description": "API ベース URL。null で解除。"
-                    }
-                },
-                "required": ["provider"]
-            }),
-        }]
+                    "required": ["action"]
+                }),
+            },
+        ]
     }
 
     async fn configure_llm_provider(
@@ -155,6 +180,67 @@ impl SystemGatewayActions {
             Err((_code, msg)) => err(msg),
         }
     }
+
+    async fn manage_allowed_commands(
+        &self,
+        args: &Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
+        if ctx.caller != GatewayCaller::Owner {
+            return err("manage_allowed_commands requires owner".to_string());
+        }
+        let agent_id = ctx.agent_id.clone();
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        let conn = match self.state.db.lock() {
+            Ok(c) => c,
+            Err(_) => return err("db lock failed".to_string()),
+        };
+        match action {
+            "list" => match opencrab_db::queries::list_agent_allowed_commands(&conn, &agent_id) {
+                Ok(cmds) => GatewayActionResult {
+                    success: true,
+                    data: Some(json!({ "commands": cmds })),
+                    error: None,
+                },
+                Err(e) => err(e.to_string()),
+            },
+            "add" => {
+                let Some(cmd) = command.filter(|s| !s.is_empty()) else {
+                    return err("command is required for add".to_string());
+                };
+                match opencrab_db::queries::add_agent_allowed_command(
+                    &conn, &agent_id, &cmd, "owner",
+                ) {
+                    Ok(added) => GatewayActionResult {
+                        success: true,
+                        data: Some(json!({ "command": cmd, "added": added })),
+                        error: None,
+                    },
+                    Err(e) => err(e.to_string()),
+                }
+            }
+            "remove" => {
+                let Some(cmd) = command.filter(|s| !s.is_empty()) else {
+                    return err("command is required for remove".to_string());
+                };
+                match opencrab_db::queries::remove_agent_allowed_command(&conn, &agent_id, &cmd) {
+                    Ok(removed) => GatewayActionResult {
+                        success: true,
+                        data: Some(json!({ "command": cmd, "removed": removed })),
+                        error: None,
+                    },
+                    Err(e) => err(e.to_string()),
+                }
+            }
+            other => err(format!("unknown action: {other} (list/add/remove)")),
+        }
+    }
 }
 
 fn err(msg: String) -> GatewayActionResult {
@@ -183,6 +269,7 @@ impl GatewayActions for SystemGatewayActions {
     ) -> GatewayActionResult {
         match name {
             "configure_llm_provider" => self.configure_llm_provider(args, ctx).await,
+            "manage_allowed_commands" => self.manage_allowed_commands(args, ctx).await,
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
