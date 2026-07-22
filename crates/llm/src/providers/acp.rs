@@ -241,15 +241,85 @@ impl LlmProvider for AcpProvider {
     }
 
     async fn health_check(&self) -> Result<bool> {
-        // 起動コマンドの存在確認（--version が無いエージェントもあるので失敗は false）。
-        let ok = Command::new(resolve_binary(&self.binary_path))
-            .arg("--version")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        // 実際に ACP エージェントを起動し initialize ハンドシェイクが通るかを確認する。
+        // `<binary> --version` は npx ラッパ（binary=npx, args=[-y, @…/claude-code-acp]）等で
+        // 常に成功し「ACP を起こせるか」を反映しない。#118 の自動ロールバックや接続テストが
+        // 壊れた設定を誤って成功判定しないよう、本物のハンドシェイクで確認する。
+        let cwd = self.workspace_cwd(None);
+        let mut cmd = Command::new(resolve_binary(&self.binary_path));
+        cmd.args(&self.args);
+        cmd.kill_on_drop(true);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        cmd.current_dir(&cwd);
+        let Ok(mut child) = cmd.spawn() else {
+            return Ok(false);
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Ok(false);
+        };
+        // 起動確認は短時間で（長い chat timeout をそのまま使わず 15s を上限に）。
+        let probe_timeout = self.timeout.min(Duration::from_secs(15));
+        let ok = tokio::time::timeout(
+            probe_timeout,
+            acp_initialize_handshake(Box::new(stdin), stdout),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+        // child は drop 時に kill_on_drop で終了する。
+        drop(child);
         Ok(ok)
+    }
+}
+
+/// トランスポート上で `initialize` ハンドシェイクだけを行い、相手が ACP を話せる
+/// （＝実際に起動できた）かを確認する。`health_check` の実体で、in-memory パイプで
+/// テストできるよう transport を抽象化している。
+async fn acp_initialize_handshake<R>(
+    writer: Box<dyn AsyncWrite + Send + Unpin>,
+    reader: R,
+) -> Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+{
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let text = Arc::new(Mutex::new(String::new()));
+    let reader_task = spawn_reader(reader, writer.clone(), pending.clone(), text);
+    struct Abort(JoinHandle<()>);
+    impl Drop for Abort {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _abort = Abort(reader_task);
+
+    let id = 1u64;
+    let (tx, rx) = oneshot::channel();
+    pending.lock().unwrap().insert(id, tx);
+    let msg = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "clientCapabilities": {
+                "fs": {"readTextFile": false, "writeTextFile": false},
+                "terminal": false
+            },
+            "clientInfo": {"name": "opencrab", "version": env!("CARGO_PKG_VERSION")}
+        }
+    });
+    if let Err(e) = write_line(&writer, &msg).await {
+        pending.lock().unwrap().remove(&id);
+        return Err(anyhow!("ACP initialize 送信失敗: {e}"));
+    }
+    match rx.await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!("ACP initialize エラー: {e}")),
+        Err(_) => Err(anyhow!("ACP: initialize 前に接続が閉じました")),
     }
 }
 
@@ -709,5 +779,44 @@ mod tests {
         .unwrap();
         assert_eq!(text, "Hi there");
         assert_eq!(stop, "end_turn");
+    }
+
+    #[tokio::test]
+    async fn test_health_handshake_ok_when_initialize_answered() {
+        let (client_w, agent_r) = tokio::io::duplex(8192);
+        let (agent_w, client_r) = tokio::io::duplex(8192);
+        // initialize に応答するモックエージェント。
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(agent_r).lines();
+            let mut w = agent_w;
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if msg.get("method").and_then(|v| v.as_str()) == Some("initialize") {
+                    let id = msg.get("id").cloned().unwrap_or(json!(1));
+                    let resp = json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1,"authMethods":[]}});
+                    let mut s = serde_json::to_string(&resp).unwrap();
+                    s.push('\n');
+                    let _ = w.write_all(s.as_bytes()).await;
+                    let _ = w.flush().await;
+                }
+            }
+        });
+        assert!(acp_initialize_handshake(Box::new(client_w), client_r)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_health_handshake_fails_when_connection_closes() {
+        let (client_w, agent_r) = tokio::io::duplex(8192);
+        let (agent_w, client_r) = tokio::io::duplex(8192);
+        // 応答せず即クローズ（`npx --version` は通るが ACP を話せないエージェントの模擬）。
+        drop(agent_r);
+        drop(agent_w);
+        assert!(acp_initialize_handshake(Box::new(client_w), client_r)
+            .await
+            .is_err());
     }
 }
