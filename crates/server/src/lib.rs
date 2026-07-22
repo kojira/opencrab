@@ -16,6 +16,7 @@ pub mod memory_maintenance;
 pub mod nostr_runner_impl;
 pub mod process;
 pub mod skill_consolidation;
+pub mod system_actions;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;

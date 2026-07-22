@@ -77,7 +77,13 @@ pub const DISCORD_ACTIONS: &[&str] = &[
 const MAX_DEPTH: u32 = 2;
 
 /// owner のみが可視・実行できるアクション（#45）。
-pub const OWNER_ONLY_ACTIONS: &[&str] = &["update_instructions", "update_heartbeat_instructions"];
+pub const OWNER_ONLY_ACTIONS: &[&str] = &[
+    "update_instructions",
+    "update_heartbeat_instructions",
+    // LLM プロバイダ設定の即時変更（ルーターのホットスワップ）。外部ユーザー由来の
+    // ターン（caller=Agent）からは一覧にも出さず実行もしない。owner のみ。
+    "configure_llm_provider",
+];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
 /// `execute_skill` は現行の gateway に実装が無い防御的エントリ（将来追加時に
@@ -929,6 +935,69 @@ mod tests {
             !names.contains(&"update_instructions"),
             "Agent should NOT see update_instructions"
         );
+    }
+
+    /// `configure_llm_provider`（#118）は owner 限定。gateway が定義を出しても
+    /// 非 owner には可視化されず、名前指定の実行も dispatch で拒否されること。
+    #[tokio::test]
+    async fn test_configure_llm_provider_is_owner_only() {
+        struct GwConfig;
+        #[async_trait::async_trait]
+        impl GatewayActions for GwConfig {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                vec![GatewayActionDef {
+                    name: "configure_llm_provider".to_string(),
+                    description: "x".to_string(),
+                    parameters: json!({"type": "object"}),
+                }]
+            }
+            async fn execute(
+                &self,
+                _n: &str,
+                _a: &serde_json::Value,
+                _c: &opencrab_gateway::GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({"reached_gateway": true})),
+                    error: None,
+                }
+            }
+        }
+
+        // Agent: 一覧に出ず、名前指定の実行も owner ゲートで拒否される。
+        let (_d, actx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
+            .with_gateway_actions(Arc::new(GwConfig));
+        assert!(
+            !agent_exec
+                .list_tools()
+                .iter()
+                .any(|t| t.name == "configure_llm_provider"),
+            "Agent must NOT see configure_llm_provider"
+        );
+        let r = agent_exec
+            .execute("configure_llm_provider", &json!({"provider": "acp"}))
+            .await;
+        assert!(!r.success, "Agent execution must be rejected");
+        assert!(r.error.unwrap().to_lowercase().contains("owner"));
+
+        // Owner: 可視化され、実行は gateway に到達する。
+        let (_d2, octx) = test_context_with_caller(CallerIdentity::Owner);
+        let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), octx)
+            .with_gateway_actions(Arc::new(GwConfig));
+        assert!(
+            owner_exec
+                .list_tools()
+                .iter()
+                .any(|t| t.name == "configure_llm_provider"),
+            "Owner should see configure_llm_provider"
+        );
+        let r2 = owner_exec
+            .execute("configure_llm_provider", &json!({"provider": "acp"}))
+            .await;
+        assert!(r2.success, "Owner execution should reach the gateway");
+        assert_eq!(r2.data["reached_gateway"], true);
     }
 
     #[test]

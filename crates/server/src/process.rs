@@ -1348,10 +1348,14 @@ pub async fn run_agent_response(
     );
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
-        let bridged = match req.gateway_actions {
-            Some(ga) => bridged.with_gateway_actions(ga),
-            None => bridged,
-        };
+        // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
+        // 供給する。既存 gateway（Discord/Nostr）は inner として委譲される（composite）。
+        // owner 限定ツールは bridge の OWNER_ONLY_ACTIONS が可視性/実行を強制する。
+        let system_actions = std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
+            state.clone(),
+            req.gateway_actions,
+        ));
+        let bridged = bridged.with_gateway_actions(system_actions);
         // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
         match state.mcp_manager.as_ref() {
             Some(m) => {

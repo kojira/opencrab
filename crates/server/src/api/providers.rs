@@ -187,6 +187,94 @@ fn tri_string(
     }
 }
 
+/// プロバイダ名のバリデーション（英数字・`_`・`-` のみ、1〜64 文字）。
+pub(crate) fn valid_provider_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// 三値ボディ（`serde_json::Map`）を既存オーバーライド行にマージして新しい行を作る。
+///
+/// 戻り値 `None` は「全フィールドが未設定 → オーバーライド行を削除すべき」を意味する。
+/// ダッシュボード PUT とエージェントツールの双方がこの一箇所を共有し、三値
+/// セマンティクス（キー欠落=不変 / null=解除 / 値=上書き）を一貫させる。
+pub(crate) fn build_override_row(
+    conn: &rusqlite::Connection,
+    name: &str,
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<opencrab_db::queries::LlmProviderOverrideRow>, (StatusCode, String)> {
+    // 既存行をベースに部分更新（欠落フィールドは維持）
+    let mut row = opencrab_db::queries::get_llm_provider_override(conn, name)
+        .map_err(internal)?
+        .unwrap_or(opencrab_db::queries::LlmProviderOverrideRow {
+            provider: name.to_string(),
+            ..Default::default()
+        });
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    if let Some(v) = tri_bool(body, "enabled").map_err(bad)? {
+        row.enabled = v;
+    }
+    if let Some(v) = tri_string(body, "api_key").map_err(bad)? {
+        // 空文字は「解除」として None に正規化
+        row.api_key = v.filter(|s| !s.is_empty());
+    }
+    if let Some(v) = tri_string(body, "base_url").map_err(bad)? {
+        row.base_url = v;
+    }
+    if let Some(v) = tri_string(body, "default_model").map_err(bad)? {
+        row.default_model = v;
+    }
+    if let Some(v) = tri_string(body, "reasoning_effort").map_err(bad)? {
+        // 空文字は「解除」として None に正規化
+        row.reasoning_effort = v.filter(|s| !s.is_empty());
+    }
+    // 起動系（subprocess プロバイダ codex/cursor/acp 向け）。空文字は解除。
+    if let Some(v) = tri_string(body, "binary_path").map_err(bad)? {
+        row.binary_path = v.filter(|s| !s.is_empty());
+    }
+    if let Some(v) = tri_string(body, "working_dir").map_err(bad)? {
+        row.working_dir = v.filter(|s| !s.is_empty());
+    }
+    // args は文字列配列 or null（解除）。
+    match body.get("args") {
+        None => {}
+        Some(serde_json::Value::Null) => row.args_json = None,
+        Some(serde_json::Value::Array(a)) => {
+            let args: Vec<String> = a
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            row.args_json = Some(serde_json::to_string(&args).unwrap_or_else(|_| "[]".into()));
+        }
+        Some(other) => return Err(bad(format!("args: expected array or null, got: {other}"))),
+    }
+    // timeout_secs は数値 or null（解除）。
+    match body.get("timeout_secs") {
+        None => {}
+        Some(serde_json::Value::Null) => row.timeout_secs = None,
+        Some(v) if v.is_u64() || v.is_i64() => row.timeout_secs = v.as_i64(),
+        Some(other) => {
+            return Err(bad(format!(
+                "timeout_secs: expected int or null, got: {other}"
+            )))
+        }
+    }
+    // 全フィールドが None ならオーバーライド行ごと削除
+    let all_none = row.enabled.is_none()
+        && row.api_key.is_none()
+        && row.base_url.is_none()
+        && row.default_model.is_none()
+        && row.reasoning_effort.is_none()
+        && row.binary_path.is_none()
+        && row.args_json.is_none()
+        && row.working_dir.is_none()
+        && row.timeout_secs.is_none();
+    Ok((!all_none).then_some(row))
+}
+
 /// PUT /api/llm/providers/{name} — オーバーライド保存 + ルーター再構築
 ///
 /// ボディはキー有無で三値を判定するため `serde_json::Map` で受ける（上記参照）。
@@ -195,87 +283,18 @@ pub async fn update_provider(
     Path(name): Path<String>,
     Json(body): Json<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        || name.is_empty()
-        || name.len() > 64
-    {
+    if !valid_provider_name(&name) {
         return Err((StatusCode::BAD_REQUEST, "invalid provider name".into()));
     }
 
     {
         let conn = state.db.lock().unwrap();
-        // 既存行をベースに部分更新（欠落フィールドは維持）
-        let mut row = opencrab_db::queries::get_llm_provider_override(&conn, &name)
-            .map_err(internal)?
-            .unwrap_or(opencrab_db::queries::LlmProviderOverrideRow {
-                provider: name.clone(),
-                ..Default::default()
-            });
-        let bad = |e: String| (StatusCode::BAD_REQUEST, e);
-        if let Some(v) = tri_bool(&body, "enabled").map_err(bad)? {
-            row.enabled = v;
-        }
-        if let Some(v) = tri_string(&body, "api_key").map_err(bad)? {
-            // 空文字は「解除」として None に正規化
-            row.api_key = v.filter(|s| !s.is_empty());
-        }
-        if let Some(v) = tri_string(&body, "base_url").map_err(bad)? {
-            row.base_url = v;
-        }
-        if let Some(v) = tri_string(&body, "default_model").map_err(bad)? {
-            row.default_model = v;
-        }
-        if let Some(v) = tri_string(&body, "reasoning_effort").map_err(bad)? {
-            // 空文字は「解除」として None に正規化
-            row.reasoning_effort = v.filter(|s| !s.is_empty());
-        }
-        // 起動系（subprocess プロバイダ codex/cursor/acp 向け）。空文字は解除。
-        if let Some(v) = tri_string(&body, "binary_path").map_err(bad)? {
-            row.binary_path = v.filter(|s| !s.is_empty());
-        }
-        if let Some(v) = tri_string(&body, "working_dir").map_err(bad)? {
-            row.working_dir = v.filter(|s| !s.is_empty());
-        }
-        // args は文字列配列 or null（解除）。
-        match body.get("args") {
-            None => {}
-            Some(serde_json::Value::Null) => row.args_json = None,
-            Some(serde_json::Value::Array(a)) => {
-                let args: Vec<String> = a
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-                row.args_json = Some(serde_json::to_string(&args).unwrap_or_else(|_| "[]".into()));
+        match build_override_row(&conn, &name, &body)? {
+            None => opencrab_db::queries::delete_llm_provider_override(&conn, &name)
+                .map_err(internal)?,
+            Some(row) => {
+                opencrab_db::queries::upsert_llm_provider_override(&conn, &row).map_err(internal)?
             }
-            Some(other) => return Err(bad(format!("args: expected array or null, got: {other}"))),
-        }
-        // timeout_secs は数値 or null（解除）。
-        match body.get("timeout_secs") {
-            None => {}
-            Some(serde_json::Value::Null) => row.timeout_secs = None,
-            Some(v) if v.is_u64() || v.is_i64() => row.timeout_secs = v.as_i64(),
-            Some(other) => {
-                return Err(bad(format!(
-                    "timeout_secs: expected int or null, got: {other}"
-                )))
-            }
-        }
-        // 全フィールドが None ならオーバーライド行ごと削除
-        if row.enabled.is_none()
-            && row.api_key.is_none()
-            && row.base_url.is_none()
-            && row.default_model.is_none()
-            && row.reasoning_effort.is_none()
-            && row.binary_path.is_none()
-            && row.args_json.is_none()
-            && row.working_dir.is_none()
-            && row.timeout_secs.is_none()
-        {
-            opencrab_db::queries::delete_llm_provider_override(&conn, &name).map_err(internal)?;
-        } else {
-            opencrab_db::queries::upsert_llm_provider_override(&conn, &row).map_err(internal)?;
         }
     }
 
@@ -470,7 +489,7 @@ pub async fn test_provider_endpoint(
     Json(json!({ "provider": name, "ok": ok }))
 }
 
-fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
+pub(crate) fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
     let overrides = {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::list_llm_provider_overrides(&conn).map_err(internal)?
@@ -485,6 +504,105 @@ fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
     state.llm_router.swap(router);
     tracing::info!(providers = ?names, "LLM router hot-reloaded from dashboard settings");
     Ok(())
+}
+
+/// `apply_provider_override_with_rollback` の結果。
+pub(crate) struct ApplyOutcome {
+    /// 最終状態に新しい設定が適用されているか（false = ロールバック済み）。
+    pub applied: bool,
+    /// subprocess プロバイダで起動確認（health_check）を実行した結果。
+    /// None = テスト対象外（非 subprocess）。
+    pub test_ok: Option<bool>,
+    /// 起動確認に失敗し、元の設定へ戻したか。
+    pub rolled_back: bool,
+}
+
+/// オーバーライドを適用 → ルーター再構築 → （subprocess なら）起動確認し、失敗したら
+/// 元のオーバーライド状態へ**自動ロールバック**して再構築する。
+///
+/// エージェント（owner）がツールから設定を配線する経路で使う。壊れた設定で
+/// プロバイダが起動不能になっても、直前の状態に自動復帰させ、その事実を呼び出し元に返す。
+/// api_key はこの経路では受け付けない（秘密情報を LLM 経路に載せない）。
+pub(crate) async fn apply_provider_override_with_rollback(
+    state: &AppState,
+    name: &str,
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Result<ApplyOutcome, (StatusCode, String)> {
+    if !valid_provider_name(name) {
+        return Err((StatusCode::BAD_REQUEST, "invalid provider name".into()));
+    }
+    // 1. 変更前のオーバーライド行を退避（ロールバック用）。
+    let previous = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_llm_provider_override(&conn, name).map_err(internal)?
+    };
+    // オーバーライド行を `desired`（Some=upsert / None=削除）へ書き込むヘルパ。
+    let write_override = |desired: Option<&opencrab_db::queries::LlmProviderOverrideRow>| {
+        let conn = state.db.lock().unwrap();
+        match desired {
+            Some(row) => opencrab_db::queries::upsert_llm_provider_override(&conn, row),
+            None => opencrab_db::queries::delete_llm_provider_override(&conn, name),
+        }
+    };
+    // previous の状態へ戻すヘルパ（ロールバック）。
+    let restore_previous = || write_override(previous.as_ref());
+
+    // 2. 新しい行を構築して書き込む（全 None なら削除）。
+    let desired = {
+        let conn = state.db.lock().unwrap();
+        build_override_row(&conn, name, body)?
+    };
+    write_override(desired.as_ref()).map_err(internal)?;
+
+    // 3. ルーター再構築。build 自体が失敗する壊れた設定（例: 不正な引数）も「起動失敗」
+    //    として扱い、DB を previous へ戻してから通知する（壊れた行を残さない）。
+    if reload_router(state).is_err() {
+        restore_previous().map_err(internal)?;
+        // 復元後の再構築は previous（元は正常だった設定）なので成功するはず。失敗しても
+        // best-effort でログのみ（router は swap 前で旧状態が生きている）。
+        let _ = reload_router(state);
+        tracing::warn!(
+            provider = %name,
+            "provider configuration failed to build router; rolled back to previous settings"
+        );
+        return Ok(ApplyOutcome {
+            applied: false,
+            test_ok: Some(false),
+            rolled_back: true,
+        });
+    }
+
+    // 4. 非 subprocess は自動起動確認の対象外（health_check が外部ネットワーク呼び出しに
+    //    なるため、保存＝即ネットワーク発火 + 一過性の失敗で誤ロールバックを避ける）。
+    if !is_subprocess_provider(name) {
+        return Ok(ApplyOutcome {
+            applied: true,
+            test_ok: None,
+            rolled_back: false,
+        });
+    }
+
+    // 5. subprocess は起動確認。成功ならそのまま。
+    if test_provider(state, name).await {
+        return Ok(ApplyOutcome {
+            applied: true,
+            test_ok: Some(true),
+            rolled_back: false,
+        });
+    }
+
+    // 6. 失敗 → 元の状態へロールバックして再構築。
+    restore_previous().map_err(internal)?;
+    reload_router(state)?;
+    tracing::warn!(
+        provider = %name,
+        "provider configuration failed health_check; rolled back to previous settings"
+    );
+    Ok(ApplyOutcome {
+        applied: false,
+        test_ok: Some(false),
+        rolled_back: true,
+    })
 }
 
 // ============================================
@@ -581,4 +699,90 @@ pub async fn delete_voice_config(
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn body(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn valid_provider_name_rules() {
+        assert!(valid_provider_name("acp"));
+        assert!(valid_provider_name("openai-4o_mini"));
+        assert!(!valid_provider_name(""));
+        assert!(!valid_provider_name("bad name")); // space
+        assert!(!valid_provider_name("bad/name")); // slash
+        assert!(!valid_provider_name(&"x".repeat(65))); // too long
+    }
+
+    #[test]
+    fn build_override_row_sets_launch_fields() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let conn = db.lock().unwrap();
+        let b = body(json!({
+            "binary_path": "/usr/bin/acp",
+            "args": ["--foo", "bar"],
+            "timeout_secs": 90,
+            "enabled": true,
+        }));
+        let row = build_override_row(&conn, "acp", &b).unwrap().unwrap();
+        assert_eq!(row.provider, "acp");
+        assert_eq!(row.binary_path.as_deref(), Some("/usr/bin/acp"));
+        assert_eq!(row.args_json.as_deref(), Some(r#"["--foo","bar"]"#));
+        assert_eq!(row.timeout_secs, Some(90));
+        assert_eq!(row.enabled, Some(true));
+    }
+
+    #[test]
+    fn build_override_row_all_none_means_delete() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let conn = db.lock().unwrap();
+        // 空文字/null は解除。全て解除なら None（＝行削除）。
+        let b = body(json!({
+            "binary_path": "",
+            "working_dir": "",
+            "args": null,
+            "timeout_secs": null,
+        }));
+        assert!(build_override_row(&conn, "acp", &b).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_override_row_merges_onto_existing() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let conn = db.lock().unwrap();
+        // まず binary_path を保存。
+        let first = build_override_row(&conn, "acp", &body(json!({"binary_path": "/a"})))
+            .unwrap()
+            .unwrap();
+        opencrab_db::queries::upsert_llm_provider_override(&conn, &first).unwrap();
+        // 次に timeout だけ変更 → binary_path は保持される（部分更新）。
+        let merged = build_override_row(&conn, "acp", &body(json!({"timeout_secs": 30})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.binary_path.as_deref(), Some("/a"));
+        assert_eq!(merged.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn build_override_row_rejects_bad_types() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let conn = db.lock().unwrap();
+        assert!(build_override_row(&conn, "acp", &body(json!({"timeout_secs": "nope"}))).is_err());
+        assert!(build_override_row(&conn, "acp", &body(json!({"args": "nope"}))).is_err());
+    }
+
+    #[test]
+    fn subprocess_classification() {
+        assert!(is_subprocess_provider("acp"));
+        assert!(is_subprocess_provider("codex"));
+        assert!(is_subprocess_provider("cursor"));
+        assert!(!is_subprocess_provider("openai"));
+        assert!(!is_subprocess_provider("anthropic"));
+    }
 }
