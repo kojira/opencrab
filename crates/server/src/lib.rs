@@ -317,6 +317,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/mcp/{name}/enabled",
             post(api::mcp::set_mcp_enabled),
         )
+        .route(
+            "/api/agents/{id}/mcp/{name}/test",
+            post(api::mcp::test_mcp_server),
+        )
         // Co-Agent管理
         .route(
             "/api/agents/{id}/co-agents",

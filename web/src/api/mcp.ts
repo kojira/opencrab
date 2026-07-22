@@ -11,6 +11,8 @@ export interface McpServerDto {
   connected: boolean;
   /** 接続時のツール数（未接続なら null）。 */
   tools: number | null;
+  /** 直近の接続失敗理由（接続成功/未試行なら null）。 */
+  connect_error?: string | null;
 }
 
 export interface PutMcpBody {
@@ -47,4 +49,12 @@ export function deleteMcpServer(
   name: string,
 ): Promise<{ deleted: boolean }> {
   return api.del(`/agents/${agentId}/mcp/${encodeURIComponent(name)}`);
+}
+
+/** 現在の設定で使い捨て接続を試み、繋がるか・ツール数・失敗理由を返す。 */
+export function testMcpServer(
+  agentId: string,
+  name: string,
+): Promise<{ ok: boolean; tools?: number; error?: string }> {
+  return api.post(`/agents/${agentId}/mcp/${encodeURIComponent(name)}/test`);
 }
