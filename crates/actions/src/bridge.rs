@@ -124,6 +124,22 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
     }
 }
 
+/// tool 結果 Value から秘密鍵フィールド（`nsec`）をマスクした複製を返す。
+/// 観測系（activity webhook 等の sink）へ秘密鍵を生で流さないために使う。
+/// 呼び出し側は `nsec` を含むときだけ呼ぶ（clone コストを避けるため）。
+fn redact_secret_fields(data: &serde_json::Value) -> serde_json::Value {
+    let mut cloned = data.clone();
+    if let Some(obj) = cloned.as_object_mut() {
+        if obj.contains_key("nsec") {
+            obj.insert(
+                "nsec".to_string(),
+                serde_json::Value::String("[redacted]".to_string()),
+            );
+        }
+    }
+    cloned
+}
+
 /// エラー文言から「権限拒否（実行されなかった）」を判定する。
 ///
 /// 優先: 構造的マーカー（`REJECTION_CODE_PREFIX`）。
@@ -365,6 +381,15 @@ impl BridgedExecutor {
         } else {
             ToolEventStatus::Failed
         };
+        // 秘密鍵（nsec 等）を含む結果は sink（activity webhook 等の観測系）へ生で流さない。
+        // 含む場合だけ redact したコピーを作って渡す（通常は clone を避ける）。
+        let redacted;
+        let sink_result: &serde_json::Value = if result.data.get("nsec").is_some() {
+            redacted = redact_secret_fields(&result.data);
+            &redacted
+        } else {
+            &result.data
+        };
         sink.on_event(&ToolEvent {
             tool_name: name,
             tool_call_id: call_id,
@@ -375,7 +400,7 @@ impl BridgedExecutor {
             started_at: &started_at,
             duration_ms: Some(duration_ms),
             args,
-            result: Some(&result.data),
+            result: Some(sink_result),
             error: result.error.as_deref(),
         });
         result
@@ -455,6 +480,21 @@ mod tests {
     use opencrab_gateway::{GatewayActionDef, GatewayActionResult};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn test_redact_secret_fields_masks_nsec() {
+        let data = json!({"nsec": "nsec1supersecret", "npub": "npub1abc", "pubkey": "hex"});
+        let red = redact_secret_fields(&data);
+        assert_eq!(red["nsec"], "[redacted]");
+        // 非秘密フィールドは保持。
+        assert_eq!(red["npub"], "npub1abc");
+        assert_eq!(red["pubkey"], "hex");
+        // 秘密が残らない。
+        assert!(!red.to_string().contains("supersecret"));
+        // nsec が無ければそのまま。
+        let plain = json!({"url": "https://x"});
+        assert_eq!(redact_secret_fields(&plain), plain);
+    }
 
     /// テスト用GatewayActionsモック
     struct MockGatewayActions;

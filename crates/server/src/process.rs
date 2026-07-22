@@ -919,6 +919,26 @@ fn set_llm_log_callback(
     });
 }
 
+/// tool_result JSON から秘密鍵フィールド（`nsec`）をマスクする。永続化前に呼ぶ。
+/// JSON として解釈できない場合は生の中身に秘密鍵が残りうるため、固定の placeholder に
+/// 置き換える（生保存で漏らさない）。
+fn redact_secret_fields_json(result_json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                if obj.contains_key("nsec") {
+                    obj.insert(
+                        "nsec".to_string(),
+                        serde_json::Value::String("[redacted]".to_string()),
+                    );
+                }
+            }
+            v.to_string()
+        }
+        Err(_) => "{\"note\":\"[redacted secret result]\"}".to_string(),
+    }
+}
+
 /// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
 /// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
 fn set_turn_log_callbacks(
@@ -979,6 +999,16 @@ fn set_turn_log_callbacks(
         let tr_workspace = tool_result_workspace;
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
+                // 秘密鍵はセッションログに永続化しない。tool_result は後続ターンで
+                // build_conversation_string により会話へ再注入されるため、nsec を含む結果
+                // （nostr_generate_key）を生のまま保存すると、DB 保存時漏洩＋プロンプト
+                // インジェクションでの持ち出し対象になる。ライブのモデル向け結果には nsec が
+                // 残るが、永続化前にここでマスクする。
+                let result_json = if tool_name == "nostr_generate_key" {
+                    redact_secret_fields_json(&result_json)
+                } else {
+                    result_json
+                };
                 const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
                 let content = if result_json.len() >= TOOL_RESULT_SIZE_LIMIT {
                     // 大きい結果はファイルに保存

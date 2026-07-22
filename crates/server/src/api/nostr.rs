@@ -210,9 +210,9 @@ pub async fn generate_nostr_key(
         ));
     };
 
-    // 生成（nostaro vanity）。同時実行は 1 に制限。失敗（未インストール/timeout/
-    // 既に進行中 等）は 500。エラー文言に秘密鍵が載らないことは parse 側で担保済み
-    // （生成失敗の経路には鍵が存在しない）。
+    // 生成（nostaro vanity）。同時実行は NostaroCli 内のゲートで 1 に直列化する
+    // （進行中なら待つ。生成は ≤3 文字で通常即時）。失敗（未インストール/timeout 等）は
+    // 500。エラー文言に秘密鍵が載らないことは parse 側で担保済み（失敗経路に鍵は無い）。
     let generated = manager
         .generate_key(prefix)
         .await
