@@ -450,15 +450,20 @@ where
                 continue; // JSON でない行（ログ等）はスキップ
             };
             let has_method = msg.get("method").is_some();
-            let id = msg.get("id").and_then(|v| v.as_u64());
-            match (has_method, id) {
-                // 受信リクエスト（agent → client）。応答が必須。
-                (true, Some(req_id)) => {
+            // JSON-RPC 2.0 の id は**数値でも文字列でも**よい。分類は id の有無で行う
+            // （数値決め打ちだと、文字列 id の受信リクエストを通知と誤分類して未応答→
+            // ハングする）。自分が送る id は u64 なので、応答照合だけ as_u64 を使う。
+            let has_id = msg.get("id").is_some();
+            match (has_method, has_id) {
+                // 受信リクエスト（agent → client）。応答が必須。id は生のまま echo する。
+                (true, true) => {
+                    let req_id = msg.get("id").cloned().unwrap_or(Value::Null);
                     handle_incoming_request(&writer, req_id, &msg).await;
                 }
-                // 自分のリクエストへの応答。
-                (false, Some(resp_id)) => {
-                    if let Some(tx) = pending.lock().unwrap().remove(&resp_id) {
+                // 自分のリクエストへの応答（自分の id は u64）。
+                (false, true) => {
+                    let resp_id = msg.get("id").and_then(|v| v.as_u64());
+                    if let Some(tx) = resp_id.and_then(|id| pending.lock().unwrap().remove(&id)) {
                         if let Some(err) = msg.get("error") {
                             let m = err
                                 .get("message")
@@ -472,7 +477,7 @@ where
                     }
                 }
                 // 通知（session/update 等）。
-                (true, None) => {
+                (true, false) => {
                     accumulate_update(&msg, &text);
                 }
                 _ => {}
@@ -516,7 +521,8 @@ fn accumulate_update(msg: &Value, text: &Arc<Mutex<String>>) {
 /// （fs/terminal は能力を出していないので本来来ない）は method-not-found を返す。
 async fn handle_incoming_request(
     writer: &Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
-    req_id: u64,
+    // JSON-RPC id は数値/文字列いずれもありうるので生の Value のまま echo する。
+    req_id: Value,
     msg: &Value,
 ) {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
@@ -652,7 +658,9 @@ mod tests {
                     "session/new" => Some(json!({"sessionId":"sess-1"})),
                     "session/prompt" => {
                         // まず permission を要求 → 本文チャンク → 応答（end_turn）。
-                        let perm = json!({"jsonrpc":"2.0","id":9001,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"t1"},"options":[{"optionId":"ok","name":"Allow","kind":"allow_once"}]}});
+                        // 文字列 id で送る（JSON-RPC 2.0 は文字列 id を許す。数値決め打ちで
+                        // 誤分類→未応答→ハングしないことの回帰テスト）。
+                        let perm = json!({"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"t1"},"options":[{"optionId":"ok","name":"Allow","kind":"allow_once"}]}});
                         let mut s = serde_json::to_string(&perm).unwrap();
                         s.push('\n');
                         let _ = w.write_all(s.as_bytes()).await;
