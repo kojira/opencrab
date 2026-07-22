@@ -111,6 +111,40 @@ impl SystemGatewayActions {
                     "required": ["action"]
                 }),
             },
+            GatewayActionDef {
+                name: "configure_nostr".to_string(),
+                description:
+                    "自分の Nostr 連携設定（購読リレー・フィルタ authors/keywords/kinds・\
+                有効/無効）を変更する（owner 限定）。秘密鍵は変更も取得もできない（鍵生成は別手段）。\
+                省略したフィールドは現状維持。enabled=true にするには author か keyword が必要。\
+                設定は保存と同時にマネージャへ反映（enabled なら起動 / 無効なら停止）。"
+                        .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "relays": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "購読リレー URL 一覧（例: wss://yabu.me）。"
+                        },
+                        "authors": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "購読する author（npub/hex）。"
+                        },
+                        "keywords": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "購読キーワード。"
+                        },
+                        "kinds": {
+                            "type": "array", "items": {"type": "integer"},
+                            "description": "購読する kind 番号。"
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "有効化して起動 / 無効化して停止。"
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -242,6 +276,100 @@ impl SystemGatewayActions {
             other => err(format!("unknown action: {other} (list/add/remove)")),
         }
     }
+
+    async fn configure_nostr(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
+        if ctx.caller != GatewayCaller::Owner {
+            return err("configure_nostr requires owner".to_string());
+        }
+        let agent_id = ctx.agent_id.clone();
+        // 既存設定を partial 更新のベースにする（省略フィールドは現状維持）。
+        let existing = {
+            let conn = match self.state.db.lock() {
+                Ok(c) => c,
+                Err(_) => return err("db lock failed".to_string()),
+            };
+            opencrab_db::queries::get_agent_nostr_config(&conn, &agent_id).unwrap_or(None)
+        };
+        let Some(existing) = existing else {
+            return err(
+                "Nostr 設定が未作成です。先に鍵を生成してください（operator がダッシュボードで生成）"
+                    .to_string(),
+            );
+        };
+        let ef: Value = serde_json::from_str(&existing.filter_json).unwrap_or_else(|_| json!({}));
+        // args の配列（文字列）を取り出す。無ければ None（＝現状維持）。
+        let arg_strs = |k: &str| -> Option<Vec<String>> {
+            args.get(k).and_then(|x| x.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        };
+        let cur_strs = |v: &Value, k: &str| -> Vec<String> {
+            v.get(k)
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let arg_or_cur_kinds = || -> Vec<u32> {
+            let extract = |v: &Value| -> Vec<u32> {
+                v.as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|n| n.as_u64().map(|v| v as u32))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            match args.get("kinds") {
+                Some(v) => extract(v),
+                None => ef.get("kinds").map(extract).unwrap_or_default(),
+            }
+        };
+
+        let relays = arg_strs("relays")
+            .unwrap_or_else(|| serde_json::from_str(&existing.relays_json).unwrap_or_default());
+        let authors = arg_strs("authors").unwrap_or_else(|| cur_strs(&ef, "authors"));
+        let keywords = arg_strs("keywords").unwrap_or_else(|| cur_strs(&ef, "keywords"));
+        let kinds = arg_or_cur_kinds();
+        let enabled = args
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(existing.enabled);
+
+        match crate::api::nostr::apply_nostr_settings(
+            &self.state,
+            &agent_id,
+            &relays,
+            &authors,
+            &keywords,
+            &kinds,
+            enabled,
+            None,
+        )
+        .await
+        {
+            Ok(()) => GatewayActionResult {
+                success: true,
+                // secret_key は返さない。
+                data: Some(json!({
+                    "agent_id": agent_id,
+                    "relays": relays,
+                    "authors": authors,
+                    "keywords": keywords,
+                    "kinds": kinds,
+                    "enabled": enabled,
+                })),
+                error: None,
+            },
+            Err((_code, msg)) => err(msg),
+        }
+    }
 }
 
 fn err(msg: String) -> GatewayActionResult {
@@ -271,6 +399,7 @@ impl GatewayActions for SystemGatewayActions {
         match name {
             "configure_llm_provider" => self.configure_llm_provider(args, ctx).await,
             "manage_allowed_commands" => self.manage_allowed_commands(args, ctx).await,
+            "configure_nostr" => self.configure_nostr(args, ctx).await,
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,

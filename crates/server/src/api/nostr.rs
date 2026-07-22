@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use opencrab_db::queries::AgentNostrConfigRow;
-use opencrab_nostr::{config_from_row, validate_vanity_prefix, NostrFilter};
+use opencrab_nostr::{config_from_row, validate_vanity_prefix};
 
 use crate::AppState;
 
@@ -91,14 +91,42 @@ pub async fn update_nostr_config(
     Path(id): Path<String>,
     Json(body): Json<PutNostrBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // 既存の秘密鍵を保持（新規指定が無ければ）。
+    apply_nostr_settings(
+        &state,
+        &id,
+        &body.relays,
+        &body.authors,
+        &body.keywords,
+        &body.kinds,
+        body.enabled,
+        body.secret_key.as_deref(),
+    )
+    .await?;
+    Ok(Json(json!({"updated": true, "enabled": body.enabled})))
+}
+
+/// Nostr 設定を保存し、マネージャに反映（enabled なら起動、else 停止）する共通処理。
+/// REST（`update_nostr_config`）と エージェントツール（`configure_nostr`）の両方が使う。
+///
+/// `secret_key_override` が空でなければそれを、無ければ既存の秘密鍵を保持する
+/// （更新で誤って鍵をクリアしない）。既存も無ければ 400（先に鍵生成が必要）。
+/// 起動失敗時に「enabled だが未稼働」の不整合を残さないよう、まず enabled=false で
+/// 保存し、起動成功後にのみ enabled=true にする。
+pub(crate) async fn apply_nostr_settings(
+    state: &AppState,
+    agent_id: &str,
+    relays: &[String],
+    authors: &[String],
+    keywords: &[String],
+    kinds: &[u32],
+    enabled: bool,
+    secret_key_override: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
     let existing = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::get_agent_nostr_config(&conn, &id).unwrap_or(None)
+        opencrab_db::queries::get_agent_nostr_config(&conn, agent_id).unwrap_or(None)
     };
-    let secret_key = body
-        .secret_key
-        .as_deref()
+    let secret_key = secret_key_override
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
@@ -108,33 +136,26 @@ pub async fn update_nostr_config(
     if secret_key.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "secret_key（nsec）が必要です".to_string(),
+            "secret_key（nsec）が必要です。先に鍵を生成してください".to_string(),
         ));
     }
 
-    let filter = NostrFilter {
-        authors: body.authors.clone(),
-        keywords: body.keywords.clone(),
-        kinds: body.kinds.clone(),
-    };
     // author も keyword も無い購読は全ノート洪水になるため拒否（enabled 時のみ）。
-    if body.enabled && filter.authors.is_empty() && filter.keywords.is_empty() {
+    if enabled && authors.is_empty() && keywords.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             "author か keyword を少なくとも1つ指定してください（全ノート購読は不可）".to_string(),
         ));
     }
 
-    // まず enabled=false で保存する。起動が成功して初めて enabled=true にする
-    // （起動失敗時に「enabled だが未稼働」の不整合を残さない）。
     let row = AgentNostrConfigRow {
-        agent_id: id.clone(),
+        agent_id: agent_id.to_string(),
         secret_key,
-        relays_json: serde_json::to_string(&body.relays).unwrap_or_else(|_| "[]".to_string()),
+        relays_json: serde_json::to_string(relays).unwrap_or_else(|_| "[]".to_string()),
         filter_json: serde_json::to_string(&json!({
-            "authors": filter.authors,
-            "keywords": filter.keywords,
-            "kinds": filter.kinds,
+            "authors": authors,
+            "keywords": keywords,
+            "kinds": kinds,
         }))
         .unwrap_or_else(|_| "{}".to_string()),
         enabled: false,
@@ -147,20 +168,20 @@ pub async fn update_nostr_config(
 
     // マネージャ反映。
     if let Some(manager) = state.nostr_manager.as_ref() {
-        if body.enabled {
+        if enabled {
             let config = config_from_row(&row);
             manager
-                .start_agent_gateway(&id, &row.secret_key, config)
+                .start_agent_gateway(agent_id, &row.secret_key, config)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let conn = state.db.lock().unwrap();
-            opencrab_db::queries::set_agent_nostr_config_enabled(&conn, &id, true).ok();
+            opencrab_db::queries::set_agent_nostr_config_enabled(&conn, agent_id, true).ok();
         } else {
-            manager.stop_agent_gateway(&id).await;
+            manager.stop_agent_gateway(agent_id).await;
         }
     }
 
-    Ok(Json(json!({"updated": true, "enabled": body.enabled})))
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

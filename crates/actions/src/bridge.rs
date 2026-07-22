@@ -85,6 +85,8 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "configure_llm_provider",
     // 許可コマンド（execute_shell のホワイトリスト）の管理。実行範囲を広げるため owner のみ。
     "manage_allowed_commands",
+    // Nostr 連携設定（購読リレー/フィルタ/有効化）。外部発信・アイデンティティに関わるため owner のみ。
+    "configure_nostr",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
@@ -1005,7 +1007,11 @@ mod tests {
     /// 設定変更系（#116）は owner 限定であること（ポリシー表の権威）。
     #[test]
     fn test_settings_tools_are_owner_only() {
-        for name in ["configure_llm_provider", "manage_allowed_commands"] {
+        for name in [
+            "configure_llm_provider",
+            "manage_allowed_commands",
+            "configure_nostr",
+        ] {
             let p = tool_policy(name);
             assert!(p.owner_only, "{name} must be owner_only");
             assert!(
