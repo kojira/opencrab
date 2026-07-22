@@ -8,11 +8,13 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use opencrab_core::workspace::resolve_agent_workspace;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 use crate::config::NostrConfig;
 
@@ -64,6 +66,10 @@ pub struct NostaroCli {
     binary_path: String,
     timeout: Duration,
     vanity_timeout: Duration,
+    /// vanity 生成の同時実行を絞るゲート。`Arc` 共有なので clone 間で同じ制限が効く
+    /// （HTTP ルートも LLM ツール経由も同じ 1 本のゲートを通る = 長時間 nostaro
+    /// プロセスを並列に溢れさせない）。
+    vanity_gate: Arc<Semaphore>,
 }
 
 impl Default for NostaroCli {
@@ -78,6 +84,7 @@ impl NostaroCli {
             binary_path: DEFAULT_NOSTARO_PATH.to_string(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             vanity_timeout: Duration::from_secs(DEFAULT_VANITY_TIMEOUT_SECS),
+            vanity_gate: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -208,6 +215,14 @@ impl NostaroCli {
     pub async fn vanity(&self, prefix: &str) -> Result<GeneratedKey> {
         let prefix = prefix.trim().to_lowercase();
         validate_vanity_prefix(&prefix)?;
+        // 同時実行を 1 に絞る（各生成は最大 vanity_timeout ぶん nostaro プロセスを
+        // 抱える。並列に溢れさせない = DoS/資源枯渇の防止）。生成は ≤3 文字で通常
+        // 即時なので、待ちは実質発生しない。
+        let _permit = self
+            .vanity_gate
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("vanity ゲートが閉じています"))?;
         // config 非依存なので base_command は使わず素で組む。
         let mut cmd = Command::new(&self.binary_path);
         cmd.kill_on_drop(true);
