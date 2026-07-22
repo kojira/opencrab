@@ -417,9 +417,18 @@ fn replace_secret_key_line(toml: &str, nsec: &str) -> String {
     s
 }
 
-/// 秘密（nsec 等）を含むファイルを**作成時から 0600**で書く（chmod 前の
-/// world-readable 窓を作らない）。unix 以外は通常書き込み。失敗は握りつぶさない。
+/// 一意な temp path 用のプロセス内カウンタ（同一 pid の並行書き込みでの temp 衝突防止）。
+static SECRET_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 秘密（nsec 等）を含むファイルを**作成時から 0600**で、かつ**アトミックに**書く。
+///
+/// 一意な temp（同ディレクトリ・0600）へ書いてから `rename` で差し替える。これにより
+/// 読み手（nostaro）が**部分書き込みの config を絶対に読まない**（partial read → 既定
+/// リレーへ publish のような事故を防ぐ）。同一 config への並行書き込みも、最終パスは
+/// 常に完全なファイルを指す（内容は決定的で同一）。unix 以外は通常書き込み。
 fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    let n = SECRET_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), n));
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -429,15 +438,21 @@ fn write_secret_file(path: &std::path::Path, contents: &str) -> Result<()> {
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(path)
-            .with_context(|| format!("failed to open secret file: {}", path.display()))?;
+            .open(&tmp)
+            .with_context(|| format!("failed to open secret temp: {}", tmp.display()))?;
         f.write_all(contents.as_bytes())
-            .with_context(|| format!("failed to write secret file: {}", path.display()))?;
+            .with_context(|| format!("failed to write secret temp: {}", tmp.display()))?;
+        f.sync_all().ok();
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(path, contents)
-            .with_context(|| format!("failed to write secret file: {}", path.display()))?;
+        std::fs::write(&tmp, contents)
+            .with_context(|| format!("failed to write secret temp: {}", tmp.display()))?;
+    }
+    // アトミックに差し替え。失敗したら temp を掃除する。
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("failed to place secret file: {}", path.display()));
     }
     Ok(())
 }
