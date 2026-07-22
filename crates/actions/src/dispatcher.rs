@@ -50,6 +50,7 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(CreateMySkillAction));
         dispatcher.register(Arc::new(RetireMySkillAction));
         dispatcher.register(Arc::new(RestoreMySkillAction));
+        dispatcher.register(Arc::new(ReadSkillAction));
         dispatcher.register(Arc::new(BrowseMemoryIndexAction));
         dispatcher.register(Arc::new(RetrieveMemoryNodesAction));
         dispatcher.register(Arc::new(SearchMemoryIndexAction));
