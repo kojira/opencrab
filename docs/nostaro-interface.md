@@ -32,6 +32,33 @@ OpenCrab は起動時にこれを取得し、**自分の投稿を受信ループ
 無限ループ＋LLM 支出の防止）。取得できないと OpenCrab はゲートウェイを**起動しない**
 （fail-closed）ので、実機接続にはこのコマンドが必須。
 
+### 改造 1c: `nostaro vanity --json`（鍵生成・汎用）
+
+`nostaro vanity --json [--prefix=<bech32>]` で**新規鍵を生成**し、1 行の JSON を stdout に
+出力する。OpenCrab はこれをエージェントの Nostr アイデンティティ生成に使う（ダッシュボード /
+`POST /api/agents/{id}/nostr/generate`）。
+
+```
+nostaro vanity --json [--prefix=<bech32prefix>]
+```
+
+- `--prefix` は npub（`npub1...`）の `1` 以降に前置される bech32 文字列。省略/空なら通常の
+  ランダム鍵を即返す。
+- **config 非依存**: 既存 config/秘密鍵を読まず、純粋に生成するだけ（OpenCrab は生成時に
+  `--config` を付けない）。
+- 出力（stdout, 1 行 JSON）:
+
+```json
+{ "nsec": "nsec1...", "npub": "npub1...", "pubkey": "<hex pubkey>" }
+```
+
+- `nsec` は必須。`npub`/`pubkey` は任意（あれば表示・自己ループ防止に使える）。
+- 進捗を出す場合は stderr へ（OpenCrab は stdout の最後の JSON 行を採用する）。
+
+OpenCrab 側の防御: prefix は bech32 charset かつ最大 4 文字に制限してから渡す（探索コストは
+`32^len` で増えるため、同期リクエストがハングしないよう保守的に制限）。nostaro 側は通常の
+生成でよい。
+
 ### 引数の渡し方（OpenCrab 側の防御・nostaro は通常のパーサでよい）
 
 OpenCrab は positional を取るサブコマンド（post/reply/dm/zap/upload）で **`--`

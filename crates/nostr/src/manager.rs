@@ -44,6 +44,11 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         self
     }
 
+    /// 内部の nostaro CLI ラッパー（鍵生成など gateway 起動を伴わない操作用）。
+    pub fn cli(&self) -> &NostaroCli {
+        &self.cli
+    }
+
     /// エージェントの Nostr ゲートウェイを起動する。
     ///
     /// 秘密鍵/リレーから per-agent config.toml を materialize（0600）し、自分の pubkey を

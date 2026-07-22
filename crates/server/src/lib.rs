@@ -284,6 +284,10 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(api::nostr::delete_nostr_config),
         )
         .route(
+            "/api/agents/{id}/nostr/generate",
+            post(api::nostr::generate_nostr_key),
+        )
+        .route(
             "/api/agents/{id}/nostr/start",
             post(api::nostr::start_nostr_gateway),
         )
