@@ -245,6 +245,14 @@ impl McpClientManager {
 
     /// 切断されたサーバ（クラッシュ/終了）を抱えるエージェントを再接続する（自己修復）。
     /// dead が無ければ何もしない。起動時に spawn した周期スイープから呼ぶ。
+    ///
+    /// 再接続は必ず reload 調停（`reload_agent` = `mark_reload_requested`→`run_reload`）
+    /// 経由で行う。`start_agent` を直接呼ぶと、設定編集の reload と競合したとき
+    /// スイープが読んだ**古い設定で上書き**してしまう（世代チェックで、より新しい
+    /// 編集が来ていればスイープ側はスキップされ、編集が勝つ）。
+    ///
+    /// 注意: 1台でも dead なら該当エージェントの全サーバを張り直す（健全なサーバも
+    /// 一旦切って再接続）。稀な事象かつ 60s に1回に律速されるため許容する。
     pub async fn reconnect_dead(&self) {
         // dead を持つエージェントを収集（ロックは同期・await を跨がない）。
         let stale: Vec<String> = {
@@ -256,8 +264,7 @@ impl McpClientManager {
         };
         for agent_id in stale {
             warn!(agent_id, "MCP: 切断されたサーバを検出、再接続します");
-            let configs = self.agent_configs(&agent_id);
-            self.start_agent(&agent_id, configs).await;
+            self.reload_agent(&agent_id).await;
         }
     }
 
