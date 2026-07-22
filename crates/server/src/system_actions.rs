@@ -38,10 +38,11 @@ impl SystemGatewayActions {
                 name: "configure_llm_provider".to_string(),
                 description:
                     "LLM プロバイダの設定を即時適用する（owner 限定）。DB オーバーライドに\
-                保存してルーターをホットスワップするため再起動は不要。codex/cursor/acp などの\
-                subprocess プロバイダは適用後に起動確認（health_check）を行い、失敗した場合は\
-                自動的に直前の設定へロールバックし、その旨を結果で通知する。各フィールドは\
-                三値: 省略=変更しない / null=オーバーライド解除（TOML に戻す）/ 値=上書き。\
+                保存してルーターをホットスワップするため再起動は不要。codex/cursor は適用後に\
+                起動確認（health_check）を行い、失敗した場合は自動的に直前の設定へロールバック\
+                して結果で通知する。acp と API キー型は自動ロールバックの対象外（acp の起動確認は\
+                ネットワーク依存で誤判定しうるため。ダッシュボードの接続テストで明示的に確認する）。\
+                各フィールドは三値: 省略=変更しない / null=オーバーライド解除（TOML に戻す）/ 値=上書き。\
                 api_key はこのツールでは変更できない（ダッシュボードから設定する）。"
                         .to_string(),
                 parameters: json!({

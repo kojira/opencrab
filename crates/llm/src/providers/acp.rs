@@ -277,6 +277,9 @@ impl LlmProvider for AcpProvider {
 /// トランスポート上で `initialize` ハンドシェイクだけを行い、相手が ACP を話せる
 /// （＝実際に起動できた）かを確認する。`health_check` の実体で、in-memory パイプで
 /// テストできるよう transport を抽象化している。
+///
+/// 注意: 本関数は**内部 timeout を持たない**（相手が無反応なら `rx.await` で待ち続ける）。
+/// 呼び出し側は必ず `tokio::time::timeout` でくくること（`health_check` はそうしている）。
 async fn acp_initialize_handshake<R>(
     writer: Box<dyn AsyncWrite + Send + Unpin>,
     reader: R,

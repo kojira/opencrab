@@ -30,12 +30,25 @@ const KNOWN_PROVIDERS: &[&str] = &[
     "chatgpt",
 ];
 
-/// subprocess 型（CLI を spawn する）プロバイダ。起動設定 binary_path/args 等を持ち、
-/// health_check がローカルの `--version` 実行で完結する（外部ネットワーク呼び出しをしない）。
+/// subprocess 型（CLI を spawn する）プロバイダ。起動設定 binary_path/args 等を持つ。
 const SUBPROCESS_PROVIDERS: &[&str] = &["codex", "cursor", "acp"];
 
 fn is_subprocess_provider(name: &str) -> bool {
     SUBPROCESS_PROVIDERS.contains(&name)
+}
+
+/// 保存時の自動起動確認（health_check）と、失敗時の自動ロールバックの対象。
+///
+/// health_check がローカルの `<binary> --version` で完結し高速・確定的な
+/// codex/cursor のみ。acp は health_check が実際に ACP エージェントを起こす
+/// （npx/uvx のコールドスタートで DL が走る等、外部ネットワーク依存で低速・非確定）
+/// ため、これを自動ロールバックに使うと正常な設定でも誤って差し戻す。よって acp は
+/// 自動対象から外し、明示的な接続テスト（/test エンドポイント・ダッシュボードのボタン）
+/// でのみ本物のハンドシェイク確認を行う（#127 レビュー指摘）。
+const AUTO_HEALTHTEST_PROVIDERS: &[&str] = &["codex", "cursor"];
+
+fn is_auto_healthtest_provider(name: &str) -> bool {
+    AUTO_HEALTHTEST_PROVIDERS.contains(&name)
 }
 
 /// API キーのマスク表示。末尾 4 文字だけ見せる（短いキーは伏せ字のみ）。
@@ -302,10 +315,10 @@ pub async fn update_provider(
 
     // 保存後に起動確認（health_check）して結果を返す（ダッシュボードは自動差し戻しせず、
     // 繋がったか可視化するだけ。自動ロールバックはエージェント経由の変更で行う）。
-    // subprocess 型のみ自動テストする。API キー型（openai 等）の health_check は
-    // 外部への認証付きネットワーク呼び出しになり、保存のたびに発火・ブロックするのを避ける
-    // （明示的な接続テストは /test エンドポイント経由で行える）。
-    let test = if is_subprocess_provider(&name) {
+    // 自動対象は health_check が高速・確定的な codex/cursor のみ。API キー型（openai 等）や
+    // acp（ネットワーク依存の本物ハンドシェイク）は保存のたびに発火・ブロック・誤判定するのを
+    // 避けて自動テストしない（明示的な接続テストは /test エンドポイント経由で行える）。
+    let test = if is_auto_healthtest_provider(&name) {
         Some(test_provider(&state, &name).await)
     } else {
         None
@@ -572,9 +585,11 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 4. 非 subprocess は自動起動確認の対象外（health_check が外部ネットワーク呼び出しに
-    //    なるため、保存＝即ネットワーク発火 + 一過性の失敗で誤ロールバックを避ける）。
-    if !is_subprocess_provider(name) {
+    // 4. 自動起動確認・自動ロールバックの対象は health_check が高速・確定的な codex/cursor のみ。
+    //    API キー型や acp（ネットワーク依存の本物ハンドシェイク。npx/uvx のコールドスタートや
+    //    一過性のネットワーク失敗で誤判定しうる）は対象外とし、正常な設定を誤って差し戻さない。
+    //    acp の起動確認は明示的な /test（ダッシュボードのボタン）で行う（#127 レビュー指摘）。
+    if !is_auto_healthtest_provider(name) {
         return Ok(ApplyOutcome {
             applied: true,
             test_ok: None,
@@ -582,7 +597,7 @@ pub(crate) async fn apply_provider_override_with_rollback(
         });
     }
 
-    // 5. subprocess でも、再構築後にルーターへ登録されていない場合（enabled=false での
+    // 5. 対象でも、再構築後にルーターへ登録されていない場合（enabled=false での
     //    無効化やオーバーライド削除で TOML でも無効等）は、起動確認の対象が存在しない。
     //    これを health_check 失敗と混同するとロールバックが暴発し「無効化できない」
     //    バグになるため、意図した非登録は適用成功として扱う。
@@ -803,6 +818,16 @@ mod tests {
         assert!(is_subprocess_provider("cursor"));
         assert!(!is_subprocess_provider("openai"));
         assert!(!is_subprocess_provider("anthropic"));
+    }
+
+    /// 自動 health_check/ロールバックの対象は codex/cursor のみ。acp は
+    /// ネットワーク依存の本物ハンドシェイクのため自動対象から外す（#127 レビュー指摘）。
+    #[test]
+    fn auto_healthtest_excludes_acp_and_api_providers() {
+        assert!(is_auto_healthtest_provider("codex"));
+        assert!(is_auto_healthtest_provider("cursor"));
+        assert!(!is_auto_healthtest_provider("acp"));
+        assert!(!is_auto_healthtest_provider("openai"));
     }
 
     /// レビュー Finding 1 の回帰ガード: subprocess プロバイダを enabled=false で
