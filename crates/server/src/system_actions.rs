@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use opencrab_gateway::{
     GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
 };
+use opencrab_mcp::is_valid_server_name;
 use serde_json::{json, Value};
 
 use crate::AppState;
@@ -164,6 +165,31 @@ impl SystemGatewayActions {
                         "reasoning_effort": {"type": ["string", "null"], "description": "推論強度（low/medium/high 等）。"},
                         "web_search": {"type": ["boolean", "null"], "description": "本文URL読取り/web 検索の有効化。"}
                     }
+                }),
+            },
+            GatewayActionDef {
+                name: "configure_mcp_server".to_string(),
+                description:
+                    "自分の MCP サーバ設定を管理する（owner 限定）。追加/更新・削除・有効切替が\
+                でき、変更後は接続をバックグラウンドで貼り直す。env の値は結果に出さない（キー名のみ）。\
+                add で env を省略すると既存の env を保持する。"
+                        .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "add", "remove", "set_enabled"],
+                            "description": "list=一覧 / add=追加更新 / remove=削除 / set_enabled=有効切替。"
+                        },
+                        "name": {"type": "string", "description": "サーバ論理名（英数字・_・-、__ 不可）。list 以外で必須。"},
+                        "command": {"type": "string", "description": "起動コマンド（add で必須、例: npx）。"},
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "起動引数。"},
+                        "env": {"type": "object", "description": "追加環境変数（キー→値）。省略で既存保持。値は結果に出さない。"},
+                        "trusted_only": {"type": "boolean", "description": "true で owner/trusted のターンのみ露出。"},
+                        "enabled": {"type": "boolean", "description": "有効/無効。"}
+                    },
+                    "required": ["action"]
                 }),
             },
         ]
@@ -449,6 +475,193 @@ impl SystemGatewayActions {
             Err(e) => err(e.to_string()),
         }
     }
+
+    async fn configure_mcp_server(
+        &self,
+        args: &Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
+        if ctx.caller != GatewayCaller::Owner {
+            return err("configure_mcp_server requires owner".to_string());
+        }
+        let agent_id = ctx.agent_id.clone();
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        match action {
+            "list" => {
+                let servers = {
+                    let conn = match self.state.db.lock() {
+                        Ok(c) => c,
+                        Err(_) => return err("db lock failed".to_string()),
+                    };
+                    match opencrab_db::queries::list_agent_mcp_servers(&conn, &agent_id) {
+                        Ok(s) => s,
+                        Err(e) => return err(e.to_string()),
+                    }
+                };
+                // env の値は出さず、キー名のみ返す（秘密を LLM 経路に載せない）。
+                let list: Vec<Value> = servers
+                    .iter()
+                    .map(|s| {
+                        let env_keys: Vec<String> =
+                            serde_json::from_str::<serde_json::Map<String, Value>>(&s.env_json)
+                                .map(|m| m.keys().cloned().collect())
+                                .unwrap_or_default();
+                        let args_arr: Vec<String> =
+                            serde_json::from_str(&s.args_json).unwrap_or_default();
+                        json!({
+                            "name": s.name,
+                            "command": s.command,
+                            "args": args_arr,
+                            "env_keys": env_keys,
+                            "trusted_only": s.trusted_only,
+                            "enabled": s.enabled,
+                        })
+                    })
+                    .collect();
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({ "servers": list })),
+                    error: None,
+                }
+            }
+            "add" => {
+                let Some(name) = name.filter(|s| !s.is_empty()) else {
+                    return err("name is required".to_string());
+                };
+                if !is_valid_server_name(&name) {
+                    return err(
+                        "サーバ名は英数字・_・-（1〜64文字、__ を含まない）にしてください"
+                            .to_string(),
+                    );
+                }
+                let command = args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if command.is_empty() {
+                    return err("command が必要です".to_string());
+                }
+                let args_vec: Vec<String> = args
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // 既存を（env 保持・デフォルト継承のため）読む。
+                let existing = {
+                    let conn = match self.state.db.lock() {
+                        Ok(c) => c,
+                        Err(_) => return err("db lock failed".to_string()),
+                    };
+                    opencrab_db::queries::get_agent_mcp_server(&conn, &agent_id, &name)
+                        .unwrap_or(None)
+                };
+                // env は空/未指定なら既存を保持（値を伏せているため無変更更新で消さない）。
+                let env_json = match args.get("env") {
+                    Some(Value::Object(m)) if !m.is_empty() => {
+                        serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string())
+                    }
+                    _ => existing
+                        .as_ref()
+                        .map(|e| e.env_json.clone())
+                        .unwrap_or_else(|| "{}".to_string()),
+                };
+                let trusted_only = args
+                    .get("trusted_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| existing.as_ref().map(|e| e.trusted_only).unwrap_or(false));
+                let enabled = args
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| existing.as_ref().map(|e| e.enabled).unwrap_or(true));
+                let row = opencrab_db::queries::AgentMcpServerRow {
+                    agent_id: agent_id.clone(),
+                    name: name.clone(),
+                    command,
+                    args_json: serde_json::to_string(&args_vec)
+                        .unwrap_or_else(|_| "[]".to_string()),
+                    env_json,
+                    trusted_only,
+                    enabled,
+                };
+                {
+                    let conn = match self.state.db.lock() {
+                        Ok(c) => c,
+                        Err(_) => return err("db lock failed".to_string()),
+                    };
+                    if let Err(e) = opencrab_db::queries::upsert_agent_mcp_server(&conn, &row) {
+                        return err(e.to_string());
+                    }
+                }
+                crate::api::mcp::spawn_reload(&self.state, agent_id);
+                GatewayActionResult {
+                    success: true,
+                    // env の値は返さない。
+                    data: Some(json!({ "name": name, "upserted": true, "enabled": enabled })),
+                    error: None,
+                }
+            }
+            "remove" => {
+                let Some(name) = name.filter(|s| !s.is_empty()) else {
+                    return err("name is required".to_string());
+                };
+                let removed = {
+                    let conn = match self.state.db.lock() {
+                        Ok(c) => c,
+                        Err(_) => return err("db lock failed".to_string()),
+                    };
+                    match opencrab_db::queries::delete_agent_mcp_server(&conn, &agent_id, &name) {
+                        Ok(r) => r,
+                        Err(e) => return err(e.to_string()),
+                    }
+                };
+                crate::api::mcp::spawn_reload(&self.state, agent_id);
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({ "name": name, "removed": removed })),
+                    error: None,
+                }
+            }
+            "set_enabled" => {
+                let Some(name) = name.filter(|s| !s.is_empty()) else {
+                    return err("name is required".to_string());
+                };
+                let Some(enabled) = args.get("enabled").and_then(|v| v.as_bool()) else {
+                    return err("enabled (bool) is required for set_enabled".to_string());
+                };
+                {
+                    let conn = match self.state.db.lock() {
+                        Ok(c) => c,
+                        Err(_) => return err("db lock failed".to_string()),
+                    };
+                    if let Err(e) = opencrab_db::queries::set_agent_mcp_server_enabled(
+                        &conn, &agent_id, &name, enabled,
+                    ) {
+                        return err(e.to_string());
+                    }
+                }
+                crate::api::mcp::spawn_reload(&self.state, agent_id);
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({ "name": name, "enabled": enabled })),
+                    error: None,
+                }
+            }
+            other => err(format!(
+                "unknown action: {other} (list/add/remove/set_enabled)"
+            )),
+        }
+    }
 }
 
 fn err(msg: String) -> GatewayActionResult {
@@ -480,6 +693,7 @@ impl GatewayActions for SystemGatewayActions {
             "manage_allowed_commands" => self.manage_allowed_commands(args, ctx).await,
             "configure_nostr" => self.configure_nostr(args, ctx).await,
             "configure_self" => self.configure_self(args, ctx).await,
+            "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
