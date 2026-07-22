@@ -123,6 +123,20 @@ impl McpClientManager {
         McpToolProvider::new(servers, caller_is_trusted)
     }
 
+    /// 接続済みサーバの (name, tools 数) 一覧（ダッシュボード表示用）。
+    pub fn connected_status(&self, agent_id: &str) -> Vec<(String, usize)> {
+        self.agents
+            .read()
+            .unwrap()
+            .get(agent_id)
+            .map(|v| {
+                v.iter()
+                    .map(|s| (s.server.server_name().to_string(), s.server.tools().len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 何らかのサーバに接続済みか。
     pub fn has_connections(&self, agent_id: &str) -> bool {
         self.agents
