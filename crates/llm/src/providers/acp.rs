@@ -12,7 +12,7 @@
 //! [`build_cli_prompt`]）。起動コマンド/引数はエージェントによって異なるため `binary_path`/`args`
 //! で設定する。認証はエージェント側の env/ログインに委ねる（`authMethods` があれば best-effort）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -37,6 +37,8 @@ const DEFAULT_ACP_PATH: &str = "acp-agent";
 /// model は UI/ルーティング（`acp:<model>`）用の名目値。
 const DEFAULT_MODEL: &str = "default";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// 失敗時に添える stderr 末尾の保持行数（起動失敗・認証エラー等の切り分け用）。
+const STDERR_TAIL_LINES: usize = 30;
 /// このクライアントが名乗る ACP プロトコルバージョン（**整数**。文字列ではない）。
 const ACP_PROTOCOL_VERSION: u64 = 1;
 
@@ -172,8 +174,9 @@ impl LlmProvider for AcpProvider {
         cmd.kill_on_drop(true);
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            // stderr は読まないと buffer 詰まりでエージェントが止まりうるので捨てる。
-            .stderr(std::process::Stdio::null());
+            // stderr は継続的に drain して末尾を保持する（読まずに放置すると buffer 詰まりで
+            // エージェントが止まりうるため必ず drain する）。起動失敗・認証エラーの切り分けに使う。
+            .stderr(std::process::Stdio::piped());
         cmd.current_dir(&cwd);
 
         let mut child = cmd
@@ -187,6 +190,8 @@ impl LlmProvider for AcpProvider {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("ACP: stdout ハンドルが取れません"))?;
+        // stderr 末尾を保持する drain タスクを起こす（detached。child kill で EOF→終了）。
+        let stderr_tail = child.stderr.take().map(spawn_stderr_tail);
 
         // セッション全体を timeout でくくる。timeout/失敗時は child が drop され
         // kill_on_drop で kill される。
@@ -194,14 +199,20 @@ impl LlmProvider for AcpProvider {
             self.timeout,
             drive_acp_session(Box::new(stdin), stdout, prompt, cwd),
         )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "ACP エージェントが {}s でタイムアウトしました",
-                self.timeout.as_secs()
-            )
-        })?;
-        let (text, stop_reason) = driven?;
+        .await;
+        // 失敗時は stderr の末尾を添えて可視化する。
+        let suffix = || stderr_tail.as_ref().map(stderr_suffix).unwrap_or_default();
+        let (text, stop_reason) = match driven {
+            Err(_) => {
+                return Err(anyhow!(
+                    "ACP エージェントが {}s でタイムアウトしました{}",
+                    self.timeout.as_secs(),
+                    suffix()
+                ))
+            }
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(anyhow!("{e}{}", suffix())),
+        };
 
         let content = if text.trim().is_empty() {
             None
@@ -271,6 +282,40 @@ impl LlmProvider for AcpProvider {
         // child は drop 時に kill_on_drop で終了する。
         drop(child);
         Ok(ok)
+    }
+}
+
+/// 子プロセスの stderr を継続的に読み、末尾 [`STDERR_TAIL_LINES`] 行を保持する
+/// detached タスクを起こす。stderr を読まず放置すると pipe buffer 詰まりで
+/// エージェントが止まりうるため、パイプするなら必ず drain する。child が kill されると
+/// EOF に達しタスクは自然終了する。
+fn spawn_stderr_tail(stderr: tokio::process::ChildStderr) -> Arc<Mutex<VecDeque<String>>> {
+    let tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+    let tail_w = tail.clone();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut t = tail_w.lock().unwrap();
+            if t.len() >= STDERR_TAIL_LINES {
+                t.pop_front();
+            }
+            t.push_back(line);
+        }
+    });
+    tail
+}
+
+/// 保持した stderr 末尾をエラーに添える文字列にする（空なら空文字）。
+fn stderr_suffix(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
+    let t = tail.lock().unwrap();
+    if t.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n--- ACP エージェントの stderr（末尾 {} 行）---\n{}",
+            t.len(),
+            t.iter().cloned().collect::<Vec<_>>().join("\n")
+        )
     }
 }
 
@@ -809,6 +854,40 @@ mod tests {
         assert!(acp_initialize_handshake(Box::new(client_w), client_r)
             .await
             .is_ok());
+    }
+
+    #[test]
+    fn test_stderr_suffix_empty_and_populated() {
+        let tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+        assert_eq!(stderr_suffix(&tail), "");
+        tail.lock().unwrap().push_back("boom".to_string());
+        let s = stderr_suffix(&tail);
+        assert!(s.contains("stderr"));
+        assert!(s.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_stderr_tail_captures_lines() {
+        // 実サブプロセスの stderr を drain して末尾に取り込めること。
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("echo err1 >&2; echo err2 >&2")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let tail = spawn_stderr_tail(child.stderr.take().unwrap());
+        let _ = child.wait().await;
+        // drain タスクが読み切るのを待つ。
+        for _ in 0..50 {
+            if tail.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let s = stderr_suffix(&tail);
+        assert!(s.contains("err1"), "stderr tail should contain err1: {s}");
+        assert!(s.contains("err2"), "stderr tail should contain err2: {s}");
     }
 
     #[tokio::test]
