@@ -308,7 +308,7 @@ async fn handle_event<R: NostrAgentRunner>(
                 );
                 return;
             }
-            if let Err(e) = cli.reply(agent_id, event.reply_target(), reply).await {
+            if let Err(e) = cli.reply(agent_id, event.reply_target(), reply, None).await {
                 warn!(agent_id, error = %e, "nostr implicit reply failed");
             }
         }

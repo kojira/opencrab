@@ -82,6 +82,15 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 
+### マルチ identity 送信（`from` 指定）
+
+送信ツールの任意 `from`（npub）を指定すると、本鍵ではなく **`nostr_generate_key` で
+生成した鍵**で送信できる。OpenCrab 側は本設定 `config.toml` の relays/blossom を継承しつつ
+`secret_key` だけをその生成鍵に差し替えた一時 config（`generated-keys/<npub>.config.toml`,
+0600）を作り、`--config` をそちらに向けて上表と同じサブコマンドを呼ぶ。nostaro 側の改造は
+不要（`--config` の指すファイルの鍵で送信するだけ）。`from` に使えるのは、そのエージェントが
+生成した鍵（`generated-keys/<npub>.nsec` が存在するもの）に限る。
+
 ## 受信（`watch` の汎用改造が必要）
 
 現状の `watch` は Discord webhook 専用でフィルタが弱い。OpenCrab は次の形で spawn し、

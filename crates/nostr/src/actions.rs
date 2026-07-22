@@ -60,6 +60,15 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// 送信系ツール共通の任意 `from` パラメータ定義（マルチ identity 投稿）。
+fn from_param() -> Value {
+    json!({
+        "type": "string",
+        "description": "任意。nostr_generate_key で生成した鍵の npub を指定すると、本鍵ではなく\
+                        その鍵で送信する（未指定なら本鍵で送信）。指定できるのは自分が生成した鍵のみ。"
+    })
+}
+
 #[async_trait]
 impl GatewayActions for NostrGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
@@ -70,7 +79,8 @@ impl GatewayActions for NostrGatewayActions {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "投稿本文。"}
+                        "text": {"type": "string", "description": "投稿本文。"},
+                        "from": from_param(),
                     },
                     "required": ["text"]
                 }),
@@ -82,7 +92,8 @@ impl GatewayActions for NostrGatewayActions {
                     "type": "object",
                     "properties": {
                         "target": {"type": "string", "description": "返信先ノートの note1.../hex id。"},
-                        "text": {"type": "string", "description": "返信本文。"}
+                        "text": {"type": "string", "description": "返信本文。"},
+                        "from": from_param(),
                     },
                     "required": ["target", "text"]
                 }),
@@ -94,7 +105,8 @@ impl GatewayActions for NostrGatewayActions {
                     "type": "object",
                     "properties": {
                         "recipient": {"type": "string", "description": "宛先の npub または hex pubkey。"},
-                        "text": {"type": "string", "description": "本文。"}
+                        "text": {"type": "string", "description": "本文。"},
+                        "from": from_param(),
                     },
                     "required": ["recipient", "text"]
                 }),
@@ -107,7 +119,8 @@ impl GatewayActions for NostrGatewayActions {
                     "properties": {
                         "recipient": {"type": "string", "description": "宛先の npub または hex pubkey。"},
                         "amount": {"type": "integer", "description": "sats 単位の金額。"},
-                        "message": {"type": "string", "description": "zap コメント（任意）。"}
+                        "message": {"type": "string", "description": "zap コメント（任意）。"},
+                        "from": from_param(),
                     },
                     "required": ["recipient", "amount"]
                 }),
@@ -118,7 +131,8 @@ impl GatewayActions for NostrGatewayActions {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "アップロードするファイルパス。"}
+                        "path": {"type": "string", "description": "アップロードするファイルパス。"},
+                        "from": from_param(),
                     },
                     "required": ["path"]
                 }),
@@ -152,7 +166,7 @@ impl GatewayActions for NostrGatewayActions {
                 let Some(text) = arg_str(args, "text") else {
                     return err("text パラメータが必要です");
                 };
-                match self.cli.post(agent_id, text).await {
+                match self.cli.post(agent_id, text, arg_str(args, "from")).await {
                     Ok(out) => {
                         self.mark_sent();
                         ok(json!({"result": out}))
@@ -165,7 +179,11 @@ impl GatewayActions for NostrGatewayActions {
                 else {
                     return err("target と text パラメータが必要です");
                 };
-                match self.cli.reply(agent_id, target, text).await {
+                match self
+                    .cli
+                    .reply(agent_id, target, text, arg_str(args, "from"))
+                    .await
+                {
                     Ok(out) => {
                         self.mark_sent();
                         ok(json!({"result": out}))
@@ -179,7 +197,11 @@ impl GatewayActions for NostrGatewayActions {
                 else {
                     return err("recipient と text パラメータが必要です");
                 };
-                match self.cli.dm(agent_id, recipient, text).await {
+                match self
+                    .cli
+                    .dm(agent_id, recipient, text, arg_str(args, "from"))
+                    .await
+                {
                     Ok(out) => {
                         self.mark_sent();
                         ok(json!({"result": out}))
@@ -195,7 +217,11 @@ impl GatewayActions for NostrGatewayActions {
                     return err("amount パラメータ（整数）が必要です");
                 };
                 let message = arg_str(args, "message");
-                match self.cli.zap(agent_id, recipient, amount, message).await {
+                match self
+                    .cli
+                    .zap(agent_id, recipient, amount, message, arg_str(args, "from"))
+                    .await
+                {
                     Ok(out) => {
                         self.mark_sent();
                         ok(json!({"result": out}))
@@ -207,7 +233,7 @@ impl GatewayActions for NostrGatewayActions {
                 let Some(path) = arg_str(args, "path") else {
                     return err("path パラメータが必要です");
                 };
-                match self.cli.upload(agent_id, path).await {
+                match self.cli.upload(agent_id, path, arg_str(args, "from")).await {
                     Ok(url) => ok(json!({"url": url})),
                     Err(e) => err(format!("nostr_upload 失敗: {e}")),
                 }
