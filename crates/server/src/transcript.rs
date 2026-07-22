@@ -120,6 +120,53 @@ pub fn record_discord_agent_reply(
     );
 }
 
+/// Nostr 受信イベント（投稿者発言）。agent_id 列には送信者 pubkey が入る（discord と同様の慣習）。
+pub fn record_nostr_user_message(
+    conn: &Connection,
+    session_id: &str,
+    sender_pubkey: &str,
+    sender_name: &str,
+    text: &str,
+) {
+    let meta = serde_json::json!({
+        "source": "nostr",
+        "user_name": sender_name,
+        "pubkey": sender_pubkey,
+    });
+    insert_session_log_best_effort(
+        conn,
+        &SessionLogRow {
+            id: None,
+            agent_id: sender_pubkey.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: text.to_string(),
+            speaker_id: Some(sender_pubkey.to_string()),
+            turn_number: None,
+            metadata_json: Some(meta.to_string()),
+            created_at: None,
+        },
+    );
+}
+
+/// エージェントの Nostr 返信。
+pub fn record_nostr_agent_reply(conn: &Connection, agent_id: &str, session_id: &str, text: &str) {
+    insert_session_log_best_effort(
+        conn,
+        &SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: text.to_string(),
+            speaker_id: Some(agent_id.to_string()),
+            turn_number: None,
+            metadata_json: Some(serde_json::json!({"source": "nostr_response"}).to_string()),
+            created_at: None,
+        },
+    );
+}
+
 /// REST 経由のエージェント応答（sessions.rs / agents_messages.rs 共通の形）。
 pub fn record_rest_agent_reply(
     conn: &Connection,

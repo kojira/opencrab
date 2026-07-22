@@ -139,6 +139,54 @@ impl NostaroCli {
         self.run(cmd).await
     }
 
+    /// `nostaro pubkey` — このエージェント（config）の公開鍵（hex）を返す。
+    /// 自分の投稿への自己返信ループを防ぐために使う。
+    pub async fn pubkey(&self, agent_id: &str) -> Result<String> {
+        let mut cmd = self.base_command(agent_id)?;
+        cmd.arg("pubkey");
+        self.run(cmd).await
+    }
+
+    /// per-agent の nostaro config.toml を DB 由来の秘密鍵/リレーから materialize する。
+    ///
+    /// nsec を含むため**パーミッションを 0600** に落とす（他者に読ませない）。relays は
+    /// 送信（post/reply）が publish するリレー。受信は watch のフラグで別途明示する。
+    pub fn materialize_config(
+        agent_id: &str,
+        secret_key: &str,
+        relays: &[String],
+        blossom_server: Option<&str>,
+    ) -> Result<PathBuf> {
+        let path = Self::agent_config_path(agent_id)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create nostr dir: {}", parent.display()))?;
+        }
+        // 値はクォートを含まない前提（nsec/URL）。念のため二重引用符は除去する。
+        let esc = |s: &str| s.replace('"', "");
+        let relay_list = relays
+            .iter()
+            .map(|r| format!("\"{}\"", esc(r)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut toml = format!(
+            "secret_key = \"{}\"\nrelays = [{}]\n",
+            esc(secret_key),
+            relay_list
+        );
+        if let Some(b) = blossom_server.filter(|s| !s.is_empty()) {
+            toml.push_str(&format!("blossom_server = \"{}\"\n", esc(b)));
+        }
+        std::fs::write(&path, toml)
+            .with_context(|| format!("failed to write nostaro config: {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        Ok(path)
+    }
+
     /// watch 用の Command を組む（spawn はループ側が行い、stdout の JSONL を読む）。
     ///
     /// リレー/フィルタは**必ずフラグで明示**して渡す（config の default に依存しない

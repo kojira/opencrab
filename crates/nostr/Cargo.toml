@@ -17,6 +17,8 @@ tracing.workspace = true
 
 opencrab-core.workspace = true
 opencrab-gateway.workspace = true
+opencrab-actions.workspace = true
+opencrab-db.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

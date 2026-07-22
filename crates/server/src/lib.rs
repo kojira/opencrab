@@ -13,12 +13,16 @@ pub mod config;
 pub mod hot_reload;
 pub mod llm_adapter;
 pub mod memory_maintenance;
+pub mod nostr_runner_impl;
 pub mod process;
 pub mod skill_consolidation;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
 pub mod transcript;
+
+/// per-agent Nostr sub-gateway マネージャの共有ハンドル。
+pub type SharedNostrManager = Arc<opencrab_nostr::NostrGatewayManager<AppState>>;
 
 use opencrab_llm::router::LlmRouter;
 
@@ -74,6 +78,8 @@ pub struct AppState {
     pub index_build_inflight: memory_maintenance::IndexBuildInflight,
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
+    /// per-agent Nostr sub-gateway マネージャ（main で構築してセットされる）。
+    pub nostr_manager: Option<SharedNostrManager>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -269,6 +275,21 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/agents/{id}/discord/stop",
             post(api::agents::stop_discord_gateway),
+        )
+        // Nostr sub-gateway per-agent config
+        .route(
+            "/api/agents/{id}/nostr",
+            get(api::nostr::get_nostr_config)
+                .put(api::nostr::update_nostr_config)
+                .delete(api::nostr::delete_nostr_config),
+        )
+        .route(
+            "/api/agents/{id}/nostr/start",
+            post(api::nostr::start_nostr_gateway),
+        )
+        .route(
+            "/api/agents/{id}/nostr/stop",
+            post(api::nostr::stop_nostr_gateway),
         )
         // Co-Agent管理
         .route(

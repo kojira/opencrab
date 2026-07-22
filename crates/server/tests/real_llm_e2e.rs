@@ -60,6 +60,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
         #[cfg(feature = "discord")]
         discord_manager: None,
+        nostr_manager: None,
     };
     let app = create_router(state);
     (app, db)

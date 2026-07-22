@@ -10,6 +10,7 @@ pub mod import_sync;
 pub mod llm;
 pub mod llm_logs;
 pub mod memory;
+pub mod nostr;
 pub mod providers;
 pub mod sessions;
 pub mod setup;
