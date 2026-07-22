@@ -122,21 +122,32 @@ impl McpClientManager {
                 .or_default()
                 .push(config_from_row(row));
         }
-        for (agent_id, configs) in by_agent {
-            self.start_agent(&agent_id, configs).await;
-        }
+        // エージェント間も並列に接続する（1 エージェントの hang が起動全体を止めない）。
+        let starts = by_agent
+            .into_iter()
+            .map(|(agent_id, configs)| async move { self.start_agent(&agent_id, configs).await });
+        futures::future::join_all(starts).await;
     }
 
     /// 指定エージェントのサーバ群へ接続する（既存接続は置き換え）。接続失敗した
     /// サーバはスキップして他を活かす（fail-soft）。
     pub async fn start_agent(&self, agent_id: &str, configs: Vec<McpServerConfig>) {
+        // enabled のサーバへ**並列**に接続する。逐次だと 1 台の initialize hang が
+        // 他サーバ（と、restore 時は他エージェント）の接続やサーバ起動を最大 30s/台
+        // 待たせるため、join_all で同時に張る。
+        let futs = configs
+            .into_iter()
+            .filter(|c| c.enabled)
+            .map(|cfg| async move {
+                let r = McpClient::connect(&cfg).await;
+                (cfg, r)
+            });
+        let results = futures::future::join_all(futs).await;
+
         let mut connected = Vec::new();
         let mut errors: HashMap<String, String> = HashMap::new();
-        for cfg in configs {
-            if !cfg.enabled {
-                continue;
-            }
-            match McpClient::connect(&cfg).await {
+        for (cfg, r) in results {
+            match r {
                 Ok(client) => {
                     info!(agent_id, server = %cfg.name, tools = client.tools().len(), "MCP サーバ接続");
                     connected.push(ConnectedServer {

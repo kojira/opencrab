@@ -1924,6 +1924,7 @@ version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "opencrab-actions",
  "opencrab-core",
  "opencrab-db",
