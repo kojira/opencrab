@@ -15,6 +15,14 @@ export interface LlmProviderInfo {
   default_model: string;
   /** 推論（thinking）強度。空はモデル既定。 */
   reasoning_effort: string;
+  /** 起動バイナリ（subprocess プロバイダ codex/cursor/acp）。 */
+  binary_path: string;
+  /** 起動引数（acp 等）。 */
+  args: string[];
+  /** 作業ディレクトリ。 */
+  working_dir: string;
+  /** タイムアウト秒（0 は既定）。 */
+  timeout_secs: number;
 }
 
 export interface LlmProvidersResponse {
@@ -32,6 +40,10 @@ export interface UpdateProviderBody {
   base_url?: string | null;
   default_model?: string | null;
   reasoning_effort?: string | null;
+  binary_path?: string | null;
+  args?: string[] | null;
+  working_dir?: string | null;
+  timeout_secs?: number | null;
 }
 
 export function getLlmProviders(): Promise<LlmProvidersResponse> {
@@ -41,7 +53,7 @@ export function getLlmProviders(): Promise<LlmProvidersResponse> {
 export function updateLlmProvider(
   name: string,
   body: UpdateProviderBody,
-): Promise<{ provider: LlmProviderInfo; reloaded: boolean }> {
+): Promise<{ provider: LlmProviderInfo; reloaded: boolean; test_ok: boolean }> {
   return api.put(`/llm/providers/${encodeURIComponent(name)}`, body);
 }
 
@@ -51,6 +63,11 @@ export function resetLlmProvider(name: string): Promise<{ deleted: boolean; relo
 
 export function reloadLlmProviders(): Promise<{ reloaded: boolean; active_providers: string[] }> {
   return api.post('/llm/providers/reload');
+}
+
+/** 現在の設定でプロバイダの起動確認（health_check）を行う。 */
+export function testLlmProvider(name: string): Promise<{ provider: string; ok: boolean }> {
+  return api.post(`/llm/providers/${encodeURIComponent(name)}/test`);
 }
 
 export interface CodexDiagnostics {

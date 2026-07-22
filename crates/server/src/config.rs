@@ -413,6 +413,23 @@ pub fn apply_llm_overrides(
         if let Some(effort) = &row.reasoning_effort {
             entry.reasoning_effort = effort.clone();
         }
+        if let Some(bp) = &row.binary_path {
+            entry.binary_path = bp.clone();
+        }
+        if let Some(args_json) = &row.args_json {
+            // JSON 配列としてパース。壊れていれば既存を保つ。
+            if let Ok(args) = serde_json::from_str::<Vec<String>>(args_json) {
+                entry.args = args;
+            }
+        }
+        if let Some(wd) = &row.working_dir {
+            entry.working_dir = wd.clone();
+        }
+        if let Some(t) = row.timeout_secs {
+            if t > 0 {
+                entry.timeout_secs = t as u64;
+            }
+        }
     }
     cfg
 }

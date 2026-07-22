@@ -3,6 +3,7 @@ import { getLogLevel, patchLogLevel } from '../api/system';
 import {
   getLlmProviders,
   updateLlmProvider,
+  testLlmProvider,
   resetLlmProvider,
   getVoiceConfig,
   updateVoiceConfig,
@@ -17,6 +18,9 @@ import {
 } from '../api/providers';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
+
+// subprocess 型プロバイダ（起動コマンド/引数/timeout を編集できる）
+const SUBPROCESS_PROVIDERS = ['codex', 'cursor', 'acp'];
 
 const inputCls =
   'rounded-lg border border-outline bg-surface px-3 py-2 text-sm text-on-surface focus:outline-none focus:ring-2 focus:ring-primary w-full';
@@ -40,12 +44,20 @@ function ProviderEditor({
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [defaultModel, setDefaultModel] = useState(provider.default_model);
   const [reasoningEffort, setReasoningEffort] = useState(provider.reasoning_effort);
+  const isSubprocess = SUBPROCESS_PROVIDERS.includes(provider.name);
+  const [binaryPath, setBinaryPath] = useState(provider.binary_path);
+  const [args, setArgs] = useState(provider.args.join(' '));
+  const [timeoutSecs, setTimeoutSecs] = useState(
+    provider.timeout_secs ? String(provider.timeout_secs) : '',
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [testMsg, setTestMsg] = useState<string | null>(null);
 
   const save = async () => {
     setSaving(true);
     setError(null);
+    setTestMsg(null);
     const body: UpdateProviderBody = {};
     // 空欄のままなら API キーは変更しない（マスク値の再送を防ぐ）
     if (apiKey !== '') body.api_key = apiKey;
@@ -54,13 +66,39 @@ function ProviderEditor({
       body.default_model = defaultModel === '' ? null : defaultModel;
     if (reasoningEffort !== provider.reasoning_effort)
       body.reasoning_effort = reasoningEffort === '' ? null : reasoningEffort;
+    if (isSubprocess) {
+      if (binaryPath !== provider.binary_path)
+        body.binary_path = binaryPath === '' ? null : binaryPath;
+      const argsList = args
+        .trim()
+        .split(/\s+/)
+        .filter((s) => s.length > 0);
+      if (args.trim() !== provider.args.join(' ')) body.args = argsList.length ? argsList : null;
+      const tNum = timeoutSecs === '' ? null : parseInt(timeoutSecs, 10);
+      if ((provider.timeout_secs || 0) !== (tNum || 0)) body.timeout_secs = tNum;
+    }
     try {
-      await updateLlmProvider(provider.name, body);
-      onSaved(`${provider.name} を保存し、ルーターを再構築しました（再起動不要）`);
+      const res = await updateLlmProvider(provider.name, body);
+      const suffix = isSubprocess
+        ? res.test_ok
+          ? '（接続OK）'
+          : '（保存しましたが接続確認に失敗。binary_path/args を確認してください）'
+        : '';
+      onSaved(`${provider.name} を保存し、ルーターを再構築しました（再起動不要）${suffix}`);
     } catch (e) {
       setError(String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runTest = async () => {
+    setTestMsg('テスト中...');
+    try {
+      const r = await testLlmProvider(provider.name);
+      setTestMsg(r.ok ? '✅ 接続OK（起動確認できました）' : '❌ 接続失敗（binary_path/args を確認）');
+    } catch (e) {
+      setTestMsg(`❌ ${String(e)}`);
     }
   };
 
@@ -123,6 +161,57 @@ function ProviderEditor({
           </select>
         </div>
       </div>
+
+      {isSubprocess && (
+        <div className="space-y-3 rounded-lg border border-outline/60 p-3">
+          <p className="text-xs font-medium text-on-surface-variant">
+            起動設定（subprocess プロバイダ）
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+                起動コマンド（binary_path）
+              </label>
+              <input
+                value={binaryPath}
+                onChange={(e) => setBinaryPath(e.target.value)}
+                placeholder="例: gemini / npx / cursor-agent"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+                起動引数（空白区切り）
+              </label>
+              <input
+                value={args}
+                onChange={(e) => setArgs(e.target.value)}
+                placeholder="例: --experimental-acp / -y @zed-industries/claude-code-acp"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+                タイムアウト秒（空欄 = 既定）
+              </label>
+              <input
+                value={timeoutSecs}
+                onChange={(e) => setTimeoutSecs(e.target.value)}
+                placeholder="300"
+                inputMode="numeric"
+                className={inputCls}
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={runTest} disabled={saving} className={btnGhost}>
+              接続テスト
+            </button>
+            {testMsg && <span className="text-sm text-on-surface-variant">{testMsg}</span>}
+          </div>
+        </div>
+      )}
+
       {error && <p className="text-sm text-red-500">エラー: {error}</p>}
       <div className="flex gap-2">
         <button onClick={save} disabled={saving} className={btnPrimary}>

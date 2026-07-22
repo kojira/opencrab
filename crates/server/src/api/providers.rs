@@ -73,6 +73,25 @@ fn provider_entry(
         .and_then(|o| o.reasoning_effort.clone())
         .or_else(|| toml_cfg.map(|c| c.reasoning_effort.clone()))
         .unwrap_or_default();
+    // 起動系（subprocess プロバイダ）: DB > TOML
+    let binary_path = ov
+        .and_then(|o| o.binary_path.clone())
+        .or_else(|| toml_cfg.map(|c| c.binary_path.clone()))
+        .unwrap_or_default();
+    let args: Vec<String> = ov
+        .and_then(|o| o.args_json.as_deref())
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .or_else(|| toml_cfg.map(|c| c.args.clone()))
+        .unwrap_or_default();
+    let working_dir = ov
+        .and_then(|o| o.working_dir.clone())
+        .or_else(|| toml_cfg.map(|c| c.working_dir.clone()))
+        .unwrap_or_default();
+    let timeout_secs = ov
+        .and_then(|o| o.timeout_secs)
+        .map(|t| t as u64)
+        .or_else(|| toml_cfg.map(|c| c.timeout_secs))
+        .unwrap_or(0);
 
     json!({
         "name": name,
@@ -86,6 +105,10 @@ fn provider_entry(
         "base_url": base_url,
         "default_model": default_model,
         "reasoning_effort": reasoning_effort,
+        "binary_path": binary_path,
+        "args": args,
+        "working_dir": working_dir,
+        "timeout_secs": timeout_secs,
     })
 }
 
@@ -200,12 +223,47 @@ pub async fn update_provider(
             // 空文字は「解除」として None に正規化
             row.reasoning_effort = v.filter(|s| !s.is_empty());
         }
+        // 起動系（subprocess プロバイダ codex/cursor/acp 向け）。空文字は解除。
+        if let Some(v) = tri_string(&body, "binary_path").map_err(bad)? {
+            row.binary_path = v.filter(|s| !s.is_empty());
+        }
+        if let Some(v) = tri_string(&body, "working_dir").map_err(bad)? {
+            row.working_dir = v.filter(|s| !s.is_empty());
+        }
+        // args は文字列配列 or null（解除）。
+        match body.get("args") {
+            None => {}
+            Some(serde_json::Value::Null) => row.args_json = None,
+            Some(serde_json::Value::Array(a)) => {
+                let args: Vec<String> = a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                row.args_json = Some(serde_json::to_string(&args).unwrap_or_else(|_| "[]".into()));
+            }
+            Some(other) => return Err(bad(format!("args: expected array or null, got: {other}"))),
+        }
+        // timeout_secs は数値 or null（解除）。
+        match body.get("timeout_secs") {
+            None => {}
+            Some(serde_json::Value::Null) => row.timeout_secs = None,
+            Some(v) if v.is_u64() || v.is_i64() => row.timeout_secs = v.as_i64(),
+            Some(other) => {
+                return Err(bad(format!(
+                    "timeout_secs: expected int or null, got: {other}"
+                )))
+            }
+        }
         // 全フィールドが None ならオーバーライド行ごと削除
         if row.enabled.is_none()
             && row.api_key.is_none()
             && row.base_url.is_none()
             && row.default_model.is_none()
             && row.reasoning_effort.is_none()
+            && row.binary_path.is_none()
+            && row.args_json.is_none()
+            && row.working_dir.is_none()
+            && row.timeout_secs.is_none()
         {
             opencrab_db::queries::delete_llm_provider_override(&conn, &name).map_err(internal)?;
         } else {
@@ -214,6 +272,10 @@ pub async fn update_provider(
     }
 
     reload_router(&state)?;
+
+    // 保存後に起動確認（health_check）して結果を返す（ダッシュボードは自動差し戻しせず、
+    // 繋がったか可視化するだけ。自動ロールバックはエージェント経由の変更で行う）。
+    let test = test_provider(&state, &name).await;
 
     // 更新後の状態を返す
     let overrides = {
@@ -225,6 +287,7 @@ pub async fn update_provider(
     Ok(Json(json!({
         "provider": provider_entry(&name, &state, &overrides, &active),
         "reloaded": true,
+        "test_ok": test,
     })))
 }
 
@@ -373,6 +436,25 @@ async fn resolve_binary_path(cmd: &str) -> Option<String> {
 }
 
 /// TOML + DB オーバーライドからルーターを再構築してスワップする。
+/// プロバイダの起動確認（health_check）。subprocess プロバイダ（codex/cursor/acp）は
+/// `<binary> --version` 等でバイナリの起動可否を見る。ルータに無ければ false。
+pub(crate) async fn test_provider(state: &AppState, provider: &str) -> bool {
+    let router = state.llm_router.get();
+    let Some(p) = router.get_provider(provider).cloned() else {
+        return false;
+    };
+    p.health_check().await.unwrap_or(false)
+}
+
+/// POST /api/llm/providers/{name}/test — 現在の設定で起動確認する。
+pub async fn test_provider_endpoint(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Json<serde_json::Value> {
+    let ok = test_provider(&state, &name).await;
+    Json(json!({ "provider": name, "ok": ok }))
+}
+
 fn reload_router(state: &AppState) -> Result<(), (StatusCode, String)> {
     let overrides = {
         let conn = state.db.lock().unwrap();

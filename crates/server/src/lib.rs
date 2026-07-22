@@ -138,6 +138,10 @@ pub fn create_router(state: AppState) -> Router {
             delete(api::providers::delete_provider_override),
         )
         .route(
+            "/api/llm/providers/{name}/test",
+            post(api::providers::test_provider_endpoint),
+        )
+        .route(
             "/api/voice/config",
             get(api::providers::get_voice_config)
                 .put(api::providers::update_voice_config)
