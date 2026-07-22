@@ -130,6 +130,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/llm/cursor/diagnostics",
             get(api::providers::cursor_diagnostics),
         )
+        // acp 診断（起動バイナリ/引数/解決パス）
+        .route(
+            "/api/llm/acp/diagnostics",
+            get(api::providers::acp_diagnostics),
+        )
         .route(
             "/api/llm/providers/{name}",
             put(api::providers::update_provider),

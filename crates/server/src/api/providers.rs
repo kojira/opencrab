@@ -455,6 +455,68 @@ async fn run_cursor_version(cmd: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// GET /api/llm/acp/diagnostics — サーバープロセスが実際に使う ACP エージェントの
+/// 起動バイナリ・引数・解決パスを返す。ACP は `binary_path`（例 npx）+ `args`
+/// （例 `-y @zed-industries/claude-code-acp`）で起動し、args がエージェント本体を
+/// 担うため、`<binary> --version` だけでは起動可否が分からない。ここでは PATH/バイナリ
+/// 解決の切り分け情報を返し、実際に ACP を話せるかは接続テスト（/test）で確認する。
+pub async fn acp_diagnostics(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cfg = state.llm_config.providers.get("acp");
+    let configured = cfg
+        .map(|c| c.binary_path.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let args: Vec<String> = cfg.map(|c| c.args.clone()).unwrap_or_default();
+
+    if configured.is_empty() {
+        return Json(json!({
+            "configured_path": "",
+            "args": args,
+            "resolved_path": null,
+            "version": null,
+            "error": "binary_path が未設定です（例: npx / gemini）。ダッシュボードで設定してください。",
+        }));
+    }
+
+    let resolved_path = resolve_binary_path(&configured).await;
+    // 起動バイナリ自体の --version（npx ラッパ等では ACP 本体のバージョンではない点に注意）。
+    let (version, error) = match run_version(&configured).await {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e)),
+    };
+
+    Json(json!({
+        // config で指定した起動バイナリ（PATH 検索されうる）
+        "configured_path": configured,
+        // 起動引数（ACP 本体の指定を含む）
+        "args": args,
+        // サーバー環境で実際に解決される絶対パス（which）
+        "resolved_path": resolved_path,
+        // `<binary> --version` の出力（npx 等では起動バイナリ自身のバージョン）
+        "version": version,
+        "error": error,
+    }))
+}
+
+/// `<cmd> --version` を実行して出力を返す（汎用）。cmd は config 由来
+/// （リクエスト入力ではない）なのでコマンドインジェクションの懸念はない。
+async fn run_version(cmd: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new(cmd)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| format!("実行できませんでした（{cmd}）: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "`{cmd} --version` が失敗しました（{}）: {}",
+            out.status,
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// サーバー環境で cmd が解決される絶対パスを返す（`which`）。
 /// 既に絶対/相対パス指定ならそのまま返す。
 async fn resolve_binary_path(cmd: &str) -> Option<String> {

@@ -10,11 +10,13 @@ import {
   resetVoiceConfig,
   getCodexDiagnostics,
   getCursorDiagnostics,
+  getAcpDiagnostics,
   LlmProviderInfo,
   UpdateProviderBody,
   VoiceConfig,
   CodexDiagnostics,
   CursorDiagnostics,
+  AcpDiagnostics,
 } from '../api/providers';
 
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
@@ -47,6 +49,7 @@ function ProviderEditor({
   const isSubprocess = SUBPROCESS_PROVIDERS.includes(provider.name);
   const [binaryPath, setBinaryPath] = useState(provider.binary_path);
   const [args, setArgs] = useState(provider.args.join(' '));
+  const [workingDir, setWorkingDir] = useState(provider.working_dir);
   const [timeoutSecs, setTimeoutSecs] = useState(
     provider.timeout_secs ? String(provider.timeout_secs) : '',
   );
@@ -74,6 +77,8 @@ function ProviderEditor({
         .split(/\s+/)
         .filter((s) => s.length > 0);
       if (args.trim() !== provider.args.join(' ')) body.args = argsList.length ? argsList : null;
+      if (workingDir !== provider.working_dir)
+        body.working_dir = workingDir === '' ? null : workingDir;
       // 空欄 = オーバーライド解除(null)。非数値は誤ってクリアしないよう変更なし扱い。
       const parsed = parseInt(timeoutSecs, 10);
       const tNum = timeoutSecs.trim() === '' ? null : Number.isNaN(parsed) ? undefined : parsed;
@@ -190,6 +195,17 @@ function ProviderEditor({
                 value={args}
                 onChange={(e) => setArgs(e.target.value)}
                 placeholder="例: --experimental-acp / -y @zed-industries/claude-code-acp"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+                作業ディレクトリ（空欄 = 既定）
+              </label>
+              <input
+                value={workingDir}
+                onChange={(e) => setWorkingDir(e.target.value)}
+                placeholder="例: /path/to/workspace"
                 className={inputCls}
               />
             </div>
@@ -479,6 +495,87 @@ function CursorDiagnosticsCard() {
             <span className="w-32 shrink-0 text-on-surface-variant">設定パス</span>
             <span className="font-mono text-on-surface break-all">
               {diag.configured_path || 'cursor-agent（PATH 検索）'}
+            </span>
+          </div>
+          {diag.error && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-xs text-red-500">
+              {diag.error}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============ ACP 診断 ============
+
+function AcpDiagnosticsCard() {
+  const [diag, setDiag] = useState<AcpDiagnostics | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setDiag(await getAcpDiagnostics());
+    } catch (e) {
+      setDiag({
+        configured_path: '',
+        args: [],
+        resolved_path: null,
+        version: null,
+        error: String(e),
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <div className="card-elevated space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-semibold text-on-surface">ACP 診断</h2>
+        <button onClick={load} disabled={loading} className={btnGhost}>
+          {loading ? '確認中...' : '再確認'}
+        </button>
+      </div>
+      <p className="text-xs text-on-surface-variant">
+        opencrab の<strong>サーバープロセスが実際に使う</strong> ACP エージェントの起動バイナリと
+        引数です。ACP は <code className="font-mono">binary_path</code>（例{' '}
+        <code className="font-mono">npx</code>）+ <code className="font-mono">args</code>（例{' '}
+        <code className="font-mono">-y @zed-industries/claude-code-acp</code>）で起動し、
+        <strong>引数がエージェント本体を担う</strong>ため <code className="font-mono">--version</code>
+        だけでは起動可否が分かりません。実際に ACP を話せるかは各プロバイダ行の
+        <strong>「接続テスト」</strong>で確認してください。
+      </p>
+      {diag && (
+        <div className="space-y-1 text-sm">
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">解決パス</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.resolved_path ?? '（PATH 上に見つからない）'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">設定バイナリ</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.configured_path || '（未設定）'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">引数</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.args.length ? diag.args.join(' ') : '（なし）'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <span className="w-32 shrink-0 text-on-surface-variant">バージョン</span>
+            <span className="font-mono text-on-surface break-all">
+              {diag.version ?? '（取得できません）'}
             </span>
           </div>
           {diag.error && (
@@ -815,6 +912,7 @@ export default function SystemSettings() {
 
       <CodexDiagnosticsCard />
       <CursorDiagnosticsCard />
+      <AcpDiagnosticsCard />
 
       <VoiceSettings />
 
