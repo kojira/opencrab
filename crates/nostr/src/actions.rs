@@ -123,6 +123,20 @@ impl GatewayActions for NostrGatewayActions {
                     "required": ["path"]
                 }),
             },
+            GatewayActionDef {
+                name: "nostr_generate_key".to_string(),
+                description: "新しい Nostr 鍵（keypair）を生成して返す。任意で vanity prefix（npub の \
+                              npub1 以降・bech32 文字のみ・最大3文字）を指定できる。返り値の nsec は\
+                              **秘密鍵**なので、公開ノートには絶対に投稿せず、必要な相手にだけ DM 等で\
+                              安全に渡すこと。これは新規 keypair を作るユーティリティであり、あなた自身の\
+                              アイデンティティ（送信に使う鍵）は変更しない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（最大3文字, 例: cat）。"}
+                    }
+                }),
+            },
         ]
     }
 
@@ -198,6 +212,21 @@ impl GatewayActions for NostrGatewayActions {
                     Err(e) => err(format!("nostr_upload 失敗: {e}")),
                 }
             }
+            "nostr_generate_key" => {
+                // prefix は任意。未指定/空ならランダム鍵。検証は cli.vanity 側で行う。
+                let prefix = arg_str(args, "prefix").unwrap_or("");
+                match self.cli.vanity(prefix).await {
+                    // nsec は秘密鍵。結果に含めて返すが、モデルへ強く警告する
+                    // （公開投稿しないよう）。mark_sent は呼ばない（送信ではない）。
+                    Ok(k) => ok(json!({
+                        "nsec": k.nsec,
+                        "npub": k.npub,
+                        "pubkey": k.pubkey,
+                        "warning": "nsec は秘密鍵です。公開ノートに投稿せず、必要な相手にだけ DM 等で安全に渡してください。",
+                    })),
+                    Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
+                }
+            }
             other => err(format!("unknown nostr action: {other}")),
         }
     }
@@ -217,6 +246,7 @@ mod tests {
             "nostr_dm",
             "nostr_zap",
             "nostr_upload",
+            "nostr_generate_key",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
