@@ -802,4 +802,44 @@ mod tests {
             assert!(props.contains_key(key), "missing property: {key}");
         }
     }
+
+    /// Regression guard for #146: nostr_generate_key must be a *own* definition
+    /// (bootstrap tool) so it is exposed on every turn regardless of whether the
+    /// nostr watch loop / keys are configured. If someone moves it back into the
+    /// key-gated inner NostrGatewayActions bundle, own_definitions loses it and
+    /// this test fails — that is the "露出が二度と消えない" guard.
+    #[test]
+    fn nostr_generate_key_is_always_exposed() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "nostr_generate_key")
+            .expect("nostr_generate_key must be an own (always-exposed) definition (#146)");
+        // vanity 用の任意 prefix パラメータを受ける。
+        let props = d.parameters["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("prefix"),
+            "nostr_generate_key must accept an optional vanity `prefix`"
+        );
+        // bootstrap ツールは required なし（引数なしでも鍵を作れる）。
+        assert!(
+            d.parameters.get("required").is_none(),
+            "nostr_generate_key must not require any argument"
+        );
+    }
+
+    /// definitions() dedups own vs inner by name: when the inner gateway also
+    /// defines nostr_generate_key (nostr watch loop running), the merged tool
+    /// list must still contain exactly one entry (providers reject duplicates).
+    #[test]
+    fn definitions_dedup_keeps_single_nostr_generate_key() {
+        // own_definitions is the source that definitions() starts from; assert it
+        // is unique there so the dedup contract holds.
+        let defs = SystemGatewayActions::own_definitions();
+        let count = defs
+            .iter()
+            .filter(|d| d.name == "nostr_generate_key")
+            .count();
+        assert_eq!(count, 1, "nostr_generate_key must be defined exactly once in own_definitions");
+    }
 }
