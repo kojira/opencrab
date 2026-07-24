@@ -266,3 +266,18 @@ pub struct SubtaskSettled {
 - **既存セッションID 形式の変更**（`discord-*` / `nostr-*` / `heartbeat-*` のパース規約はそのまま利用）。
 
 > 注: §1.5 のとおり **webhook（`WebhookConfig`/`DeliveryBatch`）の分離は S1 の不可分な一部**であり、スコープ外ではない（v1 の「webhook 直交でスコープ外」は撤回）。
+
+---
+
+## 8. 決定事項（レビュー後確定）
+
+第三者レビュー3件とオーナー判断を経て、以下を確定する（PR #153 v2 で反映）。
+
+1. **配置 = 案A**: subtask ランタイム + `SubtaskCompletionSink` を `crates/actions` の**自己完結モジュール `actions::subtask`** に置く。将来 subtask が肥大した場合の案B（専用 crate）への切り出しを低コストに保つため、モジュール境界を crate 抽出可能な形に保つ。
+2. **REST の配送 = 最小（保存 → 取得/poll）**。ダッシュボードのライブ会話は **#154 web gateway（SSE/WebSocket）** が担い、生 REST エンドポイントに live push は積まない（冗長回避）。§6 の REST 記述はこれに従う。
+3. **root gateway 注入の具体形は S2 スパイクで確定**（`GatewayCallContext` への `root_gateway: Option<Arc<dyn GatewayActions>>` 追加 vs sub-engine builder 経由、自己参照 Arc の構築順/Weak 要否）。plan フェーズでは未確定のままでよい＝オーナーが今決める分岐ではない。
+4. **基準 = main から新規**（fix版 #144/#150/#151 は破棄。§0.1 参照）。
+5. **実装は S0→S4 を段階実装**し、各段「ビルド緑・既存挙動不変」＋レビューを完了条件とする。
+
+### 本プログラムにおける位置づけ
+本 RFC（#152）は統括 #155「discord crate の runtime 化解消」の第一歩。確立する「gateway 非依存の完了再注入抽象」「合成 gateway 注入」は、後続の #156(AgentRunner 脱Discord)/#157(汎用ツール移設)/#158(共有経路)/#159(命名) と #154(web gateway) の共通土台になる。
