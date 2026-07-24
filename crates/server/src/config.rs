@@ -703,6 +703,65 @@ mod tests {
         std::env::remove_var("TEST_B");
     }
 
+    /// `owner_discord_id` は環境変数参照で与える（ローカル固有値を `.env` に寄せる）。
+    #[test]
+    fn owner_discord_id_expands_from_env() {
+        std::env::set_var("TEST_OWNER_DISCORD_ID", "123456789012345678");
+        let raw = "[gateway.discord]\nowner_discord_id = \"${TEST_OWNER_DISCORD_ID}\"\n";
+        let cfg: AppConfig = toml::from_str(&expand_env_vars(raw)).unwrap();
+        assert_eq!(cfg.gateway.discord.owner_discord_id, "123456789012345678");
+        assert!(crate::api::is_owner_id(
+            &cfg.gateway.discord.owner_discord_id,
+            "123456789012345678"
+        ));
+        std::env::remove_var("TEST_OWNER_DISCORD_ID");
+    }
+
+    /// 環境変数が未設定なら空文字に展開される。空のオーナー ID は誰とも一致させない
+    /// （= オーナー無し扱い）ので、空の caller が owner に昇格しない。
+    #[test]
+    fn unset_owner_discord_id_grants_owner_to_nobody() {
+        let raw = "[gateway.discord]\nowner_discord_id = \"${UNSET_OWNER_DISCORD_ID_FOR_TEST}\"\n";
+        let cfg: AppConfig = toml::from_str(&expand_env_vars(raw)).unwrap();
+        let owner = &cfg.gateway.discord.owner_discord_id;
+        assert!(owner.is_empty());
+        assert!(!crate::api::is_owner_id(owner, ""));
+        assert!(!crate::api::is_owner_id(owner, "123456789012345678"));
+    }
+
+    /// `load_config`（ファイル読み込み → `${}` 展開 → TOML パース）を通しても
+    /// 環境変数の値が `owner_discord_id` に入る。
+    #[test]
+    fn load_config_expands_owner_discord_id_from_env() {
+        std::env::set_var("TEST_LOAD_OWNER_DISCORD_ID", "123456789012345678");
+        let dir = std::env::temp_dir().join("opencrab-config-owner-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("owner.toml");
+        std::fs::write(
+            &path,
+            "[gateway.discord]\nenabled = true\nowner_discord_id = \"${TEST_LOAD_OWNER_DISCORD_ID}\"\n",
+        )
+        .unwrap();
+        let cfg = load_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.gateway.discord.owner_discord_id, "123456789012345678");
+        let _ = std::fs::remove_file(&path);
+        std::env::remove_var("TEST_LOAD_OWNER_DISCORD_ID");
+    }
+
+    /// 配布テンプレート（`config/default.toml.example`）は `${}` 参照込みでも
+    /// ロードできる（環境変数が未設定でもパースが壊れない）。
+    #[test]
+    fn shipped_config_example_loads_and_owner_comes_from_env() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/default.toml.example");
+        let cfg = load_config(path.to_str().unwrap()).expect("default.toml.example must parse");
+        // テンプレートは共有ゲートウェイを既定で無効にしている（個人 ID を含めない）。
+        assert!(!cfg.gateway.discord.enabled);
+        // owner は環境変数から与えられる。この値がそのまま owner 判定に使われる。
+        let owner = cfg.gateway.discord.owner_discord_id.clone();
+        assert_eq!(owner, std::env::var("OWNER_DISCORD_ID").unwrap_or_default());
+    }
+
     #[test]
     fn test_apply_llm_overrides() {
         use opencrab_db::queries::LlmProviderOverrideRow;
