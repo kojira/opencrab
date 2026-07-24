@@ -23,7 +23,15 @@ enabled = true
 token = "${DISCORD_TOKEN}"
 guild_ids = []
 agent_ids = ["crab"]
-owner_discord_id = "390732846236434452"
+owner_discord_id = "${OWNER_DISCORD_ID}"
+```
+
+環境ごとに変わる値（トークン、オーナー ID）は TOML に直接書かず、`.env` から
+`${...}` で参照する（`.env.example` を参照）。
+
+```dotenv
+DISCORD_TOKEN=
+OWNER_DISCORD_ID=123456789012345678
 ```
 
 ### DiscordGatewayConfig の各フィールド
@@ -34,7 +42,7 @@ owner_discord_id = "390732846236434452"
 | `token` | `String` | (必須) | Discord Bot トークン。環境変数 `${DISCORD_TOKEN}` を推奨 |
 | `guild_ids` | `Vec<u64>` | `[]` | **現在未使用**。将来の Guild フィルタリング用予約フィールド |
 | `agent_ids` | `Vec<String>` | `[]` | この Bot が応答するエージェント ID のリスト |
-| `owner_discord_id` | `String` | `""` | DM に応答するオーナーの Discord User ID |
+| `owner_discord_id` | `String` | `""` | DM に応答するオーナーの Discord User ID。環境変数 `${OWNER_DISCORD_ID}` を推奨。空（未設定）ならオーナー無しとして扱われる |
 
 ### Discord Bot トークンの取得
 
