@@ -192,7 +192,66 @@ impl SystemGatewayActions {
                     "required": ["action"]
                 }),
             },
+            // bootstrap ツール（鍵不要）。送信系（nostr_post 等・鍵前提）とは分離し、
+            // transport 非依存で全ターンに露出する。これにより「鍵を作るツールが鍵の
+            // ある時しか出ない」循環依存（#141）を解消する。owner 限定にはしない
+            // （nsec は返さず・送信もしないので Agent 呼び出しでも安全）。
+            GatewayActionDef {
+                name: "nostr_generate_key".to_string(),
+                description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
+                              npub1 以降・bech32 文字のみ。長さ上限は無いが、長いほど探索に時間が \
+                              かかる＝3文字程度で即時、それ以上は徐々に長くなる）を指定できる。返るのは公開情報の \
+                              npub / pubkey のみ。**秘密鍵(nsec)はサーバ内に安全に保存され、あなた（LLM）\
+                              には渡されない**（セキュリティのため）。これは新規 keypair を作るユーティリティ\
+                              であり、あなた自身の送信用アイデンティティは変更しない。"
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（長さ上限なし。長いほど探索に時間がかかる, 例: cat）。"}
+                    }
+                }),
+            },
         ]
+    }
+
+    /// bootstrap 用の鍵生成（鍵未設定でも実行可能）。実体は `NostaroCli::vanity`
+    /// （config 非依存）で、生成した nsec は**サーバ内に 0600 で保存**し LLM には返さない
+    /// （npub/pubkey のみ）。process.rs の防御マスク（tool_name==nostr_generate_key）と
+    /// bridge の nsec redaction が多層で秘密漏洩を防ぐ。
+    async fn nostr_generate_key(
+        &self,
+        args: &Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        let prefix = args
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .unwrap_or("");
+        // 稼働中のマネージャの CLI（binary_path 等の設定を継承）を使う。無ければ既定。
+        let cli = self
+            .state
+            .nostr_manager
+            .as_ref()
+            .map(|m| m.cli().clone())
+            .unwrap_or_default();
+        match cli.vanity(prefix).await {
+            Ok(k) => match opencrab_nostr::NostaroCli::save_generated_key(&ctx.agent_id, &k) {
+                Ok(_) => GatewayActionResult {
+                    success: true,
+                    // nsec は返さない（サーバ内 0600 保存済み）。npub/pubkey のみ。
+                    data: Some(json!({
+                        "npub": k.npub,
+                        "pubkey": k.pubkey,
+                        "note": "新しい鍵を生成しました。秘密鍵(nsec)はサーバ内に安全に保存済みで、セキュリティ上あなた（LLM）には渡していません。共有・言及してよいのは npub までです。",
+                    })),
+                    error: None,
+                },
+                Err(e) => err(format!("鍵は生成しましたが保存に失敗しました: {e}")),
+            },
+            Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
+        }
     }
 
     async fn configure_llm_provider(
@@ -677,7 +736,16 @@ impl GatewayActions for SystemGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
         let mut defs = Self::own_definitions();
         if let Some(inner) = &self.inner {
-            defs.extend(inner.definitions());
+            // own と同名のツールは重複させない（own を優先）。nostr watch ループ稼働時は
+            // inner=NostrGatewayActions も nostr_generate_key を定義するため、ここで
+            // dedup しないとツール一覧に同名が2つ並ぶ（provider が拒否しうる）。
+            let own_names: std::collections::HashSet<String> =
+                defs.iter().map(|d| d.name.clone()).collect();
+            for d in inner.definitions() {
+                if !own_names.contains(&d.name) {
+                    defs.push(d);
+                }
+            }
         }
         defs
     }
@@ -694,6 +762,8 @@ impl GatewayActions for SystemGatewayActions {
             "configure_nostr" => self.configure_nostr(args, ctx).await,
             "configure_self" => self.configure_self(args, ctx).await,
             "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
+            // bootstrap 鍵生成（鍵未設定でも露出）。inner より先に own が処理する。
+            "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
