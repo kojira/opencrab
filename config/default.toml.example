@@ -64,7 +64,7 @@ base_url = "http://localhost:8080"
 # Codex CLI（ローカル。codex サブスク利用時）。binary_path 省略時は PATH から検索。
 [llm.providers.codex]
 default_model = "o4-mini"
-sandbox = "danger-full-access"
+sandbox = "read-only"
 timeout_secs = 300
 models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # reasoning_effort = "medium"
