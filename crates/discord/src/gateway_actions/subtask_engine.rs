@@ -144,6 +144,79 @@ impl SubtaskCompletionSink for DiscordCompletionSink {
     }
 }
 
+/// Map an `LlmCallLog` from a sub-engine to an `llm_logs` row (#148).
+///
+/// The sub-engine (spawned by `execute_spawn_subtask`) was previously unwired
+/// for llm logging — only depth0 was recorded via the server's
+/// `set_llm_log_callback` — so subtask inference and its tokens were lost. This
+/// mirrors the depth0 logic (crates/server/src/process.rs) column-for-column,
+/// tagging rows with `session_id = subtask-{id}`. `trigger_message_id` is `None`
+/// because a subtask has no originating Discord message. Extracted from the
+/// callback closure so the mapping can be unit-tested without running an engine.
+fn build_subtask_llm_log_row(
+    agent_id: &str,
+    session_id: &str,
+    log: &opencrab_core::LlmCallLog,
+) -> opencrab_db::queries::LlmLogRow {
+    let (prompt_tokens, completion_tokens, total_tokens) = log
+        .response
+        .as_ref()
+        .map(|r| &r.usage)
+        .map(|u| {
+            (
+                Some(u.prompt_tokens as i64),
+                Some(u.completion_tokens as i64),
+                Some(u.total_tokens as i64),
+            )
+        })
+        .unwrap_or((None, None, None));
+
+    let cache_read_tokens = log
+        .response
+        .as_ref()
+        .map(|r| &r.usage)
+        .map(|u| u.cache_read_input_tokens as i64);
+    let cache_creation_tokens = log
+        .response
+        .as_ref()
+        .map(|r| &r.usage)
+        .map(|u| u.cache_creation_input_tokens as i64);
+
+    let response_str = log
+        .response
+        .as_ref()
+        .map(|r| serde_json::to_string(r).unwrap_or_default())
+        .unwrap_or_default();
+
+    opencrab_db::queries::LlmLogRow {
+        id: Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: Some(session_id.to_string()),
+        model: Some(log.request.model.clone()),
+        prompt: serde_json::to_string(&log.request).unwrap_or_default(),
+        response: response_str,
+        tool_calls: log
+            .response
+            .as_ref()
+            .and_then(|r| r.first_message())
+            .and_then(|m| m.tool_calls.as_ref())
+            .filter(|tc| !tc.is_empty())
+            .and_then(|tc| serde_json::to_string(tc).ok()),
+        latency_ms: Some(log.latency_ms),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        error_code: log.error_str.as_ref().map(|_| "error".to_string()),
+        error_body: log.error_str.clone(),
+        requested_at: Some(log.requested_at.clone()),
+        trigger_message_id: None,
+        is_bot_iteration: log.is_bot_iteration,
+        cache_read_tokens,
+        cache_creation_tokens,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 impl DiscordGatewayActions {
     pub(crate) async fn execute_spawn_subtask(
         &self,
@@ -549,63 +622,8 @@ impl DiscordGatewayActions {
             let log_agent_id = agent_id.clone();
             let log_session_id = sub_session_id.clone();
             sub_engine.set_log_callback(move |log: &opencrab_core::LlmCallLog| {
-                let (prompt_tokens, completion_tokens, total_tokens) = log
-                    .response
-                    .as_ref()
-                    .map(|r| &r.usage)
-                    .map(|u| {
-                        (
-                            Some(u.prompt_tokens as i64),
-                            Some(u.completion_tokens as i64),
-                            Some(u.total_tokens as i64),
-                        )
-                    })
-                    .unwrap_or((None, None, None));
-
-                let cache_read_tokens = log
-                    .response
-                    .as_ref()
-                    .map(|r| &r.usage)
-                    .map(|u| u.cache_read_input_tokens as i64);
-                let cache_creation_tokens = log
-                    .response
-                    .as_ref()
-                    .map(|r| &r.usage)
-                    .map(|u| u.cache_creation_input_tokens as i64);
-
-                let response_str = log
-                    .response
-                    .as_ref()
-                    .map(|r| serde_json::to_string(r).unwrap_or_default())
-                    .unwrap_or_default();
-
-                let log_row = opencrab_db::queries::LlmLogRow {
-                    id: Uuid::new_v4().to_string(),
-                    agent_id: log_agent_id.clone(),
-                    session_id: Some(log_session_id.clone()),
-                    model: Some(log.request.model.clone()),
-                    prompt: serde_json::to_string(&log.request).unwrap_or_default(),
-                    response: response_str,
-                    tool_calls: log
-                        .response
-                        .as_ref()
-                        .and_then(|r| r.first_message())
-                        .and_then(|m| m.tool_calls.as_ref())
-                        .filter(|tc| !tc.is_empty())
-                        .and_then(|tc| serde_json::to_string(tc).ok()),
-                    latency_ms: Some(log.latency_ms),
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens,
-                    error_code: log.error_str.as_ref().map(|_| "error".to_string()),
-                    error_body: log.error_str.clone(),
-                    requested_at: Some(log.requested_at.clone()),
-                    trigger_message_id: None,
-                    is_bot_iteration: log.is_bot_iteration,
-                    cache_read_tokens,
-                    cache_creation_tokens,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                };
+                let log_row =
+                    build_subtask_llm_log_row(&log_agent_id, &log_session_id, log);
                 if let Ok(conn) = log_db.lock() {
                     if let Err(e) = opencrab_db::queries::insert_llm_log(&conn, &log_row) {
                         tracing::error!("Failed to insert llm_log (subtask): {e}");
@@ -2222,5 +2240,64 @@ mod tests {
             sink.is_some(),
             "global-only activity default -> sink present"
         );
+    }
+
+    // ---- #148: subtask sub-engine LLM logging ----
+
+    /// A successful sub-engine call maps to an llm_logs row tagged with the
+    /// subtask session id, with tokens accounted and no trigger message.
+    #[test]
+    fn build_subtask_llm_log_row_accounts_tokens_and_tags_session() {
+        let mut resp = opencrab_core::ChatResponse::text("done");
+        resp.model = "gpt-test".to_string();
+        resp.usage.prompt_tokens = 100;
+        resp.usage.completion_tokens = 20;
+        resp.usage.total_tokens = 120;
+        resp.usage.cache_read_input_tokens = 30;
+        resp.usage.cache_creation_input_tokens = 5;
+        let log = opencrab_core::LlmCallLog {
+            request: opencrab_core::ChatRequest::new("gpt-test", vec![]),
+            response: Some(resp),
+            error_str: None,
+            latency_ms: 42,
+            requested_at: "2026-07-25T00:00:00Z".to_string(),
+            is_bot_iteration: true,
+        };
+        let row = build_subtask_llm_log_row("agent-x", "subtask-abc", &log);
+        assert_eq!(row.agent_id, "agent-x");
+        assert_eq!(row.session_id.as_deref(), Some("subtask-abc"));
+        assert_eq!(row.model.as_deref(), Some("gpt-test"));
+        assert_eq!(row.prompt_tokens, Some(100));
+        assert_eq!(row.completion_tokens, Some(20));
+        assert_eq!(row.total_tokens, Some(120));
+        assert_eq!(row.cache_read_tokens, Some(30));
+        assert_eq!(row.cache_creation_tokens, Some(5));
+        assert_eq!(row.latency_ms, Some(42));
+        assert!(row.is_bot_iteration);
+        // subtask には originating Discord message が無いので必ず None。
+        assert_eq!(row.trigger_message_id, None);
+        assert!(row.error_code.is_none());
+    }
+
+    /// A failed sub-engine call (no response) yields null tokens but still records
+    /// the error, so failures are observable instead of silently dropped.
+    #[test]
+    fn build_subtask_llm_log_row_records_errors_with_null_tokens() {
+        let log = opencrab_core::LlmCallLog {
+            request: opencrab_core::ChatRequest::new("gpt-test", vec![]),
+            response: None,
+            error_str: Some("boom".to_string()),
+            latency_ms: 7,
+            requested_at: "2026-07-25T00:00:00Z".to_string(),
+            is_bot_iteration: false,
+        };
+        let row = build_subtask_llm_log_row("agent-x", "subtask-err", &log);
+        assert_eq!(row.session_id.as_deref(), Some("subtask-err"));
+        assert_eq!(row.prompt_tokens, None);
+        assert_eq!(row.completion_tokens, None);
+        assert_eq!(row.total_tokens, None);
+        assert_eq!(row.cache_read_tokens, None);
+        assert_eq!(row.error_code.as_deref(), Some("error"));
+        assert_eq!(row.error_body.as_deref(), Some("boom"));
     }
 }

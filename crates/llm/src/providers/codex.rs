@@ -208,12 +208,8 @@ impl LlmProvider for CodexProvider {
         // 最終メッセージ本文の取得方法は変えない: 引き続き `-o` ファイルから読む
         // （--json と -o は直交する: --json は stdout 形式、-o は最終メッセージ書き出しで、
         // 併用しても -o ファイルは書かれる）。usage 取得のためだけに --json を併用する。
-        cmd.arg("--json")
-            .arg("-o")
-            .arg(&output_path)
-            // Read prompt from stdin to avoid ARG_MAX limits and /proc exposure.
-            .arg("-")
-            .stdin(std::process::Stdio::piped())
+        append_nonstreaming_output_args(&mut cmd, &output_path);
+        cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
@@ -625,6 +621,18 @@ fn parse_jsonl_event(line: &str, model: &str) -> Option<ChatStreamDelta> {
     }
 }
 
+/// Append the args for the non-streaming `chat_completion` codex invocation.
+///
+/// `--json` makes codex emit JSONL events (incl. `turn.completed` with usage)
+/// on stdout so `parse_usage_from_stdout` can account tokens (#148: without it
+/// usage was all-zero). `-o <path>` still writes the final message to the temp
+/// file (orthogonal to `--json`), and a trailing `-` reads the prompt from stdin
+/// to avoid ARG_MAX limits / `/proc` exposure. Extracted so the arg contract can
+/// be asserted without spawning the codex CLI.
+fn append_nonstreaming_output_args(cmd: &mut Command, output_path: &str) {
+    cmd.arg("--json").arg("-o").arg(output_path).arg("-");
+}
+
 /// Parse usage information from stdout JSONL (look for turn.completed with usage).
 fn parse_usage_from_stdout(stdout: &[u8]) -> Usage {
     let text = String::from_utf8_lossy(stdout);
@@ -989,5 +997,42 @@ mod tests {
         assert_eq!(usage.completion_tokens, 50);
         assert_eq!(usage.total_tokens, 550);
         assert_eq!(usage.cache_read_input_tokens, 400);
+    }
+
+    /// #148 regression: without `--json`, codex emits no `turn.completed` events,
+    /// so usage parsing yields all zeros. This documents the exact pre-fix symptom
+    /// and pairs with the positive test above / the arg-contract test below.
+    #[test]
+    fn test_parse_usage_from_stdout_without_json_is_zero() {
+        let stdout = b"just the final assistant text, no JSONL events here\n";
+        let usage = parse_usage_from_stdout(stdout);
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    /// #148 regression: the non-streaming chat_completion invocation must pass
+    /// `--json` (before `-o`) so usage can be accounted. Guards against the flag
+    /// being dropped, which would silently zero out codex token accounting.
+    #[test]
+    fn test_nonstreaming_command_includes_json_flag() {
+        let mut cmd = Command::new("codex");
+        append_nonstreaming_output_args(&mut cmd, "/tmp/out.txt");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "--json"),
+            "non-streaming codex command must include --json for usage accounting (#148): {args:?}"
+        );
+        let json_pos = args.iter().position(|a| a == "--json").unwrap();
+        let o_pos = args.iter().position(|a| a == "-o").unwrap();
+        assert!(json_pos < o_pos, "--json must precede -o: {args:?}");
+        // -o still writes the final message file; prompt still comes from stdin (`-`).
+        assert_eq!(args.get(o_pos + 1).map(String::as_str), Some("/tmp/out.txt"));
+        assert!(args.iter().any(|a| a == "-"), "prompt must be read from stdin");
     }
 }
