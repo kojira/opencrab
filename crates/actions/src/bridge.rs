@@ -256,6 +256,11 @@ impl BridgedExecutor {
             session_id: self.context.session_id.clone(),
             depth: self.depth,
             agent_id: self.context.agent_id.clone(),
+            // 合成 gateway 自身のハンドルを子へ渡す（RFC #152 S2）。sub-engine を
+            // 構築する `spawn_subtask` が「自分を包む合成 gateway」を辿れるように
+            // する注入口。Arc は本 executor が所有し、ここでは clone して短命な
+            // ctx に載せるだけ（自己参照 Arc ではない＝サイクルなし）。
+            root_gateway: self.gateway_actions.clone(),
         }
     }
 
@@ -1137,6 +1142,43 @@ mod tests {
         // args は LLM 由来のものがそのまま渡り、__* キーは注入されない。
         let args = gw.last_args.lock().unwrap().clone().unwrap();
         assert_eq!(args, json!({"x": 1}));
+    }
+
+    /// RFC #152 S2: gateway の `execute` に渡る ctx に、合成 gateway 自身への
+    /// ハンドル（`root_gateway`）が注入されること。sub-engine を構築する
+    /// `spawn_subtask` がこれを辿って合成 gateway を wrap できる（自己参照 Arc 不要
+    /// = Arc は本 executor が所有し、ctx は clone を短命に運ぶだけ）。
+    #[tokio::test]
+    async fn test_gateway_ctx_carries_root_gateway_handle() {
+        let (_dir, ctx) = test_context();
+        let gw = Arc::new(CtxRecordingGateway {
+            last_ctx: Mutex::new(None),
+            last_args: Mutex::new(None),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_gateway_actions(gw.clone());
+        let r = executor.execute("ctx_probe", &json!({})).await;
+        assert!(r.success);
+        let seen = gw.last_ctx.lock().unwrap().clone().unwrap();
+        assert!(
+            seen.root_gateway.is_some(),
+            "root_gateway handle must be injected so a sub-engine can wrap the composite gateway"
+        );
+    }
+
+    /// root_gateway 未注入（gateway_actions 無し）の executor は、ctx.root_gateway が
+    /// None のまま（後方互換 = 非破壊）。
+    #[tokio::test]
+    async fn test_gateway_ctx_root_gateway_none_without_gateway_actions() {
+        // gateway_actions を付けない executor では、そもそも gateway.execute へ
+        // 到達しないため、ここでは gateway_call_context() の生成結果を直接確認する。
+        let (_dir, ctx) = test_context();
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        let call_ctx = executor.gateway_call_context();
+        assert!(
+            call_ctx.root_gateway.is_none(),
+            "no gateway_actions => root_gateway must stay None (backward compatible)"
+        );
     }
 
     /// "Unknown action: {name}" と同文のエラーを返す実アクションが gateway に

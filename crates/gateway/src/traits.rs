@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -36,7 +38,10 @@ impl GatewayCaller {
 ///
 /// bridge（実行境界）が構築し、gateway 実装へ型付きで渡す。ツール引数 JSON には
 /// 実行コンテキストを一切混ぜない。
-#[derive(Debug, Clone)]
+///
+/// `Debug` は手実装する（`root_gateway` の trait object が `Debug` を実装しないため
+/// derive できない）。
+#[derive(Clone)]
 pub struct GatewayCallContext {
     pub caller: GatewayCaller,
     /// 呼び出し元エンジンのセッションID。セッション文脈の無い実行（直接呼び出し等）
@@ -45,6 +50,30 @@ pub struct GatewayCallContext {
     /// sub-engine のネスト深さ（メインエンジン = 0）。
     pub depth: u32,
     pub agent_id: String,
+    /// この呼び出しを実行している合成 gateway 自身へのハンドル（RFC #152 S2）。
+    ///
+    /// `spawn_subtask` が sub-engine を構築する際、子（callee）が「自分を包む合成
+    /// gateway」（例: `SystemGatewayActions`）を辿れるようにするための注入口。
+    /// `BridgedExecutor` が `execute` 呼び出し時に自身の `gateway_actions` を
+    /// clone して載せる。自己参照 Arc ではない（Arc は `BridgedExecutor` が保持し、
+    /// ctx は短命な借用として運ぶだけ。サイクルは生じない）。
+    /// 既定 `None`（後方互換 — 未注入なら従来通り transport gateway 単体で動く）。
+    pub root_gateway: Option<Arc<dyn GatewayActions>>,
+}
+
+impl std::fmt::Debug for GatewayCallContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayCallContext")
+            .field("caller", &self.caller)
+            .field("session_id", &self.session_id)
+            .field("depth", &self.depth)
+            .field("agent_id", &self.agent_id)
+            .field(
+                "root_gateway",
+                &self.root_gateway.as_ref().map(|_| "<gateway>"),
+            )
+            .finish()
+    }
 }
 
 impl GatewayCallContext {
@@ -54,6 +83,7 @@ impl GatewayCallContext {
             session_id: None,
             depth: 0,
             agent_id: agent_id.into(),
+            root_gateway: None,
         }
     }
 
@@ -69,6 +99,12 @@ impl GatewayCallContext {
 
     pub fn with_depth(mut self, depth: u32) -> Self {
         self.depth = depth;
+        self
+    }
+
+    /// 合成 gateway 自身のハンドルを注入する（RFC #152 S2）。
+    pub fn with_root_gateway(mut self, root: Arc<dyn GatewayActions>) -> Self {
+        self.root_gateway = Some(root);
         self
     }
 }

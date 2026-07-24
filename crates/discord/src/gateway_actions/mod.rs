@@ -1292,9 +1292,12 @@ mod tests {
         let (actions, db) = make_test_actions();
         let parent = "discord-test-agent-111-222";
         let _h = insert_fake_subtask(&actions, "st-sub", "subtask-s1", parent);
-        let sub_gw = SubEngineGatewayActions::new(actions.clone());
+        // 後方互換の経路（root_gateway 未注入）では transport gateway 単体を wrap する。
+        let sub_gw = SubEngineGatewayActions::new(std::sync::Arc::new(actions.clone()));
 
-        // definitions は report_progress のみ
+        // Discord 単体の definitions に対して許可リストを適用するため report_progress のみ。
+        // （nostr_generate_key は Discord gateway の definitions に無いため出ない。
+        //   合成 gateway 経由の到達は subtask_engine.rs の S2 テストで固定する。）
         let names: Vec<String> = sub_gw.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["report_progress".to_string()]);
 
