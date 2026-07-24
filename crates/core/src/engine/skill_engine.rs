@@ -413,8 +413,7 @@ impl SkillEngine {
                     // `SubtaskCompletionSink` 経由で親セッションを resume して再注入される。
                     if let Some(dispatcher) = &self.tool_dispatcher {
                         if dispatcher.should_dispatch(tool_name) {
-                            let outcome =
-                                dispatcher.dispatch(tool_name, &args, &tool_call.id);
+                            let outcome = dispatcher.dispatch(tool_name, &args, &tool_call.id);
                             let spawned = serde_json::json!({
                                 "status": "spawned",
                                 "subtask_id": outcome.subtask_id,
@@ -428,17 +427,9 @@ impl SkillEngine {
                                 subtask_id = %outcome.subtask_id,
                                 "tool auto-dispatched as background subtask"
                             );
-                            messages.push(Message::tool(
-                                tool_call.id.clone(),
-                                result_json.clone(),
-                            ));
+                            messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
                             if let Some(ref cb) = self.on_tool_result {
-                                cb(
-                                    tool_call.id.clone(),
-                                    tool_name.clone(),
-                                    result_json,
-                                    false,
-                                );
+                                cb(tool_call.id.clone(), tool_name.clone(), result_json, false);
                             }
                             continue;
                         }
@@ -958,7 +949,11 @@ mod tests {
 
         // 1回目: ツール呼び出し（dispatch 対象）。2回目: 最終テキスト。
         let llm = MockLlm::new(vec![
-            tool_call_response(vec![tc("tc-1", "nostr_generate_key", serde_json::json!({}))]),
+            tool_call_response(vec![tc(
+                "tc-1",
+                "nostr_generate_key",
+                serde_json::json!({}),
+            )]),
             text_response("鍵の生成を開始しました"),
         ]);
         // executor が呼ばれたら記録する（dispatch 対象は呼ばれてはならない）。
@@ -1012,7 +1007,10 @@ mod tests {
             "dispatch 対象ツールは inline executor で実行されてはならない"
         );
         // dispatcher.dispatch が1回呼ばれた。
-        assert_eq!(dispatcher.dispatched.lock().unwrap().as_slice(), &["nostr_generate_key"]);
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["nostr_generate_key"]
+        );
         // tool_result は spawned マーカー（同ターン返却）。
         let seen = seen_tool_results.lock().unwrap();
         assert_eq!(seen.len(), 1);

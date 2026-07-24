@@ -1032,7 +1032,13 @@ mod tests {
         let o_pos = args.iter().position(|a| a == "-o").unwrap();
         assert!(json_pos < o_pos, "--json must precede -o: {args:?}");
         // -o still writes the final message file; prompt still comes from stdin (`-`).
-        assert_eq!(args.get(o_pos + 1).map(String::as_str), Some("/tmp/out.txt"));
-        assert!(args.iter().any(|a| a == "-"), "prompt must be read from stdin");
+        assert_eq!(
+            args.get(o_pos + 1).map(String::as_str),
+            Some("/tmp/out.txt")
+        );
+        assert!(
+            args.iter().any(|a| a == "-"),
+            "prompt must be read from stdin"
+        );
     }
 }

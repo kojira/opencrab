@@ -368,10 +368,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/web/send",
             post(api::web::send_web_message),
         )
-        .route(
-            "/api/agents/{id}/web/stream",
-            get(api::web::web_stream),
-        )
+        .route("/api/agents/{id}/web/stream", get(api::web::web_stream))
         // 許可コマンド管理
         .route(
             "/api/agents/{id}/allowed-commands",

@@ -37,7 +37,10 @@ pub async fn send_web_message(
     Path(id): Path<String>,
     Json(req): Json<SendWebMessageRequest>,
 ) -> Json<serde_json::Value> {
-    let user_id = req.user_id.clone().unwrap_or_else(|| "web-user".to_string());
+    let user_id = req
+        .user_id
+        .clone()
+        .unwrap_or_else(|| "web-user".to_string());
     let session_id = web_session_id(&id, &req.conversation_id);
 
     // 1. 認可: 既存 REST（agents_messages）に倣い trusted_users から caller を導出する。
@@ -90,7 +93,9 @@ pub async fn send_web_message(
                 metadata_json: None,
             };
             if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
-                return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}));
+                return Json(
+                    serde_json::json!({"error": format!("Failed to create session: {e}")}),
+                );
             }
         }
     }
@@ -129,15 +134,7 @@ pub async fn send_web_message(
     let response = gateway
         .run_serialized(
             &session_id,
-            run_and_deliver(
-                &state,
-                &gateway,
-                &id,
-                &session_id,
-                caller,
-                None,
-                "direct",
-            ),
+            run_and_deliver(&state, &gateway, &id, &session_id, caller, None, "direct"),
         )
         .await;
 

@@ -23,7 +23,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::{broadcast, Mutex};
 
-use opencrab_actions::{CallerIdentity, RunRequest, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
+use opencrab_actions::{
+    CallerIdentity, RunRequest, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+};
 
 use crate::process;
 use crate::AppState;

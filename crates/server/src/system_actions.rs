@@ -850,7 +850,10 @@ impl GatewayActions for SystemGatewayActions {
             // どちらも同一の共有 registry を叩くため二重にキャンセルされることはない。
             "cancel_subtask" => {
                 let inner_handles = self.inner.as_ref().is_some_and(|inner| {
-                    inner.definitions().iter().any(|d| d.name == "cancel_subtask")
+                    inner
+                        .definitions()
+                        .iter()
+                        .any(|d| d.name == "cancel_subtask")
                 });
                 if inner_handles {
                     // inner が cancel_subtask を実装している（Discord）→ 委譲。
@@ -935,7 +938,10 @@ mod tests {
             .iter()
             .filter(|d| d.name == "nostr_generate_key")
             .count();
-        assert_eq!(count, 1, "nostr_generate_key must be defined exactly once in own_definitions");
+        assert_eq!(
+            count, 1,
+            "nostr_generate_key must be defined exactly once in own_definitions"
+        );
     }
 
     /// Regression guard for #161: cancel_subtask must be an *own* (server-neutral)
@@ -958,7 +964,10 @@ mod tests {
         );
         // own に丁度1件（dedup の source が一意）。
         let count = defs.iter().filter(|d| d.name == "cancel_subtask").count();
-        assert_eq!(count, 1, "cancel_subtask must be defined exactly once in own_definitions");
+        assert_eq!(
+            count, 1,
+            "cancel_subtask must be defined exactly once in own_definitions"
+        );
     }
 
     /// #161: Discord のような inner が cancel_subtask を定義しても、merge 後は
@@ -1001,10 +1010,15 @@ mod tests {
         }
 
         let inner: Arc<dyn GatewayActions> = Arc::new(InnerWithCancel);
-        let merged =
-            SystemGatewayActions::merge_definitions(SystemGatewayActions::own_definitions(), Some(&inner));
+        let merged = SystemGatewayActions::merge_definitions(
+            SystemGatewayActions::own_definitions(),
+            Some(&inner),
+        );
         let cancel_count = merged.iter().filter(|d| d.name == "cancel_subtask").count();
-        assert_eq!(cancel_count, 1, "merge 後も cancel_subtask は1件（own 優先で dedup）");
+        assert_eq!(
+            cancel_count, 1,
+            "merge 後も cancel_subtask は1件（own 優先で dedup）"
+        );
         // inner 固有ツールは通す（dedup は同名のみ）。
         assert!(merged.iter().any(|d| d.name == "discord_only_tool"));
     }

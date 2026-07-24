@@ -17,7 +17,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use opencrab_core::{ActionExecutor, ActionResult, DispatchOutcome, FunctionDefinition, ToolDispatcher};
+use opencrab_core::{
+    ActionExecutor, ActionResult, DispatchOutcome, FunctionDefinition, ToolDispatcher,
+};
 use tokio::task::AbortHandle;
 
 /// subtask が settle（決着）したときの種別。
@@ -301,14 +303,10 @@ impl ActionExecutor for SharedExecutor {
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
-    let mut set: HashSet<String> = [
-        "spawn_subtask",
-        "cancel_subtask",
-        "report_progress",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut set: HashSet<String> = ["spawn_subtask", "cancel_subtask", "report_progress"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     // Discord 配送系（bridge の DISCORD_ACTIONS と同一集合）。
     for name in crate::bridge::DISCORD_ACTIONS {
         set.insert((*name).to_string());

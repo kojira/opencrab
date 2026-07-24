@@ -85,7 +85,9 @@ fn setup() -> bool {
     // 冪等（複数テストで呼んでも安全）。`.env` の実値・機密はリポジトリに入れない。
     let _ = dotenvy::dotenv();
     if !e2e_enabled() {
-        eprintln!("[e2e skip] OPENCRAB_E2E!=1 のため skip します（有効化するには OPENCRAB_E2E=1）。");
+        eprintln!(
+            "[e2e skip] OPENCRAB_E2E!=1 のため skip します（有効化するには OPENCRAB_E2E=1）。"
+        );
         return false;
     }
     // owner の user_id はローカル固有情報なので既定値を持たない。未設定なら skip。
@@ -314,18 +316,23 @@ async fn e2e_basic_reply() {
     let conv = unique_conversation("basic");
     let session_id = web_session_id(&agent_id, &conv);
 
-    let resp = web_send(&client, &agent_id, &conv, "こんにちは。ひとことだけ挨拶を返してください。")
-        .await
-        .expect("web_send failed");
+    let resp = web_send(
+        &client,
+        &agent_id,
+        &conv,
+        "こんにちは。ひとことだけ挨拶を返してください。",
+    )
+    .await
+    .expect("web_send failed");
     eprintln!("[e2e_basic_reply] send resp: {resp}");
 
     // user speech（speaker=owner）と agent speech（speaker=agent）が両方入るまで待つ。
     let ok = poll_until(Duration::from_secs(90), || {
         let Ok(conn) = open_db() else { return false };
         let logs = fetch_session_logs(&conn, &session_id);
-        let has_user = logs
-            .iter()
-            .any(|l| l.log_type == "speech" && l.speaker_id.as_deref() == Some(owner_id_or_panic().as_str()));
+        let has_user = logs.iter().any(|l| {
+            l.log_type == "speech" && l.speaker_id.as_deref() == Some(owner_id_or_panic().as_str())
+        });
         let has_agent = logs
             .iter()
             .any(|l| l.log_type == "speech" && l.speaker_id.as_deref() == Some(agent_id.as_str()));

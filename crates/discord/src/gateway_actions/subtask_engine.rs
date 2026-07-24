@@ -622,8 +622,7 @@ impl DiscordGatewayActions {
             let log_agent_id = agent_id.clone();
             let log_session_id = sub_session_id.clone();
             sub_engine.set_log_callback(move |log: &opencrab_core::LlmCallLog| {
-                let log_row =
-                    build_subtask_llm_log_row(&log_agent_id, &log_session_id, log);
+                let log_row = build_subtask_llm_log_row(&log_agent_id, &log_session_id, log);
                 if let Ok(conn) = log_db.lock() {
                     if let Err(e) = opencrab_db::queries::insert_llm_log(&conn, &log_row) {
                         tracing::error!("Failed to insert llm_log (subtask): {e}");
@@ -1544,7 +1543,10 @@ mod tests {
         let r = sub
             .execute("nostr_generate_key", &serde_json::json!({}), &ctx)
             .await;
-        assert!(r.success, "nostr_generate_key must reach the composite gateway");
+        assert!(
+            r.success,
+            "nostr_generate_key must reach the composite gateway"
+        );
         assert_eq!(r.data.unwrap()["reached"], "nostr_generate_key");
     }
 

@@ -81,12 +81,7 @@ pub trait ToolDispatcher: Send + Sync {
     ///
     /// 実処理（`executor.execute_with_id`）は別タスクで走り、完了で
     /// `settle_completed`（DB 永続化 → sink 発火）が親セッションを resume させる。
-    fn dispatch(
-        &self,
-        tool_name: &str,
-        args: &Value,
-        tool_call_id: &str,
-    ) -> DispatchOutcome;
+    fn dispatch(&self, tool_name: &str, args: &Value, tool_call_id: &str) -> DispatchOutcome;
 }
 
 // ---------------------------------------------------------------------------
