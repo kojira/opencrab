@@ -115,7 +115,9 @@ enabled = false
 token = "${DISCORD_TOKEN}"
 guild_ids = []
 agent_ids = []           # 応答させるエージェント ID（per-agent 設定を使う場合は空でよい）
-owner_discord_id = ""    # DM に応答するオーナーの Discord ユーザー ID
+# DM に応答するオーナーの Discord ユーザー ID。環境ごとに変わるので `.env` の
+# OWNER_DISCORD_ID から渡す（未設定なら空 = オーナー無し）。
+owner_discord_id = "${OWNER_DISCORD_ID}"
 
 [gateway.cli]
 enabled = true
