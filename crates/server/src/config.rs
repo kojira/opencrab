@@ -813,6 +813,25 @@ rabomi = "1"
         assert_eq!(config.llm.default_provider, "openai");
     }
 
+    /// Regression guard for #149: shipping `config/default.toml` must keep the
+    /// codex sandbox at `read-only` so the codex CLI cannot write to the
+    /// workspace / run arbitrary builds. If someone flips it back to
+    /// `danger-full-access` this test fails.
+    #[test]
+    fn test_default_toml_codex_sandbox_is_read_only() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/default.toml");
+        let config = load_config(path).expect("shipped default.toml must load");
+        let codex = config
+            .llm
+            .providers
+            .get("codex")
+            .expect("default.toml must define a codex provider");
+        assert_eq!(
+            codex.sandbox, "read-only",
+            "codex sandbox in config/default.toml must stay read-only (regression #149)"
+        );
+    }
+
     #[test]
     fn test_build_router_empty_keys() {
         let config = LlmConfig::default();
