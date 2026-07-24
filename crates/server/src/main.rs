@@ -564,6 +564,9 @@ async fn main() -> anyhow::Result<()> {
 
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     Arc::new(dashmap::DashMap::new());
+                // ループ（auto-dispatch）と gateway_actions（cancel_subtask）が同一 registry を
+                // 共有し、auto-dispatch した subtask を停止可能にする（RFC #152 S3a / P0）。
+                let subtask_registry_for_loop = subtask_registry.clone();
                 // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
                 // gateway_actions とループで同じチャンネルを共有する必要がある。
                 let (event_tx, event_rx) = opencrab_discord::message_loop::create_event_channel();
@@ -659,6 +662,7 @@ async fn main() -> anyhow::Result<()> {
                         // enable されたエージェントはメッセージ処理時にスキップ（#40）。
                         true,
                         voice_manager,
+                        subtask_registry_for_loop,
                     )
                     .await;
                 });

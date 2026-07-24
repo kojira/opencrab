@@ -13,9 +13,11 @@
 //! - Discord 固有型（`WebhookConfig` / `DeliveryBatch` / serenity 等）は
 //!   ここには一切入れない。webhook 系は S1 で discord 側の随伴構造へ分離する。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use opencrab_core::{ActionExecutor, ActionResult, DispatchOutcome, FunctionDefinition, ToolDispatcher};
 use tokio::task::AbortHandle;
 
 /// subtask が settle（決着）したときの種別。
@@ -172,6 +174,213 @@ pub fn settle_completed(
     });
 }
 
+// ---------------------------------------------------------------------------
+// S3a: 単一ツールを subtask として実行する dispatcher（非ブロック / 全ツール自動化）
+// ---------------------------------------------------------------------------
+
+/// `Arc<dyn ActionExecutor>` を `ActionExecutor` として使えるようにする薄い委譲ラッパ。
+///
+/// `SkillEngine::new` は `Box<dyn ActionExecutor>` を取るが、S3a では同じ合成 executor
+/// を engine（inline 実行用）と `SubtaskToolDispatcher`（background 実行用）で**共有**
+/// したい。executor を 1 つの `Arc` にまとめ、engine には `Box::new(SharedExecutor(arc))`、
+/// dispatcher には `arc.clone()` を渡すことで、`nostr_generate_key` 等 server ツールを
+/// 含む合成 gateway 到達性（RFC #152 S2）を dispatch 経路でも共有する。
+pub struct SharedExecutor(pub Arc<dyn ActionExecutor>);
+
+#[async_trait::async_trait]
+impl ActionExecutor for SharedExecutor {
+    async fn execute(&self, name: &str, args: &serde_json::Value) -> ActionResult {
+        self.0.execute(name, args).await
+    }
+    async fn execute_with_id(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        tool_call_id: &str,
+    ) -> ActionResult {
+        self.0.execute_with_id(name, args, tool_call_id).await
+    }
+    fn list_tools(&self) -> Vec<FunctionDefinition> {
+        self.0.list_tools()
+    }
+}
+
+/// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツール名の集合。
+///
+/// - 制御系（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
+///   subtask ライフサイクルを操作するため background 化しない。
+/// - 配送系（Discord 送信・VC 参加/退出・peer review 依頼）: 「送る」こと自体が
+///   応答であり、background 化して完了で再注入する意味がない。
+///
+/// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
+pub fn default_non_dispatch_tools() -> HashSet<String> {
+    let mut set: HashSet<String> = [
+        "spawn_subtask",
+        "cancel_subtask",
+        "report_progress",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // Discord 配送系（bridge の DISCORD_ACTIONS と同一集合）。
+    for name in crate::bridge::DISCORD_ACTIONS {
+        set.insert((*name).to_string());
+    }
+    // TODO(#152 P2 / 別 issue): Nostr 配線時に Nostr 配送系（nostr_dm / nostr_zap /
+    // reply 等）を除外集合へ追加する。現状 Nostr は auto-dispatch 未配線のため実害なし。
+    set
+}
+
+/// 「単一ツールを background subtask として実行する」job のランタイム（RFC #152 S3a）。
+///
+/// `execute_spawn_subtask` が sub-engine（LLM ループ）を建てるのに対し、これは
+/// **指定 1 ツールを合成 executor で実行するだけ**の job。spawn / registry 登録
+/// （`SpawnedSubtask`, label=`tool(主要引数)`）/ 完了時 `settle_completed`（DB 永続化
+/// → registry 除去 → sink 発火）という中核は既存と共有し、job の中身だけ差し替える。
+///
+/// `core::ToolDispatcher` を実装し、`SkillEngine` のツール実行点から呼ばれる。
+pub struct SubtaskToolDispatcher {
+    /// dispatch したツールを実行する合成 executor（server ツールを含む）。
+    executor: Arc<dyn ActionExecutor>,
+    /// 走行中 subtask の registry（settle 時に除去 / 将来の cancel/list 用）。
+    registry: SubtaskRegistry,
+    db: opencrab_db::Db,
+    /// 完了再注入 sink（gateway 別。Discord=LoopEvent / Nostr=reply ...）。
+    sink: Arc<dyn SubtaskCompletionSink>,
+    agent_id: String,
+    parent_session_id: String,
+    /// auto-dispatch しないツール名（既定 = `default_non_dispatch_tools()`）。
+    non_dispatch: HashSet<String>,
+}
+
+impl SubtaskToolDispatcher {
+    pub fn new(
+        executor: Arc<dyn ActionExecutor>,
+        registry: SubtaskRegistry,
+        db: opencrab_db::Db,
+        sink: Arc<dyn SubtaskCompletionSink>,
+        agent_id: impl Into<String>,
+        parent_session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            executor,
+            registry,
+            db,
+            sink,
+            agent_id: agent_id.into(),
+            parent_session_id: parent_session_id.into(),
+            non_dispatch: default_non_dispatch_tools(),
+        }
+    }
+
+    /// auto-dispatch 対象外の集合を差し替える。
+    pub fn with_non_dispatch(mut self, non_dispatch: HashSet<String>) -> Self {
+        self.non_dispatch = non_dispatch;
+        self
+    }
+}
+
+/// `tool(主要引数)` 形式のラベルを組む。args が object なら最初のキーの値（scalar）を
+/// 40 文字までプレビューする。
+fn dispatch_label(tool_name: &str, args: &serde_json::Value) -> String {
+    let preview = args
+        .as_object()
+        .and_then(|m| m.values().next())
+        .map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    let preview: String = preview.chars().take(40).collect();
+    if preview.is_empty() {
+        format!("{tool_name}()")
+    } else {
+        format!("{tool_name}({preview})")
+    }
+}
+
+impl ToolDispatcher for SubtaskToolDispatcher {
+    fn should_dispatch(&self, tool_name: &str) -> bool {
+        !self.non_dispatch.contains(tool_name)
+    }
+
+    fn dispatch(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        tool_call_id: &str,
+    ) -> DispatchOutcome {
+        let subtask_id = uuid::Uuid::new_v4().to_string();
+        let sub_session_id = format!("subtask-{subtask_id}");
+        let label = dispatch_label(tool_name, args);
+
+        // 各種クローン（background タスクへムーブ）。
+        let executor = self.executor.clone();
+        let registry = self.registry.clone();
+        let db = self.db.clone();
+        let sink = self.sink.clone();
+        let agent_id = self.agent_id.clone();
+        let parent_session_id = self.parent_session_id.clone();
+        let tool_name_owned = tool_name.to_string();
+        let args_owned = args.clone();
+        let tool_call_id_owned = tool_call_id.to_string();
+        let subtask_id_task = subtask_id.clone();
+        let sub_session_id_task = sub_session_id.clone();
+
+        // 開始ゲート: 親が registry へ insert し終えるまでタスク本体を走らせない
+        // （即完了する job が親の insert より先に remove して running のままリークするのを防ぐ。
+        //  execute_spawn_subtask と同じ不変条件）。
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let join = tokio::spawn(async move {
+            let _ = start_rx.await;
+
+            // 単一ツールを合成 executor で実行する（sub-engine は建てない）。
+            let result = executor
+                .execute_with_id(&tool_name_owned, &args_owned, &tool_call_id_owned)
+                .await;
+            let exit_reason = if result.success { "completed" } else { "error" };
+            // 完了本文 = ツール結果 JSON（DB へ永続化。sink には運ばない = RFC §1.3）。
+            let result_text = serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"success":false}"#.to_string());
+
+            // 中核（gateway 非依存）: DB 永続化 → registry 除去 → sink 発火。
+            // 順序契約（DB 記録 → 通知）は settle_completed が 1 箇所で保証する。
+            settle_completed(
+                &registry,
+                &db,
+                sink.as_ref(),
+                SettleContext {
+                    parent_session_id,
+                    agent_id,
+                    subtask_id: subtask_id_task,
+                    sub_session_id: sub_session_id_task,
+                    exit_reason: exit_reason.to_string(),
+                },
+                &result_text,
+            );
+        });
+
+        // registry へ登録（開始ゲート解放の前 = insert-before-run）。
+        self.registry.insert(
+            subtask_id.clone(),
+            SpawnedSubtask {
+                abort_handle: join.abort_handle(),
+                session_id: sub_session_id,
+                parent_session_id: self.parent_session_id.clone(),
+                agent_id: self.agent_id.clone(),
+                label: label.clone(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+            },
+        );
+        // insert 完了 → タスク本体の実行を許可する。
+        let _ = start_tx.send(());
+
+        DispatchOutcome { subtask_id, label }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +492,217 @@ mod tests {
         assert_eq!(sink.logs_at_fire.load(Ordering::SeqCst), 1);
         // registry からは除去済み。
         assert!(registry.is_empty());
+    }
+
+    /// RFC #152 S3a + S2 dormant 解消の実経路実証:
+    /// dispatch した単一ツール（`nostr_generate_key`）が**合成 executor**
+    /// （`BridgedExecutor` + gateway_actions = server ツール源）で実行され、完了が
+    /// `settle_completed`（DB 永続化 → registry 除去 → sink 発火）で親セッションへ
+    /// 再注入されること。
+    #[tokio::test]
+    async fn dispatched_single_tool_runs_on_composite_executor_and_reinjects() {
+        use crate::bridge::BridgedExecutor;
+        use crate::dispatcher::ActionDispatcher;
+        use crate::traits::{ActionContext, CallerIdentity};
+        use opencrab_gateway::{
+            GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext,
+        };
+
+        // `nostr_generate_key` を提供する mock 合成 gateway（server ツール源の代役）。
+        // nsec は返さず npub/pubkey のみ返す（実装と同じく秘密は LLM へ出さない）。
+        struct MockServerGateway;
+        #[async_trait::async_trait]
+        impl GatewayActions for MockServerGateway {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                vec![GatewayActionDef {
+                    name: "nostr_generate_key".to_string(),
+                    description: "generate a nostr key".to_string(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }]
+            }
+            async fn execute(
+                &self,
+                name: &str,
+                _args: &serde_json::Value,
+                _ctx: &GatewayCallContext,
+            ) -> GatewayActionResult {
+                assert_eq!(name, "nostr_generate_key");
+                GatewayActionResult {
+                    success: true,
+                    data: Some(serde_json::json!({"npub":"npub1abc","pubkey":"deadbeef"})),
+                    error: None,
+                }
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let parent = "discord-agent-x-1-2";
+        let ctx = ActionContext {
+            caller: CallerIdentity::Agent,
+            agent_id: "agent-x".to_string(),
+            agent_name: "X".to_string(),
+            session_id: Some(parent.to_string()),
+            db: db.clone(),
+            workspace: Arc::new(ws),
+            last_metrics_id: Arc::new(Mutex::new(None)),
+            model_override: Arc::new(Mutex::new(None)),
+            current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+            runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test".to_string(),
+                active_model: None,
+                available_providers: vec![],
+                gateway: "discord".to_string(),
+            })),
+        };
+
+        // 合成 executor（gateway_actions に server ツール源）を 1 つの Arc にまとめる。
+        let executor: Arc<dyn ActionExecutor> = Arc::new(
+            BridgedExecutor::new(ActionDispatcher::new(), ctx)
+                .with_gateway_actions(Arc::new(MockServerGateway)),
+        );
+
+        let sink = Arc::new(RecordingSink::default());
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-x",
+            parent,
+        );
+
+        // dispatch 対象判定: server ツールは dispatch、制御系はしない。
+        assert!(dispatcher.should_dispatch("nostr_generate_key"));
+        assert!(!dispatcher.should_dispatch("spawn_subtask"));
+        assert!(!dispatcher.should_dispatch("discord_send"));
+
+        let outcome = dispatcher.dispatch("nostr_generate_key", &serde_json::json!({}), "tc-1");
+        assert!(outcome.label.starts_with("nostr_generate_key("));
+
+        // 完了待ち: settle_completed が registry から remove するまで。
+        for _ in 0..200 {
+            if registry.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(registry.is_empty(), "settle 後に registry から除去される");
+
+        // sink が completed で 1 回だけ発火（再注入トリガ）。
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].exit_reason, "completed");
+        assert_eq!(events[0].kind, SettleKind::Completed);
+        assert_eq!(events[0].session_id, parent);
+        drop(events);
+
+        // DB へ subtask_completed が着地し、result にツール結果（npub）を含む
+        // （resume は build_conversation_string でこれを読み直す = RFC §1.3）。
+        let conn = db.lock().unwrap();
+        let logs = opencrab_db::queries::list_recent_session_logs(&conn, parent, 10).unwrap();
+        assert!(
+            logs.iter().any(|l| {
+                l.content.contains("subtask_completed") && l.content.contains("npub1abc")
+            }),
+            "親セッションログに subtask_completed（result=npub 含む）が永続化される"
+        );
+    }
+
+    /// RFC #152 S3a / P0: auto-dispatch した subtask は**共有 registry** に載り、
+    /// その `abort_handle` で停止できること（`cancel_subtask` の認可ゲートが叩く経路）。
+    #[tokio::test]
+    async fn dispatched_subtask_is_registered_and_abortable() {
+        use crate::bridge::BridgedExecutor;
+        use crate::dispatcher::ActionDispatcher;
+        use crate::traits::{ActionContext, CallerIdentity};
+        use opencrab_gateway::{
+            GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext,
+        };
+
+        // 実行が完了しない（pending）ツールを提供する gateway。abort されるまで走り続ける。
+        struct BlockingGateway;
+        #[async_trait::async_trait]
+        impl GatewayActions for BlockingGateway {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                vec![GatewayActionDef {
+                    name: "long_running".to_string(),
+                    description: "never completes".to_string(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }]
+            }
+            async fn execute(
+                &self,
+                _name: &str,
+                _args: &serde_json::Value,
+                _ctx: &GatewayCallContext,
+            ) -> GatewayActionResult {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let parent = "discord-agent-x-1-2";
+        let ctx = ActionContext {
+            caller: CallerIdentity::Agent,
+            agent_id: "agent-x".to_string(),
+            agent_name: "X".to_string(),
+            session_id: Some(parent.to_string()),
+            db: db.clone(),
+            workspace: Arc::new(ws),
+            last_metrics_id: Arc::new(Mutex::new(None)),
+            model_override: Arc::new(Mutex::new(None)),
+            current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+            runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test".to_string(),
+                active_model: None,
+                available_providers: vec![],
+                gateway: "discord".to_string(),
+            })),
+        };
+        let executor: Arc<dyn ActionExecutor> = Arc::new(
+            BridgedExecutor::new(ActionDispatcher::new(), ctx)
+                .with_gateway_actions(Arc::new(BlockingGateway)),
+        );
+
+        let sink = Arc::new(RecordingSink::default());
+        // 共有 registry（ループと gateway_actions が共有するものの代役）。
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-x",
+            parent,
+        );
+
+        let outcome = dispatcher.dispatch("long_running", &serde_json::json!({}), "tc-1");
+
+        // 共有 registry に載っている（＝cancel_subtask から到達可能）。
+        assert!(registry.contains_key(&outcome.subtask_id));
+        let entry = registry.get(&outcome.subtask_id).unwrap();
+        assert_eq!(entry.parent_session_id, parent);
+
+        // cancel_subtask 相当: abort_handle で停止 → registry から除去。
+        entry.abort_handle.abort();
+        drop(entry);
+        registry.remove(&outcome.subtask_id);
+
+        // 完了で settle しないので sink は発火しない（aborted = 完了イベント無し）。
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(registry.is_empty());
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "abort された subtask は settle_completed を通らず sink を発火しない"
+        );
     }
 
     #[tokio::test]

@@ -47,6 +47,49 @@ pub trait ActionExecutor: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Trait: ToolDispatcher (RFC #152 S3a — 非ブロック / 全ツール自動 subtask 化)
+// ---------------------------------------------------------------------------
+
+/// 単一ツールをバックグラウンド subtask として起動したときのマーカー。
+///
+/// エンジンはこれを `{status:"spawned", subtask_id, tool, label}` の tool_result へ
+/// 写して**同ターン**でエージェントへ返す。実処理は完了時に
+/// `SubtaskCompletionSink` 経由で親セッションへ再注入される（RFC §1.3）。
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    /// 起動した subtask の ID。
+    pub subtask_id: String,
+    /// 人間可読ラベル（`tool(主要引数)`）。
+    pub label: String,
+}
+
+/// エンジンのツール実行点で「auto-dispatch 対象ツールを background subtask 化」する
+/// ためのフック（gateway 非依存）。
+///
+/// `SkillEngine` は `opencrab-actions` に依存できない（actions が core に依存する
+/// 逆向き）ため、フックの trait を core に置き、実装（executor / registry / sink を
+/// 保持する `SubtaskToolDispatcher`）は actions 側に置く。エンジンは
+/// `Arc<dyn ToolDispatcher>` を保持し、ツール呼び出しごとに問い合わせるだけ。
+pub trait ToolDispatcher: Send + Sync {
+    /// このツールを background subtask として dispatch すべきか。
+    ///
+    /// 制御系（spawn_subtask / cancel_subtask / report_progress）や配送系
+    /// （discord_send 等）は `false`（＝従来どおり同期実行）を返すことを想定する。
+    fn should_dispatch(&self, tool_name: &str) -> bool;
+
+    /// ツールを background subtask として起動し、**同期的に**マーカーを返す。
+    ///
+    /// 実処理（`executor.execute_with_id`）は別タスクで走り、完了で
+    /// `settle_completed`（DB 永続化 → sink 発火）が親セッションを resume させる。
+    fn dispatch(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        tool_call_id: &str,
+    ) -> DispatchOutcome;
+}
+
+// ---------------------------------------------------------------------------
 // Trait: LlmClient
 // ---------------------------------------------------------------------------
 

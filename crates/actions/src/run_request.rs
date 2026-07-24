@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use opencrab_gateway::GatewayActions;
 
+use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
 use crate::traits::CallerIdentity;
 
 /// 1回のエージェント応答実行の要求。
@@ -31,6 +32,14 @@ pub struct RunRequest {
     pub trigger_message_id: Option<String>,
     /// 応答テキスト確定時の即時コールバック（Discord への先行送信等）。
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// 自動 dispatch（非ブロック / RFC #152 S3a）の完了再注入 sink（gateway 別）。
+    /// Some のとき `run_agent_response` は depth0 でメインエンジンへ dispatcher を
+    /// 注入し、dispatch 対象ツールを background subtask 化する。None なら従来どおり
+    /// 全ツール inline 実行（後方互換・非破壊）。
+    pub completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
+    /// dispatch した単一ツール subtask を追跡する registry（cancel/list 用に共有）。
+    /// None のとき `run_agent_response` が run 内でフレッシュに生成する。
+    pub subtask_registry: Option<SubtaskRegistry>,
 }
 
 impl RunRequest {
@@ -57,6 +66,8 @@ impl RunRequest {
             depth: 0,
             trigger_message_id: None,
             on_response_text: None,
+            completion_sink: None,
+            subtask_registry: None,
         }
     }
 
@@ -82,6 +93,19 @@ impl RunRequest {
 
     pub fn with_on_response_text(mut self, cb: Arc<dyn Fn(String) + Send + Sync>) -> Self {
         self.on_response_text = Some(cb);
+        self
+    }
+
+    /// 非ブロック自動 dispatch（RFC #152 S3a）を有効化する。`sink` は完了再注入の
+    /// gateway 別配送口（Discord=LoopEvent / Nostr=reply ...）。`registry` は走行中
+    /// subtask の共有 registry（None なら run 内でフレッシュ生成）。
+    pub fn with_dispatch(
+        mut self,
+        registry: Option<SubtaskRegistry>,
+        sink: Arc<dyn SubtaskCompletionSink>,
+    ) -> Self {
+        self.completion_sink = Some(sink);
+        self.subtask_registry = registry;
         self
     }
 }

@@ -4,7 +4,7 @@ use anyhow::Result;
 use tracing;
 
 use super::types::{
-    ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient,
+    ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient, ToolDispatcher,
 };
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
 use opencrab_llm_types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
@@ -49,6 +49,11 @@ pub struct SkillEngine {
     /// 載せ、対応プロバイダ（chatgpt=web_search / google=url_context）がツールを
     /// 有効化する。非対応プロバイダは単に無視する。
     web_search: bool,
+    /// 自動 dispatch フック（RFC #152 S3a）。Some のとき、`should_dispatch` が真の
+    /// ツールは inline 実行せず background subtask 化し、**同ターンで**
+    /// `{status:"spawned", ...}` を tool_result として返す。engine 外（executor 経由の
+    /// 合成 runtime）から注入する。None なら従来どおり全ツールを inline 実行する。
+    tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
 }
 
 impl SkillEngine {
@@ -69,7 +74,15 @@ impl SkillEngine {
             on_tool_result: None,
             reasoning_effort: None,
             web_search: false,
+            tool_dispatcher: None,
         }
+    }
+
+    /// 自動 dispatch フックを注入する（RFC #152 S3a）。以後、`should_dispatch` が真の
+    /// ツール呼び出しは inline 実行されず background subtask 化され、同ターンで
+    /// spawned マーカーが tool_result として返る。
+    pub fn set_tool_dispatcher(&mut self, dispatcher: Arc<dyn ToolDispatcher>) {
+        self.tool_dispatcher = Some(dispatcher);
     }
 
     /// Set the per-run reasoning (thinking) effort attached to each request.
@@ -391,6 +404,46 @@ impl SkillEngine {
                     // Canonical tool-call arguments are a JSON string; parse to a
                     // Value for the executor boundary (empty object on malformed).
                     let args = tool_call.arguments_json();
+
+                    // 自動 dispatch（RFC #152 S3a・非ブロック）: dispatch 対象ツールは
+                    // inline 実行せず background subtask 化し、**同ターンで**
+                    // `{status:"spawned", ...}` を tool_result として返して継続する。
+                    // yield-mode は作らない（別ターンを与えず、エージェントは自分の
+                    // ターン資源でこの結果を見て自然文で続行する）。実処理の完了は
+                    // `SubtaskCompletionSink` 経由で親セッションを resume して再注入される。
+                    if let Some(dispatcher) = &self.tool_dispatcher {
+                        if dispatcher.should_dispatch(tool_name) {
+                            let outcome =
+                                dispatcher.dispatch(tool_name, &args, &tool_call.id);
+                            let spawned = serde_json::json!({
+                                "status": "spawned",
+                                "subtask_id": outcome.subtask_id,
+                                "tool": tool_name,
+                                "label": outcome.label,
+                            });
+                            let result_json = serde_json::to_string(&spawned)
+                                .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
+                            tracing::debug!(
+                                tool = %tool_name,
+                                subtask_id = %outcome.subtask_id,
+                                "tool auto-dispatched as background subtask"
+                            );
+                            messages.push(Message::tool(
+                                tool_call.id.clone(),
+                                result_json.clone(),
+                            ));
+                            if let Some(ref cb) = self.on_tool_result {
+                                cb(
+                                    tool_call.id.clone(),
+                                    tool_name.clone(),
+                                    result_json,
+                                    false,
+                                );
+                            }
+                            continue;
+                        }
+                    }
+
                     let result = self
                         .executor
                         .execute_with_id(tool_name, &args, &tool_call.id)
@@ -868,5 +921,137 @@ mod tests {
         assert_eq!(texts.len(), 1);
         assert_eq!(texts[0], "直接答えます");
         assert_eq!(result.response, "直接答えます");
+    }
+
+    // ---- RFC #152 S3a: 自動 dispatch（非ブロック / 全ツール subtask 化） ----
+
+    /// 記録用の最小 `ToolDispatcher`。`should_dispatch` は control 集合以外を真にし、
+    /// `dispatch` は inline 実行せずマーカーだけ返す（実処理は起こさない）。
+    struct RecordingDispatcher {
+        control: std::collections::HashSet<String>,
+        dispatched: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::ToolDispatcher for RecordingDispatcher {
+        fn should_dispatch(&self, tool_name: &str) -> bool {
+            !self.control.contains(tool_name)
+        }
+        fn dispatch(
+            &self,
+            tool_name: &str,
+            _args: &Value,
+            _tool_call_id: &str,
+        ) -> crate::DispatchOutcome {
+            self.dispatched.lock().unwrap().push(tool_name.to_string());
+            crate::DispatchOutcome {
+                subtask_id: format!("sub-for-{tool_name}"),
+                label: format!("{tool_name}(...)"),
+            }
+        }
+    }
+
+    /// dispatch 対象ツールは inline 実行（executor）されず、**同ターンで** spawned
+    /// マーカーが tool_result として返り、次イテレーションでエージェントが継続すること。
+    #[tokio::test]
+    async fn test_auto_dispatch_returns_spawned_marker_same_turn() {
+        use std::sync::{Arc, Mutex};
+
+        // 1回目: ツール呼び出し（dispatch 対象）。2回目: 最終テキスト。
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![tc("tc-1", "nostr_generate_key", serde_json::json!({}))]),
+            text_response("鍵の生成を開始しました"),
+        ]);
+        // executor が呼ばれたら記録する（dispatch 対象は呼ばれてはならない）。
+        struct SpyExecutor {
+            called: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for SpyExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.called.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let executor = SpyExecutor {
+            called: called.clone(),
+        };
+
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let dispatcher = Arc::new(RecordingDispatcher {
+            control: ["spawn_subtask", "report_progress", "cancel_subtask"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            dispatched: Mutex::new(Vec::new()),
+        });
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        // 2回目の LLM 呼び出しが見る messages を記録し、spawned マーカーの再注入を検証する。
+        let seen_tool_results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen_tool_results.clone();
+        engine.set_on_tool_result(move |_id, name, json, _err| {
+            seen_clone.lock().unwrap().push(format!("{name}:{json}"));
+        });
+
+        let result = engine
+            .run("system", "鍵を作って", "test-model")
+            .await
+            .unwrap();
+
+        // dispatch されたので executor は呼ばれない。
+        assert!(
+            called.lock().unwrap().is_empty(),
+            "dispatch 対象ツールは inline executor で実行されてはならない"
+        );
+        // dispatcher.dispatch が1回呼ばれた。
+        assert_eq!(dispatcher.dispatched.lock().unwrap().as_slice(), &["nostr_generate_key"]);
+        // tool_result は spawned マーカー（同ターン返却）。
+        let seen = seen_tool_results.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("\"status\":\"spawned\""));
+        assert!(seen[0].contains("\"subtask_id\":\"sub-for-nostr_generate_key\""));
+        // エージェントは自分のターンで継続して最終応答を出す。
+        assert_eq!(result.response, "鍵の生成を開始しました");
+        assert_eq!(result.iterations, 2);
+    }
+
+    /// control 系ツール（report_progress 等）は dispatch されず inline 実行される。
+    #[tokio::test]
+    async fn test_control_tools_not_dispatched() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
+            text_response("done"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+            },
+        );
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        // test_tool を control 扱いにして dispatch させない。
+        let dispatcher = Arc::new(RecordingDispatcher {
+            control: ["test_tool"].iter().map(|s| s.to_string()).collect(),
+            dispatched: Mutex::new(Vec::new()),
+        });
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let result = engine.run("system", "go", "test-model").await.unwrap();
+        // dispatch されず inline 実行された（dispatched は空）。
+        assert!(dispatcher.dispatched.lock().unwrap().is_empty());
+        assert_eq!(result.tool_calls_made, 1);
+        assert_eq!(result.response, "done");
     }
 }

@@ -30,8 +30,8 @@ pub mod workspace;
 // Re-export primary types for convenience.
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
 pub use engine::{
-    ActionExecutor, ActionResult, ChatRequest, ChatResponse, EngineResult, FunctionDefinition,
-    LlmCallLog, LlmClient, SkillEngine, ToolCall,
+    ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchOutcome, EngineResult,
+    FunctionDefinition, LlmCallLog, LlmClient, SkillEngine, ToolCall, ToolDispatcher,
 };
 pub use heartbeat::{heartbeat_loop, HeartbeatCallback, HeartbeatConfig, HeartbeatDecision};
 pub use identity::Identity;

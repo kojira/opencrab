@@ -57,6 +57,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         gateway.start().await?;
 
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        // ループ（auto-dispatch）と gateway_actions（cancel_subtask）で同一 registry を
+        // 共有し、auto-dispatch した subtask を停止可能にする（RFC #152 S3a / P0）。
+        let subtask_registry_for_loop = subtask_registry.clone();
 
         // Create event channel for A2UI and other async events
         let (event_tx, event_rx) = crate::message_loop::create_event_channel();
@@ -98,6 +101,7 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 false,
                 // VC 対話 v1 は共有（TOML）ゲートウェイのみ対応。per-agent 側は未配線。
                 None,
+                subtask_registry_for_loop,
             )
             .await;
         });

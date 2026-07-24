@@ -24,7 +24,8 @@ pub use bridge::{
 pub use dispatcher::ActionDispatcher;
 pub use run_request::RunRequest;
 pub use subtask::{
-    SettleKind, SpawnedSubtask, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+    default_non_dispatch_tools, SettleKind, SharedExecutor, SpawnedSubtask,
+    SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled, SubtaskToolDispatcher,
 };
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;

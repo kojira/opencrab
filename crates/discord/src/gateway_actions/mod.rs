@@ -28,6 +28,7 @@ mod webhook;
 
 pub(crate) use peer_review::record_peer_review_reply;
 pub use subtask_engine::spawn_activity_tool_event_sink;
+pub(crate) use subtask_engine::DiscordCompletionSink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 

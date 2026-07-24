@@ -128,6 +128,14 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          You work asynchronously. When you call a tool, the result arrives later — and you\n\
          are called again with the result in the conversation history.\n\
          \n\
+         Some tools return `{{status:\"spawned\", subtask_id: ...}}` immediately instead of a\n\
+         final result. This means the work has started in the background and its result will\n\
+         arrive later in a separate turn (as a `[subtask_completed: ...]` entry). When you\n\
+         see a `spawned` result:\n\
+         - Briefly tell the user you've started the task (do not claim it is finished)\n\
+         - Do NOT call the same tool again for the same request — it is already running\n\
+         - Do NOT invent or guess the result — wait for the actual completion turn\n\
+         \n\
          When you see `[subtask_completed: ...]` in the conversation:\n\
          - It means a tool you called has finished, and it's your turn again\n\
          - Check what the result contains\n\
@@ -1395,8 +1403,38 @@ pub async fn run_agent_response(
 
     // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
     let max_iterations = if depth == 0 { 30 } else { usize::MAX };
-    let mut engine =
-        opencrab_core::SkillEngine::new(Box::new(llm_client), Box::new(executor), max_iterations);
+
+    // 合成 executor を 1 つの Arc にまとめ、engine（inline 実行）と dispatcher
+    // （background 実行 = RFC #152 S3a 非ブロック）で共有する。dispatch した単一
+    // ツールは同じ合成 executor（SystemGatewayActions を含む＝nostr_generate_key
+    // 等 server ツール到達可）で実行される（S2 到達性の実経路化）。
+    let executor: std::sync::Arc<dyn opencrab_core::ActionExecutor> = std::sync::Arc::new(executor);
+    let mut engine = opencrab_core::SkillEngine::new(
+        Box::new(llm_client),
+        Box::new(opencrab_actions::SharedExecutor(executor.clone())),
+        max_iterations,
+    );
+
+    // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
+    // されているときだけ有効化する。sink 未配線（REST 一発呼び等）や sub-engine は
+    // 従来どおり全ツール inline 実行（後方互換・非破壊）。
+    if depth == 0 {
+        if let Some(sink) = req.completion_sink.clone() {
+            let registry = req
+                .subtask_registry
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
+            let dispatcher = opencrab_actions::SubtaskToolDispatcher::new(
+                executor.clone(),
+                registry,
+                state.db.clone(),
+                sink,
+                agent_id.to_string(),
+                session_id.to_string(),
+            );
+            engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
+        }
+    }
 
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
     if let Some(effort) = &agent_reasoning_effort {
