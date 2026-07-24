@@ -2,6 +2,8 @@
 dashboard/target/
 dashboard/Cargo.lock
 **/*.rs.bk
+# 設定などのローカルバックアップは追跡しない
+*.bak
 *.pdb
 .DS_Store
 data/
