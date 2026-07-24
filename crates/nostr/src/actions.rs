@@ -150,14 +150,15 @@ impl GatewayActions for NostrGatewayActions {
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
                 description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
-                              npub1 以降・bech32 文字のみ・最大3文字）を指定できる。返るのは公開情報の \
+                              npub1 以降・bech32 文字のみ。長さ上限は無いが、長いほど探索に時間が \
+                              かかる＝3文字程度で即時、それ以上は徐々に長くなる）を指定できる。返るのは公開情報の \
                               npub / pubkey のみ。**秘密鍵(nsec)はサーバ内に安全に保存され、あなた（LLM）\
                               には渡されない**（セキュリティのため）。これは新規 keypair を作るユーティリティ\
                               であり、あなた自身の送信用アイデンティティは変更しない。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（最大3文字, 例: cat）。"}
+                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（長さ上限なし。長いほど探索に時間がかかる, 例: cat）。"}
                     }
                 }),
             },

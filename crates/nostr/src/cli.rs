@@ -20,16 +20,20 @@ use crate::config::NostrConfig;
 
 const DEFAULT_NOSTARO_PATH: &str = "nostaro";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
-/// vanity 生成は探索に時間がかかるため、通常操作より長い timeout を使う。
-const DEFAULT_VANITY_TIMEOUT_SECS: u64 = 60;
+/// vanity 生成は prefix が長いと探索に非常に時間がかかる。上限を撤廃したため、
+/// timeout で強制的に打ち切らず「実質無制限」にし、停止はキャンセル
+/// （`CancellationToken` → タスク abort → future drop → `kill_on_drop` で nostaro を
+/// kill）に委ねる。24h は保険（プロセス取り残し防止）で、通常はここに到達しない。
+const DEFAULT_VANITY_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
 /// vanity prefix に使える文字集合（bech32 小文字。npub の `npub1` 以降に現れる）。
 /// `1` `b` `i` `o` は bech32 に存在しないので除外される。
 const BECH32_CHARSET: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
-/// vanity prefix の最大長。探索コストは 32^len で指数的に増える。同期リクエストを
-/// 長くブロックしないよう保守的に 3 文字（期待 ~32^3≈3万試行＝ほぼ即時）に制限する。
-/// より長い vanity は nostaro を直接使う。
+/// vanity prefix の「目安」長。探索コストは 32^len で指数的に増える（32^3≈3万試行＝
+/// ほぼ即時、それ以上は急激に伸びる）。**もはや上限として強制はしない**（ツール実行が
+/// 内部 spawn + キャンセル可能になったため、長い prefix でも途中停止できる）。
+/// 呼び出し側が UI/説明で目安を示すための参考値として残す。
 pub const MAX_VANITY_PREFIX_LEN: usize = 3;
 
 /// 新規生成された鍵。nsec は DB に保存し config へ materialize する。
@@ -44,12 +48,8 @@ pub struct GeneratedKey {
 /// vanity prefix を検証する（bech32 charset・長さ）。呼び出し前に弾いて、
 /// 無効 prefix で nostaro を無駄に spawn したり探索が終わらないのを防ぐ。
 pub fn validate_vanity_prefix(prefix: &str) -> Result<()> {
-    if prefix.chars().count() > MAX_VANITY_PREFIX_LEN {
-        anyhow::bail!(
-            "vanity prefix が長すぎます（最大 {} 文字）。長い prefix は探索が終わりません",
-            MAX_VANITY_PREFIX_LEN
-        );
-    }
+    // 長さ上限は撤廃した（探索は内部 spawn + キャンセルで途中停止できる）。
+    // charset 検証だけは残す（bech32 に無い文字は永遠に一致せず探索が終わらないため）。
     for c in prefix.chars() {
         if !BECH32_CHARSET.contains(c) {
             anyhow::bail!(
@@ -99,6 +99,15 @@ impl NostaroCli {
     pub fn with_timeout_secs(mut self, secs: u64) -> Self {
         if secs > 0 {
             self.timeout = Duration::from_secs(secs);
+        }
+        self
+    }
+
+    /// vanity 生成の timeout（秒）を設定する。0 は無視（既定を保つ）。
+    /// 探索を強制打ち切りしたくない場合は大きな値を渡し、停止はキャンセルに委ねる。
+    pub fn with_vanity_timeout_secs(mut self, secs: u64) -> Self {
+        if secs > 0 {
+            self.vanity_timeout = Duration::from_secs(secs);
         }
         self
     }
@@ -540,8 +549,11 @@ mod tests {
         assert!(validate_vanity_prefix("1ac").is_err());
         assert!(validate_vanity_prefix("bob").is_err());
         assert!(validate_vanity_prefix("cab").is_err()); // 'b' は bech32 に無い
-                                                         // 長すぎ（探索が終わらない）は拒否（cap=3）。
-        assert!(validate_vanity_prefix("cafe").is_err());
+                                                         // 長さ上限は撤廃した。bech32 charset のみで構成される長い prefix は OK
+                                                         // （探索は内部 spawn + キャンセルで途中停止できる）。
+        assert!(validate_vanity_prefix("cafe").is_ok()); // c,a,f,e は全て bech32 charset
+        assert!(validate_vanity_prefix("crab").is_err()); // 'b' は bech32 に無い
+        assert!(validate_vanity_prefix("qqqqqqqq").is_ok()); // 長くても charset OK なら通す
     }
 
     #[test]
