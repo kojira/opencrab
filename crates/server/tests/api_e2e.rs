@@ -34,6 +34,7 @@ fn create_test_app() -> Router {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
     };
     create_router(state)
 }
@@ -719,6 +720,7 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
     };
     let app = create_router(state);
     (app, db, mock)
@@ -1615,6 +1617,7 @@ fn state_with_consolidation(
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
     }
 }
 

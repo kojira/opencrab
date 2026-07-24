@@ -493,6 +493,7 @@ async fn main() -> anyhow::Result<()> {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: Arc::new(opencrab_server::web_gateway::WebGateway::new()),
     };
 
     #[cfg(feature = "discord")]
