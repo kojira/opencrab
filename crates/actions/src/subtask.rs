@@ -174,6 +174,93 @@ pub fn settle_completed(
     });
 }
 
+/// `cancel_subtask` の結果種別（gateway 非依存 / #161）。
+///
+/// gateway 別の戻り値整形（`GatewayActionResult` の success/error）は呼び出し側が
+/// 行う。ここでは「停止した / 不在 / 権限なし」の三値だけを型で返し、認可と registry
+/// 操作を 1 箇所（`cancel_subtask`）に集約する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// 対象を abort し registry から除去した。
+    Cancelled,
+    /// 対象 `subtask_id` が registry に存在しない。
+    NotFound,
+    /// 存在するが呼び出し元に権限が無い（親セッション/owner 以外）。
+    Unauthorized,
+}
+
+/// 走行中 subtask を停止する中核処理（gateway 非依存 / #161）。
+///
+/// web / Nostr / REST など Discord 以外の transport でも `cancel_subtask` ツールを
+/// 露出できるよう、認可・abort・registry 除去・親ログ記録を server-neutral 層へ
+/// 集約する。Discord の `execute_cancel_subtask` と同じ契約を踏襲する。
+///
+/// 認可（#64）: `is_owner` なら常に許可。そうでなければ「呼び出し元セッションが親
+/// （`parent_session_id == caller_session_id`）」の subtask のみ停止できる（自己/兄弟/
+/// 他セッションのものは不可）。`remove_if` は shard ロック下で述語を評価するため、
+/// 「認可確認 → 削除」の間にエントリが差し替わる TOCTOU が無い（所有権フィールドは
+/// insert 後不変）。
+///
+/// 成功時: `abort_handle.abort()` → registry から除去 → 親セッションログへ
+/// `tool_cancelled` を best-effort 記録する。abort により background closure は
+/// 中断されるため `settle_completed`（完了 sink 発火）は通らない = 完了イベント無し。
+pub fn cancel_subtask(
+    registry: &SubtaskRegistry,
+    db: &opencrab_db::Db,
+    subtask_id: &str,
+    is_owner: bool,
+    caller_session_id: Option<&str>,
+) -> CancelOutcome {
+    let authorized = |s: &SpawnedSubtask| -> bool {
+        if is_owner {
+            return true;
+        }
+        matches!(caller_session_id, Some(cs) if !cs.is_empty() && s.parent_session_id == cs)
+    };
+
+    match registry.remove_if(subtask_id, |_, s| authorized(s)) {
+        Some((_, subtask)) => {
+            subtask.abort_handle.abort();
+
+            // 親セッションログへ subtask_cancelled を best-effort 記録する。
+            let parent = subtask.parent_session_id.clone();
+            if !parent.is_empty() {
+                if let Ok(conn) = db.lock() {
+                    let log = opencrab_db::queries::SessionLogRow {
+                        id: None,
+                        agent_id: subtask.agent_id.clone(),
+                        session_id: parent,
+                        log_type: "tool_cancelled".to_string(),
+                        content: format!("subtask '{}' was cancelled", subtask.label),
+                        speaker_id: None,
+                        turn_number: None,
+                        metadata_json: Some(
+                            serde_json::json!({
+                                "tool_call_id": subtask_id,
+                                "tool_name": "spawn_subtask",
+                                "label": subtask.label,
+                            })
+                            .to_string(),
+                        ),
+                        created_at: None,
+                    };
+                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+                }
+            }
+            CancelOutcome::Cancelled
+        }
+        None => {
+            // remove_if の None は「不在」と「権限なし」の両方。所有権フィールドは
+            // insert 後不変なので contains_key で区別できる。
+            if registry.contains_key(subtask_id) {
+                CancelOutcome::Unauthorized
+            } else {
+                CancelOutcome::NotFound
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // S3a: 単一ツールを subtask として実行する dispatcher（非ブロック / 全ツール自動化）
 // ---------------------------------------------------------------------------
@@ -703,6 +790,106 @@ mod tests {
             sink.events.lock().unwrap().is_empty(),
             "abort された subtask は settle_completed を通らず sink を発火しない"
         );
+    }
+
+    /// 与えた parent_session_id で「即完了しない」fake subtask を registry へ登録し、
+    /// その JoinHandle を返す（abort されたか検証するため）。
+    fn insert_fake_subtask(
+        registry: &SubtaskRegistry,
+        subtask_id: &str,
+        parent_session_id: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        registry.insert(
+            subtask_id.to_string(),
+            SpawnedSubtask {
+                abort_handle: handle.abort_handle(),
+                session_id: format!("subtask-{subtask_id}"),
+                parent_session_id: parent_session_id.to_string(),
+                agent_id: "agent-a".to_string(),
+                label: "long job".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+            },
+        );
+        handle
+    }
+
+    /// #161: 親セッションからの cancel_subtask は abort + 除去し、親ログへ
+    /// tool_cancelled を記録する。
+    #[tokio::test]
+    async fn cancel_subtask_parent_session_aborts_and_removes() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let handle = insert_fake_subtask(&registry, "st-1", parent);
+
+        let outcome = cancel_subtask(&registry, &db, "st-1", false, Some(parent));
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+        assert!(registry.is_empty(), "cancel 後に registry から除去される");
+        // 実際に abort された。
+        assert!(handle.await.unwrap_err().is_cancelled());
+        // 親セッションログに tool_cancelled が着地する。
+        let conn = db.lock().unwrap();
+        let logs = opencrab_db::queries::list_recent_session_logs(&conn, parent, 10).unwrap();
+        assert!(
+            logs.iter().any(|l| l.log_type == "tool_cancelled"),
+            "親ログに tool_cancelled が記録される"
+        );
+    }
+
+    /// #161: 存在しない subtask_id は NotFound（権限拒否ではない）。
+    #[tokio::test]
+    async fn cancel_subtask_missing_is_not_found() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let outcome = cancel_subtask(&registry, &db, "nope", false, Some("web-a-c1"));
+        assert_eq!(outcome, CancelOutcome::NotFound);
+    }
+
+    /// #161: 他セッションが親の subtask は Unauthorized で拒否し、abort もしない。
+    #[tokio::test]
+    async fn cancel_subtask_foreign_session_unauthorized() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let handle = insert_fake_subtask(&registry, "st-x", "web-other-c9");
+
+        let outcome = cancel_subtask(&registry, &db, "st-x", false, Some("web-me-c1"));
+        assert_eq!(outcome, CancelOutcome::Unauthorized);
+        // 拒否したのでエントリは残り、abort もされない。
+        assert!(registry.contains_key("st-x"));
+        handle.abort(); // テスト後始末。
+    }
+
+    /// #161: session 文脈が無い agent は他人の subtask を停止できない（Unauthorized）。
+    #[tokio::test]
+    async fn cancel_subtask_no_session_unauthorized() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let handle = insert_fake_subtask(&registry, "st-ns", "web-other-c9");
+
+        let outcome = cancel_subtask(&registry, &db, "st-ns", false, None);
+        assert_eq!(outcome, CancelOutcome::Unauthorized);
+        assert!(registry.contains_key("st-ns"));
+        handle.abort();
+    }
+
+    /// #161: owner は無関係なセッション文脈からでも停止できる。
+    #[tokio::test]
+    async fn cancel_subtask_owner_bypasses_session_check() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let handle = insert_fake_subtask(&registry, "st-any", "web-other-c9");
+
+        let outcome = cancel_subtask(&registry, &db, "st-any", true, None);
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+        assert!(registry.is_empty());
+        assert!(handle.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
