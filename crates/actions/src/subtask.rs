@@ -94,6 +94,84 @@ pub struct SpawnedSubtask {
 /// 現 `opencrab_discord::SubtaskRegistry` と同型だが gateway 非依存。
 pub type SubtaskRegistry = Arc<DashMap<String, SpawnedSubtask>>;
 
+/// `settle_completed` が subtask_completed ログの記録と sink 発火に用いる文脈。
+///
+/// 本文（result）は別引数で受け取る。DB へは本文込みで永続化するが、sink へ渡す
+/// `SubtaskSettled` には本文を載せない（RFC §1.3）。
+pub struct SettleContext {
+    /// 親セッション ID（resume 対象。空なら DB 記録をスキップ）。
+    pub parent_session_id: String,
+    /// 実行エージェント ID。
+    pub agent_id: String,
+    /// settle した subtask の ID。
+    pub subtask_id: String,
+    /// subtask 自身のセッション ID（ログの session フィールドに載せる）。
+    pub sub_session_id: String,
+    /// 決着理由（completed / error / timeout / stopped_by_limit）。
+    pub exit_reason: String,
+}
+
+/// subtask 完了の中核処理（gateway 非依存 / RFC §4 S1）。
+///
+/// この関数が **二重回答の順序契約**（RFC §6 受け入れ基準）を 1 箇所で保証する:
+///   1. `subtask_completed` を親セッションログ（DB）へ永続化する（本文 `result_text`
+///      を含む）。
+///   2. registry から当該 subtask を除去する。
+///   3. sink を発火する（本文は運ばない。手順 1 で DB 永続化済み）。
+///
+/// **DB 永続化（1）は必ず sink 発火（3）より前**に行う。sink 実装（例: Discord）は
+/// この後に親セッションを resume し、`build_conversation_string` が DB から会話を
+/// 再構築するため、完了ログが先に着地している必要がある。
+///
+/// gateway 固有の後始末（webhook terminal 送出・progress debounce 除去・随伴構造の
+/// 掃除など）は本関数の呼び出し**前**に呼び出し側で行う。それらは DB 永続化とも
+/// sink 発火とも順序依存が無い（webhook は非同期配送・別マップ）ため、載せ替えても
+/// 観測可能な挙動は変わらない。
+pub fn settle_completed(
+    registry: &SubtaskRegistry,
+    db: &opencrab_db::Db,
+    sink: &dyn SubtaskCompletionSink,
+    ctx: SettleContext,
+    result_text: &str,
+) {
+    // 1. 完了本文を DB へ永続化する（sink 発火より前 = 順序契約）。
+    if !ctx.parent_session_id.is_empty() {
+        if let Ok(conn) = db.lock() {
+            let log = opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: ctx.agent_id.clone(),
+                session_id: ctx.parent_session_id.clone(),
+                log_type: "system".to_string(),
+                content: serde_json::json!({
+                    "type": "subtask_completed",
+                    "subtask_id": ctx.subtask_id,
+                    "session_id": ctx.sub_session_id,
+                    "exit_reason": ctx.exit_reason,
+                    "result": result_text,
+                })
+                .to_string(),
+                speaker_id: None,
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            };
+            opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+        }
+    }
+
+    // 2. registry から除去する。
+    registry.remove(&ctx.subtask_id);
+
+    // 3. sink を発火する（本文は運ばない = DB 永続化済み）。
+    sink.on_subtask_settled(SubtaskSettled {
+        session_id: ctx.parent_session_id,
+        agent_id: ctx.agent_id,
+        subtask_id: ctx.subtask_id,
+        exit_reason: ctx.exit_reason,
+        kind: SettleKind::Completed,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +213,76 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].subtask_id, "sub-2");
         assert_eq!(events[0].kind, SettleKind::Progress);
+    }
+
+    /// `settle_completed` は sink 発火の時点で subtask_completed ログが DB に
+    /// 着地済みであること（順序契約 = RFC §6 受け入れ基準）を検証する。
+    #[tokio::test]
+    async fn settle_completed_persists_before_sink() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+
+        // 完了本体の代わりに、即完了しない pending task で abort_handle を用意。
+        let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        registry.insert(
+            "sub-1".to_string(),
+            SpawnedSubtask {
+                abort_handle: handle,
+                session_id: "subtask-sub-1".to_string(),
+                parent_session_id: "discord-a-1-2".to_string(),
+                agent_id: "agent-a".to_string(),
+                label: "job".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+            },
+        );
+
+        // sink は発火された瞬間の DB 上の subtask_completed ログ件数を記録する。
+        struct OrderingSink {
+            db: opencrab_db::Db,
+            session_id: String,
+            logs_at_fire: AtomicI64,
+        }
+        impl SubtaskCompletionSink for OrderingSink {
+            fn on_subtask_settled(&self, _ev: SubtaskSettled) {
+                let conn = self.db.lock().unwrap();
+                let n: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
+                        [&self.session_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                self.logs_at_fire.store(n, Ordering::SeqCst);
+            }
+        }
+        let sink = OrderingSink {
+            db: db.clone(),
+            session_id: "discord-a-1-2".to_string(),
+            logs_at_fire: AtomicI64::new(-1),
+        };
+
+        settle_completed(
+            &registry,
+            &db,
+            &sink,
+            SettleContext {
+                parent_session_id: "discord-a-1-2".to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "sub-1".to_string(),
+                sub_session_id: "subtask-sub-1".to_string(),
+                exit_reason: "completed".to_string(),
+            },
+            "the result body",
+        );
+
+        // sink 発火時点で完了ログが既に DB にあった（DB 永続化 → 通知）。
+        assert_eq!(sink.logs_at_fire.load(Ordering::SeqCst), 1);
+        // registry からは除去済み。
+        assert!(registry.is_empty());
     }
 
     #[tokio::test]

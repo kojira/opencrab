@@ -12,7 +12,6 @@ use dashmap::DashMap;
 use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use serde_json::json;
 use serenity::http::Http;
-use tokio::task::AbortHandle;
 
 use crate::message_loop::LoopEvent;
 use crate::PendingInteractionRegistry;
@@ -32,24 +31,25 @@ pub use subtask_engine::spawn_activity_tool_event_sink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 
-/// A running subtask tracked by the registry.
-#[derive(Clone)]
-pub struct SpawnedSubtask {
-    pub abort_handle: AbortHandle,
-    pub session_id: String,
-    pub parent_session_id: String,
-    pub spawned_at: String,
-    pub agent_id: String,
+/// 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設した
+/// （RFC #152 S1）。Discord 固有の webhook 系（`webhook` / `webhook_tx`）は
+/// `SpawnedSubtask` に載せず、`SubtaskWebhooks` 随伴マップへ分離する（下記）。
+pub use opencrab_actions::subtask::{SpawnedSubtask, SubtaskRegistry};
+
+/// `SpawnedSubtask` から分離した Discord 固有の webhook 随伴データ（RFC §1.5）。
+///
+/// actions の gateway 非依存 `SpawnedSubtask` には webhook を載せられないため、
+/// subtask_id をキーに別マップで保持する。ライフサイクルは registry と同期させる
+/// （spawn 時に insert、完了/キャンセル時に remove）。
+pub(crate) struct DiscordSubtaskWebhook {
     /// Subtask lifecycle webhook config (spawn 時指定)。None なら通知無効。
     pub webhook: Option<WebhookConfig>,
     /// 同一 run の lifecycle delivery を直列化する sender。
     pub webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>>,
-    /// duration 算出用の起動時刻。
-    pub started_instant: std::time::Instant,
 }
 
-/// Registry of active subtasks keyed by subtask_id.
-pub type SubtaskRegistry = Arc<DashMap<String, SpawnedSubtask>>;
+/// subtask_id → Discord webhook 随伴データのマップ。registry と対で共有する。
+pub(crate) type SubtaskWebhooks = Arc<DashMap<String, DiscordSubtaskWebhook>>;
 
 struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
 
@@ -85,6 +85,9 @@ pub struct DiscordGatewayActions {
     /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
     workspace_base: String,
     subtask_registry: SubtaskRegistry,
+    /// registry と対の Discord webhook 随伴マップ（RFC #152 S1: webhook 分離）。
+    /// registry と同じく Clone で共有され、sub-engine 用クローンからも同じ実体を見る。
+    subtask_webhooks: SubtaskWebhooks,
     /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
     webhook_client: reqwest::Client,
     /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook。
@@ -121,6 +124,7 @@ impl DiscordGatewayActions {
             default_model,
             workspace_base,
             subtask_registry,
+            subtask_webhooks: Arc::new(DashMap::new()),
             webhook_client: reqwest::Client::new(),
             default_subtask_webhook,
             pending_interaction_registry: None,
@@ -1093,11 +1097,10 @@ mod tests {
                 abort_handle: handle.abort_handle(),
                 session_id: session_id.to_string(),
                 parent_session_id: parent_session_id.to_string(),
-                spawned_at: "2026-01-01T00:00:00Z".to_string(),
                 agent_id: "test-agent".to_string(),
-                webhook: None,
-                webhook_tx: None,
-                started_instant: std::time::Instant::now(),
+                label: "test".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
             },
         );
         handle

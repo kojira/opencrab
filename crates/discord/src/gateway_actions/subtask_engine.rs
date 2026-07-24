@@ -11,8 +11,11 @@ use super::subtask_webhook::reject;
 use super::webhook::{
     self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
 };
-use super::{ArcLlmClient, DiscordGatewayActions, SpawnedSubtask};
+use super::{ArcLlmClient, DiscordGatewayActions, DiscordSubtaskWebhook, SpawnedSubtask};
 use crate::message_loop::{parse_discord_session, LoopEvent};
+use opencrab_actions::subtask::{
+    settle_completed, SettleContext, SettleKind, SubtaskCompletionSink, SubtaskSettled,
+};
 
 /// sub-engine に許可する gateway アクションの許可リスト（#63）。
 ///
@@ -75,50 +78,56 @@ impl opencrab_gateway::GatewayActions for SubEngineGatewayActions {
     }
 }
 
-/// parent_session_id から routing 情報を復元して SubtaskCompleted イベントを送る（#39）。
+/// `SubtaskCompletionSink` の Discord 実装（RFC #152 S1）。
 ///
-/// 旧 completion_registry はメッセージごとに完了クロージャを登録していたが、
-/// クロージャのキャプチャ値は全て session_id（`discord-{agent}-{guild}-{channel}`）から
-/// 導出可能だったため、パーサ + イベントループへの直接送信に置き換えた。
-/// event_tx 未設定（イベントループの無い構築、例: 一発呼びの API 経路）や
-/// Discord 形式でない session は、旧実装でレジストリ未登録だった場合と同様に
-/// 発火しない（warn のみ）。
-fn send_subtask_completed_event(
-    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
-    parent_session_id: &str,
-    agent_id: &str,
-    subtask_id: String,
-    result: String,
-    exit_reason: String,
-) {
-    let Some(tx) = event_tx else {
-        tracing::debug!(
-            session_id = %parent_session_id,
-            "subtask completion: event_tx not configured, skipping main-engine notification"
-        );
-        return;
-    };
-    let Some((guild_id, channel_id)) = parse_discord_session(parent_session_id) else {
-        // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
-        // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
-        tracing::debug!(
-            session_id = %parent_session_id,
-            "subtask completion: parent session is not a discord session, skipping main-engine notification"
-        );
-        return;
-    };
-    let is_dm = guild_id.is_empty();
-    let _ = tx.send(LoopEvent::SubtaskCompleted {
-        session_id: parent_session_id.to_string(),
-        agent_id: agent_id.to_string(),
-        subtask_id,
-        result,
-        exit_reason,
-        channel_id,
-        channel_id_str: channel_id.to_string(),
-        guild_id,
-        is_dm,
-    });
+/// 旧 `send_subtask_completed_event`（LoopEvent 直依存）を置換する。runtime
+/// （actions 側 `settle_completed` / progress debounce）は `Arc<dyn
+/// SubtaskCompletionSink>` としてこれを呼ぶだけで、`LoopEvent` を知らない。
+/// `parse_discord_session` / `LoopEvent` は Discord に閉じたままここに残す。
+///
+/// parent_session_id から routing 情報を復元して `LoopEvent::SubtaskCompleted` を送る
+/// （#39）。session_id（`discord-{agent}-{guild}-{channel}`）から導出できるため、
+/// クロージャの登録は不要。event_tx 未設定（イベントループの無い構築、例: 一発呼びの
+/// API 経路）や Discord 形式でない session は、旧実装で未登録だった場合と同様に発火
+/// しない（debug のみ）。
+pub(crate) struct DiscordCompletionSink {
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
+}
+
+impl SubtaskCompletionSink for DiscordCompletionSink {
+    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        let Some(tx) = &self.event_tx else {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                "subtask completion: event_tx not configured, skipping main-engine notification"
+            );
+            return;
+        };
+        let Some((guild_id, channel_id)) = parse_discord_session(&ev.session_id) else {
+            // 非 Discord の親セッション（heartbeat-* / subtask-* のネスト等）は正常系。
+            // 旧レジストリ実装でも未登録で発火しなかったため、debug に留める。
+            tracing::debug!(
+                session_id = %ev.session_id,
+                "subtask completion: parent session is not a discord session, skipping main-engine notification"
+            );
+            return;
+        };
+        let is_dm = guild_id.is_empty();
+        let _ = tx.send(LoopEvent::SubtaskCompleted {
+            session_id: ev.session_id,
+            agent_id: ev.agent_id,
+            subtask_id: ev.subtask_id,
+            // 本文は運ばない。完了本文は DB（session_logs）へ永続化済みで、再注入は
+            // `build_conversation_string` が DB から読み直す（`process_subtask_completed`
+            // の引数は `_result` = 未使用。RFC §1.3）。
+            result: String::new(),
+            exit_reason: ev.exit_reason,
+            channel_id,
+            channel_id_str: channel_id.to_string(),
+            guild_id,
+            is_dm,
+        });
+    }
 }
 
 impl DiscordGatewayActions {
@@ -545,8 +554,13 @@ impl DiscordGatewayActions {
         let subtask_id_clone = subtask_id.clone();
         let sub_session_id_clone = sub_session_id.clone();
         let agent_id_clone = agent_id.clone();
-        let event_tx_clone = self.event_tx.clone();
+        // 完了通知は sink 経由（LoopEvent 直依存を置換）。event_tx から Discord 実装を
+        // 組み立て、runtime 中核 `settle_completed` へ `&dyn` として渡す。
+        let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(DiscordCompletionSink {
+            event_tx: self.event_tx.clone(),
+        });
         let subtask_registry_clone = self.subtask_registry.clone();
+        let subtask_webhooks_clone = self.subtask_webhooks.clone();
         let progress_debounce_clone = self.progress_debounce.clone();
         let default_model_clone = effective_model.clone();
         let webhook_clone = webhook.clone();
@@ -607,30 +621,9 @@ impl DiscordGatewayActions {
                 Err(_) => ("timeout".to_string(), "Subtask timed out.".to_string()),
             };
 
-            // Write subtask_completed to parent session log.
-            if !parent_session_clone.is_empty() {
-                if let Ok(conn) = db_clone.lock() {
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: agent_id_clone.clone(),
-                        session_id: parent_session_clone.clone(),
-                        log_type: "system".to_string(),
-                        content: serde_json::json!({
-                            "type": "subtask_completed",
-                            "subtask_id": subtask_id_clone,
-                            "session_id": sub_session_id_clone,
-                            "exit_reason": exit_reason,
-                            "result": result_text,
-                        })
-                        .to_string(),
-                        speaker_id: None,
-                        turn_number: None,
-                        metadata_json: None,
-                        created_at: None,
-                    };
-                    opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                }
-            }
+            // --- gateway 固有の後始末（DB 永続化 / sink 発火の前に済ませる。RFC #152
+            //     S1: これらは DB 永続化とも sink 発火とも順序依存が無い＝webhook は
+            //     非同期配送・別マップ。載せ替えても観測挙動は不変）。---
 
             // Emit terminal lifecycle webhook (completed / failed / timed_out).
             if let (Some(cfg), Some(tx)) = (&webhook_clone, &webhook_tx_clone) {
@@ -651,9 +644,6 @@ impl DiscordGatewayActions {
                 }
             }
 
-            // Remove from registry.
-            subtask_registry_clone.remove(&subtask_id_clone);
-
             // 保留中の progress デバウンスを無効化する。エントリが消えると、まだ
             // sleep 中のデバウンスタスクは is_latest=false 扱いになり発火しない。
             // これが無いと、終了イベントの後に遅延 progress（0〜3秒窓）が届いて
@@ -662,14 +652,24 @@ impl DiscordGatewayActions {
             // progress は advisory であり次の report_progress で再アームされる）。
             progress_debounce_clone.remove(&parent_session_clone);
 
-            // メインエンジンへの完了通知（イベントループへ直接送信）。
-            send_subtask_completed_event(
-                event_tx_clone.as_ref(),
-                &parent_session_clone,
-                &agent_id_clone,
-                subtask_id_clone,
-                result_text,
-                exit_reason,
+            // webhook 随伴データを registry と対で除去する。
+            subtask_webhooks_clone.remove(&subtask_id_clone);
+
+            // --- 中核（gateway 非依存）: DB へ subtask_completed を永続化 → registry
+            //     除去 → sink 発火。順序契約（DB 記録 → 通知）は settle_completed が
+            //     1 箇所で保証する（RFC §6 受け入れ基準）。sink は本文を運ばない。---
+            settle_completed(
+                &subtask_registry_clone,
+                &db_clone,
+                sink.as_ref(),
+                SettleContext {
+                    parent_session_id: parent_session_clone,
+                    agent_id: agent_id_clone,
+                    subtask_id: subtask_id_clone,
+                    sub_session_id: sub_session_id_clone,
+                    exit_reason,
+                },
+                &result_text,
             );
         });
 
@@ -680,11 +680,20 @@ impl DiscordGatewayActions {
                 abort_handle,
                 session_id: sub_session_id.clone(),
                 parent_session_id: parent_session_id.clone(),
-                spawned_at: spawned_at.clone(),
                 agent_id: agent_id.clone(),
-                webhook: webhook.clone(),
-                webhook_tx: webhook_tx.clone(),
-                started_instant,
+                label: label.clone(),
+                started_at: started_instant,
+                // Discord は返信先を parent_session_id から parse_discord_session で
+                // 復元する（DiscordCompletionSink）ため、reply_target は未使用。
+                reply_target: None,
+            },
+        );
+        // webhook 系（Discord 固有）は registry と対の随伴マップへ分離する（RFC §1.5）。
+        self.subtask_webhooks.insert(
+            subtask_id.clone(),
+            DiscordSubtaskWebhook {
+                webhook,
+                webhook_tx,
             },
         );
 
@@ -744,20 +753,23 @@ impl DiscordGatewayActions {
 
                 // Emit aborted lifecycle webhook. アボートで spawned closure は
                 // 中断されるため terminal completed/failed は来ない → ここが唯一の終端。
-                if let (Some(cfg), Some(tx)) = (&subtask.webhook, &subtask.webhook_tx) {
-                    if cfg.wants("aborted") {
-                        let duration_ms = subtask.started_instant.elapsed().as_millis() as u64;
-                        let msg = webhook::build_terminal_message(
-                            "aborted",
-                            &subtask_id,
-                            &subtask.session_id,
-                            Some(duration_ms),
-                            "cancelled by request",
-                        );
-                        let _ = tx.send(DeliveryBatch {
-                            url: cfg.url.clone(),
-                            messages: vec![msg],
-                        });
+                // webhook 系は registry と対の随伴マップから引く（RFC §1.5）。
+                if let Some((_, wh)) = self.subtask_webhooks.remove(&subtask_id) {
+                    if let (Some(cfg), Some(tx)) = (&wh.webhook, &wh.webhook_tx) {
+                        if cfg.wants("aborted") {
+                            let duration_ms = subtask.started_at.elapsed().as_millis() as u64;
+                            let msg = webhook::build_terminal_message(
+                                "aborted",
+                                &subtask_id,
+                                &subtask.session_id,
+                                Some(duration_ms),
+                                "cancelled by request",
+                            );
+                            let _ = tx.send(DeliveryBatch {
+                                url: cfg.url.clone(),
+                                messages: vec![msg],
+                            });
+                        }
                     }
                 }
 
@@ -921,17 +933,20 @@ impl DiscordGatewayActions {
         }
 
         if let Some((resolved_subtask_id, subtask)) = &subtask_entry {
-            if let (Some(cfg), Some(tx)) = (&subtask.webhook, &subtask.webhook_tx) {
-                if cfg.wants("progress") {
-                    let msg = webhook::build_progress_message(
-                        resolved_subtask_id,
-                        &subtask.session_id,
-                        &message,
-                    );
-                    let _ = tx.send(DeliveryBatch {
-                        url: cfg.url.clone(),
-                        messages: vec![msg],
-                    });
+            // webhook 系は registry と対の随伴マップから引く（RFC §1.5）。
+            if let Some(wh) = self.subtask_webhooks.get(resolved_subtask_id) {
+                if let (Some(cfg), Some(tx)) = (&wh.webhook, &wh.webhook_tx) {
+                    if cfg.wants("progress") {
+                        let msg = webhook::build_progress_message(
+                            resolved_subtask_id,
+                            &subtask.session_id,
+                            &message,
+                        );
+                        let _ = tx.send(DeliveryBatch {
+                            url: cfg.url.clone(),
+                            messages: vec![msg],
+                        });
+                    }
                 }
             }
         }
@@ -948,12 +963,15 @@ impl DiscordGatewayActions {
             *gen += 1;
             *gen
         };
-        let event_tx_clone = self.event_tx.clone();
+        // 完了通知と同じ sink 経由で進捗トリガを送る（LoopEvent 直依存を置換）。
+        // 進捗本文は上で親セッションログ（DB）へ永続化済みのため、sink には運ばない。
+        let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(DiscordCompletionSink {
+            event_tx: self.event_tx.clone(),
+        });
         let progress_debounce_clone = self.progress_debounce.clone();
         let parent_session_clone = parent_session_id.clone();
         let subtask_id_clone = subtask_id.clone();
         let agent_id_clone = agent_id.clone();
-        let message_clone = message.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             // 自分より後に report_progress が来ていたら（世代が進んでいたら）発火しない。
@@ -965,14 +983,13 @@ impl DiscordGatewayActions {
                 return;
             }
             progress_debounce_clone.remove(&parent_session_clone);
-            send_subtask_completed_event(
-                event_tx_clone.as_ref(),
-                &parent_session_clone,
-                &agent_id_clone,
-                subtask_id_clone,
-                message_clone,
-                "progress".to_string(),
-            );
+            sink.on_subtask_settled(SubtaskSettled {
+                session_id: parent_session_clone,
+                agent_id: agent_id_clone,
+                subtask_id: subtask_id_clone,
+                exit_reason: "progress".to_string(),
+                kind: SettleKind::Progress,
+            });
         });
 
         GatewayActionResult {
