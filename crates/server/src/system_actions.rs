@@ -12,6 +12,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opencrab_actions::{
+    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SubtaskRegistry, REJECTION_CODE_PREFIX,
+};
 use opencrab_gateway::{
     GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
 };
@@ -25,11 +28,24 @@ pub struct SystemGatewayActions {
     state: AppState,
     /// transport 固有の gateway（Discord/Nostr 等）。自分が扱わないツールを委譲する。
     inner: Option<Arc<dyn GatewayActions>>,
+    /// auto-dispatch した走行中 subtask の共有 registry（#161）。web/Nostr/REST でも
+    /// `cancel_subtask` を露出するため server-neutral 層に配線する。`run_agent_response`
+    /// が dispatcher へ渡すものと同一 Arc（Discord では gateway_actions の registry とも
+    /// 同一）。`None` の場合は走行中 subtask が無く cancel は not found を返す。
+    subtask_registry: Option<SubtaskRegistry>,
 }
 
 impl SystemGatewayActions {
-    pub fn new(state: AppState, inner: Option<Arc<dyn GatewayActions>>) -> Self {
-        Self { state, inner }
+    pub fn new(
+        state: AppState,
+        inner: Option<Arc<dyn GatewayActions>>,
+        subtask_registry: Option<SubtaskRegistry>,
+    ) -> Self {
+        Self {
+            state,
+            inner,
+            subtask_registry,
+        }
     }
 
     /// 本ツール源が直接提供するツール定義。
@@ -212,6 +228,24 @@ impl SystemGatewayActions {
                     }
                 }),
             },
+            // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
+            // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
+            // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
+            // owner 限定）は共有 registry を引く実体（cancel_subtask）が担う。
+            GatewayActionDef {
+                name: "cancel_subtask".to_string(),
+                description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "subtask_id": {
+                            "type": "string",
+                            "description": "キャンセルするサブタスクのID（subtask_spawnedイベントから取得）"
+                        }
+                    },
+                    "required": ["subtask_id"]
+                }),
+            },
         ]
     }
 
@@ -251,6 +285,40 @@ impl SystemGatewayActions {
                 Err(e) => err(format!("鍵は生成しましたが保存に失敗しました: {e}")),
             },
             Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
+        }
+    }
+
+    /// 実行中 subtask の停止（#161）。共有 `SubtaskRegistry` を引き、認可（親セッション/
+    /// owner 限定）・abort・除去・親ログ記録を server-neutral の `cancel_subtask` に委ねる。
+    /// registry 未配線（`None`）や不在は not found を返す。権限なしは REJECTION_CODE_PREFIX
+    /// を付けて拒否として通知する（Discord 実装と同契約）。
+    fn cancel_subtask(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        let Some(subtask_id) = args.get("subtask_id").and_then(|v| v.as_str()) else {
+            return err("cancel_subtask: 'subtask_id' is required".to_string());
+        };
+        let Some(registry) = self.subtask_registry.as_ref() else {
+            // dispatch 未配線（走行中 subtask を追跡していない）→ 不在扱い。
+            return err(format!("cancel_subtask: subtask '{subtask_id}' not found"));
+        };
+        let is_owner = ctx.caller == GatewayCaller::Owner;
+        match neutral_cancel_subtask(
+            registry,
+            &self.state.db,
+            subtask_id,
+            is_owner,
+            ctx.session_id.as_deref(),
+        ) {
+            CancelOutcome::Cancelled => GatewayActionResult {
+                success: true,
+                data: Some(json!({ "cancelled": true, "subtask_id": subtask_id })),
+                error: None,
+            },
+            CancelOutcome::NotFound => {
+                err(format!("cancel_subtask: subtask '{subtask_id}' not found"))
+            }
+            CancelOutcome::Unauthorized => err(format!(
+                "{REJECTION_CODE_PREFIX}cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
+            )),
         }
     }
 
@@ -731,23 +799,34 @@ fn err(msg: String) -> GatewayActionResult {
     }
 }
 
-#[async_trait]
-impl GatewayActions for SystemGatewayActions {
-    fn definitions(&self) -> Vec<GatewayActionDef> {
-        let mut defs = Self::own_definitions();
-        if let Some(inner) = &self.inner {
-            // own と同名のツールは重複させない（own を優先）。nostr watch ループ稼働時は
-            // inner=NostrGatewayActions も nostr_generate_key を定義するため、ここで
-            // dedup しないとツール一覧に同名が2つ並ぶ（provider が拒否しうる）。
+impl SystemGatewayActions {
+    /// own 定義と inner 定義を name で dedup してマージする（own 優先）。
+    ///
+    /// nostr watch ループ稼働時は inner=NostrGatewayActions も nostr_generate_key を、
+    /// Discord では inner が cancel_subtask を定義するため、ここで dedup しないと
+    /// ツール一覧に同名が2つ並ぶ（provider が拒否しうる）。`definitions()` の実体を
+    /// 静的関数に切り出し、AppState 無しで dedup 契約を単体テストできるようにする（#161）。
+    fn merge_definitions(
+        mut own: Vec<GatewayActionDef>,
+        inner: Option<&Arc<dyn GatewayActions>>,
+    ) -> Vec<GatewayActionDef> {
+        if let Some(inner) = inner {
             let own_names: std::collections::HashSet<String> =
-                defs.iter().map(|d| d.name.clone()).collect();
+                own.iter().map(|d| d.name.clone()).collect();
             for d in inner.definitions() {
                 if !own_names.contains(&d.name) {
-                    defs.push(d);
+                    own.push(d);
                 }
             }
         }
-        defs
+        own
+    }
+}
+
+#[async_trait]
+impl GatewayActions for SystemGatewayActions {
+    fn definitions(&self) -> Vec<GatewayActionDef> {
+        Self::merge_definitions(Self::own_definitions(), self.inner.as_ref())
     }
 
     async fn execute(
@@ -764,6 +843,22 @@ impl GatewayActions for SystemGatewayActions {
             "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
             // bootstrap 鍵生成（鍵未設定でも露出）。inner より先に own が処理する。
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
+            // subtask 停止（#161）。transport 固有 gateway（Discord）が cancel_subtask を
+            // 実装しているなら、その完全な後始末（aborted webhook 送出・session theme から
+            // の task_description 解決）を保つため inner へ委譲する。実装していない
+            // transport（web/Nostr/REST）では own が共有 registry を引いて停止する。
+            // どちらも同一の共有 registry を叩くため二重にキャンセルされることはない。
+            "cancel_subtask" => {
+                let inner_handles = self.inner.as_ref().is_some_and(|inner| {
+                    inner.definitions().iter().any(|d| d.name == "cancel_subtask")
+                });
+                if inner_handles {
+                    // inner が cancel_subtask を実装している（Discord）→ 委譲。
+                    self.inner.as_ref().unwrap().execute(name, args, ctx).await
+                } else {
+                    self.cancel_subtask(args, ctx)
+                }
+            }
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
@@ -841,5 +936,76 @@ mod tests {
             .filter(|d| d.name == "nostr_generate_key")
             .count();
         assert_eq!(count, 1, "nostr_generate_key must be defined exactly once in own_definitions");
+    }
+
+    /// Regression guard for #161: cancel_subtask must be an *own* (server-neutral)
+    /// definition so web / Nostr / REST — not just Discord — expose the tool to
+    /// stop auto-dispatched subtasks. If it is removed from own_definitions the
+    /// tool disappears on every non-Discord transport again — that is the bug this
+    /// guards against.
+    #[test]
+    fn cancel_subtask_is_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "cancel_subtask")
+            .expect("cancel_subtask must be an own (server-neutral) definition (#161)");
+        // subtask_id は必須。
+        let required = d.parameters["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|v| v == "subtask_id"),
+            "cancel_subtask must require subtask_id"
+        );
+        // own に丁度1件（dedup の source が一意）。
+        let count = defs.iter().filter(|d| d.name == "cancel_subtask").count();
+        assert_eq!(count, 1, "cancel_subtask must be defined exactly once in own_definitions");
+    }
+
+    /// #161: Discord のような inner が cancel_subtask を定義しても、merge 後は
+    /// own の1件だけが残る（providers は同名重複を拒否しうる）。merge_definitions を
+    /// 直接叩くことで AppState 無しに実コードの dedup 契約を検証する。
+    #[test]
+    fn merge_definitions_dedups_cancel_subtask_from_inner() {
+        use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
+
+        /// cancel_subtask と固有ツールを定義する Discord 風 inner モック。
+        struct InnerWithCancel;
+        #[async_trait]
+        impl GatewayActions for InnerWithCancel {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                vec![
+                    GatewayActionDef {
+                        name: "cancel_subtask".to_string(),
+                        description: "discord cancel".to_string(),
+                        parameters: json!({"type": "object"}),
+                    },
+                    GatewayActionDef {
+                        name: "discord_only_tool".to_string(),
+                        description: "x".to_string(),
+                        parameters: json!({"type": "object"}),
+                    },
+                ]
+            }
+            async fn execute(
+                &self,
+                _name: &str,
+                _args: &Value,
+                _ctx: &GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: None,
+                    error: None,
+                }
+            }
+        }
+
+        let inner: Arc<dyn GatewayActions> = Arc::new(InnerWithCancel);
+        let merged =
+            SystemGatewayActions::merge_definitions(SystemGatewayActions::own_definitions(), Some(&inner));
+        let cancel_count = merged.iter().filter(|d| d.name == "cancel_subtask").count();
+        assert_eq!(cancel_count, 1, "merge 後も cancel_subtask は1件（own 優先で dedup）");
+        // inner 固有ツールは通す（dedup は同名のみ）。
+        assert!(merged.iter().any(|d| d.name == "discord_only_tool"));
     }
 }

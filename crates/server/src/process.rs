@@ -1363,9 +1363,13 @@ pub async fn run_agent_response(
         // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
         // 供給する。既存 gateway（Discord/Nostr）は inner として委譲される（composite）。
         // owner 限定ツールは bridge の OWNER_ONLY_ACTIONS が可視性/実行を強制する。
+        // 共有 registry を neutral 層の cancel_subtask（#161）へ配線する。dispatcher が
+        // 使う registry と同一 Arc を渡すことで、auto-dispatch された subtask を
+        // cancel_subtask で停止できる（Discord では gateway_actions の registry とも同一）。
         let system_actions = std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
             state.clone(),
             req.gateway_actions,
+            req.subtask_registry.clone(),
         ));
         let bridged = bridged.with_gateway_actions(system_actions);
         // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
