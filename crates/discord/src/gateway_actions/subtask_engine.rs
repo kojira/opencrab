@@ -539,6 +539,81 @@ impl DiscordGatewayActions {
             }
         }
 
+        // sub-engine の LLM 呼び出しも llm_logs に記録する（#148: depth0 メインは
+        // server 側 set_llm_log_callback で記録するが、sub-engine は未配線でトークン計上が
+        // 漏れていた）。opencrab-server の private 関数は使えないため、depth0 実装
+        // （crates/server/src/process.rs:853-924）と列名/型を一致させて同等ロジックを
+        // インラインする。trigger_message_id は subtask には無いので None。
+        {
+            let log_db = self.db.clone();
+            let log_agent_id = agent_id.clone();
+            let log_session_id = sub_session_id.clone();
+            sub_engine.set_log_callback(move |log: &opencrab_core::LlmCallLog| {
+                let (prompt_tokens, completion_tokens, total_tokens) = log
+                    .response
+                    .as_ref()
+                    .map(|r| &r.usage)
+                    .map(|u| {
+                        (
+                            Some(u.prompt_tokens as i64),
+                            Some(u.completion_tokens as i64),
+                            Some(u.total_tokens as i64),
+                        )
+                    })
+                    .unwrap_or((None, None, None));
+
+                let cache_read_tokens = log
+                    .response
+                    .as_ref()
+                    .map(|r| &r.usage)
+                    .map(|u| u.cache_read_input_tokens as i64);
+                let cache_creation_tokens = log
+                    .response
+                    .as_ref()
+                    .map(|r| &r.usage)
+                    .map(|u| u.cache_creation_input_tokens as i64);
+
+                let response_str = log
+                    .response
+                    .as_ref()
+                    .map(|r| serde_json::to_string(r).unwrap_or_default())
+                    .unwrap_or_default();
+
+                let log_row = opencrab_db::queries::LlmLogRow {
+                    id: Uuid::new_v4().to_string(),
+                    agent_id: log_agent_id.clone(),
+                    session_id: Some(log_session_id.clone()),
+                    model: Some(log.request.model.clone()),
+                    prompt: serde_json::to_string(&log.request).unwrap_or_default(),
+                    response: response_str,
+                    tool_calls: log
+                        .response
+                        .as_ref()
+                        .and_then(|r| r.first_message())
+                        .and_then(|m| m.tool_calls.as_ref())
+                        .filter(|tc| !tc.is_empty())
+                        .and_then(|tc| serde_json::to_string(tc).ok()),
+                    latency_ms: Some(log.latency_ms),
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    error_code: log.error_str.as_ref().map(|_| "error".to_string()),
+                    error_body: log.error_str.clone(),
+                    requested_at: Some(log.requested_at.clone()),
+                    trigger_message_id: None,
+                    is_bot_iteration: log.is_bot_iteration,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Ok(conn) = log_db.lock() {
+                    if let Err(e) = opencrab_db::queries::insert_llm_log(&conn, &log_row) {
+                        tracing::error!("Failed to insert llm_log (subtask): {e}");
+                    }
+                }
+            });
+        }
+
         // エージェントの personality と instructions を DB から取得
         let (agent_personality, agent_instructions) = {
             let conn = self.db.lock().unwrap();

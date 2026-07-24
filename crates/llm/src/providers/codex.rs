@@ -203,7 +203,13 @@ impl LlmProvider for CodexProvider {
             .as_deref()
             .or(self.reasoning_effort.as_deref());
         let mut cmd = self.build_base_command(model, request.agent_id.as_deref(), effort);
-        cmd.arg("-o")
+        // `--json` で stdout に JSONL イベント（turn.completed 等）を出させ、usage を
+        // 取得する（#148: 非ストリーミング経路は従来 --json 未指定で usage が全ゼロだった）。
+        // 最終メッセージ本文の取得方法は変えない: 引き続き `-o` ファイルから読む
+        // （--json と -o は直交する: --json は stdout 形式、-o は最終メッセージ書き出しで、
+        // 併用しても -o ファイルは書かれる）。usage 取得のためだけに --json を併用する。
+        cmd.arg("--json")
+            .arg("-o")
             .arg(&output_path)
             // Read prompt from stdin to avoid ARG_MAX limits and /proc exposure.
             .arg("-")
