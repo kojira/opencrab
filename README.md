@@ -232,6 +232,12 @@ cargo test -p opencrab-core     #  8 tests
 
 # Run E2E API tests
 cargo test -p opencrab-server
+
+# Local-only E2E harness (NOT for CI). Drives a running server over HTTP/SSE with a
+# real LLM to verify tool dispatch / cancellation end-to-end. Gated by OPENCRAB_E2E=1.
+# Prereqs: local server running (./dev.sh restart) + ~/.codex/auth.json authenticated.
+cp .env.example .env   # adjust values if needed (no secrets committed)
+OPENCRAB_E2E=1 cargo test -p opencrab-server --test e2e_local -- --ignored --nocapture
 ```
 
 ## Tech Stack

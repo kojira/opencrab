@@ -46,6 +46,8 @@ tempfile = { workspace = true }
 tower = { workspace = true }
 http-body-util = "0.1"
 hyper = "1"
+# ローカル専用 E2E ハーネス（tests/e2e_local.rs）が稼働中サーバを HTTP/SSE で叩くため。
+reqwest = { workspace = true }
 
 [lints]
 workspace = true
