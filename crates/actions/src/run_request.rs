@@ -40,6 +40,11 @@ pub struct RunRequest {
     /// dispatch した単一ツール subtask を追跡する registry（cancel/list 用に共有）。
     /// None のとき `run_agent_response` が run 内でフレッシュに生成する。
     pub subtask_registry: Option<SubtaskRegistry>,
+    /// この実行を起こした inbound メッセージの返信先（gateway 不透明 token / #167）。
+    /// dispatch 有効時に `SubtaskToolDispatcher` → `SpawnedSubtask` へ引き継がれ、
+    /// settle 時に `SubtaskSettled.reply_target` として sink へ届く。session_id から
+    /// 返信先を復元できない gateway（Nostr など）用。None なら指定なし。
+    pub reply_target: Option<String>,
 }
 
 impl RunRequest {
@@ -68,6 +73,7 @@ impl RunRequest {
             on_response_text: None,
             completion_sink: None,
             subtask_registry: None,
+            reply_target: None,
         }
     }
 
@@ -106,6 +112,18 @@ impl RunRequest {
     ) -> Self {
         self.completion_sink = Some(sink);
         self.subtask_registry = registry;
+        self
+    }
+
+    /// inbound メッセージの返信先（gateway 不透明 token）を渡す（#167）。
+    ///
+    /// dispatch 有効時（`with_dispatch`）に `SubtaskToolDispatcher` へ引き継がれ、
+    /// dispatch した subtask の `SpawnedSubtask.reply_target` に載る。settle 時に
+    /// `SubtaskSettled.reply_target` として sink へ届くため、session_id から返信先を
+    /// 復元できない gateway（Nostr の event id など）でも完了を返信できる。
+    /// Discord のように session_id から復元する gateway は呼ばなくてよい。
+    pub fn with_reply_target(mut self, reply_target: impl Into<String>) -> Self {
+        self.reply_target = Some(reply_target.into());
         self
     }
 }

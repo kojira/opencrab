@@ -1105,6 +1105,8 @@ impl DiscordGatewayActions {
                 subtask_id: subtask_id_clone,
                 exit_reason: "progress".to_string(),
                 kind: SettleKind::Progress,
+                // Discord は parent_session_id から返信先を復元するため不要（#167）。
+                reply_target: None,
             });
         });
 

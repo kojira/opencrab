@@ -37,9 +37,8 @@ pub enum SettleKind {
 
 /// subtask の settle を親セッションへ通知するための最小ペイロード。
 ///
-/// 本文（result）は運搬しない（RFC §1.3）。返信ルーティング（`reply_target`）も
-/// 載せない — ランタイムが settle 時に registry から引いて sink へ渡す
-/// （RFC §3.1(4)）。ここには resume 判断に要る最小情報だけを持つ。
+/// 本文（result）は運搬しない（RFC §1.3）。ここには resume 判断と返信配送に要る
+/// 最小情報だけを持つ。
 #[derive(Debug, Clone)]
 pub struct SubtaskSettled {
     /// 親セッション ID（resume 対象）。
@@ -53,6 +52,14 @@ pub struct SubtaskSettled {
     pub exit_reason: String,
     /// 決着の種別（完了 or 進捗）。
     pub kind: SettleKind,
+    /// gateway 不透明な返信ルーティング token（#167 / RFC §3.1(4)）。
+    ///
+    /// ランタイム（`settle_completed`）が registry の `SpawnedSubtask.reply_target`
+    /// を引いて載せる。session_id から返信先を復元できない gateway（Nostr の
+    /// event id など）のための経路であり、Discord のように session_id から導出
+    /// できる sink は `None` のままでよい（無視する）。`None` は「返信配送先の
+    /// 指定なし」を意味し、sink 側の既存挙動を変えない。
+    pub reply_target: Option<String>,
 }
 
 /// subtask 完了通知の抽象（`LoopEvent` 直依存を置換する）。
@@ -120,8 +127,12 @@ pub struct SettleContext {
 /// この関数が **二重回答の順序契約**（RFC §6 受け入れ基準）を 1 箇所で保証する:
 ///   1. `subtask_completed` を親セッションログ（DB）へ永続化する（本文 `result_text`
 ///      を含む）。
-///   2. registry から当該 subtask を除去する。
-///   3. sink を発火する（本文は運ばない。手順 1 で DB 永続化済み）。
+///   2. registry から当該 subtask を除去し、**その際に取り出したエントリから**
+///      `reply_target` を読み出す（#167）。除去してから引き直すことはできない
+///      （エントリが消えているため）ので、`remove` の戻り値を使う。これは
+///      shard ロック下の 1 操作なので「読んでから消す」間の TOCTOU も無い。
+///   3. sink を発火する（本文は運ばない。手順 1 で DB 永続化済み）。`reply_target`
+///      は手順 2 で得た値を載せる。
 ///
 /// **DB 永続化（1）は必ず sink 発火（3）より前**に行う。sink 実装（例: Discord）は
 /// この後に親セッションを resume し、`build_conversation_string` が DB から会話を
@@ -163,8 +174,11 @@ pub fn settle_completed(
         }
     }
 
-    // 2. registry から除去する。
-    registry.remove(&ctx.subtask_id);
+    // 2. registry から除去し、除去したエントリから reply_target を回収する。
+    //    remove 後は引けないため、remove の戻り値から読み出す（#167）。
+    let reply_target = registry
+        .remove(&ctx.subtask_id)
+        .and_then(|(_, subtask)| subtask.reply_target);
 
     // 3. sink を発火する（本文は運ばない = DB 永続化済み）。
     sink.on_subtask_settled(SubtaskSettled {
@@ -173,6 +187,7 @@ pub fn settle_completed(
         subtask_id: ctx.subtask_id,
         exit_reason: ctx.exit_reason,
         kind: SettleKind::Completed,
+        reply_target,
     });
 }
 
@@ -336,6 +351,11 @@ pub struct SubtaskToolDispatcher {
     parent_session_id: String,
     /// auto-dispatch しないツール名（既定 = `default_non_dispatch_tools()`）。
     non_dispatch: HashSet<String>,
+    /// dispatch した subtask に付与する gateway 不透明な返信ルーティング token
+    /// （#167）。この dispatcher は 1 回の親ターンに紐づくため、inbound の返信先を
+    /// そのまま全 dispatch へ引き継ぐ。`None` なら返信配送先の指定なし（Discord は
+    /// session_id から復元するため `None` のままでよい）。
+    reply_target: Option<String>,
 }
 
 impl SubtaskToolDispatcher {
@@ -355,12 +375,22 @@ impl SubtaskToolDispatcher {
             agent_id: agent_id.into(),
             parent_session_id: parent_session_id.into(),
             non_dispatch: default_non_dispatch_tools(),
+            reply_target: None,
         }
     }
 
     /// auto-dispatch 対象外の集合を差し替える。
     pub fn with_non_dispatch(mut self, non_dispatch: HashSet<String>) -> Self {
         self.non_dispatch = non_dispatch;
+        self
+    }
+
+    /// dispatch する subtask に載せる返信ルーティング token を設定する（#167）。
+    ///
+    /// settle 時に `settle_completed` が registry から引いて `SubtaskSettled`
+    /// へ載せるため、sink は session_id に依らず返信先を得られる。
+    pub fn with_reply_target(mut self, reply_target: Option<String>) -> Self {
+        self.reply_target = reply_target;
         self
     }
 }
@@ -456,7 +486,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 agent_id: self.agent_id.clone(),
                 label: label.clone(),
                 started_at: std::time::Instant::now(),
-                reply_target: None,
+                reply_target: self.reply_target.clone(),
             },
         );
         // insert 完了 → タスク本体の実行を許可する。
@@ -492,6 +522,7 @@ mod tests {
             subtask_id: "sub-1".to_string(),
             exit_reason: "completed".to_string(),
             kind: SettleKind::Completed,
+            reply_target: None,
         });
 
         // downcast せずに検証するため、具象型で1つ生成しても振る舞いを確認できる。
@@ -502,6 +533,7 @@ mod tests {
             subtask_id: "sub-2".to_string(),
             exit_reason: "progress".to_string(),
             kind: SettleKind::Progress,
+            reply_target: None,
         });
         let events = recording.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -579,122 +611,276 @@ mod tests {
         assert!(registry.is_empty());
     }
 
-    /// RFC #152 S3a + S2 dormant 解消の実経路実証:
-    /// dispatch した単一ツール（`nostr_generate_key`）が**合成 executor**
-    /// （`BridgedExecutor` + gateway_actions = server ツール源）で実行され、完了が
-    /// `settle_completed`（DB 永続化 → registry 除去 → sink 発火）で親セッションへ
-    /// 再注入されること。
-    #[tokio::test]
-    async fn dispatched_single_tool_runs_on_composite_executor_and_reinjects() {
-        use crate::bridge::BridgedExecutor;
-        use crate::dispatcher::ActionDispatcher;
-        use crate::traits::{ActionContext, CallerIdentity};
-        use opencrab_gateway::{
-            GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext,
-        };
-
-        // `nostr_generate_key` を提供する mock 合成 gateway（server ツール源の代役）。
-        // nsec は返さず npub/pubkey のみ返す（実装と同じく秘密は LLM へ出さない）。
-        struct MockServerGateway;
-        #[async_trait::async_trait]
-        impl GatewayActions for MockServerGateway {
-            fn definitions(&self) -> Vec<GatewayActionDef> {
-                vec![GatewayActionDef {
-                    name: "nostr_generate_key".to_string(),
-                    description: "generate a nostr key".to_string(),
-                    parameters: serde_json::json!({"type":"object"}),
-                }]
-            }
-            async fn execute(
-                &self,
-                name: &str,
-                _args: &serde_json::Value,
-                _ctx: &GatewayCallContext,
-            ) -> GatewayActionResult {
-                assert_eq!(name, "nostr_generate_key");
-                GatewayActionResult {
-                    success: true,
-                    data: Some(serde_json::json!({"npub":"npub1abc","pubkey":"deadbeef"})),
-                    error: None,
-                }
-            }
-        }
+    /// 与えた `reply_target` で fake subtask を登録し、`settle_completed` を通した
+    /// ときに sink が受け取った `SubtaskSettled` を返すヘルパ。
+    ///
+    /// 「DB 永続化 → registry 除去 → sink 発火」の順序契約もここで併せて検証する
+    /// （sink 発火時点で完了ログが着地済み・registry から除去済み）。
+    async fn settle_and_capture(reply_target: Option<&str>) -> SubtaskSettled {
+        use std::sync::atomic::{AtomicI64, Ordering};
 
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
-        let dir = tempfile::TempDir::new().unwrap();
-        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
-        let parent = "discord-agent-x-1-2";
-        let ctx = ActionContext {
-            caller: CallerIdentity::Agent,
-            agent_id: "agent-x".to_string(),
-            agent_name: "X".to_string(),
-            session_id: Some(parent.to_string()),
-            db: db.clone(),
-            workspace: Arc::new(ws),
-            last_metrics_id: Arc::new(Mutex::new(None)),
-            model_override: Arc::new(Mutex::new(None)),
-            current_purpose: Arc::new(Mutex::new("conversation".to_string())),
-            runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
-                default_model: "mock:test".to_string(),
-                active_model: None,
-                available_providers: vec![],
-                gateway: "discord".to_string(),
-            })),
-        };
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "nostr-agent-a-npub1sender";
 
-        // 合成 executor（gateway_actions に server ツール源）を 1 つの Arc にまとめる。
-        let executor: Arc<dyn ActionExecutor> = Arc::new(
-            BridgedExecutor::new(ActionDispatcher::new(), ctx)
-                .with_gateway_actions(Arc::new(MockServerGateway)),
+        let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        registry.insert(
+            "sub-rt".to_string(),
+            SpawnedSubtask {
+                abort_handle: handle,
+                session_id: "subtask-sub-rt".to_string(),
+                parent_session_id: parent.to_string(),
+                agent_id: "agent-a".to_string(),
+                label: "job".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: reply_target.map(|s| s.to_string()),
+            },
         );
 
-        let sink = Arc::new(RecordingSink::default());
+        // sink 発火の瞬間に「完了ログ件数 / registry に残っているか」も記録する。
+        struct CapturingSink {
+            db: opencrab_db::Db,
+            registry: SubtaskRegistry,
+            session_id: String,
+            event: Mutex<Option<SubtaskSettled>>,
+            logs_at_fire: AtomicI64,
+            still_registered: std::sync::atomic::AtomicBool,
+        }
+        impl SubtaskCompletionSink for CapturingSink {
+            fn on_subtask_settled(&self, ev: SubtaskSettled) {
+                let n: i64 = {
+                    let conn = self.db.lock().unwrap();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
+                        [&self.session_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+                };
+                self.logs_at_fire.store(n, Ordering::SeqCst);
+                self.still_registered
+                    .store(self.registry.contains_key(&ev.subtask_id), Ordering::SeqCst);
+                *self.event.lock().unwrap() = Some(ev);
+            }
+        }
+
+        let sink = CapturingSink {
+            db: db.clone(),
+            registry: registry.clone(),
+            session_id: parent.to_string(),
+            event: Mutex::new(None),
+            logs_at_fire: AtomicI64::new(-1),
+            still_registered: std::sync::atomic::AtomicBool::new(true),
+        };
+
+        settle_completed(
+            &registry,
+            &db,
+            &sink,
+            SettleContext {
+                parent_session_id: parent.to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "sub-rt".to_string(),
+                sub_session_id: "subtask-sub-rt".to_string(),
+                exit_reason: "completed".to_string(),
+            },
+            "the result body",
+        );
+
+        // 順序契約: sink 発火時点で DB 永続化済み・registry 除去済み。
+        assert_eq!(
+            sink.logs_at_fire.load(Ordering::SeqCst),
+            1,
+            "sink 発火より前に subtask_completed が DB へ着地している"
+        );
+        assert!(
+            !sink.still_registered.load(Ordering::SeqCst),
+            "sink 発火より前に registry から除去されている"
+        );
+        assert!(registry.is_empty());
+
+        let captured = sink.event.lock().unwrap().take();
+        captured.expect("sink が発火する")
+    }
+
+    /// #167: settle 時に registry の `reply_target` を読み出して sink へ渡す。
+    /// 除去より前に回収するため、remove 後でも値が失われない。
+    #[tokio::test]
+    async fn settle_completed_passes_reply_target_to_sink() {
+        let ev = settle_and_capture(Some("nostr:note1abcdef")).await;
+        assert_eq!(ev.reply_target.as_deref(), Some("nostr:note1abcdef"));
+        assert_eq!(ev.kind, SettleKind::Completed);
+        assert_eq!(ev.subtask_id, "sub-rt");
+    }
+
+    /// #167 非退行: `reply_target` が None（Discord 経路）なら None のまま渡り、
+    /// 従来どおり session_id から返信先を復元する sink の挙動を変えない。
+    #[tokio::test]
+    async fn settle_completed_without_reply_target_yields_none() {
+        let ev = settle_and_capture(None).await;
+        assert!(ev.reply_target.is_none());
+        assert_eq!(ev.exit_reason, "completed");
+    }
+
+    /// registry に該当エントリが無い（既に cancel された等）場合も従来どおり
+    /// sink は発火し、`reply_target` は None になる。
+    #[tokio::test]
+    async fn settle_completed_missing_registry_entry_yields_none() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = RecordingSink::default();
+
+        settle_completed(
+            &registry,
+            &db,
+            &sink,
+            SettleContext {
+                parent_session_id: "web-agent-a-c1".to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "gone".to_string(),
+                sub_session_id: "subtask-gone".to_string(),
+                exit_reason: "completed".to_string(),
+            },
+            "body",
+        );
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].reply_target.is_none());
+    }
+
+    /// 単一ツールを即完了（または永久 pending）で返す最小 executor。
+    /// `SubtaskToolDispatcher` の配線検証用（合成 executor は別テストで検証済み）。
+    struct FakeExecutor {
+        pending: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ActionExecutor for FakeExecutor {
+        async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+            if self.pending {
+                std::future::pending::<()>().await;
+            }
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+            }
+        }
+        fn list_tools(&self) -> Vec<FunctionDefinition> {
+            Vec::new()
+        }
+    }
+
+    /// #167: `SubtaskToolDispatcher::with_reply_target` の値が dispatch した
+    /// subtask の `SpawnedSubtask.reply_target` に載る。
+    #[tokio::test]
+    async fn dispatcher_sets_reply_target_on_spawned_subtask() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: true });
+
         let dispatcher = SubtaskToolDispatcher::new(
             executor,
             registry.clone(),
             db.clone(),
             sink.clone(),
-            "agent-x",
-            parent,
+            "agent-a",
+            "nostr-agent-a-npub1sender",
+        )
+        .with_reply_target(Some("nostr:note1target".to_string()));
+
+        let outcome = dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+        let entry = registry.get(&outcome.subtask_id).unwrap();
+        assert_eq!(entry.reply_target.as_deref(), Some("nostr:note1target"));
+        entry.abort_handle.abort();
+        drop(entry);
+    }
+
+    /// #167 非退行: `with_reply_target` を呼ばない（Discord 経路）と従来どおり None。
+    #[tokio::test]
+    async fn dispatcher_defaults_reply_target_to_none() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: true });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            "discord-agent-a-1-2",
         );
 
-        // dispatch 対象判定: server ツールは dispatch、制御系はしない。
-        assert!(dispatcher.should_dispatch("nostr_generate_key"));
-        assert!(!dispatcher.should_dispatch("spawn_subtask"));
-        assert!(!dispatcher.should_dispatch("discord_send"));
+        let outcome = dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+        let entry = registry.get(&outcome.subtask_id).unwrap();
+        assert!(entry.reply_target.is_none());
+        entry.abort_handle.abort();
+        drop(entry);
+    }
 
-        let outcome = dispatcher.dispatch("nostr_generate_key", &serde_json::json!({}), "tc-1");
-        assert!(outcome.label.starts_with("nostr_generate_key("));
+    /// #167: `RunRequest::with_reply_target` の値が（`process.rs` と同じ配線で）
+    /// dispatcher → `SpawnedSubtask` → settle → sink まで一貫して運ばれる。
+    #[tokio::test]
+    async fn run_request_reply_target_reaches_sink_via_dispatcher() {
+        use crate::traits::CallerIdentity;
+        use crate::RunRequest;
 
-        // 完了待ち: settle_completed が registry から remove するまで。
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        // ゲートウェイ側（Nostr 等）が inbound の返信先を RunRequest に載せる。
+        let req = RunRequest::new(
+            "agent-a",
+            "A",
+            "nostr-agent-a-npub1sender",
+            "sys",
+            "conv",
+            "nostr",
+            CallerIdentity::Agent,
+        )
+        .with_reply_target("nostr:note1abcdef")
+        .with_dispatch(Some(registry.clone()), sink.clone());
+        assert_eq!(req.reply_target.as_deref(), Some("nostr:note1abcdef"));
+
+        // process.rs の dispatcher 構築と同じ配線（RunRequest → dispatcher）。
+        let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: false });
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            req.agent_id.clone(),
+            req.session_id.clone(),
+        )
+        .with_reply_target(req.reply_target.clone());
+
+        dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+
+        // settle（DB 永続化 → 除去 → sink 発火）まで待つ。
         for _ in 0..200 {
-            if registry.is_empty() {
+            if !sink.events.lock().unwrap().is_empty() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert!(registry.is_empty(), "settle 後に registry から除去される");
-
-        // sink が completed で 1 回だけ発火（再注入トリガ）。
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].exit_reason, "completed");
-        assert_eq!(events[0].kind, SettleKind::Completed);
-        assert_eq!(events[0].session_id, parent);
-        drop(events);
-
-        // DB へ subtask_completed が着地し、result にツール結果（npub）を含む
-        // （resume は build_conversation_string でこれを読み直す = RFC §1.3）。
-        let conn = db.lock().unwrap();
-        let logs = opencrab_db::queries::list_recent_session_logs(&conn, parent, 10).unwrap();
-        assert!(
-            logs.iter().any(|l| {
-                l.content.contains("subtask_completed") && l.content.contains("npub1abc")
-            }),
-            "親セッションログに subtask_completed（result=npub 含む）が永続化される"
+        assert_eq!(
+            events[0].reply_target.as_deref(),
+            Some("nostr:note1abcdef"),
+            "RunRequest の reply_target が settle 時に sink まで届く"
         );
+        assert_eq!(events[0].session_id, "nostr-agent-a-npub1sender");
     }
 
     /// RFC #152 S3a / P0: auto-dispatch した subtask は**共有 registry** に載り、

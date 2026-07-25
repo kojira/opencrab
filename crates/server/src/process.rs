@@ -1428,6 +1428,9 @@ pub async fn run_agent_response(
                 .subtask_registry
                 .clone()
                 .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
+            // inbound の返信先（gateway 不透明 token / #167）を dispatcher へ渡す。
+            // dispatch した subtask の `SpawnedSubtask.reply_target` に載り、settle 時に
+            // sink へ届く（session_id から返信先を復元できない gateway 用）。
             let dispatcher = opencrab_actions::SubtaskToolDispatcher::new(
                 executor.clone(),
                 registry,
@@ -1435,7 +1438,8 @@ pub async fn run_agent_response(
                 sink,
                 agent_id.to_string(),
                 session_id.to_string(),
-            );
+            )
+            .with_reply_target(req.reply_target.clone());
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
         }
     }
