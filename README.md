@@ -230,7 +230,7 @@ Standard skills defined in `skills/`:
 | Workspace Management | `workspace-management.skill.md` | File and directory operations within the agent workspace |
 | LLM Selection | `llm-selection.skill.md` | Dynamic model selection based on task requirements |
 | LLM Meta-Analysis | `llm-meta-analysis.skill.md` | Cross-model performance analysis and insight extraction |
-| Cursor CLI | `cursor-cli-local.skill.md` | Practical options for driving the Cursor CLI (`agent` / `cursor-agent`) via `execute_shell` |
+| Cursor CLI | `cursor-cli-local.skill.md` | Driving the Cursor CLI (`agent`) through `execute_shell`. Requires granting the command per agent via `agent_allowed_commands`; it is intentionally not in the global allowlist |
 
 ## Configuration
 
