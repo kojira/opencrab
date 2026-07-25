@@ -151,7 +151,7 @@ impl opencrab_discord::AgentRunner for AppState {
         agent_ids: &[String],
         owner_discord_id: &str,
     ) -> bool {
-        if !owner_discord_id.is_empty() && sender_id == owner_discord_id {
+        if crate::api::is_owner_id(owner_discord_id, sender_id) {
             return true;
         }
         match self.db.lock() {
@@ -166,6 +166,7 @@ impl opencrab_discord::AgentRunner for AppState {
                     any_trusted
                 } else {
                     // 信頼ユーザー登録が全く無い場合は owner のみ許可（owner 未設定なら全許可）。
+                    // owner 未設定時に全許可へ倒れる既存挙動。fail-closed への統一は #174。
                     owner_discord_id.is_empty() || sender_id == owner_discord_id
                 }
             }
@@ -175,7 +176,7 @@ impl opencrab_discord::AgentRunner for AppState {
     }
 
     fn dm_allowed(&self, sender_id: &str, agent_id: &str, owner_discord_id: &str) -> bool {
-        if !owner_discord_id.is_empty() && sender_id == owner_discord_id {
+        if crate::api::is_owner_id(owner_discord_id, sender_id) {
             return true;
         }
         match self.db.lock() {
@@ -184,6 +185,7 @@ impl opencrab_discord::AgentRunner for AppState {
                     opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
                 } else {
                     // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
+                    // owner 未設定時に全許可へ倒れる既存挙動。fail-closed への統一は #174。
                     owner_discord_id.is_empty() || sender_id == owner_discord_id
                 }
             }
@@ -197,7 +199,7 @@ impl opencrab_discord::AgentRunner for AppState {
         agent_ids: &[String],
         owner_discord_id: &str,
     ) -> opencrab_actions::CallerIdentity {
-        if !owner_discord_id.is_empty() && sender_id == owner_discord_id {
+        if crate::api::is_owner_id(owner_discord_id, sender_id) {
             return opencrab_actions::CallerIdentity::Owner;
         }
         // DB接続取得失敗時は trust_info=None（＝最小権限の Agent 扱い）。
@@ -322,5 +324,87 @@ impl opencrab_discord::AgentRunner for AppState {
             .as_ref()
             .map(|m| m.is_running(agent_id))
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrab_actions::CallerIdentity;
+    use opencrab_discord::AgentRunner;
+
+    /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件）。
+    /// `resolve_caller` の owner 判定は DB とプロバイダに依存しないので十分。
+    fn test_state() -> AppState {
+        let conn = opencrab_db::init_memory().unwrap();
+        AppState {
+            db: opencrab_db::Db::from_connection(conn),
+            llm_router: crate::SharedLlmRouter::new(opencrab_llm::router::LlmRouter::new()),
+            llm_config: Arc::new(toml::from_str("").unwrap()),
+            voice_config: Arc::new(Default::default()),
+            voice_runtime: Arc::new(std::sync::Mutex::new(None)),
+            workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+            default_model: "mock:test".to_string(),
+            tools_config: Arc::new(std::sync::RwLock::new(
+                opencrab_actions::tools::ToolsConfig::default(),
+            )),
+            compaction_ratio: 0.5,
+            evaluator: crate::config::EvaluatorConfig::default(),
+            skill_consolidation: crate::config::SkillConsolidationConfig::default(),
+            loop_restart_enabled: false,
+            index_build_inflight: Arc::new(dashmap::DashMap::new()),
+            discord_manager: None,
+            nostr_manager: None,
+            mcp_manager: None,
+        }
+    }
+
+    #[test]
+    fn resolve_caller_grants_owner_when_owner_matches() {
+        let state = test_state();
+        let caller = state.resolve_caller(
+            "123456789012345678",
+            &["agent-1".to_string()],
+            "123456789012345678",
+        );
+        assert_eq!(caller, CallerIdentity::Owner);
+    }
+
+    #[test]
+    fn resolve_caller_does_not_grant_owner_when_owner_unset_and_sender_empty() {
+        // owner 未設定（空文字）＋ 送信者 ID も空。ここで Owner に昇格しないこと。
+        let state = test_state();
+        let caller = state.resolve_caller("", &["agent-1".to_string()], "");
+        assert_eq!(caller, CallerIdentity::Agent);
+    }
+
+    #[test]
+    fn resolve_caller_does_not_grant_owner_when_owner_unset() {
+        let state = test_state();
+        let caller = state.resolve_caller("123456789012345678", &["agent-1".to_string()], "");
+        assert_eq!(caller, CallerIdentity::Agent);
+    }
+
+    #[test]
+    fn resolve_caller_treats_whitespace_only_owner_as_unset() {
+        // 空白のみの owner 設定で、空白を送るだけでは Owner にならない。
+        let state = test_state();
+        assert_eq!(
+            state.resolve_caller(" ", &["agent-1".to_string()], " "),
+            CallerIdentity::Agent
+        );
+    }
+
+    #[test]
+    fn resolve_caller_ignores_surrounding_whitespace_on_owner() {
+        let state = test_state();
+        assert_eq!(
+            state.resolve_caller(
+                "123456789012345678",
+                &["agent-1".to_string()],
+                " 123456789012345678\n"
+            ),
+            CallerIdentity::Owner
+        );
     }
 }
