@@ -513,6 +513,20 @@ async fn main() -> anyhow::Result<()> {
 
         let discord_cfg = &cfg.gateway.discord;
 
+        // owner 未設定は「無音で権限モデルが変わる」ので起動時に必ず知らせる。
+        // `.env` の OWNER_DISCORD_ID を入れ忘れると `${OWNER_DISCORD_ID}` が空文字に
+        // 展開され、設定ファイルを見ても気づけない。
+        if discord_cfg.enabled && discord_cfg.owner_discord_id.trim().is_empty() {
+            tracing::warn!(
+                "gateway.discord.owner_discord_id is empty (check OWNER_DISCORD_ID in .env). \
+                 Consequences: (1) owner-only features are unavailable because no one is \
+                 recognized as owner; (2) for agents with no trusted users registered, DMs from \
+                 ANY Discord user are accepted; (3) owner-only UI (forms/modals/buttons) skips \
+                 its operator check and is open to anyone who can see it. \
+                 Set OWNER_DISCORD_ID in production."
+            );
+        }
+
         // Fallback: config-based shared gateway (existing behavior).
         if discord_cfg.enabled && !discord_cfg.token.is_empty() {
             tracing::info!("Starting Discord gateway (config-based fallback)...");
