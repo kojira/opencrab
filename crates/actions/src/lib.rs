@@ -10,6 +10,7 @@ pub mod search;
 pub mod skill_management;
 pub mod soul;
 pub mod subtask;
+pub mod subtask_registries;
 pub mod task_ledger;
 pub mod tools;
 pub mod traits;
@@ -28,6 +29,7 @@ pub use subtask::{
     SharedExecutor, SpawnedSubtask, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
     SubtaskToolDispatcher,
 };
+pub use subtask_registries::SubtaskRegistries;
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;
 pub use traits::*;
