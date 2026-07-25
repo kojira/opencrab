@@ -109,6 +109,21 @@ export OPENROUTER_API_KEY="..."
 export DISCORD_TOKEN="..."
 ```
 
+Values that differ per environment (bot token, your Discord user ID) can also be kept
+in a `.env` file instead of `export`ing them. The server and CLI load `.env` at startup,
+and `config/default.toml` references the values as `${VAR}`:
+
+```bash
+cp .env.example .env
+# then edit .env
+```
+
+`OWNER_DISCORD_ID` is your own Discord user ID and gates owner-only behavior. **Set it
+if you use the Discord gateway**: when it is empty, nobody is recognized as owner, so
+owner-only features stop working, DMs from any user are accepted for agents that have
+no trusted users registered, and owner-only UI (forms/modals/buttons) skips its
+operator check. See [docs/discord.md](docs/discord.md) for details.
+
 ### 4. Development (recommended)
 
 ```bash
