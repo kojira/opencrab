@@ -27,6 +27,8 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# owner 未設定警告が実際に warn イベントとして出ることをテストで捕まえる。
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

@@ -20,20 +20,25 @@ pub async fn send_agent_message(
     Path(id): Path<String>,
     Json(req): Json<SendAgentMessageRequest>,
 ) -> Json<serde_json::Value> {
-    let session_id = format!("agent-msg-{}-{}", id, req.user_id);
+    // 呼び出し元 ID は入口で 1 回だけ正規化し、以降すべて（認可・セッションキー・
+    // speaker_id）で同じ値を使う。`is_owner_id` が trim して比較する一方でセッション
+    // キーだけ生値を使うと、`" <id> "` が owner にはなれるのに別セッション・別
+    // speaker_id として記録される非対称が生まれる。
+    let user_id = req.user_id.trim();
+    let session_id = format!("agent-msg-{}-{}", id, user_id);
 
     // 1. Determine caller identity from trusted_users table.
     let caller = {
         let conn = state.db.lock().unwrap();
-        match opencrab_db::queries::get_trusted_user(&conn, &req.user_id, &id) {
+        match opencrab_db::queries::get_trusted_user(&conn, user_id, &id) {
             Some(u) if u.permission == "co_agent" => opencrab_actions::CallerIdentity::CoAgent {
-                agent_id: req.user_id.clone(),
+                agent_id: user_id.to_string(),
             },
             Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
             None => {
                 let cfg = opencrab_db::queries::get_agent_discord_config(&conn, &id);
                 if let Ok(Some(c)) = cfg {
-                    if c.owner_discord_id == req.user_id {
+                    if crate::api::is_owner_id(&c.owner_discord_id, user_id) {
                         opencrab_actions::CallerIdentity::Owner
                     } else {
                         opencrab_actions::CallerIdentity::Agent
@@ -88,7 +93,7 @@ pub async fn send_agent_message(
             session_id: session_id.clone(),
             log_type: "speech".to_string(),
             content: req.content.clone(),
-            speaker_id: Some(req.user_id.clone()),
+            speaker_id: Some(user_id.to_string()),
             turn_number: None,
             metadata_json: None,
             created_at: None,

@@ -1145,17 +1145,19 @@ Base URL: `http://localhost:3000`
 
 セッション ID は `agent-msg-{agent_id}-{user_id}` の形式で自動生成・再利用される。会話履歴は保持される。
 
+`user_id` はハンドラ入口で 1 回だけ前後の空白を除去され（trim）、以降の権限判定・セッション ID・`speaker_id` すべてで同じ正規化済みの値が使われる。つまり `" 123 "` と `"123"` は同じセッション・同じ送信者として扱われる。
+
 **Request Body**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | content | string | ✅ | メッセージ本文 |
-| user_id | string | ✅ | 送信者の ID（Discord ユーザー ID または エージェント ID） |
+| user_id | string | ✅ | 送信者の ID（Discord ユーザー ID または エージェント ID）。前後の空白は除去される |
 
 **Caller 権限の決定ロジック**:
 - `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
 - `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
-- `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`
+- `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
 - それ以外 → `Agent`
 
 **Example Request**
@@ -1374,7 +1376,7 @@ Base URL: `http://localhost:3000`
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | bot_token | string | ✅ | Discord Bot トークン |
-| owner_discord_id | string | ❌ | オーナーの Discord ユーザー ID |
+| owner_discord_id | string | ❌ | オーナーの Discord ユーザー ID。保存時に前後の空白は除去される（空白のみは未設定と同じ） |
 
 **Example Request**
 
@@ -1412,7 +1414,7 @@ Base URL: `http://localhost:3000`
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | bot_token | string | ❌ | Discord Bot トークン |
-| owner_discord_id | string | ❌ | オーナーの Discord ユーザー ID |
+| owner_discord_id | string | ❌ | オーナーの Discord ユーザー ID。保存時に前後の空白は除去される（空白のみは未設定と同じ） |
 
 **Example Request**
 
