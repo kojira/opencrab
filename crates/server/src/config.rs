@@ -676,17 +676,60 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
 mod tests {
     use super::*;
 
+    /// 環境変数を触るテストを直列化するロック。
+    ///
+    /// 環境変数はプロセス全体で共有されるので、`cargo test` の並列実行下では
+    /// あるテストの `set_var`/`remove_var` が別テストの読み取りに割り込む。
+    /// 必要なのは「同一プロセス内での直列化」だけなので、`serial_test` を
+    /// 依存に追加せず標準ライブラリの `Mutex` で済ませている。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `ENV_LOCK` を取得する。テストが panic してロックが poison されても、
+    /// 後続テストが道連れで落ちないように中身を取り出して続行する。
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 環境変数をテスト中だけ差し替え、`Drop` で元の状態（未設定なら未設定）に
+    /// 戻す RAII ガード。assert 失敗で panic しても復元されるため、値が後続
+    /// テストや開発者のシェル由来の設定に漏れない。
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+
     #[test]
     fn test_expand_env_vars() {
-        std::env::set_var("TEST_EXPAND_KEY", "hello123");
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::set("TEST_EXPAND_KEY", "hello123");
         let input = "api_key = \"${TEST_EXPAND_KEY}\"";
         let result = expand_env_vars(input);
         assert_eq!(result, "api_key = \"hello123\"");
-        std::env::remove_var("TEST_EXPAND_KEY");
     }
 
     #[test]
     fn test_expand_env_vars_missing() {
+        let _lock = env_lock();
         let input = "api_key = \"${NONEXISTENT_VAR_12345}\"";
         let result = expand_env_vars(input);
         assert_eq!(result, "api_key = \"\"");
@@ -694,19 +737,19 @@ mod tests {
 
     #[test]
     fn test_expand_env_vars_multiple() {
-        std::env::set_var("TEST_A", "aaa");
-        std::env::set_var("TEST_B", "bbb");
+        let _lock = env_lock();
+        let _a = EnvVarGuard::set("TEST_A", "aaa");
+        let _b = EnvVarGuard::set("TEST_B", "bbb");
         let input = "${TEST_A} and ${TEST_B}";
         let result = expand_env_vars(input);
         assert_eq!(result, "aaa and bbb");
-        std::env::remove_var("TEST_A");
-        std::env::remove_var("TEST_B");
     }
 
     /// `owner_discord_id` は環境変数参照で与える（ローカル固有値を `.env` に寄せる）。
     #[test]
     fn owner_discord_id_expands_from_env() {
-        std::env::set_var("TEST_OWNER_DISCORD_ID", "123456789012345678");
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::set("TEST_OWNER_DISCORD_ID", "123456789012345678");
         let raw = "[gateway.discord]\nowner_discord_id = \"${TEST_OWNER_DISCORD_ID}\"\n";
         let cfg: AppConfig = toml::from_str(&expand_env_vars(raw)).unwrap();
         assert_eq!(cfg.gateway.discord.owner_discord_id, "123456789012345678");
@@ -714,13 +757,13 @@ mod tests {
             &cfg.gateway.discord.owner_discord_id,
             "123456789012345678"
         ));
-        std::env::remove_var("TEST_OWNER_DISCORD_ID");
     }
 
     /// 環境変数が未設定なら空文字に展開される。空のオーナー ID は誰とも一致させない
     /// （= オーナー無し扱い）ので、空の caller が owner に昇格しない。
     #[test]
     fn unset_owner_discord_id_grants_owner_to_nobody() {
+        let _lock = env_lock();
         let raw = "[gateway.discord]\nowner_discord_id = \"${UNSET_OWNER_DISCORD_ID_FOR_TEST}\"\n";
         let cfg: AppConfig = toml::from_str(&expand_env_vars(raw)).unwrap();
         let owner = &cfg.gateway.discord.owner_discord_id;
@@ -733,10 +776,12 @@ mod tests {
     /// 環境変数の値が `owner_discord_id` に入る。
     #[test]
     fn load_config_expands_owner_discord_id_from_env() {
-        std::env::set_var("TEST_LOAD_OWNER_DISCORD_ID", "123456789012345678");
-        let dir = std::env::temp_dir().join("opencrab-config-owner-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("owner.toml");
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::set("TEST_LOAD_OWNER_DISCORD_ID", "123456789012345678");
+        // 一時ディレクトリはテストごとにユニークで、`TempDir` の Drop で削除される
+        // （固定パスの残骸を作らない / 並列実行でも衝突しない）。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.toml");
         std::fs::write(
             &path,
             "[gateway.discord]\nenabled = true\nowner_discord_id = \"${TEST_LOAD_OWNER_DISCORD_ID}\"\n",
@@ -744,22 +789,45 @@ mod tests {
         .unwrap();
         let cfg = load_config(path.to_str().unwrap()).unwrap();
         assert_eq!(cfg.gateway.discord.owner_discord_id, "123456789012345678");
-        let _ = std::fs::remove_file(&path);
-        std::env::remove_var("TEST_LOAD_OWNER_DISCORD_ID");
     }
 
-    /// 配布テンプレート（`config/default.toml.example`）は `${}` 参照込みでも
-    /// ロードできる（環境変数が未設定でもパースが壊れない）。
+    /// リポジトリに追跡されている設定ファイルは、owner を実 ID の直書きではなく
+    /// `${OWNER_DISCORD_ID}` 参照で持つ。
+    ///
+    /// 期待値は実測と独立なセンチネル定数に固定する（環境変数から期待値を導出すると
+    /// 参照が壊れていても両辺が同じ値になりトートロジーになる）。これにより
+    /// 「変数名の typo」「実 ID の直書きへの逆戻り」「参照ごと消える」のいずれでも落ちる。
+    ///
+    /// 本番 (`crates/server/src/main.rs`) と CLI がロードするのは `config/default.toml`
+    /// なので、配布テンプレートだけでなく両方を回す。
     #[test]
-    fn shipped_config_example_loads_and_owner_comes_from_env() {
+    fn shipped_configs_take_owner_discord_id_from_env() {
+        let _lock = env_lock();
+        // `${}` を含まない値にする（expand_env_vars は展開結果も再走査するため）。
+        const SENTINEL: &str = "sentinel-owner-000";
+        let _guard = EnvVarGuard::set("OWNER_DISCORD_ID", SENTINEL);
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for name in ["config/default.toml.example", "config/default.toml"] {
+            let path = repo_root.join(name);
+            let cfg = load_config(path.to_str().unwrap())
+                .unwrap_or_else(|e| panic!("{name} must parse: {e:#}"));
+            assert_eq!(
+                cfg.gateway.discord.owner_discord_id, SENTINEL,
+                "{name}: owner_discord_id must resolve from ${{OWNER_DISCORD_ID}} \
+                 (a literal ID or a typo in the variable name would break this)"
+            );
+        }
+    }
+
+    /// 配布テンプレートは共有ゲートウェイを既定で無効にしている（個人 ID や
+    /// トークンを持たない状態で配られる）。
+    #[test]
+    fn shipped_config_example_keeps_shared_gateway_disabled() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../config/default.toml.example");
         let cfg = load_config(path.to_str().unwrap()).expect("default.toml.example must parse");
-        // テンプレートは共有ゲートウェイを既定で無効にしている（個人 ID を含めない）。
         assert!(!cfg.gateway.discord.enabled);
-        // owner は環境変数から与えられる。この値がそのまま owner 判定に使われる。
-        let owner = cfg.gateway.discord.owner_discord_id.clone();
-        assert_eq!(owner, std::env::var("OWNER_DISCORD_ID").unwrap_or_default());
     }
 
     #[test]
