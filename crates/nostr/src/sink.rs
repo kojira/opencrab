@@ -1,0 +1,665 @@
+//! Nostr の応答生成経路と subtask 完了 sink（#168 / RFC #152 S3b-1）。
+//!
+//! Nostr は「inbound イベントへの応答」と「background subtask 完了後の resume」の
+//! 2 経路で同じことをする: 会話を DB から再構築 → `run_agent_response` → 返信。
+//! その共通経路を [`NostrResponder`] に置き、[`SubtaskCompletionSink`] 実装も同じ型が
+//! 担う（web gateway の `WebCompletionSink` + `run_and_deliver` と同じ構造）。
+//!
+//! 不変条件（RFC §6）:
+//! - **二重回答しない**: `settle_completed` が「DB 永続化 → sink 発火」の順序を保証済み。
+//!   resume は `build_conversation_string` で DB から会話を再構築するため、完了本文を
+//!   sink で運ぶ必要がない。
+//! - **per-session 直列化**: inbound と resume の応答生成をどちらも
+//!   [`NostrSessionRuntime::run_serialized`] の下で走らせる。同一セッション（相手）に
+//!   対して 2 本の応答生成が並行しないので、二重投稿にならない。
+//! - **二重投稿しない（Nostr 固有）**: モデルが `nostr_*` で明示送信していれば
+//!   `sent_flag` が立ち、ループ側の暗黙返信を抑制する。この判定が成り立つのは
+//!   配送系ツールが **inline 実行**（`NOSTR_DELIVERY_ACTIONS` = dispatch 除外）で
+//!   あることが前提。background 化すると run 終了時にまだ送信されておらず、
+//!   暗黙返信と後追いの明示送信で二重投稿になる。
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use tracing::{debug, error, warn};
+
+use opencrab_actions::{CallerIdentity, RunRequest, SubtaskCompletionSink, SubtaskSettled};
+use opencrab_gateway::GatewayActions;
+
+use crate::actions::NostrGatewayActions;
+use crate::cli::NostaroCli;
+use crate::identity::NostrIdentityAdmin;
+use crate::runner::NostrAgentRunner;
+use crate::session::{NostrSessionRuntime, NOSTR_SESSION_PREFIX};
+
+/// Nostr の応答生成 + 返信配送の実体。`SubtaskCompletionSink` も実装する。
+///
+/// watch ループ（inbound）と完了 sink（resume）が同じ `runtime`（session ロック +
+/// registry）・同じ `cli`（送信）・同じ `admin`（identity 切替）を共有する。
+pub struct NostrResponder<R: NostrAgentRunner> {
+    runner: R,
+    cli: NostaroCli,
+    runtime: Arc<NostrSessionRuntime>,
+    admin: Arc<dyn NostrIdentityAdmin>,
+    agent_id: String,
+}
+
+impl<R: NostrAgentRunner> Clone for NostrResponder<R> {
+    fn clone(&self) -> Self {
+        Self {
+            runner: self.runner.clone(),
+            cli: self.cli.clone(),
+            runtime: self.runtime.clone(),
+            admin: self.admin.clone(),
+            agent_id: self.agent_id.clone(),
+        }
+    }
+}
+
+impl<R: NostrAgentRunner> NostrResponder<R> {
+    pub fn new(
+        runner: R,
+        cli: NostaroCli,
+        runtime: Arc<NostrSessionRuntime>,
+        admin: Arc<dyn NostrIdentityAdmin>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            runner,
+            cli,
+            runtime,
+            admin,
+            agent_id: agent_id.into(),
+        }
+    }
+
+    pub fn runtime(&self) -> &Arc<NostrSessionRuntime> {
+        &self.runtime
+    }
+
+    /// 会話を DB から再構築 → `run_agent_response`（非ブロック dispatch 付き）→
+    /// 応答を転記し、明示送信が無ければ `reply_target` へ暗黙返信する共通経路。
+    ///
+    /// **呼び出し側が `run_serialized` の下で await すること**（inbound / resume を
+    /// 同一セッションで直列化する）。返り値は配送した応答本文（沈黙時は `None`）。
+    pub async fn respond(
+        &self,
+        session_id: &str,
+        reply_target: &str,
+        prompt_suffix: &str,
+        trigger_message_id: Option<&str>,
+    ) -> Option<String> {
+        let agent_id = self.agent_id.as_str();
+        let (base_prompt, agent_name) = self.runner.build_agent_context(agent_id);
+        let system_prompt = format!("{base_prompt}\n\n{prompt_suffix}");
+
+        let budget = self.runner.context_budget_tokens(agent_id);
+        let conversation = self
+            .runner
+            .build_conversation_string(session_id, agent_id, budget)
+            .unwrap_or_default();
+
+        // 明示送信フラグ（暗黙返信の二重投稿防止）。配送系ツールは dispatch 除外
+        // （`NOSTR_DELIVERY_ACTIONS`）なので、run が返る時点で送信は済んでいる。
+        let gw = NostrGatewayActions::new(self.cli.clone()).with_admin(self.admin.clone());
+        let sent = gw.sent_flag();
+        let actions: Arc<dyn GatewayActions> = Arc::new(gw);
+
+        // dispatch（S3a）: registry は session 単位で共有し（cancel_subtask 到達性）、
+        // sink は自分自身（完了したらまた直列化下で resume する）。
+        let registry = self.runtime.registry_for(session_id);
+        let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(self.clone());
+
+        let mut req = RunRequest::new(
+            agent_id,
+            agent_name,
+            session_id,
+            system_prompt,
+            conversation,
+            "nostr",
+            // Nostr の投稿者は外部ユーザー。最小権限（Agent）で扱う。
+            CallerIdentity::Agent,
+        )
+        .with_gateway_actions(actions)
+        .with_dispatch(Some(registry), sink)
+        .with_reply_target(reply_target);
+        if let Some(id) = trigger_message_id {
+            req = req.with_trigger_message_id(id);
+        }
+
+        match self.runner.run_agent_response(req).await {
+            Ok(result) => {
+                let reply = result.response.trim().to_string();
+                if reply.is_empty() || reply == "NO_REPLY" {
+                    debug!(agent_id, session_id, "nostr: agent chose silence");
+                    return None;
+                }
+                // 最終応答テキストを転記（会話履歴の継続性）。
+                self.runner
+                    .record_nostr_agent_reply(agent_id, session_id, &reply);
+                // モデルが既に nostr_* で送信していれば暗黙返信しない（二重送信防止）。
+                if sent.load(Ordering::SeqCst) {
+                    debug!(
+                        agent_id,
+                        session_id,
+                        "nostr: explicit send already occurred; skipping implicit reply"
+                    );
+                    return Some(reply);
+                }
+                if let Err(e) = self.cli.reply(agent_id, reply_target, &reply, None).await {
+                    warn!(agent_id, error = %e, "nostr implicit reply failed");
+                }
+                Some(reply)
+            }
+            Err(e) => {
+                error!(agent_id, session_id, error = %e, "nostr agent run failed");
+                None
+            }
+        }
+    }
+}
+
+/// resume 時に system prompt へ足す Nostr 固有の指示を組む。
+fn resume_prompt_suffix(reply_target: &str, subtask_id: &str, exit_reason: &str) -> String {
+    format!(
+        "[Nostr] 依頼されていたバックグラウンド処理が完了しました。結果は直前の会話ログの \
+         subtask_completed に入っています。相手へ伝えるなら nostr_reply(target=\"{reply_target}\") \
+         を使ってください（target は返信先ノート）。伝える必要がなければ NO_REPLY とだけ答えてください。\
+         \n[subtask_completed: subtask_id={subtask_id}, exit_reason={exit_reason}]"
+    )
+}
+
+impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
+    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        // 非 Nostr の親セッション（heartbeat-* / web-* / ネストした subtask-* 等）は
+        // 正常系としてスキップする（Discord / web の sink も同様に前置きで弾く）。
+        if !ev.session_id.starts_with(NOSTR_SESSION_PREFIX) {
+            debug!(
+                session_id = %ev.session_id,
+                "nostr sink: parent session is not a nostr session, skipping resume"
+            );
+            return;
+        }
+        // 返信先が無ければ **resume しない**（方針 / #168）。
+        //
+        // Nostr は「返信して初めて相手に届く」gateway で、session_id からは返信先ノート
+        // を復元できない（相手 pubkey しか入っていない）。宛先不明のまま resume すると
+        // (1) 届かない応答を生成して LLM 費用を払い、(2) その本文を会話ログに転記して
+        // しまう（送っていないのに送ったことになり、以後の文脈が実際の Nostr 上のやり取り
+        // と食い違う）。完了本文は `settle_completed` が既に DB へ永続化しているので、
+        // 次の inbound で `build_conversation_string` が自然に拾う（heartbeat の
+        // 「次 tick 拾い」と同じ扱い）。取りこぼしではなく遅延配送になる。
+        let reply_target = ev.reply_target.clone().unwrap_or_default();
+        if reply_target.trim().is_empty() {
+            debug!(
+                session_id = %ev.session_id,
+                subtask_id = %ev.subtask_id,
+                "nostr sink: no reply_target; skipping resume (完了本文は DB 済み。次の inbound で文脈に載る)"
+            );
+            return;
+        }
+
+        let responder = self.clone();
+        let sid = ev.session_id.clone();
+        // sink は同期関数。resume は非同期なので spawn する（web gateway と同じ。
+        // ここで待つと dispatch した subtask の完了処理を塞ぐ）。
+        tokio::spawn(async move {
+            let suffix = resume_prompt_suffix(&reply_target, &ev.subtask_id, &ev.exit_reason);
+            let fut = responder.respond(&sid, &reply_target, &suffix, None);
+            // inbound の応答生成と直列化する（同一セッションで二重に返信しない）。
+            responder.runtime.run_serialized(&sid, fut).await;
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use opencrab_actions::{SettleKind, SubtaskSettled};
+    use opencrab_core::EngineResult;
+    use opencrab_db::queries::AgentNostrConfigRow;
+
+    use crate::session::nostr_session_id;
+
+    /// run_agent_response の観測 1 件（session_id, reply_target, dispatch 有効か）。
+    type RunObservation = (String, Option<String>, bool);
+    /// 転記された応答 1 件（agent_id, session_id, text）。
+    type ReplyObservation = (String, String, String);
+
+    /// テスト用の最小 `NostrAgentRunner`。LLM も DB も使わず、応答を差し替える。
+    #[derive(Clone)]
+    struct FakeRunner {
+        response: String,
+        runs: Arc<Mutex<Vec<RunObservation>>>,
+        replies: Arc<Mutex<Vec<ReplyObservation>>>,
+        /// run 中の待機（直列化テスト用）。
+        delay: Duration,
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+        /// Some のとき「モデルが inline で nostr_reply を呼んだ」ことを模して、
+        /// 渡された gateway_actions を実際に実行する（sent フラグ経路の検証）。
+        explicit_reply_target: Option<String>,
+    }
+
+    impl FakeRunner {
+        fn new(response: &str) -> Self {
+            Self {
+                response: response.to_string(),
+                runs: Arc::new(Mutex::new(Vec::new())),
+                replies: Arc::new(Mutex::new(Vec::new())),
+                delay: Duration::from_millis(0),
+                inflight: Arc::new(AtomicUsize::new(0)),
+                max_inflight: Arc::new(AtomicUsize::new(0)),
+                explicit_reply_target: None,
+            }
+        }
+
+        fn with_delay(mut self, d: Duration) -> Self {
+            self.delay = d;
+            self
+        }
+
+        /// 「モデルがターン中に nostr_reply を明示実行する」挙動を仕込む。
+        fn with_explicit_reply(mut self, target: &str) -> Self {
+            self.explicit_reply_target = Some(target.to_string());
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NostrAgentRunner for FakeRunner {
+        async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
+            let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            self.max_inflight.fetch_max(now, AtomicOrdering::SeqCst);
+            self.runs.lock().unwrap().push((
+                req.session_id.clone(),
+                req.reply_target.clone(),
+                req.completion_sink.is_some() && req.subtask_registry.is_some(),
+            ));
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            // モデルが配送系ツールを inline 実行するケース（sent フラグを立てる経路）。
+            if let (Some(target), Some(ga)) =
+                (&self.explicit_reply_target, req.gateway_actions.as_ref())
+            {
+                let ctx = opencrab_gateway::GatewayCallContext::for_agent(&req.agent_id);
+                let r = ga
+                    .execute(
+                        "nostr_reply",
+                        &serde_json::json!({"target": target, "text": "明示送信"}),
+                        &ctx,
+                    )
+                    .await;
+                assert!(
+                    r.success,
+                    "fake nostaro での明示送信は成功する: {:?}",
+                    r.error
+                );
+            }
+            self.inflight.fetch_sub(1, AtomicOrdering::SeqCst);
+            Ok(EngineResult {
+                response: self.response.clone(),
+                iterations: 1,
+                tool_calls_made: 0,
+                stopped_by_limit: false,
+                xml_fallback_parses: 0,
+            })
+        }
+
+        fn build_agent_context(&self, _agent_id: &str) -> (String, String) {
+            ("base prompt".to_string(), "テストくん".to_string())
+        }
+
+        fn build_conversation_string(
+            &self,
+            _session_id: &str,
+            _agent_id: &str,
+            _budget: usize,
+        ) -> anyhow::Result<String> {
+            Ok("conversation".to_string())
+        }
+
+        fn context_budget_tokens(&self, _agent_id: &str) -> usize {
+            1000
+        }
+
+        fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str) {}
+
+        fn record_nostr_user_message(&self, _s: &str, _p: &str, _n: &str, _t: &str) {}
+
+        fn record_nostr_agent_reply(&self, agent_id: &str, session_id: &str, text: &str) {
+            self.replies.lock().unwrap().push((
+                agent_id.to_string(),
+                session_id.to_string(),
+                text.to_string(),
+            ));
+        }
+
+        fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
+            Vec::new()
+        }
+
+        fn get_nostr_config(&self, _agent_id: &str) -> Option<AgentNostrConfigRow> {
+            None
+        }
+
+        fn set_nostr_secret_key(&self, _agent_id: &str, _secret_key: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopAdmin;
+
+    #[async_trait::async_trait]
+    impl NostrIdentityAdmin for NoopAdmin {
+        async fn adopt_generated_identity(
+            &self,
+            _agent_id: &str,
+            npub: &str,
+        ) -> anyhow::Result<String> {
+            Ok(npub.to_string())
+        }
+    }
+
+    /// 送信を観測するための fake nostaro（argv を 1 行ずつ log へ追記するスクリプト）。
+    /// 実リレーへは一切繋がない。
+    struct FakeNostaro {
+        _dir: tempfile::TempDir,
+        script: std::path::PathBuf,
+        log: std::path::PathBuf,
+    }
+
+    impl FakeNostaro {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("sent.log");
+            let script = dir.path().join("fake-nostaro.sh");
+            std::fs::write(
+                &script,
+                format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Self {
+                _dir: dir,
+                script,
+                log,
+            }
+        }
+
+        fn cli(&self) -> NostaroCli {
+            NostaroCli::new().with_binary_path(self.script.to_string_lossy().to_string())
+        }
+
+        fn sent(&self) -> String {
+            std::fs::read_to_string(&self.log).unwrap_or_default()
+        }
+
+        /// log に `needle` が現れるまで待つ（最大 2 秒）。
+        async fn wait_for(&self, needle: &str) -> bool {
+            for _ in 0..200 {
+                if self.sent().contains(needle) {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+    }
+
+    fn responder(runner: FakeRunner, cli: NostaroCli) -> NostrResponder<FakeRunner> {
+        NostrResponder::new(
+            runner,
+            cli,
+            Arc::new(NostrSessionRuntime::new()),
+            Arc::new(NoopAdmin),
+            "agent-sink-test",
+        )
+    }
+
+    fn settled(session_id: &str, reply_target: Option<&str>) -> SubtaskSettled {
+        SubtaskSettled {
+            session_id: session_id.to_string(),
+            agent_id: "agent-sink-test".to_string(),
+            subtask_id: "st-1".to_string(),
+            exit_reason: "completed".to_string(),
+            kind: SettleKind::Completed,
+            reply_target: reply_target.map(|s| s.to_string()),
+        }
+    }
+
+    /// sink は `reply_target` 宛に返信する（session_id からは復元できない宛先）。
+    #[tokio::test]
+    async fn sink_replies_to_reply_target() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("鍵ができました");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+
+        r.on_subtask_settled(settled(&sid, Some("note1target")));
+
+        assert!(
+            fake.wait_for("note1target").await,
+            "reply_target 宛に返信されるべき: log={}",
+            fake.sent()
+        );
+        let sent = fake.sent();
+        assert!(sent.contains("reply"), "reply サブコマンドで送る: {sent}");
+        assert!(sent.contains("鍵ができました"));
+        // resume も dispatch 有効（registry + sink）で走り、reply_target を引き継ぐ。
+        let runs = runner.runs.lock().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, sid);
+        assert_eq!(runs[0].1.as_deref(), Some("note1target"));
+        assert!(runs[0].2, "resume も非ブロック dispatch を有効化する");
+    }
+
+    /// `reply_target` が None のときは graceful にスキップ（resume も送信もしない）。
+    #[tokio::test]
+    async fn sink_without_reply_target_is_graceful() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("届かない応答");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+
+        r.on_subtask_settled(settled(&sid, None));
+        // 空文字も「指定なし」扱い。
+        r.on_subtask_settled(settled(&sid, Some("   ")));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            fake.sent().is_empty(),
+            "宛先不明なら送信しない: {}",
+            fake.sent()
+        );
+        assert!(
+            runner.runs.lock().unwrap().is_empty(),
+            "宛先不明なら LLM も回さない（費用と未配送転記の防止）"
+        );
+    }
+
+    /// 非 Nostr セッションの settle は無視する（web / heartbeat のネスト等）。
+    #[tokio::test]
+    async fn sink_ignores_non_nostr_sessions() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("x");
+        let r = responder(runner.clone(), fake.cli());
+
+        r.on_subtask_settled(settled("web-agent-x-conv1", Some("note1target")));
+        r.on_subtask_settled(settled("heartbeat-agent-x", Some("note1target")));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(fake.sent().is_empty());
+        assert!(runner.runs.lock().unwrap().is_empty());
+    }
+
+    /// NO_REPLY / 空応答なら送信しない（沈黙の尊重）。
+    #[tokio::test]
+    async fn no_reply_response_is_not_delivered() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("NO_REPLY");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+
+        let out = r.respond(&sid, "note1target", "suffix", None).await;
+        assert!(out.is_none());
+        assert!(fake.sent().is_empty());
+        // 転記もしない（送っていない応答を履歴に残さない）。
+        assert!(runner.replies.lock().unwrap().is_empty());
+    }
+
+    /// 二重投稿しない（#168 の核）: モデルがターン中に `nostr_reply` を明示実行したら
+    /// `sent` フラグが立ち、暗黙返信は送らない。送信は 1 回だけ。
+    ///
+    /// この不変条件は配送系ツールが **inline 実行**（dispatch 除外）であることに依存する。
+    /// background 化されると run が返る時点でフラグが立っておらず、暗黙返信＋後追いの
+    /// 明示送信で 2 通になる。除外集合の側は `nostr_delivery_actions_are_non_dispatch`
+    /// （`crates/nostr/src/actions.rs`）が守る。
+    #[tokio::test]
+    async fn explicit_send_suppresses_implicit_reply() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("本文").with_explicit_reply("note1explicit");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-dup");
+
+        let out = r
+            .respond(&sid, "note1implicit", "suffix", Some("evt-1"))
+            .await;
+        assert_eq!(out.as_deref(), Some("本文"));
+
+        // 明示送信の 1 通だけ。暗黙返信（note1implicit 宛）は送らない。
+        let sent = fake.sent();
+        assert!(sent.contains("note1explicit"), "明示送信が届く: {sent}");
+        assert!(
+            !sent.contains("note1implicit"),
+            "明示送信済みなら暗黙返信しない（二重投稿の防止）: {sent}"
+        );
+        assert_eq!(
+            sent.lines().filter(|l| l.contains("reply")).count(),
+            1,
+            "送信は 1 回だけ: {sent}"
+        );
+        // 応答本文の転記は行う（会話履歴の継続性）。
+        assert_eq!(runner.replies.lock().unwrap().len(), 1);
+    }
+
+    /// 明示送信が無ければ `reply_target` 宛に暗黙返信する（従来挙動の保持）。
+    #[tokio::test]
+    async fn implicit_reply_is_sent_when_no_explicit_send() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("暗黙で返す");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-implicit");
+
+        r.respond(&sid, "note1implicit", "suffix", Some("evt-1"))
+            .await;
+        let sent = fake.sent();
+        assert!(sent.contains("note1implicit"), "{sent}");
+        assert!(sent.contains("暗黙で返す"), "{sent}");
+        assert_eq!(sent.lines().filter(|l| l.contains("reply")).count(), 1);
+    }
+
+    /// 同一セッションでは inbound 相当の respond と resume が直列化される。
+    #[tokio::test]
+    async fn resume_serializes_with_inbound_on_same_session() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("ok").with_delay(Duration::from_millis(120));
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-serial");
+
+        // inbound 相当（run_serialized 下で respond）を走らせつつ、途中で完了 sink を発火。
+        let r2 = r.clone();
+        let sid2 = sid.clone();
+        let inbound = tokio::spawn(async move {
+            let fut = r2.respond(&sid2, "note1inbound", "suffix", Some("evt-1"));
+            r2.runtime().run_serialized(&sid2, fut).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        r.on_subtask_settled(settled(&sid, Some("note1resume")));
+
+        inbound.await.unwrap();
+        assert!(fake.wait_for("note1resume").await, "resume も配送される");
+        // 直列化されているので LLM 実行が重なることはない。
+        assert_eq!(
+            runner.max_inflight.load(AtomicOrdering::SeqCst),
+            1,
+            "同一セッションの応答生成は同時に 1 本まで（二重回答の防止）"
+        );
+        assert_eq!(runner.runs.lock().unwrap().len(), 2);
+    }
+
+    /// 別セッション（別の相手）は直列化されず並行する。
+    #[tokio::test]
+    async fn different_sessions_are_not_serialized() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("ok").with_delay(Duration::from_millis(150));
+        let r = responder(runner.clone(), fake.cli());
+
+        r.on_subtask_settled(settled(
+            &nostr_session_id("agent-sink-test", "pk-a"),
+            Some("note1a"),
+        ));
+        r.on_subtask_settled(settled(
+            &nostr_session_id("agent-sink-test", "pk-b"),
+            Some("note1b"),
+        ));
+
+        assert!(fake.wait_for("note1a").await);
+        assert!(fake.wait_for("note1b").await);
+        assert!(
+            runner.max_inflight.load(AtomicOrdering::SeqCst) >= 2,
+            "別セッションは並行して走れる"
+        );
+    }
+
+    /// dispatch した subtask は session 共有 registry に載り、`cancel_subtask` から
+    /// 到達できる（別 registry を渡すと常に not found になる回帰の防止 / #169）。
+    #[tokio::test]
+    async fn registry_is_shared_between_inbound_and_resume() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("ok");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-reg");
+
+        let inbound_registry = r.runtime().registry_for(&sid);
+        // respond が RunRequest に載せる registry と同一 Arc であること。
+        let via_respond = r.runtime().registry_for(&sid);
+        assert!(Arc::ptr_eq(&inbound_registry, &via_respond));
+
+        // 走行中 subtask を模して登録 → has_running が真。
+        inbound_registry.insert(
+            "st-live".to_string(),
+            opencrab_actions::SpawnedSubtask {
+                abort_handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+                session_id: "subtask-st-live".to_string(),
+                parent_session_id: sid.clone(),
+                agent_id: "agent-sink-test".to_string(),
+                label: "nostr_generate_key(sunny)".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: Some("note1target".to_string()),
+            },
+        );
+        assert!(r.runtime().has_running(&sid));
+
+        // 同じ registry を引く `cancel_subtask`（server-neutral / #161）で停止できる。
+        let db = opencrab_db::Db::memory().unwrap();
+        let outcome = opencrab_actions::cancel_subtask(
+            &r.runtime().registry_for(&sid),
+            &db,
+            "st-live",
+            false,
+            Some(&sid),
+        );
+        assert_eq!(outcome, opencrab_actions::CancelOutcome::Cancelled);
+        assert!(!r.runtime().has_running(&sid));
+    }
+}

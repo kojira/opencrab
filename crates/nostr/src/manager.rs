@@ -12,15 +12,14 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use anyhow::Context;
-use opencrab_actions::{CallerIdentity, RunRequest};
-use opencrab_gateway::GatewayActions;
 
-use crate::actions::NostrGatewayActions;
 use crate::cli::NostaroCli;
 use crate::config::NostrConfig;
 use crate::event::{parse_watch_line, NostrEvent};
 use crate::identity::NostrIdentityAdmin;
 use crate::runner::NostrAgentRunner;
+use crate::session::{nostr_session_id, NostrSessionRuntime};
+use crate::sink::NostrResponder;
 
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
 type SelfPubkey = Arc<RwLock<String>>;
@@ -33,6 +32,10 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     gateways: RwLock<HashMap<String, JoinHandle<()>>>,
     runner: R,
     cli: NostaroCli,
+    /// per-session 直列化ロック + dispatch registry（#168）。全エージェント横断で 1 つ。
+    /// watch ループと完了 sink が同じ Arc を共有することが、二重投稿の防止
+    /// （直列化）と `cancel_subtask` 到達性（同一 registry）の条件。
+    runtime: Arc<NostrSessionRuntime>,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -41,6 +44,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             gateways: RwLock::new(HashMap::new()),
             runner,
             cli: NostaroCli::new(),
+            runtime: Arc::new(NostrSessionRuntime::new()),
         }
     }
 
@@ -52,6 +56,11 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     /// 内部の nostaro CLI ラッパー（gateway 起動を伴わない操作用）。
     pub fn cli(&self) -> &NostaroCli {
         &self.cli
+    }
+
+    /// per-session ランタイム（直列化ロック + dispatch registry）。
+    pub fn session_runtime(&self) -> &Arc<NostrSessionRuntime> {
+        &self.runtime
     }
 
     /// vanity で新規鍵を生成する。同時実行の制限は `NostaroCli` 内のゲートで一元化
@@ -113,8 +122,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             cli: cli.clone(),
             self_pubkey: self_pubkey_cell.clone(),
         });
+        let runtime = self.runtime.clone();
         let handle = tokio::spawn(async move {
-            run_nostr_loop(runner, cli, agent, config, self_pubkey_cell, admin).await;
+            run_nostr_loop(runner, cli, agent, config, self_pubkey_cell, admin, runtime).await;
         });
 
         self.gateways
@@ -200,6 +210,7 @@ impl SeenEvents {
 
 /// watch ループ本体。watch が落ちてもバックオフして再購読する（abort されるまで）。
 /// dedup セットはループ寿命で保持する（再購読時の replay を跨いで効かせる）。
+#[allow(clippy::too_many_arguments)]
 async fn run_nostr_loop<R: NostrAgentRunner>(
     runner: R,
     cli: NostaroCli,
@@ -207,6 +218,7 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
     config: NostrConfig,
     self_pubkey: SelfPubkey,
     admin: Arc<dyn NostrIdentityAdmin>,
+    runtime: Arc<NostrSessionRuntime>,
 ) {
     let mut seen = SeenEvents::new(512);
     loop {
@@ -217,6 +229,7 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
             &config,
             &self_pubkey,
             &admin,
+            &runtime,
             &mut seen,
         )
         .await
@@ -237,6 +250,7 @@ async fn run_watch_once<R: NostrAgentRunner>(
     config: &NostrConfig,
     self_pubkey: &SelfPubkey,
     admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
     seen: &mut SeenEvents,
 ) -> anyhow::Result<()> {
     let mut cmd = cli.build_watch_command(agent_id, config)?;
@@ -265,7 +279,7 @@ async fn run_watch_once<R: NostrAgentRunner>(
             debug!(agent_id, "nostr: skipping already-processed event");
             continue;
         }
-        handle_event(runner, cli, agent_id, admin, &event).await;
+        handle_event(runner, cli, agent_id, admin, runtime, &event).await;
     }
     // stdout EOF → プロセス終了を回収。
     let _ = child.wait().await;
@@ -273,24 +287,21 @@ async fn run_watch_once<R: NostrAgentRunner>(
 }
 
 /// 受信イベント1件を処理する（セッション記録 → エージェント実行 → 返信）。
+///
+/// 応答生成（会話再構築 → LLM → 返信）は **per-session ロックの下**で実行する（#168）。
+/// subtask 完了 resume はループ外の spawn から同じセッションへ入ってくるため、ロックが
+/// 無いと inbound と resume が同じ会話から独立に返信を組み立てて二重投稿になる。
+/// セッションの用意と受信の転記はロックの外で先に済ませる（ロック待ちの間に取りこぼさない）。
 async fn handle_event<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
     admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
     event: &NostrEvent,
 ) {
     // author 単位のセッション（1 相手 = 1 会話）。
-    let session_id = format!("nostr-{agent_id}-{}", event.pubkey);
-
-    let (base_prompt, agent_name) = runner.build_agent_context(agent_id);
-    let system_prompt = format!(
-        "{base_prompt}\n\n[Nostr] {author} さんの投稿への応答です。返信するなら \
-         nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
-         返信不要なら NO_REPLY とだけ答えてください。",
-        author = event.author_label(),
-        target = event.reply_target(),
-    );
+    let session_id = nostr_session_id(agent_id, &event.pubkey);
 
     runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}");
     runner.record_nostr_user_message(
@@ -300,50 +311,28 @@ async fn handle_event<R: NostrAgentRunner>(
         &event.content,
     );
 
-    let budget = runner.context_budget_tokens(agent_id);
-    let conversation = runner
-        .build_conversation_string(&session_id, agent_id, budget)
-        .unwrap_or_default();
+    let prompt_suffix = format!(
+        "[Nostr] {author} さんの投稿への応答です。返信するなら \
+         nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
+         返信不要なら NO_REPLY とだけ答えてください。",
+        author = event.author_label(),
+        target = event.reply_target(),
+    );
 
-    let gw = NostrGatewayActions::new(cli.clone()).with_admin(admin.clone());
-    let sent = gw.sent_flag();
-    let actions: Arc<dyn GatewayActions> = Arc::new(gw);
-    let req = RunRequest::new(
+    let responder = NostrResponder::new(
+        runner.clone(),
+        cli.clone(),
+        runtime.clone(),
+        admin.clone(),
         agent_id,
-        agent_name,
-        session_id.clone(),
-        system_prompt,
-        conversation,
-        "nostr",
-        // Nostr の投稿者は外部ユーザー。最小権限（Agent）で扱う。
-        CallerIdentity::Agent,
-    )
-    .with_gateway_actions(actions)
-    .with_trigger_message_id(event.id.clone());
-
-    match runner.run_agent_response(req).await {
-        Ok(result) => {
-            let reply = result.response.trim();
-            if reply.is_empty() || reply == "NO_REPLY" {
-                debug!(agent_id, "nostr: agent chose silence");
-                return;
-            }
-            // 最終応答テキストを転記（会話履歴の継続性）。
-            runner.record_nostr_agent_reply(agent_id, &session_id, reply);
-            // モデルが既に nostr_* で送信していれば暗黙返信しない（二重送信防止）。
-            if sent.load(std::sync::atomic::Ordering::SeqCst) {
-                debug!(
-                    agent_id,
-                    "nostr: explicit send already occurred; skipping implicit reply"
-                );
-                return;
-            }
-            if let Err(e) = cli.reply(agent_id, event.reply_target(), reply, None).await {
-                warn!(agent_id, error = %e, "nostr implicit reply failed");
-            }
-        }
-        Err(e) => error!(agent_id, error = %e, "nostr agent run failed"),
-    }
+    );
+    let fut = responder.respond(
+        &session_id,
+        event.reply_target(),
+        &prompt_suffix,
+        Some(&event.id),
+    );
+    runtime.run_serialized(&session_id, fut).await;
 }
 
 /// watch ループが握る identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、

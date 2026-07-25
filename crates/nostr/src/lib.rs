@@ -8,6 +8,9 @@
 //!   と購読フィルタ（author / keyword / kind）。
 //! - [`event::NostrEvent`]: `nostaro watch --json` の1件（JSONL）。
 //! - [`actions::NostrGatewayActions`]: `nostr_post`/`reply`/`dm`/`zap`/`upload` ツール。
+//! - [`session::NostrSessionRuntime`]: per-session 直列化ロック + dispatch registry。
+//! - [`sink::NostrResponder`]: 応答生成 + 返信配送の共通経路。subtask 完了 sink
+//!   （`SubtaskCompletionSink`）も兼ね、完了時に同じ経路で resume して返信する（#168）。
 //!
 //! 鍵はエージェント毎に `data/agents/{id}/nostr/config.toml` に隔離する
 //! （[`cli::NostaroCli::agent_config_path`]、`validate_agent_id` 経由）。
@@ -21,6 +24,8 @@ pub mod event;
 pub mod identity;
 pub mod manager;
 pub mod runner;
+pub mod session;
+pub mod sink;
 
 pub use actions::NostrGatewayActions;
 pub use cli::{validate_vanity_prefix, GeneratedKey, NostaroCli, MAX_VANITY_PREFIX_LEN};
@@ -29,3 +34,5 @@ pub use event::{parse_watch_line, NostrEvent};
 pub use identity::NostrIdentityAdmin;
 pub use manager::NostrGatewayManager;
 pub use runner::NostrAgentRunner;
+pub use session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};
+pub use sink::NostrResponder;
