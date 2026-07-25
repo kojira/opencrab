@@ -32,7 +32,14 @@ struct AgentGatewayEntry {
 /// `start_agent_gateway` 本体は `DiscordGateway::start()` で実ネットワークに出るため
 /// そのままではテストできない。ネットワークに触らない前処理だけをこの関数に切り出し、
 /// 戻り値（正規化済み owner）を呼び出し側に使わせることで、警告と正規化の両方を
-/// 単体テストで押さえる（呼び出し自体を外すと型が合わずコンパイルが通らない）。
+/// 単体テストで押さえる。
+///
+/// `#[deny(dead_code)]` は「この関数が呼ばれ続けること」を保証するための保険。
+/// 将来 `start_agent_gateway` をリファクタして呼び出しを落とすと、警告ではなく
+/// コンパイルエラーになる（CI は警告では落ちないため、警告では歯止めにならない）。
+/// 呼び出しが消えると owner の入口正規化も消え、レガシー空白付きの行で
+/// 「DM は通るのに owner 専用 UI だけ無言で拒否」が復活してしまう。
+#[deny(dead_code)]
 fn prepare_owner_for_gateway(agent_id: &str, owner_discord_id: &str) -> String {
     let owner_discord_id = owner_discord_id.trim();
     crate::owner_warning::warn_if_agent_gateway_owner_unset(agent_id, owner_discord_id);
