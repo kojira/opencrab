@@ -408,8 +408,31 @@ async fn e2e_nonblocking_dispatch() {
     );
     eprintln!("[e2e_nonblocking_dispatch] OK: subtask_completed(completed) を確認");
 
-    // 3) 完了後、再注入により最終応答（agent speech）が入る（1 件以上）。
-    let replied = poll_until(Duration::from_secs(90), || {
+    // 3) 完了後、**再注入ターンが実際に走った**ことを検証する。
+    //
+    // 「agent speech が 1 件以上ある」では不十分。エージェントは `status:"spawned"` を
+    // 受け取って同ターン内で喋る（「実行を開始した」等）ので、その発話だけで条件が
+    // 満たされてしまい、完了 sink を丸ごと無効化しても pass してしまう（空振り）。
+    // resume は system prompt に `[subtask_completed: subtask_id=..., exit_reason=...]`
+    // を必ず付ける（`crates/server/src/web_gateway.rs`）ので、llm_logs の prompt に
+    // このマーカーが現れることを resume ターンの直接証拠として使う。
+    let resumed = poll_until(Duration::from_secs(90), || {
+        let Ok(conn) = open_db() else { return false };
+        fetch_llm_prompts(&conn, &session_id)
+            .iter()
+            .any(|p| p.contains("[subtask_completed: subtask_id="))
+    })
+    .await;
+    assert!(
+        resumed,
+        "90s 以内に再注入ターン（llm_logs.prompt に [subtask_completed: subtask_id=] を含む \
+         リクエスト）が現れませんでした (session={session_id})。完了 sink が resume を \
+         起こしていない可能性があります。"
+    );
+    eprintln!("[e2e_nonblocking_dispatch] OK: 再注入ターンが走ったことを確認");
+
+    // 参考: 再注入後は agent の発話が入る（マーカー検証の後なので空振りしない）。
+    let replied = poll_until(Duration::from_secs(30), || {
         let Ok(conn) = open_db() else { return false };
         fetch_session_logs(&conn, &session_id)
             .iter()
@@ -418,9 +441,8 @@ async fn e2e_nonblocking_dispatch() {
     .await;
     assert!(
         replied,
-        "90s 以内に agent の最終応答(speech)が入りませんでした (session={session_id})"
+        "再注入は走ったが agent の発話が記録されていません (session={session_id})"
     );
-    eprintln!("[e2e_nonblocking_dispatch] OK: 再注入後の agent 応答を確認");
 }
 
 // ==================== シナリオ 3: cancel が subtask を止める（#161 回帰） ====================

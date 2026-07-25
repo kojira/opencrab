@@ -100,6 +100,14 @@ impl WebGateway {
         self.registries.registry_for(session_id)
     }
 
+    /// このセッションに未決着の subtask が残っているか。
+    ///
+    /// `cancel_subtask` が引く registry と同一のものを見るので、決着後に空になることを
+    /// 外から確認できる（REST 側の `SubtaskRegistries::has_running` と対称）。
+    pub fn has_running(&self, session_id: &str) -> bool {
+        self.registries.has_running(session_id)
+    }
+
     fn lock_for(&self, session_id: &str) -> Arc<Mutex<()>> {
         self.session_locks
             .entry(session_id.to_string())

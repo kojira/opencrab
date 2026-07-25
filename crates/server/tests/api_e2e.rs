@@ -2157,6 +2157,84 @@ async fn test_rest_message_dispatches_tool_as_background_subtask() {
     assert!(!state.subtask_registries.has_running(&session_id));
 }
 
+/// #154 / #152: `POST /api/agents/{id}/web/send` もツールを background subtask として
+/// dispatch する（メインを塞がない）。
+///
+/// このテストが必要な理由: 非ブロック dispatch の注入は `process.rs` の 1 箇所
+/// （`depth == 0 && state.subtask_auto_dispatch` の分岐）で決まる。そこを潰しても
+/// 従来は REST のテスト 1 本しか落ちず、web / Discord / Nostr / heartbeat は全緑
+/// だった。web の配線をここで固定して、看板機能が無音で失われるのを防ぐ。
+#[tokio::test]
+async fn test_web_send_dispatches_tool_as_background_subtask() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "WebDispatcher", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-web-dispatch-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "web_background_work",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/web/send"),
+        Some(serde_json::json!({
+            "conversation_id": "conv-dispatch",
+            "content": "スキルを覚えて",
+            "user_id": "u1"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+    assert_eq!(session_id, format!("web-{agent_id}-conv-dispatch"));
+
+    // dispatch された（tool_result が spawned）。inline 実行なら status フィールドは無い。
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("\"status\":\"spawned\"")),
+        "web でツールが background subtask へ dispatch されていない: {:?}",
+        logs.iter()
+            .map(|l| (l.log_type.clone(), l.content.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // 完了本文（subtask_completed）が親セッションログへ着地する。
+    let mut settled = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("subtask_completed"))
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        settled,
+        "web で dispatch した subtask の完了本文が親セッションログへ永続化されない"
+    );
+
+    // 決着後は web gateway 側の registry も空になる（`cancel_subtask` の到達先と同一）。
+    assert!(
+        !state.web_gateway.has_running(&session_id),
+        "決着後も web gateway の registry にエントリが残っている"
+    );
+}
+
 /// #169: registry が `AppState` 経由で共有されるため、REST から `cancel_subtask` が
 /// 走行中 subtask に到達できる（使い捨て registry では常に not found だった）。
 #[tokio::test]
