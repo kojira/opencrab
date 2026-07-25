@@ -350,8 +350,9 @@ pub async fn patch_discord_config(
     if let Some(ref manager) = state.discord_manager {
         // Stop the current gateway first (no-op if not running).
         manager.stop_agent_gateway(&id).await;
-        // Restart only if enabled and token is present.
-        if cfg.enabled && !cfg.bot_token.is_empty() {
+        // Restart only if enabled and token is present（起動条件は
+        // `gateway_will_start` に集約。空白だけのトークンは「無し」扱い）。
+        if opencrab_discord::gateway_will_start(cfg.enabled, &cfg.bot_token) {
             if let Err(e) = manager
                 .start_agent_gateway(&id, &cfg.bot_token, &cfg.owner_discord_id)
                 .await

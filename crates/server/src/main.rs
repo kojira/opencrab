@@ -525,7 +525,9 @@ async fn main() -> anyhow::Result<()> {
         );
 
         // Fallback: config-based shared gateway (existing behavior).
-        if discord_cfg.enabled && !discord_cfg.token.is_empty() {
+        // 起動条件は警告条件と同じ述語を使う（条件の二重管理を避ける。理由は
+        // `gateway_will_start` の doc コメント参照）。
+        if opencrab_discord::gateway_will_start(discord_cfg.enabled, &discord_cfg.token) {
             tracing::info!("Starting Discord gateway (config-based fallback)...");
 
             // Validate agent IDs against the database

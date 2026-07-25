@@ -17,9 +17,23 @@ const CONSEQUENCES: &str = "Consequences: (1) owner-only features are unavailabl
      Discord user are accepted; (3) owner-only UI (forms/modals/buttons) skips its operator \
      check and is open to anyone who can see it.";
 
+/// Discord ゲートウェイが**実際に起動する**条件（`enabled` かつトークンがある）。
+///
+/// 起動判定と下の警告条件を別々に書くと、両者がずれても誰も気づけない。実際に
+/// ずれていた例: 警告側は `token.trim().is_empty()`、共有ゲートウェイの起動側は
+/// 生の `is_empty()` だったため、`DISCORD_TOKEN=" "` では「ゲートウェイは起動する
+/// のに owner 未設定の警告が出ない」取りこぼしになっていた。空白だけのトークンでは
+/// Discord に接続できないので、起動しない側に揃える。
+///
+/// 起動判定を行う全経路（共有ゲートウェイの起動、per-agent 設定更新後の再起動）と
+/// 警告条件がこの述語を参照することで、条件を 1 箇所に閉じる。
+pub fn gateway_will_start(enabled: bool, token: &str) -> bool {
+    enabled && !token.trim().is_empty()
+}
+
 /// 共有（TOML）ゲートウェイの owner 未設定を警告する。警告したら `true`。
 ///
-/// ゲートウェイが**実際に起動する条件**（`enabled` かつトークンあり）でだけ警告する。
+/// ゲートウェイが**実際に起動する条件**（[`gateway_will_start`]）でだけ警告する。
 /// 追跡ファイル `config/default.toml` は `enabled = true` なので、`DISCORD_TOKEN` を
 /// 持たない開発者にまで出すと「常に出ている警告」になり信用されなくなる。
 pub fn warn_if_shared_gateway_owner_unset(
@@ -27,7 +41,7 @@ pub fn warn_if_shared_gateway_owner_unset(
     token: &str,
     owner_discord_id: &str,
 ) -> bool {
-    if !enabled || token.trim().is_empty() || !owner_discord_id.trim().is_empty() {
+    if !gateway_will_start(enabled, token) || !owner_discord_id.trim().is_empty() {
         return false;
     }
     warn!(
@@ -55,14 +69,15 @@ pub fn warn_if_agent_gateway_owner_unset(agent_id: &str, owner_discord_id: &str)
     true
 }
 
+/// テスト用: `tracing` 出力を文字列として捕まえるヘルパー。
+///
+/// 「警告条件を満たす」だけでなく「実際に warn イベントが出る」ことを検証するため。
+/// per-agent 経路の起動前処理（`manager::prepare_owner_for_gateway`）のテストからも使う。
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod capture {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    /// `tracing` の出力を文字列として拾う `MakeWriter`。
-    /// 「警告条件を満たす」だけでなく「実際に warn イベントが出る」ことを検証する。
     #[derive(Clone, Default)]
     struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -83,8 +98,8 @@ mod tests {
         }
     }
 
-    /// `f` の実行中に出た tracing 出力を返す。
-    fn captured_logs(f: impl FnOnce()) -> String {
+    /// `f` の実行中に出た tracing 出力（WARN 以上）を返す。
+    pub(crate) fn captured_logs(f: impl FnOnce()) -> String {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(CaptureWriter(buf.clone()))
@@ -94,6 +109,42 @@ mod tests {
         tracing::subscriber::with_default(subscriber, f);
         let bytes = buf.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture::captured_logs;
+    use super::*;
+
+    #[test]
+    fn blank_token_does_not_start_the_shared_gateway() {
+        // 空白だけのトークンでは Discord に接続できないので「起動しない」に倒す。
+        // 生の `is_empty()` に戻すと `DISCORD_TOKEN=" "` で起動判定だけが真になり、
+        // owner 未設定の警告を取りこぼす（このテストが落ちる）。
+        assert!(gateway_will_start(true, "bot-token"));
+        assert!(!gateway_will_start(true, ""));
+        assert!(!gateway_will_start(true, " "));
+        assert!(!gateway_will_start(true, " \t\n"));
+        // 無効なら起動しない。
+        assert!(!gateway_will_start(false, "bot-token"));
+    }
+
+    #[test]
+    fn shared_gateway_warning_fires_exactly_when_it_starts_without_owner() {
+        // 「起動する条件」と「警告する条件」がずれていないことを網羅で固定する。
+        for enabled in [true, false] {
+            for token in ["bot-token", "", " ", " \t\n"] {
+                for owner in ["", " ", "\n", "123456789012345678", " 1234 "] {
+                    let expected = gateway_will_start(enabled, token) && owner.trim().is_empty();
+                    assert_eq!(
+                        warn_if_shared_gateway_owner_unset(enabled, token, owner),
+                        expected,
+                        "enabled={enabled} token={token:?} owner={owner:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

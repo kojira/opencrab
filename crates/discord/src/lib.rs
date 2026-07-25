@@ -22,7 +22,9 @@ pub use gateway_actions::{
 };
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
-pub use owner_warning::{warn_if_agent_gateway_owner_unset, warn_if_shared_gateway_owner_unset};
+pub use owner_warning::{
+    gateway_will_start, warn_if_agent_gateway_owner_unset, warn_if_shared_gateway_owner_unset,
+};
 pub use renderer::DiscordRenderer;
 
 /// A2UI pending interaction registry type.
