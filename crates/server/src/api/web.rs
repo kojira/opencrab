@@ -31,24 +31,16 @@ pub struct SendWebMessageRequest {
 /// 認可判定に使う既定のユーザ ID（`user_id` 省略時・空文字時）。
 const DEFAULT_WEB_USER_ID: &str = "web-user";
 
-/// 設定された owner ID と呼び出し元 ID が一致するか判定する。
-///
-/// `owner_discord_id` は DB スキーマ上 `TEXT NOT NULL DEFAULT ''` で、owner 未設定の
-/// エージェントでは空文字になる。素朴な `==` だと空の呼び出し元 ID が owner と
-/// 一致してしまうため、空の owner ID は「owner 未設定」として誰とも一致させない。
-///
-/// NOTE: #164 で `crate::api::is_owner_id` として同等のヘルパが追加されている。
-/// マージ後はそちらへ統一する。
-fn resolve_is_owner(owner_id: &str, user_id: &str) -> bool {
-    !owner_id.is_empty() && owner_id == user_id
-}
-
 /// リクエストの `user_id` を認可判定に使える形へ正規化する。
 ///
 /// `Option<String>` なので `None` は既定値に落ちるが、JSON で `""` を明示すると
 /// `Some("")` となり既定値が適用されない。空文字は認可上の主体として意味を持たない
 /// （session_logs の speaker_id にもそのまま入る）ため、空白のみの場合も含めて
 /// 既定の web ユーザとして扱う。
+///
+/// owner 判定は `crate::api::is_owner_id`（#164）に委ねる。前後の空白はここで
+/// 落としておき、認可・セッションキー・speaker_id すべてで同じ値を使う
+/// （REST の `agents_messages` と同じ方針）。
 fn normalize_user_id(user_id: Option<&str>) -> String {
     match user_id.map(str::trim) {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -79,7 +71,7 @@ pub async fn send_web_message(
             None => {
                 let cfg = opencrab_db::queries::get_agent_discord_config(&conn, &id);
                 if let Ok(Some(c)) = cfg {
-                    if resolve_is_owner(&c.owner_discord_id, &user_id) {
+                    if crate::api::is_owner_id(&c.owner_discord_id, &user_id) {
                         opencrab_actions::CallerIdentity::Owner
                     } else {
                         opencrab_actions::CallerIdentity::Agent
@@ -207,24 +199,31 @@ pub async fn web_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_user_id, resolve_is_owner, DEFAULT_WEB_USER_ID};
+    use super::{normalize_user_id, DEFAULT_WEB_USER_ID};
+    use crate::api::is_owner_id;
 
     #[test]
     fn unset_owner_matches_nobody() {
         // 回帰ガード: owner 未設定（空文字）のとき、空の user_id を owner と判定しない。
-        assert!(!resolve_is_owner("", ""));
-        assert!(!resolve_is_owner("", DEFAULT_WEB_USER_ID));
-        assert!(!resolve_is_owner("", "123456789012345678"));
+        assert!(!is_owner_id("", ""));
+        assert!(!is_owner_id("", DEFAULT_WEB_USER_ID));
+        assert!(!is_owner_id("", "123456789012345678"));
+    }
+
+    #[test]
+    fn whitespace_only_owner_matches_nobody() {
+        // 空白のみの owner 設定は未設定と同じ扱い。空白だけを送って owner に
+        // なれないこと（`is_owner_id` が両辺を trim する前提の確認）。
+        assert!(!is_owner_id("   ", "   "));
+        assert!(!is_owner_id("\t", DEFAULT_WEB_USER_ID));
+        assert!(!is_owner_id(" \n ", "123456789012345678"));
     }
 
     #[test]
     fn configured_owner_matches_only_exact_id() {
-        assert!(resolve_is_owner("123456789012345678", "123456789012345678"));
-        assert!(!resolve_is_owner(
-            "123456789012345678",
-            "987654321098765432"
-        ));
-        assert!(!resolve_is_owner("123456789012345678", ""));
+        assert!(is_owner_id("123456789012345678", "123456789012345678"));
+        assert!(!is_owner_id("123456789012345678", "987654321098765432"));
+        assert!(!is_owner_id("123456789012345678", ""));
     }
 
     #[test]
@@ -248,6 +247,14 @@ mod tests {
     fn normalized_empty_user_id_is_not_owner_even_if_owner_is_default_name() {
         // 空 user_id は既定値へ落ちるため、owner 未設定と組み合わせても owner にならない。
         let user_id = normalize_user_id(Some(""));
-        assert!(!resolve_is_owner("", &user_id));
+        assert!(!is_owner_id("", &user_id));
+    }
+
+    #[test]
+    fn normalized_user_id_matches_owner_with_stray_whitespace() {
+        // `.env` 由来の owner 値に空白が混ざっても、正規化済み user_id と一致する。
+        let user_id = normalize_user_id(Some("  123456789012345678  "));
+        assert_eq!(user_id, "123456789012345678");
+        assert!(is_owner_id(" 123456789012345678\n", &user_id));
     }
 }

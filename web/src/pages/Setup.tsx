@@ -501,7 +501,7 @@ function DiscordStep({
           type="text"
           className="input-outlined"
           value={ownerId}
-          placeholder="390732846236434452"
+          placeholder="123456789012345678"
           onChange={(e) => setOwnerId(e.target.value)}
         />
       </div>

@@ -318,7 +318,8 @@ pub async fn patch_discord_config(
             &conn,
             &id,
             req.bot_token.as_deref(),
-            req.owner_discord_id.as_deref(),
+            // PUT と同じく入口で正規化する（理由は update_discord_config のコメント参照）。
+            req.owner_discord_id.as_deref().map(str::trim),
         )
         .unwrap()
     };
@@ -349,8 +350,9 @@ pub async fn patch_discord_config(
     if let Some(ref manager) = state.discord_manager {
         // Stop the current gateway first (no-op if not running).
         manager.stop_agent_gateway(&id).await;
-        // Restart only if enabled and token is present.
-        if cfg.enabled && !cfg.bot_token.is_empty() {
+        // Restart only if enabled and token is present（起動条件は
+        // `gateway_will_start` に集約。空白だけのトークンは「無し」扱い）。
+        if opencrab_discord::gateway_will_start(cfg.enabled, &cfg.bot_token) {
             if let Err(e) = manager
                 .start_agent_gateway(&id, &cfg.bot_token, &cfg.owner_discord_id)
                 .await
@@ -380,7 +382,11 @@ pub async fn update_discord_config(
     Path(id): Path<String>,
     Json(req): Json<UpdateDiscordConfigRequest>,
 ) -> Json<serde_json::Value> {
-    let owner_discord_id = req.owner_discord_id.unwrap_or_default();
+    // 入口で正規化する。owner の判定は `api::is_owner_id`（trim 済み比較）を通る経路と、
+    // 下位 crate の生比較のまま残っている経路（form/modal、ボタン操作）が混在するため、
+    // 前後空白付きの値を保存すると「DM は通るのに owner 専用 UI だけ無言で拒否される」
+    // 半端な状態になる。判定述語を下位 crate へ移す整理は #174。
+    let owner_discord_id = req.owner_discord_id.unwrap_or_default().trim().to_string();
 
     // Save to DB.
     {

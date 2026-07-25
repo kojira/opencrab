@@ -137,7 +137,9 @@ enabled = true
 token = "${DISCORD_TOKEN}"
 guild_ids = []
 agent_ids = ["crab", "54fab4ec-fad2-45d9-92dd-e62e50e2b36b", "6b79ac3a-7f17-4618-a827-5bda992a3698"]  # Discordメッセージに応答するエージェントID
-owner_discord_id = "390732846236434452"  # DMに応答するオーナーのDiscord User ID
+# DMに応答するオーナーのDiscord User ID。環境ごとに変わるので `.env` の
+# OWNER_DISCORD_ID から渡す（未設定なら空 = オーナー無しとして扱われる）。
+owner_discord_id = "${OWNER_DISCORD_ID}"
 heartbeat_channel_id = 1470698801395273861
 # spawn_subtask.webhook を明示しない時に使う lifecycle webhook。
 # url = "" または未指定なら無効。実URLは環境変数で渡す。

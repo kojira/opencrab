@@ -20,6 +20,32 @@ struct AgentGatewayEntry {
     handle: JoinHandle<()>,
 }
 
+/// per-agent ゲートウェイを起動する**前**の owner 前処理: 正規化して、未設定なら警告する。
+///
+/// owner は入口で正規化する。DB に前後空白付きで保存された既存行でも、
+/// 「DM は通るのに owner 専用 UI だけ無言で拒否される」半端な状態を作らない
+/// （下位の form/modal 側は生比較のまま。判定述語の共通化は #174）。
+///
+/// per-agent 経路は共有（TOML）ゲートウェイ側の起動警告に載らないので、ここでも
+/// owner 未設定を知らせる（復元経路 `restore_from_db` も通る）。
+///
+/// `start_agent_gateway` 本体は `DiscordGateway::start()` で実ネットワークに出るため
+/// そのままではテストできない。ネットワークに触らない前処理だけをこの関数に切り出し、
+/// 戻り値（正規化済み owner）を呼び出し側に使わせることで、警告と正規化の両方を
+/// 単体テストで押さえる。
+///
+/// `#[deny(dead_code)]` は「この関数が呼ばれ続けること」を保証するための保険。
+/// 将来 `start_agent_gateway` をリファクタして呼び出しを落とすと、警告ではなく
+/// コンパイルエラーになる（CI は警告では落ちないため、警告では歯止めにならない）。
+/// 呼び出しが消えると owner の入口正規化も消え、レガシー空白付きの行で
+/// 「DM は通るのに owner 専用 UI だけ無言で拒否」が復活してしまう。
+#[deny(dead_code)]
+fn prepare_owner_for_gateway(agent_id: &str, owner_discord_id: &str) -> String {
+    let owner_discord_id = owner_discord_id.trim();
+    crate::owner_warning::warn_if_agent_gateway_owner_unset(agent_id, owner_discord_id);
+    owner_discord_id.to_string()
+}
+
 pub struct DiscordGatewayManager<T: AgentRunner> {
     // std RwLock（tokio ではない）: is_running を同期メソッドにするため。
     // ガードを await 跨ぎで保持しないこと（各メソッドでスコープを閉じる）。
@@ -42,6 +68,10 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         token: &str,
         owner_discord_id: &str,
     ) -> anyhow::Result<()> {
+        // 起動前の owner 前処理（正規化 + 未設定警告）。テストは下の `tests` モジュール。
+        let owner_normalized = prepare_owner_for_gateway(agent_id, owner_discord_id);
+        let owner_discord_id = owner_normalized.as_str();
+
         // Stop existing gateway for this agent if running.
         self.stop_agent_gateway(agent_id).await;
 
@@ -175,5 +205,52 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             entry.handle.abort();
             info!(agent_id = %agent_id, "Per-agent Discord gateway stopped (shutdown_all)");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_owner_for_gateway;
+    use crate::owner_warning::capture::captured_logs;
+
+    /// 起動経路が owner を正規化して渡す（DB のレガシー行が空白付きでも同じ）。
+    #[test]
+    fn start_path_normalizes_owner() {
+        assert_eq!(
+            prepare_owner_for_gateway("crab", "  123456789012345678\n"),
+            "123456789012345678"
+        );
+        assert_eq!(prepare_owner_for_gateway("crab", "   "), "");
+    }
+
+    /// 起動経路そのものが owner 未設定の警告を出す。
+    ///
+    /// `owner_warning` の純関数テストだけでは「呼ばれているか」を保証できない。
+    /// ここでは起動前処理を実際に呼び、warn イベントが出ることを確認する。
+    #[test]
+    fn start_path_warns_when_owner_is_unset() {
+        for owner in ["", " ", " \t\n"] {
+            let logs = captured_logs(|| {
+                prepare_owner_for_gateway("agent-under-test", owner);
+            });
+            assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+            assert!(
+                logs.contains("empty owner_discord_id"),
+                "owner={owner:?} で本文が出ること: {logs}"
+            );
+            assert!(
+                logs.contains("agent-under-test"),
+                "どのエージェントか分かること: {logs}"
+            );
+        }
+    }
+
+    /// owner 設定済みなら起動経路は黙る（「常に出ている警告」を作らない）。
+    #[test]
+    fn start_path_is_silent_when_owner_is_set() {
+        let logs = captured_logs(|| {
+            prepare_owner_for_gateway("crab", "  123456789012345678  ");
+        });
+        assert!(logs.trim().is_empty(), "余計な警告を出さないこと: {logs}");
     }
 }
