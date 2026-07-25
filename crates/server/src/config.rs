@@ -809,6 +809,11 @@ mod tests {
     ///
     /// 本番 (`crates/server/src/main.rs`) と CLI がロードするのは `config/default.toml`
     /// なので、配布テンプレートだけでなく両方を回す。
+    ///
+    /// **注意**: `config/default.toml` は追跡ファイル（＝各開発者の実稼働設定）なので、
+    /// このテストは作業コピーの中身も検査する。ローカルで owner を実 ID に直書きすると
+    /// 無関係な変更でも `cargo test` が落ちる。これは意図した挙動で、作業コピーでも
+    /// `${OWNER_DISCORD_ID}` 参照を維持すること（ローカル固有値は `.env` に置く）。
     #[test]
     fn shipped_configs_take_owner_discord_id_from_env() {
         let _lock = env_lock();
@@ -819,24 +824,49 @@ mod tests {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for name in ["config/default.toml.example", "config/default.toml"] {
             let path = repo_root.join(name);
-            let cfg = load_config(path.to_str().unwrap())
-                .unwrap_or_else(|e| panic!("{name} must parse: {e:#}"));
+            let cfg = load_config(path.to_str().unwrap()).unwrap_or_else(|e| {
+                panic!(
+                    "{name} is not valid TOML (check your working copy of this tracked file): {e:#}"
+                )
+            });
             assert_eq!(
                 cfg.gateway.discord.owner_discord_id, SENTINEL,
                 "{name}: owner_discord_id must resolve from ${{OWNER_DISCORD_ID}} \
-                 (a literal ID or a typo in the variable name would break this)"
+                 (a literal ID written into this tracked file, or a typo in the variable name, \
+                 breaks this). Keep the ${{OWNER_DISCORD_ID}} reference and put your own ID in .env"
             );
         }
     }
 
     /// 配布テンプレートは共有ゲートウェイを既定で無効にしている（個人 ID や
     /// トークンを持たない状態で配られる）。
+    ///
+    /// `load_config` は `${}` 展開で環境変数を読むので、`set_var` する他テストと
+    /// 直列化するため `env_lock()` を取る。
     #[test]
     fn shipped_config_example_keeps_shared_gateway_disabled() {
+        let _lock = env_lock();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../config/default.toml.example");
         let cfg = load_config(path.to_str().unwrap()).expect("default.toml.example must parse");
         assert!(!cfg.gateway.discord.enabled);
+    }
+
+    /// `load_config` は owner を trim して返す（`.env` のコピペで前後に空白が
+    /// 混ざっても、生比較が残る下位経路と判定がズレない）。
+    #[test]
+    fn load_config_trims_owner_discord_id() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::set("TEST_TRIM_OWNER_DISCORD_ID", "  123456789012345678\t");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner-trim.toml");
+        std::fs::write(
+            &path,
+            "[gateway.discord]\nowner_discord_id = \"${TEST_TRIM_OWNER_DISCORD_ID}\"\n",
+        )
+        .unwrap();
+        let cfg = load_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.gateway.discord.owner_discord_id, "123456789012345678");
     }
 
     #[test]
