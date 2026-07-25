@@ -326,13 +326,14 @@ async fn handle_event<R: NostrAgentRunner>(
         admin.clone(),
         agent_id,
     );
-    let fut = responder.respond(
-        &session_id,
-        event.reply_target(),
-        &prompt_suffix,
-        Some(&event.id),
-    );
-    runtime.run_serialized(&session_id, fut).await;
+    responder
+        .respond_serialized(
+            &session_id,
+            event.reply_target(),
+            &prompt_suffix,
+            Some(&event.id),
+        )
+        .await;
 }
 
 /// watch ループが握る identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、

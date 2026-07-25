@@ -77,12 +77,28 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         &self.runtime
     }
 
+    /// [`Self::respond`] を per-session ロックの下で実行する（唯一の公開入口）。
+    ///
+    /// inbound（watch ループ）と resume（完了 sink）が同じロックを通るので、同一
+    /// セッションに対して 2 本の応答生成が並行しない = 二重投稿しない。ロック取得を
+    /// 呼び出し側の責務にすると 1 箇所の忘れで不変条件が壊れるため、ここに閉じ込める。
+    pub async fn respond_serialized(
+        &self,
+        session_id: &str,
+        reply_target: &str,
+        prompt_suffix: &str,
+        trigger_message_id: Option<&str>,
+    ) -> Option<String> {
+        let fut = self.respond(session_id, reply_target, prompt_suffix, trigger_message_id);
+        self.runtime.run_serialized(session_id, fut).await
+    }
+
     /// 会話を DB から再構築 → `run_agent_response`（非ブロック dispatch 付き）→
     /// 応答を転記し、明示送信が無ければ `reply_target` へ暗黙返信する共通経路。
     ///
-    /// **呼び出し側が `run_serialized` の下で await すること**（inbound / resume を
-    /// 同一セッションで直列化する）。返り値は配送した応答本文（沈黙時は `None`）。
-    pub async fn respond(
+    /// 呼び出しは [`Self::respond_serialized`] 経由に限る（直列化の担保）。
+    /// 返り値は配送した応答本文（沈黙時は `None`）。
+    async fn respond(
         &self,
         session_id: &str,
         reply_target: &str,
@@ -205,9 +221,10 @@ impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
         // ここで待つと dispatch した subtask の完了処理を塞ぐ）。
         tokio::spawn(async move {
             let suffix = resume_prompt_suffix(&reply_target, &ev.subtask_id, &ev.exit_reason);
-            let fut = responder.respond(&sid, &reply_target, &suffix, None);
             // inbound の応答生成と直列化する（同一セッションで二重に返信しない）。
-            responder.runtime.run_serialized(&sid, fut).await;
+            responder
+                .respond_serialized(&sid, &reply_target, &suffix, None)
+                .await;
         });
     }
 }
@@ -510,7 +527,9 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test", "pk-abc");
 
-        let out = r.respond(&sid, "note1target", "suffix", None).await;
+        let out = r
+            .respond_serialized(&sid, "note1target", "suffix", None)
+            .await;
         assert!(out.is_none());
         assert!(fake.sent().is_empty());
         // 転記もしない（送っていない応答を履歴に残さない）。
@@ -532,7 +551,7 @@ mod tests {
         let sid = nostr_session_id("agent-sink-test", "pk-dup");
 
         let out = r
-            .respond(&sid, "note1implicit", "suffix", Some("evt-1"))
+            .respond_serialized(&sid, "note1implicit", "suffix", Some("evt-1"))
             .await;
         assert_eq!(out.as_deref(), Some("本文"));
 
@@ -560,7 +579,7 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test", "pk-implicit");
 
-        r.respond(&sid, "note1implicit", "suffix", Some("evt-1"))
+        r.respond_serialized(&sid, "note1implicit", "suffix", Some("evt-1"))
             .await;
         let sent = fake.sent();
         assert!(sent.contains("note1implicit"), "{sent}");
@@ -576,12 +595,12 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test", "pk-serial");
 
-        // inbound 相当（run_serialized 下で respond）を走らせつつ、途中で完了 sink を発火。
+        // inbound 相当（watch ループと同じ入口）を走らせつつ、途中で完了 sink を発火。
         let r2 = r.clone();
         let sid2 = sid.clone();
         let inbound = tokio::spawn(async move {
-            let fut = r2.respond(&sid2, "note1inbound", "suffix", Some("evt-1"));
-            r2.runtime().run_serialized(&sid2, fut).await;
+            r2.respond_serialized(&sid2, "note1inbound", "suffix", Some("evt-1"))
+                .await;
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         r.on_subtask_settled(settled(&sid, Some("note1resume")));
