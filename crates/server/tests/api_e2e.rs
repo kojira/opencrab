@@ -13,9 +13,18 @@ use opencrab_server::{create_router, AppState};
 
 /// Create test app using the REAL server router (same as production).
 fn create_test_app() -> Router {
+    create_test_app_with_db().0
+}
+
+/// `create_test_app` と同じアプリを作り、同じ DB ハンドルも返す。
+///
+/// API を経由せずに行を書き込みたいテスト（入口の正規化が入る前に保存された
+/// レガシー行の再現）で使う。
+fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
+    let db = opencrab_db::Db::from_connection(conn);
     let state = AppState {
-        db: opencrab_db::Db::from_connection(conn),
+        db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(LlmRouter::new()),
         llm_config: Arc::new(toml::from_str("").unwrap()),
         voice_config: Arc::new(Default::default()),
@@ -35,7 +44,7 @@ fn create_test_app() -> Router {
         nostr_manager: None,
         mcp_manager: None,
     };
-    create_router(state)
+    (create_router(state), db)
 }
 
 // ==================== Helper ====================
@@ -664,9 +673,14 @@ async fn test_empty_user_id_is_not_owner_when_owner_unset() {
     assert_eq!(caller_type, "agent");
 }
 
-/// owner 未設定のとき、空白のみの `user_id` でも Owner 権限にならない。
+/// 空白のみの owner を保存しても owner は「未設定」のままで、空白のみの `user_id`
+/// で呼んでも Owner 権限にならない。
+///
+/// PUT の入口 trim により `" "` は `""` として保存されるため、これは「空 owner」の
+/// 検証になる（空白のまま保存された**レガシー行**の経路は
+/// `test_legacy_whitespace_only_owner_row_matches_nobody` が受け持つ）。
 #[tokio::test]
-async fn test_whitespace_user_id_is_not_owner_when_owner_whitespace() {
+async fn test_whitespace_user_id_is_not_owner_when_owner_blank() {
     let app = create_test_app();
     let (agent_id, app) = create_test_agent(app).await;
     let app = set_agent_owner(app, &agent_id, " ").await;
@@ -732,6 +746,115 @@ async fn test_owner_discord_id_is_trimmed_on_save() {
     // ハンドラ経路でも trim 済みの ID が owner として通る。
     let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
     assert_eq!(caller_type, "owner");
+}
+
+/// `PATCH /api/agents/{id}/discord` も owner を trim して保存する。
+///
+/// PUT だけ直しても、ダッシュボードからの部分更新（PATCH）経路から空白付きの owner が
+/// 入り込む余地が残る（PUT 版は `test_owner_discord_id_is_trimmed_on_save`）。
+#[tokio::test]
+async fn test_owner_discord_id_is_trimmed_on_patch() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    // PATCH は設定済みの行にしか効かないので、まず PUT で作る。
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/agents/{agent_id}/discord"),
+        Some(serde_json::json!({
+            "owner_discord_id": "  987654321098765432\n",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["ok"], true, "patch must succeed: {resp}");
+    assert_eq!(
+        resp["owner_discord_id"], "987654321098765432",
+        "PATCH は owner を trim して保存する: {resp}"
+    );
+
+    // 保存値そのものが trim されている。
+    let (status, resp) = send_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/discord"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["owner_discord_id"], "987654321098765432");
+
+    // ハンドラ経路でも新しい owner が通り、置き換えられた古い owner は通らない。
+    let (app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
+    assert_eq!(caller_type, "owner");
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_ne!(
+        caller_type, "owner",
+        "replaced owner must lose owner rights"
+    );
+}
+
+/// レガシー行（入口 trim を入れる前に空白付きで保存された `owner_discord_id`）でも
+/// ハンドラ経路の owner 判定が成立する。
+///
+/// 入口の正規化は新規保存にしか効かないので、既存 DB の行は空白付きのまま残る。
+/// API を経由せず DB に直接書いてその状態を再現する。
+#[tokio::test]
+async fn test_legacy_padded_owner_row_is_still_recognized() {
+    let (app, db) = create_test_app_with_db();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    {
+        let conn = db.lock().unwrap();
+        assert!(opencrab_db::queries::patch_agent_discord_config(
+            &conn,
+            &agent_id,
+            None,
+            Some("  123456789012345678\n"),
+        )
+        .unwrap());
+    }
+
+    let (app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_eq!(
+        caller_type, "owner",
+        "padded legacy owner row must still match the owner"
+    );
+    // 別 ID は当然 owner ではない（trim 比較が緩みすぎていない）。
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
+    assert_ne!(caller_type, "owner");
+}
+
+/// レガシー行の owner が空白のみなら「未設定」として扱い、誰も owner に昇格させない。
+#[tokio::test]
+async fn test_legacy_whitespace_only_owner_row_matches_nobody() {
+    let (app, db) = create_test_app_with_db();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    {
+        let conn = db.lock().unwrap();
+        assert!(opencrab_db::queries::patch_agent_discord_config(
+            &conn,
+            &agent_id,
+            None,
+            Some(" \t\n")
+        )
+        .unwrap());
+    }
+
+    let mut app = app;
+    for user_id in [" \t\n", " ", "", "123456789012345678"] {
+        let (next, caller_type) = caller_type_for(app, &agent_id, user_id).await;
+        app = next;
+        assert_ne!(
+            caller_type, "owner",
+            "whitespace-only legacy owner must match nobody (user_id={user_id:?})"
+        );
+    }
 }
 
 /// `user_id` の前後空白はハンドラ入口で 1 回だけ正規化され、認可・セッションキー・
