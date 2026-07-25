@@ -691,6 +691,77 @@ async fn test_configured_owner_is_recognized_through_handler() {
     assert_eq!(caller_type, "owner");
 }
 
+/// 負のコントロール: owner 設定済みでも、**別の** `user_id` は Owner にならない
+/// （ガードが過少に振れて誰でも owner になっていない）。
+#[tokio::test]
+async fn test_other_user_is_not_owner_when_owner_configured() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "987654321098765432").await;
+    assert_ne!(
+        caller_type, "owner",
+        "a different user_id must not be recognized as owner"
+    );
+    assert_eq!(caller_type, "agent");
+}
+
+/// `PUT /api/agents/{id}/discord` は owner を trim して保存する。
+///
+/// 前後空白付きのまま保存すると、trim 済み比較を行う経路（`is_owner_id`）では
+/// owner と認識されるのに、生比較が残る下位経路（form/modal）だけ無言で拒否される
+/// 半端な状態になる。入口で正規化して防ぐ（判定述語の共通化は #174）。
+#[tokio::test]
+async fn test_owner_discord_id_is_trimmed_on_save() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "  123456789012345678\n").await;
+
+    // 保存値そのものが trim されている。
+    let (status, resp) = send_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/discord"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["owner_discord_id"], "123456789012345678");
+
+    // ハンドラ経路でも trim 済みの ID が owner として通る。
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_eq!(caller_type, "owner");
+}
+
+/// `user_id` の前後空白はハンドラ入口で 1 回だけ正規化され、認可・セッションキー・
+/// `speaker_id` すべてで同じ値が使われる（owner にはなれるのに別セッションに
+/// 記録される、という非対称を作らない）。
+#[tokio::test]
+async fn test_user_id_is_trimmed_consistently() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({
+            "content": "hello",
+            "user_id": "  123456789012345678 ",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["caller_type"], "owner");
+    assert_eq!(
+        resp["session_id"],
+        format!("agent-msg-{agent_id}-123456789012345678"),
+        "session id must use the trimmed user_id: {resp}"
+    );
+}
+
 // ==================== MockLlmProvider ====================
 
 /// A mock LLM provider that returns pre-queued responses.
