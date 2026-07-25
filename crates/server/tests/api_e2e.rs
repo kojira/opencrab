@@ -604,6 +604,93 @@ async fn test_delete_nonexistent_agent() {
     assert_eq!(resp["deleted"], false);
 }
 
+// ==================== Caller identity (owner) via handler ====================
+//
+// `is_owner_id` の単体テストだけでは、実際のハンドラがそれを通っている保証が
+// 無い（判定を素朴な `==` に戻しても単体テストは緑のまま）。ここでは
+// `POST /api/agents/{id}/messages` を実際に叩いて caller 判定を検証する。
+// LLM プロバイダは 0 件なのでハンドラは早期 return し、`caller_type` を JSON で返す。
+
+/// per-agent Discord 設定を保存する（owner を明示指定）。
+async fn set_agent_owner(app: Router, agent_id: &str, owner_discord_id: &str) -> Router {
+    let (status, resp) = send_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/agents/{agent_id}/discord"),
+        Some(serde_json::json!({
+            "bot_token": "test-token",
+            "owner_discord_id": owner_discord_id,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["ok"], true, "discord config must be saved: {resp}");
+    app
+}
+
+/// `POST /api/agents/{id}/messages` を叩いて `caller_type` を返す。
+async fn caller_type_for(app: Router, agent_id: &str, user_id: &str) -> (Router, String) {
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({
+            "content": "hello",
+            "user_id": user_id,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let caller_type = resp["caller_type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("response must carry caller_type: {resp}"))
+        .to_string();
+    (app, caller_type)
+}
+
+/// owner 未設定（per-agent Discord 設定の owner が空文字）のとき、空の `user_id`
+/// で呼んでも Owner 権限にならない。
+#[tokio::test]
+async fn test_empty_user_id_is_not_owner_when_owner_unset() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "").await;
+    assert_ne!(
+        caller_type, "owner",
+        "empty user_id must not be promoted to owner when owner is unset"
+    );
+    assert_eq!(caller_type, "agent");
+}
+
+/// owner 未設定のとき、空白のみの `user_id` でも Owner 権限にならない。
+#[tokio::test]
+async fn test_whitespace_user_id_is_not_owner_when_owner_whitespace() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, " ").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, " ").await;
+    assert_ne!(
+        caller_type, "owner",
+        "whitespace-only owner must be treated as unset"
+    );
+    assert_eq!(caller_type, "agent");
+}
+
+/// 正のコントロール: owner を設定すれば、その `user_id` はハンドラ経路で
+/// Owner として認識される（ガードが過剰に効いて owner を落としていない）。
+#[tokio::test]
+async fn test_configured_owner_is_recognized_through_handler() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+    let app = set_agent_owner(app, &agent_id, "123456789012345678").await;
+
+    let (_app, caller_type) = caller_type_for(app, &agent_id, "123456789012345678").await;
+    assert_eq!(caller_type, "owner");
+}
+
 // ==================== MockLlmProvider ====================
 
 /// A mock LLM provider that returns pre-queued responses.
