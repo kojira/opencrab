@@ -28,6 +28,7 @@ use opencrab_actions::{
 };
 
 use crate::process;
+use crate::subtask_registries::SubtaskRegistries;
 use crate::AppState;
 
 /// web セッション ID の接頭辞。sink はこれで web セッションを識別する。
@@ -61,7 +62,7 @@ pub struct WebEvent {
 #[derive(Default)]
 pub struct WebGateway {
     session_locks: DashMap<String, Arc<Mutex<()>>>,
-    registries: DashMap<String, SubtaskRegistry>,
+    registries: SubtaskRegistries,
     channels: DashMap<String, broadcast::Sender<String>>,
 }
 
@@ -96,10 +97,7 @@ impl WebGateway {
 
     /// セッションの dispatch registry を取得する（無ければ生成し、inbound/resume で共有）。
     fn registry_for(&self, session_id: &str) -> SubtaskRegistry {
-        self.registries
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(DashMap::new()))
-            .clone()
+        self.registries.registry_for(session_id)
     }
 
     fn lock_for(&self, session_id: &str) -> Arc<Mutex<()>> {

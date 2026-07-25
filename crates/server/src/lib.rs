@@ -16,6 +16,7 @@ pub mod memory_maintenance;
 pub mod nostr_runner_impl;
 pub mod process;
 pub mod skill_consolidation;
+pub mod subtask_registries;
 pub mod system_actions;
 pub mod web_gateway;
 
@@ -88,6 +89,10 @@ pub struct AppState {
     pub mcp_manager: Option<SharedMcpManager>,
     /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
     pub web_gateway: Arc<web_gateway::WebGateway>,
+    /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
+    /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
+    /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
+    pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
 }
 
 pub fn create_router(state: AppState) -> Router {

@@ -63,6 +63,9 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         nostr_manager: None,
         mcp_manager: None,
         web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
     };
     let app = create_router(state);
     (app, db)
