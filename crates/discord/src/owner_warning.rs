@@ -1,0 +1,163 @@
+//! owner 未設定（`owner_discord_id` が空）を起動時に知らせる警告。
+//!
+//! Discord ゲートウェイの起動経路は 2 つある。
+//!
+//! - 共有（TOML）ゲートウェイ: `config/default.toml` の `[gateway.discord]`
+//! - per-agent ゲートウェイ: `PUT /api/agents/{id}/discord`（ダッシュボード）で
+//!   保存した設定から起動、およびサーバー再起動時の DB からの復元
+//!
+//! 配布テンプレートは共有ゲートウェイを無効にしているため、新規オンボーディングは
+//! per-agent 経路を通る。両経路で同じ本文の警告を出せるよう、判定と文面をここに集約する。
+
+use tracing::warn;
+
+/// owner 未設定が招く結果（両経路で同じ内容を出す）。
+const CONSEQUENCES: &str = "Consequences: (1) owner-only features are unavailable because no one \
+     is recognized as owner; (2) for agents with no trusted users registered, DMs from ANY \
+     Discord user are accepted; (3) owner-only UI (forms/modals/buttons) skips its operator \
+     check and is open to anyone who can see it.";
+
+/// 共有（TOML）ゲートウェイの owner 未設定を警告する。警告したら `true`。
+///
+/// ゲートウェイが**実際に起動する条件**（`enabled` かつトークンあり）でだけ警告する。
+/// 追跡ファイル `config/default.toml` は `enabled = true` なので、`DISCORD_TOKEN` を
+/// 持たない開発者にまで出すと「常に出ている警告」になり信用されなくなる。
+pub fn warn_if_shared_gateway_owner_unset(
+    enabled: bool,
+    token: &str,
+    owner_discord_id: &str,
+) -> bool {
+    if !enabled || token.trim().is_empty() || !owner_discord_id.trim().is_empty() {
+        return false;
+    }
+    warn!(
+        "gateway.discord.owner_discord_id is empty (check OWNER_DISCORD_ID in .env). \
+         {CONSEQUENCES} Set OWNER_DISCORD_ID in production."
+    );
+    true
+}
+
+/// per-agent ゲートウェイの owner 未設定を警告する。警告したら `true`。
+///
+/// per-agent 設定の owner 欄は任意（未入力なら空文字で保存される）ため、共有
+/// ゲートウェイ側の警告条件ではこの経路を一度も拾えない。どのエージェントの設定を
+/// 直せばよいか分かるよう `agent_id` を添える。
+pub fn warn_if_agent_gateway_owner_unset(agent_id: &str, owner_discord_id: &str) -> bool {
+    if !owner_discord_id.trim().is_empty() {
+        return false;
+    }
+    warn!(
+        agent_id = %agent_id,
+        "per-agent Discord gateway is starting with an empty owner_discord_id. \
+         {CONSEQUENCES} Set the owner for this agent from the dashboard \
+         (or PUT /api/agents/{{id}}/discord)."
+    );
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    /// `tracing` の出力を文字列として拾う `MakeWriter`。
+    /// 「警告条件を満たす」だけでなく「実際に warn イベントが出る」ことを検証する。
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// `f` の実行中に出た tracing 出力を返す。
+    fn captured_logs(f: impl FnOnce()) -> String {
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CaptureWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn shared_gateway_warns_only_when_it_actually_starts() {
+        // enabled + トークンあり + owner 空 → 警告
+        assert!(warn_if_shared_gateway_owner_unset(true, "bot-token", ""));
+        assert!(warn_if_shared_gateway_owner_unset(true, "bot-token", "   "));
+        // トークン無し（＝共有ゲートウェイは起動しない）→ 警告しない
+        assert!(!warn_if_shared_gateway_owner_unset(true, "", ""));
+        assert!(!warn_if_shared_gateway_owner_unset(true, "  ", ""));
+        // 無効 → 警告しない
+        assert!(!warn_if_shared_gateway_owner_unset(false, "bot-token", ""));
+        // owner 設定済み → 警告しない
+        assert!(!warn_if_shared_gateway_owner_unset(
+            true,
+            "bot-token",
+            "123456789012345678"
+        ));
+    }
+
+    #[test]
+    fn agent_gateway_warns_when_owner_is_blank() {
+        assert!(warn_if_agent_gateway_owner_unset("crab", ""));
+        assert!(warn_if_agent_gateway_owner_unset("crab", " \n"));
+        assert!(!warn_if_agent_gateway_owner_unset(
+            "crab",
+            "123456789012345678"
+        ));
+    }
+
+    #[test]
+    fn agent_gateway_warning_is_emitted_with_agent_id() {
+        let logs = captured_logs(|| {
+            assert!(warn_if_agent_gateway_owner_unset("agent-under-test", ""));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("empty owner_discord_id"),
+            "本文が出ること: {logs}"
+        );
+        assert!(
+            logs.contains("agent-under-test"),
+            "どのエージェントか分かること: {logs}"
+        );
+    }
+
+    #[test]
+    fn shared_gateway_warning_is_emitted() {
+        let logs = captured_logs(|| {
+            assert!(warn_if_shared_gateway_owner_unset(true, "bot-token", ""));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("gateway.discord.owner_discord_id is empty"),
+            "本文が出ること: {logs}"
+        );
+    }
+
+    #[test]
+    fn no_warning_is_emitted_when_owner_is_set() {
+        let logs = captured_logs(|| {
+            warn_if_shared_gateway_owner_unset(true, "bot-token", "123456789012345678");
+            warn_if_agent_gateway_owner_unset("crab", "123456789012345678");
+        });
+        assert!(logs.trim().is_empty(), "余計な警告を出さないこと: {logs}");
+    }
+}

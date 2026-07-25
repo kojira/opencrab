@@ -42,6 +42,15 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         token: &str,
         owner_discord_id: &str,
     ) -> anyhow::Result<()> {
+        // owner は入口で正規化する。DB に前後空白付きで保存された既存行でも、
+        // 「DM は通るのに owner 専用 UI だけ無言で拒否される」半端な状態を作らない
+        // （下位の form/modal 側は生比較のまま。判定述語の共通化は #174）。
+        let owner_discord_id = owner_discord_id.trim();
+
+        // per-agent 経路は共有（TOML）ゲートウェイ側の起動警告に載らないので、
+        // ここでも owner 未設定を知らせる（復元経路 restore_from_db も通る）。
+        crate::owner_warning::warn_if_agent_gateway_owner_unset(agent_id, owner_discord_id);
+
         // Stop existing gateway for this agent if running.
         self.stop_agent_gateway(agent_id).await;
 
