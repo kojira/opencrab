@@ -73,6 +73,35 @@ pub const DISCORD_ACTIONS: &[&str] = &[
     "leave_voice_channel",
 ];
 
+/// Nostr の**配送系**アクション（#168）。「送る」こと自体が応答なので、非ブロック
+/// dispatch（RFC #152 S3a）の対象から外して inline 実行のままにする集合。
+///
+/// background 化すると、親ターンが「明示送信済み」フラグ（`NostrGatewayActions::sent_flag`）
+/// を観測する前に run が終わり、暗黙返信（ループ側のフォールバック reply）と、後から
+/// 完了した明示送信の**二重投稿**になる。
+///
+/// 送信系以外の2つ:
+/// - `nostr_upload`: 送信ではない（`sent` を立てない）が、戻り値の URL を同じターンで
+///   投稿本文に使うのが通常の用法。background 化すると URL の代わりに `spawned` が返り、
+///   モデルが URL を載せられなくなる。
+/// - `nostr_switch_identity`: 送信ではないが「以後の全送信のアイデンティティを差し替える」。
+///   親ターンの送信と順序が入れ替わると別 identity で投稿しかねないため inline に留める。
+///
+/// 一方 `nostr_generate_key`（vanity 探索 = 長時間）は dispatch 対象に**残す**
+/// （これを background 化するのが S3a の主目的）。
+///
+/// この一覧は `crates/nostr` の `NostrGatewayActions::definitions()` と対応する
+/// （ドリフト検出テストが nostr crate 側にある）。`DISCORD_ACTIONS` と同様、
+/// gateway 名を下位層に置くのは既存の前例に倣う。
+pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
+    "nostr_post",
+    "nostr_reply",
+    "nostr_dm",
+    "nostr_zap",
+    "nostr_upload",
+    "nostr_switch_identity",
+];
+
 /// spawn_subtask のネスト上限。
 const MAX_DEPTH: u32 = 2;
 

@@ -342,8 +342,10 @@ impl ActionExecutor for SharedExecutor {
 ///
 /// - 制御系（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
 ///   subtask ライフサイクルを操作するため background 化しない。
-/// - 配送系（Discord 送信・VC 参加/退出・peer review 依頼）: 「送る」こと自体が
-///   応答であり、background 化して完了で再注入する意味がない。
+/// - 配送系（Discord 送信・VC 参加/退出・peer review 依頼・Nostr 送信）: 「送る」こと
+///   自体が応答であり、background 化して完了で再注入する意味がない。加えて gateway が
+///   「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合（Nostr）、
+///   background 化は**二重投稿**を生む。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
@@ -355,8 +357,12 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
     for name in crate::bridge::DISCORD_ACTIONS {
         set.insert((*name).to_string());
     }
-    // TODO(#152 P2 / 別 issue): Nostr 配線時に Nostr 配送系（nostr_dm / nostr_zap /
-    // reply 等）を除外集合へ追加する。現状 Nostr は auto-dispatch 未配線のため実害なし。
+    // Nostr 配送系（#168）。background 化すると親ターンが「明示送信済み」フラグを
+    // 観測できず、暗黙返信と二重投稿になる。`nostr_generate_key` は含まない
+    // （長時間処理なので dispatch 対象に残す）。
+    for name in crate::bridge::NOSTR_DELIVERY_ACTIONS {
+        set.insert((*name).to_string());
+    }
     set
 }
 
@@ -1047,10 +1053,14 @@ mod tests {
             parent,
         );
 
-        // dispatch 対象判定: server ツールは dispatch、制御系はしない。
+        // dispatch 対象判定: server ツールは dispatch、制御系/配送系はしない。
         assert!(dispatcher.should_dispatch("nostr_generate_key"));
         assert!(!dispatcher.should_dispatch("spawn_subtask"));
         assert!(!dispatcher.should_dispatch("discord_send"));
+        // Nostr 配送系（#168）: background 化すると暗黙返信と二重投稿になる。
+        assert!(!dispatcher.should_dispatch("nostr_reply"));
+        assert!(!dispatcher.should_dispatch("nostr_post"));
+        assert!(!dispatcher.should_dispatch("nostr_dm"));
 
         let outcome = dispatcher.dispatch("nostr_generate_key", &serde_json::json!({}), "tc-1");
         assert!(outcome.label.starts_with("nostr_generate_key("));

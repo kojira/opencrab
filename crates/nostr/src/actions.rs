@@ -358,6 +358,67 @@ mod tests {
         }
     }
 
+    /// #168: `cancel_subtask` を Nostr gateway 側で**定義しない**こと。
+    ///
+    /// `SystemGatewayActions` は「inner が cancel_subtask を定義していれば inner へ委譲」
+    /// する。Nostr が定義してしまうと、`RunRequest::with_dispatch` で渡した共有 registry
+    /// （`NostrSessionRuntime` が session 単位で貸すもの）ではなく inner 側の別 registry が
+    /// 引かれ、走行中 subtask の停止が常に not found になる。定義しない＝server-neutral の
+    /// 実装が共有 registry を引く、が正しい配線。
+    #[test]
+    fn test_nostr_gateway_does_not_define_cancel_subtask() {
+        let names: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            !names.contains(&"cancel_subtask".to_string()),
+            "cancel_subtask は server-neutral 実装（共有 registry を引く）に任せる"
+        );
+    }
+
+    /// #168: Nostr 配送系は **非ブロック dispatch の対象外**（inline 実行）であること。
+    ///
+    /// background 化すると、親ターンが `sent_flag` を観測する前に run が終わり、
+    /// ループの暗黙返信と後追いの明示送信で**二重投稿**になる。併せて、除外集合の名前が
+    /// 実在のアクションを指していること（ドリフト検出）と、`nostr_generate_key` が
+    /// dispatch 対象に残っていること（長時間処理の非ブロック化＝S3a の主目的、
+    /// E2E `e2e_cancel_stops_subtask` の前提）も守る。
+    #[test]
+    fn test_nostr_delivery_actions_are_non_dispatch() {
+        let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in opencrab_actions::NOSTR_DELIVERY_ACTIONS {
+            assert!(
+                live.contains(&name.to_string()),
+                "{name} は除外集合にあるが nostr gateway definitions に無い（リネームで死名化）"
+            );
+            assert!(
+                non_dispatch.contains(*name),
+                "{name} は配送系なので dispatch 対象外でなければならない（二重投稿防止）"
+            );
+        }
+
+        // 送信系（sent フラグを立てるもの）が漏れていないこと。
+        for name in ["nostr_post", "nostr_reply", "nostr_dm", "nostr_zap"] {
+            assert!(
+                non_dispatch.contains(name),
+                "{name} は送信系なので dispatch 対象外でなければならない"
+            );
+        }
+        // 長時間処理は dispatch 対象に残す。
+        assert!(
+            !non_dispatch.contains("nostr_generate_key"),
+            "nostr_generate_key は background 化する（S3a の主目的）"
+        );
+    }
+
     #[tokio::test]
     async fn test_missing_args_rejected_without_spawning() {
         let a = NostrGatewayActions::new(NostaroCli::new());
