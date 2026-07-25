@@ -93,12 +93,16 @@ cp config/default.toml.example config/default.toml
 > handles secrets like Discord bot tokens, only expose the dashboard on a trusted
 > network (e.g. localhost or behind a VPN/reverse proxy with auth).
 
-### 3. Set environment variables (optional)
+### 3. Set environment variables (required for Discord, optional otherwise)
 
 By default, OpenCrab uses [hermit-shell](https://github.com/kojira/hermit-shell) (`localhost:8765`) as the LLM backend. hermit-shell is a macOS-native OpenAI-compatible proxy for Anthropic that retrieves API keys from the macOS Keychain automatically.
 
-You can configure LLM providers from the dashboard instead of setting these. If you
-prefer environment variables, set provider API keys directly:
+LLM providers can be configured from the dashboard, so API keys are optional here.
+Discord is different: `config/default.toml` no longer holds an owner ID of its own —
+it reads `${OWNER_DISCORD_ID}` from the environment — so the Discord gateway needs a
+`.env` file (or exported variables) to know who the owner is.
+
+If you prefer environment variables for LLM providers too, set the API keys directly:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -109,9 +113,12 @@ export OPENROUTER_API_KEY="..."
 export DISCORD_TOKEN="..."
 ```
 
-Values that differ per environment (bot token, your Discord user ID) can also be kept
-in a `.env` file instead of `export`ing them. The server and CLI load `.env` at startup,
-and `config/default.toml` references the values as `${VAR}`:
+#### `.env` (how per-environment values are supplied)
+
+Values that differ per environment (Discord bot token, your Discord user ID) are kept
+in a `.env` file rather than in the tracked config. The server and CLI load `.env` at
+startup, and `config/default.toml` references the values as `${VAR}` — an unset variable
+expands to an empty string, so a missing `.env` silently leaves the value empty:
 
 ```bash
 cp .env.example .env
@@ -119,10 +126,12 @@ cp .env.example .env
 ```
 
 `OWNER_DISCORD_ID` is your own Discord user ID and gates owner-only behavior. **Set it
-if you use the Discord gateway**: when it is empty, nobody is recognized as owner, so
-owner-only features stop working, DMs from any user are accepted for agents that have
-no trusted users registered, and owner-only UI (forms/modals/buttons) skips its
-operator check. See [docs/discord.md](docs/discord.md) for details.
+whenever you use Discord** (shared gateway or per-agent bots): when it is empty, nobody
+is recognized as owner, so owner-only features stop working, DMs from any user are
+accepted for agents that have no trusted users registered, and owner-only UI
+(forms/modals/buttons) skips its operator check. The server logs a warning at startup
+when a Discord gateway starts without an owner. See
+[docs/discord.md](docs/discord.md) for details.
 
 ### 4. Development (recommended)
 
