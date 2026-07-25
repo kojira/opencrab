@@ -513,6 +513,8 @@ async fn main() -> anyhow::Result<()> {
         db,
         llm_router: opencrab_server::SharedLlmRouter::new(llm_router),
         llm_config: Arc::new(cfg.llm.clone()),
+        // 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / env 上書き）。
+        subtask_auto_dispatch: cfg.subtask.auto_dispatch,
         // 純 TOML を保持する（DB オーバーライド適用前の土台）。API の GET は
         // DB 行が無いときこれを "toml" として返すため、リセット後に古い実効値を
         // TOML と誤表示しないよう effective ではなく cfg.voice を入れる（レビュー指摘）。

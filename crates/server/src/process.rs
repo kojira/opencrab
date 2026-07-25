@@ -1376,7 +1376,7 @@ pub async fn run_agent_response(
     // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
     // されているときだけ有効化する。sink 未配線（REST 一発呼び等）や sub-engine は
     // 従来どおり全ツール inline 実行（後方互換・非破壊）。
-    if depth == 0 {
+    if depth == 0 && state.subtask_auto_dispatch {
         if let Some(sink) = req.completion_sink.clone() {
             let registry = req
                 .subtask_registry

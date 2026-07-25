@@ -93,6 +93,9 @@ pub struct AppState {
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
     /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
     pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
+    /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
+    /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
+    pub subtask_auto_dispatch: bool,
 }
 
 pub fn create_router(state: AppState) -> Router {

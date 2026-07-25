@@ -49,28 +49,86 @@ pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
 
 /// Discord 送信系アクション: depth >= 1 の sub-engine からは**定義の非表示と実行の拒否の両方**で
 /// ブロックする（定義から隠すだけでは、モデルが親コンテキストの記憶で名前を呼んだ場合に素通しになる）。
+///
+/// **この一覧は `DiscordGatewayActions::definitions()` に実在する名前だけを持つ。**
+/// 以前は 20 名のうち 13 名（`discord_send` / `discord_react` / `discord_edit_message` …）が
+/// 現行 gateway に存在しない死名で、depth ゲートも dispatch 除外も実質空振りしていた。
+/// ドリフト検出は `crates/discord` の `test_bridge_policy_names_are_live_gateway_actions`
+/// と `discord_tools_are_classified_for_dispatch` が担う。
+///
+/// なお sub-engine の実効ゲートはこの deny-list ではなく `SUB_ENGINE_ALLOWED_ACTIONS`
+/// （allow-list / `crates/discord/src/gateway_actions/subtask_engine.rs`）。ここは多層防御。
 pub const DISCORD_ACTIONS: &[&str] = &[
-    "discord_send",
     "discord_send_file",
-    "discord_react",
-    "discord_delete_message",
-    "discord_edit_message",
-    "discord_start_thread",
-    "discord_list_channels",
-    "discord_get_channel_info",
-    "discord_list_guilds",
-    "discord_set_channel_writable",
-    "discord_whitelist_channel",
     "discord_add_reaction",
-    "discord_remove_reaction",
-    "discord_send_reply",
-    "discord_send_with_embed",
-    "discord_pin_message",
-    "discord_unpin_message",
+    "discord_list_channels",
+    "discord_list_guilds",
+    // A2UI 送信（ユーザーの応答待ちを伴う対話的配送）。sub-engine からは不可。
+    "send_ui",
     "request_peer_review",
     // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
     "join_voice_channel",
     "leave_voice_channel",
+];
+
+/// Discord gateway のツールのうち **inline 実行のまま**にするもの
+/// （`default_non_dispatch_tools` の種）。
+///
+/// 分類基準（5 項目）の権威は [`crate::subtask::default_non_dispatch_tools`] の doc、
+/// 運用者向けの一覧は `docs/DESIGN.md`「非ブロックツール実行（dispatch）」節。
+///
+/// 全要素が `DiscordGatewayActions::definitions()` に実在し、かつ
+/// [`DISCORD_DISPATCHABLE_ACTIONS`] と互いに素であることをテストで保証する。
+pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
+    // (1) 制御系（default_non_dispatch_tools の制御集合と重複するが、Discord の
+    //     definitions() 全名を分類し尽くすためここにも並べる）。
+    "spawn_subtask",
+    "cancel_subtask",
+    "report_progress",
+    // (2) 配送系。
+    "discord_send_file",
+    "discord_add_reaction",
+    "request_peer_review",
+    "join_voice_channel",
+    "leave_voice_channel",
+    // (2) 配送系 + ユーザーの応答待ち（pending interaction）。
+    "send_ui",
+    // (3) 同ターン結果依存: webhook URL / 作成物の ID をそのターンで使う。
+    "ensure_webhook",
+    "ensure_subtask_webhook",
+    "discord_create_webhook",
+    "discord_create_channel",
+    "set_default_webhook",
+    "set_default_subtask_webhook",
+    // (4) run 内共有状態: readable/writable は走行中ターンの配送可否を左右する。
+    "discord_channel_config",
+    // (5) 純粋な読み取り。
+    "discord_list_channels",
+    "discord_list_guilds",
+    "list_allowed_commands",
+    "list_webhooks",
+    "list_subtask_webhooks",
+    "get_default_webhook",
+    "get_default_subtask_webhook",
+    "read_heartbeat_instructions",
+    // (3) 許可コマンドの追加/削除は「許可した直後に execute_shell を使う」用法が通常で、
+    //     結果（正規化された名前・成否）も即答すべきもの。
+    "add_allowed_command",
+    "remove_allowed_command",
+];
+
+/// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
+///
+/// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く。ここに無く
+/// [`DISCORD_INLINE_ACTIONS`] にも無い名前が `definitions()` に現れたらテストが落ちる。
+pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
+    // 全メモリの再インデックス（長時間）。dispatch の主目的。
+    "rebuild_memory_index",
+    // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
+    "create_skill",
+    // 設定/指示文の書き込み。同ターンで読み戻さない。
+    "update_memory_index_config",
+    "update_heartbeat_instructions",
 ];
 
 /// Nostr の**配送系**アクション（#168）。「送る」こと自体が応答なので、非ブロック
@@ -101,6 +159,15 @@ pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
     "nostr_upload",
     "nostr_switch_identity",
 ];
+
+/// Nostr gateway のツールのうち、**意図的に dispatch を許す**もの
+/// （[`NOSTR_DELIVERY_ACTIONS`] の補集合）。
+///
+/// `nostr_generate_key` は vanity 探索で分単位かかりうる長時間処理。これを background
+/// 化するのが RFC #152 S3a の主目的。ここにも [`NOSTR_DELIVERY_ACTIONS`] にも無い名前が
+/// `NostrGatewayActions::definitions()` に現れたら
+/// `nostr_tools_are_classified_for_dispatch`（`crates/nostr/src/actions.rs`）が落ちる。
+pub const NOSTR_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
 
 /// spawn_subtask のネスト上限。
 const MAX_DEPTH: u32 = 2;

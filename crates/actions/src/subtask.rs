@@ -505,20 +505,44 @@ impl ActionExecutor for SharedExecutor {
 
 /// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツール名の集合。
 ///
-/// 判定ルール（この 3 つのどれかに当てはまるツールは inline に残す）:
+/// # 分類基準（この 5 つのどれかに当てはまるツールは inline に残す）
+///
 /// 1. **制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
 ///    subtask ライフサイクルを操作するため background 化しない。
-/// 2. **配送系**（Discord 送信・VC 参加/退出・peer review 依頼・Nostr 送信）: 「送る」こと
-///    自体が応答であり、background 化して完了で再注入する意味がない。加えて gateway が
-///    「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合（Nostr）、
-///    background 化は**二重投稿**を生む。
-/// 3. **run 内共有状態を書くツール**（`select_llm`）: `ActionContext` の
-///    `model_override` / `current_purpose` のように、走行中の run が同一プロセス内で
-///    共有している状態を書き換える。background 化すると (a) そのターンには効かず
-///    （`spawned` が返るだけ）、(b) 書き込みが engine の次イテレーションと競合して
-///    「いつのターンから効くか」が非決定になる。制御の効き方を保つため inline に残す。
+/// 2. **配送系**（Discord 送信・A2UI 送信・VC 参加/退出・peer review 依頼・Nostr 送信）:
+///    「送る」こと自体が応答であり、background 化して完了で再注入する意味がない。加えて
+///    gateway が「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合
+///    （Nostr）、background 化は**二重投稿**を生む。`send_ui` はさらに**ユーザーの応答を
+///    待機する** pending interaction を張るため、background 化すると (a) UI 投稿と本文
+///    返信の順序が入れ替わり、(b) エージェントは `spawned` しか見えずインタラクション
+///    ID を扱えず、(c) クリックによる resume と subtask 決着の resume で返信が 2 通になる。
+/// 3. **同ターン結果依存**: 戻り値（URL / ID）をそのターンの後続処理や応答本文に使う用法が
+///    通常のもの（`ensure_webhook` / `ensure_subtask_webhook` / `discord_create_webhook` /
+///    `discord_create_channel` / `nostr_upload`）。background 化すると値の代わりに
+///    `spawned` が返るだけなので、用法そのものが壊れる。
+/// 4. **run 内共有状態を書くツール**（`select_llm` / `discord_channel_config` /
+///    `nostr_switch_identity`）: `ActionContext` の `model_override` / `current_purpose`、
+///    チャンネルの writable、以後の送信 identity のように、走行中の run（や同ターンの配送）
+///    が参照している状態を書き換える。background 化すると (a) そのターンには効かず、
+///    (b) 書き込みが engine の次イテレーションや配送と競合して「いつのターンから効くか」が
+///    非決定になる。制御の効き方を保つため inline に残す。
+/// 5. **純粋な読み取りで即答すべきもの**（`list_*` / `get_*` / `read_heartbeat_instructions`）:
+///    dispatch すると質問 1 つが 2 ターン 2 メッセージに割れるだけで、得るものが無い。
+///
+/// 逆に dispatch を**残す**のは「長時間かかる」か「同ターンで結果を使わない書き込み」のみ
+/// （`rebuild_memory_index` / `create_skill` / `nostr_generate_key` / server ツールの
+/// `execute_shell` / `write_file` / `web_search` …）。
+///
+/// # ドリフト検出
+///
+/// gateway 側の `definitions()` の**全名**が「この集合にある」か「明示的な dispatch 可
+/// リスト（[`crate::bridge::DISCORD_DISPATCHABLE_ACTIONS`] /
+/// [`crate::bridge::NOSTR_DISPATCHABLE_ACTIONS`]）にある」かのどちらかであることを、
+/// 各 gateway crate の fail-closed テストが検査する。新ツールを追加すると、どちらにも
+/// 入れない限りテストが落ちる（= 分類を強制する）。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
+/// 運用者向けの一覧は `docs/DESIGN.md`「非ブロックツール実行（dispatch）」節。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
     let mut set: HashSet<String> = [
         "spawn_subtask",
@@ -530,8 +554,10 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    // Discord 配送系（bridge の DISCORD_ACTIONS と同一集合）。
-    for name in crate::bridge::DISCORD_ACTIONS {
+    // Discord gateway の inline 集合（配送系 / 同ターン結果依存 / run 内共有状態 /
+    // 純粋な読み取り）。depth ゲートの `DISCORD_ACTIONS` とは目的が違う別集合で、
+    // `DISCORD_ACTIONS ⊆ DISCORD_INLINE_ACTIONS` はテストで保証する。
+    for name in crate::bridge::DISCORD_INLINE_ACTIONS {
         set.insert((*name).to_string());
     }
     // Nostr 配送系（#168）。background 化すると親ターンが「明示送信済み」フラグを
@@ -1425,7 +1451,9 @@ mod tests {
         // dispatch 対象判定: server ツールは dispatch、制御系/配送系はしない。
         assert!(dispatcher.should_dispatch("nostr_generate_key"));
         assert!(!dispatcher.should_dispatch("spawn_subtask"));
-        assert!(!dispatcher.should_dispatch("discord_send"));
+        // 実在する Discord 配送系（`discord_send` は現行 gateway に無い死名だった）。
+        assert!(!dispatcher.should_dispatch("discord_send_file"));
+        assert!(!dispatcher.should_dispatch("send_ui"));
         // Nostr 配送系（#168）: background 化すると暗黙返信と二重投稿になる。
         assert!(!dispatcher.should_dispatch("nostr_reply"));
         assert!(!dispatcher.should_dispatch("nostr_post"));
@@ -2170,5 +2198,97 @@ mod tests {
             set.contains("select_llm"),
             "select_llm は run 内共有状態（model_override）を書くため inline に残す"
         );
+    }
+
+    /// 分類集合の内部整合性（#152）。
+    ///
+    /// - inline 集合と dispatch 可リストは互いに素（同じ名前が両方に属さない）。
+    /// - `DISCORD_ACTIONS`（depth ゲート）は inline 集合の部分集合。配送系を depth
+    ///   ゲートに入れておきながら dispatch してしまう食い違いを防ぐ。
+    /// - inline 集合は重複を含まない（一覧の手編集で二重に足す事故の検出）。
+    #[test]
+    fn dispatch_classification_sets_are_consistent() {
+        let non_dispatch = default_non_dispatch_tools();
+
+        for name in crate::bridge::DISCORD_DISPATCHABLE_ACTIONS {
+            assert!(
+                !non_dispatch.contains(*name),
+                "{name} が dispatch 可リストと inline 集合の両方に居る"
+            );
+        }
+        for name in crate::bridge::NOSTR_DISPATCHABLE_ACTIONS {
+            assert!(
+                !non_dispatch.contains(*name),
+                "{name} が dispatch 可リストと inline 集合の両方に居る"
+            );
+        }
+        for name in crate::bridge::DISCORD_ACTIONS {
+            assert!(
+                crate::bridge::DISCORD_INLINE_ACTIONS.contains(name),
+                "{name} は depth ゲート（DISCORD_ACTIONS）にあるのに dispatch されてしまう"
+            );
+        }
+        let unique: HashSet<&&str> = crate::bridge::DISCORD_INLINE_ACTIONS.iter().collect();
+        assert_eq!(
+            unique.len(),
+            crate::bridge::DISCORD_INLINE_ACTIONS.len(),
+            "DISCORD_INLINE_ACTIONS に重複がある"
+        );
+    }
+
+    /// [P1 回帰] 配送系 + ユーザー応答待ちの `send_ui` は dispatch しない。
+    /// background 化すると UI 投稿と本文返信の順序が入れ替わり、クリック resume と
+    /// subtask 決着 resume で返信が 2 通になる。
+    #[test]
+    fn send_ui_is_not_dispatched() {
+        assert!(default_non_dispatch_tools().contains("send_ui"));
+    }
+
+    /// [P1 回帰] 戻り値の URL を同ターンで使う `ensure_*webhook` は dispatch しない。
+    #[test]
+    fn same_turn_result_dependent_tools_are_not_dispatched() {
+        let set = default_non_dispatch_tools();
+        for name in [
+            "ensure_webhook",
+            "ensure_subtask_webhook",
+            "discord_create_webhook",
+            "discord_create_channel",
+            "nostr_upload",
+        ] {
+            assert!(
+                set.contains(name),
+                "{name} は同ターンで戻り値を使うため inline"
+            );
+        }
+    }
+
+    /// [P1 回帰] 純粋な読み取りは dispatch しない（質問 1 つが 2 ターンに割れる）。
+    #[test]
+    fn pure_read_tools_are_not_dispatched() {
+        let set = default_non_dispatch_tools();
+        for name in [
+            "list_webhooks",
+            "list_subtask_webhooks",
+            "list_allowed_commands",
+            "get_default_webhook",
+            "get_default_subtask_webhook",
+            "read_heartbeat_instructions",
+            "discord_list_channels",
+            "discord_list_guilds",
+        ] {
+            assert!(set.contains(name), "{name} は純粋な読み取りなので inline");
+        }
+    }
+
+    /// 長時間処理は dispatch 対象に**残る**（除外集合が広がりすぎた回帰の検出）。
+    #[test]
+    fn long_running_tools_stay_dispatchable() {
+        let set = default_non_dispatch_tools();
+        for name in ["nostr_generate_key", "rebuild_memory_index", "create_skill"] {
+            assert!(
+                !set.contains(name),
+                "{name} は長時間処理なので dispatch 対象に残す"
+            );
+        }
     }
 }

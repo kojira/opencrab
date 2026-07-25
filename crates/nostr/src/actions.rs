@@ -419,6 +419,57 @@ mod tests {
         );
     }
 
+    /// **fail-closed な dispatch 分類ガード（#152 / #178）**。
+    ///
+    /// `test_nostr_delivery_actions_are_non_dispatch` は「定数 → 実装」の片方向なので、
+    /// **新しい配送系を実装したが定数へ入れ忘れた**ケースを検知できない（レビューで
+    /// `mark_sent()` を呼ぶ新アクションを足しても全テスト緑だった）。
+    ///
+    /// ここは実装（`definitions()`）を起点に走査し、全名が
+    /// 「[`opencrab_actions::NOSTR_DELIVERY_ACTIONS`]（= 除外集合）」か
+    /// 「[`opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS`]（= 意図的な dispatch 可）」の
+    /// どちらか**ちょうど一方**に属することを要求する。新アクションを追加すると、
+    /// 分類を明示するまでこのテストが落ちる。
+    ///
+    /// 判定基準は `opencrab_actions::default_non_dispatch_tools` の doc（5 項目）。
+    #[test]
+    fn nostr_tools_are_classified_for_dispatch() {
+        let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in &live {
+            let inline = non_dispatch.contains(name);
+            let dispatchable =
+                opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.contains(&name.as_str());
+            assert!(
+                inline ^ dispatchable,
+                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
+                 新しい Nostr アクションを追加したら NOSTR_DELIVERY_ACTIONS か \
+                 NOSTR_DISPATCHABLE_ACTIONS のどちらかへ入れること（配送系＝`mark_sent()` を\
+                 呼ぶもの・戻り値を同ターンで使うもの・identity を書き換えるものは前者）"
+            );
+        }
+
+        // 逆方向: 定数側に死名が無いこと。
+        for name in opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS {
+            assert!(
+                live.contains(&name.to_string()),
+                "NOSTR_DISPATCHABLE_ACTIONS の {name} が definitions() に無い（死名）"
+            );
+        }
+        // 分類は definitions() を覆い尽くす。
+        assert_eq!(
+            opencrab_actions::NOSTR_DELIVERY_ACTIONS.len()
+                + opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.len(),
+            live.len(),
+            "分類集合の合計が definitions() の数と一致しない（新アクションの分類漏れ）"
+        );
+    }
+
     #[tokio::test]
     async fn test_missing_args_rejected_without_spawning() {
         let a = NostrGatewayActions::new(NostaroCli::new());

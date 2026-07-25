@@ -263,6 +263,8 @@ cargo test -p opencrab-server
 # real LLM to verify tool dispatch / cancellation end-to-end. Gated by OPENCRAB_E2E=1.
 # Prereqs: local server running (./dev.sh restart) + ~/.codex/auth.json authenticated.
 cp .env.example .env   # adjust values if needed (no secrets committed)
+# OPENCRAB_E2E_OWNER_ID is also required (no default): the user_id used for owner
+# authorization checks. Set it in .env; tests skip when it is unset.
 OPENCRAB_E2E=1 cargo test -p opencrab-server --test e2e_local -- --ignored --nocapture
 ```
 

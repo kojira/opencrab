@@ -31,6 +31,54 @@ pub struct AppConfig {
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
+    /// 非ブロックツール実行（dispatch / RFC #152 S3a）。
+    #[serde(default)]
+    pub subtask: SubtaskConfig,
+}
+
+/// 非ブロックツール実行（dispatch）の設定（RFC #152 S3a）。
+///
+/// dispatch は「LLM のツール呼び出しを background subtask として実行し、そのターンには
+/// `{"status":"spawned"}` だけを返して完了後に別ターンで再注入する」挙動。除外集合
+/// （`opencrab_actions::default_non_dispatch_tools`）のツールは従来どおり inline 実行。
+#[derive(Debug, Deserialize, Clone)]
+pub struct SubtaskConfig {
+    /// 自動 dispatch の有効/無効（**kill switch**）。
+    ///
+    /// `false` にすると全ツールが inline 実行に戻る（この機能導入前の挙動）。
+    /// 回帰を踏んだ運用者が再ビルドせずに戻せる唯一の手段なので消さないこと。
+    /// 環境変数 `OPENCRAB_SUBTASK_AUTO_DISPATCH`（`0`/`false`/`off`/`no` で無効）が
+    /// TOML より優先する（`.env` だけで切り戻せるように）。
+    #[serde(default = "default_subtask_auto_dispatch")]
+    pub auto_dispatch: bool,
+}
+
+impl Default for SubtaskConfig {
+    fn default() -> Self {
+        Self {
+            auto_dispatch: default_subtask_auto_dispatch(),
+        }
+    }
+}
+
+fn default_subtask_auto_dispatch() -> bool {
+    true
+}
+
+/// dispatch の kill switch を上書きする環境変数名。
+pub const SUBTASK_AUTO_DISPATCH_ENV: &str = "OPENCRAB_SUBTASK_AUTO_DISPATCH";
+
+/// `OPENCRAB_SUBTASK_AUTO_DISPATCH` を bool として解釈する。
+///
+/// 未設定 / 空 / 解釈不能なら `None`（TOML 値を使う）。真偽の綴りは緩く受ける
+/// （`1/true/on/yes` と `0/false/off/no`、大小文字無視）。
+fn auto_dispatch_from_env() -> Option<bool> {
+    let raw = std::env::var(SUBTASK_AUTO_DISPATCH_ENV).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Some(true),
+        "0" | "false" | "off" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// スリープ時スキル棚卸しの設定（design-sleep-skill-consolidation.md §10）。
@@ -362,6 +410,11 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
     let owner = config.gateway.discord.owner_discord_id.trim();
     if owner.len() != config.gateway.discord.owner_discord_id.len() {
         config.gateway.discord.owner_discord_id = owner.to_string();
+    }
+
+    // dispatch の kill switch は環境変数で上書きできる（`.env` だけで切り戻せるように）。
+    if let Some(v) = auto_dispatch_from_env() {
+        config.subtask.auto_dispatch = v;
     }
 
     Ok(config)

@@ -16,7 +16,7 @@ use axum::{
 use futures::Stream;
 use serde::Deserialize;
 
-use crate::web_gateway::{run_and_deliver, web_session_id};
+use crate::web_gateway::{run_and_deliver_serialized, web_session_id};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -50,8 +50,8 @@ fn normalize_user_id(user_id: Option<&str>) -> String {
 
 /// POST /api/agents/{id}/web/send — inbound メッセージを受けてエージェントを実行する。
 ///
-/// per-session 直列化の下で `run_and_deliver` を実行し、直接応答を body で返しつつ
-/// SSE へも push する。subtask 完了 resume の応答は SSE のみで配送される。
+/// `run_and_deliver_serialized`（直列化込みの唯一の公開入口）を実行し、直接応答を body で
+/// 返しつつ SSE へも push する。subtask 完了 resume の応答は SSE のみで配送される。
 pub async fn send_web_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -146,14 +146,12 @@ pub async fn send_web_message(
         }));
     }
 
-    // 5. per-session 直列化の下で実行し、直接応答を返す（SSE へも push 済み）。
+    // 5. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
+    //    `run_and_deliver_serialized` の内側に閉じている（呼び忘れが起こらない）。
     let gateway = state.web_gateway.clone();
-    let response = gateway
-        .run_serialized(
-            &session_id,
-            run_and_deliver(&state, &gateway, &id, &session_id, caller, None, "direct"),
-        )
-        .await;
+    let response =
+        run_and_deliver_serialized(&state, &gateway, &id, &session_id, caller, None, "direct")
+            .await;
 
     Json(serde_json::json!({
         "session_id": session_id,

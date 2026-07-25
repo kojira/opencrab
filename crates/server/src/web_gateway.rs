@@ -117,7 +117,12 @@ impl WebGateway {
     ///
     /// - 異なるセッションは並行、同一セッションは直列（inbound / resume を割り込ませない）。
     /// - inbound は呼び出し側が `.await` し、resume は `tokio::spawn` の中で `.await` する。
-    pub async fn run_serialized<F, T>(&self, session_id: &str, fut: F) -> T
+    ///
+    /// **module-private**: 直列化を呼び出し側の責務にすると 1 箇所の忘れで不変条件が壊れる
+    /// （レビューで実証: sink 側の `run_serialized` を外してもテストは全緑だった）。
+    /// 外へ出す入口は [`run_and_deliver_serialized`] だけにする（Nostr の
+    /// `NostrResponder::respond_serialized` と同じ構造）。
+    async fn run_serialized<F, T>(&self, session_id: &str, fut: F) -> T
     where
         F: Future<Output = T>,
     {
@@ -162,7 +167,7 @@ impl SubtaskCompletionSink for WebCompletionSink {
             );
             let sid = ev.session_id.clone();
             let agent_id = ev.agent_id.clone();
-            let fut = run_and_deliver(
+            run_and_deliver_serialized(
                 &state,
                 &gateway,
                 &agent_id,
@@ -170,10 +175,40 @@ impl SubtaskCompletionSink for WebCompletionSink {
                 CallerIdentity::Agent,
                 Some(&note),
                 "subtask_resume",
-            );
-            gateway.run_serialized(&sid, fut).await;
+            )
+            .await;
         });
     }
+}
+
+/// [`run_and_deliver`] を per-session ロックの下で実行する（**唯一の公開入口**）。
+///
+/// inbound（`POST /api/agents/{id}/web/send`）と resume（`WebCompletionSink`）が同じ
+/// ロックを通るので、同一セッションに対して 2 本の応答生成が並行しない = 同じ履歴から
+/// 2 通の応答が SSE へ流れない。
+///
+/// ロック取得を呼び出し側の責務にしていた頃は、sink 側の `run_serialized` を外しても
+/// テストが全緑だった（呼び忘れを検出できない構造だった）。Nostr の
+/// `NostrResponder::respond_serialized` と同じく、直列化をここに閉じ込める。
+pub async fn run_and_deliver_serialized(
+    state: &AppState,
+    gateway: &Arc<WebGateway>,
+    agent_id: &str,
+    session_id: &str,
+    caller: CallerIdentity,
+    system_prompt_suffix: Option<&str>,
+    kind: &str,
+) -> Option<String> {
+    let fut = run_and_deliver(
+        state,
+        gateway,
+        agent_id,
+        session_id,
+        caller,
+        system_prompt_suffix,
+        kind,
+    );
+    gateway.run_serialized(session_id, fut).await
 }
 
 /// 会話を DB から構築 → `run_agent_response`（非ブロック dispatch 付き）→ 応答を
@@ -181,8 +216,11 @@ impl SubtaskCompletionSink for WebCompletionSink {
 ///
 /// 返り値: 配送した応答本文（NO_REPLY / 空 / エラー時は None）。
 ///
+/// 呼び出しは [`run_and_deliver_serialized`] 経由に限る（直列化の担保のため
+/// module-private にしている）。
+///
 /// **MutexGuard を await 跨ぎで保持しない**（各 DB ロックはブロックで閉じてから await）。
-pub async fn run_and_deliver(
+async fn run_and_deliver(
     state: &AppState,
     gateway: &Arc<WebGateway>,
     agent_id: &str,

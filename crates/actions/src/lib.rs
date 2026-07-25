@@ -21,8 +21,8 @@ pub mod run_request;
 
 pub use bridge::{
     tool_policy, BridgedExecutor, ToolEvent, ToolEventSink, ToolEventStatus, ToolPolicy,
-    DISCORD_ACTIONS, NOSTR_DELIVERY_ACTIONS, OWNER_ONLY_ACTIONS, REJECTION_CODE_PREFIX,
-    TRUSTED_ONLY_ACTIONS,
+    DISCORD_ACTIONS, DISCORD_DISPATCHABLE_ACTIONS, DISCORD_INLINE_ACTIONS, NOSTR_DELIVERY_ACTIONS,
+    NOSTR_DISPATCHABLE_ACTIONS, OWNER_ONLY_ACTIONS, REJECTION_CODE_PREFIX, TRUSTED_ONLY_ACTIONS,
 };
 pub use dispatcher::ActionDispatcher;
 pub use run_request::RunRequest;
