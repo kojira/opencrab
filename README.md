@@ -129,8 +129,10 @@ cp .env.example .env
 whenever you use Discord** (shared gateway or per-agent bots): when it is empty, nobody
 is recognized as owner, so owner-only features stop working, DMs from any user are
 accepted for agents that have no trusted users registered, and owner-only UI
-(forms/modals/buttons) skips its operator check. The server logs a warning at startup
-when a Discord gateway starts without an owner. See
+(forms/modals/buttons) skips its operator check. The server logs a warning whenever a
+Discord gateway starts without an owner — at boot for the shared gateway, and for
+per-agent bots both at boot (restored from the database) and when a config is saved
+from the dashboard. See
 [docs/discord.md](docs/discord.md) for details.
 
 ### 4. Development (recommended)
