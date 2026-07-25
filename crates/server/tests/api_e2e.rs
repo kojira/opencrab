@@ -692,6 +692,13 @@ impl LlmProvider for MockLlmProvider {
 /// Create test app with a MockLlmProvider registered in the LlmRouter.
 /// Returns (Router, opencrab_db::Db, Arc<MockLlmProvider>).
 fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>) {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    (app, db, mock)
+}
+
+/// `create_test_app_with_llm` の `AppState` も返す版（#169）。
+/// dispatch registry のような「ハンドラとテストが共有するランタイム状態」を検証するのに使う。
+fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>, AppState) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
 
@@ -728,8 +735,8 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
     };
-    let app = create_router(state);
-    (app, db, mock)
+    let app = create_router(state.clone());
+    (app, db, mock, state)
 }
 
 /// Create a named agent with a specific persona via the API.
@@ -1754,4 +1761,266 @@ async fn test_skill_consolidation_curates_and_audits() {
     // last_at が前進している
     let last = opencrab_db::queries::get_last_skill_consolidation_at(&conn, "a1").unwrap();
     assert!(last.is_some() && last.as_deref() != Some("2020-01-01T00:00:00+00:00"));
+}
+
+// ==================== #169: REST の非ブロック dispatch ====================
+
+/// REST セッションのログを新しい順に取る小さなヘルパ。
+fn session_logs(
+    db: &opencrab_db::Db,
+    session_id: &str,
+) -> Vec<opencrab_db::queries::SessionLogRow> {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::list_recent_session_logs(&conn, session_id, 100).unwrap()
+}
+
+fn session_status(db: &opencrab_db::Db, session_id: &str) -> Option<String> {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::get_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.status)
+}
+
+/// 即完了しない fake subtask を registry へ登録する（走行中 subtask の代役）。
+fn insert_running_subtask(
+    registry: &opencrab_actions::SubtaskRegistry,
+    subtask_id: &str,
+    parent_session_id: &str,
+    agent_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let handle = tokio::spawn(std::future::pending::<()>());
+    registry.insert(
+        subtask_id.to_string(),
+        opencrab_actions::SpawnedSubtask {
+            abort_handle: handle.abort_handle(),
+            session_id: format!("subtask-{subtask_id}"),
+            parent_session_id: parent_session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            label: "long job".to_string(),
+            started_at: std::time::Instant::now(),
+            reply_target: None,
+        },
+    );
+    handle
+}
+
+/// #169: `POST /api/agents/{id}/messages` はツールを background subtask として dispatch する
+/// （メインを塞がない）。ツール結果は inline の `{"success":...}` ではなく
+/// `{"status":"spawned"}` になり、完了本文は親セッションログへ着地する（取得口 = セッションログ）。
+#[tokio::test]
+async fn test_rest_message_dispatches_tool_as_background_subtask() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Dispatcher", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-dispatch-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "background_work",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "スキルを覚えて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+    assert_eq!(session_id, format!("agent-msg-{agent_id}-u1"));
+
+    // dispatch された（tool_result が spawned）。inline 実行なら status フィールドは無い。
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("\"status\":\"spawned\"")),
+        "REST でツールが background subtask へ dispatch されていない: {:?}",
+        logs.iter()
+            .map(|l| (l.log_type.clone(), l.content.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // 完了本文（subtask_completed）が親セッションログへ着地する = REST の取得口。
+    let mut settled = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("subtask_completed"))
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        settled,
+        "dispatch した subtask の完了本文が親セッションログへ永続化されない"
+    );
+
+    // 決着後は registry が空（settle_completed が除去する）。
+    assert!(!state.subtask_registries.has_running(&session_id));
+}
+
+/// #169: registry が `AppState` 経由で共有されるため、REST から `cancel_subtask` が
+/// 走行中 subtask に到達できる（使い捨て registry では常に not found だった）。
+#[tokio::test]
+async fn test_rest_cancel_subtask_reaches_shared_registry() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Canceller", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    // ハンドラが使うのと同一の registry（AppState 保持）へ走行中 subtask を登録する。
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-rest-1", &session_id, &agent_id);
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-cancel-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "cancel_subtask".to_string(),
+            arguments: serde_json::json!({"subtask_id": "st-rest-1"}).to_string(),
+        },
+    }]);
+    mock.push_text_response("止めました");
+
+    let (status, _resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "さっきのを止めて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 停止が到達した: registry から除去され、タスクが abort されている。
+    assert!(
+        !registry.contains_key("st-rest-1"),
+        "cancel_subtask が共有 registry に到達していない（not found）"
+    );
+    assert!(handle.await.unwrap_err().is_cancelled());
+
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter().any(|l| l.log_type == "tool_cancelled"),
+        "親セッションログに tool_cancelled が記録されない"
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("not found")),
+        "cancel_subtask が not found を返している: {:?}",
+        logs.iter()
+            .filter(|l| l.log_type == "tool_result")
+            .map(|l| l.content.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// #169: 走行中 subtask があるあいだは session を `completed` にしない。
+#[tokio::test]
+async fn test_rest_session_stays_active_while_subtask_runs() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Runner", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-running", &session_id, &agent_id);
+
+    mock.push_text_response("走らせています");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "進捗どう", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("active"),
+        "走行中 subtask があるのに session が completed になっている"
+    );
+    handle.abort();
+}
+
+/// #169 非退行: 走行中 subtask が無ければ従来どおり応答後に `completed` になる。
+#[tokio::test]
+async fn test_rest_session_completed_when_no_subtask_runs() {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Plain", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    mock.push_text_response("できました");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "やって", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("completed")
+    );
+}
+
+/// #169: 最後の subtask が決着した時点で `RestCompletionSink` が session を完了させる
+/// （走行中は active のままなので、誰かが最後に完了させないと永久 active になる）。
+#[tokio::test]
+async fn test_rest_sink_completes_session_after_last_subtask_settles() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Sinker", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-sink-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "sink_check",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "覚えて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+
+    let mut completed = false;
+    for _ in 0..100 {
+        if session_status(&db, &session_id).as_deref() == Some("completed") {
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        completed,
+        "全 subtask 決着後も session が completed にならない"
+    );
+    assert!(!state.subtask_registries.has_running(&session_id));
 }
