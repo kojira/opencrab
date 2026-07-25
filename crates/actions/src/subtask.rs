@@ -14,13 +14,23 @@
 //!   ここには一切入れない。webhook 系は S1 で discord 側の随伴構造へ分離する。
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use futures::FutureExt;
 use opencrab_core::{
-    ActionExecutor, ActionResult, DispatchOutcome, FunctionDefinition, ToolDispatcher,
+    ActionExecutor, ActionResult, DispatchCall, DispatchOutcome, FunctionDefinition, ToolDispatcher,
 };
 use tokio::task::AbortHandle;
+
+/// dispatch した subtask の既定タイムアウト（秒）。`spawn_subtask` の既定と揃える
+/// （`crates/discord/src/gateway_actions/subtask_engine.rs` の `timeout_secs`）。
+///
+/// これが無いと、ハングするツール（応答しないネットワーク・終わらないコマンド）が
+/// registry に永久滞留し、`exit_reason="timeout"` が到達不能になる（REST は
+/// `sessions.status` が永久 `active`、依頼が無言で消える）。
+pub const DEFAULT_DISPATCH_TIMEOUT_SECS: u64 = 1800;
 
 /// subtask が settle（決着）したときの種別。
 ///
@@ -33,6 +43,85 @@ pub enum SettleKind {
     Completed,
     /// 走行中の中間進捗通知。
     Progress,
+    /// `cancel_subtask` により停止した（完了ではない）。
+    ///
+    /// この種別は `SubtaskCompletionSink::on_subtask_cancelled` からのみ渡る。
+    /// 完了経路（`on_subtask_settled`）とは別メソッドなので、resume する sink が
+    /// 誤って「停止したのに返信する」ことはない。
+    Cancelled,
+}
+
+// ---------------------------------------------------------------------------
+// subtask のライフサイクル排他（cancel と settle の競合窓を閉じる）
+// ---------------------------------------------------------------------------
+
+const LIFECYCLE_RUNNING: u8 = 0;
+const LIFECYCLE_CANCELLED: u8 = 1;
+const LIFECYCLE_SETTLING: u8 = 2;
+
+/// 「停止（cancel）」と「決着（settle）」のどちらが先に主張したかを 1 回だけ確定させる
+/// 排他ラッチ。
+///
+/// これが無いと次の窓が空く: ツール本体が完走してから `settle_completed` が
+/// DB 永続化を終えるまでの間（JSON 化 + DB ロック取得 + INSERT）に `cancel_subtask`
+/// が入ると、`abort()` はもう効かず（await 後は同期実行）、cancel が成功を返した上で
+/// `subtask_completed` が DB に書かれ sink が発火して**止めたのに返信が届く**。
+///
+/// `claim_cancel` / `claim_settle` は CAS（Running からの遷移）なので、両者が同時に
+/// 走っても成功するのは一方だけ。cancel が勝てば settle は DB 記録も sink 発火も
+/// 行わず、settle が勝てば cancel は「もう停止できない」ことを知れる。
+#[derive(Debug, Clone)]
+pub struct SubtaskLifecycle {
+    state: Arc<AtomicU8>,
+}
+
+impl Default for SubtaskLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubtaskLifecycle {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(LIFECYCLE_RUNNING)),
+        }
+    }
+
+    /// 停止を主張する（Running → Cancelled）。成功したら、以後の `settle_completed`
+    /// は DB 永続化も sink 発火も行わない。
+    pub fn claim_cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                LIFECYCLE_RUNNING,
+                LIFECYCLE_CANCELLED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// 決着を主張する（Running → Settling）。成功したら DB 永続化と sink 発火を行う。
+    pub fn claim_settle(&self) -> bool {
+        self.state
+            .compare_exchange(
+                LIFECYCLE_RUNNING,
+                LIFECYCLE_SETTLING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// すでに停止が確定しているか。
+    pub fn is_cancelled(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == LIFECYCLE_CANCELLED
+    }
+
+    /// すでに決着（settle）が確定しているか。
+    pub fn is_settling(&self) -> bool {
+        self.state.load(Ordering::SeqCst) == LIFECYCLE_SETTLING
+    }
 }
 
 /// subtask の settle を親セッションへ通知するための最小ペイロード。
@@ -72,6 +161,25 @@ pub trait SubtaskCompletionSink: Send + Sync {
     /// 親セッションのエージェントを resume して subtask 結果を会話へ再注入する
     /// トリガ。本文は DB 永続化済みのため運搬しない（RFC §1.3）。
     fn on_subtask_settled(&self, ev: SubtaskSettled);
+
+    /// `cancel_subtask` で subtask が停止したときの通知（`kind = Cancelled`）。
+    ///
+    /// **完了経路とは別メソッド**にしてある。停止は「resume して返信する」イベント
+    /// ではなく、`on_subtask_settled` に流すと resume する sink（Discord / web /
+    /// Nostr）が「止めたのに返信する」ことになる。既定実装は debug ログのみで、
+    /// 停止で状態整合が必要な sink（REST の `sessions.status`）だけが override する。
+    ///
+    /// これにより「停止の到達性」が `cancel_subtask` の 1 箇所に閉じる（各経路が
+    /// cancel 後に個別に後始末する必要がない）。
+    fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
+        tracing::debug!(
+            session_id = %ev.session_id,
+            agent_id = %ev.agent_id,
+            subtask_id = %ev.subtask_id,
+            exit_reason = %ev.exit_reason,
+            "subtask cancelled (sink has no cancel-time reconciliation)"
+        );
+    }
 }
 
 /// 何もしない `SubtaskCompletionSink`（debug ログのみ / #167）。
@@ -127,6 +235,10 @@ pub struct SpawnedSubtask {
     /// settle 時にランタイムが registry から引いて sink へ渡す。
     /// `None` なら返信配送しない。
     pub reply_target: Option<String>,
+    /// 「停止」と「決着」の排他ラッチ。`cancel_subtask` が `claim_cancel` を、
+    /// 走行タスク側の `settle_completed` が `claim_settle` を主張し、先に主張した
+    /// 一方だけが有効になる（cancel 後の完了 sink 発火を防ぐ）。
+    pub lifecycle: SubtaskLifecycle,
 }
 
 /// アクティブな subtask を subtask_id で引く registry（gateway 非依存版）。
@@ -149,6 +261,13 @@ pub struct SettleContext {
     pub sub_session_id: String,
     /// 決着理由（completed / error / timeout / stopped_by_limit）。
     pub exit_reason: String,
+    /// 停止/決着の排他ラッチ（`SpawnedSubtask.lifecycle` のクローン）。
+    ///
+    /// `settle_completed` は **DB 永続化の前に** `claim_settle()` を試み、失敗した
+    /// （= `cancel_subtask` が先に停止を主張した）場合は DB 記録も sink 発火も行わない。
+    /// registry へ登録しない一発呼び（テスト等）は `SubtaskLifecycle::new()` を渡せば
+    /// 常に claim が成功し、従来と同じ挙動になる。
+    pub lifecycle: SubtaskLifecycle,
 }
 
 /// subtask 完了の中核処理（gateway 非依存 / RFC §4 S1）。
@@ -178,6 +297,20 @@ pub fn settle_completed(
     ctx: SettleContext,
     result_text: &str,
 ) {
+    // 0. 停止と決着の排他（DB 永続化より前）。`cancel_subtask` が先に停止を主張して
+    //    いたら、ここでは **DB 記録も registry 除去も sink 発火もしない**。
+    //    ツール完走〜DB INSERT の窓で cancel が入ったとき、`cancelled:true` を返した
+    //    のに完了ログが着地して sink が resume する（＝止めたのに返信が届く）のを防ぐ。
+    if !ctx.lifecycle.claim_settle() {
+        tracing::debug!(
+            session_id = %ctx.parent_session_id,
+            subtask_id = %ctx.subtask_id,
+            exit_reason = %ctx.exit_reason,
+            "subtask was cancelled before settling; skipping persistence and sink"
+        );
+        return;
+    }
+
     // 1. 完了本文を DB へ永続化する（sink 発火より前 = 順序契約）。
     if !ctx.parent_session_id.is_empty() {
         if let Ok(conn) = db.lock() {
@@ -247,12 +380,24 @@ pub enum CancelOutcome {
 /// 「認可確認 → 削除」の間にエントリが差し替わる TOCTOU が無い（所有権フィールドは
 /// insert 後不変）。
 ///
-/// 成功時: `abort_handle.abort()` → registry から除去 → 親セッションログへ
-/// `tool_cancelled` を best-effort 記録する。abort により background closure は
-/// 中断されるため `settle_completed`（完了 sink 発火）は通らない = 完了イベント無し。
+/// 成功時: **停止を主張（`claim_cancel`）** → `abort_handle.abort()` → registry から
+/// 除去 → 親セッションログへ `tool_cancelled` を best-effort 記録 → sink へ
+/// `on_subtask_cancelled`（`exit_reason="cancelled"`）を通知する。
+///
+/// 停止の主張は registry 除去と同じ shard ロック下（`remove_if` の述語内）で行う。
+/// `abort()` は「ツール本体を await 中」なら効くが、既に完走して `settle_completed`
+/// へ入っている場合は効かない。そこでラッチで排他し、cancel が勝ったときは
+/// `settle_completed` 側が DB 記録も sink 発火も諦める（＝完了イベント無し）。
+/// 逆に settle が先に主張していた場合は停止できないので `NotFound` を返す
+/// （その subtask は通常完了として通知される）。
+///
+/// `sink` を渡すと停止も 1 箇所から通知でき、経路側（REST の `sessions.status` 等）が
+/// cancel 後に個別に整合を取る必要がなくなる。既定実装は debug ログのみなので、
+/// resume する sink（Discord / web / Nostr）の挙動は変わらない。
 pub fn cancel_subtask(
     registry: &SubtaskRegistry,
     db: &opencrab_db::Db,
+    sink: Option<&dyn SubtaskCompletionSink>,
     subtask_id: &str,
     is_owner: bool,
     caller_session_id: Option<&str>,
@@ -264,7 +409,11 @@ pub fn cancel_subtask(
         matches!(caller_session_id, Some(cs) if !cs.is_empty() && s.parent_session_id == cs)
     };
 
-    match registry.remove_if(subtask_id, |_, s| authorized(s)) {
+    // 述語は shard ロック下で評価される。認可 → 停止の主張（CAS）→ 除去を 1 操作に
+    // まとめるため、認可も claim も述語内で行う（claim に失敗＝決着済みなら除去しない）。
+    match registry.remove_if(subtask_id, |_, s| {
+        authorized(s) && s.lifecycle.claim_cancel()
+    }) {
         Some((_, subtask)) => {
             subtask.abort_handle.abort();
 
@@ -275,7 +424,7 @@ pub fn cancel_subtask(
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: subtask.agent_id.clone(),
-                        session_id: parent,
+                        session_id: parent.clone(),
                         log_type: "tool_cancelled".to_string(),
                         content: format!("subtask '{}' was cancelled", subtask.label),
                         speaker_id: None,
@@ -293,22 +442,38 @@ pub fn cancel_subtask(
                     opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
                 }
             }
+
+            // 停止を sink へ通知する（完了経路とは別メソッド = resume しない）。
+            // これで「最後の subtask が cancel されたのに誰もセッションを完了に
+            // しない」（REST が永久 active）が起きない。
+            if let Some(sink) = sink {
+                sink.on_subtask_cancelled(SubtaskSettled {
+                    session_id: parent,
+                    agent_id: subtask.agent_id.clone(),
+                    subtask_id: subtask_id.to_string(),
+                    exit_reason: "cancelled".to_string(),
+                    kind: SettleKind::Cancelled,
+                    reply_target: subtask.reply_target.clone(),
+                });
+            }
             CancelOutcome::Cancelled
         }
         None => {
-            // remove_if の None は「不在」と「権限なし」の両方。所有権フィールドは
-            // insert 後不変なので contains_key で区別できる。
-            if registry.contains_key(subtask_id) {
-                CancelOutcome::Unauthorized
-            } else {
-                CancelOutcome::NotFound
+            // remove_if の None は「不在」「権限なし」「既に決着（settle）済み」。
+            // 所有権フィールドは insert 後不変なので contains_key で不在と区別でき、
+            // 残っていて claim に失敗した場合（決着済み = もう停止できない）は
+            // NotFound として扱う（停止対象として存在しない）。
+            match registry.get(subtask_id) {
+                Some(entry) if !entry.lifecycle.is_settling() => CancelOutcome::Unauthorized,
+                Some(_) => CancelOutcome::NotFound,
+                None => CancelOutcome::NotFound,
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// S3a: 単一ツールを subtask として実行する dispatcher（非ブロック / 全ツール自動化）
+// S3a: ツール呼び出しバッチを subtask として実行する dispatcher（非ブロック / 全ツール自動化）
 // ---------------------------------------------------------------------------
 
 /// `Arc<dyn ActionExecutor>` を `ActionExecutor` として使えるようにする薄い委譲ラッパ。
@@ -340,19 +505,31 @@ impl ActionExecutor for SharedExecutor {
 
 /// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツール名の集合。
 ///
-/// - 制御系（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
-///   subtask ライフサイクルを操作するため background 化しない。
-/// - 配送系（Discord 送信・VC 参加/退出・peer review 依頼・Nostr 送信）: 「送る」こと
-///   自体が応答であり、background 化して完了で再注入する意味がない。加えて gateway が
-///   「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合（Nostr）、
-///   background 化は**二重投稿**を生む。
+/// 判定ルール（この 3 つのどれかに当てはまるツールは inline に残す）:
+/// 1. **制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
+///    subtask ライフサイクルを操作するため background 化しない。
+/// 2. **配送系**（Discord 送信・VC 参加/退出・peer review 依頼・Nostr 送信）: 「送る」こと
+///    自体が応答であり、background 化して完了で再注入する意味がない。加えて gateway が
+///    「明示送信したか」を親ターンの終わりに見て暗黙返信を抑制する場合（Nostr）、
+///    background 化は**二重投稿**を生む。
+/// 3. **run 内共有状態を書くツール**（`select_llm`）: `ActionContext` の
+///    `model_override` / `current_purpose` のように、走行中の run が同一プロセス内で
+///    共有している状態を書き換える。background 化すると (a) そのターンには効かず
+///    （`spawned` が返るだけ）、(b) 書き込みが engine の次イテレーションと競合して
+///    「いつのターンから効くか」が非決定になる。制御の効き方を保つため inline に残す。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
-    let mut set: HashSet<String> = ["spawn_subtask", "cancel_subtask", "report_progress"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut set: HashSet<String> = [
+        "spawn_subtask",
+        "cancel_subtask",
+        "report_progress",
+        // run 内共有状態（model_override / current_purpose）を書く制御系ツール。
+        "select_llm",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     // Discord 配送系（bridge の DISCORD_ACTIONS と同一集合）。
     for name in crate::bridge::DISCORD_ACTIONS {
         set.insert((*name).to_string());
@@ -366,12 +543,27 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
     set
 }
 
-/// 「単一ツールを background subtask として実行する」job のランタイム（RFC #152 S3a）。
+/// 「同一バッチのツール呼び出しを background subtask として実行する」job のランタイム
+/// （RFC #152 S3a）。
 ///
 /// `execute_spawn_subtask` が sub-engine（LLM ループ）を建てるのに対し、これは
-/// **指定 1 ツールを合成 executor で実行するだけ**の job。spawn / registry 登録
+/// **指定ツールを合成 executor で順に実行するだけ**の job。spawn / registry 登録
 /// （`SpawnedSubtask`, label=`tool(主要引数)`）/ 完了時 `settle_completed`（DB 永続化
 /// → registry 除去 → sink 発火）という中核は既存と共有し、job の中身だけ差し替える。
+///
+/// 不変条件:
+/// - **1 バッチ = 1 subtask**。同一 assistant メッセージのツールは並行実行せず
+///   `calls` の順に逐次実行する（`write_file` → `execute_shell` の依存順を守る）。
+///   結果として完了通知（親の resume）も 1 バッチにつき 1 回で済む。
+/// - **必ず決着する**。ツールがハングしても既定タイムアウト
+///   （`DEFAULT_DISPATCH_TIMEOUT_SECS`）で `exit_reason="timeout"`、panic しても
+///   `catch_unwind` で `exit_reason="error"` として settle し、registry に死骸を残さない。
+/// - **cancel と競合しない**。`SubtaskLifecycle` により停止と決着は排他。
+///
+/// 既知の残課題: 1 run の**別イテレーション**でそれぞれツールが dispatch された場合
+/// （LLM が spawned マーカーを見た後にさらにツールを呼ぶ）は subtask が 2 本になり、
+/// 完了 sink も 2 回発火する。バッチ内（同一 assistant メッセージ）の N ツールは 1 本に
+/// まとまるため、レビューで実証された「1 ターン N ツール → N 通の返信」は解消する。
 ///
 /// `core::ToolDispatcher` を実装し、`SkillEngine` のツール実行点から呼ばれる。
 pub struct SubtaskToolDispatcher {
@@ -391,6 +583,12 @@ pub struct SubtaskToolDispatcher {
     /// そのまま全 dispatch へ引き継ぐ。`None` なら返信配送先の指定なし（Discord は
     /// session_id から復元するため `None` のままでよい）。
     reply_target: Option<String>,
+    /// バッチ全体の実行時間上限。超過すると `exit_reason="timeout"` で settle する。
+    timeout: std::time::Duration,
+    /// 上限超過の tool_result を退避するエージェントのワークスペース root
+    /// （inline 経路 `process.rs` の `tool_result_workspace` と同じもの）。
+    /// `None` なら退避せず切り詰める。
+    workspace_root: Option<std::path::PathBuf>,
 }
 
 impl SubtaskToolDispatcher {
@@ -411,12 +609,29 @@ impl SubtaskToolDispatcher {
             parent_session_id: parent_session_id.into(),
             non_dispatch: default_non_dispatch_tools(),
             reply_target: None,
+            timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
+            workspace_root: None,
         }
     }
 
     /// auto-dispatch 対象外の集合を差し替える。
     pub fn with_non_dispatch(mut self, non_dispatch: HashSet<String>) -> Self {
         self.non_dispatch = non_dispatch;
+        self
+    }
+
+    /// バッチ実行のタイムアウトを差し替える（既定 = `DEFAULT_DISPATCH_TIMEOUT_SECS`）。
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// 大きい tool_result の退避先（エージェントのワークスペース root）を設定する。
+    ///
+    /// inline 経路と同じ扱い（上限超過はファイルへ退避してポインタだけ DB に残す）を
+    /// dispatch 経路でも行うために必要。未設定なら切り詰めのみ。
+    pub fn with_workspace_root(mut self, root: Option<std::path::PathBuf>) -> Self {
+        self.workspace_root = root;
         self
     }
 
@@ -449,20 +664,38 @@ fn dispatch_label(tool_name: &str, args: &serde_json::Value) -> String {
     }
 }
 
+/// バッチ全体のラベル（`tool(arg), tool(arg)` を 120 文字で打ち切る）。
+fn batch_label(calls: &[DispatchCall]) -> String {
+    let joined = calls
+        .iter()
+        .map(|c| dispatch_label(&c.tool_name, &c.args))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let truncated: String = joined.chars().take(120).collect();
+    if truncated.len() < joined.len() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+/// 1 ツールの実行結果（バッチの決着理由と本文の組み立てに使う）。
+struct CallOutcome {
+    /// 永続化用に無害化済みの結果本文。
+    sanitized: String,
+    /// このツールが失敗（`success == false` / panic）したか。
+    failed: bool,
+}
+
 impl ToolDispatcher for SubtaskToolDispatcher {
     fn should_dispatch(&self, tool_name: &str) -> bool {
         !self.non_dispatch.contains(tool_name)
     }
 
-    fn dispatch(
-        &self,
-        tool_name: &str,
-        args: &serde_json::Value,
-        tool_call_id: &str,
-    ) -> DispatchOutcome {
+    fn dispatch_batch(&self, calls: &[DispatchCall]) -> DispatchOutcome {
         let subtask_id = uuid::Uuid::new_v4().to_string();
         let sub_session_id = format!("subtask-{subtask_id}");
-        let label = dispatch_label(tool_name, args);
+        let label = batch_label(calls);
 
         // 各種クローン（background タスクへムーブ）。
         let executor = self.executor.clone();
@@ -471,11 +704,15 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         let sink = self.sink.clone();
         let agent_id = self.agent_id.clone();
         let parent_session_id = self.parent_session_id.clone();
-        let tool_name_owned = tool_name.to_string();
-        let args_owned = args.clone();
-        let tool_call_id_owned = tool_call_id.to_string();
+        let calls_owned = calls.to_vec();
         let subtask_id_task = subtask_id.clone();
         let sub_session_id_task = sub_session_id.clone();
+        let timeout = self.timeout;
+        let workspace_root = self.workspace_root.clone();
+        // 停止/決着の排他ラッチ。registry のエントリ（cancel 側）とタスク本体
+        // （settle 側）が同じラッチを共有する。
+        let lifecycle = SubtaskLifecycle::new();
+        let lifecycle_task = lifecycle.clone();
 
         // 開始ゲート: 親が registry へ insert し終えるまでタスク本体を走らせない
         // （即完了する job が親の insert より先に remove して running のままリークするのを防ぐ。
@@ -485,14 +722,108 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         let join = tokio::spawn(async move {
             let _ = start_rx.await;
 
-            // 単一ツールを合成 executor で実行する（sub-engine は建てない）。
-            let result = executor
-                .execute_with_id(&tool_name_owned, &args_owned, &tool_call_id_owned)
-                .await;
-            let exit_reason = if result.success { "completed" } else { "error" };
-            // 完了本文 = ツール結果 JSON（DB へ永続化。sink には運ばない = RFC §1.3）。
-            let result_text = serde_json::to_string(&result)
-                .unwrap_or_else(|_| r#"{"success":false}"#.to_string());
+            // バッチ全体に 1 つの期限を与える（ハングしたツールで永久滞留しない）。
+            let deadline = tokio::time::Instant::now() + timeout;
+            let mut outcomes: Vec<(String, CallOutcome)> = Vec::with_capacity(calls_owned.len());
+            let mut timed_out = false;
+
+            // **逐次実行**（並行にしない）: LLM が並べた順序に依存関係があり得る。
+            for call in &calls_owned {
+                // panic を settle へ変換する（catch しないと task が unwind して
+                // settle を通らず、registry に死骸が残り REST は永久 active になる）。
+                let fut = std::panic::AssertUnwindSafe(executor.execute_with_id(
+                    &call.tool_name,
+                    &call.args,
+                    &call.tool_call_id,
+                ))
+                .catch_unwind();
+
+                let raw = match tokio::time::timeout_at(deadline, fut).await {
+                    Ok(Ok(result)) => {
+                        let failed = !result.success;
+                        let json = serde_json::to_string(&result)
+                            .unwrap_or_else(|_| r#"{"success":false}"#.to_string());
+                        (json, failed)
+                    }
+                    Ok(Err(panic_payload)) => {
+                        let msg = panic_message(&panic_payload);
+                        tracing::error!(
+                            tool = %call.tool_name,
+                            subtask_id = %subtask_id_task,
+                            "dispatched tool panicked; settling as error"
+                        );
+                        (
+                            serde_json::json!({
+                                "success": false,
+                                "data": null,
+                                "error": format!("tool '{}' panicked: {msg}", call.tool_name),
+                            })
+                            .to_string(),
+                            true,
+                        )
+                    }
+                    Err(_elapsed) => {
+                        timed_out = true;
+                        (
+                            serde_json::json!({
+                                "success": false,
+                                "data": null,
+                                "error": format!(
+                                    "tool '{}' timed out after {}s",
+                                    call.tool_name,
+                                    timeout.as_secs()
+                                ),
+                            })
+                            .to_string(),
+                            true,
+                        )
+                    }
+                };
+
+                // inline 経路（process.rs の on_tool_result）と**同一**の無害化を通す:
+                // 秘密フィールドのマスク ＋ サイズ上限/ワークスペース退避。
+                let sanitized = crate::tool_result_log::sanitize_tool_result_for_log(
+                    &call.tool_name,
+                    &raw.0,
+                    &parent_session_id,
+                    &call.tool_call_id,
+                    workspace_root.as_deref(),
+                );
+                outcomes.push((
+                    call.tool_name.clone(),
+                    CallOutcome {
+                        sanitized,
+                        failed: raw.1,
+                    },
+                ));
+                if timed_out {
+                    // 期限切れ後は残りを実行しない（依存順のため後続は前提が崩れている）。
+                    break;
+                }
+            }
+
+            let exit_reason = if timed_out {
+                "timeout"
+            } else if outcomes.iter().any(|(_, o)| o.failed) {
+                "error"
+            } else {
+                "completed"
+            };
+            // 完了本文（DB へ永続化。sink には運ばない = RFC §1.3）。
+            // 単一ツールのときは従来と同じ「ツール結果 JSON そのまま」を保つ。
+            let result_text = if calls_owned.len() == 1 {
+                outcomes
+                    .into_iter()
+                    .next()
+                    .map(|(_, o)| o.sanitized)
+                    .unwrap_or_else(|| r#"{"success":false}"#.to_string())
+            } else {
+                let arr: Vec<serde_json::Value> = outcomes
+                    .into_iter()
+                    .map(|(tool, o)| serde_json::json!({"tool": tool, "result": o.sanitized}))
+                    .collect();
+                serde_json::to_string(&arr).unwrap_or_else(|_| r#"[]"#.to_string())
+            };
 
             // 中核（gateway 非依存）: DB 永続化 → registry 除去 → sink 発火。
             // 順序契約（DB 記録 → 通知）は settle_completed が 1 箇所で保証する。
@@ -506,6 +837,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                     subtask_id: subtask_id_task,
                     sub_session_id: sub_session_id_task,
                     exit_reason: exit_reason.to_string(),
+                    lifecycle: lifecycle_task,
                 },
                 &result_text,
             );
@@ -522,12 +854,24 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 label: label.clone(),
                 started_at: std::time::Instant::now(),
                 reply_target: self.reply_target.clone(),
+                lifecycle,
             },
         );
         // insert 完了 → タスク本体の実行を許可する。
         let _ = start_tx.send(());
 
         DispatchOutcome { subtask_id, label }
+    }
+}
+
+/// `catch_unwind` の payload から人間可読なメッセージを取り出す。
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -540,12 +884,32 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<SubtaskSettled>>,
+        /// 停止通知（`on_subtask_cancelled`）を別に記録する。
+        cancelled: Mutex<Vec<SubtaskSettled>>,
     }
 
     impl SubtaskCompletionSink for RecordingSink {
         fn on_subtask_settled(&self, ev: SubtaskSettled) {
             self.events.lock().unwrap().push(ev);
         }
+        fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
+            self.cancelled.lock().unwrap().push(ev);
+        }
+    }
+
+    /// 単一ツールを 1 バッチとして dispatch するテストヘルパ
+    /// （engine は `dispatch_batch` しか呼ばない）。
+    fn dispatch_one(
+        dispatcher: &SubtaskToolDispatcher,
+        tool_name: &str,
+        args: serde_json::Value,
+        tool_call_id: &str,
+    ) -> DispatchOutcome {
+        dispatcher.dispatch_batch(&[DispatchCall {
+            tool_name: tool_name.to_string(),
+            args,
+            tool_call_id: tool_call_id.to_string(),
+        }])
     }
 
     #[test]
@@ -598,6 +962,7 @@ mod tests {
                 label: "job".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                lifecycle: SubtaskLifecycle::new(),
             },
         );
 
@@ -636,6 +1001,7 @@ mod tests {
                 subtask_id: "sub-1".to_string(),
                 sub_session_id: "subtask-sub-1".to_string(),
                 exit_reason: "completed".to_string(),
+                lifecycle: SubtaskLifecycle::new(),
             },
             "the result body",
         );
@@ -670,6 +1036,7 @@ mod tests {
                 label: "job".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: reply_target.map(|s| s.to_string()),
+                lifecycle: SubtaskLifecycle::new(),
             },
         );
 
@@ -719,6 +1086,7 @@ mod tests {
                 subtask_id: "sub-rt".to_string(),
                 sub_session_id: "subtask-sub-rt".to_string(),
                 exit_reason: "completed".to_string(),
+                lifecycle: SubtaskLifecycle::new(),
             },
             "the result body",
         );
@@ -777,6 +1145,7 @@ mod tests {
                 subtask_id: "gone".to_string(),
                 sub_session_id: "subtask-gone".to_string(),
                 exit_reason: "completed".to_string(),
+                lifecycle: SubtaskLifecycle::new(),
             },
             "body",
         );
@@ -829,7 +1198,7 @@ mod tests {
         )
         .with_reply_target(Some("nostr:note1target".to_string()));
 
-        let outcome = dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+        let outcome = dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
         let entry = registry.get(&outcome.subtask_id).unwrap();
         assert_eq!(entry.reply_target.as_deref(), Some("nostr:note1target"));
         entry.abort_handle.abort();
@@ -854,7 +1223,7 @@ mod tests {
             "discord-agent-a-1-2",
         );
 
-        let outcome = dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+        let outcome = dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
         let entry = registry.get(&outcome.subtask_id).unwrap();
         assert!(entry.reply_target.is_none());
         entry.abort_handle.abort();
@@ -899,7 +1268,7 @@ mod tests {
         )
         .with_reply_target(req.reply_target.clone());
 
-        dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+        dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
 
         // settle（DB 永続化 → 除去 → sink 発火）まで待つ。
         for _ in 0..200 {
@@ -952,7 +1321,7 @@ mod tests {
             "agent-a",
             "heartbeat-agent-a",
         );
-        dispatcher.dispatch("some_tool", &serde_json::json!({}), "tc-1");
+        dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
 
         for _ in 0..200 {
             if registry.is_empty() {
@@ -1062,7 +1431,12 @@ mod tests {
         assert!(!dispatcher.should_dispatch("nostr_post"));
         assert!(!dispatcher.should_dispatch("nostr_dm"));
 
-        let outcome = dispatcher.dispatch("nostr_generate_key", &serde_json::json!({}), "tc-1");
+        let outcome = dispatch_one(
+            &dispatcher,
+            "nostr_generate_key",
+            serde_json::json!({}),
+            "tc-1",
+        );
         assert!(outcome.label.starts_with("nostr_generate_key("));
 
         // 完了待ち: settle_completed が registry から remove するまで。
@@ -1166,7 +1540,7 @@ mod tests {
             parent,
         );
 
-        let outcome = dispatcher.dispatch("long_running", &serde_json::json!({}), "tc-1");
+        let outcome = dispatch_one(&dispatcher, "long_running", serde_json::json!({}), "tc-1");
 
         // 共有 registry に載っている（＝cancel_subtask から到達可能）。
         assert!(registry.contains_key(&outcome.subtask_id));
@@ -1205,6 +1579,7 @@ mod tests {
                 label: "long job".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                lifecycle: SubtaskLifecycle::new(),
             },
         );
         handle
@@ -1220,7 +1595,7 @@ mod tests {
         let parent = "web-agent-a-conv1";
         let handle = insert_fake_subtask(&registry, "st-1", parent);
 
-        let outcome = cancel_subtask(&registry, &db, "st-1", false, Some(parent));
+        let outcome = cancel_subtask(&registry, &db, None, "st-1", false, Some(parent));
         assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(registry.is_empty(), "cancel 後に registry から除去される");
         // 実際に abort された。
@@ -1240,7 +1615,7 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
-        let outcome = cancel_subtask(&registry, &db, "nope", false, Some("web-a-c1"));
+        let outcome = cancel_subtask(&registry, &db, None, "nope", false, Some("web-a-c1"));
         assert_eq!(outcome, CancelOutcome::NotFound);
     }
 
@@ -1252,7 +1627,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-x", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, "st-x", false, Some("web-me-c1"));
+        let outcome = cancel_subtask(&registry, &db, None, "st-x", false, Some("web-me-c1"));
         assert_eq!(outcome, CancelOutcome::Unauthorized);
         // 拒否したのでエントリは残り、abort もされない。
         assert!(registry.contains_key("st-x"));
@@ -1267,7 +1642,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-ns", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, "st-ns", false, None);
+        let outcome = cancel_subtask(&registry, &db, None, "st-ns", false, None);
         assert_eq!(outcome, CancelOutcome::Unauthorized);
         assert!(registry.contains_key("st-ns"));
         handle.abort();
@@ -1281,7 +1656,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-any", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, "st-any", true, None);
+        let outcome = cancel_subtask(&registry, &db, None, "st-any", true, None);
         assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(registry.is_empty());
         assert!(handle.await.unwrap_err().is_cancelled());
@@ -1304,6 +1679,7 @@ mod tests {
             label: "compile the report".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: Some("channel:456".to_string()),
+            lifecycle: SubtaskLifecycle::new(),
         };
         registry.insert("sub-1".to_string(), entry);
 
@@ -1317,5 +1693,482 @@ mod tests {
         drop(got);
         registry.remove("sub-1");
         assert!(registry.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // レビュー指摘（P0/P1）の回帰テスト群
+    // -----------------------------------------------------------------------
+
+    /// 親セッションログに着地した subtask_completed の件数。
+    fn completed_log_count(db: &opencrab_db::Db, session_id: &str) -> usize {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_recent_session_logs(&conn, session_id, 50)
+            .unwrap()
+            .iter()
+            .filter(|l| l.content.contains("subtask_completed"))
+            .count()
+    }
+
+    /// 親セッションログの subtask_completed 本文（最初の 1 件）。
+    fn completed_log_body(db: &opencrab_db::Db, session_id: &str) -> String {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::list_recent_session_logs(&conn, session_id, 50)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.content.contains("subtask_completed"))
+            .map(|l| l.content)
+            .unwrap_or_default()
+    }
+
+    /// settle が終わる（registry が空になる）まで待つ。
+    async fn wait_until_settled(registry: &SubtaskRegistry) {
+        for _ in 0..400 {
+            if registry.is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("subtask が決着しなかった（registry が空にならない）");
+    }
+
+    /// ラッチ: 停止と決着は排他（先に主張した一方だけが成功する）。
+    #[test]
+    fn lifecycle_claims_are_mutually_exclusive() {
+        let l = SubtaskLifecycle::new();
+        assert!(l.claim_cancel());
+        assert!(!l.claim_settle(), "cancel 済みなら settle は主張できない");
+        assert!(l.is_cancelled());
+
+        let l2 = SubtaskLifecycle::new();
+        assert!(l2.claim_settle());
+        assert!(!l2.claim_cancel(), "決着済みなら cancel は主張できない");
+        assert!(l2.is_settling());
+    }
+
+    /// [P0 回帰] cancel が先に主張していたら `settle_completed` は
+    /// **DB 記録も sink 発火もしない**（止めたのに返信が届くのを防ぐ）。
+    #[tokio::test]
+    async fn settle_after_cancel_persists_nothing_and_fires_no_sink() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = RecordingSink::default();
+        let parent = "web-agent-a-conv1";
+
+        let lifecycle = SubtaskLifecycle::new();
+        assert!(lifecycle.claim_cancel(), "cancel が先に主張する");
+
+        settle_completed(
+            &registry,
+            &db,
+            &sink,
+            SettleContext {
+                parent_session_id: parent.to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "st-1".to_string(),
+                sub_session_id: "subtask-st-1".to_string(),
+                exit_reason: "completed".to_string(),
+                lifecycle,
+            },
+            "the result body",
+        );
+
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            0,
+            "cancel 後は完了 sink を発火しない"
+        );
+        assert_eq!(
+            completed_log_count(&db, parent),
+            0,
+            "cancel 後は subtask_completed を DB へ書かない"
+        );
+    }
+
+    /// [P0 回帰] 実経路: ツールが**完走した直後**（settle の DB 永続化より前）に
+    /// `cancel_subtask` が入っても、完了ログも sink 発火も起きない。
+    ///
+    /// 競合窓を決定的に再現するため、executor が結果を返す直前に自分で
+    /// `cancel_subtask` を呼ぶ（= tool 完走 → cancel → settle の順序）。
+    #[tokio::test]
+    async fn cancel_in_settle_window_suppresses_completion() {
+        /// 結果を返す直前に自分の subtask を cancel する executor。
+        struct CancellingExecutor {
+            registry: SubtaskRegistry,
+            db: opencrab_db::Db,
+            outcome: Arc<Mutex<Option<CancelOutcome>>>,
+        }
+        #[async_trait::async_trait]
+        impl ActionExecutor for CancellingExecutor {
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+                // 走行中の自分（registry の唯一のエントリ）を停止する。
+                let id = self
+                    .registry
+                    .iter()
+                    .next()
+                    .map(|e| e.key().clone())
+                    .expect("dispatch した subtask が registry にある");
+                let outcome = cancel_subtask(&self.registry, &self.db, None, &id, true, None);
+                *self.outcome.lock().unwrap() = Some(outcome);
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"ok": true}),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                Vec::new()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let cancel_outcome = Arc::new(Mutex::new(None));
+
+        let executor: Arc<dyn ActionExecutor> = Arc::new(CancellingExecutor {
+            registry: registry.clone(),
+            db: db.clone(),
+            outcome: cancel_outcome.clone(),
+        });
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        );
+        dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
+
+        wait_until_settled(&registry).await;
+        // settle 側が走り切るのを待つ（発火するならこの間に発火する）。
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            *cancel_outcome.lock().unwrap(),
+            Some(CancelOutcome::Cancelled),
+            "cancel は成功を返している"
+        );
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            0,
+            "cancel 成功後に完了 sink が発火してはならない（resume して返信が届く）"
+        );
+        assert_eq!(
+            completed_log_count(&db, parent),
+            0,
+            "cancel 成功後に subtask_completed が DB へ書かれてはならない"
+        );
+    }
+
+    /// [P1 回帰] cancel は完了経路ではなく `on_subtask_cancelled` を通り、
+    /// `exit_reason="cancelled"` / `kind=Cancelled` で通知される
+    /// （REST が最後の subtask 停止でセッションを完了にできる）。
+    #[tokio::test]
+    async fn cancel_notifies_sink_without_completion() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = RecordingSink::default();
+        let parent = "agent-msg-agent-a-u1";
+        let handle = insert_fake_subtask(&registry, "st-1", parent);
+
+        let outcome = cancel_subtask(&registry, &db, Some(&sink), "st-1", false, Some(parent));
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let cancelled = sink.cancelled.lock().unwrap();
+        assert_eq!(cancelled.len(), 1, "停止は sink へ 1 回通知される");
+        assert_eq!(cancelled[0].exit_reason, "cancelled");
+        assert_eq!(cancelled[0].kind, SettleKind::Cancelled);
+        assert_eq!(cancelled[0].session_id, parent);
+        // 完了経路（resume する側）は発火しない。
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "停止で on_subtask_settled（resume 経路）を呼んではならない"
+        );
+        assert!(registry.is_empty());
+        handle.abort();
+    }
+
+    /// [P0 回帰] 同一バッチの複数ツールは 1 subtask 内で**dispatch 順に逐次実行**され、
+    /// 完了 sink は **1 回だけ**発火する（N 通の返信にならない）。
+    #[tokio::test]
+    async fn batch_runs_sequentially_in_order_and_settles_once() {
+        /// 実行順を記録し、最初のツールだけ遅い executor
+        /// （個別 spawn だと速い方が先に完走して順序が崩れる）。
+        struct OrderExecutor {
+            order: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl ActionExecutor for OrderExecutor {
+            async fn execute(&self, name: &str, _args: &serde_json::Value) -> ActionResult {
+                if name == "slow_tool" {
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                }
+                self.order.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"tool": name}),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                Vec::new()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn ActionExecutor> = Arc::new(OrderExecutor {
+            order: order.clone(),
+        });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        );
+
+        let calls = vec![
+            DispatchCall {
+                tool_name: "slow_tool".to_string(),
+                args: serde_json::json!({"path": "x"}),
+                tool_call_id: "tc-1".to_string(),
+            },
+            DispatchCall {
+                tool_name: "fast_tool".to_string(),
+                args: serde_json::json!({"cmd": "build"}),
+                tool_call_id: "tc-2".to_string(),
+            },
+        ];
+        let outcome = dispatcher.dispatch_batch(&calls);
+        // バッチ全体で subtask は 1 本だけ。
+        assert_eq!(registry.len(), 1, "1 バッチ = 1 subtask");
+        assert!(outcome.label.contains("slow_tool"));
+        assert!(outcome.label.contains("fast_tool"));
+
+        wait_until_settled(&registry).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            &["slow_tool", "fast_tool"],
+            "遅い方が先に dispatch されていれば先に実行される（並行化して順序を失わない）"
+        );
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            1,
+            "1 親ターンの resume は 1 回だけ"
+        );
+        assert_eq!(
+            completed_log_count(&db, parent),
+            1,
+            "完了ログもバッチにつき 1 件"
+        );
+        // 本文には両ツールの結果が入る（resume 時に DB から読み直される）。
+        let body = completed_log_body(&db, parent);
+        assert!(body.contains("slow_tool") && body.contains("fast_tool"));
+    }
+
+    /// [P0 回帰] dispatch にもタイムアウトがあり、`exit_reason="timeout"` で
+    /// settle して registry から除去される（永久滞留＝無言の消失を防ぐ）。
+    #[tokio::test]
+    async fn dispatch_times_out_and_settles() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        // 完了しないツール。
+        let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: true });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        )
+        .with_timeout(std::time::Duration::from_millis(60));
+
+        dispatch_one(&dispatcher, "hangs_forever", serde_json::json!({}), "tc-1");
+        wait_until_settled(&registry).await;
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].exit_reason, "timeout",
+            "既定タイムアウト超過は exit_reason=timeout で到達する"
+        );
+        assert_eq!(completed_log_count(&db, parent), 1);
+    }
+
+    /// 既定のタイムアウトは `spawn_subtask` と揃える。
+    #[test]
+    fn default_dispatch_timeout_matches_spawn_subtask() {
+        assert_eq!(DEFAULT_DISPATCH_TIMEOUT_SECS, 1800);
+    }
+
+    /// [P1 回帰] ツールが panic しても `exit_reason="error"` で settle され、
+    /// registry に死骸が残らない（REST が永久 active にならない）。
+    #[tokio::test]
+    async fn dispatch_panic_settles_as_error() {
+        struct PanicExecutor;
+        #[async_trait::async_trait]
+        impl ActionExecutor for PanicExecutor {
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+                panic!("boom inside tool");
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                Vec::new()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let executor: Arc<dyn ActionExecutor> = Arc::new(PanicExecutor);
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        );
+        dispatch_one(&dispatcher, "panics", serde_json::json!({}), "tc-1");
+
+        wait_until_settled(&registry).await;
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "panic でも settle して通知する");
+        assert_eq!(events[0].exit_reason, "error");
+        assert!(completed_log_body(&db, parent).contains("panicked"));
+    }
+
+    /// [P1 回帰] dispatch 経路も inline と同じ無害化を通す:
+    /// 大きい結果はワークスペースへ退避し、DB にはポインタだけを残す。
+    #[tokio::test]
+    async fn dispatch_offloads_large_result_like_inline() {
+        struct BigExecutor;
+        #[async_trait::async_trait]
+        impl ActionExecutor for BigExecutor {
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"blob": "Z".repeat(50_000)}),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                Vec::new()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let dir = tempfile::TempDir::new().unwrap();
+        let parent = "web-agent-a-conv1";
+        let executor: Arc<dyn ActionExecutor> = Arc::new(BigExecutor);
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        )
+        .with_workspace_root(Some(dir.path().to_path_buf()));
+
+        dispatch_one(&dispatcher, "read_file", serde_json::json!({}), "tc-big");
+        wait_until_settled(&registry).await;
+
+        let body = completed_log_body(&db, parent);
+        assert!(
+            body.contains("[Tool Result: file://tmp/"),
+            "上限超過はファイルへ退避してポインタだけ残す: {}",
+            &body[..body.len().min(200)]
+        );
+        assert!(
+            !body.contains(&"Z".repeat(1_000)),
+            "巨大本文が session_logs に入ってはならない"
+        );
+        assert!(dir.path().join("tmp").read_dir().unwrap().count() > 0);
+    }
+
+    /// [P1 回帰] dispatch 経路でも秘密鍵はマスクして永続化する。
+    #[tokio::test]
+    async fn dispatch_redacts_secret_result_like_inline() {
+        struct SecretExecutor;
+        #[async_trait::async_trait]
+        impl ActionExecutor for SecretExecutor {
+            async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"npub": "npub1ok", "nsec": "nsec1leaked"}),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                Vec::new()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let executor: Arc<dyn ActionExecutor> = Arc::new(SecretExecutor);
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        );
+        dispatch_one(
+            &dispatcher,
+            "nostr_generate_key",
+            serde_json::json!({}),
+            "tc-1",
+        );
+        wait_until_settled(&registry).await;
+
+        let body = completed_log_body(&db, parent);
+        assert!(
+            !body.contains("nsec1leaked"),
+            "秘密鍵が DB へ入ってはならない"
+        );
+        assert!(body.contains("redacted"));
+        assert!(body.contains("npub1ok"), "非秘密は保持する");
+    }
+
+    /// [P1 回帰] run 内共有状態を書く `select_llm` は dispatch しない（inline のまま）。
+    #[test]
+    fn select_llm_is_not_dispatched() {
+        let set = default_non_dispatch_tools();
+        assert!(
+            set.contains("select_llm"),
+            "select_llm は run 内共有状態（model_override）を書くため inline に残す"
+        );
     }
 }

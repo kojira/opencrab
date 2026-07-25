@@ -120,6 +120,7 @@ mod tests {
             label: "job".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: None,
+            lifecycle: crate::subtask::SubtaskLifecycle::new(),
         }
     }
 }

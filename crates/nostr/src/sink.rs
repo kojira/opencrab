@@ -665,6 +665,7 @@ mod tests {
                 label: "nostr_generate_key(sunny)".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: Some("note1target".to_string()),
+                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
             },
         );
         assert!(r.runtime().has_running(&sid));
@@ -674,6 +675,7 @@ mod tests {
         let outcome = opencrab_actions::cancel_subtask(
             &r.runtime().registry_for(&sid),
             &db,
+            None,
             "st-live",
             false,
             Some(&sid),

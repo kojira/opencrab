@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use opencrab_actions::{
-    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SubtaskRegistry, REJECTION_CODE_PREFIX,
+    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SubtaskCompletionSink,
+    SubtaskRegistry, REJECTION_CODE_PREFIX,
 };
 use opencrab_gateway::{
     GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
@@ -33,6 +34,12 @@ pub struct SystemGatewayActions {
     /// が dispatcher へ渡すものと同一 Arc（Discord では gateway_actions の registry とも
     /// 同一）。`None` の場合は走行中 subtask が無く cancel は not found を返す。
     subtask_registry: Option<SubtaskRegistry>,
+    /// 停止（`cancel_subtask`）を通知する完了 sink（この run の `RunRequest` と同一）。
+    ///
+    /// 停止は `on_subtask_cancelled`（既定は no-op）で通知するため resume は起きない。
+    /// REST のように「最後の subtask の決着でセッションを完了にする」経路は、この通知
+    /// を受けて `sessions.status` の整合を取る（無いと永久 `active` のまま残る）。
+    completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
 }
 
 impl SystemGatewayActions {
@@ -40,11 +47,13 @@ impl SystemGatewayActions {
         state: AppState,
         inner: Option<Arc<dyn GatewayActions>>,
         subtask_registry: Option<SubtaskRegistry>,
+        completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
     ) -> Self {
         Self {
             state,
             inner,
             subtask_registry,
+            completion_sink,
         }
     }
 
@@ -304,6 +313,7 @@ impl SystemGatewayActions {
         match neutral_cancel_subtask(
             registry,
             &self.state.db,
+            self.completion_sink.as_deref(),
             subtask_id,
             is_owner,
             ctx.session_id.as_deref(),

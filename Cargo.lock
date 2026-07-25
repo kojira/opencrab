@@ -1775,6 +1775,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap 6.1.0",
+ "futures",
  "indexmap",
  "opencrab-core",
  "opencrab-db",

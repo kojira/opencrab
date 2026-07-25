@@ -2081,6 +2081,7 @@ fn insert_running_subtask(
             label: "long job".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: None,
+            lifecycle: opencrab_actions::SubtaskLifecycle::new(),
         },
     );
     handle

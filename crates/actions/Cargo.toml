@@ -15,6 +15,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 rusqlite = { workspace = true }
 dashmap = { workspace = true }
+futures = { workspace = true }
 opencrab-core = { workspace = true }
 opencrab-gateway = { workspace = true }
 opencrab-db = { workspace = true }

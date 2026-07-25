@@ -12,6 +12,7 @@ pub mod soul;
 pub mod subtask;
 pub mod subtask_registries;
 pub mod task_ledger;
+pub mod tool_result_log;
 pub mod tools;
 pub mod traits;
 pub mod workspace;
@@ -27,10 +28,13 @@ pub use dispatcher::ActionDispatcher;
 pub use run_request::RunRequest;
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, CancelOutcome, NoopCompletionSink, SettleKind,
-    SharedExecutor, SpawnedSubtask, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
-    SubtaskToolDispatcher,
+    SharedExecutor, SpawnedSubtask, SubtaskCompletionSink, SubtaskLifecycle, SubtaskRegistry,
+    SubtaskSettled, SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS,
 };
 pub use subtask_registries::SubtaskRegistries;
+pub use tool_result_log::{
+    redact_secret_fields_json, sanitize_tool_result_for_log, TOOL_RESULT_SIZE_LIMIT,
+};
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;
 pub use traits::*;

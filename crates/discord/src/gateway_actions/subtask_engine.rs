@@ -687,6 +687,12 @@ impl DiscordGatewayActions {
         // その後 insert が着地して「running のまま」のエントリがリークする。
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
 
+        // 停止/決着の排他ラッチ。sub-engine が完走してから settle が DB へ着地する
+        // までの窓で cancel が入っても、完了ログと sink 発火は行われない
+        // （= 止めたのに返信が届くのを防ぐ）。
+        let lifecycle = opencrab_actions::SubtaskLifecycle::new();
+        let lifecycle_task = lifecycle.clone();
+
         let join_handle = tokio::spawn(async move {
             // insert 完了を待つ（送信側が drop された場合も先へ進む）。
             let _ = start_rx.await;
@@ -784,6 +790,7 @@ impl DiscordGatewayActions {
                     subtask_id: subtask_id_clone,
                     sub_session_id: sub_session_id_clone,
                     exit_reason,
+                    lifecycle: lifecycle_task,
                 },
                 &result_text,
             );
@@ -802,6 +809,7 @@ impl DiscordGatewayActions {
                 // Discord は返信先を parent_session_id から parse_discord_session で
                 // 復元する（DiscordCompletionSink）ため、reply_target は未使用。
                 reply_target: None,
+                lifecycle,
             },
         );
         // webhook 系（Discord 固有）は registry と対の随伴マップへ分離する（RFC §1.5）。
@@ -860,10 +868,13 @@ impl DiscordGatewayActions {
 
         // remove_if は shard ロック下で述語を評価するため、「認可確認→削除」の間に
         // エントリが差し替わる TOCTOU が無い（所有権フィールドは insert 後不変）。
-        match self
-            .subtask_registry
-            .remove_if(&subtask_id, |_, subtask| authorized(subtask))
-        {
+        // 述語内で停止を主張（`claim_cancel`）することで、abort が効かない窓
+        // （sub-engine が完走して settle_completed へ入った後）でも「cancel 成功 ＋
+        // 完了ログ着地 ＋ sink 発火」の二重決着にならない。既に決着済みなら claim に
+        // 失敗し、エントリは残したまま not found を返す（通常完了として通知される）。
+        match self.subtask_registry.remove_if(&subtask_id, |_, subtask| {
+            authorized(subtask) && subtask.lifecycle.claim_cancel()
+        }) {
             Some((_, subtask)) => {
                 subtask.abort_handle.abort();
 
@@ -934,9 +945,14 @@ impl DiscordGatewayActions {
                 }
             }
             None => {
-                // remove_if の None は「不在」と「権限なし」の両方。エントリの所有権
-                // フィールドは不変なので contains_key で区別できる。
-                if self.subtask_registry.contains_key(&subtask_id) {
+                // remove_if の None は「不在」「権限なし」「既に決着済み（claim 失敗）」。
+                // 所有権フィールドは不変なので、残っていて決着中でなければ権限なし。
+                let already_settling = self
+                    .subtask_registry
+                    .get(&subtask_id)
+                    .map(|e| e.lifecycle.is_settling())
+                    .unwrap_or(false);
+                if self.subtask_registry.contains_key(&subtask_id) && !already_settling {
                     reject(format!(
                         "cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
                     ))

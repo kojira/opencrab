@@ -6,7 +6,7 @@ pub mod xml_parser;
 
 pub use skill_engine::SkillEngine;
 pub use types::{
-    ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchOutcome, EngineResult,
-    FunctionDefinition, LlmCallLog, LlmClient, ToolCall, ToolDispatcher,
+    ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
+    EngineResult, FunctionDefinition, LlmCallLog, LlmClient, ToolCall, ToolDispatcher,
 };
 pub use xml_parser::parse_xml_tool_calls;
