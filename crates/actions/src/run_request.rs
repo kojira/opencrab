@@ -105,6 +105,10 @@ impl RunRequest {
     /// 非ブロック自動 dispatch（RFC #152 S3a）を有効化する。`sink` は完了再注入の
     /// gateway 別配送口（Discord=LoopEvent / Nostr=reply ...）。`registry` は走行中
     /// subtask の共有 registry（None なら run 内でフレッシュ生成）。
+    ///
+    /// 「dispatch は有効にしたいが即時の再注入は不要」な経路（heartbeat 等）は
+    /// `sink` に `Arc::new(NoopCompletionSink)` を渡せばよい（完了本文は
+    /// `settle_completed` が DB へ永続化するので、次 tick の会話再構築で拾える）。
     pub fn with_dispatch(
         mut self,
         registry: Option<SubtaskRegistry>,
