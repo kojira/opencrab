@@ -352,8 +352,17 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
 
     let expanded = expand_env_vars(&raw);
 
-    let config: AppConfig =
+    let mut config: AppConfig =
         toml::from_str(&expanded).with_context(|| "Failed to parse config TOML")?;
+
+    // owner は入口で正規化する。`.env` からのコピペで前後に空白が混ざると、
+    // `api::is_owner_id`（trim 済み比較）を通る経路では owner と認識されるのに、
+    // 生比較が残っている下位 crate（form/modal、ボタン操作）だけ無言で拒否される。
+    // 判定述語を下位 crate へ移す整理は #174。
+    let owner = config.gateway.discord.owner_discord_id.trim();
+    if owner.len() != config.gateway.discord.owner_discord_id.len() {
+        config.gateway.discord.owner_discord_id = owner.to_string();
+    }
 
     Ok(config)
 }

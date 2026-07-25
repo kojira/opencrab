@@ -318,7 +318,8 @@ pub async fn patch_discord_config(
             &conn,
             &id,
             req.bot_token.as_deref(),
-            req.owner_discord_id.as_deref(),
+            // PUT と同じく入口で正規化する（理由は update_discord_config のコメント参照）。
+            req.owner_discord_id.as_deref().map(str::trim),
         )
         .unwrap()
     };
@@ -380,7 +381,11 @@ pub async fn update_discord_config(
     Path(id): Path<String>,
     Json(req): Json<UpdateDiscordConfigRequest>,
 ) -> Json<serde_json::Value> {
-    let owner_discord_id = req.owner_discord_id.unwrap_or_default();
+    // 入口で正規化する。owner の判定は `api::is_owner_id`（trim 済み比較）を通る経路と、
+    // 下位 crate の生比較のまま残っている経路（form/modal、ボタン操作）が混在するため、
+    // 前後空白付きの値を保存すると「DM は通るのに owner 専用 UI だけ無言で拒否される」
+    // 半端な状態になる。判定述語を下位 crate へ移す整理は #174。
+    let owner_discord_id = req.owner_discord_id.unwrap_or_default().trim().to_string();
 
     // Save to DB.
     {
