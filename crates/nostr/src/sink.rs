@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use tracing::{debug, error, warn};
 
-use opencrab_actions::{CallerIdentity, RunRequest, SubtaskCompletionSink, SubtaskSettled};
+use opencrab_actions::{
+    CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskSettled,
+};
 use opencrab_gateway::GatewayActions;
 
 use crate::actions::NostrGatewayActions;
@@ -187,6 +189,16 @@ fn resume_prompt_suffix(reply_target: &str, subtask_id: &str, exit_reason: &str)
 
 impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
     fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        // 決着（Completed）以外（進捗通知など）で resume すると、まだ走っている run の
+        // 途中で二重に応答してしまう。型の意図をここで実際に守る。
+        if ev.kind != SettleKind::Completed {
+            debug!(
+                session_id = %ev.session_id,
+                kind = ?ev.kind,
+                "nostr sink: not a completion, skipping resume"
+            );
+            return;
+        }
         // 非 Nostr の親セッション（heartbeat-* / web-* / ネストした subtask-* 等）は
         // 正常系としてスキップする（Discord / web の sink も同様に前置きで弾く）。
         if !ev.session_id.starts_with(NOSTR_SESSION_PREFIX) {
@@ -236,7 +248,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use opencrab_actions::{SettleKind, SubtaskSettled};
+    use opencrab_actions::SubtaskSettled;
     use opencrab_core::EngineResult;
     use opencrab_db::queries::AgentNostrConfigRow;
 

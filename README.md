@@ -240,6 +240,7 @@ Configuration is loaded from `config/default.toml` and **hot-reloaded** when fil
 - **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), CLI toggle
 - **Database** — SQLite path
 - **Tools** — Shell commands with per-command permission levels (`agent` / `owner`)
+- **Background tool execution** — `[subtask] auto_dispatch` (default `true`). Tool calls run in the background so the response loop never blocks; results are re-injected into the conversation when they finish. Set it to `false` (or export `OPENCRAB_SUBTASK_AUTO_DISPATCH=0`, which takes precedence) to fall back to fully synchronous tool execution. See "非ブロックツール実行" in `docs/DESIGN.md` for which tools stay inline and why.
 
 The `[tools]` section supports config-driven tool definitions with permission levels, hot-reloaded without server restart.
 

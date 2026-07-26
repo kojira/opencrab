@@ -24,7 +24,7 @@ use dashmap::DashMap;
 use tokio::sync::{broadcast, Mutex};
 
 use opencrab_actions::{
-    CallerIdentity, RunRequest, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+    CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
 };
 
 use crate::process;
@@ -157,6 +157,16 @@ pub struct WebCompletionSink {
 
 impl SubtaskCompletionSink for WebCompletionSink {
     fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        // 決着（Completed）以外（進捗通知など）で resume すると、まだ走っている run の
+        // 途中で二重に応答してしまう。型の意図をここで実際に守る。
+        if ev.kind != SettleKind::Completed {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                kind = ?ev.kind,
+                "web sink: not a completion, skipping resume"
+            );
+            return;
+        }
         if !ev.session_id.starts_with(WEB_SESSION_PREFIX) {
             tracing::debug!(
                 session_id = %ev.session_id,

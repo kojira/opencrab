@@ -5,6 +5,16 @@ workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 
 # デフォルトLLM設定
+
+[subtask]
+# ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
+#
+# false にすると全ツールが同期実行に戻る（この機能の導入前と同じ挙動）。
+# 環境変数 OPENCRAB_SUBTASK_AUTO_DISPATCH（0/false/off/no）が
+# この値より優先されるので、.env だけで切り戻せる。
+# 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
+auto_dispatch = true
+
 [llm]
 default_provider = "codex"
 # Codex サブスク経由で GPT-5.6（Sol にエイリアス）を使う。
