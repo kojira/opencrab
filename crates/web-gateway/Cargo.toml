@@ -15,6 +15,9 @@ serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 dashmap.workspace = true
+# HTTP 境界（ルータ + ハンドラ / #190 S4）。上位は `.merge(http::routes())` するだけ。
+axum.workspace = true
+futures.workspace = true
 
 opencrab-core.workspace = true
 opencrab-actions.workspace = true
