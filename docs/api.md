@@ -1282,6 +1282,8 @@ Base URL: `http://localhost:3000`
 | caller_type | string | `"owner"` \| `"trusted_user"` \| `"co_agent"` \| `"agent"` |
 | response | string \| null | 直接応答の本文。`NO_REPLY`／空応答／エラー時は `null` |
 
+> **失敗時のレスポンス形は不揃いである（HTTP ステータスはいずれも 200）**: 上の 3 フィールドが必ず返るのは成功時と「LLM プロバイダ未設定」の経路だけで、セッション作成／発話記録の失敗の経路は **`error` だけ**を返し `session_id` / `caller_type` / `response` を含まない。ダッシュボードはエラー時にこれらのフィールドを読めない前提で書く必要がある（下の Error Response の例を参照）。この不揃い（および失敗時も 200 を返すこと）の是正は [#200](https://github.com/kojira/opencrab/issues/200) で扱い、本ドキュメントは現状の実装を記述している。
+
 **Example Response**
 
 ```json
