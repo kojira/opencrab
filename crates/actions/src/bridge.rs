@@ -981,6 +981,36 @@ mod tests {
         );
     }
 
+    /// **許可リストは MCP スロットを覆わない**（危険の所在を固定する）。
+    ///
+    /// `BridgedExecutor` は gateway と MCP を別スロットで持つ。sub-engine の許可リストは
+    /// gateway スロットに被せるものなので、MCP ツールは**素通りする**。したがって
+    /// 「sub-engine は最小権限」を保つには、MCP を注入する側（`crates/server` の応答生成）で
+    /// **深さを見て注入しない**必要がある。ここではその前提（＝許可リストに頼れないこと）を
+    /// 固定する。将来 MCP を許可リスト経由に通す設計へ変えたら、このテストが落ちるので
+    /// そのとき深さゲートを緩められる。
+    #[tokio::test]
+    async fn allowlist_does_not_cover_the_mcp_slot() {
+        // gateway 側は許可リストで絞る。
+        let gateway: Arc<dyn GatewayActions> =
+            Arc::new(SubEngineGatewayActions::new(Arc::new(FakeCompositeGateway)));
+        // MCP 側は絞られていない別スロット（同じフェイクを流用して「素通り」を見る）。
+        let mcp: Arc<dyn GatewayActions> = Arc::new(FakeCompositeGateway);
+
+        let gateway_names: Vec<String> =
+            gateway.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            !gateway_names.contains(&"send_ui".to_string()),
+            "gateway スロットは許可リストで絞られる: {gateway_names:?}"
+        );
+
+        let mcp_names: Vec<String> = mcp.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            mcp_names.contains(&"send_ui".to_string()),
+            "MCP スロットは許可リストを通らない（この前提が崩れたら深さゲートを見直す）: {mcp_names:?}"
+        );
+    }
+
     /// report_progress は引き続き transport gateway へ委譲され動く（S1 挙動不変）。
     #[tokio::test]
     async fn subengine_report_progress_still_reaches_inner() {

@@ -1387,12 +1387,20 @@ pub async fn run_agent_response(
         };
         let bridged = bridged.with_gateway_actions(gateway_actions);
         // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
+        //
+        // **depth 0 限定**。MCP は gateway とは別スロットなので、sub-engine の許可リスト
+        // （`SubEngineGatewayActions`）を通らない。深さを見ずに注入すると、deny-by-default
+        // のはずの sub-engine が運用者の繋いだ任意の外部ツール（送信・削除を含みうる）に
+        // 到達できてしまい、最小権限の前提が崩れる。移設前の sub-engine も MCP は
+        // 持っていなかった（`git show <移設前>:...subtask_engine.rs` に注入なし）ので、
+        // ここは従来挙動の維持でもある。sub-engine へ開けたい場合は許可リストと同じく
+        // 明示的な opt-in を設計してから行う。
         match state.mcp_manager.as_ref() {
-            Some(m) => {
+            Some(m) if depth == 0 => {
                 let provider = m.provider_for(agent_id, caller_is_trusted);
                 bridged.with_mcp_actions(std::sync::Arc::new(provider))
             }
-            None => bridged,
+            _ => bridged,
         }
     };
     // ツール/コマンド活動を webhook へ実況する sink を挿す。
