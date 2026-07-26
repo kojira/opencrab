@@ -8,15 +8,14 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::subtask_webhook::reject;
-use super::webhook::{
-    self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
-};
-use super::{ArcLlmClient, DiscordGatewayActions, DiscordSubtaskWebhook};
+use super::webhook::{self, DeliveryBatch, WebhookResolution};
+use super::{ArcLlmClient, DiscordGatewayActions};
 use crate::message_loop::{parse_discord_session, LoopEvent};
 use opencrab_actions::subtask::{
     settle_completed, SettleContext, SettleKind, SpawnedSubtask, SubtaskCompletionSink,
     SubtaskSettled,
 };
+use opencrab_actions::subtask_notify::SubtaskRunInfo;
 use opencrab_actions::SubEngineGatewayActions;
 
 /// `SubtaskCompletionSink` の Discord 実装（RFC #152 S1）。
@@ -193,162 +192,46 @@ impl DiscordGatewayActions {
         let started_instant = std::time::Instant::now();
         let depth = parent_depth + 1;
 
-        // Subtask lifecycle webhook を固定順序で解決する（explicit > tool > agent > global > env）。
-        // db lock は解決の間だけ握り、await をまたがない。
-        let resolution = {
-            let conn = self.db.lock().unwrap();
-            webhook::resolve_subtask_webhook(
-                &conn,
-                &agent_id,
-                "spawn_subtask",
-                args,
-                self.default_subtask_webhook.as_ref(),
-            )
-        };
-
-        // 解決結果を webhook 設定 + 可視性メタへ写像する。
-        let (webhook, webhook_source, webhook_status): (
-            Option<WebhookConfig>,
-            Option<WebhookSource>,
-            &'static str,
-        ) = match resolution {
-            WebhookResolution::Error {
-                code,
-                message,
-                source,
-            } => {
-                emit_activity_diagnostic(
-                    self.db.clone(),
-                    self.webhook_client.clone(),
-                    &agent_id,
-                    "spawn_subtask",
-                    "webhook_resolution_error",
-                    &format!(
-                        "spawn_subtask webhook resolution failed before execution: {code}: {message} (source: {})",
-                        source.as_str()
-                    ),
-                    args,
-                    None,
-                );
-                // 検証失敗 → spawn しない。raw url はどこにも出さない。
-                return GatewayActionResult {
-                    success: false,
-                    error: Some(format!("{code}: {message}")),
-                    data: Some(json!({
-                        "webhook_source": source.as_str(),
-                        "webhook_status": "error",
-                        "webhook_error": message,
-                    })),
-                };
-            }
-            WebhookResolution::Use { config, source } => (Some(config), Some(source), "ok"),
-            WebhookResolution::Disabled { source } => (None, Some(source), "disabled"),
-            WebhookResolution::None => (None, None, "none"),
-        };
-        let webhook_redacted_url = webhook
-            .as_ref()
-            .map(|cfg| webhook::redact_webhook_url(&cfg.url));
-        let webhook_source_str: Option<&'static str> = webhook_source.map(|s| s.as_str());
-
         let label = args["label"]
             .as_str()
             .map(|s| s.to_string())
             .unwrap_or_else(|| task.chars().take(50).collect::<String>());
 
-        // give-up 時に親セッションログへ 1 件記録する sink を構築する。
-        let giveup_sink: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>> =
-            if webhook.is_some() && !parent_session_id.is_empty() {
-                let db_sink = self.db.clone();
-                let agent_sink = agent_id.clone();
-                let parent_sink = parent_session_id.clone();
-                let subtask_sink = subtask_id.clone();
-                let sub_session_sink = sub_session_id.clone();
-                let redacted_sink = webhook_redacted_url.clone().unwrap_or_default();
-                Some(std::sync::Arc::new(move |error: &str| {
-                    if let Ok(conn) = db_sink.lock() {
-                        webhook::record_webhook_delivery_failure(
-                            &conn,
-                            &agent_sink,
-                            &parent_sink,
-                            &subtask_sink,
-                            &sub_session_sink,
-                            &redacted_sink,
-                            error,
-                        );
-                    }
-                }))
-            } else {
-                None
-            };
-
-        // 一般ツール/コマンド活動（activity family）のデフォルト webhook があるか。
-        // 判定は webhook::has_activity_default に集約（resolve_activity_webhook と同じ
-        // scope 集合: tool/agent/global の enabled な activity 行。env/config fallback なし）。
-        let has_activity = {
-            let conn = self.db.lock().unwrap();
-            webhook::has_activity_default(&conn, &agent_id)
-        };
-
-        // 同一 run の配送を直列化する worker を 1 つだけ起動する。lifecycle（started/
-        // completed/...）と tool_call_*（activity）を同じ tx に流すことで、両系統の
-        // 送出順序を 1 本の worker で保証する（別 worker を立てて順序が崩れるのを防ぐ）。
-        let webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>> =
-            if webhook.is_some() || has_activity {
-                Some(webhook::spawn_run_worker_with_sink(
-                    self.webhook_client.clone(),
-                    giveup_sink,
-                ))
-            } else {
-                None
-            };
-
-        if webhook_status != "ok" {
-            emit_activity_diagnostic(
-                self.db.clone(),
-                self.webhook_client.clone(),
-                &agent_id,
-                "spawn_subtask",
-                "webhook_resolution_diagnostic",
-                &format!(
-                    "spawn_subtask lifecycle webhook status is {webhook_status}; source={}",
-                    webhook_source_str.unwrap_or("none")
-                ),
-                args,
-                webhook_tx.as_ref(),
-            );
-        }
-
-        // lifecycle の started を送る（同じ共有 worker 経由）。
-        if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
-            if cfg.wants("started") {
-                let meta = LifecycleMeta {
-                    label: label.clone(),
-                    run_id: subtask_id.clone(),
-                    session_key: sub_session_id.clone(),
+        // lifecycle 通知は抽象境界（`SubtaskLifecycleNotifier`）越しに扱う（#175 S3）。
+        // 宛先の解決・配送ワーカーの起動・整形はすべて実装側（Discord なら
+        // `DiscordWebhookNotifier`）に閉じており、ここは「起きた事実」を渡すだけ。
+        // 解決に失敗したら spawn しない（fail-closed）。raw url はどこにも出さない。
+        let notify = match self.lifecycle_notifier().begin_run(&SubtaskRunInfo {
+            agent_id: &agent_id,
+            subtask_id: &subtask_id,
+            sub_session_id: &sub_session_id,
+            parent_session_id: &parent_session_id,
+            label: &label,
+            tool_args: args,
+        }) {
+            Ok(session) => session,
+            Err(e) => {
+                return GatewayActionResult {
+                    success: false,
+                    error: Some(format!("{}: {}", e.code, e.message)),
+                    data: Some(json!({
+                        "webhook_source": e.source,
+                        "webhook_status": "error",
+                        "webhook_error": e.message,
+                    })),
                 };
-                let messages =
-                    webhook::build_started_messages(&meta, &task, webhook::DISCORD_CHUNK_LIMIT);
-                let _ = tx.send(DeliveryBatch {
-                    url: cfg.url.clone(),
-                    messages,
-                });
             }
-        }
+        };
+        let notifier = notify.notifier;
+        let webhook_source_str = notify.target.source;
+        let webhook_status = notify.target.status;
+        let webhook_redacted_url = notify.target.redacted_url;
 
-        // activity webhook があれば、sub-engine の executor に ToolEventSink を挿し
-        // tool_call_* を共有 worker 経由で配送する。
-        let tool_event_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>> =
-            match (has_activity, &webhook_tx) {
-                (true, Some(tx)) => Some(Arc::new(WebhookToolEventSink {
-                    db: self.db.clone(),
-                    agent_id: agent_id.clone(),
-                    tx: tx.clone(),
-                    max_chars: 1500,
-                    counter: std::sync::atomic::AtomicUsize::new(0),
-                    cap: 200,
-                })),
-                _ => None,
-            };
+        // 開始を通知する。
+        notifier.on_started(&task);
+
+        // 通知実装が実況用の sink を持っていれば sub-engine の executor に挿す。
+        let tool_event_sink = notifier.tool_event_sink();
 
         // Create the sub-session in the DB.
         {
@@ -505,46 +388,24 @@ impl DiscordGatewayActions {
             usize::MAX,
         );
 
-        if let (Some(cfg), Some(tx)) = (&webhook, &webhook_tx) {
-            if cfg.wants("progress") {
-                let progress_url = cfg.url.clone();
-                let progress_tx = tx.clone();
-                let progress_subtask_id = subtask_id.clone();
-                let progress_session_id = sub_session_id.clone();
-                sub_engine.set_on_tool_call(move |assistant_content, tool_calls_json| {
-                    let detail = summarize_tool_calls(&assistant_content, &tool_calls_json);
-                    let msg = webhook::build_progress_message(
-                        &progress_subtask_id,
-                        &progress_session_id,
-                        &detail,
-                    );
-                    let _ = progress_tx.send(DeliveryBatch {
-                        url: progress_url.clone(),
-                        messages: vec![msg],
-                    });
-                });
+        // sub-engine のツール呼び出し/結果を進捗として実況する。購読していない
+        // （`wants_progress()` が false）ならフック自体を挿さず、要約の計算も省く。
+        if notifier.wants_progress() {
+            let progress_notifier = notifier.clone();
+            sub_engine.set_on_tool_call(move |assistant_content, tool_calls_json| {
+                let detail = summarize_tool_calls(&assistant_content, &tool_calls_json);
+                progress_notifier.on_progress(&detail);
+            });
 
-                let progress_url = cfg.url.clone();
-                let progress_tx = tx.clone();
-                let progress_subtask_id = subtask_id.clone();
-                let progress_session_id = sub_session_id.clone();
-                sub_engine.set_on_tool_result(
-                    move |_tool_call_id, tool_name, result_json, is_error| {
-                        let status = if is_error { "failed" } else { "completed" };
-                        let preview: String = result_json.chars().take(500).collect();
-                        let detail = format!("tool `{tool_name}` {status}\n{preview}");
-                        let msg = webhook::build_progress_message(
-                            &progress_subtask_id,
-                            &progress_session_id,
-                            &detail,
-                        );
-                        let _ = progress_tx.send(DeliveryBatch {
-                            url: progress_url.clone(),
-                            messages: vec![msg],
-                        });
-                    },
-                );
-            }
+            let progress_notifier = notifier.clone();
+            sub_engine.set_on_tool_result(
+                move |_tool_call_id, tool_name, result_json, is_error| {
+                    let status = if is_error { "failed" } else { "completed" };
+                    let preview: String = result_json.chars().take(500).collect();
+                    let detail = format!("tool `{tool_name}` {status}\n{preview}");
+                    progress_notifier.on_progress(&detail);
+                },
+            );
         }
 
         // sub-engine の LLM 呼び出しも llm_logs に記録する（#148: depth0 メインは
@@ -611,11 +472,10 @@ impl DiscordGatewayActions {
             event_tx: self.event_tx.clone(),
         });
         let subtask_registry_clone = self.subtask_registry.clone();
-        let subtask_webhooks_clone = self.subtask_webhooks.clone();
+        let subtask_notifiers_clone = self.subtask_notifiers.clone();
         let progress_debounce_clone = self.progress_debounce.clone();
         let default_model_clone = effective_model.clone();
-        let webhook_clone = webhook.clone();
-        let webhook_tx_clone = webhook_tx.clone();
+        let notifier_task = notifier.clone();
 
         // 開始ゲート: 親がレジストリへ insert し終えるまでタスク本体を走らせない。
         // これが無いと、即座に失敗するサブタスクが親の insert より先に remove を実行し、
@@ -682,24 +542,13 @@ impl DiscordGatewayActions {
             //     S1: これらは DB 永続化とも sink 発火とも順序依存が無い＝webhook は
             //     非同期配送・別マップ。載せ替えても観測挙動は不変）。---
 
-            // Emit terminal lifecycle webhook (completed / failed / timed_out).
-            if let (Some(cfg), Some(tx)) = (&webhook_clone, &webhook_tx_clone) {
-                let status = webhook::exit_reason_to_status(&exit_reason);
-                if cfg.wants(status) {
-                    let duration_ms = started_instant.elapsed().as_millis() as u64;
-                    let msg = webhook::build_terminal_message(
-                        status,
-                        &subtask_id_clone,
-                        &sub_session_id_clone,
-                        Some(duration_ms),
-                        &result_text,
-                    );
-                    let _ = tx.send(DeliveryBatch {
-                        url: cfg.url.clone(),
-                        messages: vec![msg],
-                    });
-                }
-            }
+            // 終了（正常 / 異常 / タイムアウト）を通知する。表示状態への写像と購読
+            // フィルタは通知実装側の責務。
+            notifier_task.on_finished(
+                &exit_reason,
+                started_instant.elapsed().as_millis() as u64,
+                &result_text,
+            );
 
             // 保留中の progress デバウンスを無効化する。エントリが消えると、まだ
             // sleep 中のデバウンスタスクは is_latest=false 扱いになり発火しない。
@@ -709,8 +558,8 @@ impl DiscordGatewayActions {
             // progress は advisory であり次の report_progress で再アームされる）。
             progress_debounce_clone.remove(&parent_session_clone);
 
-            // webhook 随伴データを registry と対で除去する。
-            subtask_webhooks_clone.remove(&subtask_id_clone);
+            // 通知口を registry と対で除去する。
+            subtask_notifiers_clone.remove(&subtask_id_clone);
 
             // --- 中核（gateway 非依存）: DB へ subtask_completed を永続化 → registry
             //     除去 → sink 発火。順序契約（DB 記録 → 通知）は settle_completed が
@@ -747,14 +596,9 @@ impl DiscordGatewayActions {
                 lifecycle,
             },
         );
-        // webhook 系（Discord 固有）は registry と対の随伴マップへ分離する（RFC §1.5）。
-        self.subtask_webhooks.insert(
-            subtask_id.clone(),
-            DiscordSubtaskWebhook {
-                webhook,
-                webhook_tx,
-            },
-        );
+        // 通知口（gateway 固有の実装を隠した trait オブジェクト）は registry と対の
+        // 随伴マップへ分離する（RFC §1.5）。cancel / report_progress はここから引く。
+        self.subtask_notifiers.insert(subtask_id.clone(), notifier);
 
         // insert が完了したのでタスク本体の実行を許可する。
         let _ = start_tx.send(());
@@ -813,26 +657,11 @@ impl DiscordGatewayActions {
             Some((_, subtask)) => {
                 subtask.abort_handle.abort();
 
-                // Emit aborted lifecycle webhook. アボートで spawned closure は
-                // 中断されるため terminal completed/failed は来ない → ここが唯一の終端。
-                // webhook 系は registry と対の随伴マップから引く（RFC §1.5）。
-                if let Some((_, wh)) = self.subtask_webhooks.remove(&subtask_id) {
-                    if let (Some(cfg), Some(tx)) = (&wh.webhook, &wh.webhook_tx) {
-                        if cfg.wants("aborted") {
-                            let duration_ms = subtask.started_at.elapsed().as_millis() as u64;
-                            let msg = webhook::build_terminal_message(
-                                "aborted",
-                                &subtask_id,
-                                &subtask.session_id,
-                                Some(duration_ms),
-                                "cancelled by request",
-                            );
-                            let _ = tx.send(DeliveryBatch {
-                                url: cfg.url.clone(),
-                                messages: vec![msg],
-                            });
-                        }
-                    }
+                // 中断を通知する。アボートで spawned closure は中断されるため終了通知は
+                // 来ない → ここが唯一の終端。通知口は registry と対の随伴マップから引く
+                // （RFC §1.5）。
+                if let Some((_, notifier)) = self.subtask_notifiers.remove(&subtask_id) {
+                    notifier.on_cancelled(subtask.started_at.elapsed().as_millis() as u64);
                 }
 
                 // Write subtask_cancelled to parent session log.
@@ -1008,22 +837,10 @@ impl DiscordGatewayActions {
             }
         }
 
-        if let Some((resolved_subtask_id, subtask)) = &subtask_entry {
-            // webhook 系は registry と対の随伴マップから引く（RFC §1.5）。
-            if let Some(wh) = self.subtask_webhooks.get(resolved_subtask_id) {
-                if let (Some(cfg), Some(tx)) = (&wh.webhook, &wh.webhook_tx) {
-                    if cfg.wants("progress") {
-                        let msg = webhook::build_progress_message(
-                            resolved_subtask_id,
-                            &subtask.session_id,
-                            &message,
-                        );
-                        let _ = tx.send(DeliveryBatch {
-                            url: cfg.url.clone(),
-                            messages: vec![msg],
-                        });
-                    }
-                }
+        if let Some((resolved_subtask_id, _)) = &subtask_entry {
+            // 進捗を通知する。通知口は registry と対の随伴マップから引く（RFC §1.5）。
+            if let Some(notifier) = self.subtask_notifiers.get(resolved_subtask_id) {
+                notifier.on_progress(&message);
             }
         }
 
@@ -1144,7 +961,7 @@ pub fn spawn_activity_tool_event_sink(
     }))
 }
 
-fn emit_activity_diagnostic(
+pub(super) fn emit_activity_diagnostic(
     db: opencrab_db::Db,
     client: reqwest::Client,
     agent_id: &str,
@@ -1257,13 +1074,32 @@ fn build_activity_diagnostic_batch(
 /// イベントごとに resolve_activity_webhook で宛先を解決（tool > agent > global）し、
 /// build_tool_event_message で整形（covered 経路ゆえ unredacted、上限超過のみロスレス
 /// chunk）してから送る。
-struct WebhookToolEventSink {
+pub(super) struct WebhookToolEventSink {
     db: opencrab_db::Db,
     agent_id: String,
     tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
     max_chars: usize,
     counter: AtomicUsize,
     cap: usize,
+}
+
+impl WebhookToolEventSink {
+    pub(super) fn new(
+        db: opencrab_db::Db,
+        agent_id: String,
+        tx: tokio::sync::mpsc::UnboundedSender<DeliveryBatch>,
+        max_chars: usize,
+        cap: usize,
+    ) -> Self {
+        Self {
+            db,
+            agent_id,
+            tx,
+            max_chars,
+            counter: AtomicUsize::new(0),
+            cap,
+        }
+    }
 }
 
 impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
@@ -1440,6 +1276,257 @@ fn short_json_preview(data: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use opencrab_gateway::GatewayActions as _;
+
+    // ---- #175 S3: lifecycle 通知の抽象境界（trait 経由の配線） ----
+    //
+    // 通知の中身（整形）は Discord 実装側のテストで固定している。ここで固定するのは
+    // 「3 つのツール本体が trait を実際に呼ぶ」という配線そのもので、呼び出しを 1 つ
+    // 落とせば対応するテストが落ちる。
+
+    /// テスト用の通知口。呼ばれたイベントを順に記録する。
+    #[derive(Default)]
+    struct RecordingNotifier {
+        events: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingNotifier {
+        fn record(&self, ev: String) {
+            self.events.lock().unwrap().push(ev);
+        }
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl opencrab_actions::subtask_notify::SubtaskRunNotifier for RecordingNotifier {
+        fn on_started(&self, task: &str) {
+            self.record(format!("started:{task}"));
+        }
+        fn on_progress(&self, detail: &str) {
+            self.record(format!("progress:{detail}"));
+        }
+        fn on_finished(&self, exit_reason: &str, _duration_ms: u64, result_text: &str) {
+            self.record(format!("finished:{exit_reason}:{result_text}"));
+        }
+        fn on_cancelled(&self, _duration_ms: u64) {
+            self.record("cancelled".to_string());
+        }
+        fn wants_progress(&self) -> bool {
+            true
+        }
+    }
+
+    /// `RecordingNotifier` を返すファクトリ。
+    struct RecordingNotifierFactory {
+        notifier: Arc<RecordingNotifier>,
+    }
+
+    impl opencrab_actions::subtask_notify::SubtaskLifecycleNotifier for RecordingNotifierFactory {
+        fn begin_run(
+            &self,
+            run: &opencrab_actions::subtask_notify::SubtaskRunInfo<'_>,
+        ) -> Result<
+            opencrab_actions::subtask_notify::SubtaskNotifySession,
+            opencrab_actions::subtask_notify::NotifyTargetError,
+        > {
+            self.notifier.record(format!("begin:{}", run.label));
+            Ok(opencrab_actions::subtask_notify::SubtaskNotifySession {
+                notifier: self.notifier.clone(),
+                target: opencrab_actions::subtask_notify::NotifyTarget::none(),
+            })
+        }
+    }
+
+    /// LLM を呼ばずに 1 往復で完了する stub（sub-engine を最後まで走らせるため）。
+    struct StubLlmClient;
+
+    #[async_trait::async_trait]
+    impl opencrab_core::LlmClient for StubLlmClient {
+        async fn chat(
+            &self,
+            _request: opencrab_core::ChatRequest,
+        ) -> anyhow::Result<opencrab_core::ChatResponse> {
+            Ok(opencrab_core::ChatResponse::text("sub-engine done"))
+        }
+    }
+
+    /// テスト用の gateway actions（Discord HTTP は呼ばない）。
+    fn wiring_actions(
+        llm: Option<Arc<dyn opencrab_core::LlmClient>>,
+        workspace_base: &str,
+    ) -> DiscordGatewayActions {
+        let db = opencrab_db::Db::memory().unwrap();
+        DiscordGatewayActions::new(
+            Arc::new(serenity::http::Http::new("dummy-token")),
+            db,
+            Arc::new(std::sync::RwLock::new(
+                opencrab_actions::tools::ToolsConfig::default(),
+            )),
+            llm,
+            "test-model".to_string(),
+            workspace_base.to_string(),
+            Arc::new(dashmap::DashMap::new()),
+            None,
+        )
+    }
+
+    fn wiring_ctx(caller: opencrab_gateway::GatewayCaller, session_id: &str) -> GatewayCallContext {
+        GatewayCallContext::new(caller, "test-agent").with_session_id(session_id)
+    }
+
+    /// registry に走行中サブタスクを 1 件登録する（abort されない pending タスク）。
+    fn insert_running_subtask(
+        actions: &DiscordGatewayActions,
+        subtask_id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        actions.subtask_registry.insert(
+            subtask_id.to_string(),
+            SpawnedSubtask {
+                abort_handle: handle.abort_handle(),
+                session_id: session_id.to_string(),
+                parent_session_id: parent_session_id.to_string(),
+                agent_id: "test-agent".to_string(),
+                label: "job".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            },
+        );
+        handle
+    }
+
+    /// `report_progress` は随伴マップの通知口へ進捗を渡す。
+    #[tokio::test]
+    async fn report_progress_notifies_through_trait() {
+        let actions = wiring_actions(None, "/tmp");
+        let _h = insert_running_subtask(
+            &actions,
+            "st-1",
+            "subtask-st-1",
+            "discord-test-agent-111-222",
+        );
+        let recorder = Arc::new(RecordingNotifier::default());
+        actions
+            .subtask_notifiers
+            .insert("st-1".to_string(), recorder.clone());
+
+        let res = actions
+            .execute_report_progress(
+                &json!({"message": "halfway there"}),
+                &wiring_ctx(opencrab_gateway::GatewayCaller::Agent, "subtask-st-1"),
+            )
+            .await;
+        assert!(res.success, "report_progress: {:?}", res.error);
+        assert_eq!(recorder.events(), vec!["progress:halfway there"]);
+    }
+
+    /// `cancel_subtask` は通知口へ中断を伝え、随伴マップから外す。
+    #[tokio::test]
+    async fn cancel_subtask_notifies_through_trait() {
+        let actions = wiring_actions(None, "/tmp");
+        let _h = insert_running_subtask(
+            &actions,
+            "st-1",
+            "subtask-st-1",
+            "discord-test-agent-111-222",
+        );
+        let recorder = Arc::new(RecordingNotifier::default());
+        actions
+            .subtask_notifiers
+            .insert("st-1".to_string(), recorder.clone());
+
+        let res = actions.execute_cancel_subtask(
+            &json!({"subtask_id": "st-1"}),
+            &wiring_ctx(
+                opencrab_gateway::GatewayCaller::Owner,
+                "discord-test-agent-111-222",
+            ),
+        );
+        assert!(res.success, "cancel_subtask: {:?}", res.error);
+        assert_eq!(recorder.events(), vec!["cancelled"]);
+        assert!(
+            !actions.subtask_notifiers.contains_key("st-1"),
+            "通知口は registry と対で除去する"
+        );
+    }
+
+    /// `spawn_subtask` は走行の開始と終了を trait 経由で通知し、決着時に通知口を外す。
+    #[tokio::test]
+    async fn spawn_subtask_notifies_started_and_finished_through_trait() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(RecordingNotifier::default());
+        let actions = wiring_actions(Some(Arc::new(StubLlmClient)), tmp.path().to_str().unwrap())
+            .with_lifecycle_notifier(Arc::new(RecordingNotifierFactory {
+                notifier: recorder.clone(),
+            }));
+
+        let res = actions
+            .execute_spawn_subtask(
+                &json!({"task": "do the thing", "label": "job"}),
+                &wiring_ctx(
+                    opencrab_gateway::GatewayCaller::Agent,
+                    "discord-test-agent-111-222",
+                ),
+            )
+            .await;
+        assert!(res.success, "spawn_subtask: {:?}", res.error);
+        let subtask_id = res.data.as_ref().unwrap()["subtask_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 開始は同期的に通知される。
+        assert_eq!(
+            recorder.events(),
+            vec!["begin:job".to_string(), "started:do the thing".to_string()]
+        );
+
+        // 終了は spawn したタスクから通知される。
+        for _ in 0..200 {
+            if recorder.events().len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let events = recorder.events();
+        assert_eq!(
+            events.get(2).map(|s| s.as_str()),
+            Some("finished:completed:sub-engine done"),
+            "終了通知が届かない: {events:?}"
+        );
+        assert!(
+            !actions.subtask_notifiers.contains_key(&subtask_id),
+            "決着後は通知口を外す"
+        );
+    }
+
+    /// 通知先を持たない構成（`NoopLifecycleNotifier`）でも subtask 生成は成立する
+    /// （= Discord 抜きでも通知の依存で詰まらない。S4 の前提）。
+    #[tokio::test]
+    async fn spawn_subtask_works_with_noop_notifier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let actions = wiring_actions(Some(Arc::new(StubLlmClient)), tmp.path().to_str().unwrap())
+            .with_lifecycle_notifier(Arc::new(opencrab_actions::NoopLifecycleNotifier));
+
+        let res = actions
+            .execute_spawn_subtask(
+                &json!({"task": "do the thing"}),
+                &wiring_ctx(
+                    opencrab_gateway::GatewayCaller::Agent,
+                    "discord-test-agent-111-222",
+                ),
+            )
+            .await;
+        assert!(res.success, "spawn_subtask: {:?}", res.error);
+        let data = res.data.unwrap();
+        assert_eq!(data["status"], "spawned");
+        assert_eq!(data["webhook_status"], "none");
+        assert!(data["webhook_source"].is_null());
+        assert!(data["webhook_redacted_url"].is_null());
+    }
 
     // ---- RFC #152 S1: DiscordCompletionSink（完了の再注入経路） ----
     //
