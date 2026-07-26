@@ -274,6 +274,22 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 16,
+        description: "trusted_discord_users.platform (信頼済みユーザーの識別子空間を経路で分ける, issue #214)",
+        // 列追加のみ（ほぼ可逆）。既存行は全て Discord の識別子空間なので DEFAULT 'discord'
+        // で生かす。一意制約 (discord_user_id, agent_id) はここでは触らない
+        // （変更するとテーブル再構築＝非可逆になるため #159 に合流させる）。
+        // 新規DB は SCHEMA_SQL 側で列を持つため column_exists でガードして冪等にする（v3 前例）。
+        up: |conn| {
+            if !column_exists(conn, "trusted_discord_users", "platform")? {
+                conn.execute_batch(
+                    "ALTER TABLE trusted_discord_users ADD COLUMN platform TEXT NOT NULL DEFAULT 'discord'",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -1412,6 +1428,10 @@ CREATE TABLE IF NOT EXISTS trusted_discord_users (
   created_by TEXT NOT NULL DEFAULT 'owner',
   created_at TEXT NOT NULL,
   display_name TEXT NOT NULL DEFAULT '',
+  -- その識別子が「どの経路のものか」（#214）。列追加前の行は全て Discord の
+  -- 識別子空間なので DEFAULT 'discord'（`pending_interactions.platform` の前例に倣う）。
+  -- 一意制約は (discord_user_id, agent_id) のまま据え置く（作り直しは非可逆なので #159）。
+  platform TEXT NOT NULL DEFAULT 'discord',
   UNIQUE (discord_user_id, agent_id)
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
@@ -1934,6 +1954,57 @@ mod migration_tests {
         initialize(&conn).expect("upgrade v2 -> v3");
         assert!(column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 再実行しても冪等
+        initialize(&conn).expect("idempotent");
+    }
+
+    /// v16: `trusted_discord_users.platform` の付与（#214）。
+    ///
+    /// 列追加のみで、**既存行は従来の経路（`discord`）として生きる**こと
+    /// （既存の信頼済みユーザーが移行で一斉に権限を失わない）。
+    #[test]
+    fn platform_migration_keeps_existing_rows_on_discord() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）
+        assert!(column_exists(&conn, "trusted_discord_users", "platform").unwrap());
+
+        // v15 相当の既存 DB を模す: platform 列なしのテーブルに作り直し、行を 1 件入れて
+        // version 15 へ戻す。
+        conn.execute_batch(
+            "DROP TABLE trusted_discord_users;
+             CREATE TABLE trusted_discord_users (
+               id TEXT PRIMARY KEY,
+               discord_user_id TEXT NOT NULL,
+               agent_id TEXT NOT NULL,
+               permission TEXT NOT NULL DEFAULT 'user',
+               created_by TEXT NOT NULL DEFAULT 'owner',
+               created_at TEXT NOT NULL,
+               display_name TEXT NOT NULL DEFAULT '',
+               UNIQUE (discord_user_id, agent_id)
+             );
+             INSERT INTO trusted_discord_users
+               (id, discord_user_id, agent_id, permission, created_by, created_at, display_name)
+               VALUES ('old-1', '42', 'a1', 'co_agent', 'owner', '2026-01-01', 'Crab B');
+             PRAGMA user_version = 15",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "trusted_discord_users", "platform").unwrap());
+
+        initialize(&conn).expect("upgrade v15 -> v16");
+        assert!(column_exists(&conn, "trusted_discord_users", "platform").unwrap());
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 既存行は残り、従来の経路として引ける（他の列も失われていない）。
+        let (platform, permission): (String, String) = conn
+            .query_row(
+                "SELECT platform, permission FROM trusted_discord_users WHERE id = 'old-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(platform, "discord");
+        assert_eq!(permission, "co_agent");
 
         // 再実行しても冪等
         initialize(&conn).expect("idempotent");

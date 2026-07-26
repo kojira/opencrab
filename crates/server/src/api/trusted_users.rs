@@ -47,6 +47,12 @@ pub struct AddTrustedUserRequest {
     pub display_name: Option<String>,
 }
 
+/// 信頼済みユーザーを登録する（Discord の識別子空間）。
+///
+/// リクエストのフィールドは `discord_user_id` なので、登録される経路は `discord` 固定
+/// （#214）。web / REST のユーザーを別経路として登録できるようにするのは、DTO の
+/// 作り直しを伴うため #159 の担当。ここで経路を受け取ると request/response の契約が
+/// 二重に変わるので、この PR では触らない。
 pub async fn add_trusted_user(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -60,6 +66,7 @@ pub async fn add_trusted_user(
 
     opencrab_db::queries::add_trusted_user(
         &conn,
+        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
         &id,
         &agent_id,
         &req.discord_user_id,

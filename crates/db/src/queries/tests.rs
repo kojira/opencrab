@@ -39,6 +39,7 @@ fn test_trusted_user_display_name_round_trip() {
     let conn = setup();
     add_trusted_user(
         &conn,
+        TRUSTED_PLATFORM_DISCORD,
         "id-1",
         "a1",
         "42",
@@ -48,7 +49,7 @@ fn test_trusted_user_display_name_round_trip() {
         "Crab B",
     )
     .unwrap();
-    let row = get_trusted_user(&conn, "42", "a1").unwrap();
+    let row = get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1").unwrap();
     assert_eq!(row.display_name, "Crab B");
     assert_eq!(row.permission, "co_agent");
 
@@ -56,15 +57,118 @@ fn test_trusted_user_display_name_round_trip() {
     let rows = list_trusted_users(&conn, "a1").unwrap();
     assert_eq!(rows[0].display_name, "Crab B2");
 
-    // v3 以前の行（DEFAULT ''）も読み出せる
+    // v3 以前の行（display_name / platform とも列 DEFAULT）も読み出せる
     conn.execute(
         "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at) \
          VALUES ('id-2', '43', 'a1', 'user', 'owner', '2026-01-01')",
         [],
     )
     .unwrap();
-    let row = get_trusted_user(&conn, "43", "a1").unwrap();
+    let row = get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "43", "a1").unwrap();
     assert_eq!(row.display_name, "");
+    // 列追加前からある行は従来の経路（discord）として生きる（#214）
+    assert_eq!(row.platform, TRUSTED_PLATFORM_DISCORD);
+}
+
+// ---- 経路（identity platform）で識別子空間が分かれること（#214） ----
+
+/// 1 件登録するテストヘルパ。
+fn add_trusted(conn: &Connection, platform: &str, row_id: &str, user_id: &str, agent_id: &str) {
+    add_trusted_user(
+        conn,
+        platform,
+        row_id,
+        agent_id,
+        user_id,
+        "user",
+        "owner",
+        "2026-01-01",
+        "",
+    )
+    .unwrap();
+}
+
+/// 同じ識別子でも経路が違えば別扱い（信頼が経路をまたいで引き継がれない）。
+#[test]
+fn trust_does_not_cross_platforms() {
+    let conn = setup();
+    // Discord 経路に "42" を登録する。
+    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
+    assert!(is_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1"));
+    // 同じ文字列を web / REST の識別子として名乗っても、その経路では信頼されない。
+    assert!(!is_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1"));
+    assert!(!is_trusted_user(&conn, TRUSTED_PLATFORM_REST, "42", "a1"));
+    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1").is_none());
+
+    // 逆向きも同じ: web 経路の登録は Discord 経路へ漏れない。
+    add_trusted(&conn, TRUSTED_PLATFORM_WEB, "row-w", "dash-user", "a1");
+    assert!(is_trusted_user(
+        &conn,
+        TRUSTED_PLATFORM_WEB,
+        "dash-user",
+        "a1"
+    ));
+    assert!(!is_trusted_user(
+        &conn,
+        TRUSTED_PLATFORM_DISCORD,
+        "dash-user",
+        "a1"
+    ));
+}
+
+/// 登録件数の判定も経路で切られている
+/// （ある経路に登録があっても、別経路から見れば「0 件」）。
+#[test]
+fn trusted_user_count_is_scoped_by_platform() {
+    let conn = setup();
+    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a1"), 0);
+
+    add_trusted(&conn, TRUSTED_PLATFORM_WEB, "row-w", "dash-user", "a1");
+    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_WEB, "a1"), 1);
+    // web に 1 件あっても Discord から見れば未登録（= owner のみ許可の段が生きる）。
+    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a1"), 0);
+    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_REST, "a1"), 0);
+
+    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
+    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a1"), 1);
+    // エージェントでも切れている
+    assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a2"), 0);
+}
+
+/// 互換読み（暫定）: 自経路の行が無ければ従来の `discord` 経路の行も見る。
+/// 従来経路そのもの（discord）はフォールバックしない。
+#[test]
+fn legacy_fallback_reads_discord_rows_until_migration() {
+    let conn = setup();
+    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
+
+    // 自経路の行が無い → 従来経路の行が見える（既存の信頼が一斉に失効しない）。
+    let via_web = get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_WEB, "42", "a1")
+        .expect("legacy fallback");
+    assert_eq!(via_web.platform, TRUSTED_PLATFORM_DISCORD);
+    assert!(
+        get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_REST, "42", "a1").is_some()
+    );
+
+    // 自経路の行があればそれが優先される（フォールバックへ落ちない）。
+    add_trusted(&conn, TRUSTED_PLATFORM_WEB, "row-w", "dash-user", "a1");
+    let own = get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_WEB, "dash-user", "a1")
+        .expect("own platform row");
+    assert_eq!(own.platform, TRUSTED_PLATFORM_WEB);
+
+    // Discord 側は逆向きに漏れない（web の行は Discord からは見えないまま）。
+    assert!(get_trusted_user_with_legacy_fallback(
+        &conn,
+        TRUSTED_PLATFORM_DISCORD,
+        "dash-user",
+        "a1"
+    )
+    .is_none());
+
+    // 未登録は経路を問わず None（フォールバックが「誰でも通る」にはならない）。
+    assert!(
+        get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_WEB, "999", "a1").is_none()
+    );
 }
 
 #[test]

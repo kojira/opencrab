@@ -668,6 +668,7 @@ mod tests {
         let delivery = FakeDelivery::new();
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "row-1",
             "agent-1",
             "42",
@@ -680,6 +681,7 @@ mod tests {
         // 数値の display_name（id 解釈に食われないこと）
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "row-2",
             "agent-1",
             "77",
@@ -692,6 +694,7 @@ mod tests {
         // co_agent でない行はロスター外
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "row-3",
             "agent-1",
             "44",
@@ -750,6 +753,7 @@ mod tests {
             let conn = db.lock().unwrap();
             opencrab_db::queries::add_trusted_user(
                 &conn,
+                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
                 "row-1",
                 "agent-a",
                 "42",
