@@ -963,6 +963,22 @@ mod tests {
         );
         // 合成 gateway の実行痕跡（reached）が data に無い＝届いていない。
         assert!(r.data.is_none());
+
+        // 未知名（実在しないツール）は **拒否マーカーを付けない**。分類器が幻覚の
+        // ツール名を「権限で弾かれた」と誤分類すると、リトライや権限系の扱いが壊れる。
+        let unknown = sub
+            .execute("no_such_tool_at_all", &serde_json::json!({}), &ctx)
+            .await;
+        assert!(!unknown.success);
+        let unknown_err = unknown.error.unwrap();
+        assert!(
+            !unknown_err.starts_with(REJECTION_CODE_PREFIX),
+            "未知名は権限拒否として扱わない: {unknown_err}"
+        );
+        assert!(
+            unknown_err.contains("Unknown gateway action"),
+            "未知名は通常の失敗として返す: {unknown_err}"
+        );
     }
 
     /// report_progress は引き続き transport gateway へ委譲され動く（S1 挙動不変）。
