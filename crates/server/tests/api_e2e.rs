@@ -895,13 +895,22 @@ async fn test_user_id_is_trimmed_consistently() {
 /// A mock LLM provider that returns pre-queued responses.
 struct MockLlmProvider {
     responses: Mutex<VecDeque<ChatResponse>>,
+    /// 受け取った各リクエストの system prompt（連結）。何ターン目にどんな system prompt で
+    /// 呼ばれたかを検証する（subtask 完了 resume の注入マーカーの確認に使う）。
+    system_prompts: Mutex<Vec<String>>,
 }
 
 impl MockLlmProvider {
     fn new() -> Self {
         Self {
             responses: Mutex::new(VecDeque::new()),
+            system_prompts: Mutex::new(Vec::new()),
         }
+    }
+
+    /// これまでに受け取ったリクエストの system prompt 一覧（呼ばれた順）。
+    fn system_prompts(&self) -> Vec<String> {
+        self.system_prompts.lock().unwrap().clone()
     }
 
     fn push_text_response(&self, text: &str) {
@@ -961,7 +970,17 @@ impl LlmProvider for MockLlmProvider {
         Ok(vec![])
     }
 
-    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // キューが尽きていても記録は残す（何回どんな system prompt で呼ばれたかが証拠）。
+        let system = request
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .filter_map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.system_prompts.lock().unwrap().push(system);
+
         let mut queue = self.responses.lock().unwrap();
         queue
             .pop_front()
@@ -2232,6 +2251,194 @@ async fn test_web_send_dispatches_tool_as_background_subtask() {
     assert!(
         !state.web_gateway.has_running(&session_id),
         "決着後も web gateway の registry にエントリが残っている"
+    );
+}
+
+/// SSE チャンネルから指定 `kind` のイベントが届くまで待つ（テスト用ヘルパ）。
+///
+/// resume は sink → `tokio::spawn` の非同期経路なので、待たずに読むと取りこぼす。
+/// 途中で流れる別 `kind`（inbound の `direct` など）は読み飛ばす。
+async fn recv_web_event_of_kind(
+    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    kind: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let needle = format!("\"kind\":\"{kind}\"");
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(payload)) if payload.contains(&needle) => return Some(payload),
+            // 別 kind のイベント（inbound の direct 等）は読み飛ばす。
+            Ok(Ok(_)) => continue,
+            // チャンネル終了 / lag / タイムアウトは「届かなかった」扱い。
+            Ok(Err(_)) | Err(_) => return None,
+        }
+    }
+}
+
+/// #152 / #154 [P2]: **バックグラウンド実行の結果が web の会話へ再注入される**
+/// （看板機能の後半）ことを in-process で固定する。
+///
+/// このテストが必要な理由: 再注入は `WebCompletionSink::on_subtask_settled` の 1 箇所で
+/// 起きるが、そこを丸ごと `return;` にしても opencrab-server のテストは全て緑だった。
+/// 唯一の検証が `#[ignore]` + 実 LLM + 稼働サーバ前提の E2E で、CI では走らなかった。
+///
+/// 3 つの独立した証拠で resume の実行を確認する:
+/// 1. SSE へ `kind:"subtask_resume"` のイベントが流れる（配送）。
+/// 2. resume ターンの LLM リクエストの system prompt に `[subtask_completed: subtask_id=`
+///    が注入されている（会話への再注入）。
+/// 3. resume ターンの発話が親セッションの履歴へ残る（永続化）。
+#[tokio::test]
+async fn test_web_subtask_completion_resumes_parent_conversation() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "WebResumer", "TestPersona").await;
+    let session_id = format!("web-{agent_id}-conv-resume");
+
+    // resume は非同期に発火するので、送信前に購読しておく（取りこぼし防止）。
+    let mut rx = state.web_gateway.subscribe(&session_id);
+
+    // 1 ターン目: ツール呼び出し → dispatch → spawned を見た 2 回目で本文を返す。
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-web-resume-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "web_resume_work",
+                "experience": "e",
+                "outcome": "success",
+                "lesson": "l",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+    // 3 回目 = subtask 完了後の resume ターン。
+    mock.push_text_response("スキルの学習が完了しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/web/send"),
+        Some(serde_json::json!({
+            "conversation_id": "conv-resume",
+            "content": "スキルを覚えて",
+            "user_id": "u1"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["session_id"].as_str().unwrap(), session_id);
+
+    // 証拠 1: resume の応答が SSE へ配送される。
+    let payload =
+        recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| {
+                // system prompt 全文は巨大なので、件数と完了マーカーの有無だけを出す。
+                let prompts = mock.system_prompts();
+                let with_marker = prompts
+                    .iter()
+                    .filter(|p| p.contains("[subtask_completed: subtask_id="))
+                    .count();
+                panic!(
+                    "subtask 完了後に resume の SSE イベントが流れない（再注入が動いていない）。\
+             LLM 呼び出し回数={} うち完了マーカー入り={with_marker}",
+                    prompts.len()
+                )
+            });
+    assert!(
+        payload.contains("スキルの学習が完了しました"),
+        "resume イベントの本文が resume ターンの応答ではない: {payload}"
+    );
+
+    // 証拠 2: resume ターンの system prompt に完了マーカーが注入されている。
+    let prompts = mock.system_prompts();
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p.contains("[subtask_completed: subtask_id=")),
+        "resume ターンの system prompt に完了マーカーが注入されていない: {prompts:?}"
+    );
+
+    // 証拠 3: resume ターンの発話が親セッションの履歴へ残る（再読込しても消えない）。
+    let mut persisted = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("スキルの学習が完了しました"))
+        {
+            persisted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        persisted,
+        "resume ターンの発話が親セッションの履歴へ保存されない"
+    );
+}
+
+/// #152 [P2 回帰]: **進捗通知（`SettleKind::Progress`）では resume しない**。
+///
+/// 走行中の subtask の途中経過で親を resume すると、まだ走っている run の最中に
+/// 二重で応答してしまう。`WebCompletionSink` の `kind != Completed` ガードを外すと
+/// このテストが落ちる。
+///
+/// 対比として同じ sink に `Completed` を投げ、そちらでは resume が走ることも確認する
+/// （sink 全体を no-op にしただけでも落ちるようにするため）。
+#[tokio::test]
+async fn test_web_progress_settlement_does_not_resume() {
+    use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
+    use opencrab_server::web_gateway::WebCompletionSink;
+
+    let (app, _db, mock, state) = create_test_app_with_state();
+    let (agent_id, _app) = create_test_agent_named(app, "WebProgress", "TestPersona").await;
+    let session_id = format!("web-{agent_id}-conv-progress");
+    let mut rx = state.web_gateway.subscribe(&session_id);
+
+    let sink = WebCompletionSink {
+        state: state.clone(),
+        gateway: state.web_gateway.clone(),
+    };
+    let settled = |kind: SettleKind| SubtaskSettled {
+        session_id: session_id.clone(),
+        agent_id: agent_id.clone(),
+        subtask_id: "st-progress-1".to_string(),
+        exit_reason: "progress".to_string(),
+        kind,
+        reply_target: None,
+    };
+
+    // 進捗通知: resume しない = LLM を一度も呼ばない / SSE へ何も流れない。
+    // （応答生成が走ると、LLM のキューが空でも `kind:"error"` が SSE へ流れるので、
+    //   「特定 kind が来ない」ではなく「何も来ない」を要求する。）
+    sink.on_subtask_settled(settled(SettleKind::Progress));
+    let stray = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+    assert!(
+        stray.is_err(),
+        "進捗通知（Progress）で resume してしまっている（走行中の run に二重応答する）: {stray:?}"
+    );
+    assert_eq!(
+        mock.system_prompts().len(),
+        0,
+        "進捗通知で LLM 応答生成が走っている（resume してはならない）"
+    );
+
+    // 対比: 完了通知なら resume が走る（このガードが「効きすぎ」でないことの確認）。
+    mock.push_text_response("完了しました");
+    sink.on_subtask_settled(settled(SettleKind::Completed));
+    assert!(
+        recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
+            .await
+            .is_some(),
+        "完了通知（Completed）で resume が走らない"
     );
 }
 
