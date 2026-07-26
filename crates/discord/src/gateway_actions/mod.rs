@@ -1458,7 +1458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sub_engine_gateway_allowlist() {
-        use crate::gateway_actions::subtask_engine::SubEngineGatewayActions;
+        use opencrab_actions::SubEngineGatewayActions;
 
         let (actions, db) = make_test_actions();
         let parent = "discord-test-agent-111-222";
