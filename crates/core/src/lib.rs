@@ -22,6 +22,7 @@ pub mod import;
 pub mod llm_text;
 pub mod memory;
 pub mod memory_index;
+pub mod runtime_context;
 pub mod skill;
 pub mod soul;
 pub mod task_ledger;
@@ -36,6 +37,7 @@ pub use engine::{
 pub use heartbeat::{heartbeat_loop, HeartbeatCallback, HeartbeatConfig, HeartbeatDecision};
 pub use identity::Identity;
 pub use memory::MemoryManager;
+pub use runtime_context::prepend_runtime_context;
 pub use skill::{Skill, SkillManager, SkillSource};
 pub use soul::{Soul, ThinkingStyle};
 pub use workspace::{FileEntry, Workspace};
