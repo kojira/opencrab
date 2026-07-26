@@ -217,8 +217,11 @@ pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
     // ここには無い（どちらも分類の所属は dispatchable のまま）。
     // `update_heartbeat_instructions`（#157 S3）も server 側
     // （`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。
-    // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
-    "create_skill",
+    // `create_skill`（#157 S6）も server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。
+    // その結果この集合は**空**になった（Discord に残るツールは配送系 / 同ターン結果依存 /
+    // run 内共有状態 / 純粋な読み取りのいずれかで、全部 inline）。空でも定数は残す:
+    // ドリフト検出テストが `DISCORD_INLINE_ACTIONS` との対で参照しており、Discord 固有の
+    // 長時間ツールが将来増えたときの受け皿になる。
 ];
 
 /// Nostr の**配送系**アクション（#168）。「送る」こと自体が応答なので、非ブロック
@@ -347,6 +350,10 @@ pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &[
     // 指示文の書き込み（#157 S3 で Discord から移設）。同ターンで読み戻さない。
     // Discord 側でも dispatchable だったので分類の所属は変えていない。
     "update_heartbeat_instructions",
+    // スキルファイルの生成。結果は確認のみで同ターンでは使わない（#157 S6 で Discord から
+    // 移設）。移設前は `DISCORD_DISPATCHABLE_ACTIONS` に属していたので、所属を変えずに
+    // ここへ移した。core の `create_my_skill`（[`CORE_DISPATCHABLE_ACTIONS`]）と同分類。
+    "create_skill",
 ];
 
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
@@ -424,7 +431,8 @@ pub const CORE_DISPATCHABLE_ACTIONS: &[&str] = &[
     "reflect_and_learn",
     // 要約の保存: 同ターンで読み戻さない。
     "summarize_and_save",
-    // スキル生成（Discord の `create_skill` と同分類）。
+    // スキル生成（`create_skill` と同分類。あちらは server 側の gateway ツール /
+    // [`SERVER_DISPATCHABLE_ACTIONS`]）。
     "create_my_skill",
 ];
 
@@ -1794,10 +1802,10 @@ mod tests {
             names.iter().any(|n| n == "update_instructions"),
             "update_instructions must exist in dispatcher"
         );
-        // `create_skill` は Discord gateway 側（discord crate のテストで実在性を検証）、
-        // `update_heartbeat_instructions` / `read_heartbeat_instructions` は #157 S3 で
-        // server 側の合成 gateway へ移設（server crate のテストで検証）。execute_skill は
-        // 防御的エントリ（実装なし）であることをここで明文化する。
+        // `create_skill`（#157 S6）と `update_heartbeat_instructions` /
+        // `read_heartbeat_instructions`（#157 S3）は server 側の合成 gateway が実装する
+        // （実在性は server crate のテストで検証）。execute_skill は防御的エントリ
+        // （実装なし）であることをここで明文化する。
         assert!(!names.iter().any(|n| n == "execute_skill"));
     }
 

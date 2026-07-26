@@ -15,7 +15,6 @@ use serenity::http::Http;
 use crate::message_loop::LoopEvent;
 use crate::PendingInteractionRegistry;
 
-mod agent_management;
 mod discord_ops;
 mod peer_review;
 mod subtask_engine;
@@ -305,33 +304,14 @@ impl GatewayActions for DiscordGatewayActions {
                 }),
             },
             // `update_memory_index_config` / `add_allowed_command` /
-            // `list_allowed_commands` / `remove_allowed_command` は #157 S1 で
-            // gateway 非依存層（server 側 `SystemGatewayActions`）へ移設済み。
+            // `list_allowed_commands` / `remove_allowed_command` は #157 S1 で、
+            // `create_skill` は #157 S6 で gateway 非依存層（server 側
+            // `SystemGatewayActions`。実体は `crates/server/src/agent_management.rs`）へ
+            // 移設済み。いずれも serenity を参照せず DB だけに依存していたのに、Discord
+            // 経由のターンにしか出ないのが不具合だった（#157 / #155）。
             // ここで再定義すると合成 gateway の dedup（own 優先）で own 側に食われ、
             // Discord の実装が黙って死ぬので**定義してはならない**
             // （`test_definitions_returns_expected_count` の negative assert が守る）。
-            GatewayActionDef {
-                name: "create_skill".to_string(),
-                description: "ユーザーから「〇〇するスキルを作って」と言われたとき新しいスキルを作成する。guidanceにコマンド例・使い方を書くことで、LLMがexecute_shellで動的に実行できるようになる。同名スキルが存在する場合は更新される。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "スキル名"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "スキルの説明"
-                        },
-                        "guidance": {
-                            "type": "string",
-                            "description": "スキルのガイダンス（省略時は空文字列）"
-                        }
-                    },
-                    "required": ["name", "description"]
-                }),
-            },
             GatewayActionDef {
                 name: "discord_send_file".to_string(),
                 description: "Discordチャンネルにファイル（画像等）をアップロードして送信する。ファイルパスはワークスペース内のパスのみ指定可能（パストラバーサル防止）。25MBサイズ制限あり。".to_string(),
@@ -594,7 +574,6 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_add_reaction" => self.execute_discord_add_reaction(args).await,
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "discord_create_channel" => self.execute_discord_create_channel(args).await,
-            "create_skill" => self.execute_create_skill(args, ctx),
             "discord_send_file" => self.execute_send_file(args, ctx).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
@@ -666,10 +645,10 @@ mod tests {
             .with_session_id("subtask-s1")
             .with_depth(1);
 
-        // 実在するが許可外 → rejected: マーカー（`spawn_subtask` / `cancel_subtask` を
-        // 含まないのは、Discord がもう定義していないため。ネスト禁止の実効ゲートは
-        // 許可リスト側）。
-        for name in ["send_ui", "discord_channel_config", "create_skill"] {
+        // 実在するが許可外 → rejected: マーカー（`spawn_subtask` / `cancel_subtask` /
+        // `create_skill` を含まないのは、Discord がもう定義していないため。ネスト禁止の
+        // 実効ゲートは許可リスト側）。
+        for name in ["send_ui", "discord_channel_config", "discord_send_file"] {
             let result = sub_gw.execute(name, &json!({}), &sub_ctx).await;
             assert!(!result.success, "{name} should be blocked");
             assert!(
@@ -696,6 +675,7 @@ mod tests {
             "cancel_subtask",
             "read_heartbeat_instructions",
             "update_heartbeat_instructions",
+            "create_skill",
         ] {
             let result = sub_gw
                 .execute(moved, &json!({"message": "x"}), &sub_ctx)
@@ -759,6 +739,14 @@ mod tests {
                 assert!(
                     !names.contains(&n.to_string()),
                     "read_heartbeat_instructions は server 側の実装だけであるべき"
+                );
+            } else if *n == "create_skill" {
+                // 移設済み（#157 S6）。同じ理由で Discord には無い。実在性の検証は
+                // `crates/server/src/system_actions.rs` の
+                // `create_skill_is_exposed_in_own_definitions` が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "create_skill は server 側の実装だけであるべき"
                 );
             } else if n.starts_with("nostr_") {
                 // nostr_zap / nostr_dm は Nostr ゲートウェイ側のアクション（この
@@ -827,6 +815,8 @@ mod tests {
                 "DISCORD_INLINE_ACTIONS の {name} が definitions() に無い（死名）"
             );
         }
+        // #157 S6 で `create_skill` が server 側へ移り、この集合は**空**になった（Discord に
+        // 残るツールは全部 inline）。空でもこのループは死名検出として意味を持つ。
         for name in opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS {
             assert!(
                 names.contains(&name.to_string()),
@@ -880,7 +870,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 14);
+        assert_eq!(defs.len(), 13);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -890,7 +880,6 @@ mod tests {
         assert!(names.contains(&"discord_add_reaction"));
         assert!(names.contains(&"discord_create_webhook"));
         assert!(names.contains(&"discord_create_channel"));
-        assert!(names.contains(&"create_skill"));
         assert!(names.contains(&"discord_send_file"));
         assert!(names.contains(&"join_voice_channel"));
         assert!(names.contains(&"leave_voice_channel"));
@@ -899,9 +888,9 @@ mod tests {
         assert!(names.contains(&"ensure_subtask_webhook"));
         assert!(names.contains(&"ensure_webhook"));
 
-        // #175 S4 / #157 S1・S2・S3・S5 / #155: サブタスク生成・進捗報告・**停止**・記憶
+        // #175 S4 / #157 S1・S2・S3・S5・S6 / #155: サブタスク生成・進捗報告・**停止**・記憶
         // インデックス再構築と、汎用管理ツール（記憶インデックス設定・許可コマンド 3 種）・
-        // ハートビート指示 2 種・通知先（webhook）の管理 6 種は gateway 非依存層
+        // ハートビート指示 2 種・通知先（webhook）の管理 6 種・スキル生成は gateway 非依存層
         // （server 側 `SystemGatewayActions`）へ移設済み。
         // Discord がこれらを再び定義すると `SystemGatewayActions` の dedup（own 優先）で
         // own 側に食われ、Discord 実装の後処理が黙って落ちる（#155 の後退）。
@@ -923,6 +912,8 @@ mod tests {
             "get_default_webhook",
             "set_default_webhook",
             "list_webhooks",
+            // #157 S6 で移設したスキル生成。
+            "create_skill",
         ] {
             assert!(
                 !names.contains(&moved),
@@ -1238,72 +1229,9 @@ mod tests {
         assert!(result.error.unwrap().contains("数値ID"));
     }
 
-    // ---- create_skill ----
-
-    #[tokio::test]
-    async fn test_create_skill_basic() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "create_skill",
-                &json!({
-
-                    "name": "天気確認",
-                    "description": "curl wttr.inで天気を確認する"
-                }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(result.success, "create_skill should succeed");
-        let data = result.data.unwrap();
-        assert!(data["id"].is_string(), "should return id");
-    }
-
-    #[tokio::test]
-    async fn test_create_skill_dedup() {
-        let (actions, _db) = make_test_actions();
-        // Create skill twice
-        actions
-            .execute(
-                "create_skill",
-                &json!({
-
-                    "name": "天気確認",
-                    "description": "first version"
-                }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        let result2 = actions
-            .execute(
-                "create_skill",
-                &json!({
-
-                    "name": "天気確認",
-                    "description": "updated version"
-                }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(result2.success, "second create should succeed (dedup)");
-    }
-
-    #[tokio::test]
-    async fn test_create_skill_rejected_for_non_owner() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "create_skill",
-                &json!({
-                    "name": "test",
-                    "description": "test"
-                }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("trusted user"));
-    }
+    // `create_skill` の 3 テスト（基本 / 同名 dedup / 非 trusted 拒否）は #157 S6 で
+    // server 側（`crates/server/src/system_actions.rs`）へ移植済み（1 件も落としていない）。
+    // 実体は `crates/server/src/agent_management.rs`。
 
     // ---- discord_send_file ----
 
