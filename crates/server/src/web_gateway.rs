@@ -279,6 +279,15 @@ mod tests {
             .await;
         });
 
+        // spawn したタスクを実際に走らせてロックを取らせる（yield を挟まないと
+        // current_thread ランタイムでは一度も走らず、非競合の取得を測るだけになる）。
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "先行タスクがロックを取っていないと、この検証は非競合の取得を測るだけになる"
+        );
+
         // 別セッションは block を待たずに実行できる。
         tokio::time::timeout(
             Duration::from_millis(100),
