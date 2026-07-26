@@ -220,11 +220,36 @@ impl AgentRuntime for FakeRunner {
         self.has_llm_providers
     }
 
-    // ---- 以下は web ゲートウェイの経路が使わない（Discord 由来の記録/掃除）。
+    // ---- 以下は web ゲートウェイの経路が使わない（Discord/Nostr 由来の記録/掃除）。
     //      呼ばれたら配線ミスなので黙って no-op にせず落とす。
 
     fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {
         unimplemented!("web の fake は NO_REPLY 記録を使わない")
+    }
+
+    fn record_inbound_message(
+        &self,
+        _source: opencrab_actions::TranscriptSource,
+        _record: &opencrab_actions::InboundMessageRecord<'_>,
+    ) {
+        unimplemented!("web は WebAgentRunner::record_user_message を使う")
+    }
+
+    fn record_outbound_reply(
+        &self,
+        _source: opencrab_actions::TranscriptSource,
+        _record: &opencrab_actions::OutboundReplyRecord<'_>,
+    ) {
+        unimplemented!("web は WebAgentRunner::record_agent_reply を使う")
+    }
+
+    fn record_interaction_response(
+        &self,
+        _agent_id: &str,
+        _session_id: &str,
+        _record: &opencrab_actions::InteractionRecord<'_>,
+    ) {
+        unimplemented!("web の fake は A2UI interaction を使わない")
     }
 
     fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {

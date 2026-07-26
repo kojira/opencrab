@@ -5,7 +5,8 @@
 //!
 //! ゲートウェイ非依存なメソッド（応答生成・会話履歴・トークン予算・セッション/
 //! インタラクション管理）は `agent_runtime_impl.rs` の
-//! [`opencrab_actions::AgentRuntime`] 実装が持つ（#156 S1）。
+//! [`opencrab_actions::AgentRuntime`] 実装が持つ（#156 S1）。転記（#42）も同様に
+//! そちらへ移した（#158 S3）。
 
 use crate::AppState;
 
@@ -16,58 +17,6 @@ impl opencrab_discord::AgentRunner for AppState {
 
     fn workspace_base(&self) -> &str {
         &self.workspace_base
-    }
-
-    // ---- 転記（#42: 行の形は transcript モジュールが所有） ----
-
-    fn record_user_message(
-        &self,
-        session_id: &str,
-        sender_id: &str,
-        sender_name: &str,
-        avatar_url: Option<&str>,
-        channel_id: &str,
-        text: &str,
-        image_urls: &[String],
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_discord_user_message(
-                &conn,
-                session_id,
-                sender_id,
-                sender_name,
-                avatar_url,
-                channel_id,
-                text,
-                image_urls,
-            );
-        }
-    }
-
-    fn record_agent_reply(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        channel_id: &str,
-        text: &str,
-        context: opencrab_discord::DiscordReplyContext<'_>,
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_discord_agent_reply(
-                &conn, agent_id, session_id, channel_id, text, &context,
-            );
-        }
-    }
-
-    fn record_interaction_response(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        record: opencrab_discord::InteractionRecord<'_>,
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_interaction_response(&conn, agent_id, session_id, &record);
-        }
     }
 
     // ---- 判定（#43） ----

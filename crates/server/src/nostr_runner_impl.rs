@@ -4,35 +4,12 @@
 //! transcript ヘルパへ委譲して実装する（discord の AgentRunner impl と同型）。
 //!
 //! ゲートウェイ非依存なメソッドは `agent_runtime_impl.rs` の
-//! [`opencrab_actions::AgentRuntime`] 実装が持つ（#156 S1）。
+//! [`opencrab_actions::AgentRuntime`] 実装が持つ（#156 S1）。転記（受信イベント /
+//! エージェント返信）も同様にそちらへ移した（#158 S3）。
 
 use crate::AppState;
 
 impl opencrab_nostr::NostrAgentRunner for AppState {
-    fn record_nostr_user_message(
-        &self,
-        session_id: &str,
-        sender_pubkey: &str,
-        sender_name: &str,
-        text: &str,
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_nostr_user_message(
-                &conn,
-                session_id,
-                sender_pubkey,
-                sender_name,
-                text,
-            );
-        }
-    }
-
-    fn record_nostr_agent_reply(&self, agent_id: &str, session_id: &str, text: &str) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_nostr_agent_reply(&conn, agent_id, session_id, text);
-        }
-    }
-
     fn list_enabled_nostr_configs(&self) -> Vec<opencrab_db::queries::AgentNostrConfigRow> {
         let conn = self.db.lock().unwrap();
         opencrab_db::queries::list_enabled_agent_nostr_configs(&conn).unwrap_or_default()
