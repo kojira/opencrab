@@ -25,6 +25,9 @@ use async_trait::async_trait;
 
 use opencrab_core::EngineResult;
 
+use crate::transcript::{
+    InboundMessageRecord, InteractionRecord, OutboundReplyRecord, TranscriptSource,
+};
 use crate::RunRequest;
 
 /// ゲートウェイ非依存なエージェント実行・セッション管理の境界。
@@ -64,6 +67,27 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
 
     /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
+
+    /// ゲートウェイから受信した発言をセッションログへ記録する（best-effort）。
+    ///
+    /// 由来（`metadata_json` の `source`）は [`TranscriptSource`] で受ける。行の形は
+    /// `crates/server` の transcript モジュールが所有し、移設前とバイト等価な
+    /// `metadata_json` を書く（#158 S3）。
+    fn record_inbound_message(&self, source: TranscriptSource, record: &InboundMessageRecord<'_>);
+
+    /// エージェントの応答をセッションログへ記録する（best-effort）。
+    ///
+    /// このターンの起動要因は [`crate::AgentReplyContext`] で表す（Nostr のように
+    /// 記録しない由来は `None`）。
+    fn record_outbound_reply(&self, source: TranscriptSource, record: &OutboundReplyRecord<'_>);
+
+    /// A2UI インタラクション応答をセッションログへ記録する（best-effort）。
+    fn record_interaction_response(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        record: &InteractionRecord<'_>,
+    );
 
     /// セッションが無ければ作成し、あれば metadata 未設定時のみ補完する（best-effort）。
     ///

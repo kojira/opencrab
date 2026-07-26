@@ -57,6 +57,39 @@ impl AgentRuntime for AppState {
         }
     }
 
+    // ---- 転記（#42: 行の形は transcript モジュールが所有。#158 S3 で gateway 非依存に）
+
+    fn record_inbound_message(
+        &self,
+        source: opencrab_actions::TranscriptSource,
+        record: &opencrab_actions::InboundMessageRecord<'_>,
+    ) {
+        if let Ok(conn) = self.db.lock() {
+            crate::transcript::record_inbound_message(&conn, source, record);
+        }
+    }
+
+    fn record_outbound_reply(
+        &self,
+        source: opencrab_actions::TranscriptSource,
+        record: &opencrab_actions::OutboundReplyRecord<'_>,
+    ) {
+        if let Ok(conn) = self.db.lock() {
+            crate::transcript::record_outbound_reply(&conn, source, record);
+        }
+    }
+
+    fn record_interaction_response(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        record: &opencrab_actions::InteractionRecord<'_>,
+    ) {
+        if let Ok(conn) = self.db.lock() {
+            crate::transcript::record_interaction_response(&conn, agent_id, session_id, record);
+        }
+    }
+
     fn ensure_session(
         &self,
         session_id: &str,

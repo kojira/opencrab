@@ -14,17 +14,10 @@ use opencrab_actions::AgentRuntime;
 use opencrab_db::queries::AgentNostrConfigRow;
 
 pub trait NostrAgentRunner: AgentRuntime {
-    /// 受信 Nostr イベントをセッションログに残す（best-effort）。
-    fn record_nostr_user_message(
-        &self,
-        session_id: &str,
-        sender_pubkey: &str,
-        sender_name: &str,
-        text: &str,
-    );
-
-    /// エージェントの Nostr 返信をセッションログに残す（best-effort）。
-    fn record_nostr_agent_reply(&self, agent_id: &str, session_id: &str, text: &str);
+    // 転記（受信イベント / エージェント返信）は [`AgentRuntime`] が持つ（#158 S3）。
+    // `record_inbound_message` / `record_outbound_reply` を
+    // `TranscriptSource::Nostr` で呼ぶ。Discord と行の形が同じなので、gateway ごとに
+    // 宣言を分ける理由が無い。
 
     /// enabled な per-agent Nostr 設定一覧（起動時 restore 用）。
     fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow>;

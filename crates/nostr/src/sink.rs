@@ -156,8 +156,16 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                     return None;
                 }
                 // 最終応答テキストを転記（会話履歴の継続性）。
-                self.runner
-                    .record_nostr_agent_reply(agent_id, session_id, &reply);
+                self.runner.record_outbound_reply(
+                    opencrab_actions::TranscriptSource::Nostr,
+                    &opencrab_actions::OutboundReplyRecord {
+                        agent_id,
+                        session_id,
+                        channel_id: None,
+                        text: &reply,
+                        context: None,
+                    },
+                );
                 // モデルが既に nostr_* で送信していれば暗黙返信しない（二重送信防止）。
                 if sent.load(Ordering::SeqCst) {
                     debug!(
@@ -366,7 +374,37 @@ mod tests {
 
         fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
 
-        // 以下は Nostr の経路が使わない（Discord 由来の記録/掃除）。
+        fn record_outbound_reply(
+            &self,
+            source: opencrab_actions::TranscriptSource,
+            record: &opencrab_actions::OutboundReplyRecord<'_>,
+        ) {
+            assert_eq!(source, opencrab_actions::TranscriptSource::Nostr);
+            self.replies.lock().unwrap().push((
+                record.agent_id.to_string(),
+                record.session_id.to_string(),
+                record.text.to_string(),
+            ));
+        }
+
+        // 以下はこの sink の経路が使わない（受信転記/NO_REPLY/掃除）。
+        fn record_inbound_message(
+            &self,
+            _source: opencrab_actions::TranscriptSource,
+            _record: &opencrab_actions::InboundMessageRecord<'_>,
+        ) {
+            unimplemented!("nostr の fake は受信転記を使わない")
+        }
+
+        fn record_interaction_response(
+            &self,
+            _agent_id: &str,
+            _session_id: &str,
+            _record: &opencrab_actions::InteractionRecord<'_>,
+        ) {
+            unimplemented!("nostr の fake は A2UI interaction を使わない")
+        }
+
         fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {
             unimplemented!("nostr の fake は NO_REPLY 記録を使わない")
         }
@@ -385,16 +423,6 @@ mod tests {
     }
 
     impl NostrAgentRunner for FakeRunner {
-        fn record_nostr_user_message(&self, _s: &str, _p: &str, _n: &str, _t: &str) {}
-
-        fn record_nostr_agent_reply(&self, agent_id: &str, session_id: &str, text: &str) {
-            self.replies.lock().unwrap().push((
-                agent_id.to_string(),
-                session_id.to_string(),
-                text.to_string(),
-            ));
-        }
-
         fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
             Vec::new()
         }

@@ -39,30 +39,20 @@ pub use renderer::DiscordRenderer;
 // #170 と同じ方針で **re-export しない**（他 crate が Discord crate 経由でコアの型を
 // 引かないようにする）。
 
-/// Discord 応答の記録コンテキスト（#42: ターン記録の集約）。
-///
-/// metadata の `triggered_by` 等の差分を型で表現する。記録の実体（SessionLogRow の
-/// 組み立てと書き込みポリシー）は server 側の transcript モジュールが所有する。
-#[derive(Debug, Clone)]
-pub enum DiscordReplyContext<'a> {
-    /// 新着メッセージへの直接応答。
-    Direct { tool_calls_made: usize },
-    /// サブタスク完了を受けた再呼び出しの応答。
-    SubtaskCompleted,
-    /// A2UI インタラクション応答を受けた再呼び出しの応答。
-    InteractionResponse { interaction_id: &'a str },
-}
-
-/// A2UI インタラクションの記録内容（#42）。
-pub struct InteractionRecord<'a> {
-    pub interaction_id: &'a str,
-    pub surface_id: &'a str,
-    pub action_name: &'a str,
-    pub component_id: &'a str,
-    pub responder_id: &'a str,
-    /// session_logs の content に書く整形済みテキスト。
-    pub content: &'a str,
-}
+// 転記の語彙 — 応答の起動要因を表す旧 `DiscordReplyContext` と A2UI 応答の記録内容を
+// 表す旧 `InteractionRecord` — は **gateway 非依存層**（`opencrab_actions::transcript`）
+// へ移設済み（#158 S3）。どちらも中身は文字列と数値だけで transport 依存の型を含んで
+// いなかったのに、server の転記モジュールが discord crate の型を引くため、記録の関数が
+// `#[cfg(feature = "discord")]` 配下に落ちていた（discord を切ると Nostr と同じ形の
+// 記録まで消える）。
+//
+// 置き換え:
+// - `DiscordReplyContext` → `opencrab_actions::AgentReplyContext`
+// - `InteractionRecord` → `opencrab_actions::InteractionRecord`
+// - 記録メソッド → `opencrab_actions::AgentRuntime::record_inbound_message` /
+//   `record_outbound_reply` / `record_interaction_response`
+//
+// #170 と同じ方針で **re-export しない**。
 
 /// Trait abstracting the server-side agent processing pipeline.
 ///
@@ -88,38 +78,9 @@ pub trait AgentRunner: opencrab_actions::AgentRuntime {
     /// ワークスペースベースパスを返す（例: "/data/workspace/{agent_id}"）。
     fn workspace_base(&self) -> &str;
 
-    // ---- 転記（#42: ターン記録の集約。実装は server の transcript モジュール） ----
-
-    /// Discord ユーザー発言をセッションログに記録する（best-effort）。
-    #[allow(clippy::too_many_arguments)]
-    fn record_user_message(
-        &self,
-        session_id: &str,
-        sender_id: &str,
-        sender_name: &str,
-        avatar_url: Option<&str>,
-        channel_id: &str,
-        text: &str,
-        image_urls: &[String],
-    );
-
-    /// エージェントの Discord 応答を記録する（best-effort）。
-    fn record_agent_reply(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        channel_id: &str,
-        text: &str,
-        context: DiscordReplyContext<'_>,
-    );
-
-    /// A2UI インタラクション応答をセッションログに記録する（best-effort）。
-    fn record_interaction_response(
-        &self,
-        agent_id: &str,
-        session_id: &str,
-        record: InteractionRecord<'_>,
-    );
+    // 転記（#42: ターン記録の集約）は [`opencrab_actions::AgentRuntime`] が持つ
+    // （`record_inbound_message` / `record_outbound_reply` /
+    // `record_interaction_response` — #158 S3）。
 
     // ---- 判定（#43: trust / channel ポリシー） ----
 

@@ -589,14 +589,18 @@ async fn process_incoming_message<T: AgentRunner>(
 
         spawn_serialized_on_session(session_locks.clone(), session_id.clone(), async move {
             // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
-            state_spawn.record_user_message(
-                &session_id_spawn,
-                &sender_id_spawn,
-                &sender_name_spawn,
-                sender_avatar_spawn.as_deref(),
-                &channel_id_str_spawn,
-                &text_spawn,
-                &image_urls_spawn,
+            state_spawn.record_inbound_message(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::InboundMessageRecord {
+                    session_id: &session_id_spawn,
+                    sender_id: &sender_id_spawn,
+                    sender_name: &sender_name_spawn,
+                    avatar_url: sender_avatar_spawn.as_deref(),
+                    channel_id: Some(&channel_id_str_spawn),
+                    pubkey: None,
+                    text: &text_spawn,
+                    image_urls: &image_urls_spawn,
+                },
             );
 
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
@@ -715,13 +719,16 @@ async fn handle_agent_response<T: AgentRunner>(
                 state.record_agent_no_reply(agent_id, session_id);
                 return;
             }
-            state.record_agent_reply(
-                agent_id,
-                session_id,
-                channel_id_str,
-                &engine_result.response,
-                crate::DiscordReplyContext::Direct {
-                    tool_calls_made: engine_result.tool_calls_made,
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id,
+                    session_id,
+                    channel_id: Some(channel_id_str),
+                    text: &engine_result.response,
+                    context: Some(opencrab_actions::AgentReplyContext::Direct {
+                        tool_calls_made: engine_result.tool_calls_made,
+                    }),
                 },
             );
         }
@@ -831,12 +838,15 @@ async fn process_subtask_completed<T: AgentRunner>(
             } else if let Some(v) = &voice {
                 v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
             }
-            state.record_agent_reply(
-                &agent_id,
-                &session_id,
-                &channel_id_str,
-                &engine_result.response,
-                crate::DiscordReplyContext::SubtaskCompleted,
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id: &agent_id,
+                    session_id: &session_id,
+                    channel_id: Some(&channel_id_str),
+                    text: &engine_result.response,
+                    context: Some(opencrab_actions::AgentReplyContext::SubtaskCompleted),
+                },
             );
         }
         _ => {}
@@ -1083,7 +1093,7 @@ async fn process_interaction_response<T: AgentRunner>(
         state.record_interaction_response(
             &agent_id,
             &session_id,
-            crate::InteractionRecord {
+            &opencrab_actions::InteractionRecord {
                 interaction_id: &interaction_id,
                 surface_id: &response.surface_id,
                 action_name: &response.action_name,
@@ -1154,13 +1164,16 @@ async fn process_interaction_response<T: AgentRunner>(
             {
                 error!("Interaction response Discord send failed: {e}");
             }
-            state.record_agent_reply(
-                &agent_id,
-                &session_id,
-                &channel_id_str,
-                &engine_result.response,
-                crate::DiscordReplyContext::InteractionResponse {
-                    interaction_id: &interaction_id,
+            state.record_outbound_reply(
+                opencrab_actions::TranscriptSource::Discord,
+                &opencrab_actions::OutboundReplyRecord {
+                    agent_id: &agent_id,
+                    session_id: &session_id,
+                    channel_id: Some(&channel_id_str),
+                    text: &engine_result.response,
+                    context: Some(opencrab_actions::AgentReplyContext::InteractionResponse {
+                        interaction_id: &interaction_id,
+                    }),
                 },
             );
         }
