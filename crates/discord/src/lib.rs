@@ -126,13 +126,6 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         req: opencrab_actions::RunRequest,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 
-    /// 走行中サブタスクの lifecycle 通知口マップ（#175 S4）。
-    ///
-    /// subtask の生成は gateway 非依存層（server 側 `spawn_subtask`）が行い、通知口を
-    /// このマップへ登録する。Discord の `cancel_subtask` が中断を通知するために、
-    /// **同一の**マップを共有する必要がある（別インスタンスだと通知が届かない）。
-    fn subtask_notifiers(&self) -> opencrab_actions::subtask_notify::SubtaskNotifiers;
-
     /// 会話コンテキストのトークン予算を返す（context_window * compaction_ratio）。
     /// `agent_id` の per-agent モデルに応じた pricing を参照する。
     fn context_budget_tokens(&self, agent_id: &str) -> usize;

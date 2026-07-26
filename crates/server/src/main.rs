@@ -707,8 +707,6 @@ async fn main() -> anyhow::Result<()> {
                     gateway.http().clone(),
                     state.db.clone(),
                     state.workspace_base.clone(),
-                    subtask_registry,
-                    state.subtask_notifiers.clone(),
                     default_subtask_webhook,
                 )
                 .with_event_tx(event_tx.clone())

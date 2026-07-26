@@ -176,11 +176,9 @@ pub const DISCORD_ACTIONS: &[&str] = &[
 /// 全要素が `DiscordGatewayActions::definitions()` に実在し、かつ
 /// [`DISCORD_DISPATCHABLE_ACTIONS`] と互いに素であることをテストで保証する。
 pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
-    // (1) 制御系（default_non_dispatch_tools の制御集合と重複するが、Discord の
-    //     definitions() 全名を分類し尽くすためここにも並べる）。
-    //     `spawn_subtask` / `report_progress` は #175 S4 で server 側（
-    //     `SERVER_INLINE_ACTIONS`）へ移設済み。Discord は定義しないのでここには無い。
-    "cancel_subtask",
+    // (1) 制御系（`spawn_subtask` / `report_progress` は #175 S4、`cancel_subtask` は
+    //     #157 S2 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。Discord は
+    //     どれも定義しないのでここには無い）。
     // (2) 配送系。
     "discord_send_file",
     "discord_add_reaction",
@@ -205,9 +203,9 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     "list_subtask_webhooks",
     "get_default_webhook",
     "get_default_subtask_webhook",
-    "read_heartbeat_instructions",
-    // 許可コマンドの list/add/remove は #157 S1 で server 側（`SERVER_INLINE_ACTIONS`）へ
-    // 移設済み。Discord は定義しないのでここには無い（分類の所属は inline のまま）。
+    // 許可コマンドの list/add/remove は #157 S1、`read_heartbeat_instructions` は
+    // #157 S3 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。Discord は定義しない
+    // のでここには無い（どちらも分類の所属は inline のまま）。
 ];
 
 /// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
@@ -218,10 +216,10 @@ pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
     // `rebuild_memory_index`（#175 S4）と `update_memory_index_config`（#157 S1）は
     // server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。Discord は定義しないので
     // ここには無い（どちらも分類の所属は dispatchable のまま）。
+    // `update_heartbeat_instructions`（#157 S3）も server 側
+    // （`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。
     // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
     "create_skill",
-    // 設定/指示文の書き込み。同ターンで読み戻さない。
-    "update_heartbeat_instructions",
 ];
 
 /// Nostr の**配送系**アクション（#168）。「送る」こと自体が応答なので、非ブロック
@@ -316,6 +314,9 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     許可は次の run から効く / #202）。同ターン反映を根拠にはしない。
     "add_allowed_command",
     "remove_allowed_command",
+    // (5) 純粋な読み取り（#157 S3 で Discord から移設）。移設前は
+    //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
+    "read_heartbeat_instructions",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -332,6 +333,9 @@ pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &[
     // 設定の書き込み（#157 S1 で Discord から移設）。同ターンで読み戻さない。
     // Discord 側でも dispatchable だったので分類の所属は変えていない。
     "update_memory_index_config",
+    // 指示文の書き込み（#157 S3 で Discord から移設）。同ターンで読み戻さない。
+    // Discord 側でも dispatchable だったので分類の所属は変えていない。
+    "update_heartbeat_instructions",
 ];
 
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
@@ -1779,9 +1783,10 @@ mod tests {
             names.iter().any(|n| n == "update_instructions"),
             "update_instructions must exist in dispatcher"
         );
-        // update_heartbeat_instructions / create_skill / read_heartbeat_instructions は
-        // gateway 側（discord crate のテストで実在性を検証）。execute_skill は防御的
-        // エントリ（実装なし）であることをここで明文化する。
+        // `create_skill` は Discord gateway 側（discord crate のテストで実在性を検証）、
+        // `update_heartbeat_instructions` / `read_heartbeat_instructions` は #157 S3 で
+        // server 側の合成 gateway へ移設（server crate のテストで検証）。execute_skill は
+        // 防御的エントリ（実装なし）であることをここで明文化する。
         assert!(!names.iter().any(|n| n == "execute_skill"));
     }
 
