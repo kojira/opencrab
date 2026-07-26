@@ -44,7 +44,7 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
-        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -1037,7 +1037,7 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
-        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -1943,7 +1943,7 @@ fn state_with_consolidation(
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
-        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
@@ -2411,7 +2411,7 @@ async fn test_web_subtask_completion_resumes_parent_conversation() {
 #[tokio::test]
 async fn test_web_progress_settlement_does_not_resume() {
     use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
-    use opencrab_server::web_gateway::WebCompletionSink;
+    use opencrab_web_gateway::WebCompletionSink;
 
     let (app, _db, mock, state) = create_test_app_with_state();
     let (agent_id, _app) = create_test_agent_named(app, "WebProgress", "TestPersona").await;

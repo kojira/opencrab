@@ -201,7 +201,8 @@ fn unique_conversation(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-/// web session_id 規約: `web-{agent_id}-{conversation_id}`（`web_gateway::web_session_id` と同一）。
+/// web session_id 規約: `web-{agent_id}-{conversation_id}`
+/// （`opencrab_web_gateway::web_session_id` と同一）。
 fn web_session_id(agent_id: &str, conversation_id: &str) -> String {
     format!("web-{agent_id}-{conversation_id}")
 }

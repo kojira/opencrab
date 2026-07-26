@@ -532,7 +532,7 @@ async fn main() -> anyhow::Result<()> {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
-        web_gateway: Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
         progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
