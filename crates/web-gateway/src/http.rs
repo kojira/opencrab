@@ -50,6 +50,12 @@ pub struct SendWebMessageRequest {
 }
 
 /// 認可判定に使う既定のユーザ ID（`user_id` 省略時・空文字時）。
+///
+/// **公開契約ではない**: `pub` なのは `crates/server` 側のテスト（正規化と owner 判定の
+/// 噛み合わせ）から参照するためだけで、クレート外の利用者向けの API ではない。
+/// 値そのものは HTTP レスポンス／`session_logs` の `speaker_id` に現れるので、
+/// 変更するときは server 側の owner 判定テストも合わせて見ること。
+#[doc(hidden)]
 pub const DEFAULT_WEB_USER_ID: &str = "web-user";
 
 /// リクエストの `user_id` を認可判定に使える形へ正規化する。
@@ -63,6 +69,12 @@ pub const DEFAULT_WEB_USER_ID: &str = "web-user";
 /// の `is_owner_id` / #164）に委ねる。前後の空白はここで落としておき、認可・
 /// セッションキー・speaker_id すべてで同じ値を使う（REST の `agents_messages` と
 /// 同じ方針）。正規化とその owner 判定の噛み合わせは server 側にテストがある。
+///
+/// **公開契約ではない**: [`DEFAULT_WEB_USER_ID`] と同じく、`pub` なのは server 側の
+/// 境界テストから呼ぶためだけである（正規化はゲートウェイ、owner 判定は server に
+/// あるため、両方を import できないと噛み合わせを検査できない）。ハンドラ経路で
+/// 実際に正規化が効いていることは下の `handler_normalizes_the_user_id_*` が見る。
+#[doc(hidden)]
 pub fn normalize_user_id(user_id: Option<&str>) -> String {
     match user_id.map(str::trim) {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -129,6 +141,13 @@ pub struct StreamQuery {
 ///
 /// inbound への直接応答と subtask 完了 resume の応答の双方が push される。
 /// 未接続時に発話が失われないよう、応答は DB（session_logs）にも保存されている。
+///
+/// ## 取りこぼし時の契約（テストで固定済み）
+///
+/// broadcast のバックログ（`SSE_CHANNEL_CAPACITY`）を超えて遅れた購読者は
+/// `Lagged` を受ける。このとき**ストリームは切らずに継続する**（落ちた発話は
+/// `session_logs` から辿れるので、接続だけは維持するほうがダッシュボードの
+/// 挙動として望ましい）。送信側が全て drop された `Closed` のときだけ終了する。
 pub async fn web_stream<R: WebAgentRunner>(
     State(state): State<R>,
     Path(id): Path<String>,
@@ -159,6 +178,66 @@ pub async fn web_stream<R: WebAgentRunner>(
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use opencrab_actions::CallerIdentity;
+    use tower::ServiceExt; // oneshot
+
+    use crate::gateway::{web_session_id, WebEvent, SSE_CHANNEL_CAPACITY};
+    use crate::testing::FakeRunner;
+
+    /// [`routes`] に実リクエストを 1 本流して `(status, body)` を返す。
+    ///
+    /// body を読み切るので**終端するレスポンス専用**（SSE には `call_status` か
+    /// `oneshot` を直接使う）。
+    async fn call(runner: &FakeRunner, req: Request<Body>) -> (StatusCode, String) {
+        let app = routes::<FakeRunner>().with_state(runner.clone());
+        let res = app
+            .oneshot(req)
+            .await
+            .expect("router がリクエストを落とした");
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .expect("body を読めない");
+        (
+            status,
+            String::from_utf8(bytes.to_vec()).expect("body が UTF-8 でない"),
+        )
+    }
+
+    /// ステータス行だけを見る（body を読まないので SSE でも安全）。
+    async fn call_status(runner: &FakeRunner, req: Request<Body>) -> StatusCode {
+        let app = routes::<FakeRunner>().with_state(runner.clone());
+        app.oneshot(req)
+            .await
+            .expect("router がリクエストを落とした")
+            .status()
+    }
+
+    fn send_request(agent_id: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{agent_id}/web/send"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("リクエストを組めない")
+    }
+
+    fn get_request(uri: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("リクエストを組めない")
+    }
+
+    fn inbound(content: &str) -> serde_json::Value {
+        serde_json::json!({"conversation_id": "c1", "content": content})
+    }
+
     #[test]
     fn empty_user_id_falls_back_to_default() {
         assert_eq!(normalize_user_id(None), DEFAULT_WEB_USER_ID);
@@ -176,12 +255,259 @@ mod tests {
         );
     }
 
-    /// ルータのパスが移設前と同一であること（`create_router` から merge される）。
-    #[test]
-    fn routes_expose_the_documented_paths() {
-        use crate::testing::FakeRunner;
-        // 構築できること自体が「両ハンドラが Router<R> に載る」ことの確認。
-        // パス文字列の一致は E2E（HTTP 経由）が担保する。
-        let _router: Router<FakeRunner> = routes::<FakeRunner>();
+    /// **ルータのパスが移設前と同一であること**。
+    ///
+    /// 以前は `routes::<FakeRunner>()` を構築するだけで、パス文字列を変えても落ちない
+    /// テストだった（レビューの変異実験で「購読側のパスだけ変更」がすり抜けた）。
+    /// 実リクエストを流して「404 にならない」ことを見るので、どちらのパスを変えても落ちる。
+    #[tokio::test]
+    async fn routes_expose_the_documented_paths() {
+        let runner = FakeRunner::new("ok");
+
+        // 1. 送信: POST /api/agents/{id}/web/send
+        let status = call_status(&runner, send_request("a", inbound("hi"))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "POST /api/agents/{{id}}/web/send が期待どおりに載っていない"
+        );
+
+        // 2. 購読: GET /api/agents/{id}/web/stream?conversation={cid}
+        //    body（SSE）は終端しないので読まない。
+        let status = call_status(
+            &runner,
+            get_request("/api/agents/a/web/stream?conversation=c1"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "GET /api/agents/{{id}}/web/stream が期待どおりに載っていない"
+        );
+
+        // 3. クエリ名 `conversation` も契約（ダッシュボードが組み立てる URL）。
+        //    別名にすると extractor が 400 を返す = 404 とは区別できる。
+        let status = call_status(&runner, get_request("/api/agents/a/web/stream")).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "`conversation` は必須クエリ（名前が変わると 400 になる）"
+        );
+    }
+
+    /// 上の「404 でないこと」に意味を持たせるため、載っていないパスが 404 になることを見る。
+    #[tokio::test]
+    async fn unrouted_paths_are_not_captured() {
+        let runner = FakeRunner::new("ok");
+        for uri in [
+            "/api/agents/a/web/sends",
+            "/api/agents/a/web/streams",
+            "/api/agents/a/web",
+        ] {
+            assert_eq!(
+                call_status(&runner, get_request(uri)).await,
+                StatusCode::NOT_FOUND,
+                "{uri} は routes() の担当外"
+            );
+        }
+    }
+
+    /// レスポンスの `caller_type` は [`WebAgentRunner::resolve_caller`] の返り値由来であること。
+    ///
+    /// 呼び出し元判定を捨てて固定値（例: 常に owner）を返す変異はここで落ちる。
+    #[tokio::test]
+    async fn send_reports_the_caller_type_resolved_by_the_runner() {
+        let cases = [
+            (CallerIdentity::Owner, "owner"),
+            (CallerIdentity::TrustedUser, "trusted_user"),
+            (CallerIdentity::Agent, "agent"),
+            (
+                CallerIdentity::CoAgent {
+                    agent_id: "peer".to_string(),
+                },
+                "co_agent",
+            ),
+        ];
+        for (caller, expected) in cases {
+            let runner = FakeRunner::new("やあ").with_caller(caller.clone());
+            let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
+            assert_eq!(status, StatusCode::OK);
+            let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+            assert_eq!(
+                v["caller_type"], expected,
+                "caller_type が resolve_caller({caller:?}) の結果に由来していない"
+            );
+            assert_eq!(v["session_id"], web_session_id("a", "c1"));
+            assert_eq!(v["response"], "やあ");
+        }
+    }
+
+    /// **ユーザ ID の正規化がハンドラ経路で効いていること**。
+    ///
+    /// 正規化関数の単体テストだけでは、ハンドラが正規化を通さなくなっても検出できない。
+    /// 認可判定（`resolve_caller`）と DB 記録（`record_user_message`）の両方へ
+    /// 同じ正規化済みの値が渡ることを観測する。
+    #[tokio::test]
+    async fn handler_normalizes_the_user_id_before_authorization_and_recording() {
+        let cases = [
+            (serde_json::json!("  alice  "), "alice"),
+            (serde_json::json!("alice"), "alice"),
+            (serde_json::json!(""), DEFAULT_WEB_USER_ID),
+            (serde_json::json!("   "), DEFAULT_WEB_USER_ID),
+            (serde_json::Value::Null, DEFAULT_WEB_USER_ID),
+        ];
+        for (sent, expected) in cases {
+            let runner = FakeRunner::new("ok");
+            let (status, _) = call(
+                &runner,
+                send_request(
+                    "a",
+                    serde_json::json!({
+                        "conversation_id": "c1",
+                        "content": "hi",
+                        "user_id": sent,
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let lookups = runner.caller_lookups();
+            assert_eq!(lookups.len(), 1, "認可判定が 1 回呼ばれる");
+            assert_eq!(
+                lookups[0].user_id, expected,
+                "認可判定へ正規化されていない user_id ({sent}) が渡っている"
+            );
+            assert_eq!(lookups[0].agent_id, "a");
+
+            let messages = runner.user_messages();
+            assert_eq!(messages.len(), 1, "ユーザ発話が 1 件記録される");
+            assert_eq!(
+                messages[0].user_id, expected,
+                "session_logs へ正規化されていない user_id ({sent}) が渡っている"
+            );
+            assert_eq!(messages[0].agent_id, "a");
+            assert_eq!(messages[0].session_id, web_session_id("a", "c1"));
+            assert_eq!(messages[0].content, "hi");
+        }
+    }
+
+    /// LLM プロバイダ未設定のときのレスポンス形（docs/api.md の契約）。
+    #[tokio::test]
+    async fn send_without_llm_provider_reports_the_error_without_running() {
+        let runner = FakeRunner::new("ok")
+            .with_caller(CallerIdentity::TrustedUser)
+            .without_llm_provider();
+        let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert_eq!(v["error"], "No LLM providers available");
+        assert!(v["response"].is_null());
+        assert_eq!(v["caller_type"], "trusted_user");
+        assert_eq!(v["session_id"], web_session_id("a", "c1"));
+        assert!(runner.runs().is_empty(), "実行してはいけない");
+        // ユーザ発話は記録済み（プロバイダ設定後に履歴として残る）。
+        assert_eq!(runner.user_messages().len(), 1);
+    }
+
+    /// セッション用意・発話記録の失敗は実行せずにエラー本文を返す（現状の契約）。
+    ///
+    /// この 2 分岐だけ `session_id` / `caller_type` を返さない点も含めて固定する
+    /// （ダッシュボードはエラー時にこれらを読めない前提で書く必要がある）。
+    #[tokio::test]
+    async fn send_reports_persistence_failures_without_running() {
+        let cases = [
+            (
+                FakeRunner::new("ok").failing_ensure_session("disk full"),
+                "Failed to create session: disk full",
+            ),
+            (
+                FakeRunner::new("ok").failing_record_user_message("locked"),
+                "Failed to log message: locked",
+            ),
+        ];
+        for (runner, expected) in cases {
+            let (status, body) = call(&runner, send_request("a", inbound("hi"))).await;
+            assert_eq!(status, StatusCode::OK);
+            let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+            assert_eq!(v["error"], expected);
+            assert!(
+                v["session_id"].is_null() && v["caller_type"].is_null(),
+                "この分岐は session_id / caller_type を返さない: {body}"
+            );
+            assert!(runner.runs().is_empty(), "実行してはいけない");
+        }
+    }
+
+    /// **取りこぼし（`Lagged`）ではストリームを切らない**。
+    ///
+    /// バックログ超過で落ちた発話は `session_logs` から辿れる。接続を切ると
+    /// ダッシュボードが再購読するまで live push が止まるので、継続が契約。
+    #[tokio::test]
+    async fn sse_stream_continues_after_the_subscriber_lags() {
+        let runner = FakeRunner::new("ok");
+        let sid = web_session_id("a", "lag");
+
+        let app = routes::<FakeRunner>().with_state(runner.clone());
+        let res = app
+            .oneshot(get_request("/api/agents/a/web/stream?conversation=lag"))
+            .await
+            .expect("router がリクエストを落とした");
+        assert_eq!(res.status(), StatusCode::OK);
+        let mut body = res.into_body();
+
+        // 購読者は 1 件も読んでいない状態で capacity 超過まで publish する
+        // （= 次の recv が `Lagged` になる）。
+        for i in 0..(SSE_CHANNEL_CAPACITY + 50) {
+            runner.web_gateway().publish(
+                &sid,
+                &WebEvent {
+                    kind: "direct".to_string(),
+                    agent_id: "a".to_string(),
+                    content: format!("m{i}"),
+                },
+            );
+        }
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("取りこぼし後に何も届かない（ストリームが止まった）")
+            .expect("取りこぼしでストリームが終了した（`Lagged` で切ってはいけない）")
+            .expect("body フレームの読み出しに失敗");
+        let data = frame.into_data().expect("data フレームでない");
+        let text = String::from_utf8(data.to_vec()).expect("UTF-8 でない");
+        assert!(
+            text.starts_with("data: "),
+            "SSE の data フレームでない: {text:?}"
+        );
+        // 溢れた分は落ちるが、生き残った発話は届く。
+        assert!(
+            text.contains("\"kind\":\"direct\""),
+            "中身が壊れている: {text:?}"
+        );
+    }
+
+    /// 送信側が全て drop された（`Closed`）ときはストリームを終了する。
+    #[tokio::test]
+    async fn sse_stream_ends_when_the_channel_closes() {
+        let runner = FakeRunner::new("ok");
+        let app = routes::<FakeRunner>().with_state(runner.clone());
+        let res = app
+            .oneshot(get_request("/api/agents/a/web/stream?conversation=closing"))
+            .await
+            .expect("router がリクエストを落とした");
+        assert_eq!(res.status(), StatusCode::OK);
+        let mut body = res.into_body();
+
+        // 最後の所有者を落とす → WebGateway ごと broadcast::Sender が drop される。
+        drop(runner);
+
+        let next = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("Closed でもストリームが終わらない");
+        assert!(
+            next.is_none(),
+            "送信側が全滅したらストリームは終了する（keep-alive で居座らない）"
+        );
     }
 }

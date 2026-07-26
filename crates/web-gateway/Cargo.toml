@@ -24,3 +24,8 @@ opencrab-actions.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# ルータへ実リクエストを流すため（`ServiceExt::oneshot`）。パスの一致・クエリ名・
+# レスポンス body を HTTP 経由で検査する（#195 レビュー対応）。
+tower = { workspace = true }
+# SSE の body をフレーム単位で読む（取りこぼし時に継続することの確認）。
+http-body-util = "0.1"
