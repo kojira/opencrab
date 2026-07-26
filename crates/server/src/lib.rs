@@ -22,6 +22,7 @@ pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
 pub mod web_runner_impl;
+pub mod webhook_targets;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
