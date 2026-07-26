@@ -341,6 +341,68 @@ impl SystemGatewayActions {
                     "required": ["message"]
                 }),
             },
+            // ---- #157 S1: gateway 非依存の汎用管理ツール（Discord から移設） ----
+            //
+            // 以下 4 つは実装が serenity を一切参照せず DB と実行許可設定だけに依存して
+            // いたのに、Discord gateway にしか無かったため web / Nostr / REST / heartbeat
+            // 経由のターンでは使えなかった（#157 / #155）。定義・引数スキーマ・
+            // レスポンス JSON はすべて Discord 実装から**1 文字も変えずに**移している。
+            // 実体は `crate::agent_management`。
+            GatewayActionDef {
+                name: "update_memory_index_config".to_string(),
+                description: "メモリインデックスの設定（batch_size、threshold）を更新する。少なくとも1つのパラメータを指定する必要がある。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "batch_size": {
+                            "type": "integer",
+                            "description": "一度に処理するメモリのバッチサイズ"
+                        },
+                        "threshold": {
+                            "type": "integer",
+                            "description": "インデックス再構築の閾値"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "add_allowed_command".to_string(),
+                description: "シェルツールの許可コマンドリストに新しいコマンドを追加する。オーナーのみ実行可能。コマンド名（例: curl, wget, git）を指定する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "追加するコマンド名（英数字・ハイフン・アンダースコアのみ。例: curl, wget, git）"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            GatewayActionDef {
+                name: "list_allowed_commands".to_string(),
+                description: "現在DBに保存されている許可コマンドの一覧を取得する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "remove_allowed_command".to_string(),
+                description: "シェルツールの許可コマンドリストからコマンドを削除する。オーナーのみ実行可能。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "削除するコマンド名"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
         ]
     }
 
@@ -1176,6 +1238,22 @@ impl GatewayActions for SystemGatewayActions {
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
+            // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
+            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。実行許可設定は
+            // `AppState.tools_config` を直接更新する = Discord gateway が受け取っていた
+            // ものと同一 Arc。
+            "update_memory_index_config" => {
+                crate::agent_management::update_memory_index_config(&self.state, args, ctx)
+            }
+            "add_allowed_command" => {
+                crate::agent_management::add_allowed_command(&self.state, args, ctx)
+            }
+            "list_allowed_commands" => {
+                crate::agent_management::list_allowed_commands(&self.state, ctx)
+            }
+            "remove_allowed_command" => {
+                crate::agent_management::remove_allowed_command(&self.state, args, ctx)
+            }
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
@@ -1406,6 +1484,12 @@ mod tests {
             "configure_self",
             "configure_mcp_server",
             "cancel_subtask",
+            // #157 S1 で Discord から移設。分類の所属（inline）は移設前と同じ。
+            // 純粋な読み取り（一覧の即答）+ 同ターン結果依存（許可した直後に
+            // execute_shell を使う）。Discord 側にあった同趣旨の固定の引き継ぎ。
+            "list_allowed_commands",
+            "add_allowed_command",
+            "remove_allowed_command",
         ] {
             assert!(
                 non_dispatch.contains(name),
@@ -1415,6 +1499,12 @@ mod tests {
         assert!(
             !non_dispatch.contains("nostr_generate_key"),
             "nostr_generate_key は長時間の vanity 探索なので dispatch 対象に残す"
+        );
+        // #157 S1 で Discord から移設。dispatchable の所属も移設前と同じ
+        // （設定の書き込みで同ターンに読み戻さない）。
+        assert!(
+            !non_dispatch.contains("update_memory_index_config"),
+            "update_memory_index_config は移設前と同じく dispatch 対象に残す"
         );
     }
 

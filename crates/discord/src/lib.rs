@@ -103,9 +103,6 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
     /// への結合を構築時の1点に限定する）。
     fn db(&self) -> &opencrab_db::Db;
 
-    /// Access the shared tools configuration.
-    fn tools_config(&self) -> &Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>;
-
     /// Whether any LLM providers are configured.
     fn has_llm_providers(&self) -> bool;
 

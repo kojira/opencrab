@@ -101,7 +101,6 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             crate::DiscordGatewayActions::new(
                 gateway.http().clone(),
                 self.state.db().clone(),
-                self.state.tools_config().clone(),
                 self.state.workspace_base().to_string(),
                 subtask_registry,
                 self.state.subtask_notifiers(),

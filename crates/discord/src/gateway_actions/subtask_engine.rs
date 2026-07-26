@@ -601,9 +601,6 @@ mod tests {
         DiscordGatewayActions::new(
             Arc::new(serenity::http::Http::new("dummy-token")),
             db,
-            Arc::new(std::sync::RwLock::new(
-                opencrab_actions::tools::ToolsConfig::default(),
-            )),
             "/tmp".to_string(),
             Arc::new(dashmap::DashMap::new()),
             Arc::new(dashmap::DashMap::new()),

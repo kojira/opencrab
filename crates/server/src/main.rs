@@ -706,7 +706,6 @@ async fn main() -> anyhow::Result<()> {
                 let gateway_actions_base = opencrab_discord::DiscordGatewayActions::new(
                     gateway.http().clone(),
                     state.db.clone(),
-                    state.tools_config.clone(),
                     state.workspace_base.clone(),
                     subtask_registry,
                     state.subtask_notifiers.clone(),

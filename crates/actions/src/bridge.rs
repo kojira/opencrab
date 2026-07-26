@@ -201,16 +201,13 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     // (5) 純粋な読み取り。
     "discord_list_channels",
     "discord_list_guilds",
-    "list_allowed_commands",
     "list_webhooks",
     "list_subtask_webhooks",
     "get_default_webhook",
     "get_default_subtask_webhook",
     "read_heartbeat_instructions",
-    // (3) 許可コマンドの追加/削除は「許可した直後に execute_shell を使う」用法が通常で、
-    //     結果（正規化された名前・成否）も即答すべきもの。
-    "add_allowed_command",
-    "remove_allowed_command",
+    // 許可コマンドの list/add/remove は #157 S1 で server 側（`SERVER_INLINE_ACTIONS`）へ
+    // 移設済み。Discord は定義しないのでここには無い（分類の所属は inline のまま）。
 ];
 
 /// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
@@ -218,12 +215,12 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
 /// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く。ここに無く
 /// [`DISCORD_INLINE_ACTIONS`] にも無い名前が `definitions()` に現れたらテストが落ちる。
 pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
-    // `rebuild_memory_index` は #175 S4 で server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ
-    // 移設済み。Discord は定義しないのでここには無い。
+    // `rebuild_memory_index`（#175 S4）と `update_memory_index_config`（#157 S1）は
+    // server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。Discord は定義しないので
+    // ここには無い（どちらも分類の所属は dispatchable のまま）。
     // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
     "create_skill",
     // 設定/指示文の書き込み。同ターンで読み戻さない。
-    "update_memory_index_config",
     "update_heartbeat_instructions",
 ];
 
@@ -306,6 +303,13 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     （戻り値の subtask_id を同ターンで cancel / 追跡に使う）なので、さらに
     //     dispatch で包むと二重の背景化になり意味を成さない。
     "spawn_subtask",
+    // (5) 純粋な読み取り（#157 S1 で Discord から移設）。「許可コマンドを教えて」が
+    //     2 ターン 2 メッセージに割れないよう inline。
+    "list_allowed_commands",
+    // (3) 同ターン結果依存（#157 S1 で Discord から移設）: 「許可した直後に
+    //     execute_shell を使う」用法が通常で、結果（成否・既存かどうか）も即答すべきもの。
+    "add_allowed_command",
+    "remove_allowed_command",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -319,6 +323,9 @@ pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &[
     // 全メモリの再インデックス（長時間・同ターンで結果を使わない / #175 S4 で Discord
     // から移設）。dispatch の主目的そのもの。
     "rebuild_memory_index",
+    // 設定の書き込み（#157 S1 で Discord から移設）。同ターンで読み戻さない。
+    // Discord 側でも dispatchable だったので分類の所属は変えていない。
+    "update_memory_index_config",
 ];
 
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
