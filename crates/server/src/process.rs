@@ -265,9 +265,13 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          \n\
          As REQUESTER — to get a second opinion on your work:\n\
          - Call `request_peer_review` with the raw diff/output/trace as `content` (never a \
-         summary), the current `channel_id` from [Discord context], optional `instructions`, \
-         and optionally `reviewer` to mention a specific registered reviewer.\n\
-         - A Discord `{reply_marker}` reply from a registered reviewer about your task is \
+         summary), optional `instructions`, and optionally `reviewer` to name a specific \
+         registered reviewer.\n\
+         - You do NOT need to say where the request goes: the destination is taken from the \
+         current conversation automatically. Never invent, guess or reconstruct a destination \
+         identifier — pass one only when you deliberately need a different destination than \
+         this conversation.\n\
+         - A `{reply_marker}` reply from a registered reviewer about your task is \
          automatically recorded into your task ledger — do not record those again. If review \
          feedback reaches you any other way, record it with `record_task_progress` yourself. \
          Address the gaps before calling `close_task`. \
@@ -288,23 +292,23 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
 /// trusted_discord_users の permission='co_agent' 行（選定ロジックは
 /// `queries::list_co_agent_reviewers` に一元化 — reviewer 解決側と共有）。
 /// ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
+///
+/// **表示名だけを出す**（#158 S2）。共有プロンプトは transport 非依存でなければならず、
+/// メンション記法（`<@id>`）の組み立ては transport 側の責務。reviewer の解決は
+/// 「表示名優先・登録済みのみ」（`resolve_reviewer`）なので表示名で引ける。
+/// 表示名が空の行は名前で指名できないため載せない（モデルに識別子を推測させない）。
 fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String {
     let reviewers: Vec<String> = opencrab_db::queries::list_co_agent_reviewers(conn, agent_id)
         .unwrap_or_default()
         .into_iter()
-        .map(|u| {
-            if u.display_name.is_empty() {
-                format!("- <@{}>", u.discord_user_id)
-            } else {
-                format!("- <@{}> {}", u.discord_user_id, u.display_name)
-            }
-        })
+        .filter(|u| !u.display_name.is_empty())
+        .map(|u| format!("- {}", u.display_name))
         .collect();
     if reviewers.is_empty() {
         String::new()
     } else {
         format!(
-            "\nYour registered peer reviewers (pass their display name or user id as `reviewer`):\n{}\n",
+            "\nYour registered peer reviewers (pass their display name as `reviewer`):\n{}\n",
             reviewers.join("\n")
         )
     }
@@ -1921,11 +1925,86 @@ mod peer_reviewers_section_tests {
         .unwrap();
 
         let section = peer_reviewers_section(&conn, "a1");
-        assert!(section.contains("- <@42> Crab B"));
-        assert!(section.contains("- <@43>"));
+        // 表示名のみ。メンション記法（transport 固有）は共有プロンプトに出さない（#158 S2）。
+        assert!(section.contains("- Crab B"));
+        assert!(!section.contains("<@"));
+        assert!(!section.contains("42"));
+        // 表示名が空の行（id=43）は指名できないので載せない
+        assert!(!section.contains("43"));
         assert!(!section.contains("Human"));
         // 他エージェントのロスターには出ない
         assert_eq!(peer_reviewers_section(&conn, "a2"), "");
+    }
+
+    /// 表示名のある co_agent が居なければロスターは空（id だけの行は載らない）。
+    #[test]
+    fn roster_is_empty_when_all_display_names_are_blank() {
+        let conn = opencrab_db::init_memory().unwrap();
+        opencrab_db::queries::add_trusted_user(
+            &conn,
+            "r1",
+            "a1",
+            "42",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "",
+        )
+        .unwrap();
+        assert_eq!(peer_reviewers_section(&conn, "a1"), "");
+    }
+}
+
+/// 共有システムプロンプトに transport 前提が混ざらないことの検査（#158 S2 の完了条件）。
+///
+/// transport 固有の 1 行（`[Discord context: ...]` 等）は各ゲートウェイが
+/// `build_agent_context` の返り値に**後付け**する。共有部分に transport 語が入ると、
+/// Discord 以外（Nostr / web / REST / heartbeat）のターンでモデルが存在しない文脈を
+/// 参照したり、幻覚した宛先を書いたりする。
+#[cfg(test)]
+mod shared_prompt_is_transport_neutral_tests {
+    use super::build_agent_context;
+
+    /// 共有プロンプトから transport 語が消えていること（grep 相当をテスト化）。
+    #[test]
+    fn shared_prompt_has_no_transport_specific_terms() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // ロスターも共有プロンプトの一部なので、レビュアーを登録した状態で検査する。
+        opencrab_db::queries::add_trusted_user(
+            &conn,
+            "r1",
+            "a1",
+            "42",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "Crab B",
+        )
+        .unwrap();
+
+        let (prompt, _name) = build_agent_context(&conn, "a1");
+
+        // ロスターが載っている（= 空プロンプトを検査して通っているのではない）
+        assert!(prompt.contains("- Crab B"), "roster missing: {prompt}");
+
+        for needle in ["Discord", "discord", "[Discord context]", "<@"] {
+            assert!(
+                !prompt.contains(needle),
+                "shared system prompt must not contain {needle:?}:\n{prompt}"
+            );
+        }
+    }
+
+    /// 宛先の取得方法を指示していないこと（宛先は実行側が文脈から既定値にする）。
+    #[test]
+    fn shared_prompt_does_not_teach_destination_lookup() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _name) = build_agent_context(&conn, "a1");
+        assert!(
+            !prompt.contains("channel_id"),
+            "shared system prompt must not name a transport destination argument:\n{prompt}"
+        );
+        assert!(prompt.contains("taken from the current conversation"));
     }
 }
 
