@@ -10,7 +10,13 @@
 //! InteractionResponse の推論をループ内で await すると、その間**全チャンネル・
 //! 全エージェント**の受信処理が停止する（サブタスクが report_progress するたびに
 //! メインが無応答になる）。現在は全イベントを spawn + セッション単位ロック
-//! （`spawn_serialized_on_session`）で処理し、直列化の範囲を同一セッションに限定する。
+//! （`SessionRuntime::spawn_serialized`）で処理し、直列化の範囲を同一セッションに限定する。
+//!
+//! v3.2 (#156 S2): セッションロック表は Discord 独自実装をやめ、gateway 非依存層の
+//! [`SessionRuntime`](opencrab_actions::SessionRuntime) に統合した（web / Nostr と同一実装）。
+//! Discord 固有なのは「結果を待たずに spawn する」形だけで、それも共通側の薄い入口
+//! [`SessionRuntime::spawn_serialized`](opencrab_actions::SessionRuntime::spawn_serialized)
+//! に寄せてある。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,20 +25,15 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+use opencrab_actions::SessionRuntime;
 use opencrab_core::a2ui::UiRenderer;
 use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
 
+use crate::AgentRunner;
+
 /// 同一(channel, sender)のメッセージをまとめるまでの待機時間。
 const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
-
-/// セッションID → 推論直列化ロック。
-///
-/// 同一セッションの推論を直列化し、割り込みメッセージによる履歴不整合（同じ内容の
-/// 二重回答）を防ぐために使う。
-type SessionLocks = Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
-
-use crate::AgentRunner;
 
 /// メッセージループへの内部イベント。
 pub enum LoopEvent {
@@ -198,11 +199,13 @@ pub async fn run_discord_loop<T: AgentRunner>(
     let mut debounce_buffers: HashMap<(String, String), (Vec<IncomingMessage>, Instant)> =
         HashMap::new();
 
-    // セッション単位の推論直列化ロック。
+    // セッション単位の推論直列化ランタイム（gateway 非依存層の共通実装 / #156 S2）。
     // 同一セッションへの推論が並行実行されると、1つ目の応答がまだDBに記録されていない
     // 状態で2つ目の会話履歴が構築され、同じ内容を二重回答してしまう。これを防ぐため、
     // 会話履歴の構築・推論・応答ログをセッション単位で直列化する。
-    let session_locks: SessionLocks = Arc::new(dashmap::DashMap::new());
+    // dispatch registry は既存どおり呼び出し側から受け取る（DiscordGatewayActions と
+    // 同じ Arc を共有する必要があるため、ここでは直列化ロックだけを使う）。
+    let session_runtime = Arc::new(SessionRuntime::new());
 
     loop {
         // 次にフラッシュすべきバッファのデッドラインを計算
@@ -245,7 +248,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let event_tx_c = event_tx.clone();
                         let registry_c = subtask_registry.clone();
                         let sess = session_id.clone();
-                        spawn_serialized_on_session(session_locks.clone(), sess, async move {
+                        session_runtime.spawn_serialized(sess, async move {
                             process_subtask_completed(
                                 session_id,
                                 agent_id,
@@ -265,6 +268,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             )
                             .await;
                         });
+                        // JoinHandle は破棄する（応答は待たない = 受信ループを止めない）。
                     }
                     Some(LoopEvent::InteractionResponse {
                         interaction_id,
@@ -281,7 +285,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
                         let sess = session_id.clone();
-                        spawn_serialized_on_session(session_locks.clone(), sess, async move {
+                        session_runtime.spawn_serialized(sess, async move {
                             process_interaction_response(
                                 interaction_id,
                                 session_id,
@@ -338,7 +342,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         agent_ids.clone(),
                         gateway_actions.clone(),
                         owner_discord_id.clone(),
-                        session_locks.clone(),
+                        session_runtime.clone(),
                         skip_agents_with_dedicated_gateway,
                         voice.clone(),
                         event_tx.clone(),
@@ -364,7 +368,7 @@ async fn process_incoming_message<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    session_locks: SessionLocks,
+    session_runtime: Arc<SessionRuntime>,
     skip_agents_with_dedicated_gateway: bool,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
@@ -587,7 +591,7 @@ async fn process_incoming_message<T: AgentRunner>(
         let event_tx_spawn = event_tx.clone();
         let registry_spawn = subtask_registry.clone();
 
-        spawn_serialized_on_session(session_locks.clone(), session_id.clone(), async move {
+        session_runtime.spawn_serialized(session_id.clone(), async move {
             // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
             state_spawn.record_inbound_message(
                 opencrab_actions::TranscriptSource::Discord,
@@ -674,34 +678,6 @@ async fn process_incoming_message<T: AgentRunner>(
             }
         });
     }
-}
-
-/// セッション単位ロックの下で `fut` を実行するタスクを spawn する。
-///
-/// イベントループを推論でブロックしないための共通経路（受信メッセージ = P1、
-/// サブタスク完了/進捗・A2UI 応答 = 旧 P2 直列実行の置き換え）:
-/// - ループ自体は即座に次のイベントへ進む（全チャンネル・全エージェントが停止しない）
-/// - 同一セッションの履歴構築→推論→応答ログはロックで直列化される（割り込み二重回答の防止）
-/// - 終了時に待機者がいなければ map からロックエントリを回収する（#39:
-///   session_locks はプロセス生存中に単調増加していた）。remove_if は DashMap の
-///   shard 書き込みロック下で述語を評価し、entry() も同じ shard ロックを取るため、
-///   「strong_count == 1（= map 以外に保持者なし）」の判定と削除の間に新しい clone が
-///   割り込むことはない。待機者がいれば残す。
-fn spawn_serialized_on_session<F>(session_locks: SessionLocks, session_id: String, fut: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    let sess_lock = session_locks
-        .entry(session_id.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    tokio::spawn(async move {
-        let guard = sess_lock.lock().await;
-        fut.await;
-        drop(guard);
-        drop(sess_lock);
-        session_locks.remove_if(&session_id, |_, lock| Arc::strong_count(lock) == 1);
-    });
 }
 
 /// エージェント応答結果を処理してDiscordに送信する。
@@ -1396,11 +1372,7 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        discord_context_line, parse_discord_session, parse_seen_message_id,
-        spawn_serialized_on_session, SessionLocks,
-    };
-    use std::sync::Arc;
+    use super::{discord_context_line, parse_discord_session, parse_seen_message_id};
 
     #[test]
     fn parse_discord_session_guild_channel() {
@@ -1473,77 +1445,5 @@ mod tests {
     fn parse_seen_message_id_rejects_non_numeric() {
         assert_eq!(parse_seen_message_id("not-a-number"), None);
         assert_eq!(parse_seen_message_id("123abc"), None);
-    }
-
-    #[tokio::test]
-    async fn test_spawn_serialized_on_session_does_not_block_caller() {
-        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        // 完了までブロックする future を渡しても、spawn 呼び出し自体は即座に返る
-        spawn_serialized_on_session(locks.clone(), "s1".to_string(), async move {
-            let _ = rx.await;
-        });
-        // caller 側はブロックされていない（この行に到達できることが検証）
-        let _ = tx.send(());
-        // 完了後にロックエントリが回収される
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while locks.contains_key("s1") {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("lock entry must be reclaimed after completion");
-    }
-
-    #[tokio::test]
-    async fn test_spawn_serialized_same_session_serializes() {
-        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
-        let concurrent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let max_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        for _ in 0..5 {
-            let c = concurrent.clone();
-            let m = max_seen.clone();
-            let d = done.clone();
-            spawn_serialized_on_session(locks.clone(), "same".to_string(), async move {
-                let now = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                m.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                c.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                d.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            });
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while done.load(std::sync::atomic::Ordering::SeqCst) < 5 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("all serialized tasks must finish");
-        assert_eq!(
-            max_seen.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "same-session futures must never run concurrently"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_spawn_serialized_different_sessions_run_concurrently() {
-        let locks: SessionLocks = Arc::new(dashmap::DashMap::new());
-        // s-block は保持したまま、s-free が完了できることを確認する
-        // （旧実装 = イベントループ直列 await では s-block が全体を塞いでいた）。
-        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
-        spawn_serialized_on_session(locks.clone(), "s-block".to_string(), async move {
-            let _ = hold_rx.await;
-        });
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-        spawn_serialized_on_session(locks.clone(), "s-free".to_string(), async move {
-            let _ = done_tx.send(());
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
-            .await
-            .expect("other sessions must not be blocked by a long-running session")
-            .unwrap();
-        let _ = hold_tx.send(());
     }
 }
