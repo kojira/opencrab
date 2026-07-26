@@ -33,14 +33,19 @@ opencrab/
 ├── crates/
 │   ├── core/       エージェントの「脳」。Soul, Identity, Memory, Skill, Workspace, SkillEngine
 │   ├── llm/        LLM抽象化層。マルチプロバイダー、ルーティング、メトリクス、コスト計算
-│   ├── gateway/    I/Oアダプタ層。REST, CLI, Discord, WebSocket
-│   ├── actions/    エージェントが実行できる行動の定義と実装
+│   ├── llm-types/  LLM の型定義のみ（葉クレート。兄弟クレートが循環せず依存できるように分離）
+│   ├── gateway/    Gateway / GatewayActions トレイト ＋ アダプタ（REST, CLI, WebSocket(stub), Discord）
+│   ├── actions/    アクション定義・実行、バックグラウンド実行のランタイム、分類ポリシー表
 │   ├── db/         SQLiteスキーマとクエリ関数
+│   ├── mcp/        外部ツール連携（MCP。子プロセスとして起動し張り替え・死活検出を持つ）
 │   ├── discord/    Discord統合。メッセージループ、管理アクション、per-agent Bot管理
-│   ├── server/     Axum HTTPサーバー。REST API + ゲートウェイ統合
+│   ├── nostr/      Nostr統合。セッション単位のキューと同時実行上限
+│   ├── voice/      STT/TTS プロバイダ層（voice session の管理は discord 側）
+│   ├── server/     Axum HTTPサーバー。REST API + 応答生成パイプライン + web ゲートウェイ
 │   └── cli/        対話型REPLクライアント
-├── dashboard/      Dioxus製Web UI（エージェント管理、セッション監視、分析）
+├── web/            React フロントエンド（Vite + Tailwind CSS + i18n EN/JA）
 ├── config/         設定ファイル (TOML)
+├── docs/           設計ドキュメント
 └── skills/         スキル定義ファイル (Markdown)
 ```
 
@@ -49,15 +54,18 @@ opencrab/
 ```
 server ──→ core ──→ db
   │          ↑
-  ├──→ llm ──┘ (トレイト経由、直接依存なし)
+  ├──→ llm ──┘ (トレイト経由、直接依存なし)  llm ──→ llm-types
   ├──→ gateway
-  ├──→ actions ──→ core, db
-  ├──→ discord (optional) ──→ gateway, db, core
+  ├──→ actions ──→ core, db, gateway
+  ├──→ discord (optional) ──→ gateway, db, core, actions
+  ├──→ nostr ──→ db, core, actions
+  ├──→ mcp
+  ├──→ voice
   └──→ db
 
 cli ──→ core, db
 
-dashboard ──→ (HTTP経由でserverと通信)
+web（フロントエンド） ──→ (HTTP経由でserverと通信)
 ```
 
 `core`は`llm`や`actions`に直接依存しない。代わりに`LlmClient`トレイトと`ActionExecutor`トレイトを定義し、サーバー層で実装を結合する（依存性逆転）。
@@ -75,6 +83,20 @@ dashboard ──→ (HTTP経由でserverと通信)
                                    ↓
                               最終応答 → Gateway → 外部出力
 ```
+
+### 2.4 クレート分離の方針（重要）
+
+**目指す姿は「コアは生きたまま、外側（transport・拡張）を落とさずに差し替えられる」構成**であり、最終的な目的は**エージェントが自分自身で opencrab を開発できるようにすること**。単一バイナリのままだと「自分が動いているコードを差し替える」＝「自分を落とす」ことになるため、この分離が前提になる。
+
+手段は**別プロセス + プロトコル**（外部ツール連携で既に実証済みの形）。動的ライブラリによるプラグイン機構は Rust に安定 ABI が無いため採らない。
+
+したがって以下を守る:
+
+- **汎用の機能を transport のクレートに置かない**（置くと transport が実質ランタイム化する。実際に起きている）
+- **状態はコアが持つ**（プラグインは再起動されうるので、外側に状態を置くと差し替え時に分裂する）
+- **上位が個々のゲートウェイを名指しで知らない**形へ寄せる（ゲートウェイを足しても上位に手が入らないこと）
+
+分離の順序・判断基準・非目標は **[design-plugin-architecture.md](design-plugin-architecture.md)** を参照。新機能の実装やレビューの際は、まずこの基準に照らすこと。
 
 ---
 
@@ -292,12 +314,14 @@ SkillEngine
 
 ### 7.1 Gatewayトレイト
 
-すべてのI/Oチャネルは`Gateway`トレイトを実装する：
+`Gateway`トレイトは I/O チャネルの抽象として定義されている：
 
 - `connect()`: 接続確立
 - `receive()`: メッセージ受信（ブロッキング）
 - `send()`: メッセージ送信
 - `disconnect()`: 切断
+
+**現状の注意**: このトレイトは `gateway` クレート内のアダプタ 4 種が実装しているだけで、**上位からは消費されていない**（`dyn Gateway` の使用箇所がゼロ）。Nostr と web は I/O チャネルだがこのトレイトを実装しておらず、上位は各ゲートウェイを個別のフィールドとして名指しで保持している。この状態を解消して「上位が個々のゲートウェイを知らない」形へ寄せる方針は §2.4 と [design-plugin-architecture.md](design-plugin-architecture.md) を参照。
 
 ### 7.2 メッセージ型
 
