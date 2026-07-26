@@ -2593,6 +2593,238 @@ async fn test_rest_cancel_subtask_reaches_shared_registry() {
     );
 }
 
+// ================================================================================
+// #203 / #184: REST + Discord の実配線で「最後の走行中 subtask の停止」がセッションを
+// 完了させることの e2e 固定（実際に起きていた不具合の再発防止）。
+//
+// #204 より前の壊れ方: 合成層（`SystemGatewayActions`）が「inner が `cancel_subtask` を
+// 定義していれば inner へ委譲」していたため、Discord が有効だと停止が Discord 実装へ
+// 流れ、REST の完了受け口（`RestCompletionSink::on_subtask_cancelled`）が**一度も
+// 呼ばれず**、セッションが永久に `active` のまま残っていた。#204 で委譲を撤去したが、
+// 「transport gateway が inner として配線された構成」を実際に作るテストが無かったため、
+// 配線全体（共有 registry → 停止の実体 → 停止 sink → `sessions.status`）が繋がって
+// いることは読解でしか裏付けられていなかった。
+//
+// ## なぜ HTTP エンドポイントを叩かないのか
+//
+// `send_agent_message` は run のあとに必ず `complete_session_if_idle`（registry が空なら
+// `completed`）を通す。つまり **sink が一度も呼ばれなくても、同じリクエストの終わりで
+// セッションは `completed` になる** = HTTP 層の観測ではこの不具合を検知できない
+// （旧実装でも緑になる）。そこで停止ターンだけはハンドラ step 9 と同一の `RunRequest`
+// （REST の sink + 共有 registry + transport gateway を inner）を組んで
+// `process::run_agent_response` を直接呼び、完了が **停止 sink 経由でだけ**起きることを
+// 観測する。実ネットワークには出ない（`serenity::http::Http::new` は接続しない）。
+// ================================================================================
+
+/// 「走行中 subtask を 1 本抱えた REST セッション」を作り、`inner` を transport gateway
+/// として配線した run から `cancel_subtask` を呼ぶ。
+///
+/// 返り値は [`CancelObservation`]（assert は呼び出し側が行う）。
+///
+/// `make_inner` はハンドラと同じ材料（共有 DB / workspace_base）から transport gateway を
+/// 組むためのファクトリ。本番（`send_agent_message` step 6）と同じく `state.db` を渡す。
+#[cfg(feature = "discord")]
+async fn cancel_last_subtask_in_rest_run_with_inner(
+    make_inner: impl FnOnce(opencrab_db::Db, String) -> Arc<dyn opencrab_gateway::GatewayActions>,
+) -> CancelObservation {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "DiscordWired", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    // 1. 走行中 subtask を共有 registry へ入れた状態で HTTP を 1 回通し、sessions 行を
+    //    作りつつ `active` のまま残す（= 本番の「dispatch 済みでまだ走っている」状態）。
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-dw-1", &session_id, &agent_id);
+    mock.push_text_response("走らせています");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "長いのをやって", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("active"),
+        "前提が崩れている: 走行中 subtask があるのに session が active でない"
+    );
+
+    // 2. 停止ターン。`send_agent_message` step 9 と同一の RunRequest を組む。
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-cancel-dw".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "cancel_subtask".to_string(),
+            arguments: serde_json::json!({"subtask_id": "st-dw-1"}).to_string(),
+        },
+    }]);
+    mock.push_text_response("止めました");
+
+    let sink: Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+        Arc::new(opencrab_server::api::agents_messages::RestCompletionSink {
+            db: db.clone(),
+            registry: registry.clone(),
+        });
+    let run_req = opencrab_actions::RunRequest::new(
+        &agent_id,
+        "DiscordWired",
+        &session_id,
+        "system",
+        "user: さっきのを止めて",
+        "rest",
+        opencrab_actions::CallerIdentity::Agent,
+    )
+    .with_dispatch(Some(registry.clone()), sink)
+    .with_gateway_actions(make_inner(db.clone(), state.workspace_base.clone()));
+    opencrab_server::process::run_agent_response(&state, run_req)
+        .await
+        .expect("停止ターンの run が失敗した");
+
+    // 観測だけして返す（assert は呼び出し側。症状 = `sessions.status` を先に主張させたい）。
+    let removed_from_registry = !registry.contains_key("st-dw-1");
+    let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .map(|r| r.unwrap_err().is_cancelled())
+        .unwrap_or(false);
+    CancelObservation {
+        session_status: session_status(&db, &session_id),
+        removed_from_registry,
+        aborted,
+    }
+}
+
+/// [`cancel_last_subtask_in_rest_run_with_inner`] の観測結果。
+#[cfg(feature = "discord")]
+struct CancelObservation {
+    /// 停止後の親セッションの `sessions.status`（本題。`completed` でなければ #184 の再発）。
+    session_status: Option<String>,
+    /// 共有 registry から当該 subtask が外れたか。
+    removed_from_registry: bool,
+    /// subtask のタスクが実際に abort されたか。
+    aborted: bool,
+}
+
+/// **#184 の実害バグの e2e 固定**: Discord の gateway actions を実際に inner として
+/// 配線した REST の run で最後の走行中 subtask を停止すると、セッションが `completed`
+/// になる（停止 sink が発火する唯一の経路）。
+///
+/// 落ちるとき: 合成層が停止を own で処理しなくなったとき（inner へ委譲する / own の
+/// 分岐から sink 通知が抜けるなど）。Discord は #204 以降 `cancel_subtask` を定義しない
+/// ので、委譲すれば `Unknown action` になり sink は呼ばれない。
+#[cfg(feature = "discord")]
+#[tokio::test]
+async fn test_rest_cancel_completes_session_with_discord_gateway_wired() {
+    let obs = cancel_last_subtask_in_rest_run_with_inner(|db, workspace_base| {
+        Arc::new(opencrab_discord::DiscordGatewayActions::new(
+            // 接続しない（HTTP クライアントを組むだけ）。Discord API は一度も叩かない。
+            Arc::new(serenity::http::Http::new("dummy-token")),
+            db,
+            workspace_base,
+            None,
+        ))
+    })
+    .await;
+    assert_eq!(
+        obs.session_status.as_deref(),
+        Some("completed"),
+        "REST + Discord 配線で最後の走行中 subtask を停止したのにセッションが completed に\
+         ならない（RestCompletionSink::on_subtask_cancelled が呼ばれていない = #184 の再発）"
+    );
+    assert!(
+        obs.removed_from_registry,
+        "停止が共有 registry に到達していない（not found のまま）"
+    );
+    assert!(obs.aborted, "停止したのに subtask が abort されていない");
+}
+
+/// **#204 前の構成そのものの再現**: inner（Discord 相当）が `cancel_subtask` を**同名で
+/// 定義していても**、停止は own が処理してセッションが `completed` になる。
+///
+/// 落ちるとき: 合成層の停止を `report_progress` と同じ「inner が定義していれば委譲」
+/// パターンに戻したとき。委譲先は sink を触らないので、セッションは `active` のまま残る
+/// （= #184 で報告された永久 active そのもの）。
+#[cfg(feature = "discord")]
+#[tokio::test]
+async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask() {
+    /// 実際の Discord gateway actions に「`cancel_subtask` の定義と実装」を足した inner。
+    /// #204 で撤去した旧 Discord 実装と同じ形（sink を触らずに成功を返す）。
+    struct CancelDefiningInner {
+        discord: opencrab_discord::DiscordGatewayActions,
+        cancel_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl opencrab_gateway::GatewayActions for CancelDefiningInner {
+        fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
+            let mut defs = self.discord.definitions();
+            defs.push(opencrab_gateway::GatewayActionDef {
+                name: "cancel_subtask".to_string(),
+                description: "discord cancel (旧実装相当)".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"subtask_id": {"type": "string"}},
+                    "required": ["subtask_id"]
+                }),
+            });
+            defs
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            args: &serde_json::Value,
+            ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> opencrab_gateway::GatewayActionResult {
+            if name == "cancel_subtask" {
+                self.cancel_calls
+                    .lock()
+                    .unwrap()
+                    .push(args["subtask_id"].as_str().unwrap_or("?").to_string());
+                // 旧 Discord 実装は完了 sink を知らない = セッション整合を取らない。
+                return opencrab_gateway::GatewayActionResult {
+                    success: true,
+                    data: Some(serde_json::json!({"cancelled": true, "reached_inner": true})),
+                    error: None,
+                };
+            }
+            self.discord.execute(name, args, ctx).await
+        }
+    }
+
+    let cancel_calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = cancel_calls.clone();
+    let obs = cancel_last_subtask_in_rest_run_with_inner(move |db, workspace_base| {
+        Arc::new(CancelDefiningInner {
+            discord: opencrab_discord::DiscordGatewayActions::new(
+                Arc::new(serenity::http::Http::new("dummy-token")),
+                db,
+                workspace_base,
+                None,
+            ),
+            cancel_calls: recorded,
+        })
+    })
+    .await;
+
+    let delegated = cancel_calls.lock().unwrap().clone();
+    assert_eq!(
+        obs.session_status.as_deref(),
+        Some("completed"),
+        "inner が cancel_subtask を定義していると停止 sink が落ちてセッションが永久 active に\
+         なる（#184 の再発 / 委譲パターンへの逆戻り）。inner へ届いた停止: {delegated:?}"
+    );
+    assert!(
+        delegated.is_empty(),
+        "cancel_subtask が inner へ委譲されている（own が処理しなければ sink が発火しない）: {delegated:?}"
+    );
+    assert!(
+        obs.removed_from_registry,
+        "停止が共有 registry に到達していない（not found のまま）"
+    );
+    assert!(obs.aborted, "停止したのに subtask が abort されていない");
+}
+
 /// #169: 走行中 subtask があるあいだは session を `completed` にしない。
 #[tokio::test]
 async fn test_rest_session_stays_active_while_subtask_runs() {
