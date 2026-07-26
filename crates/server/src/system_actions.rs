@@ -980,6 +980,87 @@ mod tests {
         );
     }
 
+    /// **fail-closed な dispatch 分類ガード（#152）**。
+    ///
+    /// `own_definitions()` の全名が「非ブロック dispatch の除外集合（inline）」か
+    /// 「意図的な dispatch 可リスト」のどちらか**ちょうど一方**に属することを要求する。
+    ///
+    /// この gateway は transport 非依存で web / REST / heartbeat の全ターンに載る
+    /// （`crates/server/src/process.rs` の合成 executor）のに、Discord / Nostr / core と
+    /// 違って分類ガードが無く、6 個中 5 個（`configure_llm_provider` /
+    /// `manage_allowed_commands` / `configure_nostr` / `configure_self` /
+    /// `configure_mcp_server`）が黙って background 化されていた。実装
+    /// （`own_definitions()`）を起点に走査するので、新しい設定ツールを足すと分類を
+    /// 明示するまでテストが落ちる。判定基準は
+    /// `opencrab_actions::default_non_dispatch_tools` の doc。
+    #[test]
+    fn server_tools_are_classified_for_dispatch() {
+        let names: Vec<String> = SystemGatewayActions::own_definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(!names.is_empty(), "own_definitions が空");
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in &names {
+            let inline = non_dispatch.contains(name);
+            let dispatchable =
+                opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&name.as_str());
+            assert!(
+                inline ^ dispatchable,
+                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
+                 新しいツールを追加したら opencrab_actions::SERVER_INLINE_ACTIONS か \
+                 SERVER_DISPATCHABLE_ACTIONS のどちらかへ入れること（判定基準は \
+                 default_non_dispatch_tools の doc / docs/DESIGN.md §4.4）"
+            );
+        }
+
+        // 逆方向: 定数側に死名が無いこと。
+        for name in opencrab_actions::SERVER_INLINE_ACTIONS {
+            assert!(
+                names.contains(&(*name).to_string()),
+                "SERVER_INLINE_ACTIONS の {name} が own_definitions() に無い（死名）"
+            );
+        }
+        for name in opencrab_actions::SERVER_DISPATCHABLE_ACTIONS {
+            assert!(
+                names.contains(&(*name).to_string()),
+                "SERVER_DISPATCHABLE_ACTIONS の {name} が own_definitions() に無い（死名）"
+            );
+        }
+        // 分類は own_definitions() を覆い尽くす。
+        assert_eq!(
+            opencrab_actions::SERVER_INLINE_ACTIONS.len()
+                + opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.len(),
+            names.len(),
+            "分類集合の合計が own_definitions() の数と一致しない（分類漏れ）"
+        );
+    }
+
+    /// [P1 回帰] 設定変更ツールは inline（同ターンで結果を返す）。長時間の鍵探索だけが
+    /// background。分類定数を経由せず `default_non_dispatch_tools()` の実効値を見る。
+    #[test]
+    fn config_tools_are_inline_and_key_generation_is_dispatched() {
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+        for name in [
+            "configure_llm_provider",
+            "manage_allowed_commands",
+            "configure_nostr",
+            "configure_self",
+            "configure_mcp_server",
+            "cancel_subtask",
+        ] {
+            assert!(
+                non_dispatch.contains(name),
+                "{name} は background 化してはならない（設定の共有状態書き込み / 一覧の即答）"
+            );
+        }
+        assert!(
+            !non_dispatch.contains("nostr_generate_key"),
+            "nostr_generate_key は長時間の vanity 探索なので dispatch 対象に残す"
+        );
+    }
+
     /// #161: Discord のような inner が cancel_subtask を定義しても、merge 後は
     /// own の1件だけが残る（providers は同名重複を拒否しうる）。merge_definitions を
     /// 直接叩くことで AppState 無しに実コードの dedup 契約を検証する。

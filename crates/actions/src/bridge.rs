@@ -169,6 +169,50 @@ pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
 /// `nostr_tools_are_classified_for_dispatch`（`crates/nostr/src/actions.rs`）が落ちる。
 pub const NOSTR_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
 
+/// server 内蔵の設定ツール源（`crates/server/src/system_actions.rs` の
+/// `SystemGatewayActions`）のうち **inline 実行のまま**にするもの。
+///
+/// この gateway は Discord/Nostr と違い **transport 非依存**で、web / REST / heartbeat の
+/// 全ターンに載る（`crates/server/src/process.rs` の合成 executor）。分類ガードの外に
+/// 置いていた頃は 6 個中 5 個が background 化され、
+/// - `manage_allowed_commands(action="list")` / `configure_mcp_server(action="list")` は
+///   純粋な読み取り（基準5）なのに「一覧を教えて」が 2 ターン 2 メッセージに割れ、
+/// - `configure_llm_provider` は run 内共有状態（LLM ルーター）のホットスワップ（基準4）
+///   なのに走行中の run と非同期に差し替わり、doc が約束する「health_check → 失敗なら
+///   自動ロールバックして結果で通知」が同ターンで得られない、
+/// という壊れ方をしていた。
+///
+/// **fail-closed**: `SystemGatewayActions::own_definitions()` の全名がこの集合か
+/// [`SERVER_DISPATCHABLE_ACTIONS`] のどちらか一方に属することを
+/// `server_tools_are_classified_for_dispatch`（`crates/server/src/system_actions.rs`）が
+/// 検査する。新しい設定ツールを足したら分類を強制される。
+pub const SERVER_INLINE_ACTIONS: &[&str] = &[
+    // (4) run 内共有状態: LLM ルーターのホットスワップ。走行中の run が参照している
+    //     プロバイダを差し替えるうえ、適用後の health_check / 自動ロールバックの結果を
+    //     同ターンで返す契約になっている。
+    "configure_llm_provider",
+    // (5) 純粋な読み取り（action="list"）+ (3) 同ターン結果依存（add/remove した直後に
+    //     execute_shell を使う用法）。Discord 側の add/remove/list_allowed_command と同分類。
+    "manage_allowed_commands",
+    // (4) 設定の書き込み: 以後の Nostr 送信（relay / identity）に効く共有状態。
+    //     成否を同ターンで確認して次の操作へ進む。
+    "configure_nostr",
+    // (4) 設定の書き込み: 名前・system prompt 等、以後の run の前提を書き換える。
+    "configure_self",
+    // (5) 純粋な読み取り（action="list"）+ (3) 追加した直後に当該 MCP ツールを使う用法。
+    "configure_mcp_server",
+    // (1) 制御系: 走行中 subtask の停止。background 化しては意味を成さない。
+    "cancel_subtask",
+];
+
+/// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
+///
+/// `nostr_generate_key` は vanity 探索で分単位かかりうる長時間処理（RFC #152 S3a の
+/// 主目的）。`SystemGatewayActions` は鍵未設定でもこれを露出する bootstrap ツールとして
+/// 自前で定義するため、Nostr gateway の [`NOSTR_DISPATCHABLE_ACTIONS`] とは別に
+/// この gateway でも分類する必要がある。
+pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
+
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
 /// にするもの（`default_non_dispatch_tools` の種）。
 ///

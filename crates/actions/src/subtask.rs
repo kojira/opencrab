@@ -596,14 +596,17 @@ impl ActionExecutor for SharedExecutor {
 ///
 /// # ドリフト検出
 ///
-/// core（[`crate::dispatcher::ActionDispatcher`]）と gateway（Discord / Nostr）の
-/// `definitions()` の**全名**が「この集合にある」か「明示的な dispatch 可リスト
+/// core（[`crate::dispatcher::ActionDispatcher`]）と全 gateway（Discord / Nostr /
+/// server 内蔵の `SystemGatewayActions`）の `definitions()` の**全名**が「この集合に
+/// ある」か「明示的な dispatch 可リスト
 /// （[`crate::bridge::CORE_DISPATCHABLE_ACTIONS`] /
 /// [`crate::bridge::DISCORD_DISPATCHABLE_ACTIONS`] /
-/// [`crate::bridge::NOSTR_DISPATCHABLE_ACTIONS`]）にある」かのどちらかであることを、
+/// [`crate::bridge::NOSTR_DISPATCHABLE_ACTIONS`] /
+/// [`crate::bridge::SERVER_DISPATCHABLE_ACTIONS`]）にある」かのどちらかであることを、
 /// fail-closed テストが検査する（core は `core_actions_are_classified_for_dispatch`、
-/// gateway は各 gateway crate 側）。新ツールを追加すると、どちらにも入れない限り
-/// テストが落ちる（= 分類を強制する）。
+/// gateway は各 gateway 実装の crate 側 = `crates/discord` / `crates/nostr` /
+/// `crates/server`）。新ツールを追加すると、どちらにも入れない限りテストが落ちる
+/// （= 分類を強制する）。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 /// 運用者向けの一覧は `docs/DESIGN.md`「非ブロックツール実行（dispatch）」節。
@@ -627,6 +630,13 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
     // 観測できず、暗黙返信と二重投稿になる。`nostr_generate_key` は含まない
     // （長時間処理なので dispatch 対象に残す）。
     for name in crate::bridge::NOSTR_DELIVERY_ACTIONS {
+        set.insert((*name).to_string());
+    }
+    // server 内蔵の設定ツール源（`SystemGatewayActions`）の inline 集合。transport
+    // 非依存で web / REST / heartbeat の全ターンに載るのに分類ガードの外にあり、
+    // 設定変更（run 内共有状態）と一覧（純粋な読み取り）が background 化されていた。
+    // `nostr_generate_key`（長時間の鍵探索）だけは dispatch 対象に残す。
+    for name in crate::bridge::SERVER_INLINE_ACTIONS {
         set.insert((*name).to_string());
     }
     set
@@ -2659,6 +2669,12 @@ mod tests {
                 "{name} が dispatch 可リストと inline 集合の両方に居る"
             );
         }
+        for name in crate::bridge::SERVER_DISPATCHABLE_ACTIONS {
+            assert!(
+                !non_dispatch.contains(*name),
+                "{name} が dispatch 可リストと inline 集合の両方に居る"
+            );
+        }
         for name in crate::bridge::DISCORD_ACTIONS {
             assert!(
                 crate::bridge::DISCORD_INLINE_ACTIONS.contains(name),
@@ -2677,6 +2693,35 @@ mod tests {
             crate::bridge::CORE_INLINE_ACTIONS.len(),
             "CORE_INLINE_ACTIONS に重複がある"
         );
+        let unique: HashSet<&&str> = crate::bridge::SERVER_INLINE_ACTIONS.iter().collect();
+        assert_eq!(
+            unique.len(),
+            crate::bridge::SERVER_INLINE_ACTIONS.len(),
+            "SERVER_INLINE_ACTIONS に重複がある"
+        );
+    }
+
+    /// [P1 回帰] server 内蔵の設定ツール（transport 非依存で web/REST/heartbeat の
+    /// 全ターンに載る）は inline。分類ガードの外にあった頃は 5 個が background 化され、
+    /// 設定変更（LLM ルーターのホットスワップ等）と一覧取得が同ターンで返らなかった。
+    #[test]
+    fn server_config_tools_are_not_dispatched() {
+        let set = default_non_dispatch_tools();
+        for name in [
+            "configure_llm_provider",
+            "manage_allowed_commands",
+            "configure_nostr",
+            "configure_self",
+            "configure_mcp_server",
+            "cancel_subtask",
+        ] {
+            assert!(
+                set.contains(name),
+                "{name} は server の設定ツール（共有状態の書き込み / 純粋な読み取り）なので inline"
+            );
+        }
+        // 長時間の鍵探索だけは dispatch 対象に残す。
+        assert!(!set.contains("nostr_generate_key"));
     }
 
     /// [P1 回帰] 配送系 + ユーザー応答待ちの `send_ui` は dispatch しない。
