@@ -12,8 +12,8 @@ use tracing::{error, info};
 use opencrab_gateway::DiscordGateway;
 
 use crate::AgentRunner;
-use crate::PendingInteractionRegistry;
 use opencrab_actions::subtask::SubtaskRegistry;
+use opencrab_core::a2ui::PendingInteractionRegistry;
 
 struct AgentGatewayEntry {
     gateway: Arc<DiscordGateway>,

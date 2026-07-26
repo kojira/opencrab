@@ -119,7 +119,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    pending_registry: Option<crate::PendingInteractionRegistry>,
+    pending_registry: Option<opencrab_core::a2ui::PendingInteractionRegistry>,
     event_channel: Option<(
         mpsc::UnboundedSender<LoopEvent>,
         mpsc::UnboundedReceiver<LoopEvent>,
@@ -843,7 +843,7 @@ async fn process_subtask_completed<T: AgentRunner>(
 /// LoopEvent::InteractionResponseとしてイベントループに送信する。
 async fn handle_component_interaction(
     data: opencrab_gateway::ComponentInteractionData,
-    registry: &crate::PendingInteractionRegistry,
+    registry: &opencrab_core::a2ui::PendingInteractionRegistry,
     renderer_http: Arc<serenity::http::Http>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
 ) {
@@ -865,11 +865,10 @@ async fn handle_component_interaction(
         match pending_ref {
             Some(ref pending) => {
                 // Owner-only check
-                if !pending.owner_discord_id.is_empty() && data.user_id != pending.owner_discord_id
-                {
+                if !pending.owner_id.is_empty() && data.user_id != pending.owner_id {
                     debug!(
                         user_id = %data.user_id,
-                        owner_id = %pending.owner_discord_id,
+                        owner_id = %pending.owner_id,
                         "Non-owner tried to interact with owner-only UI"
                     );
                     return;
@@ -878,9 +877,14 @@ async fn handle_component_interaction(
                 Some((
                     pending.session_id.clone(),
                     pending.agent_id.clone(),
-                    pending.channel_id,
-                    pending.channel_id_str.clone(),
-                    pending.is_dm,
+                    // 保留状態はコアの `RenderTarget` を持つ（#156 S3）。Discord の
+                    // チャンネル識別子は数値なので、移設前と同じフォールバック
+                    // （`parse().unwrap_or(0)`）で数値化する。
+                    pending.target.channel_id.parse::<u64>().unwrap_or(0),
+                    pending.target.channel_id.clone(),
+                    // 旧 `PendingInteraction.is_dm` は send_ui 時点で常に false が入って
+                    // いた（送信時には判定できない）。移設後もその既定を保つ。
+                    false,
                     pending.surface_id.clone(),
                     pending.rendered_message.clone(),
                 ))

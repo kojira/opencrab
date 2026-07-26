@@ -11,10 +11,6 @@ pub mod owner_warning;
 pub mod renderer;
 pub mod voice_session;
 
-use std::sync::Arc;
-
-use dashmap::DashMap;
-
 pub use gateway_actions::DiscordGatewayActions;
 // 通知先（webhook）の設定型は gateway 非依存層（`opencrab_actions::webhook_target`）が
 // 保持する（#157 S4）。Discord crate は re-export せず、他 crate が Discord crate 経由で
@@ -27,40 +23,20 @@ pub use owner_warning::{
 };
 pub use renderer::DiscordRenderer;
 
-/// A2UI pending interaction registry type.
-pub type PendingInteractionRegistry = Arc<DashMap<String, PendingInteraction>>;
-
-/// A pending A2UI interaction waiting for user response.
-pub struct PendingInteraction {
-    pub session_id: String,
-    pub agent_id: String,
-    pub channel_id: u64,
-    pub channel_id_str: String,
-    /// ギルドID（DMの場合は空文字列）。送信時には不明なことがあるため空がデフォルト。
-    pub guild_id: String,
-    pub is_dm: bool,
-    pub surface_id: String,
-    pub a2ui_components: Vec<opencrab_core::a2ui::A2uiComponent>,
-    pub owner_discord_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub timeout_secs: u64,
-    pub rendered_message: opencrab_core::a2ui::RenderedMessage,
-    pub event_tx: tokio::sync::mpsc::UnboundedSender<message_loop::LoopEvent>,
-    /// Formコンポーネント情報（モーダル用）。Button押下時にModalを表示するために保持。
-    pub form_data: Option<FormData>,
-}
-
-/// Form/Modal表示に必要なデータ
-pub struct FormData {
-    /// Modal custom_id（形式: `interaction:{uuid}:modal:{form_action_name}`）
-    pub modal_custom_id: String,
-    /// Modalタイトル
-    pub title: String,
-    /// Modal用ActionRows（CreateInputTextの配列）
-    pub action_rows: Vec<serenity::all::CreateActionRow>,
-    /// Submit時のアクション
-    pub action: opencrab_core::a2ui::A2uiAction,
-}
+// A2UI の保留状態（`PendingInteraction` / `PendingInteractionRegistry`）と Form の
+// 描画物（旧 `FormData`）は **gateway 非依存層**（`opencrab_core::a2ui`）へ移設済み
+// （#156 S3）。旧実装は保留状態に Discord のイベントループへ送るチャンネル
+// （`UnboundedSender<LoopEvent>`）・チャンネル/ギルド識別子・DM 判定・serenity の
+// モーダル描画物を直に埋めていたため、汎用層に置けなかった。
+//
+// 置き換え:
+// - 応答の戻し先 → `opencrab_core::a2ui::UiResponseSink`（Discord 実装は
+//   `gateway_actions::ui::DiscordUiResponseSink`）
+// - チャンネル識別子 → `opencrab_core::a2ui::RenderTarget`
+// - モーダル描画物 → `opencrab_core::a2ui::RenderedForm`（`UiRenderer::build_form` が構築）
+//
+// #170 と同じ方針で **re-export しない**（他 crate が Discord crate 経由でコアの型を
+// 引かないようにする）。
 
 /// Discord 応答の記録コンテキスト（#42: ターン記録の集約）。
 ///

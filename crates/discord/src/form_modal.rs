@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use opencrab_core::a2ui::A2uiComponentType;
+use opencrab_core::a2ui::{A2uiComponentType, PendingInteractionRegistry};
 use opencrab_gateway::{A2uiFormModalResolver, A2uiFormModalSpec};
-
-use crate::PendingInteractionRegistry;
+use serenity::all::CreateActionRow;
 
 /// `PendingInteractionRegistry` を参照してモーダル仕様を解決するクロージャを返す。
 pub fn form_modal_resolver(registry: PendingInteractionRegistry) -> A2uiFormModalResolver {
@@ -30,7 +29,7 @@ pub fn resolve_form_modal_for_button(
 
     let pending = registry.get(interaction_id)?;
 
-    if !pending.owner_discord_id.is_empty() && user_id != pending.owner_discord_id {
+    if !pending.owner_id.is_empty() && user_id != pending.owner_id {
         return None;
     }
 
@@ -65,10 +64,15 @@ pub fn resolve_form_modal_for_button(
         return None;
     }
 
+    // 保留状態は gateway 非依存（コアの型）なので、serenity の描画物は
+    // `RenderedForm` の型消去された payload から取り出す（入れたのは
+    // `DiscordRenderer::build_form`）。
+    let action_rows = fd.payload::<Vec<CreateActionRow>>()?;
+
     Some(A2uiFormModalSpec {
         modal_custom_id: fd.modal_custom_id.clone(),
         title: fd.title.clone(),
-        components: fd.action_rows.clone(),
+        components: action_rows.clone(),
     })
 }
 
@@ -76,29 +80,27 @@ pub fn resolve_form_modal_for_button(
 mod tests {
     use super::*;
     use dashmap::DashMap;
-    use opencrab_core::a2ui::{A2uiAction, A2uiComponent, A2uiComponentType, RenderedMessage};
-    use serenity::all::{CreateActionRow, CreateInputText, InputTextStyle};
-    use tokio::sync::mpsc;
-
-    use crate::message_loop::LoopEvent;
-    use crate::FormData;
+    use opencrab_core::a2ui::{
+        A2uiAction, A2uiComponent, A2uiComponentType, PendingInteraction, RenderTarget,
+        RenderedForm, RenderedMessage,
+    };
+    use serenity::all::{CreateInputText, InputTextStyle};
 
     fn test_registry() -> PendingInteractionRegistry {
         Arc::new(DashMap::new())
     }
 
-    fn dummy_pending(form_data: Option<FormData>) -> crate::PendingInteraction {
-        let (event_tx, _rx) = mpsc::unbounded_channel::<LoopEvent>();
-        crate::PendingInteraction {
+    fn dummy_pending(form_data: Option<RenderedForm>) -> PendingInteraction {
+        PendingInteraction {
             session_id: "s1".into(),
             agent_id: "a1".into(),
-            channel_id: 1,
-            channel_id_str: "1".into(),
-            guild_id: String::new(),
-            is_dm: false,
+            target: RenderTarget {
+                channel_id: "1".into(),
+                platform: "discord".into(),
+            },
             surface_id: "interaction:uuid-abc".into(),
             a2ui_components: vec![],
-            owner_discord_id: String::new(),
+            owner_id: String::new(),
             created_at: chrono::Utc::now(),
             timeout_secs: 300,
             rendered_message: RenderedMessage {
@@ -106,9 +108,22 @@ mod tests {
                 message_id: Some("1".into()),
                 channel_id: "1".into(),
             },
-            event_tx,
             form_data,
         }
+    }
+
+    fn form_render(modal_custom_id: &str, title: &str, action_name: &str) -> RenderedForm {
+        RenderedForm::new(
+            modal_custom_id,
+            title,
+            A2uiAction {
+                name: action_name.into(),
+                context: None,
+            },
+            vec![CreateActionRow::InputText(
+                CreateInputText::new(InputTextStyle::Short, "Name", "field1").required(true),
+            )],
+        )
     }
 
     #[test]
@@ -121,18 +136,7 @@ mod tests {
 
     #[test]
     fn resolve_returns_modal_when_button_matches_form_action() {
-        let row = CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Name", "field1").required(true),
-        );
-        let form_data = FormData {
-            modal_custom_id: "interaction:uuid-abc:modal:submit".into(),
-            title: "My form".into(),
-            action_rows: vec![row.clone()],
-            action: A2uiAction {
-                name: "submit".into(),
-                context: None,
-            },
-        };
+        let form_data = form_render("interaction:uuid-abc:modal:submit", "My form", "submit");
         let mut pending = dummy_pending(Some(form_data));
         pending.a2ui_components = vec![
             A2uiComponent {
@@ -172,21 +176,9 @@ mod tests {
 
     #[test]
     fn resolve_respects_owner_only() {
-        let form_data = FormData {
-            modal_custom_id: "interaction:uuid-abc:modal:go".into(),
-            title: "T".into(),
-            action_rows: vec![CreateActionRow::InputText(CreateInputText::new(
-                InputTextStyle::Short,
-                "L",
-                "i1",
-            ))],
-            action: A2uiAction {
-                name: "go".into(),
-                context: None,
-            },
-        };
+        let form_data = form_render("interaction:uuid-abc:modal:go", "T", "go");
         let mut pending = dummy_pending(Some(form_data));
-        pending.owner_discord_id = "owner99".into();
+        pending.owner_id = "owner99".into();
         pending.a2ui_components = vec![
             A2uiComponent {
                 id: "f1".into(),
@@ -219,6 +211,53 @@ mod tests {
         assert!(
             resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", "other_user",)
                 .is_none()
+        );
+    }
+
+    /// 描画物が Discord の型でない（＝別 transport が入れた）保留状態からは
+    /// モーダル仕様を作らない（downcast 失敗で None）。
+    #[test]
+    fn resolve_returns_none_for_foreign_form_payload() {
+        let foreign = RenderedForm::new(
+            "interaction:uuid-abc:modal:go",
+            "T",
+            A2uiAction {
+                name: "go".into(),
+                context: None,
+            },
+            vec!["not-a-serenity-row".to_string()],
+        );
+        let mut pending = dummy_pending(Some(foreign));
+        pending.a2ui_components = vec![
+            A2uiComponent {
+                id: "f1".into(),
+                component_type: A2uiComponentType::Form {
+                    title: "T".into(),
+                    children: vec![],
+                    action: A2uiAction {
+                        name: "go".into(),
+                        context: None,
+                    },
+                },
+            },
+            A2uiComponent {
+                id: "b1".into(),
+                component_type: A2uiComponentType::Button {
+                    text: "Go".into(),
+                    action: A2uiAction {
+                        name: "go".into(),
+                        context: None,
+                    },
+                    style: None,
+                    emoji: None,
+                    disabled: false,
+                },
+            },
+        ];
+        let reg = test_registry();
+        reg.insert("uuid-abc".into(), pending);
+        assert!(
+            resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", "user1").is_none()
         );
     }
 }

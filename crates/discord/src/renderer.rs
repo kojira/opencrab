@@ -521,6 +521,31 @@ impl UiRenderer for DiscordRenderer {
         self.disable_buttons(rendered, Some("⏰ タイムアウトしました"))
             .await
     }
+
+    /// Discord の Modal 描画物（`Vec<CreateActionRow>`）を `RenderedForm` に隠して返す。
+    ///
+    /// 保留状態（`PendingInteraction`）は gateway 非依存層にあり serenity の型を持てない。
+    /// **描画物の構築ごとこの描画トレイトの内側に置く**ことで、汎用層はコアの型
+    /// （`RenderedForm` = modal_custom_id / title / action + 型消去した payload）だけを
+    /// 保持できる。取り出すのは Discord 自身（`form_modal::resolve_form_modal_for_button`）。
+    fn build_form(
+        &self,
+        surface_id: &str,
+        components: &[A2uiComponent],
+    ) -> Option<opencrab_core::a2ui::RenderedForm> {
+        // 最初の Form コンポーネントだけを対象にする（移設前と同じ）。
+        let form = opencrab_actions::a2ui::find_form_component(components)?;
+        let A2uiComponentType::Form { title, action, .. } = &form.component_type else {
+            return None;
+        };
+        let action_rows = self.build_modal_action_rows(form, components).ok()?;
+        Some(opencrab_core::a2ui::RenderedForm::new(
+            opencrab_actions::a2ui::modal_custom_id(surface_id, &action.name),
+            title.clone(),
+            action.clone(),
+            action_rows,
+        ))
+    }
 }
 
 #[cfg(test)]
