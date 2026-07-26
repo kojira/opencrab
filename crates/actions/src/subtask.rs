@@ -73,6 +73,17 @@ const LIFECYCLE_SETTLING: u8 = 2;
 #[derive(Debug, Clone)]
 pub struct SubtaskLifecycle {
     state: Arc<AtomicU8>,
+    /// 完走した call の部分結果（cancel 時に親ログへ残すため / #152 レビュー P2）。
+    ///
+    /// 1 バッチ = 1 subtask にしたことで粒度が粗くなり、`cancel_subtask` は
+    /// `settle_completed` を丸ごと抑止するため「3 ファイル書いた後に止めた」場合に
+    /// **どこまで進んだか**がラベルしか残らなかった。走行タスクが 1 call 完走ごとに
+    /// ここへ積み、`cancel_subtask` が `tool_cancelled` の本文/メタデータへ載せる。
+    ///
+    /// ラッチと同じ「cancel 側（registry エントリ）と走行タスク側が共有する 1 個の
+    /// ハンドル」なので、`SpawnedSubtask` に新フィールドを増やさずに共有できる
+    /// （既存の全構築点は `SubtaskLifecycle::new()` を呼ぶだけで空の記録を得る）。
+    completed_calls: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 impl Default for SubtaskLifecycle {
@@ -85,7 +96,23 @@ impl SubtaskLifecycle {
     pub fn new() -> Self {
         Self {
             state: Arc::new(AtomicU8::new(LIFECYCLE_RUNNING)),
+            completed_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// 完走した 1 call の部分結果を記録する（cancel 時の「どこまで進んだか」用）。
+    pub fn record_completed_call(&self, entry: serde_json::Value) {
+        if let Ok(mut v) = self.completed_calls.lock() {
+            v.push(entry);
+        }
+    }
+
+    /// これまでに完走した call の部分結果（cancel 時に親ログへ載せる）。
+    pub fn completed_calls(&self) -> Vec<serde_json::Value> {
+        self.completed_calls
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     /// 停止を主張する（Running → Cancelled）。成功したら、以後の `settle_completed`
@@ -418,15 +445,32 @@ pub fn cancel_subtask(
             subtask.abort_handle.abort();
 
             // 親セッションログへ subtask_cancelled を best-effort 記録する。
+            //
+            // **部分結果も残す**（#152 レビュー P2）。1 バッチ = 1 subtask なので、
+            // 停止時に `settle_completed` を丸ごと抑止するとラベルしか残らず「3 ファイル
+            // 書いた後に止めた」ときにどこまで進んだか分からない。完走済み call を本文へ
+            // 列挙し（人が読む/会話へ再注入される）、構造は metadata に載せる。
             let parent = subtask.parent_session_id.clone();
             if !parent.is_empty() {
+                let completed = subtask.lifecycle.completed_calls();
+                let content = if completed.is_empty() {
+                    format!("subtask '{}' was cancelled", subtask.label)
+                } else {
+                    let partial =
+                        serde_json::to_string(&completed).unwrap_or_else(|_| "[]".to_string());
+                    format!(
+                        "subtask '{}' was cancelled after {} completed tool call(s): {partial}",
+                        subtask.label,
+                        completed.len()
+                    )
+                };
                 if let Ok(conn) = db.lock() {
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: subtask.agent_id.clone(),
                         session_id: parent.clone(),
                         log_type: "tool_cancelled".to_string(),
-                        content: format!("subtask '{}' was cancelled", subtask.label),
+                        content,
                         speaker_id: None,
                         turn_number: None,
                         metadata_json: Some(
@@ -434,6 +478,7 @@ pub fn cancel_subtask(
                                 "tool_call_id": subtask_id,
                                 "tool_name": "spawn_subtask",
                                 "label": subtask.label,
+                                "completed_calls": completed,
                             })
                             .to_string(),
                         ),
@@ -505,7 +550,7 @@ impl ActionExecutor for SharedExecutor {
 
 /// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツール名の集合。
 ///
-/// # 分類基準（この 5 つのどれかに当てはまるツールは inline に残す）
+/// # 分類基準（この 6 つのどれかに当てはまるツールは inline に残す）
 ///
 /// 1. **制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）: それ自体が
 ///    subtask ライフサイクルを操作するため background 化しない。
@@ -526,34 +571,52 @@ impl ActionExecutor for SharedExecutor {
 ///    が参照している状態を書き換える。background 化すると (a) そのターンには効かず、
 ///    (b) 書き込みが engine の次イテレーションや配送と競合して「いつのターンから効くか」が
 ///    非決定になる。制御の効き方を保つため inline に残す。
-/// 5. **純粋な読み取りで即答すべきもの**（`list_*` / `get_*` / `read_heartbeat_instructions`）:
+/// 5. **純粋な読み取りで即答すべきもの**（`list_*` / `get_*` / `ws_read` / `ws_list` /
+///    `search_memory_index` / `retrieve_memory_nodes` / `read_heartbeat_instructions`）:
 ///    dispatch すると質問 1 つが 2 ターン 2 メッセージに割れるだけで、得るものが無い。
+///    system prompt が指示する記憶想起フロー（`search_memory_index` →
+///    `retrieve_memory_nodes`）のような**同ターンの 2 段連鎖**では、背景往復が 2 回 =
+///    ユーザーへ 4 通になる。
+/// 6. **報告する価値が無い短時間の書き込み**（`update_impression` / `save_model_insight` /
+///    `record_task_progress`）: dispatch には必ず resume ターン（= ユーザーへの追加
+///    メッセージ）が 1 本付く。値の小さい書き込みを background 化すると雑音が増えるだけ。
 ///
 /// 逆に dispatch を**残す**のは「長時間かかる」か「同ターンで結果を使わない書き込み」のみ
-/// （`rebuild_memory_index` / `create_skill` / `nostr_generate_key` / server ツールの
-/// `execute_shell` / `write_file` / `web_search` …）。
+/// （`rebuild_memory_index` / `create_skill` / `nostr_generate_key` / `ws_write` /
+/// `learn_from_experience` / server ツールの `execute_shell` …）。
+///
+/// # MCP ツール（`mcp__*`）
+///
+/// **既定 inline**（安全側）。運用者が繋いだ任意の外部ツールなので、配送系（外部へ
+/// 「送る」）なのか同ターンで戻り値を使うのかを静的に判定できない。無分類で全 dispatch
+/// すると、外部送信系 MCP が background 化されて配送順が入れ替わる/二重送信になる。
+/// 判定は [`SubtaskToolDispatcher::should_dispatch`] が名前の接頭辞で行う（一覧に列挙
+/// できないため集合ではなく規則で扱う）。長時間の MCP ツールを background 化したい
+/// 運用者は `with_non_dispatch` で当該名を除いた集合を渡す。
 ///
 /// # ドリフト検出
 ///
-/// gateway 側の `definitions()` の**全名**が「この集合にある」か「明示的な dispatch 可
-/// リスト（[`crate::bridge::DISCORD_DISPATCHABLE_ACTIONS`] /
+/// core（[`crate::dispatcher::ActionDispatcher`]）と gateway（Discord / Nostr）の
+/// `definitions()` の**全名**が「この集合にある」か「明示的な dispatch 可リスト
+/// （[`crate::bridge::CORE_DISPATCHABLE_ACTIONS`] /
+/// [`crate::bridge::DISCORD_DISPATCHABLE_ACTIONS`] /
 /// [`crate::bridge::NOSTR_DISPATCHABLE_ACTIONS`]）にある」かのどちらかであることを、
-/// 各 gateway crate の fail-closed テストが検査する。新ツールを追加すると、どちらにも
-/// 入れない限りテストが落ちる（= 分類を強制する）。
+/// fail-closed テストが検査する（core は `core_actions_are_classified_for_dispatch`、
+/// gateway は各 gateway crate 側）。新ツールを追加すると、どちらにも入れない限り
+/// テストが落ちる（= 分類を強制する）。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 /// 運用者向けの一覧は `docs/DESIGN.md`「非ブロックツール実行（dispatch）」節。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
-    let mut set: HashSet<String> = [
-        "spawn_subtask",
-        "cancel_subtask",
-        "report_progress",
-        // run 内共有状態（model_override / current_purpose）を書く制御系ツール。
-        "select_llm",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut set: HashSet<String> = ["spawn_subtask", "cancel_subtask", "report_progress"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    // core アクション（`ActionDispatcher::new()`）の inline 集合。以前はここが空で、
+    // core 32 個が分類ガードの外＝全 dispatch だった（記憶想起が 4 通に割れる等）。
+    for name in crate::bridge::CORE_INLINE_ACTIONS {
+        set.insert((*name).to_string());
+    }
     // Discord gateway の inline 集合（配送系 / 同ターン結果依存 / run 内共有状態 /
     // 純粋な読み取り）。depth ゲートの `DISCORD_ACTIONS` とは目的が違う別集合で、
     // `DISCORD_ACTIONS ⊆ DISCORD_INLINE_ACTIONS` はテストで保証する。
@@ -707,14 +770,44 @@ fn batch_label(calls: &[DispatchCall]) -> String {
 
 /// 1 ツールの実行結果（バッチの決着理由と本文の組み立てに使う）。
 struct CallOutcome {
+    /// 呼び出し元 LLM の tool_call_id（同じツールを複数回呼んだバッチの対応付け）。
+    tool_call_id: String,
     /// 永続化用に無害化済みの結果本文。
     sanitized: String,
-    /// このツールが失敗（`success == false` / panic）したか。
+    /// このツールが失敗（`success == false` / panic / 未実行）したか。
     failed: bool,
+}
+
+/// 複数ツールバッチの完了本文 1 要素を組む。
+///
+/// `sanitized` は原則 JSON 文字列なので、**文字列としてではなく構造として**埋める
+/// （`serde_json::from_str` を試す）。文字列のまま入れると
+/// `"result":"[{\"result\":\"{\\\"success\\\":true…"` のような三重エスケープになり、
+/// 会話へ再注入するときの整形でさらにエスケープが増えてモデルが読めなくなる。
+/// 退避ポインタ（`[Tool Result: file://…]`）や切り詰めで JSON にならない場合だけ
+/// 文字列で入れる。
+///
+/// `tool_call_id` も必ず載せる（同じツールを複数回呼んだバッチは順序でしか対応が
+/// 取れなかった）。
+fn batch_result_entry(tool: &str, outcome: &CallOutcome) -> serde_json::Value {
+    let result = serde_json::from_str::<serde_json::Value>(&outcome.sanitized)
+        .unwrap_or_else(|_| serde_json::Value::String(outcome.sanitized.clone()));
+    serde_json::json!({
+        "tool": tool,
+        "tool_call_id": outcome.tool_call_id,
+        "result": result,
+    })
 }
 
 impl ToolDispatcher for SubtaskToolDispatcher {
     fn should_dispatch(&self, tool_name: &str) -> bool {
+        // MCP ツール（`mcp__*`）は既定 inline（安全側）。運用者が繋いだ任意ツールなので
+        // 配送系かどうかを静的に分類できず、全 dispatch すると外部送信系 MCP が
+        // background 化されて配送順の入れ替わり/二重送信になる。名前を静的に列挙できない
+        // ため集合ではなく接頭辞の規則で扱う（`default_non_dispatch_tools` の doc 参照）。
+        if tool_name.starts_with(crate::bridge::MCP_TOOL_PREFIX) {
+            return false;
+        }
         !self.non_dispatch.contains(tool_name)
     }
 
@@ -815,15 +908,37 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                     &call.tool_call_id,
                     workspace_root.as_deref(),
                 );
-                outcomes.push((
-                    call.tool_name.clone(),
-                    CallOutcome {
-                        sanitized,
-                        failed: raw.1,
-                    },
-                ));
+                let outcome = CallOutcome {
+                    tool_call_id: call.tool_call_id.clone(),
+                    sanitized,
+                    failed: raw.1,
+                };
+                // cancel されたときに「どこまで進んだか」を親へ残せるよう、完走した
+                // call の部分結果をラッチ（cancel 側と共有）へ積む。
+                lifecycle_task.record_completed_call(batch_result_entry(&call.tool_name, &outcome));
+                outcomes.push((call.tool_name.clone(), outcome));
                 if timed_out {
                     // 期限切れ後は残りを実行しない（依存順のため後続は前提が崩れている）。
+                    //
+                    // ただし**未実行であることは本文に残す**（#152 レビュー P2）。
+                    // system prompt は「同じツールを再呼びするな（もう走っている）」と
+                    // 指示しているので、痕跡が無いとエージェントは未実行を知る手段が無く
+                    // 依頼が無言で消える。
+                    for skipped in calls_owned.iter().skip(outcomes.len()) {
+                        outcomes.push((
+                            skipped.tool_name.clone(),
+                            CallOutcome {
+                                tool_call_id: skipped.tool_call_id.clone(),
+                                sanitized: serde_json::json!({
+                                    "success": false,
+                                    "data": null,
+                                    "error": "skipped: batch timed out",
+                                })
+                                .to_string(),
+                                failed: true,
+                            },
+                        ));
+                    }
                     break;
                 }
             }
@@ -839,14 +954,15 @@ impl ToolDispatcher for SubtaskToolDispatcher {
             // 単一ツールのときは従来と同じ「ツール結果 JSON そのまま」を保つ。
             let result_text = if calls_owned.len() == 1 {
                 outcomes
-                    .into_iter()
-                    .next()
-                    .map(|(_, o)| o.sanitized)
+                    .first()
+                    .map(|(_, o)| o.sanitized.clone())
                     .unwrap_or_else(|| r#"{"success":false}"#.to_string())
             } else {
+                // 複数ツール: 結果を**構造として**埋め、`tool_call_id` も載せる
+                // （三重エスケープと対応付け不能の解消 = レビュー P2）。
                 let arr: Vec<serde_json::Value> = outcomes
-                    .into_iter()
-                    .map(|(tool, o)| serde_json::json!({"tool": tool, "result": o.sanitized}))
+                    .iter()
+                    .map(|(tool, o)| batch_result_entry(tool, o))
                     .collect();
                 serde_json::to_string(&arr).unwrap_or_else(|_| r#"[]"#.to_string())
             };
@@ -2008,6 +2124,207 @@ mod tests {
         assert!(body.contains("slow_tool") && body.contains("fast_tool"));
     }
 
+    /// 指定名のツールだけ永久に pending する executor（残りは即成功）。
+    /// 完走した call 数を数える（cancel 時の部分結果検証用）。
+    struct HangingExecutor {
+        hang_on: String,
+        finished: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ActionExecutor for HangingExecutor {
+        async fn execute(&self, name: &str, _args: &serde_json::Value) -> ActionResult {
+            if name == self.hang_on {
+                std::future::pending::<()>().await;
+            }
+            self.finished.lock().unwrap().push(name.to_string());
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"tool": name}),
+                error: None,
+            }
+        }
+        fn list_tools(&self) -> Vec<FunctionDefinition> {
+            Vec::new()
+        }
+    }
+
+    fn call(tool: &str, id: &str) -> DispatchCall {
+        DispatchCall {
+            tool_name: tool.to_string(),
+            args: serde_json::json!({"x": 1}),
+            tool_call_id: id.to_string(),
+        }
+    }
+
+    /// [P2 回帰] timeout でバッチが打ち切られたとき、**未実行 call も本文に現れる**。
+    ///
+    /// system prompt は「同じツールを再呼びするな（もう走っている）」と指示するので、
+    /// 痕跡が無いとエージェントは未実行を知る手段が無く依頼が無言で消える。
+    #[tokio::test]
+    async fn timed_out_batch_records_skipped_calls() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let executor: Arc<dyn ActionExecutor> = Arc::new(HangingExecutor {
+            hang_on: "hangs".to_string(),
+            finished: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        )
+        .with_timeout(std::time::Duration::from_millis(60));
+
+        dispatcher.dispatch_batch(&[
+            call("ok1", "tc-1"),
+            call("hangs", "tc-2"),
+            call("ok2", "tc-3"),
+            call("ok3", "tc-4"),
+        ]);
+        wait_until_settled(&registry).await;
+
+        let body = completed_log_body(&db, parent);
+        // 4 call すべてが本文に現れる（未実行の 2 つは skipped として）。
+        for id in ["tc-1", "tc-2", "tc-3", "tc-4"] {
+            assert!(body.contains(id), "{id} が完了本文に無い: {body}");
+        }
+        assert_eq!(
+            body.matches("skipped: batch timed out").count(),
+            2,
+            "未実行 call（ok2 / ok3）が skipped として記録されるべき: {body}"
+        );
+        assert_eq!(sink.events.lock().unwrap()[0].exit_reason, "timeout");
+    }
+
+    /// [P2 回帰] 複数ツールバッチの完了本文は **構造として** 結果を埋め、
+    /// `tool_call_id` を含む（三重エスケープと順序依存の対応付けの解消）。
+    #[tokio::test]
+    async fn batch_body_embeds_results_as_json_with_tool_call_id() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let executor: Arc<dyn ActionExecutor> = Arc::new(HangingExecutor {
+            hang_on: "never".to_string(),
+            finished: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        );
+        // 同じツールを 2 回呼ぶ（順序でしか対応が取れなかったケース）。
+        dispatcher.dispatch_batch(&[call("ws_write", "tc-a"), call("ws_write", "tc-b")]);
+        wait_until_settled(&registry).await;
+
+        // 完了ログ本文（`{"type":"subtask_completed",...,"result":"<配列 JSON>"}`）を
+        // 2 段でパースし、結果が**文字列ではなく object** であることを確かめる。
+        let log: serde_json::Value =
+            serde_json::from_str(&completed_log_body(&db, parent)).expect("完了ログは JSON");
+        let arr: Vec<serde_json::Value> =
+            serde_json::from_str(log["result"].as_str().expect("result は配列 JSON 文字列"))
+                .expect("result は JSON 配列としてパースできる");
+        assert_eq!(arr.len(), 2);
+        for (i, id) in ["tc-a", "tc-b"].iter().enumerate() {
+            assert_eq!(arr[i]["tool"], "ws_write");
+            assert_eq!(
+                arr[i]["tool_call_id"], *id,
+                "tool_call_id が無いと同名ツールの対応が取れない: {arr:?}"
+            );
+            assert!(
+                arr[i]["result"].is_object(),
+                "結果は構造として埋める（文字列だと多重エスケープになる）: {}",
+                arr[i]["result"]
+            );
+            assert_eq!(arr[i]["result"]["success"], true);
+        }
+    }
+
+    /// [P2 回帰] cancel でバッチを止めたとき、**完走済み call の部分結果**が親ログに残る
+    /// （どこまで進んだかがラベルしか残らないのを防ぐ）。
+    #[tokio::test]
+    async fn cancel_records_partial_results_of_completed_calls() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let finished = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn ActionExecutor> = Arc::new(HangingExecutor {
+            hang_on: "hangs".to_string(),
+            finished: finished.clone(),
+        });
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        );
+        let outcome = dispatcher.dispatch_batch(&[
+            call("ws_write", "tc-1"),
+            call("ws_write", "tc-2"),
+            call("hangs", "tc-3"),
+        ]);
+
+        // 先頭 2 call が完走してハングに入るまで待つ。
+        for _ in 0..200 {
+            if finished.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(finished.lock().unwrap().len(), 2);
+
+        let cancelled = cancel_subtask(
+            &registry,
+            &db,
+            Some(sink.as_ref()),
+            &outcome.subtask_id,
+            true,
+            None,
+        );
+        assert_eq!(cancelled, CancelOutcome::Cancelled);
+
+        // 完了 sink は発火しない（停止したので返信しない）が、部分結果は残る。
+        assert!(sink.events.lock().unwrap().is_empty());
+        let conn = db.lock().unwrap();
+        let log = opencrab_db::queries::list_recent_session_logs(&conn, parent, 10)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.log_type == "tool_cancelled")
+            .expect("tool_cancelled が親ログに残る");
+        assert!(
+            log.content.contains("2 completed tool call(s)"),
+            "完走済み call 数が残るべき: {}",
+            log.content
+        );
+        assert!(log.content.contains("tc-1") && log.content.contains("tc-2"));
+        assert!(
+            !log.content.contains("tc-3"),
+            "未完了 call は部分結果に含めない: {}",
+            log.content
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(log.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["completed_calls"].as_array().unwrap().len(), 2);
+    }
+
     /// [P0 回帰] dispatch にもタイムアウトがあり、`exit_reason="timeout"` で
     /// settle して registry から除去される（永久滞留＝無言の消失を防ぐ）。
     #[tokio::test]
@@ -2200,6 +2517,120 @@ mod tests {
         );
     }
 
+    /// [P1 回帰 / fail-closed] `ActionDispatcher` の core アクション**全名**が
+    /// inline / dispatch のどちらかに分類されている（#152）。
+    ///
+    /// これが無かった頃は core 32 個が分類ガードの外にあり全 dispatch されていた:
+    /// 記憶想起フロー（`search_memory_index` → `retrieve_memory_nodes`）が背景往復
+    /// 2 回 = ユーザーへ 4 通、`open_task` は task_id の代わりに `spawned` が返る、
+    /// という壊れ方をしていた。既存の `pure_read_tools_are_not_dispatched` は Discord
+    /// gateway の読み取りしか見ないので検知できなかった。
+    #[test]
+    fn core_actions_are_classified_for_dispatch() {
+        let names = crate::dispatcher::ActionDispatcher::new().action_names();
+        assert!(
+            !names.is_empty(),
+            "core アクションが 1 つも登録されていない"
+        );
+
+        for name in &names {
+            let inline = crate::bridge::CORE_INLINE_ACTIONS.contains(&name.as_str());
+            let dispatchable = crate::bridge::CORE_DISPATCHABLE_ACTIONS.contains(&name.as_str());
+            assert!(
+                inline ^ dispatchable,
+                "core アクション {name} が未分類（または両方に居る）。\
+                 新しいアクションを登録したら CORE_INLINE_ACTIONS か \
+                 CORE_DISPATCHABLE_ACTIONS のどちらかへ入れること（判定基準は \
+                 default_non_dispatch_tools の doc / docs/DESIGN.md）"
+            );
+        }
+        // 死名検出: 一覧側に実在しない名前を残さない（空振りする分類を防ぐ）。
+        for name in crate::bridge::CORE_INLINE_ACTIONS {
+            assert!(
+                names.contains(&(*name).to_string()),
+                "CORE_INLINE_ACTIONS の {name} が ActionDispatcher に無い（死名）"
+            );
+        }
+        for name in crate::bridge::CORE_DISPATCHABLE_ACTIONS {
+            assert!(
+                names.contains(&(*name).to_string()),
+                "CORE_DISPATCHABLE_ACTIONS の {name} が ActionDispatcher に無い（死名）"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            crate::bridge::CORE_INLINE_ACTIONS.len()
+                + crate::bridge::CORE_DISPATCHABLE_ACTIONS.len(),
+            "分類の総数が登録アクション数と一致しない"
+        );
+
+        // 分類が実際に効いている（除外集合へ反映されている）。
+        let non_dispatch = default_non_dispatch_tools();
+        for name in crate::bridge::CORE_INLINE_ACTIONS {
+            assert!(
+                non_dispatch.contains(*name),
+                "{name} は inline 分類なのに dispatch されてしまう"
+            );
+        }
+        for name in crate::bridge::CORE_DISPATCHABLE_ACTIONS {
+            assert!(
+                !non_dispatch.contains(*name),
+                "{name} は dispatch 可分類なのに inline 集合に居る"
+            );
+        }
+    }
+
+    /// [P1 回帰] system prompt が指示する記憶想起フローと台帳の同ターン連鎖は inline。
+    /// dispatch されると 1 質問が複数ターン・複数メッセージに割れる。
+    #[test]
+    fn memory_recall_and_task_ledger_tools_are_inline() {
+        let set = default_non_dispatch_tools();
+        for name in [
+            // 記憶想起（2 段連鎖）。
+            "search_memory_index",
+            "retrieve_memory_nodes",
+            "browse_memory_index",
+            // 純粋読み取り。
+            "ws_read",
+            "ws_list",
+            "get_task",
+            "read_skill",
+            "get_system_info",
+            // 同ターン結果依存（戻り値の task_id を後続で使う）。
+            "open_task",
+        ] {
+            assert!(
+                set.contains(name),
+                "{name} は inline でなければならない（分類基準 3/5）"
+            );
+        }
+    }
+
+    /// [P1 回帰] MCP ツール（`mcp__*`）は既定 inline。運用者が繋いだ任意ツールの性質
+    /// （配送系か / 同ターン結果依存か）は静的に分類できないため安全側に倒す。
+    #[tokio::test]
+    async fn mcp_tools_are_not_dispatched_by_default() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: true });
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry,
+            db,
+            sink,
+            "agent-a",
+            "web-agent-a-conv1",
+        );
+
+        assert!(!dispatcher.should_dispatch("mcp__slack__post_message"));
+        assert!(!dispatcher.should_dispatch("mcp__anything__at_all"));
+        // 非 MCP の dispatch 可ツールは従来どおり dispatch される。
+        assert!(dispatcher.should_dispatch("execute_shell"));
+        assert!(dispatcher.should_dispatch("ws_write"));
+    }
+
     /// 分類集合の内部整合性（#152）。
     ///
     /// - inline 集合と dispatch 可リストは互いに素（同じ名前が両方に属さない）。
@@ -2210,6 +2641,12 @@ mod tests {
     fn dispatch_classification_sets_are_consistent() {
         let non_dispatch = default_non_dispatch_tools();
 
+        for name in crate::bridge::CORE_DISPATCHABLE_ACTIONS {
+            assert!(
+                !non_dispatch.contains(*name),
+                "{name} が dispatch 可リストと inline 集合の両方に居る"
+            );
+        }
         for name in crate::bridge::DISCORD_DISPATCHABLE_ACTIONS {
             assert!(
                 !non_dispatch.contains(*name),
@@ -2233,6 +2670,12 @@ mod tests {
             unique.len(),
             crate::bridge::DISCORD_INLINE_ACTIONS.len(),
             "DISCORD_INLINE_ACTIONS に重複がある"
+        );
+        let unique: HashSet<&&str> = crate::bridge::CORE_INLINE_ACTIONS.iter().collect();
+        assert_eq!(
+            unique.len(),
+            crate::bridge::CORE_INLINE_ACTIONS.len(),
+            "CORE_INLINE_ACTIONS に重複がある"
         );
     }
 

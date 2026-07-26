@@ -169,6 +169,85 @@ pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
 /// `nostr_tools_are_classified_for_dispatch`（`crates/nostr/src/actions.rs`）が落ちる。
 pub const NOSTR_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
 
+/// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
+/// にするもの（`default_non_dispatch_tools` の種）。
+///
+/// gateway 由来のツール（Discord / Nostr）だけを分類していた頃は、core アクション
+/// 32 個が**分類ガードの外**にあり全部 dispatch されていた。その結果
+/// - system prompt が指示する記憶想起フロー（`search_memory_index` →
+///   `retrieve_memory_nodes`）が 2 回の背景往復 = ユーザーへ 4 通、
+/// - `open_task` は戻り値の task_id を同ターンで使うのに `spawned` しか返らない、
+/// という壊れ方をしていた。分類基準（[`crate::subtask::default_non_dispatch_tools`]
+/// の doc）に沿って全名を明示する。
+///
+/// **fail-closed**: `ActionDispatcher::new()` の全アクション名がこの集合か
+/// [`CORE_DISPATCHABLE_ACTIONS`] のどちらか一方に属することを
+/// `core_actions_are_classified_for_dispatch`（`crates/actions/src/subtask.rs`）が
+/// 検査する。新しい core アクションを登録したら、どちらかへ入れない限りテストが落ちる。
+pub const CORE_INLINE_ACTIONS: &[&str] = &[
+    // (1) 制御系: そのターンを終える宣言。background 化すると同ターンに効かない。
+    "declare_done",
+    // (3) 同ターン結果依存: 生成した内声をそのターンの応答づくりに使う。
+    "generate_inner_voice",
+    // (3) 同ターン結果依存: 自己評価の結果を見てそのターンの応答を直す。
+    "evaluate_response",
+    // (3) 同ターン結果依存: 戻り値の task_id を update/record/close で使う。
+    "open_task",
+    // (3) 同ターン結果依存: 編集/削除/作成の成否を確認して次の操作へ進む用法が通常
+    //     （mkdir → write、edit → 失敗なら別の編集、のような同ターンの連鎖）。
+    "ws_edit",
+    "ws_delete",
+    "ws_mkdir",
+    // (4) run 内共有状態: model_override / current_purpose を書き換える。
+    "select_llm",
+    // (4) run 内共有状態: 以後のスキル可視性（棚）を書き換える。
+    "retire_my_skill",
+    "restore_my_skill",
+    // (4) run 内共有状態: 以後の system prompt に効く指示文の書き込み（owner 専用）。
+    "update_instructions",
+    // (4) 台帳の状態: contract / progress / close が同ターンに効かないと、以後の
+    //     `get_task` と食い違う（「更新したのに古い契約が見える」）。
+    "update_task_contract",
+    "record_task_progress",
+    "close_task",
+    // (5) 純粋な読み取り（即答すべきもの）。dispatch すると質問 1 つが 2 ターン
+    //     2 メッセージに割れるだけ。記憶想起フローは 2 段連鎖なので特に致命的。
+    "get_system_info",
+    "ws_read",
+    "ws_list",
+    "read_skill",
+    "browse_memory_index",
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "search_my_history",
+    "get_task",
+    "analyze_llm_usage",
+    "recall_model_experiences",
+    // (6) 情報価値の無い短時間の書き込み。dispatch には必ず resume ターン
+    //     （= ユーザーへの追加メッセージ）が 1 本付くので、報告する価値が無い
+    //     書き込みを background 化すると雑音が増えるだけ。
+    "update_impression",
+    "save_model_insight",
+];
+
+/// core アクションのうち、**意図的に dispatch を許す**もの。
+///
+/// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く（dispatch には
+/// resume ターンが 1 本付くので、その 1 通に見合う仕事に限る）。
+pub const CORE_DISPATCHABLE_ACTIONS: &[&str] = &[
+    // 長文の書き出しは payload が大きくなりうる。書けたかどうかは完了報告で足りる。
+    "ws_write",
+    // 学習の書き込み: 戻り値（skill_id）を同ターンで使わない。「覚えておいて」は
+    // 非ブロックで処理して完了時に報告するのが自然な依頼。
+    "learn_from_experience",
+    "learn_from_peer",
+    "reflect_and_learn",
+    // 要約の保存: 同ターンで読み戻さない。
+    "summarize_and_save",
+    // スキル生成（Discord の `create_skill` と同分類）。
+    "create_my_skill",
+];
+
 /// spawn_subtask のネスト上限。
 const MAX_DEPTH: u32 = 2;
 
@@ -286,7 +365,11 @@ fn is_rejection(error: Option<&str>) -> bool {
 /// Optionally holds `GatewayActions` to merge gateway-specific tools.
 /// MCP ツール名の名前空間プレフィックス（`opencrab_mcp::MCP_TOOL_PREFIX` と一致させる。
 /// actions は mcp に依存できない＝依存循環になるため定数で持つ）。
-const MCP_TOOL_PREFIX: &str = "mcp__";
+///
+/// dispatch 分類でも使う: MCP ツールは運用者が繋いだ任意の外部ツールで、性質
+/// （配送系か / 同ターンで結果を使うか）を静的に分類できないため、**既定 inline**
+/// （安全側）にする（[`crate::subtask::SubtaskToolDispatcher::should_dispatch`]）。
+pub const MCP_TOOL_PREFIX: &str = "mcp__";
 
 pub struct BridgedExecutor {
     dispatcher: ActionDispatcher,
