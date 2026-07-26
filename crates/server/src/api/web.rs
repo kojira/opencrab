@@ -3,8 +3,10 @@
 //! - `POST /api/agents/{id}/web/send` — ダッシュボードからの inbound。
 //! - `GET  /api/agents/{id}/web/stream?conversation={cid}` — SSE 購読。
 //!
-//! session_id 規約・直列化・SSE 配送・非ブロック dispatch の実体は
-//! `crate::web_gateway` に置き、ここは HTTP 境界（抽出・認可・DB 記録）だけを持つ。
+//! session_id 規約・直列化・SSE 配送・非ブロック dispatch の実体は独立クレート
+//! `opencrab-web-gateway`（`crate::web_gateway` から再エクスポート）に置き、ここは
+//! HTTP 境界（抽出・レスポンス整形）だけを持つ。認可判定・セッション用意・DB 記録は
+//! `WebAgentRunner`（`AppState` 実装 = `crate::web_runner_impl`）越しに呼ぶ。
 
 use std::convert::Infallible;
 
@@ -16,7 +18,9 @@ use axum::{
 use futures::Stream;
 use serde::Deserialize;
 
-use crate::web_gateway::{run_and_deliver_serialized, web_session_id};
+use crate::web_gateway::{
+    caller_type_label, run_and_deliver_serialized, web_session_id, WebAgentRunner,
+};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -61,83 +65,21 @@ pub async fn send_web_message(
     let session_id = web_session_id(&id, &req.conversation_id);
 
     // 1. 認可: 既存 REST（agents_messages）に倣い trusted_users から caller を導出する。
-    let caller = {
-        let conn = state.db.lock().unwrap();
-        match opencrab_db::queries::get_trusted_user(&conn, &user_id, &id) {
-            Some(u) if u.permission == "co_agent" => opencrab_actions::CallerIdentity::CoAgent {
-                agent_id: user_id.clone(),
-            },
-            Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
-            None => {
-                let cfg = opencrab_db::queries::get_agent_discord_config(&conn, &id);
-                if let Ok(Some(c)) = cfg {
-                    if crate::api::is_owner_id(&c.owner_discord_id, &user_id) {
-                        opencrab_actions::CallerIdentity::Owner
-                    } else {
-                        opencrab_actions::CallerIdentity::Agent
-                    }
-                } else {
-                    opencrab_actions::CallerIdentity::Agent
-                }
-            }
-        }
-    };
-    let caller_type = match &caller {
-        opencrab_actions::CallerIdentity::CoAgent { .. } => "co_agent",
-        opencrab_actions::CallerIdentity::TrustedUser => "trusted_user",
-        opencrab_actions::CallerIdentity::Owner => "owner",
-        _ => "agent",
-    };
+    let caller = state.resolve_caller(&id, &user_id);
+    let caller_type = caller_type_label(&caller);
 
     // 2. セッションを用意する（無ければ作成）。
-    {
-        let conn = state.db.lock().unwrap();
-        let existing = opencrab_db::queries::get_session(&conn, &session_id)
-            .ok()
-            .flatten();
-        if existing.is_none() {
-            let session = opencrab_db::queries::SessionRow {
-                id: session_id.clone(),
-                mode: "autonomous".to_string(),
-                theme: "web_conversation".to_string(),
-                phase: "divergent".to_string(),
-                turn_number: 0,
-                status: "active".to_string(),
-                participant_ids_json: serde_json::json!([&id]).to_string(),
-                facilitator_id: None,
-                done_count: 0,
-                max_turns: None,
-                metadata_json: None,
-            };
-            if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
-                return Json(
-                    serde_json::json!({"error": format!("Failed to create session: {e}")}),
-                );
-            }
-        }
+    if let Err(e) = WebAgentRunner::ensure_session(&state, &session_id, &id) {
+        return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}));
     }
 
-    // 3. ユーザ発話を DB へ記録する（run_and_deliver は DB から会話を再構築する）。
-    {
-        let conn = state.db.lock().unwrap();
-        let log = opencrab_db::queries::SessionLogRow {
-            id: None,
-            agent_id: id.clone(),
-            session_id: session_id.clone(),
-            log_type: "speech".to_string(),
-            content: req.content.clone(),
-            speaker_id: Some(user_id.clone()),
-            turn_number: None,
-            metadata_json: None,
-            created_at: None,
-        };
-        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}));
-        }
+    // 3. ユーザ発話を DB へ記録する（応答生成は DB から会話を再構築する）。
+    if let Err(e) = state.record_user_message(&id, &session_id, &user_id, &req.content) {
+        return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}));
     }
 
     // 4. LLM プロバイダの可用性チェック。
-    if state.llm_router.get().provider_names().is_empty() {
+    if !state.has_llm_provider() {
         return Json(serde_json::json!({
             "session_id": session_id,
             "caller_type": caller_type,
@@ -148,10 +90,10 @@ pub async fn send_web_message(
 
     // 5. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
     //    `run_and_deliver_serialized` の内側に閉じている（呼び忘れが起こらない）。
-    let gateway = state.web_gateway.clone();
+    //    ランタイム（SSE チャンネル + ロック）は runner から引かれるため、inbound と
+    //    完了 sink が別のランタイムを掴む余地は無い。
     let response =
-        run_and_deliver_serialized(&state, &gateway, &id, &session_id, caller, None, "direct")
-            .await;
+        run_and_deliver_serialized(&state, &id, &session_id, caller, None, "direct").await;
 
     Json(serde_json::json!({
         "session_id": session_id,
