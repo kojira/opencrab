@@ -139,9 +139,17 @@ pub async fn send_agent_message(
     let session_id = format!("{}{}-{}", REST_SESSION_PREFIX, id, user_id);
 
     // 1. Determine caller identity from trusted_users table.
+    //    引く経路は `rest`（#214）。ただし当面は互換読み
+    //    （`get_trusted_user_with_legacy_fallback` — 自経路の行が無ければ従来の
+    //    `discord` 経路も見る）を通す。理由と外す条件はその関数の doc を参照。
     let caller = {
         let conn = state.db.lock().unwrap();
-        match opencrab_db::queries::get_trusted_user(&conn, user_id, &id) {
+        match opencrab_db::queries::get_trusted_user_with_legacy_fallback(
+            &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_REST,
+            user_id,
+            &id,
+        ) {
             Some(u) if u.permission == "co_agent" => opencrab_actions::CallerIdentity::CoAgent {
                 agent_id: user_id.to_string(),
             },

@@ -85,6 +85,23 @@ pub fn delete_trusted_co_agent(
 // TrustedDiscordUser
 // ============================================
 
+// ---- 経路（identity platform, #214） ----
+//
+// 信頼済みユーザーの表は元々「Discord のユーザー識別子」ひとつの平坦な空間だった。
+// web / REST は自分の側のユーザー識別子で同じ表を引いていたため、識別子が一致すると
+// 信頼が経路をまたいで引き継がれていた。`platform` 列を足し、認可の読み出しは
+// `(platform, discord_user_id, agent_id)` で引く。
+//
+// 列名 `discord_user_id` / 表名 `trusted_discord_users` の改名は #159 の担当
+// （読み手・REST の DTO・web の型が連動するため一括でやる）。ここでは列追加だけ。
+
+/// 列追加前から存在する行が属する経路。マイグレーションの `DEFAULT` と一致させる。
+pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
+/// ダッシュボード（web ゲートウェイ）が申告するユーザー識別子の経路。
+pub const TRUSTED_PLATFORM_WEB: &str = "web";
+/// REST `POST /api/agents/{id}/messages` が申告するユーザー識別子の経路。
+pub const TRUSTED_PLATFORM_REST: &str = "rest";
+
 #[derive(Debug, Clone)]
 pub struct TrustedDiscordUserRow {
     pub id: String,
@@ -95,6 +112,8 @@ pub struct TrustedDiscordUserRow {
     pub created_at: String,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。空文字可。
     pub display_name: String,
+    /// `discord_user_id` がどの経路の識別子か（#214）。既存行は `discord`。
+    pub platform: String,
 }
 
 fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedDiscordUserRow> {
@@ -106,28 +125,64 @@ fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedDis
         created_by: row.get(4)?,
         created_at: row.get(5)?,
         display_name: row.get(6)?,
+        platform: row.get(7)?,
     })
 }
 
 const TRUSTED_USER_COLUMNS: &str =
-    "id, discord_user_id, agent_id, permission, created_by, created_at, display_name";
+    "id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform";
 
+/// `(経路, 識別子, エージェント)` で 1 行引く。経路が違えば別人として扱う。
+///
+/// 引けない（未登録 / DB エラー）ときは `None` = 最小権限へ倒れる（fail-closed）。
 pub fn get_trusted_user(
     conn: &Connection,
+    platform: &str,
     discord_user_id: &str,
     agent_id: &str,
 ) -> Option<TrustedDiscordUserRow> {
     conn.query_row(
         &format!(
             "SELECT {TRUSTED_USER_COLUMNS} \
-             FROM trusted_discord_users WHERE discord_user_id = ?1 AND agent_id = ?2"
+             FROM trusted_discord_users \
+             WHERE platform = ?1 AND discord_user_id = ?2 AND agent_id = ?3"
         ),
-        [discord_user_id, agent_id],
+        [platform, discord_user_id, agent_id],
         trusted_user_from_row,
     )
     .ok()
 }
 
+/// **暫定の互換読み（#214）**: 自経路の行が無ければ従来の経路（`discord`）の行も見る。
+///
+/// web / REST は #214 以前、経路を区別せず Discord の識別子空間の行を自分のユーザー
+/// 識別子で引いて動いていた。いきなり経路で厳密に切ると、**既存の信頼済みユーザーが
+/// 一斉に権限を失う**（緩む方向ではないが機能が黙って止まる）。移行のあいだだけ
+/// 従来経路へフォールバックする。
+///
+/// この経路では #214 の穴（識別子が一致すると信頼が経路をまたぐ）が残っている点に注意。
+///
+/// **外す条件**: web / REST のユーザーを `platform='web'` / `'rest'` の行として登録し
+/// 直したあと。登録手段（REST の DTO に経路を通す）は #159 が入れるので、それが済んだら
+/// この関数を消して呼び出し元を [`get_trusted_user`] へ戻す（呼び出し元は
+/// `web_runner_impl.rs` と `api/agents_messages.rs` の 2 箇所だけ）。
+pub fn get_trusted_user_with_legacy_fallback(
+    conn: &Connection,
+    platform: &str,
+    discord_user_id: &str,
+    agent_id: &str,
+) -> Option<TrustedDiscordUserRow> {
+    get_trusted_user(conn, platform, discord_user_id, agent_id).or_else(|| {
+        if platform == TRUSTED_PLATFORM_DISCORD {
+            None
+        } else {
+            get_trusted_user(conn, TRUSTED_PLATFORM_DISCORD, discord_user_id, agent_id)
+        }
+    })
+}
+
+/// 管理 UI（`GET /api/agents/{id}/trusted-users`）向けの一覧。**経路で絞らない**
+/// （運用者が全経路の登録を一覧できる必要があるため）。認可の判定には使わない。
 pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedDiscordUserRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {TRUSTED_USER_COLUMNS} \
@@ -137,9 +192,17 @@ pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<Trust
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// 信頼済みユーザーを 1 件登録する。
+///
+/// `platform` は「`discord_user_id` がどの経路の識別子か」。読み出し側と同じ位置
+/// （`conn` の次）に置いて、経路と permission の取り違えを起きにくくしている。
+///
+/// 一意制約は `(discord_user_id, agent_id)` のままなので、**同じ識別子文字列を
+/// 別経路で登録することはまだできない**（制約の作り直しは非可逆なので #159）。
 #[allow(clippy::too_many_arguments)]
 pub fn add_trusted_user(
     conn: &Connection,
+    platform: &str,
     id: &str,
     agent_id: &str,
     discord_user_id: &str,
@@ -149,15 +212,18 @@ pub fn add_trusted_user(
     display_name: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at, display_name) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        [id, discord_user_id, agent_id, permission, created_by, created_at, display_name],
+        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        [id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform],
     )?;
     Ok(())
 }
 
 /// このエージェントのピアレビュアー（permission='co_agent' の trusted user）一覧。
 /// プロンプトのロスター表示と reviewer 解決の両方がこれを使う（選定ロジックの一元化）。
+///
+/// **経路で絞らない**: これは「誰にレビューを頼めるか」のロスターであって、呼び出し元の
+/// 認可判定ではない。経路で切ると別経路から登録された co_agent が指名できなくなる。
 pub fn list_co_agent_reviewers(
     conn: &Connection,
     agent_id: &str,
@@ -200,20 +266,31 @@ pub fn remove_trusted_user(conn: &Connection, id: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
-pub fn is_trusted_user(conn: &Connection, discord_user_id: &str, agent_id: &str) -> bool {
+/// `(経路, 識別子, エージェント)` が登録されているか。DB エラー時は false（fail-closed）。
+pub fn is_trusted_user(
+    conn: &Connection,
+    platform: &str,
+    discord_user_id: &str,
+    agent_id: &str,
+) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) FROM trusted_discord_users WHERE discord_user_id = ?1 AND agent_id = ?2",
-        [discord_user_id, agent_id],
+        "SELECT COUNT(*) FROM trusted_discord_users \
+         WHERE platform = ?1 AND discord_user_id = ?2 AND agent_id = ?3",
+        [platform, discord_user_id, agent_id],
         |row| row.get::<_, i64>(0),
     )
     .map(|c| c > 0)
     .unwrap_or(false)
 }
 
-pub fn trusted_user_count(conn: &Connection, agent_id: &str) -> i64 {
+/// そのエージェントに **その経路の** 信頼ユーザーが何件登録されているか（#214）。
+///
+/// DM 許可は「登録が 0 件ならオーナーのみ」という二段構えなので、件数も経路で
+/// 切らないと「ある経路に 1 件あるだけで別経路も『登録あり』」に化ける。
+pub fn trusted_user_count(conn: &Connection, platform: &str, agent_id: &str) -> i64 {
     conn.query_row(
-        "SELECT COUNT(*) FROM trusted_discord_users WHERE agent_id = ?1",
-        [agent_id],
+        "SELECT COUNT(*) FROM trusted_discord_users WHERE platform = ?1 AND agent_id = ?2",
+        [platform, agent_id],
         |row| row.get::<_, i64>(0),
     )
     .unwrap_or(0)

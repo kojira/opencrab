@@ -175,10 +175,16 @@ pub(crate) fn record_peer_review_reply(
         warn!("record_peer_review_reply: DB lock failed, review not recorded");
         return false;
     };
-    // 送信者ゲート: 登録済み co_agent のみ
-    let is_co_agent = opencrab_db::queries::get_trusted_user(&conn, sender_id, agent_id)
-        .map(|u| u.permission == "co_agent")
-        .unwrap_or(false);
+    // 送信者ゲート: 登録済み co_agent のみ。sender_id は Discord のユーザー識別子なので
+    // 経路も Discord 固定で引く（#214）。
+    let is_co_agent = opencrab_db::queries::get_trusted_user(
+        &conn,
+        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        sender_id,
+        agent_id,
+    )
+    .map(|u| u.permission == "co_agent")
+    .unwrap_or(false);
     if !is_co_agent {
         tracing::debug!(
             agent_id = %agent_id,
@@ -320,6 +326,7 @@ mod tests {
             // 送信者 "42" をこのエージェントの co_agent として登録
             opencrab_db::queries::add_trusted_user(
                 &conn,
+                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
                 "row-1",
                 "a1",
                 "42",

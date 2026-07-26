@@ -1892,6 +1892,7 @@ mod peer_reviewers_section_tests {
 
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "r1",
             "a1",
             "42",
@@ -1903,6 +1904,7 @@ mod peer_reviewers_section_tests {
         .unwrap();
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "r2",
             "a1",
             "43",
@@ -1914,6 +1916,7 @@ mod peer_reviewers_section_tests {
         .unwrap();
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "r3",
             "a1",
             "44",
@@ -1942,6 +1945,7 @@ mod peer_reviewers_section_tests {
         let conn = opencrab_db::init_memory().unwrap();
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "r1",
             "a1",
             "42",
@@ -1972,6 +1976,7 @@ mod shared_prompt_is_transport_neutral_tests {
         // ロスターも共有プロンプトの一部なので、レビュアーを登録した状態で検査する。
         opencrab_db::queries::add_trusted_user(
             &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "r1",
             "a1",
             "42",

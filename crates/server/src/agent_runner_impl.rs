@@ -48,12 +48,25 @@ impl opencrab_discord::AgentRunner for AppState {
         }
         match self.db.lock() {
             Ok(conn) => {
-                let any_trusted = agent_ids
-                    .iter()
-                    .any(|aid| opencrab_db::queries::is_trusted_user(&conn, sender_id, aid));
-                let any_registered = agent_ids
-                    .iter()
-                    .any(|aid| opencrab_db::queries::trusted_user_count(&conn, aid) > 0);
+                // 経路は Discord 固定（この trait は Discord ゲートウェイ専用）。
+                // 信頼の判定も登録件数の判定も同じ経路で切る（#214）。件数を経路で
+                // 切らないと、web / REST に 1 件登録があるだけでここが「登録あり」に
+                // 化けて、Discord 側の owner-only フォールバックが黙って外れる。
+                let any_trusted = agent_ids.iter().any(|aid| {
+                    opencrab_db::queries::is_trusted_user(
+                        &conn,
+                        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                        sender_id,
+                        aid,
+                    )
+                });
+                let any_registered = agent_ids.iter().any(|aid| {
+                    opencrab_db::queries::trusted_user_count(
+                        &conn,
+                        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                        aid,
+                    ) > 0
+                });
                 if any_registered {
                     any_trusted
                 } else {
@@ -77,8 +90,19 @@ impl opencrab_discord::AgentRunner for AppState {
         }
         match self.db.lock() {
             Ok(conn) => {
-                if opencrab_db::queries::trusted_user_count(&conn, agent_id) > 0 {
-                    opencrab_db::queries::is_trusted_user(&conn, sender_id, agent_id)
+                // 経路は Discord 固定。件数判定も同じ経路で切る（理由は `dm_allowed_any`）。
+                if opencrab_db::queries::trusted_user_count(
+                    &conn,
+                    opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                    agent_id,
+                ) > 0
+                {
+                    opencrab_db::queries::is_trusted_user(
+                        &conn,
+                        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                        sender_id,
+                        agent_id,
+                    )
                 } else {
                     // このエージェントに信頼ユーザー登録が無い場合は owner のみ許可。
                     // owner 未設定時に全許可へ倒れる既存挙動。fail-closed への統一は #174。
@@ -101,9 +125,15 @@ impl opencrab_discord::AgentRunner for AppState {
         }
         // DB接続取得失敗時は trust_info=None（＝最小権限の Agent 扱い）。
         let trust_info = match self.db.lock() {
-            Ok(conn) => agent_ids
-                .iter()
-                .find_map(|aid| opencrab_db::queries::get_trusted_user(&conn, sender_id, aid)),
+            Ok(conn) => agent_ids.iter().find_map(|aid| {
+                // 経路は Discord 固定（#214）。互換読みは不要 — 従来の行が Discord 経路そのもの。
+                opencrab_db::queries::get_trusted_user(
+                    &conn,
+                    opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                    sender_id,
+                    aid,
+                )
+            }),
             Err(_) => None,
         };
         match trust_info {
@@ -239,6 +269,99 @@ mod tests {
                 " 123456789012345678\n"
             ),
             CallerIdentity::Owner
+        );
+    }
+
+    /// #214: 別経路（web）の登録が Discord の DM 許可へ漏れないこと。
+    ///
+    /// 修正前は識別子空間が平坦だったため、web 経路に `"dash-user"` を登録すると
+    /// (a) 件数判定が「登録あり」に化け、(b) 同じ文字列を名乗る Discord の送信者が
+    /// そのまま信頼済みとして通っていた。
+    fn register_trusted(state: &AppState, platform: &str, user_id: &str, agent_id: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::add_trusted_user(
+            &conn,
+            platform,
+            &format!("row-{platform}-{user_id}"),
+            agent_id,
+            user_id,
+            "user",
+            "owner",
+            "2026-01-01",
+            "",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dm_allow_does_not_inherit_trust_from_another_platform() {
+        let state = test_state();
+        let agents = ["agent-1".to_string()];
+        let owner = "123456789012345678";
+
+        // web 経路にだけ登録がある状態。
+        register_trusted(
+            &state,
+            opencrab_db::queries::TRUSTED_PLATFORM_WEB,
+            "dash-user",
+            "agent-1",
+        );
+
+        // 同じ文字列を名乗る Discord 送信者は通らない（信頼が経路をまたがない）。
+        assert!(!state.dm_allowed("dash-user", "agent-1", owner));
+        assert!(!state.dm_allowed_any("dash-user", &agents, owner));
+
+        // Discord 経路に登録すれば通る（判定そのものは壊れていない）。
+        register_trusted(
+            &state,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            "42",
+            "agent-1",
+        );
+        assert!(state.dm_allowed("42", "agent-1", owner));
+        assert!(state.dm_allowed_any("42", &agents, owner));
+    }
+
+    /// #214: 登録件数の判定も経路で切られていること。
+    ///
+    /// web に 1 件あるだけで Discord 側が「登録あり」に化けると、owner-only の段が
+    /// 黙って別の分岐に入る。ここでは Discord 側の件数が 0 のままであることを、
+    /// 「owner 未設定なら全許可」という既存フォールバックが生きることで観測する。
+    #[test]
+    fn dm_registration_count_is_scoped_to_discord() {
+        let state = test_state();
+        let agents = ["agent-1".to_string()];
+
+        // web 経路にだけ登録がある（Discord から見れば 0 件のまま）。
+        register_trusted(
+            &state,
+            opencrab_db::queries::TRUSTED_PLATFORM_WEB,
+            "dash-user",
+            "agent-1",
+        );
+
+        // owner 未設定 → Discord 側は「登録 0 件」の段に入る（既存の fail-open、#174）。
+        assert!(state.dm_allowed("someone-else", "agent-1", ""));
+        assert!(state.dm_allowed_any("someone-else", &agents, ""));
+
+        // owner 設定済みなら owner のみ許可（緩みっぱなしではない）。
+        assert!(!state.dm_allowed("someone-else", "agent-1", "123456789012345678"));
+        assert!(!state.dm_allowed_any("someone-else", &agents, "123456789012345678"));
+    }
+
+    /// #214: `resolve_caller` も経路で切られている（別経路の permission を継がない）。
+    #[test]
+    fn resolve_caller_does_not_inherit_permission_from_another_platform() {
+        let state = test_state();
+        register_trusted(
+            &state,
+            opencrab_db::queries::TRUSTED_PLATFORM_WEB,
+            "dash-user",
+            "agent-1",
+        );
+        assert_eq!(
+            state.resolve_caller("dash-user", &["agent-1".to_string()], "owner-id"),
+            CallerIdentity::Agent
         );
     }
 }
