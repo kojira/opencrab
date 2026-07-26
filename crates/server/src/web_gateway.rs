@@ -199,139 +199,6 @@ impl SubtaskCompletionSink for WebCompletionSink {
     }
 }
 
-/// [`run_and_deliver`] を per-session ロックの下で実行する（**唯一の公開入口**）。
-///
-/// inbound（`POST /api/agents/{id}/web/send`）と resume（`WebCompletionSink`）が同じ
-/// ロックを通るので、同一セッションに対して 2 本の応答生成が並行しない = 同じ履歴から
-/// 2 通の応答が SSE へ流れない。
-///
-/// ロック取得を呼び出し側の責務にしていた頃は、sink 側の `run_serialized` を外しても
-/// テストが全緑だった（呼び忘れを検出できない構造だった）。Nostr の
-/// `NostrResponder::respond_serialized` と同じく、直列化をここに閉じ込める。
-pub async fn run_and_deliver_serialized(
-    state: &AppState,
-    gateway: &Arc<WebGateway>,
-    agent_id: &str,
-    session_id: &str,
-    caller: CallerIdentity,
-    system_prompt_suffix: Option<&str>,
-    kind: &str,
-) -> Option<String> {
-    let fut = run_and_deliver(
-        state,
-        gateway,
-        agent_id,
-        session_id,
-        caller,
-        system_prompt_suffix,
-        kind,
-    );
-    gateway.run_serialized(session_id, fut).await
-}
-
-/// 会話を DB から構築 → `run_agent_response`（非ブロック dispatch 付き）→ 応答を
-/// DB 保存 ＋ SSE 配送する共通経路。inbound と subtask resume の双方が使う。
-///
-/// 返り値: 配送した応答本文（NO_REPLY / 空 / エラー時は None）。
-///
-/// 呼び出しは [`run_and_deliver_serialized`] 経由に限る（直列化の担保のため
-/// module-private にしている）。
-///
-/// **MutexGuard を await 跨ぎで保持しない**（各 DB ロックはブロックで閉じてから await）。
-async fn run_and_deliver(
-    state: &AppState,
-    gateway: &Arc<WebGateway>,
-    agent_id: &str,
-    session_id: &str,
-    caller: CallerIdentity,
-    system_prompt_suffix: Option<&str>,
-    kind: &str,
-) -> Option<String> {
-    // 1. system prompt（+ resume 時は [subtask_completed] 注入）。
-    let (mut system_prompt, agent_name) = {
-        let conn = state.db.lock().unwrap();
-        process::build_agent_context(&conn, agent_id)
-    };
-    if let Some(suffix) = system_prompt_suffix {
-        system_prompt = format!("{system_prompt}\n\n{suffix}");
-    }
-
-    // 2. 会話文字列（DB から再構築 = 二重回答不変の要）。
-    let conversation = {
-        let conn = state.db.lock().unwrap();
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (prov, mdl) = process::split_llm_model_spec(&eff);
-        let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
-        match process::build_conversation_string(&conn, session_id, agent_id, budget) {
-            Ok(raw) => process::prepend_runtime_context(&raw, "web_conversation"),
-            Err(e) => {
-                tracing::error!(session_id = %session_id, "web run: build_conversation_string failed: {e}");
-                return None;
-            }
-        }
-    };
-
-    // 3. 非ブロック dispatch（S3a）を有効化して実行。sink / registry は session 共有。
-    let registry = gateway.registry_for(session_id);
-    let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(WebCompletionSink {
-        state: state.clone(),
-        gateway: gateway.clone(),
-    });
-    let run_req = RunRequest::new(
-        agent_id,
-        &agent_name,
-        session_id,
-        &system_prompt,
-        &conversation,
-        "web",
-        caller,
-    )
-    .with_dispatch(Some(registry), sink);
-
-    let result = process::run_agent_response(state, run_req).await;
-
-    // 4. 応答の保存 ＋ SSE 配送。
-    match result {
-        Ok(er) if !er.response.trim().is_empty() && er.response.trim() != "NO_REPLY" => {
-            {
-                let conn = state.db.lock().unwrap();
-                crate::transcript::record_rest_agent_reply(
-                    &conn,
-                    agent_id,
-                    session_id,
-                    &er.response,
-                    er.iterations,
-                    er.tool_calls_made,
-                );
-            }
-            gateway.publish(
-                session_id,
-                &WebEvent {
-                    kind: kind.to_string(),
-                    agent_id: agent_id.to_string(),
-                    content: er.response.clone(),
-                },
-            );
-            Some(er.response)
-        }
-        Ok(_) => None, // NO_REPLY / 空: 配送しない。
-        Err(e) => {
-            tracing::error!(agent_id = %agent_id, session_id = %session_id, error = format!("{e:#}"), "web run: agent response failed");
-            gateway.publish(
-                session_id,
-                &WebEvent {
-                    kind: "error".to_string(),
-                    agent_id: agent_id.to_string(),
-                    content: format!("(error: {e})"),
-                },
-            );
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,3 +318,153 @@ mod tests {
         );
     }
 }
+
+/// 直列化を**構造で**保証するための private 子モジュール。
+///
+/// `run_and_deliver`（生の応答生成）はこのモジュールの外から呼べない。Rust では
+/// 親モジュールも子の private 項目にアクセスできないため、同じファイル内にある
+/// `WebCompletionSink` からも直呼びできず、**ロック取得の忘れがコンパイル時に
+/// 不可能**になる（テストで検出する方式より強い保証）。
+///
+/// 外へ出す入口は [`serialized::run_and_deliver_serialized`] だけ。
+mod serialized {
+    use super::*;
+
+    /// [`run_and_deliver`] を per-session ロックの下で実行する（**唯一の公開入口**）。
+    ///
+    /// inbound（`POST /api/agents/{id}/web/send`）と resume（`WebCompletionSink`）が同じ
+    /// ロックを通るので、同一セッションに対して 2 本の応答生成が並行しない = 同じ履歴から
+    /// 2 通の応答が SSE へ流れない。
+    ///
+    /// ロック取得を呼び出し側の責務にしていた頃は、sink 側の `run_serialized` を外しても
+    /// テストが全緑だった（呼び忘れを検出できない構造だった）。Nostr の
+    /// `NostrResponder::respond_serialized` と同じく、直列化をここに閉じ込める。
+    pub async fn run_and_deliver_serialized(
+        state: &AppState,
+        gateway: &Arc<WebGateway>,
+        agent_id: &str,
+        session_id: &str,
+        caller: CallerIdentity,
+        system_prompt_suffix: Option<&str>,
+        kind: &str,
+    ) -> Option<String> {
+        let fut = run_and_deliver(
+            state,
+            gateway,
+            agent_id,
+            session_id,
+            caller,
+            system_prompt_suffix,
+            kind,
+        );
+        gateway.run_serialized(session_id, fut).await
+    }
+
+    /// 会話を DB から構築 → `run_agent_response`（非ブロック dispatch 付き）→ 応答を
+    /// DB 保存 ＋ SSE 配送する共通経路。inbound と subtask resume の双方が使う。
+    ///
+    /// 返り値: 配送した応答本文（NO_REPLY / 空 / エラー時は None）。
+    ///
+    /// 呼び出しは [`run_and_deliver_serialized`] 経由に限る（直列化の担保のため
+    /// module-private にしている）。
+    ///
+    /// **MutexGuard を await 跨ぎで保持しない**（各 DB ロックはブロックで閉じてから await）。
+    async fn run_and_deliver(
+        state: &AppState,
+        gateway: &Arc<WebGateway>,
+        agent_id: &str,
+        session_id: &str,
+        caller: CallerIdentity,
+        system_prompt_suffix: Option<&str>,
+        kind: &str,
+    ) -> Option<String> {
+        // 1. system prompt（+ resume 時は [subtask_completed] 注入）。
+        let (mut system_prompt, agent_name) = {
+            let conn = state.db.lock().unwrap();
+            process::build_agent_context(&conn, agent_id)
+        };
+        if let Some(suffix) = system_prompt_suffix {
+            system_prompt = format!("{system_prompt}\n\n{suffix}");
+        }
+
+        // 2. 会話文字列（DB から再構築 = 二重回答不変の要）。
+        let conversation = {
+            let conn = state.db.lock().unwrap();
+            let eff = opencrab_db::queries::effective_model_for_agent(
+                &conn,
+                agent_id,
+                &state.default_model,
+            )
+            .unwrap_or_else(|_| state.default_model.clone());
+            let (prov, mdl) = process::split_llm_model_spec(&eff);
+            let budget = process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
+            match process::build_conversation_string(&conn, session_id, agent_id, budget) {
+                Ok(raw) => process::prepend_runtime_context(&raw, "web_conversation"),
+                Err(e) => {
+                    tracing::error!(session_id = %session_id, "web run: build_conversation_string failed: {e}");
+                    return None;
+                }
+            }
+        };
+
+        // 3. 非ブロック dispatch（S3a）を有効化して実行。sink / registry は session 共有。
+        let registry = gateway.registry_for(session_id);
+        let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(WebCompletionSink {
+            state: state.clone(),
+            gateway: gateway.clone(),
+        });
+        let run_req = RunRequest::new(
+            agent_id,
+            &agent_name,
+            session_id,
+            &system_prompt,
+            &conversation,
+            "web",
+            caller,
+        )
+        .with_dispatch(Some(registry), sink);
+
+        let result = process::run_agent_response(state, run_req).await;
+
+        // 4. 応答の保存 ＋ SSE 配送。
+        match result {
+            Ok(er) if !er.response.trim().is_empty() && er.response.trim() != "NO_REPLY" => {
+                {
+                    let conn = state.db.lock().unwrap();
+                    crate::transcript::record_rest_agent_reply(
+                        &conn,
+                        agent_id,
+                        session_id,
+                        &er.response,
+                        er.iterations,
+                        er.tool_calls_made,
+                    );
+                }
+                gateway.publish(
+                    session_id,
+                    &WebEvent {
+                        kind: kind.to_string(),
+                        agent_id: agent_id.to_string(),
+                        content: er.response.clone(),
+                    },
+                );
+                Some(er.response)
+            }
+            Ok(_) => None, // NO_REPLY / 空: 配送しない。
+            Err(e) => {
+                tracing::error!(agent_id = %agent_id, session_id = %session_id, error = format!("{e:#}"), "web run: agent response failed");
+                gateway.publish(
+                    session_id,
+                    &WebEvent {
+                        kind: "error".to_string(),
+                        agent_id: agent_id.to_string(),
+                        content: format!("(error: {e})"),
+                    },
+                );
+                None
+            }
+        }
+    }
+}
+
+pub use serialized::run_and_deliver_serialized;
