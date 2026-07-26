@@ -194,6 +194,10 @@ fn resolve_heartbeat_instructions(
 
 `crates/actions`（および `crates/discord/src/gateway_actions/discord_ops.rs` のパターン）に倣い、`GatewayActionResult` を返すアクションを追加する。
 
+> **実装場所（#157 S3 で更新）**: 両ツールは gateway 非依存層 — `crates/server/src/heartbeat_instructions.rs`（定義は `crates/server/src/system_actions.rs` の `own_definitions()`）にある。Discord ゲートウェイには実装が無い。したがって web / Nostr / REST / heartbeat のターンでも使える。
+>
+> ただし **`scope="channel"` / `scope="effective"` は非対称**である。`scope="agent"` が触るのは `agents` 行なので全経路で機能するが、チャンネル上書きの行を作るのは Discord のチャンネル運用だけなので、非 Discord 経路では通常「行が無い」応答（`channel` は空文字列、`effective` はエージェント/既定へのフォールバック）になる。テーブル名・カラム名の Discord 依存を解消する改名は #159 の担当。
+
 ### 7.1 `update_heartbeat_instructions`（Owner限定・書き込み）
 
 引数:

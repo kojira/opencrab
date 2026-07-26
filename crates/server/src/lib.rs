@@ -11,6 +11,7 @@ pub mod agent_log;
 pub mod agent_management;
 pub mod api;
 pub mod config;
+pub mod heartbeat_instructions;
 pub mod hot_reload;
 pub mod llm_adapter;
 pub mod memory_maintenance;

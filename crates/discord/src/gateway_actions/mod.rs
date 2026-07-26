@@ -17,7 +17,6 @@ use crate::PendingInteractionRegistry;
 
 mod agent_management;
 mod discord_ops;
-mod heartbeat_instructions;
 mod peer_review;
 mod subtask_engine;
 mod subtask_notifier;
@@ -32,13 +31,12 @@ pub(crate) use subtask_engine::DiscordCompletionSink;
 pub use subtask_notifier::DiscordWebhookNotifier;
 
 // 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設済み
-// （RFC #152 S1）。Discord 側は re-export せず参照するだけにして、他 crate が
-// Discord crate 経由でサブタスク型を引かないようにする（#170）。lifecycle 通知は
-// `SpawnedSubtask` に載せず、`SubtaskNotifiers` 随伴マップへ分離する（#175 S3:
-// 値は `Arc<dyn SubtaskRunNotifier>` なので Discord 固有の型は晒さない）。
-use opencrab_actions::subtask::SubtaskRegistry;
-use opencrab_actions::subtask_notify::SubtaskNotifiers;
-// 通知先（webhook）の設定型も同様に gateway 非依存層が保持する（#157 S4）。
+// （RFC #152 S1）。#157 S2 で停止処理も移設したため、この gateway はもう registry も
+// lifecycle 通知口マップも保持しない（型を import する必要すら無くなった）。
+//
+// 通知先（webhook）の設定型も同様に gateway 非依存層が保持する（#157 S4）。こちらは
+// `DiscordGatewayActions` が env/config 由来のフォールバックとして保持し続けるため、
+// re-export せず型だけを参照する（他 crate が Discord crate 経由で引かないように）。
 use opencrab_actions::webhook_target::WebhookConfig;
 
 /// Discord固有のゲートウェイアクション実装。
@@ -46,9 +44,12 @@ use opencrab_actions::webhook_target::WebhookConfig;
 /// serenityのHTTPクライアントとDB接続を保持し、
 /// Discord管理操作をGatewayActionsとして提供する。
 ///
-/// Clone は全フィールドが Arc/ハンドルの共有クローンで、subtask_registry /
-/// progress_debounce / event_tx / db を**共有**する（sub-engine 用の
-/// `SubEngineGatewayActions` が同じ registry を見るための前提）。
+/// Clone は全フィールドが Arc/ハンドルの共有クローンで、event_tx / db を**共有**する。
+///
+/// subtask の登録簿（`SubtaskRegistry`）と lifecycle 通知口マップ（`SubtaskNotifiers`）は
+/// **もう保持しない**（#157 S2）。停止（`cancel_subtask`）が gateway 非依存層
+/// （`opencrab_actions::cancel_subtask`）だけの実装になり、Discord 側から両方を参照する
+/// 理由が無くなったため。所有者は server 側（`AppState` / message_loop）。
 #[derive(Clone)]
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
@@ -56,12 +57,6 @@ pub struct DiscordGatewayActions {
     /// ワークスペースのベーステンプレート（例: "/data/workspace/{agent_id}"）。
     /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
     workspace_base: String,
-    subtask_registry: SubtaskRegistry,
-    /// registry と対の lifecycle 通知口マップ（RFC #152 S1 の webhook 分離を #175 S3 で
-    /// trait オブジェクト化したもの）。#175 S4 で subtask の生成が gateway 非依存層へ
-    /// 移ったため、**このマップは server 側（`AppState`）が所有し、構築時に共有
-    /// クローンを受け取る**。`cancel_subtask` はここから通知口を引いて中断を伝える。
-    subtask_notifiers: SubtaskNotifiers,
     /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook
     /// （`get/set_default_subtask_webhook` の解決に使う）。
     default_subtask_webhook: Option<WebhookConfig>,
@@ -79,16 +74,12 @@ impl DiscordGatewayActions {
         http: Arc<Http>,
         db: opencrab_db::Db,
         workspace_base: String,
-        subtask_registry: SubtaskRegistry,
-        subtask_notifiers: SubtaskNotifiers,
         default_subtask_webhook: Option<WebhookConfig>,
     ) -> Self {
         Self {
             http,
             db,
             workspace_base,
-            subtask_registry,
-            subtask_notifiers,
             default_subtask_webhook,
             pending_interaction_registry: None,
             event_tx: None,
@@ -394,70 +385,13 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": []
                 }),
             },
-            GatewayActionDef {
-                name: "cancel_subtask".to_string(),
-                description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "subtask_id": {
-                            "type": "string",
-                            "description": "キャンセルするサブタスクのID（subtask_spawnedイベントから取得）"
-                        }
-                    },
-                    "required": ["subtask_id"]
-                }),
-            },
-            GatewayActionDef {
-                name: "update_heartbeat_instructions".to_string(),
-                description: "ハートビート（自律発言）時の振る舞い指示を更新する。オーナーが「これからハートビートでは○○して」と明示的に依頼した文脈でのみ呼ぶこと。出力形式（SPEAK/LEARN/IDLE）はランタイムが固定するため、ここでは頻度・トーン・話題・沈黙条件などの方針のみを書く。オーナー限定。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "enum": ["agent", "channel"],
-                            "description": "agent=エージェント全体のグローバル指示、channel=特定チャンネルの上書き。"
-                        },
-                        "channel_id": {
-                            "type": "string",
-                            "description": "scope=channelのとき必須。対象チャンネルの数値ID。"
-                        },
-                        "guild_id": {
-                            "type": "string",
-                            "description": "scope=channelで新規にチャンネル設定を作成する場合に必要なサーバーの数値ID。"
-                        },
-                        "instructions": {
-                            "type": "string",
-                            "description": "新しいハートビート指示の全文（最大4000字）。"
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "変更理由（監査ログに記録される。省略可）。"
-                        }
-                    },
-                    "required": ["scope", "instructions"]
-                }),
-            },
-            GatewayActionDef {
-                name: "read_heartbeat_instructions".to_string(),
-                description: "現在のハートビート指示を読み出す。scope=agentでエージェント全体、scope=channelでチャンネル上書きのみ、scope=effectiveで実際にtickで使われる合成結果（解決ルール適用後）を返す。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "enum": ["agent", "channel", "effective"],
-                            "description": "agent / channel / effective。channel・effectiveのときはchannel_id必須。"
-                        },
-                        "channel_id": {
-                            "type": "string",
-                            "description": "scope=channel または effective のとき必須。対象チャンネルの数値ID。"
-                        }
-                    },
-                    "required": ["scope"]
-                }),
-            },
+            // `update_heartbeat_instructions` / `read_heartbeat_instructions` は #157 S3 で
+            // gateway 非依存層（server 側 `SystemGatewayActions` / 実体は
+            // `crates/server/src/heartbeat_instructions.rs`）へ移設済み。DB のみに依存する
+            // ツールだったのに Discord 経由のターンでしか露出していなかった（#157 / #155）。
+            // ここで再定義すると合成 gateway の dedup（own 優先）で own 側に食われ、
+            // Discord の実装が黙って死ぬので**定義してはならない**
+            // （`test_definitions_returns_expected_count` の negative assert が守る）。
             GatewayActionDef {
                 name: "get_default_subtask_webhook".to_string(),
                 description: "spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
@@ -846,12 +780,7 @@ impl GatewayActions for DiscordGatewayActions {
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
             "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
-            "cancel_subtask" => self.execute_cancel_subtask(args, ctx),
             "send_ui" => self.execute_send_ui(args, ctx).await,
-            "update_heartbeat_instructions" => {
-                self.execute_update_heartbeat_instructions(args, ctx)
-            }
-            "read_heartbeat_instructions" => self.execute_read_heartbeat_instructions(args, ctx),
             "get_default_subtask_webhook" => self.execute_get_default_subtask_webhook(args, ctx),
             "set_default_subtask_webhook" => self.execute_set_default_subtask_webhook(args, ctx),
             "ensure_subtask_webhook" => self.execute_ensure_subtask_webhook(args, ctx).await,
@@ -873,7 +802,6 @@ impl GatewayActions for DiscordGatewayActions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_actions::subtask::SpawnedSubtask;
     use opencrab_gateway::GatewayCaller;
     use serde_json::json;
 
@@ -883,15 +811,7 @@ mod tests {
         let db = opencrab_db::Db::memory().unwrap();
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
-        let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
-        let actions = DiscordGatewayActions::new(
-            http,
-            db.clone(),
-            "/tmp".to_string(),
-            subtask_registry,
-            Arc::new(dashmap::DashMap::new()),
-            None,
-        );
+        let actions = DiscordGatewayActions::new(http, db.clone(), "/tmp".to_string(), None);
         (actions, db)
     }
 
@@ -902,308 +822,10 @@ mod tests {
         GatewayCallContext::new(caller, "test-agent").with_session_id("discord-test-agent-111-222")
     }
 
-    /// テスト用: registry に偽の実行中サブタスクを登録する。
-    /// abort_handle は pending future の spawn から取得（テスト終了時に破棄される）。
-    fn insert_fake_subtask(
-        actions: &DiscordGatewayActions,
-        id: &str,
-        session_id: &str,
-        parent_session_id: &str,
-    ) -> tokio::task::JoinHandle<()> {
-        insert_fake_subtask_with_label(actions, id, session_id, parent_session_id, "test")
-    }
-
-    /// `insert_fake_subtask` の label 指定版。自動 dispatch した subtask は
-    /// `tool(主要引数)` 形式の label を持つ（#176 の回帰テスト用）。
-    fn insert_fake_subtask_with_label(
-        actions: &DiscordGatewayActions,
-        id: &str,
-        session_id: &str,
-        parent_session_id: &str,
-        label: &str,
-    ) -> tokio::task::JoinHandle<()> {
-        let handle = tokio::spawn(std::future::pending::<()>());
-        actions.subtask_registry.insert(
-            id.to_string(),
-            SpawnedSubtask {
-                abort_handle: handle.abort_handle(),
-                session_id: session_id.to_string(),
-                parent_session_id: parent_session_id.to_string(),
-                agent_id: "test-agent".to_string(),
-                label: label.to_string(),
-                started_at: std::time::Instant::now(),
-                reply_target: None,
-                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
-            },
-        );
-        handle
-    }
-
-    /// 停止ログ（`tool_cancelled`）の本文を親セッションから 1 件だけ引く。
-    fn cancelled_log_content(db: &opencrab_db::Db, session_id: &str) -> String {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT content FROM memory_sessions \
-             WHERE session_id = ?1 AND log_type = 'tool_cancelled'",
-            [session_id],
-            |row| row.get(0),
-        )
-        .unwrap()
-    }
-
-    /// 停止ログの metadata_json を親セッションから 1 件だけ引く。
-    fn cancelled_log_metadata(db: &opencrab_db::Db, session_id: &str) -> serde_json::Value {
-        let raw: String = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT metadata_json FROM memory_sessions \
-                 WHERE session_id = ?1 AND log_type = 'tool_cancelled'",
-                [session_id],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
-        serde_json::from_str(&raw).unwrap()
-    }
-
-    fn count_session_logs(db: &opencrab_db::Db, session_id: &str) -> i64 {
-        let conn = db.lock().unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )
-        .unwrap()
-    }
-
-    // ---- #64b: cancel_subtask の認可 ----
-
-    #[tokio::test]
-    async fn test_cancel_subtask_not_found_is_plain_error() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "no-such"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        let err = result.error.unwrap();
-        assert!(err.contains("not found"));
-        // 不在は権限拒否ではない
-        assert!(!err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
-    }
-
-    #[tokio::test]
-    async fn test_cancel_subtask_rejects_foreign_session() {
-        let (actions, _db) = make_test_actions();
-        let _h = insert_fake_subtask(&actions, "st-x", "subtask-x1", "discord-other-1-2");
-
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-x"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap()
-            .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
-        // エントリは残っている（abort されていない）
-        assert!(actions.subtask_registry.contains_key("st-x"));
-    }
-
-    #[tokio::test]
-    async fn test_cancel_subtask_allows_parent_session() {
-        let (actions, _db) = make_test_actions();
-        let handle = insert_fake_subtask(
-            &actions,
-            "st-mine",
-            "subtask-m1",
-            "discord-test-agent-111-222",
-        );
-
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-mine"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        assert!(!actions.subtask_registry.contains_key("st-mine"));
-        // 実際に abort されたこと
-        assert!(handle.await.unwrap_err().is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn test_cancel_subtask_owner_bypasses_session_check() {
-        let (actions, _db) = make_test_actions();
-        let _h = insert_fake_subtask(&actions, "st-any", "subtask-a1", "discord-other-1-2");
-
-        // owner は無関係なセッション文脈からでもキャンセルできる
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-any"}),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        assert!(!actions.subtask_registry.contains_key("st-any"));
-    }
-
-    #[tokio::test]
-    async fn test_cancel_subtask_rejects_agent_without_session() {
-        let (actions, _db) = make_test_actions();
-        let _h = insert_fake_subtask(&actions, "st-ns", "subtask-n1", "discord-other-1-2");
-
-        let no_session = GatewayCallContext::new(GatewayCaller::Agent, "test-agent");
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-ns"}),
-                &no_session,
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap()
-            .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
-    }
-
-    // ---- #176: 停止ログのラベル（sub-session が無いケースのフォールバック） ----
-
-    /// テスト用: sub-session の行を作る（明示的 `spawn_subtask` 相当）。
-    fn insert_sub_session(db: &opencrab_db::Db, session_id: &str, theme: &str) {
-        let conn = db.lock().unwrap();
-        opencrab_db::queries::insert_session(
-            &conn,
-            &opencrab_db::queries::SessionRow {
-                id: session_id.to_string(),
-                mode: "subtask".to_string(),
-                theme: theme.to_string(),
-                phase: "active".to_string(),
-                turn_number: 0,
-                status: "active".to_string(),
-                participant_ids_json: serde_json::json!(["test-agent"]).to_string(),
-                facilitator_id: None,
-                done_count: 0,
-                max_turns: None,
-                metadata_json: None,
-            },
-        )
-        .unwrap();
-    }
-
-    /// 自動 dispatch で起動した subtask は sub-session の行を持たないため、
-    /// `sessions.theme` からは説明を引けない。停止ログのラベルが空にならず、
-    /// registry の label（ツール名を含む）へフォールバックすること。
-    #[tokio::test]
-    async fn test_cancel_subtask_falls_back_to_label_without_sub_session() {
-        let (actions, db) = make_test_actions();
-        let parent = "discord-test-agent-111-222";
-        // sub-session は **作らない**（自動 dispatch の再現）。
-        let _h = insert_fake_subtask_with_label(
-            &actions,
-            "st-auto",
-            "subtask-auto1",
-            parent,
-            "execute_shell(ls -la)",
-        );
-
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-auto"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-
-        let content = cancelled_log_content(&db, parent);
-        assert_ne!(
-            content, "subtask '' was cancelled",
-            "sub-session が無いとラベルが空になっている（#176 の退行）"
-        );
-        assert_eq!(content, "subtask 'execute_shell(ls -la)' was cancelled");
-        assert!(
-            content.contains("execute_shell"),
-            "停止ログにツール名が含まれていない: {content}"
-        );
-        assert_eq!(
-            cancelled_log_metadata(&db, parent)["task"],
-            "execute_shell(ls -la)"
-        );
-    }
-
-    /// 明示的な `spawn_subtask`（sub-session あり）では従来どおり theme を使う。
-    /// `Subtask: ` prefix の除去も含めて記録内容が退行しないこと。
-    #[tokio::test]
-    async fn test_cancel_subtask_prefers_sub_session_theme() {
-        let (actions, db) = make_test_actions();
-        let parent = "discord-test-agent-111-222";
-        insert_sub_session(&db, "subtask-explicit1", "Subtask: ログを調査する");
-        let _h = insert_fake_subtask_with_label(
-            &actions,
-            "st-explicit",
-            "subtask-explicit1",
-            parent,
-            "spawn_subtask(ログを調査する)",
-        );
-
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-explicit"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-
-        assert_eq!(
-            cancelled_log_content(&db, parent),
-            "subtask 'ログを調査する' was cancelled"
-        );
-        assert_eq!(
-            cancelled_log_metadata(&db, parent)["task"],
-            "ログを調査する"
-        );
-    }
-
-    /// sub-session はあるが theme が空のケースでも label へフォールバックする。
-    #[tokio::test]
-    async fn test_cancel_subtask_falls_back_on_empty_theme() {
-        let (actions, db) = make_test_actions();
-        let parent = "discord-test-agent-111-222";
-        insert_sub_session(&db, "subtask-empty1", "");
-        let _h = insert_fake_subtask_with_label(
-            &actions,
-            "st-empty",
-            "subtask-empty1",
-            parent,
-            "nostr_generate_key(main)",
-        );
-
-        let result = actions
-            .execute(
-                "cancel_subtask",
-                &json!({"subtask_id": "st-empty"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        assert_eq!(
-            cancelled_log_content(&db, parent),
-            "subtask 'nostr_generate_key(main)' was cancelled"
-        );
-    }
+    // `cancel_subtask` の 8 テスト（認可 4 / セッション無し 1 / 停止ログの説明文 3）と
+    // その registry ヘルパは #157 S2 で server 側（`crates/server/src/system_actions.rs`）
+    // へ移植済み。停止処理は gateway 非依存層の唯一の実装になったので、この gateway は
+    // registry も lifecycle 通知口マップも持たない。
 
     // ---- #63: SubEngineGatewayActions 許可リスト ----
 
@@ -1212,8 +834,6 @@ mod tests {
         use opencrab_actions::SubEngineGatewayActions;
 
         let (actions, _db) = make_test_actions();
-        let parent = "discord-test-agent-111-222";
-        let _h = insert_fake_subtask(&actions, "st-sub", "subtask-s1", parent);
         // 後方互換の経路（root_gateway 未注入）では transport gateway 単体を wrap する。
         let sub_gw = SubEngineGatewayActions::new(std::sync::Arc::new(actions.clone()));
 
@@ -1231,9 +851,10 @@ mod tests {
             .with_session_id("subtask-s1")
             .with_depth(1);
 
-        // 実在するが許可外 → rejected: マーカー（spawn_subtask を含まないのは、
-        // Discord がもう定義していないため。ネスト禁止の実効ゲートは許可リスト側）。
-        for name in ["cancel_subtask", "send_ui", "discord_channel_config"] {
+        // 実在するが許可外 → rejected: マーカー（`spawn_subtask` / `cancel_subtask` を
+        // 含まないのは、Discord がもう定義していないため。ネスト禁止の実効ゲートは
+        // 許可リスト側）。
+        for name in ["send_ui", "discord_channel_config", "create_skill"] {
             let result = sub_gw.execute(name, &json!({}), &sub_ctx).await;
             assert!(!result.success, "{name} should be blocked");
             assert!(
@@ -1254,7 +875,13 @@ mod tests {
         assert!(!err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
 
         // 移設済みツールも Discord 単体経由では届かない（未知の名前として失敗する）。
-        for moved in ["report_progress", "spawn_subtask"] {
+        for moved in [
+            "report_progress",
+            "spawn_subtask",
+            "cancel_subtask",
+            "read_heartbeat_instructions",
+            "update_heartbeat_instructions",
+        ] {
             let result = sub_gw
                 .execute(moved, &json!({"message": "x"}), &sub_ctx)
                 .await;
@@ -1300,14 +927,23 @@ mod tests {
         let (actions, _db) = make_test_actions();
         let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
 
-        // owner-only（gateway 側）
-        assert!(names.contains(&"update_heartbeat_instructions".to_string()));
+        // owner-only な `update_heartbeat_instructions` と trusted-only な
+        // `read_heartbeat_instructions` は #157 S3 で server 側へ移設済み。実在性の検証は
+        // `crates/server/src/system_actions.rs` の
+        // `heartbeat_instruction_tools_are_exposed_in_own_definitions` が担う。
         // trusted-only（gateway 側。execute_skill は防御的エントリで実装なし）
         for n in opencrab_actions::TRUSTED_ONLY_ACTIONS {
             if *n == "execute_skill" {
                 assert!(
                     !names.contains(&n.to_string()),
                     "execute_skill は未実装のはず"
+                );
+            } else if *n == "read_heartbeat_instructions" {
+                // 移設済み（#157 S3）。Discord が再定義すると合成 gateway の dedup で
+                // own 側に食われるので、無いことを固定する。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "read_heartbeat_instructions は server 側の実装だけであるべき"
                 );
             } else if n.starts_with("nostr_") {
                 // nostr_zap / nostr_dm は Nostr ゲートウェイ側のアクション（この
@@ -1414,7 +1050,8 @@ mod tests {
             // 同趣旨の inline 固定は `crates/server/src/system_actions.rs` にある）
             "list_webhooks",
             "list_subtask_webhooks",
-            "read_heartbeat_instructions",
+            // `read_heartbeat_instructions` は #157 S3 で server 側へ移設。同趣旨の
+            // inline 固定は `crates/server/src/system_actions.rs` にある。
         ] {
             assert!(
                 non_dispatch.contains(name),
@@ -1429,7 +1066,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 23);
+        assert_eq!(defs.len(), 20);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -1443,10 +1080,7 @@ mod tests {
         assert!(names.contains(&"discord_send_file"));
         assert!(names.contains(&"join_voice_channel"));
         assert!(names.contains(&"leave_voice_channel"));
-        assert!(names.contains(&"cancel_subtask"));
         assert!(names.contains(&"send_ui"));
-        assert!(names.contains(&"update_heartbeat_instructions"));
-        assert!(names.contains(&"read_heartbeat_instructions"));
         assert!(names.contains(&"get_default_subtask_webhook"));
         assert!(names.contains(&"set_default_subtask_webhook"));
         assert!(names.contains(&"ensure_subtask_webhook"));
@@ -1456,19 +1090,23 @@ mod tests {
         assert!(names.contains(&"ensure_webhook"));
         assert!(names.contains(&"list_webhooks"));
 
-        // #175 S4 / #157 S1 / #155: サブタスク生成・進捗報告・記憶インデックス再構築と
-        // 汎用管理ツール（記憶インデックス設定・許可コマンド 3 種）は gateway 非依存層
-        // （server 側 `SystemGatewayActions`）へ移設済み。
+        // #175 S4 / #157 S1・S2・S3 / #155: サブタスク生成・進捗報告・**停止**・記憶
+        // インデックス再構築と、汎用管理ツール（記憶インデックス設定・許可コマンド 3 種）・
+        // ハートビート指示 2 種は gateway 非依存層（server 側 `SystemGatewayActions`）へ
+        // 移設済み。
         // Discord がこれらを再び定義すると `SystemGatewayActions` の dedup（own 優先）で
         // own 側に食われ、Discord 実装の後処理が黙って落ちる（#155 の後退）。
         for moved in [
             "spawn_subtask",
             "report_progress",
+            "cancel_subtask",
             "rebuild_memory_index",
             "update_memory_index_config",
             "add_allowed_command",
             "list_allowed_commands",
             "remove_allowed_command",
+            "update_heartbeat_instructions",
+            "read_heartbeat_instructions",
         ] {
             assert!(
                 !names.contains(&moved),
@@ -1967,144 +1605,10 @@ mod tests {
     }
 
     // ---- heartbeat instructions ----
-
-    #[tokio::test]
-    async fn test_update_heartbeat_instructions_rejected_for_non_owner() {
-        let (actions, db) = make_test_actions();
-        let result = actions
-            .execute(
-                "update_heartbeat_instructions",
-                &json!({
-
-                    "scope": "agent",
-                    "instructions": "話題があるときだけ話す",
-                }),
-                &tctx(GatewayCaller::TrustedUser),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("オーナー"));
-        // No audit recorded.
-        let conn = db.lock().unwrap();
-        let rows = opencrab_db::queries::list_heartbeat_instructions_audit(&conn, "test-agent", 10)
-            .unwrap();
-        assert!(rows.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_update_heartbeat_instructions_owner_success_and_audit() {
-        let (actions, db) = make_test_actions();
-        // Agent row must exist for scope=agent patch.
-        {
-            let conn = db.lock().unwrap();
-            let agent = opencrab_db::queries::AgentRow {
-                agent_id: "test-agent".to_string(),
-                name: "N".to_string(),
-                job_title: None,
-                organization: None,
-                image_url: None,
-                persona_name: "P".to_string(),
-                personality: None,
-                instructions: String::new(),
-                heartbeat_instructions: "OLD".to_string(),
-                model: None,
-                reasoning_effort: None,
-                web_search: None,
-                metadata_json: None,
-            };
-            opencrab_db::queries::upsert_agent(&conn, &agent).unwrap();
-        }
-        let result = actions
-            .execute(
-                "update_heartbeat_instructions",
-                &json!({
-
-                    "scope": "agent",
-                    "instructions": "NEW指示",
-                    "reason": "オーナー依頼",
-                }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(
-            result.success,
-            "owner update should succeed: {:?}",
-            result.error
-        );
-
-        let conn = db.lock().unwrap();
-        let got = opencrab_db::queries::get_agent(&conn, "test-agent")
-            .unwrap()
-            .unwrap();
-        assert_eq!(got.heartbeat_instructions, "NEW指示");
-        let rows = opencrab_db::queries::list_heartbeat_instructions_audit(&conn, "test-agent", 10)
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].old_value.as_deref(), Some("OLD"));
-        assert_eq!(rows[0].new_value.as_deref(), Some("NEW指示"));
-        assert_eq!(rows[0].reason.as_deref(), Some("オーナー依頼"));
-    }
-
-    #[tokio::test]
-    async fn test_read_heartbeat_instructions_effective() {
-        let (actions, db) = make_test_actions();
-        {
-            let conn = db.lock().unwrap();
-            opencrab_db::queries::upsert_channel_config(
-                &conn,
-                &opencrab_db::queries::ChannelConfigRow {
-                    channel_id: "ch1".to_string(),
-                    agent_id: "test-agent".to_string(),
-                    guild_id: "g1".to_string(),
-                    channel_name: String::new(),
-                    readable: true,
-                    writable: true,
-                    whitelisted: false,
-                    heartbeat_enabled: true,
-                    heartbeat_interval_secs: None,
-                    heartbeat_instructions: "業務連絡のみ".to_string(),
-                },
-            )
-            .unwrap();
-        }
-        let result = actions
-            .execute(
-                "read_heartbeat_instructions",
-                &json!({"scope": "effective", "channel_id": "ch1", }),
-                &tctx(GatewayCaller::TrustedUser),
-            )
-            .await;
-        assert!(result.success);
-        let data = result.data.unwrap();
-        assert_eq!(data["source"], "channel");
-        assert_eq!(data["instructions"], "業務連絡のみ");
-    }
-
-    #[tokio::test]
-    async fn test_read_heartbeat_instructions_rejected_for_plain_agent() {
-        let (actions, _db) = make_test_actions();
-        // 素の agent 権限は拒否される。
-        let result = actions
-            .execute(
-                "read_heartbeat_instructions",
-                &json!({"scope": "agent"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-
-        // co_agent は許可される。
-        let allowed = actions
-            .execute(
-                "read_heartbeat_instructions",
-                &json!({"scope": "agent", }),
-                &tctx(GatewayCaller::CoAgent {
-                    agent_id: "co-agent-1".to_string(),
-                }),
-            )
-            .await;
-        assert!(allowed.success);
-    }
+    //
+    // 4 テスト（owner 以外の拒否 + 監査なし / owner 成功 + 監査 / effective 解決 /
+    // 素の agent 拒否 + co_agent 許可）は #157 S3 で server 側
+    // （`crates/server/src/system_actions.rs`）へ移植済み。
 
     #[tokio::test]
     async fn test_create_channel_invalid_parent_id() {

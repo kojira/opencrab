@@ -2116,6 +2116,7 @@ fn insert_running_subtask(
             parent_session_id: parent_session_id.to_string(),
             agent_id: agent_id.to_string(),
             label: "long job".to_string(),
+            tool_name: "spawn_subtask".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: None,
             lifecycle: opencrab_actions::SubtaskLifecycle::new(),

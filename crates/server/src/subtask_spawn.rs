@@ -339,6 +339,7 @@ pub async fn spawn_subtask(
             parent_session_id: parent_session_id.clone(),
             agent_id: agent_id.clone(),
             label,
+            tool_name: "spawn_subtask".to_string(),
             started_at: started_instant,
             // 明示 spawn の返信先は親セッションから復元する（sink 側の責務 / #167）。
             reply_target: None,

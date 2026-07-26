@@ -256,6 +256,16 @@ pub struct SpawnedSubtask {
     pub agent_id: String,
     /// 人間可読ラベル（list / cancel での識別用）。
     pub label: String,
+    /// **この subtask を生み出したツールの名前**（停止ログの `tool_name` に載る / #184）。
+    ///
+    /// 明示的な起動なら `spawn_subtask`、非ブロック dispatch で背景化されたツールなら
+    /// そのツール名（複数ツールのバッチは `", "` 区切り）。
+    /// 以前は停止ログの `tool_name` が常に `spawn_subtask` 固定だったため、
+    /// 自動 dispatch されたツールを停止すると会話履歴に
+    /// 「spawn_subtask がキャンセルされた / subtask 'execute_shell(...)' was cancelled」
+    /// という**矛盾した 2 行**が並んでいた（`crates/server/src/process.rs` の
+    /// `tool_cancelled` 整形）。
+    pub tool_name: String,
     /// 起動時刻（duration 算出用）。monotonic な `Instant` を用いる。
     pub started_at: std::time::Instant,
     /// gateway 不透明な返信ルーティング token（spawn 時に捕捉）。
@@ -396,11 +406,27 @@ pub enum CancelOutcome {
     Unauthorized,
 }
 
-/// 走行中 subtask を停止する中核処理（gateway 非依存 / #161）。
+/// 走行中 subtask を停止する中核処理（gateway 非依存 / #161・#157 S2）。
 ///
 /// web / Nostr / REST など Discord 以外の transport でも `cancel_subtask` ツールを
-/// 露出できるよう、認可・abort・registry 除去・親ログ記録を server-neutral 層へ
-/// 集約する。Discord の `execute_cancel_subtask` と同じ契約を踏襲する。
+/// 露出できるよう、認可・abort・registry 除去・親ログ記録・lifecycle 通知を
+/// server-neutral 層へ集約する。**停止の実装はこの 1 関数だけ**で、transport 固有の
+/// 実装は持たない（#157 S2 で Discord 実装を撤去し、その固有の後始末をここへ取り込んだ）。
+///
+/// # Discord 実装から取り込んだ 2 点（#157 S2）
+///
+/// 1. **中断の通知送出**: `notifiers`（registry と対の随伴マップ）から通知口を引いて
+///    `on_cancelled(duration_ms)` を呼び、マップから外す。abort すると spawned closure は
+///    中断されて終了通知が来ないため、ここが lifecycle 通知の唯一の終端になる（RFC §1.5）。
+///    **順序契約との関係**: この通知は親ログ INSERT より前だが、実装（Discord の
+///    `SubtaskWebhookNotifier::on_cancelled`）は webhook 配送キューへ 1 通積むだけで
+///    応答生成を起動しない。「記録 → registry 除去 → sink 発火」という二重返信防止の
+///    順序契約に触れるのは resume する `sink` 側だけで、そちらは従来どおり INSERT の後。
+/// 2. **停止ログの説明文の解決順序**: sub-session の `sessions.theme`（`Subtask: ` prefix を
+///    除去）を第一候補にし、引けない/空のときだけ registry の `label`
+///    （例: `execute_shell(...)`）へフォールバックする。明示的な `spawn_subtask` は
+///    人間可読なテーマを持つが、自動 dispatch は sub-session の行を作らないため theme を
+///    引けず、そのままだと親ログが `subtask '' was cancelled` になる（#176）。
 ///
 /// 認可（#64）: `is_owner` なら常に許可。そうでなければ「呼び出し元セッションが親
 /// （`parent_session_id == caller_session_id`）」の subtask のみ停止できる（自己/兄弟/
@@ -409,8 +435,10 @@ pub enum CancelOutcome {
 /// insert 後不変）。
 ///
 /// 成功時: **停止を主張（`claim_cancel`）** → `abort_handle.abort()` → registry から
-/// 除去 → 親セッションログへ `tool_cancelled` を best-effort 記録 → sink へ
-/// `on_subtask_cancelled`（`exit_reason="cancelled"`）を通知する。
+/// 除去 → 通知口へ `on_cancelled` → 親セッションログへ `tool_cancelled` を best-effort
+/// 記録 → sink へ `on_subtask_cancelled`（`exit_reason="cancelled"`）を通知する。
+/// この順序は旧 Discord 実装（通知が親ログより先）と neutral 実装（親ログが sink より
+/// 先）の両方を満たす。
 ///
 /// 停止の主張は registry 除去と同じ shard ロック下（`remove_if` の述語内）で行う。
 /// `abort()` は「ツール本体を await 中」なら効くが、既に完走して `settle_completed`
@@ -422,10 +450,12 @@ pub enum CancelOutcome {
 /// `sink` を渡すと停止も 1 箇所から通知でき、経路側（REST の `sessions.status` 等）が
 /// cancel 後に個別に整合を取る必要がなくなる。既定実装は debug ログのみなので、
 /// resume する sink（Discord / web / Nostr）の挙動は変わらない。
+#[allow(clippy::too_many_arguments)]
 pub fn cancel_subtask(
     registry: &SubtaskRegistry,
     db: &opencrab_db::Db,
     sink: Option<&dyn SubtaskCompletionSink>,
+    notifiers: Option<&crate::subtask_notify::SubtaskNotifiers>,
     subtask_id: &str,
     is_owner: bool,
     caller_session_id: Option<&str>,
@@ -445,6 +475,15 @@ pub fn cancel_subtask(
         Some((_, subtask)) => {
             subtask.abort_handle.abort();
 
+            // 中断を lifecycle 通知口へ伝え、随伴マップから外す（旧 Discord 実装から移設
+            // / RFC §1.5）。abort で spawned closure は中断されるため終了通知は来ない
+            // → ここが唯一の終端。親ログ INSERT より**前**に呼ぶ（旧実装と同順序）。
+            if let Some(notifiers) = notifiers {
+                if let Some((_, notifier)) = notifiers.remove(subtask_id) {
+                    notifier.on_cancelled(subtask.started_at.elapsed().as_millis() as u64);
+                }
+            }
+
             // 親セッションログへ subtask_cancelled を best-effort 記録する。
             //
             // **部分結果も残す**（#152 レビュー P2）。1 バッチ = 1 subtask なので、
@@ -454,18 +493,36 @@ pub fn cancel_subtask(
             let parent = subtask.parent_session_id.clone();
             if !parent.is_empty() {
                 let completed = subtask.lifecycle.completed_calls();
-                let content = if completed.is_empty() {
-                    format!("subtask '{}' was cancelled", subtask.label)
-                } else {
-                    let partial =
-                        serde_json::to_string(&completed).unwrap_or_else(|_| "[]".to_string());
-                    format!(
-                        "subtask '{}' was cancelled after {} completed tool call(s): {partial}",
-                        subtask.label,
-                        completed.len()
-                    )
-                };
                 if let Ok(conn) = db.lock() {
+                    // 停止対象の説明は sub-session の theme を第一候補にする（旧 Discord
+                    // 実装から移設 / #176）。明示的な `spawn_subtask` はここに人間可読な
+                    // テーマを持つが、自動 dispatch は sub-session の行を作らないため
+                    // theme を引けない。引けない/空のときは registry の label
+                    // （例: `execute_shell(...)`）へフォールバックする。
+                    let task_description =
+                        opencrab_db::queries::get_session(&conn, &subtask.session_id)
+                            .ok()
+                            .flatten()
+                            .map(|session| {
+                                session
+                                    .theme
+                                    .strip_prefix("Subtask: ")
+                                    .unwrap_or(&session.theme)
+                                    .to_string()
+                            })
+                            .filter(|desc| !desc.is_empty())
+                            .unwrap_or_else(|| subtask.label.clone());
+                    let content = if completed.is_empty() {
+                        format!("subtask '{task_description}' was cancelled")
+                    } else {
+                        let partial =
+                            serde_json::to_string(&completed).unwrap_or_else(|_| "[]".to_string());
+                        format!(
+                            "subtask '{}' was cancelled after {} completed tool call(s): {partial}",
+                            task_description,
+                            completed.len()
+                        )
+                    };
                     let log = opencrab_db::queries::SessionLogRow {
                         id: None,
                         agent_id: subtask.agent_id.clone(),
@@ -475,9 +532,14 @@ pub fn cancel_subtask(
                         speaker_id: None,
                         turn_number: None,
                         metadata_json: Some(
+                            // `task` は旧 Discord 実装のキー、`label` / `completed_calls`
+                            // は neutral 実装のキー。統合後は**両方**載せる（どちらの
+                            // 読み手も壊さない）。`tool_name` は固定値ではなく
+                            // **実際に停止したツール名**（#184）。
                             serde_json::json!({
                                 "tool_call_id": subtask_id,
-                                "tool_name": "spawn_subtask",
+                                "tool_name": subtask.tool_name,
+                                "task": task_description,
                                 "label": subtask.label,
                                 "completed_calls": completed,
                             })
@@ -765,6 +827,21 @@ fn dispatch_label(tool_name: &str, args: &serde_json::Value) -> String {
     }
 }
 
+/// バッチが背景化したツール名（重複を除いた `", "` 区切り / #184）。
+///
+/// 停止ログの `tool_name` に載る。以前は `spawn_subtask` 固定だったため、自動 dispatch
+/// されたツールを停止すると「spawn_subtask がキャンセルされた」と描画され、直後の
+/// 本文行（`subtask 'execute_shell(...)' was cancelled`）と矛盾していた。
+fn batch_tool_names(calls: &[DispatchCall]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for c in calls {
+        if !names.contains(&c.tool_name.as_str()) {
+            names.push(&c.tool_name);
+        }
+    }
+    names.join(", ")
+}
+
 /// バッチ全体のラベル（`tool(arg), tool(arg)` を 120 文字で打ち切る）。
 fn batch_label(calls: &[DispatchCall]) -> String {
     let joined = calls
@@ -827,6 +904,8 @@ impl ToolDispatcher for SubtaskToolDispatcher {
         let subtask_id = uuid::Uuid::new_v4().to_string();
         let sub_session_id = format!("subtask-{subtask_id}");
         let label = batch_label(calls);
+        // 停止ログに載せる「実際に背景化したツール名」（#184）。
+        let tool_names = batch_tool_names(calls);
 
         // 各種クローン（background タスクへムーブ）。
         let executor = self.executor.clone();
@@ -1006,6 +1085,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 parent_session_id: self.parent_session_id.clone(),
                 agent_id: self.agent_id.clone(),
                 label: label.clone(),
+                tool_name: tool_names,
                 started_at: std::time::Instant::now(),
                 reply_target: self.reply_target.clone(),
                 lifecycle,
@@ -1114,6 +1194,7 @@ mod tests {
                 parent_session_id: "discord-a-1-2".to_string(),
                 agent_id: "agent-a".to_string(),
                 label: "job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
                 lifecycle: SubtaskLifecycle::new(),
@@ -1188,6 +1269,7 @@ mod tests {
                 parent_session_id: parent.to_string(),
                 agent_id: "agent-a".to_string(),
                 label: "job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: reply_target.map(|s| s.to_string()),
                 lifecycle: SubtaskLifecycle::new(),
@@ -1733,6 +1815,7 @@ mod tests {
                 parent_session_id: parent_session_id.to_string(),
                 agent_id: "agent-a".to_string(),
                 label: "long job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
                 lifecycle: SubtaskLifecycle::new(),
@@ -1751,7 +1834,7 @@ mod tests {
         let parent = "web-agent-a-conv1";
         let handle = insert_fake_subtask(&registry, "st-1", parent);
 
-        let outcome = cancel_subtask(&registry, &db, None, "st-1", false, Some(parent));
+        let outcome = cancel_subtask(&registry, &db, None, None, "st-1", false, Some(parent));
         assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(registry.is_empty(), "cancel 後に registry から除去される");
         // 実際に abort された。
@@ -1771,7 +1854,7 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
-        let outcome = cancel_subtask(&registry, &db, None, "nope", false, Some("web-a-c1"));
+        let outcome = cancel_subtask(&registry, &db, None, None, "nope", false, Some("web-a-c1"));
         assert_eq!(outcome, CancelOutcome::NotFound);
     }
 
@@ -1783,7 +1866,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-x", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, None, "st-x", false, Some("web-me-c1"));
+        let outcome = cancel_subtask(&registry, &db, None, None, "st-x", false, Some("web-me-c1"));
         assert_eq!(outcome, CancelOutcome::Unauthorized);
         // 拒否したのでエントリは残り、abort もされない。
         assert!(registry.contains_key("st-x"));
@@ -1798,7 +1881,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-ns", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, None, "st-ns", false, None);
+        let outcome = cancel_subtask(&registry, &db, None, None, "st-ns", false, None);
         assert_eq!(outcome, CancelOutcome::Unauthorized);
         assert!(registry.contains_key("st-ns"));
         handle.abort();
@@ -1812,7 +1895,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-any", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, None, "st-any", true, None);
+        let outcome = cancel_subtask(&registry, &db, None, None, "st-any", true, None);
         assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(registry.is_empty());
         assert!(handle.await.unwrap_err().is_cancelled());
@@ -1833,6 +1916,7 @@ mod tests {
             parent_session_id: "discord-123".to_string(),
             agent_id: "agent-a".to_string(),
             label: "compile the report".to_string(),
+            tool_name: "spawn_subtask".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: Some("channel:456".to_string()),
             lifecycle: SubtaskLifecycle::new(),
@@ -1964,7 +2048,7 @@ mod tests {
                     .next()
                     .map(|e| e.key().clone())
                     .expect("dispatch した subtask が registry にある");
-                let outcome = cancel_subtask(&self.registry, &self.db, None, &id, true, None);
+                let outcome = cancel_subtask(&self.registry, &self.db, None, None, &id, true, None);
                 *self.outcome.lock().unwrap() = Some(outcome);
                 ActionResult {
                     success: true,
@@ -2032,7 +2116,15 @@ mod tests {
         let parent = "agent-msg-agent-a-u1";
         let handle = insert_fake_subtask(&registry, "st-1", parent);
 
-        let outcome = cancel_subtask(&registry, &db, Some(&sink), "st-1", false, Some(parent));
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            Some(&sink),
+            None,
+            "st-1",
+            false,
+            Some(parent),
+        );
         assert_eq!(outcome, CancelOutcome::Cancelled);
 
         let cancelled = sink.cancelled.lock().unwrap();
@@ -2307,6 +2399,7 @@ mod tests {
             &registry,
             &db,
             Some(sink.as_ref()),
+            None,
             &outcome.subtask_id,
             true,
             None,

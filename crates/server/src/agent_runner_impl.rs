@@ -40,10 +40,6 @@ impl opencrab_discord::AgentRunner for AppState {
         process::run_agent_response(self, req).await
     }
 
-    fn subtask_notifiers(&self) -> opencrab_actions::subtask_notify::SubtaskNotifiers {
-        self.subtask_notifiers.clone()
-    }
-
     fn context_budget_tokens(&self, agent_id: &str) -> usize {
         let conn = self.db.lock().unwrap();
         let eff =

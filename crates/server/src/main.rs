@@ -645,10 +645,11 @@ async fn main() -> anyhow::Result<()> {
                 let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
                 gateway.start().await?;
 
+                // auto-dispatch の登録簿。停止（`cancel_subtask`）は gateway 非依存層の実装が
+                // 同じ Arc を run 経由（`RunRequest::with_dispatch`）で受け取るため、この
+                // registry はループへ渡すだけでよい（#157 S2 で gateway_actions からは外した）。
                 let subtask_registry: opencrab_actions::SubtaskRegistry =
                     Arc::new(dashmap::DashMap::new());
-                // ループ（auto-dispatch）と gateway_actions（cancel_subtask）が同一 registry を
-                // 共有し、auto-dispatch した subtask を停止可能にする（RFC #152 S3a / P0）。
                 let subtask_registry_for_loop = subtask_registry.clone();
                 // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
                 // gateway_actions とループで同じチャンネルを共有する必要がある。
@@ -710,8 +711,6 @@ async fn main() -> anyhow::Result<()> {
                     gateway.http().clone(),
                     state.db.clone(),
                     state.workspace_base.clone(),
-                    subtask_registry,
-                    state.subtask_notifiers.clone(),
                     default_subtask_webhook,
                 )
                 .with_event_tx(event_tx.clone())
