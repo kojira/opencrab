@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use opencrab_actions::{SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
+use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
 
 use crate::process;
 use crate::AppState;
@@ -42,6 +42,17 @@ pub struct RestCompletionSink {
 
 impl SubtaskCompletionSink for RestCompletionSink {
     fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        // 決着（Completed）以外（進捗通知など）でセッションを完了扱いにしてはならない。
+        // 進捗はまだ run が回っている最中に飛ぶので、ここで completed にすると
+        // 「応答が返る前に completed」を観測させてしまう。web / Nostr の受け口と同じガード。
+        if ev.kind != SettleKind::Completed {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                kind = ?ev.kind,
+                "rest sink: not a completion, nothing to reconcile"
+            );
+            return;
+        }
         if !ev.session_id.starts_with(REST_SESSION_PREFIX) {
             tracing::debug!(
                 session_id = %ev.session_id,
@@ -402,6 +413,35 @@ mod tests {
             "completed",
             "最後の subtask を停止したのにセッションが active のまま残る"
         );
+    }
+
+    /// 進捗通知（Progress）でセッションを完了扱いにしてはならない。
+    ///
+    /// 進捗はまだ run が回っている最中に飛ぶ。ここで completed にすると、応答が
+    /// 返る前に `sessions.status` を見たクライアントが「完了した」と誤認する。
+    /// #175 S1 で進捗報告ツールが全経路に露出し、REST の受け口にも Progress が
+    /// 届くようになったので、web / Nostr と同じガードが要る。
+    #[tokio::test]
+    async fn progress_does_not_complete_the_session() {
+        let session_id = "agent-msg-agent-a-u1";
+        let db = db_with_session(session_id);
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let sink = RestCompletionSink {
+            db: db.clone(),
+            registry: registry.clone(),
+        };
+
+        assert_eq!(status_of(&db, session_id), "active");
+        sink.on_subtask_settled(settled(session_id, SettleKind::Progress));
+        assert_eq!(
+            status_of(&db, session_id),
+            "active",
+            "進捗通知でセッションが完了扱いにされている（run はまだ回っている）"
+        );
+
+        // 決着（Completed）なら従来どおり完了にする（ガードが効きすぎていないこと）。
+        sink.on_subtask_settled(settled(session_id, SettleKind::Completed));
+        assert_eq!(status_of(&db, session_id), "completed");
     }
 
     /// 他に走行中 subtask が残っているあいだは停止でも完了にしない。

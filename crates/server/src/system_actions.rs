@@ -1580,6 +1580,44 @@ mod tests {
         assert!(progress_messages(&state, "parent-of-someone-else").is_empty());
     }
 
+    /// 親セッションからの代理報告は許す（所有権ゲートの片方の分岐）。
+    ///
+    /// 所有権ゲートは「自分の subtask」か「自分が親である subtask」のどちらかなら通す。
+    /// 親側の分岐を落としても他のテストは全て通ってしまう（変異実験で確認済み）ため、
+    /// ここで固定する。Discord 側にも同趣旨のテストがある。
+    #[tokio::test]
+    async fn report_progress_allows_parent_reporting_child() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-1", "subtask-st-1", "parent-session");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        // 呼び出し元は subtask 本人ではなく「親セッション」。
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "親からの代理報告", "subtask_id": "st-1" }),
+                &sub_ctx("parent-session"),
+            )
+            .await;
+        assert!(
+            r.success,
+            "親セッションからの代理報告は許される: {:?}",
+            r.error
+        );
+        assert!(
+            progress_messages(&state, "parent-session")
+                .iter()
+                .any(|m| m.contains("親からの代理報告")),
+            "親セッションのログへ記録される"
+        );
+    }
+
     /// セッション必須ガード（fail-closed）: session_id が無い文脈では実行できない。
     #[tokio::test]
     async fn report_progress_requires_session_context() {
