@@ -66,6 +66,16 @@ impl ProgressDebounce {
         }
         is_latest
     }
+
+    /// キーの世代エントリを破棄し、待機中のデバウンスを不発にする。
+    ///
+    /// サブタスクの決着時に呼ぶ（#175 S4）。これが無いと、終了イベントの後に遅延
+    /// progress（0〜3 秒窓）が届いて完了返信の直後に余計な推論・重複返信が走る。
+    /// 同一親セッションの兄弟サブタスクの保留 progress も巻き添えで消えるが、
+    /// progress は advisory であり次の `report_progress` で再アームされる。
+    pub fn clear(&self, key: &str) {
+        self.generations.remove(key);
+    }
 }
 
 #[cfg(test)]
