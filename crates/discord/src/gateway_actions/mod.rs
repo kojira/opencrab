@@ -1519,4 +1519,38 @@ mod tests {
         assert!(!no_channel.success);
         assert!(no_channel.error.unwrap().contains("channel_id"));
     }
+
+    /// **設定ファイル由来のフォールバックが Discord 経路で今までどおり効く**（#157 S5）。
+    ///
+    /// この値は #157 S5 で `AppState` へ持ち上げたが、Discord gateway_actions は
+    /// 従来どおりコンストラクタで同じ値を受け取る。DB に行が無くても既定が解決され、
+    /// `ensure_*` は webhook を**作らずに**それを返す（持ち上げによる挙動変化なし）。
+    #[tokio::test]
+    async fn config_fallback_still_resolves_on_the_discord_path() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let http = Arc::new(Http::new("dummy-token"));
+        let actions = DiscordGatewayActions::new(
+            http,
+            db,
+            "/tmp".to_string(),
+            opencrab_actions::webhook_target::WebhookConfig::from_parts(
+                WH_VALID_URL.to_string(),
+                Some(vec!["started".to_string()]),
+            ),
+        );
+
+        let result = actions
+            .execute(
+                "ensure_subtask_webhook",
+                &json!({ "scope": "agent" }),
+                &tctx(GatewayCaller::Owner),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        let data = result.data.unwrap();
+        assert_eq!(data["created"], false, "既定があるので作成してはいけない");
+        assert_eq!(data["source"], "env_config");
+        assert_eq!(data["scope"], "env_config");
+        assert!(json_has_no_raw_token(&data));
+    }
 }

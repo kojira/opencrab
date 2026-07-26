@@ -84,8 +84,9 @@ impl AppConfig {
     ///
     /// transport の機能フラグから独立している点が要点で、`#[cfg(feature = "discord")]`
     /// の外から呼べる。`AppState::default_subtask_webhook` へはこの結果を入れる。
-    pub fn default_subtask_webhook(&self) -> Option<opencrab_actions::webhook_target::WebhookConfig>
-    {
+    pub fn default_subtask_webhook(
+        &self,
+    ) -> Option<opencrab_actions::webhook_target::WebhookConfig> {
         self.subtask
             .default_webhook
             .as_ref()
@@ -1091,6 +1092,85 @@ rabomi = "1"
         assert_eq!(
             codex.sandbox, "read-only",
             "codex sandbox in config/default.toml must stay read-only (regression #149)"
+        );
+    }
+
+    // ---- #157 S5: 通知先フォールバックの持ち上げ ----
+
+    /// **旧キーだけの設定ファイルがそのまま動く**（後方互換）。
+    ///
+    /// `[gateway.discord] default_subtask_webhook` は #157 S5 以前の唯一の書き方。
+    /// これが読めなくなると既存の運用が黙って通知を失う。
+    #[test]
+    fn legacy_discord_webhook_key_is_still_honored() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[gateway.discord]
+default_subtask_webhook = { url = "https://discord.com/api/webhooks/1/legacytok", events = ["started"] }
+"#,
+        )
+        .unwrap();
+        let resolved = cfg.default_subtask_webhook().expect("旧キーが読まれるべき");
+        assert_eq!(resolved.url, "https://discord.com/api/webhooks/1/legacytok");
+        assert_eq!(resolved.events, Some(vec!["started".to_string()]));
+    }
+
+    /// 新しい **transport 非依存キー** `[subtask] default_webhook` が読める。
+    ///
+    /// Discord の設定ブロックが 1 行も無い設定ファイルでも通知先が決まる
+    /// （= Discord 機能フラグから独立した）ことがこの持ち上げの要点。
+    #[test]
+    fn transport_neutral_webhook_key_is_honored_without_any_discord_config() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[subtask]
+default_webhook = { url = "https://discord.com/api/webhooks/2/neutraltok" }
+"#,
+        )
+        .unwrap();
+        let resolved = cfg.default_subtask_webhook().expect("新キーが読まれるべき");
+        assert_eq!(
+            resolved.url,
+            "https://discord.com/api/webhooks/2/neutraltok"
+        );
+        assert_eq!(resolved.events, None);
+    }
+
+    /// 両方書いてあるときは新キーが勝つ（移行期の曖昧さを残さない）。
+    #[test]
+    fn transport_neutral_webhook_key_wins_over_the_legacy_one() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[subtask]
+default_webhook = { url = "https://discord.com/api/webhooks/2/neutraltok" }
+
+[gateway.discord]
+default_subtask_webhook = { url = "https://discord.com/api/webhooks/1/legacytok" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.default_subtask_webhook().unwrap().url,
+            "https://discord.com/api/webhooks/2/neutraltok"
+        );
+    }
+
+    /// どちらも無ければ未設定。url が空文字のときも未設定として扱う。
+    #[test]
+    fn absent_or_empty_webhook_url_resolves_to_none() {
+        let empty: AppConfig = toml::from_str("").unwrap();
+        assert!(empty.default_subtask_webhook().is_none());
+
+        let blank: AppConfig = toml::from_str(
+            r#"
+[subtask]
+default_webhook = { url = "" }
+"#,
+        )
+        .unwrap();
+        assert!(
+            blank.default_subtask_webhook().is_none(),
+            "url が空なら未設定扱い（`.env` 未設定で ${{VAR}} が空展開される運用）"
         );
     }
 
