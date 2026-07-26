@@ -2418,10 +2418,8 @@ async fn test_web_progress_settlement_does_not_resume() {
     let session_id = format!("web-{agent_id}-conv-progress");
     let mut rx = state.web_gateway.subscribe(&session_id);
 
-    let sink = WebCompletionSink {
-        state: state.clone(),
-        gateway: state.web_gateway.clone(),
-    };
+    // SSE チャンネルと直列化ロックは runner（AppState）から引かれる。
+    let sink = WebCompletionSink::new(state.clone());
     let settled = |kind: SettleKind| SubtaskSettled {
         session_id: session_id.clone(),
         agent_id: agent_id.clone(),

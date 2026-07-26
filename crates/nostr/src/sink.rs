@@ -4,6 +4,9 @@
 //! 2 経路で同じことをする: 会話を DB から再構築 → `run_agent_response` → 返信。
 //! その共通経路を [`NostrResponder`] に置き、[`SubtaskCompletionSink`] 実装も同じ型が
 //! 担う（web gateway の `WebCompletionSink` + `run_and_deliver` と同じ構造）。
+//! ただし web は応答生成と sink を別モジュールに分けており、sink から生の応答生成へ
+//! 到達できない（直列化の飛ばしがコンパイルエラーになる）。ここは同一モジュールなので
+//! その保証が無く、`respond_serialized` 経由という規律に頼っている。
 //!
 //! 不変条件（RFC §6）:
 //! - **二重回答しない**: `settle_completed` が「DB 永続化 → sink 発火」の順序を保証済み。

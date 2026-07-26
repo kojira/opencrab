@@ -1819,6 +1819,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "iana-time-zone",
  "opencrab-db",
  "opencrab-llm-types",
  "rusqlite",
@@ -1983,6 +1984,7 @@ dependencies = [
  "opencrab-mcp",
  "opencrab-nostr",
  "opencrab-voice",
+ "opencrab-web-gateway",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2006,6 +2008,21 @@ dependencies = [
  "anyhow",
  "async-trait",
  "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "opencrab-web-gateway"
+version = "0.2.17"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dashmap 6.1.0",
+ "opencrab-actions",
+ "opencrab-core",
  "serde",
  "serde_json",
  "tokio",

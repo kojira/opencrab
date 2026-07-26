@@ -499,7 +499,7 @@ async fn e2e_nonblocking_dispatch() {
     // 受け取って同ターン内で喋る（「実行を開始した」等）ので、その発話だけで条件が
     // 満たされてしまい、完了 sink を丸ごと無効化しても pass してしまう（空振り）。
     // resume は system prompt に `[subtask_completed: subtask_id=..., exit_reason=...]`
-    // を必ず付ける（`crates/server/src/web_gateway.rs`）ので、llm_logs の prompt に
+    // を必ず付ける（`crates/web-gateway/src/sink.rs`）ので、llm_logs の prompt に
     // このマーカーが現れることを resume ターンの直接証拠として使う。
     let resumed = poll_until(Duration::from_secs(90), || {
         let Ok(conn) = open_db() else { return false };
