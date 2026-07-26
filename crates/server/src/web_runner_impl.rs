@@ -130,15 +130,26 @@ impl WebAgentRunner for AppState {
         iterations: usize,
         tool_calls_made: usize,
     ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_rest_agent_reply(
-                &conn,
-                agent_id,
-                session_id,
-                text,
-                iterations,
-                tool_calls_made,
-            );
+        match self.db.lock() {
+            Ok(conn) => {
+                crate::transcript::record_rest_agent_reply(
+                    &conn,
+                    agent_id,
+                    session_id,
+                    text,
+                    iterations,
+                    tool_calls_made,
+                );
+            }
+            Err(_) => {
+                // best-effort な転記だが、黙って落とすと「SSE には返信が流れたのに
+                // 履歴に無い」状態が痕跡なしで生まれる（次ターンで言い直す）。
+                tracing::error!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    "web: DB ロックが毒化しており応答を転記できなかった"
+                );
+            }
         }
     }
 

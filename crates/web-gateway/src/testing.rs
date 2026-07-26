@@ -17,13 +17,30 @@ use crate::gateway::WebGateway;
 use crate::runner::WebAgentRunner;
 
 /// `run_agent_response` の観測 1 件。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunObservation {
     pub session_id: String,
     pub system_prompt: String,
     pub conversation: String,
     /// registry と sink の両方が載っているか（非ブロック dispatch が有効か）。
     pub dispatch_enabled: bool,
+    /// run に載った登録簿そのもの。停止（cancel）が届くには、これが
+    /// `WebGateway::registry_for(session_id)` と**同一の Arc** でなければならない。
+    ///
+    /// 中身（`SpawnedSubtask`）は `Debug` を実装しないため、`Debug` は手実装で伏せる。
+    pub subtask_registry: Option<opencrab_actions::SubtaskRegistry>,
+}
+
+impl std::fmt::Debug for RunObservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunObservation")
+            .field("session_id", &self.session_id)
+            .field("system_prompt", &self.system_prompt)
+            .field("conversation", &self.conversation)
+            .field("dispatch_enabled", &self.dispatch_enabled)
+            .field("subtask_registry", &self.subtask_registry.is_some())
+            .finish()
+    }
 }
 
 /// 転記された応答 1 件。
@@ -95,6 +112,7 @@ impl WebAgentRunner for FakeRunner {
             system_prompt: req.system_prompt.clone(),
             conversation: req.conversation.clone(),
             dispatch_enabled: req.completion_sink.is_some() && req.subtask_registry.is_some(),
+            subtask_registry: req.subtask_registry.clone(),
         });
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
