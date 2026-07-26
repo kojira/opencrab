@@ -18,8 +18,10 @@
 //! 参照できない。registry 本体（`SubtaskRegistry`）と同じ gateway 非依存層に置くことで、
 //! どのゲートウェイからも同じ 1 実装を使える。
 //!
-//! Discord（`spawn_serialized_on_session`）は「spawn 込みで戻り値なし」という別形のため
-//! 今回は統合しない（別 issue）。
+//! Discord は受信ループ形のため「spawn 込みで応答を返さない」という別形だが、そのために
+//! ロック表を二重に持つ理由はない。[`SessionRuntime::spawn_serialized`]（`run_serialized` を
+//! `tokio::spawn` で包むだけの薄い入口）へ寄せ、ロックの生成・取得・回収の実装はここ 1 つに
+//! なった（#156 S2）。
 
 use std::future::Future;
 use std::sync::Arc;
@@ -112,6 +114,36 @@ impl SessionRuntime {
         drop(lock);
         self.release_lock_if_idle(session_id);
         out
+    }
+
+    /// `fut` を「同一セッションのロック下で走らせるタスク」として spawn する（結果は返さない）。
+    ///
+    /// 受信ループ形のゲートウェイ（Discord）向けの薄い入口。中身は [`Self::run_serialized`]
+    /// を `tokio::spawn` で包むだけで、ロックの生成・取得・アイドル回収は同じ 1 実装を通る。
+    ///
+    /// **ロックの取得は spawn した中で行う**（呼び出し側では await しない）。受信ループが
+    /// 取得を待つと、走行中セッションの推論が終わるまで**全チャンネル・全エージェント**の
+    /// 受信が止まる（過去にこれでデッドロックを作った）。応答の値を返さないのも同じ理由で、
+    /// 「呼び出し側は結果を待たない」ことを型で示している。
+    ///
+    /// 渡す `fut` には**受信の記録から応答の記録まで**を丸ごと入れること。ロック取得の後に
+    /// 受信の記録と履歴構築が来る順序が崩れると、確定前の履歴から 2 本目の返信が組み立てられて
+    /// 二重投稿になる（[`Self::run_serialized`] の注意書きと同じ不変条件）。
+    ///
+    /// 返す `JoinHandle` は破棄してよい（テストが完了を待てるように返しているだけ）。
+    pub fn spawn_serialized<F>(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+        fut: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let runtime = Arc::clone(self);
+        let session_id = session_id.into();
+        tokio::spawn(async move {
+            runtime.run_serialized(&session_id, fut).await;
+        })
     }
 }
 
@@ -277,5 +309,74 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(rt.holds_lock_entry("s-running"));
         running.abort();
+    }
+
+    /// spawn 形の入口は呼び出し側（受信ループ）をブロックしない。
+    ///
+    /// ロック取得を呼び出し側で await すると、走行中セッションの推論が終わるまで
+    /// 受信そのものが止まる。ここでは「完了までブロックする future を渡しても
+    /// 呼び出しが即座に返る」ことと、完了後にエントリが回収されることを見る。
+    #[tokio::test]
+    async fn spawn_serialized_does_not_block_caller() {
+        let rt = Arc::new(SessionRuntime::new());
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = rt.spawn_serialized("s-spawn", async move {
+            let _ = rx.await;
+        });
+        // 呼び出し側はブロックされていない（この行に到達できることが検証）。
+        tx.send(()).expect("task must be waiting");
+        handle.await.expect("spawned task panicked");
+        assert!(
+            !rt.holds_lock_entry("s-spawn"),
+            "完了後はロックエントリが回収される"
+        );
+    }
+
+    /// spawn 形でも同一セッションは直列（割り込みによる二重返信の防止）。
+    #[tokio::test]
+    async fn spawn_serialized_same_session_serializes() {
+        let rt = Arc::new(SessionRuntime::new());
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let inflight = inflight.clone();
+            let max_concurrent = max_concurrent.clone();
+            handles.push(rt.spawn_serialized("s-spawn-serial", async move {
+                let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_concurrent.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                inflight.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.await.expect("spawned task panicked");
+        }
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            1,
+            "同一セッションの spawn は並行してはならない"
+        );
+    }
+
+    /// spawn 形でも別セッションは長時間セッションに塞がれない。
+    #[tokio::test]
+    async fn spawn_serialized_different_sessions_run_concurrently() {
+        let rt = Arc::new(SessionRuntime::new());
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        let blocking = rt.spawn_serialized("s-spawn-block", async move {
+            let _ = hold_rx.await;
+        });
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        rt.spawn_serialized("s-spawn-free", async move {
+            let _ = done_tx.send(());
+        });
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .expect("別セッションは長時間セッションに塞がれてはならない")
+            .expect("sender dropped");
+        let _ = hold_tx.send(());
+        blocking.await.expect("spawned task panicked");
     }
 }
