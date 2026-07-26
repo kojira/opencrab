@@ -70,7 +70,7 @@ web（フロントエンド） ──→ (HTTP経由でserverと通信)
 
 `core`は`llm`や`actions`に直接依存しない。代わりに`LlmClient`トレイトと`ActionExecutor`トレイトを定義し、サーバー層で実装を結合する（依存性逆転）。
 
-`discord`クレートは`AgentRunner`トレイトを定義し、`server`が`AppState`に対してこれを実装することで循環依存を回避している。ゲートウェイ非依存な実行境界（応答生成・会話履歴・トークン予算・セッション管理）は`actions`クレートの`AgentRuntime`トレイトが持ち、`AgentRunner` / `NostrAgentRunner` / `WebAgentRunner`はいずれもそのスーパートレイトとして継承する（#156）。
+`discord`クレートは`AgentRunner`トレイトを定義し、`server`が`AppState`に対してこれを実装することで循環依存を回避している。ゲートウェイ非依存な実行境界（応答生成・会話履歴・トークン予算・セッション管理・**ターン転記**）は`actions`クレートの`AgentRuntime`トレイトが持ち、`AgentRunner` / `NostrAgentRunner` / `WebAgentRunner`はいずれもそのスーパートレイトとして継承する（#156 / #158）。
 
 ### 2.3 データの流れ
 
@@ -342,7 +342,8 @@ SkillEngine
 Discord固有のロジックは専用の`opencrab-discord`クレートに分離されている：
 
 - **`opencrab-discord`クレート**: メッセージループ、Discord管理アクション（サーバー/チャンネル一覧、チャンネル設定）、per-agent Botライフサイクル管理を提供
-- **`AgentRunner`トレイト**: `discord`クレートで定義。Discord固有の判定・転記・per-agentゲートウェイを抽象化し、`server`が`AppState`に対して実装する。これにより`discord → server`の循環依存を回避。エージェント処理パイプライン（LLM呼び出し等）そのものは`actions`の`AgentRuntime`（全ゲートウェイ共通、実装は`server/src/agent_runtime_impl.rs`の1箇所）が持つ
+- **`AgentRunner`トレイト**: `discord`クレートで定義。Discord固有の判定（trust / チャンネルポリシー）・per-agentゲートウェイを抽象化し、`server`が`AppState`に対して実装する。これにより`discord → server`の循環依存を回避。エージェント処理パイプライン（LLM呼び出し等）そのものは`actions`の`AgentRuntime`（全ゲートウェイ共通、実装は`server/src/agent_runtime_impl.rs`の1箇所）が持つ
+- **ターン転記（session_logs への記録）**: `AgentRunner`ではなく`actions`の`AgentRuntime`が持つ（`record_inbound_message` / `record_outbound_reply` / `record_interaction_response` — #158）。記録の種別（metadata の`source`）は列挙型`opencrab_actions::TranscriptSource`で受け、行の形は`server/src/transcript.rs`が所有する（transport の feature flag に依存しない）
 - **`opencrab-gateway`のDiscordアダプタ**: serenity Botの接続・メッセージ受信・送信を担当（feature flag `discord`で条件付きコンパイル）
 - **`server`の`discord` feature**: `opencrab-discord`をoptional依存として有効化。`serenity`への直接依存はない
 

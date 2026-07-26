@@ -5,6 +5,11 @@
 - 関連能力: #144（全ツール非ブロック）/ #150（エージェント駆動の停止）/ #151（個別/クロスセッション cancel/list）/ #142（走行中サブの steer）/ #143（親コンテキスト継承）
 - 前提: 本 RFC は「計画を先に PR → 第三者レビュー → 合意後に実装」の**計画フェーズ**。コードは変更していない。
 
+> **読み方（後続 issue で方針が変わった箇所がある）**
+> 本 RFC は**執筆時点（main HEAD `8d64bef`）の現状分析と当時の意思決定の記録**であり、現在のコードの説明ではない。後続の実装で判断が変わった箇所には `> **更新（#…）**` の注記を**その場に追記**してある（当時の判断は消していない）。現状のコードを知りたい場合は注記側を、なぜそう決めたかの経緯を知りたい場合は本文側を読むこと。
+>
+> 現時点で方針が変わっているもの: §2-3 / §4 S4 の**転記型の所在**（#158 S3 で `opencrab_actions::transcript` へ移設）。
+
 > **基準（オーナー確定）**
 > 1. **main（HEAD `8d64bef`）から作り直す**。#144/#150/#151 の未コミット fix 版（`BackgroundDispatch` / `dispatch_pending_tool_calls` / `subtask_dispatch` / `cancel_job` / `cancel_running_tools` / `RunningJob` 等）は**プロトタイプとして破棄済み**であり、本設計は引きずらない。本 RFC の行番号はすべて main HEAD に対して張っている（上記 fix 版のシンボルは main に存在しない — §0.1 で実証）。
 > 2. 軸は「**最小で層違反を解消する**」。理想アーキテクチャを一気に作らない。
@@ -119,6 +124,7 @@ db, gateway, voice, llm-types      （葉）
 1. **非 Discord で完了再注入が不可**: 完了通知が `LoopEvent`（Discord 専用 enum）に固定され、event_tx を持たない/Discord セッション形式でない親では破棄される（`subtask_engine.rs:94-108`）。→ Nostr / REST / heartbeat で subtask が実質機能しない（§1.4）。
 2. **server ツールが subtask から不達**: 子に root gateway が渡らず、sub-engine が合成 `SystemGatewayActions` を見られない（§1.7）。→ 長時間 server ツールを subtask 化できない。
 3. **逆依存**: server が discord のサブタスク型を import する（`opencrab_discord::SubtaskRegistry`：`crates/server/src/main.rs:565`、`crates/server/src/api/agents_messages.rs:118`／`DiscordReplyContext`：`crates/server/src/transcript.rs:93`）。REST は使い捨て registry を新規構築（`agents_messages.rs:118`）。
+   - > **更新（#158 S3、2026-07）**: 転記型の逆依存は解消済み。`DiscordReplyContext` / `InteractionRecord` は `opencrab_actions::transcript` へ移設され（`AgentReplyContext` / `InteractionRecord`）、`crates/server/src/transcript.rs` は discord crate を参照しない。§4 S4 の当時の判断（下記）から方針が変わっている。
 4. **ゲートウェイ非対称**: Discord だけが再注入を持ち、他は同期完結。共通能力のはずが1ゲートウェイの実装詳細に埋まっている。
 
 ---
@@ -211,6 +217,9 @@ pub struct SubtaskSettled {
 - **S4. 旧結合の除去**
   - server の `opencrab_discord::SubtaskRegistry` 参照（`main.rs:565` / `agents_messages.rs:118`）を actions 由来へ置換。`DiscordReplyContext`（`transcript.rs:93`）等 Discord 固有の転記型は Discord 側に残す。
   - 完了条件: server が discord のサブタスク**ランタイム型**に依存しない。
+  - > **更新（#158 S3、2026-07）**: 転記型を Discord 側に残す判断は**取り消された**。本 RFC 時点では「Discord 固有」と見なしていたが、実際には `DiscordReplyContext` の 3 variant は「このターンが何で起動されたか」（直接の発話 / サブタスク完了 / A2UI 応答）を表すだけで transport 依存の型を含まず、`InteractionRecord` も同様だった。この 2 型が discord crate に居るせいで server の転記関数が `#[cfg(feature = "discord")]` 配下に落ち、discord feature を切ると Nostr とまったく同じ形の記録まで消えていた。
+    >
+    > **現在の所在**: `opencrab_actions::transcript`（`AgentReplyContext` / `InteractionRecord` / `InboundMessageRecord` / `OutboundReplyRecord` / `TranscriptSource`）。記録メソッドは `AgentRunner` / `NostrAgentRunner` から `opencrab_actions::AgentRuntime`（`record_inbound_message` / `record_outbound_reply` / `record_interaction_response`）へ移り、`crates/server/src/transcript.rs` の transport 別関数は統合されて機能フラグ配下から出た。記録される `metadata_json` はバイト等価（種別文字列は列挙型が保持）。
 
 ---
 
