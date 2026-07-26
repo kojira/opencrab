@@ -537,6 +537,10 @@ async fn main() -> anyhow::Result<()> {
         progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(Mutex::new(None)),
+        // 設定ファイル由来の通知先フォールバック（#157 S5）。**Discord 機能フラグの
+        // 外**で 1 度だけ解決し、以降の利用者（gateway 非依存の管理ツール / lifecycle
+        // 通知 / Discord gateway_actions）は全てこの 1 つの値を参照する。
+        default_subtask_webhook: cfg.default_subtask_webhook(),
     };
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
@@ -545,17 +549,7 @@ async fn main() -> anyhow::Result<()> {
     // （web / REST から起動したサブタスクにも lifecycle 通知が出る）。
     #[cfg(feature = "discord")]
     {
-        let default_subtask_webhook = cfg
-            .gateway
-            .discord
-            .default_subtask_webhook
-            .as_ref()
-            .and_then(|c| {
-                opencrab_actions::webhook_target::WebhookConfig::from_parts(
-                    c.url.clone(),
-                    c.events.clone(),
-                )
-            });
+        let default_subtask_webhook = state.default_subtask_webhook.clone();
         *state.subtask_lifecycle_notifier.lock().unwrap() = Some(Arc::new(
             opencrab_discord::DiscordWebhookNotifier::new(
                 state.db.clone(),
@@ -654,15 +648,10 @@ async fn main() -> anyhow::Result<()> {
                 // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
                 // gateway_actions とループで同じチャンネルを共有する必要がある。
                 let (event_tx, event_rx) = opencrab_discord::message_loop::create_event_channel();
-                let default_subtask_webhook = discord_cfg
-                    .default_subtask_webhook
-                    .as_ref()
-                    .and_then(|cfg| {
-                        opencrab_actions::webhook_target::WebhookConfig::from_parts(
-                            cfg.url.clone(),
-                            cfg.events.clone(),
-                        )
-                    });
+                // 設定ファイル由来の通知先フォールバック（#157 S5 で `AppState` へ
+                // 持ち上げ済み）。Discord にはもう `ensure_*` しか残っていないが、
+                // 解決経路が全 transport で同じ値を見ることをここで担保する。
+                let default_subtask_webhook = state.default_subtask_webhook.clone();
                 // VC 対話（STT/TTS）: 実効設定（DB オーバーライド適用済み）で構築する。
                 // プロバイダ構築失敗（未知の provider 等）は起動を止めず警告して無効化。
                 let voice_cfg = &effective_voice;

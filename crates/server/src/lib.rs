@@ -121,6 +121,15 @@ pub struct AppState {
     /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
     /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
     pub subtask_auto_dispatch: bool,
+    /// 設定ファイル由来の**通知先フォールバック**（#157 S5）。
+    ///
+    /// 通知先の解決は「明示指定 → DB の scope 別既定（tool>agent>global）→ ここ」の順で、
+    /// DB 行が皆無のときだけ効く（`WebhookSource::EnvConfig`）。以前この値は Discord
+    /// 起動ブロックのローカル変数にしか無く、gateway 非依存層からは到達できなかった。
+    /// 管理ツール（`get_default_subtask_webhook` 等）を合成層へ移すにあたり、
+    /// **transport の機能フラグに依存しない形**でここへ持ち上げた
+    /// （`config::AppConfig::default_subtask_webhook`）。
+    pub default_subtask_webhook: Option<opencrab_actions::webhook_target::WebhookConfig>,
 }
 
 impl AppState {
@@ -167,6 +176,7 @@ pub(crate) fn test_app_state() -> AppState {
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
+        default_subtask_webhook: None,
     }
 }
 

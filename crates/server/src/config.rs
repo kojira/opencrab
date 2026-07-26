@@ -51,13 +51,51 @@ pub struct SubtaskConfig {
     /// TOML より優先する（`.env` だけで切り戻せるように）。
     #[serde(default = "default_subtask_auto_dispatch")]
     pub auto_dispatch: bool,
+
+    /// 設定ファイル由来の**通知先フォールバック**（#157 S5）。
+    ///
+    /// 通知先の解決順は「明示指定 → DB の scope 別既定（tool>agent>global）→ ここ」。
+    /// DB 行が 1 つも無いときだけ効く最後の砦（`WebhookSource::EnvConfig`）。
+    ///
+    /// 元は `[gateway.discord] default_subtask_webhook` にあり、**Discord 機能が有効な
+    /// ビルドの Discord 起動ブロックでしか読まれていなかった**ため、web / REST / Nostr /
+    /// heartbeat の経路からは到達できなかった。transport 非依存の `[subtask]` 名前空間へ
+    /// 持ち上げる。旧キーは後方互換のフォールバックとして読み続ける
+    /// （[`AppConfig::default_subtask_webhook`]）。
+    #[serde(default)]
+    pub default_webhook: Option<SubtaskWebhookConfig>,
 }
 
 impl Default for SubtaskConfig {
     fn default() -> Self {
         Self {
             auto_dispatch: default_subtask_auto_dispatch(),
+            default_webhook: None,
         }
+    }
+}
+
+impl AppConfig {
+    /// 設定ファイル由来の通知先フォールバックを解決する（#157 S5）。
+    ///
+    /// 優先順位は **新キー `[subtask] default_webhook` → 旧キー
+    /// `[gateway.discord] default_subtask_webhook`**。旧キーだけを書いた既存の設定
+    /// ファイルはそのまま動き続ける（後方互換）。url が空/空白のみなら「未設定」。
+    ///
+    /// transport の機能フラグから独立している点が要点で、`#[cfg(feature = "discord")]`
+    /// の外から呼べる。`AppState::default_subtask_webhook` へはこの結果を入れる。
+    pub fn default_subtask_webhook(&self) -> Option<opencrab_actions::webhook_target::WebhookConfig>
+    {
+        self.subtask
+            .default_webhook
+            .as_ref()
+            .or(self.gateway.discord.default_subtask_webhook.as_ref())
+            .and_then(|c| {
+                opencrab_actions::webhook_target::WebhookConfig::from_parts(
+                    c.url.clone(),
+                    c.events.clone(),
+                )
+            })
     }
 }
 
@@ -345,6 +383,11 @@ pub struct DiscordGatewayConfig {
     #[serde(default)]
     pub heartbeat_channel_id: Option<u64>,
     /// spawn_subtask.webhook が省略された時に使うデフォルトの lifecycle webhook。
+    ///
+    /// **旧キー（後方互換）**: #157 S5 で transport 非依存の `[subtask] default_webhook`
+    /// へ持ち上げた。既存の設定ファイルを壊さないためここは残し、新キーが未設定の
+    /// ときのフォールバックとして読み続ける（[`AppConfig::default_subtask_webhook`]）。
+    /// 新規に書くなら `[subtask] default_webhook` を使うこと。
     #[serde(default)]
     pub default_subtask_webhook: Option<SubtaskWebhookConfig>,
 }
