@@ -7,21 +7,15 @@
 //! 応答生成が並行しうる。両者が同じ会話から独立に返信を組み立てると二重投稿になる
 //! （RFC §6 の不変条件違反）。
 //!
-//! そこで web gateway（`WebGateway::run_serialized`）と同じ per-session ロックを
-//! Nostr にも置く。ロックの粒度は **session = エージェント × 相手 pubkey** なので、
-//! 別の相手との会話や別エージェントは従来どおり並行する。
+//! そこで per-session ロックを置く。ロックの粒度は **session = エージェント × 相手
+//! pubkey** なので、別の相手との会話や別エージェントは従来どおり並行する。
 //!
-//! `registries` は dispatch した subtask を追跡する registry を session 単位で貸す。
-//! inbound と resume で同一 Arc を共有することが `cancel_subtask`（#161）が到達できる
-//! 条件（別 registry を渡すと常に not found になる）。
+//! 直列化ロジックそのものは web gateway と文字レベルでほぼ同一だったため、#190 S1 で
+//! gateway 非依存層の [`SessionRuntime`] へ 1 つに寄せた。ここに残すのは **Nostr 固有の
+//! 語彙**（session_id の規約と接頭辞）だけで、`NostrSessionRuntime` はその下位層型の
+//! 別名である（呼び出し側の型名・API は不変）。
 
-use std::future::Future;
-use std::sync::Arc;
-
-use dashmap::DashMap;
-use tokio::sync::Mutex;
-
-use opencrab_actions::{SubtaskRegistries, SubtaskRegistry};
+use opencrab_actions::SessionRuntime;
 
 /// Nostr セッション ID の接頭辞。sink はこれで Nostr セッションを識別する。
 pub const NOSTR_SESSION_PREFIX: &str = "nostr-";
@@ -33,64 +27,15 @@ pub fn nostr_session_id(agent_id: &str, author_pubkey: &str) -> String {
 
 /// Nostr ゲートウェイが全エージェント横断で 1 つ持つ per-session ランタイム。
 ///
-/// `NostrGatewayManager` が保持し、watch ループと完了 sink が同じ Arc を共有する。
-#[derive(Default)]
-pub struct NostrSessionRuntime {
-    session_locks: DashMap<String, Arc<Mutex<()>>>,
-    registries: SubtaskRegistries,
-}
-
-impl NostrSessionRuntime {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// セッションの dispatch registry を取得する（無ければ生成し、inbound/resume で共有）。
-    pub fn registry_for(&self, session_id: &str) -> SubtaskRegistry {
-        self.registries.registry_for(session_id)
-    }
-
-    /// セッションに走行中（未決着）の dispatch subtask があるか。
-    pub fn has_running(&self, session_id: &str) -> bool {
-        self.registries.has_running(session_id)
-    }
-
-    fn lock_for(&self, session_id: &str) -> Arc<Mutex<()>> {
-        self.session_locks
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    /// 待機者がいなければロックエントリを回収する（リーク防止）。
-    fn release_lock_if_idle(&self, session_id: &str) {
-        self.session_locks
-            .remove_if(session_id, |_, lock| Arc::strong_count(lock) == 1);
-    }
-
-    /// 同一セッションのロック下で `fut` を実行する（per-session 直列化）。
-    ///
-    /// - 同一セッションは直列（inbound と subtask 完了 resume を割り込ませない）。
-    /// - 異なるセッション（別の相手 / 別エージェント）は並行。
-    pub async fn run_serialized<F, T>(&self, session_id: &str, fut: F) -> T
-    where
-        F: Future<Output = T>,
-    {
-        let lock = self.lock_for(session_id);
-        let guard = lock.lock().await;
-        let out = fut.await;
-        drop(guard);
-        drop(lock);
-        self.release_lock_if_idle(session_id);
-        out
-    }
-}
+/// `NostrGatewayManager` が `Arc` で保持し、watch ループと完了 sink が同じ Arc を共有する。
+/// 実体は gateway 非依存層の [`SessionRuntime`]（per-session 直列化 + dispatch 登録簿）。
+/// 直列化を Nostr 側に複製しないことで、web と挙動がずれない。
+pub type NostrSessionRuntime = SessionRuntime;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::sync::Arc;
 
     #[test]
     fn session_id_follows_convention() {
@@ -111,65 +56,15 @@ mod tests {
         assert!(!Arc::ptr_eq(&a, &c));
     }
 
-    /// per-session 直列化: 同一セッションの並行実行は同時実行数 1 になる。
-    #[tokio::test]
-    async fn same_session_serializes() {
-        let rt = Arc::new(NostrSessionRuntime::new());
-        let inflight = Arc::new(AtomicUsize::new(0));
-        let max_concurrent = Arc::new(AtomicUsize::new(0));
-        let sid = nostr_session_id("a1", "serial");
-
-        let mut handles = Vec::new();
-        for _ in 0..5 {
-            let rt = rt.clone();
-            let inflight = inflight.clone();
-            let max_concurrent = max_concurrent.clone();
-            let sid = sid.clone();
-            handles.push(tokio::spawn(async move {
-                rt.run_serialized(&sid, async move {
-                    let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_concurrent.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    inflight.fetch_sub(1, Ordering::SeqCst);
-                })
-                .await;
-            }));
-        }
-        for h in handles {
-            h.await.unwrap();
-        }
-        assert_eq!(max_concurrent.load(Ordering::SeqCst), 1);
-    }
-
-    /// 異なるセッション（別の相手）は互いをブロックしない。
-    #[tokio::test]
-    async fn different_sessions_run_concurrently() {
-        let rt = Arc::new(NostrSessionRuntime::new());
-        let rt1 = rt.clone();
-        let block = tokio::spawn(async move {
-            rt1.run_serialized(&nostr_session_id("a1", "blocking"), async {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            })
-            .await;
-        });
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            rt.run_serialized(&nostr_session_id("a1", "free"), async {}),
-        )
-        .await
-        .expect("別セッションは他セッションのロックで待たされてはならない");
-
-        block.abort();
-    }
-
-    /// 待機者のいないロックエントリは回収される（リーク防止）。
+    /// Nostr の session_id でも直列化ロックが取得・回収される（下位層への委譲の配線確認）。
+    ///
+    /// 直列 / 並行そのものの検証は下位層
+    /// （`opencrab_actions::session_runtime` のテスト）が持つ。
     #[tokio::test]
     async fn idle_lock_is_reclaimed() {
         let rt = NostrSessionRuntime::new();
         let sid = nostr_session_id("a1", "reclaim");
         rt.run_serialized(&sid, async {}).await;
-        assert!(rt.session_locks.get(&sid).is_none());
+        assert!(!rt.holds_lock_entry(&sid));
     }
 }

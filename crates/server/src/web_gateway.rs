@@ -21,14 +21,14 @@ use std::future::Future;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 
 use opencrab_actions::{
-    CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+    CallerIdentity, RunRequest, SessionRuntime, SettleKind, SubtaskCompletionSink, SubtaskRegistry,
+    SubtaskSettled,
 };
 
 use crate::process;
-use crate::subtask_registries::SubtaskRegistries;
 use crate::AppState;
 
 /// web セッション ID の接頭辞。sink はこれで web セッションを識別する。
@@ -55,14 +55,14 @@ pub struct WebEvent {
 
 /// web gateway の共有ランタイム。`AppState` が `Arc<WebGateway>` として保持する。
 ///
-/// - `session_locks`: per-session 直列化ロック（Discord の SessionLocks 相当）。
-/// - `registries`: per-session の dispatch 用 registry（inbound / resume で共有し、
-///   cancel/list から到達可能に保つ）。
-/// - `channels`: per-session の SSE ファンアウト（broadcast）。
+/// - `runtime`: per-session 直列化ロック ＋ dispatch 用 registry。gateway 非依存層の
+///   [`SessionRuntime`] に委譲する（Nostr と同一実装 / #190 S1）。inbound と resume が
+///   同じロック・同じ registry を通ることで、二重回答の防止と cancel の到達性を保つ。
+/// - `channels`: per-session の SSE ファンアウト（broadcast）。**web 固有**なのでここに残す
+///   （Nostr は返信を relay へ送るため配信チャンネルを持たない）。
 #[derive(Default)]
 pub struct WebGateway {
-    session_locks: DashMap<String, Arc<Mutex<()>>>,
-    registries: SubtaskRegistries,
+    runtime: SessionRuntime,
     channels: DashMap<String, broadcast::Sender<String>>,
 }
 
@@ -97,7 +97,7 @@ impl WebGateway {
 
     /// セッションの dispatch registry を取得する（無ければ生成し、inbound/resume で共有）。
     fn registry_for(&self, session_id: &str) -> SubtaskRegistry {
-        self.registries.registry_for(session_id)
+        self.runtime.registry_for(session_id)
     }
 
     /// このセッションに未決着の subtask が残っているか。
@@ -105,26 +105,16 @@ impl WebGateway {
     /// `cancel_subtask` が引く registry と同一のものを見るので、決着後に空になることを
     /// 外から確認できる（REST 側の `SubtaskRegistries::has_running` と対称）。
     pub fn has_running(&self, session_id: &str) -> bool {
-        self.registries.has_running(session_id)
-    }
-
-    fn lock_for(&self, session_id: &str) -> Arc<Mutex<()>> {
-        self.session_locks
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    /// 待機者がいなければロックエントリを回収する（#39 相当のリーク防止）。
-    fn release_lock_if_idle(&self, session_id: &str) {
-        self.session_locks
-            .remove_if(session_id, |_, lock| Arc::strong_count(lock) == 1);
+        self.runtime.has_running(session_id)
     }
 
     /// 同一セッションのロック下で `fut` を実行する（per-session 直列化）。
     ///
     /// - 異なるセッションは並行、同一セッションは直列（inbound / resume を割り込ませない）。
     /// - inbound は呼び出し側が `.await` し、resume は `tokio::spawn` の中で `.await` する。
+    ///
+    /// ロック保持・アイドル回収の実装は [`SessionRuntime::run_serialized`]（gateway 非依存層）
+    /// にあり、ここはそれへの薄いラッパである。
     ///
     /// **module-private**: 直列化を呼び出し側の責務にすると 1 箇所の忘れで不変条件が壊れる
     /// （レビューで実証: sink 側の `run_serialized` を外してもテストは全緑だった）。
@@ -134,13 +124,7 @@ impl WebGateway {
     where
         F: Future<Output = T>,
     {
-        let lock = self.lock_for(session_id);
-        let guard = lock.lock().await;
-        let out = fut.await;
-        drop(guard);
-        drop(lock);
-        self.release_lock_if_idle(session_id);
-        out
+        self.runtime.run_serialized(session_id, fut).await
     }
 }
 
@@ -295,6 +279,15 @@ mod tests {
             .await;
         });
 
+        // spawn したタスクを実際に走らせてロックを取らせる（yield を挟まないと
+        // current_thread ランタイムでは一度も走らず、非競合の取得を測るだけになる）。
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "先行タスクがロックを取っていないと、この検証は非競合の取得を測るだけになる"
+        );
+
         // 別セッションは block を待たずに実行できる。
         tokio::time::timeout(
             Duration::from_millis(100),
@@ -313,7 +306,7 @@ mod tests {
         let sid = web_session_id("a", "reclaim");
         gw.run_serialized(&sid, async {}).await;
         assert!(
-            gw.session_locks.get(&sid).is_none(),
+            !gw.runtime.holds_lock_entry(&sid),
             "待機者がいないロックは回収される"
         );
     }
