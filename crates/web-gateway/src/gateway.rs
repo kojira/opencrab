@@ -14,7 +14,11 @@ pub const WEB_SESSION_PREFIX: &str = "web-";
 pub const WEB_SESSION_THEME: &str = "web_conversation";
 
 /// SSE チャンネルの capacity（未接続時のバックログ）。
-const SSE_CHANNEL_CAPACITY: usize = 256;
+///
+/// crate 内に見せているのは、`http` の取りこぼし（`Lagged`）テストが「capacity を
+/// 超える数を publish する」ために必要だから（数値をテスト側へ写すと capacity を
+/// 変えたときにテストが黙って無意味になる）。
+pub(crate) const SSE_CHANNEL_CAPACITY: usize = 256;
 
 /// session_id 規約: `web-{agent_id}-{conversation_id}`。
 pub fn web_session_id(agent_id: &str, conversation_id: &str) -> String {

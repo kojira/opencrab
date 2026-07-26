@@ -1,9 +1,10 @@
-//! OpenCrab の web ゲートウェイ（ダッシュボード会話 / #154・切り出しは #190 S3）。
+//! OpenCrab の web ゲートウェイ（ダッシュボード会話 / #154・切り出しは #190 S3・S4）。
 //!
 //! ダッシュボードからエージェントと会話するためのゲートウェイ。HTTP 境界（axum の
-//! ハンドラ）は今のところ `crates/server` 側に残り、ここには**ゲートウェイの実体**
-//! （SSE 配信チャンネル、セッション ID 規約、応答生成の入口、subtask 完了の受け口）
-//! が入る。
+//! ルータとハンドラ / [`http`]）と**ゲートウェイの実体**（SSE 配信チャンネル、
+//! セッション ID 規約、応答生成の入口、subtask 完了の受け口）の両方がここに入る。
+//! 上位（`crates/server` の `create_router`）は [`http::routes`] を `.merge()` で
+//! 取り付けるだけでよい。
 //!
 //! `crates/server` には依存しない。エージェント実行と永続化に必要な操作は
 //! [`WebAgentRunner`] トレイト越しに呼ぶ（`crates/server` の `AppState` が実装する）。
@@ -22,7 +23,8 @@
 //!
 //! Rust では兄弟モジュールから private 項目へ到達できないため、sink が生の応答生成を
 //! 直呼びするコードはコンパイルできない（同一モジュール内 private だと直呼びできて
-//! しまい、直列化の呼び忘れが型で防げない）。
+//! しまい、直列化の呼び忘れが型で防げない）。HTTP ハンドラ（[`http`]）も同じく兄弟
+//! モジュールなので、公開入口以外を呼べない。
 //!
 //! ## Discord / Nostr との対比
 //!
@@ -37,6 +39,7 @@
 //!   1 本のロックで inbound / resume を直列化する。異なるセッションは並行。
 
 pub mod gateway;
+pub mod http;
 pub mod respond;
 pub mod runner;
 pub mod sink;
@@ -47,6 +50,7 @@ mod testing;
 pub use gateway::{
     caller_type_label, web_session_id, WebEvent, WebGateway, WEB_SESSION_PREFIX, WEB_SESSION_THEME,
 };
+pub use http::routes;
 pub use respond::run_and_deliver_serialized;
 pub use runner::WebAgentRunner;
 pub use sink::WebCompletionSink;
