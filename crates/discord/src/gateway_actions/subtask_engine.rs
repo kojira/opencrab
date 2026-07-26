@@ -1439,7 +1439,6 @@ fn short_json_preview(data: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_gateway::GatewayActions as _;
 
     // ---- RFC #152 S1: DiscordCompletionSink（完了の再注入経路） ----
     //
