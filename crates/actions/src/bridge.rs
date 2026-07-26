@@ -188,24 +188,23 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     // (2) 配送系 + ユーザーの応答待ち（pending interaction）。
     "send_ui",
     // (3) 同ターン結果依存: webhook URL / 作成物の ID をそのターンで使う。
+    //     `ensure_*` は既存デフォルトが無いとき `discord_create_webhook` を呼ぶ
+    //     （serenity 依存の transport 固有処理）ので #157 S5 でも Discord に残る。
     "ensure_webhook",
     "ensure_subtask_webhook",
     "discord_create_webhook",
     "discord_create_channel",
-    "set_default_webhook",
-    "set_default_subtask_webhook",
     // (4) run 内共有状態: readable/writable は走行中ターンの配送可否を左右する。
     "discord_channel_config",
     // (5) 純粋な読み取り。
     "discord_list_channels",
     "discord_list_guilds",
-    "list_webhooks",
-    "list_subtask_webhooks",
-    "get_default_webhook",
-    "get_default_subtask_webhook",
     // 許可コマンドの list/add/remove は #157 S1、`read_heartbeat_instructions` は
     // #157 S3 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。Discord は定義しない
     // のでここには無い（どちらも分類の所属は inline のまま）。
+    // 通知先（webhook）の管理 6 種（`get/set_default_[subtask_]webhook` /
+    // `list_[subtask_]webhooks`）は #157 S5 で server 側（`SERVER_INLINE_ACTIONS`）へ
+    // 移設済み。分類の所属は inline のまま変えていない。
 ];
 
 /// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
@@ -317,6 +316,18 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     // (5) 純粋な読み取り（#157 S3 で Discord から移設）。移設前は
     //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
     "read_heartbeat_instructions",
+    // 通知先（webhook）の管理（#157 S5 で Discord から移設）。**移設前の分類を維持する**:
+    // 6 個とも `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
+    //
+    // (3) 同ターン結果依存: 設定した直後に `get_default_*` / `list_*` で読み戻して
+    //     「どこに通知されるか」を同じターンで答える用法。
+    "set_default_webhook",
+    "set_default_subtask_webhook",
+    // (5) 純粋な読み取り。「今の通知先を教えて」が 2 ターン 2 メッセージに割れないよう inline。
+    "get_default_webhook",
+    "get_default_subtask_webhook",
+    "list_webhooks",
+    "list_subtask_webhooks",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。

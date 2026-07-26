@@ -463,6 +463,206 @@ impl SystemGatewayActions {
                     "required": ["scope"]
                 }),
             },
+            // ---- #157 S5: 通知先（webhook）の管理ツール（Discord から移設） ----
+            //
+            // 実装は DB と設定ファイル由来の既定値しか触らないのに Discord gateway に
+            // しか無かった。定義・引数スキーマ・レスポンス JSON・エラー文言は Discord
+            // 実装から**1 バイトも変えずに**移している。実体は `crate::webhook_targets`。
+            // 権限はハンドラ内検査のみ（bridge の owner/trusted リストには無い＝単層）。
+            //
+            // `ensure_webhook` / `ensure_subtask_webhook` は **Discord に残る**。既存
+            // デフォルトが無いとき `discord_create_webhook`（serenity 依存）で webhook を
+            // 新規作成するためで、ここには定義しない。
+            GatewayActionDef {
+                name: "get_default_subtask_webhook".to_string(),
+                description: "spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "tool scope を解決する際のツール名（省略可）。"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "参考情報（解決は固定順序: tool>agent>global>env）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "set_default_subtask_webhook".to_string(),
+                description: "scope（agent/tool/global）ごとのデフォルト subtask webhook を設定する。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner限定。応答にrawトークンは含まれない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "tool", "global"],
+                            "description": "agent=エージェント既定、tool=spawn_subtaskツール既定、global=全体既定。"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。global では '*' に強制）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "scope=tool のとき省略時 'spawn_subtask'。"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "Discord webhook URL。空/省略でそのscopeを無効化する。"
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "有効/無効（url指定時のデフォルトtrue）。"
+                        },
+                        "events": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "通知イベント（省略時は全て）。"
+                        },
+                        "output_mode": {
+                            "type": "string",
+                            "description": "出力モード（省略時 'summary'）。"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "最大文字数（省略時 1500）。"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": "種別（省略時 'subtask'）。"
+                        }
+                    },
+                    "required": ["scope"]
+                }),
+            },
+            GatewayActionDef {
+                name: "list_subtask_webhooks".to_string(),
+                description: "登録されている subtask webhook 設定を一覧する。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。globalも併せて返る）。"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "scopeで絞り込み（省略可）。"
+                        },
+                        "include_disabled": {
+                            "type": "boolean",
+                            "description": "無効化済みも含めるか（省略時 false）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "get_default_webhook".to_string(),
+                description: "実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "family": {
+                            "type": "string",
+                            "enum": ["activity", "subtask"],
+                            "description": "解決するファミリ（省略時 'activity'）。"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "tool scope を解決する際のツール名（省略可）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "set_default_webhook".to_string(),
+                description: "scope（agent/tool/global）ごとのデフォルト webhook を設定する（既定 family='activity'）。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner は全 scope、agent は自分の agent-scope のみ設定/無効化できる。応答にrawトークンは含まれない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "tool", "global"],
+                            "description": "agent=エージェント既定、tool=ツール既定、global=全体既定。"
+                        },
+                        "family": {
+                            "type": "string",
+                            "enum": ["activity", "subtask"],
+                            "description": "設定するファミリ（省略時 'activity'）。"
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。global では '*' に強制）。"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "scope=tool のとき省略時 'spawn_subtask'。activity の特定ツール宛先はツール名を指定する。"
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "Discord webhook URL。空/省略でそのscopeを無効化する。"
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "有効/無効（url指定時のデフォルトtrue）。"
+                        },
+                        "events": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "通知イベント（省略時は全て）。"
+                        },
+                        "output_mode": {
+                            "type": "string",
+                            "description": "出力モード（省略時 'summary'）。"
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "最大文字数（省略時 1500）。"
+                        }
+                    },
+                    "required": ["scope"]
+                }),
+            },
+            GatewayActionDef {
+                name: "list_webhooks".to_string(),
+                description: "登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "対象エージェントID（省略時は自分。globalも併せて返る）。"
+                        },
+                        "family": {
+                            "type": "string",
+                            "description": "family（kind）で絞り込み（省略可）。例: 'activity' / 'subtask'。"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "scopeで絞り込み（省略可）。"
+                        },
+                        "include_disabled": {
+                            "type": "boolean",
+                            "description": "無効化済みも含めるか（省略時 false）。"
+                        }
+                    },
+                    "required": []
+                }),
+            },
         ]
     }
 
@@ -1329,6 +1529,29 @@ impl GatewayActions for SystemGatewayActions {
             "read_heartbeat_instructions" => {
                 crate::heartbeat_instructions::read_heartbeat_instructions(&self.state, args, ctx)
             }
+            // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
+            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
+            // 由来のフォールバックは `AppState::default_subtask_webhook` から読むので、
+            // Discord 機能の有無に関わらず同じ既定へ到達する。
+            //
+            // `ensure_webhook` / `ensure_subtask_webhook` はここに**無い**（Discord に
+            // 残した webhook 新規作成つきのツール）。既定の `_ =>` で inner へ委譲される。
+            "get_default_subtask_webhook" => {
+                crate::webhook_targets::get_default_subtask_webhook(&self.state, args, ctx)
+            }
+            "set_default_subtask_webhook" => {
+                crate::webhook_targets::set_default_subtask_webhook(&self.state, args, ctx)
+            }
+            "list_subtask_webhooks" => {
+                crate::webhook_targets::list_subtask_webhooks(&self.state, args, ctx)
+            }
+            "get_default_webhook" => {
+                crate::webhook_targets::get_default_webhook(&self.state, args, ctx)
+            }
+            "set_default_webhook" => {
+                crate::webhook_targets::set_default_webhook(&self.state, args, ctx)
+            }
+            "list_webhooks" => crate::webhook_targets::list_webhooks(&self.state, args, ctx),
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
@@ -2245,6 +2468,183 @@ mod tests {
 
     fn agent_ctx() -> GatewayCallContext {
         GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
+    }
+
+    // ---- #157 S5: 通知先（webhook）の管理ツール ----
+
+    /// 移設した 6 ツールの名前（#157 S5）。`ensure_*` は含まない（Discord 側に残る）。
+    const MOVED_WEBHOOK_TOOLS: &[&str] = &[
+        "get_default_subtask_webhook",
+        "set_default_subtask_webhook",
+        "list_subtask_webhooks",
+        "get_default_webhook",
+        "set_default_webhook",
+        "list_webhooks",
+    ];
+
+    /// **#157 S5 の本題**: 6 ツールが own 定義にちょうど 1 件ずつある。
+    #[test]
+    fn webhook_target_tools_are_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        for name in MOVED_WEBHOOK_TOOLS {
+            assert_eq!(
+                defs.iter().filter(|d| &d.name == name).count(),
+                1,
+                "{name} は own 定義にちょうど 1 件必要（#157 S5）"
+            );
+        }
+    }
+
+    /// **Discord 無効の構成でも 6 ツールが露出する**（#157 S5 の証明）。
+    ///
+    /// `inner = None` は「transport 固有 gateway が居ない」経路（web / REST / Nostr /
+    /// heartbeat、および Discord feature 無効ビルド）そのもの。移設前はこの構成で
+    /// 6 ツールが一切出なかった＝ #157 が報告している不具合そのもの。
+    #[test]
+    fn webhook_target_tools_are_exposed_without_any_transport_gateway() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        for name in MOVED_WEBHOOK_TOOLS {
+            assert!(
+                names.contains(&name.to_string()),
+                "transport gateway 無しの構成で {name} が露出しない（#157 の不具合そのもの）: {names:?}"
+            );
+        }
+        // 逆に、Discord に残した `ensure_*` はここには出ない（inner が居ないため）。
+        for name in ["ensure_webhook", "ensure_subtask_webhook"] {
+            assert!(
+                !names.contains(&name.to_string()),
+                "{name} は Discord gateway 由来のはず（own に増やしてはいけない）"
+            );
+        }
+    }
+
+    /// 引数スキーマを移設前（Discord 定義）と同一に保つ。
+    ///
+    /// 名前・`required`・プロパティ名の集合をリテラルで固定する。ここが変わると
+    /// 既存の会話ログにあるツール呼び出しが通らなくなる。
+    #[test]
+    fn webhook_target_tool_schemas_match_the_discord_originals() {
+        let defs = SystemGatewayActions::own_definitions();
+        let find = |n: &str| defs.iter().find(|d| d.name == n).unwrap();
+        let props = |n: &str| {
+            let mut keys: Vec<String> = find(n).parameters["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+
+        assert_eq!(
+            find("get_default_subtask_webhook").parameters["required"],
+            json!([])
+        );
+        assert_eq!(
+            props("get_default_subtask_webhook"),
+            vec!["agent_id", "scope", "tool_name"]
+        );
+
+        assert_eq!(
+            find("set_default_subtask_webhook").parameters["required"],
+            json!(["scope"])
+        );
+        assert_eq!(
+            props("set_default_subtask_webhook"),
+            vec![
+                "agent_id",
+                "enabled",
+                "events",
+                "kind",
+                "max_chars",
+                "output_mode",
+                "scope",
+                "tool_name",
+                "url",
+            ]
+        );
+
+        assert_eq!(
+            find("list_subtask_webhooks").parameters["required"],
+            json!([])
+        );
+        assert_eq!(
+            props("list_subtask_webhooks"),
+            vec!["agent_id", "include_disabled", "scope"]
+        );
+
+        assert_eq!(
+            find("get_default_webhook").parameters["required"],
+            json!([])
+        );
+        assert_eq!(
+            props("get_default_webhook"),
+            vec!["agent_id", "family", "tool_name"]
+        );
+
+        assert_eq!(
+            find("set_default_webhook").parameters["required"],
+            json!(["scope"])
+        );
+        assert_eq!(
+            props("set_default_webhook"),
+            vec![
+                "agent_id",
+                "enabled",
+                "events",
+                "family",
+                "max_chars",
+                "output_mode",
+                "scope",
+                "tool_name",
+                "url",
+            ]
+        );
+
+        assert_eq!(find("list_webhooks").parameters["required"], json!([]));
+        assert_eq!(
+            props("list_webhooks"),
+            vec!["agent_id", "family", "include_disabled", "scope"]
+        );
+    }
+
+    /// **6 ツールは inner へ委譲されない**（own が唯一の実装）。
+    ///
+    /// 委譲パターンのまま残すと、Discord が誤って再定義したときに own の実装が黙って
+    /// バイパスされる（#155 の後退）。`ensure_*` は逆に inner へ渡る必要がある。
+    #[tokio::test]
+    async fn webhook_target_tools_are_not_delegated_to_inner() {
+        let state = crate::test_app_state();
+        let inner = Arc::new(RecordingInner::new(&[
+            "get_default_subtask_webhook",
+            "set_default_subtask_webhook",
+            "list_subtask_webhooks",
+            "get_default_webhook",
+            "set_default_webhook",
+            "list_webhooks",
+            "ensure_webhook",
+        ]));
+        let actions = SystemGatewayActions::new(state, Some(inner.clone()), None, None);
+
+        for name in MOVED_WEBHOOK_TOOLS {
+            let _ = actions
+                .execute(name, &json!({"scope": "agent"}), &owner_ctx())
+                .await;
+        }
+        assert!(
+            inner.calls().is_empty(),
+            "移設した 6 ツールが inner へ委譲された: {:?}",
+            inner.calls()
+        );
+
+        // Discord に残した `ensure_webhook` は既定アームで inner へ委譲される。
+        let _ = actions
+            .execute("ensure_webhook", &json!({}), &owner_ctx())
+            .await;
+        assert_eq!(inner.calls(), vec!["ensure_webhook".to_string()]);
     }
 
     /// **#157 S1 の本題**: 4 ツールが `SystemGatewayActions` の own 定義になっている。

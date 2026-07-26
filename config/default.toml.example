@@ -32,6 +32,16 @@ max_workspace_size_mb = 100
 # 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
 auto_dispatch = true
 
+# 通知先（webhook）の設定ファイル由来フォールバック。
+#
+# 通知先は「呼び出しで明示 → DB の scope 別既定（tool>agent>global）→ ここ」の順で
+# 解決され、DB に設定が 1 つも無いときだけこの値が使われる。
+# 特定の transport（Discord 等）に依存しない設定なので [subtask] に置く。
+#
+# 旧キー [gateway.discord] default_subtask_webhook も引き続き読まれる（後方互換）。
+# 両方書いた場合はこちらが優先。url = "" または未指定なら無効。
+# default_webhook = { url = "${SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
+
 [llm]
 default_provider = "openai"
 default_model = "claude-sonnet-4-6"
@@ -133,6 +143,9 @@ owner_discord_id = "${OWNER_DISCORD_ID}"
 # spawn_subtask.webhook を明示しない時に使う lifecycle 通知先。
 # 実 URL は `.env` の DISCORD_SUBTASK_WEBHOOK_URL から渡す。
 # url = "" または行ごと未指定なら無効。
+#
+# 【旧キー】transport 非依存の [subtask] default_webhook へ移動した。ここも
+# 引き続き読まれる（後方互換）が、新規に書くなら [subtask] 側を使うこと。
 # default_subtask_webhook = { url = "${DISCORD_SUBTASK_WEBHOOK_URL}", events = ["started", "progress", "completed", "failed", "timed_out", "aborted"] }
 
 [gateway.cli]

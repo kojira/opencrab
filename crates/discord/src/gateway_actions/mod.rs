@@ -392,76 +392,15 @@ impl GatewayActions for DiscordGatewayActions {
             // ここで再定義すると合成 gateway の dedup（own 優先）で own 側に食われ、
             // Discord の実装が黙って死ぬので**定義してはならない**
             // （`test_definitions_returns_expected_count` の negative assert が守る）。
-            GatewayActionDef {
-                name: "get_default_subtask_webhook".to_string(),
-                description: "spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "対象エージェントID（省略時は自分）。"
-                        },
-                        "tool_name": {
-                            "type": "string",
-                            "description": "tool scope を解決する際のツール名（省略可）。"
-                        },
-                        "scope": {
-                            "type": "string",
-                            "description": "参考情報（解決は固定順序: tool>agent>global>env）。"
-                        }
-                    },
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "set_default_subtask_webhook".to_string(),
-                description: "scope（agent/tool/global）ごとのデフォルト subtask webhook を設定する。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner限定。応答にrawトークンは含まれない。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "enum": ["agent", "tool", "global"],
-                            "description": "agent=エージェント既定、tool=spawn_subtaskツール既定、global=全体既定。"
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "対象エージェントID（省略時は自分。global では '*' に強制）。"
-                        },
-                        "tool_name": {
-                            "type": "string",
-                            "description": "scope=tool のとき省略時 'spawn_subtask'。"
-                        },
-                        "url": {
-                            "type": "string",
-                            "description": "Discord webhook URL。空/省略でそのscopeを無効化する。"
-                        },
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "有効/無効（url指定時のデフォルトtrue）。"
-                        },
-                        "events": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "通知イベント（省略時は全て）。"
-                        },
-                        "output_mode": {
-                            "type": "string",
-                            "description": "出力モード（省略時 'summary'）。"
-                        },
-                        "max_chars": {
-                            "type": "integer",
-                            "description": "最大文字数（省略時 1500）。"
-                        },
-                        "kind": {
-                            "type": "string",
-                            "description": "種別（省略時 'subtask'）。"
-                        }
-                    },
-                    "required": ["scope"]
-                }),
-            },
+            //
+            // 同じ理由で、通知先（webhook）の管理 6 種（`get/set_default_[subtask_]webhook`
+            // / `list_[subtask_]webhooks`）も #157 S5 で server 側（実体は
+            // `crates/server/src/webhook_targets.rs`）へ移設済み。**ここで定義してはならない。**
+            //
+            // 残る `ensure_subtask_webhook` / `ensure_webhook` は、既存デフォルトが無い
+            // ときに `discord_create_webhook`（serenity 依存）で webhook を新規作成する
+            // ため Discord 固有。解決部分だけを下位層へ割る設計は実装が 1 つしか無い空の
+            // 抽象を生むので S5 では行わない。
             GatewayActionDef {
                 name: "ensure_subtask_webhook".to_string(),
                 description: "使えるデフォルト subtask webhook が既にあればそれを redacted で返す（owner/trusted_user/co_agent）。無ければ owner かつ channel_id 指定時のみ webhook を新規作成して既定に登録する。rawトークンは返さない。".to_string(),
@@ -496,100 +435,6 @@ impl GatewayActions for DiscordGatewayActions {
                         }
                     },
                     "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "list_subtask_webhooks".to_string(),
-                description: "登録されている subtask webhook 設定を一覧する。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "対象エージェントID（省略時は自分。globalも併せて返る）。"
-                        },
-                        "scope": {
-                            "type": "string",
-                            "description": "scopeで絞り込み（省略可）。"
-                        },
-                        "include_disabled": {
-                            "type": "boolean",
-                            "description": "無効化済みも含めるか（省略時 false）。"
-                        }
-                    },
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "get_default_webhook".to_string(),
-                description: "実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "family": {
-                            "type": "string",
-                            "enum": ["activity", "subtask"],
-                            "description": "解決するファミリ（省略時 'activity'）。"
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "対象エージェントID（省略時は自分）。"
-                        },
-                        "tool_name": {
-                            "type": "string",
-                            "description": "tool scope を解決する際のツール名（省略可）。"
-                        }
-                    },
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "set_default_webhook".to_string(),
-                description: "scope（agent/tool/global）ごとのデフォルト webhook を設定する（既定 family='activity'）。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner は全 scope、agent は自分の agent-scope のみ設定/無効化できる。応答にrawトークンは含まれない。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "scope": {
-                            "type": "string",
-                            "enum": ["agent", "tool", "global"],
-                            "description": "agent=エージェント既定、tool=ツール既定、global=全体既定。"
-                        },
-                        "family": {
-                            "type": "string",
-                            "enum": ["activity", "subtask"],
-                            "description": "設定するファミリ（省略時 'activity'）。"
-                        },
-                        "agent_id": {
-                            "type": "string",
-                            "description": "対象エージェントID（省略時は自分。global では '*' に強制）。"
-                        },
-                        "tool_name": {
-                            "type": "string",
-                            "description": "scope=tool のとき省略時 'spawn_subtask'。activity の特定ツール宛先はツール名を指定する。"
-                        },
-                        "url": {
-                            "type": "string",
-                            "description": "Discord webhook URL。空/省略でそのscopeを無効化する。"
-                        },
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "有効/無効（url指定時のデフォルトtrue）。"
-                        },
-                        "events": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "通知イベント（省略時は全て）。"
-                        },
-                        "output_mode": {
-                            "type": "string",
-                            "description": "出力モード（省略時 'summary'）。"
-                        },
-                        "max_chars": {
-                            "type": "integer",
-                            "description": "最大文字数（省略時 1500）。"
-                        }
-                    },
-                    "required": ["scope"]
                 }),
             },
             GatewayActionDef {
@@ -628,32 +473,6 @@ impl GatewayActions for DiscordGatewayActions {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "通知イベント（省略時は全て）。"
-                        }
-                    },
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "list_webhooks".to_string(),
-                description: "登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "agent_id": {
-                            "type": "string",
-                            "description": "対象エージェントID（省略時は自分。globalも併せて返る）。"
-                        },
-                        "family": {
-                            "type": "string",
-                            "description": "family（kind）で絞り込み（省略可）。例: 'activity' / 'subtask'。"
-                        },
-                        "scope": {
-                            "type": "string",
-                            "description": "scopeで絞り込み（省略可）。"
-                        },
-                        "include_disabled": {
-                            "type": "boolean",
-                            "description": "無効化済みも含めるか（省略時 false）。"
                         }
                     },
                     "required": []
@@ -781,15 +600,11 @@ impl GatewayActions for DiscordGatewayActions {
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
             "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
             "send_ui" => self.execute_send_ui(args, ctx).await,
-            "get_default_subtask_webhook" => self.execute_get_default_subtask_webhook(args, ctx),
-            "set_default_subtask_webhook" => self.execute_set_default_subtask_webhook(args, ctx),
+            // 通知先（webhook）の管理は #157 S5 で server 側（`crates/server/src/
+            // webhook_targets.rs`）へ移設済み。ここに残るのは webhook を**新規作成**する
+            // `ensure_*` だけ（既定 family: `*_subtask_*` は subtask、汎用名は activity）。
             "ensure_subtask_webhook" => self.execute_ensure_subtask_webhook(args, ctx).await,
-            "list_subtask_webhooks" => self.execute_list_subtask_webhooks(args, ctx),
-            // 汎用名（既定 family='activity'）。
-            "get_default_webhook" => self.execute_get_default_webhook(args, ctx),
-            "set_default_webhook" => self.execute_set_default_webhook(args, ctx),
             "ensure_webhook" => self.execute_ensure_webhook(args, ctx).await,
-            "list_webhooks" => self.execute_list_webhooks(args, ctx),
             _ => GatewayActionResult {
                 success: false,
                 data: None,
@@ -1046,12 +861,11 @@ mod tests {
             "ensure_subtask_webhook",
             "discord_create_webhook",
             "discord_create_channel",
-            // 純粋な読み取り（`list_allowed_commands` は #157 S1 で server 側へ移設。
-            // 同趣旨の inline 固定は `crates/server/src/system_actions.rs` にある）
-            "list_webhooks",
-            "list_subtask_webhooks",
-            // `read_heartbeat_instructions` は #157 S3 で server 側へ移設。同趣旨の
-            // inline 固定は `crates/server/src/system_actions.rs` にある。
+            // 純粋な読み取り: `list_allowed_commands` は #157 S1、
+            // `read_heartbeat_instructions` は #157 S3、通知先の管理 6 種
+            // （`get/set_default_[subtask_]webhook` / `list_[subtask_]webhooks`）は
+            // #157 S5 で server 側へ移設。同趣旨の inline 固定は
+            // `crates/server/src/system_actions.rs` にある。
         ] {
             assert!(
                 non_dispatch.contains(name),
@@ -1066,7 +880,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 20);
+        assert_eq!(defs.len(), 14);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -1081,19 +895,14 @@ mod tests {
         assert!(names.contains(&"join_voice_channel"));
         assert!(names.contains(&"leave_voice_channel"));
         assert!(names.contains(&"send_ui"));
-        assert!(names.contains(&"get_default_subtask_webhook"));
-        assert!(names.contains(&"set_default_subtask_webhook"));
+        // webhook 新規作成つきの 2 本だけが残る（#157 S5）。
         assert!(names.contains(&"ensure_subtask_webhook"));
-        assert!(names.contains(&"list_subtask_webhooks"));
-        assert!(names.contains(&"get_default_webhook"));
-        assert!(names.contains(&"set_default_webhook"));
         assert!(names.contains(&"ensure_webhook"));
-        assert!(names.contains(&"list_webhooks"));
 
-        // #175 S4 / #157 S1・S2・S3 / #155: サブタスク生成・進捗報告・**停止**・記憶
+        // #175 S4 / #157 S1・S2・S3・S5 / #155: サブタスク生成・進捗報告・**停止**・記憶
         // インデックス再構築と、汎用管理ツール（記憶インデックス設定・許可コマンド 3 種）・
-        // ハートビート指示 2 種は gateway 非依存層（server 側 `SystemGatewayActions`）へ
-        // 移設済み。
+        // ハートビート指示 2 種・通知先（webhook）の管理 6 種は gateway 非依存層
+        // （server 側 `SystemGatewayActions`）へ移設済み。
         // Discord がこれらを再び定義すると `SystemGatewayActions` の dedup（own 優先）で
         // own 側に食われ、Discord 実装の後処理が黙って落ちる（#155 の後退）。
         for moved in [
@@ -1107,6 +916,13 @@ mod tests {
             "remove_allowed_command",
             "update_heartbeat_instructions",
             "read_heartbeat_instructions",
+            // #157 S5 で移設した通知先の管理 6 種。
+            "get_default_subtask_webhook",
+            "set_default_subtask_webhook",
+            "list_subtask_webhooks",
+            "get_default_webhook",
+            "set_default_webhook",
+            "list_webhooks",
         ] {
             assert!(
                 !names.contains(&moved),
@@ -1628,361 +1444,19 @@ mod tests {
         assert!(result.error.unwrap().contains("parent_id"));
     }
 
-    // ---- subtask webhook gateway actions ----
+    // ---- webhook 新規作成つきアクション（ensure_*） ----
+    //
+    // 可視化・管理の 6 本（`get/set_default_[subtask_]webhook` / `list_[subtask_]webhooks`）
+    // とその 18 テストは #157 S5 で server 側（`crates/server/src/webhook_targets.rs`）へ
+    // 移設済み。DB と設定ファイル由来の既定値しか触らないので gateway 非依存層で持てる。
+    // ここに残るのは `discord_create_webhook`（serenity 依存）を呼ぶ `ensure_*` だけ。
 
     const WH_VALID_URL: &str = "https://discord.com/api/webhooks/123456789/abcSECRETtok";
     const WH_SECRET: &str = "abcSECRETtok";
 
+    /// 応答 JSON に raw トークンが 1 度も現れないこと（秘匿処理の不変条件）。
     fn json_has_no_raw_token(v: &serde_json::Value) -> bool {
         !v.to_string().contains(WH_SECRET)
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_requires_owner() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::TrustedUser),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("requires owner"));
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_agent_self_manage_allowed() {
-        let (actions, db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "family": "activity",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(
-            result.success,
-            "agent self-manage should succeed: {:?}",
-            result.error
-        );
-        let data = result.data.unwrap();
-        assert_eq!(data["enabled"], true);
-
-        let conn = db.lock().unwrap();
-        let row = opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "activity",
-        )
-        .unwrap()
-        .unwrap();
-        assert!(row.enabled);
-        assert_eq!(row.url, WH_VALID_URL);
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_agent_can_disable_own() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "url": "",
-                }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(
-            result.success,
-            "agent disable should succeed: {:?}",
-            result.error
-        );
-        assert_eq!(result.data.unwrap()["enabled"], false);
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_agent_cannot_set_tool_scope() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "tool",
-                    "tool_name": "execute_shell",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("forbidden_scope"));
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_agent_cannot_set_global() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "global",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("forbidden_scope"));
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_agent_cannot_set_other_agent() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "agent_id": "someone-else",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("forbidden_scope"));
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_trusted_user_cannot_set() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::TrustedUser),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("requires owner"));
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_owner_success_redacted() {
-        let (actions, db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "url": WH_VALID_URL,
-                }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(
-            result.success,
-            "owner set should succeed: {:?}",
-            result.error
-        );
-        let data = result.data.unwrap();
-        assert!(json_has_no_raw_token(&data), "raw token leaked in response");
-        assert!(data["redacted_url"]
-            .as_str()
-            .unwrap()
-            .contains("[redacted]"));
-
-        // stored in DB
-        let conn = db.lock().unwrap();
-        let row = opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "subtask",
-        )
-        .unwrap()
-        .unwrap();
-        assert!(row.enabled);
-        assert_eq!(row.url, WH_VALID_URL);
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_invalid_url() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({
-
-                    "scope": "agent",
-                    "url": "http://evil.com/x",
-                }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("invalid_webhook_url"));
-    }
-
-    #[tokio::test]
-    async fn test_set_default_subtask_webhook_empty_url_disables() {
-        let (actions, db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({  "scope": "agent" }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        let conn = db.lock().unwrap();
-        let row = opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "subtask",
-        )
-        .unwrap()
-        .unwrap();
-        assert!(!row.enabled);
-    }
-
-    #[tokio::test]
-    async fn test_get_default_subtask_webhook_permission_and_redaction() {
-        let (actions, db) = make_test_actions();
-        // seed an agent default
-        {
-            let conn = db.lock().unwrap();
-            let row = opencrab_db::queries::AgentWebhookConfigRow {
-                scope: "agent".to_string(),
-                agent_id: "test-agent".to_string(),
-                tool_name: String::new(),
-                kind: "subtask".to_string(),
-                url: WH_VALID_URL.to_string(),
-                events_json: None,
-                enabled: true,
-                name: None,
-                created_by: Some("owner".to_string()),
-                output_mode: "summary".to_string(),
-                max_chars: 1500,
-                updated_at: String::new(),
-            };
-            opencrab_db::queries::upsert_agent_webhook_config(&conn, &row).unwrap();
-        }
-
-        // bare agent denied
-        let denied = actions
-            .execute(
-                "get_default_subtask_webhook",
-                &json!({}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!denied.success);
-
-        // trusted_user allowed, redacted only
-        let allowed = actions
-            .execute(
-                "get_default_subtask_webhook",
-                &json!({}),
-                &tctx(GatewayCaller::TrustedUser),
-            )
-            .await;
-        assert!(allowed.success);
-        let data = allowed.data.unwrap();
-        assert!(json_has_no_raw_token(&data));
-        assert_eq!(data["status"], "ok");
-        assert_eq!(data["source"], "agent_default");
-    }
-
-    #[tokio::test]
-    async fn test_get_default_subtask_webhook_include_secret_rejected() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "get_default_subtask_webhook",
-                &json!({  "include_secret": true }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("include_secret"));
-    }
-
-    #[tokio::test]
-    async fn test_list_subtask_webhooks_permission_and_redaction() {
-        let (actions, db) = make_test_actions();
-        {
-            let conn = db.lock().unwrap();
-            let row = opencrab_db::queries::AgentWebhookConfigRow {
-                scope: "agent".to_string(),
-                agent_id: "test-agent".to_string(),
-                tool_name: String::new(),
-                kind: "subtask".to_string(),
-                url: WH_VALID_URL.to_string(),
-                events_json: None,
-                enabled: true,
-                name: None,
-                created_by: Some("owner".to_string()),
-                output_mode: "summary".to_string(),
-                max_chars: 1500,
-                updated_at: String::new(),
-            };
-            opencrab_db::queries::upsert_agent_webhook_config(&conn, &row).unwrap();
-        }
-
-        // bare agent denied
-        let denied = actions
-            .execute(
-                "list_subtask_webhooks",
-                &json!({}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!denied.success);
-
-        let allowed = actions
-            .execute(
-                "list_subtask_webhooks",
-                &json!({}),
-                &tctx(GatewayCaller::CoAgent {
-                    agent_id: "co-agent-1".to_string(),
-                }),
-            )
-            .await;
-        assert!(allowed.success);
-        let data = allowed.data.unwrap();
-        assert!(json_has_no_raw_token(&data), "raw token leaked in list");
-        let hooks = data["webhooks"].as_array().unwrap();
-        assert_eq!(hooks.len(), 1);
-        assert!(hooks[0]["redacted_url"]
-            .as_str()
-            .unwrap()
-            .contains("[redacted]"));
     }
 
     #[tokio::test]
@@ -2046,220 +1520,37 @@ mod tests {
         assert!(no_channel.error.unwrap().contains("channel_id"));
     }
 
-    // ---- generic webhook action names / default family ----
-
-    /// 汎用 set_default_webhook は既定で family='activity' の行を upsert する。
+    /// **設定ファイル由来のフォールバックが Discord 経路で今までどおり効く**（#157 S5）。
+    ///
+    /// この値は #157 S5 で `AppState` へ持ち上げたが、Discord gateway_actions は
+    /// 従来どおりコンストラクタで同じ値を受け取る。DB に行が無くても既定が解決され、
+    /// `ensure_*` は webhook を**作らずに**それを返す（持ち上げによる挙動変化なし）。
     #[tokio::test]
-    async fn test_generic_set_default_webhook_defaults_to_activity_family() {
-        let (actions, db) = make_test_actions();
+    async fn config_fallback_still_resolves_on_the_discord_path() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let http = Arc::new(Http::new("dummy-token"));
+        let actions = DiscordGatewayActions::new(
+            http,
+            db,
+            "/tmp".to_string(),
+            opencrab_actions::webhook_target::WebhookConfig::from_parts(
+                WH_VALID_URL.to_string(),
+                Some(vec!["started".to_string()]),
+            ),
+        );
+
         let result = actions
             .execute(
-                "set_default_webhook",
-                &json!({  "scope": "agent", "url": WH_VALID_URL }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(
-            result.success,
-            "owner set should succeed: {:?}",
-            result.error
-        );
-        let data = result.data.unwrap();
-        assert_eq!(data["family"], "activity");
-        assert!(json_has_no_raw_token(&data), "raw token leaked in response");
-
-        let conn = db.lock().unwrap();
-        // activity 行が作られ、subtask 行は作られない。
-        let activity = opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "activity",
-        )
-        .unwrap();
-        assert!(activity.is_some(), "activity row should exist");
-        assert_eq!(activity.unwrap().url, WH_VALID_URL);
-        let subtask = opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "subtask",
-        )
-        .unwrap();
-        assert!(
-            subtask.is_none(),
-            "subtask row must not be created by generic name"
-        );
-    }
-
-    /// 後方互換 set_default_subtask_webhook は既定で family='subtask' を返しつつ、
-    /// agent の通常 tool/command activity へも効くよう activity 行も mirror する。
-    #[tokio::test]
-    async fn test_subtask_named_set_defaults_to_subtask_and_activity_families() {
-        let (actions, db) = make_test_actions();
-        let result = actions
-            .execute(
-                "set_default_subtask_webhook",
-                &json!({  "scope": "agent", "url": WH_VALID_URL }),
+                "ensure_subtask_webhook",
+                &json!({ "scope": "agent" }),
                 &tctx(GatewayCaller::Owner),
             )
             .await;
         assert!(result.success, "{:?}", result.error);
-        assert_eq!(result.data.unwrap()["family"], "subtask");
-        let conn = db.lock().unwrap();
-        assert!(opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "subtask",
-        )
-        .unwrap()
-        .is_some());
-        let activity = opencrab_db::queries::get_agent_webhook_config(
-            &conn,
-            "agent",
-            "test-agent",
-            "",
-            "activity",
-        )
-        .unwrap();
-        assert!(
-            activity.is_some(),
-            "compat subtask default should also enable activity streaming"
-        );
-        let resolved = crate::gateway_actions::webhook::resolve_activity_webhook(
-            &conn,
-            "test-agent",
-            "execute_shell",
-        );
-        assert!(
-            matches!(
-                resolved,
-                crate::gateway_actions::webhook::WebhookResolution::Use { .. }
-            ),
-            "activity default should resolve after set_default_subtask_webhook"
-        );
-    }
-
-    /// agent 自身は汎用名でも自分の agent-scope のみ設定でき、他 scope は拒否される。
-    #[tokio::test]
-    async fn test_generic_set_default_webhook_agent_scope_permission() {
-        let (actions, _db) = make_test_actions();
-        // 自分の agent-scope は許可。
-        let ok = actions
-            .execute(
-                "set_default_webhook",
-                &json!({  "scope": "agent", "url": WH_VALID_URL }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(
-            ok.success,
-            "agent self-manage should succeed: {:?}",
-            ok.error
-        );
-        // global は拒否。
-        let denied = actions
-            .execute(
-                "set_default_webhook",
-                &json!({  "scope": "global", "url": WH_VALID_URL }),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!denied.success);
-        assert!(denied.error.unwrap().contains("forbidden_scope"));
-    }
-
-    /// 汎用 get_default_webhook は activity 行のみを解決する（subtask 行は使わない）。
-    #[tokio::test]
-    async fn test_generic_get_default_webhook_resolves_activity_only() {
-        let (actions, db) = make_test_actions();
-        {
-            let conn = db.lock().unwrap();
-            // subtask 行のみを seed。activity 行は無い。
-            let row = opencrab_db::queries::AgentWebhookConfigRow {
-                scope: "agent".to_string(),
-                agent_id: "test-agent".to_string(),
-                tool_name: String::new(),
-                kind: "subtask".to_string(),
-                url: WH_VALID_URL.to_string(),
-                events_json: None,
-                enabled: true,
-                name: None,
-                created_by: Some("owner".to_string()),
-                output_mode: "summary".to_string(),
-                max_chars: 1500,
-                updated_at: String::new(),
-            };
-            opencrab_db::queries::upsert_agent_webhook_config(&conn, &row).unwrap();
-        }
-        // activity family の解決では subtask 行に fall through しない → none。
-        let activity = actions
-            .execute(
-                "get_default_webhook",
-                &json!({}),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert!(activity.success);
-        let data = activity.data.unwrap();
-        assert_eq!(data["status"], "none");
-        assert_eq!(data["family"], "activity");
-        // subtask family（family 明示）なら解決できる。
-        let subtask = actions
-            .execute(
-                "get_default_webhook",
-                &json!({  "family": "subtask" }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        assert_eq!(subtask.data.unwrap()["status"], "ok");
-    }
-
-    /// 汎用 list_webhooks は family で kind を絞り込める。
-    #[tokio::test]
-    async fn test_generic_list_webhooks_family_filter() {
-        let (actions, db) = make_test_actions();
-        {
-            let conn = db.lock().unwrap();
-            for kind in ["subtask", "activity"] {
-                let row = opencrab_db::queries::AgentWebhookConfigRow {
-                    scope: "agent".to_string(),
-                    agent_id: "test-agent".to_string(),
-                    tool_name: String::new(),
-                    kind: kind.to_string(),
-                    url: WH_VALID_URL.to_string(),
-                    events_json: None,
-                    enabled: true,
-                    name: None,
-                    created_by: Some("owner".to_string()),
-                    output_mode: "summary".to_string(),
-                    max_chars: 1500,
-                    updated_at: String::new(),
-                };
-                opencrab_db::queries::upsert_agent_webhook_config(&conn, &row).unwrap();
-            }
-        }
-        // 絞り込み無し → 両方。
-        let all = actions
-            .execute("list_webhooks", &json!({}), &tctx(GatewayCaller::Owner))
-            .await;
-        assert_eq!(all.data.unwrap()["webhooks"].as_array().unwrap().len(), 2);
-        // family=activity → 1 件。
-        let filtered = actions
-            .execute(
-                "list_webhooks",
-                &json!({  "family": "activity" }),
-                &tctx(GatewayCaller::Owner),
-            )
-            .await;
-        let hooks = filtered.data.unwrap();
-        let arr = hooks["webhooks"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["kind"], "activity");
-        assert!(json_has_no_raw_token(&hooks));
+        let data = result.data.unwrap();
+        assert_eq!(data["created"], false, "既定があるので作成してはいけない");
+        assert_eq!(data["source"], "env_config");
+        assert_eq!(data["scope"], "env_config");
+        assert!(json_has_no_raw_token(&data));
     }
 }
