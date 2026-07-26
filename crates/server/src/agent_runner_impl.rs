@@ -46,14 +46,8 @@ impl opencrab_discord::AgentRunner for AppState {
         process::run_agent_response(self, req).await
     }
 
-    fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient> {
-        Arc::new(crate::llm_adapter::LlmRouterAdapter::new(
-            self.llm_router.clone(),
-        ))
-    }
-
-    fn default_model(&self) -> String {
-        self.default_model.clone()
+    fn subtask_notifiers(&self) -> opencrab_actions::subtask_notify::SubtaskNotifiers {
+        self.subtask_notifiers.clone()
     }
 
     fn context_budget_tokens(&self, agent_id: &str) -> usize {

@@ -245,10 +245,9 @@ pub async fn send_agent_message(
                     http,
                     state.db.clone(),
                     Arc::new(std::sync::RwLock::new(tools_cfg)),
-                    None,
-                    state.default_model.clone(),
                     state.workspace_base.clone(),
                     subtask_registry,
+                    state.subtask_notifiers.clone(),
                     None,
                 );
                 Some(Arc::new(ga) as Arc<dyn opencrab_gateway::GatewayActions>)
