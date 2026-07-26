@@ -75,7 +75,8 @@ pub const DISCORD_ACTIONS: &[&str] = &[
 /// （`default_non_dispatch_tools` の種）。
 ///
 /// 分類基準（5 項目）の権威は [`crate::subtask::default_non_dispatch_tools`] の doc、
-/// 運用者向けの一覧は `docs/DESIGN.md`「非ブロックツール実行（dispatch）」節。
+/// 運用者向けの**分類基準**は `docs/DESIGN.md`「非ブロックツール実行」節。
+/// ツール名の一覧はこの定数群が唯一の権威で、doc 側には置かない（二重管理を避ける）。
 ///
 /// 全要素が `DiscordGatewayActions::definitions()` に実在し、かつ
 /// [`DISCORD_DISPATCHABLE_ACTIONS`] と互いに素であることをテストで保証する。

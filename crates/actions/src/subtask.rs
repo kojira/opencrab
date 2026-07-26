@@ -609,7 +609,8 @@ impl ActionExecutor for SharedExecutor {
 /// （= 分類を強制する）。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
-/// 運用者向けの一覧は `docs/DESIGN.md`「非ブロックツール実行（dispatch）」節。
+/// 運用者向けの**分類基準**は `docs/DESIGN.md`「非ブロックツール実行」節。
+/// ツール名の一覧はこの定数群が唯一の権威で、doc 側には置かない（二重管理を避ける）。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
     let mut set: HashSet<String> = ["spawn_subtask", "cancel_subtask", "report_progress"]
         .iter()
