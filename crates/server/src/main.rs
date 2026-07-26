@@ -476,6 +476,10 @@ async fn main() -> anyhow::Result<()> {
     // Load config from TOML (with env var expansion)
     let cfg = config::load_config("config/default.toml")?;
 
+    // 新しい通知先キーを空 url で書くと、旧キーの有効な値が黙って無効化される（#207）。
+    // 挙動（新キー優先 / 空 url は無効）は意図したものなので変えず、気づけるようにだけする。
+    cfg.warn_if_legacy_webhook_masked();
+
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
