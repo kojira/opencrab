@@ -53,17 +53,25 @@ opencrab/
 ├── crates/
 │   ├── core/       # Agent engine, soul, identity, memory, skills, workspace, heartbeat
 │   ├── llm/        # Multi-provider LLM abstraction, routing, metrics, pricing
-│   ├── gateway/    # Multi-channel message gateway (REST, CLI, WebSocket, Discord)
-│   ├── actions/    # Action dispatcher (28 actions) and skill bridge executor
+│   ├── llm-types/  # LLM type definitions only (kept separate to keep deps light)
+│   ├── gateway/    # Gateway traits and adapters (transport-agnostic contracts)
+│   ├── actions/    # Action dispatcher, background execution runtime, policy tables
 │   ├── db/         # SQLite persistence with FTS5 full-text search
-│   ├── server/     # Axum REST API server with hot-reload config watcher
+│   ├── mcp/        # MCP client (external tool servers as child processes)
+│   ├── server/     # Axum REST API server, agent response pipeline, web gateway
 │   ├── cli/        # Interactive REPL CLI
-│   └── discord/    # Discord gateway with per-agent manager and message loop
+│   ├── discord/    # Discord gateway with per-agent manager and message loop
+│   ├── nostr/      # Nostr gateway (per-session queue, concurrency cap)
+│   └── voice/      # Voice session support
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)
 ├── config/         # Configuration files (hot-reloaded)
 ├── docs/           # Design docs and assets
 └── skills/         # Standard skill definitions (Markdown)
 ```
+
+**Direction of travel**: the goal is a structure where the **core keeps running while the outer layers (transports, extensions) can be swapped without downtime** — ultimately so that agents can develop opencrab itself. Generic functionality must not live in transport crates, state belongs to the core, and the upper layer should not name individual gateways. See **[docs/design-plugin-architecture.md](docs/design-plugin-architecture.md)** before adding a new gateway or moving code between crates.
+
+Some of this is not yet true (the web gateway currently lives inside `server`, and `discord` still holds generic tools). Those are tracked as issues and are being unwound.
 
 ## Prerequisites
 
