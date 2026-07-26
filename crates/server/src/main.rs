@@ -534,6 +534,7 @@ async fn main() -> anyhow::Result<()> {
         mcp_manager: None,
         web_gateway: Arc::new(opencrab_server::web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
+        progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
     };
 
     #[cfg(feature = "discord")]

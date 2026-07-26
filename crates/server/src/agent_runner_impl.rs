@@ -341,30 +341,7 @@ mod tests {
     /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件）。
     /// `resolve_caller` の owner 判定は DB とプロバイダに依存しないので十分。
     fn test_state() -> AppState {
-        let conn = opencrab_db::init_memory().unwrap();
-        AppState {
-            db: opencrab_db::Db::from_connection(conn),
-            llm_router: crate::SharedLlmRouter::new(opencrab_llm::router::LlmRouter::new()),
-            llm_config: Arc::new(toml::from_str("").unwrap()),
-            subtask_auto_dispatch: true,
-            voice_config: Arc::new(Default::default()),
-            voice_runtime: Arc::new(std::sync::Mutex::new(None)),
-            workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
-            default_model: "mock:test".to_string(),
-            tools_config: Arc::new(std::sync::RwLock::new(
-                opencrab_actions::tools::ToolsConfig::default(),
-            )),
-            compaction_ratio: 0.5,
-            evaluator: crate::config::EvaluatorConfig::default(),
-            skill_consolidation: crate::config::SkillConsolidationConfig::default(),
-            loop_restart_enabled: false,
-            index_build_inflight: Arc::new(dashmap::DashMap::new()),
-            discord_manager: None,
-            nostr_manager: None,
-            mcp_manager: None,
-            web_gateway: Arc::new(crate::web_gateway::WebGateway::new()),
-            subtask_registries: Arc::new(crate::subtask_registries::SubtaskRegistries::new()),
-        }
+        crate::test_app_state()
     }
 
     #[test]

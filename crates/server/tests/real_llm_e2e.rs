@@ -67,6 +67,9 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
+        ),
     };
     let app = create_router(state);
     (app, db)

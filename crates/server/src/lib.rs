@@ -93,9 +93,47 @@ pub struct AppState {
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
     /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
     pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
+    /// `report_progress`（#175 S1）のデバウンス世代カウンタ。
+    ///
+    /// `SystemGatewayActions` は run ごとに作り直されるため、そのフィールドに置くと
+    /// デバウンスが毎回リセットされ全ての進捗報告が発火する。プロセス寿命の共有状態
+    /// である `AppState` に置いて、gateway の生成を跨いで間引きが効くようにする。
+    pub progress_debounce: Arc<subtask_registries::ProgressDebounce>,
     /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
     /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
     pub subtask_auto_dispatch: bool,
+}
+
+/// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
+///
+/// crate 内のユニットテスト共用。`AppState` にフィールドが増えたときの追随箇所を
+/// 1 つに保つ（テストごとの構造体リテラル複製を避ける）。
+#[cfg(test)]
+pub(crate) fn test_app_state() -> AppState {
+    let conn = opencrab_db::init_memory().unwrap();
+    AppState {
+        db: opencrab_db::Db::from_connection(conn),
+        llm_router: SharedLlmRouter::new(LlmRouter::new()),
+        llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
+        voice_config: Arc::new(Default::default()),
+        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
+        workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        default_model: "mock:test".to_string(),
+        tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
+        compaction_ratio: 0.5,
+        evaluator: config::EvaluatorConfig::default(),
+        skill_consolidation: config::SkillConsolidationConfig::default(),
+        loop_restart_enabled: false,
+        index_build_inflight: Arc::new(dashmap::DashMap::new()),
+        #[cfg(feature = "discord")]
+        discord_manager: None,
+        nostr_manager: None,
+        mcp_manager: None,
+        web_gateway: Arc::new(web_gateway::WebGateway::new()),
+        subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
+        progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
+    }
 }
 
 pub fn create_router(state: AppState) -> Router {
