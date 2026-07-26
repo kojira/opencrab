@@ -59,6 +59,16 @@ pub struct GatewayCallContext {
     /// ctx は短命な借用として運ぶだけ。サイクルは生じない）。
     /// 既定 `None`（後方互換 — 未注入なら従来通り transport gateway 単体で動く）。
     pub root_gateway: Option<Arc<dyn GatewayActions>>,
+    /// この実行を起こした inbound メッセージの返信先（gateway 不透明 token / #158 S1）。
+    ///
+    /// `RunRequest.reply_target`（#167）と**同じ不透明トークン**をツール実行の文脈まで
+    /// 運ぶ。宛先を引数で受けるアクション（`request_peer_review` 等）が、引数省略時の
+    /// フォールバックとして使う。トークンの解釈は各 gateway の責務（Discord は
+    /// channel id の数値文字列、Nostr は返信先イベント id）。
+    ///
+    /// 既定 `None`（後方互換 — 宛先を明示するツール呼び出しは従来どおり動く）。
+    /// `None` かつ引数も無い場合は空文字で送らず明示エラーにする（fail-closed）。
+    pub reply_target: Option<String>,
 }
 
 impl std::fmt::Debug for GatewayCallContext {
@@ -72,6 +82,7 @@ impl std::fmt::Debug for GatewayCallContext {
                 "root_gateway",
                 &self.root_gateway.as_ref().map(|_| "<gateway>"),
             )
+            .field("reply_target", &self.reply_target)
             .finish()
     }
 }
@@ -84,6 +95,7 @@ impl GatewayCallContext {
             depth: 0,
             agent_id: agent_id.into(),
             root_gateway: None,
+            reply_target: None,
         }
     }
 
@@ -105,6 +117,15 @@ impl GatewayCallContext {
     /// 合成 gateway 自身のハンドルを注入する（RFC #152 S2）。
     pub fn with_root_gateway(mut self, root: Arc<dyn GatewayActions>) -> Self {
         self.root_gateway = Some(root);
+        self
+    }
+
+    /// inbound メッセージの返信先（gateway 不透明 token）を注入する（#158 S1）。
+    ///
+    /// `None` を渡した場合は「宛先なし」として扱う（`RunRequest.reply_target` が
+    /// `Option<String>` なので、そのまま流し込めるよう `Option` を受ける）。
+    pub fn with_reply_target(mut self, reply_target: Option<String>) -> Self {
+        self.reply_target = reply_target;
         self
     }
 }

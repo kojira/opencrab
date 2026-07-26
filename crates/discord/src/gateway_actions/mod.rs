@@ -532,7 +532,7 @@ impl GatewayActions for DiscordGatewayActions {
                 description: "自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼をDiscordチャンネルへ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
                 parameters: json!({
                     "type": "object",
-                    "required": ["content", "channel_id"],
+                    "required": ["content"],
                     "properties": {
                         "content": {
                             "type": "string",
@@ -540,7 +540,7 @@ impl GatewayActions for DiscordGatewayActions {
                         },
                         "channel_id": {
                             "type": "string",
-                            "description": "投稿先DiscordチャンネルのID（数値文字列）。現在のチャンネルIDは会話の[Discord context]にchannel_id=XXXXとして記載されている。"
+                            "description": "投稿先DiscordチャンネルのID（数値文字列）。現在のチャンネルIDは会話の[Discord context]にchannel_id=XXXXとして記載されている。省略可（省略時は今のやりとりの返信先へ投稿する）。"
                         },
                         "instructions": {
                             "type": "string",

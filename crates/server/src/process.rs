@@ -1374,7 +1374,12 @@ pub async fn run_agent_response(
         .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
 
     let executor = {
-        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
+        // inbound の返信先（gateway 不透明 token / #167）をツール実行の文脈
+        // （`GatewayCallContext.reply_target`）まで運ぶ（#158 S1）。宛先を引数で受ける
+        // gateway アクションが、引数省略時のフォールバックとして読む。
+        let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx)
+            .with_depth(depth)
+            .with_reply_target(req.reply_target.clone());
         // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
         // 供給する。既存 gateway（Discord/Nostr）は inner として委譲される（composite）。
         // owner 限定ツールは bridge の OWNER_ONLY_ACTIONS が可視性/実行を強制する。
