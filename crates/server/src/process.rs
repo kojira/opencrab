@@ -13,6 +13,39 @@ use opencrab_llm::pricing::PricingRegistry;
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};
 use crate::AppState;
 
+/// sub-engine のツール呼び出しを進捗テキストへ要約する（#175 S4）。
+///
+/// 旧 Discord 実装（`execute_spawn_subtask`）から移設。`{function:{name}}`（正準）と
+/// `{name}`（旧形状）の両方に対応し、assistant 本文は先頭 500 文字だけ添える。
+fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> String {
+    let mut names = Vec::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(tool_calls_json) {
+        if let Some(calls) = value.as_array() {
+            for call in calls {
+                let name = call
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| call.get("name").and_then(|v| v.as_str()));
+                if let Some(name) = name {
+                    names.push(format!("`{name}`"));
+                }
+            }
+        }
+    }
+    let tools = if names.is_empty() {
+        "tool call".to_string()
+    } else {
+        names.join(", ")
+    };
+    let preview: String = assistant_content.trim().chars().take(500).collect();
+    if preview.is_empty() {
+        format!("calling {tools}")
+    } else {
+        format!("calling {tools}\n{preview}")
+    }
+}
+
 /// DBからエージェントの agents 行と skills を読み込んでシステムプロンプトを構築する。
 ///
 /// 返り値: (system_prompt, agent_name)
@@ -1246,7 +1279,17 @@ pub async fn run_agent_response(
     // Create BridgedExecutor with ActionContext.
     let last_metrics_id = Arc::new(std::sync::Mutex::new(None));
     let model_override = Arc::new(std::sync::Mutex::new(None));
-    let current_purpose = Arc::new(std::sync::Mutex::new("conversation".to_string()));
+    // depth >= 1 の再入実行は sub-engine（`spawn_subtask` が起動したサブタスク）。
+    // メトリクスの purpose ラベルは旧 Discord 実装（`execute_spawn_subtask`）と同じく
+    // "subtask" にする（#175 S4）。
+    let current_purpose = Arc::new(std::sync::Mutex::new(
+        if depth == 0 {
+            "conversation"
+        } else {
+            "subtask"
+        }
+        .to_string(),
+    ));
 
     let runtime_info = opencrab_actions::RuntimeInfo {
         default_model: state.default_model.clone(),
@@ -1303,6 +1346,16 @@ pub async fn run_agent_response(
             | opencrab_actions::CallerIdentity::CoAgent { .. }
             | opencrab_actions::CallerIdentity::TrustedUser
     );
+    // 走行中 subtask の共有 registry を **1 度だけ**解決する。`SystemGatewayActions`
+    // （cancel_subtask / report_progress）と自動 dispatcher、そして `spawn_subtask`
+    // （#175 S4）が同一 Arc を見ることで「停止の到達性」が保たれる。呼び出し側が
+    // registry を渡さなかった場合も、この run 内では全員が同じフレッシュな registry を
+    // 共有する（以前は dispatcher だけがフレッシュ生成し、cancel が not found になった）。
+    let subtask_registry: opencrab_actions::SubtaskRegistry = req
+        .subtask_registry
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
+
     let executor = {
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx).with_depth(depth);
         // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
@@ -1311,35 +1364,65 @@ pub async fn run_agent_response(
         // 共有 registry を neutral 層の cancel_subtask（#161）へ配線する。dispatcher が
         // 使う registry と同一 Arc を渡すことで、auto-dispatch された subtask を
         // cancel_subtask で停止できる（Discord では gateway_actions の registry とも同一）。
-        let system_actions = std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
-            state.clone(),
-            req.gateway_actions,
-            req.subtask_registry.clone(),
-            // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
-            // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
-            // 変わらず、REST だけがセッション状態の整合を取る。
-            req.completion_sink.clone(),
-        ));
-        let bridged = bridged.with_gateway_actions(system_actions);
+        let system_actions: std::sync::Arc<dyn opencrab_gateway::GatewayActions> =
+            std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
+                state.clone(),
+                req.gateway_actions,
+                Some(subtask_registry.clone()),
+                // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
+                // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
+                // 変わらず、REST だけがセッション状態の整合を取る。
+                req.completion_sink.clone(),
+            ));
+        // depth >= 1（sub-engine）は許可リストで最外周を絞る（#63 / RFC #152 S2）。
+        // **合成後**（server ツール + transport の union）に被せるのが要点で、これが
+        // 無いと再入実行がそのまま設定ツールや `spawn_subtask` へ到達し、サブタスクの
+        // ネスト禁止も崩れる。deny-by-default なので新ツールを足しても自動では開かない。
+        let gateway_actions: std::sync::Arc<dyn opencrab_gateway::GatewayActions> = if depth == 0 {
+            system_actions
+        } else {
+            std::sync::Arc::new(opencrab_actions::SubEngineGatewayActions::new(
+                system_actions,
+            ))
+        };
+        let bridged = bridged.with_gateway_actions(gateway_actions);
         // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
+        //
+        // **depth 0 限定**。MCP は gateway とは別スロットなので、sub-engine の許可リスト
+        // （`SubEngineGatewayActions`）を通らない。深さを見ずに注入すると、deny-by-default
+        // のはずの sub-engine が運用者の繋いだ任意の外部ツール（送信・削除を含みうる）に
+        // 到達できてしまい、最小権限の前提が崩れる。移設前の sub-engine も MCP は
+        // 持っていなかった（`git show <移設前>:...subtask_engine.rs` に注入なし）ので、
+        // ここは従来挙動の維持でもある。sub-engine へ開けたい場合は許可リストと同じく
+        // 明示的な opt-in を設計してから行う。
         match state.mcp_manager.as_ref() {
-            Some(m) => {
+            Some(m) if depth == 0 => {
                 let provider = m.provider_for(agent_id, caller_is_trusted);
                 bridged.with_mcp_actions(std::sync::Arc::new(provider))
             }
-            None => bridged,
+            _ => bridged,
         }
     };
-    // depth0/メインエージェント自身のツール/コマンド活動も activity webhook へ流す。
-    // spawn_subtask の sub-engine だけでなくメイン executor にも ToolEventSink を挿す。
-    // activity 行が無ければ factory は None を返し、配送 worker も起動しない（best-effort）。
-    // 無効/不正なデフォルトは sink 側で診断を残し、黙って fall through しない。
+    // ツール/コマンド活動を webhook へ実況する sink を挿す。
+    //
+    // - サブタスク走行（`run_notifier` あり）は、その run 専用の配送ワーカーを共有する
+    //   sink を通知実装から受け取る（lifecycle と tool_call_* の順序が 1 本の worker で
+    //   保たれる）。
+    // - それ以外（depth0 / メインターン）は activity family のデフォルト宛先から
+    //   factory で組む。activity 行が無ければ factory は None を返し、配送 worker も
+    //   起動しない（best-effort）。無効/不正なデフォルトは sink 側で診断を残し、黙って
+    //   fall through しない。
+    let run_notifier = req.run_notifier.clone();
+    let notifier_tool_sink = run_notifier.as_ref().and_then(|n| n.tool_event_sink());
     #[cfg(feature = "discord")]
-    let executor =
-        match opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id) {
-            Some(sink) => executor.with_tool_event_sink(sink),
-            None => executor,
-        };
+    let tool_event_sink = notifier_tool_sink
+        .or_else(|| opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id));
+    #[cfg(not(feature = "discord"))]
+    let tool_event_sink = notifier_tool_sink;
+    let executor = match tool_event_sink {
+        Some(sink) => executor.with_tool_event_sink(sink),
+        None => executor,
+    };
 
     // Create LlmRouterAdapter with metrics recording.
     let metrics_ctx = MetricsContext {
@@ -1378,10 +1461,7 @@ pub async fn run_agent_response(
     // 従来どおり全ツール inline 実行（後方互換・非破壊）。
     if depth == 0 && state.subtask_auto_dispatch {
         if let Some(sink) = req.completion_sink.clone() {
-            let registry = req
-                .subtask_registry
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
+            let registry = subtask_registry.clone();
             // inbound の返信先（gateway 不透明 token / #167）を dispatcher へ渡す。
             // dispatch した subtask の `SpawnedSubtask.reply_target` に載り、settle 時に
             // sink へ届く（session_id から返信先を復元できない gateway 用）。
@@ -1398,6 +1478,24 @@ pub async fn run_agent_response(
             // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
             .with_workspace_root(Some(tool_result_workspace.clone()));
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
+        }
+    }
+
+    // サブタスク走行の実況（#175 S4）。ツール呼び出しと結果を進捗として通知口へ流す。
+    // 購読していない（`wants_progress()` が false）ならフック自体を挿さず、要約の計算も
+    // 省く（旧 `execute_spawn_subtask` と同じ判定）。
+    if let Some(notifier) = run_notifier {
+        if notifier.wants_progress() {
+            let on_call = notifier.clone();
+            engine.set_on_tool_call(move |assistant_content, tool_calls_json| {
+                on_call.on_progress(&summarize_tool_calls(&assistant_content, &tool_calls_json));
+            });
+            let on_result = notifier.clone();
+            engine.set_on_tool_result(move |_tool_call_id, tool_name, result_json, is_error| {
+                let status = if is_error { "failed" } else { "completed" };
+                let preview: String = result_json.chars().take(500).collect();
+                on_result.on_progress(&format!("tool `{tool_name}` {status}\n{preview}"));
+            });
         }
     }
 
@@ -1531,11 +1629,11 @@ pub async fn run_agent_response(
         }
     };
 
-    spawn_background_index_build(state, agent_id, &effective_model);
-
-    // スキル利用回数: depth 0 の run 完了時、応答で言及された有効スキルを +1。
-    // sub-engine の内部 run は数えない（メインの返答のみを対象）。
+    // 記憶インデックスの背景ビルドとスキル利用回数は depth 0（メインターン）のみ。
+    // sub-engine の内部 run では走らせない（旧 `execute_spawn_subtask` の sub-engine は
+    // どちらも持たなかった。サブタスクごとに LLM 支出が増えるのを避ける）。
     if depth == 0 {
+        spawn_background_index_build(state, agent_id, &effective_model);
         if let Ok(ref engine_result) = result {
             record_used_skills(state, agent_id, session_id, &engine_result.response);
         }

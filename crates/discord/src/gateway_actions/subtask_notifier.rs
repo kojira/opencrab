@@ -36,7 +36,7 @@ const TOOL_EVENT_CAP: usize = 200;
 ///
 /// 走行ごとに宛先を解決し、その run 専用の配送ワーカーを 1 本起動して
 /// [`DiscordWebhookRunNotifier`] を返す。
-pub(crate) struct DiscordWebhookNotifier {
+pub struct DiscordWebhookNotifier {
     db: opencrab_db::Db,
     /// 配送ワーカーが共有する HTTP クライアント。
     client: reqwest::Client,
@@ -45,14 +45,12 @@ pub(crate) struct DiscordWebhookNotifier {
 }
 
 impl DiscordWebhookNotifier {
-    pub(crate) fn new(
-        db: opencrab_db::Db,
-        client: reqwest::Client,
-        default_subtask_webhook: Option<WebhookConfig>,
-    ) -> Self {
+    /// 配送用の HTTP クライアントは内部で 1 つ作る（呼び出し側 = server crate に
+    /// reqwest 依存を持ち込まないため）。
+    pub fn new(db: opencrab_db::Db, default_subtask_webhook: Option<WebhookConfig>) -> Self {
         Self {
             db,
-            client,
+            client: reqwest::Client::new(),
             default_subtask_webhook,
         }
     }
@@ -469,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn begin_run_without_config_yields_none_target() {
         let db = opencrab_db::Db::memory().unwrap();
-        let factory = DiscordWebhookNotifier::new(db, reqwest::Client::new(), None);
+        let factory = DiscordWebhookNotifier::new(db, None);
         let args = serde_json::json!({"task": "t"});
         let session = factory
             .begin_run(&SubtaskRunInfo {
@@ -491,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn begin_run_with_invalid_explicit_url_errors() {
         let db = opencrab_db::Db::memory().unwrap();
-        let factory = DiscordWebhookNotifier::new(db, reqwest::Client::new(), None);
+        let factory = DiscordWebhookNotifier::new(db, None);
         let args = serde_json::json!({
             "task": "t",
             "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" }
@@ -519,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn begin_run_with_explicit_url_yields_ok_target() {
         let db = opencrab_db::Db::memory().unwrap();
-        let factory = DiscordWebhookNotifier::new(db, reqwest::Client::new(), None);
+        let factory = DiscordWebhookNotifier::new(db, None);
         let args = serde_json::json!({
             "task": "t",
             "webhook": { "url": URL, "events": ["started"] }

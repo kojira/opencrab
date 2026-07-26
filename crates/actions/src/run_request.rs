@@ -10,6 +10,7 @@ use std::sync::Arc;
 use opencrab_gateway::GatewayActions;
 
 use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
+use crate::subtask_notify::SubtaskRunNotifier;
 use crate::traits::CallerIdentity;
 
 /// 1回のエージェント応答実行の要求。
@@ -45,6 +46,12 @@ pub struct RunRequest {
     /// settle 時に `SubtaskSettled.reply_target` として sink へ届く。session_id から
     /// 返信先を復元できない gateway（Nostr など）用。None なら指定なし。
     pub reply_target: Option<String>,
+    /// サブタスク走行の通知口（#175 S4）。`depth >= 1` の再入実行（sub-engine）で
+    /// 使い、走行中のツール呼び出し/結果を進捗として実況し、ツールイベント sink を
+    /// executor へ挿す。`None`（既定）なら通知しない。
+    ///
+    /// depth0 の通常ターンでは使わない（サブタスクの lifecycle 通知は spawn 側が持つ）。
+    pub run_notifier: Option<Arc<dyn SubtaskRunNotifier>>,
 }
 
 impl RunRequest {
@@ -74,6 +81,7 @@ impl RunRequest {
             completion_sink: None,
             subtask_registry: None,
             reply_target: None,
+            run_notifier: None,
         }
     }
 
@@ -128,6 +136,13 @@ impl RunRequest {
     /// Discord のように session_id から復元する gateway は呼ばなくてよい。
     pub fn with_reply_target(mut self, reply_target: impl Into<String>) -> Self {
         self.reply_target = Some(reply_target.into());
+        self
+    }
+
+    /// サブタスク走行の通知口を渡す（#175 S4）。`with_depth(depth + 1)` と組で使い、
+    /// 再入した `run_agent_response` が進捗フックとツールイベント sink を配線する。
+    pub fn with_run_notifier(mut self, notifier: Arc<dyn SubtaskRunNotifier>) -> Self {
+        self.run_notifier = Some(notifier);
         self
     }
 }

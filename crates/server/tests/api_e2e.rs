@@ -48,6 +48,8 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
+        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
@@ -1039,6 +1041,8 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
+        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
@@ -1943,6 +1947,8 @@ fn state_with_consolidation(
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
+        subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),

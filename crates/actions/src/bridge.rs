@@ -82,6 +82,11 @@ fn gateway_reject(msg: impl Into<String>) -> opencrab_gateway::GatewayActionResu
 /// spawn_subtask は意図的に含めない: ネスト spawn は従来も（gateway 未接続のため）
 /// 不可能だった現状維持。ネストを有効化する場合は bridge の MAX_DEPTH ゲートではなく
 /// この許可リストが実効ゲートである点に注意。
+///
+/// **#175 S4 以降はこの点がより重要**: `spawn_subtask` は Discord gateway ではなく
+/// 合成 gateway（`SystemGatewayActions`）の own ツールになったため、許可リストに
+/// 足すと sub-engine から**必ず**到達できてしまう（transport の有無に依存しない）。
+/// ガードは `sub_engine_cannot_see_spawn_subtask`（`crates/server/src/system_actions.rs`）。
 pub const SUB_ENGINE_ALLOWED_ACTIONS: &[&str] = &["report_progress", "nostr_generate_key"];
 
 /// sub-engine 専用の最小権限 gateway。許可リストのアクションだけを inner 実装へ委譲する。
@@ -173,9 +178,9 @@ pub const DISCORD_ACTIONS: &[&str] = &[
 pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     // (1) 制御系（default_non_dispatch_tools の制御集合と重複するが、Discord の
     //     definitions() 全名を分類し尽くすためここにも並べる）。
-    "spawn_subtask",
+    //     `spawn_subtask` / `report_progress` は #175 S4 で server 側（
+    //     `SERVER_INLINE_ACTIONS`）へ移設済み。Discord は定義しないのでここには無い。
     "cancel_subtask",
-    "report_progress",
     // (2) 配送系。
     "discord_send_file",
     "discord_add_reaction",
@@ -213,8 +218,8 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
 /// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く。ここに無く
 /// [`DISCORD_INLINE_ACTIONS`] にも無い名前が `definitions()` に現れたらテストが落ちる。
 pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
-    // 全メモリの再インデックス（長時間）。dispatch の主目的。
-    "rebuild_memory_index",
+    // `rebuild_memory_index` は #175 S4 で server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ
+    // 移設済み。Discord は定義しないのでここには無い。
     // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
     "create_skill",
     // 設定/指示文の書き込み。同ターンで読み戻さない。
@@ -296,9 +301,11 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     "cancel_subtask",
     // (1) 制御系: サブタスクの進捗報告（#175 S1）。それ自体が subtask ライフサイクルの
     //     通知（デバウンス後にメインエンジンを呼び直す）なので background 化しない。
-    //     Discord 側の実装は S5 まで残るため `DISCORD_INLINE_ACTIONS` からは外さない
-    //     （どちらの供給源から見ても inline であることに変わりはない）。
     "report_progress",
+    // (1) 制御系: サブタスクの起動（#175 S4）。それ自体が「background 化する」ツール
+    //     （戻り値の subtask_id を同ターンで cancel / 追跡に使う）なので、さらに
+    //     dispatch で包むと二重の背景化になり意味を成さない。
+    "spawn_subtask",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -307,7 +314,12 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
 /// 主目的）。`SystemGatewayActions` は鍵未設定でもこれを露出する bootstrap ツールとして
 /// 自前で定義するため、Nostr gateway の [`NOSTR_DISPATCHABLE_ACTIONS`] とは別に
 /// この gateway でも分類する必要がある。
-pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
+pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &[
+    "nostr_generate_key",
+    // 全メモリの再インデックス（長時間・同ターンで結果を使わない / #175 S4 で Discord
+    // から移設）。dispatch の主目的そのもの。
+    "rebuild_memory_index",
+];
 
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
 /// にするもの（`default_non_dispatch_tools` の種）。
@@ -954,7 +966,6 @@ mod tests {
 
         // 未知名（実在しないツール）は **拒否マーカーを付けない**。分類器が幻覚の
         // ツール名を「権限で弾かれた」と誤分類すると、リトライや権限系の扱いが壊れる。
-        // この分岐は所有クレート内にテストが無く、下位層だけを回すと素通りしていた。
         let unknown = sub
             .execute("no_such_tool_at_all", &serde_json::json!({}), &ctx)
             .await;
@@ -967,6 +978,36 @@ mod tests {
         assert!(
             unknown_err.contains("Unknown gateway action"),
             "未知名は通常の失敗として返す: {unknown_err}"
+        );
+    }
+
+    /// **許可リストは MCP スロットを覆わない**（危険の所在を固定する）。
+    ///
+    /// `BridgedExecutor` は gateway と MCP を別スロットで持つ。sub-engine の許可リストは
+    /// gateway スロットに被せるものなので、MCP ツールは**素通りする**。したがって
+    /// 「sub-engine は最小権限」を保つには、MCP を注入する側（`crates/server` の応答生成）で
+    /// **深さを見て注入しない**必要がある。ここではその前提（＝許可リストに頼れないこと）を
+    /// 固定する。将来 MCP を許可リスト経由に通す設計へ変えたら、このテストが落ちるので
+    /// そのとき深さゲートを緩められる。
+    #[tokio::test]
+    async fn allowlist_does_not_cover_the_mcp_slot() {
+        // gateway 側は許可リストで絞る。
+        let gateway: Arc<dyn GatewayActions> =
+            Arc::new(SubEngineGatewayActions::new(Arc::new(FakeCompositeGateway)));
+        // MCP 側は絞られていない別スロット（同じフェイクを流用して「素通り」を見る）。
+        let mcp: Arc<dyn GatewayActions> = Arc::new(FakeCompositeGateway);
+
+        let gateway_names: Vec<String> =
+            gateway.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            !gateway_names.contains(&"send_ui".to_string()),
+            "gateway スロットは許可リストで絞られる: {gateway_names:?}"
+        );
+
+        let mcp_names: Vec<String> = mcp.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            mcp_names.contains(&"send_ui".to_string()),
+            "MCP スロットは許可リストを通らない（この前提が崩れたら深さゲートを見直す）: {mcp_names:?}"
         );
     }
 

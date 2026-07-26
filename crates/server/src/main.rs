@@ -535,7 +535,32 @@ async fn main() -> anyhow::Result<()> {
         web_gateway: Arc::new(opencrab_server::web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
         progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
+        subtask_notifiers: Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: Arc::new(Mutex::new(None)),
     };
+
+    // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
+    // 非依存層にあるため、通知先の解決（DB の webhook 設定 + TOML の既定）だけを持つ
+    // この実装を `AppState` へ差し込む。Discord ゲートウェイの稼働有無とは独立に効く
+    // （web / REST から起動したサブタスクにも lifecycle 通知が出る）。
+    #[cfg(feature = "discord")]
+    {
+        let default_subtask_webhook = cfg
+            .gateway
+            .discord
+            .default_subtask_webhook
+            .as_ref()
+            .and_then(|c| {
+                opencrab_discord::WebhookConfig::from_parts(c.url.clone(), c.events.clone())
+            });
+        *state.subtask_lifecycle_notifier.lock().unwrap() = Some(Arc::new(
+            opencrab_discord::DiscordWebhookNotifier::new(
+                state.db.clone(),
+                default_subtask_webhook,
+            ),
+        )
+            as Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier>);
+    }
 
     #[cfg(feature = "discord")]
     let heartbeat_discord_http: Arc<Mutex<Option<Arc<serenity::http::Http>>>> =
@@ -682,14 +707,9 @@ async fn main() -> anyhow::Result<()> {
                     gateway.http().clone(),
                     state.db.clone(),
                     state.tools_config.clone(),
-                    Some(Arc::new(
-                        opencrab_server::llm_adapter::LlmRouterAdapter::new(
-                            state.llm_router.clone(),
-                        ),
-                    )),
-                    state.default_model.clone(),
                     state.workspace_base.clone(),
                     subtask_registry,
+                    state.subtask_notifiers.clone(),
                     default_subtask_webhook,
                 )
                 .with_event_tx(event_tx.clone())
