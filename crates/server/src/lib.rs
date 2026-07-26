@@ -9,6 +9,7 @@ use tower_http::trace::TraceLayer;
 
 pub mod agent_log;
 pub mod agent_management;
+pub mod agent_runtime_impl;
 pub mod api;
 pub mod config;
 pub mod heartbeat_instructions;

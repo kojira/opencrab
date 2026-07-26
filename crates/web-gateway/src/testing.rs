@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
-use opencrab_actions::{CallerIdentity, RunRequest};
+use opencrab_actions::{AgentRuntime, CallerIdentity, RunRequest};
 use opencrab_core::EngineResult;
 
 use crate::gateway::WebGateway;
@@ -79,9 +79,9 @@ pub struct FakeRunner {
     response: Result<String, String>,
     /// `resolve_caller` が返す権限（レスポンスの `caller_type` の由来）。
     caller: CallerIdentity,
-    /// `has_llm_provider` の返り値（false でプロバイダ未設定の分岐を試す）。
-    has_llm_provider: bool,
-    /// `Some` なら `ensure_session` がこのメッセージで失敗する。
+    /// `has_llm_providers` の返り値（false でプロバイダ未設定の分岐を試す）。
+    has_llm_providers: bool,
+    /// `Some` なら `ensure_web_session` がこのメッセージで失敗する。
     ensure_session_error: Option<String>,
     /// `Some` なら `record_user_message` がこのメッセージで失敗する。
     record_user_message_error: Option<String>,
@@ -108,7 +108,7 @@ impl FakeRunner {
             gateway: Arc::new(WebGateway::new()),
             response,
             caller: CallerIdentity::Agent,
-            has_llm_provider: true,
+            has_llm_providers: true,
             ensure_session_error: None,
             record_user_message_error: None,
             runs: Arc::new(Mutex::new(Vec::new())),
@@ -146,7 +146,7 @@ impl FakeRunner {
 
     /// LLM プロバイダ未設定にする（ハンドラが実行せずにエラーを返す分岐）。
     pub fn without_llm_provider(mut self) -> Self {
-        self.has_llm_provider = false;
+        self.has_llm_providers = false;
         self
     }
 
@@ -172,7 +172,7 @@ impl FakeRunner {
 }
 
 #[async_trait]
-impl WebAgentRunner for FakeRunner {
+impl AgentRuntime for FakeRunner {
     async fn run_agent_response(&self, req: RunRequest) -> Result<EngineResult> {
         let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_inflight.fetch_max(now, Ordering::SeqCst);
@@ -216,10 +216,41 @@ impl WebAgentRunner for FakeRunner {
         1000
     }
 
-    fn has_llm_provider(&self) -> bool {
-        self.has_llm_provider
+    fn has_llm_providers(&self) -> bool {
+        self.has_llm_providers
     }
 
+    // ---- 以下は web ゲートウェイの経路が使わない（Discord 由来の記録/掃除）。
+    //      呼ばれたら配線ミスなので黙って no-op にせず落とす。
+
+    fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {
+        unimplemented!("web の fake は NO_REPLY 記録を使わない")
+    }
+
+    fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {
+        unimplemented!("web は ensure_web_session を使う")
+    }
+
+    fn session_theme(&self, _session_id: &str) -> Option<String> {
+        unimplemented!("web の fake は session_theme を使わない")
+    }
+
+    fn mark_interaction_status(
+        &self,
+        _interaction_id: &str,
+        _status: &str,
+        _response_json: Option<&str>,
+        _responder_id: Option<&str>,
+    ) {
+        unimplemented!("web の fake は A2UI interaction を使わない")
+    }
+
+    fn cleanup_stale_interactions(&self) {
+        unimplemented!("web の fake は A2UI interaction を使わない")
+    }
+}
+
+impl WebAgentRunner for FakeRunner {
     fn resolve_caller(&self, agent_id: &str, user_id: &str) -> CallerIdentity {
         self.caller_lookups.lock().unwrap().push(CallerLookup {
             agent_id: agent_id.to_string(),
@@ -228,7 +259,7 @@ impl WebAgentRunner for FakeRunner {
         self.caller.clone()
     }
 
-    fn ensure_session(&self, _session_id: &str, _agent_id: &str) -> Result<()> {
+    fn ensure_web_session(&self, _session_id: &str, _agent_id: &str) -> Result<()> {
         match &self.ensure_session_error {
             Some(msg) => Err(anyhow!(msg.clone())),
             None => Ok(()),

@@ -13,49 +13,30 @@
 //! - **失敗の表現は `anyhow::Result`**。HTTP レスポンスの文面は呼び出し側が組む
 //!   （実装は DB エラーをそのまま伝播させ、既存のメッセージを保つ）。
 //! - `Clone + Send + Sync + 'static`: 完了 sink は `tokio::spawn` の中で resume する
-//!   ため、runner を所有して move できる必要がある。
+//!   ため、runner を所有して move できる必要がある（境界は [`AgentRuntime`] が持つ）。
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_trait::async_trait;
 
-use opencrab_actions::{CallerIdentity, RunRequest};
-use opencrab_core::EngineResult;
+use opencrab_actions::{AgentRuntime, CallerIdentity};
 
 use crate::gateway::WebGateway;
 
-#[async_trait]
-pub trait WebAgentRunner: Send + Sync + Clone + 'static {
-    /// エージェント応答パイプライン（SkillEngine + LLM）を実行する。
-    async fn run_agent_response(&self, req: RunRequest) -> Result<EngineResult>;
-
-    /// system prompt と表示名を組み立てる（`(system_prompt, agent_name)`）。
-    fn build_agent_context(&self, agent_id: &str) -> (String, String);
-
-    /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
-    ///
-    /// 二重回答を防ぐ要: resume は完了本文を sink で運ばず、DB から会話を再構築する。
-    fn build_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        context_budget_tokens: usize,
-    ) -> Result<String>;
-
-    /// 会話コンテキストのトークン予算（有効モデルの context window × 比率）。
-    fn context_budget_tokens(&self, agent_id: &str) -> usize;
-
-    /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
-    fn has_llm_provider(&self) -> bool;
-
+/// ゲートウェイ非依存な実行・セッション管理は [`AgentRuntime`] が持つ（#156 S1）。
+/// ここには web の語彙（ダッシュボードのユーザ、SSE ランタイム、web セッションの形）を
+/// 含むものだけを宣言する。
+pub trait WebAgentRunner: AgentRuntime {
     /// 呼び出し元の権限を判定する（trusted_users / owner 設定から導出）。
     ///
     /// 返すのは権限モデルの型だけで、判定に使う設定行はここには出さない。
     fn resolve_caller(&self, agent_id: &str, user_id: &str) -> CallerIdentity;
 
     /// web 会話セッションが無ければ作成する。
-    fn ensure_session(&self, session_id: &str, agent_id: &str) -> Result<()>;
+    ///
+    /// [`AgentRuntime::ensure_session`] とは別物: web のセッションは mode/phase/theme が
+    /// 固定で metadata を持たず、失敗を呼び出し側へ返す（best-effort ではない）。
+    fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> Result<()>;
 
     /// ダッシュボードからのユーザ発話をセッションログへ記録する。
     ///

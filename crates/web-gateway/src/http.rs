@@ -99,7 +99,7 @@ pub async fn send_web_message<R: WebAgentRunner>(
     let caller_type = caller_type_label(&caller);
 
     // 2. セッションを用意する（無ければ作成）。
-    if let Err(e) = state.ensure_session(&session_id, &id) {
+    if let Err(e) = state.ensure_web_session(&session_id, &id) {
         return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}));
     }
 
@@ -109,7 +109,7 @@ pub async fn send_web_message<R: WebAgentRunner>(
     }
 
     // 4. LLM プロバイダの可用性チェック。
-    if !state.has_llm_provider() {
+    if !state.has_llm_providers() {
         return Json(serde_json::json!({
             "session_id": session_id,
             "caller_type": caller_type,

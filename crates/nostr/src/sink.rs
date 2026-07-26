@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl NostrAgentRunner for FakeRunner {
+    impl opencrab_actions::AgentRuntime for FakeRunner {
         async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
             let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             self.max_inflight.fetch_max(now, AtomicOrdering::SeqCst);
@@ -360,8 +360,31 @@ mod tests {
             1000
         }
 
-        fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str) {}
+        fn has_llm_providers(&self) -> bool {
+            true
+        }
 
+        fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
+
+        // 以下は Nostr の経路が使わない（Discord 由来の記録/掃除）。
+        fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {
+            unimplemented!("nostr の fake は NO_REPLY 記録を使わない")
+        }
+
+        fn session_theme(&self, _session_id: &str) -> Option<String> {
+            unimplemented!("nostr の fake は session_theme を使わない")
+        }
+
+        fn mark_interaction_status(&self, _i: &str, _s: &str, _r: Option<&str>, _u: Option<&str>) {
+            unimplemented!("nostr の fake は A2UI interaction を使わない")
+        }
+
+        fn cleanup_stale_interactions(&self) {
+            unimplemented!("nostr の fake は A2UI interaction を使わない")
+        }
+    }
+
+    impl NostrAgentRunner for FakeRunner {
         fn record_nostr_user_message(&self, _s: &str, _p: &str, _n: &str, _t: &str) {}
 
         fn record_nostr_agent_reply(&self, agent_id: &str, session_id: &str, text: &str) {

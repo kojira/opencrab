@@ -3,53 +3,17 @@
 //! web ゲートウェイ（`crates/web-gateway`）の最小 runner を、既存の process /
 //! transcript / queries ヘルパへ委譲して実装する（nostr の `NostrAgentRunner`
 //! impl と同型）。DB 行の型はここで閉じ、ゲートウェイ側へは出さない。
+//!
+//! ゲートウェイ非依存なメソッドは `agent_runtime_impl.rs` の
+//! [`opencrab_actions::AgentRuntime`] 実装が持つ（#156 S1）。
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use opencrab_web_gateway::{WebAgentRunner, WebGateway, WEB_SESSION_THEME};
 
-use crate::process;
 use crate::AppState;
 
-#[async_trait]
 impl WebAgentRunner for AppState {
-    async fn run_agent_response(
-        &self,
-        req: opencrab_actions::RunRequest,
-    ) -> anyhow::Result<opencrab_core::EngineResult> {
-        process::run_agent_response(self, req).await
-    }
-
-    fn build_agent_context(&self, agent_id: &str) -> (String, String) {
-        let conn = self.db.lock().unwrap();
-        process::build_agent_context(&conn, agent_id)
-    }
-
-    fn build_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        context_budget_tokens: usize,
-    ) -> anyhow::Result<String> {
-        let conn = self.db.lock().unwrap();
-        process::build_conversation_string(&conn, session_id, agent_id, context_budget_tokens)
-    }
-
-    fn context_budget_tokens(&self, agent_id: &str) -> usize {
-        let conn = self.db.lock().unwrap();
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &self.default_model)
-                .unwrap_or_else(|_| self.default_model.clone());
-        let (prov, mdl) = process::split_llm_model_spec(&eff);
-        process::compute_context_budget(&conn, prov, mdl, self.compaction_ratio)
-    }
-
-    fn has_llm_provider(&self) -> bool {
-        !self.llm_router.get().provider_names().is_empty()
-    }
-
     /// 呼び出し元の権限判定。既存 REST（`agents_messages`）に倣い trusted_users から
     /// caller を導出し、未登録なら Discord 設定の owner と突き合わせる（#164）。
     fn resolve_caller(&self, agent_id: &str, user_id: &str) -> opencrab_actions::CallerIdentity {
@@ -74,7 +38,7 @@ impl WebAgentRunner for AppState {
         }
     }
 
-    fn ensure_session(&self, session_id: &str, agent_id: &str) -> anyhow::Result<()> {
+    fn ensure_web_session(&self, session_id: &str, agent_id: &str) -> anyhow::Result<()> {
         let conn = self.db.lock().unwrap();
         let existing = opencrab_db::queries::get_session(&conn, session_id)
             .ok()
