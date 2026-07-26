@@ -47,6 +47,12 @@ pub struct SystemGatewayActions {
     /// REST のように「最後の subtask の決着でセッションを完了にする」経路は、この通知
     /// を受けて `sessions.status` の整合を取る（無いと永久 `active` のまま残る）。
     completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
+    /// transport が提供する A2UI 描画面（#156 S3）。`inner` から 1 度だけ引く。
+    ///
+    /// `send_ui` の実体は gateway 非依存層（`opencrab_actions::a2ui`）にあるが、描画と
+    /// ユーザー応答の受け取りは transport にしか作れない。`Some` のときだけ `send_ui`
+    /// を露出する（描画できない transport のターンに「必ず失敗するツール」を出さない）。
+    a2ui: Option<Arc<opencrab_core::a2ui::A2uiSurface>>,
 }
 
 impl SystemGatewayActions {
@@ -56,16 +62,41 @@ impl SystemGatewayActions {
         subtask_registry: Option<SubtaskRegistry>,
         completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
     ) -> Self {
+        let a2ui = inner.as_ref().and_then(|i| i.a2ui_surface());
         Self {
             state,
             inner,
             subtask_registry,
             completion_sink,
+            a2ui,
         }
     }
 
-    /// 本ツール源が直接提供するツール定義。
+    /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
+    ///
+    /// 分類の網羅性検査（`server_tools_are_classified_for_dispatch`）はこの**全量**を
+    /// 見るので、`send_ui` も分類を強制される。
     fn own_definitions() -> Vec<GatewayActionDef> {
+        let mut defs = Self::always_own_definitions();
+        defs.push(opencrab_actions::send_ui_definition());
+        defs
+    }
+
+    /// `with_a2ui` が false のときは `send_ui` を落とす。
+    ///
+    /// `send_ui` は A2UI を描画できる transport（現状 Discord）のターンだけに出す。
+    /// 移設前は `DiscordGatewayActions::definitions()` にしか無かったので、これで
+    /// 露出範囲が移設前と一致する。
+    fn own_definitions_with_a2ui(with_a2ui: bool) -> Vec<GatewayActionDef> {
+        let mut defs = Self::own_definitions();
+        if !with_a2ui {
+            defs.retain(|d| d.name != "send_ui");
+        }
+        defs
+    }
+
+    /// 描画面の有無に依存しないツール定義。
+    fn always_own_definitions() -> Vec<GatewayActionDef> {
         vec![
             GatewayActionDef {
                 name: "configure_llm_provider".to_string(),
@@ -1521,7 +1552,10 @@ impl SystemGatewayActions {
 #[async_trait]
 impl GatewayActions for SystemGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
-        Self::merge_definitions(Self::own_definitions(), self.inner.as_ref())
+        Self::merge_definitions(
+            Self::own_definitions_with_a2ui(self.a2ui.is_some()),
+            self.inner.as_ref(),
+        )
     }
 
     async fn execute(
@@ -1608,6 +1642,23 @@ impl GatewayActions for SystemGatewayActions {
                 )
                 .await
             }
+            // A2UI 送信（#156 S3）。Discord 側の実装は撤去済みなので inner へは委譲しない
+            // （委譲パターンにすると二重定義を招く）。描画面が無い transport では
+            // `definitions()` に出ないが、モデルが名前で呼んだ場合に備えて明示エラーを返す
+            // （fail-closed。黙って inner へ落とさない）。
+            "send_ui" => match &self.a2ui {
+                Some(surface) => {
+                    opencrab_actions::send_ui(&self.state.db, surface, args, ctx).await
+                }
+                None => GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "send_ui はこのゲートウェイでは利用できません（UI を描画できません）"
+                            .to_string(),
+                    ),
+                },
+            },
             // subtask 停止（#161 / #157 S2）。transport 非依存の唯一の実装（Discord 側の
             // 実装は撤去済み）。**inner へは委譲しない**: 委譲パターンのままにすると、
             // Discord が誤って `cancel_subtask` を再定義したときに own の実装（lifecycle
@@ -1642,6 +1693,20 @@ impl GatewayActions for SystemGatewayActions {
                 },
             },
         }
+    }
+
+    /// transport の A2UI 描画面を**そのまま外へ通す**（#156 S3）。
+    ///
+    /// 本番の sub-engine 配線は入れ子（`spawn_subtask` が `ctx.root_gateway` = この合成
+    /// gateway を子へ渡し、子の `run_agent_response` がそれを `inner` にして**もう 1 段**
+    /// 合成 gateway を作り、`SubEngineGatewayActions` で包む）。ここで転送しないと、
+    /// 内側の合成 gateway は描画面を得られず `send_ui` を定義しないため、sub-engine から
+    /// 名前指定で呼ばれたときの拒否が「権限拒否（`rejected:`）」ではなく
+    /// 「Unknown gateway action」に変わる（遮断自体は保たれるが分類が変わる）。
+    /// 移設前は Discord gateway が最内まで `inner` として届いていたので `send_ui` は
+    /// 常に「実在するが許可外」だった。その分類を保つための転送。
+    fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
+        self.a2ui.clone()
     }
 }
 
@@ -4507,5 +4572,281 @@ mod tests {
         ] {
             assert_eq!(merged.iter().filter(|d| d.name == name).count(), 1);
         }
+    }
+    // ---- #156 S3: A2UI 送信（send_ui）の gateway 非依存化 ----
+
+    /// A2UI 描画面を提供する inner のフェイク（Discord の代役）。
+    struct A2uiProvidingInner {
+        surface: Arc<opencrab_core::a2ui::A2uiSurface>,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    struct NoopRenderer;
+
+    #[async_trait]
+    impl opencrab_core::a2ui::UiRenderer for NoopRenderer {
+        async fn render(
+            &self,
+            _surface_id: &str,
+            _components: &[opencrab_core::a2ui::A2uiComponent],
+            channel: &opencrab_core::a2ui::RenderTarget,
+        ) -> Result<opencrab_core::a2ui::RenderedMessage, opencrab_core::a2ui::RenderError>
+        {
+            Ok(opencrab_core::a2ui::RenderedMessage {
+                platform: channel.platform.clone(),
+                message_id: Some("m1".into()),
+                channel_id: channel.channel_id.clone(),
+            })
+        }
+        async fn update_on_response(
+            &self,
+            _rendered: &opencrab_core::a2ui::RenderedMessage,
+            _response: &opencrab_core::a2ui::UserActionResponse,
+        ) -> Result<(), opencrab_core::a2ui::RenderError> {
+            Ok(())
+        }
+        async fn update_on_timeout(
+            &self,
+            _rendered: &opencrab_core::a2ui::RenderedMessage,
+        ) -> Result<(), opencrab_core::a2ui::RenderError> {
+            Ok(())
+        }
+    }
+
+    struct CountingUiSink(std::sync::Mutex<usize>);
+
+    impl opencrab_core::a2ui::UiResponseSink for CountingUiSink {
+        fn on_ui_response(&self, _ev: opencrab_core::a2ui::UiResponseEvent) {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+
+    impl A2uiProvidingInner {
+        fn new(owner_id: &str) -> Self {
+            Self {
+                surface: Arc::new(opencrab_core::a2ui::A2uiSurface {
+                    renderer: Arc::new(NoopRenderer),
+                    platform: "fake".to_string(),
+                    owner_id: owner_id.to_string(),
+                    pending: Some(opencrab_core::a2ui::PendingUiSurface {
+                        registry: Arc::new(dashmap::DashMap::new()),
+                        sink: Arc::new(CountingUiSink(std::sync::Mutex::new(0))),
+                    }),
+                }),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GatewayActions for A2uiProvidingInner {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            // transport 側は `send_ui` を**定義しない**（移設済み）。
+            vec![GatewayActionDef {
+                name: "fake_transport_tool".to_string(),
+                description: "x".to_string(),
+                parameters: json!({"type": "object"}),
+            }]
+        }
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &Value,
+            _ctx: &GatewayCallContext,
+        ) -> GatewayActionResult {
+            self.calls.lock().unwrap().push(name.to_string());
+            GatewayActionResult {
+                success: true,
+                data: Some(json!({ "reached_inner": name })),
+                error: None,
+            }
+        }
+        fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
+            Some(self.surface.clone())
+        }
+    }
+
+    /// 分類の網羅性検査が見る**全量**（`own_definitions`）に `send_ui` が 1 件だけある。
+    /// 消すと `SERVER_INLINE_ACTIONS` の死名検出と分類ガードが空振りする。
+    #[test]
+    fn send_ui_is_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        assert_eq!(
+            defs.iter().filter(|d| d.name == "send_ui").count(),
+            1,
+            "send_ui must be defined exactly once in own_definitions"
+        );
+    }
+
+    /// **移設の本題**: transport 固有の gateway が Discord でなくても、A2UI 描画面を
+    /// 提供すれば `send_ui` が露出し、実体（gateway 非依存層）が動く。
+    #[tokio::test]
+    async fn send_ui_works_for_any_transport_that_provides_a_surface() {
+        let state = crate::test_app_state();
+        let inner = Arc::new(A2uiProvidingInner::new("owner-1"));
+        let actions = SystemGatewayActions::new(state.clone(), Some(inner.clone()), None, None);
+
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"send_ui".to_string()), "{names:?}");
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("fake-session-1");
+        let r = actions
+            .execute(
+                "send_ui",
+                &json!({
+                    "channel_id": "42",
+                    "components": [{"id": "t", "component": "Text", "text": "hi"}],
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let interaction_id = r.data.unwrap()["interaction_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 保留状態は transport の描画面の登録簿に載る（コアの型だけ）。
+        let surface = inner.a2ui_surface().unwrap();
+        let pending = surface.pending.as_ref().unwrap();
+        let entry = pending.registry.get(&interaction_id).expect("registered");
+        assert_eq!(entry.target.channel_id, "42");
+        assert_eq!(entry.target.platform, "fake");
+        // オーナー限定ゲートの識別子が空文字にならない（空だと誰でも操作できてしまう）。
+        assert_eq!(entry.owner_id, "owner-1");
+
+        // **inner へ委譲していない**（own が唯一の実装）。
+        assert!(
+            !inner.calls.lock().unwrap().iter().any(|c| c == "send_ui"),
+            "send_ui must not be delegated to inner: {:?}",
+            inner.calls.lock().unwrap()
+        );
+    }
+
+    /// 描画面を持たない transport（web / Nostr / REST / heartbeat）のターンでは
+    /// **露出しない**（移設前の露出範囲＝Discord 経路のみ、と一致させる）。
+    /// 名前で呼ばれても inner へ落とさず明示エラー（fail-closed）。
+    #[tokio::test]
+    async fn send_ui_is_hidden_and_refused_without_a_surface() {
+        let state = crate::test_app_state();
+        // inner なし（web / REST / Nostr / heartbeat、Discord feature 無効ビルド）。
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        assert!(!names.contains(&"send_ui".to_string()), "{names:?}");
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("web-session-1");
+        let r = actions
+            .execute(
+                "send_ui",
+                &json!({"channel_id": "1", "components": []}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.unwrap(),
+            "send_ui はこのゲートウェイでは利用できません（UI を描画できません）"
+        );
+
+        // A2UI を提供しない inner を挟んでも同じ（inner へ委譲しない）。
+        let inner = Arc::new(RecordingInner::new(&["some_transport_tool"]));
+        let actions = SystemGatewayActions::new(state, Some(inner.clone()), None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        assert!(!names.contains(&"send_ui".to_string()), "{names:?}");
+        let r = actions
+            .execute(
+                "send_ui",
+                &json!({"channel_id": "1", "components": []}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        assert!(
+            !inner.calls().iter().any(|c| c == "send_ui"),
+            "must not fall through to inner: {:?}",
+            inner.calls()
+        );
+    }
+
+    /// **sub-engine からの遮断**（移設前は Discord 側テストが固定していた不変条件）。
+    ///
+    /// 許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）に無いので、合成 gateway が
+    /// `send_ui` を露出していても depth >= 1 では一覧に出ず、名前指定でも
+    /// 権限拒否（`rejected:` マーカー）になる。
+    #[tokio::test]
+    async fn send_ui_is_blocked_in_sub_engine() {
+        let state = crate::test_app_state();
+        let transport = Arc::new(A2uiProvidingInner::new("owner-1"));
+
+        // **本番と同じ入れ子の配線**を組む（`crates/server/src/process.rs`）:
+        //   depth0: SystemGatewayActions(inner = transport)             ← 親ターン
+        //   spawn_subtask が ctx.root_gateway = depth0 の合成 gateway を子へ渡す
+        //   depth1: SystemGatewayActions(inner = depth0 の合成 gateway) ← 子ターン
+        //           を SubEngineGatewayActions で包む
+        // 1 段構成で組むと、内側の合成 gateway が描画面を転送できているかを検出できない。
+        let depth0: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+            state.clone(),
+            Some(transport),
+            None,
+            None,
+        ));
+        // 親ターンでは露出する（前提の確認）。
+        assert!(depth0.definitions().iter().any(|d| d.name == "send_ui"));
+
+        let depth1: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+            state,
+            Some(depth0.clone()),
+            None,
+            None,
+        ));
+        // 描画面が入れ子の内側まで届いている（届かないと下の拒否分類が
+        // 「Unknown gateway action」へ変わる）。
+        assert!(
+            depth1.definitions().iter().any(|d| d.name == "send_ui"),
+            "A2UI 描画面が入れ子の合成 gateway へ転送されていない"
+        );
+
+        let sub = opencrab_actions::SubEngineGatewayActions::new(depth1);
+        let names: Vec<String> = sub.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            !names.contains(&"send_ui".to_string()),
+            "send_ui must NOT be exposed to the sub-engine: {names:?}"
+        );
+
+        let r = sub
+            .execute(
+                "send_ui",
+                &json!({"channel_id": "1", "components": []}),
+                &sub_ctx("subtask-s1"),
+            )
+            .await;
+        assert!(!r.success, "send_ui must be blocked in the sub-engine");
+        // 移設前と同じ分類（実在するが許可外 = 権限拒否）。「そんなツールは無い」に
+        // 落ちると幻覚ツール名と同じ扱いになり、拒否の観測が変わる。
+        let err = r.error.as_deref().unwrap();
+        assert!(
+            err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX),
+            "send_ui must be a policy rejection, not an unknown tool: {err}"
+        );
+        assert!(
+            !err.contains("Unknown gateway action"),
+            "分類が「そんなツールは無い」へ退行している: {err}"
+        );
+
+        // 多層防御: 名前ベースの depth 拒否リストにも残っている。
+        assert!(opencrab_actions::DISCORD_ACTIONS.contains(&"send_ui"));
+        assert!(opencrab_actions::tool_policy("send_ui").blocked_in_subengine);
+    }
+
+    /// `send_ui` は inline（配送系 + ユーザー応答待ち）。分類の所属は移設前と同じ。
+    #[test]
+    fn send_ui_stays_inline_after_the_move() {
+        assert!(opencrab_actions::default_non_dispatch_tools().contains("send_ui"));
+        assert!(opencrab_actions::SERVER_INLINE_ACTIONS.contains(&"send_ui"));
+        assert!(!opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&"send_ui"));
+        assert!(!opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&"send_ui"));
+        assert!(!opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&"send_ui"));
     }
 }

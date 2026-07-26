@@ -2770,9 +2770,14 @@ mod tests {
                 "{name} が dispatch 可リストと inline 集合の両方に居る"
             );
         }
+        // `DISCORD_ACTIONS`（depth ゲート）は **inline 集合全体**の部分集合。
+        // `send_ui` のように実装が gateway 非依存層へ移った名前は
+        // `SERVER_INLINE_ACTIONS` 側に属するため、`DISCORD_INLINE_ACTIONS` 単体ではなく
+        // `default_non_dispatch_tools()` の和集合で判定する（不変条件は「depth ゲートに
+        // 載る名前は dispatch されない」であって、どの定数に属するかではない）。
         for name in crate::bridge::DISCORD_ACTIONS {
             assert!(
-                crate::bridge::DISCORD_INLINE_ACTIONS.contains(name),
+                non_dispatch.contains(*name),
                 "{name} は depth ゲート（DISCORD_ACTIONS）にあるのに dispatch されてしまう"
             );
         }

@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 tokio = { workspace = true }
 async-trait = { workspace = true }
+# A2UI の保留インタラクション登録簿（`a2ui::PendingInteractionRegistry`）用。
+dashmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

@@ -13,7 +13,7 @@ use serde_json::json;
 use serenity::http::Http;
 
 use crate::message_loop::LoopEvent;
-use crate::PendingInteractionRegistry;
+use opencrab_core::a2ui::PendingInteractionRegistry;
 
 mod discord_ops;
 mod peer_review;
@@ -59,6 +59,9 @@ pub struct DiscordGatewayActions {
     /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook
     /// （`get/set_default_subtask_webhook` の解決に使う）。
     default_subtask_webhook: Option<WebhookConfig>,
+    /// A2UI の保留インタラクション登録簿（コアの型 / #156 S3）。
+    /// `send_ui` の実体は gateway 非依存層にあり、この gateway は
+    /// `a2ui_surface()` で登録簿と受け口をそちらへ渡すだけ。
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
     /// owner-only な A2UI インタラクションの権限判定に使う owner の Discord ユーザーID。
@@ -459,75 +462,6 @@ impl GatewayActions for DiscordGatewayActions {
                 }),
             },
             GatewayActionDef {
-                name: "send_ui".to_string(),
-                description: "A2UIコンポーネントで構成されたUIを送信し、ユーザーの応答を待機する。\n\n使用例（ボタン）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"選んでください\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"btn1\", \"btn2\"]}, {\"id\": \"btn1\", \"component\": \"Button\", \"text\": \"選択A\", \"style\": \"primary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"A\"}}}, {\"id\": \"btn2\", \"component\": \"Button\", \"text\": \"選択B\", \"style\": \"secondary\", \"action\": {\"name\": \"choose\", \"context\": {\"value\": \"B\"}}}]}\n\n使用例（セレクトメニュー）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"モデルを選択\"}, {\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"sel1\"]}, {\"id\": \"sel1\", \"component\": \"SelectMenu\", \"placeholder\": \"モデルを選んでください\", \"options\": [{\"label\": \"GPT-4\", \"value\": \"gpt-4\"}, {\"label\": \"Claude\", \"value\": \"claude\"}], \"action\": {\"name\": \"select_model\"}}]}\n\n使用例（フォーム/モーダル）:\n{\"channel_id\": \"123456789\", \"components\": [{\"id\": \"col1\", \"component\": \"Column\", \"children\": [\"txt1\", \"row1\"]}, {\"id\": \"txt1\", \"component\": \"Text\", \"text\": \"設定を変更\"}, {\"id\": \"row1\", \"component\": \"Row\", \"children\": [\"trigger_btn\"]}, {\"id\": \"trigger_btn\", \"component\": \"Button\", \"text\": \"設定を開く\", \"style\": \"primary\", \"action\": {\"name\": \"open_form\"}}, {\"id\": \"form1\", \"component\": \"Form\", \"title\": \"設定変更\", \"children\": [\"input_name\", \"input_desc\"], \"action\": {\"name\": \"submit_form\"}}, {\"id\": \"input_name\", \"component\": \"TextInput\", \"label\": \"名前\", \"placeholder\": \"名前を入力\", \"style\": \"short\", \"required\": true}, {\"id\": \"input_desc\", \"component\": \"TextInput\", \"label\": \"説明\", \"placeholder\": \"説明を入力\", \"style\": \"paragraph\", \"required\": false}]}\n\n注意: Rowのchildrenで参照するButton/SelectMenuはトップレベルのcomponents配列に定義する。各Buttonには一意のidとaction（name + context）を設定する。SelectMenuの選択結果はaction.contextにselected_valuesとして返される。Formはモーダル表示用でトリガーボタンが必要。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "channel_id": {
-                            "type": "string",
-                            "description": "送信先チャンネルID"
-                        },
-                        "components": {
-                            "type": "array",
-                            "description": "A2UI v0.9 コンポーネント配列",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": { "type": "string" },
-                                    "component": { "type": "string", "enum": ["Text", "Button", "Row", "Column", "SelectMenu", "TextInput", "Form"] },
-                                    "text": { "type": "string" },
-                                    "variant": { "type": "string" },
-                                    "label": { "type": "string", "description": "TextInputのラベル" },
-                                    "title": { "type": "string", "description": "Formのタイトル" },
-                                    "action": {
-                                        "type": "object",
-                                        "properties": {
-                                            "name": { "type": "string" },
-                                            "context": { "type": "object" }
-                                        }
-                                    },
-                                    "style": { "type": "string" },
-                                    "emoji": { "type": "string" },
-                                    "children": { "type": "array", "items": { "type": "string" } },
-                                    "options": {
-                                        "type": "array",
-                                        "description": "SelectMenuの選択肢",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "label": { "type": "string" },
-                                                "value": { "type": "string" },
-                                                "description": { "type": "string" },
-                                                "emoji": { "type": "string" },
-                                                "default": { "type": "boolean" }
-                                            },
-                                            "required": ["label", "value"]
-                                        }
-                                    },
-                                    "placeholder": { "type": "string" },
-                                    "min_values": { "type": "integer" },
-                                    "max_values": { "type": "integer" },
-                                    "min_length": { "type": "integer" },
-                                    "max_length": { "type": "integer" },
-                                    "required": { "type": "boolean" }
-                                },
-                                "required": ["id", "component"]
-                            }
-                        },
-                        "timeout_secs": {
-                            "type": "integer",
-                            "description": "タイムアウト秒数（デフォルト: 300）"
-                        },
-                        "owner_only": {
-                            "type": "boolean",
-                            "description": "オーナーのみ操作可能か（デフォルト: true）"
-                        }
-                    },
-                    "required": ["channel_id", "components"]
-                }),
-            },
-            GatewayActionDef {
                 name: "request_peer_review".to_string(),
                 description: "自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼をDiscordチャンネルへ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
                 parameters: json!({
@@ -578,7 +512,6 @@ impl GatewayActions for DiscordGatewayActions {
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
             "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
-            "send_ui" => self.execute_send_ui(args, ctx).await,
             // 通知先（webhook）の管理は #157 S5 で server 側（`crates/server/src/
             // webhook_targets.rs`）へ移設済み。ここに残るのは webhook を**新規作成**する
             // `ensure_*` だけ（既定 family: `*_subtask_*` は subtask、汎用名は activity）。
@@ -590,6 +523,17 @@ impl GatewayActions for DiscordGatewayActions {
                 error: Some(format!("Unknown gateway action: {name}")),
             },
         }
+    }
+
+    /// A2UI の描画面を合成 gateway へ差し出す（#156 S3）。
+    ///
+    /// `send_ui` の実体は gateway 非依存層（`opencrab_actions::a2ui`）にあり、
+    /// Discord が提供するのは描画（`DiscordRenderer`）と応答の受け口
+    /// （`DiscordUiResponseSink`）だけ。合成 gateway
+    /// （`SystemGatewayActions`）はこれが `Some` のターンでだけ `send_ui` を露出する
+    /// ため、移設前と同じ「Discord 経由のターンだけで使える」露出になる。
+    fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
+        Some(Arc::new(self.build_a2ui_surface()))
     }
 }
 
@@ -646,9 +590,9 @@ mod tests {
             .with_depth(1);
 
         // 実在するが許可外 → rejected: マーカー（`spawn_subtask` / `cancel_subtask` /
-        // `create_skill` を含まないのは、Discord がもう定義していないため。ネスト禁止の
-        // 実効ゲートは許可リスト側）。
-        for name in ["send_ui", "discord_channel_config", "discord_send_file"] {
+        // `create_skill` / `send_ui` を含まないのは、Discord がもう定義していないため。
+        // ネスト禁止の実効ゲートは許可リスト側）。
+        for name in ["discord_channel_config", "discord_send_file"] {
             let result = sub_gw.execute(name, &json!({}), &sub_ctx).await;
             assert!(!result.success, "{name} should be blocked");
             assert!(
@@ -676,6 +620,11 @@ mod tests {
             "read_heartbeat_instructions",
             "update_heartbeat_instructions",
             "create_skill",
+            // #156 S3: A2UI 送信も server 側（`SystemGatewayActions`）の own ツール。
+            // 合成 gateway 経由で sub-engine から到達できないことは
+            // `send_ui_is_blocked_in_sub_engine`（`crates/server/src/system_actions.rs`）
+            // が固定する。
+            "send_ui",
         ] {
             let result = sub_gw
                 .execute(moved, &json!({"message": "x"}), &sub_ctx)
@@ -702,7 +651,9 @@ mod tests {
         });
         // `report_progress` / `spawn_subtask` は server 側へ移設済み（#175 S4）。
         // 同趣旨のガードは `crates/server/src/system_actions.rs` にある。
-        for name in ["request_peer_review", "send_ui"] {
+        // `send_ui` は #156 S3 で gateway 非依存層へ移設済み。同趣旨のガードは
+        // `crates/actions/src/a2ui.rs` の `send_ui_without_session_fails_closed`。
+        for name in ["request_peer_review"] {
             let result = actions.execute(name, &args, &no_session).await;
             assert!(!result.success, "{name} should fail without session");
             assert!(
@@ -759,6 +710,19 @@ mod tests {
         // DISCORD_ACTIONS は**全要素が実在**しなければならない（死名は depth ゲートも
         // dispatch 除外も空振りさせる）。以前は 20 名のうち 13 名が死名だった。
         for n in opencrab_actions::DISCORD_ACTIONS {
+            if *n == "send_ui" {
+                // #156 S3 で gateway 非依存層へ移設済み。深さ拒否は**名前ベース**なので
+                // 実装がどこにあっても効くため一覧には残す（`TRUSTED_ONLY_ACTIONS` の
+                // `create_skill` と同じ扱い）。Discord が再定義すると合成 gateway の
+                // dedup で own 側に食われるので、無いことを固定する。実在性の検証は
+                // `send_ui_is_exposed_in_own_definitions`
+                // （`crates/server/src/system_actions.rs`）が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "send_ui は gateway 非依存層の実装だけであるべき"
+                );
+                continue;
+            }
             assert!(
                 names.contains(&n.to_string()),
                 "DISCORD_ACTIONS の {n} が definitions() に無い（死名）"
@@ -841,8 +805,8 @@ mod tests {
     fn delivery_and_read_tools_are_inline() {
         let non_dispatch = opencrab_actions::default_non_dispatch_tools();
         for name in [
-            // 配送系（ユーザー応答待ちを含む）
-            "send_ui",
+            // 配送系（`send_ui` は #156 S3 で server 側へ移設。同趣旨の inline 固定は
+            // `crates/server/src/system_actions.rs` にある）
             "discord_send_file",
             "discord_add_reaction",
             "request_peer_review",
@@ -870,7 +834,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 13);
+        assert_eq!(defs.len(), 12);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -883,7 +847,6 @@ mod tests {
         assert!(names.contains(&"discord_send_file"));
         assert!(names.contains(&"join_voice_channel"));
         assert!(names.contains(&"leave_voice_channel"));
-        assert!(names.contains(&"send_ui"));
         // webhook 新規作成つきの 2 本だけが残る（#157 S5）。
         assert!(names.contains(&"ensure_subtask_webhook"));
         assert!(names.contains(&"ensure_webhook"));

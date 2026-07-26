@@ -44,6 +44,7 @@ pub use workspace::{FileEntry, Workspace};
 
 // A2UI types
 pub use a2ui::{
-    build_confirmation_components, A2uiAction, A2uiComponent, A2uiComponentType, A2uiUserAction,
-    RenderError, RenderTarget, RenderedMessage, UiRenderer, UserActionResponse,
+    build_confirmation_components, A2uiAction, A2uiComponent, A2uiComponentType, A2uiSurface,
+    A2uiUserAction, PendingInteraction, PendingInteractionRegistry, PendingUiSurface, RenderError,
+    RenderTarget, RenderedMessage, UiRenderer, UiResponseEvent, UiResponseSink, UserActionResponse,
 };
