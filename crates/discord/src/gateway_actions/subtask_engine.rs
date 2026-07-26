@@ -1275,7 +1275,6 @@ fn short_json_preview(data: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_gateway::GatewayActions as _;
 
     // ---- #175 S3: lifecycle 通知の抽象境界（trait 経由の配線） ----
     //
