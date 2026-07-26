@@ -1,22 +1,18 @@
-//! サブタスクエンジン操作（Discord に残る分: cancel_subtask と完了 sink）。
+//! サブタスクエンジン操作（Discord に残る分: 完了 sink と activity sink）。
 //!
 //! `spawn_subtask` / `report_progress` は gateway 非依存層へ移設済み（#175 S4:
 //! `crates/server/src/subtask_spawn.rs` と `crates/server/src/system_actions.rs`）。
-//! ここに残るのは Discord 固有の 3 つだけ:
+//! `cancel_subtask` も #157 S2 / #184 で移設済み（`opencrab_actions::cancel_subtask` が
+//! 唯一の実装。sub-session theme からの説明文解決と lifecycle 通知もそちらへ移した）。
+//! ここに残るのは Discord 固有の 2 つだけ:
 //! - `DiscordCompletionSink`（決着を Discord のイベントループへ再注入する）
-//! - `execute_cancel_subtask`（sub-session の theme を使った停止ログ）
 //! - activity webhook 向けの `ToolEventSink` とその factory
 
 use std::sync::Arc;
 
-use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
-use serde_json::json;
-
-use super::subtask_webhook::reject;
 use super::webhook::{self, DeliveryBatch, WebhookResolution};
-use super::DiscordGatewayActions;
 use crate::message_loop::{parse_discord_session, LoopEvent};
-use opencrab_actions::subtask::{SpawnedSubtask, SubtaskCompletionSink, SubtaskSettled};
+use opencrab_actions::subtask::{SubtaskCompletionSink, SubtaskSettled};
 
 /// `SubtaskCompletionSink` の Discord 実装（RFC #152 S1）。
 ///
@@ -75,132 +71,6 @@ impl SubtaskCompletionSink for DiscordCompletionSink {
             guild_id,
             is_dm,
         });
-    }
-}
-
-impl DiscordGatewayActions {
-    pub(crate) fn execute_cancel_subtask(
-        &self,
-        args: &serde_json::Value,
-        ctx: &GatewayCallContext,
-    ) -> GatewayActionResult {
-        let subtask_id = match args["subtask_id"].as_str() {
-            Some(id) => id.to_string(),
-            None => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("cancel_subtask: 'subtask_id' is required".to_string()),
-                };
-            }
-        };
-
-        // 認可（#64）: owner は常に許可。それ以外は「呼び出し元セッションが親」の
-        // サブタスクのみキャンセルできる（自己/兄弟/他セッションのものは不可）。
-        let authorized = |subtask: &SpawnedSubtask| -> bool {
-            if ctx.caller == opencrab_gateway::GatewayCaller::Owner {
-                return true;
-            }
-            matches!(ctx.session_id.as_deref(),
-                Some(s) if !s.is_empty() && subtask.parent_session_id == s)
-        };
-
-        // remove_if は shard ロック下で述語を評価するため、「認可確認→削除」の間に
-        // エントリが差し替わる TOCTOU が無い（所有権フィールドは insert 後不変）。
-        // 述語内で停止を主張（`claim_cancel`）することで、abort が効かない窓
-        // （sub-engine が完走して settle_completed へ入った後）でも「cancel 成功 ＋
-        // 完了ログ着地 ＋ sink 発火」の二重決着にならない。既に決着済みなら claim に
-        // 失敗し、エントリは残したまま not found を返す（通常完了として通知される）。
-        match self.subtask_registry.remove_if(&subtask_id, |_, subtask| {
-            authorized(subtask) && subtask.lifecycle.claim_cancel()
-        }) {
-            Some((_, subtask)) => {
-                subtask.abort_handle.abort();
-
-                // 中断を通知する。アボートで spawned closure は中断されるため終了通知は
-                // 来ない → ここが唯一の終端。通知口は registry と対の随伴マップから引く
-                // （RFC §1.5）。
-                if let Some((_, notifier)) = self.subtask_notifiers.remove(&subtask_id) {
-                    notifier.on_cancelled(subtask.started_at.elapsed().as_millis() as u64);
-                }
-
-                // Write subtask_cancelled to parent session log.
-                let parent_session_id = subtask.parent_session_id.clone();
-                if !parent_session_id.is_empty() {
-                    if let Ok(conn) = self.db.lock() {
-                        // 停止対象の説明は sub-session の theme を第一候補にする
-                        // （明示的な `spawn_subtask` はここに人間可読なテーマを持つ）。
-                        //
-                        // ただし自動 dispatch で背景実行に回った subtask は sub-session
-                        // の行を作らないため theme を引けず、そのままだと親ログが
-                        // `subtask '' was cancelled` になって「どのツールを止めたのか」
-                        // が分からない（#176）。theme が引けない/空のときは registry が
-                        // 保持する label（例: `execute_shell(...)`）へフォールバックする。
-                        let task_description =
-                            opencrab_db::queries::get_session(&conn, &subtask.session_id)
-                                .ok()
-                                .flatten()
-                                .map(|session| {
-                                    session
-                                        .theme
-                                        .strip_prefix("Subtask: ")
-                                        .unwrap_or(&session.theme)
-                                        .to_string()
-                                })
-                                .filter(|desc| !desc.is_empty())
-                                .unwrap_or_else(|| subtask.label.clone());
-                        let log = opencrab_db::queries::SessionLogRow {
-                            id: None,
-                            agent_id: subtask.agent_id.clone(),
-                            session_id: parent_session_id.clone(),
-                            log_type: "tool_cancelled".to_string(),
-                            content: format!("subtask '{}' was cancelled", task_description),
-                            speaker_id: None,
-                            turn_number: None,
-                            metadata_json: Some(
-                                serde_json::json!({
-                                    "tool_call_id": subtask_id,
-                                    "tool_name": "spawn_subtask",
-                                    "task": task_description,
-                                })
-                                .to_string(),
-                            ),
-                            created_at: None,
-                        };
-                        opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
-                    }
-                }
-
-                GatewayActionResult {
-                    success: true,
-                    data: Some(json!({"cancelled": true, "subtask_id": subtask_id})),
-                    error: None,
-                }
-            }
-            None => {
-                // remove_if の None は「不在」「権限なし」「既に決着済み（claim 失敗）」。
-                // 所有権フィールドは不変なので、残っていて決着中でなければ権限なし。
-                let already_settling = self
-                    .subtask_registry
-                    .get(&subtask_id)
-                    .map(|e| e.lifecycle.is_settling())
-                    .unwrap_or(false);
-                if self.subtask_registry.contains_key(&subtask_id) && !already_settling {
-                    reject(format!(
-                        "cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
-                    ))
-                } else {
-                    GatewayActionResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!(
-                            "cancel_subtask: subtask '{}' not found",
-                            subtask_id
-                        )),
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -555,116 +425,6 @@ fn short_json_preview(data: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use opencrab_actions::subtask::SettleKind;
-
-    // ---- #175 S3: lifecycle 通知の抽象境界（trait 経由の配線） ----
-    //
-    // 通知の中身（整形）は Discord 実装側のテストで固定している。ここで固定するのは
-    // 「3 つのツール本体が trait を実際に呼ぶ」という配線そのもので、呼び出しを 1 つ
-    // 落とせば対応するテストが落ちる。
-
-    /// テスト用の通知口。呼ばれたイベントを順に記録する。
-    #[derive(Default)]
-    struct RecordingNotifier {
-        events: std::sync::Mutex<Vec<String>>,
-    }
-
-    impl RecordingNotifier {
-        fn record(&self, ev: String) {
-            self.events.lock().unwrap().push(ev);
-        }
-        fn events(&self) -> Vec<String> {
-            self.events.lock().unwrap().clone()
-        }
-    }
-
-    impl opencrab_actions::subtask_notify::SubtaskRunNotifier for RecordingNotifier {
-        fn on_started(&self, task: &str) {
-            self.record(format!("started:{task}"));
-        }
-        fn on_progress(&self, detail: &str) {
-            self.record(format!("progress:{detail}"));
-        }
-        fn on_finished(&self, exit_reason: &str, _duration_ms: u64, result_text: &str) {
-            self.record(format!("finished:{exit_reason}:{result_text}"));
-        }
-        fn on_cancelled(&self, _duration_ms: u64) {
-            self.record("cancelled".to_string());
-        }
-        fn wants_progress(&self) -> bool {
-            true
-        }
-    }
-
-    /// テスト用の gateway actions（Discord HTTP は呼ばない）。
-    fn wiring_actions() -> DiscordGatewayActions {
-        let db = opencrab_db::Db::memory().unwrap();
-        DiscordGatewayActions::new(
-            Arc::new(serenity::http::Http::new("dummy-token")),
-            db,
-            "/tmp".to_string(),
-            Arc::new(dashmap::DashMap::new()),
-            Arc::new(dashmap::DashMap::new()),
-            None,
-        )
-    }
-
-    fn wiring_ctx(caller: opencrab_gateway::GatewayCaller, session_id: &str) -> GatewayCallContext {
-        GatewayCallContext::new(caller, "test-agent").with_session_id(session_id)
-    }
-
-    /// registry に走行中サブタスクを 1 件登録する（abort されない pending タスク）。
-    fn insert_running_subtask(
-        actions: &DiscordGatewayActions,
-        subtask_id: &str,
-        session_id: &str,
-        parent_session_id: &str,
-    ) -> tokio::task::JoinHandle<()> {
-        let handle = tokio::spawn(std::future::pending::<()>());
-        actions.subtask_registry.insert(
-            subtask_id.to_string(),
-            SpawnedSubtask {
-                abort_handle: handle.abort_handle(),
-                session_id: session_id.to_string(),
-                parent_session_id: parent_session_id.to_string(),
-                agent_id: "test-agent".to_string(),
-                label: "job".to_string(),
-                started_at: std::time::Instant::now(),
-                reply_target: None,
-                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
-            },
-        );
-        handle
-    }
-
-    /// `cancel_subtask` は通知口へ中断を伝え、随伴マップから外す。
-    #[tokio::test]
-    async fn cancel_subtask_notifies_through_trait() {
-        let actions = wiring_actions();
-        let _h = insert_running_subtask(
-            &actions,
-            "st-1",
-            "subtask-st-1",
-            "discord-test-agent-111-222",
-        );
-        let recorder = Arc::new(RecordingNotifier::default());
-        actions
-            .subtask_notifiers
-            .insert("st-1".to_string(), recorder.clone());
-
-        let res = actions.execute_cancel_subtask(
-            &json!({"subtask_id": "st-1"}),
-            &wiring_ctx(
-                opencrab_gateway::GatewayCaller::Owner,
-                "discord-test-agent-111-222",
-            ),
-        );
-        assert!(res.success, "cancel_subtask: {:?}", res.error);
-        assert_eq!(recorder.events(), vec!["cancelled"]);
-        assert!(
-            !actions.subtask_notifiers.contains_key("st-1"),
-            "通知口は registry と対で除去する"
-        );
-    }
 
     // ---- RFC #152 S1: DiscordCompletionSink（完了の再注入経路） ----
     //

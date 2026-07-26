@@ -118,6 +118,7 @@ mod tests {
             parent_session_id: parent_session_id.to_string(),
             agent_id: "agent-x".to_string(),
             label: "job".to_string(),
+            tool_name: "spawn_subtask".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: None,
             lifecycle: crate::subtask::SubtaskLifecycle::new(),

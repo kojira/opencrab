@@ -232,9 +232,9 @@ pub async fn send_agent_message(
     let subtask_registry = state.subtask_registries.registry_for(&session_id);
 
     // 6. Get gateway_actions from discord_manager.
-    //    Discord の gateway_actions にも**同一の**registry を渡す。
-    //    `SystemGatewayActions` は inner が cancel_subtask を実装している場合そちらへ
-    //    委譲するため、別 registry を渡すと停止が not found になる。
+    //    停止（`cancel_subtask`）は #157 S2 で gateway 非依存層だけの実装になったので、
+    //    Discord の gateway_actions へ registry を渡す必要はもう無い（`SystemGatewayActions`
+    //    が上の共有 registry を直接引く）。
     #[cfg(feature = "discord")]
     let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = {
         if let Some(ref dm) = state.discord_manager {
@@ -245,13 +245,10 @@ pub async fn send_agent_message(
                 // ここで `RwLock::new(clone)` を作っていた頃は REST 経路だけ**使い捨ての
                 // コピー**を触っていた（#197）。引数自体が消えたので、別インスタンスを
                 // 渡す余地はコンパイル時に無い。
-                let subtask_registry = subtask_registry.clone();
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
                     state.workspace_base.clone(),
-                    subtask_registry,
-                    state.subtask_notifiers.clone(),
                     None,
                 );
                 Some(Arc::new(ga) as Arc<dyn opencrab_gateway::GatewayActions>)
@@ -462,6 +459,7 @@ mod tests {
                 parent_session_id: session_id.to_string(),
                 agent_id: "agent-a".to_string(),
                 label: "other".to_string(),
+                tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
                 lifecycle: SubtaskLifecycle::new(),

@@ -403,6 +403,66 @@ impl SystemGatewayActions {
                     "required": ["command"]
                 }),
             },
+            // ---- #157 S3: ハートビート指示ツール（Discord から移設） ----
+            //
+            // 実装は DB のみに依存していたのに Discord gateway にしか無かった。定義・
+            // 引数スキーマ・レスポンス JSON は Discord 実装から**1 文字も変えずに**移して
+            // いる。実体は `crate::heartbeat_instructions`。
+            // 権限は bridge の `OWNER_ONLY_ACTIONS`（update）/ `TRUSTED_ONLY_ACTIONS`
+            // （read）が可視性と実行の双方でゲートし、ハンドラ内検査も残す（多層防御）。
+            // **チャンネル単位の設定は非対称**（`scope="channel"` が触るのは Discord の
+            // チャンネル設定テーブルなので、非 Discord 経路では通常「行が無い」応答に
+            // なる）。詳細は `crate::heartbeat_instructions` の doc。
+            GatewayActionDef {
+                name: "update_heartbeat_instructions".to_string(),
+                description: "ハートビート（自律発言）時の振る舞い指示を更新する。オーナーが「これからハートビートでは○○して」と明示的に依頼した文脈でのみ呼ぶこと。出力形式（SPEAK/LEARN/IDLE）はランタイムが固定するため、ここでは頻度・トーン・話題・沈黙条件などの方針のみを書く。オーナー限定。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "channel"],
+                            "description": "agent=エージェント全体のグローバル指示、channel=特定チャンネルの上書き。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "scope=channelのとき必須。対象チャンネルの数値ID。"
+                        },
+                        "guild_id": {
+                            "type": "string",
+                            "description": "scope=channelで新規にチャンネル設定を作成する場合に必要なサーバーの数値ID。"
+                        },
+                        "instructions": {
+                            "type": "string",
+                            "description": "新しいハートビート指示の全文（最大4000字）。"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "変更理由（監査ログに記録される。省略可）。"
+                        }
+                    },
+                    "required": ["scope", "instructions"]
+                }),
+            },
+            GatewayActionDef {
+                name: "read_heartbeat_instructions".to_string(),
+                description: "現在のハートビート指示を読み出す。scope=agentでエージェント全体、scope=channelでチャンネル上書きのみ、scope=effectiveで実際にtickで使われる合成結果（解決ルール適用後）を返す。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "channel", "effective"],
+                            "description": "agent / channel / effective。channel・effectiveのときはchannel_id必須。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "scope=channel または effective のとき必須。対象チャンネルの数値ID。"
+                        }
+                    },
+                    "required": ["scope"]
+                }),
+            },
         ]
     }
 
@@ -508,10 +568,12 @@ impl SystemGatewayActions {
         }
     }
 
-    /// 実行中 subtask の停止（#161）。共有 `SubtaskRegistry` を引き、認可（親セッション/
-    /// owner 限定）・abort・除去・親ログ記録を server-neutral の `cancel_subtask` に委ねる。
-    /// registry 未配線（`None`）や不在は not found を返す。権限なしは REJECTION_CODE_PREFIX
-    /// を付けて拒否として通知する（Discord 実装と同契約）。
+    /// 実行中 subtask の停止（#161・#157 S2）。共有 `SubtaskRegistry` を引き、認可
+    /// （親セッション/owner 限定）・abort・除去・lifecycle 通知・親ログ記録・sink 通知を
+    /// server-neutral の `cancel_subtask` に委ねる。**これが唯一の実装**で、transport 固有の
+    /// 停止実装は無い（#157 S2 で Discord 実装を撤去し、その固有の後始末を neutral 層へ
+    /// 取り込んだ）。registry 未配線（`None`）や不在は not found を返す。権限なしは
+    /// `REJECTION_CODE_PREFIX` を付けて拒否として通知する（旧 Discord 実装と同契約）。
     fn cancel_subtask(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
         let Some(subtask_id) = args.get("subtask_id").and_then(|v| v.as_str()) else {
             return err("cancel_subtask: 'subtask_id' is required".to_string());
@@ -525,6 +587,9 @@ impl SystemGatewayActions {
             registry,
             &self.state.db,
             self.completion_sink.as_deref(),
+            // 中断の lifecycle 通知（旧 Discord 実装の後始末）はこのマップ経由で行う。
+            // `spawn_subtask` が insert したものと同一 Arc（`AppState` 共有）。
+            Some(&self.state.subtask_notifiers),
             subtask_id,
             is_owner,
             ctx.session_id.as_deref(),
@@ -1196,8 +1261,8 @@ fn err(msg: String) -> GatewayActionResult {
 impl SystemGatewayActions {
     /// own 定義と inner 定義を name で dedup してマージする（own 優先）。
     ///
-    /// nostr watch ループ稼働時は inner=NostrGatewayActions も nostr_generate_key を、
-    /// Discord では inner が cancel_subtask を定義するため、ここで dedup しないと
+    /// nostr watch ループ稼働時は inner=NostrGatewayActions も nostr_generate_key を
+    /// 定義するため、ここで dedup しないと
     /// ツール一覧に同名が2つ並ぶ（provider が拒否しうる）。`definitions()` の実体を
     /// 静的関数に切り出し、AppState 無しで dedup 契約を単体テストできるようにする（#161）。
     fn merge_definitions(
@@ -1256,6 +1321,14 @@ impl GatewayActions for SystemGatewayActions {
             "remove_allowed_command" => {
                 crate::agent_management::remove_allowed_command(&self.state, args, ctx)
             }
+            // ハートビート指示ツール（#157 S3）。Discord 側の実装は撤去済みなので
+            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。
+            "update_heartbeat_instructions" => {
+                crate::heartbeat_instructions::update_heartbeat_instructions(&self.state, args, ctx)
+            }
+            "read_heartbeat_instructions" => {
+                crate::heartbeat_instructions::read_heartbeat_instructions(&self.state, args, ctx)
+            }
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
@@ -1272,26 +1345,13 @@ impl GatewayActions for SystemGatewayActions {
                 )
                 .await
             }
-            // subtask 停止（#161）。transport 固有 gateway（Discord）が cancel_subtask を
-            // 実装しているなら、その完全な後始末（aborted webhook 送出・session theme から
-            // の task_description 解決）を保つため inner へ委譲する。実装していない
-            // transport（web/Nostr/REST）では own が共有 registry を引いて停止する。
-            // どちらも同一の共有 registry を叩くため二重にキャンセルされることはない。
-            "cancel_subtask" => {
-                let inner_handles = self.inner.as_ref().is_some_and(|inner| {
-                    inner
-                        .definitions()
-                        .iter()
-                        .any(|d| d.name == "cancel_subtask")
-                });
-                if inner_handles {
-                    // inner が cancel_subtask を実装している（Discord）→ 委譲。
-                    self.inner.as_ref().unwrap().execute(name, args, ctx).await
-                } else {
-                    self.cancel_subtask(args, ctx)
-                }
-            }
-            // subtask 進捗報告（#175 S1）。cancel_subtask と同じ委譲パターン。
+            // subtask 停止（#161 / #157 S2）。transport 非依存の唯一の実装（Discord 側の
+            // 実装は撤去済み）。**inner へは委譲しない**: 委譲パターンのままにすると、
+            // Discord が誤って `cancel_subtask` を再定義したときに own の実装（lifecycle
+            // 通知 + 部分結果ログ + sink 通知）が黙ってバイパスされる。
+            "cancel_subtask" => self.cancel_subtask(args, ctx),
+            // subtask 進捗報告（#175 S1）。**唯一残る委譲パターン**（cancel_subtask は
+            // #157 S2 で委譲を撤去した）。
             // transport 固有 gateway（Discord）が report_progress を実装しているなら、
             // その固有の後処理（lifecycle webhook への progress 送出）を保つため inner
             // へ委譲する＝ Discord 経路は挙動不変。実装していない transport
@@ -1507,6 +1567,16 @@ mod tests {
         assert!(
             !non_dispatch.contains("update_memory_index_config"),
             "update_memory_index_config は移設前と同じく dispatch 対象に残す"
+        );
+        // #157 S3 で Discord から移設。分類の所属も移設前と同じ
+        // （読み出し = inline / 書き込み = dispatchable）。
+        assert!(
+            non_dispatch.contains("read_heartbeat_instructions"),
+            "read_heartbeat_instructions は移設前と同じく inline（一覧の即答）"
+        );
+        assert!(
+            !non_dispatch.contains("update_heartbeat_instructions"),
+            "update_heartbeat_instructions は移設前と同じく dispatch 対象に残す"
         );
     }
 
@@ -1790,6 +1860,7 @@ mod tests {
                 parent_session_id: parent_session_id.to_string(),
                 agent_id: "agent-x".to_string(),
                 label: "job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
@@ -2876,5 +2947,799 @@ mod tests {
             "inner の有無に関わらずグローバル設定へ書いてはならない（#202）: {:?}",
             live_allowed_commands(&state)
         );
+    }
+    // ================================================================================
+    // #157 S2 / #184: 停止（cancel_subtask）の移植テスト
+    //
+    // 旧 Discord 実装（`crates/discord` の `execute_cancel_subtask`）にあった 8 テストを
+    // そのまま持ってきたもの（1 件も落としていない）。停止の実装は
+    // `opencrab_actions::cancel_subtask` 1 箇所になったので、契約はこの合成層で固定する。
+    // ================================================================================
+
+    /// 停止対象を任意の label / tool_name で 1 件登録した registry を作る。
+    fn registry_with_labeled(
+        subtask_id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+        label: &str,
+        tool_name: &str,
+    ) -> SubtaskRegistry {
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        registry.insert(
+            subtask_id.to_string(),
+            opencrab_actions::SpawnedSubtask {
+                abort_handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+                session_id: session_id.to_string(),
+                parent_session_id: parent_session_id.to_string(),
+                agent_id: "agent-x".to_string(),
+                label: label.to_string(),
+                tool_name: tool_name.to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            },
+        );
+        registry
+    }
+
+    /// sub-session の行を作る（明示的な `spawn_subtask` 相当）。
+    fn insert_sub_session(state: &AppState, session_id: &str, theme: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::insert_session(
+            &conn,
+            &opencrab_db::queries::SessionRow {
+                id: session_id.to_string(),
+                mode: "subtask".to_string(),
+                theme: theme.to_string(),
+                phase: "active".to_string(),
+                turn_number: 0,
+                status: "active".to_string(),
+                participant_ids_json: json!(["agent-x"]).to_string(),
+                facilitator_id: None,
+                done_count: 0,
+                max_turns: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 停止ログ（`tool_cancelled`）を親セッションから 1 件だけ引く。
+    fn cancelled_log(
+        state: &AppState,
+        parent_session_id: &str,
+    ) -> opencrab_db::queries::SessionLogRow {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::list_recent_session_logs(&conn, parent_session_id, 20)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.log_type == "tool_cancelled")
+            .expect("tool_cancelled が親ログに残る")
+    }
+
+    fn cancelled_log_metadata(state: &AppState, parent_session_id: &str) -> Value {
+        serde_json::from_str(
+            cancelled_log(state, parent_session_id)
+                .metadata_json
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn parent_ctx(parent_session_id: &str) -> GatewayCallContext {
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id(parent_session_id)
+    }
+
+    async fn cancel(
+        actions: &SystemGatewayActions,
+        subtask_id: &str,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        actions
+            .execute("cancel_subtask", &json!({"subtask_id": subtask_id}), ctx)
+            .await
+    }
+
+    /// 不在は**権限拒否ではない**プレーンなエラー（旧 Discord テストの移植）。
+    #[tokio::test]
+    async fn cancel_subtask_not_found_is_plain_error() {
+        let state = crate::test_app_state();
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let actions = SystemGatewayActions::new(state, None, Some(registry), None);
+        let r = cancel(&actions, "no-such", &parent_ctx("web-agent-x-c1")).await;
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert_eq!(err, "cancel_subtask: subtask 'no-such' not found");
+        assert!(!err.starts_with(REJECTION_CODE_PREFIX));
+    }
+
+    /// 他セッションが親の subtask は拒否し、エントリも残す（abort しない）。
+    #[tokio::test]
+    async fn cancel_subtask_rejects_foreign_session() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-x", "subtask-x1", "web-other-c9");
+        let actions = SystemGatewayActions::new(state, None, Some(registry.clone()), None);
+        let r = cancel(&actions, "st-x", &parent_ctx("web-agent-x-c1")).await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref().unwrap(),
+            format!("{REJECTION_CODE_PREFIX}cancel_subtask: subtask 'st-x' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）")
+        );
+        assert!(registry.contains_key("st-x"), "abort されていない");
+    }
+
+    /// 親セッションからの停止は成功し、registry から除去される。
+    #[tokio::test]
+    async fn cancel_subtask_allows_parent_session() {
+        let state = crate::test_app_state();
+        let parent = "web-agent-x-c1";
+        let registry = registry_with("st-mine", "subtask-m1", parent);
+        let actions = SystemGatewayActions::new(state, None, Some(registry.clone()), None);
+        let r = cancel(&actions, "st-mine", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+        // レスポンス JSON も旧実装と同一。
+        assert_eq!(
+            r.data.unwrap(),
+            json!({"cancelled": true, "subtask_id": "st-mine"})
+        );
+        assert!(!registry.contains_key("st-mine"));
+    }
+
+    /// owner は無関係なセッション文脈からでも停止できる。
+    #[tokio::test]
+    async fn cancel_subtask_owner_bypasses_session_check() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-any", "subtask-a1", "web-other-c9");
+        let actions = SystemGatewayActions::new(state, None, Some(registry.clone()), None);
+        let r = cancel(&actions, "st-any", &owner_ctx()).await;
+        assert!(r.success, "{:?}", r.error);
+        assert!(!registry.contains_key("st-any"));
+    }
+
+    /// セッション文脈の無い agent は他人の subtask を停止できない。
+    #[tokio::test]
+    async fn cancel_subtask_rejects_agent_without_session() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-ns", "subtask-n1", "web-other-c9");
+        let actions = SystemGatewayActions::new(state, None, Some(registry.clone()), None);
+        let r = cancel(&actions, "st-ns", &agent_ctx()).await;
+        assert!(!r.success);
+        assert!(r
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(REJECTION_CODE_PREFIX));
+        assert!(registry.contains_key("st-ns"));
+    }
+
+    /// #176: 自動 dispatch した subtask は sub-session の行を持たないため theme を引けず、
+    /// registry の label（ツール名を含む）へフォールバックする。
+    #[tokio::test]
+    async fn cancel_subtask_falls_back_to_label_without_sub_session() {
+        let state = crate::test_app_state();
+        let parent = "web-agent-x-c1";
+        // sub-session は**作らない**（自動 dispatch の再現）。
+        let registry = registry_with_labeled(
+            "st-auto",
+            "subtask-auto1",
+            parent,
+            "execute_shell(ls -la)",
+            "execute_shell",
+        );
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+        let r = cancel(&actions, "st-auto", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+
+        let log = cancelled_log(&state, parent);
+        assert_ne!(
+            log.content, "subtask '' was cancelled",
+            "sub-session が無いとラベルが空になっている（#176 の退行）"
+        );
+        assert_eq!(log.content, "subtask 'execute_shell(ls -la)' was cancelled");
+        let meta = cancelled_log_metadata(&state, parent);
+        assert_eq!(meta["task"], "execute_shell(ls -la)");
+        // #184: 種別名は固定値ではなく**実際に停止したツール名**。
+        assert_eq!(meta["tool_name"], "execute_shell");
+        assert_eq!(meta["tool_call_id"], "st-auto");
+        assert_eq!(meta["label"], "execute_shell(ls -la)");
+        assert_eq!(meta["completed_calls"], json!([]));
+    }
+
+    /// 明示的な `spawn_subtask`（sub-session あり）では theme を使い、`Subtask: ` prefix を
+    /// 除去する。
+    #[tokio::test]
+    async fn cancel_subtask_prefers_sub_session_theme() {
+        let state = crate::test_app_state();
+        let parent = "web-agent-x-c1";
+        insert_sub_session(&state, "subtask-explicit1", "Subtask: ログを調査する");
+        let registry = registry_with_labeled(
+            "st-explicit",
+            "subtask-explicit1",
+            parent,
+            "spawn_subtask(ログを調査する)",
+            "spawn_subtask",
+        );
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+        let r = cancel(&actions, "st-explicit", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+
+        assert_eq!(
+            cancelled_log(&state, parent).content,
+            "subtask 'ログを調査する' was cancelled"
+        );
+        let meta = cancelled_log_metadata(&state, parent);
+        assert_eq!(meta["task"], "ログを調査する");
+        assert_eq!(meta["tool_name"], "spawn_subtask");
+    }
+
+    /// sub-session はあるが theme が空のケースでも label へフォールバックする。
+    #[tokio::test]
+    async fn cancel_subtask_falls_back_on_empty_theme() {
+        let state = crate::test_app_state();
+        let parent = "web-agent-x-c1";
+        insert_sub_session(&state, "subtask-empty1", "");
+        let registry = registry_with_labeled(
+            "st-empty",
+            "subtask-empty1",
+            parent,
+            "nostr_generate_key(main)",
+            "nostr_generate_key",
+        );
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+        let r = cancel(&actions, "st-empty", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            cancelled_log(&state, parent).content,
+            "subtask 'nostr_generate_key(main)' was cancelled"
+        );
+    }
+
+    /// 旧 Discord 実装の固有の後始末その 1: **中断を lifecycle 通知口へ伝え、随伴マップ
+    /// から外す**。落とすと lifecycle webhook の `aborted` が黙って消える。
+    #[tokio::test]
+    async fn cancel_subtask_notifies_the_run_notifier() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl opencrab_actions::subtask_notify::SubtaskRunNotifier for Recorder {
+            fn on_cancelled(&self, _duration_ms: u64) {
+                self.0.lock().unwrap().push("cancelled".to_string());
+            }
+        }
+
+        let state = crate::test_app_state();
+        let recorder = Arc::new(Recorder::default());
+        state
+            .subtask_notifiers
+            .insert("st-1".to_string(), recorder.clone());
+        let parent = "web-agent-x-c1";
+        let registry = registry_with("st-1", "subtask-st-1", parent);
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+
+        let r = cancel(&actions, "st-1", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(recorder.0.lock().unwrap().clone(), vec!["cancelled"]);
+        assert!(
+            !state.subtask_notifiers.contains_key("st-1"),
+            "通知口は registry と対で除去する"
+        );
+    }
+
+    /// **停止も完了 sink（`on_subtask_cancelled`）へ通知する**（#184 / REST の永久 active
+    /// バグ）。委譲していた頃の Discord 経路はこれを落としていた。
+    #[tokio::test]
+    async fn cancel_subtask_notifies_the_completion_sink() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl SubtaskCompletionSink for Recorder {
+            fn on_subtask_settled(&self, _ev: SubtaskSettled) {
+                self.0.lock().unwrap().push("settled".to_string());
+            }
+            fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("cancelled:{}:{}", ev.subtask_id, ev.exit_reason));
+            }
+        }
+
+        let state = crate::test_app_state();
+        let parent = "web-agent-x-c1";
+        let registry = registry_with("st-1", "subtask-st-1", parent);
+        let sink = Arc::new(Recorder::default());
+        let actions = SystemGatewayActions::new(
+            state,
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        let r = cancel(&actions, "st-1", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            sink.0.lock().unwrap().clone(),
+            vec!["cancelled:st-1:cancelled"],
+            "停止は on_subtask_cancelled だけを呼ぶ（resume する on_subtask_settled は呼ばない）"
+        );
+    }
+
+    /// **negative assert（#157 S2）**: Discord が `cancel_subtask` を再定義しても own が
+    /// 処理する。委譲パターンに戻すと own の後始末（通知・部分結果ログ・sink）が黙って
+    /// バイパスされるので、その経路を作らせない。
+    #[tokio::test]
+    async fn cancel_subtask_is_not_delegated_to_inner() {
+        let state = crate::test_app_state();
+        let parent = "web-agent-x-c1";
+        let registry = registry_with("st-1", "subtask-st-1", parent);
+        let inner = Arc::new(RecordingInner::new(&["cancel_subtask"]));
+        let actions = SystemGatewayActions::new(
+            state,
+            Some(inner.clone() as Arc<dyn GatewayActions>),
+            Some(registry.clone()),
+            None,
+        );
+
+        let r = cancel(&actions, "st-1", &parent_ctx(parent)).await;
+        assert!(r.success, "{:?}", r.error);
+        assert!(
+            r.data.as_ref().unwrap().get("reached_inner").is_none(),
+            "cancel_subtask が inner へ委譲されている（own が処理すべき）"
+        );
+        assert!(
+            inner.calls().is_empty(),
+            "inner へ到達してはならない: {:?}",
+            inner.calls()
+        );
+        assert!(!registry.contains_key("st-1"), "own が実際に停止している");
+    }
+
+    /// merge 後も `cancel_subtask` は 1 件（own 優先で dedup）。
+    #[test]
+    fn merge_definitions_still_dedups_cancel_subtask() {
+        let inner: Arc<dyn GatewayActions> = Arc::new(RecordingInner::new(&["cancel_subtask"]));
+        let merged = SystemGatewayActions::merge_definitions(
+            SystemGatewayActions::own_definitions(),
+            Some(&inner),
+        );
+        assert_eq!(
+            merged.iter().filter(|d| d.name == "cancel_subtask").count(),
+            1
+        );
+    }
+
+    // ================================================================================
+    // #157 S3: ハートビート指示ツールの移植テスト
+    //
+    // 旧 Discord 実装（`crates/discord` の `heartbeat_instructions.rs`）にあった 4 テストを
+    // そのまま持ってきたもの（1 件も落としていない）＋ 移設の本題（非 Discord 構成でも
+    // 定義に現れる）とレスポンス JSON / エラー文言のリテラル固定。
+    // ================================================================================
+
+    fn trusted_ctx() -> GatewayCallContext {
+        GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x")
+    }
+
+    /// エージェント行を用意する（`scope="agent"` の patch 対象）。
+    fn insert_agent(state: &AppState, heartbeat_instructions: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &opencrab_db::queries::AgentRow {
+                agent_id: "agent-x".to_string(),
+                name: "N".to_string(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "P".to_string(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: heartbeat_instructions.to_string(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn audit_rows(state: &AppState) -> Vec<opencrab_db::queries::HeartbeatInstructionsAuditRow> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::list_heartbeat_instructions_audit(&conn, "agent-x", 10).unwrap()
+    }
+
+    /// **#157 S3 の本題**: 2 ツールが own 定義（= transport の有無に依存せず全ターンで
+    /// 露出する）。own から消えると Discord 専用に逆戻りする。
+    #[test]
+    fn heartbeat_instruction_tools_are_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        for name in [
+            "update_heartbeat_instructions",
+            "read_heartbeat_instructions",
+        ] {
+            assert_eq!(
+                defs.iter().filter(|d| d.name == name).count(),
+                1,
+                "{name} は own 定義にちょうど 1 件必要（#157 S3）"
+            );
+        }
+        let update = defs
+            .iter()
+            .find(|d| d.name == "update_heartbeat_instructions")
+            .unwrap();
+        let required = update.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "scope"));
+        assert!(required.iter().any(|v| v == "instructions"));
+        let props = update.parameters["properties"].as_object().unwrap();
+        for key in ["scope", "channel_id", "guild_id", "instructions", "reason"] {
+            assert!(props.contains_key(key), "missing property: {key}");
+        }
+        let read = defs
+            .iter()
+            .find(|d| d.name == "read_heartbeat_instructions")
+            .unwrap();
+        assert!(read.parameters["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "scope"));
+    }
+
+    /// **Discord 無効の構成でも定義に現れる**（#157 の本題）。inner=None は
+    /// web / Nostr / REST / heartbeat 経路そのもの。
+    #[test]
+    fn heartbeat_instruction_tools_are_visible_without_discord() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"update_heartbeat_instructions".to_string()));
+        assert!(names.contains(&"read_heartbeat_instructions".to_string()));
+        // 停止も同様（#157 S2）。
+        assert!(names.contains(&"cancel_subtask".to_string()));
+    }
+
+    /// owner 以外は拒否し、監査ログも残さない（旧 Discord テストの移植）。
+    #[tokio::test]
+    async fn update_heartbeat_instructions_rejected_for_non_owner() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "agent", "instructions": "話題があるときだけ話す"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("このアクションはオーナーのみ実行できます")
+        );
+        assert!(audit_rows(&state).is_empty(), "監査ログを残してはならない");
+    }
+
+    /// owner は成功し、DB へ反映され、監査ログに old/new/reason が残る（旧テストの移植）。
+    /// レスポンス JSON もリテラルで固定する。
+    #[tokio::test]
+    async fn update_heartbeat_instructions_owner_success_and_audit() {
+        let state = crate::test_app_state();
+        insert_agent(&state, "OLD");
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({
+                    "scope": "agent",
+                    "instructions": "NEW指示",
+                    "reason": "オーナー依頼",
+                }),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "success": true,
+                "scope": "agent",
+                "channel_id": Value::Null,
+                "length": 5,
+                "preview": "NEW指示",
+            })
+        );
+
+        {
+            let conn = state.db.lock().unwrap();
+            let got = opencrab_db::queries::get_agent(&conn, "agent-x")
+                .unwrap()
+                .unwrap();
+            assert_eq!(got.heartbeat_instructions, "NEW指示");
+        }
+        let rows = audit_rows(&state);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope, "agent");
+        assert_eq!(rows[0].old_value.as_deref(), Some("OLD"));
+        assert_eq!(rows[0].new_value.as_deref(), Some("NEW指示"));
+        assert_eq!(rows[0].reason.as_deref(), Some("オーナー依頼"));
+        assert_eq!(rows[0].caller_identity, GatewayCaller::Owner.label());
+    }
+
+    /// エージェント行が無ければ移設前と同じ文言で失敗する。
+    #[tokio::test]
+    async fn update_heartbeat_instructions_missing_agent_and_bad_args() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "agent", "instructions": "x"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert_eq!(r.error.as_deref(), Some("エージェントが見つかりません"));
+
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "agent"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert_eq!(r.error.as_deref(), Some("instructionsパラメータが必要です"));
+
+        let too_long = "あ".repeat(opencrab_db::queries::MAX_HEARTBEAT_INSTRUCTIONS_LEN + 1);
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "agent", "instructions": too_long}),
+                &owner_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some(
+                format!(
+                    "instructionsが長すぎます（最大{}文字）",
+                    opencrab_db::queries::MAX_HEARTBEAT_INSTRUCTIONS_LEN
+                )
+                .as_str()
+            )
+        );
+
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "channel", "instructions": "x"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("scope=channelのときはchannel_idが必要です")
+        );
+
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "channel", "channel_id": "ch1", "instructions": "x"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("新規チャンネル設定の作成にはguild_idが必要です")
+        );
+
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "nope", "instructions": "x"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("不明なscope: nope（agent または channel）")
+        );
+    }
+
+    /// `scope="effective"` が解決結果（source + instructions）を返す（旧テストの移植）。
+    #[tokio::test]
+    async fn read_heartbeat_instructions_effective() {
+        let state = crate::test_app_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "agent-x".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: false,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: "業務連絡のみ".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let r = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "effective", "channel_id": "ch1"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["scope"], "effective");
+        assert_eq!(data["channel_id"], "ch1");
+        assert_eq!(data["source"], "channel");
+        assert_eq!(data["instructions"], "業務連絡のみ");
+    }
+
+    /// 素の agent は拒否、co_agent は許可（旧テストの移植）。移設後も権限のゲートが効く。
+    #[tokio::test]
+    async fn read_heartbeat_instructions_rejected_for_plain_agent() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let r = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "agent"}),
+                &agent_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("このアクションは信頼済みの呼び出し元のみ実行できます")
+        );
+
+        let allowed = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "agent"}),
+                &GatewayCallContext::new(
+                    GatewayCaller::CoAgent {
+                        agent_id: "co-agent-1".to_string(),
+                    },
+                    "agent-x",
+                ),
+            )
+            .await;
+        assert!(allowed.success, "{:?}", allowed.error);
+        assert_eq!(
+            allowed.data.unwrap(),
+            json!({"scope": "agent", "instructions": ""})
+        );
+    }
+
+    /// **チャンネル単位設定の非対称（#157 S3）**: 非 Discord 経路には通常チャンネル設定の
+    /// 行が無いので、`scope="channel"` は空文字列を返し、`scope="effective"` は
+    /// エージェント/既定へフォールバックする。エラーにはならない（露出はする）。
+    #[tokio::test]
+    async fn read_heartbeat_instructions_channel_scope_is_empty_without_a_channel_row() {
+        let state = crate::test_app_state();
+        insert_agent(&state, "エージェント既定の指示");
+        let actions = SystemGatewayActions::new(state, None, None, None);
+
+        let r = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "channel", "channel_id": "no-such-channel"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "scope": "channel",
+                "channel_id": "no-such-channel",
+                "instructions": "",
+            })
+        );
+
+        let r = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "effective", "channel_id": "no-such-channel"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["instructions"], "エージェント既定の指示");
+        assert_eq!(data["source"], "agent");
+    }
+
+    /// 読み出しの引数エラー文言も移設前と同一。
+    #[tokio::test]
+    async fn read_heartbeat_instructions_bad_args() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let r = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "channel"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("scope=channelのときはchannel_idが必要です")
+        );
+
+        let r = actions
+            .execute(
+                "read_heartbeat_instructions",
+                &json!({"scope": "nope"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("不明なscope: nope（agent / channel / effective）")
+        );
+    }
+
+    /// **negative assert（#157 S3）**: Discord がハートビート指示ツールを再定義しても own が
+    /// 処理する（委譲パターンにしない）。
+    #[tokio::test]
+    async fn heartbeat_instruction_tools_are_not_delegated_to_inner() {
+        let state = crate::test_app_state();
+        insert_agent(&state, "OLD");
+        let inner = Arc::new(RecordingInner::new(&[
+            "update_heartbeat_instructions",
+            "read_heartbeat_instructions",
+        ]));
+        let actions = SystemGatewayActions::new(
+            state,
+            Some(inner.clone() as Arc<dyn GatewayActions>),
+            None,
+            None,
+        );
+
+        for (name, args) in [
+            (
+                "update_heartbeat_instructions",
+                json!({"scope": "agent", "instructions": "NEW"}),
+            ),
+            ("read_heartbeat_instructions", json!({"scope": "agent"})),
+        ] {
+            let r = actions.execute(name, &args, &owner_ctx()).await;
+            assert!(r.success, "{name}: {:?}", r.error);
+            assert!(
+                r.data.as_ref().unwrap().get("reached_inner").is_none(),
+                "{name} が inner へ委譲されている（own が処理すべき）"
+            );
+        }
+        assert!(
+            inner.calls().is_empty(),
+            "inner へ到達してはならない: {:?}",
+            inner.calls()
+        );
+
+        // merge 後も 1 件（own 優先で dedup）。
+        let inner2: Arc<dyn GatewayActions> = Arc::new(RecordingInner::new(&[
+            "update_heartbeat_instructions",
+            "read_heartbeat_instructions",
+        ]));
+        let merged = SystemGatewayActions::merge_definitions(
+            SystemGatewayActions::own_definitions(),
+            Some(&inner2),
+        );
+        for name in [
+            "update_heartbeat_instructions",
+            "read_heartbeat_instructions",
+        ] {
+            assert_eq!(merged.iter().filter(|d| d.name == name).count(), 1);
+        }
     }
 }

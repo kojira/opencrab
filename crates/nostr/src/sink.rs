@@ -678,6 +678,7 @@ mod tests {
                 parent_session_id: sid.clone(),
                 agent_id: "agent-sink-test".to_string(),
                 label: "nostr_generate_key(sunny)".to_string(),
+                tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: Some("note1target".to_string()),
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
@@ -690,6 +691,7 @@ mod tests {
         let outcome = opencrab_actions::cancel_subtask(
             &r.runtime().registry_for(&sid),
             &db,
+            None,
             None,
             "st-live",
             false,
