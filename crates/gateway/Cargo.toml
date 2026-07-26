@@ -20,6 +20,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 serenity = { workspace = true, optional = true }
 songbird = { workspace = true, optional = true }
+# A2UI の描画面（`GatewayActions::a2ui_surface`）がコアの型を返すため（#156 S3）。
+# core は gateway に依存しないので循環はしない。
+opencrab-core = { workspace = true }
 
 [lints]
 workspace = true

@@ -125,6 +125,18 @@ pub trait GatewayActions: Send + Sync {
         args: &serde_json::Value,
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult;
+
+    /// この transport が A2UI（`send_ui`）の描画面を提供するなら返す（#156 S3）。
+    ///
+    /// `send_ui` の**実体は gateway 非依存層**（`opencrab_actions::a2ui`）にあるが、
+    /// 描画とユーザー応答の受け取りは transport にしか作れない。合成 gateway
+    /// （`SystemGatewayActions`）はこのメソッドで transport の描画面を引き、
+    /// **提供する transport のターンでだけ** `send_ui` を露出する。
+    ///
+    /// 既定は `None`（A2UI を描画できない transport）。
+    fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
+        None
+    }
 }
 
 /// ゲートウェイアクションの定義

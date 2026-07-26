@@ -305,8 +305,12 @@ impl DiscordRenderer {
     ///
     /// Form内のTextInputコンポーネントをCreateInputTextに変換し、
     /// 各InputTextを個別のActionRowに格納する（Discordの制約）。
+    ///
+    /// **部品ツリーだけの純関数**（`self.http` を触らない）なので関連関数にしてある。
+    /// これにより、保留状態（`opencrab_core::a2ui::PendingInteraction`）に描画物を
+    /// 持たせず、ボタン押下時に部品ツリーから組み直せる（#156 S3 —
+    /// `form_modal::resolve_form_modal_for_button`）。
     pub fn build_modal_action_rows(
-        &self,
         form: &A2uiComponent,
         components: &[A2uiComponent],
     ) -> Result<Vec<CreateActionRow>, RenderError> {
@@ -1058,20 +1062,18 @@ mod tests {
 
     #[test]
     fn build_modal_action_rows_basic() {
-        let r = test_renderer();
         let comps = vec![
             form("form1", "Test Form", vec!["input1", "input2"], "submit"),
             text_input("input1", "Name", Some("short"), true),
             text_input("input2", "Description", Some("paragraph"), false),
         ];
         let form_comp = &comps[0];
-        let rows = r.build_modal_action_rows(form_comp, &comps).unwrap();
+        let rows = DiscordRenderer::build_modal_action_rows(form_comp, &comps).unwrap();
         assert_eq!(rows.len(), 2);
     }
 
     #[test]
     fn build_modal_action_rows_too_many_inputs() {
-        let r = test_renderer();
         let input_ids: Vec<String> = (0..6).map(|i| format!("input{}", i)).collect();
         let mut comps = vec![form(
             "form1",
@@ -1082,7 +1084,7 @@ mod tests {
         for id in &input_ids {
             comps.push(text_input(id, "Field", Some("short"), true));
         }
-        let result = r.build_modal_action_rows(&comps[0], &comps);
+        let result = DiscordRenderer::build_modal_action_rows(&comps[0], &comps);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1092,9 +1094,8 @@ mod tests {
 
     #[test]
     fn build_modal_action_rows_missing_child() {
-        let r = test_renderer();
         let comps = vec![form("form1", "Test", vec!["missing_input"], "submit")];
-        let result = r.build_modal_action_rows(&comps[0], &comps);
+        let result = DiscordRenderer::build_modal_action_rows(&comps[0], &comps);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

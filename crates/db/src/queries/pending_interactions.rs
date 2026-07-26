@@ -50,6 +50,23 @@ pub fn insert_pending_interaction(
     Ok(())
 }
 
+/// 描画済みメッセージ ID を pending_interaction へ書き戻す。
+///
+/// 送信（描画）は挿入の後に行われるため、`insert_pending_interaction` では
+/// `message_id` を埋められない。SQL は移設前（Discord gateway 内の生 SQL / #156 S3）と
+/// 同一。
+pub fn set_pending_interaction_message_id(
+    conn: &Connection,
+    id: &str,
+    message_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE pending_interactions SET message_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![message_id, id],
+    )?;
+    Ok(())
+}
+
 /// pending_interaction の取得
 pub fn get_pending_interaction(
     conn: &Connection,

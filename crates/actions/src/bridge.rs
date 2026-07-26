@@ -145,11 +145,17 @@ impl GatewayActions for SubEngineGatewayActions {
 /// Discord 送信系アクション: depth >= 1 の sub-engine からは**定義の非表示と実行の拒否の両方**で
 /// ブロックする（定義から隠すだけでは、モデルが親コンテキストの記憶で名前を呼んだ場合に素通しになる）。
 ///
-/// **この一覧は `DiscordGatewayActions::definitions()` に実在する名前だけを持つ。**
+/// **この一覧は実在する名前だけを持つ。**
 /// 以前は 20 名のうち 13 名（`discord_send` / `discord_react` / `discord_edit_message` …）が
 /// 現行 gateway に存在しない死名で、depth ゲートも dispatch 除外も実質空振りしていた。
 /// ドリフト検出は `crates/discord` の `test_bridge_policy_names_are_live_gateway_actions`
 /// と `discord_tools_are_classified_for_dispatch` が担う。
+///
+/// ゲートは**名前ベース**なので、実装が gateway 非依存層へ移っても効き続ける
+/// （`TRUSTED_ONLY_ACTIONS` と同じ性質）。`send_ui` は #156 S3 で
+/// `SystemGatewayActions` の own ツールになったが、深さ拒否の意図は変わらないので
+/// この一覧に**残す**（実在性の検証は server 側の
+/// `send_ui_is_blocked_in_sub_engine` が担う）。
 ///
 /// なお sub-engine の実効ゲートはこの deny-list ではなく [`SUB_ENGINE_ALLOWED_ACTIONS`]
 /// （allow-list / 同じモジュール）。ここは多層防御。
@@ -159,6 +165,7 @@ pub const DISCORD_ACTIONS: &[&str] = &[
     "discord_list_channels",
     "discord_list_guilds",
     // A2UI 送信（ユーザーの応答待ちを伴う対話的配送）。sub-engine からは不可。
+    // 実装は gateway 非依存層（#156 S3）だが、名前ベースの拒否はそのまま効く。
     "send_ui",
     "request_peer_review",
     // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
@@ -185,8 +192,9 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     "request_peer_review",
     "join_voice_channel",
     "leave_voice_channel",
-    // (2) 配送系 + ユーザーの応答待ち（pending interaction）。
-    "send_ui",
+    // (2) 配送系 + ユーザーの応答待ち（pending interaction）だった `send_ui` は
+    //     #156 S3 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。分類の所属は
+    //     inline のまま変えていない。
     // (3) 同ターン結果依存: webhook URL / 作成物の ID をそのターンで使う。
     //     `ensure_*` は既存デフォルトが無いとき `discord_create_webhook` を呼ぶ
     //     （serenity 依存の transport 固有処理）ので #157 S5 でも Discord に残る。
@@ -331,6 +339,12 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     "get_default_subtask_webhook",
     "list_webhooks",
     "list_subtask_webhooks",
+    // (2) 配送系 + ユーザーの応答待ち（#156 S3 で Discord から移設）。**移設前の分類を
+    //     維持する**: `DISCORD_INLINE_ACTIONS` に属していたので所属を変えずにここへ移した。
+    //     background 化すると (a) UI 投稿と本文返信の順序が入れ替わり、(b) エージェントは
+    //     インタラクション ID を扱えず、(c) クリック resume と subtask 決着 resume で
+    //     返信が 2 通になる（#152 の実害そのもの）。
+    "send_ui",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
