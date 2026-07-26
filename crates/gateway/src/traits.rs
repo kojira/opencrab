@@ -158,6 +158,22 @@ pub trait GatewayActions: Send + Sync {
     fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
         None
     }
+
+    /// この transport が素テキストの配送口を提供するなら返す（#157 S7）。
+    ///
+    /// `request_peer_review` の**実体は gateway 非依存層**
+    /// （`crates/server/src/peer_review.rs`）にあるが、宛先検査・メンション記法・
+    /// 1 通あたりの上限・送信そのものは transport にしか作れない。合成 gateway
+    /// （`SystemGatewayActions`）はこのメソッドで配送口を引き、汎用層へ渡す。
+    ///
+    /// `a2ui_surface()` と違い、これを提供しない transport でも
+    /// `request_peer_review` は**定義に出る**（配送口が無いときだけ実行が明示エラー）。
+    /// ツールの露出が transport の有無で消えないようにするのが #157 の目的そのもの。
+    ///
+    /// 既定は `None`（テキストを送れない transport）。
+    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
+        None
+    }
 }
 
 /// ゲートウェイアクションの定義

@@ -53,6 +53,14 @@ pub struct SystemGatewayActions {
     /// ユーザー応答の受け取りは transport にしか作れない。`Some` のときだけ `send_ui`
     /// を露出する（描画できない transport のターンに「必ず失敗するツール」を出さない）。
     a2ui: Option<Arc<opencrab_core::a2ui::A2uiSurface>>,
+    /// transport が提供する素テキストの配送口（#157 S7）。`inner` から 1 度だけ引く。
+    ///
+    /// `request_peer_review` の実体は gateway 非依存層（`crate::peer_review`）にあるが、
+    /// 宛先検査・メンション記法・1 通の上限・送信そのものは transport にしか作れない。
+    /// `a2ui` と違い**露出は絞らない**（配送口の無い transport でも定義に出す）: ツールが
+    /// transport の有無で消えないようにするのが #157 の目的で、無いときは実行だけが
+    /// 明示エラーになる。
+    text_delivery: Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>>,
 }
 
 impl SystemGatewayActions {
@@ -63,12 +71,14 @@ impl SystemGatewayActions {
         completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
     ) -> Self {
         let a2ui = inner.as_ref().and_then(|i| i.a2ui_surface());
+        let text_delivery = inner.as_ref().and_then(|i| i.text_delivery());
         Self {
             state,
             inner,
             subtask_registry,
             completion_sink,
             a2ui,
+            text_delivery,
         }
     }
 
@@ -730,6 +740,9 @@ impl SystemGatewayActions {
                     "required": []
                 }),
             },
+            // ピアレビュー依頼（#157 S7）。定義は gateway 非依存層が持つ（transport の
+            // 配送口の有無に関わらず露出する）。
+            crate::peer_review::request_peer_review_definition(),
         ]
     }
 
@@ -1659,6 +1672,30 @@ impl GatewayActions for SystemGatewayActions {
                     ),
                 },
             },
+            // ピアレビュー依頼（#157 S7）。Discord 側の実装は撤去済みなので inner へは
+            // 委譲しない（委譲パターンにすると二重定義を招く）。配送口を持たない
+            // transport でも**定義には出す**（#157 の目的）ので、無いときは黙って inner へ
+            // 落とさず明示エラーを返す（fail-closed）。
+            "request_peer_review" => match &self.text_delivery {
+                Some(delivery) => {
+                    crate::peer_review::request_peer_review(
+                        &self.state.db,
+                        delivery.as_ref(),
+                        args,
+                        ctx,
+                    )
+                    .await
+                }
+                None => GatewayActionResult {
+                    success: false,
+                    data: None,
+                    error: Some(
+                        "request_peer_review はこのゲートウェイでは利用できません（メッセージを送信できません）。\
+                         このターンの transport はテキストを送れないため、ピアレビュー依頼は省略して先へ進んでよい。"
+                            .to_string(),
+                    ),
+                },
+            },
             // subtask 停止（#161 / #157 S2）。transport 非依存の唯一の実装（Discord 側の
             // 実装は撤去済み）。**inner へは委譲しない**: 委譲パターンのままにすると、
             // Discord が誤って `cancel_subtask` を再定義したときに own の実装（lifecycle
@@ -1707,6 +1744,16 @@ impl GatewayActions for SystemGatewayActions {
     /// 常に「実在するが許可外」だった。その分類を保つための転送。
     fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
         self.a2ui.clone()
+    }
+
+    /// transport の素テキスト配送口を**そのまま外へ通す**（#157 S7）。
+    ///
+    /// `a2ui_surface()` の転送と同じ理由: 本番の sub-engine 配線は合成 gateway の入れ子
+    /// なので、ここで転送しないと内側の合成 gateway が配送口を失い、`request_peer_review`
+    /// が「定義には出るが必ず失敗する」状態になる（sub-engine では深さ拒否が先に効くため
+    /// 実害は無いが、能力を黙って落とさない）。
+    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
+        self.text_delivery.clone()
     }
 }
 
@@ -4848,5 +4895,364 @@ mod tests {
         assert!(!opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&"send_ui"));
         assert!(!opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&"send_ui"));
         assert!(!opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&"send_ui"));
+    }
+
+    // ---- #157 S7: ピアレビュー依頼（request_peer_review）の gateway 非依存化 ----
+
+    /// 素テキスト配送口を提供する inner のフェイク（Discord の代役）。
+    struct DeliveryProvidingInner {
+        delivery: Arc<FakeTextDelivery>,
+        calls: std::sync::Mutex<Vec<String>>,
+        /// true なら `request_peer_review` を**再定義**する（negative assert 用）。
+        redefines_peer_review: bool,
+    }
+
+    /// 送信を記録するだけの [`TextDelivery`]。Discord と同じ規約
+    /// （数値宛先 / `<@id>` / 1900 chars）を模す。
+    #[derive(Default)]
+    struct FakeTextDelivery {
+        sent: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl opencrab_core::text_delivery::TextDelivery for FakeTextDelivery {
+        fn validate_target(&self, target: &str) -> Result<(), String> {
+            if target.parse::<u64>().is_ok() {
+                Ok(())
+            } else {
+                Err(format!("無効なchannel_id: {target}"))
+            }
+        }
+        fn mention(&self, user_id: &str) -> String {
+            format!("<@{user_id}>")
+        }
+        fn chunk_limit(&self) -> usize {
+            1900
+        }
+        async fn send_text(&self, target: &str, text: &str) -> Result<(), String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((target.to_string(), text.to_string()));
+            Ok(())
+        }
+    }
+
+    impl DeliveryProvidingInner {
+        fn new() -> Self {
+            Self {
+                delivery: Arc::new(FakeTextDelivery::default()),
+                calls: std::sync::Mutex::new(Vec::new()),
+                redefines_peer_review: false,
+            }
+        }
+        /// transport が誤って移設済みツールを再定義した構成。
+        fn redefining() -> Self {
+            Self {
+                redefines_peer_review: true,
+                ..Self::new()
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GatewayActions for DeliveryProvidingInner {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            // transport 側は `request_peer_review` を**定義しない**（移設済み）。
+            let mut defs = vec![GatewayActionDef {
+                name: "fake_transport_tool".to_string(),
+                description: "x".to_string(),
+                parameters: json!({"type": "object"}),
+            }];
+            if self.redefines_peer_review {
+                defs.push(GatewayActionDef {
+                    name: "request_peer_review".to_string(),
+                    description: "transport の古い実装".to_string(),
+                    parameters: json!({"type": "object"}),
+                });
+            }
+            defs
+        }
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &Value,
+            _ctx: &GatewayCallContext,
+        ) -> GatewayActionResult {
+            self.calls.lock().unwrap().push(name.to_string());
+            GatewayActionResult {
+                success: true,
+                data: Some(json!({ "reached_inner": name })),
+                error: None,
+            }
+        }
+        fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
+            Some(self.delivery.clone())
+        }
+    }
+
+    /// 分類の網羅性検査が見る**全量**（`own_definitions`）に `request_peer_review` が
+    /// 1 件だけある。消すと `SERVER_INLINE_ACTIONS` の死名検出と分類ガードが空振りする。
+    #[test]
+    fn request_peer_review_is_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        assert_eq!(
+            defs.iter()
+                .filter(|d| d.name == "request_peer_review")
+                .count(),
+            1,
+            "request_peer_review must be defined exactly once in own_definitions"
+        );
+    }
+
+    /// **移設の本題（#157）**: Discord 無効の構成（`inner = None` / web・REST・heartbeat・
+    /// Nostr のターン）でも `request_peer_review` が**定義に現れる**。
+    ///
+    /// `send_ui`（描画面が無いと露出しない）とはここが違う: 配送口が無いのは
+    /// 「送れない」だけで、ツールの存在自体を transport の有無に依存させない。
+    #[test]
+    fn request_peer_review_is_defined_even_without_discord() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            names.contains(&"request_peer_review".to_string()),
+            "Discord 無効の構成でも定義に出ること: {names:?}"
+        );
+    }
+
+    /// **移設の本題**: transport が Discord でなくても、素テキストの配送口を提供すれば
+    /// 依頼が実際に投稿される（ヘッダ + part X/N）。
+    #[tokio::test]
+    async fn request_peer_review_works_for_any_transport_that_provides_delivery() {
+        let state = crate::test_app_state();
+        let inner = Arc::new(DeliveryProvidingInner::new());
+        let actions = SystemGatewayActions::new(state, Some(inner.clone()), None, None);
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("fake-session-1");
+        let r = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "raw diff", "channel_id": "555"}),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["channel_id"], "555");
+        assert_eq!(data["parts"], 1);
+        assert_eq!(
+            data["message"],
+            "ピアレビュー依頼を投稿しました。[Peer Review] で始まる返信を待ってください。"
+        );
+
+        // ヘッダ + part 1/1 の 2 通が配送口へ出た。
+        let sent = inner.delivery.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].0, "555");
+        assert!(sent[0].1.starts_with("[Peer Review Request] from agent-x"));
+        assert_eq!(sent[1].1, "part 1/1\nraw diff");
+
+        // **inner へ委譲していない**（own が唯一の実装）。
+        assert!(
+            !inner
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c == "request_peer_review"),
+            "request_peer_review must not be delegated to inner: {:?}",
+            inner.calls.lock().unwrap()
+        );
+    }
+
+    /// 宛先の妥当性判定と文言は transport（配送口）の責務。移設前の
+    /// `無効なchannel_id: …` がそのまま返る。
+    #[tokio::test]
+    async fn invalid_target_error_comes_from_the_transport() {
+        let state = crate::test_app_state();
+        let inner = Arc::new(DeliveryProvidingInner::new());
+        let actions = SystemGatewayActions::new(state, Some(inner.clone()), None, None);
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("fake-session-1");
+        let r = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff", "channel_id": "not-a-number"}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(r.error.unwrap(), "無効なchannel_id: not-a-number");
+        // 1 通も出していない（fail-closed）。
+        assert!(inner.delivery.sent.lock().unwrap().is_empty());
+    }
+
+    /// 配送口を持たない transport では**定義には出るが実行は明示エラー**（fail-closed）。
+    /// 黙って inner へ落とさない。
+    #[tokio::test]
+    async fn request_peer_review_is_refused_without_a_delivery() {
+        let state = crate::test_app_state();
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("web-session-1");
+
+        // inner なし。
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff", "channel_id": "1"}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        // 既存の 8 種のエラー文言は変えていない。ここは移設で新設した文言で、
+        // 共有プロンプトが全ターンでレビュー依頼を促すため**次の行動**まで書く。
+        assert_eq!(
+            r.error.unwrap(),
+            "request_peer_review はこのゲートウェイでは利用できません（メッセージを送信できません）。\
+             このターンの transport はテキストを送れないため、ピアレビュー依頼は省略して先へ進んでよい。"
+        );
+
+        // 配送口を提供しない inner を挟んでも同じ（inner へ委譲しない）。
+        let inner = Arc::new(RecordingInner::new(&["some_transport_tool"]));
+        let actions = SystemGatewayActions::new(state, Some(inner.clone()), None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            names.contains(&"request_peer_review".to_string()),
+            "{names:?}"
+        );
+        let r = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff", "channel_id": "1"}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        assert!(
+            !inner.calls().iter().any(|c| c == "request_peer_review"),
+            "must not fall through to inner: {:?}",
+            inner.calls()
+        );
+    }
+
+    /// **sub-engine からの遮断**（移設前は Discord 側テストが固定していた不変条件）。
+    ///
+    /// 許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）に無いので、合成 gateway が
+    /// `request_peer_review` を露出していても depth >= 1 では一覧に出ず、名前指定でも
+    /// 権限拒否（`rejected:` マーカー）になる。
+    #[tokio::test]
+    async fn request_peer_review_is_blocked_in_sub_engine() {
+        let state = crate::test_app_state();
+        let transport = Arc::new(DeliveryProvidingInner::new());
+
+        // 本番と同じ入れ子の配線（`crates/server/src/process.rs`）。
+        let depth0: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+            state.clone(),
+            Some(transport),
+            None,
+            None,
+        ));
+        assert!(depth0
+            .definitions()
+            .iter()
+            .any(|d| d.name == "request_peer_review"));
+        // 配送口が入れ子の内側まで転送されている（能力を黙って落とさない）。
+        assert!(depth0.text_delivery().is_some());
+
+        let depth1: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+            state,
+            Some(depth0.clone()),
+            None,
+            None,
+        ));
+        assert!(depth1.text_delivery().is_some());
+
+        let sub = opencrab_actions::SubEngineGatewayActions::new(depth1);
+        let names: Vec<String> = sub.definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            !names.contains(&"request_peer_review".to_string()),
+            "request_peer_review must NOT be exposed to the sub-engine: {names:?}"
+        );
+
+        let r = sub
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff", "channel_id": "1"}),
+                &sub_ctx("subtask-s1"),
+            )
+            .await;
+        assert!(!r.success);
+        // 移設前と同じ分類（実在するが許可外 = 権限拒否）。
+        let err = r.error.as_deref().unwrap();
+        assert!(
+            err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX),
+            "request_peer_review must be a policy rejection: {err}"
+        );
+        assert!(
+            !err.contains("Unknown gateway action"),
+            "分類が「そんなツールは無い」へ退行している: {err}"
+        );
+
+        // 多層防御: 名前ベースの depth 拒否リストにも残っている。
+        assert!(opencrab_actions::DISCORD_ACTIONS.contains(&"request_peer_review"));
+        assert!(opencrab_actions::tool_policy("request_peer_review").blocked_in_subengine);
+    }
+
+    /// `request_peer_review` は inline（配送系）。分類の所属は移設前と同じ。
+    #[test]
+    fn request_peer_review_stays_inline_after_the_move() {
+        assert!(opencrab_actions::default_non_dispatch_tools().contains("request_peer_review"));
+        assert!(opencrab_actions::SERVER_INLINE_ACTIONS.contains(&"request_peer_review"));
+        assert!(!opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&"request_peer_review"));
+        assert!(!opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&"request_peer_review"));
+        assert!(!opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&"request_peer_review"));
+    }
+
+    /// **negative assert（#157 S7）**: transport（Discord）が `request_peer_review` を
+    /// 再定義しても own が処理する（委譲パターンにしない）。
+    ///
+    /// 委譲のままにすると、dedup（own 優先）で定義は own に食われるのに実行は transport の
+    /// 古い実装へ流れ、レビュアー解決や台帳記録が黙ってバイパスされる。
+    #[tokio::test]
+    async fn own_handles_request_peer_review_even_if_the_transport_redefines_it() {
+        let state = crate::test_app_state();
+        let inner = Arc::new(DeliveryProvidingInner::redefining());
+        let actions = SystemGatewayActions::new(state, Some(inner.clone()), None, None);
+
+        // 定義は 1 件だけ（own 優先の dedup）。
+        let defs = actions.definitions();
+        assert_eq!(
+            defs.iter()
+                .filter(|d| d.name == "request_peer_review")
+                .count(),
+            1
+        );
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("fake-session-1");
+        let r = actions
+            .execute(
+                "request_peer_review",
+                &json!({"content": "diff", "channel_id": "7"}),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        // own の実装が動いた証拠: 配送口へヘッダ + part が出て、inner の execute は
+        // 呼ばれていない。
+        assert_eq!(inner.delivery.sent.lock().unwrap().len(), 2);
+        assert!(
+            !inner
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c == "request_peer_review"),
+            "own must not delegate: {:?}",
+            inner.calls.lock().unwrap()
+        );
     }
 }

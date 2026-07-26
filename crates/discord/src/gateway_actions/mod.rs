@@ -20,6 +20,7 @@ mod peer_review;
 mod subtask_engine;
 mod subtask_notifier;
 mod subtask_webhook;
+mod text_delivery;
 mod ui;
 mod voice_actions;
 mod webhook;
@@ -461,32 +462,6 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": []
                 }),
             },
-            GatewayActionDef {
-                name: "request_peer_review".to_string(),
-                description: "自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼をDiscordチャンネルへ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "required": ["content"],
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "レビュー対象のRAWコンテンツ（diff・出力・トレース等）。要約せずそのまま渡すこと。上限12000文字（超える場合はワークスペースに保存してdiscord_send_fileで添付する）。"
-                        },
-                        "channel_id": {
-                            "type": "string",
-                            "description": "投稿先の宛先ID（省略可）。**通常は省略する** — 省略時は今のやりとりの返信先へ投稿される。今の会話とは別の宛先へ送りたいときだけ指定すること（推測した識別子を渡してはならない）。"
-                        },
-                        "instructions": {
-                            "type": "string",
-                            "description": "レビュアーに重点的に見てほしい観点（省略可）。"
-                        },
-                        "reviewer": {
-                            "type": "string",
-                            "description": "指名したいレビュアー（省略可）。システムプロンプトの Peer Reviewers 一覧にある表示名を渡す。指定するとヘッダにメンションが付く。"
-                        }
-                    }
-                }),
-            },
         ]
     }
 
@@ -509,7 +484,9 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "discord_create_channel" => self.execute_discord_create_channel(args).await,
             "discord_send_file" => self.execute_send_file(args, ctx).await,
-            "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
+            // ピアレビュー依頼は #157 S7 で server 側（`crates/server/src/peer_review.rs`）
+            // へ移設済み。Discord に残るのは配送口（`text_delivery()`）と、返信の回収
+            // （`peer_review::record_peer_review_reply` / 受信ループから呼ぶ）だけ。
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
             "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
             // 通知先（webhook）の管理は #157 S5 で server 側（`crates/server/src/
@@ -534,6 +511,15 @@ impl GatewayActions for DiscordGatewayActions {
     /// ため、移設前と同じ「Discord 経由のターンだけで使える」露出になる。
     fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
         Some(Arc::new(self.build_a2ui_surface()))
+    }
+
+    /// 素テキストの配送口を合成 gateway へ差し出す（#157 S7）。
+    ///
+    /// `request_peer_review` の実体は gateway 非依存層
+    /// （`crates/server/src/peer_review.rs`）にあり、Discord が提供するのは宛先検査・
+    /// メンション記法・1 通の上限・送信そのものだけ（`DiscordTextDelivery`）。
+    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
+        Some(Arc::new(self.build_text_delivery()))
     }
 }
 
@@ -625,6 +611,8 @@ mod tests {
             // `send_ui_is_blocked_in_sub_engine`（`crates/server/src/system_actions.rs`）
             // が固定する。
             "send_ui",
+            // #157 S7: ピアレビュー依頼も同様（`request_peer_review_is_blocked_in_sub_engine`）。
+            "request_peer_review",
         ] {
             let result = sub_gw
                 .execute(moved, &json!({"message": "x"}), &sub_ctx)
@@ -634,34 +622,13 @@ mod tests {
     }
 
     // ---- #36: セッション必須アクションの fail-closed ----
-
-    /// セッション文脈の無い実行（session_id: None）では、session に依存する
-    /// アクションが "" で黙って進まず明示エラーになること。
-    #[tokio::test]
-    async fn test_session_required_actions_fail_closed_without_session() {
-        let (actions, _db) = make_test_actions();
-        let no_session = GatewayCallContext::new(GatewayCaller::Owner, "test-agent");
-        // 各アクションの他の必須引数は満たしておき、session 検査だけで落ちることを見る。
-        let args = json!({
-            "content": "diff",
-            "channel_id": "123",
-            "message": "m",
-            "components": [],
-            "task": "t",
-        });
-        // `report_progress` / `spawn_subtask` は server 側へ移設済み（#175 S4）。
-        // 同趣旨のガードは `crates/server/src/system_actions.rs` にある。
-        // `send_ui` は #156 S3 で gateway 非依存層へ移設済み。同趣旨のガードは
-        // `crates/actions/src/a2ui.rs` の `send_ui_without_session_fails_closed`。
-        for name in ["request_peer_review"] {
-            let result = actions.execute(name, &args, &no_session).await;
-            assert!(!result.success, "{name} should fail without session");
-            assert!(
-                result.error.unwrap().contains("セッション"),
-                "{name} should mention missing session context"
-            );
-        }
-    }
+    //
+    // この gateway にセッション必須アクションはもう残っていない:
+    // `report_progress` / `spawn_subtask` は #175 S4、`send_ui` は #156 S3、
+    // `request_peer_review` は #157 S7 で gateway 非依存層へ移設済み。同趣旨のガードは
+    // それぞれ `crates/server/src/system_actions.rs` / `crates/actions/src/a2ui.rs` の
+    // `send_ui_without_session_fails_closed` / `crates/server/src/peer_review.rs` の
+    // `error_messages_are_byte_stable` にある。
 
     // ---- #45: bridge ポリシー表と gateway 定義のドリフト検出 ----
 
@@ -720,6 +687,17 @@ mod tests {
                 assert!(
                     !names.contains(&n.to_string()),
                     "send_ui は gateway 非依存層の実装だけであるべき"
+                );
+                continue;
+            }
+            if *n == "request_peer_review" {
+                // #157 S7 で gateway 非依存層へ移設済み。send_ui と同じ扱い（深さ拒否は
+                // 名前ベースなので一覧には残す）。実在性の検証は
+                // `request_peer_review_is_exposed_in_own_definitions`
+                // （`crates/server/src/system_actions.rs`）が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "request_peer_review は gateway 非依存層の実装だけであるべき"
                 );
                 continue;
             }
@@ -805,11 +783,10 @@ mod tests {
     fn delivery_and_read_tools_are_inline() {
         let non_dispatch = opencrab_actions::default_non_dispatch_tools();
         for name in [
-            // 配送系（`send_ui` は #156 S3 で server 側へ移設。同趣旨の inline 固定は
-            // `crates/server/src/system_actions.rs` にある）
+            // 配送系（`send_ui` は #156 S3、`request_peer_review` は #157 S7 で server 側へ
+            // 移設。同趣旨の inline 固定は `crates/server/src/system_actions.rs` にある）
             "discord_send_file",
             "discord_add_reaction",
-            "request_peer_review",
             // 同ターンで戻り値（URL / ID）を使う
             "ensure_webhook",
             "ensure_subtask_webhook",
@@ -834,10 +811,9 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 12);
+        assert_eq!(defs.len(), 11);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"request_peer_review"));
         assert!(names.contains(&"discord_list_guilds"));
         assert!(names.contains(&"discord_list_channels"));
         assert!(names.contains(&"discord_channel_config"));
@@ -851,7 +827,7 @@ mod tests {
         assert!(names.contains(&"ensure_subtask_webhook"));
         assert!(names.contains(&"ensure_webhook"));
 
-        // #175 S4 / #157 S1・S2・S3・S5・S6 / #155: サブタスク生成・進捗報告・**停止**・記憶
+        // #175 S4 / #157 S1・S2・S3・S5・S6・S7 / #155: サブタスク生成・進捗報告・**停止**・記憶
         // インデックス再構築と、汎用管理ツール（記憶インデックス設定・許可コマンド 3 種）・
         // ハートビート指示 2 種・通知先（webhook）の管理 6 種・スキル生成は gateway 非依存層
         // （server 側 `SystemGatewayActions`）へ移設済み。
@@ -877,6 +853,8 @@ mod tests {
             "list_webhooks",
             // #157 S6 で移設したスキル生成。
             "create_skill",
+            // #157 S7 で移設したピアレビュー依頼（Discord に残るのは配送口と返信回収）。
+            "request_peer_review",
         ] {
             assert!(
                 !names.contains(&moved),
@@ -898,59 +876,11 @@ mod tests {
         }
     }
 
-    // ---- request_peer_review (検証エラー系: HTTP呼び出し前に返る) ----
-
-    #[tokio::test]
-    async fn test_peer_review_missing_content() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "request_peer_review",
-                &json!({"channel_id": "123"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("content"));
-    }
-
-    #[tokio::test]
-    async fn test_peer_review_missing_or_invalid_channel() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "request_peer_review",
-                &json!({"content": "diff"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("channel_id"));
-
-        let result = actions
-            .execute(
-                "request_peer_review",
-                &json!({"content": "diff", "channel_id": "not-a-number"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("無効なchannel_id"));
-    }
-
-    #[tokio::test]
-    async fn test_peer_review_content_too_long() {
-        let (actions, _db) = make_test_actions();
-        let result = actions
-            .execute(
-                "request_peer_review",
-                &json!({"content": "x".repeat(12_001), "channel_id": "123"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result.error.unwrap().contains("12000"));
-    }
+    // ---- request_peer_review ----
+    //
+    // 引数検査（content 必須 / 長さ上限 / 宛先の解決と検査）のテストは #157 S7 で
+    // server 側（`crates/server/src/peer_review.rs`）へ移設済み。Discord に残る配送口の
+    // テストは `super::text_delivery`。
 
     // ---- channel_config ----
 
