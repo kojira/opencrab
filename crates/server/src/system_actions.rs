@@ -1239,9 +1239,10 @@ impl GatewayActions for SystemGatewayActions {
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
             // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
-            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。実行許可設定は
-            // `AppState.tools_config` を直接更新する = Discord gateway が受け取っていた
-            // ものと同一 Arc。
+            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。許可コマンドは
+            // **DB のみ**を更新する。グローバルな実行許可設定へは書かない（他エージェントへ
+            // 漏れるため / #202）。次の run が `process::resolve_run_tools_config` で
+            // DB から拾い直す。
             "update_memory_index_config" => {
                 crate::agent_management::update_memory_index_config(&self.state, args, ctx)
             }
@@ -2089,9 +2090,9 @@ mod tests {
 
     /// 実行許可設定に shell セクションを持たせた `AppState`。
     ///
-    /// `ToolsConfig::default()` は `shell: None` で、ホットリロードの更新は
-    /// `if let Some(shell)` にガードされている。「許可コマンドを足したら走行中の設定にも
-    /// 載る」ことを検証するには shell が有効な構成が必要。
+    /// `initial` は**設定ファイル由来**の許可コマンド（グローバル設定）を模す。
+    /// per-agent の許可（DB）と混ざらないこと（#202）を検証するには、この 2 つが
+    /// 区別できる構成が必要。
     fn state_with_shell(initial: &[&str]) -> AppState {
         let state = crate::test_app_state();
         {
@@ -2128,6 +2129,42 @@ mod tests {
     fn db_allowed_commands(state: &AppState, agent_id: &str) -> Vec<String> {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id).unwrap()
+    }
+
+    /// **次の run** がそのエージェントに許可するコマンド一覧。
+    ///
+    /// 応答生成（`crate::process`）が毎 run 呼ぶ解決点をそのまま使う。グローバル設定と
+    /// 混同しないよう、per-agent の実効値はこのヘルパー越しにだけ見る。
+    fn run_allowed_commands(state: &AppState, agent_id: &str) -> Vec<String> {
+        crate::process::resolve_run_tools_config(state, agent_id)
+            .shell
+            .map(|s| s.allowed_commands)
+            .unwrap_or_default()
+    }
+
+    /// シェルツールを実際に dispatch するための `ActionContext`（作業ディレクトリ付き）。
+    fn shell_ctx() -> (tempfile::TempDir, opencrab_actions::ActionContext) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let conn = opencrab_db::init_memory().unwrap();
+        let ctx = opencrab_actions::ActionContext {
+            caller: opencrab_actions::CallerIdentity::Owner,
+            agent_id: "agent-x".to_string(),
+            agent_name: "Agent X".to_string(),
+            session_id: None,
+            db: opencrab_db::Db::from_connection(conn),
+            workspace: Arc::new(ws),
+            last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
+            model_override: Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: Arc::new(std::sync::Mutex::new("test".to_string())),
+            runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
+                default_model: "mock:test".to_string(),
+                active_model: None,
+                available_providers: vec![],
+                gateway: "test".to_string(),
+            })),
+        };
+        (dir, ctx)
     }
 
     fn owner_ctx() -> GatewayCallContext {
@@ -2285,17 +2322,17 @@ mod tests {
         assert_eq!(live_allowed_commands(&state), vec!["git"]);
     }
 
-    /// **走行中の実行許可設定が更新される（ホットリロード）**。
+    /// **グローバルな実行許可設定へは書かない**（#202）。DB だけが更新される。
     ///
-    /// DB へ書くだけでは不十分で、`AppState.tools_config` の**同一 Arc**へ載せないと
-    /// 「許可したのに実行できない」に戻る。ここでは gateway とは別に持っている
-    /// `state` のハンドルから読み直して、共有 Arc が更新されたことを確かめる。
+    /// 移設前の Discord 実装は DB と併せてグローバル設定にも書き込んでいた。応答生成は
+    /// **全エージェント**についてこの設定を実行許可の土台として複製する
+    /// （`crate::process::resolve_run_tools_config`）ので、その書き込みは
+    /// 「A が許可したコマンドが全エージェントで実行可能になる」漏れそのものだった。
     ///
-    /// 移設の副作用として **REST 経路でもこれが効くようになる**（#197）: 移設前の
-    /// REST は `RwLock::new(tools_config.clone())` という使い捨てのコピーを Discord
-    /// gateway へ渡していたため、この反映が捨てられていた。
+    /// このテストは**旧 `add_allowed_command_updates_the_live_shared_tools_config` の
+    /// 反転**である。旧テストは漏れを不変条件として固定していた。
     #[tokio::test]
-    async fn add_allowed_command_updates_the_live_shared_tools_config() {
+    async fn add_allowed_command_does_not_write_to_the_global_tools_config() {
         let state = state_with_shell(&["ls"]);
         let actions = SystemGatewayActions::new(state.clone(), None, None, None);
 
@@ -2308,15 +2345,24 @@ mod tests {
             .await;
         assert!(r.success, "{:?}", r.error);
 
-        // DB へ永続化されている。
+        // DB へ永続化されている（信頼できる情報源）。
         assert_eq!(db_allowed_commands(&state, "agent-x"), vec!["curl"]);
-        // かつ**同じ Arc**から読める（走行中の設定に載っている）。
-        assert_eq!(live_allowed_commands(&state), vec!["ls", "curl"]);
+        // グローバル設定は 1 文字も変わらない。
+        assert_eq!(
+            live_allowed_commands(&state),
+            vec!["ls"],
+            "グローバル設定へ書き込むと全エージェントへ漏れる（#202）"
+        );
     }
 
-    /// 削除も走行中の設定へ反映される（追加と対称）。
+    /// 削除もグローバル設定を触らない（追加と対称 / #202）。
+    ///
+    /// 旧実装は `retain` でグローバル設定からも消していたため、**設定ファイル由来の
+    /// コマンドをエージェントの操作でグローバルに削除できた**。
+    /// 旧 `remove_allowed_command_updates_the_live_shared_tools_config` の反転。
     #[tokio::test]
-    async fn remove_allowed_command_updates_the_live_shared_tools_config() {
+    async fn remove_allowed_command_does_not_write_to_the_global_tools_config() {
+        // "curl" は**設定ファイル由来**でもあり、かつ agent-x の DB 許可でもある状態。
         let state = state_with_shell(&["ls", "curl"]);
         {
             let conn = state.db.lock().unwrap();
@@ -2335,7 +2381,167 @@ mod tests {
         assert!(r.success, "{:?}", r.error);
 
         assert!(db_allowed_commands(&state, "agent-x").is_empty());
+        assert_eq!(
+            live_allowed_commands(&state),
+            vec!["ls", "curl"],
+            "設定ファイル由来のコマンドをエージェントの操作で消してはならない（#202）"
+        );
+    }
+
+    /// **エージェント A の追加が、エージェント B の実行許可を変えない**（#202 の本体）。
+    ///
+    /// 「次の run が何を許可するか」は `crate::process::resolve_run_tools_config` が
+    /// 決める（応答生成が毎 run 呼ぶ唯一の解決点）。A の追加後にそれを両エージェントで
+    /// 解決し、A にだけ効いていることを固定する。
+    ///
+    /// これが `add_allowed_command_takes_effect_on_the_callers_next_run` と対になって
+    /// 「撤去しても呼び出し元は困らない / 他エージェントへは漏れない」の両方を証明する。
+    #[tokio::test]
+    async fn add_allowed_command_does_not_change_another_agents_permissions() {
+        let state = state_with_shell(&["ls"]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &GatewayCallContext::new(GatewayCaller::Owner, "agent-a"),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        assert_eq!(
+            run_allowed_commands(&state, "agent-a"),
+            vec!["ls", "curl"],
+            "追加したエージェント自身には次の run で効かなければならない"
+        );
+        assert_eq!(
+            run_allowed_commands(&state, "agent-b"),
+            vec!["ls"],
+            "agent-a の追加が agent-b の実行許可を広げてはならない（#202）"
+        );
+        // グローバル設定そのものも汚れていない。
         assert_eq!(live_allowed_commands(&state), vec!["ls"]);
+    }
+
+    /// **エージェント A の削除が、設定ファイル由来のコマンドや B の許可を消さない**（#202）。
+    #[tokio::test]
+    async fn remove_allowed_command_does_not_change_another_agents_permissions() {
+        // 設定ファイル由来: "ls"。A と B の両方が DB で "curl" を許可されている。
+        let state = state_with_shell(&["ls"]);
+        {
+            let conn = state.db.lock().unwrap();
+            for agent in ["agent-a", "agent-b"] {
+                opencrab_db::queries::add_agent_allowed_command(&conn, agent, "curl", "owner")
+                    .unwrap();
+            }
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "remove_allowed_command",
+                &json!({"command": "curl"}),
+                &GatewayCallContext::new(GatewayCaller::Owner, "agent-a"),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        assert_eq!(
+            run_allowed_commands(&state, "agent-a"),
+            vec!["ls"],
+            "削除は呼び出したエージェントには次の run で効く"
+        );
+        assert_eq!(
+            run_allowed_commands(&state, "agent-b"),
+            vec!["ls", "curl"],
+            "agent-a の削除が agent-b の許可を消してはならない（#202）"
+        );
+        assert_eq!(
+            live_allowed_commands(&state),
+            vec!["ls"],
+            "設定ファイル由来の許可は残る（#202）"
+        );
+    }
+
+    /// **追加した許可は「次の run」で呼び出したエージェントに効く**（撤去の前提の実証）。
+    ///
+    /// グローバル設定への書き込みを撤去してよい根拠は 2 つあり、両方をここで実際に
+    /// 走らせて確かめる。
+    ///
+    /// 1. **次の run で効く**: run の冒頭で `resolve_run_tools_config` が DB の許可を
+    ///    ローカル複製へマージし、`register_tools_from_config` がそれを `ShellToolAction`
+    ///    へ渡す。したがって次の run のシェルツールは許可リスト検査を通す。
+    /// 2. **同ターンでは元から効かない**: ツール登録は run 冒頭のスナップショットなので、
+    ///    許可を追加しても**その run で登録済みのツール**には届かない。つまりグローバル
+    ///    書き込みを撤去しても失われる機能は無い（撤去前も同ターン反映は無かった）。
+    ///
+    /// 許可リスト検査だけを見るため、実際には存在しないコマンド名を使う。
+    /// 拒否は「allowed list に無い」/ 通過は「spawn 失敗」で区別でき、プロセスは
+    /// 一切起動しない（PATH や OS 差に依存しない）。
+    #[tokio::test]
+    async fn add_allowed_command_takes_effect_on_the_next_run_but_not_the_same_turn() {
+        const CMD: &str = "opencrab_absent_probe";
+
+        let state = state_with_shell(&[]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        // --- この run のツールを登録する（run 冒頭のスナップショット） ---
+        let mut this_run = opencrab_actions::ActionDispatcher::new();
+        opencrab_actions::register_tools_from_config(
+            &crate::process::resolve_run_tools_config(&state, "agent-x"),
+            &mut this_run,
+        );
+
+        // --- 走行中に許可を追加する ---
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": CMD}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let (_dir, ctx) = shell_ctx();
+
+        // 根拠 2: **同ターンでは効かない**（登録済みツールはスナップショットを持つ）。
+        let same_turn = this_run
+            .execute("execute_shell", &json!({"command": CMD}), &ctx)
+            .await;
+        assert!(!same_turn.success);
+        assert!(
+            same_turn
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("is not in the allowed list"),
+            "同ターン反映は元から効かない前提が崩れている: {:?}",
+            same_turn.error
+        );
+
+        // 根拠 1: **次の run では効く**（DB からマージされる）。
+        let mut next_run = opencrab_actions::ActionDispatcher::new();
+        opencrab_actions::register_tools_from_config(
+            &crate::process::resolve_run_tools_config(&state, "agent-x"),
+            &mut next_run,
+        );
+        let next = next_run
+            .execute("execute_shell", &json!({"command": CMD}), &ctx)
+            .await;
+        assert!(!next.success, "存在しないコマンドなので spawn は失敗する");
+        let e = next.error.as_deref().unwrap_or_default();
+        assert!(
+            !e.contains("is not in the allowed list"),
+            "次の run では許可リスト検査を通らなければならない（撤去の前提）: {e}"
+        );
+        assert!(
+            e.contains("Failed to spawn command"),
+            "許可リストを通過して spawn まで到達したはず: {e}"
+        );
+
+        // グローバル設定は最後まで汚れていない。
+        assert!(live_allowed_commands(&state).is_empty());
     }
 
     /// **コマンド名の文字種検査が効く**（英数字・`-`・`_` のみ）。
@@ -2625,20 +2831,24 @@ mod tests {
         );
     }
 
-    /// **移設の副作用で REST 経路でもホットリロードが効くようになったことの固定**（#197）。
+    /// **transport gateway が inner に居ても（REST + Discord 構成）漏れないことの固定**。
     ///
-    /// REST（`crates/server/src/api/agents_messages.rs`）は Discord が有効なとき
-    /// `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組む。移設前は
+    /// このテストは**旧 `hot_reload_reaches_the_shared_config_even_with_a_transport_inner`
+    /// の反転**である。旧テストは「inner が居てもグローバル設定に反映される」ことを
+    /// 不変条件として固定していたが、それは #202 の漏れそのものだった。
+    ///
+    /// 経緯（#197 との関係）: REST（`crate::api::agents_messages`）は Discord が有効な
+    /// とき `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組む。移設前は
     /// その Discord gateway へ `Arc::new(RwLock::new(state.tools_config.read().clone()))`
-    /// ＝**使い捨てのコピー**を渡していたため、`add_allowed_command` の反映が
-    /// `AppState` の共有 Arc に届かず捨てられていた。
+    /// ＝**使い捨てのコピー**を渡していた。そのおかげで REST 経路は**偶然この漏れが
+    /// 無かった**。素朴に移設すると共有実体へ届いて漏れる側に揃ってしまうため、同じ
+    /// 変更でグローバル書き込みを撤去した。
     ///
-    /// 移設後は許可コマンド系が own ツールになり `self.state.tools_config` を直接
-    /// 更新するので、inner が居ても（＝REST + Discord 構成でも）共有 Arc が更新される。
-    /// 構造的な保証も入った: `DiscordGatewayActions::new` はもう実行許可設定を受け取らない
-    /// ので、別インスタンスを作る余地がコンパイル時に消えている。
+    /// #197 について構造面で言えることは、`DiscordGatewayActions::new` がもう実行許可
+    /// 設定を受け取らない（引数自体が消えた）＝**別インスタンスを作る余地がコンパイル時に
+    /// 無い**という点だけである。
     #[tokio::test]
-    async fn hot_reload_reaches_the_shared_config_even_with_a_transport_inner() {
+    async fn add_allowed_command_does_not_leak_to_the_global_config_with_a_transport_inner() {
         let state = state_with_shell(&[]);
         // REST + Discord 相当: transport gateway が inner に居る構成。
         let inner = Arc::new(RecordingInner::new(&["discord_send_file"]));
@@ -2658,10 +2868,12 @@ mod tests {
             .await;
         assert!(r.success, "{:?}", r.error);
 
-        assert_eq!(
-            live_allowed_commands(&state),
-            vec!["curl"],
-            "REST 経路（inner あり）でも共有 tools_config に反映されなければならない（#197）"
+        // DB にだけ入る。
+        assert_eq!(db_allowed_commands(&state, "agent-x"), vec!["curl"]);
+        assert!(
+            live_allowed_commands(&state).is_empty(),
+            "inner の有無に関わらずグローバル設定へ書いてはならない（#202）: {:?}",
+            live_allowed_commands(&state)
         );
     }
 }

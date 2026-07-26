@@ -284,8 +284,10 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     プロバイダを差し替えるうえ、適用後の health_check / 自動ロールバックの結果を
     //     同ターンで返す契約になっている。
     "configure_llm_provider",
-    // (5) 純粋な読み取り（action="list"）+ (3) 同ターン結果依存（add/remove した直後に
-    //     execute_shell を使う用法）。Discord 側の add/remove/list_allowed_command と同分類。
+    // (5) 純粋な読み取り（action="list"）。add/remove も成否を同ターンで返す契約なので
+    //     inline。ここでも「許可した直後に同ターンで execute_shell」は**できない**
+    //     （ツール登録が run 冒頭でスナップショット / #202）ことに注意。
+    //     `add_allowed_command` / `remove_allowed_command` と同分類。
     "manage_allowed_commands",
     // (4) 設定の書き込み: 以後の Nostr 送信（relay / identity）に効く共有状態。
     //     成否を同ターンで確認して次の操作へ進む。
@@ -306,8 +308,12 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     // (5) 純粋な読み取り（#157 S1 で Discord から移設）。「許可コマンドを教えて」が
     //     2 ターン 2 メッセージに割れないよう inline。
     "list_allowed_commands",
-    // (3) 同ターン結果依存（#157 S1 で Discord から移設）: 「許可した直後に
-    //     execute_shell を使う」用法が通常で、結果（成否・既存かどうか）も即答すべきもの。
+    // **移設前の分類を維持する**（#157 S1 で Discord から移設）。移設前は
+    //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
+    //     分類の妥当性そのものは移設の範囲外（変えるなら別 issue）。
+    //     なお「許可した直後に同ターンで execute_shell を使う」ことは**元から
+    //     できない**（ツール登録が run 冒頭で設定をスナップショットするため、
+    //     許可は次の run から効く / #202）。同ターン反映を根拠にはしない。
     "add_allowed_command",
     "remove_allowed_command",
 ];

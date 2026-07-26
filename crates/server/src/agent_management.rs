@@ -12,8 +12,28 @@
 //!   これらの名前を**持っていない**ため、このハンドラ内検査が唯一のゲートである。
 //! - **コマンド名の文字種検査**（英数字・`-`・`_` のみ）。同系統の
 //!   `manage_allowed_commands` は trim だけなので、移設で緩めてはいけない。
-//! - **走行中の実行許可設定の更新**（`AppState.tools_config` への反映）。落とすと
-//!   「許可したのに実行できない」に戻る。
+//!
+//! # グローバル設定へは書かない（#202）
+//!
+//! 旧 Discord 実装は DB に加えて**グローバルな実行許可設定**（`AppState.tools_config`）
+//! にも許可コマンドを書き込んでいた。応答生成は**全エージェント**についてこの設定を
+//! 実行許可の土台として複製するため、これは「A が許可したコマンドが全エージェントで
+//! 実行可能になる」漏れそのものだった（削除側は設定ファイル由来のコマンドを
+//! グローバルに消せた）。移設と同時に**この書き込みを撤去した**。
+//!
+//! 撤去して呼び出し元が困らない理由:
+//! - `crate::process::resolve_run_tools_config` が**毎 run 無条件に**、そのエージェントの
+//!   DB 上の許可コマンドを走行時のローカル複製へマージする。よって呼び出したエージェント
+//!   自身には**次の run で**効く（DB が信頼できる情報源）。
+//! - **同ターン反映は元からどちらの経路でも効かない**。ツールの登録
+//!   （`opencrab_actions::register_tools_from_config`）が run の冒頭で
+//!   `ShellToolConfig` を clone してスナップショットするため、走行中に設定を
+//!   書き換えても本ターンのツールには届かない。つまり撤去で失われる機能は無い。
+//! - グローバル書き込みはそもそも永続しない。`crate::hot_reload` が設定ファイル変更時に
+//!   グローバル値を丸ごと上書きする。
+//!
+//! 同じ方針は `crate::main` の起動時設定構築と `crate::api::allowed_commands`
+//! （REST）にも明文化されている。
 
 use serde_json::json;
 
@@ -88,9 +108,9 @@ pub(crate) fn update_memory_index_config(
 
 /// 許可コマンドの追加（オーナー限定）。
 ///
-/// 旧 `DiscordGatewayActions::execute_add_allowed_command` の移設。DB へ永続化したうえで
-/// **走行中の実行許可設定**（`AppState.tools_config`）にも反映する。この Arc は Discord
-/// gateway が受け取っていたものと同一（`crates/server/src/main.rs` の配線）。
+/// 旧 `DiscordGatewayActions::execute_add_allowed_command` の移設。**DB のみ**へ永続化する。
+/// 旧実装が併せて行っていたグローバル設定への書き込みは撤去した（モジュール doc の
+/// 「グローバル設定へは書かない」/ #202）。
 pub(crate) fn add_allowed_command(
     state: &AppState,
     args: &serde_json::Value,
@@ -131,27 +151,17 @@ pub(crate) fn add_allowed_command(
 
     let conn = state.db.lock().unwrap();
     match opencrab_db::queries::add_agent_allowed_command(&conn, &ctx.agent_id, command, "owner") {
-        Ok(true) => {
-            // Update in-memory tools_config
-            drop(conn);
-            if let Ok(mut cfg) = state.tools_config.write() {
-                if let Some(ref mut shell) = cfg.shell {
-                    let cmd_str = command.to_string();
-                    if !shell.allowed_commands.contains(&cmd_str) {
-                        shell.allowed_commands.push(cmd_str);
-                    }
-                }
-            }
-            GatewayActionResult {
-                success: true,
-                data: Some(json!({
-                    "command": command,
-                    "agent_id": ctx.agent_id,
-                    "message": format!("`{}` を許可コマンドに追加しました", command),
-                })),
-                error: None,
-            }
-        }
+        // グローバル設定（`state.tools_config`）へは書かない。次の run が
+        // `resolve_run_tools_config` で DB から拾い直す（#202）。
+        Ok(true) => GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "command": command,
+                "agent_id": ctx.agent_id,
+                "message": format!("`{}` を許可コマンドに追加しました", command),
+            })),
+            error: None,
+        },
         Ok(false) => GatewayActionResult {
             success: true,
             data: Some(json!({
@@ -208,7 +218,9 @@ pub(crate) fn list_allowed_commands(
 /// 許可コマンドの削除（オーナー限定）。
 ///
 /// 旧 `DiscordGatewayActions::execute_remove_allowed_command` の移設。追加と対称に
-/// 走行中の実行許可設定からも取り除く。
+/// **DB のみ**から取り除く。旧実装はグローバル設定からも `retain` で消していたが、
+/// それは設定ファイル由来のコマンドや他エージェントの許可を巻き込んで消す漏れだった
+/// （#202）ので撤去した。
 pub(crate) fn remove_allowed_command(
     state: &AppState,
     args: &serde_json::Value,
@@ -235,24 +247,17 @@ pub(crate) fn remove_allowed_command(
 
     let conn = state.db.lock().unwrap();
     match opencrab_db::queries::remove_agent_allowed_command(&conn, &ctx.agent_id, command) {
-        Ok(true) => {
-            // Update in-memory tools_config
-            drop(conn);
-            if let Ok(mut cfg) = state.tools_config.write() {
-                if let Some(ref mut shell) = cfg.shell {
-                    shell.allowed_commands.retain(|c| c != command);
-                }
-            }
-            GatewayActionResult {
-                success: true,
-                data: Some(json!({
-                    "command": command,
-                    "agent_id": ctx.agent_id,
-                    "message": format!("`{}` を許可コマンドから削除しました", command),
-                })),
-                error: None,
-            }
-        }
+        // グローバル設定（`state.tools_config`）からは消さない。設定ファイル由来の
+        // コマンドや他エージェントの許可を巻き込むため（#202）。
+        Ok(true) => GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "command": command,
+                "agent_id": ctx.agent_id,
+                "message": format!("`{}` を許可コマンドから削除しました", command),
+            })),
+            error: None,
+        },
         Ok(false) => GatewayActionResult {
             success: true,
             data: Some(json!({

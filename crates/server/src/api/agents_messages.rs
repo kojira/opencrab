@@ -240,10 +240,11 @@ pub async fn send_agent_message(
         if let Some(ref dm) = state.discord_manager {
             if let Some(http) = dm.get_http_for_agent(&id) {
                 // 実行許可設定はもう渡さない（#157 S1）。許可コマンド系ツールは
-                // gateway 非依存層（`SystemGatewayActions`）へ移り、`AppState.tools_config`
-                // の共有 Arc を直接更新する。ここで `RwLock::new(clone)` を作っていた頃は
-                // REST 経路だけ**使い捨てのコピー**を触っており、許可の反映が消えていた
-                // （#197 の既存不整合）。
+                // gateway 非依存層（`SystemGatewayActions`）へ移り、**DB のみ**を更新する
+                // ようになった（グローバル設定への書き込みは #202 の漏れなので撤去）。
+                // ここで `RwLock::new(clone)` を作っていた頃は REST 経路だけ**使い捨ての
+                // コピー**を触っていた（#197）。引数自体が消えたので、別インスタンスを
+                // 渡す余地はコンパイル時に無い。
                 let subtask_registry = subtask_registry.clone();
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
