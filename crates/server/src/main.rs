@@ -616,7 +616,7 @@ async fn main() -> anyhow::Result<()> {
                 let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
                 gateway.start().await?;
 
-                let subtask_registry: opencrab_discord::SubtaskRegistry =
+                let subtask_registry: opencrab_actions::SubtaskRegistry =
                     Arc::new(dashmap::DashMap::new());
                 // ループ（auto-dispatch）と gateway_actions（cancel_subtask）が同一 registry を
                 // 共有し、auto-dispatch した subtask を停止可能にする（RFC #152 S3a / P0）。

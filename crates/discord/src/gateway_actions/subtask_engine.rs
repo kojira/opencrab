@@ -11,10 +11,11 @@ use super::subtask_webhook::reject;
 use super::webhook::{
     self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
 };
-use super::{ArcLlmClient, DiscordGatewayActions, DiscordSubtaskWebhook, SpawnedSubtask};
+use super::{ArcLlmClient, DiscordGatewayActions, DiscordSubtaskWebhook};
 use crate::message_loop::{parse_discord_session, LoopEvent};
 use opencrab_actions::subtask::{
-    settle_completed, SettleContext, SettleKind, SubtaskCompletionSink, SubtaskSettled,
+    settle_completed, SettleContext, SettleKind, SpawnedSubtask, SubtaskCompletionSink,
+    SubtaskSettled,
 };
 
 /// sub-engine に許可する gateway アクションの許可リスト（#63 / RFC #152 S2）。

@@ -240,8 +240,8 @@ impl SubtaskCompletionSink for NoopCompletionSink {
 
 /// registry が追跡する走行中 subtask のエントリ（gateway 非依存版）。
 ///
-/// 既存 `opencrab_discord::SpawnedSubtask` と同型だが、Discord 固有の
-/// webhook フィールド（`WebhookConfig` / `DeliveryBatch`）は持たない。
+/// 旧 Discord 実装のエントリ型と同型だが、Discord 固有の webhook フィールド
+/// （`WebhookConfig` / `DeliveryBatch`）は持たない。
 /// 返信ルーティングは gateway 不透明な `reply_target` として spawn 時に捕捉する
 /// （RFC §3.1(4)、Nostr で session_id から導出できない問題への対処）。
 #[derive(Clone)]
@@ -270,7 +270,8 @@ pub struct SpawnedSubtask {
 
 /// アクティブな subtask を subtask_id で引く registry（gateway 非依存版）。
 ///
-/// 現 `opencrab_discord::SubtaskRegistry` と同型だが gateway 非依存。
+/// 旧 Discord 実装の registry 型と同型だが gateway 非依存。全ゲートウェイと
+/// server がこの型を直接参照する（#170 で Discord 側の re-export は撤去済み）。
 pub type SubtaskRegistry = Arc<DashMap<String, SpawnedSubtask>>;
 
 /// `settle_completed` が subtask_completed ログの記録と sink 発火に用いる文脈。

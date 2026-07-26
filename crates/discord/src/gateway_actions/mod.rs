@@ -32,10 +32,12 @@ pub(crate) use subtask_engine::DiscordCompletionSink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 
-/// 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設した
-/// （RFC #152 S1）。Discord 固有の webhook 系（`webhook` / `webhook_tx`）は
-/// `SpawnedSubtask` に載せず、`SubtaskWebhooks` 随伴マップへ分離する（下記）。
-pub use opencrab_actions::subtask::{SpawnedSubtask, SubtaskRegistry};
+// 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設済み
+// （RFC #152 S1）。Discord 側は re-export せず参照するだけにして、他 crate が
+// Discord crate 経由でサブタスク型を引かないようにする（#170）。Discord 固有の
+// webhook 系（`webhook` / `webhook_tx`）は `SpawnedSubtask` に載せず、
+// `SubtaskWebhooks` 随伴マップへ分離する（下記）。
+use opencrab_actions::subtask::SubtaskRegistry;
 
 /// `SpawnedSubtask` から分離した Discord 固有の webhook 随伴データ（RFC §1.5）。
 ///
@@ -1050,6 +1052,7 @@ impl GatewayActions for DiscordGatewayActions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrab_actions::subtask::SpawnedSubtask;
     use opencrab_gateway::GatewayCaller;
     use serde_json::json;
 
