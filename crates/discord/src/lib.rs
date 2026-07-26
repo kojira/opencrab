@@ -17,9 +17,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 
 pub use gateway_actions::DiscordGatewayActions;
-pub use gateway_actions::{
-    spawn_activity_tool_event_sink, SpawnedSubtask, SubtaskRegistry, WebhookConfig,
-};
+pub use gateway_actions::{spawn_activity_tool_event_sink, WebhookConfig};
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 pub use owner_warning::{

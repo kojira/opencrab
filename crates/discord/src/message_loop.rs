@@ -135,7 +135,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // auto-dispatch した background subtask を載せる共有 registry（RFC #152 S3a / P0）。
     // `DiscordGatewayActions` と**同一**の registry を渡すことで、auto-dispatch した
     // 単一ツール subtask が `cancel_subtask` の認可ゲート経由で親/owner から停止可能になる。
-    subtask_registry: crate::SubtaskRegistry,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
         Some((tx, rx)) => (tx, rx),
@@ -368,7 +368,7 @@ async fn process_incoming_message<T: AgentRunner>(
     skip_agents_with_dedicated_gateway: bool,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
-    subtask_registry: crate::SubtaskRegistry,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -744,7 +744,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
-    subtask_registry: crate::SubtaskRegistry,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
 ) {
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
 

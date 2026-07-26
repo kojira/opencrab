@@ -11,10 +11,11 @@ use super::subtask_webhook::reject;
 use super::webhook::{
     self, DeliveryBatch, LifecycleMeta, WebhookConfig, WebhookResolution, WebhookSource,
 };
-use super::{ArcLlmClient, DiscordGatewayActions, DiscordSubtaskWebhook, SpawnedSubtask};
+use super::{ArcLlmClient, DiscordGatewayActions, DiscordSubtaskWebhook};
 use crate::message_loop::{parse_discord_session, LoopEvent};
 use opencrab_actions::subtask::{
-    settle_completed, SettleContext, SettleKind, SubtaskCompletionSink, SubtaskSettled,
+    settle_completed, SettleContext, SettleKind, SpawnedSubtask, SubtaskCompletionSink,
+    SubtaskSettled,
 };
 
 /// sub-engine に許可する gateway アクションの許可リスト（#63 / RFC #152 S2）。
@@ -912,6 +913,14 @@ impl DiscordGatewayActions {
                 let parent_session_id = subtask.parent_session_id.clone();
                 if !parent_session_id.is_empty() {
                     if let Ok(conn) = self.db.lock() {
+                        // 停止対象の説明は sub-session の theme を第一候補にする
+                        // （明示的な `spawn_subtask` はここに人間可読なテーマを持つ）。
+                        //
+                        // ただし自動 dispatch で背景実行に回った subtask は sub-session
+                        // の行を作らないため theme を引けず、そのままだと親ログが
+                        // `subtask '' was cancelled` になって「どのツールを止めたのか」
+                        // が分からない（#176）。theme が引けない/空のときは registry が
+                        // 保持する label（例: `execute_shell(...)`）へフォールバックする。
                         let task_description =
                             opencrab_db::queries::get_session(&conn, &subtask.session_id)
                                 .ok()
@@ -923,7 +932,8 @@ impl DiscordGatewayActions {
                                         .unwrap_or(&session.theme)
                                         .to_string()
                                 })
-                                .unwrap_or_default();
+                                .filter(|desc| !desc.is_empty())
+                                .unwrap_or_else(|| subtask.label.clone());
                         let log = opencrab_db::queries::SessionLogRow {
                             id: None,
                             agent_id: subtask.agent_id.clone(),

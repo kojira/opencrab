@@ -32,10 +32,12 @@ pub(crate) use subtask_engine::DiscordCompletionSink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 
-/// 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設した
-/// （RFC #152 S1）。Discord 固有の webhook 系（`webhook` / `webhook_tx`）は
-/// `SpawnedSubtask` に載せず、`SubtaskWebhooks` 随伴マップへ分離する（下記）。
-pub use opencrab_actions::subtask::{SpawnedSubtask, SubtaskRegistry};
+// 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設済み
+// （RFC #152 S1）。Discord 側は re-export せず参照するだけにして、他 crate が
+// Discord crate 経由でサブタスク型を引かないようにする（#170）。Discord 固有の
+// webhook 系（`webhook` / `webhook_tx`）は `SpawnedSubtask` に載せず、
+// `SubtaskWebhooks` 随伴マップへ分離する（下記）。
+use opencrab_actions::subtask::SubtaskRegistry;
 
 /// `SpawnedSubtask` から分離した Discord 固有の webhook 随伴データ（RFC §1.5）。
 ///
@@ -1050,6 +1052,7 @@ impl GatewayActions for DiscordGatewayActions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrab_actions::subtask::SpawnedSubtask;
     use opencrab_gateway::GatewayCaller;
     use serde_json::json;
 
@@ -1091,6 +1094,18 @@ mod tests {
         session_id: &str,
         parent_session_id: &str,
     ) -> tokio::task::JoinHandle<()> {
+        insert_fake_subtask_with_label(actions, id, session_id, parent_session_id, "test")
+    }
+
+    /// `insert_fake_subtask` の label 指定版。自動 dispatch した subtask は
+    /// `tool(主要引数)` 形式の label を持つ（#176 の回帰テスト用）。
+    fn insert_fake_subtask_with_label(
+        actions: &DiscordGatewayActions,
+        id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+        label: &str,
+    ) -> tokio::task::JoinHandle<()> {
         let handle = tokio::spawn(std::future::pending::<()>());
         actions.subtask_registry.insert(
             id.to_string(),
@@ -1099,13 +1114,40 @@ mod tests {
                 session_id: session_id.to_string(),
                 parent_session_id: parent_session_id.to_string(),
                 agent_id: "test-agent".to_string(),
-                label: "test".to_string(),
+                label: label.to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
             },
         );
         handle
+    }
+
+    /// 停止ログ（`tool_cancelled`）の本文を親セッションから 1 件だけ引く。
+    fn cancelled_log_content(db: &opencrab_db::Db, session_id: &str) -> String {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT content FROM memory_sessions \
+             WHERE session_id = ?1 AND log_type = 'tool_cancelled'",
+            [session_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// 停止ログの metadata_json を親セッションから 1 件だけ引く。
+    fn cancelled_log_metadata(db: &opencrab_db::Db, session_id: &str) -> serde_json::Value {
+        let raw: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT metadata_json FROM memory_sessions \
+                 WHERE session_id = ?1 AND log_type = 'tool_cancelled'",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        serde_json::from_str(&raw).unwrap()
     }
 
     fn count_session_logs(db: &opencrab_db::Db, session_id: &str) -> i64 {
@@ -1283,6 +1325,133 @@ mod tests {
             .as_deref()
             .unwrap()
             .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
+    }
+
+    // ---- #176: 停止ログのラベル（sub-session が無いケースのフォールバック） ----
+
+    /// テスト用: sub-session の行を作る（明示的 `spawn_subtask` 相当）。
+    fn insert_sub_session(db: &opencrab_db::Db, session_id: &str, theme: &str) {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::insert_session(
+            &conn,
+            &opencrab_db::queries::SessionRow {
+                id: session_id.to_string(),
+                mode: "subtask".to_string(),
+                theme: theme.to_string(),
+                phase: "active".to_string(),
+                turn_number: 0,
+                status: "active".to_string(),
+                participant_ids_json: serde_json::json!(["test-agent"]).to_string(),
+                facilitator_id: None,
+                done_count: 0,
+                max_turns: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 自動 dispatch で起動した subtask は sub-session の行を持たないため、
+    /// `sessions.theme` からは説明を引けない。停止ログのラベルが空にならず、
+    /// registry の label（ツール名を含む）へフォールバックすること。
+    #[tokio::test]
+    async fn test_cancel_subtask_falls_back_to_label_without_sub_session() {
+        let (actions, db) = make_test_actions();
+        let parent = "discord-test-agent-111-222";
+        // sub-session は **作らない**（自動 dispatch の再現）。
+        let _h = insert_fake_subtask_with_label(
+            &actions,
+            "st-auto",
+            "subtask-auto1",
+            parent,
+            "execute_shell(ls -la)",
+        );
+
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-auto"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+
+        let content = cancelled_log_content(&db, parent);
+        assert_ne!(
+            content, "subtask '' was cancelled",
+            "sub-session が無いとラベルが空になっている（#176 の退行）"
+        );
+        assert_eq!(content, "subtask 'execute_shell(ls -la)' was cancelled");
+        assert!(
+            content.contains("execute_shell"),
+            "停止ログにツール名が含まれていない: {content}"
+        );
+        assert_eq!(
+            cancelled_log_metadata(&db, parent)["task"],
+            "execute_shell(ls -la)"
+        );
+    }
+
+    /// 明示的な `spawn_subtask`（sub-session あり）では従来どおり theme を使う。
+    /// `Subtask: ` prefix の除去も含めて記録内容が退行しないこと。
+    #[tokio::test]
+    async fn test_cancel_subtask_prefers_sub_session_theme() {
+        let (actions, db) = make_test_actions();
+        let parent = "discord-test-agent-111-222";
+        insert_sub_session(&db, "subtask-explicit1", "Subtask: ログを調査する");
+        let _h = insert_fake_subtask_with_label(
+            &actions,
+            "st-explicit",
+            "subtask-explicit1",
+            parent,
+            "spawn_subtask(ログを調査する)",
+        );
+
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-explicit"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+
+        assert_eq!(
+            cancelled_log_content(&db, parent),
+            "subtask 'ログを調査する' was cancelled"
+        );
+        assert_eq!(
+            cancelled_log_metadata(&db, parent)["task"],
+            "ログを調査する"
+        );
+    }
+
+    /// sub-session はあるが theme が空のケースでも label へフォールバックする。
+    #[tokio::test]
+    async fn test_cancel_subtask_falls_back_on_empty_theme() {
+        let (actions, db) = make_test_actions();
+        let parent = "discord-test-agent-111-222";
+        insert_sub_session(&db, "subtask-empty1", "");
+        let _h = insert_fake_subtask_with_label(
+            &actions,
+            "st-empty",
+            "subtask-empty1",
+            parent,
+            "nostr_generate_key(main)",
+        );
+
+        let result = actions
+            .execute(
+                "cancel_subtask",
+                &json!({"subtask_id": "st-empty"}),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            cancelled_log_content(&db, parent),
+            "subtask 'nostr_generate_key(main)' was cancelled"
+        );
     }
 
     // ---- #63: SubEngineGatewayActions 許可リスト ----
