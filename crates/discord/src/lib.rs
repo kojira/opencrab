@@ -13,7 +13,6 @@ pub mod voice_session;
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use dashmap::DashMap;
 
 pub use gateway_actions::DiscordGatewayActions;
@@ -97,41 +96,17 @@ pub struct InteractionRecord<'a> {
 /// メソッドは意図レベル（記録・判定・セッション管理）で切る（#43）。discord 側が
 /// 生の SQL（`opencrab_db::queries::*`）を直接叩くことは、`db()` を使う
 /// ゲートウェイアクション**構築**を除き禁止。
-#[async_trait]
-pub trait AgentRunner: Send + Sync + Clone + 'static {
+///
+/// ゲートウェイの語彙を含まないメソッド（応答生成・会話履歴・トークン予算・
+/// セッション/インタラクション管理）は [`opencrab_actions::AgentRuntime`] が持つ（#156 S1）。
+/// ここには Discord の語彙（チャンネル・DM・per-agent ゲートウェイ）を含むものだけを残す。
+pub trait AgentRunner: opencrab_actions::AgentRuntime {
     /// Access the shared database connection.
     ///
     /// **構築専用**（DiscordGatewayActions 等のコンポーネント配線のみに使う）。
     /// メッセージ処理ロジックからの直接クエリには使わないこと（#43 — ストレージ
     /// への結合を構築時の1点に限定する）。
     fn db(&self) -> &opencrab_db::Db;
-
-    /// Whether any LLM providers are configured.
-    fn has_llm_providers(&self) -> bool;
-
-    /// Build the agent's system prompt and name from DB.
-    ///
-    /// Returns `(system_prompt, agent_name)`.
-    fn build_agent_context(&self, agent_id: &str) -> (String, String);
-
-    /// Build the conversation history string for a session (with compaction).
-    fn build_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        context_budget_tokens: usize,
-    ) -> Result<String, anyhow::Error>;
-
-    /// Run the full agent response pipeline (SkillEngine + LLM).
-    /// 実行要求は `RunRequest`（#33）で受ける。
-    async fn run_agent_response(
-        &self,
-        req: opencrab_actions::RunRequest,
-    ) -> anyhow::Result<opencrab_core::EngineResult>;
-
-    /// 会話コンテキストのトークン予算を返す（context_window * compaction_ratio）。
-    /// `agent_id` の per-agent モデルに応じた pricing を参照する。
-    fn context_budget_tokens(&self, agent_id: &str) -> usize;
 
     /// ワークスペースベースパスを返す（例: "/data/workspace/{agent_id}"）。
     fn workspace_base(&self) -> &str;
@@ -150,9 +125,6 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         text: &str,
         image_urls: &[String],
     );
-
-    /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
-    fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
 
     /// エージェントの Discord 応答を記録する（best-effort）。
     fn record_agent_reply(
@@ -196,31 +168,7 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         owner_discord_id: &str,
     ) -> opencrab_actions::CallerIdentity;
 
-    // ---- セッション/インタラクション管理（#43） ----
-
-    /// セッションが無ければ作成し、あれば metadata 未設定時のみ補完する（best-effort）。
-    fn ensure_session(
-        &self,
-        session_id: &str,
-        agent_ids: &[String],
-        theme: &str,
-        metadata_json: &str,
-    );
-
-    /// セッションの theme を返す（無ければ None）。
-    fn session_theme(&self, session_id: &str) -> Option<String>;
-
-    /// pending interaction のステータスを更新する（best-effort）。
-    fn mark_interaction_status(
-        &self,
-        interaction_id: &str,
-        status: &str,
-        response_json: Option<&str>,
-        responder_id: Option<&str>,
-    );
-
-    /// 古い pending interaction を掃除する（起動時）。
-    fn cleanup_stale_interactions(&self);
+    // ---- per-agent ゲートウェイ（#40） ----
 
     /// 有効な per-agent Discord 設定の一覧。
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow>;

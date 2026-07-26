@@ -1,3 +1,4 @@
+pub mod agent_runtime;
 pub mod bridge;
 pub mod common;
 pub mod dispatcher;
@@ -22,6 +23,7 @@ pub mod workspace;
 
 pub mod run_request;
 
+pub use agent_runtime::AgentRuntime;
 pub use bridge::{
     tool_policy, BridgedExecutor, SubEngineGatewayActions, ToolEvent, ToolEventSink,
     ToolEventStatus, ToolPolicy, CORE_DISPATCHABLE_ACTIONS, CORE_INLINE_ACTIONS, DISCORD_ACTIONS,

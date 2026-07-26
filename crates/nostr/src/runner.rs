@@ -3,42 +3,17 @@
 //! discord の `AgentRunner`（巨大・Discord 固有）に依存しないよう、必要なメソッド
 //! だけを切り出したトレイト。`crates/server` の `AppState` が実装し、既存の
 //! `run_agent_response` / セッション/転記ヘルパへ委譲する。
+//!
+//! ゲートウェイ非依存な実行・セッション管理は [`opencrab_actions::AgentRuntime`] が
+//! 持つ（#156 S1）。ここには Nostr の語彙（イベント・pubkey・設定行）を含むものだけを
+//! 宣言する。
 
 use anyhow::Result;
-use async_trait::async_trait;
 
-use opencrab_actions::RunRequest;
-use opencrab_core::EngineResult;
+use opencrab_actions::AgentRuntime;
 use opencrab_db::queries::AgentNostrConfigRow;
 
-#[async_trait]
-pub trait NostrAgentRunner: Send + Sync + Clone + 'static {
-    /// エージェント応答パイプライン（SkillEngine + LLM）を実行する。
-    async fn run_agent_response(&self, req: RunRequest) -> Result<EngineResult>;
-
-    /// system prompt と表示名を組み立てる（`(system_prompt, agent_name)`）。
-    fn build_agent_context(&self, agent_id: &str) -> (String, String);
-
-    /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
-    fn build_conversation_string(
-        &self,
-        session_id: &str,
-        agent_id: &str,
-        context_budget_tokens: usize,
-    ) -> Result<String>;
-
-    /// 会話コンテキストのトークン予算。
-    fn context_budget_tokens(&self, agent_id: &str) -> usize;
-
-    /// セッションが無ければ作成する（best-effort）。
-    fn ensure_session(
-        &self,
-        session_id: &str,
-        agent_ids: &[String],
-        theme: &str,
-        metadata_json: &str,
-    );
-
+pub trait NostrAgentRunner: AgentRuntime {
     /// 受信 Nostr イベントをセッションログに残す（best-effort）。
     fn record_nostr_user_message(
         &self,

@@ -1230,7 +1230,7 @@ fn ensure_discord_session<T: AgentRunner>(
     incoming: &IncomingMessage,
 ) {
     let (theme, metadata_json) = build_discord_session_metadata(incoming);
-    state.ensure_session(session_id, agent_ids, &theme, &metadata_json);
+    state.ensure_session(session_id, agent_ids, &theme, &metadata_json, "discord");
 }
 
 /// Discord用: message_idを含む変動コンテキストを前置するヘルパー。

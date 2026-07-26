@@ -527,7 +527,7 @@ async fn handle_event<R: NostrAgentRunner>(
     // author 単位のセッション（1 相手 = 1 会話）。
     let session_id = nostr_session_id(agent_id, &event.pubkey);
 
-    runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}");
+    runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}", "nostr");
     runner.record_nostr_user_message(
         &session_id,
         &event.pubkey,
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl NostrAgentRunner for SlowRunner {
+    impl opencrab_actions::AgentRuntime for SlowRunner {
         async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
             let target = req.reply_target.clone().unwrap_or_default();
             self.started.lock().unwrap().push(target.clone());
@@ -712,8 +712,31 @@ mod tests {
             1000
         }
 
-        fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str) {}
+        fn has_llm_providers(&self) -> bool {
+            true
+        }
 
+        fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
+
+        // 以下は Nostr の経路が使わない（Discord 由来の記録/掃除）。
+        fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {
+            unimplemented!("nostr の fake は NO_REPLY 記録を使わない")
+        }
+
+        fn session_theme(&self, _session_id: &str) -> Option<String> {
+            unimplemented!("nostr の fake は session_theme を使わない")
+        }
+
+        fn mark_interaction_status(&self, _i: &str, _s: &str, _r: Option<&str>, _u: Option<&str>) {
+            unimplemented!("nostr の fake は A2UI interaction を使わない")
+        }
+
+        fn cleanup_stale_interactions(&self) {
+            unimplemented!("nostr の fake は A2UI interaction を使わない")
+        }
+    }
+
+    impl NostrAgentRunner for SlowRunner {
         fn record_nostr_user_message(&self, _s: &str, _p: &str, _n: &str, text: &str) {
             self.recorded.lock().unwrap().push(text.to_string());
         }
