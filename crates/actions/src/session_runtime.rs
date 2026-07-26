@@ -93,9 +93,10 @@ impl SessionRuntime {
     /// - 異なるセッション（別の相手 / 別エージェント / 別会話）は並行。
     ///
     /// 呼び出し側の注意: ゲートウェイ層はこれを**直接公開しない**。生の応答生成を
-    /// private に閉じ、直列化込みの入口だけを公開する（web の `mod serialized` /
-    /// Nostr の `NostrResponder::respond_serialized`）。直列化を呼び出し側の責務に
-    /// すると 1 箇所の呼び忘れで不変条件が壊れ、テストでは検出できない。
+    /// private に閉じ、直列化込みの入口だけを公開する（web は `respond` モジュールに
+    /// 応答生成、兄弟の `sink` モジュールに完了受け口を置いて直呼びをコンパイル
+    /// エラーにしている / Nostr は `NostrResponder::respond_serialized`）。直列化を
+    /// 呼び出し側の責務にすると 1 箇所の呼び忘れで不変条件が壊れ、テストでは検出できない。
     pub async fn run_serialized<F, T>(&self, session_id: &str, fut: F) -> T
     where
         F: Future<Output = T>,
