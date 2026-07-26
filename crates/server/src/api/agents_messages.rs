@@ -239,12 +239,16 @@ pub async fn send_agent_message(
     let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = {
         if let Some(ref dm) = state.discord_manager {
             if let Some(http) = dm.get_http_for_agent(&id) {
-                let tools_cfg = state.tools_config.read().unwrap().clone();
+                // 実行許可設定はもう渡さない（#157 S1）。許可コマンド系ツールは
+                // gateway 非依存層（`SystemGatewayActions`）へ移り、**DB のみ**を更新する
+                // ようになった（グローバル設定への書き込みは #202 の漏れなので撤去）。
+                // ここで `RwLock::new(clone)` を作っていた頃は REST 経路だけ**使い捨ての
+                // コピー**を触っていた（#197）。引数自体が消えたので、別インスタンスを
+                // 渡す余地はコンパイル時に無い。
                 let subtask_registry = subtask_registry.clone();
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
-                    Arc::new(std::sync::RwLock::new(tools_cfg)),
                     state.workspace_base.clone(),
                     subtask_registry,
                     state.subtask_notifiers.clone(),

@@ -13,6 +13,39 @@ use opencrab_llm::pricing::PricingRegistry;
 use crate::llm_adapter::{LlmRouterAdapter, MetricsContext};
 use crate::AppState;
 
+/// この run で使う実行許可設定（`ToolsConfig`）を解決する。
+///
+/// グローバル設定（`AppState.tools_config`）の**複製**に、そのエージェントの DB 上の
+/// 許可コマンドをマージして返す。グローバル側は決して書き換えない — 混ぜると
+/// 全エージェントの許可が合流し、あるエージェントの許可が他へ漏れる（#202）。
+/// 同じ方針は起動時の設定構築（`crate::main`）と REST の許可コマンド管理
+/// （`crate::api::allowed_commands`）にも明文化されている。
+///
+/// **この関数が毎 run 無条件に呼ばれることが、許可コマンドツールがグローバル設定へ
+/// 書き込む必要が無い理由**である（`crate::agent_management`）。DB が信頼できる
+/// 情報源で、次の run はここで必ず拾い直す。
+pub(crate) fn resolve_run_tools_config(
+    state: &AppState,
+    agent_id: &str,
+) -> opencrab_actions::tools::ToolsConfig {
+    let mut tools_cfg = state.tools_config.read().unwrap().clone();
+    if let Ok(conn) = state.db.lock() {
+        if let Ok(agent_cmds) = opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id) {
+            if !agent_cmds.is_empty() {
+                let shell = tools_cfg
+                    .shell
+                    .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
+                for cmd in agent_cmds {
+                    if !shell.allowed_commands.contains(&cmd) {
+                        shell.allowed_commands.push(cmd);
+                    }
+                }
+            }
+        }
+    }
+    tools_cfg
+}
+
 /// sub-engine のツール呼び出しを進捗テキストへ要約する（#175 S4）。
 ///
 /// 旧 Discord 実装（`execute_spawn_subtask`）から移設。`{function:{name}}`（正準）と
@@ -1315,27 +1348,13 @@ pub async fn run_agent_response(
         runtime_info: Arc::new(std::sync::Mutex::new(runtime_info)),
     };
     let mut dispatcher = opencrab_actions::ActionDispatcher::new();
-    let mut tools_cfg = state.tools_config.read().unwrap().clone();
     // このエージェント専用の許可コマンド（DB管理）を、ローカルコピーにのみマージする。
     // グローバル config に足すと他エージェントにも許可が漏れる（per-agent スコープの担保）。
-    {
-        if let Ok(conn) = state.db.lock() {
-            if let Ok(agent_cmds) =
-                opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id)
-            {
-                if !agent_cmds.is_empty() {
-                    let shell = tools_cfg
-                        .shell
-                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
-                    for cmd in agent_cmds {
-                        if !shell.allowed_commands.contains(&cmd) {
-                            shell.allowed_commands.push(cmd);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let tools_cfg = resolve_run_tools_config(state, agent_id);
+    // 登録はここで **スナップショット**される（`register_tools_from_config` は
+    // `ShellToolConfig` を clone して `ShellToolAction` に持たせる）。したがって
+    // 走行中に設定を書き換えても本ターンのツールには届かない。許可コマンドの
+    // 追加・削除が効くのは常に**次の run** からである（#202 の根拠）。
     opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
     // MCP の trusted_only サーバは信頼された呼び出し元のターンでのみ露出する。
     let caller_is_trusted = matches!(

@@ -40,9 +40,9 @@ pub trait ToolEventSink: Send + Sync {
 /// 権限ポリシーによる拒否（実行に到達しなかった）を表す構造的マーカー。
 ///
 /// gateway action 等が permission-check で拒否したときは、エラー文言の先頭へ
-/// この安定コードを付ける（`crate::reject_marker` 経由）。分類器はこの構造的な
-/// 接頭辞を第一の根拠にする。`"permission"` / `"denied"` / `"forbidden"` のような
-/// 広い自然言語の部分一致は、実行されたが失敗した通常のエラー（例: OS の
+/// この安定コードを付ける（この定数を直接前置するか、`gateway_reject` 経由）。分類器は
+/// この構造的な接頭辞を第一の根拠にする。`"permission"` / `"denied"` / `"forbidden"`
+/// のような広い自然言語の部分一致は、実行されたが失敗した通常のエラー（例: OS の
 /// "Permission denied"、shell の "Operation not permitted"）を rejected に誤分類
 /// するため使わない。
 pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
@@ -64,11 +64,11 @@ fn gateway_reject(msg: impl Into<String>) -> opencrab_gateway::GatewayActionResu
 
 /// sub-engine に許可する gateway アクションの許可リスト（#63 / RFC #152 S2）。
 ///
-/// bridge の DISCORD_ACTIONS depth ゲートは 28 アクション中 5 つしかブロックしないため、
-/// 素の DiscordGatewayActions を接続すると、ハンドラ側ゲートの無いアクション
-/// （send_ui / discord_channel_config / discord_create_channel / update_memory_index_config
-/// 等）が depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可した
-/// アクションだけを sub-engine から到達可能にする（deny-by-default 最外周フィルタ）。
+/// bridge の DISCORD_ACTIONS depth ゲートは `DiscordGatewayActions::definitions()` の
+/// **一部しか**ブロックしないため、素の DiscordGatewayActions を接続すると、ハンドラ側
+/// ゲートの無いアクション（discord_channel_config / discord_create_channel 等）が
+/// depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可したアクション
+/// だけを sub-engine から到達可能にする（deny-by-default 最外周フィルタ）。
 ///
 /// S2 で inner が合成 gateway（`SystemGatewayActions` = server ツール + transport の union）
 /// になったため、このフィルタは**合成後のアクション和集合**に対して最外周で強制される。
@@ -201,16 +201,13 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     // (5) 純粋な読み取り。
     "discord_list_channels",
     "discord_list_guilds",
-    "list_allowed_commands",
     "list_webhooks",
     "list_subtask_webhooks",
     "get_default_webhook",
     "get_default_subtask_webhook",
     "read_heartbeat_instructions",
-    // (3) 許可コマンドの追加/削除は「許可した直後に execute_shell を使う」用法が通常で、
-    //     結果（正規化された名前・成否）も即答すべきもの。
-    "add_allowed_command",
-    "remove_allowed_command",
+    // 許可コマンドの list/add/remove は #157 S1 で server 側（`SERVER_INLINE_ACTIONS`）へ
+    // 移設済み。Discord は定義しないのでここには無い（分類の所属は inline のまま）。
 ];
 
 /// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
@@ -218,12 +215,12 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
 /// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く。ここに無く
 /// [`DISCORD_INLINE_ACTIONS`] にも無い名前が `definitions()` に現れたらテストが落ちる。
 pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
-    // `rebuild_memory_index` は #175 S4 で server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ
-    // 移設済み。Discord は定義しないのでここには無い。
+    // `rebuild_memory_index`（#175 S4）と `update_memory_index_config`（#157 S1）は
+    // server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。Discord は定義しないので
+    // ここには無い（どちらも分類の所属は dispatchable のまま）。
     // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
     "create_skill",
     // 設定/指示文の書き込み。同ターンで読み戻さない。
-    "update_memory_index_config",
     "update_heartbeat_instructions",
 ];
 
@@ -287,8 +284,10 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     プロバイダを差し替えるうえ、適用後の health_check / 自動ロールバックの結果を
     //     同ターンで返す契約になっている。
     "configure_llm_provider",
-    // (5) 純粋な読み取り（action="list"）+ (3) 同ターン結果依存（add/remove した直後に
-    //     execute_shell を使う用法）。Discord 側の add/remove/list_allowed_command と同分類。
+    // (5) 純粋な読み取り（action="list"）。add/remove も成否を同ターンで返す契約なので
+    //     inline。ここでも「許可した直後に同ターンで execute_shell」は**できない**
+    //     （ツール登録が run 冒頭でスナップショット / #202）ことに注意。
+    //     `add_allowed_command` / `remove_allowed_command` と同分類。
     "manage_allowed_commands",
     // (4) 設定の書き込み: 以後の Nostr 送信（relay / identity）に効く共有状態。
     //     成否を同ターンで確認して次の操作へ進む。
@@ -306,6 +305,17 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     （戻り値の subtask_id を同ターンで cancel / 追跡に使う）なので、さらに
     //     dispatch で包むと二重の背景化になり意味を成さない。
     "spawn_subtask",
+    // (5) 純粋な読み取り（#157 S1 で Discord から移設）。「許可コマンドを教えて」が
+    //     2 ターン 2 メッセージに割れないよう inline。
+    "list_allowed_commands",
+    // **移設前の分類を維持する**（#157 S1 で Discord から移設）。移設前は
+    //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
+    //     分類の妥当性そのものは移設の範囲外（変えるなら別 issue）。
+    //     なお「許可した直後に同ターンで execute_shell を使う」ことは**元から
+    //     できない**（ツール登録が run 冒頭で設定をスナップショットするため、
+    //     許可は次の run から効く / #202）。同ターン反映を根拠にはしない。
+    "add_allowed_command",
+    "remove_allowed_command",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -319,6 +329,9 @@ pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &[
     // 全メモリの再インデックス（長時間・同ターンで結果を使わない / #175 S4 で Discord
     // から移設）。dispatch の主目的そのもの。
     "rebuild_memory_index",
+    // 設定の書き込み（#157 S1 で Discord から移設）。同ターンで読み戻さない。
+    // Discord 側でも dispatchable だったので分類の所属は変えていない。
+    "update_memory_index_config",
 ];
 
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま

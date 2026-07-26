@@ -57,9 +57,18 @@ per-agent ゲートウェイ側のループ（`manager.rs`）はこのチェッ�
 `crates/server/src/hot_reload.rs` は config.toml の変更を検知すると共有の
 `ToolsConfig` を**丸ごと差し替える**。一見 DB 由来の許可コマンドが消えるように
 見えるが、消えない: `agent_allowed_commands` は保存時に ToolsConfig へは書かれず、
-**実行のたびに** DB から読んでエージェント専用のクローンへマージされる
-（`process.rs` / `subtask_engine.rs` の executor 組み立て時）。共有 ToolsConfig は
-常に「TOML の姿」だけを持ち、DB のランタイム追加分は per-call で合成される。
+**実行のたびに** DB から読んでエージェント専用のクローンへマージされる。合成関数は
+`crates/server/src/process.rs` の `resolve_run_tools_config` 1 箇所だけで、run の冒頭で
+必ず呼ばれる。共有 ToolsConfig は常に「TOML の姿」だけを持ち、DB のランタイム追加分は
+per-run で合成される。
+
+この不変条件（DB 由来を共有 ToolsConfig へ書かない）は、**許可コマンドの追加・削除
+ツールにも適用される**。かつて Discord 実装は DB と共有 ToolsConfig の両方へ書いており、
+それが「あるエージェントの許可が全エージェントへ漏れる」不具合（#202）だった。
+#157 S1 の移設時に書き込みを撤去した。撤去しても呼び出し元が困らないのは、
+上記の合成が毎 run 走るため**次の run で必ず効く**からである。なお**同一ターン内では
+元から効かない**（`register_tools_from_config` が run 冒頭で `ShellToolConfig` を
+clone してスナップショットする）。
 
 ## 新しい設定を足すときの指針
 

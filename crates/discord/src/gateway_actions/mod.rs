@@ -52,7 +52,6 @@ use opencrab_actions::subtask_notify::SubtaskNotifiers;
 pub struct DiscordGatewayActions {
     http: Arc<Http>,
     db: opencrab_db::Db,
-    tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// ワークスペースのベーステンプレート（例: "/data/workspace/{agent_id}"）。
     /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
     workspace_base: String,
@@ -78,7 +77,6 @@ impl DiscordGatewayActions {
     pub fn new(
         http: Arc<Http>,
         db: opencrab_db::Db,
-        tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
         workspace_base: String,
         subtask_registry: SubtaskRegistry,
         subtask_notifiers: SubtaskNotifiers,
@@ -87,7 +85,6 @@ impl DiscordGatewayActions {
         Self {
             http,
             db,
-            tools_config,
             workspace_base,
             subtask_registry,
             subtask_notifiers,
@@ -315,61 +312,12 @@ impl GatewayActions for DiscordGatewayActions {
                     "required": ["guild_id", "name"]
                 }),
             },
-            GatewayActionDef {
-                name: "update_memory_index_config".to_string(),
-                description: "メモリインデックスの設定（batch_size、threshold）を更新する。少なくとも1つのパラメータを指定する必要がある。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "batch_size": {
-                            "type": "integer",
-                            "description": "一度に処理するメモリのバッチサイズ"
-                        },
-                        "threshold": {
-                            "type": "integer",
-                            "description": "インデックス再構築の閾値"
-                        }
-                    },
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "add_allowed_command".to_string(),
-                description: "シェルツールの許可コマンドリストに新しいコマンドを追加する。オーナーのみ実行可能。コマンド名（例: curl, wget, git）を指定する。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "追加するコマンド名（英数字・ハイフン・アンダースコアのみ。例: curl, wget, git）"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-            },
-            GatewayActionDef {
-                name: "list_allowed_commands".to_string(),
-                description: "現在DBに保存されている許可コマンドの一覧を取得する。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
-                name: "remove_allowed_command".to_string(),
-                description: "シェルツールの許可コマンドリストからコマンドを削除する。オーナーのみ実行可能。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "削除するコマンド名"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-            },
+            // `update_memory_index_config` / `add_allowed_command` /
+            // `list_allowed_commands` / `remove_allowed_command` は #157 S1 で
+            // gateway 非依存層（server 側 `SystemGatewayActions`）へ移設済み。
+            // ここで再定義すると合成 gateway の dedup（own 優先）で own 側に食われ、
+            // Discord の実装が黙って死ぬので**定義してはならない**
+            // （`test_definitions_returns_expected_count` の negative assert が守る）。
             GatewayActionDef {
                 name: "create_skill".to_string(),
                 description: "ユーザーから「〇〇するスキルを作って」と言われたとき新しいスキルを作成する。guidanceにコマンド例・使い方を書くことで、LLMがexecute_shellで動的に実行できるようになる。同名スキルが存在する場合は更新される。".to_string(),
@@ -892,10 +840,6 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_add_reaction" => self.execute_discord_add_reaction(args).await,
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "discord_create_channel" => self.execute_discord_create_channel(args).await,
-            "update_memory_index_config" => self.execute_update_memory_index_config(args, ctx),
-            "add_allowed_command" => self.execute_add_allowed_command(args, ctx),
-            "list_allowed_commands" => self.execute_list_allowed_commands(ctx),
-            "remove_allowed_command" => self.execute_remove_allowed_command(args, ctx),
             "create_skill" => self.execute_create_skill(args, ctx),
             "discord_send_file" => self.execute_send_file(args, ctx).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
@@ -938,14 +882,10 @@ mod tests {
         let db = opencrab_db::Db::memory().unwrap();
         // serenityのHttpはダミートークンで作成（API呼び出しはしない）
         let http = Arc::new(Http::new("dummy-token"));
-        let tools_config = Arc::new(std::sync::RwLock::new(
-            opencrab_actions::tools::ToolsConfig::default(),
-        ));
         let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         let actions = DiscordGatewayActions::new(
             http,
             db.clone(),
-            tools_config,
             "/tmp".to_string(),
             subtask_registry,
             Arc::new(dashmap::DashMap::new()),
@@ -1469,10 +1409,10 @@ mod tests {
             "ensure_subtask_webhook",
             "discord_create_webhook",
             "discord_create_channel",
-            // 純粋な読み取り
+            // 純粋な読み取り（`list_allowed_commands` は #157 S1 で server 側へ移設。
+            // 同趣旨の inline 固定は `crates/server/src/system_actions.rs` にある）
             "list_webhooks",
             "list_subtask_webhooks",
-            "list_allowed_commands",
             "read_heartbeat_instructions",
         ] {
             assert!(
@@ -1488,7 +1428,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 27);
+        assert_eq!(defs.len(), 23);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -1498,10 +1438,6 @@ mod tests {
         assert!(names.contains(&"discord_add_reaction"));
         assert!(names.contains(&"discord_create_webhook"));
         assert!(names.contains(&"discord_create_channel"));
-        assert!(names.contains(&"update_memory_index_config"));
-        assert!(names.contains(&"add_allowed_command"));
-        assert!(names.contains(&"list_allowed_commands"));
-        assert!(names.contains(&"remove_allowed_command"));
         assert!(names.contains(&"create_skill"));
         assert!(names.contains(&"discord_send_file"));
         assert!(names.contains(&"join_voice_channel"));
@@ -1519,11 +1455,20 @@ mod tests {
         assert!(names.contains(&"ensure_webhook"));
         assert!(names.contains(&"list_webhooks"));
 
-        // #175 S4 / #155: サブタスク生成・進捗報告・記憶インデックス再構築は
-        // gateway 非依存層（server 側 `SystemGatewayActions`）へ移設済み。
-        // Discord がこれらを再び定義すると `SystemGatewayActions` の dedup で
-        // 名前が衝突し、LLM クライアントも Discord へ戻ってくる（#155 の後退）。
-        for moved in ["spawn_subtask", "report_progress", "rebuild_memory_index"] {
+        // #175 S4 / #157 S1 / #155: サブタスク生成・進捗報告・記憶インデックス再構築と
+        // 汎用管理ツール（記憶インデックス設定・許可コマンド 3 種）は gateway 非依存層
+        // （server 側 `SystemGatewayActions`）へ移設済み。
+        // Discord がこれらを再び定義すると `SystemGatewayActions` の dedup（own 優先）で
+        // own 側に食われ、Discord 実装の後処理が黙って落ちる（#155 の後退）。
+        for moved in [
+            "spawn_subtask",
+            "report_progress",
+            "rebuild_memory_index",
+            "update_memory_index_config",
+            "add_allowed_command",
+            "list_allowed_commands",
+            "remove_allowed_command",
+        ] {
             assert!(
                 !names.contains(&moved),
                 "{moved} は server 側の実装だけであるべき"

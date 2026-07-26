@@ -41,8 +41,8 @@ opencrabのアーキテクチャは本質的に同じ：
 | `SkillEngine` ループ | ✅ 実装済み | `crates/core/src/engine.rs` |
 | `ActionDispatcher` | ✅ 実装済み | `crates/actions/src/dispatcher.rs` |
 | `execute_shell` | ✅ 実装済み | `crates/actions/src/tools/shell.rs` |
-| `execute_skill` | ✅ 実装済み | `crates/discord/src/gateway_actions.rs` |
-| `add_allowed_command` | ✅ 実装済み | `crates/discord/src/gateway_actions.rs` |
+| `execute_skill` | ⚠️ 未実装 | 名前だけが `crates/actions/src/bridge.rs` の可視性テーブルに予約されている（実装は無い） |
+| `add_allowed_command` | ✅ 実装済み | `crates/server/src/agent_management.rs`（#157 S1 で Discord から移設。全ターンで使える） |
 | `ws_read/write/edit` | ✅ 実装済み | `crates/actions/src/workspace.rs` |
 
 ### 実際に不足しているもの（3つだけ）

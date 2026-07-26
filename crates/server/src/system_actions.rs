@@ -341,6 +341,68 @@ impl SystemGatewayActions {
                     "required": ["message"]
                 }),
             },
+            // ---- #157 S1: gateway 非依存の汎用管理ツール（Discord から移設） ----
+            //
+            // 以下 4 つは実装が serenity を一切参照せず DB と実行許可設定だけに依存して
+            // いたのに、Discord gateway にしか無かったため web / Nostr / REST / heartbeat
+            // 経由のターンでは使えなかった（#157 / #155）。定義・引数スキーマ・
+            // レスポンス JSON はすべて Discord 実装から**1 文字も変えずに**移している。
+            // 実体は `crate::agent_management`。
+            GatewayActionDef {
+                name: "update_memory_index_config".to_string(),
+                description: "メモリインデックスの設定（batch_size、threshold）を更新する。少なくとも1つのパラメータを指定する必要がある。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "batch_size": {
+                            "type": "integer",
+                            "description": "一度に処理するメモリのバッチサイズ"
+                        },
+                        "threshold": {
+                            "type": "integer",
+                            "description": "インデックス再構築の閾値"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "add_allowed_command".to_string(),
+                description: "シェルツールの許可コマンドリストに新しいコマンドを追加する。オーナーのみ実行可能。コマンド名（例: curl, wget, git）を指定する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "追加するコマンド名（英数字・ハイフン・アンダースコアのみ。例: curl, wget, git）"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            GatewayActionDef {
+                name: "list_allowed_commands".to_string(),
+                description: "現在DBに保存されている許可コマンドの一覧を取得する。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            },
+            GatewayActionDef {
+                name: "remove_allowed_command".to_string(),
+                description: "シェルツールの許可コマンドリストからコマンドを削除する。オーナーのみ実行可能。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "削除するコマンド名"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
         ]
     }
 
@@ -383,8 +445,9 @@ impl SystemGatewayActions {
         }
     }
 
-    /// 記憶インデックスの全再構築（#175 S4）。Discord 実装（`execute_rebuild_memory_index`）
-    /// をそのまま移設したもので、LLM クライアントは `AppState` のルーターから組む。
+    /// 記憶インデックスの全再構築（#175 S4）。旧 Discord 実装
+    /// （`DiscordGatewayActions::execute_rebuild_memory_index`・撤去済み）をそのまま
+    /// 移設したもので、LLM クライアントは `AppState` のルーターから組む。
     async fn rebuild_memory_index(&self, ctx: &GatewayCallContext) -> GatewayActionResult {
         let llm_client = crate::llm_adapter::LlmRouterAdapter::new(self.state.llm_router.clone())
             .with_agent_id(&ctx.agent_id);
@@ -1176,6 +1239,23 @@ impl GatewayActions for SystemGatewayActions {
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
+            // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
+            // inner へは委譲しない（委譲パターンにすると二重定義を招く）。許可コマンドは
+            // **DB のみ**を更新する。グローバルな実行許可設定へは書かない（他エージェントへ
+            // 漏れるため / #202）。次の run が `process::resolve_run_tools_config` で
+            // DB から拾い直す。
+            "update_memory_index_config" => {
+                crate::agent_management::update_memory_index_config(&self.state, args, ctx)
+            }
+            "add_allowed_command" => {
+                crate::agent_management::add_allowed_command(&self.state, args, ctx)
+            }
+            "list_allowed_commands" => {
+                crate::agent_management::list_allowed_commands(&self.state, ctx)
+            }
+            "remove_allowed_command" => {
+                crate::agent_management::remove_allowed_command(&self.state, args, ctx)
+            }
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
@@ -1406,6 +1486,12 @@ mod tests {
             "configure_self",
             "configure_mcp_server",
             "cancel_subtask",
+            // #157 S1 で Discord から移設。分類の所属（inline）は移設前と同じ。
+            // 純粋な読み取り（一覧の即答）+ 同ターン結果依存（許可した直後に
+            // execute_shell を使う）。Discord 側にあった同趣旨の固定の引き継ぎ。
+            "list_allowed_commands",
+            "add_allowed_command",
+            "remove_allowed_command",
         ] {
             assert!(
                 non_dispatch.contains(name),
@@ -1415,6 +1501,12 @@ mod tests {
         assert!(
             !non_dispatch.contains("nostr_generate_key"),
             "nostr_generate_key は長時間の vanity 探索なので dispatch 対象に残す"
+        );
+        // #157 S1 で Discord から移設。dispatchable の所属も移設前と同じ
+        // （設定の書き込みで同ターンに読み戻さない）。
+        assert!(
+            !non_dispatch.contains("update_memory_index_config"),
+            "update_memory_index_config は移設前と同じく dispatch 対象に残す"
         );
     }
 
@@ -1989,5 +2081,800 @@ mod tests {
             "デバウンスは gateway の作り直しを跨いで効かなければならない（AppState 側に置く）。届いた: {settled:?}"
         );
         assert_eq!(settled[0].kind, SettleKind::Progress);
+    }
+
+    // ---- #157 S1: 汎用管理ツール 4 個の gateway 非依存化 ----
+    //
+    // 移設前（origin/main）にはこの 4 ツールの挙動テストが**1 件も無かった**ため、
+    // ここは「移植」ではなく新規に契約を覆うテスト群である。守っている不変条件は
+    // `crate::agent_management` のモジュール doc に列挙してある。
+
+    /// 実行許可設定に shell セクションを持たせた `AppState`。
+    ///
+    /// `initial` は**設定ファイル由来**の許可コマンド（グローバル設定）を模す。
+    /// per-agent の許可（DB）と混ざらないこと（#202）を検証するには、この 2 つが
+    /// 区別できる構成が必要。
+    fn state_with_shell(initial: &[&str]) -> AppState {
+        let state = crate::test_app_state();
+        {
+            let mut cfg = state.tools_config.write().unwrap();
+            cfg.enabled = true;
+            cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
+                enabled: true,
+                allowed_commands: initial.iter().map(|s| s.to_string()).collect(),
+                timeout_secs: 30,
+                max_timeout_secs: 300,
+                working_dir: None,
+                inherit_env: false,
+                allowed_env_vars: Vec::new(),
+                max_output_bytes: 1024,
+                commands: Vec::new(),
+            });
+        }
+        state
+    }
+
+    /// 走行中の実行許可設定（`AppState.tools_config`）に載っているコマンド一覧。
+    fn live_allowed_commands(state: &AppState) -> Vec<String> {
+        state
+            .tools_config
+            .read()
+            .unwrap()
+            .shell
+            .as_ref()
+            .map(|s| s.allowed_commands.clone())
+            .unwrap_or_default()
+    }
+
+    /// DB に永続化されている許可コマンド一覧。
+    fn db_allowed_commands(state: &AppState, agent_id: &str) -> Vec<String> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id).unwrap()
+    }
+
+    /// **次の run** がそのエージェントに許可するコマンド一覧。
+    ///
+    /// 応答生成（`crate::process`）が毎 run 呼ぶ解決点をそのまま使う。グローバル設定と
+    /// 混同しないよう、per-agent の実効値はこのヘルパー越しにだけ見る。
+    fn run_allowed_commands(state: &AppState, agent_id: &str) -> Vec<String> {
+        crate::process::resolve_run_tools_config(state, agent_id)
+            .shell
+            .map(|s| s.allowed_commands)
+            .unwrap_or_default()
+    }
+
+    /// シェルツールを実際に dispatch するための `ActionContext`（作業ディレクトリ付き）。
+    fn shell_ctx() -> (tempfile::TempDir, opencrab_actions::ActionContext) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let conn = opencrab_db::init_memory().unwrap();
+        let ctx = opencrab_actions::ActionContext {
+            caller: opencrab_actions::CallerIdentity::Owner,
+            agent_id: "agent-x".to_string(),
+            agent_name: "Agent X".to_string(),
+            session_id: None,
+            db: opencrab_db::Db::from_connection(conn),
+            workspace: Arc::new(ws),
+            last_metrics_id: Arc::new(std::sync::Mutex::new(None)),
+            model_override: Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: Arc::new(std::sync::Mutex::new("test".to_string())),
+            runtime_info: Arc::new(std::sync::Mutex::new(opencrab_actions::RuntimeInfo {
+                default_model: "mock:test".to_string(),
+                active_model: None,
+                available_providers: vec![],
+                gateway: "test".to_string(),
+            })),
+        };
+        (dir, ctx)
+    }
+
+    fn owner_ctx() -> GatewayCallContext {
+        GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+    }
+
+    fn agent_ctx() -> GatewayCallContext {
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
+    }
+
+    /// **#157 S1 の本題**: 4 ツールが `SystemGatewayActions` の own 定義になっている。
+    ///
+    /// own 定義は transport の有無に依存しないため、これが `definitions()` に出ることは
+    /// 「web / Nostr / REST / heartbeat でも使える」ことと同義である。own から消えると
+    /// Discord 専用に逆戻りする（それが #157 が報告している不具合そのもの）。
+    #[test]
+    fn generic_management_tools_are_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        for name in [
+            "update_memory_index_config",
+            "add_allowed_command",
+            "list_allowed_commands",
+            "remove_allowed_command",
+        ] {
+            assert_eq!(
+                defs.iter().filter(|d| d.name == name).count(),
+                1,
+                "{name} は own 定義にちょうど 1 件必要（#157 S1）"
+            );
+        }
+    }
+
+    /// **Discord 無効の構成でも 4 ツールが露出する**（#157 S1 の証明）。
+    ///
+    /// `inner = None` は「transport 固有 gateway が居ない」経路（web / REST /
+    /// heartbeat、および Discord feature 無効ビルド）そのもの。移設前はこの構成で
+    /// 4 ツールが一切出なかった。
+    #[test]
+    fn generic_management_tools_are_exposed_without_any_transport_gateway() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        for name in [
+            "update_memory_index_config",
+            "add_allowed_command",
+            "list_allowed_commands",
+            "remove_allowed_command",
+        ] {
+            assert!(
+                names.contains(&name.to_string()),
+                "transport gateway 無しの構成で {name} が露出しない（#157 の不具合そのもの）: {names:?}"
+            );
+        }
+    }
+
+    /// 引数スキーマを移設前（Discord 定義）と同一に保つ。
+    #[test]
+    fn generic_management_tool_schemas_match_the_discord_originals() {
+        let defs = SystemGatewayActions::own_definitions();
+        let find = |n: &str| defs.iter().find(|d| d.name == n).unwrap();
+
+        let d = find("update_memory_index_config");
+        assert!(d.parameters["required"].as_array().unwrap().is_empty());
+        let props = d.parameters["properties"].as_object().unwrap();
+        assert_eq!(props["batch_size"]["type"], json!("integer"));
+        assert_eq!(props["threshold"]["type"], json!("integer"));
+
+        for n in ["add_allowed_command", "remove_allowed_command"] {
+            let d = find(n);
+            assert_eq!(d.parameters["required"], json!(["command"]), "{n}");
+            assert_eq!(
+                d.parameters["properties"]["command"]["type"],
+                json!("string"),
+                "{n}"
+            );
+        }
+
+        let d = find("list_allowed_commands");
+        assert!(d.parameters["required"].as_array().unwrap().is_empty());
+        assert!(d.parameters["properties"].as_object().unwrap().is_empty());
+    }
+
+    /// **オーナー限定検査が移設後も効く**（add）。
+    ///
+    /// bridge の `OWNER_ONLY_ACTIONS` は `add_allowed_command` /
+    /// `remove_allowed_command` を**持っていない**（持っているのは新系統の
+    /// `manage_allowed_commands` だけ）。つまりこのハンドラ内検査が唯一のゲートで、
+    /// 落とすと非オーナーがシェル実行範囲を広げられる。
+    ///
+    /// エラー文言はバイト単位で移設前と同一（移設で文言が変わっていないことの防波堤）。
+    #[tokio::test]
+    async fn add_allowed_command_rejects_non_owner_without_side_effects() {
+        // このゲートが bridge 側に無いことを固定する（多層防御ではなく単層である事実）。
+        assert!(
+            !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"add_allowed_command"),
+            "bridge 側に owner ゲートが増えたなら、この単層前提のコメントを見直すこと"
+        );
+
+        let state = state_with_shell(&[]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &agent_ctx(),
+            )
+            .await;
+
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("このアクションはオーナーのみ実行できます"),
+            "拒否文言は移設前と 1 文字も変えない"
+        );
+        assert!(r.data.is_none());
+        // 副作用ゼロ: DB も走行中の実行許可設定も変わらない。
+        assert!(db_allowed_commands(&state, "agent-x").is_empty());
+        assert!(live_allowed_commands(&state).is_empty());
+    }
+
+    /// **オーナー限定検査が移設後も効く**（remove）。既に許可済みのコマンドが
+    /// 非オーナーの呼び出しで消えないこと。
+    #[tokio::test]
+    async fn remove_allowed_command_rejects_non_owner_without_side_effects() {
+        assert!(
+            !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"remove_allowed_command"),
+            "bridge 側に owner ゲートが増えたなら、この単層前提のコメントを見直すこと"
+        );
+
+        let state = state_with_shell(&["git"]);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", "git", "owner")
+                .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "remove_allowed_command",
+                &json!({"command": "git"}),
+                &agent_ctx(),
+            )
+            .await;
+
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("このアクションはオーナーのみ実行できます"),
+            "拒否文言は移設前と 1 文字も変えない"
+        );
+        // 許可は残っている（DB も走行中の設定も）。
+        assert_eq!(db_allowed_commands(&state, "agent-x"), vec!["git"]);
+        assert_eq!(live_allowed_commands(&state), vec!["git"]);
+    }
+
+    /// **グローバルな実行許可設定へは書かない**（#202）。DB だけが更新される。
+    ///
+    /// 移設前の Discord 実装は DB と併せてグローバル設定にも書き込んでいた。応答生成は
+    /// **全エージェント**についてこの設定を実行許可の土台として複製する
+    /// （`crate::process::resolve_run_tools_config`）ので、その書き込みは
+    /// 「A が許可したコマンドが全エージェントで実行可能になる」漏れそのものだった。
+    ///
+    /// このテストは**旧 `add_allowed_command_updates_the_live_shared_tools_config` の
+    /// 反転**である。旧テストは漏れを不変条件として固定していた。
+    #[tokio::test]
+    async fn add_allowed_command_does_not_write_to_the_global_tools_config() {
+        let state = state_with_shell(&["ls"]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        // DB へ永続化されている（信頼できる情報源）。
+        assert_eq!(db_allowed_commands(&state, "agent-x"), vec!["curl"]);
+        // グローバル設定は 1 文字も変わらない。
+        assert_eq!(
+            live_allowed_commands(&state),
+            vec!["ls"],
+            "グローバル設定へ書き込むと全エージェントへ漏れる（#202）"
+        );
+    }
+
+    /// 削除もグローバル設定を触らない（追加と対称 / #202）。
+    ///
+    /// 旧実装は `retain` でグローバル設定からも消していたため、**設定ファイル由来の
+    /// コマンドをエージェントの操作でグローバルに削除できた**。
+    /// 旧 `remove_allowed_command_updates_the_live_shared_tools_config` の反転。
+    #[tokio::test]
+    async fn remove_allowed_command_does_not_write_to_the_global_tools_config() {
+        // "curl" は**設定ファイル由来**でもあり、かつ agent-x の DB 許可でもある状態。
+        let state = state_with_shell(&["ls", "curl"]);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", "curl", "owner")
+                .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "remove_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        assert!(db_allowed_commands(&state, "agent-x").is_empty());
+        assert_eq!(
+            live_allowed_commands(&state),
+            vec!["ls", "curl"],
+            "設定ファイル由来のコマンドをエージェントの操作で消してはならない（#202）"
+        );
+    }
+
+    /// **エージェント A の追加が、エージェント B の実行許可を変えない**（#202 の本体）。
+    ///
+    /// 「次の run が何を許可するか」は `crate::process::resolve_run_tools_config` が
+    /// 決める（応答生成が毎 run 呼ぶ唯一の解決点）。A の追加後にそれを両エージェントで
+    /// 解決し、A にだけ効いていることを固定する。
+    ///
+    /// これが `add_allowed_command_takes_effect_on_the_next_run_but_not_the_same_turn` と対になって
+    /// 「撤去しても呼び出し元は困らない / 他エージェントへは漏れない」の両方を証明する。
+    #[tokio::test]
+    async fn add_allowed_command_does_not_change_another_agents_permissions() {
+        let state = state_with_shell(&["ls"]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &GatewayCallContext::new(GatewayCaller::Owner, "agent-a"),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        assert_eq!(
+            run_allowed_commands(&state, "agent-a"),
+            vec!["ls", "curl"],
+            "追加したエージェント自身には次の run で効かなければならない"
+        );
+        assert_eq!(
+            run_allowed_commands(&state, "agent-b"),
+            vec!["ls"],
+            "agent-a の追加が agent-b の実行許可を広げてはならない（#202）"
+        );
+        // グローバル設定そのものも汚れていない。
+        assert_eq!(live_allowed_commands(&state), vec!["ls"]);
+    }
+
+    /// **エージェント A の削除が、設定ファイル由来のコマンドや B の許可を消さない**（#202）。
+    #[tokio::test]
+    async fn remove_allowed_command_does_not_change_another_agents_permissions() {
+        // 設定ファイル由来: "ls"。A と B の両方が DB で "curl" を許可されている。
+        let state = state_with_shell(&["ls"]);
+        {
+            let conn = state.db.lock().unwrap();
+            for agent in ["agent-a", "agent-b"] {
+                opencrab_db::queries::add_agent_allowed_command(&conn, agent, "curl", "owner")
+                    .unwrap();
+            }
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "remove_allowed_command",
+                &json!({"command": "curl"}),
+                &GatewayCallContext::new(GatewayCaller::Owner, "agent-a"),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        assert_eq!(
+            run_allowed_commands(&state, "agent-a"),
+            vec!["ls"],
+            "削除は呼び出したエージェントには次の run で効く"
+        );
+        assert_eq!(
+            run_allowed_commands(&state, "agent-b"),
+            vec!["ls", "curl"],
+            "agent-a の削除が agent-b の許可を消してはならない（#202）"
+        );
+        assert_eq!(
+            live_allowed_commands(&state),
+            vec!["ls"],
+            "設定ファイル由来の許可は残る（#202）"
+        );
+    }
+
+    /// **追加した許可は「次の run」で呼び出したエージェントに効く**（撤去の前提の実証）。
+    ///
+    /// グローバル設定への書き込みを撤去してよい根拠は 2 つあり、両方をここで実際に
+    /// 走らせて確かめる。
+    ///
+    /// 1. **次の run で効く**: run の冒頭で `resolve_run_tools_config` が DB の許可を
+    ///    ローカル複製へマージし、`register_tools_from_config` がそれを `ShellToolAction`
+    ///    へ渡す。したがって次の run のシェルツールは許可リスト検査を通す。
+    /// 2. **同ターンでは元から効かない**: ツール登録は run 冒頭のスナップショットなので、
+    ///    許可を追加しても**その run で登録済みのツール**には届かない。つまりグローバル
+    ///    書き込みを撤去しても失われる機能は無い（撤去前も同ターン反映は無かった）。
+    ///
+    /// 許可リスト検査だけを見るため、実際には存在しないコマンド名を使う。
+    /// 拒否は「allowed list に無い」/ 通過は「spawn 失敗」で区別でき、プロセスは
+    /// 一切起動しない（PATH や OS 差に依存しない）。
+    #[tokio::test]
+    async fn add_allowed_command_takes_effect_on_the_next_run_but_not_the_same_turn() {
+        const CMD: &str = "opencrab_absent_probe";
+
+        let state = state_with_shell(&[]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        // --- この run のツールを登録する（run 冒頭のスナップショット） ---
+        let mut this_run = opencrab_actions::ActionDispatcher::new();
+        opencrab_actions::register_tools_from_config(
+            &crate::process::resolve_run_tools_config(&state, "agent-x"),
+            &mut this_run,
+        );
+
+        // --- 走行中に許可を追加する ---
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": CMD}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let (_dir, ctx) = shell_ctx();
+
+        // 根拠 2: **同ターンでは効かない**（登録済みツールはスナップショットを持つ）。
+        let same_turn = this_run
+            .execute("execute_shell", &json!({"command": CMD}), &ctx)
+            .await;
+        assert!(!same_turn.success);
+        assert!(
+            same_turn
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("is not in the allowed list"),
+            "同ターン反映は元から効かない前提が崩れている: {:?}",
+            same_turn.error
+        );
+
+        // 根拠 1: **次の run では効く**（DB からマージされる）。
+        let mut next_run = opencrab_actions::ActionDispatcher::new();
+        opencrab_actions::register_tools_from_config(
+            &crate::process::resolve_run_tools_config(&state, "agent-x"),
+            &mut next_run,
+        );
+        let next = next_run
+            .execute("execute_shell", &json!({"command": CMD}), &ctx)
+            .await;
+        assert!(!next.success, "存在しないコマンドなので spawn は失敗する");
+        let e = next.error.as_deref().unwrap_or_default();
+        assert!(
+            !e.contains("is not in the allowed list"),
+            "次の run では許可リスト検査を通らなければならない（撤去の前提）: {e}"
+        );
+        assert!(
+            e.contains("Failed to spawn command"),
+            "許可リストを通過して spawn まで到達したはず: {e}"
+        );
+
+        // グローバル設定は最後まで汚れていない。
+        assert!(live_allowed_commands(&state).is_empty());
+    }
+
+    /// **コマンド名の文字種検査が効く**（英数字・`-`・`_` のみ）。
+    ///
+    /// 同系統の `manage_allowed_commands` は trim だけなので、移設でこちらを緩めると
+    /// `rm -rf /` のようなシェル片やパス区切りを許可リストへ入れられてしまう。
+    /// 検査は DB へ触る**前**に行う（副作用ゼロ）。
+    #[tokio::test]
+    async fn add_allowed_command_rejects_invalid_command_characters() {
+        let state = state_with_shell(&[]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        for bad in ["rm -rf /", "/bin/sh", "git;whoami", "cat|less", "a$b"] {
+            let r = actions
+                .execute(
+                    "add_allowed_command",
+                    &json!({"command": bad}),
+                    &owner_ctx(),
+                )
+                .await;
+            assert!(!r.success, "{bad} は拒否されなければならない");
+            let e = r.error.unwrap();
+            assert_eq!(
+                e,
+                format!(
+                    "コマンド名に無効な文字が含まれています: {}（英数字・ハイフン・アンダースコアのみ使用可）",
+                    bad
+                ),
+                "文字種エラーの文言は移設前と同一"
+            );
+        }
+        // 1 件も通っていない。
+        assert!(db_allowed_commands(&state, "agent-x").is_empty());
+        assert!(live_allowed_commands(&state).is_empty());
+
+        // 対: 妥当な文字（英数字・ハイフン・アンダースコア）は通る。
+        for good in ["curl", "docker-compose", "my_tool", "python3"] {
+            let r = actions
+                .execute(
+                    "add_allowed_command",
+                    &json!({"command": good}),
+                    &owner_ctx(),
+                )
+                .await;
+            assert!(r.success, "{good} は許可されるべき: {:?}", r.error);
+        }
+    }
+
+    /// `command` 未指定 / 空文字は移設前と同じ文言で失敗する（add / remove の両方）。
+    #[tokio::test]
+    async fn allowed_command_tools_require_a_non_empty_command() {
+        let state = state_with_shell(&[]);
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        for name in ["add_allowed_command", "remove_allowed_command"] {
+            for args in [json!({}), json!({"command": ""}), json!({"command": 42})] {
+                let r = actions.execute(name, &args, &owner_ctx()).await;
+                assert!(!r.success, "{name} {args}");
+                assert_eq!(
+                    r.error.as_deref(),
+                    Some("commandパラメータが必要です"),
+                    "{name} {args}"
+                );
+            }
+        }
+    }
+
+    /// **レスポンス JSON が移設前と同一**（許可コマンド 3 種）。期待値をリテラルで固定する。
+    #[tokio::test]
+    async fn allowed_command_response_json_is_unchanged() {
+        let state = state_with_shell(&[]);
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        // 追加（新規）
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "command": "curl",
+                "agent_id": "agent-x",
+                "message": "`curl` を許可コマンドに追加しました",
+            })
+        );
+
+        // 追加（既存）: `already_exists` が付く。
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "command": "curl",
+                "agent_id": "agent-x",
+                "message": "`curl` はすでに許可コマンドに登録されています",
+                "already_exists": true,
+            })
+        );
+
+        // 一覧: commands / count / agent_id の 3 キー。
+        let r = actions
+            .execute("list_allowed_commands", &json!({}), &agent_ctx())
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "commands": ["curl"],
+                "count": 1,
+                "agent_id": "agent-x",
+            })
+        );
+
+        // 削除（存在した）
+        let r = actions
+            .execute(
+                "remove_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "command": "curl",
+                "agent_id": "agent-x",
+                "message": "`curl` を許可コマンドから削除しました",
+            })
+        );
+
+        // 削除（存在しない）: `not_found` が付き、success は true のまま。
+        let r = actions
+            .execute(
+                "remove_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "command": "curl",
+                "agent_id": "agent-x",
+                "message": "`curl` は許可コマンドに登録されていませんでした",
+                "not_found": true,
+            })
+        );
+    }
+
+    /// 一覧は**呼び出し元のエージェント**の許可コマンドだけを返す（agent_id スコープ）。
+    #[tokio::test]
+    async fn list_allowed_commands_is_scoped_to_the_calling_agent() {
+        let state = crate::test_app_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", "curl", "owner")
+                .unwrap();
+            opencrab_db::queries::add_agent_allowed_command(&conn, "other-agent", "wget", "owner")
+                .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let r = actions
+            .execute("list_allowed_commands", &json!({}), &agent_ctx())
+            .await;
+        assert!(r.success);
+        assert_eq!(r.data.unwrap()["commands"], json!(["curl"]));
+    }
+
+    /// **レスポンス JSON が移設前と同一**（記憶インデックス設定）。
+    /// `previous` / `current` の入れ子形をリテラルで固定する。
+    #[tokio::test]
+    async fn update_memory_index_config_response_json_is_unchanged() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        // 未設定からの更新: previous は既定値。
+        let r = actions
+            .execute(
+                "update_memory_index_config",
+                &json!({"batch_size": 10}),
+                &agent_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "agent_id": "agent-x",
+                "previous": {
+                    "batch_size": opencrab_db::queries::BATCH_SIZE_DEFAULT,
+                    "threshold": opencrab_db::queries::THRESHOLD_DEFAULT,
+                },
+                "current": { "batch_size": 10, "threshold": opencrab_db::queries::THRESHOLD_DEFAULT },
+            })
+        );
+
+        // 片方だけ指定すると、もう片方は現状維持。
+        let r = actions
+            .execute(
+                "update_memory_index_config",
+                &json!({"threshold": 5}),
+                &agent_ctx(),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "agent_id": "agent-x",
+                "previous": { "batch_size": 10, "threshold": opencrab_db::queries::THRESHOLD_DEFAULT },
+                "current": { "batch_size": 10, "threshold": 5 },
+            })
+        );
+
+        // DB へ永続化されている。
+        let conn = state.db.lock().unwrap();
+        let cfg = opencrab_db::queries::get_memory_index_config(&conn, "agent-x").unwrap();
+        assert_eq!((cfg.batch_size, cfg.threshold), (10, 5));
+    }
+
+    /// 引数が両方欠けているときは移設前と同じ文言で失敗する。
+    #[tokio::test]
+    async fn update_memory_index_config_requires_at_least_one_field() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let r = actions
+            .execute("update_memory_index_config", &json!({}), &agent_ctx())
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("batch_sizeまたはthresholdの少なくとも1つが必要です")
+        );
+    }
+
+    /// 移設した 4 ツールは **inner（Discord）へ委譲しない**。
+    ///
+    /// `cancel_subtask` / `report_progress` は Discord 固有の後処理を保つため委譲する
+    /// が、この 4 つは Discord 側の実装を撤去したので own が処理しなければならない。
+    /// 委譲パターンで書くと、Discord が誤って再定義したときに own の実装が黙って
+    /// バイパスされる。
+    #[tokio::test]
+    async fn generic_management_tools_are_not_delegated_to_inner() {
+        let state = state_with_shell(&[]);
+        let inner = Arc::new(RecordingInner::new(&[
+            "update_memory_index_config",
+            "add_allowed_command",
+            "list_allowed_commands",
+            "remove_allowed_command",
+        ]));
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            Some(inner.clone() as Arc<dyn GatewayActions>),
+            None,
+            None,
+        );
+
+        for (name, args) in [
+            ("update_memory_index_config", json!({"batch_size": 7})),
+            ("add_allowed_command", json!({"command": "curl"})),
+            ("list_allowed_commands", json!({})),
+            ("remove_allowed_command", json!({"command": "curl"})),
+        ] {
+            let r = actions.execute(name, &args, &owner_ctx()).await;
+            assert!(r.success, "{name}: {:?}", r.error);
+            assert!(
+                r.data.as_ref().unwrap().get("reached_inner").is_none(),
+                "{name} が inner へ委譲されている（own が処理すべき）"
+            );
+        }
+        assert!(
+            inner.calls().is_empty(),
+            "inner へ到達してはならない: {:?}",
+            inner.calls()
+        );
+    }
+
+    /// **transport gateway が inner に居ても（REST + Discord 構成）漏れないことの固定**。
+    ///
+    /// このテストは**旧 `hot_reload_reaches_the_shared_config_even_with_a_transport_inner`
+    /// の反転**である。旧テストは「inner が居てもグローバル設定に反映される」ことを
+    /// 不変条件として固定していたが、それは #202 の漏れそのものだった。
+    ///
+    /// 経緯（#197 との関係）: REST（`crate::api::agents_messages`）は Discord が有効な
+    /// とき `SystemGatewayActions { inner: Some(DiscordGatewayActions) }` を組む。移設前は
+    /// その Discord gateway へ `Arc::new(RwLock::new(state.tools_config.read().clone()))`
+    /// ＝**使い捨てのコピー**を渡していた。そのおかげで REST 経路は**偶然この漏れが
+    /// 無かった**。素朴に移設すると共有実体へ届いて漏れる側に揃ってしまうため、同じ
+    /// 変更でグローバル書き込みを撤去した。
+    ///
+    /// #197 について構造面で言えることは、`DiscordGatewayActions::new` がもう実行許可
+    /// 設定を受け取らない（引数自体が消えた）＝**別インスタンスを作る余地がコンパイル時に
+    /// 無い**という点だけである。
+    #[tokio::test]
+    async fn add_allowed_command_does_not_leak_to_the_global_config_with_a_transport_inner() {
+        let state = state_with_shell(&[]);
+        // REST + Discord 相当: transport gateway が inner に居る構成。
+        let inner = Arc::new(RecordingInner::new(&["discord_send_file"]));
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            Some(inner as Arc<dyn GatewayActions>),
+            None,
+            None,
+        );
+
+        let r = actions
+            .execute(
+                "add_allowed_command",
+                &json!({"command": "curl"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        // DB にだけ入る。
+        assert_eq!(db_allowed_commands(&state, "agent-x"), vec!["curl"]);
+        assert!(
+            live_allowed_commands(&state).is_empty(),
+            "inner の有無に関わらずグローバル設定へ書いてはならない（#202）: {:?}",
+            live_allowed_commands(&state)
+        );
     }
 }

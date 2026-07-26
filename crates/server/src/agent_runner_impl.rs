@@ -3,8 +3,6 @@
 //! Bridges the discord crate's AgentRunner trait to the server's
 //! process module, breaking the circular dependency.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
 use crate::process;
@@ -14,10 +12,6 @@ use crate::AppState;
 impl opencrab_discord::AgentRunner for AppState {
     fn db(&self) -> &opencrab_db::Db {
         &self.db
-    }
-
-    fn tools_config(&self) -> &Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>> {
-        &self.tools_config
     }
 
     fn has_llm_providers(&self) -> bool {
