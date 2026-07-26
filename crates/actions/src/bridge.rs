@@ -582,6 +582,10 @@ pub struct BridgedExecutor {
     mcp_actions: Option<Arc<dyn GatewayActions>>,
     depth: u32,
     tool_event_sink: Option<Arc<dyn ToolEventSink>>,
+    /// この run を起こした inbound メッセージの返信先（gateway 不透明 token / #158 S1）。
+    /// `gateway_call_context` が `GatewayCallContext.reply_target` に載せ、宛先引数を
+    /// 省略したツール呼び出しのフォールバックにする。既定 `None`。
+    reply_target: Option<String>,
 }
 
 impl BridgedExecutor {
@@ -593,6 +597,7 @@ impl BridgedExecutor {
             mcp_actions: None,
             depth: 0,
             tool_event_sink: None,
+            reply_target: None,
         }
     }
 
@@ -614,6 +619,16 @@ impl BridgedExecutor {
 
     pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
         self.tool_event_sink = Some(sink);
+        self
+    }
+
+    /// inbound メッセージの返信先（gateway 不透明 token）を注入する（#158 S1）。
+    ///
+    /// `RunRequest.reply_target` と同じ `Option<String>` をそのまま受け、ツール実行時の
+    /// `GatewayCallContext.reply_target` として gateway 実装へ運ぶ。未注入なら `None`
+    /// のままで、宛先を明示するツール呼び出しの挙動は変わらない。
+    pub fn with_reply_target(mut self, reply_target: Option<String>) -> Self {
+        self.reply_target = reply_target;
         self
     }
 
@@ -642,6 +657,9 @@ impl BridgedExecutor {
             // する注入口。Arc は本 executor が所有し、ここでは clone して短命な
             // ctx に載せるだけ（自己参照 Arc ではない＝サイクルなし）。
             root_gateway: self.gateway_actions.clone(),
+            // inbound の返信先を gateway 実装まで運ぶ（#158 S1）。宛先を引数で受ける
+            // アクションが、引数省略時のフォールバックとして読む。
+            reply_target: self.reply_target.clone(),
         }
     }
 
@@ -1691,6 +1709,72 @@ mod tests {
             seen.root_gateway.is_some(),
             "root_gateway handle must be injected so a sub-engine can wrap the composite gateway"
         );
+    }
+
+    /// #158 S1: gateway の `execute` に渡る ctx が、この run を起こした inbound の
+    /// 返信先（gateway 不透明 token）を運ぶこと。宛先引数を省略したツール呼び出しの
+    /// フォールバック源になる。
+    #[tokio::test]
+    async fn test_gateway_ctx_carries_reply_target() {
+        let (_dir, ctx) = test_context();
+        let gw = Arc::new(CtxRecordingGateway {
+            last_ctx: Mutex::new(None),
+            last_args: Mutex::new(None),
+        });
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(gw.clone())
+            .with_reply_target(Some("note1abcdef".to_string()));
+        let r = executor.execute("ctx_probe", &json!({})).await;
+        assert!(r.success);
+        let seen = gw.last_ctx.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.reply_target.as_deref(), Some("note1abcdef"));
+    }
+
+    /// #158 S1 非退行: 返信先を注入しない executor は ctx.reply_target が None のまま
+    /// （後方互換 = 宛先を明示する呼び出しの挙動は変わらない）。
+    #[tokio::test]
+    async fn test_gateway_ctx_reply_target_none_by_default() {
+        let (_dir, ctx) = test_context();
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        assert!(executor.gateway_call_context().reply_target.is_none());
+    }
+
+    /// #158 S1: Nostr 経路（`RunRequest.reply_target` を載せる gateway）で、`process.rs`
+    /// と同じ配線を通すとツール実行の文脈に返信先が**非 None** で届くこと。Nostr は既に
+    /// `RunRequest` に返信先を入れている（#167）ので、この段だけで効く。
+    #[tokio::test]
+    async fn test_nostr_run_request_reply_target_reaches_gateway_ctx() {
+        use crate::run_request::RunRequest;
+
+        let (_dir, action_ctx) = test_context();
+        // Nostr gateway が inbound の返信先（イベント id）を RunRequest に載せる。
+        let req = RunRequest::new(
+            "agent-a",
+            "A",
+            "nostr-agent-a-npub1sender",
+            "sys",
+            "conv",
+            "nostr",
+            CallerIdentity::Agent,
+        )
+        .with_reply_target("note1abcdef");
+
+        let gw = Arc::new(CtxRecordingGateway {
+            last_ctx: Mutex::new(None),
+            last_args: Mutex::new(None),
+        });
+        // process.rs の executor 構築と同じ配線（RunRequest → BridgedExecutor）。
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), action_ctx)
+            .with_gateway_actions(gw.clone())
+            .with_reply_target(req.reply_target.clone());
+
+        assert!(executor.execute("ctx_probe", &json!({})).await.success);
+        let seen = gw.last_ctx.lock().unwrap().clone().unwrap();
+        assert!(
+            seen.reply_target.is_some(),
+            "Nostr 経路ではツール文脈の返信先が非 None になる"
+        );
+        assert_eq!(seen.reply_target.as_deref(), Some("note1abcdef"));
     }
 
     /// root_gateway 未注入（gateway_actions 無し）の executor は、ctx.root_gateway が

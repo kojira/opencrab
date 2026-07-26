@@ -631,6 +631,10 @@ async fn process_incoming_message<T: AgentRunner>(
                             caller_spawn,
                         )
                         .with_gateway_actions(ga_spawn)
+                        // 返信先（gateway 不透明 token / #158 S1）= 受信チャンネルの
+                        // 数値文字列。Discord は従来 session_id から復元して間に合わせて
+                        // いたが、ツール文脈まで運べば宛先引数を省略できる。
+                        .with_reply_target(channel_id_str_spawn.clone())
                         .with_image_urls(image_urls_spawn.clone());
                         if !discord_message_id_spawn.is_empty() {
                             run_req =
@@ -797,6 +801,8 @@ async fn process_subtask_completed<T: AgentRunner>(
                 opencrab_actions::CallerIdentity::Agent,
             )
             .with_gateway_actions(gateway_actions)
+            // 返信先（gateway 不透明 token / #158 S1）= resume 対象チャンネルの数値文字列。
+            .with_reply_target(channel_id_str.clone())
             .with_dispatch(Some(subtask_registry.clone()), {
                 // resume したメインエンジンも非ブロック dispatch を継続できるよう sink を配線。
                 // 共有 registry に載せて停止可能にする（P0）。
@@ -1128,7 +1134,9 @@ async fn process_interaction_response<T: AgentRunner>(
                 "discord",
                 opencrab_actions::CallerIdentity::Agent,
             )
-            .with_gateway_actions(gateway_actions),
+            .with_gateway_actions(gateway_actions)
+            // 返信先（gateway 不透明 token / #158 S1）= UI 応答が来たチャンネルの数値文字列。
+            .with_reply_target(channel_id_str.clone()),
         )
         .await
     {

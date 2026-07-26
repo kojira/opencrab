@@ -363,6 +363,29 @@ pub(crate) fn record_peer_review_reply(
     }
 }
 
+/// ピアレビュー依頼の投稿先を解決する（#158 S1）。
+///
+/// 引数 `channel_id` が最優先。未指定（または空）なら実行文脈の返信先
+/// （`GatewayCallContext.reply_target` = gateway 不透明 token。Discord では channel id の
+/// 数値文字列）へフォールバックする。**両方無ければ空文字で送らず明示エラー**
+/// （fail-closed）。宛先を明示した呼び出しの挙動は従来どおり（既定値が増えるだけ）。
+fn resolve_review_channel<'a>(
+    args: &'a serde_json::Value,
+    ctx: &'a GatewayCallContext,
+) -> Result<&'a str, String> {
+    if let Some(id) = args
+        .get("channel_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.trim().is_empty())
+    {
+        return Ok(id);
+    }
+    ctx.reply_target
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "channel_idパラメータが必要です（実行文脈に返信先がありません）".to_string())
+}
+
 impl DiscordGatewayActions {
     pub(crate) async fn execute_request_peer_review(
         &self,
@@ -404,13 +427,13 @@ impl DiscordGatewayActions {
                 )),
             };
         }
-        let channel_id_str = match args.get("channel_id").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => {
+        let channel_id_str = match resolve_review_channel(args, ctx) {
+            Ok(id) => id,
+            Err(error) => {
                 return GatewayActionResult {
                     success: false,
                     data: None,
-                    error: Some("channel_idパラメータが必要です".to_string()),
+                    error: Some(error),
                 }
             }
         };
@@ -549,6 +572,55 @@ impl DiscordGatewayActions {
 mod tests {
     use super::*;
     use crate::gateway_actions::webhook::DISCORD_CHUNK_LIMIT;
+    use opencrab_gateway::GatewayCaller;
+
+    /// #158 S1: 宛先を省略したら実行文脈の返信先（Discord では channel id の数値文字列）
+    /// が使われる。
+    #[test]
+    fn resolve_channel_falls_back_to_ctx_reply_target() {
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-a")
+            .with_reply_target(Some("111222333".to_string()));
+        let args = json!({"content": "diff"});
+        let resolved = resolve_review_channel(&args, &ctx).unwrap();
+        assert_eq!(resolved, "111222333");
+    }
+
+    /// #158 S1 非退行: 宛先を明示したら文脈の返信先より優先される（既定値が増えるだけ）。
+    #[test]
+    fn resolve_channel_prefers_explicit_argument() {
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-a")
+            .with_reply_target(Some("111222333".to_string()));
+        let args = json!({"content": "diff", "channel_id": "999"});
+        let resolved = resolve_review_channel(&args, &ctx).unwrap();
+        assert_eq!(resolved, "999", "引数の宛先が文脈より優先される");
+    }
+
+    /// #158 S1: 引数も文脈も宛先を持たないなら "" で送らず明示エラー（fail-closed）。
+    #[test]
+    fn resolve_channel_fails_closed_without_any_target() {
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-a");
+        let args = json!({"content": "diff"});
+        let err = resolve_review_channel(&args, &ctx).unwrap_err();
+        assert!(
+            err.starts_with("channel_idパラメータが必要です"),
+            "既存の文言に揃える: {err}"
+        );
+    }
+
+    /// 空文字は宛先として扱わない（"" のまま送らない = fail-closed の担保）。
+    #[test]
+    fn resolve_channel_treats_blank_as_unspecified() {
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-a")
+            .with_reply_target(Some("444".to_string()));
+        let blank_args = json!({"content": "diff", "channel_id": "  "});
+        let resolved = resolve_review_channel(&blank_args, &ctx).unwrap();
+        assert_eq!(resolved, "444");
+
+        let blank_ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-a")
+            .with_reply_target(Some("".to_string()));
+        let args = json!({"content": "diff"});
+        assert!(resolve_review_channel(&args, &blank_ctx).is_err());
+    }
 
     #[test]
     fn header_includes_task_and_instructions() {
