@@ -211,15 +211,20 @@ The ActionDispatcher registers **28 actions** across 7 categories, invokable by 
 | **Soul** (1) | `update_instructions` | Owner-only agent behavioral instruction update |
 | **Shell** (1) | `execute_shell` | Run shell commands from the agent's allowed command list |
 
-In addition, the Discord gateway supports **gateway-only actions** invokable via natural language:
+In addition, **gateway actions** are invokable via natural language. Where they are
+implemented decides where they are usable: the transport-independent source
+(`SystemGatewayActions`, `crates/server/src/system_actions.rs`) is composed into **every**
+turn — Discord, web, Nostr, REST and heartbeat alike — while a transport crate's actions
+only exist on that transport's turns.
 
-| Category | Actions |
-|----------|---------|
-| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file` |
-| **Skills** | `create_skill` |
-| **Memory** | `rebuild_memory_index`, `update_memory_index_config` |
-| **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command` |
-| **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress` |
+| Category | Actions | Available on |
+|----------|---------|--------------|
+| **Config** | `configure_llm_provider`, `configure_self`, `configure_nostr`, `configure_mcp_server`, `nostr_generate_key` | all turns (`crates/server/src/system_actions.rs`) |
+| **Memory** | `rebuild_memory_index`, `update_memory_index_config` | all turns (`crates/server`) |
+| **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions.rs`) |
+| **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress` | all turns (`crates/server`) |
+| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `send_ui`, webhook/voice management | Discord turns only (`crates/discord`) |
+| **Skills** | `create_skill` | Discord turns only (`crates/discord`) |
 
 ## Skills
 
