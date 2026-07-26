@@ -2269,6 +2269,85 @@ async fn test_web_send_dispatches_tool_as_background_subtask() {
     );
 }
 
+/// GET を 1 本流し、**body を読まずに** `(status, content-type)` を返す。
+///
+/// `send_request` は body を読み切るので、終端しない SSE レスポンス（`web/stream`）には
+/// 使えない。ハングを「失敗」として観測できるよう、ヘッダ取得にタイムアウトを掛ける。
+async fn get_head(app: Router, uri: &str) -> (StatusCode, Option<String>) {
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req))
+        .await
+        .expect("router がレスポンスヘッダを返さない（ハングしている）")
+        .expect("router がリクエストを落とした");
+    let content_type = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    // body（SSE ストリーム）は読まずに drop する。
+    (res.status(), content_type)
+}
+
+/// #190 S4: **購読側のルートが server の合成済み Router に取り付いていること**。
+///
+/// web gateway のルート定義は独立クレートへ移設され（`opencrab_web_gateway::routes()`）、
+/// server は `create_router` の `.merge(...)` で取り付けるだけになった。クレート側の
+/// テストはルータ単体（`routes()`）を叩くので、**server の合成が壊れても気づけない**。
+/// 送信側（`web/send`）は上の dispatch/resume テストが合成済み Router 越しに叩いている
+/// が、購読側（`web/stream`）には in-process の検証が無かった。
+///
+/// これが落ちる変異: `create_router` の `.merge(opencrab_web_gateway::routes::<AppState>())`
+/// を消す / 購読側のパス文字列を変える / クエリ名 `conversation` を変える。
+///
+/// SSE の body は終端しないので読まない（**接続が確立してルートが解決されること**が主眼）。
+#[tokio::test]
+async fn test_web_stream_route_is_mounted_on_the_server_router() {
+    let app = create_test_app();
+    // 購読は DB を触らない（agent 行の有無に依存しない）。パスの解決だけを見る。
+    let agent_id = "mounted-agent";
+
+    // 1. 購読ルートが載っている: 404 ではなく 200 + SSE の content-type が返る。
+    let (status, content_type) = get_head(
+        app.clone(),
+        &format!("/api/agents/{agent_id}/web/stream?conversation=conv-mounted"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "server の合成済み Router に GET /api/agents/{{id}}/web/stream が載っていない"
+    );
+    assert!(
+        content_type
+            .as_deref()
+            .is_some_and(|ct| ct.starts_with("text/event-stream")),
+        "SSE ハンドラに解決されていない（content-type: {content_type:?}）"
+    );
+
+    // 2. クエリ名 `conversation` も契約（ダッシュボードが組み立てる URL）。
+    //    名前が変わると extractor が 400 を返すので、404 とは区別できる。
+    let (status, _) = get_head(app.clone(), &format!("/api/agents/{agent_id}/web/stream")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "`conversation` が必須クエリでなくなっている"
+    );
+
+    // 3. 対照: 取り付けていないパスは 404 になる（1. の「404 でない」に意味を持たせる）。
+    for uri in [
+        format!("/api/agents/{agent_id}/web/streams?conversation=c"),
+        format!("/api/agents/{agent_id}/web/stream/extra?conversation=c"),
+        format!("/api/agents/{agent_id}/web"),
+    ] {
+        let (status, _) = get_head(app.clone(), &uri).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{uri} は取り付けたルートの担当外のはず"
+        );
+    }
+}
+
 /// SSE チャンネルから指定 `kind` のイベントが届くまで待つ（テスト用ヘルパ）。
 ///
 /// resume は sink → `tokio::spawn` の非同期経路なので、待たずに読むと取りこぼす。
