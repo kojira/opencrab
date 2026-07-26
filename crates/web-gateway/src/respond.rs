@@ -243,6 +243,38 @@ mod tests {
             .contains("[subtask_completed: subtask_id=st-1"));
     }
 
+    /// **run に載る登録簿は、停止処理が引くものと同一の Arc でなければならない**。
+    ///
+    /// 停止（cancel）は「セッションの登録簿から subtask を引く」実装なので、応答生成に
+    /// 別の登録簿を渡すと走行中の subtask が見つからず、停止が常に失敗する。ここを壊しても
+    /// 落ちるテストが無い状態だったので固定する（同一性の検査なので `Arc::ptr_eq` で見る）。
+    #[tokio::test]
+    async fn run_uses_the_gateways_registry_so_cancel_can_reach_it() {
+        let runner = FakeRunner::new("ok");
+        let sid = web_session_id("a", "c-registry");
+
+        run_and_deliver_serialized(
+            &runner,
+            "a",
+            &sid,
+            CallerIdentity::TrustedUser,
+            None,
+            "direct",
+        )
+        .await;
+
+        let runs = runner.runs();
+        let observed = runs
+            .first()
+            .and_then(|r| r.subtask_registry.clone())
+            .expect("run に登録簿が載っていない（非ブロック実行が無効）");
+        let from_gateway = runner.web_gateway().registry_for(&sid);
+        assert!(
+            std::sync::Arc::ptr_eq(&observed, &from_gateway),
+            "応答生成に渡した登録簿が、停止処理が引くものと別インスタンスになっている"
+        );
+    }
+
     /// 同一セッションの入口呼び出しは直列化される（入口が必ずロックを取る）。
     #[tokio::test]
     async fn entry_point_serializes_same_session() {
