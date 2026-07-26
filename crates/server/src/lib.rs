@@ -16,7 +16,9 @@ pub mod memory_maintenance;
 pub mod nostr_runner_impl;
 pub mod process;
 pub mod skill_consolidation;
+pub mod subtask_registries;
 pub mod system_actions;
+pub mod web_gateway;
 
 #[cfg(feature = "discord")]
 mod agent_runner_impl;
@@ -85,6 +87,15 @@ pub struct AppState {
     /// per-agent Nostr sub-gateway マネージャ（main で構築してセットされる）。
     pub nostr_manager: Option<SharedNostrManager>,
     pub mcp_manager: Option<SharedMcpManager>,
+    /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
+    pub web_gateway: Arc<web_gateway::WebGateway>,
+    /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
+    /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
+    /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
+    pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
+    /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
+    /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
+    pub subtask_auto_dispatch: bool,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -360,6 +371,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/messages",
             post(api::agents_messages::send_agent_message),
         )
+        // web gateway（#154）: ダッシュボードからの会話 + SSE 配送
+        .route(
+            "/api/agents/{id}/web/send",
+            post(api::web::send_web_message),
+        )
+        .route("/api/agents/{id}/web/stream", get(api::web::web_stream))
         // 許可コマンド管理
         .route(
             "/api/agents/{id}/allowed-commands",

@@ -43,6 +43,44 @@ fn get_or_create_heartbeat_session(
     session_id
 }
 
+/// heartbeat 経路の `RunRequest` を組む（#169）。
+///
+/// 非ブロック dispatch（RFC #152 S3a）を有効化する。これにより heartbeat の tick は
+/// 長時間ツールで塞がれず、`cancel_subtask`（#161）からも停止できる。
+///
+/// - registry: **agent 単位**で `AppState` が保持しているものを共有する。tick /
+///   チャンネル / heartbeat ループ再起動（設定変更）を跨いで同一 Arc なので、前 tick で
+///   dispatch した subtask を後続 tick の `cancel_subtask` が引ける（使い捨ての DashMap
+///   では常に not found）。
+/// - sink: `NoopCompletionSink` = **即時 resume はしない**。完了本文は
+///   `settle_completed` が親セッションログへ永続化し、heartbeat は毎 tick 同じ
+///   session_id で `build_conversation_string` により会話を再構築するため、次 tick で
+///   自然に文脈へ載る。sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
+///   sink 側へ複製する必要があり、かつ session ロックが無いため次 tick と競合して
+///   二重応答の不変条件（RFC §6）を壊す。
+fn heartbeat_run_request(
+    registries: &opencrab_server::subtask_registries::SubtaskRegistries,
+    agent_id: &str,
+    agent_name: &str,
+    session_id: &str,
+    system_prompt: &str,
+    conversation: &str,
+) -> opencrab_actions::RunRequest {
+    opencrab_actions::RunRequest::new(
+        agent_id,
+        agent_name,
+        session_id,
+        system_prompt,
+        conversation,
+        "heartbeat",
+        opencrab_actions::CallerIdentity::Owner,
+    )
+    .with_dispatch(
+        Some(registries.registry_for(agent_id)),
+        Arc::new(opencrab_actions::NoopCompletionSink),
+    )
+}
+
 /// ハートビートコールバックを生成する。
 /// 初期起動とhot-reload再起動の両方で使用。
 fn make_heartbeat_callback(
@@ -223,17 +261,16 @@ fn make_heartbeat_callback(
                     "ハートビート自律行動",
                 );
 
-                // 5. run_agent_response を呼び出す
+                // 5. run_agent_response を呼び出す（非ブロック dispatch 有効 / #169）
                 let engine_result = opencrab_server::process::run_agent_response(
                     &state,
-                    opencrab_actions::RunRequest::new(
+                    heartbeat_run_request(
+                        &state.subtask_registries,
                         &agent_id_owned,
                         &agent_name,
                         &session_id,
                         &system_prompt,
                         &conversation,
-                        "heartbeat",
-                        opencrab_actions::CallerIdentity::Owner,
                     ),
                 )
                 .await;
@@ -476,6 +513,8 @@ async fn main() -> anyhow::Result<()> {
         db,
         llm_router: opencrab_server::SharedLlmRouter::new(llm_router),
         llm_config: Arc::new(cfg.llm.clone()),
+        // 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / env 上書き）。
+        subtask_auto_dispatch: cfg.subtask.auto_dispatch,
         // 純 TOML を保持する（DB オーバーライド適用前の土台）。API の GET は
         // DB 行が無いときこれを "toml" として返すため、リセット後に古い実効値を
         // TOML と誤表示しないよう effective ではなく cfg.voice を入れる（レビュー指摘）。
@@ -493,6 +532,8 @@ async fn main() -> anyhow::Result<()> {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
     };
 
     #[cfg(feature = "discord")]
@@ -577,6 +618,9 @@ async fn main() -> anyhow::Result<()> {
 
                 let subtask_registry: opencrab_discord::SubtaskRegistry =
                     Arc::new(dashmap::DashMap::new());
+                // ループ（auto-dispatch）と gateway_actions（cancel_subtask）が同一 registry を
+                // 共有し、auto-dispatch した subtask を停止可能にする（RFC #152 S3a / P0）。
+                let subtask_registry_for_loop = subtask_registry.clone();
                 // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
                 // gateway_actions とループで同じチャンネルを共有する必要がある。
                 let (event_tx, event_rx) = opencrab_discord::message_loop::create_event_channel();
@@ -672,6 +716,7 @@ async fn main() -> anyhow::Result<()> {
                         // enable されたエージェントはメッセージ処理時にスキップ（#40）。
                         true,
                         voice_manager,
+                        subtask_registry_for_loop,
                     )
                     .await;
                 });
@@ -903,4 +948,81 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrab_server::subtask_registries::SubtaskRegistries;
+
+    /// #169: heartbeat の `RunRequest` に非ブロック dispatch が配線される
+    /// （`completion_sink` が Some のときだけ `run_agent_response` が dispatcher を注入する）。
+    #[test]
+    fn heartbeat_run_request_enables_dispatch() {
+        let registries = SubtaskRegistries::new();
+        let req = heartbeat_run_request(
+            &registries,
+            "agent-a",
+            "A",
+            "heartbeat-agent-a-123",
+            "sys",
+            "conv",
+        );
+        assert!(
+            req.completion_sink.is_some(),
+            "heartbeat は dispatch を有効化する（sink 未配線だと全ツール inline 実行）"
+        );
+        assert!(
+            req.subtask_registry.is_some(),
+            "registry を渡さないと run 内で使い捨てが作られ cancel_subtask が not found になる"
+        );
+        assert_eq!(req.gateway, "heartbeat");
+    }
+
+    /// #169: registry は **agent 単位**で共有される。tick を跨いで同一 Arc なので、
+    /// 前 tick で dispatch した subtask を後続 tick の `cancel_subtask` が引ける。
+    #[test]
+    fn heartbeat_registry_is_shared_across_ticks_per_agent() {
+        let registries = SubtaskRegistries::new();
+        // 同一エージェントの別 tick（チャンネル違いで session_id も違う）。
+        let tick1 =
+            heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-1", "", "");
+        let tick2 =
+            heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-2", "", "");
+        let r1 = tick1.subtask_registry.unwrap();
+        let r2 = tick2.subtask_registry.unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&r1, &r2),
+            "同一エージェントの tick は同じ registry を共有する"
+        );
+
+        // 別エージェントは独立（他エージェントの subtask が混ざらない）。
+        let other =
+            heartbeat_run_request(&registries, "agent-b", "B", "heartbeat-agent-b-1", "", "");
+        assert!(!std::sync::Arc::ptr_eq(
+            &r1,
+            &other.subtask_registry.unwrap()
+        ));
+    }
+
+    /// #169: heartbeat の sink は再注入しない（`NoopCompletionSink`）。
+    /// 呼んでも resume を起こさず、完了本文は次 tick の会話再構築で拾う。
+    #[tokio::test]
+    async fn heartbeat_sink_does_not_reinject() {
+        use opencrab_actions::{SettleKind, SubtaskSettled};
+
+        let registries = SubtaskRegistries::new();
+        let req = heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-1", "", "");
+        // Noop sink は呼んでも副作用が無い（panic せず、resume も配送もしない）。
+        req.completion_sink
+            .unwrap()
+            .on_subtask_settled(SubtaskSettled {
+                session_id: "heartbeat-agent-a-1".to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "st-1".to_string(),
+                exit_reason: "completed".to_string(),
+                kind: SettleKind::Completed,
+                reply_target: None,
+            });
+    }
 }

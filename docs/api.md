@@ -50,6 +50,9 @@ Base URL: `http://localhost:3000`
 | POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
 | **Agent Messages** | | |
 | POST | `/api/agents/{id}/messages` | Send direct message to agent |
+| **Web** | | |
+| POST | `/api/agents/{id}/web/send` | Send message from web dashboard (inbound) |
+| GET | `/api/agents/{id}/web/stream` | Subscribe to agent utterances (SSE) |
 | **Analytics** | | |
 | GET | `/api/agents/{id}/analytics` | Analytics summary |
 | GET | `/api/agents/{id}/analytics/detail` | Analytics by model |
@@ -1019,6 +1022,8 @@ Base URL: `http://localhost:3000`
 
 > メッセージ送信者（`agent_id`）以外の全参加者が自動的に応答する。LLM 呼び出しが発生する。
 
+> **ツール実行は inline（同期）**: この経路は非ブロック dispatch を配線しない。エージェントが呼んだツールはすべて応答ターンの中で実行され、その結果を踏まえた最終応答が `responses[].content` に入る（`tool_calls_made` も実際の実行回数）。同じ「メッセージ送信」でも `POST /api/agents/{id}/messages` は意味論が異なる（後述）。
+
 **Request Body**
 
 | Field | Type | Required | Description |
@@ -1147,6 +1152,27 @@ Base URL: `http://localhost:3000`
 
 `user_id` はハンドラ入口で 1 回だけ前後の空白を除去され（trim）、以降の権限判定・セッション ID・`speaker_id` すべてで同じ正規化済みの値が使われる。つまり `" 123 "` と `"123"` は同じセッション・同じ送信者として扱われる。
 
+**ツール実行は非ブロック（background subtask）**
+
+この経路は非ブロック dispatch を配線している。エージェントが返したツール呼び出しは、同一 assistant メッセージ分をまとめて 1 つの background subtask として dispatch され、**HTTP 応答はその完了を待たずに返る**。
+
+- **ツールの実行結果は応答本文に含まれない**。`responses[].content` はツールを呼ぶと決めた時点のエージェント発話であり、「ツール結果を踏まえた最終応答」ではない。
+- **一部のツールは従来どおり inline 実行**され、その結果は同じターンの応答本文に反映される。inline に留めるのは「背景化すると壊れるもの」で、分類の考え方は次のとおり:
+  - **配送系**（送信・投稿・返信・UI 提示）、**同ターンで戻り値を使うもの**（生成した ID / URL をそのターンで使う）、**run 内の共有状態を書くもの**（実行中モデルの切り替え等）、**純粋な読み取りで即答すべきもの**（一覧・検索）、そして **dispatch 自体の制御系**（`spawn_subtask` / `cancel_subtask` / `report_progress`）。
+  - inline 集合は**ツールの供給源ごとに別々に存在する** — 共通アクション群 / サーバ内蔵の設定ツール群 / Discord / Nostr の 4 つ。数十個規模で増減するため、ここでは列挙しない（列挙すると必ず実装と乖離する）。
+  - **MCP ツール（`mcp__*`）は既定で inline**。運用者が繋いだ外部ツールの性質を静的に判定できないため、安全側に倒している。
+  - 逆に、**明示的に dispatch 対象へ回されるものもある**（長時間処理。例: `nostr_generate_key` の vanity 鍵探索）。
+  - **正確な一覧の権威はコード**（`crates/actions/src/bridge.rs` の inline 集合 / dispatch 可集合の定数対）。分類基準の解説は `docs/DESIGN.md` §4.4「非ブロックツール実行」を参照。
+- dispatch は最上位ターンのみ。`spawn_subtask` で建てたサブエンジンの中は全ツール inline 実行。
+- **完了結果の取得**は `GET /api/sessions/{id}/logs`（`session_id` はレスポンスの `session_id`）。この経路の完了 sink は「保存のみ」で、結果を再注入して LLM を回し直す（resume）ことはしない。保存された完了本文は次回 POST 時の会話履歴として文脈に載る。
+- **`sessions.status` を「走行中かどうか」の判定に使わないこと**。この経路がセッション行を `active` にするのは**初回作成時だけ**で、`active` に戻す経路が無い。挙動は次のようになる:
+  - **1 通目**: 走行中の subtask がある間は `active` のままで、最後の subtask が決着（完了 / 停止）した時点で `completed` になる。決着前にサーバが停止すれば `active` のまま残る。
+  - **2 通目以降**: セッション行は既に `completed` なので、subtask が走行中でも `completed` と読める。つまり `completed` は「もう走っていない」ことを意味しない。
+  - 完了の観測には `sessions.status` ではなく `GET /api/sessions/{id}/logs` の `subtask_completed` を使うこと（上記「完了結果の取得」）。
+- background subtask はバッチ全体で既定 1,800 秒のタイムアウトを持つ（超過時は `exit_reason="timeout"` として決着する）。走行中の subtask はエージェントの `cancel_subtask` で停止できる（registry はセッション単位で共有されるため、後続リクエストからも到達できる）。
+
+> **送信 API ごとに意味論が違う**: `POST /api/sessions/{id}/messages` は非ブロック dispatch を配線せず、ツールを inline 実行した結果を応答本文に含めて返す。`POST /api/agents/{id}/web/send` は本エンドポイントと同じく dispatch するが、完了時に resume して結果を SSE で配送する（下記 Web セクション）。
+
 **Request Body**
 
 | Field | Type | Required | Description |
@@ -1204,6 +1230,135 @@ Base URL: `http://localhost:3000`
   "error": "No LLM providers available"
 }
 ```
+
+---
+
+## Web
+
+ダッシュボード（web UI）からエージェントと会話するためのゲートウェイ。送信（inbound）と購読（SSE）の 2 本で構成される。
+
+セッション ID は `web-{agent_id}-{conversation_id}` の形式で自動生成・再利用される（`conversation_id` が会話スレッドの単位）。同一セッションの inbound と subtask 完了 resume は 1 本のロックで直列化される（割り込みによる二重回答の防止）。別セッションは並行して処理される。
+
+### POST /api/agents/{id}/web/send
+
+**目的**: web UI からのメッセージを送信し、直接応答を得る（応答は同時に SSE へも配送される）
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| conversation_id | string | ✅ | 会話 ID。セッション ID `web-{agent_id}-{conversation_id}` の構成要素 |
+| content | string | ✅ | メッセージ本文 |
+| user_id | string | ❌ | 送信者の ID（権限判定・`speaker_id` に使う）。省略時／空文字・空白のみのときは `"web-user"` |
+
+`user_id` は前後の空白を除去してから使われ、権限判定・`speaker_id` で同じ正規化済みの値が使われる（`POST /api/agents/{id}/messages` と同じ方針）。
+
+**Caller 権限の決定ロジック**: `POST /api/agents/{id}/messages` と同一。
+
+- `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
+- `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
+- `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
+- それ以外 → `Agent`
+
+> HTTP レベルの認証は無く（CORS は permissive）、権限はリクエストボディの `user_id` から導出される。既定値の `"web-user"` は `trusted_users` に登録しなければ `Agent` 権限にとどまる。ローカル／信頼済みネットワーク前提の想定である点は他のエンドポイントと同じ。
+
+セッションが存在しない場合は自動作成される（`theme` = `"web_conversation"`、`mode` = `"autonomous"`、`status` = `"active"`）。ユーザー発話は `session_logs` に記録され、応答生成時の会話履歴は毎回 DB から再構築される。
+
+**Example Request**
+
+```json
+{
+  "conversation_id": "conv-1",
+  "content": "今日のタスクを整理して",
+  "user_id": "123456789012345678"
+}
+```
+
+**Response**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| session_id | string | セッション ID（`web-{agent_id}-{conversation_id}`） |
+| caller_type | string | `"owner"` \| `"trusted_user"` \| `"co_agent"` \| `"agent"` |
+| response | string \| null | 直接応答の本文。`NO_REPLY`／空応答／エラー時は `null` |
+
+**Example Response**
+
+```json
+{
+  "session_id": "web-550e8400-e29b-41d4-a716-446655440000-conv-1",
+  "caller_type": "owner",
+  "response": "了解。まず優先度順に並べ替えるね。"
+}
+```
+
+**ツール実行は非ブロック（background subtask）**
+
+`POST /api/agents/{id}/messages` と同じく非ブロック dispatch を配線しているため、**ツールの実行結果は `response` に含まれない**（inline に留まるツールとその分類は Agent Messages の記述を参照）。差分は完了後の扱いで、この経路は subtask が決着すると per-session ロックの下でエージェントを resume し、生成された応答を **SSE の `subtask_resume` イベントとして配送する**（HTTP 応答はすでに返っているため body には現れない）。
+
+**Error Response** (no LLM provider)
+
+```json
+{
+  "session_id": "web-...-conv-1",
+  "caller_type": "agent",
+  "response": null,
+  "error": "No LLM providers available"
+}
+```
+
+**Error Response** (セッション作成・発話記録の失敗)
+
+```json
+{"error": "Failed to create session: ..."}
+```
+
+```json
+{"error": "Failed to log message: ..."}
+```
+
+---
+
+### GET /api/agents/{id}/web/stream
+
+**目的**: エージェント発話を SSE（`text/event-stream`）で購読する
+
+**Query Parameters**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| conversation | string | ✅ | 会話 ID。`web-{agent_id}-{conversation}` のセッションを購読する |
+
+購読自体に権限チェックは無い（`agent_id` と `conversation` を知っていれば購読できる）。keep-alive コメントが定期送出される。
+
+**Event 形式**
+
+SSE の `event:` 名は設定されない（既定の `message`）。各イベントの `data` は以下の JSON オブジェクトで、**種別は `kind` フィールドで判別する**。
+
+| Field | Type | Description |
+|-------|------|-------------|
+| kind | string | `"direct"` \| `"subtask_resume"` \| `"error"` |
+| agent_id | string | 発話したエージェントの ID |
+| content | string | 発話本文（`error` のときはエラーメッセージ） |
+
+| kind | 意味 |
+|------|------|
+| `direct` | `POST .../web/send` への直接応答。同じ本文が HTTP レスポンスの `response` にも入る（二重に見える点に注意） |
+| `subtask_resume` | dispatch した background subtask の完了を受けて resume したターンの応答。HTTP レスポンスには現れず、この経路のみで届く |
+| `error` | 応答生成が失敗した。`content` は `"(error: ...)"` 形式 |
+
+**Example Event**
+
+```
+data: {"kind":"subtask_resume","agent_id":"550e8400-e29b-41d4-a716-446655440000","content":"調査が終わったよ。結果は…"}
+```
+
+**配送の性質**
+
+- `direct` / `subtask_resume` の本文は `session_logs` にも保存される。stream を開く前に発生した発話や、取りこぼした発話は `GET /api/sessions/{id}/logs` で辿れる（`error` イベントは publish のみで DB に残らない）。
+- publish は best-effort。購読者がいないセッションのイベントは破棄される。
+- 未読バックログの上限は 256 件で、超過した購読者は溢れた分をスキップして受信を継続する（欠けた分は上記のログ経由で辿る）。
+- `NO_REPLY` および空応答は配送されない。
 
 ---
 

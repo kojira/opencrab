@@ -46,6 +46,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base,
@@ -62,6 +63,10 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
     };
     let app = create_router(state);
     (app, db)

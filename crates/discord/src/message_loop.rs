@@ -132,6 +132,10 @@ pub async fn run_discord_loop<T: AgentRunner>(
     skip_agents_with_dedicated_gateway: bool,
     // VC 対話が有効なとき Some。エージェント返信を対応する VC で読み上げる。
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    // auto-dispatch した background subtask を載せる共有 registry（RFC #152 S3a / P0）。
+    // `DiscordGatewayActions` と**同一**の registry を渡すことで、auto-dispatch した
+    // 単一ツール subtask が `cancel_subtask` の認可ゲート経由で親/owner から停止可能になる。
+    subtask_registry: crate::SubtaskRegistry,
 ) {
     let (event_tx, mut event_rx) = match event_channel {
         Some((tx, rx)) => (tx, rx),
@@ -238,6 +242,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
                         let voice_c = voice.clone();
+                        let event_tx_c = event_tx.clone();
+                        let registry_c = subtask_registry.clone();
                         let sess = session_id.clone();
                         spawn_serialized_on_session(session_locks.clone(), sess, async move {
                             process_subtask_completed(
@@ -254,6 +260,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 state_c,
                                 ga_c,
                                 voice_c,
+                                event_tx_c,
+                                registry_c,
                             )
                             .await;
                         });
@@ -333,6 +341,8 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         session_locks.clone(),
                         skip_agents_with_dedicated_gateway,
                         voice.clone(),
+                        event_tx.clone(),
+                        subtask_registry.clone(),
                     )
                     .await;
                 }
@@ -357,6 +367,8 @@ async fn process_incoming_message<T: AgentRunner>(
     session_locks: SessionLocks,
     skip_agents_with_dedicated_gateway: bool,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    subtask_registry: crate::SubtaskRegistry,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -572,6 +584,8 @@ async fn process_incoming_message<T: AgentRunner>(
         let sender_name_spawn = incoming.sender.name.clone();
         let sender_avatar_spawn = incoming.sender.avatar_url.clone();
         let text_spawn = text.clone();
+        let event_tx_spawn = event_tx.clone();
+        let registry_spawn = subtask_registry.clone();
 
         spawn_serialized_on_session(session_locks.clone(), session_id.clone(), async move {
             // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
@@ -625,6 +639,18 @@ async fn process_incoming_message<T: AgentRunner>(
                         if let Some(cb) = on_response_text {
                             run_req = run_req.with_on_response_text(cb);
                         }
+                        // 非ブロック自動 dispatch（RFC #152 S3a）: 完了再注入は Discord の
+                        // イベントループ（LoopEvent::SubtaskCompleted → 同一セッション直列
+                        // resume）へ流す sink を配線する。これで掘削中も同一チャンネルの
+                        // 後続メッセージに応答できる（セッションロックは run 終了で解放され、
+                        // background subtask 完了時に別途 resume される）。
+                        let sink: std::sync::Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+                            std::sync::Arc::new(crate::gateway_actions::DiscordCompletionSink {
+                                event_tx: Some(event_tx_spawn.clone()),
+                            });
+                        // 共有 registry（DiscordGatewayActions と同一）に載せて、
+                        // auto-dispatch した subtask を cancel_subtask で停止可能にする（P0）。
+                        run_req = run_req.with_dispatch(Some(registry_spawn.clone()), sink);
                         run_req
                     })
                     .await;
@@ -717,6 +743,8 @@ async fn process_subtask_completed<T: AgentRunner>(
     state: T,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    subtask_registry: crate::SubtaskRegistry,
 ) {
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
 
@@ -768,7 +796,16 @@ async fn process_subtask_completed<T: AgentRunner>(
                 "discord",
                 opencrab_actions::CallerIdentity::Agent,
             )
-            .with_gateway_actions(gateway_actions),
+            .with_gateway_actions(gateway_actions)
+            .with_dispatch(Some(subtask_registry.clone()), {
+                // resume したメインエンジンも非ブロック dispatch を継続できるよう sink を配線。
+                // 共有 registry に載せて停止可能にする（P0）。
+                let sink: std::sync::Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+                    std::sync::Arc::new(crate::gateway_actions::DiscordCompletionSink {
+                        event_tx: Some(event_tx.clone()),
+                    });
+                sink
+            }),
         )
         .await
     {

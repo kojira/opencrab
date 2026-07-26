@@ -22,6 +22,16 @@ max_workspace_size_mb = 100
 # 既定は hermit-shell（localhost:8765 の OpenAI 互換 Anthropic プロキシ、macOS 向け）。
 # それ以外を使う場合は、ダッシュボードの `/setup` または「システム設定」から
 # プロバイダーを有効化して API キーを設定してください（TOML 編集は不要）。
+
+[subtask]
+# ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
+#
+# false にすると全ツールが同期実行に戻る（この機能の導入前と同じ挙動）。
+# 環境変数 OPENCRAB_SUBTASK_AUTO_DISPATCH（0/false/off/no）が
+# この値より優先されるので、.env だけで切り戻せる。
+# 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
+auto_dispatch = true
+
 [llm]
 default_provider = "openai"
 default_model = "claude-sonnet-4-6"
@@ -64,7 +74,7 @@ base_url = "http://localhost:8080"
 # Codex CLI（ローカル。codex サブスク利用時）。binary_path 省略時は PATH から検索。
 [llm.providers.codex]
 default_model = "o4-mini"
-sandbox = "danger-full-access"
+sandbox = "read-only"
 timeout_secs = 300
 models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # reasoning_effort = "medium"

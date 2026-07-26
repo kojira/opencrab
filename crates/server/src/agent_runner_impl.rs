@@ -346,6 +346,7 @@ mod tests {
             db: opencrab_db::Db::from_connection(conn),
             llm_router: crate::SharedLlmRouter::new(opencrab_llm::router::LlmRouter::new()),
             llm_config: Arc::new(toml::from_str("").unwrap()),
+            subtask_auto_dispatch: true,
             voice_config: Arc::new(Default::default()),
             voice_runtime: Arc::new(std::sync::Mutex::new(None)),
             workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
@@ -361,6 +362,8 @@ mod tests {
             discord_manager: None,
             nostr_manager: None,
             mcp_manager: None,
+            web_gateway: Arc::new(crate::web_gateway::WebGateway::new()),
+            subtask_registries: Arc::new(crate::subtask_registries::SubtaskRegistries::new()),
         }
     }
 

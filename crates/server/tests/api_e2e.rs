@@ -27,6 +27,7 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(LlmRouter::new()),
         llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
@@ -43,6 +44,10 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
     };
     (create_router(state), db)
 }
@@ -890,13 +895,22 @@ async fn test_user_id_is_trimmed_consistently() {
 /// A mock LLM provider that returns pre-queued responses.
 struct MockLlmProvider {
     responses: Mutex<VecDeque<ChatResponse>>,
+    /// 受け取った各リクエストの system prompt（連結）。何ターン目にどんな system prompt で
+    /// 呼ばれたかを検証する（subtask 完了 resume の注入マーカーの確認に使う）。
+    system_prompts: Mutex<Vec<String>>,
 }
 
 impl MockLlmProvider {
     fn new() -> Self {
         Self {
             responses: Mutex::new(VecDeque::new()),
+            system_prompts: Mutex::new(Vec::new()),
         }
+    }
+
+    /// これまでに受け取ったリクエストの system prompt 一覧（呼ばれた順）。
+    fn system_prompts(&self) -> Vec<String> {
+        self.system_prompts.lock().unwrap().clone()
     }
 
     fn push_text_response(&self, text: &str) {
@@ -956,7 +970,17 @@ impl LlmProvider for MockLlmProvider {
         Ok(vec![])
     }
 
-    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        // キューが尽きていても記録は残す（何回どんな system prompt で呼ばれたかが証拠）。
+        let system = request
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .filter_map(|m| m.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.system_prompts.lock().unwrap().push(system);
+
         let mut queue = self.responses.lock().unwrap();
         queue
             .pop_front()
@@ -969,6 +993,13 @@ impl LlmProvider for MockLlmProvider {
 /// Create test app with a MockLlmProvider registered in the LlmRouter.
 /// Returns (Router, opencrab_db::Db, Arc<MockLlmProvider>).
 fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>) {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    (app, db, mock)
+}
+
+/// `create_test_app_with_llm` の `AppState` も返す版（#169）。
+/// dispatch registry のような「ハンドラとテストが共有するランタイム状態」を検証するのに使う。
+fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>, AppState) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
 
@@ -981,6 +1012,7 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
         db: db.clone(),
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir()
@@ -1000,9 +1032,13 @@ fn create_test_app_with_llm() -> (Router, opencrab_db::Db, Arc<MockLlmProvider>)
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
     };
-    let app = create_router(state);
-    (app, db, mock)
+    let app = create_router(state.clone());
+    (app, db, mock, state)
 }
 
 /// Create a named agent with a specific persona via the API.
@@ -1880,6 +1916,7 @@ fn state_with_consolidation(
         db,
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
+        subtask_auto_dispatch: true,
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
@@ -1896,6 +1933,10 @@ fn state_with_consolidation(
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
+        subtask_registries: std::sync::Arc::new(
+            opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
     }
 }
 
@@ -2023,4 +2064,533 @@ async fn test_skill_consolidation_curates_and_audits() {
     // last_at が前進している
     let last = opencrab_db::queries::get_last_skill_consolidation_at(&conn, "a1").unwrap();
     assert!(last.is_some() && last.as_deref() != Some("2020-01-01T00:00:00+00:00"));
+}
+
+// ==================== #169: REST の非ブロック dispatch ====================
+
+/// REST セッションのログを新しい順に取る小さなヘルパ。
+fn session_logs(
+    db: &opencrab_db::Db,
+    session_id: &str,
+) -> Vec<opencrab_db::queries::SessionLogRow> {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::list_recent_session_logs(&conn, session_id, 100).unwrap()
+}
+
+fn session_status(db: &opencrab_db::Db, session_id: &str) -> Option<String> {
+    let conn = db.lock().unwrap();
+    opencrab_db::queries::get_session(&conn, session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.status)
+}
+
+/// 即完了しない fake subtask を registry へ登録する（走行中 subtask の代役）。
+fn insert_running_subtask(
+    registry: &opencrab_actions::SubtaskRegistry,
+    subtask_id: &str,
+    parent_session_id: &str,
+    agent_id: &str,
+) -> tokio::task::JoinHandle<()> {
+    let handle = tokio::spawn(std::future::pending::<()>());
+    registry.insert(
+        subtask_id.to_string(),
+        opencrab_actions::SpawnedSubtask {
+            abort_handle: handle.abort_handle(),
+            session_id: format!("subtask-{subtask_id}"),
+            parent_session_id: parent_session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            label: "long job".to_string(),
+            started_at: std::time::Instant::now(),
+            reply_target: None,
+            lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+        },
+    );
+    handle
+}
+
+/// #169: `POST /api/agents/{id}/messages` はツールを background subtask として dispatch する
+/// （メインを塞がない）。ツール結果は inline の `{"success":...}` ではなく
+/// `{"status":"spawned"}` になり、完了本文は親セッションログへ着地する（取得口 = セッションログ）。
+#[tokio::test]
+async fn test_rest_message_dispatches_tool_as_background_subtask() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Dispatcher", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-dispatch-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "background_work",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "スキルを覚えて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+    assert_eq!(session_id, format!("agent-msg-{agent_id}-u1"));
+
+    // dispatch された（tool_result が spawned）。inline 実行なら status フィールドは無い。
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("\"status\":\"spawned\"")),
+        "REST でツールが background subtask へ dispatch されていない: {:?}",
+        logs.iter()
+            .map(|l| (l.log_type.clone(), l.content.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // 完了本文（subtask_completed）が親セッションログへ着地する = REST の取得口。
+    let mut settled = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("subtask_completed"))
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        settled,
+        "dispatch した subtask の完了本文が親セッションログへ永続化されない"
+    );
+
+    // 決着後は registry が空（settle_completed が除去する）。
+    assert!(!state.subtask_registries.has_running(&session_id));
+}
+
+/// #154 / #152: `POST /api/agents/{id}/web/send` もツールを background subtask として
+/// dispatch する（メインを塞がない）。
+///
+/// このテストが必要な理由: 非ブロック dispatch の注入は `process.rs` の 1 箇所
+/// （`depth == 0 && state.subtask_auto_dispatch` の分岐）で決まる。そこを潰しても
+/// 従来は REST のテスト 1 本しか落ちず、web / Discord / Nostr / heartbeat は全緑
+/// だった。web の配線をここで固定して、看板機能が無音で失われるのを防ぐ。
+#[tokio::test]
+async fn test_web_send_dispatches_tool_as_background_subtask() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "WebDispatcher", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-web-dispatch-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "web_background_work",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/web/send"),
+        Some(serde_json::json!({
+            "conversation_id": "conv-dispatch",
+            "content": "スキルを覚えて",
+            "user_id": "u1"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+    assert_eq!(session_id, format!("web-{agent_id}-conv-dispatch"));
+
+    // dispatch された（tool_result が spawned）。inline 実行なら status フィールドは無い。
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("\"status\":\"spawned\"")),
+        "web でツールが background subtask へ dispatch されていない: {:?}",
+        logs.iter()
+            .map(|l| (l.log_type.clone(), l.content.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // 完了本文（subtask_completed）が親セッションログへ着地する。
+    let mut settled = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("subtask_completed"))
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        settled,
+        "web で dispatch した subtask の完了本文が親セッションログへ永続化されない"
+    );
+
+    // 決着後は web gateway 側の registry も空になる（`cancel_subtask` の到達先と同一）。
+    assert!(
+        !state.web_gateway.has_running(&session_id),
+        "決着後も web gateway の registry にエントリが残っている"
+    );
+}
+
+/// SSE チャンネルから指定 `kind` のイベントが届くまで待つ（テスト用ヘルパ）。
+///
+/// resume は sink → `tokio::spawn` の非同期経路なので、待たずに読むと取りこぼす。
+/// 途中で流れる別 `kind`（inbound の `direct` など）は読み飛ばす。
+async fn recv_web_event_of_kind(
+    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    kind: &str,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let needle = format!("\"kind\":\"{kind}\"");
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(payload)) if payload.contains(&needle) => return Some(payload),
+            // 別 kind のイベント（inbound の direct 等）は読み飛ばす。
+            Ok(Ok(_)) => continue,
+            // チャンネル終了 / lag / タイムアウトは「届かなかった」扱い。
+            Ok(Err(_)) | Err(_) => return None,
+        }
+    }
+}
+
+/// #152 / #154 [P2]: **バックグラウンド実行の結果が web の会話へ再注入される**
+/// （看板機能の後半）ことを in-process で固定する。
+///
+/// このテストが必要な理由: 再注入は `WebCompletionSink::on_subtask_settled` の 1 箇所で
+/// 起きるが、そこを丸ごと `return;` にしても opencrab-server のテストは全て緑だった。
+/// 唯一の検証が `#[ignore]` + 実 LLM + 稼働サーバ前提の E2E で、CI では走らなかった。
+///
+/// 3 つの独立した証拠で resume の実行を確認する:
+/// 1. SSE へ `kind:"subtask_resume"` のイベントが流れる（配送）。
+/// 2. resume ターンの LLM リクエストの system prompt に `[subtask_completed: subtask_id=`
+///    が注入されている（会話への再注入）。
+/// 3. resume ターンの発話が親セッションの履歴へ残る（永続化）。
+#[tokio::test]
+async fn test_web_subtask_completion_resumes_parent_conversation() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "WebResumer", "TestPersona").await;
+    let session_id = format!("web-{agent_id}-conv-resume");
+
+    // resume は非同期に発火するので、送信前に購読しておく（取りこぼし防止）。
+    let mut rx = state.web_gateway.subscribe(&session_id);
+
+    // 1 ターン目: ツール呼び出し → dispatch → spawned を見た 2 回目で本文を返す。
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-web-resume-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "web_resume_work",
+                "experience": "e",
+                "outcome": "success",
+                "lesson": "l",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("バックグラウンドで実行を開始しました");
+    // 3 回目 = subtask 完了後の resume ターン。
+    mock.push_text_response("スキルの学習が完了しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/web/send"),
+        Some(serde_json::json!({
+            "conversation_id": "conv-resume",
+            "content": "スキルを覚えて",
+            "user_id": "u1"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["session_id"].as_str().unwrap(), session_id);
+
+    // 証拠 1: resume の応答が SSE へ配送される。
+    let payload =
+        recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| {
+                // system prompt 全文は巨大なので、件数と完了マーカーの有無だけを出す。
+                let prompts = mock.system_prompts();
+                let with_marker = prompts
+                    .iter()
+                    .filter(|p| p.contains("[subtask_completed: subtask_id="))
+                    .count();
+                panic!(
+                    "subtask 完了後に resume の SSE イベントが流れない（再注入が動いていない）。\
+             LLM 呼び出し回数={} うち完了マーカー入り={with_marker}",
+                    prompts.len()
+                )
+            });
+    assert!(
+        payload.contains("スキルの学習が完了しました"),
+        "resume イベントの本文が resume ターンの応答ではない: {payload}"
+    );
+
+    // 証拠 2: resume ターンの system prompt に完了マーカーが注入されている。
+    let prompts = mock.system_prompts();
+    assert!(
+        prompts
+            .iter()
+            .any(|p| p.contains("[subtask_completed: subtask_id=")),
+        "resume ターンの system prompt に完了マーカーが注入されていない: {prompts:?}"
+    );
+
+    // 証拠 3: resume ターンの発話が親セッションの履歴へ残る（再読込しても消えない）。
+    let mut persisted = false;
+    for _ in 0..100 {
+        if session_logs(&db, &session_id)
+            .iter()
+            .any(|l| l.content.contains("スキルの学習が完了しました"))
+        {
+            persisted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        persisted,
+        "resume ターンの発話が親セッションの履歴へ保存されない"
+    );
+}
+
+/// #152 [P2 回帰]: **進捗通知（`SettleKind::Progress`）では resume しない**。
+///
+/// 走行中の subtask の途中経過で親を resume すると、まだ走っている run の最中に
+/// 二重で応答してしまう。`WebCompletionSink` の `kind != Completed` ガードを外すと
+/// このテストが落ちる。
+///
+/// 対比として同じ sink に `Completed` を投げ、そちらでは resume が走ることも確認する
+/// （sink 全体を no-op にしただけでも落ちるようにするため）。
+#[tokio::test]
+async fn test_web_progress_settlement_does_not_resume() {
+    use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
+    use opencrab_server::web_gateway::WebCompletionSink;
+
+    let (app, _db, mock, state) = create_test_app_with_state();
+    let (agent_id, _app) = create_test_agent_named(app, "WebProgress", "TestPersona").await;
+    let session_id = format!("web-{agent_id}-conv-progress");
+    let mut rx = state.web_gateway.subscribe(&session_id);
+
+    let sink = WebCompletionSink {
+        state: state.clone(),
+        gateway: state.web_gateway.clone(),
+    };
+    let settled = |kind: SettleKind| SubtaskSettled {
+        session_id: session_id.clone(),
+        agent_id: agent_id.clone(),
+        subtask_id: "st-progress-1".to_string(),
+        exit_reason: "progress".to_string(),
+        kind,
+        reply_target: None,
+    };
+
+    // 進捗通知: resume しない = LLM を一度も呼ばない / SSE へ何も流れない。
+    // （応答生成が走ると、LLM のキューが空でも `kind:"error"` が SSE へ流れるので、
+    //   「特定 kind が来ない」ではなく「何も来ない」を要求する。）
+    sink.on_subtask_settled(settled(SettleKind::Progress));
+    let stray = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+    assert!(
+        stray.is_err(),
+        "進捗通知（Progress）で resume してしまっている（走行中の run に二重応答する）: {stray:?}"
+    );
+    assert_eq!(
+        mock.system_prompts().len(),
+        0,
+        "進捗通知で LLM 応答生成が走っている（resume してはならない）"
+    );
+
+    // 対比: 完了通知なら resume が走る（このガードが「効きすぎ」でないことの確認）。
+    mock.push_text_response("完了しました");
+    sink.on_subtask_settled(settled(SettleKind::Completed));
+    assert!(
+        recv_web_event_of_kind(&mut rx, "subtask_resume", std::time::Duration::from_secs(5))
+            .await
+            .is_some(),
+        "完了通知（Completed）で resume が走らない"
+    );
+}
+
+/// #169: registry が `AppState` 経由で共有されるため、REST から `cancel_subtask` が
+/// 走行中 subtask に到達できる（使い捨て registry では常に not found だった）。
+#[tokio::test]
+async fn test_rest_cancel_subtask_reaches_shared_registry() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Canceller", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    // ハンドラが使うのと同一の registry（AppState 保持）へ走行中 subtask を登録する。
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-rest-1", &session_id, &agent_id);
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-cancel-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "cancel_subtask".to_string(),
+            arguments: serde_json::json!({"subtask_id": "st-rest-1"}).to_string(),
+        },
+    }]);
+    mock.push_text_response("止めました");
+
+    let (status, _resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "さっきのを止めて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 停止が到達した: registry から除去され、タスクが abort されている。
+    assert!(
+        !registry.contains_key("st-rest-1"),
+        "cancel_subtask が共有 registry に到達していない（not found）"
+    );
+    assert!(handle.await.unwrap_err().is_cancelled());
+
+    let logs = session_logs(&db, &session_id);
+    assert!(
+        logs.iter().any(|l| l.log_type == "tool_cancelled"),
+        "親セッションログに tool_cancelled が記録されない"
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|l| l.log_type == "tool_result" && l.content.contains("not found")),
+        "cancel_subtask が not found を返している: {:?}",
+        logs.iter()
+            .filter(|l| l.log_type == "tool_result")
+            .map(|l| l.content.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// #169: 走行中 subtask があるあいだは session を `completed` にしない。
+#[tokio::test]
+async fn test_rest_session_stays_active_while_subtask_runs() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Runner", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    let registry = state.subtask_registries.registry_for(&session_id);
+    let handle = insert_running_subtask(&registry, "st-running", &session_id, &agent_id);
+
+    mock.push_text_response("走らせています");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "進捗どう", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("active"),
+        "走行中 subtask があるのに session が completed になっている"
+    );
+    handle.abort();
+}
+
+/// #169 非退行: 走行中 subtask が無ければ従来どおり応答後に `completed` になる。
+#[tokio::test]
+async fn test_rest_session_completed_when_no_subtask_runs() {
+    let (app, db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Plain", "TestPersona").await;
+    let session_id = format!("agent-msg-{agent_id}-u1");
+
+    mock.push_text_response("できました");
+    let (status, _) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "やって", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        session_status(&db, &session_id).as_deref(),
+        Some("completed")
+    );
+}
+
+/// #169: 最後の subtask が決着した時点で `RestCompletionSink` が session を完了させる
+/// （走行中は active のままなので、誰かが最後に完了させないと永久 active になる）。
+#[tokio::test]
+async fn test_rest_sink_completes_session_after_last_subtask_settles() {
+    let (app, db, mock, state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "Sinker", "TestPersona").await;
+
+    mock.push_tool_call_response(vec![ToolCall {
+        id: "tc-sink-1".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: "learn_from_experience".to_string(),
+            arguments: serde_json::json!({
+                "skill_name": "sink_check",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            })
+            .to_string(),
+        },
+    }]);
+    mock.push_text_response("開始しました");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({"content": "覚えて", "user_id": "u1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = resp["session_id"].as_str().unwrap().to_string();
+
+    let mut completed = false;
+    for _ in 0..100 {
+        if session_status(&db, &session_id).as_deref() == Some("completed") {
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        completed,
+        "全 subtask 決着後も session が completed にならない"
+    );
+    assert!(!state.subtask_registries.has_running(&session_id));
 }

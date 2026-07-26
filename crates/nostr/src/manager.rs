@@ -2,25 +2,44 @@
 //!
 //! Discord の `DiscordGatewayManager` と同型。エージェント毎に nostaro の `watch --json`
 //! を spawn し、JSONL イベントを読んで `run_agent_response` → 返信する。
+//!
+//! **受信ループは応答生成でブロックしない**（#178）。応答生成（会話再構築 → LLM →
+//! 返信）は受信ループの外へ出し、ループは即次の行へ進む。
+//!
+//! ただし単純に `tokio::spawn` へ投げると、**同一相手からの連投の処理順が
+//! 「どの spawn タスクが先に session ロックを取るか」で決まる**（= ランダム）。
+//! 5 通目への返信が 1 通目より先に届きうる。そこで [`SessionQueues`] を挟み、
+//! **session ごとに 1 本の consumer タスク**が bounded な mpsc から FIFO で
+//! 取り出して処理する（per-session 直列 + 順序保証、別セッションは並行）。
+//! consumer はキューが空になったら自分ごと回収される（task/チャネルのリーク防止）。
+//!
+//! 同時実行上限（[`MAX_CONCURRENT_RESPONSES`]）の permit は **consumer タスクの内側**
+//! で取る。受信ループ側で取ると「session ロック待ちで何もしていないタスク」が permit を
+//! 占有し、上限が埋まった時点でループ全体（＝全相手の受信）が止まる（head-of-line
+//! blocking / #178 が直そうとしたバグと同型）。
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use anyhow::Context;
-use opencrab_actions::{CallerIdentity, RunRequest};
-use opencrab_gateway::GatewayActions;
 
-use crate::actions::NostrGatewayActions;
 use crate::cli::NostaroCli;
 use crate::config::NostrConfig;
 use crate::event::{parse_watch_line, NostrEvent};
 use crate::identity::NostrIdentityAdmin;
 use crate::runner::NostrAgentRunner;
+use crate::session::{nostr_session_id, NostrSessionRuntime};
+use crate::sink::NostrResponder;
 
 /// watch ループが握る self_pubkey の共有セル（identity 切替で更新可能）。
 type SelfPubkey = Arc<RwLock<String>>;
@@ -28,11 +47,30 @@ type SelfPubkey = Arc<RwLock<String>>;
 /// watch が落ちたときの再接続バックオフ。
 const WATCH_RESTART_DELAY: Duration = Duration::from_secs(5);
 
+/// 応答生成の同時実行上限（per-agent / #178）。
+///
+/// 受信ループを塞がないために応答生成はループ外で走らせるが、無制限に走らせると洪水時に
+/// LLM 呼び出しとメモリが暴走する。permit で「同時に走る応答生成は最大 N 本」に絞る。
+/// permit の取得は **consumer タスクの内側**（[`SessionQueues::run_consumer`]）で行う。
+/// 受信ループ側で取ると待機中のタスクが permit を占有してループが止まる。
+const MAX_CONCURRENT_RESPONSES: usize = 8;
+
+/// per-session の inbound キュー容量（per-agent / #168）。
+///
+/// 応答生成は LLM 1 往復ぶんかかるので、1 人の相手が連投し続けるとキューは伸びる。
+/// 無制限に伸ばすとメモリと「もう誰も待っていない返信」が溜まるだけなので上限を置き、
+/// 溢れたぶんは**ログに残して**捨てる（本文は転記済みなので次の応答の会話履歴に載る）。
+const SESSION_QUEUE_CAPACITY: usize = 32;
+
 pub struct NostrGatewayManager<R: NostrAgentRunner> {
     // std RwLock: is_running を同期メソッドにするため。ガードは await を跨がない。
     gateways: RwLock<HashMap<String, JoinHandle<()>>>,
     runner: R,
     cli: NostaroCli,
+    /// per-session 直列化ロック + dispatch registry（#168）。全エージェント横断で 1 つ。
+    /// watch ループと完了 sink が同じ Arc を共有することが、二重投稿の防止
+    /// （直列化）と `cancel_subtask` 到達性（同一 registry）の条件。
+    runtime: Arc<NostrSessionRuntime>,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -41,6 +79,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             gateways: RwLock::new(HashMap::new()),
             runner,
             cli: NostaroCli::new(),
+            runtime: Arc::new(NostrSessionRuntime::new()),
         }
     }
 
@@ -52,6 +91,11 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     /// 内部の nostaro CLI ラッパー（gateway 起動を伴わない操作用）。
     pub fn cli(&self) -> &NostaroCli {
         &self.cli
+    }
+
+    /// per-session ランタイム（直列化ロック + dispatch registry）。
+    pub fn session_runtime(&self) -> &Arc<NostrSessionRuntime> {
+        &self.runtime
     }
 
     /// vanity で新規鍵を生成する。同時実行の制限は `NostaroCli` 内のゲートで一元化
@@ -113,8 +157,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             cli: cli.clone(),
             self_pubkey: self_pubkey_cell.clone(),
         });
+        let runtime = self.runtime.clone();
         let handle = tokio::spawn(async move {
-            run_nostr_loop(runner, cli, agent, config, self_pubkey_cell, admin).await;
+            run_nostr_loop(runner, cli, agent, config, self_pubkey_cell, admin, runtime).await;
         });
 
         self.gateways
@@ -198,8 +243,171 @@ impl SeenEvents {
     }
 }
 
+/// 応答生成 1 件ぶんの仕事（boxed future）。session キューを非ジェネリックに保つため
+/// runner 型はここで消す。
+type ResponseJob = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// session ごとの inbound FIFO キュー束（順序保証 + 流量制限 / #168・#178）。
+///
+/// 受信ループは [`Self::enqueue`] を**同期的に**呼ぶだけ（`try_send` のみ・await 無し）。
+/// session ごとに 1 本だけ走る consumer タスクがキューから FIFO で取り出し、permit を
+/// 取ってから順に処理する。これで
+///
+/// - 同一セッションの処理順 = 投入順（連投の返信が入れ替わらない）
+/// - 別セッションは並行（ある相手が詰まっても他の相手の受信は進む）
+/// - ループは permit もロックも待たない（head-of-line blocking なし）
+///
+/// が同時に成り立つ。エントリの生成・回収と `try_send` / `try_recv` は同じ `queues`
+/// ロックの下で行うので、「回収した直後の投入」で job を取りこぼさない。
+struct SessionQueues {
+    capacity: usize,
+    /// std Mutex: ガードの下では `try_send` / `try_recv` / map 操作しかせず await を跨がない。
+    queues: Mutex<HashMap<String, mpsc::Sender<ResponseJob>>>,
+    /// キュー溢れで捨てた件数（観測用）。
+    dropped: AtomicU64,
+}
+
+impl SessionQueues {
+    fn new(capacity: usize) -> Self {
+        debug_assert!(capacity >= 1, "session queue capacity must be >= 1");
+        Self {
+            capacity: capacity.max(1),
+            queues: Mutex::new(HashMap::new()),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// 走行中の session キュー数（回収の検証用）。
+    #[cfg(test)]
+    fn active_sessions(&self) -> usize {
+        self.queues.lock().unwrap().len()
+    }
+
+    /// キュー溢れで捨てた累計件数（本番はログで観測する）。
+    #[cfg(test)]
+    fn dropped(&self) -> u64 {
+        self.dropped.load(AtomicOrdering::SeqCst)
+    }
+
+    /// session のキューへ job を投入する。**ブロックしない**（`try_send` のみ）。
+    fn enqueue(
+        self: &Arc<Self>,
+        agent_id: &str,
+        session_id: &str,
+        permits: &Arc<Semaphore>,
+        job: ResponseJob,
+    ) {
+        let mut queues = self.queues.lock().unwrap();
+        // Sender は cheap clone。借用を切ってから try_send する（Closed 時に map を触るため）。
+        let existing = queues.get(session_id).cloned();
+        let job = match existing {
+            Some(tx) => match tx.try_send(job) {
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    let dropped = self.dropped.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    warn!(
+                        agent_id,
+                        session_id,
+                        capacity = self.capacity,
+                        dropped_total = dropped,
+                        "nostr: セッションの受信キューが上限に達したため応答生成をスキップした（投稿本文は会話履歴に転記済み）"
+                    );
+                    return;
+                }
+                // consumer が消えているのにエントリが残っている（想定外）。作り直す。
+                Err(mpsc::error::TrySendError::Closed(job)) => {
+                    queues.remove(session_id);
+                    job
+                }
+            },
+            None => job,
+        };
+        self.spawn_consumer(&mut queues, agent_id, session_id, permits, job);
+    }
+
+    /// session の consumer タスクを起こす（`queues` ロック保持下で呼ぶ）。
+    fn spawn_consumer(
+        self: &Arc<Self>,
+        queues: &mut HashMap<String, mpsc::Sender<ResponseJob>>,
+        agent_id: &str,
+        session_id: &str,
+        permits: &Arc<Semaphore>,
+        first: ResponseJob,
+    ) {
+        let (tx, rx) = mpsc::channel(self.capacity);
+        // capacity >= 1 なので先頭 job は必ず入る。
+        if tx.try_send(first).is_err() {
+            error!(agent_id, session_id, "nostr: 受信キューの初期化に失敗した");
+            return;
+        }
+        queues.insert(session_id.to_string(), tx);
+        let this = self.clone();
+        let permits = permits.clone();
+        let agent_id = agent_id.to_string();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move { this.run_consumer(rx, permits, agent_id, session_id).await });
+    }
+
+    /// session の consumer 本体。キューを FIFO で処理し、空になったら自分ごと回収する。
+    async fn run_consumer(
+        self: Arc<Self>,
+        mut rx: mpsc::Receiver<ResponseJob>,
+        permits: Arc<Semaphore>,
+        agent_id: String,
+        session_id: String,
+    ) {
+        loop {
+            let job = match rx.try_recv() {
+                Ok(job) => job,
+                // 空に見えた → ロック下で再確認し、本当に空ならエントリを回収して終わる。
+                Err(_) => match self.retire_or_take(&session_id, &mut rx) {
+                    Some(job) => job,
+                    None => {
+                        debug!(
+                            agent_id,
+                            session_id, "nostr: アイドルな session キューを回収した"
+                        );
+                        return;
+                    }
+                },
+            };
+            // 流量制限は **ここ**（ループ外）で取る。受信ループ側で取ると、session ロック
+            // 待ちで何もしていないタスクが permit を占有してループ全体が止まる。
+            let Ok(_permit) = permits.clone().acquire_owned().await else {
+                self.queues.lock().unwrap().remove(&session_id);
+                warn!(
+                    agent_id,
+                    session_id, "nostr: 応答 semaphore が閉じたので session consumer を終了する"
+                );
+                return;
+            };
+            job.await;
+        }
+    }
+
+    /// キューが空なら map エントリを回収して `None`、新着があればその job を返す。
+    ///
+    /// 判定を `queues` ロックの下で行うことが要点。[`Self::enqueue`] も同じロックの下で
+    /// `try_send` するので、「空と判定 → 回収」の隙間に投入が挟まることがない。
+    fn retire_or_take(
+        &self,
+        session_id: &str,
+        rx: &mut mpsc::Receiver<ResponseJob>,
+    ) -> Option<ResponseJob> {
+        let mut queues = self.queues.lock().unwrap();
+        match rx.try_recv() {
+            Ok(job) => Some(job),
+            Err(_) => {
+                queues.remove(session_id);
+                None
+            }
+        }
+    }
+}
+
 /// watch ループ本体。watch が落ちてもバックオフして再購読する（abort されるまで）。
 /// dedup セットはループ寿命で保持する（再購読時の replay を跨いで効かせる）。
+#[allow(clippy::too_many_arguments)]
 async fn run_nostr_loop<R: NostrAgentRunner>(
     runner: R,
     cli: NostaroCli,
@@ -207,8 +415,14 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
     config: NostrConfig,
     self_pubkey: SelfPubkey,
     admin: Arc<dyn NostrIdentityAdmin>,
+    runtime: Arc<NostrSessionRuntime>,
 ) {
     let mut seen = SeenEvents::new(512);
+    // 応答生成の流量制限。watch 再購読を跨いで同じ permit プールを使う。
+    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_RESPONSES));
+    // per-session の FIFO キュー。再購読を跨いで同じものを使う（購読が張り直されても
+    // 処理待ちの順序と consumer を落とさない）。
+    let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
     loop {
         match run_watch_once(
             &runner,
@@ -217,6 +431,9 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
             &config,
             &self_pubkey,
             &admin,
+            &runtime,
+            &permits,
+            &queues,
             &mut seen,
         )
         .await
@@ -237,6 +454,9 @@ async fn run_watch_once<R: NostrAgentRunner>(
     config: &NostrConfig,
     self_pubkey: &SelfPubkey,
     admin: &Arc<dyn NostrIdentityAdmin>,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
     seen: &mut SeenEvents,
 ) -> anyhow::Result<()> {
     let mut cmd = cli.build_watch_command(agent_id, config)?;
@@ -265,32 +485,47 @@ async fn run_watch_once<R: NostrAgentRunner>(
             debug!(agent_id, "nostr: skipping already-processed event");
             continue;
         }
-        handle_event(runner, cli, agent_id, admin, &event).await;
+        // 同期呼び出し（await 無し）。応答生成は session キューの consumer が引き取る。
+        handle_event(
+            runner, cli, agent_id, admin, runtime, permits, queues, event,
+        )
+        .await;
     }
     // stdout EOF → プロセス終了を回収。
     let _ = child.wait().await;
     Ok(())
 }
 
-/// 受信イベント1件を処理する（セッション記録 → エージェント実行 → 返信）。
+/// 受信イベント1件を処理する（セッション記録 → 応答生成を session キューへ投入）。
+///
+/// **この関数は await しない**（#178）。以前は `respond_serialized(...).await` を受信
+/// ループ内で直接 await していたため、per-session ロックを resume が握っている間
+/// **ループ全体（全セッション・全相手）が停止**し、`nostaro watch` の stdout も読まれず
+/// 滞留した。S3a で resume が日常化したため常態化していた。
+///
+/// その後 `tokio::spawn` へ出したが、それだけでは **同一セッションの連投の処理順が
+/// 「どの spawn タスクが先にロックを取るか」で決まる**（順序保証が壊れる）うえ、
+/// permit をループ内で取っていたため上限が埋まると再び全相手の受信が止まった。
+/// 現在は [`SessionQueues`] へ投入するだけで、FIFO 処理・直列化・流量制限はすべて
+/// consumer タスク側（ループ外）が担う。
+///
+/// 直列化（#168）はそのまま成立する: ロック取得は [`NostrResponder::respond_serialized`]
+/// に閉じているので、consumer が回す job でも同一セッションの inbound / resume が直列化
+/// される。セッションの用意と受信の転記は**ループ内で同期的に**済ませる: DB 書き込み
+/// のみで await しないうえ、job 側へ回すと連投で転記順が入れ替わる。
+#[allow(clippy::too_many_arguments)]
 async fn handle_event<R: NostrAgentRunner>(
     runner: &R,
     cli: &NostaroCli,
     agent_id: &str,
     admin: &Arc<dyn NostrIdentityAdmin>,
-    event: &NostrEvent,
+    runtime: &Arc<NostrSessionRuntime>,
+    permits: &Arc<Semaphore>,
+    queues: &Arc<SessionQueues>,
+    event: NostrEvent,
 ) {
     // author 単位のセッション（1 相手 = 1 会話）。
-    let session_id = format!("nostr-{agent_id}-{}", event.pubkey);
-
-    let (base_prompt, agent_name) = runner.build_agent_context(agent_id);
-    let system_prompt = format!(
-        "{base_prompt}\n\n[Nostr] {author} さんの投稿への応答です。返信するなら \
-         nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
-         返信不要なら NO_REPLY とだけ答えてください。",
-        author = event.author_label(),
-        target = event.reply_target(),
-    );
+    let session_id = nostr_session_id(agent_id, &event.pubkey);
 
     runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}");
     runner.record_nostr_user_message(
@@ -300,50 +535,38 @@ async fn handle_event<R: NostrAgentRunner>(
         &event.content,
     );
 
-    let budget = runner.context_budget_tokens(agent_id);
-    let conversation = runner
-        .build_conversation_string(&session_id, agent_id, budget)
-        .unwrap_or_default();
+    let prompt_suffix = format!(
+        "[Nostr] {author} さんの投稿への応答です。返信するなら \
+         nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
+         返信不要なら NO_REPLY とだけ答えてください。",
+        author = event.author_label(),
+        target = event.reply_target(),
+    );
 
-    let gw = NostrGatewayActions::new(cli.clone()).with_admin(admin.clone());
-    let sent = gw.sent_flag();
-    let actions: Arc<dyn GatewayActions> = Arc::new(gw);
-    let req = RunRequest::new(
+    let responder = NostrResponder::new(
+        runner.clone(),
+        cli.clone(),
+        runtime.clone(),
+        admin.clone(),
         agent_id,
-        agent_name,
-        session_id.clone(),
-        system_prompt,
-        conversation,
-        "nostr",
-        // Nostr の投稿者は外部ユーザー。最小権限（Agent）で扱う。
-        CallerIdentity::Agent,
-    )
-    .with_gateway_actions(actions)
-    .with_trigger_message_id(event.id.clone());
-
-    match runner.run_agent_response(req).await {
-        Ok(result) => {
-            let reply = result.response.trim();
-            if reply.is_empty() || reply == "NO_REPLY" {
-                debug!(agent_id, "nostr: agent chose silence");
-                return;
-            }
-            // 最終応答テキストを転記（会話履歴の継続性）。
-            runner.record_nostr_agent_reply(agent_id, &session_id, reply);
-            // モデルが既に nostr_* で送信していれば暗黙返信しない（二重送信防止）。
-            if sent.load(std::sync::atomic::Ordering::SeqCst) {
-                debug!(
-                    agent_id,
-                    "nostr: explicit send already occurred; skipping implicit reply"
-                );
-                return;
-            }
-            if let Err(e) = cli.reply(agent_id, event.reply_target(), reply, None).await {
-                warn!(agent_id, error = %e, "nostr implicit reply failed");
-            }
-        }
-        Err(e) => error!(agent_id, error = %e, "nostr agent run failed"),
-    }
+    );
+    let reply_target = event.reply_target().to_string();
+    let event_id = event.id.clone();
+    let job_session_id = session_id.clone();
+    // 流量制限（permit）は **consumer タスクの内側**で取る（`run_consumer` 参照）。
+    // ここ（受信ループ内）で取ると、session ロック待ちで何もしていないタスクが permit を
+    // 占有し、受信ループ全体＝そのエージェントの全相手の受信が止まる。
+    let job: ResponseJob = Box::pin(async move {
+        responder
+            .respond_serialized(
+                &job_session_id,
+                &reply_target,
+                &prompt_suffix,
+                Some(&event_id),
+            )
+            .await;
+    });
+    queues.enqueue(agent_id, &session_id, permits, job);
 }
 
 /// watch ループが握る identity 切替の実体。runner（DB）+ cli + self_pubkey セルを capture し、
@@ -409,7 +632,422 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::SeenEvents;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+
+    use opencrab_actions::RunRequest;
+    use opencrab_core::EngineResult;
+    use opencrab_db::queries::AgentNostrConfigRow;
+
+    /// 受信ループの非ブロック性・順序保証の検証用の最小 runner。LLM も DB も使わない。
+    #[derive(Clone)]
+    struct SlowRunner {
+        delay: Duration,
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+        /// 転記された受信メッセージ（順序の検証用）。
+        recorded: Arc<Mutex<Vec<String>>>,
+        /// 応答生成を**開始**した順（reply_target）。
+        started: Arc<Mutex<Vec<String>>>,
+        /// 応答生成を**完了**した順（reply_target = 実際に返信が飛ぶ順）。
+        finished: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SlowRunner {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                inflight: Arc::new(AtomicUsize::new(0)),
+                max_inflight: Arc::new(AtomicUsize::new(0)),
+                recorded: Arc::new(Mutex::new(Vec::new())),
+                started: Arc::new(Mutex::new(Vec::new())),
+                finished: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn finished_len(&self) -> usize {
+            self.finished.lock().unwrap().len()
+        }
+
+        fn snapshot(list: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+            list.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NostrAgentRunner for SlowRunner {
+        async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
+            let target = req.reply_target.clone().unwrap_or_default();
+            self.started.lock().unwrap().push(target.clone());
+            let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            self.max_inflight.fetch_max(now, AtomicOrdering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.inflight.fetch_sub(1, AtomicOrdering::SeqCst);
+            self.finished.lock().unwrap().push(target);
+            // NO_REPLY にして nostaro（外部プロセス）を一切呼ばない。
+            Ok(EngineResult {
+                response: "NO_REPLY".to_string(),
+                iterations: 1,
+                tool_calls_made: 0,
+                stopped_by_limit: false,
+                xml_fallback_parses: 0,
+            })
+        }
+
+        fn build_agent_context(&self, _agent_id: &str) -> (String, String) {
+            ("base".to_string(), "テストくん".to_string())
+        }
+
+        fn build_conversation_string(
+            &self,
+            _session_id: &str,
+            _agent_id: &str,
+            _budget: usize,
+        ) -> anyhow::Result<String> {
+            Ok("conversation".to_string())
+        }
+
+        fn context_budget_tokens(&self, _agent_id: &str) -> usize {
+            1000
+        }
+
+        fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str) {}
+
+        fn record_nostr_user_message(&self, _s: &str, _p: &str, _n: &str, text: &str) {
+            self.recorded.lock().unwrap().push(text.to_string());
+        }
+
+        fn record_nostr_agent_reply(&self, _a: &str, _s: &str, _t: &str) {}
+
+        fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
+            Vec::new()
+        }
+
+        fn get_nostr_config(&self, _agent_id: &str) -> Option<AgentNostrConfigRow> {
+            None
+        }
+
+        fn set_nostr_secret_key(&self, _a: &str, _s: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopAdmin;
+
+    #[async_trait::async_trait]
+    impl NostrIdentityAdmin for NoopAdmin {
+        async fn adopt_generated_identity(
+            &self,
+            _agent_id: &str,
+            npub: &str,
+        ) -> anyhow::Result<String> {
+            Ok(npub.to_string())
+        }
+    }
+
+    fn event(id: &str, pubkey: &str, content: &str) -> NostrEvent {
+        NostrEvent {
+            id: id.to_string(),
+            pubkey: pubkey.to_string(),
+            npub: None,
+            note_id: Some(format!("note1{id}")),
+            author_name: None,
+            created_at: 0,
+            kind: 1,
+            content: content.to_string(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// 受信ループ相当の呼び出しを組み立てるテスト用ハーネス。
+    struct Harness {
+        runner: SlowRunner,
+        admin: Arc<dyn NostrIdentityAdmin>,
+        runtime: Arc<NostrSessionRuntime>,
+        permits: Arc<Semaphore>,
+        queues: Arc<SessionQueues>,
+        cli: NostaroCli,
+        agent_id: String,
+    }
+
+    impl Harness {
+        fn new(agent_id: &str, delay: Duration, permits: usize, capacity: usize) -> Self {
+            Self {
+                runner: SlowRunner::new(delay),
+                admin: Arc::new(NoopAdmin),
+                runtime: Arc::new(NostrSessionRuntime::new()),
+                permits: Arc::new(Semaphore::new(permits)),
+                queues: Arc::new(SessionQueues::new(capacity)),
+                cli: NostaroCli::new(),
+                agent_id: agent_id.to_string(),
+            }
+        }
+
+        /// watch ループが 1 行読んだのと同じ処理（同期・await 無し）。
+        async fn feed(&self, id: &str, pubkey: &str, content: &str) {
+            handle_event(
+                &self.runner,
+                &self.cli,
+                &self.agent_id,
+                &self.admin,
+                &self.runtime,
+                &self.permits,
+                &self.queues,
+                event(id, pubkey, content),
+            )
+            .await;
+        }
+
+        /// 応答生成が `n` 件完了するまで待つ（タイムアウトしたら false）。
+        async fn wait_finished(&self, n: usize, timeout: Duration) -> bool {
+            let deadline = std::time::Instant::now() + timeout;
+            while std::time::Instant::now() < deadline {
+                if self.runner.finished_len() >= n {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            self.runner.finished_len() >= n
+        }
+    }
+
+    /// [P1 回帰 / #168] 同一セッション（同一相手）の連投は**投入順どおり**に処理される。
+    ///
+    /// 応答生成を素朴に `tokio::spawn` へ出していたときは「どの spawn タスクが先に
+    /// session ロックを取るか」で順序が決まり、5 通目への返信が 1 通目より先に飛ぶ
+    /// ことがあった（各返信は勝ったタスクの `reply_target` に紐づく）。
+    /// multi_thread ランタイムで複数回試行して安定することを見る。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_session_events_are_processed_in_submission_order() {
+        const IDS: [&str; 8] = [
+            "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+        ];
+        let expected: Vec<String> = IDS.iter().map(|i| format!("note1{i}")).collect();
+
+        // spawn 順の運任せを暴くには複数回試行が必要（1 回だと偶然通ることがある）。
+        for trial in 0..5 {
+            let h = Harness::new("agent-order", Duration::from_millis(5), 8, 32);
+            for id in IDS {
+                h.feed(id, "pk-chatty", id).await;
+            }
+            assert!(
+                h.wait_finished(IDS.len(), Duration::from_secs(5)).await,
+                "試行{trial}: 応答生成が完了しない"
+            );
+
+            // 転記順・開始順・完了順（= 返信が飛ぶ順）がすべて投入順と一致する。
+            assert_eq!(
+                SlowRunner::snapshot(&h.runner.recorded),
+                IDS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "試行{trial}: 会話への転記順が投入順と違う"
+            );
+            assert_eq!(
+                SlowRunner::snapshot(&h.runner.started),
+                expected,
+                "試行{trial}: 同一セッションの処理順が投入順と違う"
+            );
+            assert_eq!(
+                SlowRunner::snapshot(&h.runner.finished),
+                expected,
+                "試行{trial}: 返信順が投入順と違う"
+            );
+            // 同一セッションは直列（二重投稿しない）。
+            assert_eq!(
+                h.runner.max_inflight.load(AtomicOrdering::SeqCst),
+                1,
+                "試行{trial}: 同一セッションの応答生成が並行した"
+            );
+        }
+    }
+
+    /// [P1 回帰 / #178] 受信ループは応答生成を await しない。
+    ///
+    /// 以前は `respond_serialized(...).await` をループ内で直接呼んでいたため、長い応答の
+    /// あいだ**全セッション・全相手**の受信が止まった（`nostaro watch` の stdout も
+    /// 読まれず滞留）。ここでは 2 件の `handle_event` が即座に返ること、かつ別セッション
+    /// の応答が並行することを見る。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn handle_event_does_not_block_the_receive_loop() {
+        let h = Harness::new("agent-loop", Duration::from_millis(300), 8, 32);
+
+        let started = std::time::Instant::now();
+        // 別々の相手（別セッション）から 2 件。ループ相当の直列呼び出し。
+        h.feed("e1", "pk-a", "1件目").await;
+        h.feed("e2", "pk-b", "2件目").await;
+        let elapsed = started.elapsed();
+
+        // ループは応答生成（300ms）を待たずに次へ進んでいる。
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "受信ループが応答生成でブロックしている: {elapsed:?}"
+        );
+        // 受信の転記はループ内で同期的に済んでいる（順序も保たれる）。
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.recorded),
+            vec!["1件目".to_string(), "2件目".to_string()]
+        );
+
+        // 別セッションの応答生成は並行して走る。
+        for _ in 0..100 {
+            if h.runner.max_inflight.load(AtomicOrdering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            h.runner.max_inflight.load(AtomicOrdering::SeqCst) >= 2,
+            "別セッションの応答生成が並行していない（head-of-line blocking）"
+        );
+    }
+
+    /// [P1 回帰 / #178] permit 待ちが**受信を止めない**（head-of-line blocking なし）。
+    ///
+    /// permit を受信ループ内で取っていたときは、ロック待ちで何もしていないタスクが permit
+    /// を占有し、上限が埋まった時点でループ全体（＝全相手の受信）が停止した。レビュアーの
+    /// 実験と同型: permits=2 / 同一セッション 2 件 → 別セッション 1 件。別セッションの
+    /// 応答生成が、詰まっているセッションの完了を待たずに始まることを見る。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn permit_starvation_does_not_stall_the_receive_loop() {
+        for trial in 0..3 {
+            let h = Harness::new("agent-starve", Duration::from_millis(300), 2, 32);
+
+            // 多弁な相手（同一セッション）が permit を使い切ろうとする。
+            h.feed("s1", "pk-chatty", "1").await;
+            h.feed("s2", "pk-chatty", "2").await;
+            // 別の相手。ここでループが止まってはいけない。
+            let started = std::time::Instant::now();
+            h.feed("s3", "pk-quiet", "3").await;
+            let loop_stall = started.elapsed();
+
+            assert!(
+                loop_stall < Duration::from_millis(50),
+                "試行{trial}: 別セッションの handle_event がループを止めた: {loop_stall:?}"
+            );
+
+            // 別セッションの応答生成は、詰まっているセッション（300ms×2）を待たずに始まる。
+            let mut quiet_started = false;
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < deadline {
+                if SlowRunner::snapshot(&h.runner.started)
+                    .iter()
+                    .any(|t| t == "note1s3")
+                {
+                    quiet_started = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                quiet_started,
+                "試行{trial}: 別セッションの応答生成が同一セッションの完了を待たされた"
+            );
+            // 同時に 2 本走った = permit がロック待ちに浪費されていない。
+            assert!(
+                h.runner.max_inflight.load(AtomicOrdering::SeqCst) >= 2,
+                "試行{trial}: permit がロック待ちのタスクに占有されている"
+            );
+        }
+    }
+
+    /// [#178] permit をタスク内側で取っても同時実行上限は守られる。
+    ///
+    /// permit=1 なら別セッション 3 件でも応答生成は 1 本ずつ（`max_inflight == 1`）。
+    /// ループ自体はブロックしない（上限は実同時実行だけを絞る）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_responses_are_capped_by_permits() {
+        let h = Harness::new("agent-cap", Duration::from_millis(80), 1, 32);
+
+        let started = std::time::Instant::now();
+        h.feed("c1", "pk-a", "1").await;
+        h.feed("c2", "pk-b", "2").await;
+        h.feed("c3", "pk-c", "3").await;
+        let loop_stall = started.elapsed();
+        assert!(
+            loop_stall < Duration::from_millis(50),
+            "上限が受信ループを止めている: {loop_stall:?}"
+        );
+
+        assert!(
+            h.wait_finished(3, Duration::from_secs(5)).await,
+            "応答生成が完了しない"
+        );
+        assert_eq!(
+            h.runner.max_inflight.load(AtomicOrdering::SeqCst),
+            1,
+            "permit=1 のとき応答生成は 1 本ずつ"
+        );
+        // 直列化されたぶんの時間はかかっている（上限が実在する証拠）。
+        assert!(
+            started.elapsed() >= Duration::from_millis(240),
+            "同時実行上限（permit）が効いていない: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// [#168] session キューが溢れたぶんは**ログに残して**捨てる（黙って捨てない）。
+    ///
+    /// permit を 0 本にして consumer を確実に止め、capacity を超える連投を流し込む。
+    /// 受け付けられるのは「consumer が取り出した 1 件 + バッファ capacity 件」まで。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_queue_overflow_is_dropped_and_counted() {
+        const CAPACITY: usize = 2;
+        const FLOOD: usize = 20;
+        // permits=0 → consumer は permit 待ちで止まり、キューが確実に埋まる。
+        let h = Harness::new("agent-flood", Duration::from_millis(1), 0, CAPACITY);
+
+        for i in 0..FLOOD {
+            h.feed(&format!("f{i}"), "pk-flood", &format!("{i}")).await;
+        }
+
+        // 受理されうる上限は inflight 1 + バッファ CAPACITY。
+        let accepted = FLOOD as u64 - h.queues.dropped();
+        assert!(
+            accepted <= (1 + CAPACITY) as u64,
+            "キュー上限を超えて受理された: accepted={accepted}"
+        );
+        assert!(
+            h.queues.dropped() >= (FLOOD - 1 - CAPACITY) as u64,
+            "溢れが捨てられていない: dropped={}",
+            h.queues.dropped()
+        );
+        // 捨てても投稿本文は会話履歴に転記済み（次の応答の文脈に載る）。
+        assert_eq!(SlowRunner::snapshot(&h.runner.recorded).len(), FLOOD);
+    }
+
+    /// [#168] アイドルになった session の consumer タスク / チャネルは回収される。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_session_queue_is_reclaimed() {
+        let h = Harness::new("agent-reclaim", Duration::from_millis(5), 8, 32);
+        h.feed("r1", "pk-a", "1").await;
+        h.feed("r2", "pk-b", "2").await;
+        assert!(
+            h.queues.active_sessions() > 0,
+            "投入直後は session キューが存在する"
+        );
+
+        assert!(
+            h.wait_finished(2, Duration::from_secs(5)).await,
+            "応答生成が完了しない"
+        );
+        // 完了後、キューは空になり consumer は自分ごと回収される。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && h.queues.active_sessions() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            h.queues.active_sessions(),
+            0,
+            "アイドルな session キューが回収されていない（task/チャネルのリーク）"
+        );
+
+        // 回収後に再投入しても普通に処理される（回収とレースしても取りこぼさない）。
+        h.feed("r3", "pk-a", "3").await;
+        assert!(
+            h.wait_finished(3, Duration::from_secs(5)).await,
+            "回収後の再投入が処理されない"
+        );
+    }
 
     #[test]
     fn test_seen_events_dedup_and_eviction() {

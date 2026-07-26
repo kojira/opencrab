@@ -4,6 +4,15 @@ heartbeat_enabled = true
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 
+[subtask]
+# ツール呼び出しをバックグラウンド実行に回すか（既定 true）。
+#
+# false にすると全ツールが同期実行に戻る（この機能の導入前と同じ挙動）。
+# 環境変数 OPENCRAB_SUBTASK_AUTO_DISPATCH（0/false/off/no）が
+# この値より優先されるので、.env だけで切り戻せる。
+# 詳しくは docs/DESIGN.md の「非ブロックツール実行」を参照。
+auto_dispatch = true
+
 # デフォルトLLM設定
 [llm]
 default_provider = "codex"
@@ -70,7 +79,7 @@ base_url = "http://localhost:8080"
 # Codex CLI設定（ローカル）
 [llm.providers.codex]
 default_model = "o4-mini"
-sandbox = "danger-full-access"
+sandbox = "read-only"
 timeout_secs = 300
 # 推論（thinking）強度の上書き（low|medium|high|xhigh）。空/未指定はモデル既定。
 # gpt-5.6-sol は既定 high で遅い/高コスト。ダッシュボード（システム設定）からも変更可。

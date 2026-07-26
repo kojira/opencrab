@@ -12,6 +12,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opencrab_actions::{
+    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SubtaskCompletionSink,
+    SubtaskRegistry, REJECTION_CODE_PREFIX,
+};
 use opencrab_gateway::{
     GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
 };
@@ -25,11 +29,32 @@ pub struct SystemGatewayActions {
     state: AppState,
     /// transport 固有の gateway（Discord/Nostr 等）。自分が扱わないツールを委譲する。
     inner: Option<Arc<dyn GatewayActions>>,
+    /// auto-dispatch した走行中 subtask の共有 registry（#161）。web/Nostr/REST でも
+    /// `cancel_subtask` を露出するため server-neutral 層に配線する。`run_agent_response`
+    /// が dispatcher へ渡すものと同一 Arc（Discord では gateway_actions の registry とも
+    /// 同一）。`None` の場合は走行中 subtask が無く cancel は not found を返す。
+    subtask_registry: Option<SubtaskRegistry>,
+    /// 停止（`cancel_subtask`）を通知する完了 sink（この run の `RunRequest` と同一）。
+    ///
+    /// 停止は `on_subtask_cancelled`（既定は no-op）で通知するため resume は起きない。
+    /// REST のように「最後の subtask の決着でセッションを完了にする」経路は、この通知
+    /// を受けて `sessions.status` の整合を取る（無いと永久 `active` のまま残る）。
+    completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
 }
 
 impl SystemGatewayActions {
-    pub fn new(state: AppState, inner: Option<Arc<dyn GatewayActions>>) -> Self {
-        Self { state, inner }
+    pub fn new(
+        state: AppState,
+        inner: Option<Arc<dyn GatewayActions>>,
+        subtask_registry: Option<SubtaskRegistry>,
+        completion_sink: Option<Arc<dyn SubtaskCompletionSink>>,
+    ) -> Self {
+        Self {
+            state,
+            inner,
+            subtask_registry,
+            completion_sink,
+        }
     }
 
     /// 本ツール源が直接提供するツール定義。
@@ -192,7 +217,119 @@ impl SystemGatewayActions {
                     "required": ["action"]
                 }),
             },
+            // bootstrap ツール（鍵不要）。送信系（nostr_post 等・鍵前提）とは分離し、
+            // transport 非依存で全ターンに露出する。これにより「鍵を作るツールが鍵の
+            // ある時しか出ない」循環依存（#141）を解消する。owner 限定にはしない
+            // （nsec は返さず・送信もしないので Agent 呼び出しでも安全）。
+            GatewayActionDef {
+                name: "nostr_generate_key".to_string(),
+                description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
+                              npub1 以降・bech32 文字のみ。長さ上限は無いが、長いほど探索に時間が \
+                              かかる＝3文字程度で即時、それ以上は徐々に長くなる）を指定できる。返るのは公開情報の \
+                              npub / pubkey のみ。**秘密鍵(nsec)はサーバ内に安全に保存され、あなた（LLM）\
+                              には渡されない**（セキュリティのため）。これは新規 keypair を作るユーティリティ\
+                              であり、あなた自身の送信用アイデンティティは変更しない。"
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（長さ上限なし。長いほど探索に時間がかかる, 例: cat）。"}
+                    }
+                }),
+            },
+            // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
+            // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
+            // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
+            // owner 限定）は共有 registry を引く実体（cancel_subtask）が担う。
+            GatewayActionDef {
+                name: "cancel_subtask".to_string(),
+                description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "subtask_id": {
+                            "type": "string",
+                            "description": "キャンセルするサブタスクのID（subtask_spawnedイベントから取得）"
+                        }
+                    },
+                    "required": ["subtask_id"]
+                }),
+            },
         ]
+    }
+
+    /// bootstrap 用の鍵生成（鍵未設定でも実行可能）。実体は `NostaroCli::vanity`
+    /// （config 非依存）で、生成した nsec は**サーバ内に 0600 で保存**し LLM には返さない
+    /// （npub/pubkey のみ）。process.rs の防御マスク（tool_name==nostr_generate_key）と
+    /// bridge の nsec redaction が多層で秘密漏洩を防ぐ。
+    async fn nostr_generate_key(
+        &self,
+        args: &Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        let prefix = args
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .unwrap_or("");
+        // 稼働中のマネージャの CLI（binary_path 等の設定を継承）を使う。無ければ既定。
+        let cli = self
+            .state
+            .nostr_manager
+            .as_ref()
+            .map(|m| m.cli().clone())
+            .unwrap_or_default();
+        match cli.vanity(prefix).await {
+            Ok(k) => match opencrab_nostr::NostaroCli::save_generated_key(&ctx.agent_id, &k) {
+                Ok(_) => GatewayActionResult {
+                    success: true,
+                    // nsec は返さない（サーバ内 0600 保存済み）。npub/pubkey のみ。
+                    data: Some(json!({
+                        "npub": k.npub,
+                        "pubkey": k.pubkey,
+                        "note": "新しい鍵を生成しました。秘密鍵(nsec)はサーバ内に安全に保存済みで、セキュリティ上あなた（LLM）には渡していません。共有・言及してよいのは npub までです。",
+                    })),
+                    error: None,
+                },
+                Err(e) => err(format!("鍵は生成しましたが保存に失敗しました: {e}")),
+            },
+            Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
+        }
+    }
+
+    /// 実行中 subtask の停止（#161）。共有 `SubtaskRegistry` を引き、認可（親セッション/
+    /// owner 限定）・abort・除去・親ログ記録を server-neutral の `cancel_subtask` に委ねる。
+    /// registry 未配線（`None`）や不在は not found を返す。権限なしは REJECTION_CODE_PREFIX
+    /// を付けて拒否として通知する（Discord 実装と同契約）。
+    fn cancel_subtask(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        let Some(subtask_id) = args.get("subtask_id").and_then(|v| v.as_str()) else {
+            return err("cancel_subtask: 'subtask_id' is required".to_string());
+        };
+        let Some(registry) = self.subtask_registry.as_ref() else {
+            // dispatch 未配線（走行中 subtask を追跡していない）→ 不在扱い。
+            return err(format!("cancel_subtask: subtask '{subtask_id}' not found"));
+        };
+        let is_owner = ctx.caller == GatewayCaller::Owner;
+        match neutral_cancel_subtask(
+            registry,
+            &self.state.db,
+            self.completion_sink.as_deref(),
+            subtask_id,
+            is_owner,
+            ctx.session_id.as_deref(),
+        ) {
+            CancelOutcome::Cancelled => GatewayActionResult {
+                success: true,
+                data: Some(json!({ "cancelled": true, "subtask_id": subtask_id })),
+                error: None,
+            },
+            CancelOutcome::NotFound => {
+                err(format!("cancel_subtask: subtask '{subtask_id}' not found"))
+            }
+            CancelOutcome::Unauthorized => err(format!(
+                "{REJECTION_CODE_PREFIX}cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
+            )),
+        }
     }
 
     async fn configure_llm_provider(
@@ -672,14 +809,34 @@ fn err(msg: String) -> GatewayActionResult {
     }
 }
 
+impl SystemGatewayActions {
+    /// own 定義と inner 定義を name で dedup してマージする（own 優先）。
+    ///
+    /// nostr watch ループ稼働時は inner=NostrGatewayActions も nostr_generate_key を、
+    /// Discord では inner が cancel_subtask を定義するため、ここで dedup しないと
+    /// ツール一覧に同名が2つ並ぶ（provider が拒否しうる）。`definitions()` の実体を
+    /// 静的関数に切り出し、AppState 無しで dedup 契約を単体テストできるようにする（#161）。
+    fn merge_definitions(
+        mut own: Vec<GatewayActionDef>,
+        inner: Option<&Arc<dyn GatewayActions>>,
+    ) -> Vec<GatewayActionDef> {
+        if let Some(inner) = inner {
+            let own_names: std::collections::HashSet<String> =
+                own.iter().map(|d| d.name.clone()).collect();
+            for d in inner.definitions() {
+                if !own_names.contains(&d.name) {
+                    own.push(d);
+                }
+            }
+        }
+        own
+    }
+}
+
 #[async_trait]
 impl GatewayActions for SystemGatewayActions {
     fn definitions(&self) -> Vec<GatewayActionDef> {
-        let mut defs = Self::own_definitions();
-        if let Some(inner) = &self.inner {
-            defs.extend(inner.definitions());
-        }
-        defs
+        Self::merge_definitions(Self::own_definitions(), self.inner.as_ref())
     }
 
     async fn execute(
@@ -694,6 +851,27 @@ impl GatewayActions for SystemGatewayActions {
             "configure_nostr" => self.configure_nostr(args, ctx).await,
             "configure_self" => self.configure_self(args, ctx).await,
             "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
+            // bootstrap 鍵生成（鍵未設定でも露出）。inner より先に own が処理する。
+            "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
+            // subtask 停止（#161）。transport 固有 gateway（Discord）が cancel_subtask を
+            // 実装しているなら、その完全な後始末（aborted webhook 送出・session theme から
+            // の task_description 解決）を保つため inner へ委譲する。実装していない
+            // transport（web/Nostr/REST）では own が共有 registry を引いて停止する。
+            // どちらも同一の共有 registry を叩くため二重にキャンセルされることはない。
+            "cancel_subtask" => {
+                let inner_handles = self.inner.as_ref().is_some_and(|inner| {
+                    inner
+                        .definitions()
+                        .iter()
+                        .any(|d| d.name == "cancel_subtask")
+                });
+                if inner_handles {
+                    // inner が cancel_subtask を実装している（Discord）→ 委譲。
+                    self.inner.as_ref().unwrap().execute(name, args, ctx).await
+                } else {
+                    self.cancel_subtask(args, ctx)
+                }
+            }
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
@@ -731,5 +909,208 @@ mod tests {
         for key in ["binary_path", "args", "working_dir", "timeout_secs"] {
             assert!(props.contains_key(key), "missing property: {key}");
         }
+    }
+
+    /// Regression guard for #146: nostr_generate_key must be a *own* definition
+    /// (bootstrap tool) so it is exposed on every turn regardless of whether the
+    /// nostr watch loop / keys are configured. If someone moves it back into the
+    /// key-gated inner NostrGatewayActions bundle, own_definitions loses it and
+    /// this test fails — that is the "露出が二度と消えない" guard.
+    #[test]
+    fn nostr_generate_key_is_always_exposed() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "nostr_generate_key")
+            .expect("nostr_generate_key must be an own (always-exposed) definition (#146)");
+        // vanity 用の任意 prefix パラメータを受ける。
+        let props = d.parameters["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("prefix"),
+            "nostr_generate_key must accept an optional vanity `prefix`"
+        );
+        // bootstrap ツールは required なし（引数なしでも鍵を作れる）。
+        assert!(
+            d.parameters.get("required").is_none(),
+            "nostr_generate_key must not require any argument"
+        );
+    }
+
+    /// definitions() dedups own vs inner by name: when the inner gateway also
+    /// defines nostr_generate_key (nostr watch loop running), the merged tool
+    /// list must still contain exactly one entry (providers reject duplicates).
+    #[test]
+    fn definitions_dedup_keeps_single_nostr_generate_key() {
+        // own_definitions is the source that definitions() starts from; assert it
+        // is unique there so the dedup contract holds.
+        let defs = SystemGatewayActions::own_definitions();
+        let count = defs
+            .iter()
+            .filter(|d| d.name == "nostr_generate_key")
+            .count();
+        assert_eq!(
+            count, 1,
+            "nostr_generate_key must be defined exactly once in own_definitions"
+        );
+    }
+
+    /// Regression guard for #161: cancel_subtask must be an *own* (server-neutral)
+    /// definition so web / Nostr / REST — not just Discord — expose the tool to
+    /// stop auto-dispatched subtasks. If it is removed from own_definitions the
+    /// tool disappears on every non-Discord transport again — that is the bug this
+    /// guards against.
+    #[test]
+    fn cancel_subtask_is_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "cancel_subtask")
+            .expect("cancel_subtask must be an own (server-neutral) definition (#161)");
+        // subtask_id は必須。
+        let required = d.parameters["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|v| v == "subtask_id"),
+            "cancel_subtask must require subtask_id"
+        );
+        // own に丁度1件（dedup の source が一意）。
+        let count = defs.iter().filter(|d| d.name == "cancel_subtask").count();
+        assert_eq!(
+            count, 1,
+            "cancel_subtask must be defined exactly once in own_definitions"
+        );
+    }
+
+    /// **fail-closed な dispatch 分類ガード（#152）**。
+    ///
+    /// `own_definitions()` の全名が「非ブロック dispatch の除外集合（inline）」か
+    /// 「意図的な dispatch 可リスト」のどちらか**ちょうど一方**に属することを要求する。
+    ///
+    /// この gateway は transport 非依存で web / REST / heartbeat の全ターンに載る
+    /// （`crates/server/src/process.rs` の合成 executor）のに、Discord / Nostr / core と
+    /// 違って分類ガードが無く、6 個中 5 個（`configure_llm_provider` /
+    /// `manage_allowed_commands` / `configure_nostr` / `configure_self` /
+    /// `configure_mcp_server`）が黙って background 化されていた。実装
+    /// （`own_definitions()`）を起点に走査するので、新しい設定ツールを足すと分類を
+    /// 明示するまでテストが落ちる。判定基準は
+    /// `opencrab_actions::default_non_dispatch_tools` の doc。
+    #[test]
+    fn server_tools_are_classified_for_dispatch() {
+        let names: Vec<String> = SystemGatewayActions::own_definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(!names.is_empty(), "own_definitions が空");
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in &names {
+            let inline = non_dispatch.contains(name);
+            let dispatchable =
+                opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&name.as_str());
+            assert!(
+                inline ^ dispatchable,
+                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
+                 新しいツールを追加したら opencrab_actions::SERVER_INLINE_ACTIONS か \
+                 SERVER_DISPATCHABLE_ACTIONS のどちらかへ入れること（判定基準は \
+                 default_non_dispatch_tools の doc / docs/DESIGN.md §4.4）"
+            );
+        }
+
+        // 逆方向: 定数側に死名が無いこと。
+        for name in opencrab_actions::SERVER_INLINE_ACTIONS {
+            assert!(
+                names.contains(&(*name).to_string()),
+                "SERVER_INLINE_ACTIONS の {name} が own_definitions() に無い（死名）"
+            );
+        }
+        for name in opencrab_actions::SERVER_DISPATCHABLE_ACTIONS {
+            assert!(
+                names.contains(&(*name).to_string()),
+                "SERVER_DISPATCHABLE_ACTIONS の {name} が own_definitions() に無い（死名）"
+            );
+        }
+        // 分類は own_definitions() を覆い尽くす。
+        assert_eq!(
+            opencrab_actions::SERVER_INLINE_ACTIONS.len()
+                + opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.len(),
+            names.len(),
+            "分類集合の合計が own_definitions() の数と一致しない（分類漏れ）"
+        );
+    }
+
+    /// [P1 回帰] 設定変更ツールは inline（同ターンで結果を返す）。長時間の鍵探索だけが
+    /// background。分類定数を経由せず `default_non_dispatch_tools()` の実効値を見る。
+    #[test]
+    fn config_tools_are_inline_and_key_generation_is_dispatched() {
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+        for name in [
+            "configure_llm_provider",
+            "manage_allowed_commands",
+            "configure_nostr",
+            "configure_self",
+            "configure_mcp_server",
+            "cancel_subtask",
+        ] {
+            assert!(
+                non_dispatch.contains(name),
+                "{name} は background 化してはならない（設定の共有状態書き込み / 一覧の即答）"
+            );
+        }
+        assert!(
+            !non_dispatch.contains("nostr_generate_key"),
+            "nostr_generate_key は長時間の vanity 探索なので dispatch 対象に残す"
+        );
+    }
+
+    /// #161: Discord のような inner が cancel_subtask を定義しても、merge 後は
+    /// own の1件だけが残る（providers は同名重複を拒否しうる）。merge_definitions を
+    /// 直接叩くことで AppState 無しに実コードの dedup 契約を検証する。
+    #[test]
+    fn merge_definitions_dedups_cancel_subtask_from_inner() {
+        use opencrab_gateway::{GatewayActionResult, GatewayCallContext};
+
+        /// cancel_subtask と固有ツールを定義する Discord 風 inner モック。
+        struct InnerWithCancel;
+        #[async_trait]
+        impl GatewayActions for InnerWithCancel {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                vec![
+                    GatewayActionDef {
+                        name: "cancel_subtask".to_string(),
+                        description: "discord cancel".to_string(),
+                        parameters: json!({"type": "object"}),
+                    },
+                    GatewayActionDef {
+                        name: "discord_only_tool".to_string(),
+                        description: "x".to_string(),
+                        parameters: json!({"type": "object"}),
+                    },
+                ]
+            }
+            async fn execute(
+                &self,
+                _name: &str,
+                _args: &Value,
+                _ctx: &GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: None,
+                    error: None,
+                }
+            }
+        }
+
+        let inner: Arc<dyn GatewayActions> = Arc::new(InnerWithCancel);
+        let merged = SystemGatewayActions::merge_definitions(
+            SystemGatewayActions::own_definitions(),
+            Some(&inner),
+        );
+        let cancel_count = merged.iter().filter(|d| d.name == "cancel_subtask").count();
+        assert_eq!(
+            cancel_count, 1,
+            "merge 後も cancel_subtask は1件（own 優先で dedup）"
+        );
+        // inner 固有ツールは通す（dedup は同名のみ）。
+        assert!(merged.iter().any(|d| d.name == "discord_only_tool"));
     }
 }

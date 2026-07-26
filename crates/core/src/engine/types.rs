@@ -47,6 +47,66 @@ pub trait ActionExecutor: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Trait: ToolDispatcher (RFC #152 S3a — 非ブロック / 全ツール自動 subtask 化)
+// ---------------------------------------------------------------------------
+
+/// 1 バッチ（同一 assistant メッセージの `tool_calls`）をバックグラウンド subtask として
+/// 起動したときのマーカー。
+///
+/// エンジンはこれを `{status:"spawned", subtask_id, tool, label}` の tool_result へ
+/// 写して**同ターン**でエージェントへ返す。実処理は完了時に
+/// `SubtaskCompletionSink` 経由で親セッションへ再注入される（RFC §1.3）。
+///
+/// バッチが複数ツールを含む場合も **subtask は 1 本**であり（順序保証と resume 1 回化。
+/// `ToolDispatcher::dispatch_batch` 参照）、各 tool_call には同じ `subtask_id` が返る。
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    /// 起動した subtask の ID。
+    pub subtask_id: String,
+    /// 人間可読ラベル（`tool(主要引数)`。複数ツールなら `,` 連結）。
+    pub label: String,
+}
+
+/// `dispatch_batch` に渡す 1 ツール呼び出し分の入力。
+#[derive(Debug, Clone)]
+pub struct DispatchCall {
+    /// ツール名。
+    pub tool_name: String,
+    /// ツール引数（パース済み JSON）。
+    pub args: Value,
+    /// LLM が付けた tool_call id（executor へそのまま渡す）。
+    pub tool_call_id: String,
+}
+
+/// エンジンのツール実行点で「auto-dispatch 対象ツールを background subtask 化」する
+/// ためのフック（gateway 非依存）。
+///
+/// `SkillEngine` は `opencrab-actions` に依存できない（actions が core に依存する
+/// 逆向き）ため、フックの trait を core に置き、実装（executor / registry / sink を
+/// 保持する `SubtaskToolDispatcher`）は actions 側に置く。エンジンは
+/// `Arc<dyn ToolDispatcher>` を保持し、ツール呼び出しごとに問い合わせるだけ。
+pub trait ToolDispatcher: Send + Sync {
+    /// このツールを background subtask として dispatch すべきか。
+    ///
+    /// 制御系（spawn_subtask / cancel_subtask / report_progress）や配送系
+    /// （discord_send 等）、および run 内共有状態を書くツール（select_llm）は
+    /// `false`（＝従来どおり同期実行）を返すことを想定する。
+    fn should_dispatch(&self, tool_name: &str) -> bool;
+
+    /// **同一バッチのツール呼び出し群**を 1 本の background subtask として起動し、
+    /// 同期的にマーカーを返す。
+    ///
+    /// バッチを 1 本にまとめるのは順序保証のためである。tool_call ごとに別タスクを
+    /// spawn すると `write_file` → `execute_shell("cargo build")` のような依存順が
+    /// 崩れる（速い方が先に完走する）。1 subtask 内で `calls` の順に逐次実行すれば、
+    /// LLM が並べた順序がそのまま保たれ、完了通知（＝親の resume）も 1 回で済む。
+    ///
+    /// 実処理（`executor.execute_with_id`）は別タスクで走り、完了で
+    /// `settle_completed`（DB 永続化 → sink 発火）が親セッションを resume させる。
+    fn dispatch_batch(&self, calls: &[DispatchCall]) -> DispatchOutcome;
+}
+
+// ---------------------------------------------------------------------------
 // Trait: LlmClient
 // ---------------------------------------------------------------------------
 

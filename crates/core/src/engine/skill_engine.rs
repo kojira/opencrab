@@ -4,7 +4,7 @@ use anyhow::Result;
 use tracing;
 
 use super::types::{
-    ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient,
+    ActionExecutor, ActionResult, ChatRequest, EngineResult, LlmCallLog, LlmClient, ToolDispatcher,
 };
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
 use opencrab_llm_types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
@@ -49,6 +49,11 @@ pub struct SkillEngine {
     /// 載せ、対応プロバイダ（chatgpt=web_search / google=url_context）がツールを
     /// 有効化する。非対応プロバイダは単に無視する。
     web_search: bool,
+    /// 自動 dispatch フック（RFC #152 S3a）。Some のとき、`should_dispatch` が真の
+    /// ツールは inline 実行せず background subtask 化し、**同ターンで**
+    /// `{status:"spawned", ...}` を tool_result として返す。engine 外（executor 経由の
+    /// 合成 runtime）から注入する。None なら従来どおり全ツールを inline 実行する。
+    tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
 }
 
 impl SkillEngine {
@@ -69,7 +74,15 @@ impl SkillEngine {
             on_tool_result: None,
             reasoning_effort: None,
             web_search: false,
+            tool_dispatcher: None,
         }
+    }
+
+    /// 自動 dispatch フックを注入する（RFC #152 S3a）。以後、`should_dispatch` が真の
+    /// ツール呼び出しは inline 実行されず background subtask 化され、同ターンで
+    /// spawned マーカーが tool_result として返る。
+    pub fn set_tool_dispatcher(&mut self, dispatcher: Arc<dyn ToolDispatcher>) {
+        self.tool_dispatcher = Some(dispatcher);
     }
 
     /// Set the per-run reasoning (thinking) effort attached to each request.
@@ -359,6 +372,64 @@ impl SkillEngine {
                     cb(content.clone().unwrap_or_default(), calls_json);
                 }
 
+                // 自動 dispatch（RFC #152 S3a・非ブロック）のバッチ判定。
+                //
+                // **バッチ単位**で決める（tool_call 単位ではない）。同一 assistant
+                // メッセージのツールは LLM が並べた順に依存し得る
+                // （`write_file` → `execute_shell("cargo build")` / `add_allowed_command`
+                // → `execute_shell`）ため、
+                //  - 全部 dispatch 可 → **1 本の subtask** にまとめて逐次実行（順序保持・
+                //    完了通知も 1 回 = 親の resume も 1 回）。
+                //  - 1 つでも dispatch 不可（配送系・制御系・共有状態を書くツール）や
+                //    未許可ツールが混ざる → **バッチ全体を inline 実行**（従来経路）。
+                //    混在バッチを分割すると inline と background の相対順序が保証できない。
+                let dispatch_whole_batch = match &self.tool_dispatcher {
+                    Some(d) => tool_calls.iter().all(|tc| {
+                        self.is_action_allowed(&tc.function.name)
+                            && d.should_dispatch(&tc.function.name)
+                    }),
+                    None => false,
+                };
+
+                if dispatch_whole_batch {
+                    let dispatcher = self.tool_dispatcher.as_ref().expect("checked above");
+                    let calls: Vec<super::types::DispatchCall> = tool_calls
+                        .iter()
+                        .map(|tc| super::types::DispatchCall {
+                            tool_name: tc.function.name.clone(),
+                            args: tc.arguments_json(),
+                            tool_call_id: tc.id.clone(),
+                        })
+                        .collect();
+                    total_tool_calls += calls.len();
+                    let outcome = dispatcher.dispatch_batch(&calls);
+                    tracing::debug!(
+                        tools = calls.len(),
+                        subtask_id = %outcome.subtask_id,
+                        "tool batch auto-dispatched as a single background subtask"
+                    );
+                    for tool_call in &tool_calls {
+                        let spawned = serde_json::json!({
+                            "status": "spawned",
+                            "subtask_id": outcome.subtask_id,
+                            "tool": tool_call.function.name,
+                            "label": outcome.label,
+                        });
+                        let result_json = serde_json::to_string(&spawned)
+                            .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
+                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
+                        if let Some(ref cb) = self.on_tool_result {
+                            cb(
+                                tool_call.id.clone(),
+                                tool_call.function.name.clone(),
+                                result_json,
+                                false,
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 for tool_call in &tool_calls {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
@@ -391,6 +462,9 @@ impl SkillEngine {
                     // Canonical tool-call arguments are a JSON string; parse to a
                     // Value for the executor boundary (empty object on malformed).
                     let args = tool_call.arguments_json();
+
+                    // ここに来るのは「バッチ全体を inline 実行する」経路のみ
+                    // （dispatch 判定はバッチ単位でループ前に済んでいる）。
                     let result = self
                         .executor
                         .execute_with_id(tool_name, &args, &tool_call.id)
@@ -868,5 +942,252 @@ mod tests {
         assert_eq!(texts.len(), 1);
         assert_eq!(texts[0], "直接答えます");
         assert_eq!(result.response, "直接答えます");
+    }
+
+    // ---- RFC #152 S3a: 自動 dispatch（非ブロック / 全ツール subtask 化） ----
+
+    /// 記録用の最小 `ToolDispatcher`。`should_dispatch` は control 集合以外を真にし、
+    /// `dispatch_batch` は inline 実行せずマーカーだけ返す（実処理は起こさない）。
+    struct RecordingDispatcher {
+        control: std::collections::HashSet<String>,
+        /// dispatch されたツール名（バッチごとに 1 エントリ = カンマ連結）。
+        dispatched: std::sync::Mutex<Vec<String>>,
+        /// `dispatch_batch` の呼び出し回数（= 生成された subtask の本数）。
+        batches: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RecordingDispatcher {
+        fn new(control: &[&str]) -> Self {
+            Self {
+                control: control.iter().map(|s| s.to_string()).collect(),
+                dispatched: std::sync::Mutex::new(Vec::new()),
+                batches: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl crate::ToolDispatcher for RecordingDispatcher {
+        fn should_dispatch(&self, tool_name: &str) -> bool {
+            !self.control.contains(tool_name)
+        }
+        fn dispatch_batch(&self, calls: &[crate::DispatchCall]) -> crate::DispatchOutcome {
+            self.batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let names: Vec<String> = calls.iter().map(|c| c.tool_name.clone()).collect();
+            self.dispatched.lock().unwrap().push(names.join(","));
+            crate::DispatchOutcome {
+                subtask_id: format!("sub-for-{}", names.join("+")),
+                label: names.join(", "),
+            }
+        }
+    }
+
+    /// dispatch 対象ツールは inline 実行（executor）されず、**同ターンで** spawned
+    /// マーカーが tool_result として返り、次イテレーションでエージェントが継続すること。
+    #[tokio::test]
+    async fn test_auto_dispatch_returns_spawned_marker_same_turn() {
+        use std::sync::{Arc, Mutex};
+
+        // 1回目: ツール呼び出し（dispatch 対象）。2回目: 最終テキスト。
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![tc(
+                "tc-1",
+                "nostr_generate_key",
+                serde_json::json!({}),
+            )]),
+            text_response("鍵の生成を開始しました"),
+        ]);
+        // executor が呼ばれたら記録する（dispatch 対象は呼ばれてはならない）。
+        struct SpyExecutor {
+            called: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for SpyExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.called.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let executor = SpyExecutor {
+            called: called.clone(),
+        };
+
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let dispatcher = Arc::new(RecordingDispatcher::new(&[
+            "spawn_subtask",
+            "report_progress",
+            "cancel_subtask",
+        ]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        // 2回目の LLM 呼び出しが見る messages を記録し、spawned マーカーの再注入を検証する。
+        let seen_tool_results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen_tool_results.clone();
+        engine.set_on_tool_result(move |_id, name, json, _err| {
+            seen_clone.lock().unwrap().push(format!("{name}:{json}"));
+        });
+
+        let result = engine
+            .run("system", "鍵を作って", "test-model")
+            .await
+            .unwrap();
+
+        // dispatch されたので executor は呼ばれない。
+        assert!(
+            called.lock().unwrap().is_empty(),
+            "dispatch 対象ツールは inline executor で実行されてはならない"
+        );
+        // dispatcher.dispatch が1回呼ばれた。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["nostr_generate_key"]
+        );
+        // tool_result は spawned マーカー（同ターン返却）。
+        let seen = seen_tool_results.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].contains("\"status\":\"spawned\""));
+        assert!(seen[0].contains("\"subtask_id\":\"sub-for-nostr_generate_key\""));
+        // エージェントは自分のターンで継続して最終応答を出す。
+        assert_eq!(result.response, "鍵の生成を開始しました");
+        assert_eq!(result.iterations, 2);
+    }
+
+    /// control 系ツール（report_progress 等）は dispatch されず inline 実行される。
+    #[tokio::test]
+    async fn test_control_tools_not_dispatched() {
+        use std::sync::Arc;
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
+            text_response("done"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+            },
+        );
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        // test_tool を control 扱いにして dispatch させない。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&["test_tool"]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let result = engine.run("system", "go", "test-model").await.unwrap();
+        // dispatch されず inline 実行された（dispatched は空）。
+        assert!(dispatcher.dispatched.lock().unwrap().is_empty());
+        assert_eq!(result.tool_calls_made, 1);
+        assert_eq!(result.response, "done");
+    }
+
+    /// [P0 回帰] 同一ターンに複数ツールが来たとき、tool_call ごとに個別 dispatch せず
+    /// **1 本の subtask** にまとめること（順序保持 ＋ 完了通知＝親 resume の 1 回化）。
+    #[tokio::test]
+    async fn test_multi_tool_batch_dispatched_as_single_subtask() {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc("tc-1", "write_file", serde_json::json!({"path": "x"})),
+                tc("tc-2", "execute_shell", serde_json::json!({"cmd": "build"})),
+            ]),
+            text_response("開始しました"),
+        ]);
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+        let dispatcher = Arc::new(RecordingDispatcher::new(&["spawn_subtask"]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        engine.set_on_tool_result(move |_id, _name, json, _err| {
+            seen_clone.lock().unwrap().push(json);
+        });
+
+        let result = engine.run("system", "go", "test-model").await.unwrap();
+
+        // subtask は 1 本だけ（= settle も sink 発火も 1 回）。
+        assert_eq!(
+            dispatcher.batches.load(AtomicOrdering::SeqCst),
+            1,
+            "同一バッチの複数ツールは 1 本の subtask にまとめる"
+        );
+        // dispatch 順序は LLM が並べた順のまま渡る。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["write_file,execute_shell"]
+        );
+        // tool_call ごとに spawned マーカーは返る（同じ subtask_id）。
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen
+            .iter()
+            .all(|s| s.contains("\"subtask_id\":\"sub-for-write_file+execute_shell\"")));
+        assert_eq!(result.tool_calls_made, 2);
+    }
+
+    /// [P0 回帰] dispatch 不可のツールが 1 つでも混ざるバッチは**全体を inline 実行**し、
+    /// LLM が並べた順序を保つ（分割すると inline と background の相対順序が崩れる）。
+    #[tokio::test]
+    async fn test_mixed_batch_falls_back_to_inline_in_order() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc("tc-1", "write_file", serde_json::json!({"path": "x"})),
+                tc("tc-2", "discord_send", serde_json::json!({"text": "hi"})),
+            ]),
+            text_response("done"),
+        ]);
+        struct OrderExecutor {
+            order: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for OrderExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.order.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(llm),
+            Box::new(OrderExecutor {
+                order: order.clone(),
+            }),
+            10,
+        );
+        // discord_send は dispatch 不可（配送系）。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&["discord_send"]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        engine.run("system", "go", "test-model").await.unwrap();
+
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().len(),
+            0,
+            "混在バッチは dispatch せず inline に落とす"
+        );
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            &["write_file", "discord_send"],
+            "inline 実行は LLM が並べた順序を守る"
+        );
     }
 }

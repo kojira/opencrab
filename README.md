@@ -240,6 +240,7 @@ Configuration is loaded from `config/default.toml` and **hot-reloaded** when fil
 - **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), CLI toggle
 - **Database** — SQLite path
 - **Tools** — Shell commands with per-command permission levels (`agent` / `owner`)
+- **Background tool execution** — `[subtask] auto_dispatch` (default `true`). Tool calls run in the background so the response loop never blocks; results are re-injected into the conversation when they finish. Set it to `false` (or export `OPENCRAB_SUBTASK_AUTO_DISPATCH=0`, which takes precedence) to fall back to fully synchronous tool execution. See "非ブロックツール実行" in `docs/DESIGN.md` for which tools stay inline and why.
 
 The `[tools]` section supports config-driven tool definitions with permission levels, hot-reloaded without server restart.
 
@@ -258,6 +259,14 @@ cargo test -p opencrab-core     #  8 tests
 
 # Run E2E API tests
 cargo test -p opencrab-server
+
+# Local-only E2E harness (NOT for CI). Drives a running server over HTTP/SSE with a
+# real LLM to verify tool dispatch / cancellation end-to-end. Gated by OPENCRAB_E2E=1.
+# Prereqs: local server running (./dev.sh restart) + ~/.codex/auth.json authenticated.
+cp .env.example .env   # adjust values if needed (no secrets committed)
+# OPENCRAB_E2E_OWNER_ID is also required (no default): the user_id used for owner
+# authorization checks. Set it in .env; tests skip when it is unset.
+OPENCRAB_E2E=1 cargo test -p opencrab-server --test e2e_local -- --ignored --nocapture
 ```
 
 ## Tech Stack

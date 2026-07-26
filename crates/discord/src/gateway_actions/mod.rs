@@ -12,7 +12,6 @@ use dashmap::DashMap;
 use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use serde_json::json;
 use serenity::http::Http;
-use tokio::task::AbortHandle;
 
 use crate::message_loop::LoopEvent;
 use crate::PendingInteractionRegistry;
@@ -29,27 +28,29 @@ mod webhook;
 
 pub(crate) use peer_review::record_peer_review_reply;
 pub use subtask_engine::spawn_activity_tool_event_sink;
+pub(crate) use subtask_engine::DiscordCompletionSink;
 use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 
-/// A running subtask tracked by the registry.
-#[derive(Clone)]
-pub struct SpawnedSubtask {
-    pub abort_handle: AbortHandle,
-    pub session_id: String,
-    pub parent_session_id: String,
-    pub spawned_at: String,
-    pub agent_id: String,
+/// 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設した
+/// （RFC #152 S1）。Discord 固有の webhook 系（`webhook` / `webhook_tx`）は
+/// `SpawnedSubtask` に載せず、`SubtaskWebhooks` 随伴マップへ分離する（下記）。
+pub use opencrab_actions::subtask::{SpawnedSubtask, SubtaskRegistry};
+
+/// `SpawnedSubtask` から分離した Discord 固有の webhook 随伴データ（RFC §1.5）。
+///
+/// actions の gateway 非依存 `SpawnedSubtask` には webhook を載せられないため、
+/// subtask_id をキーに別マップで保持する。ライフサイクルは registry と同期させる
+/// （spawn 時に insert、完了/キャンセル時に remove）。
+pub(crate) struct DiscordSubtaskWebhook {
     /// Subtask lifecycle webhook config (spawn 時指定)。None なら通知無効。
     pub webhook: Option<WebhookConfig>,
     /// 同一 run の lifecycle delivery を直列化する sender。
     pub webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>>,
-    /// duration 算出用の起動時刻。
-    pub started_instant: std::time::Instant,
 }
 
-/// Registry of active subtasks keyed by subtask_id.
-pub type SubtaskRegistry = Arc<DashMap<String, SpawnedSubtask>>;
+/// subtask_id → Discord webhook 随伴データのマップ。registry と対で共有する。
+pub(crate) type SubtaskWebhooks = Arc<DashMap<String, DiscordSubtaskWebhook>>;
 
 struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
 
@@ -85,6 +86,9 @@ pub struct DiscordGatewayActions {
     /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
     workspace_base: String,
     subtask_registry: SubtaskRegistry,
+    /// registry と対の Discord webhook 随伴マップ（RFC #152 S1: webhook 分離）。
+    /// registry と同じく Clone で共有され、sub-engine 用クローンからも同じ実体を見る。
+    subtask_webhooks: SubtaskWebhooks,
     /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
     webhook_client: reqwest::Client,
     /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook。
@@ -121,6 +125,7 @@ impl DiscordGatewayActions {
             default_model,
             workspace_base,
             subtask_registry,
+            subtask_webhooks: Arc::new(DashMap::new()),
             webhook_client: reqwest::Client::new(),
             default_subtask_webhook,
             pending_interaction_registry: None,
@@ -1093,11 +1098,11 @@ mod tests {
                 abort_handle: handle.abort_handle(),
                 session_id: session_id.to_string(),
                 parent_session_id: parent_session_id.to_string(),
-                spawned_at: "2026-01-01T00:00:00Z".to_string(),
                 agent_id: "test-agent".to_string(),
-                webhook: None,
-                webhook_tx: None,
-                started_instant: std::time::Instant::now(),
+                label: "test".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
             },
         );
         handle
@@ -1289,9 +1294,12 @@ mod tests {
         let (actions, db) = make_test_actions();
         let parent = "discord-test-agent-111-222";
         let _h = insert_fake_subtask(&actions, "st-sub", "subtask-s1", parent);
-        let sub_gw = SubEngineGatewayActions::new(actions.clone());
+        // 後方互換の経路（root_gateway 未注入）では transport gateway 単体を wrap する。
+        let sub_gw = SubEngineGatewayActions::new(std::sync::Arc::new(actions.clone()));
 
-        // definitions は report_progress のみ
+        // Discord 単体の definitions に対して許可リストを適用するため report_progress のみ。
+        // （nostr_generate_key は Discord gateway の definitions に無いため出ない。
+        //   合成 gateway 経由の到達は subtask_engine.rs の S2 テストで固定する。）
         let names: Vec<String> = sub_gw.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["report_progress".to_string()]);
 
@@ -1390,25 +1398,110 @@ mod tests {
                 assert!(names.contains(&n.to_string()), "{n} が definitions に無い");
             }
         }
-        // DISCORD_ACTIONS のうち現行 gateway に実在する集合（depth ゲートの実効対象）。
-        // 定義追加時にこのテストが落ちたら、ゲート対象かどうかを判断して更新すること。
-        let gated_live: Vec<&str> = opencrab_actions::DISCORD_ACTIONS
-            .iter()
-            .filter(|n| names.contains(&n.to_string()))
-            .copied()
-            .collect();
+        // DISCORD_ACTIONS は**全要素が実在**しなければならない（死名は depth ゲートも
+        // dispatch 除外も空振りさせる）。以前は 20 名のうち 13 名が死名だった。
+        for n in opencrab_actions::DISCORD_ACTIONS {
+            assert!(
+                names.contains(&n.to_string()),
+                "DISCORD_ACTIONS の {n} が definitions() に無い（死名）"
+            );
+        }
         assert_eq!(
-            gated_live,
+            opencrab_actions::DISCORD_ACTIONS.to_vec(),
             vec![
                 "discord_send_file",
+                "discord_add_reaction",
                 "discord_list_channels",
                 "discord_list_guilds",
-                "discord_add_reaction",
+                "send_ui",
                 "request_peer_review",
                 "join_voice_channel",
                 "leave_voice_channel",
             ]
         );
+    }
+
+    /// **fail-closed な dispatch 分類ガード（#152）**。
+    ///
+    /// `definitions()` の全名が「非ブロック dispatch の除外集合（inline）」か
+    /// 「意図的な dispatch 可リスト」のどちらか**ちょうど一方**に属することを要求する。
+    ///
+    /// 定数 → 実装の片方向だけを見るテストでは、「新しい配送系ツールを実装したが定数へ
+    /// 入れ忘れた」を検知できない（`send_ui` が dispatch されていた実際の事故がこれ）。
+    /// ここは実装（`definitions()`）を起点に走査するので、新ツールを追加すると分類を
+    /// 明示するまでテストが落ちる。判定基準は
+    /// `opencrab_actions::default_non_dispatch_tools` の doc（5 項目）。
+    #[test]
+    fn discord_tools_are_classified_for_dispatch() {
+        let (actions, _db) = make_test_actions();
+        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in &names {
+            let inline = non_dispatch.contains(name);
+            let dispatchable =
+                opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&name.as_str());
+            assert!(
+                inline ^ dispatchable,
+                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
+                 新しいツールを追加したら opencrab_actions::DISCORD_INLINE_ACTIONS か \
+                 DISCORD_DISPATCHABLE_ACTIONS のどちらかへ入れること（判定基準は \
+                 default_non_dispatch_tools の doc）"
+            );
+        }
+
+        // 逆方向: 定数側に死名が無いこと。
+        for name in opencrab_actions::DISCORD_INLINE_ACTIONS {
+            assert!(
+                names.contains(&name.to_string()),
+                "DISCORD_INLINE_ACTIONS の {name} が definitions() に無い（死名）"
+            );
+        }
+        for name in opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS {
+            assert!(
+                names.contains(&name.to_string()),
+                "DISCORD_DISPATCHABLE_ACTIONS の {name} が definitions() に無い（死名）"
+            );
+        }
+        // 分類は definitions() を覆い尽くす。
+        assert_eq!(
+            opencrab_actions::DISCORD_INLINE_ACTIONS.len()
+                + opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.len(),
+            names.len(),
+            "分類集合の合計が definitions() の数と一致しない"
+        );
+    }
+
+    /// 配送系・同ターン結果依存・純粋な読み取りが dispatch されていない（#152 の実害）。
+    ///
+    /// 特に `send_ui` は「UI を送信しユーザーの応答を待機する」配送系で、background 化
+    /// すると (a) UI 投稿と本文返信の順序が入れ替わり、(b) エージェントはインタラクション
+    /// ID を扱えず、(c) クリック resume と subtask 決着 resume で返信が 2 通になる。
+    #[test]
+    fn delivery_and_read_tools_are_inline() {
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+        for name in [
+            // 配送系（ユーザー応答待ちを含む）
+            "send_ui",
+            "discord_send_file",
+            "discord_add_reaction",
+            "request_peer_review",
+            // 同ターンで戻り値（URL / ID）を使う
+            "ensure_webhook",
+            "ensure_subtask_webhook",
+            "discord_create_webhook",
+            "discord_create_channel",
+            // 純粋な読み取り
+            "list_webhooks",
+            "list_subtask_webhooks",
+            "list_allowed_commands",
+            "read_heartbeat_instructions",
+        ] {
+            assert!(
+                non_dispatch.contains(name),
+                "{name} が dispatch されてしまう（inline に残すべき）"
+            );
+        }
     }
 
     // ---- definitions ----

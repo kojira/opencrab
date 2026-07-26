@@ -128,6 +128,14 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          You work asynchronously. When you call a tool, the result arrives later — and you\n\
          are called again with the result in the conversation history.\n\
          \n\
+         Some tools return `{{status:\"spawned\", subtask_id: ...}}` immediately instead of a\n\
+         final result. This means the work has started in the background and its result will\n\
+         arrive later in a separate turn (as a `[subtask_completed: ...]` entry). When you\n\
+         see a `spawned` result:\n\
+         - Briefly tell the user you've started the task (do not claim it is finished)\n\
+         - Do NOT call the same tool again for the same request — it is already running\n\
+         - Do NOT invent or guess the result — wait for the actual completion turn\n\
+         \n\
          When you see `[subtask_completed: ...]` in the conversation:\n\
          - It means a tool you called has finished, and it's your turn again\n\
          - Check what the result contains\n\
@@ -923,44 +931,6 @@ fn set_llm_log_callback(
     });
 }
 
-/// tool_result JSON から秘密鍵フィールド（`nsec`）をマスクする。永続化前に呼ぶ。
-///
-/// ここに渡るのは `ActionResult` ラッパ全体の serialize
-/// （`{"success":..,"data":{..},"error":..}`）で、`nsec` は `data` の**中**にある。
-/// トップレベルだけ見ると素通りするため、object を再帰的に辿って `nsec` を潰す。
-/// JSON として解釈できない場合は生の中身に秘密鍵が残りうるため、固定の placeholder に
-/// 置き換える（生保存で漏らさない）。
-fn redact_secret_fields_json(result_json: &str) -> String {
-    fn redact(v: &mut serde_json::Value) {
-        match v {
-            serde_json::Value::Object(obj) => {
-                if obj.contains_key("nsec") {
-                    obj.insert(
-                        "nsec".to_string(),
-                        serde_json::Value::String("[redacted]".to_string()),
-                    );
-                }
-                for (_, child) in obj.iter_mut() {
-                    redact(child);
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                for child in arr.iter_mut() {
-                    redact(child);
-                }
-            }
-            _ => {}
-        }
-    }
-    match serde_json::from_str::<serde_json::Value>(result_json) {
-        Ok(mut v) => {
-            redact(&mut v);
-            v.to_string()
-        }
-        Err(_) => "{\"note\":\"[redacted secret result]\"}".to_string(),
-    }
-}
-
 /// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
 /// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
 fn set_turn_log_callbacks(
@@ -1021,35 +991,18 @@ fn set_turn_log_callbacks(
         let tr_workspace = tool_result_workspace;
         engine.set_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
-                // 防御的マスク（defense-in-depth）。nostr_generate_key は既に nsec を
-                // 返さない設計だが、tool_result は後続ターンで build_conversation_string に
-                // より会話へ再注入されるため、万一 nsec フィールドが混ざっても永続化前に
-                // ここで潰す（DB 保存時漏洩＋プロンプトインジェクション持ち出しの防止）。
-                let result_json = if tool_name == "nostr_generate_key" {
-                    redact_secret_fields_json(&result_json)
-                } else {
-                    result_json
-                };
-                const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
-                let content = if result_json.len() >= TOOL_RESULT_SIZE_LIMIT {
-                    // 大きい結果はファイルに保存
-                    let tmp_dir = std::path::Path::new(&tr_workspace).join("tmp");
-                    let _ = std::fs::create_dir_all(&tmp_dir);
-                    let filename = format!("{}_{}.json", tr_session, tool_call_id);
-                    let file_path = tmp_dir.join(&filename);
-                    if std::fs::write(&file_path, &result_json).is_ok() {
-                        format!("[Tool Result: file://tmp/{}]", filename)
-                    } else {
-                        // 文字境界を尊重して切り詰める（バイトスライスはUTF-8境界でpanicする）
-                        let mut end = TOOL_RESULT_SIZE_LIMIT.min(result_json.len());
-                        while !result_json.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        result_json[..end].to_string()
-                    }
-                } else {
-                    result_json.clone()
-                };
+                // 永続化前の無害化（秘密フィールドのマスク ＋ サイズ上限/ワークスペース
+                // 退避）は background dispatch 経路（`SubtaskToolDispatcher` →
+                // `settle_completed`）と**共通の関数**を使う。片方だけ素通りすると、
+                // 巨大結果や秘密鍵がそのまま session_logs に入り、次ターンの会話
+                // 再構築へ再注入される。
+                let content = opencrab_actions::sanitize_tool_result_for_log(
+                    &tool_name,
+                    &result_json,
+                    &tr_session,
+                    &tool_call_id,
+                    Some(tr_workspace.as_path()),
+                );
 
                 if let Ok(conn) = tr_db.lock() {
                     let log = opencrab_db::queries::SessionLogRow {
@@ -1355,9 +1308,17 @@ pub async fn run_agent_response(
         // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
         // 供給する。既存 gateway（Discord/Nostr）は inner として委譲される（composite）。
         // owner 限定ツールは bridge の OWNER_ONLY_ACTIONS が可視性/実行を強制する。
+        // 共有 registry を neutral 層の cancel_subtask（#161）へ配線する。dispatcher が
+        // 使う registry と同一 Arc を渡すことで、auto-dispatch された subtask を
+        // cancel_subtask で停止できる（Discord では gateway_actions の registry とも同一）。
         let system_actions = std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
             state.clone(),
             req.gateway_actions,
+            req.subtask_registry.clone(),
+            // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
+            // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
+            // 変わらず、REST だけがセッション状態の整合を取る。
+            req.completion_sink.clone(),
         ));
         let bridged = bridged.with_gateway_actions(system_actions);
         // 接続済み MCP サーバのツールを注入する（本ターンの caller で trusted_only を出し分け）。
@@ -1395,8 +1356,50 @@ pub async fn run_agent_response(
 
     // Main engine: 30 iterations max. Sub-engines: unlimited (timeout-controlled).
     let max_iterations = if depth == 0 { 30 } else { usize::MAX };
-    let mut engine =
-        opencrab_core::SkillEngine::new(Box::new(llm_client), Box::new(executor), max_iterations);
+
+    // tool_result の退避先（サイズ上限超過分）。inline 経路のログ callback と
+    // dispatch 経路（`SubtaskToolDispatcher`）が同じ root を使う。
+    let tool_result_workspace =
+        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;
+
+    // 合成 executor を 1 つの Arc にまとめ、engine（inline 実行）と dispatcher
+    // （background 実行 = RFC #152 S3a 非ブロック）で共有する。dispatch した単一
+    // ツールは同じ合成 executor（SystemGatewayActions を含む＝nostr_generate_key
+    // 等 server ツール到達可）で実行される（S2 到達性の実経路化）。
+    let executor: std::sync::Arc<dyn opencrab_core::ActionExecutor> = std::sync::Arc::new(executor);
+    let mut engine = opencrab_core::SkillEngine::new(
+        Box::new(llm_client),
+        Box::new(opencrab_actions::SharedExecutor(executor.clone())),
+        max_iterations,
+    );
+
+    // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
+    // されているときだけ有効化する。sink 未配線（REST 一発呼び等）や sub-engine は
+    // 従来どおり全ツール inline 実行（後方互換・非破壊）。
+    if depth == 0 && state.subtask_auto_dispatch {
+        if let Some(sink) = req.completion_sink.clone() {
+            let registry = req
+                .subtask_registry
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::new(dashmap::DashMap::new()));
+            // inbound の返信先（gateway 不透明 token / #167）を dispatcher へ渡す。
+            // dispatch した subtask の `SpawnedSubtask.reply_target` に載り、settle 時に
+            // sink へ届く（session_id から返信先を復元できない gateway 用）。
+            let dispatcher = opencrab_actions::SubtaskToolDispatcher::new(
+                executor.clone(),
+                registry,
+                state.db.clone(),
+                sink,
+                agent_id.to_string(),
+                session_id.to_string(),
+            )
+            .with_reply_target(req.reply_target.clone())
+            // 大きい tool_result は inline 経路と同様にワークスペースへ退避する
+            // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
+            .with_workspace_root(Some(tool_result_workspace.clone()));
+            engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
+        }
+    }
 
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
     if let Some(effort) = &agent_reasoning_effort {
@@ -1425,7 +1428,7 @@ pub async fn run_agent_response(
         state.db.clone(),
         agent_id.to_string(),
         session_id.to_string(),
-        opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?,
+        tool_result_workspace,
     );
 
     let merged_image_urls = merge_image_urls(state, session_id, agent_id, &req.image_urls);
@@ -2031,7 +2034,8 @@ mod memory_index_section_injection_tests {
 
 #[cfg(test)]
 mod redact_secret_fields_tests {
-    use super::redact_secret_fields_json;
+    // redaction 本体は inline / dispatch 両経路で共有するため actions 側にある。
+    use opencrab_actions::redact_secret_fields_json;
 
     #[test]
     fn test_redacts_nsec_nested_in_actionresult_wrapper() {

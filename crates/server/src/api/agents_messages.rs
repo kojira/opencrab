@@ -6,6 +6,8 @@ use axum::{
 };
 use serde::Deserialize;
 
+use opencrab_actions::{SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled};
+
 use crate::process;
 use crate::AppState;
 
@@ -13,6 +15,104 @@ use crate::AppState;
 pub struct SendAgentMessageRequest {
     pub content: String,
     pub user_id: String,
+}
+
+/// REST 経路のセッション ID 接頭辞（`agent-msg-{agent_id}-{user_id}`）。
+pub const REST_SESSION_PREFIX: &str = "agent-msg-";
+
+/// REST 経路の完了 sink（#169）。**resume も live push もしない「保存のみ」**。
+///
+/// 完了本文は `settle_completed` が親セッションログへ永続化済み（RFC §1.3）なので、
+/// 取得は `GET /api/sessions/{id}/logs` で足りる。ここで LLM を回して結果を再注入
+/// （web の `WebCompletionSink` 相当）はしない:
+/// - REST には per-session の直列化が無い（web は `WebGateway::run_serialized`、Discord は
+///   `spawn_serialized_on_session` を持つ）。resume を走らせると同一セッションへの
+///   並行 POST と競合し、同じ会話から二重に応答する（RFC §6 の不変条件違反）。
+/// - 完了本文は次の POST の `build_conversation_string` で自然に文脈へ載る
+///   （heartbeat の「次 tick 拾い」と同じ方式）。
+///
+/// sink の役目は `sessions.status` の整合だけ: 走行中 subtask がある間はハンドラが
+/// `completed` にしないため、最後の subtask が決着した時点でここが完了させる
+/// （そうしないとセッションが永久に `active` のまま残る）。
+pub struct RestCompletionSink {
+    pub db: opencrab_db::Db,
+    /// この REST セッションの共有 registry（他に走行中 subtask が無いかの判定用）。
+    pub registry: SubtaskRegistry,
+}
+
+impl SubtaskCompletionSink for RestCompletionSink {
+    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        if !ev.session_id.starts_with(REST_SESSION_PREFIX) {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                "rest sink: parent session is not a REST session, nothing to reconcile"
+            );
+            return;
+        }
+        // `settle_completed` は sink 発火より前に当該 subtask を registry から除去する。
+        // 空でなければ他の subtask がまだ走行中 = セッションは完了ではない。
+        if !self.registry.is_empty() {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                running = self.registry.len(),
+                "rest sink: subtask settled but others are still running"
+            );
+            return;
+        }
+        mark_session_completed(&self.db, &ev.session_id);
+    }
+
+    /// 停止（`cancel_subtask`）でも `sessions.status` の整合を取る。
+    ///
+    /// cancel された subtask は `settle_completed` を通らない（完了ではない）ため、
+    /// **最後の走行中 subtask を停止した場合は誰も `completed` にしない** =
+    /// セッションが永久に `active` のまま残る。停止も決着の 1 形態として扱い、
+    /// 完了時と同じ「他に走行中が無ければ完了」判定を適用する。resume はしない
+    /// （停止したのに返信が飛ぶことはない）。
+    fn on_subtask_cancelled(&self, ev: SubtaskSettled) {
+        if !ev.session_id.starts_with(REST_SESSION_PREFIX) {
+            return;
+        }
+        // `cancel_subtask` は sink 通知より前に registry から除去している。
+        if !self.registry.is_empty() {
+            tracing::debug!(
+                session_id = %ev.session_id,
+                running = self.registry.len(),
+                "rest sink: subtask cancelled but others are still running"
+            );
+            return;
+        }
+        mark_session_completed(&self.db, &ev.session_id);
+    }
+}
+
+/// セッションを `completed` にする（best-effort）。
+fn mark_session_completed(db: &opencrab_db::Db, session_id: &str) {
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "UPDATE sessions SET status = 'completed' WHERE id = ?1",
+            [session_id],
+        )
+        .ok();
+    }
+}
+
+/// 走行中の dispatch subtask が無いときだけセッションを `completed` にする（#169）。
+///
+/// 非ブロック dispatch により、HTTP 応答を返した時点でまだ background subtask が
+/// 走っていることがある。そこで `completed` にすると「完了したのに走行中」という
+/// 不整合になるため、走行中は `active` のまま残し、最後の subtask が決着した時点で
+/// `RestCompletionSink` が完了させる。
+fn complete_session_if_idle(db: &opencrab_db::Db, session_id: &str, registry: &SubtaskRegistry) {
+    if !registry.is_empty() {
+        tracing::debug!(
+            session_id = %session_id,
+            running = registry.len(),
+            "rest: subtask still running, keeping session active"
+        );
+        return;
+    }
+    mark_session_completed(db, session_id);
 }
 
 pub async fn send_agent_message(
@@ -25,7 +125,7 @@ pub async fn send_agent_message(
     // キーだけ生値を使うと、`" <id> "` が owner にはなれるのに別セッション・別
     // speaker_id として記録される非対称が生まれる。
     let user_id = req.user_id.trim();
-    let session_id = format!("agent-msg-{}-{}", id, user_id);
+    let session_id = format!("{}{}-{}", REST_SESSION_PREFIX, id, user_id);
 
     // 1. Determine caller identity from trusted_users table.
     let caller = {
@@ -114,14 +214,22 @@ pub async fn send_agent_message(
         }));
     }
 
-    // 5. Get gateway_actions from discord_manager.
+    // 5. dispatch 用の共有 registry を確保する（#169）。
+    //    `AppState` が session_id キーで保持しているものを借りるため、リクエストを
+    //    跨いでも同一 Arc であり、dispatch した subtask を後続リクエストの
+    //    `cancel_subtask` から停止できる（使い捨ての DashMap では常に not found）。
+    let subtask_registry = state.subtask_registries.registry_for(&session_id);
+
+    // 6. Get gateway_actions from discord_manager.
+    //    Discord の gateway_actions にも**同一の**registry を渡す。
+    //    `SystemGatewayActions` は inner が cancel_subtask を実装している場合そちらへ
+    //    委譲するため、別 registry を渡すと停止が not found になる。
     #[cfg(feature = "discord")]
     let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = {
         if let Some(ref dm) = state.discord_manager {
             if let Some(http) = dm.get_http_for_agent(&id) {
                 let tools_cfg = state.tools_config.read().unwrap().clone();
-                let subtask_registry: opencrab_discord::SubtaskRegistry =
-                    std::sync::Arc::new(dashmap::DashMap::new());
+                let subtask_registry = subtask_registry.clone();
                 let ga = opencrab_discord::DiscordGatewayActions::new(
                     http,
                     state.db.clone(),
@@ -143,13 +251,13 @@ pub async fn send_agent_message(
     #[cfg(not(feature = "discord"))]
     let gateway_actions: Option<Arc<dyn opencrab_gateway::GatewayActions>> = None;
 
-    // 6. Build agent context.
+    // 7. Build agent context.
     let (system_prompt, agent_name) = {
         let conn = state.db.lock().unwrap();
         process::build_agent_context(&conn, &id)
     };
 
-    // 7. Build conversation string.
+    // 8. Build conversation string.
     let conversation = {
         let conn = state.db.lock().unwrap();
         let eff = opencrab_db::queries::effective_model_for_agent(&conn, &id, &state.default_model)
@@ -167,7 +275,14 @@ pub async fn send_agent_message(
         process::prepend_runtime_context(&raw, "direct_message")
     };
 
-    // 8. Run agent response.
+    // 9. Run agent response.
+    //     非ブロック dispatch（#152 S3a / #169）を有効化する。長時間ツールは background
+    //     subtask になり、HTTP 応答はメインを塞がずに即座に返る。sink は「保存のみ」
+    //     （resume / live push なし。取得はセッションログ経由）。
+    let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(RestCompletionSink {
+        db: state.db.clone(),
+        registry: subtask_registry.clone(),
+    });
     let mut run_req = opencrab_actions::RunRequest::new(
         &id,
         &agent_name,
@@ -176,13 +291,14 @@ pub async fn send_agent_message(
         &conversation,
         "rest",
         caller,
-    );
+    )
+    .with_dispatch(Some(subtask_registry.clone()), sink);
     if let Some(ga) = gateway_actions {
         run_req = run_req.with_gateway_actions(ga);
     }
     let result = process::run_agent_response(&state, run_req).await;
 
-    // 9. Handle result.
+    // 10. Handle result.
     match result {
         Ok(engine_result) => {
             // Log agent response.
@@ -198,15 +314,9 @@ pub async fn send_agent_message(
                 );
             }
 
-            // Mark session as completed after agent responds
-            {
-                let conn = state.db.lock().unwrap();
-                conn.execute(
-                    "UPDATE sessions SET status = 'completed' WHERE id = ?1",
-                    [&session_id],
-                )
-                .ok();
-            }
+            // 走行中 subtask が無ければセッションを完了にする（走行中は active のまま。
+            // 最後の subtask 決着時に RestCompletionSink が完了させる）。
+            complete_session_if_idle(&state.db, &session_id, &subtask_registry);
 
             Json(serde_json::json!({
                 "session_id": session_id,
@@ -219,15 +329,9 @@ pub async fn send_agent_message(
         }
         Err(e) => {
             tracing::error!(agent_id = %id, error = %e, "Agent response failed");
-            // Mark session as completed after agent responds
-            {
-                let conn = state.db.lock().unwrap();
-                conn.execute(
-                    "UPDATE sessions SET status = 'completed' WHERE id = ?1",
-                    [&session_id],
-                )
-                .ok();
-            }
+            // エラー時も同様: 走行中 subtask（エラー前に dispatch 済み）があれば
+            // 完了扱いにしない。
+            complete_session_if_idle(&state.db, &session_id, &subtask_registry);
             Json(serde_json::json!({
                 "session_id": session_id,
                 "caller_type": caller_type,
@@ -237,5 +341,110 @@ pub async fn send_agent_message(
                 }],
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrab_actions::{SettleKind, SpawnedSubtask, SubtaskLifecycle};
+
+    fn db_with_session(session_id: &str) -> opencrab_db::Db {
+        let conn = opencrab_db::init_memory().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, theme, status, created_at, updated_at) \
+             VALUES (?1, 't', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [session_id],
+        )
+        .unwrap();
+        opencrab_db::Db::from_connection(conn)
+    }
+
+    fn status_of(db: &opencrab_db::Db, session_id: &str) -> String {
+        let conn = db.lock().unwrap();
+        conn.query_row(
+            "SELECT status FROM sessions WHERE id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn settled(session_id: &str, kind: SettleKind) -> SubtaskSettled {
+        SubtaskSettled {
+            session_id: session_id.to_string(),
+            agent_id: "agent-a".to_string(),
+            subtask_id: "st-1".to_string(),
+            exit_reason: "cancelled".to_string(),
+            kind,
+            reply_target: None,
+        }
+    }
+
+    /// [P1 回帰] 最後の走行中 subtask が **cancel** されたときも session を
+    /// `completed` にする（cancel は `settle_completed` を通らないため、これが
+    /// 無いと `sessions.status` が永久に `active` のまま残る）。
+    #[tokio::test]
+    async fn cancel_reconciles_session_status() {
+        let session_id = "agent-msg-agent-a-u1";
+        let db = db_with_session(session_id);
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let sink = RestCompletionSink {
+            db: db.clone(),
+            registry: registry.clone(),
+        };
+
+        assert_eq!(status_of(&db, session_id), "active");
+        // cancel_subtask は通知より前に registry から除去する（= もう走行中はない）。
+        sink.on_subtask_cancelled(settled(session_id, SettleKind::Cancelled));
+        assert_eq!(
+            status_of(&db, session_id),
+            "completed",
+            "最後の subtask を停止したのにセッションが active のまま残る"
+        );
+    }
+
+    /// 他に走行中 subtask が残っているあいだは停止でも完了にしない。
+    #[tokio::test]
+    async fn cancel_keeps_session_active_while_others_run() {
+        let session_id = "agent-msg-agent-a-u1";
+        let db = db_with_session(session_id);
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let handle = tokio::spawn(std::future::pending::<()>());
+        registry.insert(
+            "st-other".to_string(),
+            SpawnedSubtask {
+                abort_handle: handle.abort_handle(),
+                session_id: "subtask-st-other".to_string(),
+                parent_session_id: session_id.to_string(),
+                agent_id: "agent-a".to_string(),
+                label: "other".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                lifecycle: SubtaskLifecycle::new(),
+            },
+        );
+        let sink = RestCompletionSink {
+            db: db.clone(),
+            registry: registry.clone(),
+        };
+
+        sink.on_subtask_cancelled(settled(session_id, SettleKind::Cancelled));
+        assert_eq!(status_of(&db, session_id), "active");
+        handle.abort();
+    }
+
+    /// 非 REST セッション（web-* / heartbeat-*）は対象外（誤って触らない）。
+    #[tokio::test]
+    async fn cancel_ignores_non_rest_sessions() {
+        let session_id = "web-agent-a-conv1";
+        let db = db_with_session(session_id);
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        let sink = RestCompletionSink {
+            db: db.clone(),
+            registry,
+        };
+        sink.on_subtask_cancelled(settled(session_id, SettleKind::Cancelled));
+        assert_eq!(status_of(&db, session_id), "active");
     }
 }

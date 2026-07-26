@@ -150,14 +150,15 @@ impl GatewayActions for NostrGatewayActions {
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
                 description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
-                              npub1 以降・bech32 文字のみ・最大3文字）を指定できる。返るのは公開情報の \
+                              npub1 以降・bech32 文字のみ。長さ上限は無いが、長いほど探索に時間が \
+                              かかる＝3文字程度で即時、それ以上は徐々に長くなる）を指定できる。返るのは公開情報の \
                               npub / pubkey のみ。**秘密鍵(nsec)はサーバ内に安全に保存され、あなた（LLM）\
                               には渡されない**（セキュリティのため）。これは新規 keypair を作るユーティリティ\
                               であり、あなた自身の送信用アイデンティティは変更しない。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（最大3文字, 例: cat）。"}
+                        "prefix": {"type": "string", "description": "任意。npub の npub1 以降に前置したい bech32 文字列（長さ上限なし。長いほど探索に時間がかかる, 例: cat）。"}
                     }
                 }),
             },
@@ -355,6 +356,118 @@ mod tests {
                 "{n} は TRUSTED_ONLY だが nostr gateway definitions に無い"
             );
         }
+    }
+
+    /// #168: `cancel_subtask` を Nostr gateway 側で**定義しない**こと。
+    ///
+    /// `SystemGatewayActions` は「inner が cancel_subtask を定義していれば inner へ委譲」
+    /// する。Nostr が定義してしまうと、`RunRequest::with_dispatch` で渡した共有 registry
+    /// （`NostrSessionRuntime` が session 単位で貸すもの）ではなく inner 側の別 registry が
+    /// 引かれ、走行中 subtask の停止が常に not found になる。定義しない＝server-neutral の
+    /// 実装が共有 registry を引く、が正しい配線。
+    #[test]
+    fn test_nostr_gateway_does_not_define_cancel_subtask() {
+        let names: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            !names.contains(&"cancel_subtask".to_string()),
+            "cancel_subtask は server-neutral 実装（共有 registry を引く）に任せる"
+        );
+    }
+
+    /// #168: Nostr 配送系は **非ブロック dispatch の対象外**（inline 実行）であること。
+    ///
+    /// background 化すると、親ターンが `sent_flag` を観測する前に run が終わり、
+    /// ループの暗黙返信と後追いの明示送信で**二重投稿**になる。併せて、除外集合の名前が
+    /// 実在のアクションを指していること（ドリフト検出）と、`nostr_generate_key` が
+    /// dispatch 対象に残っていること（長時間処理の非ブロック化＝S3a の主目的、
+    /// E2E `e2e_cancel_stops_subtask` の前提）も守る。
+    #[test]
+    fn test_nostr_delivery_actions_are_non_dispatch() {
+        let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in opencrab_actions::NOSTR_DELIVERY_ACTIONS {
+            assert!(
+                live.contains(&name.to_string()),
+                "{name} は除外集合にあるが nostr gateway definitions に無い（リネームで死名化）"
+            );
+            assert!(
+                non_dispatch.contains(*name),
+                "{name} は配送系なので dispatch 対象外でなければならない（二重投稿防止）"
+            );
+        }
+
+        // 送信系（sent フラグを立てるもの）が漏れていないこと。
+        for name in ["nostr_post", "nostr_reply", "nostr_dm", "nostr_zap"] {
+            assert!(
+                non_dispatch.contains(name),
+                "{name} は送信系なので dispatch 対象外でなければならない"
+            );
+        }
+        // 長時間処理は dispatch 対象に残す。
+        assert!(
+            !non_dispatch.contains("nostr_generate_key"),
+            "nostr_generate_key は background 化する（S3a の主目的）"
+        );
+    }
+
+    /// **fail-closed な dispatch 分類ガード（#152 / #178）**。
+    ///
+    /// `test_nostr_delivery_actions_are_non_dispatch` は「定数 → 実装」の片方向なので、
+    /// **新しい配送系を実装したが定数へ入れ忘れた**ケースを検知できない（レビューで
+    /// `mark_sent()` を呼ぶ新アクションを足しても全テスト緑だった）。
+    ///
+    /// ここは実装（`definitions()`）を起点に走査し、全名が
+    /// 「[`opencrab_actions::NOSTR_DELIVERY_ACTIONS`]（= 除外集合）」か
+    /// 「[`opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS`]（= 意図的な dispatch 可）」の
+    /// どちらか**ちょうど一方**に属することを要求する。新アクションを追加すると、
+    /// 分類を明示するまでこのテストが落ちる。
+    ///
+    /// 判定基準は `opencrab_actions::default_non_dispatch_tools` の doc（5 項目）。
+    #[test]
+    fn nostr_tools_are_classified_for_dispatch() {
+        let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
+            .definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+
+        for name in &live {
+            let inline = non_dispatch.contains(name);
+            let dispatchable =
+                opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.contains(&name.as_str());
+            assert!(
+                inline ^ dispatchable,
+                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
+                 新しい Nostr アクションを追加したら NOSTR_DELIVERY_ACTIONS か \
+                 NOSTR_DISPATCHABLE_ACTIONS のどちらかへ入れること（配送系＝`mark_sent()` を\
+                 呼ぶもの・戻り値を同ターンで使うもの・identity を書き換えるものは前者）"
+            );
+        }
+
+        // 逆方向: 定数側に死名が無いこと。
+        for name in opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS {
+            assert!(
+                live.contains(&name.to_string()),
+                "NOSTR_DISPATCHABLE_ACTIONS の {name} が definitions() に無い（死名）"
+            );
+        }
+        // 分類は definitions() を覆い尽くす。
+        assert_eq!(
+            opencrab_actions::NOSTR_DELIVERY_ACTIONS.len()
+                + opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.len(),
+            live.len(),
+            "分類集合の合計が definitions() の数と一致しない（新アクションの分類漏れ）"
+        );
     }
 
     #[tokio::test]

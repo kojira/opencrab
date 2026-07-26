@@ -49,28 +49,248 @@ pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
 
 /// Discord 送信系アクション: depth >= 1 の sub-engine からは**定義の非表示と実行の拒否の両方**で
 /// ブロックする（定義から隠すだけでは、モデルが親コンテキストの記憶で名前を呼んだ場合に素通しになる）。
+///
+/// **この一覧は `DiscordGatewayActions::definitions()` に実在する名前だけを持つ。**
+/// 以前は 20 名のうち 13 名（`discord_send` / `discord_react` / `discord_edit_message` …）が
+/// 現行 gateway に存在しない死名で、depth ゲートも dispatch 除外も実質空振りしていた。
+/// ドリフト検出は `crates/discord` の `test_bridge_policy_names_are_live_gateway_actions`
+/// と `discord_tools_are_classified_for_dispatch` が担う。
+///
+/// なお sub-engine の実効ゲートはこの deny-list ではなく `SUB_ENGINE_ALLOWED_ACTIONS`
+/// （allow-list / `crates/discord/src/gateway_actions/subtask_engine.rs`）。ここは多層防御。
 pub const DISCORD_ACTIONS: &[&str] = &[
-    "discord_send",
     "discord_send_file",
-    "discord_react",
-    "discord_delete_message",
-    "discord_edit_message",
-    "discord_start_thread",
-    "discord_list_channels",
-    "discord_get_channel_info",
-    "discord_list_guilds",
-    "discord_set_channel_writable",
-    "discord_whitelist_channel",
     "discord_add_reaction",
-    "discord_remove_reaction",
-    "discord_send_reply",
-    "discord_send_with_embed",
-    "discord_pin_message",
-    "discord_unpin_message",
+    "discord_list_channels",
+    "discord_list_guilds",
+    // A2UI 送信（ユーザーの応答待ちを伴う対話的配送）。sub-engine からは不可。
+    "send_ui",
     "request_peer_review",
     // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
     "join_voice_channel",
     "leave_voice_channel",
+];
+
+/// Discord gateway のツールのうち **inline 実行のまま**にするもの
+/// （`default_non_dispatch_tools` の種）。
+///
+/// 分類基準（5 項目）の権威は [`crate::subtask::default_non_dispatch_tools`] の doc、
+/// 運用者向けの**分類基準**は `docs/DESIGN.md`「非ブロックツール実行」節。
+/// ツール名の一覧はこの定数群が唯一の権威で、doc 側には置かない（二重管理を避ける）。
+///
+/// 全要素が `DiscordGatewayActions::definitions()` に実在し、かつ
+/// [`DISCORD_DISPATCHABLE_ACTIONS`] と互いに素であることをテストで保証する。
+pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
+    // (1) 制御系（default_non_dispatch_tools の制御集合と重複するが、Discord の
+    //     definitions() 全名を分類し尽くすためここにも並べる）。
+    "spawn_subtask",
+    "cancel_subtask",
+    "report_progress",
+    // (2) 配送系。
+    "discord_send_file",
+    "discord_add_reaction",
+    "request_peer_review",
+    "join_voice_channel",
+    "leave_voice_channel",
+    // (2) 配送系 + ユーザーの応答待ち（pending interaction）。
+    "send_ui",
+    // (3) 同ターン結果依存: webhook URL / 作成物の ID をそのターンで使う。
+    "ensure_webhook",
+    "ensure_subtask_webhook",
+    "discord_create_webhook",
+    "discord_create_channel",
+    "set_default_webhook",
+    "set_default_subtask_webhook",
+    // (4) run 内共有状態: readable/writable は走行中ターンの配送可否を左右する。
+    "discord_channel_config",
+    // (5) 純粋な読み取り。
+    "discord_list_channels",
+    "discord_list_guilds",
+    "list_allowed_commands",
+    "list_webhooks",
+    "list_subtask_webhooks",
+    "get_default_webhook",
+    "get_default_subtask_webhook",
+    "read_heartbeat_instructions",
+    // (3) 許可コマンドの追加/削除は「許可した直後に execute_shell を使う」用法が通常で、
+    //     結果（正規化された名前・成否）も即答すべきもの。
+    "add_allowed_command",
+    "remove_allowed_command",
+];
+
+/// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
+///
+/// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く。ここに無く
+/// [`DISCORD_INLINE_ACTIONS`] にも無い名前が `definitions()` に現れたらテストが落ちる。
+pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
+    // 全メモリの再インデックス（長時間）。dispatch の主目的。
+    "rebuild_memory_index",
+    // スキルファイルの生成。結果は確認のみで同ターンでは使わない。
+    "create_skill",
+    // 設定/指示文の書き込み。同ターンで読み戻さない。
+    "update_memory_index_config",
+    "update_heartbeat_instructions",
+];
+
+/// Nostr の**配送系**アクション（#168）。「送る」こと自体が応答なので、非ブロック
+/// dispatch（RFC #152 S3a）の対象から外して inline 実行のままにする集合。
+///
+/// background 化すると、親ターンが「明示送信済み」フラグ（`NostrGatewayActions::sent_flag`）
+/// を観測する前に run が終わり、暗黙返信（ループ側のフォールバック reply）と、後から
+/// 完了した明示送信の**二重投稿**になる。
+///
+/// 送信系以外の2つ:
+/// - `nostr_upload`: 送信ではない（`sent` を立てない）が、戻り値の URL を同じターンで
+///   投稿本文に使うのが通常の用法。background 化すると URL の代わりに `spawned` が返り、
+///   モデルが URL を載せられなくなる。
+/// - `nostr_switch_identity`: 送信ではないが「以後の全送信のアイデンティティを差し替える」。
+///   親ターンの送信と順序が入れ替わると別 identity で投稿しかねないため inline に留める。
+///
+/// 一方 `nostr_generate_key`（vanity 探索 = 長時間）は dispatch 対象に**残す**
+/// （これを background 化するのが S3a の主目的）。
+///
+/// この一覧は `crates/nostr` の `NostrGatewayActions::definitions()` と対応する
+/// （ドリフト検出テストが nostr crate 側にある）。`DISCORD_ACTIONS` と同様、
+/// gateway 名を下位層に置くのは既存の前例に倣う。
+pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
+    "nostr_post",
+    "nostr_reply",
+    "nostr_dm",
+    "nostr_zap",
+    "nostr_upload",
+    "nostr_switch_identity",
+];
+
+/// Nostr gateway のツールのうち、**意図的に dispatch を許す**もの
+/// （[`NOSTR_DELIVERY_ACTIONS`] の補集合）。
+///
+/// `nostr_generate_key` は vanity 探索で分単位かかりうる長時間処理。これを background
+/// 化するのが RFC #152 S3a の主目的。ここにも [`NOSTR_DELIVERY_ACTIONS`] にも無い名前が
+/// `NostrGatewayActions::definitions()` に現れたら
+/// `nostr_tools_are_classified_for_dispatch`（`crates/nostr/src/actions.rs`）が落ちる。
+pub const NOSTR_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
+
+/// server 内蔵の設定ツール源（`crates/server/src/system_actions.rs` の
+/// `SystemGatewayActions`）のうち **inline 実行のまま**にするもの。
+///
+/// この gateway は Discord/Nostr と違い **transport 非依存**で、web / REST / heartbeat の
+/// 全ターンに載る（`crates/server/src/process.rs` の合成 executor）。分類ガードの外に
+/// 置いていた頃は 6 個中 5 個が background 化され、
+/// - `manage_allowed_commands(action="list")` / `configure_mcp_server(action="list")` は
+///   純粋な読み取り（基準5）なのに「一覧を教えて」が 2 ターン 2 メッセージに割れ、
+/// - `configure_llm_provider` は run 内共有状態（LLM ルーター）のホットスワップ（基準4）
+///   なのに走行中の run と非同期に差し替わり、doc が約束する「health_check → 失敗なら
+///   自動ロールバックして結果で通知」が同ターンで得られない、
+/// という壊れ方をしていた。
+///
+/// **fail-closed**: `SystemGatewayActions::own_definitions()` の全名がこの集合か
+/// [`SERVER_DISPATCHABLE_ACTIONS`] のどちらか一方に属することを
+/// `server_tools_are_classified_for_dispatch`（`crates/server/src/system_actions.rs`）が
+/// 検査する。新しい設定ツールを足したら分類を強制される。
+pub const SERVER_INLINE_ACTIONS: &[&str] = &[
+    // (4) run 内共有状態: LLM ルーターのホットスワップ。走行中の run が参照している
+    //     プロバイダを差し替えるうえ、適用後の health_check / 自動ロールバックの結果を
+    //     同ターンで返す契約になっている。
+    "configure_llm_provider",
+    // (5) 純粋な読み取り（action="list"）+ (3) 同ターン結果依存（add/remove した直後に
+    //     execute_shell を使う用法）。Discord 側の add/remove/list_allowed_command と同分類。
+    "manage_allowed_commands",
+    // (4) 設定の書き込み: 以後の Nostr 送信（relay / identity）に効く共有状態。
+    //     成否を同ターンで確認して次の操作へ進む。
+    "configure_nostr",
+    // (4) 設定の書き込み: 名前・system prompt 等、以後の run の前提を書き換える。
+    "configure_self",
+    // (5) 純粋な読み取り（action="list"）+ (3) 追加した直後に当該 MCP ツールを使う用法。
+    "configure_mcp_server",
+    // (1) 制御系: 走行中 subtask の停止。background 化しては意味を成さない。
+    "cancel_subtask",
+];
+
+/// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
+///
+/// `nostr_generate_key` は vanity 探索で分単位かかりうる長時間処理（RFC #152 S3a の
+/// 主目的）。`SystemGatewayActions` は鍵未設定でもこれを露出する bootstrap ツールとして
+/// 自前で定義するため、Nostr gateway の [`NOSTR_DISPATCHABLE_ACTIONS`] とは別に
+/// この gateway でも分類する必要がある。
+pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
+
+/// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
+/// にするもの（`default_non_dispatch_tools` の種）。
+///
+/// gateway 由来のツール（Discord / Nostr）だけを分類していた頃は、core アクション
+/// 32 個が**分類ガードの外**にあり全部 dispatch されていた。その結果
+/// - system prompt が指示する記憶想起フロー（`search_memory_index` →
+///   `retrieve_memory_nodes`）が 2 回の背景往復 = ユーザーへ 4 通、
+/// - `open_task` は戻り値の task_id を同ターンで使うのに `spawned` しか返らない、
+/// という壊れ方をしていた。分類基準（[`crate::subtask::default_non_dispatch_tools`]
+/// の doc）に沿って全名を明示する。
+///
+/// **fail-closed**: `ActionDispatcher::new()` の全アクション名がこの集合か
+/// [`CORE_DISPATCHABLE_ACTIONS`] のどちらか一方に属することを
+/// `core_actions_are_classified_for_dispatch`（`crates/actions/src/subtask.rs`）が
+/// 検査する。新しい core アクションを登録したら、どちらかへ入れない限りテストが落ちる。
+pub const CORE_INLINE_ACTIONS: &[&str] = &[
+    // (1) 制御系: そのターンを終える宣言。background 化すると同ターンに効かない。
+    "declare_done",
+    // (3) 同ターン結果依存: 生成した内声をそのターンの応答づくりに使う。
+    "generate_inner_voice",
+    // (3) 同ターン結果依存: 自己評価の結果を見てそのターンの応答を直す。
+    "evaluate_response",
+    // (3) 同ターン結果依存: 戻り値の task_id を update/record/close で使う。
+    "open_task",
+    // (3) 同ターン結果依存: 編集/削除/作成の成否を確認して次の操作へ進む用法が通常
+    //     （mkdir → write、edit → 失敗なら別の編集、のような同ターンの連鎖）。
+    "ws_edit",
+    "ws_delete",
+    "ws_mkdir",
+    // (4) run 内共有状態: model_override / current_purpose を書き換える。
+    "select_llm",
+    // (4) run 内共有状態: 以後のスキル可視性（棚）を書き換える。
+    "retire_my_skill",
+    "restore_my_skill",
+    // (4) run 内共有状態: 以後の system prompt に効く指示文の書き込み（owner 専用）。
+    "update_instructions",
+    // (4) 台帳の状態: contract / progress / close が同ターンに効かないと、以後の
+    //     `get_task` と食い違う（「更新したのに古い契約が見える」）。
+    "update_task_contract",
+    "record_task_progress",
+    "close_task",
+    // (5) 純粋な読み取り（即答すべきもの）。dispatch すると質問 1 つが 2 ターン
+    //     2 メッセージに割れるだけ。記憶想起フローは 2 段連鎖なので特に致命的。
+    "get_system_info",
+    "ws_read",
+    "ws_list",
+    "read_skill",
+    "browse_memory_index",
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "search_my_history",
+    "get_task",
+    "analyze_llm_usage",
+    "recall_model_experiences",
+    // (6) 情報価値の無い短時間の書き込み。dispatch には必ず resume ターン
+    //     （= ユーザーへの追加メッセージ）が 1 本付くので、報告する価値が無い
+    //     書き込みを background 化すると雑音が増えるだけ。
+    "update_impression",
+    "save_model_insight",
+];
+
+/// core アクションのうち、**意図的に dispatch を許す**もの。
+///
+/// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く（dispatch には
+/// resume ターンが 1 本付くので、その 1 通に見合う仕事に限る）。
+pub const CORE_DISPATCHABLE_ACTIONS: &[&str] = &[
+    // 長文の書き出しは payload が大きくなりうる。書けたかどうかは完了報告で足りる。
+    "ws_write",
+    // 学習の書き込み: 戻り値（skill_id）を同ターンで使わない。「覚えておいて」は
+    // 非ブロックで処理して完了時に報告するのが自然な依頼。
+    "learn_from_experience",
+    "learn_from_peer",
+    "reflect_and_learn",
+    // 要約の保存: 同ターンで読み戻さない。
+    "summarize_and_save",
+    // スキル生成（Discord の `create_skill` と同分類）。
+    "create_my_skill",
 ];
 
 /// spawn_subtask のネスト上限。
@@ -190,7 +410,11 @@ fn is_rejection(error: Option<&str>) -> bool {
 /// Optionally holds `GatewayActions` to merge gateway-specific tools.
 /// MCP ツール名の名前空間プレフィックス（`opencrab_mcp::MCP_TOOL_PREFIX` と一致させる。
 /// actions は mcp に依存できない＝依存循環になるため定数で持つ）。
-const MCP_TOOL_PREFIX: &str = "mcp__";
+///
+/// dispatch 分類でも使う: MCP ツールは運用者が繋いだ任意の外部ツールで、性質
+/// （配送系か / 同ターンで結果を使うか）を静的に分類できないため、**既定 inline**
+/// （安全側）にする（[`crate::subtask::SubtaskToolDispatcher::should_dispatch`]）。
+pub const MCP_TOOL_PREFIX: &str = "mcp__";
 
 pub struct BridgedExecutor {
     dispatcher: ActionDispatcher,
@@ -256,6 +480,11 @@ impl BridgedExecutor {
             session_id: self.context.session_id.clone(),
             depth: self.depth,
             agent_id: self.context.agent_id.clone(),
+            // 合成 gateway 自身のハンドルを子へ渡す（RFC #152 S2）。sub-engine を
+            // 構築する `spawn_subtask` が「自分を包む合成 gateway」を辿れるように
+            // する注入口。Arc は本 executor が所有し、ここでは clone して短命な
+            // ctx に載せるだけ（自己参照 Arc ではない＝サイクルなし）。
+            root_gateway: self.gateway_actions.clone(),
         }
     }
 
@@ -1137,6 +1366,43 @@ mod tests {
         // args は LLM 由来のものがそのまま渡り、__* キーは注入されない。
         let args = gw.last_args.lock().unwrap().clone().unwrap();
         assert_eq!(args, json!({"x": 1}));
+    }
+
+    /// RFC #152 S2: gateway の `execute` に渡る ctx に、合成 gateway 自身への
+    /// ハンドル（`root_gateway`）が注入されること。sub-engine を構築する
+    /// `spawn_subtask` がこれを辿って合成 gateway を wrap できる（自己参照 Arc 不要
+    /// = Arc は本 executor が所有し、ctx は clone を短命に運ぶだけ）。
+    #[tokio::test]
+    async fn test_gateway_ctx_carries_root_gateway_handle() {
+        let (_dir, ctx) = test_context();
+        let gw = Arc::new(CtxRecordingGateway {
+            last_ctx: Mutex::new(None),
+            last_args: Mutex::new(None),
+        });
+        let executor =
+            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_gateway_actions(gw.clone());
+        let r = executor.execute("ctx_probe", &json!({})).await;
+        assert!(r.success);
+        let seen = gw.last_ctx.lock().unwrap().clone().unwrap();
+        assert!(
+            seen.root_gateway.is_some(),
+            "root_gateway handle must be injected so a sub-engine can wrap the composite gateway"
+        );
+    }
+
+    /// root_gateway 未注入（gateway_actions 無し）の executor は、ctx.root_gateway が
+    /// None のまま（後方互換 = 非破壊）。
+    #[tokio::test]
+    async fn test_gateway_ctx_root_gateway_none_without_gateway_actions() {
+        // gateway_actions を付けない executor では、そもそも gateway.execute へ
+        // 到達しないため、ここでは gateway_call_context() の生成結果を直接確認する。
+        let (_dir, ctx) = test_context();
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+        let call_ctx = executor.gateway_call_context();
+        assert!(
+            call_ctx.root_gateway.is_none(),
+            "no gateway_actions => root_gateway must stay None (backward compatible)"
+        );
     }
 
     /// "Unknown action: {name}" と同文のエラーを返す実アクションが gateway に
