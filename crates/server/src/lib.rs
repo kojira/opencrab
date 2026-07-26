@@ -17,6 +17,7 @@ pub mod nostr_runner_impl;
 pub mod process;
 pub mod skill_consolidation;
 pub mod subtask_registries;
+pub mod subtask_spawn;
 pub mod system_actions;
 pub mod web_gateway;
 
@@ -99,9 +100,37 @@ pub struct AppState {
     /// デバウンスが毎回リセットされ全ての進捗報告が発火する。プロセス寿命の共有状態
     /// である `AppState` に置いて、gateway の生成を跨いで間引きが効くようにする。
     pub progress_debounce: Arc<subtask_registries::ProgressDebounce>,
+    /// 走行中サブタスクの lifecycle 通知口（subtask_id → 通知口 / #175 S3・S4）。
+    ///
+    /// `spawn_subtask`（server 側）が insert し、決着・停止で remove する。registry と
+    /// 対で共有し、Discord の `cancel_subtask` もここから引いて中断を通知する。
+    pub subtask_notifiers: opencrab_actions::subtask_notify::SubtaskNotifiers,
+    /// サブタスク lifecycle 通知の実装（未設定なら通知しない / #175 S4）。
+    ///
+    /// Discord webhook 実装は起動時にここへ差し込む。`AppState` は clone されて
+    /// 各所へ配られるため、後から差し替えられるよう内部可変にしている
+    /// （`voice_runtime` と同じ流儀）。
+    pub subtask_lifecycle_notifier: Arc<
+        std::sync::Mutex<
+            Option<Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier>>,
+        >,
+    >,
     /// 非ブロック dispatch の kill switch（`[subtask] auto_dispatch` / 既定 true）。
     /// `false` にすると全ツールが inline 実行に戻る（#152 導入前の挙動）。
     pub subtask_auto_dispatch: bool,
+}
+
+impl AppState {
+    /// サブタスク lifecycle 通知の実装を返す（未設定なら何もしない Noop）。
+    pub fn subtask_lifecycle_notifier(
+        &self,
+    ) -> Arc<dyn opencrab_actions::subtask_notify::SubtaskLifecycleNotifier> {
+        self.subtask_lifecycle_notifier
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| Arc::new(opencrab_actions::NoopLifecycleNotifier))
+    }
 }
 
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
@@ -133,6 +162,8 @@ pub(crate) fn test_app_state() -> AppState {
         web_gateway: Arc::new(web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
+        subtask_notifiers: Arc::new(dashmap::DashMap::new()),
+        subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
     }
 }
 
