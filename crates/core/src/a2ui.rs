@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -136,59 +135,6 @@ pub enum RenderError {
     PlatformError(String),
 }
 
-/// Form（モーダル）表示用の**描画済み**データ。
-///
-/// `modal_custom_id` / `title` / `action` はコアの語彙だが、実際に表示する入力欄は
-/// transport のUIライブラリの型（Discord なら serenity の `Vec<CreateActionRow>`）で
-/// しか表現できない。そこで**その部分だけを型消去して包む**（`payload`）。
-///
-/// これにより保留状態（[`PendingInteraction`]）は transport の型を一切持たずに
-/// 「モーダルの描画物」を運べる。取り出す側（描画を実装した transport 自身）が
-/// [`RenderedForm::payload`] で自分が入れた型へ戻す。
-#[derive(Clone)]
-pub struct RenderedForm {
-    /// Modal custom_id（形式: `interaction:{uuid}:modal:{form_action_name}`）
-    pub modal_custom_id: String,
-    /// Modalタイトル
-    pub title: String,
-    /// Submit時のアクション
-    pub action: A2uiAction,
-    /// transport 固有のモーダル描画物（型消去）。
-    payload: Arc<dyn Any + Send + Sync>,
-}
-
-impl RenderedForm {
-    pub fn new<T: Any + Send + Sync>(
-        modal_custom_id: impl Into<String>,
-        title: impl Into<String>,
-        action: A2uiAction,
-        payload: T,
-    ) -> Self {
-        Self {
-            modal_custom_id: modal_custom_id.into(),
-            title: title.into(),
-            action,
-            payload: Arc::new(payload),
-        }
-    }
-
-    /// transport 固有の描画物を元の型で借用する。入れた型と違えば `None`。
-    pub fn payload<T: Any + Send + Sync>(&self) -> Option<&T> {
-        self.payload.downcast_ref::<T>()
-    }
-}
-
-impl std::fmt::Debug for RenderedForm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RenderedForm")
-            .field("modal_custom_id", &self.modal_custom_id)
-            .field("title", &self.title)
-            .field("action", &self.action)
-            .field("payload", &"<transport-specific>")
-            .finish()
-    }
-}
-
 /// A2UI JSONをプラットフォーム固有のUIに変換・送信するtrait
 #[async_trait]
 pub trait UiRenderer: Send + Sync {
@@ -206,24 +152,18 @@ pub trait UiRenderer: Send + Sync {
     ) -> Result<(), RenderError>;
 
     async fn update_on_timeout(&self, rendered: &RenderedMessage) -> Result<(), RenderError>;
-
-    /// 送信する UI に Form が含まれるなら、モーダル表示用の描画物を構築する。
-    ///
-    /// UI 送信（`send_ui`）は gateway 非依存層にあるが、モーダルの入力欄は transport の
-    /// UIライブラリの型でしか組めない。**構築ごと描画トレイトの内側に隠す**ことで、
-    /// 汎用層は [`RenderedForm`]（コアの型 + 型消去した payload）だけを保持できる。
-    ///
-    /// 既定は `None`（モーダルの概念を持たない transport）。
-    fn build_form(&self, _surface_id: &str, _components: &[A2uiComponent]) -> Option<RenderedForm> {
-        None
-    }
 }
 
 /// ユーザーの応答を待っている A2UI インタラクションの保留状態。
 ///
-/// **コアの型だけで構成する**（transport のチャンネル識別子・イベントループへの
-/// チャンネル・UIライブラリの型を持たない）。描画先は [`RenderTarget`] が、
-/// 応答の戻し先は [`UiResponseSink`] が担う。
+/// **コアの型だけで構成する**。transport のチャンネル識別子・イベントループへの
+/// チャンネル・UIライブラリの型を一切持たない: 描画先は [`RenderTarget`]、応答の
+/// 戻し先は [`UiResponseSink`] が担い、**描画物は保持しない**。
+///
+/// 描画物を持たないのが要点で、transport が再描画に必要とするもの（例: Discord の
+/// Form モーダルの入力欄）はすべて [`Self::a2ui_components`]（部品ツリー）と
+/// [`Self::surface_id`] から再導出できる。ここに描画物を置くと transport の型か、
+/// それを避けるための型消去が混入する。
 pub struct PendingInteraction {
     /// 応答を受けて再開する親セッション ID。
     pub session_id: String,
@@ -241,8 +181,6 @@ pub struct PendingInteraction {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub timeout_secs: u64,
     pub rendered_message: RenderedMessage,
-    /// Form（モーダル）の描画物。Button 押下時にモーダルを出すために保持する。
-    pub form_data: Option<RenderedForm>,
 }
 
 /// 保留中 A2UI インタラクションを interaction_id で引く登録簿。

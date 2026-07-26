@@ -6,9 +6,13 @@
 //! （[`A2uiSurface`]）を提供する transport すべてで同じ実装が使える。
 //!
 //! transport に残るのは 2 つだけ:
-//! - 描画の実装（[`opencrab_core::a2ui::UiRenderer`]。モーダルの描画物も
-//!   `build_form` でこの内側に隠す）
+//! - 描画の実装（[`opencrab_core::a2ui::UiRenderer`]）
 //! - 応答の受け口（[`UiResponseSink`]。`SubtaskCompletionSink` と同型）
+//!
+//! 保留状態（[`opencrab_core::a2ui::PendingInteraction`]）は**描画物を持たない**。
+//! transport が後で必要とするもの（Discord の Form モーダルの入力欄など）は部品ツリーと
+//! `surface_id` から再導出できるため、コアが transport の UI ライブラリの型を知る必要も、
+//! それを避けるための型消去も要らない。
 //!
 //! ## 不変条件（移設で壊してはならないもの）
 //! - **セッション必須（fail-closed）**: `session_id` が無い/空なら `""` で登録せず
@@ -25,7 +29,7 @@
 use std::sync::Arc;
 
 use opencrab_core::a2ui::{
-    A2uiComponent, A2uiComponentType, A2uiSurface, A2uiUserAction, RenderTarget, UiResponseEvent,
+    A2uiComponent, A2uiSurface, A2uiUserAction, RenderTarget, UiResponseEvent,
 };
 use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayCallContext};
 use serde_json::json;
@@ -250,10 +254,6 @@ pub async fn send_ui(
     // `pending` が無い構成（イベントループを持たない配線）は描画だけで終わる
     // ＝移設前に `pending_interaction_registry` 未配線だったときと同じ挙動。
     if let Some(pending_surface) = &surface.pending {
-        // Form があればモーダル表示用の描画物を作る（transport 固有の型は
-        // `RenderedForm` の内側に隠れる）。
-        let form_data = surface.renderer.build_form(&surface_id, &components);
-
         let pending = opencrab_core::a2ui::PendingInteraction {
             session_id: session_id.clone(),
             agent_id: ctx.agent_id.clone(),
@@ -266,7 +266,6 @@ pub async fn send_ui(
             created_at: chrono::Utc::now(),
             timeout_secs,
             rendered_message: rendered.clone(),
-            form_data,
         };
         pending_surface
             .registry
@@ -326,30 +325,11 @@ pub async fn send_ui(
     }
 }
 
-/// UI の components から最初の Form コンポーネントを探し、モーダル custom_id を組む。
-///
-/// 描画物の構築（transport 固有）は [`opencrab_core::a2ui::UiRenderer::build_form`] の
-/// 実装が行うが、`modal_custom_id` の書式はコアの契約（インタラクションの
-/// `custom_id` パーサと対）なのでここで一元化する。
-pub fn find_form_component(components: &[A2uiComponent]) -> Option<&A2uiComponent> {
-    components
-        .iter()
-        .find(|c| matches!(&c.component_type, A2uiComponentType::Form { .. }))
-}
-
-/// Form のモーダル `custom_id`（形式: `interaction:{uuid}:modal:{action_name}`）。
-pub fn modal_custom_id(surface_id: &str, action_name: &str) -> String {
-    let uuid_part = surface_id
-        .strip_prefix("interaction:")
-        .unwrap_or(surface_id);
-    format!("interaction:{}:modal:{}", uuid_part, action_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use opencrab_core::a2ui::{
-        PendingUiSurface, RenderError, RenderedForm, RenderedMessage, UiRenderer, UiResponseSink,
+        PendingUiSurface, RenderError, RenderedMessage, UiRenderer, UiResponseSink,
         UserActionResponse,
     };
     use opencrab_gateway::GatewayCaller;
@@ -358,7 +338,6 @@ mod tests {
     /// 最小の `UiRenderer` フェイク。描画要求を記録するだけ。
     struct FakeRenderer {
         rendered: Mutex<Vec<(String, String)>>,
-        with_form: bool,
     }
 
     #[async_trait::async_trait]
@@ -391,26 +370,6 @@ mod tests {
         async fn update_on_timeout(&self, _rendered: &RenderedMessage) -> Result<(), RenderError> {
             Ok(())
         }
-
-        fn build_form(
-            &self,
-            surface_id: &str,
-            components: &[A2uiComponent],
-        ) -> Option<RenderedForm> {
-            if !self.with_form {
-                return None;
-            }
-            let form = find_form_component(components)?;
-            let A2uiComponentType::Form { title, action, .. } = &form.component_type else {
-                return None;
-            };
-            Some(RenderedForm::new(
-                modal_custom_id(surface_id, &action.name),
-                title.clone(),
-                action.clone(),
-                vec!["row".to_string()],
-            ))
-        }
     }
 
     #[derive(Default)]
@@ -424,16 +383,11 @@ mod tests {
         }
     }
 
-    fn surface(
-        with_pending: bool,
-        with_form: bool,
-        owner_id: &str,
-    ) -> (A2uiSurface, Arc<RecordingSink>) {
+    fn surface(with_pending: bool, owner_id: &str) -> (A2uiSurface, Arc<RecordingSink>) {
         let sink = Arc::new(RecordingSink::default());
         let s = A2uiSurface {
             renderer: Arc::new(FakeRenderer {
                 rendered: Mutex::new(Vec::new()),
-                with_form,
             }),
             platform: "fake".to_string(),
             owner_id: owner_id.to_string(),
@@ -456,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn send_ui_without_session_fails_closed() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, _sink) = surface(true, false, "owner1");
+        let (s, _sink) = surface(true, "owner1");
         let ctx = GatewayCallContext::new(GatewayCaller::Owner, "a1");
         let r = send_ui(
             &db,
@@ -486,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn send_ui_requires_channel_and_components() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, _sink) = surface(true, false, "owner1");
+        let (s, _sink) = surface(true, "owner1");
         let ctx = ctx_with_session();
 
         let r = send_ui(&db, &s, &json!({"components": text_component()}), &ctx).await;
@@ -499,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn send_ui_registers_pending_with_core_types_only() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, _sink) = surface(true, false, "owner-42");
+        let (s, _sink) = surface(true, "owner-42");
         let ctx = ctx_with_session();
 
         let r = send_ui(
@@ -530,7 +484,6 @@ mod tests {
         assert_eq!(pending.target.platform, "fake");
         // owner 識別子は描画面の値。空文字を渡すと判定が無効になるので固定する。
         assert_eq!(pending.owner_id, "owner-42");
-        assert!(pending.form_data.is_none());
 
         // DB へは platform 列付きで永続化され、message_id が書き戻る。
         let conn = db.lock().unwrap();
@@ -549,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn send_ui_without_pending_surface_only_renders() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, _sink) = surface(false, false, "owner1");
+        let (s, _sink) = surface(false, "owner1");
         let ctx = ctx_with_session();
         let r = send_ui(
             &db,
@@ -565,7 +518,7 @@ mod tests {
     #[tokio::test]
     async fn send_ui_clamps_timeout_and_reads_owner_only() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, _sink) = surface(true, false, "o");
+        let (s, _sink) = surface(true, "o");
         let ctx = ctx_with_session();
         let r = send_ui(
             &db,
@@ -595,10 +548,13 @@ mod tests {
         assert_eq!(reg.get(&id).unwrap().owner_id, "o");
     }
 
+    /// 保留状態は**描画物を持たず部品ツリーを持つ**。transport（Discord の Form
+    /// モーダル等）は応答時にここから描画物を組み直せるので、コアが transport の UI
+    /// ライブラリの型を知る必要も、型消去も要らない。
     #[tokio::test]
-    async fn send_ui_hides_transport_form_render_behind_renderer() {
+    async fn pending_state_keeps_the_component_tree_not_a_render() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, _sink) = surface(true, true, "o");
+        let (s, _sink) = surface(true, "o");
         let ctx = ctx_with_session();
         let components = json!([
             { "id": "b1", "component": "Button", "text": "open", "action": { "name": "go" } },
@@ -619,23 +575,29 @@ mod tests {
             .to_string();
         let reg = &s.pending.as_ref().unwrap().registry;
         let pending = reg.get(&id).unwrap();
-        let form = pending.form_data.as_ref().expect("form data");
-        assert_eq!(form.modal_custom_id, format!("interaction:{id}:modal:go"));
-        assert_eq!(form.title, "T");
-        assert_eq!(form.action.name, "go");
-        // 描画物は型消去されており、入れた型でだけ取り出せる。
-        assert_eq!(
-            form.payload::<Vec<String>>().map(|v| v.len()),
-            Some(1),
-            "payload should round-trip for the renderer's own type"
-        );
-        assert!(form.payload::<u32>().is_none());
+
+        // 再導出の材料が揃っている: 部品ツリーと surface_id。
+        assert_eq!(pending.surface_id, format!("interaction:{id}"));
+        let ids: Vec<&str> = pending
+            .a2ui_components
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["b1", "f1", "i1"]);
+        assert!(matches!(
+            pending
+                .a2ui_components
+                .iter()
+                .find(|c| c.id == "f1")
+                .map(|c| &c.component_type),
+            Some(opencrab_core::a2ui::A2uiComponentType::Form { .. })
+        ));
     }
 
     #[tokio::test]
     async fn timeout_fires_sink_and_removes_registration() {
         let db = opencrab_db::Db::memory().unwrap();
-        let (s, sink) = surface(true, false, "o");
+        let (s, sink) = surface(true, "o");
         let ctx = ctx_with_session();
         let r = send_ui(
             &db,
@@ -673,19 +635,6 @@ mod tests {
         assert_eq!(events[0].response.action_name, "timeout");
         assert_eq!(events[0].response.responder_id, "system");
         assert!(reg.get(&id).is_none());
-    }
-
-    #[test]
-    fn modal_custom_id_uses_uuid_part() {
-        assert_eq!(
-            modal_custom_id("interaction:abc", "submit"),
-            "interaction:abc:modal:submit"
-        );
-        // prefix が無い surface_id はそのまま使う（移設前と同じフォールバック）。
-        assert_eq!(
-            modal_custom_id("abc", "submit"),
-            "interaction:abc:modal:submit"
-        );
     }
 
     #[test]

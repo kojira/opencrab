@@ -5,7 +5,9 @@
 //! **応答の受け口**（`UiResponseSink` の Discord 実装）と、その受け口・描画・登録簿を
 //! 束ねた「描画面」（`A2uiSurface`）の構築だけ。
 //!
-//! 描画の実装は `crate::renderer::DiscordRenderer`（`UiRenderer` / `build_form`）。
+//! 描画の実装は `crate::renderer::DiscordRenderer`（`UiRenderer`）。Form モーダルの
+//! 入力欄は保留状態に持たせず、ボタン押下時に部品ツリーから組み直す
+//! （`crate::form_modal::resolve_form_modal_for_button`）。
 
 use std::sync::Arc;
 

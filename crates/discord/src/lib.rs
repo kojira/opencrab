@@ -33,7 +33,8 @@ pub use renderer::DiscordRenderer;
 // - 応答の戻し先 → `opencrab_core::a2ui::UiResponseSink`（Discord 実装は
 //   `gateway_actions::ui::DiscordUiResponseSink`）
 // - チャンネル識別子 → `opencrab_core::a2ui::RenderTarget`
-// - モーダル描画物 → `opencrab_core::a2ui::RenderedForm`（`UiRenderer::build_form` が構築）
+// - モーダル描画物 → **保持しない**。ボタン押下時に保留状態の部品ツリーから組み直す
+//   （`form_modal::resolve_form_modal_for_button`）。コアが serenity の型を知らずに済む。
 //
 // #170 と同じ方針で **re-export しない**（他 crate が Discord crate 経由でコアの型を
 // 引かないようにする）。

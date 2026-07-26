@@ -1694,6 +1694,20 @@ impl GatewayActions for SystemGatewayActions {
             },
         }
     }
+
+    /// transport の A2UI 描画面を**そのまま外へ通す**（#156 S3）。
+    ///
+    /// 本番の sub-engine 配線は入れ子（`spawn_subtask` が `ctx.root_gateway` = この合成
+    /// gateway を子へ渡し、子の `run_agent_response` がそれを `inner` にして**もう 1 段**
+    /// 合成 gateway を作り、`SubEngineGatewayActions` で包む）。ここで転送しないと、
+    /// 内側の合成 gateway は描画面を得られず `send_ui` を定義しないため、sub-engine から
+    /// 名前指定で呼ばれたときの拒否が「権限拒否（`rejected:`）」ではなく
+    /// 「Unknown gateway action」に変わる（遮断自体は保たれるが分類が変わる）。
+    /// 移設前は Discord gateway が最内まで `inner` として届いていたので `send_ui` は
+    /// 常に「実在するが許可外」だった。その分類を保つための転送。
+    fn a2ui_surface(&self) -> Option<Arc<opencrab_core::a2ui::A2uiSurface>> {
+        self.a2ui.clone()
+    }
 }
 
 #[cfg(test)]
@@ -4764,13 +4778,37 @@ mod tests {
     #[tokio::test]
     async fn send_ui_is_blocked_in_sub_engine() {
         let state = crate::test_app_state();
-        let inner = Arc::new(A2uiProvidingInner::new("owner-1"));
-        let system: Arc<dyn GatewayActions> =
-            Arc::new(SystemGatewayActions::new(state, Some(inner), None, None));
-        // 合成 gateway 単体では露出する（前提の確認）。
-        assert!(system.definitions().iter().any(|d| d.name == "send_ui"));
+        let transport = Arc::new(A2uiProvidingInner::new("owner-1"));
 
-        let sub = opencrab_actions::SubEngineGatewayActions::new(system);
+        // **本番と同じ入れ子の配線**を組む（`crates/server/src/process.rs`）:
+        //   depth0: SystemGatewayActions(inner = transport)             ← 親ターン
+        //   spawn_subtask が ctx.root_gateway = depth0 の合成 gateway を子へ渡す
+        //   depth1: SystemGatewayActions(inner = depth0 の合成 gateway) ← 子ターン
+        //           を SubEngineGatewayActions で包む
+        // 1 段構成で組むと、内側の合成 gateway が描画面を転送できているかを検出できない。
+        let depth0: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+            state.clone(),
+            Some(transport),
+            None,
+            None,
+        ));
+        // 親ターンでは露出する（前提の確認）。
+        assert!(depth0.definitions().iter().any(|d| d.name == "send_ui"));
+
+        let depth1: Arc<dyn GatewayActions> = Arc::new(SystemGatewayActions::new(
+            state,
+            Some(depth0.clone()),
+            None,
+            None,
+        ));
+        // 描画面が入れ子の内側まで届いている（届かないと下の拒否分類が
+        // 「Unknown gateway action」へ変わる）。
+        assert!(
+            depth1.definitions().iter().any(|d| d.name == "send_ui"),
+            "A2UI 描画面が入れ子の合成 gateway へ転送されていない"
+        );
+
+        let sub = opencrab_actions::SubEngineGatewayActions::new(depth1);
         let names: Vec<String> = sub.definitions().into_iter().map(|d| d.name).collect();
         assert!(
             !names.contains(&"send_ui".to_string()),
@@ -4785,13 +4823,16 @@ mod tests {
             )
             .await;
         assert!(!r.success, "send_ui must be blocked in the sub-engine");
+        // 移設前と同じ分類（実在するが許可外 = 権限拒否）。「そんなツールは無い」に
+        // 落ちると幻覚ツール名と同じ扱いになり、拒否の観測が変わる。
+        let err = r.error.as_deref().unwrap();
         assert!(
-            r.error
-                .as_deref()
-                .unwrap()
-                .starts_with(opencrab_actions::REJECTION_CODE_PREFIX),
-            "send_ui must be a policy rejection: {:?}",
-            r.error
+            err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX),
+            "send_ui must be a policy rejection, not an unknown tool: {err}"
+        );
+        assert!(
+            !err.contains("Unknown gateway action"),
+            "分類が「そんなツールは無い」へ退行している: {err}"
         );
 
         // 多層防御: 名前ベースの depth 拒否リストにも残っている。
