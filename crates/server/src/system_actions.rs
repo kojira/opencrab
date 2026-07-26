@@ -10,11 +10,13 @@
 //! 多層防御として本ハンドラでも caller を確認する（fail-closed）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use opencrab_actions::{
-    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SubtaskCompletionSink,
-    SubtaskRegistry, REJECTION_CODE_PREFIX,
+    cancel_subtask as neutral_cancel_subtask, CancelOutcome, SettleKind, SubtaskCompletionSink,
+    SubtaskRegistry, SubtaskSettled, REJECTION_CODE_PREFIX,
 };
 use opencrab_gateway::{
     GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
@@ -23,6 +25,11 @@ use opencrab_mcp::is_valid_server_name;
 use serde_json::{json, Value};
 
 use crate::AppState;
+
+/// `report_progress` のデバウンス待機時間。Discord 実装（`execute_report_progress`）と同一。
+///
+/// この時間内に後続の `report_progress` が来たら世代が進み、古い方は発火しない。
+const PROGRESS_DEBOUNCE_DELAY: Duration = Duration::from_secs(3);
 
 /// `configure_llm_provider` などのサーバ内設定ツールを提供する `GatewayActions`。
 pub struct SystemGatewayActions {
@@ -255,6 +262,29 @@ impl SystemGatewayActions {
                     "required": ["subtask_id"]
                 }),
             },
+            // サブタスクの進捗報告（#175 S1）。Discord gateway 実装だけにあった
+            // report_progress を server-neutral 層へ露出し、web / Nostr / REST /
+            // heartbeat でもサブエンジンが進捗を報告できるようにする。引数スキーマは
+            // Discord 側の定義と同一（sub-engine の system prompt が「subtask_id は
+            // 省略可」と案内している契約を保つ）。
+            GatewayActionDef {
+                name: "report_progress".to_string(),
+                description: "サブエンジンからメインエンジンへ進捗を報告します。depth >= 1のサブエンジンのみ使用可能。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "進捗メッセージ"
+                        },
+                        "subtask_id": {
+                            "type": "string",
+                            "description": "このサブタスクのID（オプション）"
+                        }
+                    },
+                    "required": ["message"]
+                }),
+            },
         ]
     }
 
@@ -329,6 +359,170 @@ impl SystemGatewayActions {
             CancelOutcome::Unauthorized => err(format!(
                 "{REJECTION_CODE_PREFIX}cancel_subtask: subtask '{subtask_id}' をこのセッションからキャンセルする権限がありません（親セッションまたは owner のみ）"
             )),
+        }
+    }
+
+    /// サブタスクの進捗報告（#175 S1）。Discord 実装（`execute_report_progress`）の
+    /// transport 非依存な部分を移植したもの。Discord 固有の webhook 送出は Discord 側に
+    /// 残る実装が担当する（この own 実装は inner が未実装の経路でのみ走る）。
+    ///
+    /// 手順は Discord と同一:
+    /// 1. `message` 必須 / セッション必須（fail-closed）
+    /// 2. 登録簿から subtask を引く（`subtask_id` 明示 → 無ければ session_id で逆引き）
+    /// 3. 所有権ゲート（自分自身の subtask か、自分が親のもののみ）
+    /// 4. 親セッションログへ `subtask_progress` を記録（本文の永続化はここだけ）
+    /// 5. デバウンス後に完了 sink へ `SettleKind::Progress` を通知（メインエンジン再呼び出し）
+    async fn report_progress(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        let Some(message) = args.get("message").and_then(|v| v.as_str()) else {
+            return err("report_progress: 'message' is required".to_string());
+        };
+        let message = message.to_string();
+        // セッション必須（fail-closed）: 親セッションの解決が session_id に依存する（#36）。
+        let current_session_id = match ctx.session_id.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                return err(
+                    "report_progress はセッション文脈でのみ実行できます（session_id 不明）"
+                        .to_string(),
+                );
+            }
+        };
+        let subtask_id_arg = args
+            .get("subtask_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let agent_id = ctx.agent_id.clone();
+
+        // 登録簿から (subtask_id, session_id, parent_session_id) を引く。registry 未配線
+        // （`None`）は「登録簿に無い」と同じ扱い（= 自己申告として親ログにだけ残す）。
+        let subtask_entry: Option<(String, String, String)> =
+            self.subtask_registry.as_ref().and_then(|registry| {
+                if !subtask_id_arg.is_empty() {
+                    registry.get(&subtask_id_arg).map(|e| {
+                        (
+                            subtask_id_arg.clone(),
+                            e.session_id.clone(),
+                            e.parent_session_id.clone(),
+                        )
+                    })
+                } else {
+                    registry
+                        .iter()
+                        .find(|e| e.session_id == current_session_id)
+                        .map(|e| {
+                            (
+                                e.key().clone(),
+                                e.value().session_id.clone(),
+                                e.value().parent_session_id.clone(),
+                            )
+                        })
+                }
+            });
+
+        // 所有権ゲート（#64）: subtask_id は LLM 由来の引数なので、呼び出し元セッションの
+        // サブタスク（自分自身 = session_id 一致、または自分の子 = parent_session_id 一致）
+        // 以外は拒否する。無検証だと他セッションへの進捗ログ書き込み・メインエンジン
+        // 再呼び出しを誘発できてしまう。
+        if let Some((id, session_id, parent_session_id)) = &subtask_entry {
+            if session_id != &current_session_id && parent_session_id != &current_session_id {
+                return err(format!(
+                    "{REJECTION_CODE_PREFIX}report_progress: subtask '{id}' は呼び出し元セッションのサブタスクではありません"
+                ));
+            }
+        }
+
+        let subtask_id = subtask_entry
+            .as_ref()
+            .map(|(id, _, _)| id.clone())
+            .unwrap_or(subtask_id_arg);
+        let parent_session_id = subtask_entry
+            .as_ref()
+            .map(|(_, _, parent)| parent.clone())
+            .unwrap_or_else(|| current_session_id.clone());
+
+        // 進捗本文は親セッションログ（DB）へ永続化する。sink には本文を運ばない
+        // （RFC §1.3）ので、受け口が未配線でも本文自体はここで残る。
+        if !parent_session_id.is_empty() {
+            if let Ok(conn) = self.state.db.lock() {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: agent_id.clone(),
+                    session_id: parent_session_id.clone(),
+                    log_type: "system".to_string(),
+                    content: json!({
+                        "type": "subtask_progress",
+                        "subtask_id": subtask_id,
+                        "message": message,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    })
+                    .to_string(),
+                    speaker_id: None,
+                    turn_number: None,
+                    metadata_json: None,
+                    created_at: None,
+                };
+                opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+            }
+        }
+
+        // 完了受け口が未配線の経路（`with_dispatch` していない run）では、デバウンス
+        // タスクを**起動しない**。起動しても 3 秒後に通知先が無く黙って消えるだけで、
+        // (a) 無駄な tokio タスクと (b) 世代カウンタの残骸を積むだけだからである。
+        // 記録（上の親ログ）は済んでいるので、その旨を debug ログに残して成功を返す。
+        let Some(sink) = self.completion_sink.clone() else {
+            tracing::debug!(
+                session_id = %current_session_id,
+                parent_session_id = %parent_session_id,
+                subtask_id = %subtask_id,
+                "report_progress: completion sink not wired; progress logged to the parent session only (no main-engine notification)"
+            );
+            return GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "reported": true,
+                    "message": message,
+                    // 記録はしたが再注入はしていないことを呼び出し元に明示する。
+                    "notified": false,
+                })),
+                error: None,
+            };
+        };
+
+        // デバウンス: 3 秒待ってからメインエンジン再呼び出しを 1 回だけ発火する。
+        // 世代カウンタは `AppState` 側（`ProgressDebounce`）にある。この構造体は run
+        // ごとに作り直されるためフィールドに置くと毎回リセットされ、バースト時に同数の
+        // LLM 再呼び出し（コスト増・チャンネルスパム）が起きる。
+        let debounce = self.state.progress_debounce.clone();
+        let my_generation = debounce.bump(&parent_session_id);
+        let parent_session_clone = parent_session_id.clone();
+        let subtask_id_clone = subtask_id.clone();
+        let agent_id_clone = agent_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY).await;
+            // 自分より後に report_progress が来ていたら（世代が進んでいたら）発火しない。
+            if !debounce.claim_latest(&parent_session_clone, my_generation) {
+                return;
+            }
+            sink.on_subtask_settled(SubtaskSettled {
+                session_id: parent_session_clone,
+                agent_id: agent_id_clone,
+                subtask_id: subtask_id_clone,
+                exit_reason: "progress".to_string(),
+                kind: SettleKind::Progress,
+                // 進捗の宛先は親セッション。返信先の復元は sink 側の責務（#167）。
+                reply_target: None,
+            });
+        });
+
+        GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "reported": true,
+                "message": message,
+                "notified": true,
+            })),
+            error: None,
         }
     }
 
@@ -872,6 +1066,24 @@ impl GatewayActions for SystemGatewayActions {
                     self.cancel_subtask(args, ctx)
                 }
             }
+            // subtask 進捗報告（#175 S1）。cancel_subtask と同じ委譲パターン。
+            // transport 固有 gateway（Discord）が report_progress を実装しているなら、
+            // その固有の後処理（lifecycle webhook への progress 送出）を保つため inner
+            // へ委譲する＝ Discord 経路は挙動不変。実装していない transport
+            // （web/Nostr/REST/heartbeat）では own が処理する。
+            "report_progress" => {
+                let inner_handles = self.inner.as_ref().is_some_and(|inner| {
+                    inner
+                        .definitions()
+                        .iter()
+                        .any(|d| d.name == "report_progress")
+                });
+                if inner_handles {
+                    self.inner.as_ref().unwrap().execute(name, args, ctx).await
+                } else {
+                    self.report_progress(args, ctx).await
+                }
+            }
             // 自分が扱わないツールは inner gateway へ委譲する。
             _ => match &self.inner {
                 Some(inner) => inner.execute(name, args, ctx).await,
@@ -1112,5 +1324,380 @@ mod tests {
         );
         // inner 固有ツールは通す（dedup は同名のみ）。
         assert!(merged.iter().any(|d| d.name == "discord_only_tool"));
+    }
+
+    // ---- #175 S1: report_progress の gateway 非依存化 ----
+
+    /// Regression guard for #175 S1: report_progress must be an *own* (server-neutral)
+    /// definition so web / Nostr / REST / heartbeat — not just Discord — can let a
+    /// sub-engine report progress.
+    #[test]
+    fn report_progress_is_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "report_progress")
+            .expect("report_progress must be an own (server-neutral) definition (#175 S1)");
+        // message は必須 / subtask_id は任意（sub-engine の system prompt の契約）。
+        let required = d.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "message"));
+        assert!(!required.iter().any(|v| v == "subtask_id"));
+        let props = d.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("subtask_id"));
+        // own に丁度 1 件（dedup の source が一意）。
+        let count = defs.iter().filter(|d| d.name == "report_progress").count();
+        assert_eq!(count, 1);
+    }
+
+    /// Discord のような inner が report_progress を定義しても、merge 後は own の
+    /// 1 件だけが残る（provider は同名重複を拒否しうる）。
+    #[test]
+    fn merge_definitions_dedups_report_progress_from_inner() {
+        let inner: Arc<dyn GatewayActions> = Arc::new(RecordingInner::new(&["report_progress"]));
+        let merged = SystemGatewayActions::merge_definitions(
+            SystemGatewayActions::own_definitions(),
+            Some(&inner),
+        );
+        let count = merged
+            .iter()
+            .filter(|d| d.name == "report_progress")
+            .count();
+        assert_eq!(
+            count, 1,
+            "merge 後も report_progress は1件（own 優先で dedup）"
+        );
+    }
+
+    /// 指定した名前のツールを定義し、`execute` の到達を記録する inner のフェイク。
+    struct RecordingInner {
+        names: Vec<String>,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingInner {
+        fn new(names: &[&str]) -> Self {
+            Self {
+                names: names.iter().map(|s| s.to_string()).collect(),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl GatewayActions for RecordingInner {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            self.names
+                .iter()
+                .map(|n| GatewayActionDef {
+                    name: n.clone(),
+                    description: format!("{n} (inner)"),
+                    parameters: json!({"type": "object"}),
+                })
+                .collect()
+        }
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &Value,
+            _ctx: &GatewayCallContext,
+        ) -> GatewayActionResult {
+            self.calls.lock().unwrap().push(name.to_string());
+            GatewayActionResult {
+                success: true,
+                data: Some(json!({ "reached_inner": name })),
+                error: None,
+            }
+        }
+    }
+
+    /// 受け取った settle を記録する `SubtaskCompletionSink`。
+    #[derive(Default)]
+    struct RecordingSink {
+        settled: std::sync::Mutex<Vec<SubtaskSettled>>,
+    }
+
+    impl RecordingSink {
+        fn settled(&self) -> Vec<SubtaskSettled> {
+            self.settled.lock().unwrap().clone()
+        }
+    }
+
+    impl SubtaskCompletionSink for RecordingSink {
+        fn on_subtask_settled(&self, ev: SubtaskSettled) {
+            self.settled.lock().unwrap().push(ev);
+        }
+    }
+
+    /// 走行中扱いの subtask を 1 件だけ持つ registry。
+    fn registry_with(
+        subtask_id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+    ) -> SubtaskRegistry {
+        let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+        registry.insert(
+            subtask_id.to_string(),
+            opencrab_actions::SpawnedSubtask {
+                abort_handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+                session_id: session_id.to_string(),
+                parent_session_id: parent_session_id.to_string(),
+                agent_id: "agent-x".to_string(),
+                label: "job".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                lifecycle: opencrab_actions::SubtaskLifecycle::new(),
+            },
+        );
+        registry
+    }
+
+    fn sub_ctx(session_id: &str) -> GatewayCallContext {
+        GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
+            .with_session_id(session_id)
+            .with_depth(1)
+    }
+
+    /// 親セッションログに記録された subtask_progress のメッセージ一覧。
+    fn progress_messages(state: &AppState, parent_session_id: &str) -> Vec<String> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::list_session_logs_by_session(&conn, parent_session_id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|row| {
+                let v: Value = serde_json::from_str(&row.content).ok()?;
+                if v.get("type").and_then(|t| t.as_str()) != Some("subtask_progress") {
+                    return None;
+                }
+                Some(v.get("message")?.as_str()?.to_string())
+            })
+            .collect()
+    }
+
+    /// **非 Discord（inner なし）で report_progress が動く**（#175 S1 の主目的）。
+    /// 親ログに本文が残り、デバウンス後に完了受け口へ `Progress` が届く。
+    #[tokio::test(start_paused = true)]
+    async fn report_progress_works_without_inner_gateway() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-1", "subtask-st-1", "web-parent-1");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "halfway there" }),
+                &sub_ctx("subtask-st-1"),
+            )
+            .await;
+        assert!(r.success, "error: {:?}", r.error);
+        assert_eq!(r.data.as_ref().unwrap()["notified"], json!(true));
+
+        // 本文は親セッションログへ永続化される（sink には運ばない / RFC §1.3）。
+        assert_eq!(
+            progress_messages(&state, "web-parent-1"),
+            vec!["halfway there".to_string()]
+        );
+
+        // デバウンス満了後に Progress が 1 本届く。
+        tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
+        let settled = sink.settled();
+        assert_eq!(settled.len(), 1, "デバウンス後に Progress が 1 本届く");
+        assert_eq!(settled[0].kind, SettleKind::Progress);
+        assert_eq!(settled[0].session_id, "web-parent-1");
+        assert_eq!(settled[0].subtask_id, "st-1");
+        assert_eq!(settled[0].exit_reason, "progress");
+    }
+
+    /// **Discord（inner あり）では inner へ委譲される**（S1 で Discord 経路は挙動不変）。
+    /// own 実装は走らない＝親ログを書かない。
+    #[tokio::test]
+    async fn report_progress_delegates_to_inner_when_inner_defines_it() {
+        let state = crate::test_app_state();
+        let inner = Arc::new(RecordingInner::new(&["report_progress", "spawn_subtask"]));
+        let registry = registry_with("st-1", "subtask-st-1", "discord-parent-1");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            Some(inner.clone() as Arc<dyn GatewayActions>),
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "from discord" }),
+                &sub_ctx("subtask-st-1"),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.unwrap()["reached_inner"],
+            json!("report_progress"),
+            "inner（Discord 実装）へ委譲されなければならない"
+        );
+        assert_eq!(inner.calls(), vec!["report_progress".to_string()]);
+        // own 実装は走っていない（親ログも sink も触っていない）。
+        assert!(progress_messages(&state, "discord-parent-1").is_empty());
+        assert!(sink.settled().is_empty());
+    }
+
+    /// 所有権ゲート: 他人の subtask（自分の session でも親でもない）は拒否する。
+    #[tokio::test]
+    async fn report_progress_rejects_foreign_subtask() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-1", "subtask-st-1", "parent-of-someone-else");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "sneaky", "subtask_id": "st-1" }),
+                &sub_ctx("some-other-session"),
+            )
+            .await;
+        assert!(!r.success);
+        let e = r.error.unwrap();
+        assert!(
+            e.starts_with(REJECTION_CODE_PREFIX),
+            "権限拒否は構造的マーカー付き: {e}"
+        );
+        // 他セッションの親ログを汚さない。
+        assert!(progress_messages(&state, "parent-of-someone-else").is_empty());
+    }
+
+    /// セッション必須ガード（fail-closed）: session_id が無い文脈では実行できない。
+    #[tokio::test]
+    async fn report_progress_requires_session_context() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-x");
+        let r = actions
+            .execute("report_progress", &json!({ "message": "x" }), &ctx)
+            .await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("session_id"));
+    }
+
+    /// message は必須。
+    #[tokio::test]
+    async fn report_progress_requires_message() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let r = actions
+            .execute("report_progress", &json!({}), &sub_ctx("subtask-st-1"))
+            .await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("'message' is required"));
+    }
+
+    /// 完了受け口が未配線なら、記録だけして通知はしない（デバウンスタスクも起動しない）。
+    /// 「黙って消える」のを避けるため、結果に `notified: false` を載せる。
+    #[tokio::test(start_paused = true)]
+    async fn report_progress_records_but_does_not_notify_without_sink() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-1", "subtask-st-1", "rest-parent-1");
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "no sink here" }),
+                &sub_ctx("subtask-st-1"),
+            )
+            .await;
+        assert!(r.success);
+        assert_eq!(r.data.unwrap()["notified"], json!(false));
+        // 記録は残る。
+        assert_eq!(
+            progress_messages(&state, "rest-parent-1"),
+            vec!["no sink here".to_string()]
+        );
+        // デバウンスタスクを起動していない＝世代カウンタも進んでいない。
+        tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
+        assert!(
+            !state.progress_debounce.claim_latest("rest-parent-1", 1),
+            "受け口未配線ではデバウンス世代を消費しない"
+        );
+    }
+
+    /// **デバウンス状態が `AppState` 側にあることを固定する回帰テスト（#175 S1 の最重要点）**。
+    ///
+    /// `SystemGatewayActions` は run ごとに作り直される。デバウンス世代カウンタを
+    /// この構造体のフィールドに置くと、2 回目の呼び出しで世代が 0 から張り直され、
+    /// **両方の呼び出しが発火する**（＝バーストで LLM を無駄に呼ぶ）。ここでは
+    /// 別インスタンスから 2 回報告し、届く `Progress` が 1 本だけであることを固定する。
+    #[tokio::test(start_paused = true)]
+    async fn progress_debounce_survives_gateway_recreation() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-1", "subtask-st-1", "web-parent-1");
+        let sink = Arc::new(RecordingSink::default());
+
+        // 1 回目: この run 用の gateway インスタンス。
+        let first = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry.clone()),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+        assert!(
+            first
+                .execute(
+                    "report_progress",
+                    &json!({ "message": "step 1" }),
+                    &sub_ctx("subtask-st-1")
+                )
+                .await
+                .success
+        );
+        drop(first);
+
+        // 2 回目: 別の run（＝別インスタンス）。同じ AppState を共有する。
+        let second = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+        assert!(
+            second
+                .execute(
+                    "report_progress",
+                    &json!({ "message": "step 2" }),
+                    &sub_ctx("subtask-st-1")
+                )
+                .await
+                .success
+        );
+
+        tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
+
+        // 本文は 2 件とも親ログへ残る（間引くのは通知だけ）。
+        assert_eq!(
+            progress_messages(&state, "web-parent-1"),
+            vec!["step 1".to_string(), "step 2".to_string()]
+        );
+        // 通知は最後の 1 本だけ。デバウンス状態をインスタンスのフィールドに移すと 2 本届く。
+        let settled = sink.settled();
+        assert_eq!(
+            settled.len(),
+            1,
+            "デバウンスは gateway の作り直しを跨いで効かなければならない（AppState 側に置く）。届いた: {settled:?}"
+        );
+        assert_eq!(settled[0].kind, SettleKind::Progress);
     }
 }

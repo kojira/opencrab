@@ -204,6 +204,11 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     "configure_mcp_server",
     // (1) 制御系: 走行中 subtask の停止。background 化しては意味を成さない。
     "cancel_subtask",
+    // (1) 制御系: サブタスクの進捗報告（#175 S1）。それ自体が subtask ライフサイクルの
+    //     通知（デバウンス後にメインエンジンを呼び直す）なので background 化しない。
+    //     Discord 側の実装は S5 まで残るため `DISCORD_INLINE_ACTIONS` からは外さない
+    //     （どちらの供給源から見ても inline であることに変わりはない）。
+    "report_progress",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
