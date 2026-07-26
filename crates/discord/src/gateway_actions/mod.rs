@@ -474,7 +474,7 @@ impl GatewayActions for DiscordGatewayActions {
                         },
                         "channel_id": {
                             "type": "string",
-                            "description": "投稿先DiscordチャンネルのID（数値文字列）。現在のチャンネルIDは会話の[Discord context]にchannel_id=XXXXとして記載されている。省略可（省略時は今のやりとりの返信先へ投稿する）。"
+                            "description": "投稿先の宛先ID（省略可）。**通常は省略する** — 省略時は今のやりとりの返信先へ投稿される。今の会話とは別の宛先へ送りたいときだけ指定すること（推測した識別子を渡してはならない）。"
                         },
                         "instructions": {
                             "type": "string",
@@ -482,7 +482,7 @@ impl GatewayActions for DiscordGatewayActions {
                         },
                         "reviewer": {
                             "type": "string",
-                            "description": "指名したいレビュアー（省略可）。システムプロンプトの Peer Reviewers 一覧にある表示名または Discord user id。指定するとヘッダにメンションが付く。"
+                            "description": "指名したいレビュアー（省略可）。システムプロンプトの Peer Reviewers 一覧にある表示名を渡す。指定するとヘッダにメンションが付く。"
                         }
                     }
                 }),

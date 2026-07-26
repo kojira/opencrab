@@ -203,8 +203,9 @@ fn make_heartbeat_callback(
                         channel_id_str,
                     );
                     hb_source = resolved.source;
+                    // 場所の呼称は transport 中立にする（#158 S2）。名前自体は設定由来。
                     let prompt = format!(
-                        "[ハートビート] チャンネル「{}」。{}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。",
+                        "[ハートビート] 現在の会話「{}」。{}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。",
                         channel_name, resolved.text
                     );
                     let log = opencrab_db::queries::SessionLogRow {

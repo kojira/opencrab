@@ -37,7 +37,9 @@ use tracing::{debug, error, info};
 
 /// `send_ui` のツール定義。
 ///
-/// 名前・description・引数スキーマは移設前（Discord gateway）から 1 バイトも変えない。
+/// 名前と引数スキーマ（キー・型・required）は移設前（Discord gateway）から 1 バイトも
+/// 変えない。`channel_id` の**説明文だけ**は #158 S2 で transport 中立にした
+/// （宛先は今のやりとりのものを渡す、推測させない）。必須であることは変えていない。
 pub fn send_ui_definition() -> GatewayActionDef {
     GatewayActionDef {
         name: "send_ui".to_string(),
@@ -47,7 +49,7 @@ pub fn send_ui_definition() -> GatewayActionDef {
             "properties": {
                 "channel_id": {
                     "type": "string",
-                    "description": "送信先チャンネルID"
+                    "description": "送信先の宛先ID。今のやりとりの宛先をそのまま渡すこと（推測した識別子を渡してはならない）。"
                 },
                 "components": {
                     "type": "array",
