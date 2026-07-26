@@ -21,6 +21,7 @@ mod discord_ops;
 mod heartbeat_instructions;
 mod peer_review;
 mod subtask_engine;
+mod subtask_notifier;
 mod subtask_webhook;
 mod ui;
 mod voice_actions;
@@ -29,30 +30,15 @@ mod webhook;
 pub(crate) use peer_review::record_peer_review_reply;
 pub use subtask_engine::spawn_activity_tool_event_sink;
 pub(crate) use subtask_engine::DiscordCompletionSink;
-use webhook::DeliveryBatch;
 pub use webhook::WebhookConfig;
 
 // 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設済み
 // （RFC #152 S1）。Discord 側は re-export せず参照するだけにして、他 crate が
-// Discord crate 経由でサブタスク型を引かないようにする（#170）。Discord 固有の
-// webhook 系（`webhook` / `webhook_tx`）は `SpawnedSubtask` に載せず、
-// `SubtaskWebhooks` 随伴マップへ分離する（下記）。
+// Discord crate 経由でサブタスク型を引かないようにする（#170）。lifecycle 通知は
+// `SpawnedSubtask` に載せず、`SubtaskNotifiers` 随伴マップへ分離する（#175 S3:
+// 値は `Arc<dyn SubtaskRunNotifier>` なので Discord 固有の型は晒さない）。
 use opencrab_actions::subtask::SubtaskRegistry;
-
-/// `SpawnedSubtask` から分離した Discord 固有の webhook 随伴データ（RFC §1.5）。
-///
-/// actions の gateway 非依存 `SpawnedSubtask` には webhook を載せられないため、
-/// subtask_id をキーに別マップで保持する。ライフサイクルは registry と同期させる
-/// （spawn 時に insert、完了/キャンセル時に remove）。
-pub(crate) struct DiscordSubtaskWebhook {
-    /// Subtask lifecycle webhook config (spawn 時指定)。None なら通知無効。
-    pub webhook: Option<WebhookConfig>,
-    /// 同一 run の lifecycle delivery を直列化する sender。
-    pub webhook_tx: Option<tokio::sync::mpsc::UnboundedSender<DeliveryBatch>>,
-}
-
-/// subtask_id → Discord webhook 随伴データのマップ。registry と対で共有する。
-pub(crate) type SubtaskWebhooks = Arc<DashMap<String, DiscordSubtaskWebhook>>;
+use opencrab_actions::subtask_notify::{SubtaskLifecycleNotifier, SubtaskNotifiers};
 
 struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
 
@@ -88,13 +74,17 @@ pub struct DiscordGatewayActions {
     /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
     workspace_base: String,
     subtask_registry: SubtaskRegistry,
-    /// registry と対の Discord webhook 随伴マップ（RFC #152 S1: webhook 分離）。
-    /// registry と同じく Clone で共有され、sub-engine 用クローンからも同じ実体を見る。
-    subtask_webhooks: SubtaskWebhooks,
+    /// registry と対の lifecycle 通知口マップ（RFC #152 S1 の webhook 分離を #175 S3 で
+    /// trait オブジェクト化したもの）。registry と同じく Clone で共有され、sub-engine
+    /// 用クローンからも同じ実体を見る。
+    subtask_notifiers: SubtaskNotifiers,
     /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
     webhook_client: reqwest::Client,
     /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook。
     default_subtask_webhook: Option<WebhookConfig>,
+    /// lifecycle 通知の実装を差し替えるためのフック（未設定なら Discord webhook 実装）。
+    /// S4 で subtask 生成が gateway 非依存層へ移るときの注入点でもある。
+    lifecycle_notifier: Option<Arc<dyn SubtaskLifecycleNotifier>>,
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
     /// owner-only な A2UI インタラクションの権限判定に使う owner の Discord ユーザーID。
@@ -127,15 +117,38 @@ impl DiscordGatewayActions {
             default_model,
             workspace_base,
             subtask_registry,
-            subtask_webhooks: Arc::new(DashMap::new()),
+            subtask_notifiers: Arc::new(DashMap::new()),
             webhook_client: reqwest::Client::new(),
             default_subtask_webhook,
+            lifecycle_notifier: None,
             pending_interaction_registry: None,
             event_tx: None,
             owner_discord_id: String::new(),
             progress_debounce: Arc::new(dashmap::DashMap::new()),
             voice: None,
         }
+    }
+
+    /// subtask lifecycle 通知のファクトリを返す（#175 S3）。
+    ///
+    /// 既定は Discord webhook 実装。`with_lifecycle_notifier` で差し替えられ、
+    /// 通知先を持たない構成では `NoopLifecycleNotifier` を挿せる。
+    fn lifecycle_notifier(&self) -> Arc<dyn SubtaskLifecycleNotifier> {
+        match &self.lifecycle_notifier {
+            Some(n) => n.clone(),
+            None => Arc::new(subtask_notifier::DiscordWebhookNotifier::new(
+                self.db.clone(),
+                self.webhook_client.clone(),
+                self.default_subtask_webhook.clone(),
+            )),
+        }
+    }
+
+    /// lifecycle 通知の実装を差し替える（通知不要な構成は
+    /// `opencrab_actions::NoopLifecycleNotifier` を渡す）。
+    pub fn with_lifecycle_notifier(mut self, notifier: Arc<dyn SubtaskLifecycleNotifier>) -> Self {
+        self.lifecycle_notifier = Some(notifier);
+        self
     }
 
     /// エージェントの実効モデルを解決する（per-agent 設定 > グローバル default）。

@@ -10,6 +10,7 @@ pub mod search;
 pub mod skill_management;
 pub mod soul;
 pub mod subtask;
+pub mod subtask_notify;
 pub mod subtask_registries;
 pub mod task_ledger;
 pub mod tool_result_log;
@@ -33,6 +34,11 @@ pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, CancelOutcome, NoopCompletionSink, SettleKind,
     SharedExecutor, SpawnedSubtask, SubtaskCompletionSink, SubtaskLifecycle, SubtaskRegistry,
     SubtaskSettled, SubtaskToolDispatcher, DEFAULT_DISPATCH_TIMEOUT_SECS,
+};
+pub use subtask_notify::{
+    NoopLifecycleNotifier, NoopRunNotifier, NotifyTarget, NotifyTargetError,
+    SubtaskLifecycleNotifier, SubtaskNotifiers, SubtaskNotifySession, SubtaskRunInfo,
+    SubtaskRunNotifier,
 };
 pub use subtask_registries::SubtaskRegistries;
 pub use tool_result_log::{
