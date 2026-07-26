@@ -48,6 +48,9 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
+        ),
     };
     (create_router(state), db)
 }
@@ -1036,6 +1039,9 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
         ),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
+        ),
     };
     let app = create_router(state.clone());
     (app, db, mock, state)
@@ -1936,6 +1942,9 @@ fn state_with_consolidation(
         web_gateway: std::sync::Arc::new(opencrab_server::web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
+        ),
+        progress_debounce: std::sync::Arc::new(
+            opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
     }
 }
