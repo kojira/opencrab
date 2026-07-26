@@ -7,7 +7,8 @@
 //! per-session 直列化という E2E 本質を、実プロセス越しに観測する。
 //!
 //! ## ゲート（二重）
-//! - 全テストは `#[ignore]`（通常の `cargo test` では走らない）。
+//! - E2E シナリオは全て `#[ignore]`（通常の `cargo test` では走らない）。
+//!   ハーネス設定の単体テスト（サーバも LLM も要らない）だけは通常実行される。
 //! - さらに先頭で環境変数 `OPENCRAB_E2E=1` が無ければ即 `return`（skip）。
 //!   `expect`/`panic` はしない（`real_llm_e2e.rs` の `expect` パターンは踏襲しない）。
 //!
@@ -19,6 +20,9 @@
 //!   user_id。ローカル固有情報なのでリポジトリには埋め込まず `.env` で与える。
 //!   未設定の場合は各テストを skip する。
 //! - `OPENCRAB_E2E_DB`       — 既定 `data/opencrab.db`（アサート用に read-only で読む）。
+//!
+//! いずれも**空文字/空白のみは「未設定」**として扱い既定値へ落とす（`.env.example` は
+//! これらを空文字で出荷するため、`cp .env.example .env` のまま使っても壊れない）。
 //!
 //! ## 実行方法
 //! ```sh
@@ -38,26 +42,53 @@ fn e2e_enabled() -> bool {
     std::env::var("OPENCRAB_E2E").ok().as_deref() == Some("1")
 }
 
+/// 「空文字/空白のみ = 未設定」として正規化する。
+///
+/// `.env.example` は全ての `OPENCRAB_E2E_*` を**空文字で**出荷する（README の
+/// `cp .env.example .env` 手順どおりに使うとこれらが空値として読み込まれる）。
+/// 素の `unwrap_or_else(|_| default)` は「設定されている空文字」を既定値へ落とせず、
+/// base_url が空で全リクエストが失敗し、model が空だと `ensure_test_agent` の PATCH
+/// が稼働中 DB のテストエージェントの model を空文字で上書きしてしまう。
+/// `owner_id()` は元から空を弾いていたので、こちらへ流儀を揃える。
+fn non_empty(raw: Option<String>) -> Option<String> {
+    raw.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// 環境変数を「空/空白のみは未設定」として読む。
+fn env_non_empty(key: &str) -> Option<String> {
+    non_empty(std::env::var(key).ok())
+}
+
+const DEFAULT_BASE_URL: &str = "http://localhost:8080";
+const DEFAULT_MODEL: &str = "chatgpt:gpt-5.6-sol";
+
+/// 生の env 値 → 実効 base_url（テスト用に env から切り離した本体）。
+fn base_url_from(raw: Option<String>) -> String {
+    non_empty(raw).unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+}
+
 fn base_url() -> String {
-    std::env::var("OPENCRAB_E2E_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string())
+    base_url_from(std::env::var("OPENCRAB_E2E_BASE_URL").ok())
+}
+
+/// 生の env 値 → 実効 model（テスト用に env から切り離した本体）。
+fn model_from(raw: Option<String>) -> String {
+    non_empty(raw).unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
 fn model() -> String {
-    std::env::var("OPENCRAB_E2E_MODEL").unwrap_or_else(|_| "chatgpt:gpt-5.6-sol".to_string())
+    model_from(std::env::var("OPENCRAB_E2E_MODEL").ok())
 }
 
 /// 認可判定に使う owner の user_id。**既定値は持たない**（ローカル固有情報を
 /// リポジトリに埋め込まないため）。未設定なら `None` を返し、呼び出し側は skip する。
 fn owner_id() -> Option<String> {
-    match std::env::var("OPENCRAB_E2E_OWNER_ID") {
-        Ok(v) if !v.trim().is_empty() => Some(v),
-        _ => None,
-    }
+    env_non_empty("OPENCRAB_E2E_OWNER_ID")
 }
 
 fn db_path() -> String {
-    // 明示指定があれば最優先。
-    if let Ok(p) = std::env::var("OPENCRAB_E2E_DB") {
+    // 明示指定があれば最優先（空文字は未指定扱い）。
+    if let Some(p) = env_non_empty("OPENCRAB_E2E_DB") {
         return p;
     }
     // `cargo test` はテストバイナリの cwd を crate ルート（crates/server）にするため、
@@ -103,6 +134,60 @@ fn setup() -> bool {
 /// `setup()` を通過した後にのみ呼ぶ（未設定なら skip 済みのため必ず値がある）。
 fn owner_id_or_panic() -> String {
     owner_id().expect("setup() で OPENCRAB_E2E_OWNER_ID の存在を確認済み")
+}
+
+// ---- ハーネス設定の単体テスト（`#[ignore]` ではない = 通常の cargo test で走る） ----
+//
+// env そのものを書き換えると、`--ignored` 同時実行時に走行中の E2E から見える値が
+// 変わってしまうため、判定本体（`non_empty` / `*_from`）を env から切り離して検査する。
+
+#[test]
+fn blank_env_values_are_treated_as_unset() {
+    assert_eq!(non_empty(None), None);
+    assert_eq!(
+        non_empty(Some(String::new())),
+        None,
+        ".env.example の空文字"
+    );
+    assert_eq!(non_empty(Some("   ".to_string())), None, "空白のみ");
+    assert_eq!(non_empty(Some("\t\n".to_string())), None);
+    assert_eq!(non_empty(Some(" v ".to_string())), Some("v".to_string()));
+}
+
+/// `cp .env.example .env` が出荷する空文字でも既定値へ落ちる（空の base_url で
+/// 全リクエストが失敗しない）。
+#[test]
+fn base_url_falls_back_to_default_when_blank() {
+    assert_eq!(base_url_from(None), DEFAULT_BASE_URL);
+    assert_eq!(base_url_from(Some(String::new())), DEFAULT_BASE_URL);
+    assert_eq!(base_url_from(Some("  ".to_string())), DEFAULT_BASE_URL);
+    assert_eq!(
+        base_url_from(Some(" http://127.0.0.1:9999 ".to_string())),
+        "http://127.0.0.1:9999",
+        "明示値は trim して尊重する"
+    );
+}
+
+/// model が空のまま `ensure_test_agent` の PATCH に載ると、稼働中 DB の
+/// テストエージェントの model を空文字で上書きしてしまう。空は必ず既定値へ。
+#[test]
+fn model_falls_back_to_default_when_blank() {
+    assert_eq!(model_from(None), DEFAULT_MODEL);
+    assert_eq!(model_from(Some(String::new())), DEFAULT_MODEL);
+    assert_eq!(model_from(Some(" \t".to_string())), DEFAULT_MODEL);
+    assert_eq!(
+        model_from(Some(" openai:gpt-4o ".to_string())),
+        "openai:gpt-4o"
+    );
+    assert!(!model().is_empty(), "実効 model が空になってはならない");
+}
+
+/// db_path も空文字を「未指定」として候補探索へ落とす。
+#[test]
+fn db_path_ignores_blank_env_and_never_returns_empty() {
+    assert!(!db_path().is_empty());
+    assert!(!base_url().is_empty());
+    assert_eq!(env_non_empty("OPENCRAB_E2E_DB_DEFINITELY_UNSET_KEY"), None);
 }
 
 // ==================== HTTP ヘルパ ====================
