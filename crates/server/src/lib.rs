@@ -17,6 +17,7 @@ pub mod hot_reload;
 pub mod llm_adapter;
 pub mod memory_maintenance;
 pub mod nostr_runner_impl;
+pub mod peer_review;
 pub mod process;
 pub mod skill_consolidation;
 pub mod subtask_registries;

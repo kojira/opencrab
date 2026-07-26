@@ -26,6 +26,7 @@ pub mod runtime_context;
 pub mod skill;
 pub mod soul;
 pub mod task_ledger;
+pub mod text_delivery;
 pub mod workspace;
 
 // Re-export primary types for convenience.

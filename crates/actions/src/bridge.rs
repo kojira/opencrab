@@ -152,10 +152,11 @@ impl GatewayActions for SubEngineGatewayActions {
 /// と `discord_tools_are_classified_for_dispatch` が担う。
 ///
 /// ゲートは**名前ベース**なので、実装が gateway 非依存層へ移っても効き続ける
-/// （`TRUSTED_ONLY_ACTIONS` と同じ性質）。`send_ui` は #156 S3 で
-/// `SystemGatewayActions` の own ツールになったが、深さ拒否の意図は変わらないので
-/// この一覧に**残す**（実在性の検証は server 側の
-/// `send_ui_is_blocked_in_sub_engine` が担う）。
+/// （`TRUSTED_ONLY_ACTIONS` と同じ性質）。`send_ui` は #156 S3、`request_peer_review` は
+/// #157 S7 で `SystemGatewayActions` の own ツールになったが、深さ拒否の意図は
+/// 変わらないのでこの一覧に**残す**（実在性の検証は server 側の
+/// `send_ui_is_blocked_in_sub_engine` / `request_peer_review_is_blocked_in_sub_engine`
+/// が担う）。
 ///
 /// なお sub-engine の実効ゲートはこの deny-list ではなく [`SUB_ENGINE_ALLOWED_ACTIONS`]
 /// （allow-list / 同じモジュール）。ここは多層防御。
@@ -167,6 +168,8 @@ pub const DISCORD_ACTIONS: &[&str] = &[
     // A2UI 送信（ユーザーの応答待ちを伴う対話的配送）。sub-engine からは不可。
     // 実装は gateway 非依存層（#156 S3）だが、名前ベースの拒否はそのまま効く。
     "send_ui",
+    // ピアレビュー依頼（チャンネルへの配送）。sub-engine からは不可。実装は
+    // gateway 非依存層（#157 S7）だが、名前ベースの拒否はそのまま効く。
     "request_peer_review",
     // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
     "join_voice_channel",
@@ -189,12 +192,12 @@ pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
     // (2) 配送系。
     "discord_send_file",
     "discord_add_reaction",
-    "request_peer_review",
     "join_voice_channel",
     "leave_voice_channel",
     // (2) 配送系 + ユーザーの応答待ち（pending interaction）だった `send_ui` は
     //     #156 S3 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。分類の所属は
-    //     inline のまま変えていない。
+    //     inline のまま変えていない。`request_peer_review`（配送系）も #157 S7 で
+    //     同じく server 側へ移設済み。
     // (3) 同ターン結果依存: webhook URL / 作成物の ID をそのターンで使う。
     //     `ensure_*` は既存デフォルトが無いとき `discord_create_webhook` を呼ぶ
     //     （serenity 依存の transport 固有処理）ので #157 S5 でも Discord に残る。
@@ -345,6 +348,11 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     インタラクション ID を扱えず、(c) クリック resume と subtask 決着 resume で
     //     返信が 2 通になる（#152 の実害そのもの）。
     "send_ui",
+    // (2) 配送系（#157 S7 で Discord から移設）。**移設前の分類を維持する**:
+    //     `DISCORD_INLINE_ACTIONS` に属していたので所属を変えずにここへ移した。
+    //     「送る」こと自体が応答なので background 化しない（ヘッダ + part X/N を
+    //     順に投稿する配送で、部分失敗の通数を同ターンで返す契約でもある）。
+    "request_peer_review",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。

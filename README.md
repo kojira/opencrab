@@ -228,7 +228,8 @@ only exist on that transport's turns.
 | **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions.rs`) |
 | **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress` | all turns (`crates/server`) |
 | **Heartbeat** | `update_heartbeat_instructions`, `read_heartbeat_instructions` | all turns (`crates/server/src/heartbeat_instructions.rs`) — but channel-scoped overrides only mean something on Discord |
-| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel`, `send_ui`, `request_peer_review` | Discord turns only (`crates/discord`) |
+| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
+| **Delivery** | `send_ui`, `request_peer_review` | all turns whose transport can render UI (`send_ui`) or send text (`request_peer_review`) — implementations in `crates/actions/src/a2ui.rs` and `crates/server/src/peer_review.rs`; the transport only supplies the surface (`GatewayActions::a2ui_surface` / `text_delivery`) |
 | **Webhook targets** | `list_webhooks`, `get_default_webhook`, `set_default_webhook`, `list_subtask_webhooks`, `get_default_subtask_webhook`, `set_default_subtask_webhook` | all turns (`crates/server/src/webhook_targets.rs`) |
 | **Webhook creation** | `discord_create_webhook`, `ensure_webhook`, `ensure_subtask_webhook` | Discord turns only (`crates/discord`) — the `ensure_*` pair creates a webhook through serenity when no default exists |
 | **Voice** | `join_voice_channel`, `leave_voice_channel` | Discord turns only (`crates/discord`) |
@@ -237,13 +238,13 @@ only exist on that transport's turns.
 The rows above name every action in `SystemGatewayActions::own_definitions()` (the "all turns"
 rows) and every action in `DiscordGatewayActions::definitions()`. Each action is defined in
 exactly one place: `cancel_subtask`, the two heartbeat-instruction actions, the six
-webhook-target actions and `create_skill` used to be defined by Discord as well, but
-#157 S2/S3/S5/S6 removed those definitions so the transport-independent implementation is the
-only one. Drift is caught by tests rather than by
+webhook-target actions, `create_skill` and `request_peer_review` used to be defined by Discord
+as well, but #157 S2/S3/S5/S6/S7 removed those definitions so the transport-independent
+implementation is the only one. Drift is caught by tests rather than by
 review — `server_tools_are_classified_for_dispatch` requires every own definition to be
 classified and rejects dead names on the constant side, and
 `test_definitions_returns_expected_count` pins the Discord set (including that the actions
-relocated in #157 S1/S2/S3/S5/S6 are no longer defined there).
+relocated in #157 S1/S2/S3/S5/S6/S7 are no longer defined there).
 
 `create_skill` (a gateway action, `source_type="acquired"`) and `create_my_skill` (a core
 action, `source_type="self_created"`, `situation_pattern` required) are deliberately kept as
