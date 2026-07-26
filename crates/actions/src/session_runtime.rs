@@ -93,10 +93,14 @@ impl SessionRuntime {
     /// - 異なるセッション（別の相手 / 別エージェント / 別会話）は並行。
     ///
     /// 呼び出し側の注意: ゲートウェイ層はこれを**直接公開しない**。生の応答生成を
-    /// private に閉じ、直列化込みの入口だけを公開する（web は `respond` モジュールに
-    /// 応答生成、兄弟の `sink` モジュールに完了受け口を置いて直呼びをコンパイル
-    /// エラーにしている / Nostr は `NostrResponder::respond_serialized`）。直列化を
-    /// 呼び出し側の責務にすると 1 箇所の呼び忘れで不変条件が壊れ、テストでは検出できない。
+    /// private に閉じ、直列化込みの入口だけを公開する。直列化を呼び出し側の責務に
+    /// すると 1 箇所の呼び忘れで不変条件が壊れ、テストでは検出できない。
+    ///
+    /// 閉じ込めの強度は実装によって差がある。web は生の応答生成を **private 子モジュール**に
+    /// 置いているので親からも到達できない（呼び忘れがコンパイルエラーになる）。Nostr は
+    /// **同一モジュール内の private メソッド**なので、同じモジュールにある完了受け口からは
+    /// 直呼びできてしまう（呼び忘れがコンパイルでは止まらない）。新しいゲートウェイを
+    /// 作るときは web 側の形に倣うこと。
     pub async fn run_serialized<F, T>(&self, session_id: &str, fut: F) -> T
     where
         F: Future<Output = T>,
@@ -203,6 +207,60 @@ mod tests {
             "待機者がいないロックは回収される"
         );
         assert!(rt.session_locks.is_empty());
+    }
+
+    /// **解放後に到着した取得も、待機列に並んでいる先客の後ろに付く**。
+    ///
+    /// 回収の判定（待機者がいないときだけ外す）を「無条件に外す」に変えると、
+    /// 先客が待っている最中にエントリが消え、後から来た取得が**別のロックを新規に作って**
+    /// 先客と同時に走る（＝同一セッションで二重に応答する）。既存の直列テストは 5 本が
+    /// ほぼ同時に取得を通るため「解放後に遅れて到着する取得」を一度も作らず、この壊れ方を
+    /// 検知できない。ここで明示的にその順序を作る。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn late_arrival_serializes_behind_a_queued_waiter() {
+        let rt = Arc::new(SessionRuntime::new());
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let sid = "s-late";
+
+        let spawn_worker = |delay_ms: u64, hold_ms: u64| {
+            let rt = rt.clone();
+            let inflight = inflight.clone();
+            let max_concurrent = max_concurrent.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                rt.run_serialized(sid, async {
+                    let now = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_concurrent.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await;
+            })
+        };
+
+        // A: 即座に取得して 60ms 保持 / B: 10ms 後に到着（A の待機列に並ぶ）
+        // C: 80ms 後に到着（A は解放済み。回収が無条件なら別ロックを作って B と並走する）
+        let a = spawn_worker(0, 60);
+        let b = spawn_worker(10, 60);
+        let c = spawn_worker(80, 20);
+
+        // B が走行中（A 解放後）にエントリが残っていること。
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert!(
+            rt.holds_lock_entry(sid),
+            "待機者が残っているあいだはロックエントリを回収してはならない"
+        );
+
+        for h in [a, b, c] {
+            h.await.expect("worker panicked");
+        }
+        assert_eq!(
+            max_concurrent.load(Ordering::SeqCst),
+            1,
+            "解放後に到着した取得が先客と並走している（同一セッションの直列化が破れている）"
+        );
+        assert!(!rt.holds_lock_entry(sid), "最後は回収される");
     }
 
     /// 走行中はロックエントリが残る（回収が早すぎないことの裏取り）。
