@@ -1,10 +1,11 @@
-//! 汎用エージェント管理ツールの gateway 非依存実装（#157 S1）。
+//! 汎用エージェント管理ツールの gateway 非依存実装（#157 S1 / S6）。
 //!
 //! 旧実装は Discord ゲートウェイ（`crates/discord` の `gateway_actions/agent_management.rs`）
 //! にあり、**serenity を一切参照していない**のに Discord 経由のターンでしか露出しなかった
 //! （#157 / #155）。依存は DB と実行許可設定（`ToolsConfig`）だけなので、そのまま
 //! `SystemGatewayActions` の own ツールへ移し、web / Nostr / REST / heartbeat の
-//! 全ターンで使えるようにする。
+//! 全ターンで使えるようにする。S1 で許可コマンド 3 種と記憶インデックス設定、S6 で
+//! `create_skill`（旧 Discord モジュールの最後の住人）を移した。
 //!
 //! 移設で維持している不変条件（壊すと重大。順に対応するテストがある）:
 //! - **レスポンス JSON のキーと文言**（エラー文言も含む）を Discord 実装と 1 文字も変えない。
@@ -12,6 +13,13 @@
 //!   これらの名前を**持っていない**ため、このハンドラ内検査が唯一のゲートである。
 //! - **コマンド名の文字種検査**（英数字・`-`・`_` のみ）。同系統の
 //!   `manage_allowed_commands` は trim だけなので、移設で緩めてはいけない。
+//! - `create_skill` の **trusted 検査は二重構造**（bridge の `TRUSTED_ONLY_ACTIONS` +
+//!   ハンドラ内の `matches!`）。両者の許可集合は owner / co_agent / trusted_user で
+//!   完全に一致しており、bridge 側は名前ベースなので移設しても効き続ける。ハンドラ側は
+//!   多層防御として残す（`execute` を直接叩く経路が bridge を通らない場合の fail-closed）。
+//! - `create_skill` が記録する **`source_type` は `"acquired"`**。似た名前の core アクション
+//!   `create_my_skill`（`opencrab_actions::skill_management`）は `"self_created"` を書く
+//!   別のツールで、#157 では**統廃合しない**（過去の会話ログに残る呼び出しを壊さないため）。
 //!
 //! # グローバル設定へは書かない（#202）
 //!
@@ -40,6 +48,140 @@ use serde_json::json;
 use opencrab_gateway::{GatewayActionResult, GatewayCallContext, GatewayCaller};
 
 use crate::AppState;
+
+/// スキルの新規作成（同名は更新 / アーカイブ済みは復活）。owner / co_agent / trusted_user 限定。
+///
+/// 旧 `DiscordGatewayActions::execute_create_skill` の移設（#157 S6）。DB のみに依存する。
+/// レスポンス JSON のキー（`id` / `name` / `action`）・`action` の値（`created` /
+/// `updated` / `restored`）・エラー文言・書き込む `source_type`（`"acquired"`）は
+/// 1 バイトも変えていない。
+pub(crate) fn create_skill(
+    state: &AppState,
+    args: &serde_json::Value,
+    ctx: &GatewayCallContext,
+) -> GatewayActionResult {
+    // owner / co_agent / trusted_user の許可リスト（将来 variant が増えても fail-closed）。
+    if !matches!(
+        ctx.caller,
+        GatewayCaller::Owner | GatewayCaller::CoAgent { .. } | GatewayCaller::TrustedUser
+    ) {
+        return GatewayActionResult {
+            success: false,
+            data: None,
+            error: Some("このアクションはtrusted userのみ実行できます".to_string()),
+        };
+    }
+    let name = match args.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("name is required".to_string()),
+            }
+        }
+    };
+    let description = match args.get("description").and_then(|v| v.as_str()) {
+        Some(d) => d,
+        None => {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some("description is required".to_string()),
+            }
+        }
+    };
+    let guidance = args.get("guidance").and_then(|v| v.as_str()).unwrap_or("");
+
+    let conn = state.db.lock().unwrap();
+
+    // Deduplication: check if skill with same name exists (non-archived)
+    if let Ok(Some(existing)) = opencrab_db::queries::find_skill_by_name(&conn, &ctx.agent_id, name)
+    {
+        let mut updated = existing;
+        updated.description = description.to_string();
+        updated.guidance = guidance.to_string();
+        if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to update existing skill: {e}")),
+            };
+        }
+        return GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "id": updated.id,
+                "name": name,
+                "action": "updated"
+            })),
+            error: None,
+        };
+    }
+
+    // Check archived skills
+    if let Ok(Some(existing)) =
+        opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name)
+    {
+        let mut updated = existing;
+        updated.archived = false;
+        updated.is_active = true;
+        updated.description = description.to_string();
+        updated.guidance = guidance.to_string();
+        if let Err(e) = opencrab_db::queries::update_skill(&conn, &updated) {
+            return GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to restore archived skill: {e}")),
+            };
+        }
+        return GatewayActionResult {
+            success: true,
+            data: Some(json!({
+                "id": updated.id,
+                "name": name,
+                "action": "restored"
+            })),
+            error: None,
+        };
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let row = opencrab_db::queries::SkillRow {
+        id: id.clone(),
+        agent_id: ctx.agent_id.clone(),
+        name: name.to_string(),
+        description: description.to_string(),
+        situation_pattern: String::new(),
+        guidance: guidance.to_string(),
+        source_type: "acquired".to_string(),
+        source_context: None,
+        file_path: None,
+        effectiveness: None,
+        usage_count: 0,
+        is_active: true,
+        permission: "\"agent\"".to_string(),
+        archived: false,
+    };
+
+    if let Err(e) = opencrab_db::queries::insert_skill(&conn, &row) {
+        return GatewayActionResult {
+            success: false,
+            data: None,
+            error: Some(format!("Failed to create skill: {e}")),
+        };
+    }
+
+    GatewayActionResult {
+        success: true,
+        data: Some(json!({
+            "id": id,
+            "name": name,
+            "action": "created"
+        })),
+        error: None,
+    }
+}
 
 /// メモリインデックス設定（batch_size / threshold）の更新。
 ///
