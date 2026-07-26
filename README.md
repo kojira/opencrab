@@ -58,10 +58,14 @@ opencrab/
 │   ├── actions/    # Action dispatcher, background execution runtime, policy tables
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── mcp/        # MCP client (external tool servers as child processes)
-│   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline, web gateway
+│   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline
 │   ├── cli/        # Interactive REPL CLI
 │   ├── discord/    # Discord gateway with per-agent manager and message loop
 │   ├── nostr/      # Nostr gateway (per-session queue, concurrency cap)
+│   ├── web-gateway/# Dashboard gateway: axum router/handlers (POST web/send, SSE GET web/stream),
+│   │               #   per-session SSE fan-out, web-{agent}-{conversation} session-id convention,
+│   │               #   subtask-completion sink, per-session-serialized response entry point.
+│   │               #   Runs agents / persists via the WebAgentRunner trait (implemented by server)
 │   └── voice/      # STT/TTS provider layer (OpenAI-compatible STT, VOICEVOX/OpenAI TTS)
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)
 ├── config/         # Configuration files (hot-reloaded)
@@ -71,7 +75,7 @@ opencrab/
 
 **Direction of travel**: the goal is a structure where the **core keeps running while the outer layers (transports, extensions) can be swapped without downtime** — ultimately so that agents can develop opencrab itself. Generic functionality must not live in transport crates, state belongs to the core, and the upper layer should not name individual gateways. See **[docs/design-plugin-architecture.md](docs/design-plugin-architecture.md)** before adding a new gateway or moving code between crates.
 
-Some of this is not yet true and is tracked as issues: the web gateway lives inside `server`, `discord` still holds generic tools, a concrete Discord transport sits in `gateway/` next to the traits, and the `Gateway` trait itself has no consumers yet. These are being unwound.
+Some of this is not yet true and is tracked as issues: `discord` still holds generic tools, a concrete Discord transport sits in `gateway/` next to the traits, and the `Gateway` trait itself has no consumers yet. These are being unwound.
 
 ## Prerequisites
 
@@ -255,18 +259,19 @@ The `[tools]` section supports config-driven tool definitions with permission le
 ## Testing
 
 ```bash
-# Run all tests (~171 tests)
-cargo test --workspace
+# Run all tests. Some crates gate modules behind features (e.g. discord), so
+# --all-features is what CI runs and what the counts below refer to.
+cargo test --workspace --all-features
 
-# Run tests for a specific crate
-cargo test -p opencrab-db       # 52 tests
-cargo test -p opencrab-actions  # 45 tests
-cargo test -p opencrab-llm      # 34 tests
-cargo test -p opencrab-gateway  # 32 tests
-cargo test -p opencrab-core     #  8 tests
+# Run tests for a single crate (see [workspace] members in Cargo.toml for the full list)
+cargo test -p opencrab-db
+cargo test -p opencrab-actions
+cargo test -p opencrab-llm
+cargo test -p opencrab-core
+cargo test -p opencrab-web-gateway
 
-# Run E2E API tests
-cargo test -p opencrab-server
+# Run the in-process E2E API tests (builds the real router; no server needed)
+cargo test -p opencrab-server --test api_e2e
 
 # Local-only E2E harness (NOT for CI). Drives a running server over HTTP/SSE with a
 # real LLM to verify tool dispatch / cancellation end-to-end. Gated by OPENCRAB_E2E=1.
@@ -276,6 +281,12 @@ cp .env.example .env   # adjust values if needed (no secrets committed)
 # authorization checks. Set it in .env; tests skip when it is unset.
 OPENCRAB_E2E=1 cargo test -p opencrab-server --test e2e_local -- --ignored --nocapture
 ```
+
+`cargo test --workspace --all-features` currently reports **1013 passed, 0 failed, 30 ignored**
+(measured 2026-07-27). The `ignored` ones need something the suite cannot provide on its own — a
+running server (`OPENCRAB_E2E=1`, see above), real provider credentials — plus a couple of doc
+examples. Per-crate counts are deliberately not listed here because they go stale silently: run
+the command and read its own summary for the current numbers.
 
 ## Tech Stack
 

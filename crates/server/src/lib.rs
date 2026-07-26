@@ -19,7 +19,6 @@ pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
-pub mod web_gateway;
 pub mod web_runner_impl;
 
 #[cfg(feature = "discord")]
@@ -90,7 +89,8 @@ pub struct AppState {
     pub nostr_manager: Option<SharedNostrManager>,
     pub mcp_manager: Option<SharedMcpManager>,
     /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
-    pub web_gateway: Arc<web_gateway::WebGateway>,
+    /// 実体は独立クレート `opencrab-web-gateway`（#190）。
+    pub web_gateway: Arc<opencrab_web_gateway::WebGateway>,
     /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
     /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
@@ -160,7 +160,7 @@ pub(crate) fn test_app_state() -> AppState {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
-        web_gateway: Arc::new(web_gateway::WebGateway::new()),
+        web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
@@ -441,12 +441,9 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/messages",
             post(api::agents_messages::send_agent_message),
         )
-        // web gateway（#154）: ダッシュボードからの会話 + SSE 配送
-        .route(
-            "/api/agents/{id}/web/send",
-            post(api::web::send_web_message),
-        )
-        .route("/api/agents/{id}/web/stream", get(api::web::web_stream))
+        // web gateway（#154）: ダッシュボードからの会話 + SSE 配送。
+        // ルート定義とハンドラは独立クレート側にあり、ここは取り付けるだけ（#190 S4）。
+        .merge(opencrab_web_gateway::routes::<AppState>())
         // 許可コマンド管理
         .route(
             "/api/agents/{id}/allowed-commands",

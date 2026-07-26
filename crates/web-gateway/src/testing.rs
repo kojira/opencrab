@@ -51,13 +51,44 @@ pub struct ReplyObservation {
     pub text: String,
 }
 
+/// 記録されたユーザ発話 1 件（ハンドラが渡した `user_id` の観測点）。
+///
+/// `user_id` の正規化がハンドラ経路で効いていることは、正規化関数を単体で叩いても
+/// 検出できない（ハンドラが正規化を通さなくなっても単体テストは緑）。認可判定
+/// （[`WebAgentRunner::resolve_caller`]）と DB 記録の両方に**同じ正規化済みの値**が
+/// 渡ることを見るため、両方の引数を記録する。
+#[derive(Clone, Debug)]
+pub struct UserMessageObservation {
+    pub agent_id: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub content: String,
+}
+
+/// 認可判定の呼び出し 1 件（渡された `user_id` の観測点）。
+#[derive(Clone, Debug)]
+pub struct CallerLookup {
+    pub agent_id: String,
+    pub user_id: String,
+}
+
 #[derive(Clone)]
 pub struct FakeRunner {
     gateway: Arc<WebGateway>,
     /// `Ok` なら応答本文、`Err` ならエラーメッセージ。
     response: Result<String, String>,
+    /// `resolve_caller` が返す権限（レスポンスの `caller_type` の由来）。
+    caller: CallerIdentity,
+    /// `has_llm_provider` の返り値（false でプロバイダ未設定の分岐を試す）。
+    has_llm_provider: bool,
+    /// `Some` なら `ensure_session` がこのメッセージで失敗する。
+    ensure_session_error: Option<String>,
+    /// `Some` なら `record_user_message` がこのメッセージで失敗する。
+    record_user_message_error: Option<String>,
     runs: Arc<Mutex<Vec<RunObservation>>>,
     replies: Arc<Mutex<Vec<ReplyObservation>>>,
+    user_messages: Arc<Mutex<Vec<UserMessageObservation>>>,
+    caller_lookups: Arc<Mutex<Vec<CallerLookup>>>,
     delay: Duration,
     inflight: Arc<AtomicUsize>,
     max_inflight: Arc<AtomicUsize>,
@@ -76,8 +107,14 @@ impl FakeRunner {
         Self {
             gateway: Arc::new(WebGateway::new()),
             response,
+            caller: CallerIdentity::Agent,
+            has_llm_provider: true,
+            ensure_session_error: None,
+            record_user_message_error: None,
             runs: Arc::new(Mutex::new(Vec::new())),
             replies: Arc::new(Mutex::new(Vec::new())),
+            user_messages: Arc::new(Mutex::new(Vec::new())),
+            caller_lookups: Arc::new(Mutex::new(Vec::new())),
             delay: Duration::ZERO,
             inflight: Arc::new(AtomicUsize::new(0)),
             max_inflight: Arc::new(AtomicUsize::new(0)),
@@ -89,12 +126,44 @@ impl FakeRunner {
         self
     }
 
+    /// `resolve_caller` の返り値を差し替える（`caller_type` の由来を固定するため）。
+    pub fn with_caller(mut self, caller: CallerIdentity) -> Self {
+        self.caller = caller;
+        self
+    }
+
+    /// セッション用意を失敗させる（ハンドラの早期リターン分岐）。
+    pub fn failing_ensure_session(mut self, message: &str) -> Self {
+        self.ensure_session_error = Some(message.to_string());
+        self
+    }
+
+    /// ユーザ発話の記録を失敗させる（ハンドラの早期リターン分岐）。
+    pub fn failing_record_user_message(mut self, message: &str) -> Self {
+        self.record_user_message_error = Some(message.to_string());
+        self
+    }
+
+    /// LLM プロバイダ未設定にする（ハンドラが実行せずにエラーを返す分岐）。
+    pub fn without_llm_provider(mut self) -> Self {
+        self.has_llm_provider = false;
+        self
+    }
+
     pub fn runs(&self) -> Vec<RunObservation> {
         self.runs.lock().unwrap().clone()
     }
 
     pub fn replies(&self) -> Vec<ReplyObservation> {
         self.replies.lock().unwrap().clone()
+    }
+
+    pub fn user_messages(&self) -> Vec<UserMessageObservation> {
+        self.user_messages.lock().unwrap().clone()
+    }
+
+    pub fn caller_lookups(&self) -> Vec<CallerLookup> {
+        self.caller_lookups.lock().unwrap().clone()
     }
 
     pub fn max_inflight(&self) -> usize {
@@ -148,25 +217,44 @@ impl WebAgentRunner for FakeRunner {
     }
 
     fn has_llm_provider(&self) -> bool {
-        true
+        self.has_llm_provider
     }
 
-    fn resolve_caller(&self, _agent_id: &str, _user_id: &str) -> CallerIdentity {
-        CallerIdentity::Agent
+    fn resolve_caller(&self, agent_id: &str, user_id: &str) -> CallerIdentity {
+        self.caller_lookups.lock().unwrap().push(CallerLookup {
+            agent_id: agent_id.to_string(),
+            user_id: user_id.to_string(),
+        });
+        self.caller.clone()
     }
 
     fn ensure_session(&self, _session_id: &str, _agent_id: &str) -> Result<()> {
-        Ok(())
+        match &self.ensure_session_error {
+            Some(msg) => Err(anyhow!(msg.clone())),
+            None => Ok(()),
+        }
     }
 
     fn record_user_message(
         &self,
-        _agent_id: &str,
-        _session_id: &str,
-        _user_id: &str,
-        _content: &str,
+        agent_id: &str,
+        session_id: &str,
+        user_id: &str,
+        content: &str,
     ) -> Result<()> {
-        Ok(())
+        self.user_messages
+            .lock()
+            .unwrap()
+            .push(UserMessageObservation {
+                agent_id: agent_id.to_string(),
+                session_id: session_id.to_string(),
+                user_id: user_id.to_string(),
+                content: content.to_string(),
+            });
+        match &self.record_user_message_error {
+            Some(msg) => Err(anyhow!(msg.clone())),
+            None => Ok(()),
+        }
     }
 
     fn record_agent_reply(
