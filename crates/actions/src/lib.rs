@@ -17,6 +17,7 @@ pub mod task_ledger;
 pub mod tool_result_log;
 pub mod tools;
 pub mod traits;
+pub mod webhook_target;
 pub mod workspace;
 
 pub mod run_request;
@@ -49,3 +50,8 @@ pub use tool_result_log::{
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;
 pub use traits::*;
+pub use webhook_target::{
+    build_part_messages, chunk_text, has_activity_default, record_webhook_delivery_failure,
+    redact_secrets, redact_webhook_url, resolve_activity_webhook, resolve_subtask_webhook,
+    validate_webhook_url, WebhookConfig, WebhookResolution, WebhookSource,
+};

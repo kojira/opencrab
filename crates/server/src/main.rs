@@ -551,7 +551,10 @@ async fn main() -> anyhow::Result<()> {
             .default_subtask_webhook
             .as_ref()
             .and_then(|c| {
-                opencrab_discord::WebhookConfig::from_parts(c.url.clone(), c.events.clone())
+                opencrab_actions::webhook_target::WebhookConfig::from_parts(
+                    c.url.clone(),
+                    c.events.clone(),
+                )
             });
         *state.subtask_lifecycle_notifier.lock().unwrap() = Some(Arc::new(
             opencrab_discord::DiscordWebhookNotifier::new(
@@ -654,7 +657,7 @@ async fn main() -> anyhow::Result<()> {
                     .default_subtask_webhook
                     .as_ref()
                     .and_then(|cfg| {
-                        opencrab_discord::WebhookConfig::from_parts(
+                        opencrab_actions::webhook_target::WebhookConfig::from_parts(
                             cfg.url.clone(),
                             cfg.events.clone(),
                         )

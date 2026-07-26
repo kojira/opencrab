@@ -17,7 +17,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 
 pub use gateway_actions::DiscordGatewayActions;
-pub use gateway_actions::{spawn_activity_tool_event_sink, DiscordWebhookNotifier, WebhookConfig};
+// 通知先（webhook）の設定型は gateway 非依存層（`opencrab_actions::webhook_target`）が
+// 保持する（#157 S4）。Discord crate は re-export せず、他 crate が Discord crate 経由で
+// 通知先の型を引かないようにする（#170 と同じ方針）。
+pub use gateway_actions::{spawn_activity_tool_event_sink, DiscordWebhookNotifier};
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 pub use owner_warning::{

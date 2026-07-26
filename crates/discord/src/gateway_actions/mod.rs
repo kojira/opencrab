@@ -30,7 +30,6 @@ pub(crate) use peer_review::record_peer_review_reply;
 pub use subtask_engine::spawn_activity_tool_event_sink;
 pub(crate) use subtask_engine::DiscordCompletionSink;
 pub use subtask_notifier::DiscordWebhookNotifier;
-pub use webhook::WebhookConfig;
 
 // 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設済み
 // （RFC #152 S1）。Discord 側は re-export せず参照するだけにして、他 crate が
@@ -39,6 +38,8 @@ pub use webhook::WebhookConfig;
 // 値は `Arc<dyn SubtaskRunNotifier>` なので Discord 固有の型は晒さない）。
 use opencrab_actions::subtask::SubtaskRegistry;
 use opencrab_actions::subtask_notify::SubtaskNotifiers;
+// 通知先（webhook）の設定型も同様に gateway 非依存層が保持する（#157 S4）。
+use opencrab_actions::webhook_target::WebhookConfig;
 
 /// Discord固有のゲートウェイアクション実装。
 ///
