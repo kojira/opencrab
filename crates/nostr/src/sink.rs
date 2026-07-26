@@ -556,7 +556,7 @@ mod tests {
     ///
     /// この不変条件は配送系ツールが **inline 実行**（dispatch 除外）であることに依存する。
     /// background 化されると run が返る時点でフラグが立っておらず、暗黙返信＋後追いの
-    /// 明示送信で 2 通になる。除外集合の側は `nostr_delivery_actions_are_non_dispatch`
+    /// 明示送信で 2 通になる。除外集合の側は `test_nostr_delivery_actions_are_non_dispatch`
     /// （`crates/nostr/src/actions.rs`）が守る。
     #[tokio::test]
     async fn explicit_send_suppresses_implicit_reply() {

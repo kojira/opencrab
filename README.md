@@ -227,8 +227,20 @@ only exist on that transport's turns.
 | **Memory** | `rebuild_memory_index`, `update_memory_index_config` | all turns (`crates/server`) |
 | **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions.rs`) |
 | **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress` | all turns (`crates/server`) |
-| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `send_ui`, webhook/voice management | Discord turns only (`crates/discord`) |
+| **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel`, `send_ui`, `request_peer_review` | Discord turns only (`crates/discord`) |
+| **Webhooks** | `discord_create_webhook`, `ensure_webhook`, `list_webhooks`, `get_default_webhook`, `set_default_webhook`, `ensure_subtask_webhook`, `list_subtask_webhooks`, `get_default_subtask_webhook`, `set_default_subtask_webhook` | Discord turns only (`crates/discord`) |
+| **Voice** | `join_voice_channel`, `leave_voice_channel` | Discord turns only (`crates/discord`) |
+| **Heartbeat** | `update_heartbeat_instructions`, `read_heartbeat_instructions` | Discord turns only (`crates/discord`) |
 | **Skills** | `create_skill` | Discord turns only (`crates/discord`) |
+
+The rows above name every action in `SystemGatewayActions::own_definitions()` (the "all turns"
+rows) and every action in `DiscordGatewayActions::definitions()` except `cancel_subtask`: Discord
+defines that one too, but the composed gateway's own definition wins the merge, so it reaches the
+LLM through the **Subtask** row on every transport. Drift is caught by tests rather than by
+review — `server_tools_are_classified_for_dispatch` requires every own definition to be
+classified and rejects dead names on the constant side, and
+`test_definitions_returns_expected_count` pins the Discord set (including that the four actions
+relocated in #157 S1 are no longer defined there).
 
 ## Skills
 
@@ -287,11 +299,12 @@ cp .env.example .env   # adjust values if needed (no secrets committed)
 OPENCRAB_E2E=1 cargo test -p opencrab-server --test e2e_local -- --ignored --nocapture
 ```
 
-`cargo test --workspace --all-features` currently reports **1013 passed, 0 failed, 30 ignored**
-(measured 2026-07-27). The `ignored` ones need something the suite cannot provide on its own — a
+The authoritative test counts are the summary lines `cargo test --workspace --all-features` prints
+itself. No totals are reproduced here — neither workspace-wide nor per-crate — because any number
+written into this file goes stale on the next PR that adds a test, and nothing in CI verifies it.
+Some tests are reported as `ignored`: those need something the suite cannot provide on its own — a
 running server (`OPENCRAB_E2E=1`, see above), real provider credentials — plus a couple of doc
-examples. Per-crate counts are deliberately not listed here because they go stale silently: run
-the command and read its own summary for the current numbers.
+examples.
 
 ## Tech Stack
 

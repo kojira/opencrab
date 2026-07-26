@@ -40,9 +40,9 @@ pub trait ToolEventSink: Send + Sync {
 /// 権限ポリシーによる拒否（実行に到達しなかった）を表す構造的マーカー。
 ///
 /// gateway action 等が permission-check で拒否したときは、エラー文言の先頭へ
-/// この安定コードを付ける（`crate::reject_marker` 経由）。分類器はこの構造的な
-/// 接頭辞を第一の根拠にする。`"permission"` / `"denied"` / `"forbidden"` のような
-/// 広い自然言語の部分一致は、実行されたが失敗した通常のエラー（例: OS の
+/// この安定コードを付ける（この定数を直接前置するか、`gateway_reject` 経由）。分類器は
+/// この構造的な接頭辞を第一の根拠にする。`"permission"` / `"denied"` / `"forbidden"`
+/// のような広い自然言語の部分一致は、実行されたが失敗した通常のエラー（例: OS の
 /// "Permission denied"、shell の "Operation not permitted"）を rejected に誤分類
 /// するため使わない。
 pub const REJECTION_CODE_PREFIX: &str = "rejected: ";
@@ -64,11 +64,11 @@ fn gateway_reject(msg: impl Into<String>) -> opencrab_gateway::GatewayActionResu
 
 /// sub-engine に許可する gateway アクションの許可リスト（#63 / RFC #152 S2）。
 ///
-/// bridge の DISCORD_ACTIONS depth ゲートは 28 アクション中 5 つしかブロックしないため、
-/// 素の DiscordGatewayActions を接続すると、ハンドラ側ゲートの無いアクション
-/// （send_ui / discord_channel_config / discord_create_channel / update_memory_index_config
-/// 等）が depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可した
-/// アクションだけを sub-engine から到達可能にする（deny-by-default 最外周フィルタ）。
+/// bridge の DISCORD_ACTIONS depth ゲートは `DiscordGatewayActions::definitions()` の
+/// **一部しか**ブロックしないため、素の DiscordGatewayActions を接続すると、ハンドラ側
+/// ゲートの無いアクション（discord_channel_config / discord_create_channel 等）が
+/// depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可したアクション
+/// だけを sub-engine から到達可能にする（deny-by-default 最外周フィルタ）。
 ///
 /// S2 で inner が合成 gateway（`SystemGatewayActions` = server ツール + transport の union）
 /// になったため、このフィルタは**合成後のアクション和集合**に対して最外周で強制される。

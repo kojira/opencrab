@@ -445,8 +445,9 @@ impl SystemGatewayActions {
         }
     }
 
-    /// 記憶インデックスの全再構築（#175 S4）。Discord 実装（`execute_rebuild_memory_index`）
-    /// をそのまま移設したもので、LLM クライアントは `AppState` のルーターから組む。
+    /// 記憶インデックスの全再構築（#175 S4）。旧 Discord 実装
+    /// （`DiscordGatewayActions::execute_rebuild_memory_index`・撤去済み）をそのまま
+    /// 移設したもので、LLM クライアントは `AppState` のルーターから組む。
     async fn rebuild_memory_index(&self, ctx: &GatewayCallContext) -> GatewayActionResult {
         let llm_client = crate::llm_adapter::LlmRouterAdapter::new(self.state.llm_router.clone())
             .with_agent_id(&ctx.agent_id);
@@ -2394,7 +2395,7 @@ mod tests {
     /// 決める（応答生成が毎 run 呼ぶ唯一の解決点）。A の追加後にそれを両エージェントで
     /// 解決し、A にだけ効いていることを固定する。
     ///
-    /// これが `add_allowed_command_takes_effect_on_the_callers_next_run` と対になって
+    /// これが `add_allowed_command_takes_effect_on_the_next_run_but_not_the_same_turn` と対になって
     /// 「撤去しても呼び出し元は困らない / 他エージェントへは漏れない」の両方を証明する。
     #[tokio::test]
     async fn add_allowed_command_does_not_change_another_agents_permissions() {
