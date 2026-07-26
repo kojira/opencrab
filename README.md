@@ -54,15 +54,15 @@ opencrab/
 │   ├── core/       # Agent engine, soul, identity, memory, skills, workspace, heartbeat
 │   ├── llm/        # Multi-provider LLM abstraction, routing, metrics, pricing
 │   ├── llm-types/  # LLM type definitions only (kept separate to keep deps light)
-│   ├── gateway/    # Gateway traits and adapters (transport-agnostic contracts)
+│   ├── gateway/    # Gateway traits (Gateway / GatewayActions) + adapters: REST, CLI, WebSocket (stub), Discord (serenity)
 │   ├── actions/    # Action dispatcher, background execution runtime, policy tables
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── mcp/        # MCP client (external tool servers as child processes)
-│   ├── server/     # Axum REST API server, agent response pipeline, web gateway
+│   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline, web gateway
 │   ├── cli/        # Interactive REPL CLI
 │   ├── discord/    # Discord gateway with per-agent manager and message loop
 │   ├── nostr/      # Nostr gateway (per-session queue, concurrency cap)
-│   └── voice/      # Voice session support
+│   └── voice/      # STT/TTS provider layer (OpenAI-compatible STT, VOICEVOX/OpenAI TTS)
 ├── web/            # React frontend (Vite + Tailwind CSS + i18n EN/JA)
 ├── config/         # Configuration files (hot-reloaded)
 ├── docs/           # Design docs and assets
@@ -71,7 +71,7 @@ opencrab/
 
 **Direction of travel**: the goal is a structure where the **core keeps running while the outer layers (transports, extensions) can be swapped without downtime** — ultimately so that agents can develop opencrab itself. Generic functionality must not live in transport crates, state belongs to the core, and the upper layer should not name individual gateways. See **[docs/design-plugin-architecture.md](docs/design-plugin-architecture.md)** before adding a new gateway or moving code between crates.
 
-Some of this is not yet true (the web gateway currently lives inside `server`, and `discord` still holds generic tools). Those are tracked as issues and are being unwound.
+Some of this is not yet true and is tracked as issues: the web gateway lives inside `server`, `discord` still holds generic tools, a concrete Discord transport sits in `gateway/` next to the traits, and the `Gateway` trait itself has no consumers yet. These are being unwound.
 
 ## Prerequisites
 
