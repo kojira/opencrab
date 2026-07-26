@@ -102,10 +102,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                 gateway.http().clone(),
                 self.state.db().clone(),
                 self.state.tools_config().clone(),
-                Some(self.state.create_llm_client()),
-                self.state.default_model(),
                 self.state.workspace_base().to_string(),
                 subtask_registry,
+                self.state.subtask_notifiers(),
                 None,
             )
             .with_a2ui(pending_interaction_registry.clone(), event_tx.clone())

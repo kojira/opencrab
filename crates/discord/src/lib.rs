@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 
 pub use gateway_actions::DiscordGatewayActions;
-pub use gateway_actions::{spawn_activity_tool_event_sink, WebhookConfig};
+pub use gateway_actions::{spawn_activity_tool_event_sink, DiscordWebhookNotifier, WebhookConfig};
 pub use manager::DiscordGatewayManager;
 pub use message_loop::run_discord_loop;
 pub use owner_warning::{
@@ -129,11 +129,12 @@ pub trait AgentRunner: Send + Sync + Clone + 'static {
         req: opencrab_actions::RunRequest,
     ) -> anyhow::Result<opencrab_core::EngineResult>;
 
-    /// エージェントのLLMクライアントを生成する。
-    fn create_llm_client(&self) -> Arc<dyn opencrab_core::LlmClient>;
-
-    /// デフォルトモデル名を返す（"provider:model" 形式）。
-    fn default_model(&self) -> String;
+    /// 走行中サブタスクの lifecycle 通知口マップ（#175 S4）。
+    ///
+    /// subtask の生成は gateway 非依存層（server 側 `spawn_subtask`）が行い、通知口を
+    /// このマップへ登録する。Discord の `cancel_subtask` が中断を通知するために、
+    /// **同一の**マップを共有する必要がある（別インスタンスだと通知が届かない）。
+    fn subtask_notifiers(&self) -> opencrab_actions::subtask_notify::SubtaskNotifiers;
 
     /// 会話コンテキストのトークン予算を返す（context_window * compaction_ratio）。
     /// `agent_id` の per-agent モデルに応じた pricing を参照する。

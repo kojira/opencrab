@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
 use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use serde_json::json;
 use serenity::http::Http;
@@ -30,6 +29,7 @@ mod webhook;
 pub(crate) use peer_review::record_peer_review_reply;
 pub use subtask_engine::spawn_activity_tool_event_sink;
 pub(crate) use subtask_engine::DiscordCompletionSink;
+pub use subtask_notifier::DiscordWebhookNotifier;
 pub use webhook::WebhookConfig;
 
 // 走行中 subtask の registry / エントリ型は actions の gateway 非依存版へ移設済み
@@ -38,19 +38,7 @@ pub use webhook::WebhookConfig;
 // `SpawnedSubtask` に載せず、`SubtaskNotifiers` 随伴マップへ分離する（#175 S3:
 // 値は `Arc<dyn SubtaskRunNotifier>` なので Discord 固有の型は晒さない）。
 use opencrab_actions::subtask::SubtaskRegistry;
-use opencrab_actions::subtask_notify::{SubtaskLifecycleNotifier, SubtaskNotifiers};
-
-struct ArcLlmClient(Arc<dyn opencrab_core::LlmClient>);
-
-#[async_trait::async_trait]
-impl opencrab_core::LlmClient for ArcLlmClient {
-    async fn chat(
-        &self,
-        request: opencrab_core::ChatRequest,
-    ) -> anyhow::Result<opencrab_core::ChatResponse> {
-        self.0.chat(request).await
-    }
-}
+use opencrab_actions::subtask_notify::SubtaskNotifiers;
 
 /// Discord固有のゲートウェイアクション実装。
 ///
@@ -65,35 +53,23 @@ pub struct DiscordGatewayActions {
     http: Arc<Http>,
     db: opencrab_db::Db,
     tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
-    llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
-    /// サーバのグローバル default model（フォールバック）。エージェント実効モデルは
-    /// 呼び出しごとに `effective_model(&ctx.agent_id)` で解決する（#68: 共有ゲート
-    /// ウェイで first agent のモデルに固定されるのを防ぐ）。
-    default_model: String,
     /// ワークスペースのベーステンプレート（例: "/data/workspace/{agent_id}"）。
     /// エージェントごとの root は `agent_workspace_root(&ctx.agent_id)` で展開する。
     workspace_base: String,
     subtask_registry: SubtaskRegistry,
     /// registry と対の lifecycle 通知口マップ（RFC #152 S1 の webhook 分離を #175 S3 で
-    /// trait オブジェクト化したもの）。registry と同じく Clone で共有され、sub-engine
-    /// 用クローンからも同じ実体を見る。
+    /// trait オブジェクト化したもの）。#175 S4 で subtask の生成が gateway 非依存層へ
+    /// 移ったため、**このマップは server 側（`AppState`）が所有し、構築時に共有
+    /// クローンを受け取る**。`cancel_subtask` はここから通知口を引いて中断を伝える。
     subtask_notifiers: SubtaskNotifiers,
-    /// Subtask lifecycle webhook 配送用の HTTP クライアント（worker で共有）。
-    webhook_client: reqwest::Client,
-    /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook。
+    /// spawn_subtask.webhook 省略時に使うデフォルト lifecycle webhook
+    /// （`get/set_default_subtask_webhook` の解決に使う）。
     default_subtask_webhook: Option<WebhookConfig>,
-    /// lifecycle 通知の実装を差し替えるためのフック（未設定なら Discord webhook 実装）。
-    /// S4 で subtask 生成が gateway 非依存層へ移るときの注入点でもある。
-    lifecycle_notifier: Option<Arc<dyn SubtaskLifecycleNotifier>>,
     pub pending_interaction_registry: Option<PendingInteractionRegistry>,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<LoopEvent>>,
     /// owner-only な A2UI インタラクションの権限判定に使う owner の Discord ユーザーID。
     /// 空文字の場合は owner 判定が無効（誰でも操作可）になる点に注意。
     pub owner_discord_id: String,
-    /// report_progress のデバウンス世代カウンタ（parent_session_id → 最新世代）。
-    /// 短時間に複数回 report_progress が呼ばれても、最後の1回のみメインエンジン再呼び出しを
-    /// 発火させるために使う。
-    progress_debounce: Arc<dashmap::DashMap<String, u64>>,
     /// VC 対話（STT/TTS）。config の [voice] が有効なときのみ Some。
     pub voice: Option<Arc<crate::voice_session::VoiceSessionManager>>,
 }
@@ -103,64 +79,23 @@ impl DiscordGatewayActions {
         http: Arc<Http>,
         db: opencrab_db::Db,
         tools_config: Arc<std::sync::RwLock<opencrab_actions::tools::ToolsConfig>>,
-        llm_client: Option<Arc<dyn opencrab_core::LlmClient>>,
-        default_model: String,
         workspace_base: String,
         subtask_registry: SubtaskRegistry,
+        subtask_notifiers: SubtaskNotifiers,
         default_subtask_webhook: Option<WebhookConfig>,
     ) -> Self {
         Self {
             http,
             db,
             tools_config,
-            llm_client,
-            default_model,
             workspace_base,
             subtask_registry,
-            subtask_notifiers: Arc::new(DashMap::new()),
-            webhook_client: reqwest::Client::new(),
+            subtask_notifiers,
             default_subtask_webhook,
-            lifecycle_notifier: None,
             pending_interaction_registry: None,
             event_tx: None,
             owner_discord_id: String::new(),
-            progress_debounce: Arc::new(dashmap::DashMap::new()),
             voice: None,
-        }
-    }
-
-    /// subtask lifecycle 通知のファクトリを返す（#175 S3）。
-    ///
-    /// 既定は Discord webhook 実装。`with_lifecycle_notifier` で差し替えられ、
-    /// 通知先を持たない構成では `NoopLifecycleNotifier` を挿せる。
-    fn lifecycle_notifier(&self) -> Arc<dyn SubtaskLifecycleNotifier> {
-        match &self.lifecycle_notifier {
-            Some(n) => n.clone(),
-            None => Arc::new(subtask_notifier::DiscordWebhookNotifier::new(
-                self.db.clone(),
-                self.webhook_client.clone(),
-                self.default_subtask_webhook.clone(),
-            )),
-        }
-    }
-
-    /// lifecycle 通知の実装を差し替える（通知不要な構成は
-    /// `opencrab_actions::NoopLifecycleNotifier` を渡す）。
-    pub fn with_lifecycle_notifier(mut self, notifier: Arc<dyn SubtaskLifecycleNotifier>) -> Self {
-        self.lifecycle_notifier = Some(notifier);
-        self
-    }
-
-    /// エージェントの実効モデルを解決する（per-agent 設定 > グローバル default）。
-    fn effective_model(&self, agent_id: &str) -> String {
-        match self.db.lock() {
-            Ok(conn) => opencrab_db::queries::effective_model_for_agent(
-                &conn,
-                agent_id,
-                &self.default_model,
-            )
-            .unwrap_or_else(|_| self.default_model.clone()),
-            Err(_) => self.default_model.clone(),
         }
     }
 
@@ -436,15 +371,6 @@ impl GatewayActions for DiscordGatewayActions {
                 }),
             },
             GatewayActionDef {
-                name: "rebuild_memory_index".to_string(),
-                description: "メモリインデックスをゼロから再構築する。既存のインデックスを削除し、全ログを再インデックスする。時間がかかることがある。結果として logs_indexed（処理したログ数）と nodes_created（作成したインデックスノード数）を返す。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-            },
-            GatewayActionDef {
                 name: "create_skill".to_string(),
                 description: "ユーザーから「〇〇するスキルを作って」と言われたとき新しいスキルを作成する。guidanceにコマンド例・使い方を書くことで、LLMがexecute_shellで動的に実行できるようになる。同名スキルが存在する場合は更新される。".to_string(),
                 parameters: json!({
@@ -520,48 +446,6 @@ impl GatewayActions for DiscordGatewayActions {
                 }),
             },
             GatewayActionDef {
-                name: "spawn_subtask".to_string(),
-                description: "バックグラウンドでサブタスクを起動します。LLMエンジンがサブエンジンとして非同期実行し、完了後にメインエンジンを自動的に再呼び出しします。複雑な長時間処理（画像生成・コード実装・調査など）に使用してください。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": "サブエンジンに実行させるタスクの説明"
-                        },
-                        "timeout_secs": {
-                            "type": "integer",
-                            "description": "タイムアウト秒数（省略時1800秒）"
-                        },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "LLMループの最大イテレーション数（省略時は無制限）"
-                        },
-                        "label": {
-                            "type": "string",
-                            "description": "サブタスクのラベル（webhook通知の表示用。省略時はtask先頭を使用）"
-                        },
-                        "webhook": {
-                            "type": "object",
-                            "description": "subtask lifecycle を Discord webhook へ通知する設定（省略時は gateway.discord.default_subtask_webhook を使用）。",
-                            "properties": {
-                                "url": {
-                                    "type": "string",
-                                    "description": "Discord webhook URL"
-                                },
-                                "events": {
-                                    "type": "array",
-                                    "description": "通知するイベント（省略時は全て）。started/progress/completed/failed/timed_out/aborted",
-                                    "items": { "type": "string" }
-                                }
-                            },
-                            "required": ["url"]
-                        }
-                    },
-                    "required": ["task"]
-                }),
-            },
-            GatewayActionDef {
                 name: "cancel_subtask".to_string(),
                 description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
                 parameters: serde_json::json!({
@@ -573,24 +457,6 @@ impl GatewayActions for DiscordGatewayActions {
                         }
                     },
                     "required": ["subtask_id"]
-                }),
-            },
-            GatewayActionDef {
-                name: "report_progress".to_string(),
-                description: "サブエンジンからメインエンジンへ進捗を報告します。depth >= 1のサブエンジンのみ使用可能。".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "message": {
-                            "type": "string",
-                            "description": "進捗メッセージ"
-                        },
-                        "subtask_id": {
-                            "type": "string",
-                            "description": "このサブタスクのID（オプション）"
-                        }
-                    },
-                    "required": ["message"]
                 }),
             },
             GatewayActionDef {
@@ -1030,15 +896,12 @@ impl GatewayActions for DiscordGatewayActions {
             "add_allowed_command" => self.execute_add_allowed_command(args, ctx),
             "list_allowed_commands" => self.execute_list_allowed_commands(ctx),
             "remove_allowed_command" => self.execute_remove_allowed_command(args, ctx),
-            "rebuild_memory_index" => self.execute_rebuild_memory_index(ctx).await,
             "create_skill" => self.execute_create_skill(args, ctx),
             "discord_send_file" => self.execute_send_file(args, ctx).await,
             "request_peer_review" => self.execute_request_peer_review(args, ctx).await,
-            "spawn_subtask" => self.execute_spawn_subtask(args, ctx).await,
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
             "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
             "cancel_subtask" => self.execute_cancel_subtask(args, ctx),
-            "report_progress" => self.execute_report_progress(args, ctx).await,
             "send_ui" => self.execute_send_ui(args, ctx).await,
             "update_heartbeat_instructions" => {
                 self.execute_update_heartbeat_instructions(args, ctx)
@@ -1078,15 +941,14 @@ mod tests {
         let tools_config = Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
         ));
-        let subtask_registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let subtask_registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         let actions = DiscordGatewayActions::new(
             http,
             db.clone(),
             tools_config,
-            None,
-            String::new(),
             "/tmp".to_string(),
             subtask_registry,
+            Arc::new(dashmap::DashMap::new()),
             None,
         );
         (actions, db)
@@ -1171,71 +1033,6 @@ mod tests {
             |row| row.get(0),
         )
         .unwrap()
-    }
-
-    // ---- #64a: report_progress の所有権ゲート ----
-
-    #[tokio::test]
-    async fn test_report_progress_rejects_foreign_subtask_id() {
-        let (actions, db) = make_test_actions();
-        let _h = insert_fake_subtask(&actions, "st-victim", "subtask-v1", "discord-victim-9-9");
-
-        // 呼び出し元セッション（tctx の discord-test-agent-111-222）と無関係な subtask_id
-        let result = actions
-            .execute(
-                "report_progress",
-                &json!({"message": "hijack", "subtask_id": "st-victim"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(!result.success);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap()
-            .starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
-        // 被害セッションに進捗ログが書かれていないこと
-        assert_eq!(count_session_logs(&db, "discord-victim-9-9"), 0);
-    }
-
-    #[tokio::test]
-    async fn test_report_progress_allows_own_subtask_self_report() {
-        // sub-engine の自己報告: ctx.session == entry.session_id（subtask-*）
-        let (actions, db) = make_test_actions();
-        let parent = "discord-test-agent-111-222";
-        let _h = insert_fake_subtask(&actions, "st-self", "subtask-self1", parent);
-
-        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "test-agent")
-            .with_session_id("subtask-self1")
-            .with_depth(1);
-        let result = actions
-            .execute(
-                "report_progress",
-                &json!({"message": "halfway", "subtask_id": "st-self"}),
-                &ctx,
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        // 進捗は親セッションのログに書かれる
-        assert_eq!(count_session_logs(&db, parent), 1);
-    }
-
-    #[tokio::test]
-    async fn test_report_progress_allows_parent_reporting_child() {
-        // メインエンジンが自分の子について報告: ctx.session == entry.parent_session_id
-        let (actions, db) = make_test_actions();
-        let parent = "discord-test-agent-111-222";
-        let _h = insert_fake_subtask(&actions, "st-child", "subtask-c1", parent);
-
-        let result = actions
-            .execute(
-                "report_progress",
-                &json!({"message": "checking in", "subtask_id": "st-child"}),
-                &tctx(GatewayCaller::Agent),
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        assert_eq!(count_session_logs(&db, parent), 1);
     }
 
     // ---- #64b: cancel_subtask の認可 ----
@@ -1473,23 +1270,28 @@ mod tests {
     async fn test_sub_engine_gateway_allowlist() {
         use opencrab_actions::SubEngineGatewayActions;
 
-        let (actions, db) = make_test_actions();
+        let (actions, _db) = make_test_actions();
         let parent = "discord-test-agent-111-222";
         let _h = insert_fake_subtask(&actions, "st-sub", "subtask-s1", parent);
         // 後方互換の経路（root_gateway 未注入）では transport gateway 単体を wrap する。
         let sub_gw = SubEngineGatewayActions::new(std::sync::Arc::new(actions.clone()));
 
-        // Discord 単体の definitions に対して許可リストを適用するため report_progress のみ。
-        // （nostr_generate_key は Discord gateway の definitions に無いため出ない。
-        //   合成 gateway 経由の到達は subtask_engine.rs の S2 テストで固定する。）
+        // 許可リストの 2 名（report_progress / nostr_generate_key）はいずれも server 側
+        // の定義になったため（#175 S4）、Discord 単体を wrap すると露出は空になる。
+        // = sub-engine から Discord のツールへは一切到達できない。合成 gateway 経由で
+        // 許可ツールに到達できることは `crates/actions/src/bridge.rs` の S2 テストが固定する。
         let names: Vec<String> = sub_gw.definitions().into_iter().map(|d| d.name).collect();
-        assert_eq!(names, vec!["report_progress".to_string()]);
+        assert!(
+            names.is_empty(),
+            "Discord 単体では許可ツールが無い: {names:?}"
+        );
 
         let sub_ctx = GatewayCallContext::new(GatewayCaller::Agent, "test-agent")
             .with_session_id("subtask-s1")
             .with_depth(1);
 
-        // 実在するが許可外 → rejected: マーカー
+        // 実在するが許可外 → rejected: マーカー（spawn_subtask を含まないのは、
+        // Discord がもう定義していないため。ネスト禁止の実効ゲートは許可リスト側）。
         for name in ["cancel_subtask", "send_ui", "discord_channel_config"] {
             let result = sub_gw.execute(name, &json!({}), &sub_ctx).await;
             assert!(!result.success, "{name} should be blocked");
@@ -1510,16 +1312,13 @@ mod tests {
         assert!(err.contains("Unknown gateway action"));
         assert!(!err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX));
 
-        // report_progress は委譲され、共有 registry で解決される（自己報告形）
-        let result = sub_gw
-            .execute(
-                "report_progress",
-                &json!({"message": "sub progress"}),
-                &sub_ctx,
-            )
-            .await;
-        assert!(result.success, "{:?}", result.error);
-        assert_eq!(count_session_logs(&db, parent), 1);
+        // 移設済みツールも Discord 単体経由では届かない（未知の名前として失敗する）。
+        for moved in ["report_progress", "spawn_subtask"] {
+            let result = sub_gw
+                .execute(moved, &json!({"message": "x"}), &sub_ctx)
+                .await;
+            assert!(!result.success, "{moved} は Discord 単体では実行できない");
+        }
     }
 
     // ---- #36: セッション必須アクションの fail-closed ----
@@ -1538,12 +1337,9 @@ mod tests {
             "components": [],
             "task": "t",
         });
-        for name in [
-            "request_peer_review",
-            "report_progress",
-            "send_ui",
-            "spawn_subtask",
-        ] {
+        // `report_progress` / `spawn_subtask` は server 側へ移設済み（#175 S4）。
+        // 同趣旨のガードは `crates/server/src/system_actions.rs` にある。
+        for name in ["request_peer_review", "send_ui"] {
             let result = actions.execute(name, &args, &no_session).await;
             assert!(!result.success, "{name} should fail without session");
             assert!(
@@ -1692,7 +1488,7 @@ mod tests {
     fn test_definitions_returns_expected_count() {
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
-        assert_eq!(defs.len(), 30);
+        assert_eq!(defs.len(), 27);
 
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"request_peer_review"));
@@ -1706,14 +1502,11 @@ mod tests {
         assert!(names.contains(&"add_allowed_command"));
         assert!(names.contains(&"list_allowed_commands"));
         assert!(names.contains(&"remove_allowed_command"));
-        assert!(names.contains(&"rebuild_memory_index"));
         assert!(names.contains(&"create_skill"));
         assert!(names.contains(&"discord_send_file"));
-        assert!(names.contains(&"spawn_subtask"));
         assert!(names.contains(&"join_voice_channel"));
         assert!(names.contains(&"leave_voice_channel"));
         assert!(names.contains(&"cancel_subtask"));
-        assert!(names.contains(&"report_progress"));
         assert!(names.contains(&"send_ui"));
         assert!(names.contains(&"update_heartbeat_instructions"));
         assert!(names.contains(&"read_heartbeat_instructions"));
@@ -1725,6 +1518,17 @@ mod tests {
         assert!(names.contains(&"set_default_webhook"));
         assert!(names.contains(&"ensure_webhook"));
         assert!(names.contains(&"list_webhooks"));
+
+        // #175 S4 / #155: サブタスク生成・進捗報告・記憶インデックス再構築は
+        // gateway 非依存層（server 側 `SystemGatewayActions`）へ移設済み。
+        // Discord がこれらを再び定義すると `SystemGatewayActions` の dedup で
+        // 名前が衝突し、LLM クライアントも Discord へ戻ってくる（#155 の後退）。
+        for moved in ["spawn_subtask", "report_progress", "rebuild_memory_index"] {
+            assert!(
+                !names.contains(&moved),
+                "{moved} は server 側の実装だけであるべき"
+            );
+        }
     }
 
     #[test]
