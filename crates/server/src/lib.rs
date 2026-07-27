@@ -574,6 +574,56 @@ mod gateway_registry_tests {
         );
     }
 
+    /// **起動処理が実際に取る形**を実物のマネージャで再現する（#191 段階2 PR5）。
+    ///
+    /// `main` は復元位置を 2 つ持つ（Discord = 共有ゲートウェイ起動後 / Nostr = ルータ
+    /// 構築の直前）。各位置で「登録済みかつ未復元の分だけ」を走査するので、走る対象は
+    /// 移設前の `manager.restore_from_db()` と 1 対 1 になる。**1 回に畳むと Discord の
+    /// 復元が後ろへずれ、直後の heartbeat 用 HTTP クライアント取得が空振りする。**
+    ///
+    /// DB は空なので復元は 1 件も起動しない（＝実ネットワークに出ない）。ここで見たいのは
+    /// 「どのマネージャが・どの位置で・何回走査に拾われるか」。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn startup_sweep_restores_each_manager_at_its_own_point() {
+        let state = test_app_state();
+
+        // 位置 1: Discord だけが登録済み。
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        state.gateways.register(discord);
+        assert_eq!(
+            state.gateways.restore_pending().await,
+            vec![gateway_kinds::DISCORD]
+        );
+
+        // 位置 2: Nostr を登録してから走査。Discord は**もう拾わない**。
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+        assert_eq!(
+            state.gateways.restore_pending().await,
+            vec![gateway_kinds::NOSTR],
+            "2 度目の走査が Discord を巻き込むと、稼働中の接続を張り直してしまう"
+        );
+
+        // 復元は起動時 1 回だけ（周期的な自己修復は持たない）。
+        assert!(state.gateways.restore_pending().await.is_empty());
+    }
+
+    /// **Discord を落とした構成**では位置 1 の走査ごと消え、残る 1 回が Nostr を復元する。
+    #[cfg(not(feature = "discord"))]
+    #[tokio::test]
+    async fn startup_sweep_restores_nostr_without_discord() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+
+        assert_eq!(
+            state.gateways.restore_pending().await,
+            vec![gateway_kinds::NOSTR]
+        );
+        assert!(state.gateways.restore_pending().await.is_empty());
+    }
+
     /// 生存確認は「稼働していない / 未登録」のどちらでも false に倒れる。
     ///
     /// これはルーティング判定（専用ゲートウェイに任せるか、共有側が続けるか）なので、

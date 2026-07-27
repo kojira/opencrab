@@ -318,7 +318,11 @@ SkillEngine
 
 構造的にも段階2 の受け皿にならなかった：`receive(&mut self)` は `Arc` 共有された状態から呼べない（実運用の transport はすべて push 型）、どのメソッドにも `agent_id` が無く per-agent ゲートウェイ（#40）を表現できない。
 
-**現状**: 上位は各ゲートウェイを個別のフィールドとして具象型で名指しで保持している。「上位が個々のゲートウェイを知らない」形へ寄せる方針は §2.4 と [design-plugin-architecture.md](design-plugin-architecture.md) を参照（#191）。新しい transport 抽象を足すなら、削除済みの型を復活させるのではなくそこの設計から始めること。
+**現状（#191 段階2）**: 受信を持つ transport（Discord / Nostr）は `opencrab-actions` の `AgentGatewayLifecycle`（起動 / 停止 / 生存確認 / DB からの復元 / 全停止 + 既定 `None` の capability accessor）を実装し、`AppState` は種別名で引く登録簿 `AgentGatewayRegistry` だけを持つ。**個々のゲートウェイの名指しフィールドは無い。** 起動時の DB からの復元も登録簿の走査（`restore_pending`）で、復元位置が transport ごとに違うという仕様は「登録済みかつ未復元の分だけを登録順に復元する」形で保っている。
+
+残っている名指しは (1) マネージャの生成そのもの（`main`）、(2) heartbeat の発話が使う生の serenity HTTP クライアント、(3) 共有（TOML）ゲートウェイの起動ブロック（per-agent の登録簿とは別の仕組み）。MCP は**受信を持たない**ので登録簿に入れない（道具の供給者であり transport ではない）。
+
+方針は §2.4 と [design-plugin-architecture.md](design-plugin-architecture.md) を参照。新しい transport 抽象を足すなら、削除済みの型を復活させるのではなくそこの設計から始めること。
 
 ### 7.2 メッセージ型
 
