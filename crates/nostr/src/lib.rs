@@ -8,6 +8,7 @@
 //!   と購読フィルタ（author / keyword / kind）。
 //! - [`event::NostrEvent`]: `nostaro watch --json` の1件（JSONL）。
 //! - [`actions::NostrGatewayActions`]: `nostr_post`/`reply`/`dm`/`zap`/`upload` ツール。
+//! - [`key_provisioning::NostrKeyProvisioning`]: 鍵の払い出し capability（#191 段階2）。
 //! - [`session::NostrSessionRuntime`]: per-session 直列化ロック + dispatch registry。
 //! - [`sink::NostrResponder`]: 応答生成 + 返信配送の共通経路。subtask 完了 sink
 //!   （`SubtaskCompletionSink`）も兼ね、完了時に同じ経路で resume して返信する（#168）。
@@ -22,6 +23,7 @@ pub mod cli;
 pub mod config;
 pub mod event;
 pub mod identity;
+pub mod key_provisioning;
 pub mod manager;
 pub mod runner;
 pub mod session;
@@ -32,6 +34,7 @@ pub use cli::{validate_vanity_prefix, GeneratedKey, NostaroCli, MAX_VANITY_PREFI
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
 pub use event::{parse_watch_line, NostrEvent};
 pub use identity::NostrIdentityAdmin;
+pub use key_provisioning::NostrKeyProvisioning;
 pub use manager::NostrGatewayManager;
 pub use runner::NostrAgentRunner;
 pub use session::{nostr_session_id, NostrSessionRuntime, NOSTR_SESSION_PREFIX};

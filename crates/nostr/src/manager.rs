@@ -88,20 +88,9 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         self
     }
 
-    /// 内部の nostaro CLI ラッパー（gateway 起動を伴わない操作用）。
-    pub fn cli(&self) -> &NostaroCli {
-        &self.cli
-    }
-
     /// per-session ランタイム（直列化ロック + dispatch registry）。
     pub fn session_runtime(&self) -> &Arc<NostrSessionRuntime> {
         &self.runtime
-    }
-
-    /// vanity で新規鍵を生成する。同時実行の制限は `NostaroCli` 内のゲートで一元化
-    /// （HTTP ルートも LLM ツールも同じゲートを通る）。
-    pub async fn generate_key(&self, prefix: &str) -> anyhow::Result<crate::GeneratedKey> {
-        self.cli.vanity(prefix).await
     }
 
     /// エージェントの Nostr ゲートウェイを起動する。
@@ -273,6 +262,16 @@ impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatew
 
     async fn shutdown_all(&self) {
         NostrGatewayManager::shutdown_all(self).await;
+    }
+
+    /// 鍵の払い出し（capability / #191 段階2 PR4）。
+    ///
+    /// マネージャの [`NostaroCli`] を clone して渡すので `binary_path` / timeout / vanity
+    /// ゲートをそのまま継承する（HTTP ルートも LLM ツールも同じ 1 本のゲートを通る）。
+    /// **ゲートウェイの稼働は要らない**（`nostaro vanity` は config を読まない）ため、
+    /// `is_running` に関わらず常に `Some` を返す。
+    fn key_provisioning(&self) -> Option<Arc<dyn opencrab_actions::GatewayKeyProvisioning>> {
+        Some(Arc::new(crate::NostrKeyProvisioning::new(self.cli.clone())))
     }
 }
 
