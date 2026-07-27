@@ -617,7 +617,9 @@ fn trusted_platform_for(source: TranscriptSource) -> Option<&'static str> {
 /// 3. active タスクに未回収のレビュー依頼がある（依頼していないレビューを誤記録しない）
 ///
 /// 記録は追加処理: メッセージ自体はこの後通常どおり LLM にも流れる（会話には speech として残る）。
-/// session_logs には重ねて記録しない（二重描画を避ける。台帳経由で次ターンの [Task Ledger] に出る）。
+/// session_logs には重ねて記録しない（二重描画を避ける）。台帳へ書いた verdict は
+/// **この受信で走るターンの** `[Task Ledger]` に載る（#156 S4 で受信フックを会話組み立ての
+/// 前に置いたため。「次ターンに出る」と書いてあった移設前の記述は誤り）。
 /// 記録した場合 true を返す。
 fn record_peer_review_reply(
     db: &opencrab_db::Db,
