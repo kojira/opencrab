@@ -217,6 +217,16 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
 /// `prepare_owner_for_gateway` がそのまま担う（トレイト経由でも生の呼び出しでも
 /// 同じ 1 箇所を通る）。ここで trim を重ねると「正規化の置き場所が 2 つある」形になり、
 /// 片方だけ消えたときに `DM は通るのに owner 専用 UI だけ無言で拒否` が復活する。
+///
+/// ## 起動条件のガード（#191 段階2 PR3）
+///
+/// `start` は [`gateway_will_start`] で「有効フラグが立っていて、かつトークンが空白で
+/// ない」ことを確認してから起動する。**これは REST ハンドラ（`PATCH /discord`）が
+/// 呼び出しの手前で行っていた判定を、述語ごとそのまま持ち上げたもの**で、引数も同じ
+/// （同一の DB 行の `enabled` と `bot_token`）。呼び出し側の規約にすると呼び出し口が
+/// 増えるたびに忘れうるので、型の内側に閉じて「忘れても安全」にする。
+///
+/// [`gateway_will_start`]: crate::gateway_will_start
 #[async_trait::async_trait]
 impl<T: AgentRunner> opencrab_actions::AgentGatewayLifecycle for DiscordGatewayManager<T> {
     fn kind(&self) -> &'static str {
@@ -228,8 +238,25 @@ impl<T: AgentRunner> opencrab_actions::AgentGatewayLifecycle for DiscordGatewayM
             .state
             .get_discord_config(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Discord 設定がありません（agent_id={agent_id}）"))?;
-        // enabled フラグの書き換えは呼び出し側の責務（DB の方針でありライフサイクル
-        // ではない）。ここは既存の REST `/discord/start` と同じく「行があれば起動する」。
+        // 起動条件のガード。`gateway_will_start` は共有ゲートウェイの起動判定・owner 未設定
+        // 警告と同じ述語で、条件が 1 箇所に閉じている（空白だけのトークンは「無し」扱い）。
+        if !crate::gateway_will_start(cfg.enabled, &cfg.bot_token) {
+            return Err(opencrab_actions::StartDeclined::err(
+                opencrab_actions::gateway_kinds::DISCORD,
+                agent_id,
+                format!(
+                    "enabled={} / bot_token={}",
+                    cfg.enabled,
+                    if cfg.bot_token.trim().is_empty() {
+                        "空"
+                    } else {
+                        "あり"
+                    }
+                ),
+            ));
+        }
+        // enabled フラグの**書き換え**は呼び出し側の責務（DB の方針でありライフサイクル
+        // ではない）。ここで見るのは読み取りだけ。
         self.start_agent_gateway(agent_id, &cfg.bot_token, &cfg.owner_discord_id)
             .await
     }

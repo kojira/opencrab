@@ -89,16 +89,25 @@ pub struct AppState {
     /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
     /// メンテナンスループの二重 LLM 支出防止）。
     pub index_build_inflight: memory_maintenance::IndexBuildInflight,
+    /// per-agent Discord ゲートウェイマネージャ。
+    ///
+    /// **共通操作（起動 / 停止 / 生存確認）でここを見ないこと**（#191 段階2 PR3）。
+    /// それらは下の `gateways` 経由に差し替え済み。残っているのは **transport 固有の
+    /// 実体の受け渡し**だけ（`get_http_for_agent` → serenity の HTTP クライアント）で、
+    /// capability の受け口に移すのは PR4。
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
     /// per-agent Nostr sub-gateway マネージャ（main で構築してセットされる）。
+    ///
+    /// `discord_manager` と同じく、**共通操作は `gateways` 経由**。ここに残っているのは
+    /// transport 固有の操作（`cli()` / `generate_key()` = nostaro の鍵生成）だけ。
     pub nostr_manager: Option<SharedNostrManager>,
     pub mcp_manager: Option<SharedMcpManager>,
-    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2 PR2）。
+    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2）。
     ///
-    /// 上の名指しフィールド（`discord_manager` / `nostr_manager`）と**併存**する。
-    /// この PR では登録するだけで、呼び出し側はまだ名指しフィールドを見ている
-    /// （差し替えは PR3）。
+    /// **共通操作（起動 / 停止 / 生存確認）はここを通る**（PR3）。上位は個々の
+    /// ゲートウェイを名指しせず、種別名（[`opencrab_actions::gateway_kinds`]）で引く。
+    /// 未登録の種別は生存確認が **false**（共有ゲートウェイが処理を続ける側）。
     ///
     /// **内部可変**（[`opencrab_actions::AgentGatewayRegistry`] が中で `RwLock` を持つ）。
     /// マネージャの生成順は仕様であり（Discord のマネージャは共有ゲートウェイへ渡す
@@ -636,5 +645,163 @@ mod gateway_registry_tests {
         );
         gw.stop("no-such-agent").await;
         gw.shutdown_all().await;
+    }
+
+    // ------------------------------------------------------------------
+    // 起動条件のガード（#191 段階2 PR3）
+    //
+    // 呼び出しを登録簿経由に差し替えるにあたり、REST ハンドラが**呼び出しの手前**で
+    // 行っていた起動条件の判定を、各実装の `start` の中へ持ち上げた。ガードが効いて
+    // いないと「無効にしたはずの設定 / 空白だけの資格情報でも起動する」穴が開くので、
+    // ここで固定する。
+    //
+    // どのテストも**実ネットワークに出ない**。ガードは接続を試みる手前で弾くため、
+    // 弾けていなければ実際の接続失敗（別種のエラー）になり、`is_start_declined` の
+    // assert が落ちる。
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "discord")]
+    fn put_discord_config(state: &AppState, agent_id: &str, token: &str, enabled: bool) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent_discord_config(
+            &conn,
+            &opencrab_db::queries::AgentDiscordConfigRow {
+                agent_id: agent_id.to_string(),
+                bot_token: token.to_string(),
+                owner_discord_id: "111111111111111111".to_string(),
+                enabled,
+            },
+        )
+        .unwrap();
+    }
+
+    /// **無効化された設定では起動しない。**
+    ///
+    /// 移設前は `PATCH /api/agents/{id}/discord` が
+    /// `opencrab_discord::gateway_will_start(enabled, token)` を呼び出しの手前で見ていた。
+    /// 同じ述語・同じ引数（同一の DB 行の `enabled` と `bot_token`）を `start` の中へ
+    /// 移しただけなので、判定は移設前と 1 対 1 で一致する。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn discord_start_declines_when_config_is_disabled() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        state.gateways.register(discord);
+        // トークンはあるが enabled=0（「停止したはず」の設定）。
+        put_discord_config(&state, "crab", "bot-token-looks-real", false);
+
+        let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
+        let err = gw.start("crab").await.unwrap_err();
+        assert!(
+            opencrab_actions::is_start_declined(&err),
+            "無効な設定で起動を試みている（ガードが落ちている）: {err}"
+        );
+        assert!(
+            !state.gateways.is_running(gateway_kinds::DISCORD, "crab"),
+            "弾かれたのにゲートウェイが登録されている"
+        );
+    }
+
+    /// **空白だけのトークンでは起動しない**（`gateway_will_start` は trim して判定する）。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn discord_start_declines_on_blank_token() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        state.gateways.register(discord);
+        put_discord_config(&state, "crab", " \t\n", true);
+
+        let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
+        let err = gw.start("crab").await.unwrap_err();
+        assert!(
+            opencrab_actions::is_start_declined(&err),
+            "空白だけのトークンで起動を試みている: {err}"
+        );
+        assert!(!state.gateways.is_running(gateway_kinds::DISCORD, "crab"));
+    }
+
+    /// **鍵が未設定の Nostr 設定では起動しない。**
+    ///
+    /// 移設前は `PUT /api/agents/{id}/nostr` が「鍵が無ければ 400」を呼び出しの手前で
+    /// 返していた（`POST /nostr/start` にはその判定が無く、素通りしていた）。判定を
+    /// `start_agent_gateway` の単一チョークポイントへ置き直したので、どの呼び出し口
+    /// からでも同じように弾かれる。
+    #[tokio::test]
+    async fn nostr_start_declines_without_secret_key() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent_nostr_config(
+                &conn,
+                &opencrab_db::queries::AgentNostrConfigRow {
+                    agent_id: "agent-191-pr3".to_string(),
+                    secret_key: "  ".to_string(),
+                    relays_json: "[]".to_string(),
+                    filter_json: r#"{"authors":["npub1abc"],"keywords":[],"kinds":[1]}"#
+                        .to_string(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        }
+
+        let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
+        let err = gw.start("agent-191-pr3").await.unwrap_err();
+        assert!(
+            opencrab_actions::is_start_declined(&err),
+            "鍵が無いのに起動を試みている: {err}"
+        );
+        assert!(!state
+            .gateways
+            .is_running(gateway_kinds::NOSTR, "agent-191-pr3"));
+    }
+
+    /// **Nostr の `start` は DB の `enabled` を見ない。**
+    ///
+    /// ハンドラ側の方針が「起動が成功してから `enabled=true`」なので、`PUT /nostr` は
+    /// **わざと `enabled=false` の行を書いてから** `start` を呼ぶ。ここに Discord と同じ
+    /// 有効フラグのガードを足すと、その正しい経路が毎回自分のガードに弾かれて Nostr が
+    /// 二度と起動しなくなる（無効化ではなく**機能停止**）。
+    ///
+    /// 鍵はあるがフィルタが無制限（＝全ノート購読）の行で `start` を呼び、返ってくる
+    /// のが**フィルタの拒否**であることを見る。有効フラグや鍵のガードが先に弾いていれば
+    /// この文言にはならないので、「`enabled=false` を素通りして購読条件の検査まで到達
+    /// している」ことが分かる。フィルタの拒否は設定ファイルを書き出す**手前**なので、
+    /// 実プロセスもファイルシステムも触らない。
+    #[tokio::test]
+    async fn nostr_start_does_not_look_at_the_enabled_flag() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent_nostr_config(
+                &conn,
+                &opencrab_db::queries::AgentNostrConfigRow {
+                    agent_id: "agent-191-pr3".to_string(),
+                    secret_key: "nsec1testonlynotarealkey".to_string(),
+                    relays_json: "[]".to_string(),
+                    // author も keyword も無い = 無制限フィルタ（起動は拒否される）。
+                    filter_json: r#"{"authors":[],"keywords":[],"kinds":[1]}"#.to_string(),
+                    // `PUT /nostr` が start を呼ぶ瞬間の状態そのもの。
+                    enabled: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
+        let err = gw.start("agent-191-pr3").await.unwrap_err();
+        assert!(
+            err.to_string().contains("フィルタ"),
+            "enabled=false / 鍵ありの行が購読条件の検査より手前で弾かれている\
+             （enabled を見るガードを足すと PUT /nostr が通らなくなる）: {err}"
+        );
+        assert!(
+            !opencrab_actions::is_start_declined(&err),
+            "起動条件のガードで弾かれている: {err}"
+        );
     }
 }

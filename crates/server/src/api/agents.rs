@@ -4,6 +4,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use opencrab_actions::gateway_kinds;
+
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -163,9 +165,8 @@ pub async fn delete_agent(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     // Stop per-agent Discord gateway if running.
-    #[cfg(feature = "discord")]
-    if let Some(ref manager) = state.discord_manager {
-        manager.stop_agent_gateway(&id).await;
+    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
+        gw.stop(&id).await;
     }
 
     let conn = state.db.lock().unwrap();
@@ -266,12 +267,8 @@ pub async fn get_discord_config(
                 "***".to_string()
             };
 
-            #[allow(unused_mut)]
-            let mut running = false;
-            #[cfg(feature = "discord")]
-            if let Some(ref manager) = state.discord_manager {
-                running = manager.is_running(&id);
-            }
+            // 未登録（discord feature 無効 / マネージャ未生成）は false。
+            let running = state.gateways.is_running(gateway_kinds::DISCORD, &id);
 
             Json(serde_json::json!({
                 "configured": true,
@@ -346,17 +343,15 @@ pub async fn patch_discord_config(
     };
 
     // Restart the gateway with new config if enabled and token is present.
-    #[cfg(feature = "discord")]
-    if let Some(ref manager) = state.discord_manager {
+    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
         // Stop the current gateway first (no-op if not running).
-        manager.stop_agent_gateway(&id).await;
-        // Restart only if enabled and token is present（起動条件は
-        // `gateway_will_start` に集約。空白だけのトークンは「無し」扱い）。
-        if opencrab_discord::gateway_will_start(cfg.enabled, &cfg.bot_token) {
-            if let Err(e) = manager
-                .start_agent_gateway(&id, &cfg.bot_token, &cfg.owner_discord_id)
-                .await
-            {
+        gw.stop(&id).await;
+        // 起動条件（enabled かつトークンが空白でない）の判定は `start` の中にある
+        // （#191 段階2 PR3 で `gateway_will_start` ごと実装側へ持ち上げた）。
+        // 条件を満たさずに見送られたときは以前と同じく**黙って何もしない**ので、
+        // `StartDeclined` は error ログに出さない（本当の起動失敗だけ残す）。
+        if let Err(e) = gw.start(&id).await {
+            if !opencrab_actions::is_start_declined(&e) {
                 tracing::error!(agent_id = %id, error = %e, "Failed to restart Discord gateway after patch");
             }
         }
@@ -393,20 +388,19 @@ pub async fn update_discord_config(
         let conn = state.db.lock().unwrap();
         let cfg = opencrab_db::queries::AgentDiscordConfigRow {
             agent_id: id.clone(),
-            bot_token: req.bot_token.clone(),
-            owner_discord_id: owner_discord_id.clone(),
+            bot_token: req.bot_token,
+            owner_discord_id,
             enabled: true,
         };
         opencrab_db::queries::upsert_agent_discord_config(&conn, &cfg).unwrap();
     }
 
-    // Start the gateway (only when discord feature is enabled).
-    #[cfg(feature = "discord")]
-    if let Some(ref manager) = state.discord_manager {
-        match manager
-            .start_agent_gateway(&id, &req.bot_token, &owner_discord_id)
-            .await
-        {
+    // Start the gateway (only when a Discord gateway is registered).
+    // 資格情報は `start` が**この直前に書いた行**を DB から読み直す（契約が引数を取らない
+    // 理由は `AgentGatewayLifecycle` の doc 参照）。正規化済み owner を保存しているので、
+    // 読み直しても渡していた値と同じになる。
+    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
+        match gw.start(&id).await {
             Ok(()) => {
                 return Json(serde_json::json!({
                     "ok": true,
@@ -423,7 +417,7 @@ pub async fn update_discord_config(
         }
     }
 
-    // Config saved but gateway not started (discord feature disabled or manager not initialized).
+    // Config saved but gateway not started (discord feature disabled or manager not registered).
     Json(serde_json::json!({
         "ok": true,
         "message": "Config saved. Gateway not started (discord feature not active).",
@@ -439,9 +433,9 @@ pub async fn start_discord_gateway(
         opencrab_db::queries::get_agent_discord_config(&conn, &id).unwrap()
     };
 
-    let Some(_cfg) = cfg else {
+    if cfg.is_none() {
         return Json(serde_json::json!({ "ok": false, "error": "No Discord config found." }));
-    };
+    }
 
     // Set enabled=1 in DB.
     {
@@ -449,12 +443,11 @@ pub async fn start_discord_gateway(
         opencrab_db::queries::set_agent_discord_config_enabled(&conn, &id, true).unwrap();
     }
 
-    #[cfg(feature = "discord")]
-    if let Some(ref manager) = state.discord_manager {
-        match manager
-            .start_agent_gateway(&id, &_cfg.bot_token, &_cfg.owner_discord_id)
-            .await
-        {
+    // 資格情報は `start` が DB から読み直す。enabled は**この時点で既に 1** なので、
+    // `start` 側のガード（enabled かつトークンあり）が新たに弾くのは
+    // 「空白だけのトークン」だけ（それは以前も接続に失敗していた）。
+    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
+        match gw.start(&id).await {
             Ok(()) => return Json(serde_json::json!({ "ok": true })),
             Err(e) => {
                 tracing::error!(agent_id = %id, error = %e, "Failed to start Discord gateway");
@@ -476,9 +469,8 @@ pub async fn stop_discord_gateway(
         opencrab_db::queries::set_agent_discord_config_enabled(&conn, &id, false).unwrap();
     }
 
-    #[cfg(feature = "discord")]
-    if let Some(ref manager) = state.discord_manager {
-        manager.stop_agent_gateway(&id).await;
+    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
+        gw.stop(&id).await;
     }
 
     Json(serde_json::json!({ "ok": true }))
@@ -489,9 +481,8 @@ pub async fn delete_discord_config(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     // Stop the gateway.
-    #[cfg(feature = "discord")]
-    if let Some(ref manager) = state.discord_manager {
-        manager.stop_agent_gateway(&id).await;
+    if let Some(gw) = state.gateways.get(gateway_kinds::DISCORD) {
+        gw.stop(&id).await;
     }
 
     // Delete from DB.

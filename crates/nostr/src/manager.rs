@@ -114,6 +114,18 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
         secret_key: &str,
         config: NostrConfig,
     ) -> anyhow::Result<()> {
+        // 資格情報のガード（#191 段階2 PR3）。空 / 空白だけの nsec では nostaro が
+        // 動かないので、materialize（0600 のファイル書き出し）や `pubkey` 取得より
+        // **手前**で拒否する。REST の PUT が呼び出しの手前で行っていた「鍵が無ければ
+        // 400」と同じ判定を、呼び出し口によらず必ず通る位置へ置き直したもの。
+        if secret_key.trim().is_empty() {
+            return Err(opencrab_actions::StartDeclined::err(
+                opencrab_actions::gateway_kinds::NOSTR,
+                agent_id,
+                "秘密鍵（nsec）が未設定です。先に鍵を生成してください",
+            ));
+        }
+
         // 全ノート購読（author も keyword も無い）は洪水/資源浪費になるため、
         // ここ（単一チョークポイント）で拒否する（PUT enabled=false→/start バイパス封じ）。
         if config.filter_is_unbounded() {
@@ -219,7 +231,18 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
 ///
 /// **フィルタの無制限チェックはここでは行わない。** `start_agent_gateway` の中の
 /// `filter_is_unbounded` が単一チョークポイントとして担う（トレイト経由でも生の
-/// 呼び出しでも同じ 1 箇所を通る）。
+/// 呼び出しでも同じ 1 箇所を通る）。秘密鍵の空検査も同じ理由で同じ場所にある。
+///
+/// ## `enabled` を見ない理由（#191 段階2 PR3）
+///
+/// Discord 側のガードは有効フラグも見るが、**Nostr は見てはいけない**。Nostr の
+/// ハンドラは「起動が成功してから `enabled=true` にする」順序を仕様にしており
+/// （失敗時に『enabled だが未稼働』の不整合を残さないため）、`PUT /nostr` は
+/// **わざと `enabled=false` で行を書いてから** `start` を呼ぶ。ここで DB の
+/// `enabled` を見ると、その正しい経路が毎回自分のガードに弾かれる。
+///
+/// 書き込み順序の方針はハンドラ側に残し、契約側のガードは**資格情報と購読条件**
+/// （鍵の有無 / フィルタの有界性）に閉じる。これが「移設前と同じ判定」になる。
 #[async_trait::async_trait]
 impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatewayManager<R> {
     fn kind(&self) -> &'static str {
