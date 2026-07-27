@@ -203,17 +203,28 @@ See [docs/api.md](docs/api.md) for the full API reference.
 
 ## Action System
 
-The ActionDispatcher registers **28 actions** across 7 categories, invokable by agents during conversations:
+The ActionDispatcher registers these actions, invokable by agents during conversations:
 
 | Category | Actions | Description |
 |----------|---------|-------------|
-| **Common** (7) | `send_speech`, `send_noreact`, `no_reply`, `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info` | Core communication and session control |
-| **Workspace** (6) | `ws_read`, `ws_write`, `ws_edit`, `ws_list`, `ws_delete`, `ws_mkdir` | Sandboxed per-agent file operations |
-| **Learning** (3) | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
-| **Search & Memory** (5) | `search_my_history`, `summarize_and_save`, `create_my_skill`, `browse_memory_index`, `retrieve_memory_nodes` | Memory search, curation, and Agentic RAG |
-| **LLM** (5) | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
-| **Soul** (1) | `update_instructions` | Owner-only agent behavioral instruction update |
-| **Shell** (1) | `execute_shell` | Run shell commands from the agent's allowed command list |
+| **Common** | `generate_inner_voice`, `update_impression`, `declare_done`, `get_system_info` | Core session control and self-narration |
+| **Workspace** | `ws_read`, `ws_write`, `ws_edit`, `ws_list`, `ws_delete`, `ws_mkdir` | Sandboxed per-agent file operations |
+| **Learning** | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
+| **Skills** | `create_my_skill`, `retire_my_skill`, `restore_my_skill`, `read_skill` | Self-created skill lifecycle |
+| **Search & Memory** | `search_my_history`, `summarize_and_save`, `browse_memory_index`, `retrieve_memory_nodes`, `search_memory_index` | Memory search, curation, and Agentic RAG |
+| **LLM** | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
+| **Soul** | `update_instructions` | Owner-only agent behavioral instruction update |
+| **Task ledger** | `open_task`, `update_task_contract`, `record_task_progress`, `close_task`, `get_task` | Long-running task bookkeeping |
+
+One further action, `execute_shell` (run shell commands from the agent's allowed command
+list), is **config-driven**: it is registered from `[tools.shell]` rather than by
+`ActionDispatcher::new()`, so it is absent when shell tooling is disabled.
+
+The rows above name every action in `ActionDispatcher::new().action_names()`. Drift is caught
+by a test rather than by review — `readme_action_table_matches_the_dispatcher`
+(`crates/actions/src/dispatcher.rs`) parses this table and requires it to equal the registered
+set in both directions. Absolute counts are deliberately not written here: they went stale
+twice (#203), and the table itself is the check.
 
 In addition, **gateway actions** are invokable via natural language. Where they are
 implemented decides where they are usable: the transport-independent source

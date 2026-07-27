@@ -2922,3 +2922,55 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
     );
     assert!(!state.subtask_registries.has_running(&session_id));
 }
+
+/// **nsec（Nostr 秘密鍵）は設定取得 API の応答に平文で現れない**（#203 の一括点検）。
+///
+/// `GET /api/agents/{id}/nostr` は `secret_key_masked` にマスク済みの値を載せる契約だが、
+/// マスク関数を素通しに書き換えても落ちるテストが 1 件も無かった。nsec は Nostr の
+/// アイデンティティそのもので、漏れれば第三者がそのエージェントとして投稿できる。
+/// マスクの**戻り値**ではなく **API の応答ボディ全体**に平文が含まれないことを見る
+/// （経路が違えば別のフィールドから漏れうるため）。
+#[tokio::test]
+async fn test_get_nostr_config_never_returns_raw_secret_key() {
+    let app = create_test_app();
+    // 本物と同じ形の、しかしテスト専用のダミー nsec。
+    let nsec = "nsec1testonlyfakesecretkeyvalue000000000000000000000000000000";
+
+    // 保存（enabled=false なのでゲートウェイは起動しない = ネットワークに出ない）。
+    let (status, json) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/agents/a1/nostr",
+        Some(serde_json::json!({
+            "secret_key": nsec,
+            "relays": ["wss://relay.example"],
+            "keywords": ["crab"],
+            "enabled": false,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(
+        !json.to_string().contains(nsec),
+        "保存の応答に平文 nsec が含まれている: {json}"
+    );
+
+    // 取得。
+    let (status, json) = send_request(app.clone(), "GET", "/api/agents/a1/nostr", None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["configured"], true);
+    assert_eq!(json["has_secret_key"], true, "鍵の有無は伝える: {json}");
+    assert!(
+        !json.to_string().contains(nsec),
+        "取得の応答に平文 nsec が含まれている: {json}"
+    );
+    // 平文の断片も出さない（末尾数文字を見せる形のマスクへ緩めたら落とす）。
+    assert!(
+        !json.to_string().contains("testonlyfake"),
+        "nsec の一部が応答に含まれている: {json}"
+    );
+    assert_eq!(
+        json["secret_key_masked"], "••••••••",
+        "マスク済みの固定文字列を返す: {json}"
+    );
+}
