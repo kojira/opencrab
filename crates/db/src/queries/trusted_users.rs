@@ -127,12 +127,85 @@ pub fn is_known_trusted_platform(platform: &str) -> bool {
     TRUSTED_PLATFORMS.contains(&platform)
 }
 
+// ---- 権限（列挙型, #234） ----
+//
+// 信頼済みユーザーの権限はかつて素の文字列で、登録 API は受け取った値を検証も
+// 正規化もせずそのまま保存していた。判定側は `permission == "co_agent"` の完全一致、
+// ダッシュボードの選択肢は `co-agent`。**表記が 1 文字違うだけで登録は黙って無効**に
+// なり（行はあるので「信頼済みユーザー」までは落ちるが協働エージェントにはならない）、
+// UI にもログにも何も出なかった（#234）。
+//
+// 表記は**ケバブケースに統一**する。設定ファイルのコマンド権限
+// （`opencrab_actions::tools::CommandPermission`）は既に列挙型でケバブケースを
+// 指定しており、不正値はパースエラーで弾かれる＝型で守られている。守られている側の
+// 規約に寄せる。
+//
+// **`CommandPermission` を再利用しない理由**: 値の集合も意味も違う。
+// `CommandPermission` は「そのコマンドを実行するのに必要な最低の呼び出し元権限」
+// （`owner` / `agent` / `co-agent`）で、`agent`＝誰でも可を含む。こちらは
+// 「登録した相手に与える権限」（`owner` / `user` / `co-agent`）で、`agent`＝
+// 未登録の最小権限は**そもそも登録の対象にならない**（行が無い状態がそれ）。
+// 型を共有すると、片方にしか意味の無い variant が他方の入口を通ってしまう。
+
+/// 信頼済みユーザーに与える権限（`trusted_users.permission`）。
+///
+/// **表記ゆれは型で起こりえない**: DB へ書く文字列は [`Self::as_db_str`] だけが作り、
+/// 入口の検証は [`Self::parse`] だけが通す。serde 表現も同じケバブケース。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrustedUserPermission {
+    /// オーナー相当。
+    Owner,
+    /// ただの信頼済みユーザー（登録の既定）。
+    #[default]
+    User,
+    /// 協働エージェント（相互レビューの名簿に載る）。
+    CoAgent,
+}
+
+/// 権限の全体。ダッシュボードの選択肢はここから導く（一致は
+/// `dashboard_permission_options_match_the_enum` が検査する）。
+pub const TRUSTED_USER_PERMISSIONS: [TrustedUserPermission; 3] = [
+    TrustedUserPermission::Owner,
+    TrustedUserPermission::User,
+    TrustedUserPermission::CoAgent,
+];
+
+impl TrustedUserPermission {
+    /// DB に入る表記（ケバブケース）。**書き込みはこの関数だけを通す。**
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::User => "user",
+            Self::CoAgent => "co-agent",
+        }
+    }
+
+    /// 既知の表記だけを受け付ける（入口の検証用）。**別表記の受け入れはしない** —
+    /// 「どちらの表記も通す」が #234 そのものだったので、通す表記はひとつに保つ。
+    pub fn parse(s: &str) -> Option<Self> {
+        TRUSTED_USER_PERMISSIONS
+            .into_iter()
+            .find(|p| p.as_db_str() == s)
+    }
+
+    /// DB の既存値を読む。**未知の値は [`Self::User`] へ倒す**（fail-closed）。
+    ///
+    /// 行があるのに権限が読めない状態は、従来も「協働エージェントでもオーナーでも
+    /// ない＝ただの信頼済みユーザー」に落ちていた。判定結果を変えないため、その
+    /// 落とし先を保つ（緩む方向へは倒さない）。
+    pub fn from_db_str(s: &str) -> Self {
+        Self::parse(s).unwrap_or(Self::User)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TrustedUserRow {
     pub id: String,
     pub user_id: String,
     pub agent_id: String,
-    pub permission: String,
+    /// 与えられている権限（#234 で素の文字列から列挙型へ）。
+    pub permission: TrustedUserPermission,
     pub created_by: String,
     pub created_at: String,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。空文字可。
@@ -146,7 +219,7 @@ fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedUse
         id: row.get(0)?,
         user_id: row.get(1)?,
         agent_id: row.get(2)?,
-        permission: row.get(3)?,
+        permission: TrustedUserPermission::from_db_str(&row.get::<_, String>(3)?),
         created_by: row.get(4)?,
         created_at: row.get(5)?,
         display_name: row.get(6)?,
@@ -205,7 +278,7 @@ pub fn add_trusted_user(
     id: &str,
     agent_id: &str,
     user_id: &str,
-    permission: &str,
+    permission: TrustedUserPermission,
     created_by: &str,
     created_at: &str,
     display_name: &str,
@@ -213,12 +286,12 @@ pub fn add_trusted_user(
     conn.execute(
         "INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        [id, user_id, agent_id, permission, created_by, created_at, display_name, platform],
+        [id, user_id, agent_id, permission.as_db_str(), created_by, created_at, display_name, platform],
     )?;
     Ok(())
 }
 
-/// このエージェントのピアレビュアー（permission='co_agent' の trusted user）一覧。
+/// このエージェントのピアレビュアー（permission='co-agent' の trusted user）一覧。
 /// プロンプトのロスター表示と reviewer 解決の両方がこれを使う（選定ロジックの一元化）。
 ///
 /// **`platform` で絞る（#159）**。以前は絞っていなかったが、返信の受理ゲート
@@ -235,10 +308,17 @@ pub fn list_co_agent_reviewers(
 ) -> Result<Vec<TrustedUserRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {TRUSTED_USER_COLUMNS} \
-         FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = 'co_agent' \
+         FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = ?3 \
          ORDER BY created_at ASC"
     ))?;
-    let rows = stmt.query_map([platform, agent_id], trusted_user_from_row)?;
+    let rows = stmt.query_map(
+        [
+            platform,
+            agent_id,
+            TrustedUserPermission::CoAgent.as_db_str(),
+        ],
+        trusted_user_from_row,
+    )?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
@@ -257,11 +337,11 @@ pub fn update_trusted_user_display_name(
 pub fn update_trusted_user_permission(
     conn: &Connection,
     id: &str,
-    permission: &str,
+    permission: TrustedUserPermission,
 ) -> Result<bool> {
     let n = conn.execute(
         "UPDATE trusted_users SET permission = ?2 WHERE id = ?1",
-        [id, permission],
+        [id, permission.as_db_str()],
     )?;
     Ok(n > 0)
 }

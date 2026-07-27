@@ -5,6 +5,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use opencrab_db::queries::TrustedUserPermission;
+
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -14,7 +16,10 @@ pub struct TrustedUserDto {
     /// どの経路の識別子かは同じ行の [`Self::platform`]。
     pub user_id: String,
     pub agent_id: String,
-    pub permission: String,
+    /// 与えられている権限。**キーは据え置き、値はケバブケース**（#234）。
+    /// 素の文字列だった頃はダッシュボードの `co-agent` と判定側の `co_agent` が
+    /// 食い違い、登録が黙って無効になっていた。列挙型の serde 表現がそのまま出る。
+    pub permission: TrustedUserPermission,
     pub created_by: String,
     pub created_at: String,
     pub display_name: String,
@@ -71,6 +76,11 @@ pub struct AddTrustedUserRequest {
 /// 効かない」が黙って残るため）。一意制約 `(user_id, agent_id)` の衝突は 409
 /// （同じ識別子を別経路で二重に持てるようにする制約の作り直しは非可逆なので #159 に残す。
 /// 移行は旧行を DELETE してから登録し直す）。
+///
+/// **未定義の権限も同じ理由で 400**（#234）。ここが受け取った文字列を検証も正規化も
+/// せず保存していたのが、ダッシュボードの `co-agent` が黙って無効な行になっていた
+/// 直接の原因。`co_agent` のような別表記も**受け入れない** — 通す表記をひとつに
+/// 保たないと、同じ食い違いがまた生える。
 pub async fn add_trusted_user(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -82,10 +92,10 @@ pub async fn add_trusted_user(
     if !opencrab_db::queries::is_known_trusted_platform(&platform) {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let permission = parse_permission(req.permission.as_deref())?;
     let conn = state.db.lock().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let permission = req.permission.unwrap_or_else(|| "user".to_string());
     let display_name = req.display_name.unwrap_or_default();
 
     opencrab_db::queries::add_trusted_user(
@@ -94,7 +104,7 @@ pub async fn add_trusted_user(
         &id,
         &agent_id,
         &req.user_id,
-        &permission,
+        permission,
         "owner",
         &now,
         &display_name,
@@ -120,6 +130,17 @@ pub async fn add_trusted_user(
     }))
 }
 
+/// リクエストの権限を列挙型へ。省略時は既定（`user`）、未知の値は 400（#234）。
+///
+/// **入口の検証であって認可の判定ではない。** ここを通った値だけが DB に入るので、
+/// 表記ゆれの行は以後作られない。
+fn parse_permission(raw: Option<&str>) -> Result<TrustedUserPermission, StatusCode> {
+    match raw {
+        None => Ok(TrustedUserPermission::default()),
+        Some(s) => TrustedUserPermission::parse(s).ok_or(StatusCode::BAD_REQUEST),
+    }
+}
+
 /// 一意制約違反か（＝運用者が直せる衝突で、サーバの故障ではない）。
 fn is_unique_violation(e: &anyhow::Error) -> bool {
     matches!(
@@ -135,17 +156,23 @@ pub struct UpdateTrustedUserRequest {
     pub display_name: Option<String>,
 }
 
+/// 権限を更新する。**未知の権限は 400**（登録と同じ入口の検証, #234）。
+/// 権限を省略した更新（表示名だけ）は従来どおり権限に触らない。
 pub async fn update_trusted_user(
     State(state): State<AppState>,
     Path((_agent_id, user_id)): Path<(String, String)>,
     Json(req): Json<UpdateTrustedUserRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let permission = match req.permission.as_deref() {
+        None => None,
+        Some(s) => Some(TrustedUserPermission::parse(s).ok_or(StatusCode::BAD_REQUEST)?),
+    };
     let conn = state.db.lock().unwrap();
     // 2フィールドの更新は不可分にする（片方だけ永続化されて 500 を返さない）
     let update = || -> anyhow::Result<bool> {
         let tx = conn.unchecked_transaction()?;
         let mut updated = false;
-        if let Some(ref permission) = req.permission {
+        if let Some(permission) = permission {
             updated |=
                 opencrab_db::queries::update_trusted_user_permission(&tx, &user_id, permission)?;
         }
@@ -185,6 +212,20 @@ mod tests {
             permission: None,
             display_name: None,
             platform: platform.map(str::to_string),
+        }
+    }
+
+    /// 権限を明示する登録リクエスト。
+    fn req_with_permission(
+        user_id: &str,
+        platform: &str,
+        permission: &str,
+    ) -> AddTrustedUserRequest {
+        AddTrustedUserRequest {
+            user_id: user_id.to_string(),
+            permission: Some(permission.to_string()),
+            display_name: Some("Crab B".to_string()),
+            platform: Some(platform.to_string()),
         }
     }
 
@@ -308,5 +349,125 @@ mod tests {
         assert_eq!(rows[0].platform, TRUSTED_PLATFORM_WEB);
         // 経路で絞らない一覧であることは維持（運用者は全経路を見られる）。
         assert_eq!(rows[0].user_id, "dash-user");
+    }
+
+    // ---- 権限の表記（#234） ----
+
+    /// 権限を省略した登録は `user`（従来の既定と同じ）。
+    #[tokio::test]
+    async fn permission_defaults_to_user() {
+        let state = crate::test_app_state();
+        let dto = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("42", None)),
+        )
+        .await
+        .expect("add")
+        .0;
+        assert_eq!(dto.permission, TrustedUserPermission::User);
+    }
+
+    /// **未知の権限は 400。** ここが検証していなかったのが #234 の直接原因。
+    /// 旧いアンダースコア表記も通さない（通す表記をひとつに保つ）。
+    #[tokio::test]
+    async fn unknown_permission_is_rejected() {
+        let state = crate::test_app_state();
+        for bad in ["co_agent", "coagent", "CoAgent", "trusted", "admin", ""] {
+            let err = add_trusted_user(
+                State(state.clone()),
+                Path("agent-1".to_string()),
+                Json(req_with_permission("42", TRUSTED_PLATFORM_WEB, bad)),
+            )
+            .await
+            .expect_err("unknown permission");
+            assert_eq!(err, StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+        // 弾かれた登録は 1 行も残らない（「登録できたのに効かない」行を作らせない）。
+        let conn = state.db.lock().unwrap();
+        assert!(opencrab_db::queries::list_trusted_users(&conn, "agent-1")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// 更新も同じ入口で弾く。弾かれたら**元の権限のまま**（部分適用しない）。
+    #[tokio::test]
+    async fn unknown_permission_is_rejected_on_update() {
+        let state = crate::test_app_state();
+        let dto = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req_with_permission("42", TRUSTED_PLATFORM_WEB, "co-agent")),
+        )
+        .await
+        .expect("add")
+        .0;
+
+        let err = update_trusted_user(
+            State(state.clone()),
+            Path(("agent-1".to_string(), dto.id.clone())),
+            Json(UpdateTrustedUserRequest {
+                permission: Some("co_agent".to_string()),
+                display_name: None,
+            }),
+        )
+        .await
+        .expect_err("unknown permission");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+
+        let rows = list_trusted_users(State(state.clone()), Path("agent-1".to_string()))
+            .await
+            .0;
+        assert_eq!(rows[0].permission, TrustedUserPermission::CoAgent);
+    }
+
+    /// **ダッシュボードから協働エージェントとして登録した行が実際に機能すること**（#234 の本題）。
+    ///
+    /// UI が送る表記（`co-agent`）で登録した行が、
+    /// - 呼び出し元の判定で `CoAgent` になり、
+    /// - 相互レビューの名簿に載る。
+    ///
+    /// 表記が食い違っていた頃は、どちらも「ただの信頼済みユーザー」に落ちていた。
+    #[tokio::test]
+    async fn co_agent_registered_from_the_dashboard_actually_works() {
+        let state = crate::test_app_state();
+        let dto = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req_with_permission(
+                "dash-user",
+                TRUSTED_PLATFORM_WEB,
+                "co-agent",
+            )),
+        )
+        .await
+        .expect("add")
+        .0;
+        // 応答のキーは据え置き、値はケバブケース。
+        assert_eq!(dto.permission, TrustedUserPermission::CoAgent);
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap()["permission"],
+            serde_json::json!("co-agent")
+        );
+
+        let conn = state.db.lock().unwrap();
+        // 呼び出し元の判定
+        assert_eq!(
+            crate::caller_identity::resolve_caller_identity(
+                &conn,
+                TRUSTED_PLATFORM_WEB,
+                "dash-user",
+                "agent-1",
+            ),
+            opencrab_actions::CallerIdentity::CoAgent {
+                agent_id: "dash-user".to_string()
+            }
+        );
+        // 相互レビューの名簿
+        let roster =
+            opencrab_db::queries::list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_WEB, "agent-1")
+                .unwrap();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].user_id, "dash-user");
     }
 }

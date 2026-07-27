@@ -121,7 +121,12 @@ mod tests {
     use super::*;
     use opencrab_actions::CallerIdentity;
 
-    fn register(state: &AppState, platform: &str, user_id: &str, permission: &str) {
+    fn register(
+        state: &AppState,
+        platform: &str,
+        user_id: &str,
+        permission: opencrab_db::queries::TrustedUserPermission,
+    ) {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::add_trusted_user(
             &conn,
@@ -147,7 +152,7 @@ mod tests {
             &state,
             opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "42",
-            "user",
+            opencrab_db::queries::TrustedUserPermission::User,
         );
         assert_eq!(state.resolve_caller("agent-1", "42"), CallerIdentity::Agent);
     }
@@ -160,7 +165,7 @@ mod tests {
             &state,
             opencrab_db::queries::TRUSTED_PLATFORM_WEB,
             "dash-user",
-            "co_agent",
+            opencrab_db::queries::TrustedUserPermission::CoAgent,
         );
         assert_eq!(
             state.resolve_caller("agent-1", "dash-user"),
@@ -178,7 +183,7 @@ mod tests {
             &state,
             opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
             "42",
-            "user",
+            opencrab_db::queries::TrustedUserPermission::User,
         );
         assert_eq!(
             state.resolve_caller("agent-1", "999"),

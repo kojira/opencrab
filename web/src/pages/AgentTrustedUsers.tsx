@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import type { AgentDetail } from "../api/types";
-import { getTrustedUsers, addTrustedUser, removeTrustedUser, updateTrustedUser, TRUSTED_PLATFORMS } from "../api/trusted_users";
-import type { TrustedUserDto, TrustedPlatform } from "../api/trusted_users";
+import { getTrustedUsers, addTrustedUser, removeTrustedUser, updateTrustedUser, TRUSTED_PLATFORMS, TRUSTED_USER_PERMISSIONS } from "../api/trusted_users";
+import type { TrustedUserDto, TrustedPlatform, TrustedUserPermission } from "../api/trusted_users";
 import { useTranslation } from "react-i18next";
 
 interface AgentContext {
@@ -10,10 +10,11 @@ interface AgentContext {
   agentId: string;
 }
 
-const PERMISSIONS = ["user", "co-agent", "owner"];
-
 /** 経路を省略した登録は `discord` になる（サーバ側の既定と揃える）。 */
 const DEFAULT_PLATFORM: TrustedPlatform = "discord";
+
+/** 権限を省略した登録は `user` になる（サーバ側の既定と揃える）。 */
+const DEFAULT_PERMISSION: TrustedUserPermission = "user";
 
 export default function AgentTrustedUsers() {
   const { agentId } = useOutletContext<AgentContext>();
@@ -24,14 +25,14 @@ export default function AgentTrustedUsers() {
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [newUserId, setNewUserId] = useState("");
-  const [newPermission, setNewPermission] = useState("user");
+  const [newPermission, setNewPermission] = useState<TrustedUserPermission>(DEFAULT_PERMISSION);
   const [newPlatform, setNewPlatform] = useState<TrustedPlatform>(DEFAULT_PLATFORM);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editPermission, setEditPermission] = useState("user");
+  const [editPermission, setEditPermission] = useState<TrustedUserPermission>(DEFAULT_PERMISSION);
 
   const loadUsers = useCallback(() => {
     setLoading(true);
@@ -62,7 +63,7 @@ export default function AgentTrustedUsers() {
       await addTrustedUser(agentId, { user_id: uid, permission: newPermission, platform: newPlatform });
       setShowAddModal(false);
       setNewUserId("");
-      setNewPermission("user");
+      setNewPermission(DEFAULT_PERMISSION);
       setNewPlatform(DEFAULT_PLATFORM);
       loadUsers();
     } catch (e: unknown) {
@@ -101,7 +102,7 @@ export default function AgentTrustedUsers() {
             setShowAddModal(true);
             setAddError(null);
             setNewUserId("");
-            setNewPermission("user");
+            setNewPermission(DEFAULT_PERMISSION);
             setNewPlatform(DEFAULT_PLATFORM);
           }}
         >
@@ -178,9 +179,9 @@ export default function AgentTrustedUsers() {
                         <select
                           className="input-outlined text-sm py-1"
                           value={editPermission}
-                          onChange={(e) => setEditPermission(e.target.value)}
+                          onChange={(e) => setEditPermission(e.target.value as TrustedUserPermission)}
                         >
-                          {PERMISSIONS.map((p) => (
+                          {TRUSTED_USER_PERMISSIONS.map((p) => (
                             <option key={p} value={p}>{p}</option>
                           ))}
                         </select>
@@ -259,9 +260,9 @@ export default function AgentTrustedUsers() {
                 <select
                   className="input-outlined"
                   value={newPermission}
-                  onChange={(e) => setNewPermission(e.target.value)}
+                  onChange={(e) => setNewPermission(e.target.value as TrustedUserPermission)}
                 >
-                  {PERMISSIONS.map((p) => (
+                  {TRUSTED_USER_PERMISSIONS.map((p) => (
                     <option key={p} value={p}>{p}</option>
                   ))}
                 </select>
