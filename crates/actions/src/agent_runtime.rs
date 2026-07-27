@@ -115,6 +115,15 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
         responder_id: Option<&str>,
     );
 
-    /// 古い pending interaction を掃除する（起動時）。
+    /// 前プロセスから残った pending interaction を**期限切れとして閉じる**（プロセス起動時）。
+    ///
+    /// メモリ上の登録簿は再起動で消えるため、`pending` のまま残った行はどこへも応答を
+    /// 返せない。無言で放置せず閉じ、何を閉じたかをログに残す（#196）。
     fn cleanup_stale_interactions(&self);
+
+    /// 指定エージェント分だけ pending interaction を閉じる（per-agent ゲートウェイ起動時）。
+    ///
+    /// per-agent ゲートウェイは実行中にも再起動できるため、全件を閉じると同時に動いて
+    /// いる**別エージェントの生きた保留対話**まで落としてしまう（#196）。
+    fn cleanup_stale_interactions_for_agent(&self, agent_id: &str);
 }

@@ -161,10 +161,48 @@ impl AgentRuntime for AppState {
 
     fn cleanup_stale_interactions(&self) {
         let Ok(conn) = self.db.lock() else { return };
-        if let Ok(count) = opencrab_db::queries::cleanup_stale_pending_interactions(&conn) {
-            if count > 0 {
-                tracing::info!(count = count, "Cleaned up stale pending interactions");
+        match opencrab_db::queries::cleanup_stale_pending_interactions(&conn) {
+            Ok(closed) => log_closed_interactions(&closed, None),
+            Err(e) => tracing::warn!("cleanup_stale_pending_interactions failed: {e}"),
+        }
+    }
+
+    fn cleanup_stale_interactions_for_agent(&self, agent_id: &str) {
+        let Ok(conn) = self.db.lock() else { return };
+        match opencrab_db::queries::cleanup_stale_pending_interactions_for_agent(&conn, agent_id) {
+            Ok(closed) => log_closed_interactions(&closed, Some(agent_id)),
+            Err(e) => {
+                tracing::warn!(agent_id = %agent_id, "cleanup_stale_pending_interactions failed: {e}")
             }
         }
     }
+}
+
+/// 閉じた保留対話を 1 件ずつ残す（#196）。
+///
+/// 件数だけだと「どの会話の応答が捨てられたか」が後から追えない。`session_id` は
+/// #196 で挿入時に埋めるようにしたので、ここで意味のある値が出る。
+fn log_closed_interactions(
+    closed: &[opencrab_db::queries::ClosedInteraction],
+    scope: Option<&str>,
+) {
+    if closed.is_empty() {
+        return;
+    }
+    for c in closed {
+        tracing::info!(
+            interaction_id = %c.id,
+            agent_id = %c.agent_id,
+            session_id = %c.session_id,
+            platform = %c.platform,
+            channel_id = %c.channel_id,
+            surface_id = %c.surface_id,
+            "Closed stale pending interaction as timed out (no in-memory registration to resume)"
+        );
+    }
+    tracing::info!(
+        count = closed.len(),
+        scope = scope.unwrap_or("all-agents"),
+        "Cleaned up stale pending interactions"
+    );
 }
