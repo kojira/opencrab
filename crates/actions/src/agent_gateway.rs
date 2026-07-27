@@ -23,6 +23,18 @@
 //! [`AgentGatewayLifecycle::start`] は `agent_id` だけを取り、**設定の読み出しを実装側の
 //! 責務**にする。これが唯一の共通化になる。
 //!
+//! ## transport 固有の操作は capability の受け口で渡す（PR4）
+//!
+//! 起動・停止・生存確認は全 transport 共通だが、「ツール実行の実体を渡す」「鍵を作る」は
+//! それを持つ transport にしか無い。これらを共通メソッドにすると持たない実装が
+//! `unimplemented!()` を並べることになるので、**既定 `None` の capability accessor**
+//! （[`AgentGatewayLifecycle::gateway_actions_for`] /
+//! [`AgentGatewayLifecycle::key_provisioning`]）として足す。
+//!
+//! この形は新発明ではなく、[`opencrab_gateway::GatewayActions`] が
+//! `a2ui_surface()` / `text_delivery()` で既に採っている流儀に倣ったもの
+//! （「提供できる transport だけが `Some` を返す」「上位は有無で分岐するだけ」）。
+//!
 //! ## なぜ MCP を登録簿に入れないか
 //!
 //! `crates/mcp` は**受信を持たない**。外部プロセスの道具をエージェントへ供給する側で、
@@ -120,6 +132,58 @@ pub fn is_start_declined(err: &anyhow::Error) -> bool {
     err.downcast_ref::<StartDeclined>().is_some()
 }
 
+/// transport が払い出した鍵（[`GatewayKeyProvisioning`] の戻り値 / #191 段階2 PR4）。
+///
+/// ## `Debug` を derive しない
+///
+/// `secret` は**秘密値**。derive すると `tracing` の `?key` や `format!("{e:?}")` 経由で
+/// 平文が構造化ログへ落ちる。手実装で伏せ、`Display` は実装しない（表示できる形を
+/// そもそも作らない）。この型は「払い出しから保存先へ渡すまでの一時的な運び手」であって、
+/// 保持・記録する対象ではない。
+#[derive(Clone)]
+pub struct ProvisionedKey {
+    /// 秘密鍵（Nostr なら nsec）。**保存先へ渡す以外に使わないこと。**
+    pub secret: String,
+    /// 公開識別子（Nostr なら npub）。
+    pub public_id: String,
+    /// 公開鍵の hex 表現（transport が返さなければ空）。
+    pub public_key_hex: String,
+}
+
+impl std::fmt::Debug for ProvisionedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionedKey")
+            .field("secret", &"<redacted>")
+            .field("public_id", &self.public_id)
+            .field("public_key_hex", &self.public_key_hex)
+            .finish()
+    }
+}
+
+/// transport 固有の**鍵の払い出し**（capability / #191 段階2 PR4）。
+///
+/// 起動・停止・生存確認と違い、鍵を作れる transport は限られる。持つ実装だけが
+/// [`AgentGatewayLifecycle::key_provisioning`] から `Some` を返す。
+///
+/// **DB への書き込みはここでやらない。** 「生成してから DB を書く」「起動が成功して
+/// から有効化する」といった順序は呼び出し側（ハンドラ）の方針であり、capability は
+/// 払い出しそのものに閉じる（ライフサイクル契約が起動と停止だけなのと同じ理由）。
+#[async_trait]
+pub trait GatewayKeyProvisioning: Send + Sync {
+    /// 新しい鍵を払い出す。
+    ///
+    /// `prefix` は transport が定義する vanity prefix（空なら制約なし）。**書式の検証は
+    /// 実装側**（無効な prefix で外部プロセスを起こさないため、呼び出し側が手前で
+    /// 弾いてもよい）。
+    async fn generate_key(&self, prefix: &str) -> Result<ProvisionedKey>;
+
+    /// 払い出した鍵を transport の保管場所へ保存する。
+    ///
+    /// 保存先とパーミッションは transport の責務（Nostr は per-agent ディレクトリへ
+    /// 0600 で書く）。**秘密値は戻り値にも保存パスにも出さない。**
+    fn store_generated_key(&self, agent_id: &str, key: &ProvisionedKey) -> Result<()>;
+}
+
 /// 受信を持つ transport の per-agent ライフサイクル管理。
 ///
 /// 実装するのは**マネージャ**（`DiscordGatewayManager` / `NostrGatewayManager`）であって
@@ -179,6 +243,35 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
 
     /// この transport の全エージェント分を停止する（プロセス終了時）。
     async fn shutdown_all(&self);
+
+    /// この transport がこのエージェント向けの**ツール実行の実体**を提供するなら返す
+    /// （capability / #191 段階2 PR4）。
+    ///
+    /// 稼働中の接続を持つ transport だけが `Some` を返す（接続が無ければツールは
+    /// 実行できない）。REST 経由の会話は「専用ゲートウェイが稼働していればその
+    /// transport のツールも使える」という既存の挙動をこれで表す。
+    ///
+    /// `agent_id` を取るのは、実体が**エージェント単位の接続**だから
+    /// （[`GatewayActions::a2ui_surface`] のような接続 1 本に紐づく accessor と違い、
+    /// マネージャは全エージェント分を束ねている）。
+    ///
+    /// 既定は `None`（ツール実行の実体を持たない transport）。
+    ///
+    /// [`GatewayActions::a2ui_surface`]: opencrab_gateway::GatewayActions::a2ui_surface
+    fn gateway_actions_for(
+        &self,
+        _agent_id: &str,
+    ) -> Option<Arc<dyn opencrab_gateway::GatewayActions>> {
+        None
+    }
+
+    /// この transport が**鍵の払い出し**を提供するなら返す（capability / #191 段階2 PR4）。
+    ///
+    /// エージェント単位ではなくマネージャ単位（払い出しは外部コマンドの設定を継承する
+    /// だけで、稼働中の接続を必要としない）。既定は `None`（鍵を作らない transport）。
+    fn key_provisioning(&self) -> Option<Arc<dyn GatewayKeyProvisioning>> {
+        None
+    }
 }
 
 /// 稼働中の transport マネージャの登録簿（#191 段階2）。
@@ -406,6 +499,63 @@ mod tests {
             !is_start_declined(&real_failure),
             "本物の起動失敗を見送り扱いにすると、起動できない状態が無音になる"
         );
+    }
+
+    /// **capability を実装しない transport は `None` を返す**（既定が拒否側）。
+    ///
+    /// `FakeGateway` は 2 つの accessor をどちらも override していない。上位はここが
+    /// `None` のとき「その機能は無い」として扱う（ツール実行の実体なし / 鍵を作れない）。
+    /// 既定を `Some` 相当にすると、持たない transport が呼ばれて異常終了する。
+    #[test]
+    fn capability_accessors_default_to_none() {
+        let registry = AgentGatewayRegistry::new();
+        registry.register(FakeGateway::new(kinds::NOSTR, &["crab"]));
+        let gw = registry.get(kinds::NOSTR).unwrap();
+
+        assert!(
+            gw.gateway_actions_for("crab").is_none(),
+            "実装しない transport はツール実行の実体を持たない"
+        );
+        assert!(
+            gw.key_provisioning().is_none(),
+            "実装しない transport は鍵を払い出せない"
+        );
+    }
+
+    /// **未登録の種別からは capability も引けない**（受け口が無い構成で正しく失敗する）。
+    ///
+    /// 名指しフィールドが `None` のときと同じ形（`Option` が `None`）に落ちることを
+    /// 固定する。ここが `Some` に化けると、稼働していない transport のツールが
+    /// 生えたり、鍵の払い出しが黙って別経路に流れる。
+    #[test]
+    fn unregistered_kind_yields_no_capability() {
+        let registry = AgentGatewayRegistry::new();
+        assert!(registry.get(kinds::DISCORD).is_none());
+        assert!(registry
+            .get(kinds::DISCORD)
+            .and_then(|gw| gw.gateway_actions_for("crab"))
+            .is_none());
+        assert!(registry
+            .get(kinds::NOSTR)
+            .and_then(|gw| gw.key_provisioning())
+            .is_none());
+    }
+
+    /// 秘密値が `Debug` 出力に出ない（ログ・エラー文字列への漏洩を型で止める）。
+    #[test]
+    fn provisioned_key_debug_redacts_the_secret() {
+        let key = ProvisionedKey {
+            secret: "nsec1secretvalue".to_string(),
+            public_id: "npub1public".to_string(),
+            public_key_hex: "deadbeef".to_string(),
+        };
+        let rendered = format!("{key:?}");
+        assert!(
+            !rendered.contains("nsec1secretvalue"),
+            "秘密鍵が Debug に出ている: {rendered}"
+        );
+        assert!(rendered.contains("npub1public"), "公開側は見えること");
+        assert!(rendered.contains("deadbeef"));
     }
 
     /// トレイトオブジェクト越しに 5 操作すべてを呼べる（`dyn` として使える形か）。

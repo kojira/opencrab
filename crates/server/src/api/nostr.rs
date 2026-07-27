@@ -223,10 +223,16 @@ pub async fn generate_nostr_key(
         }
     }
 
-    // ここだけは名指しのまま。鍵生成（nostaro vanity）は **transport 固有の操作**で、
-    // ライフサイクル契約（起動 / 停止 / 生存確認）には無い。capability の受け口を
-    // 用意して名指しを外すのは #191 段階2 PR4。
-    let Some(manager) = state.nostr_manager.as_ref() else {
+    // 鍵生成（nostaro vanity）は **transport 固有の操作**で、ライフサイクル契約
+    // （起動 / 停止 / 生存確認）には無い。capability の受け口から引く（#191 段階2 PR4）。
+    // **受け口が無い（未登録 / 提供しない）構成は 503**。名指しフィールドが `None`
+    // だったときと同じ判定・同じ文言で、判定するこの位置（既存鍵の 409 の後、生成の
+    // 手前）も変えない。
+    let Some(provisioning) = state
+        .gateways
+        .get(gateway_kinds::NOSTR)
+        .and_then(|gw| gw.key_provisioning())
+    else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Nostr マネージャが無効です".to_string(),
@@ -236,13 +242,13 @@ pub async fn generate_nostr_key(
     // 生成（nostaro vanity）。同時実行は NostaroCli 内のゲートで 1 に直列化する
     // （進行中なら待つ。生成は ≤3 文字で通常即時）。失敗（未インストール/timeout 等）は
     // 500。エラー文言に秘密鍵が載らないことは parse 側で担保済み（失敗経路に鍵は無い）。
-    let generated = manager
+    let generated = provisioning
         .generate_key(prefix)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // 鍵を差し替えるので、稼働中なら止める（新アイデンティティで黙って走らせない）。
-    // 停止は共通操作なので、上の名指しではなく登録簿から引く。
+    // 停止は共通操作で、上と同じ登録簿から引く。
     if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
         gw.stop(&id).await;
     }
@@ -267,7 +273,7 @@ pub async fn generate_nostr_key(
             .unwrap_or_else(|| ("[]".to_string(), "{}".to_string()));
         let row = AgentNostrConfigRow {
             agent_id: id.clone(),
-            secret_key: generated.nsec,
+            secret_key: generated.secret,
             relays_json,
             filter_json,
             enabled: false,
@@ -278,8 +284,8 @@ pub async fn generate_nostr_key(
 
     Ok(Json(json!({
         "generated": true,
-        "npub": generated.npub,
-        "pubkey": generated.pubkey,
+        "npub": generated.public_id,
+        "pubkey": generated.public_key_hex,
     })))
 }
 

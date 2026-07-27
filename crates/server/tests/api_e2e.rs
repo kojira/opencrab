@@ -40,9 +40,6 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        #[cfg(feature = "discord")]
-        discord_manager: None,
-        nostr_manager: None,
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
@@ -1035,9 +1032,6 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        #[cfg(feature = "discord")]
-        discord_manager: None,
-        nostr_manager: None,
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
@@ -1943,9 +1937,6 @@ fn state_with_consolidation(
         skill_consolidation: cfg,
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
-        #[cfg(feature = "discord")]
-        discord_manager: None,
-        nostr_manager: None,
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),

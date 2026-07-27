@@ -760,21 +760,27 @@ impl SystemGatewayActions {
             .and_then(|v| v.as_str())
             .map(|s| s.trim())
             .unwrap_or("");
-        // 稼働中のマネージャの CLI（binary_path 等の設定を継承）を使う。無ければ既定。
-        let cli = self
+        // 登録済みの Nostr transport の払い出し口（binary_path 等の設定を継承）を使う。
+        // **無ければ既定**（#191 段階2 PR4）。ここは「受け口が無ければ拒否」ではない:
+        // 移設前も `unwrap_or_default()` で既定 CLI にフォールバックしており、鍵生成は
+        // ゲートウェイの稼働を必要としない（bootstrap 用途 = 鍵が無い状態から呼ぶ）。
+        // これをガードに変えると「鍵がまだ無いから起動もしていない」正しい経路が
+        // 塞がる（#191 の PR3 で踏みかけた、順序・フォールバックをガードへ機械的に
+        // 移し替える誤りと同じ形）。
+        let provisioning = self
             .state
-            .nostr_manager
-            .as_ref()
-            .map(|m| m.cli().clone())
-            .unwrap_or_default();
-        match cli.vanity(prefix).await {
-            Ok(k) => match opencrab_nostr::NostaroCli::save_generated_key(&ctx.agent_id, &k) {
+            .gateways
+            .get(opencrab_actions::gateway_kinds::NOSTR)
+            .and_then(|gw| gw.key_provisioning())
+            .unwrap_or_else(|| Arc::new(opencrab_nostr::NostrKeyProvisioning::default()));
+        match provisioning.generate_key(prefix).await {
+            Ok(k) => match provisioning.store_generated_key(&ctx.agent_id, &k) {
                 Ok(_) => GatewayActionResult {
                     success: true,
                     // nsec は返さない（サーバ内 0600 保存済み）。npub/pubkey のみ。
                     data: Some(json!({
-                        "npub": k.npub,
-                        "pubkey": k.pubkey,
+                        "npub": k.public_id,
+                        "pubkey": k.public_key_hex,
                         "note": "新しい鍵を生成しました。秘密鍵(nsec)はサーバ内に安全に保存済みで、セキュリティ上あなた（LLM）には渡していません。共有・言及してよいのは npub までです。",
                     })),
                     error: None,
