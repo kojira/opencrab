@@ -44,6 +44,7 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
@@ -1038,6 +1039,7 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
@@ -1945,6 +1947,7 @@ fn state_with_consolidation(
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),

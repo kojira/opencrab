@@ -94,6 +94,22 @@ pub struct AppState {
     /// per-agent Nostr sub-gateway マネージャ（main で構築してセットされる）。
     pub nostr_manager: Option<SharedNostrManager>,
     pub mcp_manager: Option<SharedMcpManager>,
+    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2 PR2）。
+    ///
+    /// 上の名指しフィールド（`discord_manager` / `nostr_manager`）と**併存**する。
+    /// この PR では登録するだけで、呼び出し側はまだ名指しフィールドを見ている
+    /// （差し替えは PR3）。
+    ///
+    /// **内部可変**（[`opencrab_actions::AgentGatewayRegistry`] が中で `RwLock` を持つ）。
+    /// マネージャの生成順は仕様であり（Discord のマネージャは共有ゲートウェイへ渡す
+    /// state clone より前、Nostr はルータ構築の直前）、不変フィールドにすると
+    /// 「全マネージャが state 構築前に揃っていること」を要求してその順序と衝突する。
+    /// 後から登録できる形にして順序依存を構造的に消す（`voice_runtime` /
+    /// `subtask_lifecycle_notifier` と同じ流儀）。
+    ///
+    /// **MCP は入れない。** `crates/mcp` は受信を持たず transport ではない（道具の
+    /// 供給者で、注入は深さ 0 限定）。`mcp_manager` は名指しのまま残す。
+    pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,
     /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
     /// 実体は独立クレート `opencrab-web-gateway`（#190）。
     pub web_gateway: Arc<opencrab_web_gateway::WebGateway>,
@@ -175,6 +191,7 @@ pub(crate) fn test_app_state() -> AppState {
         discord_manager: None,
         nostr_manager: None,
         mcp_manager: None,
+        gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
@@ -515,4 +532,109 @@ async fn health_check() -> &'static str {
 
 async fn api_health_check() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"status": "ok"}))
+}
+
+/// transport 登録簿（#191 段階2 PR2）が、実物のマネージャを載せて期待どおり働くこと。
+///
+/// 偽実装ではなく `DiscordGatewayManager` / `NostrGatewayManager` を入れる。生成は
+/// ネットワークに出ない（実際の接続は `start` を呼んだときだけ）ので、
+/// 「本物がトレイトオブジェクトとして成立するか」をここで押さえられる。
+#[cfg(test)]
+mod gateway_registry_tests {
+    use super::*;
+    use opencrab_actions::gateway_kinds;
+
+    /// state を clone しても登録簿は**同じ 1 つ**を指す。
+    ///
+    /// これが成り立たないと「共有ゲートウェイへ渡した clone からは専用ゲートウェイが
+    /// 見えない」ことになり、内部可変にして後から登録する意味が無くなる（#40 の
+    /// 二重処理防止が壊れる）。
+    #[test]
+    fn registry_is_shared_across_state_clones() {
+        let state = test_app_state();
+        let clone = state.clone();
+        assert!(Arc::ptr_eq(&state.gateways, &clone.gateways));
+
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+        assert_eq!(clone.gateways.kinds(), vec![gateway_kinds::NOSTR]);
+    }
+
+    /// 実物のマネージャを登録順どおりに載せられる（Discord → Nostr）。
+    #[cfg(feature = "discord")]
+    #[test]
+    fn real_managers_register_in_startup_order() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(discord);
+        state.gateways.register(nostr);
+
+        assert_eq!(
+            state.gateways.kinds(),
+            vec![gateway_kinds::DISCORD, gateway_kinds::NOSTR],
+            "登録順 = main の起動順。PR5 の走査がこの順を再現する"
+        );
+    }
+
+    /// 生存確認は「稼働していない / 未登録」のどちらでも false に倒れる。
+    ///
+    /// これはルーティング判定（専用ゲートウェイに任せるか、共有側が続けるか）なので、
+    /// 未登録で true に倒すと二重処理、panic させると停止する。
+    #[test]
+    fn is_running_falls_back_to_false() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+
+        assert!(
+            !state.gateways.is_running(gateway_kinds::NOSTR, "crab"),
+            "起動していないエージェントは false"
+        );
+        assert!(
+            !state.gateways.is_running(gateway_kinds::DISCORD, "crab"),
+            "未登録の種別も false（共有側が処理を続ける）"
+        );
+        assert!(
+            !state.gateways.is_running("mcp", "crab"),
+            "MCP は登録簿に入れない（受信を持たない）"
+        );
+    }
+
+    /// トレイト経由で起動を呼べる。設定行が無ければ `Err`（panic しない）。
+    #[tokio::test]
+    async fn start_through_trait_errors_without_db_config() {
+        let state = test_app_state();
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        state.gateways.register(nostr);
+
+        let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
+        assert!(
+            gw.start("no-such-agent").await.is_err(),
+            "設定を DB から読む契約なので、行が無ければ Err"
+        );
+        // 停止と全停止は稼働ゼロでも安全に呼べる。
+        gw.stop("no-such-agent").await;
+        gw.shutdown_all().await;
+    }
+
+    /// Discord も同じ契約で扱える（`start` は DB から読み、行が無ければ `Err`）。
+    ///
+    /// ここまで来れば実ネットワークには出ない（接続は設定行があるときだけ）。
+    #[cfg(feature = "discord")]
+    #[tokio::test]
+    async fn discord_start_through_trait_errors_without_db_config() {
+        let state = test_app_state();
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        state.gateways.register(discord);
+
+        let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
+        let err = gw.start("no-such-agent").await.unwrap_err().to_string();
+        assert!(
+            err.contains("no-such-agent"),
+            "どのエージェントか分かること: {err}"
+        );
+        gw.stop("no-such-agent").await;
+        gw.shutdown_all().await;
+    }
 }
