@@ -101,36 +101,88 @@ pub fn warn_legacy_row_no_longer_read(
 mod tests {
     use super::*;
     use opencrab_db::queries::{TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_REST};
+    use std::cell::RefCell;
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
 
-    /// `f` の実行中に出た tracing 出力（WARN 以上）を返す。
+    // ---- ログ捕捉（プロセスで 1 個の subscriber + スレッドローカルの捕捉先） ----
+    //
+    // **`tracing::subscriber::with_default` で捕捉してはいけない。** tracing は
+    // callsite ごとの `Interest`（このイベントを組み立てるか）を**プロセス全体で
+    // 1 度だけ**決めてキャッシュする。誰も subscriber を張っていないスレッドが先に
+    // その callsite を踏むと `Interest::never()` が焼き付き、以後は誰が subscriber を
+    // 張ってもそのイベントは組み立てられない。
+    //
+    // `with_default` はスレッドローカルなので、この焼き付けを止められない:
+    // subscriber を作った瞬間にグローバルの最大レベルが WARN へ上がり（それまでは
+    // OFF で誰も callsite へ到達しない）、**その直後から**、同じ callsite を踏む
+    // 並行テスト（`legacy_discord_row_no_longer_grants_trust` /
+    // `no_warning_without_a_legacy_row` / `web_runner_impl` 側）が捕捉側より先に
+    // 登録してしまう競合が開く。実測で 200 回中 16〜19 回、捕捉バッファが空になった。
+    //
+    // なのでプロセス全体で subscriber を 1 個だけ張る（最初に踏むのが必ずこの
+    // subscriber になり、`Interest` は常に「出す」で焼き付く）。どのテストの出力を
+    // 捕まえるかは**スレッドローカルの捕捉先**で切り替える。テストは 1 本 1 スレッドで
+    // 走るので、捕捉中でないスレッドの警告は捨てられ、テスト同士は干渉しない。
+
+    thread_local! {
+        /// このスレッドが捕捉中なら書き込み先。捕捉していなければ `None`（捨てる）。
+        static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct ThreadLocalWriter;
+
+    impl io::Write for ThreadLocalWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            SINK.with(|sink| {
+                if let Some(sink) = sink.borrow().as_ref() {
+                    sink.lock().unwrap().extend_from_slice(buf);
+                }
+            });
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+        type Writer = ThreadLocalWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            *self
+        }
+    }
+
+    /// `f` の実行中に**このスレッドで**出た tracing 出力（WARN 以上）を返す。
     /// 「警告条件を満たす」ではなく「実際に warn イベントが出る」ことを見るため。
     fn captured_logs(f: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-        impl io::Write for CaptureWriter {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalWriter)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
+            // 張れなければ捕捉は成立しない（別の subscriber が先に居る = テストが
+            // 意味を失う）ので、握りつぶさず落とす。
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("捕捉用 subscriber を張れること（他に global default が居ない）");
+        });
+
+        /// `f` が panic しても捕捉先を残さない。
+        struct Capturing;
+        impl Drop for Capturing {
+            fn drop(&mut self) {
+                SINK.with(|sink| *sink.borrow_mut() = None);
             }
         }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-            type Writer = CaptureWriter;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
+
         let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(CaptureWriter(buf.clone()))
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
+        SINK.with(|sink| *sink.borrow_mut() = Some(buf.clone()));
+        let _capturing = Capturing;
+        f();
+        drop(_capturing);
         let bytes = buf.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
     }
