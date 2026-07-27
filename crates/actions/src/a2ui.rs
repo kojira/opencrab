@@ -18,8 +18,9 @@
 //! - **セッション必須（fail-closed）**: `session_id` が無い/空なら `""` で登録せず
 //!   明示エラー（#36）。`Option` を素通しさせない。
 //! - **オーナー限定ゲート**: 保留状態に載せるオーナー識別子は
-//!   [`A2uiSurface::owner_id`]。空文字だと判定が無効（誰でも操作可）になるため、
-//!   配線側が空文字を渡さないこと。`owner_only` 引数は DB 列にだけ効く（移設前と同じ）。
+//!   [`A2uiSurface::owner_id`]。未設定（空文字・空白のみ）なら**誰も操作できない**
+//!   （fail-closed, #174）ので、配線側が空文字を渡すと UI が誰にも応答しなくなる。
+//!   `owner_only` 引数は DB 列にだけ効く（移設前と同じ）。
 //! - **sub-engine からの遮断**: `send_ui` は `SUB_ENGINE_ALLOWED_ACTIONS`（許可リスト）
 //!   に無く、`DISCORD_ACTIONS`（深さ拒否リスト・名前ベース）に載る。多層防御は移設後も
 //!   名前で効く。
@@ -265,7 +266,8 @@ pub async fn send_ui(
             surface_id: surface_id.clone(),
             a2ui_components: components.clone(),
             // owner の識別子は描画面が保持する値を使う（args 経由では注入されない）。
-            // 空文字だと owner 判定が無効になる点は移設前と同じ。
+            // 未設定（空文字・空白のみ）なら誰も操作できない（fail-closed, #174）。
+            // ここが空のまま登録すると、その UI は誰の操作にも応答しない。
             owner_id: surface.owner_id.clone(),
             created_at: chrono::Utc::now(),
             timeout_secs,

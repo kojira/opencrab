@@ -12,10 +12,21 @@
 use tracing::warn;
 
 /// owner 未設定が招く結果（両経路で同じ内容を出す）。
-const CONSEQUENCES: &str = "Consequences: (1) owner-only features are unavailable because no one \
-     is recognized as owner; (2) for agents with no trusted users registered, DMs from ANY \
-     Discord user are accepted; (3) owner-only UI (forms/modals/buttons) skips its operator \
-     check and is open to anyone who can see it.";
+///
+/// 未設定時のフォールバックは拒否側に統一した（#174）。以前のように「黙って権限が
+/// 緩む」のではなく「**黙って機能しない**」ので、何が動かなくなるかを具体的に書く。
+/// 運用者が「なぜ DM に応答しないのか分からない」状態に落ちるのを防ぐのがこの警告の
+/// 役目なので、ここの文面と実際のフォールバック挙動はセットで変えること。
+///
+/// (3) を「オーナー専用 UI」と書かないのは、操作者チェックが**すべての A2UI 描画面**に
+/// 効くため（`owner_only` 引数は DB の列にしか効かず、ゲートは見ていない）。狭く書くと
+/// 「オーナー専用じゃない UI は生きているはず」と誤読され、原因の切り分けを外す。
+const CONSEQUENCES: &str = "Consequences (an unset owner now fails closed): (1) owner-only \
+     features are unavailable because no one is recognized as owner; (2) for agents with no \
+     trusted Discord users registered, DMs are REJECTED from everyone, so the agent will not \
+     reply to any DM; (3) EVERY interactive UI the agent sends (forms/modals/buttons) cannot be \
+     operated by anyone -- the operator check runs on every A2UI surface, not just the ones \
+     marked owner-only.";
 
 /// Discord ゲートウェイが**実際に起動する**条件（`enabled` かつトークンがある）。
 ///
@@ -201,6 +212,44 @@ mod tests {
             logs.contains("gateway.discord.owner_discord_id is empty"),
             "本文が出ること: {logs}"
         );
+    }
+
+    /// #174: 警告本文が「拒否側に倒れる」ことを伝えていること。
+    ///
+    /// フォールバックを拒否側に統一した以上、症状は「権限が緩む」ではなく
+    /// 「DM に応答しない・UI が動かない」。文面が旧挙動（全許可）のままだと、
+    /// 運用者は警告を読んでも原因にたどり着けない。両経路とも同じ本文を出す。
+    #[test]
+    fn warning_explains_that_unset_owner_fails_closed() {
+        for logs in [
+            captured_logs(|| {
+                warn_if_shared_gateway_owner_unset(true, "bot-token", "");
+            }),
+            captured_logs(|| {
+                warn_if_agent_gateway_owner_unset("crab", "");
+            }),
+        ] {
+            assert!(
+                logs.contains("fails closed"),
+                "拒否側に倒れると書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("DMs are REJECTED from everyone"),
+                "DM に応答しなくなると書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("EVERY interactive UI"),
+                "UI の影響範囲が全描画面だと書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("cannot be operated by anyone"),
+                "UI を誰も操作できないと書いてあること: {logs}"
+            );
+            assert!(
+                logs.contains("not just the ones marked owner-only"),
+                "オーナー専用に限らないと書いてあること（狭く読むと原因の切り分けを外す）: {logs}"
+            );
+        }
     }
 
     #[test]

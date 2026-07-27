@@ -856,8 +856,10 @@ async fn handle_component_interaction(
         let pending_ref = registry.get(&interaction_id);
         match pending_ref {
             Some(ref pending) => {
-                // Owner-only check
-                if !pending.owner_id.is_empty() && data.user_id != pending.owner_id {
+                // Owner-only check.
+                // オーナー未設定（空文字・空白のみ）なら誰も操作できない（#174）。
+                // 以前は「空なら判定しない」＝誰でも操作可という fail-open だった。
+                if !opencrab_core::owner::is_owner_id(&pending.owner_id, &data.user_id) {
                     debug!(
                         user_id = %data.user_id,
                         owner_id = %pending.owner_id,
