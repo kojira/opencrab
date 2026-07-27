@@ -11,6 +11,7 @@ pub mod agent_log;
 pub mod agent_management;
 pub mod agent_runtime_impl;
 pub mod api;
+pub mod caller_identity;
 pub mod config;
 pub mod heartbeat_instructions;
 pub mod hot_reload;

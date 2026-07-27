@@ -293,17 +293,24 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
 /// `queries::list_co_agent_reviewers` に一元化 — reviewer 解決側と共有）。
 /// ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
 ///
+/// 経路も reviewer 解決と同じ [`crate::peer_review::REVIEWER_PLATFORM`]（#159）。返信を
+/// 受理できない経路の相手を載せると、指名はできるが回収されない依頼になる。
+///
 /// **表示名だけを出す**（#158 S2）。共有プロンプトは transport 非依存でなければならず、
 /// メンション記法（`<@id>`）の組み立ては transport 側の責務。reviewer の解決は
 /// 「表示名優先・登録済みのみ」（`resolve_reviewer`）なので表示名で引ける。
 /// 表示名が空の行は名前で指名できないため載せない（モデルに識別子を推測させない）。
 fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String {
-    let reviewers: Vec<String> = opencrab_db::queries::list_co_agent_reviewers(conn, agent_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|u| !u.display_name.is_empty())
-        .map(|u| format!("- {}", u.display_name))
-        .collect();
+    let reviewers: Vec<String> = opencrab_db::queries::list_co_agent_reviewers(
+        conn,
+        crate::peer_review::REVIEWER_PLATFORM,
+        agent_id,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|u| !u.display_name.is_empty())
+    .map(|u| format!("- {}", u.display_name))
+    .collect();
     if reviewers.is_empty() {
         String::new()
     } else {

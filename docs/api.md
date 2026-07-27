@@ -1180,7 +1180,8 @@ Base URL: `http://localhost:3000`
 | content | string | ✅ | メッセージ本文 |
 | user_id | string | ✅ | 送信者の ID（Discord ユーザー ID または エージェント ID）。前後の空白は除去される |
 
-**Caller 権限の決定ロジック**:
+**Caller 権限の決定ロジック**（`trusted_users` は **`platform="rest"` の行だけ**を引く。
+`discord` の行では信頼されない — [Trusted Users](#trusted-users) の移行の注記を参照）:
 - `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
 - `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
 - `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
@@ -1253,14 +1254,15 @@ Base URL: `http://localhost:3000`
 
 `user_id` は前後の空白を除去してから使われ、権限判定・`speaker_id` で同じ正規化済みの値が使われる（`POST /api/agents/{id}/messages` と同じ方針）。
 
-**Caller 権限の決定ロジック**: `POST /api/agents/{id}/messages` と同一。
+**Caller 権限の決定ロジック**: `POST /api/agents/{id}/messages` と同一（引く経路だけが違い、
+こちらは **`platform="web"` の行だけ**を見る）。
 
 - `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
 - `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
 - `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
 - それ以外 → `Agent`
 
-> HTTP レベルの認証は無く（CORS は permissive）、権限はリクエストボディの `user_id` から導出される。既定値の `"web-user"` は `trusted_users` に登録しなければ `Agent` 権限にとどまる。ローカル／信頼済みネットワーク前提の想定である点は他のエンドポイントと同じ。
+> HTTP レベルの認証は無く（CORS は permissive）、権限はリクエストボディの `user_id` から導出される。既定値の `"web-user"` は `trusted_users` に `platform="web"` で登録しなければ `Agent` 権限にとどまる。ローカル／信頼済みネットワーク前提の想定である点は他のエンドポイントと同じ。
 
 セッションが存在しない場合は自動作成される（`theme` = `"web_conversation"`、`mode` = `"autonomous"`、`status` = `"active"`）。ユーザー発話は `session_logs` に記録され、応答生成時の会話履歴は毎回 DB から再構築される。
 
@@ -1870,6 +1872,25 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 ## Trusted Users
 
+> **信頼は経路（`platform`）ごとに分かれている（#214 / #159）。**
+> 行は登録された経路でしか効かない。`discord` は Discord のユーザー ID、`web` は
+> ダッシュボード（`POST /api/web/agents/{id}/messages` 等）が申告する `user_id`、
+> `rest` は `POST /api/agents/{id}/messages` の `user_id` の識別子空間。
+> 経路が違えば同じ文字列でも別人として扱う（信頼は引き継がれない）。
+>
+> **移行が必要なケース（#159 で挙動が変わった点）**: #214 より前に登録した行はすべて
+> `platform="discord"` である。以前は「自経路の行が無ければ `discord` の行も見る」互換
+> 読みがあったため、web / REST の利用者もその行で信頼されていた。この互換読みは #159 で
+> **撤去した**ので、`web` / `rest` の行を持たない利用者は **web / REST で信頼を失い、
+> 最小権限（`Agent`）で動く**（拒否側に倒れるだけで、権限が緩むことはない）。該当する
+> 呼び出しが来ると、サーバは行の場所と直し方を WARN ログに出す
+> （`trusted user row exists only on the legacy 'discord' platform ...`）。
+>
+> **直し方**: その利用者の旧行を `DELETE /api/agents/{id}/trusted-users/{row_id}` で消し、
+> `platform` を指定して登録し直す。一意制約が `(user_id, agent_id)` のままなので、
+> **消す前に同じ識別子を別経路で登録すると 409 になる**（制約の作り直しは表の再構築を
+> 伴う非可逆な変更なので #159 に残してある）。Discord の利用者は何もしなくてよい。
+
 ### GET /api/agents/{id}/trusted-users
 
 **目的**: 信頼済みユーザー一覧を取得する
@@ -1879,11 +1900,15 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Description |
 |-------|------|-------------|
 | id | UUID | レコード ID |
-| user_id | string | その経路でのユーザー識別子（旧 `discord_user_id`。現状 REST から登録できるのは Discord の識別子のみ） |
+| user_id | string | その経路でのユーザー識別子（旧 `discord_user_id`） |
 | agent_id | UUID | エージェント ID |
 | permission | string | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` |
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
+| display_name | string | ロスター表示用の名前（空文字可） |
+| platform | string | `"discord"` \| `"web"` \| `"rest"` — その行が効く経路 |
+
+一覧は**経路で絞らない**（運用者が全経路の登録を見渡せる必要があるため）。
 
 **Example Response**
 
@@ -1894,7 +1919,9 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
   "permission": "owner",
   "created_by": "owner",
-  "created_at": "2026-03-20T10:00:00Z"
+  "created_at": "2026-03-20T10:00:00Z",
+  "display_name": "",
+  "platform": "discord"
 }]
 ```
 
@@ -1909,7 +1936,9 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | user_id | string | ✅ | その経路でのユーザー識別子（旧 `discord_user_id` も後方互換で受け付ける） |
-| permission | string | ❌ | `"owner"` \| `"trusted"` \| `"user"` (default: `"user"`) |
+| permission | string | ❌ | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` (default: `"user"`) |
+| display_name | string | ❌ | ロスター表示用の名前（default: 空文字） |
+| platform | string | ❌ | `"discord"` \| `"web"` \| `"rest"` (default: `"discord"`) — `user_id` がどの経路の識別子か |
 
 **Example Request**
 
@@ -1917,7 +1946,20 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 {"user_id": "123456789012345678", "permission": "trusted"}
 ```
 
-**Response**: TrustedUserRow（上記と同構造）
+ダッシュボード利用者を登録する例（この行は web 経路でのみ効く）:
+
+```json
+{"user_id": "web-user", "permission": "trusted", "platform": "web"}
+```
+
+**Response**: TrustedUserRow（上記と同構造。`platform` を含む）
+
+**Errors**
+
+| Status | 意味 |
+|--------|------|
+| 400 | `platform` が `discord` / `web` / `rest` 以外（登録できても誰とも一致しない行になるため弾く） |
+| 409 | 同じ `(user_id, agent_id)` が既に存在する。一意制約に経路が入っていないため、**同じ識別子を別経路で二重に持つことはまだできない**（先に旧行を削除する） |
 
 ---
 

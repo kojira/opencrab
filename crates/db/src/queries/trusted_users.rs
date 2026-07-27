@@ -95,10 +95,14 @@ pub fn delete_trusted_co_agent(
 // 表名 `trusted_discord_users` / 列名 `discord_user_id` は #159 で `trusted_users` /
 // `user_id` に改名した（マイグレーション v17。Discord は `platform` の値のひとつでしかない）。
 //
+// 互換読み（自経路の行が無ければ従来の `discord` 経路も見る暫定のフォールバック）は
+// #159 で撤去した。登録 API が経路を受け取れるようになった（`POST /api/agents/{id}/
+// trusted-users` の `platform`）ため、web / REST のユーザーは自経路の行として登録する。
+// **経路ごとの行を持たない既存の web / REST ユーザーはこの時点で信頼を失う**（緩む方向
+// ではなく機能が止まる方向）。移行手順は `docs/api.md` の Trusted Users を参照。
+//
 // **#159 に残っている作業**:
 // - 一意制約 `(user_id, agent_id)` → `(platform, user_id, agent_id)`（表の再構築＝非可逆）
-// - [`get_trusted_user_with_legacy_fallback`] の撤去
-// - ロスター（[`list_co_agent_reviewers`]）と受理ゲートの経路の非対称の解消
 
 /// 列追加前から存在する行が属する経路。マイグレーションの `DEFAULT` と一致させる。
 pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
@@ -106,6 +110,22 @@ pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
 pub const TRUSTED_PLATFORM_WEB: &str = "web";
 /// REST `POST /api/agents/{id}/messages` が申告するユーザー識別子の経路。
 pub const TRUSTED_PLATFORM_REST: &str = "rest";
+
+/// 読み出し側が実際に引く経路の全体。登録 API の検証に使う。
+///
+/// 未知の経路の行は**どの読み出しとも一致しない**（登録しても誰も信頼されない）。
+/// 綴り間違いが「登録できたのに効かない」行として黙って残るのを防ぐため、
+/// 登録 API はこの集合で弾く（fail-closed 側の検証であって、認可の判定ではない）。
+pub const TRUSTED_PLATFORMS: [&str; 3] = [
+    TRUSTED_PLATFORM_DISCORD,
+    TRUSTED_PLATFORM_WEB,
+    TRUSTED_PLATFORM_REST,
+];
+
+/// 読み出し側が引く経路として定義済みか。
+pub fn is_known_trusted_platform(platform: &str) -> bool {
+    TRUSTED_PLATFORMS.contains(&platform)
+}
 
 #[derive(Debug, Clone)]
 pub struct TrustedUserRow {
@@ -158,34 +178,6 @@ pub fn get_trusted_user(
     .ok()
 }
 
-/// **暫定の互換読み（#214）**: 自経路の行が無ければ従来の経路（`discord`）の行も見る。
-///
-/// web / REST は #214 以前、経路を区別せず Discord の識別子空間の行を自分のユーザー
-/// 識別子で引いて動いていた。いきなり経路で厳密に切ると、**既存の信頼済みユーザーが
-/// 一斉に権限を失う**（緩む方向ではないが機能が黙って止まる）。移行のあいだだけ
-/// 従来経路へフォールバックする。
-///
-/// この経路では #214 の穴（識別子が一致すると信頼が経路をまたぐ）が残っている点に注意。
-///
-/// **外す条件**: web / REST のユーザーを `platform='web'` / `'rest'` の行として登録し
-/// 直したあと。登録手段（REST の DTO に経路を通す）は #159 が入れるので、それが済んだら
-/// この関数を消して呼び出し元を [`get_trusted_user`] へ戻す（呼び出し元は
-/// `web_runner_impl.rs` と `api/agents_messages.rs` の 2 箇所だけ）。
-pub fn get_trusted_user_with_legacy_fallback(
-    conn: &Connection,
-    platform: &str,
-    user_id: &str,
-    agent_id: &str,
-) -> Option<TrustedUserRow> {
-    get_trusted_user(conn, platform, user_id, agent_id).or_else(|| {
-        if platform == TRUSTED_PLATFORM_DISCORD {
-            None
-        } else {
-            get_trusted_user(conn, TRUSTED_PLATFORM_DISCORD, user_id, agent_id)
-        }
-    })
-}
-
 /// 管理 UI（`GET /api/agents/{id}/trusted-users`）向けの一覧。**経路で絞らない**
 /// （運用者が全経路の登録を一覧できる必要があるため）。認可の判定には使わない。
 pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {
@@ -204,6 +196,8 @@ pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<Trust
 ///
 /// 一意制約は `(user_id, agent_id)` のままなので、**同じ識別子文字列を
 /// 別経路で登録することはまだできない**（制約の作り直しは非可逆なので #159）。
+/// 衝突すると `UNIQUE constraint failed` で Err になる（呼び出し元の REST は 409 に
+/// 写す）。旧行を消してから登録し直す運用で回避できる — `docs/api.md` の移行手順。
 #[allow(clippy::too_many_arguments)]
 pub fn add_trusted_user(
     conn: &Connection,
@@ -227,15 +221,24 @@ pub fn add_trusted_user(
 /// このエージェントのピアレビュアー（permission='co_agent' の trusted user）一覧。
 /// プロンプトのロスター表示と reviewer 解決の両方がこれを使う（選定ロジックの一元化）。
 ///
-/// **経路で絞らない**: これは「誰にレビューを頼めるか」のロスターであって、呼び出し元の
-/// 認可判定ではない。経路で切ると別経路から登録された co_agent が指名できなくなる。
-pub fn list_co_agent_reviewers(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {
+/// **`platform` で絞る（#159）**。以前は絞っていなかったが、返信の受理ゲート
+/// （`peer_review::record_peer_review_reply`）は送信者を**その受信経路の空間**で引くため、
+/// 別経路の co_agent は「依頼は飛ぶが返信を受理されない」非対称になっていた。名簿を
+/// 受理側と同じ経路に揃えることで、指名できる相手＝返信を受理できる相手にする。
+///
+/// **緩める方向へは動かせない**: ここは絞り込みだけで、受理ゲート側に新しい経路の
+/// 判定を足してはいない（別経路に認可判定を新設すると権限が昇格しうる経路になる）。
+pub fn list_co_agent_reviewers(
+    conn: &Connection,
+    platform: &str,
+    agent_id: &str,
+) -> Result<Vec<TrustedUserRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {TRUSTED_USER_COLUMNS} \
-         FROM trusted_users WHERE agent_id = ?1 AND permission = 'co_agent' \
+         FROM trusted_users WHERE platform = ?1 AND agent_id = ?2 AND permission = 'co_agent' \
          ORDER BY created_at ASC"
     ))?;
-    let rows = stmt.query_map([agent_id], trusted_user_from_row)?;
+    let rows = stmt.query_map([platform, agent_id], trusted_user_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 

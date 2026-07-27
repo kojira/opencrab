@@ -11,13 +11,18 @@ use crate::AppState;
 pub struct TrustedUserDto {
     pub id: String,
     /// その経路でのユーザー識別子（#159 で `discord_user_id` から改名）。
-    /// どの経路の識別子かは行の `platform`（現状 REST から登録できるのは `discord` のみ）。
+    /// どの経路の識別子かは同じ行の [`Self::platform`]。
     pub user_id: String,
     pub agent_id: String,
     pub permission: String,
     pub created_by: String,
     pub created_at: String,
     pub display_name: String,
+    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
+    ///
+    /// **応答に出す**: 互換読みの撤去後は「どの経路の行か」が権限そのものを決めるため、
+    /// 一覧に出ていないと運用者は「登録したのに効かない」行を見分けられない。
+    pub platform: String,
 }
 
 fn row_to_dto(r: opencrab_db::queries::TrustedUserRow) -> TrustedUserDto {
@@ -29,6 +34,7 @@ fn row_to_dto(r: opencrab_db::queries::TrustedUserRow) -> TrustedUserDto {
         created_by: r.created_by,
         created_at: r.created_at,
         display_name: r.display_name,
+        platform: r.platform,
     }
 }
 
@@ -49,18 +55,33 @@ pub struct AddTrustedUserRequest {
     pub permission: Option<String>,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
     pub display_name: Option<String>,
+    /// `user_id` がどの経路の識別子か（`discord` / `web` / `rest`, #159）。
+    ///
+    /// **省略時は `discord`**（#214 以前からの登録リクエストがそのまま動く）。
+    pub platform: Option<String>,
 }
 
-/// 信頼済みユーザーを登録する（Discord の識別子空間）。
+/// 信頼済みユーザーを 1 件登録する。
 ///
-/// 登録される経路は `discord` 固定（#214）。web / REST のユーザーを別経路として
-/// 登録できるようにする（リクエストで `platform` を受け取る）のは #159 の後段
-/// 「互換読みの撤去」とセットでやる。ここは命名の改名だけで、挙動は変えていない。
+/// `platform` で識別子空間を選ぶ（#159）。省略時は従来どおり `discord`。ダッシュボード
+/// 利用者は `web`、`POST /api/agents/{id}/messages` の利用者は `rest` で登録する
+/// （互換読みの撤去後、他経路の行はその経路の権限を与えない）。
+///
+/// 未定義の経路は 400 で弾く（登録できても誰とも一致しない行になり、「登録したのに
+/// 効かない」が黙って残るため）。一意制約 `(user_id, agent_id)` の衝突は 409
+/// （同じ識別子を別経路で二重に持てるようにする制約の作り直しは非可逆なので #159 に残す。
+/// 移行は旧行を DELETE してから登録し直す）。
 pub async fn add_trusted_user(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<AddTrustedUserRequest>,
 ) -> Result<Json<TrustedUserDto>, StatusCode> {
+    let platform = req
+        .platform
+        .unwrap_or_else(|| opencrab_db::queries::TRUSTED_PLATFORM_DISCORD.to_string());
+    if !opencrab_db::queries::is_known_trusted_platform(&platform) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let conn = state.db.lock().unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -69,7 +90,7 @@ pub async fn add_trusted_user(
 
     opencrab_db::queries::add_trusted_user(
         &conn,
-        opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+        &platform,
         &id,
         &agent_id,
         &req.user_id,
@@ -78,7 +99,14 @@ pub async fn add_trusted_user(
         &now,
         &display_name,
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        if is_unique_violation(&e) {
+            // 同じ識別子が別経路で既に登録されている（制約は #159 で作り直す）。
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
 
     Ok(Json(TrustedUserDto {
         id,
@@ -88,7 +116,17 @@ pub async fn add_trusted_user(
         created_by: "owner".to_string(),
         created_at: now,
         display_name,
+        platform,
     }))
+}
+
+/// 一意制約違反か（＝運用者が直せる衝突で、サーバの故障ではない）。
+fn is_unique_violation(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,4 +170,143 @@ pub async fn delete_trusted_user(
     let conn = state.db.lock().unwrap();
     let deleted = opencrab_db::queries::remove_trusted_user(&conn, &user_id).unwrap_or(false);
     Json(serde_json::json!({ "deleted": deleted }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opencrab_db::queries::{
+        TRUSTED_PLATFORM_DISCORD, TRUSTED_PLATFORM_REST, TRUSTED_PLATFORM_WEB,
+    };
+
+    fn req(user_id: &str, platform: Option<&str>) -> AddTrustedUserRequest {
+        AddTrustedUserRequest {
+            user_id: user_id.to_string(),
+            permission: None,
+            display_name: None,
+            platform: platform.map(str::to_string),
+        }
+    }
+
+    /// 経路を省略した登録は従来どおり `discord`（#214 以前のリクエストが動き続ける）。
+    #[tokio::test]
+    async fn platform_defaults_to_discord() {
+        let state = crate::test_app_state();
+        let dto = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("42", None)),
+        )
+        .await
+        .expect("add")
+        .0;
+        assert_eq!(dto.platform, TRUSTED_PLATFORM_DISCORD);
+
+        let conn = state.db.lock().unwrap();
+        assert!(opencrab_db::queries::get_trusted_user(
+            &conn,
+            TRUSTED_PLATFORM_DISCORD,
+            "42",
+            "agent-1"
+        )
+        .is_some());
+    }
+
+    /// 経路を指定すればその経路の行になる（互換読みの撤去後、これが唯一の登録手段）。
+    #[tokio::test]
+    async fn platform_is_taken_from_the_request() {
+        let state = crate::test_app_state();
+        for (platform, user_id) in [
+            (TRUSTED_PLATFORM_WEB, "dash-user"),
+            (TRUSTED_PLATFORM_REST, "rest-user"),
+        ] {
+            let dto = add_trusted_user(
+                State(state.clone()),
+                Path("agent-1".to_string()),
+                Json(req(user_id, Some(platform))),
+            )
+            .await
+            .expect("add")
+            .0;
+            assert_eq!(dto.platform, platform);
+
+            let conn = state.db.lock().unwrap();
+            assert!(
+                opencrab_db::queries::get_trusted_user(&conn, platform, user_id, "agent-1")
+                    .is_some()
+            );
+            // 他経路へは漏れない。
+            assert!(opencrab_db::queries::get_trusted_user(
+                &conn,
+                TRUSTED_PLATFORM_DISCORD,
+                user_id,
+                "agent-1"
+            )
+            .is_none());
+        }
+    }
+
+    /// 未定義の経路は弾く（登録できても誰とも一致しない行を作らせない）。
+    #[tokio::test]
+    async fn unknown_platform_is_rejected() {
+        let state = crate::test_app_state();
+        for bad in ["nostr", "Web", " web", ""] {
+            let err = add_trusted_user(
+                State(state.clone()),
+                Path("agent-1".to_string()),
+                Json(req("42", Some(bad))),
+            )
+            .await
+            .expect_err("unknown platform");
+            assert_eq!(err, StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+        let conn = state.db.lock().unwrap();
+        assert!(opencrab_db::queries::list_trusted_users(&conn, "agent-1")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// 一意制約はまだ `(user_id, agent_id)`（#159 に残した非可逆な変更）。
+    /// 同じ識別子を別経路で二重に持てないことを、500 ではなく 409 で示す。
+    #[tokio::test]
+    async fn same_identifier_on_another_platform_conflicts_until_the_constraint_is_rebuilt() {
+        let state = crate::test_app_state();
+        let _first = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("42", Some(TRUSTED_PLATFORM_DISCORD))),
+        )
+        .await
+        .expect("first add");
+
+        let err = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("42", Some(TRUSTED_PLATFORM_WEB))),
+        )
+        .await
+        .expect_err("unique violation");
+        assert_eq!(err, StatusCode::CONFLICT);
+    }
+
+    /// 一覧は経路を出す（どの行がどの経路で効くのか運用者が見分けられる）。
+    #[tokio::test]
+    async fn list_exposes_the_platform_of_each_row() {
+        let state = crate::test_app_state();
+        let _added = add_trusted_user(
+            State(state.clone()),
+            Path("agent-1".to_string()),
+            Json(req("dash-user", Some(TRUSTED_PLATFORM_WEB))),
+        )
+        .await
+        .expect("add");
+
+        let rows = list_trusted_users(State(state.clone()), Path("agent-1".to_string()))
+            .await
+            .0;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].platform, TRUSTED_PLATFORM_WEB);
+        // 経路で絞らない一覧であることは維持（運用者は全経路を見られる）。
+        assert_eq!(rows[0].user_id, "dash-user");
+    }
 }
