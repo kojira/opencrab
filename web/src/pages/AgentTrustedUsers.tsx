@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import type { AgentDetail } from "../api/types";
-import { getTrustedUsers, addTrustedUser, removeTrustedUser, updateTrustedUser } from "../api/trusted_users";
-import type { TrustedUserDto } from "../api/trusted_users";
+import { getTrustedUsers, addTrustedUser, removeTrustedUser, updateTrustedUser, TRUSTED_PLATFORMS } from "../api/trusted_users";
+import type { TrustedUserDto, TrustedPlatform } from "../api/trusted_users";
 import { useTranslation } from "react-i18next";
 
 interface AgentContext {
@@ -11,6 +11,9 @@ interface AgentContext {
 }
 
 const PERMISSIONS = ["user", "co-agent", "owner"];
+
+/** 経路を省略した登録は `discord` になる（サーバ側の既定と揃える）。 */
+const DEFAULT_PLATFORM: TrustedPlatform = "discord";
 
 export default function AgentTrustedUsers() {
   const { agentId } = useOutletContext<AgentContext>();
@@ -22,6 +25,7 @@ export default function AgentTrustedUsers() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newUserId, setNewUserId] = useState("");
   const [newPermission, setNewPermission] = useState("user");
+  const [newPlatform, setNewPlatform] = useState<TrustedPlatform>(DEFAULT_PLATFORM);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
@@ -55,10 +59,11 @@ export default function AgentTrustedUsers() {
     setAdding(true);
     setAddError(null);
     try {
-      await addTrustedUser(agentId, { user_id: uid, permission: newPermission });
+      await addTrustedUser(agentId, { user_id: uid, permission: newPermission, platform: newPlatform });
       setShowAddModal(false);
       setNewUserId("");
       setNewPermission("user");
+      setNewPlatform(DEFAULT_PLATFORM);
       loadUsers();
     } catch (e: unknown) {
       setAddError(String(e));
@@ -97,6 +102,7 @@ export default function AgentTrustedUsers() {
             setAddError(null);
             setNewUserId("");
             setNewPermission("user");
+            setNewPlatform(DEFAULT_PLATFORM);
           }}
         >
           <span className="material-symbols-outlined text-xl">add</span>
@@ -140,6 +146,9 @@ export default function AgentTrustedUsers() {
                   {t("trustedUsers.tableId")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
+                  {t("trustedUsers.tablePlatform")}
+                </th>
+                <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
                   {t("trustedUsers.tablePermission")}
                 </th>
                 <th className="text-left text-label-lg text-on-surface-variant px-4 py-3">
@@ -159,6 +168,9 @@ export default function AgentTrustedUsers() {
                 >
                   <td className="px-4 py-3 text-body-lg text-on-surface font-mono">
                     {u.user_id}
+                  </td>
+                  <td className="px-4 py-3 text-body-md text-on-surface-variant font-mono">
+                    {u.platform}
                   </td>
                   <td className="px-4 py-3 text-body-md text-on-surface-variant">
                     {editingId === u.id ? (
@@ -222,6 +234,23 @@ export default function AgentTrustedUsers() {
                   value={newUserId}
                   onChange={(e) => setNewUserId(e.target.value)}
                 />
+              </div>
+              <div>
+                <label className="block text-label-lg text-on-surface mb-2">
+                  {t("trustedUsers.platformLabel")}
+                </label>
+                <select
+                  className="input-outlined"
+                  value={newPlatform}
+                  onChange={(e) => setNewPlatform(e.target.value as TrustedPlatform)}
+                >
+                  {TRUSTED_PLATFORMS.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+                <p className="text-body-sm text-on-surface-variant mt-1">
+                  {t("trustedUsers.platformHelp")}
+                </p>
               </div>
               <div>
                 <label className="block text-label-lg text-on-surface mb-2">

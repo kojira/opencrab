@@ -22,6 +22,11 @@
 //! 後半（[`harvest_inbound_reply`]）へ移設した。依頼が書く目印と回収が探す目印が
 //! 同じファイルで突き合わせられる。
 //!
+//! ## 名簿と受理の経路（#159）
+//! 指名できる相手（ロスター）と返信を受理できる相手は **同じ経路** でなければならない。
+//! ずれていた頃は「別経路の co_agent へ依頼は飛ぶが、返信は受理ゲートで落ちる」状態に
+//! なりえた。揃える向きは名簿を狭める側だけ（[`REVIEWER_PLATFORM`]）。
+//!
 //! ## 不変条件（移設で壊してはならないもの）
 //! - **セッション必須（fail-closed）**: `session_id` が無い/空なら明示エラー（#36）。
 //! - **幻覚 id への誤送信防止**: レビュアーは**登録済みの co_agent のみ**から解決し、
@@ -161,10 +166,10 @@ pub fn build_peer_review_messages(
 /// 次に id 一致。未登録の任意 id は受け付けない（LLM の幻覚 id によるゴーストメンション防止）。
 /// 未解決の場合は Err に登録済みレビュアーの一覧文字列を返す。
 ///
-/// 名簿のキー空間（`trusted_users.user_id` と `<@id>` 形式の受理、および
-/// 「数値としてパースできる id だけを採る」判定）は **#214 の担当なので現状維持**。
-/// 返り値はパース済み数値の文字列表現で、移設前（`u64` を返して呼び出し側が
-/// `<@{id}>` に埋めていた）とバイト単位で同じメンションになる。
+/// 名簿は返信の受理ゲートと同じ経路（[`REVIEWER_PLATFORM`]）だけを引く（#159）。
+/// 返信を受理できない相手を指名させないため。`<@id>` 形式の受理と「数値としてパース
+/// できる id だけを採る」判定は据え置き。返り値はパース済み数値の文字列表現で、移設前
+/// （`u64` を返して呼び出し側が `<@{id}>` に埋めていた）とバイト単位で同じメンションになる。
 pub fn resolve_reviewer(
     conn: &rusqlite::Connection,
     delivery: &dyn TextDelivery,
@@ -172,15 +177,16 @@ pub fn resolve_reviewer(
     reviewer: &str,
 ) -> Result<String, String> {
     let reviewer = reviewer.trim();
-    let co_agents = match opencrab_db::queries::list_co_agent_reviewers(conn, agent_id) {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!("resolve_reviewer: roster query failed: {e}");
-            return Err(
-                "(レビュアー一覧の取得に失敗しました — 後で再試行してください)".to_string(),
-            );
-        }
-    };
+    let co_agents =
+        match opencrab_db::queries::list_co_agent_reviewers(conn, REVIEWER_PLATFORM, agent_id) {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!("resolve_reviewer: roster query failed: {e}");
+                return Err(
+                    "(レビュアー一覧の取得に失敗しました — 後で再試行してください)".to_string(),
+                );
+            }
+        };
     // 表示名一致を優先（数値の表示名が id 解釈に食われないように）
     if let Some(matched) = co_agents
         .iter()
@@ -600,14 +606,25 @@ pub(crate) fn harvest_inbound_reply(
 
 /// 受信の由来を、信頼済みユーザー表（`trusted_users.platform`）のキー空間へ対応づける。
 ///
-/// Nostr は送信者識別子（pubkey）を信頼済みユーザー表の経路として持たない（#159 の
-/// 残作業）。対応が無い由来は `None` を返し、回収させない。
+/// Nostr は送信者識別子（pubkey）を信頼済みユーザー表の経路として持たない。
+/// 対応が無い由来は `None` を返し、回収させない（fail-closed）。
 fn trusted_platform_for(source: TranscriptSource) -> Option<&'static str> {
     match source {
         TranscriptSource::Discord => Some(opencrab_db::queries::TRUSTED_PLATFORM_DISCORD),
         TranscriptSource::Nostr => None,
     }
 }
+
+/// レビュアー名簿（ロスター）を引く経路（#159）。
+///
+/// **[`trusted_platform_for`] が返しうる経路と一致させること。** 名簿を絞らないままだと
+/// 「別経路の co_agent を指名できる → 依頼は飛ぶ → 返信は受理ゲートで落ちる」という
+/// 非対称になる（#159 で引き継いだ課題）。揃える向きは**名簿を狭める側だけ**:
+/// 受理ゲートに別経路の判定を足すと、そこが権限の昇格経路になる。
+///
+/// 一致は `roster_platform_matches_the_harvestable_platforms` が固定する
+/// （`TranscriptSource` に由来が増えたらそのテストがコンパイルできなくなる）。
+pub(crate) const REVIEWER_PLATFORM: &str = opencrab_db::queries::TRUSTED_PLATFORM_DISCORD;
 
 /// 受信した `[Peer Review]` 返信を requester の active タスクへ自動記録する（#58）。
 ///
@@ -1004,6 +1021,55 @@ mod tests {
         let err = resolve_reviewer(&conn, &delivery, "agent-1", "Human").unwrap_err();
         assert!(err.contains("Crab B"));
         assert!(!err.contains("Human"));
+    }
+
+    /// #159: 名簿の経路と受理ゲートの経路が一致していること。
+    ///
+    /// ずれると「依頼は飛ぶが返信を受理されない」相手を指名できてしまう。
+    /// `TranscriptSource` に由来が増えたら下の `match` が非網羅でコンパイルできず、
+    /// 名簿側（[`REVIEWER_PLATFORM`]）の見直しを強制する。
+    #[test]
+    fn roster_platform_matches_the_harvestable_platforms() {
+        let all = [TranscriptSource::Discord, TranscriptSource::Nostr];
+        for source in all {
+            let expected = match source {
+                TranscriptSource::Discord => Some(REVIEWER_PLATFORM),
+                TranscriptSource::Nostr => None,
+            };
+            assert_eq!(trusted_platform_for(source), expected, "{source:?}");
+        }
+        let harvestable: std::collections::BTreeSet<&str> =
+            all.into_iter().filter_map(trusted_platform_for).collect();
+        assert_eq!(
+            harvestable,
+            std::collections::BTreeSet::from([REVIEWER_PLATFORM]),
+            "受理できる経路の集合＝名簿を引く経路であること"
+        );
+    }
+
+    /// 受理できない経路の co_agent は指名できない（依頼だけ飛ぶ状態を作らない）。
+    #[test]
+    fn resolve_reviewer_ignores_other_platform_co_agents() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let delivery = FakeDelivery::new();
+        opencrab_db::queries::add_trusted_user(
+            &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_WEB,
+            "row-w",
+            "agent-1",
+            "77",
+            "co_agent",
+            "owner",
+            "2026-01-01",
+            "Web Crab",
+        )
+        .unwrap();
+        // 表示名でも id でも解決しない。
+        assert!(resolve_reviewer(&conn, &delivery, "agent-1", "Web Crab").is_err());
+        assert!(resolve_reviewer(&conn, &delivery, "agent-1", "77").is_err());
+        // 一覧にも出さない（モデルに存在しない宛先を示唆しない）。
+        let err = resolve_reviewer(&conn, &delivery, "agent-1", "nobody").unwrap_err();
+        assert!(!err.contains("Web Crab"), "{err}");
     }
 
     #[test]

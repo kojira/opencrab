@@ -135,39 +135,94 @@ fn trusted_user_count_is_scoped_by_platform() {
     assert_eq!(trusted_user_count(&conn, TRUSTED_PLATFORM_DISCORD, "a2"), 0);
 }
 
-/// 互換読み（暫定）: 自経路の行が無ければ従来の `discord` 経路の行も見る。
-/// 従来経路そのもの（discord）はフォールバックしない。
+/// 互換読みの撤去（#159）で**何が変わったか**を明示する。
+///
+/// 撤去前: 従来経路（`discord`）の行しか無いユーザーも web / REST で信頼されていた。
+/// 撤去後: 自経路の行が無ければ引けない = そのユーザーは web / REST で権限を失う。
+/// ここが緑のままなら、互換読みが別名で復活していないということ。
 #[test]
-fn legacy_fallback_reads_discord_rows_until_migration() {
+fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
     let conn = setup();
     add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-d", "42", "a1");
 
-    // 自経路の行が無い → 従来経路の行が見える（既存の信頼が一斉に失効しない）。
-    let via_web = get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_WEB, "42", "a1")
-        .expect("legacy fallback");
-    assert_eq!(via_web.platform, TRUSTED_PLATFORM_DISCORD);
-    assert!(
-        get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_REST, "42", "a1").is_some()
-    );
+    // 従来経路の行は自経路（discord）でだけ効く。
+    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1").is_some());
+    // web / REST から同じ識別子で来ても引けない（＝移行前のユーザーは信頼を失う）。
+    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "42", "a1").is_none());
+    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_REST, "42", "a1").is_none());
 
-    // 自経路の行があればそれが優先される（フォールバックへ落ちない）。
+    // 経路ごとの行を登録し直せば、その経路でだけ信頼が戻る。
     add_trusted(&conn, TRUSTED_PLATFORM_WEB, "row-w", "dash-user", "a1");
-    let own = get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_WEB, "dash-user", "a1")
-        .expect("own platform row");
+    let own = get_trusted_user(&conn, TRUSTED_PLATFORM_WEB, "dash-user", "a1").expect("web row");
     assert_eq!(own.platform, TRUSTED_PLATFORM_WEB);
+    assert!(get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "dash-user", "a1").is_none());
+}
 
-    // Discord 側は逆向きに漏れない（web の行は Discord からは見えないまま）。
-    assert!(get_trusted_user_with_legacy_fallback(
+/// 登録 API が受け付ける経路の集合＝読み出し側が引く経路の集合。
+#[test]
+fn known_platforms_are_exactly_the_three_read_paths() {
+    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_DISCORD));
+    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_WEB));
+    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_REST));
+    // 綴り間違い・未定義の経路は弾く（登録できても誰とも一致しない行になるため）。
+    assert!(!is_known_trusted_platform("Discord"));
+    assert!(!is_known_trusted_platform("nostr"));
+    assert!(!is_known_trusted_platform(""));
+}
+
+/// ロスターも経路で切られている（#159: 受理ゲートと揃えた）。
+#[test]
+fn co_agent_roster_is_scoped_by_platform() {
+    let conn = setup();
+    add_trusted_user(
         &conn,
         TRUSTED_PLATFORM_DISCORD,
-        "dash-user",
-        "a1"
+        "row-d",
+        "a1",
+        "42",
+        "co_agent",
+        "owner",
+        "2026-01-01",
+        "Crab D",
     )
-    .is_none());
+    .unwrap();
+    add_trusted_user(
+        &conn,
+        TRUSTED_PLATFORM_WEB,
+        "row-w",
+        "a1",
+        "dash-user",
+        "co_agent",
+        "owner",
+        "2026-01-01",
+        "Crab W",
+    )
+    .unwrap();
 
-    // 未登録は経路を問わず None（フォールバックが「誰でも通る」にはならない）。
+    let discord = list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_DISCORD, "a1").unwrap();
+    assert_eq!(discord.len(), 1);
+    assert_eq!(discord[0].display_name, "Crab D");
+
+    let web = list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_WEB, "a1").unwrap();
+    assert_eq!(web.len(), 1);
+    assert_eq!(web[0].display_name, "Crab W");
+
+    assert!(list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_REST, "a1")
+        .unwrap()
+        .is_empty());
+
+    // permission と agent_id の絞り込みは維持されている。
+    add_trusted(&conn, TRUSTED_PLATFORM_DISCORD, "row-u", "43", "a1");
+    assert_eq!(
+        list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_DISCORD, "a1")
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(
-        get_trusted_user_with_legacy_fallback(&conn, TRUSTED_PLATFORM_WEB, "999", "a1").is_none()
+        list_co_agent_reviewers(&conn, TRUSTED_PLATFORM_DISCORD, "a2")
+            .unwrap()
+            .is_empty()
     );
 }
 
