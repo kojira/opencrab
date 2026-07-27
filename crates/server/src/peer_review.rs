@@ -15,10 +15,12 @@
 //! 1 通の上限 / 送信そのもの。**分割の仕方と部分失敗の勘定は汎用層に残す**
 //! （抽象越しにすると「N/M 通送信済み」が失われやすいため意図的にこちら側）。
 //!
-//! ## 返信の回収はここに無い
-//! `[Peer Review]` 返信の解析と台帳への自動記録（`record_peer_review_reply`）は
-//! Discord の受信ループ 1 箇所からしか呼ばれない。汎用の受信フック点は #156 S4 の担当
-//! なので、**依頼の送信側だけ**をここへ移し、回収経路は Discord 側に残してある。
+//! ## 返信の回収（#156 S4 でここへ合流）
+//! `[Peer Review]` 返信の解析と台帳への自動記録は、以前は Discord gateway 側にあり
+//! Discord の受信ループ 1 箇所からしか呼ばれなかった。共通の受信フック
+//! （[`opencrab_actions::AgentRuntime::on_inbound_message`]）ができたので、このファイルの
+//! 後半（[`harvest_inbound_reply`]）へ移設した。依頼が書く目印と回収が探す目印が
+//! 同じファイルで突き合わせられる。
 //!
 //! ## 不変条件（移設で壊してはならないもの）
 //! - **セッション必須（fail-closed）**: `session_id` が無い/空なら明示エラー（#36）。
@@ -32,12 +34,13 @@
 use opencrab_core::llm_text::truncate_chars;
 use opencrab_core::text_delivery::TextDelivery;
 use opencrab_gateway::{
-    GatewayActionDef, GatewayActionResult, GatewayCallContext, PEER_REVIEW_REQUEST_MARKER,
+    GatewayActionDef, GatewayActionResult, GatewayCallContext, PEER_REVIEW_REPLY_MARKER,
+    PEER_REVIEW_REQUEST_MARKER,
 };
 use serde_json::json;
 use tracing::{error, warn};
 
-use opencrab_actions::build_part_messages;
+use opencrab_actions::{build_part_messages, InboundMessageRecord, TranscriptSource};
 
 /// content の上限（chars）。配送先のレート制限（Discord なら ~5通/5秒/チャンネル）の
 /// 1ウィンドウに収まる分割数（ヘッダ+6 part 程度）に抑える。超える場合はワークスペースに
@@ -409,6 +412,279 @@ pub async fn request_peer_review(
             "message": "ピアレビュー依頼を投稿しました。[Peer Review] で始まる返信を待ってください。",
         })),
         error: None,
+    }
+}
+
+// ===========================================================================
+// 返信の回収（#156 S4 で `crates/discord/src/gateway_actions/peer_review.rs` から移設）
+// ===========================================================================
+//
+// 解析・3 つのゲート・台帳への記録は元から transport のライブラリ依存がゼロで、
+// Discord に置かれていた理由は「呼び出し口が Discord の受信ループしか無かった」こと
+// だけだった。共通の受信フック（`AgentRuntime::on_inbound_message`）ができたので、
+// 依頼側（上）と**同じファイル**へ置く。目印の噛み合わせ（依頼が書くものと回収が
+// 探すもの）が 1 ファイルで読めるようにするため:
+// - 依頼が投稿する本文の先頭   … [`PEER_REVIEW_REQUEST_MARKER`]（`[Peer Review Request]`）
+// - 依頼が台帳へ書く進捗       … `[peer review requested] ...`（`post_peer_review` 内）
+// - 回収が本文に探す目印       … [`PEER_REVIEW_REPLY_MARKER`]（`[Peer Review]`）
+// - 回収が台帳へ書く進捗       … `[peer review] score ...`（`format_peer_review_progress`）
+//   → 未回収判定は「`[peer review requested]` が `[peer review]` より新しいか」。
+//     `[Peer Review Request]` は `[Peer Review]` で始まらない（`]` の位置が違う）ため、
+//     依頼メッセージ自体が返信として回収されることはない（テストで固定）。
+
+/// `[Peer Review]` 返信のパース結果。
+#[derive(Debug, Clone, PartialEq)]
+struct PeerReviewVerdict {
+    /// 0.0-1.0 に clamp 済み。抽出できなければ None。
+    score: Option<f64>,
+    gaps: Vec<String>,
+    summary: String,
+}
+
+/// text 中で `[Peer Review]` marker が行頭（markdown 装飾は許容）に現れる位置を返す。
+///
+/// debounce がレビュアーの前置きと verdict を1メッセージに結合することがあるため、
+/// 先頭だけでなく各行の行頭を見る。行の途中の言及（レビュー対象の diff 等）は無視する。
+fn find_reply_marker(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let stripped = line.trim_start_matches(|c: char| {
+            c.is_whitespace() || c == '*' || c == '_' || c == '#' || c == '>'
+        });
+        if stripped.starts_with(PEER_REVIEW_REPLY_MARKER) {
+            return Some(offset + (line.len() - stripped.len()));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// `[Peer Review]` を行頭に含むメッセージから score / gaps / summary を抽出する。
+///
+/// レビュアーは LLM なので形式ゆれに寛容にパースする（フィールド欠落でも Some を返す）。
+/// marker を行頭に含まないメッセージは None。
+fn parse_peer_review_reply(text: &str) -> Option<PeerReviewVerdict> {
+    let marker_pos = find_reply_marker(text)?;
+    let body = &text[marker_pos + PEER_REVIEW_REPLY_MARKER.len()..];
+    let lower = body.to_ascii_lowercase();
+
+    // フィールドキーはコロン必須で照合する（"no gaps found" のような本文中の
+    // 単語をフィールド開始と誤認して gaps を捏造しないため）
+    // score: の後の最初の数値（"0.8", "0.8/1.0", "0.8 (…)" 等の先頭数値を拾う）
+    let score = lower.find("score:").and_then(|pos| {
+        let after = &body[pos + "score:".len()..];
+        let after = after.trim_start();
+        let num: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        num.parse::<f64>().ok().map(|v| v.clamp(0.0, 1.0))
+    });
+
+    // gaps: から summary:（または末尾）まで
+    let gaps = match lower.find("gaps:") {
+        Some(pos) => {
+            let after = &body[pos + "gaps:".len()..];
+            let after = after.trim_start_matches(' ');
+            let end = after
+                .to_ascii_lowercase()
+                .find("summary:")
+                .unwrap_or(after.len());
+            // インライン形式（"Gaps: none, Summary: ..."）の区切りカンマ等を落とす
+            let strip = |s: &str| {
+                s.trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                    .to_string()
+            };
+            let section = strip(&after[..end]);
+            if section.eq_ignore_ascii_case("none") || section.is_empty() {
+                Vec::new()
+            } else {
+                // "- x" 行のリスト、または改行区切りのインライン
+                let items: Vec<String> = section
+                    .lines()
+                    .map(|l| strip(l.trim().trim_start_matches('-')))
+                    .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("none"))
+                    .collect();
+                items
+            }
+        }
+        None => Vec::new(),
+    };
+
+    // summary: の後（無ければ本文先頭 200 chars をフォールバック）
+    let summary = match lower.find("summary:") {
+        Some(pos) => {
+            let after = &body[pos + "summary:".len()..];
+            after.trim().to_string()
+        }
+        None => truncate_chars(body.trim(), 200),
+    };
+
+    Some(PeerReviewVerdict {
+        score,
+        gaps,
+        summary,
+    })
+}
+
+/// パース済み verdict をタスク台帳の progress 文字列に整形する。
+fn format_peer_review_progress(verdict: &PeerReviewVerdict, reviewer: &str) -> String {
+    let score = verdict
+        .score
+        .map(|s| format!("{s:.2}"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let gaps = if verdict.gaps.is_empty() {
+        "none".to_string()
+    } else {
+        truncate_chars(&verdict.gaps.join("; "), 800)
+    };
+    format!(
+        "[peer review] score {score} (from {reviewer}): {}; gaps: {gaps}",
+        truncate_chars(&verdict.summary, 300),
+    )
+}
+
+/// active タスクに「未回収のレビュー依頼」があるか判定する。
+///
+/// 直近の進捗を新しい順に見て、`[peer review]`（受領記録）より後に
+/// `[peer review requested]` があれば未回収。これにより:
+/// - 依頼していないタスクには第三者間のレビューが記録されない
+///   （同一チャンネルの別 bot 同士のレビューを誤記録しない）
+/// - 1依頼につき1件だけ記録される（同文の連投は2件目以降スキップ）
+fn has_outstanding_review_request(conn: &rusqlite::Connection, task_id: i64) -> bool {
+    let recent =
+        opencrab_db::queries::list_recent_task_progress(conn, task_id, 30).unwrap_or_default();
+    for entry in recent.iter().rev() {
+        if entry.content.starts_with("[peer review requested]") {
+            return true;
+        }
+        if entry.content.starts_with("[peer review]") {
+            return false;
+        }
+    }
+    false
+}
+
+/// 受信フック（[`opencrab_actions::AgentRuntime::on_inbound_message`]）の購読者本体。
+///
+/// 受信メッセージがピアレビュー返信なら requester の台帳へ回収する。返信でなければ
+/// 何もしない（受信 1 件につき 1 回呼ばれる前提の best-effort）。
+///
+/// 送信者識別子がどの経路の空間に属するかは [`TranscriptSource`] から引き、**経路の
+/// 列を持たない由来では回収しない**（fail-closed）。ここを「とりあえず discord で引く」
+/// にすると、別経路の識別子が偶然一致した相手の verdict を受理してしまう。経路ごとの
+/// キー空間の分離自体は #159 の残作業。
+pub(crate) fn harvest_inbound_reply(
+    db: &opencrab_db::Db,
+    source: TranscriptSource,
+    agent_id: &str,
+    record: &InboundMessageRecord<'_>,
+) -> bool {
+    let Some(platform) = trusted_platform_for(source) else {
+        tracing::debug!(
+            agent_id = %agent_id,
+            "inbound hook: 信頼済みユーザーの経路が未定義の由来 — ピアレビュー回収をスキップ (#159)"
+        );
+        return false;
+    };
+    record_peer_review_reply(
+        db,
+        platform,
+        agent_id,
+        record.session_id,
+        record.sender_id,
+        record.sender_name,
+        record.text,
+    )
+}
+
+/// 受信の由来を、信頼済みユーザー表（`trusted_users.platform`）のキー空間へ対応づける。
+///
+/// Nostr は送信者識別子（pubkey）を信頼済みユーザー表の経路として持たない（#159 の
+/// 残作業）。対応が無い由来は `None` を返し、回収させない。
+fn trusted_platform_for(source: TranscriptSource) -> Option<&'static str> {
+    match source {
+        TranscriptSource::Discord => Some(opencrab_db::queries::TRUSTED_PLATFORM_DISCORD),
+        TranscriptSource::Nostr => None,
+    }
+}
+
+/// 受信した `[Peer Review]` 返信を requester の active タスクへ自動記録する（#58）。
+///
+/// ゲート（すべて満たす場合のみ記録）:
+/// 1. marker が行頭にある
+/// 2. 送信者がこのエージェントの登録済み co_agent（第三者・未信頼の偽 verdict を排除）
+/// 3. active タスクに未回収のレビュー依頼がある（依頼していないレビューを誤記録しない）
+///
+/// 記録は追加処理: メッセージ自体はこの後通常どおり LLM にも流れる（会話には speech として残る）。
+/// session_logs には重ねて記録しない（二重描画を避ける）。台帳へ書いた verdict は
+/// **この受信で走るターンの** `[Task Ledger]` に載る（#156 S4 で受信フックを会話組み立ての
+/// 前に置いたため。「次ターンに出る」と書いてあった移設前の記述は誤り）。
+/// 記録した場合 true を返す。
+fn record_peer_review_reply(
+    db: &opencrab_db::Db,
+    platform: &str,
+    agent_id: &str,
+    session_id: &str,
+    sender_id: &str,
+    sender_name: &str,
+    text: &str,
+) -> bool {
+    let Some(verdict) = parse_peer_review_reply(text) else {
+        return false;
+    };
+    let Ok(conn) = db.lock() else {
+        warn!("record_peer_review_reply: DB lock failed, review not recorded");
+        return false;
+    };
+    // 送信者ゲート: 登録済み co_agent のみ。sender_id を申告した経路の空間で引く
+    // （#214 で入った platform 列。経路の分離の残りは #159）。
+    let is_co_agent = opencrab_db::queries::get_trusted_user(&conn, platform, sender_id, agent_id)
+        .map(|u| u.permission == "co_agent")
+        .unwrap_or(false);
+    if !is_co_agent {
+        tracing::debug!(
+            agent_id = %agent_id,
+            sender_id = %sender_id,
+            "peer review reply from non-co_agent sender — skipping auto-record"
+        );
+        return false;
+    }
+    let Some(task) = opencrab_db::queries::get_active_task_for_session(&conn, agent_id, session_id)
+        .ok()
+        .flatten()
+    else {
+        tracing::debug!(
+            agent_id = %agent_id,
+            session_id = %session_id,
+            "peer review reply received but no active task — skipping auto-record"
+        );
+        return false;
+    };
+    if !has_outstanding_review_request(&conn, task.id) {
+        tracing::debug!(
+            agent_id = %agent_id,
+            task_id = task.id,
+            "peer review reply but no outstanding request on active task — skipping auto-record"
+        );
+        return false;
+    }
+    let content = format_peer_review_progress(&verdict, sender_name);
+    match opencrab_db::queries::insert_task_progress(&conn, task.id, "progress", &content) {
+        Ok(_) => {
+            tracing::info!(
+                agent_id = %agent_id,
+                task_id = task.id,
+                score = ?verdict.score,
+                reviewer = %sender_name,
+                "peer review reply auto-recorded to task ledger"
+            );
+            true
+        }
+        Err(e) => {
+            warn!("record_peer_review_reply: ledger record failed: {e}");
+            false
+        }
     }
 }
 
@@ -1012,5 +1288,242 @@ mod tests {
             .unwrap();
         assert!(reviewer.contains("表示名を渡す"), "{reviewer}");
         assert!(!reviewer.contains("user id"), "{reviewer}");
+    }
+
+    // ---- 返信の回収（#156 S4 で Discord gateway から移設。解析 / 整形 / 3 つのゲート）
+
+    /// 回収の便宜関数（移設前の 6 引数の呼び出し形をテスト内で保つ）。
+    fn record_discord_reply(
+        db: &opencrab_db::Db,
+        agent_id: &str,
+        session_id: &str,
+        sender_id: &str,
+        sender_name: &str,
+        text: &str,
+    ) -> bool {
+        record_peer_review_reply(
+            db,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            agent_id,
+            session_id,
+            sender_id,
+            sender_name,
+            text,
+        )
+    }
+
+    #[test]
+    fn parse_reply_full_form() {
+        let v = parse_peer_review_reply(
+            "[Peer Review] score: 0.75\ngaps:\n- tests not run\n- no error handling\nsummary: solid but unverified",
+        )
+        .unwrap();
+        assert_eq!(v.score, Some(0.75));
+        assert_eq!(v.gaps, vec!["tests not run", "no error handling"]);
+        assert_eq!(v.summary, "solid but unverified");
+    }
+
+    #[test]
+    fn parse_reply_inline_and_variants() {
+        // インライン gaps、score にスラッシュ形式、大文字
+        let v = parse_peer_review_reply(
+            "  [Peer Review] Score: 0.9/1.0, Gaps: none, Summary: looks good",
+        )
+        .unwrap();
+        assert_eq!(v.score, Some(0.9));
+        assert!(v.gaps.is_empty());
+        assert_eq!(v.summary, "looks good");
+
+        // score 欠落 → None、summary 欠落 → 本文フォールバック
+        let v = parse_peer_review_reply("[Peer Review] this looks fine to me").unwrap();
+        assert_eq!(v.score, None);
+        assert!(v.summary.contains("looks fine"));
+
+        // 1.0 超は clamp
+        let v = parse_peer_review_reply("[Peer Review] score: 8.5 summary: s").unwrap();
+        assert_eq!(v.score, Some(1.0));
+    }
+
+    #[test]
+    fn parse_reply_rejects_non_marker() {
+        assert!(parse_peer_review_reply("just chatting about [Peer Review] stuff").is_none());
+        assert!(parse_peer_review_reply("[Peer Review Request] from a").is_none());
+    }
+
+    /// **依頼側と回収側の目印が噛み合っていること**（#157 の依頼側 / #156 S4 の回収側）。
+    ///
+    /// 依頼が投稿する本文の先頭は [`PEER_REVIEW_REQUEST_MARKER`]、回収が探すのは
+    /// [`PEER_REVIEW_REPLY_MARKER`]。前者が後者で始まってしまうと、依頼メッセージ自体が
+    /// 「返信」として回収され、依頼した瞬間に verdict が捏造される。
+    #[test]
+    fn request_marker_is_not_harvested_as_a_reply() {
+        assert!(!PEER_REVIEW_REQUEST_MARKER.starts_with(PEER_REVIEW_REPLY_MARKER));
+        // 依頼側が実際に組み立てるヘッダ（`post_peer_review` と同じ形）でも回収されない。
+        let header = format!("{PEER_REVIEW_REQUEST_MARKER}<@42> from crab-a — task #7\n");
+        assert!(parse_peer_review_reply(&header).is_none());
+        // 逆向き: 回収が探す目印は依頼側の目印の前置ではない（未回収判定も同様に
+        // `[peer review requested]` が `[peer review]` で始まらないことに依存する）。
+        assert!(!"[peer review requested] posted".starts_with("[peer review]"));
+    }
+
+    #[test]
+    fn parse_reply_finds_marker_after_preamble_and_markdown() {
+        // debounce がレビュアーの前置きと verdict を結合するケース
+        let v = parse_peer_review_reply(
+            "Looking at it now.\n[Peer Review] score: 0.8, gaps: none, summary: fine",
+        )
+        .unwrap();
+        assert_eq!(v.score, Some(0.8));
+
+        // markdown 装飾付き行頭
+        let v = parse_peer_review_reply("**[Peer Review]** score: 0.5 summary: hm").unwrap();
+        assert_eq!(v.score, Some(0.5));
+
+        // 行の途中の言及は依然として無視
+        assert!(parse_peer_review_reply("the diff mentions [Peer Review] in prose").is_none());
+
+        // 本文中の "gaps" という単語をフィールド開始と誤認しない（コロン必須）
+        let v = parse_peer_review_reply("[Peer Review] score: 1.0 summary: no gaps found").unwrap();
+        assert!(v.gaps.is_empty());
+        assert_eq!(v.summary, "no gaps found");
+    }
+
+    #[test]
+    fn format_progress_bounds_and_labels() {
+        let v = PeerReviewVerdict {
+            score: Some(0.4),
+            gaps: vec!["a".repeat(600), "b".to_string()],
+            summary: "needs work".to_string(),
+        };
+        let s = format_peer_review_progress(&v, "crab-b");
+        assert!(s.starts_with("[peer review] score 0.40 (from crab-b): needs work"));
+        assert!(s.chars().count() < 1300, "progress entry must stay bounded");
+
+        let v = PeerReviewVerdict {
+            score: None,
+            gaps: vec![],
+            summary: "s".to_string(),
+        };
+        assert!(format_peer_review_progress(&v, "r").contains("score n/a"));
+    }
+
+    /// 回収の 3 つのゲート（marker / 登録済み co_agent / 未回収の依頼）と 1 依頼 1 記録。
+    #[test]
+    fn record_reply_gates_and_writes() {
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        let task_id = {
+            let conn = db.lock().unwrap();
+            // 送信者 "42" をこのエージェントの co_agent として登録
+            opencrab_db::queries::add_trusted_user(
+                &conn,
+                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                "row-1",
+                "a1",
+                "42",
+                "co_agent",
+                "owner",
+                "2026-01-01",
+                "Crab B",
+            )
+            .unwrap();
+            let task_id =
+                opencrab_db::queries::insert_task_ledger(&conn, "a1", "s1", "goal", None).unwrap();
+            // 未回収のレビュー依頼を記録
+            opencrab_db::queries::insert_task_progress(
+                &conn,
+                task_id,
+                "progress",
+                "[peer review requested] posted to channel 1 (1 parts)",
+            )
+            .unwrap();
+            task_id
+        };
+        let reply = "[Peer Review] score: 0.6\ngaps:\n- missing tests\nsummary: incomplete";
+
+        // marker 無し → 記録しない
+        assert!(!record_discord_reply(
+            &db, "a1", "s1", "42", "crab-b", "hello"
+        ));
+        // 未登録送信者（co_agent でない）→ 記録しない
+        assert!(!record_discord_reply(
+            &db, "a1", "s1", "99", "stranger", reply
+        ));
+        // active タスクの無いセッション → 記録しない
+        assert!(!record_discord_reply(
+            &db, "a1", "other", "42", "crab-b", reply
+        ));
+        // 正常系
+        assert!(record_discord_reply(&db, "a1", "s1", "42", "crab-b", reply));
+        // 依頼が回収済みになったので、追加の返信は記録しない（1依頼1記録）
+        assert!(!record_discord_reply(
+            &db, "a1", "s1", "42", "crab-b", reply
+        ));
+
+        let conn = db.lock().unwrap();
+        let progress = opencrab_db::queries::list_recent_task_progress(&conn, task_id, 10).unwrap();
+        assert_eq!(progress.len(), 2); // requested + received
+        assert!(progress[1]
+            .content
+            .contains("[peer review] score 0.60 (from crab-b)"));
+        assert!(progress[1].content.contains("missing tests"));
+    }
+
+    /// 同じ送信者識別子でも、**登録された経路が違えば解決しない**（fail-closed / #214）。
+    ///
+    /// 由来（[`TranscriptSource`]）から経路を引くので、経路の列を持たない由来
+    /// （Nostr）では回収しない。「とりあえず discord で引く」に戻すとこのテストが落ちる。
+    #[test]
+    fn harvest_resolves_sender_in_the_route_that_declared_it() {
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::add_trusted_user(
+                &conn,
+                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                "row-1",
+                "a1",
+                "42",
+                "co_agent",
+                "owner",
+                "2026-01-01",
+                "Crab B",
+            )
+            .unwrap();
+            let task_id =
+                opencrab_db::queries::insert_task_ledger(&conn, "a1", "s1", "goal", None).unwrap();
+            opencrab_db::queries::insert_task_progress(
+                &conn,
+                task_id,
+                "progress",
+                "[peer review requested] posted to channel 1 (1 parts)",
+            )
+            .unwrap();
+        }
+        let reply = "[Peer Review] score: 0.6 summary: ok";
+        let record = InboundMessageRecord {
+            session_id: "s1",
+            sender_id: "42",
+            sender_name: "crab-b",
+            avatar_url: None,
+            channel_id: Some("1"),
+            pubkey: None,
+            text: reply,
+            image_urls: &[],
+        };
+        // 経路の列を持たない由来 → 回収しない（識別子が偶然一致しても受理しない）
+        assert!(!harvest_inbound_reply(
+            &db,
+            TranscriptSource::Nostr,
+            "a1",
+            &record
+        ));
+        assert!(trusted_platform_for(TranscriptSource::Nostr).is_none());
+        // Discord は登録済み経路 → 回収する
+        assert!(harvest_inbound_reply(
+            &db,
+            TranscriptSource::Discord,
+            "a1",
+            &record
+        ));
     }
 }

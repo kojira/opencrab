@@ -33,11 +33,27 @@ struct RunObservation {
     has_completion_sink: bool,
 }
 
+/// 受信フック（`AgentRuntime::on_inbound_message`）の観測 1 件。
+///
+/// 回収の中身（`[Peer Review]` の解析・ゲート）は汎用層のテストが持つ。ここで固定
+/// するのは**受信ループがフックを呼ぶこと**と、そのとき渡す由来・帰属・本文。
+#[derive(Debug, Clone)]
+struct InboundHookCall {
+    source: opencrab_actions::TranscriptSource,
+    agent_id: String,
+    session_id: String,
+    sender_id: String,
+    sender_name: String,
+    text: String,
+}
+
 /// テスト用の最小 `AgentRunner`。LLM も Discord API も叩かず、応答は**空**を返す
 /// （空応答は送信経路に入らないので、テストがネットワークへ出ない）。
 #[derive(Clone)]
 struct FakeRunner {
     runs: Arc<Mutex<Vec<RunObservation>>>,
+    /// 受信フックの観測（呼ばれた順）。
+    inbound_hooks: Arc<Mutex<Vec<InboundHookCall>>>,
     /// run を 1 件観測したことの通知。
     ///
     /// inbound 経路の応答生成は `SessionRuntime::spawn_serialized` の別タスクで走るため、
@@ -53,6 +69,7 @@ impl FakeRunner {
     fn new() -> Self {
         Self {
             runs: Arc::new(Mutex::new(Vec::new())),
+            inbound_hooks: Arc::new(Mutex::new(Vec::new())),
             run_observed: Arc::new(tokio::sync::Notify::new()),
             db: opencrab_db::Db::memory().expect("in-memory DB"),
         }
@@ -128,6 +145,22 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         _source: opencrab_actions::TranscriptSource,
         _record: &opencrab_actions::InboundMessageRecord<'_>,
     ) {
+    }
+
+    fn on_inbound_message(
+        &self,
+        source: opencrab_actions::TranscriptSource,
+        agent_id: &str,
+        record: &opencrab_actions::InboundMessageRecord<'_>,
+    ) {
+        self.inbound_hooks.lock().unwrap().push(InboundHookCall {
+            source,
+            agent_id: agent_id.to_string(),
+            session_id: record.session_id.to_string(),
+            sender_id: record.sender_id.to_string(),
+            sender_name: record.sender_name.to_string(),
+            text: record.text.to_string(),
+        });
     }
 
     fn record_outbound_reply(
@@ -334,4 +367,59 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         has_sink,
         "inbound の run に完了 sink が無い（掘削の完了が再注入されない）"
     );
+}
+
+/// **Discord の受信は共通の受信フックを必ず通る**（#156 S4）。
+///
+/// ピアレビュー返信の回収は以前 Discord の受信ループが直接呼ぶ専用関数だった。汎用層へ
+/// 移した後にこの呼び出しが落ちると、回収は**静かに止まる**（返信は普通の発言として
+/// 流れるだけなのでログにも異常が出ない）。ここでフックの呼び出しと、渡す由来・帰属・
+/// 本文を固定する。回収そのもののゲートは汎用層（`crates/server/src/peer_review.rs`）の
+/// テストが持つ。
+#[tokio::test]
+async fn inbound_goes_through_the_shared_inbound_hook() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    let session_runtime = Arc::new(SessionRuntime::new());
+
+    let reply = "[Peer Review] score: 0.7, gaps: none, summary: ok";
+    let incoming = IncomingMessage::new(
+        MessageSource::Discord {
+            guild_id: "111".to_string(),
+            channel_id: "222".to_string(),
+        },
+        MessageContent::Text(reply.to_string()),
+        Sender::user("user-1", "crab-b"),
+    );
+
+    process_incoming_message(
+        incoming,
+        gateway,
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        session_runtime,
+        false,
+        None,
+        event_tx,
+        registry,
+    )
+    .await;
+
+    // フックは応答生成と同じ直列タスクの中（会話組み立ての前）で呼ばれる。
+    state.wait_for_run().await;
+
+    let hooks = state.inbound_hooks.lock().unwrap();
+    let call = hooks
+        .first()
+        .expect("受信が共通フック（on_inbound_message）を通っていない — 返信の回収が死ぬ");
+    assert_eq!(call.source, opencrab_actions::TranscriptSource::Discord);
+    // 帰属は**受信側エージェント**（誰の台帳に回収するか）。送信者と取り違えない。
+    assert_eq!(call.agent_id, "crab");
+    assert_eq!(call.session_id, "discord-crab-111-222");
+    assert_eq!(call.sender_id, "user-1");
+    assert_eq!(call.sender_name, "crab-b");
+    assert_eq!(call.text, reply);
 }

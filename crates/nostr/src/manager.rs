@@ -734,6 +734,15 @@ mod tests {
             self.recorded.lock().unwrap().push(record.text.to_string());
         }
 
+        fn on_inbound_message(
+            &self,
+            _source: opencrab_actions::TranscriptSource,
+            _agent_id: &str,
+            _record: &opencrab_actions::InboundMessageRecord<'_>,
+        ) {
+            // 受信フック（#156 S4）。Nostr の受信はまだ配線していないので no-op。
+        }
+
         // 以下はこの経路が使わない（NO_REPLY で返すので応答転記も走らない）。
         fn record_outbound_reply(
             &self,

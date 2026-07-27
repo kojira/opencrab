@@ -16,7 +16,6 @@ use crate::message_loop::LoopEvent;
 use opencrab_core::a2ui::PendingInteractionRegistry;
 
 mod discord_ops;
-mod peer_review;
 mod subtask_engine;
 mod subtask_notifier;
 mod subtask_webhook;
@@ -25,7 +24,10 @@ mod ui;
 mod voice_actions;
 mod webhook;
 
-pub(crate) use peer_review::record_peer_review_reply;
+// ピアレビューは**依頼側も回収側も** gateway 非依存層（`crates/server/src/peer_review.rs`）
+// にある。依頼は #157 S7、返信の回収は #156 S4 で移設した。回収の呼び出し口は
+// `opencrab_actions::AgentRuntime::on_inbound_message`（受信ループから呼ぶ共通フック）。
+// Discord に残るピアレビュー関連は配送口（`text_delivery::DiscordTextDelivery`）だけ。
 pub use subtask_engine::spawn_activity_tool_event_sink;
 pub(crate) use subtask_engine::DiscordCompletionSink;
 pub use subtask_notifier::DiscordWebhookNotifier;
@@ -484,9 +486,9 @@ impl GatewayActions for DiscordGatewayActions {
             "discord_create_webhook" => self.execute_discord_create_webhook(args).await,
             "discord_create_channel" => self.execute_discord_create_channel(args).await,
             "discord_send_file" => self.execute_send_file(args, ctx).await,
-            // ピアレビュー依頼は #157 S7 で server 側（`crates/server/src/peer_review.rs`）
-            // へ移設済み。Discord に残るのは配送口（`text_delivery()`）と、返信の回収
-            // （`peer_review::record_peer_review_reply` / 受信ループから呼ぶ）だけ。
+            // ピアレビューは依頼（#157 S7）も返信の回収（#156 S4）も server 側
+            // （`crates/server/src/peer_review.rs`）へ移設済み。Discord に残るのは
+            // 配送口（`text_delivery()`）だけ。
             "join_voice_channel" => self.execute_join_voice_channel(args, ctx).await,
             "leave_voice_channel" => self.execute_leave_voice_channel(args, ctx).await,
             // 通知先（webhook）の管理は #157 S5 で server 側（`crates/server/src/
