@@ -1863,31 +1863,44 @@ mod tests {
                 "未登録の送信者の verdict を受理した"
             );
 
-            // permission が co-agent でなければ同じく落ちる（#234 が壊れたときの形）。
-            let state2 = crate::test_app_state();
-            let _dto = crate::api::trusted_users::add_trusted_user(
+            // 登録はされているが permission が協働エージェントでなければ同じく落ちる
+            // （#234 が壊れたときの形 — 稼働環境で実際に起きていた不具合）。
+            //
+            // **未回収状態は依頼側を実際に通して作る。** ここで台帳の文言を手書きすると、
+            // 依頼側の文言が将来ずれたときにこの検査は「未回収の依頼が無い」ゲートで
+            // 落ちて素通りし、権限の検査が黙って消える（この PR が批判している
+            // 二重書きそのもの）。
+            let (state2, task2, _d2) = request_sent().await;
+            let row_id = crate::api::trusted_users::list_trusted_users(
                 State(state2.clone()),
                 Path(AGENT.to_string()),
-                Json(crate::api::trusted_users::AddTrustedUserRequest {
-                    user_id: REVIEWER_ID.to_string(),
+            )
+            .await
+            .0
+            .into_iter()
+            .find(|u| u.user_id == REVIEWER_ID)
+            .expect("登録済みのレビュアー")
+            .id;
+            let _updated = crate::api::trusted_users::update_trusted_user(
+                State(state2.clone()),
+                Path((AGENT.to_string(), row_id)),
+                Json(crate::api::trusted_users::UpdateTrustedUserRequest {
                     permission: Some("user".to_string()),
-                    display_name: Some(REVIEWER_NAME.to_string()),
-                    platform: None,
+                    display_name: None,
                 }),
             )
             .await
-            .expect("add");
-            let task2 = seed_agent_and_task(&state2);
-            {
-                let conn = state2.db.lock().unwrap();
-                opencrab_db::queries::insert_task_progress(
-                    &conn,
-                    task2,
-                    "progress",
-                    "[peer review requested] posted to channel 1 (1 parts)",
-                )
-                .unwrap();
-            }
+            .expect("協働エージェントからの降格");
+
+            // 依頼は未回収のまま（= 権限以外のゲートは開いている）
+            let before = ledger(&state2, task2);
+            assert_eq!(before.len(), 1, "{before:?}");
+            assert!(
+                before[0].starts_with("[peer review requested]"),
+                "権限ゲート以外が閉じていると、この検査は空虚になる: {}",
+                before[0]
+            );
+
             state2.on_inbound_message(
                 TranscriptSource::Discord,
                 AGENT,
