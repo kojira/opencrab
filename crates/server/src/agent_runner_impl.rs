@@ -149,6 +149,14 @@ impl opencrab_discord::AgentRunner for AppState {
         }
     }
 
+    fn get_discord_config(
+        &self,
+        agent_id: &str,
+    ) -> Option<opencrab_db::queries::AgentDiscordConfigRow> {
+        let conn = self.db.lock().ok()?;
+        opencrab_db::queries::get_agent_discord_config(&conn, agent_id).unwrap_or(None)
+    }
+
     fn served_by_dedicated_gateway(&self, agent_id: &str) -> bool {
         // DB の enabled フラグではなく manager の liveness で判定する（#40）。
         // enabled=1 でもゲートウェイが起動失敗/停止していれば false → 共有側が

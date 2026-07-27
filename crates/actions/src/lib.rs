@@ -1,4 +1,5 @@
 pub mod a2ui;
+pub mod agent_gateway;
 pub mod agent_runtime;
 pub mod bridge;
 pub mod common;
@@ -26,6 +27,9 @@ pub mod workspace;
 pub mod run_request;
 
 pub use a2ui::{send_ui, send_ui_definition};
+pub use agent_gateway::{
+    kinds as gateway_kinds, AgentGatewayLifecycle, AgentGatewayRegistry, SharedAgentGateway,
+};
 pub use agent_runtime::AgentRuntime;
 pub use bridge::{
     tool_policy, BridgedExecutor, SubEngineGatewayActions, ToolEvent, ToolEventSink,

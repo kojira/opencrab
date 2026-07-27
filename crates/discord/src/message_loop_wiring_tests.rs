@@ -248,6 +248,13 @@ impl crate::AgentRunner for FakeRunner {
         Vec::new()
     }
 
+    fn get_discord_config(
+        &self,
+        _agent_id: &str,
+    ) -> Option<opencrab_db::queries::AgentDiscordConfigRow> {
+        None
+    }
+
     fn served_by_dedicated_gateway(&self, _agent_id: &str) -> bool {
         false
     }

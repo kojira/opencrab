@@ -208,6 +208,49 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
     }
 }
 
+/// エージェント単位ライフサイクルの共通契約（#191 段階2）。
+///
+/// 既存の具象メソッドへ委譲するだけで、挙動は変えない。契約側の `start` は資格情報を
+/// 引数に取らない（transport ごとに形が違うため）ので、ここで DB の設定行を読む。
+///
+/// **owner の入口正規化はここでは行わない。** `start_agent_gateway` の中の
+/// `prepare_owner_for_gateway` がそのまま担う（トレイト経由でも生の呼び出しでも
+/// 同じ 1 箇所を通る）。ここで trim を重ねると「正規化の置き場所が 2 つある」形になり、
+/// 片方だけ消えたときに `DM は通るのに owner 専用 UI だけ無言で拒否` が復活する。
+#[async_trait::async_trait]
+impl<T: AgentRunner> opencrab_actions::AgentGatewayLifecycle for DiscordGatewayManager<T> {
+    fn kind(&self) -> &'static str {
+        opencrab_actions::gateway_kinds::DISCORD
+    }
+
+    async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        let cfg = self
+            .state
+            .get_discord_config(agent_id)
+            .ok_or_else(|| anyhow::anyhow!("Discord 設定がありません（agent_id={agent_id}）"))?;
+        // enabled フラグの書き換えは呼び出し側の責務（DB の方針でありライフサイクル
+        // ではない）。ここは既存の REST `/discord/start` と同じく「行があれば起動する」。
+        self.start_agent_gateway(agent_id, &cfg.bot_token, &cfg.owner_discord_id)
+            .await
+    }
+
+    async fn stop(&self, agent_id: &str) {
+        self.stop_agent_gateway(agent_id).await;
+    }
+
+    fn is_running(&self, agent_id: &str) -> bool {
+        DiscordGatewayManager::is_running(self, agent_id)
+    }
+
+    async fn restore_all(&self) {
+        self.restore_from_db().await;
+    }
+
+    async fn shutdown_all(&self) {
+        DiscordGatewayManager::shutdown_all(self).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::prepare_owner_for_gateway;

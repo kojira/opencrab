@@ -111,6 +111,16 @@ pub trait AgentRunner: opencrab_actions::AgentRuntime {
     /// 有効な per-agent Discord 設定の一覧。
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow>;
 
+    /// このエージェントの per-agent Discord 設定行（無ければ None）。
+    ///
+    /// [`opencrab_actions::AgentGatewayLifecycle::start`] が資格情報を引数で取らない
+    /// （transport ごとに形が違うため）ので、マネージャが自分で DB から読む。
+    /// Nostr 側の `get_nostr_config` と同型。
+    fn get_discord_config(
+        &self,
+        agent_id: &str,
+    ) -> Option<opencrab_db::queries::AgentDiscordConfigRow>;
+
     /// このエージェント専用の per-agent Discord ゲートウェイが**実際に稼働中**か。
     ///
     /// 共有（TOML）ゲートウェイ側の二重処理防止（#40）に使う。判定は DB の enabled

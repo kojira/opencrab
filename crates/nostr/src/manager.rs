@@ -211,6 +211,48 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     }
 }
 
+/// エージェント単位ライフサイクルの共通契約（#191 段階2）。
+///
+/// 既存の具象メソッドへ委譲するだけで、挙動は変えない。契約側の `start` は資格情報を
+/// 引数に取らない（transport ごとに形が違う）ので、ここで DB の設定行を読んで
+/// [`crate::config_from_row`] で `NostrConfig` に組み直す。
+///
+/// **フィルタの無制限チェックはここでは行わない。** `start_agent_gateway` の中の
+/// `filter_is_unbounded` が単一チョークポイントとして担う（トレイト経由でも生の
+/// 呼び出しでも同じ 1 箇所を通る）。
+#[async_trait::async_trait]
+impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatewayManager<R> {
+    fn kind(&self) -> &'static str {
+        opencrab_actions::gateway_kinds::NOSTR
+    }
+
+    async fn start(&self, agent_id: &str) -> anyhow::Result<()> {
+        let row = self
+            .runner
+            .get_nostr_config(agent_id)
+            .ok_or_else(|| anyhow::anyhow!("Nostr 設定がありません（agent_id={agent_id}）"))?;
+        let config = crate::config_from_row(&row);
+        self.start_agent_gateway(agent_id, &row.secret_key, config)
+            .await
+    }
+
+    async fn stop(&self, agent_id: &str) {
+        self.stop_agent_gateway(agent_id).await;
+    }
+
+    fn is_running(&self, agent_id: &str) -> bool {
+        NostrGatewayManager::is_running(self, agent_id)
+    }
+
+    async fn restore_all(&self) {
+        self.restore_from_db().await;
+    }
+
+    async fn shutdown_all(&self) {
+        NostrGatewayManager::shutdown_all(self).await;
+    }
+}
+
 /// 処理済み event.id の bounded FIFO セット（watch 再購読時の再処理 = 二重返信を防ぐ）。
 struct SeenEvents {
     order: std::collections::VecDeque<String>,
