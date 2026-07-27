@@ -138,81 +138,6 @@ impl IncomingMessage {
     }
 }
 
-/// メッセージ送信先
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum MessageTarget {
-    Channel { id: String },
-    DirectMessage { user_id: String },
-    Broadcast,
-}
-
-/// 送信メッセージ（Core → Gateway → 外部プラットフォーム）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutgoingMessage {
-    pub content: MessageContent,
-    pub target: MessageTarget,
-    pub reply_to: Option<String>,
-    pub metadata: HashMap<String, serde_json::Value>,
-}
-
-impl OutgoingMessage {
-    /// テキスト返信を簡単に作成
-    pub fn text_reply(text: impl Into<String>, reply_to: impl Into<String>) -> Self {
-        Self {
-            content: MessageContent::Text(text.into()),
-            target: MessageTarget::Broadcast,
-            reply_to: Some(reply_to.into()),
-            metadata: HashMap::new(),
-        }
-    }
-
-    /// チャンネルへのテキストメッセージを作成
-    pub fn text_to_channel(text: impl Into<String>, channel_id: impl Into<String>) -> Self {
-        Self {
-            content: MessageContent::Text(text.into()),
-            target: MessageTarget::Channel {
-                id: channel_id.into(),
-            },
-            reply_to: None,
-            metadata: HashMap::new(),
-        }
-    }
-
-    pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.metadata.insert(key.into(), value);
-        self
-    }
-}
-
-/// ゲートウェイ設定
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayConfig {
-    pub name: String,
-    pub enabled: bool,
-    pub settings: HashMap<String, serde_json::Value>,
-}
-
-impl GatewayConfig {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            enabled: true,
-            settings: HashMap::new(),
-        }
-    }
-
-    pub fn with_setting(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.settings.insert(key.into(), value);
-        self
-    }
-
-    pub fn disabled(mut self) -> Self {
-        self.enabled = false;
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,13 +153,6 @@ mod tests {
         );
         assert!(!msg.id.is_empty());
         assert_eq!(msg.content.as_text(), Some("test message"));
-    }
-
-    #[test]
-    fn test_text_reply() {
-        let reply = OutgoingMessage::text_reply("hi", "msg-1");
-        assert_eq!(reply.reply_to, Some("msg-1".to_string()));
-        assert_eq!(reply.content.as_text(), Some("hi"));
     }
 
     #[test]

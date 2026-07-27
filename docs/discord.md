@@ -10,7 +10,7 @@ opencrab は [serenity](https://github.com/serenity-rs/serenity) を使用して
 
 | crate | 役割 |
 |---|---|
-| `opencrab-gateway` | Gateway trait の定義、`DiscordGateway` の実装（低レイヤー） |
+| `opencrab-gateway` | `DiscordGateway` の実装、`GatewayActions` 抽象、共通メッセージ型（低レイヤー） |
 | `opencrab-discord` | メインループ、マネージャー、エージェントツール（高レイヤー） |
 
 ## 設定
@@ -253,7 +253,7 @@ run_discord_loop() (opencrab-discord)
 エージェント処理
     │
     ▼
-OutgoingMessage 生成
+応答テキスト
     │
     ├── チャンネル writable チェック → false なら送信しない
     │
