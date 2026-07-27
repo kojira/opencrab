@@ -239,6 +239,11 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
     /// DB の enabled な設定を全件読んで起動する（プロセス起動時の復元）。
     ///
     /// 個々の失敗はログに残して次へ進む（1 エージェントの起動失敗で他を巻き込まない）。
+    ///
+    /// **起動時 1 回だけ**呼ばれる。周期的に呼び直して落ちた接続を拾い直す仕組みは
+    /// ここには無い（MCP マネージャが持つ 60 秒周期の自己修復とは別物で、あれは
+    /// 登録簿の外にある）。1 回であることは
+    /// [`AgentGatewayRegistry::restore_pending`] が構造的に保証する。
     async fn restore_all(&self);
 
     /// この transport の全エージェント分を停止する（プロセス終了時）。
@@ -293,11 +298,38 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
 /// 登録順を保持する（`Vec`）。復元順が transport ごとに違うという事実は消えないので、
 /// 「登録した順＝現在の起動順」を保存しておき、走査への一般化（段階2 PR5）が既存の
 /// 順序をそのまま再現できるようにする。
+///
+/// ## 復元の走査は「未復元の分だけ」（段階2 PR5）
+///
+/// 起動処理から `restore_from_db` の名指しを消すにあたり、**復元を 1 箇所の走査に畳む
+/// ことはできない**。復元位置は transport ごとに違い、それが仕様だから:
+///
+/// - Discord は**共有（TOML）ゲートウェイの起動後**。起動直後の短い窓では共有側が
+///   メッセージを処理し、専用ゲートウェイが上がり次第 per-message スキップが効く。
+///   さらに直後の heartbeat 用 HTTP クライアントの取得が、この復元の完了に依存する。
+/// - Nostr は**ルータ構築の直前**。
+///
+/// 全部を最後の 1 回に畳むと Discord の復元が後ろへずれ、上の 2 つが壊れる。そこで
+/// [`Self::restore_pending`] は**呼ばれた時点で登録済みかつ未復元のものだけ**を
+/// 登録順に復元する。既存の 2 つの復元位置でこれを呼べば、走る対象も順序も移設前と
+/// 1 対 1 のまま、起動処理からは「どの transport をここで復元するか」という名指しが
+/// 消える。新しい transport は「復元させたい位置より前に登録する」だけでよく、
+/// 呼び出し口を足す必要が無い。
 #[derive(Default)]
 pub struct AgentGatewayRegistry {
     // std RwLock（tokio ではない）: `is_running` を同期メソッドに保つため。
     // ガードを await 跨ぎで保持しないこと（各メソッドで clone して閉じる）。
-    gateways: RwLock<Vec<SharedAgentGateway>>,
+    gateways: RwLock<Vec<RegisteredGateway>>,
+}
+
+/// 登録簿の 1 エントリ（マネージャ + 復元済みの印）。
+struct RegisteredGateway {
+    gateway: SharedAgentGateway,
+    /// [`AgentGatewayRegistry::restore_pending`] が既にこのマネージャの復元を回したか。
+    ///
+    /// ゲートウェイの復元は**起動時 1 回だけ**（MCP のような周期的な自己修復は持たない）。
+    /// この印がその「1 回」を構造的に保証する。
+    restored: bool,
 }
 
 impl AgentGatewayRegistry {
@@ -306,12 +338,19 @@ impl AgentGatewayRegistry {
     }
 
     /// マネージャを登録する。同じ種別が既にあれば**置き換える**（登録順は保つ）。
+    ///
+    /// 置き換えたときは復元済みの印を落とす（新しいマネージャはまだ DB から復元して
+    /// いない）。起動処理は各種別を 1 度しか登録しないので、通常の経路では効かない。
     pub fn register(&self, gateway: SharedAgentGateway) {
         let kind = gateway.kind();
+        let entry = RegisteredGateway {
+            gateway,
+            restored: false,
+        };
         let mut gateways = write_or_recover(&self.gateways);
-        match gateways.iter().position(|g| g.kind() == kind) {
-            Some(i) => gateways[i] = gateway,
-            None => gateways.push(gateway),
+        match gateways.iter().position(|e| e.gateway.kind() == kind) {
+            Some(i) => gateways[i] = entry,
+            None => gateways.push(entry),
         }
     }
 
@@ -319,8 +358,8 @@ impl AgentGatewayRegistry {
     pub fn get(&self, kind: &str) -> Option<SharedAgentGateway> {
         read_or_recover(&self.gateways)
             .iter()
-            .find(|g| g.kind() == kind)
-            .cloned()
+            .find(|e| e.gateway.kind() == kind)
+            .map(|e| e.gateway.clone())
     }
 
     /// 登録済みの全マネージャを**登録順**で返す。
@@ -328,15 +367,56 @@ impl AgentGatewayRegistry {
     /// 返すのはスナップショット（ロックは戻る前に落ちる）。呼び出し側が `.await` を
     /// 挟んで走査してもロックを跨がない。
     pub fn all(&self) -> Vec<SharedAgentGateway> {
-        read_or_recover(&self.gateways).clone()
+        read_or_recover(&self.gateways)
+            .iter()
+            .map(|e| e.gateway.clone())
+            .collect()
     }
 
     /// 登録済みの種別名を**登録順**で返す。
     pub fn kinds(&self) -> Vec<&'static str> {
         read_or_recover(&self.gateways)
             .iter()
-            .map(|g| g.kind())
+            .map(|e| e.gateway.kind())
             .collect()
+    }
+
+    /// **まだ復元していない**マネージャを、**登録順**に DB から復元する（段階2 PR5）。
+    ///
+    /// 起動処理の `restore_from_db` の名指しを置き換えるための走査。復元位置が
+    /// transport ごとに違う（理由は型の doc 参照）ため、「登録済みの全部」ではなく
+    /// **その時点で登録済みかつ未復元の分だけ**を対象にする。既存の復元位置でそのまま
+    /// 呼べば、走る対象も順序も移設前と 1 対 1 になる。
+    ///
+    /// 戻り値は実際に復元した種別名（復元した順）。ログや検査に使う。
+    ///
+    /// ## ロックを await 跨ぎで持たない
+    ///
+    /// 対象の取り出しと印付けはロックの中で済ませ、実際の復元（`.await`）はロックを
+    /// 落としてから回す。**印は await の前に付ける**: 後に付けると、復元中にもう一度
+    /// この走査が走ったとき同じマネージャを二重に復元しうる（`restore_all` は
+    /// 稼働中のゲートウェイを止めて起動し直すので、二重復元は接続の張り直しになる）。
+    pub async fn restore_pending(&self) -> Vec<&'static str> {
+        let pending: Vec<SharedAgentGateway> = {
+            let mut gateways = write_or_recover(&self.gateways);
+            gateways
+                .iter_mut()
+                .filter(|e| !e.restored)
+                .map(|e| {
+                    e.restored = true;
+                    e.gateway.clone()
+                })
+                .collect()
+        };
+
+        let mut restored = Vec::with_capacity(pending.len());
+        for gateway in pending {
+            let kind = gateway.kind();
+            tracing::debug!(kind, "restoring per-agent gateways from DB");
+            gateway.restore_all().await;
+            restored.push(kind);
+        }
+        restored
     }
 
     /// その種別の専用ゲートウェイがこのエージェントで稼働中か。
@@ -349,12 +429,25 @@ impl AgentGatewayRegistry {
             .map(|g| g.is_running(agent_id))
             .unwrap_or(false)
     }
+
+    /// その種別が既に復元済みか（検査用）。未登録なら `false`。
+    #[cfg(test)]
+    fn is_restored(&self, kind: &str) -> bool {
+        read_or_recover(&self.gateways)
+            .iter()
+            .find(|e| e.gateway.kind() == kind)
+            .map(|e| e.restored)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 復元が呼ばれた順を記録する共有ログ（PR5 の順序検査用）。
+    type OrderLog = Arc<std::sync::Mutex<Vec<&'static str>>>;
 
     /// ネットワークに出ない偽マネージャ（呼ばれた回数だけ数える）。
     struct FakeGateway {
@@ -364,6 +457,8 @@ mod tests {
         stopped: AtomicUsize,
         restored: AtomicUsize,
         shutdown: AtomicUsize,
+        /// `restore_all` が呼ばれた順を記録する先（未設定なら記録しない）。
+        restore_order: Option<OrderLog>,
     }
 
     impl FakeGateway {
@@ -375,6 +470,20 @@ mod tests {
                 stopped: AtomicUsize::new(0),
                 restored: AtomicUsize::new(0),
                 shutdown: AtomicUsize::new(0),
+                restore_order: None,
+            })
+        }
+
+        /// 復元順を共有ログへ記録する偽マネージャ。
+        fn with_order_log(kind: &'static str, log: &OrderLog) -> Arc<Self> {
+            Arc::new(Self {
+                kind,
+                running: vec![],
+                started: AtomicUsize::new(0),
+                stopped: AtomicUsize::new(0),
+                restored: AtomicUsize::new(0),
+                shutdown: AtomicUsize::new(0),
+                restore_order: Some(log.clone()),
             })
         }
     }
@@ -396,6 +505,9 @@ mod tests {
         }
         async fn restore_all(&self) {
             self.restored.fetch_add(1, Ordering::SeqCst);
+            if let Some(log) = &self.restore_order {
+                log.lock().unwrap().push(self.kind);
+            }
         }
         async fn shutdown_all(&self) {
             self.shutdown.fetch_add(1, Ordering::SeqCst);
@@ -556,6 +668,104 @@ mod tests {
         );
         assert!(rendered.contains("npub1public"), "公開側は見えること");
         assert!(rendered.contains("deadbeef"));
+    }
+
+    // ------------------------------------------------------------------
+    // 復元の走査（#191 段階2 PR5）
+    //
+    // 起動処理から `restore_from_db` の名指しを消すための走査。**順序が仕様**なので、
+    // 「何が・どの順で・何回復元されるか」をここで固定する。緩むと、Discord の復元が
+    // 後ろへずれて heartbeat の HTTP クライアントが取れなくなる（= 移設前と挙動が変わる）。
+    // ------------------------------------------------------------------
+
+    /// **起動処理が実際に取る形**（復元位置が 2 つある）を再現し、走る対象を固定する。
+    ///
+    /// 現状の起動処理は Discord を先に登録して共有ゲートウェイ起動後に復元し、その後
+    /// Nostr を登録してルータ構築の直前に復元する。走査を最後の 1 回に畳むと Discord の
+    /// 復元が後ろへずれるので、**その時点で未復元の分だけ**を各位置で復元する。
+    #[tokio::test]
+    async fn restore_pending_restores_each_gateway_at_its_own_point() {
+        let registry = AgentGatewayRegistry::new();
+
+        // 位置 1（共有ゲートウェイ起動後）: この時点で登録済みなのは Discord だけ。
+        let discord = FakeGateway::new(kinds::DISCORD, &[]);
+        registry.register(discord.clone());
+        assert_eq!(registry.restore_pending().await, vec![kinds::DISCORD]);
+        assert_eq!(discord.restored.load(Ordering::SeqCst), 1);
+
+        // 位置 2（ルータ構築の直前）: Nostr を登録してから走査。**Discord は再復元しない。**
+        let nostr = FakeGateway::new(kinds::NOSTR, &[]);
+        registry.register(nostr.clone());
+        assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+        assert_eq!(
+            discord.restored.load(Ordering::SeqCst),
+            1,
+            "2 回目の走査が Discord を巻き込むと接続を張り直してしまう"
+        );
+        assert_eq!(nostr.restored.load(Ordering::SeqCst), 1);
+    }
+
+    /// 同じ位置に複数登録されていれば**登録順**で復元する（走査が順序を保つ）。
+    #[tokio::test]
+    async fn restore_pending_follows_registration_order() {
+        let log: OrderLog = Arc::new(std::sync::Mutex::new(vec![]));
+        let registry = AgentGatewayRegistry::new();
+        registry.register(FakeGateway::with_order_log(kinds::DISCORD, &log));
+        registry.register(FakeGateway::with_order_log(kinds::NOSTR, &log));
+
+        let restored = registry.restore_pending().await;
+        assert_eq!(restored, vec![kinds::DISCORD, kinds::NOSTR]);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![kinds::DISCORD, kinds::NOSTR],
+            "実際に復元が走った順も登録順であること"
+        );
+    }
+
+    /// 復元は**起動時 1 回だけ**（周期的な自己修復は持たない）。走査を呼び直しても
+    /// 何も起きない。
+    #[tokio::test]
+    async fn restore_pending_is_a_one_shot_per_gateway() {
+        let registry = AgentGatewayRegistry::new();
+        let nostr = FakeGateway::new(kinds::NOSTR, &[]);
+        registry.register(nostr.clone());
+
+        assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+        assert!(registry.restore_pending().await.is_empty());
+        assert!(registry.restore_pending().await.is_empty());
+        assert_eq!(nostr.restored.load(Ordering::SeqCst), 1);
+        assert!(registry.is_restored(kinds::NOSTR));
+    }
+
+    /// **Discord を落とした構成**（`--no-default-features`）でも同じ形で通る。
+    ///
+    /// 位置 1 の走査ごと消えるので、残った 1 回が Nostr を復元する。
+    #[tokio::test]
+    async fn restore_pending_works_without_discord_registered() {
+        let registry = AgentGatewayRegistry::new();
+        assert!(
+            registry.restore_pending().await.is_empty(),
+            "空の登録簿でも安全に呼べる"
+        );
+
+        let nostr = FakeGateway::new(kinds::NOSTR, &[]);
+        registry.register(nostr.clone());
+        assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+        assert_eq!(nostr.restored.load(Ordering::SeqCst), 1);
+        assert!(!registry.is_restored(kinds::DISCORD), "未登録は復元済みでない");
+    }
+
+    /// 同じ種別を置き換えたら復元済みの印も落ちる（新しいマネージャは未復元）。
+    #[tokio::test]
+    async fn re_registering_clears_the_restored_mark() {
+        let registry = AgentGatewayRegistry::new();
+        registry.register(FakeGateway::new(kinds::NOSTR, &[]));
+        assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+
+        let replacement = FakeGateway::new(kinds::NOSTR, &[]);
+        registry.register(replacement.clone());
+        assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
+        assert_eq!(replacement.restored.load(Ordering::SeqCst), 1);
     }
 
     /// トレイトオブジェクト越しに 5 操作すべてを呼べる（`dyn` として使える形か）。
