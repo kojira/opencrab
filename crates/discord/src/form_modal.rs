@@ -34,8 +34,11 @@ fn modal_custom_id(surface_id: &str, action_name: &str) -> String {
 ///
 /// 操作できるのはオーナーだけ。**オーナー未設定なら誰も開けない**（#174）。
 /// 以前は「`owner_id` が空なら判定しない」＝誰でも開ける、という fail-open
-/// だったため、オーナー欄を空のまま運用するとオーナー専用 UI の権限ゲートが
-/// 黙って無効化されていた。判定は `opencrab_core::owner::is_owner_id` に集約。
+/// だったため、オーナー欄を空のまま運用すると権限ゲートが黙って無効化されていた。
+/// 判定は `opencrab_core::owner::is_owner_id` に集約。
+///
+/// このゲートは `send_ui` の `owner_only` 引数を見ない（あれは DB の列にしか
+/// 効かない）。**すべての A2UI 描画面**に効く点に注意。
 pub fn resolve_form_modal_for_button(
     registry: &PendingInteractionRegistry,
     custom_id: &str,

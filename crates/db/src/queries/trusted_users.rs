@@ -290,7 +290,9 @@ pub fn is_trusted_user(
 /// fail-open は #174 で撤去した（許可は `is_trusted_user` とオーナー判定だけで
 /// 決まる）。件数で分岐を切り替える形を復活させると、経路ごとに登録が分かれた
 /// 途端（#159）に権限が緩む方向へ倒れる。
-/// 残しているのは件数の表示・統計用途のため。
+///
+/// **現在の呼び出し元は無い**（この crate のテストのみ）。件数の表示・統計のような
+/// 認可と無関係な用途のために残してある。
 pub fn trusted_user_count(conn: &Connection, platform: &str, agent_id: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM trusted_discord_users WHERE platform = ?1 AND agent_id = ?2",

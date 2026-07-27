@@ -264,7 +264,8 @@ pub async fn send_ui(
             surface_id: surface_id.clone(),
             a2ui_components: components.clone(),
             // owner の識別子は描画面が保持する値を使う（args 経由では注入されない）。
-            // 空文字だと owner 判定が無効になる点は移設前と同じ。
+            // 未設定（空文字・空白のみ）なら誰も操作できない（fail-closed, #174）。
+            // ここが空のまま登録すると、その UI は誰の操作にも応答しない。
             owner_id: surface.owner_id.clone(),
             created_at: chrono::Utc::now(),
             timeout_secs,
