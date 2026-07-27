@@ -148,6 +148,10 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
     fn cleanup_stale_interactions(&self) {
         unimplemented!("この fake は起動時掃除を使わない")
     }
+
+    fn cleanup_stale_interactions_for_agent(&self, _agent_id: &str) {
+        unimplemented!("この fake は起動時掃除を使わない")
+    }
 }
 
 impl crate::AgentRunner for FakeRunner {
