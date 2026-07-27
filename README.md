@@ -54,7 +54,7 @@ opencrab/
 │   ├── core/       # Agent engine, soul, identity, memory, skills, workspace, heartbeat
 │   ├── llm/        # Multi-provider LLM abstraction, routing, metrics, pricing
 │   ├── llm-types/  # LLM type definitions only (kept separate to keep deps light)
-│   ├── gateway/    # Gateway traits (Gateway / GatewayActions) + adapters: REST, CLI, WebSocket (stub), Discord (serenity)
+│   ├── gateway/    # GatewayActions trait + shared message types + DiscordGateway (serenity)
 │   ├── actions/    # Action dispatcher, background execution runtime, policy tables
 │   ├── db/         # SQLite persistence with FTS5 full-text search
 │   ├── mcp/        # MCP client (external tool servers as child processes)
