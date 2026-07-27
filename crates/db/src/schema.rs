@@ -332,6 +332,47 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 18,
+        description: "trusted_users.permission: 'co_agent' → 'co-agent' (権限表記の統一, issue #234)",
+        // **既存行の書き換えのみ。行の追加・削除はしない。**
+        //
+        // 権限は列挙型になり、DB へ入る表記はケバブケースに統一した
+        // （`queries::TrustedUserPermission`）。旧い表記 `co_agent` の行は、そのままだと
+        // 読み出しで「未知の値 → ただの信頼済みユーザー」へ落ちて協働エージェントの
+        // 権限を失う。**判定結果を変えないため**にここで表記だけを移す。
+        //
+        // 触るのは `co_agent` に完全一致する行だけ。`coagent` のような別の綴りは
+        // 従来も協働エージェントとして扱われていなかった（判定は完全一致）ので、
+        // ここで拾うと**権限が増える**方向の変更になる。拾わない。
+        //
+        // 冪等性: 2 回目以降は WHERE に一致する行が無いので 0 行更新。
+        //
+        // 可逆性（データ）: 逆向きの UPDATE（`'co-agent'` → `'co_agent'`）で行の内容は
+        // 完全に戻せる。落ちる情報は無い。
+        //
+        // 切り戻し（運用）: **データを戻すだけでは古いバイナリは起動しない。**
+        // `PRAGMA user_version` が 18 のままだと、起動時の版チェック（`run_migrations`）が
+        // 「DB の版がこのバイナリの対応版より新しい」と判断してハードエラーで止まる。
+        // バイナリを戻すときは版番号も 1 つ前（17）へ戻すこと:
+        //
+        //   BEGIN;
+        //   UPDATE trusted_users SET permission = 'co_agent' WHERE permission = 'co-agent';
+        //   PRAGMA user_version = 17;
+        //   COMMIT;
+        //
+        // サーバを停止した状態で実施する（起動中の接続と競合させない）。
+        up: |conn| {
+            if !table_exists(conn, "trusted_users")? {
+                return Ok(());
+            }
+            conn.execute(
+                "UPDATE trusted_users SET permission = 'co-agent' WHERE permission = 'co_agent'",
+                [],
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -2050,7 +2091,8 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(platform, "discord");
-        assert_eq!(permission, "co_agent");
+        // 権限は失われない。表記だけ v18 (#234) がケバブケースへ移す。
+        assert_eq!(permission, "co-agent");
 
         // 再実行しても冪等
         initialize(&conn).expect("idempotent");
@@ -2112,7 +2154,8 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(user_id, "42");
-        assert_eq!(permission, "co_agent");
+        // 改名では値は動かない。表記が変わるのは後続の v18 (#234)。
+        assert_eq!(permission, "co-agent");
         assert_eq!(display_name, "Crab B");
         assert_eq!(platform, "discord");
 
@@ -2145,6 +2188,96 @@ mod migration_tests {
 
         // 再実行しても冪等
         initialize(&conn).expect("idempotent");
+    }
+
+    /// v18: `trusted_users.permission` の表記統一（#234）。
+    ///
+    /// **移行前後で権限の判定結果が変わらない**こと（同じ人が同じ権限のまま、表記だけ
+    /// ケバブケースになる）。行は 1 件も増減しない。旧い綴りのうち**判定が完全一致で
+    /// 見ていたもの（`co_agent`）だけ**を移し、それ以外は触らない（権限を増やさない）。
+    #[test]
+    fn permission_spelling_migration_rewrites_rows_without_changing_who_is_a_co_agent() {
+        use crate::queries::TrustedUserPermission;
+
+        let conn = crate::init_memory().expect("init");
+        // v17 相当の既存 DB を模す: 旧表記の行を含めて 4 件入れ、version 17 へ戻す。
+        conn.execute_batch(
+            "DELETE FROM trusted_users;
+             INSERT INTO trusted_users
+               (id, user_id, agent_id, permission, created_by, created_at, display_name, platform)
+               VALUES ('r1', '42', 'a1', 'co_agent', 'owner', '2026-01-01', 'Crab B', 'discord'),
+                      ('r2', '43', 'a1', 'user',     'owner', '2026-01-02', '',       'discord'),
+                      ('r3', '44', 'a1', 'owner',    'owner', '2026-01-03', '',       'discord'),
+                      ('r4', '45', 'a1', 'coagent',  'owner', '2026-01-04', 'Typo',   'discord');
+             PRAGMA user_version = 17",
+        )
+        .unwrap();
+
+        // 移行前の判定（旧い読み出し = permission == 'co_agent' の完全一致）。
+        let judged_before: Vec<(String, bool)> = conn
+            .prepare("SELECT id, permission FROM trusted_users ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)? == "co_agent"))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        initialize(&conn).expect("upgrade v17 -> v18");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 行は増減しない。
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trusted_users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4);
+
+        // 移行後の判定（新しい読み出し = 列挙型）。移行前と一致すること。
+        let judged_after: Vec<(String, bool)> = conn
+            .prepare("SELECT id, permission FROM trusted_users ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    TrustedUserPermission::from_db_str(&r.get::<_, String>(1)?)
+                        == TrustedUserPermission::CoAgent,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(judged_before, judged_after);
+        assert_eq!(
+            judged_after,
+            vec![
+                ("r1".to_string(), true),
+                ("r2".to_string(), false),
+                ("r3".to_string(), false),
+                ("r4".to_string(), false),
+            ]
+        );
+
+        // 表記は移り、触らない行はそのまま（`coagent` は判定が拾っていなかったので拾わない）。
+        let spellings: Vec<String> = conn
+            .prepare("SELECT permission FROM trusted_users ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(spellings, vec!["co-agent", "user", "owner", "coagent"]);
+
+        // 再実行しても冪等（2 回目は 0 行更新）。
+        initialize(&conn).expect("idempotent");
+        let after: Vec<String> = conn
+            .prepare("SELECT permission FROM trusted_users ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(after, spellings);
     }
 
     /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する

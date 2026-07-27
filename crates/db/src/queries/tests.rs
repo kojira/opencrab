@@ -43,7 +43,7 @@ fn test_trusted_user_display_name_round_trip() {
         "id-1",
         "a1",
         "42",
-        "co_agent",
+        TrustedUserPermission::CoAgent,
         "owner",
         "2026-01-01",
         "Crab B",
@@ -51,7 +51,7 @@ fn test_trusted_user_display_name_round_trip() {
     .unwrap();
     let row = get_trusted_user(&conn, TRUSTED_PLATFORM_DISCORD, "42", "a1").unwrap();
     assert_eq!(row.display_name, "Crab B");
-    assert_eq!(row.permission, "co_agent");
+    assert_eq!(row.permission, TrustedUserPermission::CoAgent);
 
     assert!(update_trusted_user_display_name(&conn, "id-1", "Crab B2").unwrap());
     let rows = list_trusted_users(&conn, "a1").unwrap();
@@ -80,7 +80,7 @@ fn add_trusted(conn: &Connection, platform: &str, row_id: &str, user_id: &str, a
         row_id,
         agent_id,
         user_id,
-        "user",
+        TrustedUserPermission::User,
         "owner",
         "2026-01-01",
         "",
@@ -180,7 +180,7 @@ fn co_agent_roster_is_scoped_by_platform() {
         "row-d",
         "a1",
         "42",
-        "co_agent",
+        TrustedUserPermission::CoAgent,
         "owner",
         "2026-01-01",
         "Crab D",
@@ -192,7 +192,7 @@ fn co_agent_roster_is_scoped_by_platform() {
         "row-w",
         "a1",
         "dash-user",
-        "co_agent",
+        TrustedUserPermission::CoAgent,
         "owner",
         "2026-01-01",
         "Crab W",
@@ -2764,4 +2764,80 @@ fn test_skill_usage_log_and_last_consolidation() {
             .as_deref(),
         Some("2026-07-02T00:00:00+00:00")
     );
+}
+
+// ---- 権限の表記（列挙型, #234） ----
+
+/// 表記ゆれが型で起こりえないこと: DB に入る文字列は列挙型からしか作れず、
+/// **全 variant がケバブケース**で、読み書きが往復する。
+#[test]
+fn permission_spelling_cannot_drift() {
+    for p in TRUSTED_USER_PERMISSIONS {
+        let s = p.as_db_str();
+        // アンダースコア表記は存在しない（#234 の食い違いはこれで起きた）。
+        assert!(!s.contains('_'), "{s} はケバブケースでない");
+        // 書いた表記はそのまま読み戻せる。
+        assert_eq!(TrustedUserPermission::parse(s), Some(p));
+        assert_eq!(TrustedUserPermission::from_db_str(s), p);
+        // serde 表現（API の応答 / 設定側の CommandPermission と同じ規約）も同じ文字列。
+        assert_eq!(serde_json::to_string(&p).unwrap(), format!("\"{s}\""));
+    }
+    // 表記は 3 つで全部（増えたらここが落ちる）。
+    assert_eq!(
+        TRUSTED_USER_PERMISSIONS.map(|p| p.as_db_str()),
+        ["owner", "user", "co-agent"]
+    );
+}
+
+/// 未知の表記は**入口で通らない**。かつて寛容に受け入れていた綴りも通らない。
+/// 読み出しは最小権限（`user`）へ倒れる（fail-closed、行の判定は従来と同じ）。
+#[test]
+fn unknown_permission_spellings_are_rejected_at_the_gate() {
+    for bad in [
+        "co_agent", "coagent", "CoAgent", "Owner", "trusted", "", " user",
+    ] {
+        assert_eq!(TrustedUserPermission::parse(bad), None, "{bad:?}");
+        assert_eq!(
+            TrustedUserPermission::from_db_str(bad),
+            TrustedUserPermission::User,
+            "{bad:?}"
+        );
+    }
+}
+
+/// 既定は `user`（登録 API の既定と揃っていること）。
+#[test]
+fn permission_defaults_to_user() {
+    assert_eq!(
+        TrustedUserPermission::default(),
+        TrustedUserPermission::User
+    );
+}
+
+/// 選択肢の定義が 2 箇所に分かれてドリフトしないこと（#234）。
+///
+/// ダッシュボードの `TRUSTED_USER_PERMISSIONS` はこの列挙型の写しでしかない。
+/// 独立した文字列配列だった頃、UI は `co-agent`・判定は `co_agent` で、
+/// **ダッシュボードからの登録が黙って無効**になっていた。片方だけ変えたらここが落ちる。
+#[test]
+fn dashboard_permission_options_match_the_enum() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/src/api/trusted_users.ts"
+    );
+    let src = std::fs::read_to_string(path).expect("ダッシュボードの API 定義を読めること");
+    let (_, rest) = src
+        .split_once("export const TRUSTED_USER_PERMISSIONS = [")
+        .expect("TRUSTED_USER_PERMISSIONS の定義があること");
+    let (list, _) = rest.split_once(']').expect("配列が閉じていること");
+    let from_dashboard: Vec<String> = list
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let from_enum: Vec<String> = TRUSTED_USER_PERMISSIONS
+        .iter()
+        .map(|p| p.as_db_str().to_string())
+        .collect();
+    assert_eq!(from_dashboard, from_enum);
 }

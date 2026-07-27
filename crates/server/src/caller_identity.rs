@@ -17,6 +17,7 @@
 //!   が旧経路の行の有無を**ログのためだけに**確認する（判定には一切使わない）。
 
 use opencrab_actions::CallerIdentity;
+use opencrab_db::queries::TrustedUserPermission;
 
 /// `(経路, 識別子, エージェント)` から呼び出し元の権限を導出する。
 ///
@@ -27,11 +28,18 @@ pub fn resolve_caller_identity(
     user_id: &str,
     agent_id: &str,
 ) -> CallerIdentity {
-    match opencrab_db::queries::get_trusted_user(conn, platform, user_id, agent_id) {
-        Some(u) if u.permission == "co_agent" => CallerIdentity::CoAgent {
+    match opencrab_db::queries::get_trusted_user(conn, platform, user_id, agent_id)
+        .map(|u| u.permission)
+    {
+        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
             agent_id: user_id.to_string(),
         },
-        Some(_) => CallerIdentity::TrustedUser,
+        // **表の `owner` はここでは Owner にしない**（従来どおり）。web / REST の
+        // owner 判定は Discord 設定の owner だけが決める（上の「動かしてはいけない線」）。
+        // 列挙型にしたので、この意図的な差は網羅的な match として明示できる。
+        Some(TrustedUserPermission::Owner) | Some(TrustedUserPermission::User) => {
+            CallerIdentity::TrustedUser
+        }
         None => {
             let cfg = opencrab_db::queries::get_agent_discord_config(conn, agent_id);
             let is_owner = matches!(cfg, Ok(Some(ref c)) if crate::api::is_owner_id(&c.owner_discord_id, user_id));
@@ -127,7 +135,12 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    fn register(conn: &rusqlite::Connection, platform: &str, user_id: &str, permission: &str) {
+    fn register(
+        conn: &rusqlite::Connection,
+        platform: &str,
+        user_id: &str,
+        permission: TrustedUserPermission,
+    ) {
         opencrab_db::queries::add_trusted_user(
             conn,
             platform,
@@ -146,7 +159,12 @@ mod tests {
     #[test]
     fn legacy_discord_row_no_longer_grants_trust() {
         let conn = opencrab_db::init_memory().unwrap();
-        register(&conn, TRUSTED_PLATFORM_DISCORD, "42", "user");
+        register(
+            &conn,
+            TRUSTED_PLATFORM_DISCORD,
+            "42",
+            TrustedUserPermission::User,
+        );
         assert_eq!(
             resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "42", "agent-1"),
             CallerIdentity::Agent
@@ -157,7 +175,12 @@ mod tests {
     #[test]
     fn removal_is_visible_to_the_operator() {
         let conn = opencrab_db::init_memory().unwrap();
-        register(&conn, TRUSTED_PLATFORM_DISCORD, "42", "user");
+        register(
+            &conn,
+            TRUSTED_PLATFORM_DISCORD,
+            "42",
+            TrustedUserPermission::User,
+        );
         let logs = captured_logs(|| {
             resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "42", "agent-1");
         });
@@ -187,7 +210,12 @@ mod tests {
             "agent-1"
         ));
         // 従来経路そのものは移行の対象外（自経路の行が無いだけ）。
-        register(&conn, TRUSTED_PLATFORM_DISCORD, "42", "user");
+        register(
+            &conn,
+            TRUSTED_PLATFORM_DISCORD,
+            "42",
+            TrustedUserPermission::User,
+        );
         assert!(!warn_legacy_row_no_longer_read(
             &conn,
             TRUSTED_PLATFORM_DISCORD,
@@ -206,8 +234,18 @@ mod tests {
     #[test]
     fn own_platform_rows_decide_the_identity() {
         let conn = opencrab_db::init_memory().unwrap();
-        register(&conn, TRUSTED_PLATFORM_REST, "rest-user", "user");
-        register(&conn, TRUSTED_PLATFORM_REST, "rest-bot", "co_agent");
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "rest-user",
+            TrustedUserPermission::User,
+        );
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "rest-bot",
+            TrustedUserPermission::CoAgent,
+        );
         assert_eq!(
             resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "rest-user", "agent-1"),
             CallerIdentity::TrustedUser

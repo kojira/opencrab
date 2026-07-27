@@ -289,7 +289,7 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
 
 /// ピアレビュアーのロスターセクションを組み立てる。
 ///
-/// trusted_users の permission='co_agent' 行（選定ロジックは
+/// trusted_users の permission='co-agent' 行（選定ロジックは
 /// `queries::list_co_agent_reviewers` に一元化 — reviewer 解決側と共有）。
 /// ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
 ///
@@ -1891,6 +1891,7 @@ mod skill_mentioned_tests {
 #[cfg(test)]
 mod peer_reviewers_section_tests {
     use super::peer_reviewers_section;
+    use opencrab_db::queries::TrustedUserPermission;
 
     #[test]
     fn roster_lists_co_agents_only_and_handles_empty() {
@@ -1903,7 +1904,7 @@ mod peer_reviewers_section_tests {
             "r1",
             "a1",
             "42",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "Crab B",
@@ -1915,7 +1916,7 @@ mod peer_reviewers_section_tests {
             "r2",
             "a1",
             "43",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "",
@@ -1927,7 +1928,7 @@ mod peer_reviewers_section_tests {
             "r3",
             "a1",
             "44",
-            "trusted_user",
+            TrustedUserPermission::User,
             "owner",
             "2026-01-01",
             "Human",
@@ -1956,7 +1957,7 @@ mod peer_reviewers_section_tests {
             "r1",
             "a1",
             "42",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "",
@@ -1975,6 +1976,7 @@ mod peer_reviewers_section_tests {
 #[cfg(test)]
 mod shared_prompt_is_transport_neutral_tests {
     use super::build_agent_context;
+    use opencrab_db::queries::TrustedUserPermission;
 
     /// 共有プロンプトから transport 語が消えていること（grep 相当をテスト化）。
     #[test]
@@ -1987,7 +1989,7 @@ mod shared_prompt_is_transport_neutral_tests {
             "r1",
             "a1",
             "42",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "Crab B",

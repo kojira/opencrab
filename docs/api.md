@@ -1182,7 +1182,7 @@ Base URL: `http://localhost:3000`
 
 **Caller 権限の決定ロジック**（`trusted_users` は **`platform="rest"` の行だけ**を引く。
 `discord` の行では信頼されない — [Trusted Users](#trusted-users) の移行の注記を参照）:
-- `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
+- `user_id` が `trusted_users` テーブルに `co-agent` 権限で登録されている → `CoAgent`
 - `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
 - `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
 - それ以外 → `Agent`
@@ -1257,7 +1257,7 @@ Base URL: `http://localhost:3000`
 **Caller 権限の決定ロジック**: `POST /api/agents/{id}/messages` と同一（引く経路だけが違い、
 こちらは **`platform="web"` の行だけ**を見る）。
 
-- `user_id` が `trusted_users` テーブルに `co_agent` 権限で登録されている → `CoAgent`
+- `user_id` が `trusted_users` テーブルに `co-agent` 権限で登録されている → `CoAgent`
 - `user_id` が `trusted_users` テーブルに登録されている → `TrustedUser`
 - `user_id` がエージェントの Discord オーナー ID と一致する → `Owner`（比較は前後の空白を無視する。オーナー ID が空文字/空白のみ＝未設定なら誰とも一致しない）
 - それ以外 → `Agent`
@@ -1902,7 +1902,7 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | id | UUID | レコード ID |
 | user_id | string | その経路でのユーザー識別子（旧 `discord_user_id`） |
 | agent_id | UUID | エージェント ID |
-| permission | string | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` |
+| permission | string | `"owner"` \| `"user"` \| `"co-agent"` — **ケバブケース**（#234） |
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
 | display_name | string | ロスター表示用の名前（空文字可） |
@@ -1936,20 +1936,20 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | user_id | string | ✅ | その経路でのユーザー識別子（旧 `discord_user_id` も後方互換で受け付ける） |
-| permission | string | ❌ | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` (default: `"user"`) |
+| permission | string | ❌ | `"owner"` \| `"user"` \| `"co-agent"` (default: `"user"`)。**これ以外は 400**（#234） |
 | display_name | string | ❌ | ロスター表示用の名前（default: 空文字） |
 | platform | string | ❌ | `"discord"` \| `"web"` \| `"rest"` (default: `"discord"`) — `user_id` がどの経路の識別子か |
 
 **Example Request**
 
 ```json
-{"user_id": "123456789012345678", "permission": "trusted"}
+{"user_id": "123456789012345678", "permission": "user"}
 ```
 
 ダッシュボード利用者を登録する例（この行は web 経路でのみ効く）:
 
 ```json
-{"user_id": "web-user", "permission": "trusted", "platform": "web"}
+{"user_id": "web-user", "permission": "co-agent", "platform": "web"}
 ```
 
 **Response**: TrustedUserRow（上記と同構造。`platform` を含む）
@@ -1958,28 +1958,39 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 | Status | 意味 |
 |--------|------|
-| 400 | `platform` が `discord` / `web` / `rest` 以外（登録できても誰とも一致しない行になるため弾く） |
+| 400 | `platform` が `discord` / `web` / `rest` 以外、または `permission` が `owner` / `user` / `co-agent` 以外（登録できても誰とも一致しない・効かない行になるため弾く。旧いアンダースコア表記 `co_agent` も弾かれる — #234） |
 | 409 | 同じ `(user_id, agent_id)` が既に存在する。一意制約に経路が入っていないため、**同じ識別子を別経路で二重に持つことはまだできない**（先に旧行を削除する） |
 
 ---
 
 ### PATCH /api/agents/{id}/trusted-users/{user_id}
 
-**目的**: ユーザーの権限を変更する
+**目的**: 信頼済みユーザーの権限・表示名を変更する（部分更新）
 
 **Request Body**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| permission | string | ✅ | `"owner"` \| `"trusted"` \| `"user"` |
+| permission | string | ❌ | `"owner"` \| `"user"` \| `"co-agent"`。**これ以外は 400**（#234）。省略時は権限に触らない |
+| display_name | string | ❌ | ロスター表示用の名前。省略時は表示名に触らない |
+
+どちらも省略可で、**指定したフィールドだけ**を更新する（両方指定した場合は 1 トランザクションで不可分に適用）。両方省略したリクエストは何も更新せず `{"updated": false}` を返す。
 
 **Example Request**
 
 ```json
-{"permission": "trusted"}
+{"permission": "co-agent"}
+```
+
+表示名だけを変更する:
+
+```json
+{"display_name": "Crab B"}
 ```
 
 **Response**
+
+`updated` は実際に行が更新されたか。対象の `user_id` が存在しない場合は `false`。
 
 ```json
 {"updated": true}

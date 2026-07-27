@@ -9,6 +9,7 @@
 //! そちらへ移した（#158 S3）。
 
 use crate::AppState;
+use opencrab_db::queries::TrustedUserPermission;
 
 impl opencrab_discord::AgentRunner for AppState {
     fn db(&self) -> &opencrab_db::Db {
@@ -119,12 +120,14 @@ impl opencrab_discord::AgentRunner for AppState {
             }),
             Err(_) => None,
         };
-        match trust_info {
-            Some(u) if u.permission == "co_agent" => opencrab_actions::CallerIdentity::CoAgent {
+        // 権限は列挙型（#234）。variant を足したらここが網羅性で落ちる＝
+        // 「新しい権限が黙って TrustedUser 扱いになる」が起きない。
+        match trust_info.map(|u| u.permission) {
+            Some(TrustedUserPermission::CoAgent) => opencrab_actions::CallerIdentity::CoAgent {
                 agent_id: sender_id.to_string(),
             },
-            Some(u) if u.permission == "owner" => opencrab_actions::CallerIdentity::Owner,
-            Some(_) => opencrab_actions::CallerIdentity::TrustedUser,
+            Some(TrustedUserPermission::Owner) => opencrab_actions::CallerIdentity::Owner,
+            Some(TrustedUserPermission::User) => opencrab_actions::CallerIdentity::TrustedUser,
             None => opencrab_actions::CallerIdentity::Agent,
         }
     }
@@ -309,7 +312,7 @@ mod tests {
             &format!("row-{platform}-{user_id}"),
             agent_id,
             user_id,
-            "user",
+            TrustedUserPermission::User,
             "owner",
             "2026-01-01",
             "",

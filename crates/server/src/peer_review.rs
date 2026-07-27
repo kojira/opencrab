@@ -209,7 +209,7 @@ pub fn resolve_reviewer(
         }
     }
     let available = if co_agents.is_empty() {
-        "(なし — trusted-users API で permission=co_agent + display_name を登録してください)"
+        "(なし — trusted-users API で permission=co-agent + display_name を登録してください)"
             .to_string()
     } else {
         co_agents
@@ -657,7 +657,7 @@ fn record_peer_review_reply(
     // 送信者ゲート: 登録済み co_agent のみ。sender_id を申告した経路の空間で引く
     // （#214 で入った platform 列。経路の分離の残りは #159）。
     let is_co_agent = opencrab_db::queries::get_trusted_user(&conn, platform, sender_id, agent_id)
-        .map(|u| u.permission == "co_agent")
+        .map(|u| u.permission == opencrab_db::queries::TrustedUserPermission::CoAgent)
         .unwrap_or(false);
     if !is_co_agent {
         tracing::debug!(
@@ -709,6 +709,7 @@ fn record_peer_review_reply(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use opencrab_db::queries::TrustedUserPermission;
     use opencrab_gateway::GatewayCaller;
     use std::sync::Mutex;
 
@@ -961,7 +962,7 @@ mod tests {
             "row-1",
             "agent-1",
             "42",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "Crab B",
@@ -974,7 +975,7 @@ mod tests {
             "row-2",
             "agent-1",
             "77",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "2026",
@@ -987,7 +988,7 @@ mod tests {
             "row-3",
             "agent-1",
             "44",
-            "trusted_user",
+            TrustedUserPermission::User,
             "owner",
             "2026-01-01",
             "Human",
@@ -1058,7 +1059,7 @@ mod tests {
             "row-w",
             "agent-1",
             "77",
-            "co_agent",
+            TrustedUserPermission::CoAgent,
             "owner",
             "2026-01-01",
             "Web Crab",
@@ -1079,7 +1080,7 @@ mod tests {
         let err = resolve_reviewer(&conn, &delivery, "agent-1", "nobody").unwrap_err();
         assert_eq!(
             err,
-            "(なし — trusted-users API で permission=co_agent + display_name を登録してください)"
+            "(なし — trusted-users API で permission=co-agent + display_name を登録してください)"
         );
     }
 
@@ -1095,7 +1096,7 @@ mod tests {
                 "row-1",
                 "agent-a",
                 "42",
-                "co_agent",
+                TrustedUserPermission::CoAgent,
                 "owner",
                 "2026-01-01",
                 "Crab B",
@@ -1486,7 +1487,7 @@ mod tests {
                 "row-1",
                 "a1",
                 "42",
-                "co_agent",
+                TrustedUserPermission::CoAgent,
                 "owner",
                 "2026-01-01",
                 "Crab B",
@@ -1549,7 +1550,7 @@ mod tests {
                 "row-1",
                 "a1",
                 "42",
-                "co_agent",
+                TrustedUserPermission::CoAgent,
                 "owner",
                 "2026-01-01",
                 "Crab B",
