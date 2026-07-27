@@ -382,6 +382,32 @@ mod tests {
         assert_eq!(registry.kinds(), vec![kinds::NOSTR, kinds::DISCORD]);
     }
 
+    /// 「設定どおり起動しなかった」失敗を、本当の起動失敗と**取り違えない**。
+    ///
+    /// 呼び出し側はこの判定で「以前と同じく黙って何もしない」を保つ（起動条件を
+    /// 満たさないだけの見送りを error ログや異常扱いにしない）。素の `anyhow` エラーが
+    /// 誤って `true` になると、本物の起動失敗が握り潰される。
+    #[test]
+    fn start_declined_is_distinguishable_from_a_real_failure() {
+        let declined = StartDeclined::err(kinds::DISCORD, "crab", "enabled=false");
+        assert!(is_start_declined(&declined));
+        let text = declined.to_string();
+        assert!(
+            text.contains("crab"),
+            "どのエージェントか分かること: {text}"
+        );
+        assert!(
+            text.contains("enabled=false"),
+            "どの条件で弾いたか分かること: {text}"
+        );
+
+        let real_failure = anyhow::anyhow!("connection refused");
+        assert!(
+            !is_start_declined(&real_failure),
+            "本物の起動失敗を見送り扱いにすると、起動できない状態が無音になる"
+        );
+    }
+
     /// トレイトオブジェクト越しに 5 操作すべてを呼べる（`dyn` として使える形か）。
     #[tokio::test]
     async fn all_operations_are_callable_through_the_trait_object() {

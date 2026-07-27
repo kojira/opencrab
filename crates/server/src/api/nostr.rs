@@ -223,6 +223,9 @@ pub async fn generate_nostr_key(
         }
     }
 
+    // ここだけは名指しのまま。鍵生成（nostaro vanity）は **transport 固有の操作**で、
+    // ライフサイクル契約（起動 / 停止 / 生存確認）には無い。capability の受け口を
+    // 用意して名指しを外すのは #191 段階2 PR4。
     let Some(manager) = state.nostr_manager.as_ref() else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -239,7 +242,10 @@ pub async fn generate_nostr_key(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // 鍵を差し替えるので、稼働中なら止める（新アイデンティティで黙って走らせない）。
-    manager.stop_agent_gateway(&id).await;
+    // 停止は共通操作なので、上の名指しではなく登録簿から引く。
+    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
+        gw.stop(&id).await;
+    }
 
     // 生成中（最大 timeout ぶん）に別リクエストが鍵を書き込む TOCTOU を避けるため、
     // 「既存鍵の再確認 → relays/filter 保持 → upsert」を**同一ロック内**で原子的に行う。
