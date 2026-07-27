@@ -1965,13 +1965,16 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 ### PATCH /api/agents/{id}/trusted-users/{user_id}
 
-**目的**: ユーザーの権限を変更する
+**目的**: 信頼済みユーザーの権限・表示名を変更する（部分更新）
 
 **Request Body**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| permission | string | ✅ | `"owner"` \| `"user"` \| `"co-agent"`。**これ以外は 400**（#234） |
+| permission | string | ❌ | `"owner"` \| `"user"` \| `"co-agent"`。**これ以外は 400**（#234）。省略時は権限に触らない |
+| display_name | string | ❌ | ロスター表示用の名前。省略時は表示名に触らない |
+
+どちらも省略可で、**指定したフィールドだけ**を更新する（両方指定した場合は 1 トランザクションで不可分に適用）。両方省略したリクエストは何も更新せず `{"updated": false}` を返す。
 
 **Example Request**
 
@@ -1979,7 +1982,15 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 {"permission": "co-agent"}
 ```
 
+表示名だけを変更する:
+
+```json
+{"display_name": "Crab B"}
+```
+
 **Response**
+
+`updated` は実際に行が更新されたか。対象の `user_id` が存在しない場合は `false`。
 
 ```json
 {"updated": true}

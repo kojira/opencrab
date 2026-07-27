@@ -347,7 +347,21 @@ const MIGRATIONS: &[Migration] = &[
         // ここで拾うと**権限が増える**方向の変更になる。拾わない。
         //
         // 冪等性: 2 回目以降は WHERE に一致する行が無いので 0 行更新。
-        // 可逆性: 逆向きの UPDATE（`'co-agent'` → `'co_agent'`）で完全に戻せる。
+        //
+        // 可逆性（データ）: 逆向きの UPDATE（`'co-agent'` → `'co_agent'`）で行の内容は
+        // 完全に戻せる。落ちる情報は無い。
+        //
+        // 切り戻し（運用）: **データを戻すだけでは古いバイナリは起動しない。**
+        // `PRAGMA user_version` が 18 のままだと、起動時の版チェック（`run_migrations`）が
+        // 「DB の版がこのバイナリの対応版より新しい」と判断してハードエラーで止まる。
+        // バイナリを戻すときは版番号も 1 つ前（17）へ戻すこと:
+        //
+        //   BEGIN;
+        //   UPDATE trusted_users SET permission = 'co_agent' WHERE permission = 'co-agent';
+        //   PRAGMA user_version = 17;
+        //   COMMIT;
+        //
+        // サーバを停止した状態で実施する（起動中の接続と競合させない）。
         up: |conn| {
             if !table_exists(conn, "trusted_users")? {
                 return Ok(());
