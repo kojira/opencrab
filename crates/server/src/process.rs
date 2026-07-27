@@ -289,7 +289,7 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
 
 /// ピアレビュアーのロスターセクションを組み立てる。
 ///
-/// trusted_discord_users の permission='co_agent' 行（選定ロジックは
+/// trusted_users の permission='co_agent' 行（選定ロジックは
 /// `queries::list_co_agent_reviewers` に一元化 — reviewer 解決側と共有）。
 /// ロスターは変更頻度が低いので system prompt 配置で問題ない（毎 run DB から再構築される）。
 ///

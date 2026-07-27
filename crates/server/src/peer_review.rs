@@ -158,7 +158,7 @@ pub fn build_peer_review_messages(
 /// 次に id 一致。未登録の任意 id は受け付けない（LLM の幻覚 id によるゴーストメンション防止）。
 /// 未解決の場合は Err に登録済みレビュアーの一覧文字列を返す。
 ///
-/// 名簿のキー空間（`trusted_users.discord_user_id` と `<@id>` 形式の受理、および
+/// 名簿のキー空間（`trusted_users.user_id` と `<@id>` 形式の受理、および
 /// 「数値としてパースできる id だけを採る」判定）は **#214 の担当なので現状維持**。
 /// 返り値はパース済み数値の文字列表現で、移設前（`u64` を返して呼び出し側が
 /// `<@{id}>` に埋めていた）とバイト単位で同じメンションになる。
@@ -183,7 +183,7 @@ pub fn resolve_reviewer(
         .iter()
         .find(|u| !u.display_name.is_empty() && u.display_name.eq_ignore_ascii_case(reviewer))
     {
-        if let Ok(id) = matched.discord_user_id.parse::<u64>() {
+        if let Ok(id) = matched.user_id.parse::<u64>() {
             return Ok(id.to_string());
         }
     }
@@ -193,8 +193,8 @@ pub fn resolve_reviewer(
         .trim_end_matches('>')
         .trim();
     if bare.parse::<u64>().is_ok() {
-        if let Some(matched) = co_agents.iter().find(|u| u.discord_user_id == bare) {
-            if let Ok(id) = matched.discord_user_id.parse::<u64>() {
+        if let Some(matched) = co_agents.iter().find(|u| u.user_id == bare) {
+            if let Ok(id) = matched.user_id.parse::<u64>() {
                 return Ok(id.to_string());
             }
         }
@@ -207,14 +207,10 @@ pub fn resolve_reviewer(
             .iter()
             .map(|u| {
                 if u.display_name.is_empty() {
-                    u.discord_user_id.clone()
+                    u.user_id.clone()
                 } else {
                     // メンション記法は transport の責務（汎用層は `<@…>` を組まない）。
-                    format!(
-                        "{} ({})",
-                        u.display_name,
-                        delivery.mention(&u.discord_user_id)
-                    )
+                    format!("{} ({})", u.display_name, delivery.mention(&u.user_id))
                 }
             })
             .collect::<Vec<_>>()

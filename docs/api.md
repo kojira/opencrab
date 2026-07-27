@@ -1879,7 +1879,7 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Description |
 |-------|------|-------------|
 | id | UUID | レコード ID |
-| discord_user_id | string | Discord ユーザー ID |
+| user_id | string | その経路でのユーザー識別子（旧 `discord_user_id`。現状 REST から登録できるのは Discord の識別子のみ） |
 | agent_id | UUID | エージェント ID |
 | permission | string | `"owner"` \| `"trusted"` \| `"user"` \| `"co_agent"` |
 | created_by | string | 作成者 |
@@ -1890,7 +1890,7 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 ```json
 [{
   "id": "f6a7b8c9-d0e1-2345-f012-345678901234",
-  "discord_user_id": "123456789012345678",
+  "user_id": "123456789012345678",
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
   "permission": "owner",
   "created_by": "owner",
@@ -1908,13 +1908,13 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| discord_user_id | string | ✅ | Discord ユーザー ID |
+| user_id | string | ✅ | その経路でのユーザー識別子（旧 `discord_user_id` も後方互換で受け付ける） |
 | permission | string | ❌ | `"owner"` \| `"trusted"` \| `"user"` (default: `"user"`) |
 
 **Example Request**
 
 ```json
-{"discord_user_id": "123456789012345678", "permission": "trusted"}
+{"user_id": "123456789012345678", "permission": "trusted"}
 ```
 
 **Response**: TrustedUserRow（上記と同構造）

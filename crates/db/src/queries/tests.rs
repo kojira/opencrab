@@ -59,7 +59,7 @@ fn test_trusted_user_display_name_round_trip() {
 
     // v3 以前の行（display_name / platform とも列 DEFAULT）も読み出せる
     conn.execute(
-        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at) \
+        "INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at) \
          VALUES ('id-2', '43', 'a1', 'user', 'owner', '2026-01-01')",
         [],
     )

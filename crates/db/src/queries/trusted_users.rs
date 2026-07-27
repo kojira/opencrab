@@ -82,7 +82,7 @@ pub fn delete_trusted_co_agent(
 }
 
 // ============================================
-// TrustedDiscordUser
+// TrustedUser
 // ============================================
 
 // ---- 経路（identity platform, #214） ----
@@ -90,10 +90,15 @@ pub fn delete_trusted_co_agent(
 // 信頼済みユーザーの表は元々「Discord のユーザー識別子」ひとつの平坦な空間だった。
 // web / REST は自分の側のユーザー識別子で同じ表を引いていたため、識別子が一致すると
 // 信頼が経路をまたいで引き継がれていた。`platform` 列を足し、認可の読み出しは
-// `(platform, discord_user_id, agent_id)` で引く。
+// `(platform, user_id, agent_id)` で引く。
 //
-// 列名 `discord_user_id` / 表名 `trusted_discord_users` の改名は #159 の担当
-// （読み手・REST の DTO・web の型が連動するため一括でやる）。ここでは列追加だけ。
+// 表名 `trusted_discord_users` / 列名 `discord_user_id` は #159 で `trusted_users` /
+// `user_id` に改名した（マイグレーション v17。Discord は `platform` の値のひとつでしかない）。
+//
+// **#159 に残っている作業**:
+// - 一意制約 `(user_id, agent_id)` → `(platform, user_id, agent_id)`（表の再構築＝非可逆）
+// - [`get_trusted_user_with_legacy_fallback`] の撤去
+// - ロスター（[`list_co_agent_reviewers`]）と受理ゲートの経路の非対称の解消
 
 /// 列追加前から存在する行が属する経路。マイグレーションの `DEFAULT` と一致させる。
 pub const TRUSTED_PLATFORM_DISCORD: &str = "discord";
@@ -103,23 +108,23 @@ pub const TRUSTED_PLATFORM_WEB: &str = "web";
 pub const TRUSTED_PLATFORM_REST: &str = "rest";
 
 #[derive(Debug, Clone)]
-pub struct TrustedDiscordUserRow {
+pub struct TrustedUserRow {
     pub id: String,
-    pub discord_user_id: String,
+    pub user_id: String,
     pub agent_id: String,
     pub permission: String,
     pub created_by: String,
     pub created_at: String,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。空文字可。
     pub display_name: String,
-    /// `discord_user_id` がどの経路の識別子か（#214）。既存行は `discord`。
+    /// `user_id` がどの経路の識別子か（#214）。既存行は `discord`。
     pub platform: String,
 }
 
-fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedDiscordUserRow> {
-    Ok(TrustedDiscordUserRow {
+fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedUserRow> {
+    Ok(TrustedUserRow {
         id: row.get(0)?,
-        discord_user_id: row.get(1)?,
+        user_id: row.get(1)?,
         agent_id: row.get(2)?,
         permission: row.get(3)?,
         created_by: row.get(4)?,
@@ -130,7 +135,7 @@ fn trusted_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TrustedDis
 }
 
 const TRUSTED_USER_COLUMNS: &str =
-    "id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform";
+    "id, user_id, agent_id, permission, created_by, created_at, display_name, platform";
 
 /// `(経路, 識別子, エージェント)` で 1 行引く。経路が違えば別人として扱う。
 ///
@@ -138,16 +143,16 @@ const TRUSTED_USER_COLUMNS: &str =
 pub fn get_trusted_user(
     conn: &Connection,
     platform: &str,
-    discord_user_id: &str,
+    user_id: &str,
     agent_id: &str,
-) -> Option<TrustedDiscordUserRow> {
+) -> Option<TrustedUserRow> {
     conn.query_row(
         &format!(
             "SELECT {TRUSTED_USER_COLUMNS} \
-             FROM trusted_discord_users \
-             WHERE platform = ?1 AND discord_user_id = ?2 AND agent_id = ?3"
+             FROM trusted_users \
+             WHERE platform = ?1 AND user_id = ?2 AND agent_id = ?3"
         ),
-        [platform, discord_user_id, agent_id],
+        [platform, user_id, agent_id],
         trusted_user_from_row,
     )
     .ok()
@@ -169,24 +174,24 @@ pub fn get_trusted_user(
 pub fn get_trusted_user_with_legacy_fallback(
     conn: &Connection,
     platform: &str,
-    discord_user_id: &str,
+    user_id: &str,
     agent_id: &str,
-) -> Option<TrustedDiscordUserRow> {
-    get_trusted_user(conn, platform, discord_user_id, agent_id).or_else(|| {
+) -> Option<TrustedUserRow> {
+    get_trusted_user(conn, platform, user_id, agent_id).or_else(|| {
         if platform == TRUSTED_PLATFORM_DISCORD {
             None
         } else {
-            get_trusted_user(conn, TRUSTED_PLATFORM_DISCORD, discord_user_id, agent_id)
+            get_trusted_user(conn, TRUSTED_PLATFORM_DISCORD, user_id, agent_id)
         }
     })
 }
 
 /// 管理 UI（`GET /api/agents/{id}/trusted-users`）向けの一覧。**経路で絞らない**
 /// （運用者が全経路の登録を一覧できる必要があるため）。認可の判定には使わない。
-pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedDiscordUserRow>> {
+pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {TRUSTED_USER_COLUMNS} \
-         FROM trusted_discord_users WHERE agent_id = ?1 ORDER BY created_at ASC"
+         FROM trusted_users WHERE agent_id = ?1 ORDER BY created_at ASC"
     ))?;
     let rows = stmt.query_map([agent_id], trusted_user_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -194,10 +199,10 @@ pub fn list_trusted_users(conn: &Connection, agent_id: &str) -> Result<Vec<Trust
 
 /// 信頼済みユーザーを 1 件登録する。
 ///
-/// `platform` は「`discord_user_id` がどの経路の識別子か」。読み出し側と同じ位置
+/// `platform` は「`user_id` がどの経路の識別子か」。読み出し側と同じ位置
 /// （`conn` の次）に置いて、経路と permission の取り違えを起きにくくしている。
 ///
-/// 一意制約は `(discord_user_id, agent_id)` のままなので、**同じ識別子文字列を
+/// 一意制約は `(user_id, agent_id)` のままなので、**同じ識別子文字列を
 /// 別経路で登録することはまだできない**（制約の作り直しは非可逆なので #159）。
 #[allow(clippy::too_many_arguments)]
 pub fn add_trusted_user(
@@ -205,16 +210,16 @@ pub fn add_trusted_user(
     platform: &str,
     id: &str,
     agent_id: &str,
-    discord_user_id: &str,
+    user_id: &str,
     permission: &str,
     created_by: &str,
     created_at: &str,
     display_name: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform) \
+        "INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        [id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform],
+        [id, user_id, agent_id, permission, created_by, created_at, display_name, platform],
     )?;
     Ok(())
 }
@@ -224,13 +229,10 @@ pub fn add_trusted_user(
 ///
 /// **経路で絞らない**: これは「誰にレビューを頼めるか」のロスターであって、呼び出し元の
 /// 認可判定ではない。経路で切ると別経路から登録された co_agent が指名できなくなる。
-pub fn list_co_agent_reviewers(
-    conn: &Connection,
-    agent_id: &str,
-) -> Result<Vec<TrustedDiscordUserRow>> {
+pub fn list_co_agent_reviewers(conn: &Connection, agent_id: &str) -> Result<Vec<TrustedUserRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {TRUSTED_USER_COLUMNS} \
-         FROM trusted_discord_users WHERE agent_id = ?1 AND permission = 'co_agent' \
+         FROM trusted_users WHERE agent_id = ?1 AND permission = 'co_agent' \
          ORDER BY created_at ASC"
     ))?;
     let rows = stmt.query_map([agent_id], trusted_user_from_row)?;
@@ -243,7 +245,7 @@ pub fn update_trusted_user_display_name(
     display_name: &str,
 ) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE trusted_discord_users SET display_name = ?2 WHERE id = ?1",
+        "UPDATE trusted_users SET display_name = ?2 WHERE id = ?1",
         [id, display_name],
     )?;
     Ok(n > 0)
@@ -255,28 +257,23 @@ pub fn update_trusted_user_permission(
     permission: &str,
 ) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE trusted_discord_users SET permission = ?2 WHERE id = ?1",
+        "UPDATE trusted_users SET permission = ?2 WHERE id = ?1",
         [id, permission],
     )?;
     Ok(n > 0)
 }
 
 pub fn remove_trusted_user(conn: &Connection, id: &str) -> Result<bool> {
-    let n = conn.execute("DELETE FROM trusted_discord_users WHERE id = ?1", [id])?;
+    let n = conn.execute("DELETE FROM trusted_users WHERE id = ?1", [id])?;
     Ok(n > 0)
 }
 
 /// `(経路, 識別子, エージェント)` が登録されているか。DB エラー時は false（fail-closed）。
-pub fn is_trusted_user(
-    conn: &Connection,
-    platform: &str,
-    discord_user_id: &str,
-    agent_id: &str,
-) -> bool {
+pub fn is_trusted_user(conn: &Connection, platform: &str, user_id: &str, agent_id: &str) -> bool {
     conn.query_row(
-        "SELECT COUNT(*) FROM trusted_discord_users \
-         WHERE platform = ?1 AND discord_user_id = ?2 AND agent_id = ?3",
-        [platform, discord_user_id, agent_id],
+        "SELECT COUNT(*) FROM trusted_users \
+         WHERE platform = ?1 AND user_id = ?2 AND agent_id = ?3",
+        [platform, user_id, agent_id],
         |row| row.get::<_, i64>(0),
     )
     .map(|c| c > 0)
@@ -295,7 +292,7 @@ pub fn is_trusted_user(
 /// 認可と無関係な用途のために残してある。
 pub fn trusted_user_count(conn: &Connection, platform: &str, agent_id: &str) -> i64 {
     conn.query_row(
-        "SELECT COUNT(*) FROM trusted_discord_users WHERE platform = ?1 AND agent_id = ?2",
+        "SELECT COUNT(*) FROM trusted_users WHERE platform = ?1 AND agent_id = ?2",
         [platform, agent_id],
         |row| row.get::<_, i64>(0),
     )
