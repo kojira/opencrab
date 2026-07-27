@@ -161,10 +161,12 @@ impl opencrab_discord::AgentRunner for AppState {
         // DB の enabled フラグではなく manager の liveness で判定する（#40）。
         // enabled=1 でもゲートウェイが起動失敗/停止していれば false → 共有側が
         // フォールバックとして処理を続け、「誰も応答しない」状態を作らない。
-        self.discord_manager
-            .as_ref()
-            .map(|m| m.is_running(agent_id))
-            .unwrap_or(false)
+        //
+        // 登録簿経由（#191 段階2 PR3）。**未登録も false** に倒れるので、名指し
+        // フィールドが `None` だったときと同じ側（共有ゲートウェイが処理を続ける）に
+        // 落ちる。true に倒すと二重処理、panic させると受信そのものが止まる。
+        self.gateways
+            .is_running(opencrab_actions::gateway_kinds::DISCORD, agent_id)
     }
 }
 

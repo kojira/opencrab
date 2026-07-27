@@ -70,6 +70,56 @@ pub mod kinds {
 /// 登録簿に入れる共有ハンドル。
 pub type SharedAgentGateway = Arc<dyn AgentGatewayLifecycle>;
 
+/// 「設定が起動条件を満たさないので**起動しなかった**」ことを表す起動失敗（#191 段階2 PR3）。
+///
+/// [`AgentGatewayLifecycle::start`] のガード（有効フラグ / 資格情報の検査）が弾いたときに
+/// 返す。異常ではなく**設定どおりの結果**なので、呼び出し側はこれを「起動失敗」と同じ
+/// 重さで扱わなくてよい（[`is_start_declined`] で見分ける）。
+///
+/// ガードそのものを呼び出し側に置かないのがこの型の存在理由。判定は実装の中に閉じ、
+/// 呼び出し側には「弾かれたのか、本当に落ちたのか」だけを渡す。呼び出し口が増えても
+/// ガードの付け忘れが起きえない形になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartDeclined {
+    /// transport の種別名（[`kinds`]）。
+    pub kind: &'static str,
+    pub agent_id: String,
+    /// 起動条件のどこを満たさなかったか（ログ・API 応答に出る）。
+    pub reason: String,
+}
+
+impl StartDeclined {
+    /// `anyhow::Error` として返すためのコンストラクタ（実装の `start` から使う）。
+    pub fn err(kind: &'static str, agent_id: &str, reason: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            kind,
+            agent_id: agent_id.to_string(),
+            reason: reason.into(),
+        })
+    }
+}
+
+impl std::fmt::Display for StartDeclined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ゲートウェイの起動条件を満たしていません（agent_id={}）: {}",
+            self.kind, self.agent_id, self.reason
+        )
+    }
+}
+
+impl std::error::Error for StartDeclined {}
+
+/// その起動失敗が [`StartDeclined`]（設定どおり起動しなかった）か。
+///
+/// 「起動条件を満たさないときは黙って何もしない」という既存の呼び出し側の挙動を、
+/// ガードを実装へ持ち上げたあとも保つために使う（設定起因の見送りを error ログに
+/// 出さない）。
+pub fn is_start_declined(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<StartDeclined>().is_some()
+}
+
 /// 受信を持つ transport の per-agent ライフサイクル管理。
 ///
 /// 実装するのは**マネージャ**（`DiscordGatewayManager` / `NostrGatewayManager`）であって
@@ -91,6 +141,17 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
     ///
     /// すでに稼働中なら実装は「止めてから起動し直す」こと（既存の
     /// `start_agent_gateway` が両実装ともそうしている）。
+    ///
+    /// ## 起動条件のガードは**この中**にある（#191 段階2 PR3）
+    ///
+    /// 「有効フラグが立っているか」「資格情報が空白でないか」の検査は**実装の `start` の
+    /// 中**で行い、満たさなければ [`StartDeclined`] を返す。呼び出し側の規約にすると
+    /// 呼び出し口が増えるたびに忘れうる（＝無効にしたはずの設定や空白のトークンで
+    /// 起動してしまう穴が開く）。このリポジトリが繰り返し採ってきた「忘れても安全」を
+    /// 構造で作る方針に合わせ、拒否側へ倒すガードを型の内側へ閉じる。
+    ///
+    /// 判定の中身は transport ごとに違う（何が資格情報かも、有効フラグを見てよいかも
+    /// 違う）ので、共通化するのは「弾いたら [`StartDeclined`] を返す」ところまで。
     ///
     /// **入口の正規化を実装から落とさないこと。** 例えば Discord は owner 識別子を
     /// ここで trim して未設定を警告する。落とすと「DM は通るのに owner 専用 UI だけ

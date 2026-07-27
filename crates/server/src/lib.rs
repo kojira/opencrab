@@ -89,16 +89,25 @@ pub struct AppState {
     /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
     /// メンテナンスループの二重 LLM 支出防止）。
     pub index_build_inflight: memory_maintenance::IndexBuildInflight,
+    /// per-agent Discord ゲートウェイマネージャ。
+    ///
+    /// **共通操作（起動 / 停止 / 生存確認）でここを見ないこと**（#191 段階2 PR3）。
+    /// それらは下の `gateways` 経由に差し替え済み。残っているのは **transport 固有の
+    /// 実体の受け渡し**だけ（`get_http_for_agent` → serenity の HTTP クライアント）で、
+    /// capability の受け口に移すのは PR4。
     #[cfg(feature = "discord")]
     pub discord_manager: Option<Arc<opencrab_discord::DiscordGatewayManager<AppState>>>,
     /// per-agent Nostr sub-gateway マネージャ（main で構築してセットされる）。
+    ///
+    /// `discord_manager` と同じく、**共通操作は `gateways` 経由**。ここに残っているのは
+    /// transport 固有の操作（`cli()` / `generate_key()` = nostaro の鍵生成）だけ。
     pub nostr_manager: Option<SharedNostrManager>,
     pub mcp_manager: Option<SharedMcpManager>,
-    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2 PR2）。
+    /// 受信を持つ transport の per-agent ライフサイクル登録簿（#191 段階2）。
     ///
-    /// 上の名指しフィールド（`discord_manager` / `nostr_manager`）と**併存**する。
-    /// この PR では登録するだけで、呼び出し側はまだ名指しフィールドを見ている
-    /// （差し替えは PR3）。
+    /// **共通操作（起動 / 停止 / 生存確認）はここを通る**（PR3）。上位は個々の
+    /// ゲートウェイを名指しせず、種別名（[`opencrab_actions::gateway_kinds`]）で引く。
+    /// 未登録の種別は生存確認が **false**（共有ゲートウェイが処理を続ける側）。
     ///
     /// **内部可変**（[`opencrab_actions::AgentGatewayRegistry`] が中で `RwLock` を持つ）。
     /// マネージャの生成順は仕様であり（Discord のマネージャは共有ゲートウェイへ渡す

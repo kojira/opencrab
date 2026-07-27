@@ -592,9 +592,11 @@ async fn main() -> anyhow::Result<()> {
         // **前に**生成して配線する。実際の復元は共有ゲートウェイ起動後に行う）。
         let manager = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
         state.discord_manager = Some(manager.clone());
-        // 名指しフィールドと**併存**で登録簿にも入れる（#191 段階2 PR2）。登録簿は
-        // `state` の clone 同士で同じ Arc を共有するので、ここで入れた分は上で
-        // clone 済みの state からも見える（読み手の差し替えは PR3）。
+        // 共通操作（起動 / 停止 / 生存確認）の呼び出し口はこの登録簿（#191 段階2 PR3）。
+        // 登録簿は `state` の clone 同士で同じ Arc を共有するので、ここで入れた分は
+        // 既に clone 済みの state からも見える（#40 の二重処理防止がこれに依存する）。
+        // 名指しフィールドは transport 固有の実体の受け渡し（`get_http_for_agent`）の
+        // ためだけに残っている（capability 化は PR4）。
         state.gateways.register(manager.clone());
 
         let discord_cfg = &cfg.gateway.discord;
@@ -936,7 +938,8 @@ async fn main() -> anyhow::Result<()> {
         let manager: opencrab_server::SharedNostrManager =
             Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
         state.nostr_manager = Some(manager.clone());
-        // 名指しフィールドと併存で登録簿にも入れる（#191 段階2 PR2）。
+        // 共通操作の呼び出し口はこの登録簿（#191 段階2 PR3）。名指しフィールドは
+        // transport 固有の操作（nostaro の鍵生成）のためだけに残る。
         // **復元（`restore_from_db`）の順序は変えない**: Discord は共有ゲートウェイ
         // 起動後、Nostr はここ（ルータ構築の直前）という現状のままにする。登録簿への
         // 一般化は PR5。

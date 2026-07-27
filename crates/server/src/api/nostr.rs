@@ -9,6 +9,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+use opencrab_actions::gateway_kinds;
 use opencrab_db::queries::AgentNostrConfigRow;
 use opencrab_nostr::{config_from_row, validate_vanity_prefix};
 
@@ -32,11 +33,8 @@ pub async fn get_nostr_config(
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::get_agent_nostr_config(&conn, &id).unwrap_or(None)
     };
-    let running = state
-        .nostr_manager
-        .as_ref()
-        .map(|m| m.is_running(&id))
-        .unwrap_or(false);
+    // 未登録（マネージャ未生成）は false。
+    let running = state.gateways.is_running(gateway_kinds::NOSTR, &id);
 
     match row {
         Some(cfg) => {
@@ -166,18 +164,19 @@ pub(crate) async fn apply_nostr_settings(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    // マネージャ反映。
-    if let Some(manager) = state.nostr_manager.as_ref() {
+    // マネージャ反映。**「起動が成功してから enabled=true」の順序はここ（ハンドラ側）の
+    // 方針として残す**（契約が持つのは起動と停止だけ）。`start` は上で upsert した行を
+    // DB から読み直すが、その時点の行は enabled=false なので、Nostr 側のガードは
+    // enabled を見ない（理由は `NostrGatewayManager` のトレイト実装の doc）。
+    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
         if enabled {
-            let config = config_from_row(&row);
-            manager
-                .start_agent_gateway(agent_id, &row.secret_key, config)
+            gw.start(agent_id)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let conn = state.db.lock().unwrap();
             opencrab_db::queries::set_agent_nostr_config_enabled(&conn, agent_id, true).ok();
         } else {
-            manager.stop_agent_gateway(agent_id).await;
+            gw.stop(agent_id).await;
         }
     }
 
@@ -287,15 +286,13 @@ pub async fn start_nostr_gateway(
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::get_agent_nostr_config(&conn, &id).unwrap_or(None)
     };
-    let Some(row) = row else {
+    if row.is_none() {
         return Err((StatusCode::NOT_FOUND, "Nostr 設定がありません".to_string()));
-    };
+    }
     // 起動が成功してから enabled=true にする（失敗時に「enabled だが未稼働」の
-    // 不整合を残さない）。
-    if let Some(manager) = state.nostr_manager.as_ref() {
-        let config = config_from_row(&row);
-        manager
-            .start_agent_gateway(&id, &row.secret_key, config)
+    // 不整合を残さない）。この順序はハンドラ側の方針として残す。
+    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
+        gw.start(&id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
@@ -315,8 +312,8 @@ pub async fn stop_nostr_gateway(
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::set_agent_nostr_config_enabled(&conn, &id, false).ok();
     }
-    if let Some(manager) = state.nostr_manager.as_ref() {
-        manager.stop_agent_gateway(&id).await;
+    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
+        gw.stop(&id).await;
     }
     Json(json!({"stopped": true}))
 }
@@ -326,8 +323,8 @@ pub async fn delete_nostr_config(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    if let Some(manager) = state.nostr_manager.as_ref() {
-        manager.stop_agent_gateway(&id).await;
+    if let Some(gw) = state.gateways.get(gateway_kinds::NOSTR) {
+        gw.stop(&id).await;
     }
     let deleted = {
         let conn = state.db.lock().unwrap();
