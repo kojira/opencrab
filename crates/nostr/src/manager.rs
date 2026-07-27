@@ -767,6 +767,10 @@ mod tests {
         fn cleanup_stale_interactions(&self) {
             unimplemented!("nostr の fake は A2UI interaction を使わない")
         }
+
+        fn cleanup_stale_interactions_for_agent(&self, _agent_id: &str) {
+            unimplemented!("nostr の fake は A2UI interaction を使わない")
+        }
     }
 
     impl NostrAgentRunner for SlowRunner {

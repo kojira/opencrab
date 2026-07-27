@@ -94,8 +94,12 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         // Create event channel for A2UI and other async events
         let (event_tx, event_rx) = crate::message_loop::create_event_channel();
 
-        // Cleanup stale pending interactions from previous runs
-        self.state.cleanup_stale_interactions();
+        // このゲートウェイの保留対話は上で作り直した登録簿（＝空）にしか無いので、
+        // 前回稼働分の `pending` 行は再開できない。期限切れとして明示的に閉じる。
+        // ただし**このエージェント分だけ**にする: per-agent ゲートウェイは実行中にも
+        // 再起動されるため（ダッシュボード操作）、全件を閉じると同時に動いている別
+        // エージェントの生きた保留対話まで落ちる（#196）。
+        self.state.cleanup_stale_interactions_for_agent(agent_id);
 
         let gateway_actions: Arc<dyn opencrab_gateway::GatewayActions> = Arc::new(
             crate::DiscordGatewayActions::new(

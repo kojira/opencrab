@@ -202,7 +202,9 @@ pub async fn send_ui(
             &conn,
             &interaction_id,
             &ctx.agent_id,
-            "", // session_id - will be set from context
+            // 再開先のセッション。ここが空だと DB 行から会話へ戻せず、プロセス再起動を
+            // 挟んだ応答が宙に浮く（#196）。上の fail-closed 検査を通った値を必ず使う。
+            &session_id,
             channel_id,
             None,
             &surface.platform,
@@ -495,8 +497,9 @@ mod tests {
         assert_eq!(row.platform, "fake");
         assert_eq!(row.channel_id, "555");
         assert_eq!(row.message_id.as_deref(), Some("msg-1"));
-        // 移設前と同じく session_id 列は空で挿入する。
-        assert_eq!(row.session_id, "");
+        // 再開先のセッションは DB 行にも入る（#196）。ここが空だとプロセス再起動後に
+        // 「どの会話へ戻すか」が引けない。
+        assert_eq!(row.session_id, "sess-1");
         assert!(row.owner_only);
         assert_eq!(row.timeout_secs, 300);
     }
@@ -637,6 +640,49 @@ mod tests {
         assert_eq!(events[0].response.action_name, "timeout");
         assert_eq!(events[0].response.responder_id, "system");
         assert!(reg.get(&id).is_none());
+    }
+
+    /// プロセス再起動を模す: メモリ上の登録簿は空、DB には `pending` の行だけがある。
+    ///
+    /// この状態で起動時の掃除を走らせると、行は**期限切れとして明示的に閉じられ**、
+    /// 閉じた記録から再開先のセッションが引ける（#196）。ボタン押下がどこにも届かない
+    /// まま行が `pending` で残り続けることはない。
+    #[tokio::test]
+    async fn stale_rows_are_closed_with_their_session_after_a_restart() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let (s, _sink) = surface(true, "o");
+        let ctx = ctx_with_session();
+        let r = send_ui(
+            &db,
+            &s,
+            &json!({"channel_id": "42", "components": text_component()}),
+            &ctx,
+        )
+        .await;
+        let id = r.data.unwrap()["interaction_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 再起動 = メモリ上の登録簿が消える（DB 行だけが残る）。
+        let registry = s.pending.as_ref().unwrap().registry.clone();
+        registry.clear();
+        assert!(registry.get(&id).is_none());
+
+        let conn = db.lock().unwrap();
+        let closed = opencrab_db::queries::cleanup_stale_pending_interactions(&conn).unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, id);
+        // ここが #196 の要: 閉じた行から再開先のセッションが引ける。
+        assert_eq!(closed[0].session_id, "sess-1");
+        assert_eq!(closed[0].agent_id, "a1");
+        assert_eq!(closed[0].platform, "fake");
+        assert_eq!(closed[0].channel_id, "42");
+
+        let row = opencrab_db::queries::get_pending_interaction(&conn, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "timeout");
     }
 
     #[test]
