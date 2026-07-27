@@ -2968,3 +2968,67 @@ async fn test_get_nostr_config_never_returns_raw_secret_key() {
         "マスク済みの固定文字列を返す: {json}"
     );
 }
+
+/// 平文（非 JSON）のエラーボディを読む。
+///
+/// `send_request` は JSON として解釈できないボディをバイト列の配列にして返すため、
+/// エラー文言をそのまま `contains` できない。
+fn plain_body(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Array(bytes) => {
+            let raw: Vec<u8> = bytes
+                .iter()
+                .filter_map(|b| b.as_u64().map(|n| n as u8))
+                .collect();
+            String::from_utf8_lossy(&raw).into_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// **鍵の払い出しの受け口が無い構成では 503 で失敗する**（#191 段階2 PR4）。
+///
+/// 鍵生成は transport 固有の操作で、`AppState` の名指しフィールドから
+/// capability の受け口（登録簿 → `key_provisioning`）へ移した。ハーネスの
+/// `AppState` は登録簿が空なので受け口が引けない。ここが「無ければ黙って既定の
+/// 外部コマンドを叩く」側へ倒れると、REST から想定外のバイナリで鍵を生成し
+/// うる（= 外部プロセスの spawn が無言で起きる）ため、**明示的に失敗する**こと
+/// と**文言が変わっていない**ことを固定する。
+///
+/// 判定の位置も仕様: prefix の書式検証（400）より後、鍵の生成より手前。
+#[tokio::test]
+async fn test_generate_nostr_key_fails_without_key_provisioning() {
+    let app = create_test_app();
+
+    let (status, body) = send_request(
+        app.clone(),
+        "POST",
+        "/api/agents/a1/nostr/generate",
+        Some(serde_json::json!({"prefix": "cr"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "受け口が無ければ 503（黙って既定の外部コマンドへ倒さない）: {body}"
+    );
+    assert!(
+        plain_body(&body).contains("Nostr マネージャが無効です"),
+        "エラー文言は据え置き: {body}"
+    );
+
+    // 書式が不正な prefix は受け口の有無より**手前**で 400（無効な prefix で
+    // 外部プロセスを起こさない、という既存の順序）。
+    let (status, body) = send_request(
+        app.clone(),
+        "POST",
+        "/api/agents/a1/nostr/generate",
+        Some(serde_json::json!({"prefix": "bbb"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "prefix の検証が先（bech32 に無い文字）: {body}"
+    );
+}
