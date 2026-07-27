@@ -19,9 +19,17 @@
 //! どのゲートウェイからも同じ 1 実装を使える。
 //!
 //! Discord は受信ループ形のため「spawn 込みで応答を返さない」という別形だが、そのために
-//! ロック表を二重に持つ理由はない。[`SessionRuntime::spawn_serialized`]（`run_serialized` を
+//! ロック表を二重に持つ理由はない。[`SessionLocks::spawn_serialized`]（`run_serialized` を
 //! `tokio::spawn` で包むだけの薄い入口）へ寄せ、ロックの生成・取得・回収の実装はここ 1 つに
 //! なった（#156 S2）。
+//!
+//! 型はロック表（[`SessionLocks`]）と「ロック表 + 登録簿」（[`SessionRuntime`]）の 2 つに
+//! 分けてある（#223）。Discord は自前の登録簿（`DiscordGatewayActions` と同一 Arc を共有
+//! するもの）を使うため、ここの登録簿を**使わない**。1 つの型に同居させたままだと、後から
+//! 見た人が「これが共有の登録簿だ」と誤認して `registry_for` を引きかねない。そうなると
+//! dispatch の登録先と `cancel_subtask` の参照先が別インスタンスになり、**停止の指示が
+//! 走行中 subtask に届かなくなる**（#161 の不変条件違反）。使わない側の型に登録簿が
+//! そもそも存在しなければ、この誤用は書けない。
 
 use std::future::Future;
 use std::sync::Arc;
@@ -32,35 +40,23 @@ use tokio::sync::Mutex;
 use crate::subtask::SubtaskRegistry;
 use crate::subtask_registries::SubtaskRegistries;
 
-/// セッション単位の直列化ロックと dispatch 登録簿を持つ共有ランタイム。
+/// セッション単位の直列化ロック表（**登録簿を持たない**）。
 ///
-/// ゲートウェイはプロセス全体で 1 つ（`Arc<SessionRuntime>`）保持し、inbound 経路と
-/// 完了 sink が同じ Arc を共有する。ロックの粒度は session_id なので、別の相手・別の
-/// エージェント・別の会話は従来どおり並行する。
+/// 直列化だけが要るゲートウェイ（Discord: dispatch 登録簿は別の共有実体を使う）はこちらを
+/// `Arc<SessionLocks>` で 1 つ持つ。登録簿も同じ実体で共有したいゲートウェイ（web / Nostr）は
+/// [`SessionRuntime`] を使う。ロックの生成・取得・アイドル回収の実装はこの型 1 つだけにあり、
+/// `SessionRuntime` はこれへ委譲する。
+///
+/// ロックの粒度は session_id なので、別の相手・別のエージェント・別の会話は従来どおり並行する。
 #[derive(Default)]
-pub struct SessionRuntime {
+pub struct SessionLocks {
     /// session_id → 直列化ロック。アイドルになったエントリは回収する（下記参照）。
     session_locks: DashMap<String, Arc<Mutex<()>>>,
-    registries: SubtaskRegistries,
 }
 
-impl SessionRuntime {
+impl SessionLocks {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// セッションの dispatch registry を取得する（無ければ生成し、inbound/resume で共有）。
-    ///
-    /// 同じ session_id には常に同じ `Arc` を返す。これが `cancel_subtask` の到達条件。
-    pub fn registry_for(&self, session_id: &str) -> SubtaskRegistry {
-        self.registries.registry_for(session_id)
-    }
-
-    /// セッションに走行中（未決着）の dispatch subtask があるか。
-    ///
-    /// `settle_completed` は sink 発火より前に registry から除去するため、決着後は false。
-    pub fn has_running(&self, session_id: &str) -> bool {
-        self.registries.has_running(session_id)
     }
 
     /// セッションのロックエントリが残っているか（回収の観測点）。
@@ -130,7 +126,24 @@ impl SessionRuntime {
     /// 受信の記録と履歴構築が来る順序が崩れると、確定前の履歴から 2 本目の返信が組み立てられて
     /// 二重投稿になる（[`Self::run_serialized`] の注意書きと同じ不変条件）。
     ///
-    /// 返す `JoinHandle` は破棄してよい（テストが完了を待てるように返しているだけ）。
+    /// **実行ハンドルは本番ビルドでは返さない**（#223）。ハンドルを返すと呼び出し側で
+    /// `.await` できてしまい、(a) 受信ループがそこで待てば走行中セッションの推論が終わるまで
+    /// 全チャンネル・全エージェントの受信が止まり、(b) 直列化ブロックの内側から同一セッションに
+    /// 対して呼んで待てば、自分が保持しているロックを自分で待つ**自己デッドロック**になる。
+    /// どちらも「破棄すること」という規約でしか防げていなかったので、規約を型に移した。
+    /// テストビルド（この crate の `cfg(test)`）だけが完了を待つために `JoinHandle` を受け取る。
+    #[cfg(not(test))]
+    pub fn spawn_serialized<F>(self: &Arc<Self>, session_id: impl Into<String>, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        // ハンドルは即座に落とす（detach）。`JoinHandle` を drop してもタスクは走り続ける
+        // （abort ではない）ので、応答生成は最後まで完了する。
+        drop(self.spawn_serialized_detached(session_id, fut));
+    }
+
+    /// `cfg(test)` 版: 完了を待てるように `JoinHandle` を返す（本番の署名は上の `()` 版）。
+    #[cfg(test)]
     pub fn spawn_serialized<F>(
         self: &Arc<Self>,
         session_id: impl Into<String>,
@@ -139,11 +152,71 @@ impl SessionRuntime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let runtime = Arc::clone(self);
+        self.spawn_serialized_detached(session_id, fut)
+    }
+
+    fn spawn_serialized_detached<F>(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+        fut: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let locks = Arc::clone(self);
         let session_id = session_id.into();
         tokio::spawn(async move {
-            runtime.run_serialized(&session_id, fut).await;
+            locks.run_serialized(&session_id, fut).await;
         })
+    }
+}
+
+/// セッション単位の直列化ロック **＋** dispatch 登録簿を持つ共有ランタイム。
+///
+/// ゲートウェイ（web / Nostr）はプロセス全体で 1 つ保持し、inbound 経路と完了 sink が同じ
+/// 実体を共有する。inbound と resume が**同一 Arc の registry** を見ることが
+/// `cancel_subtask`（#161）が走行中 subtask に到達できる条件であり、直列化と同じ
+/// 「セッション単位の実行状態」なのでここに同居させている。
+///
+/// 直列化だけが要る（登録簿は別経路で共有する）ゲートウェイは [`SessionLocks`] を使うこと。
+#[derive(Default)]
+pub struct SessionRuntime {
+    locks: SessionLocks,
+    registries: SubtaskRegistries,
+}
+
+impl SessionRuntime {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// セッションの dispatch registry を取得する（無ければ生成し、inbound/resume で共有）。
+    ///
+    /// 同じ session_id には常に同じ `Arc` を返す。これが `cancel_subtask` の到達条件。
+    pub fn registry_for(&self, session_id: &str) -> SubtaskRegistry {
+        self.registries.registry_for(session_id)
+    }
+
+    /// セッションに走行中（未決着）の dispatch subtask があるか。
+    ///
+    /// `settle_completed` は sink 発火より前に registry から除去するため、決着後は false。
+    pub fn has_running(&self, session_id: &str) -> bool {
+        self.registries.has_running(session_id)
+    }
+
+    /// セッションのロックエントリが残っているか（回収の観測点）。
+    pub fn holds_lock_entry(&self, session_id: &str) -> bool {
+        self.locks.holds_lock_entry(session_id)
+    }
+
+    /// 同一セッションのロック下で `fut` を実行する（per-session 直列化）。
+    ///
+    /// 実装は [`SessionLocks::run_serialized`] 1 つ。注意書きもそちらを参照。
+    pub async fn run_serialized<F, T>(&self, session_id: &str, fut: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        self.locks.run_serialized(session_id, fut).await
     }
 }
 
@@ -175,6 +248,9 @@ mod tests {
     }
 
     /// per-session 直列化: 同一セッションの並行実行は同時実行数 1 になる。
+    ///
+    /// ここは **`SessionRuntime` 経由**（web / Nostr の経路）で見る。ロック実装は
+    /// `SessionLocks` 1 つだが、委譲が外れれば直列化も回収も効かなくなるため。
     #[tokio::test]
     async fn same_session_serializes() {
         let rt = Arc::new(SessionRuntime::new());
@@ -204,12 +280,16 @@ mod tests {
             1,
             "同一セッションは直列でなければならない（二重応答の防止）"
         );
+        assert!(
+            !rt.holds_lock_entry("s-serial"),
+            "待機者がいなくなったロックは委譲先で回収される"
+        );
     }
 
     /// 異なるセッションは互いをブロックしない。
     #[tokio::test]
     async fn different_sessions_run_concurrently() {
-        let rt = Arc::new(SessionRuntime::new());
+        let rt = Arc::new(SessionLocks::new());
         let rt1 = rt.clone();
         let block = tokio::spawn(async move {
             rt1.run_serialized("s-blocking", async {
@@ -232,7 +312,7 @@ mod tests {
     /// 待機者のいないロックエントリは回収される（リーク防止）。
     #[tokio::test]
     async fn idle_lock_is_reclaimed() {
-        let rt = SessionRuntime::new();
+        let rt = SessionLocks::new();
         rt.run_serialized("s-reclaim", async {}).await;
         assert!(
             !rt.holds_lock_entry("s-reclaim"),
@@ -250,7 +330,7 @@ mod tests {
     /// 検知できない。ここで明示的にその順序を作る。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn late_arrival_serializes_behind_a_queued_waiter() {
-        let rt = Arc::new(SessionRuntime::new());
+        let rt = Arc::new(SessionLocks::new());
         let inflight = Arc::new(AtomicUsize::new(0));
         let max_concurrent = Arc::new(AtomicUsize::new(0));
         let sid = "s-late";
@@ -298,7 +378,7 @@ mod tests {
     /// 走行中はロックエントリが残る（回収が早すぎないことの裏取り）。
     #[tokio::test]
     async fn lock_entry_exists_while_running() {
-        let rt = Arc::new(SessionRuntime::new());
+        let rt = Arc::new(SessionLocks::new());
         let rt1 = rt.clone();
         let running = tokio::spawn(async move {
             rt1.run_serialized("s-running", async {
@@ -318,7 +398,7 @@ mod tests {
     /// 呼び出しが即座に返る」ことと、完了後にエントリが回収されることを見る。
     #[tokio::test]
     async fn spawn_serialized_does_not_block_caller() {
-        let rt = Arc::new(SessionRuntime::new());
+        let rt = Arc::new(SessionLocks::new());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let handle = rt.spawn_serialized("s-spawn", async move {
             let _ = rx.await;
@@ -335,7 +415,7 @@ mod tests {
     /// spawn 形でも同一セッションは直列（割り込みによる二重返信の防止）。
     #[tokio::test]
     async fn spawn_serialized_same_session_serializes() {
-        let rt = Arc::new(SessionRuntime::new());
+        let rt = Arc::new(SessionLocks::new());
         let inflight = Arc::new(AtomicUsize::new(0));
         let max_concurrent = Arc::new(AtomicUsize::new(0));
 
@@ -363,7 +443,7 @@ mod tests {
     /// spawn 形でも別セッションは長時間セッションに塞がれない。
     #[tokio::test]
     async fn spawn_serialized_different_sessions_run_concurrently() {
-        let rt = Arc::new(SessionRuntime::new());
+        let rt = Arc::new(SessionLocks::new());
         let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
         let blocking = rt.spawn_serialized("s-spawn-block", async move {
             let _ = hold_rx.await;
