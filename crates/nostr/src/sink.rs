@@ -265,8 +265,17 @@ mod tests {
 
     use crate::session::nostr_session_id;
 
-    /// run_agent_response の観測 1 件（session_id, reply_target, dispatch 有効か）。
-    type RunObservation = (String, Option<String>, bool);
+    /// run_agent_response の観測 1 件
+    /// （session_id, reply_target, dispatch 有効か, run に載った登録簿の実体）。
+    ///
+    /// 4 番目は **`Arc` の同一性**を見るために保持する。「dispatch が有効か」（3 番目の
+    /// bool）だけでは、別インスタンスの登録簿を渡す壊れ方を検知できない。
+    type RunObservation = (
+        String,
+        Option<String>,
+        bool,
+        Option<opencrab_actions::subtask::SubtaskRegistry>,
+    );
     /// 転記された応答 1 件（agent_id, session_id, text）。
     type ReplyObservation = (String, String, String);
 
@@ -319,6 +328,7 @@ mod tests {
                 req.session_id.clone(),
                 req.reply_target.clone(),
                 req.completion_sink.is_some() && req.subtask_registry.is_some(),
+                req.subtask_registry.clone(),
             ));
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
@@ -720,9 +730,38 @@ mod tests {
         let sid = nostr_session_id("agent-sink-test", "pk-reg");
 
         let inbound_registry = r.runtime().registry_for(&sid);
-        // respond が RunRequest に載せる registry と同一 Arc であること。
-        let via_respond = r.runtime().registry_for(&sid);
-        assert!(Arc::ptr_eq(&inbound_registry, &via_respond));
+
+        // **応答生成に実際に渡された登録簿**が、停止処理が引くものと同一 Arc であること。
+        //
+        // ここを `registry_for(&sid)` 同士の比較で書くと `SubtaskRegistries` の恒真式に
+        // なり、`respond` 側が別インスタンスを渡す壊れ方を 1 件も検知できない（実際、
+        // 旧テストは `sink.rs` の `registry_for(session_id)` を新規 DashMap に差し替えても
+        // 緑のままだった / #203 の一括点検）。捕まえたいのは配線なので、`FakeRunner` が
+        // 捕捉した `RunRequest` の中身を見る（`web-gateway` の
+        // `run_uses_the_gateways_registry_so_cancel_can_reach_it` と同じ形）。
+        //
+        // inbound（watch ループの入口）と resume（完了 sink）の**両経路**を見る:
+        // どちらか一方だけ配線が外れても停止が届かなくなる。
+        r.respond_serialized(&sid, "note1inbound", "suffix", Some("evt-1"))
+            .await;
+        r.on_subtask_settled(settled(&sid, Some("note1resume")));
+        assert!(fake.wait_for("note1resume").await, "resume が走ること");
+
+        {
+            let runs = runner.runs.lock().unwrap();
+            assert_eq!(runs.len(), 2, "inbound と resume で 2 回走る");
+            for (label, obs) in [("inbound", &runs[0]), ("resume", &runs[1])] {
+                let observed = obs
+                    .3
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{label}: run に登録簿が載っていない"));
+                assert!(
+                    Arc::ptr_eq(observed, &inbound_registry),
+                    "{label}: 応答生成に渡した登録簿が、停止処理が引くものと別インスタンス\
+                     になっている（cancel_subtask が常に not found になる）"
+                );
+            }
+        }
 
         // 走行中 subtask を模して登録 → has_running が真。
         inbound_registry.insert(

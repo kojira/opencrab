@@ -117,3 +117,108 @@ impl DiscordGatewayActions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serenity::http::Http;
+    use std::sync::Arc;
+
+    /// voice 無効（`voice: None`）の gateway。権限ゲートは voice の有無より**手前**に
+    /// あるので、これで「弾かれた理由」を区別できる。
+    fn actions() -> (DiscordGatewayActions, opencrab_db::Db) {
+        let db = opencrab_db::Db::memory().unwrap();
+        // serenity の Http はダミートークンで組むだけ（ネットワークには出ない）。
+        let http = Arc::new(Http::new("dummy-token"));
+        let a = DiscordGatewayActions::new(http, db.clone(), "/tmp".to_string(), None);
+        (a, db)
+    }
+
+    fn ctx(caller: GatewayCaller) -> GatewayCallContext {
+        GatewayCallContext::new(caller, "test-agent").with_session_id("discord-test-agent-111-222")
+    }
+
+    fn is_permission_rejection(r: &GatewayActionResult) -> bool {
+        !r.success
+            && r.error.as_deref().is_some_and(|e| {
+                e.starts_with(opencrab_actions::REJECTION_CODE_PREFIX)
+                    && e.contains("requires owner or trusted_user")
+            })
+    }
+
+    /// **VC 参加/退出は owner / trusted_user 以外を弾く**（#203 の一括点検）。
+    ///
+    /// VC 参加はサーバの他メンバーに直接聞こえる行為なので、エージェント本体や
+    /// 別エージェント（co_agent）が勝手に入れてはならない。`caller_allowed` を
+    /// 常に真へ書き換えても落ちるテストが 1 件も無く（ツール名の存在確認しか
+    /// なかった）、この 2 本が Discord 側で唯一の実行時ゲートだった。
+    ///
+    /// **co_agent を明示的に含める**のが要点: bridge の `caller_is_trusted`
+    /// （owner / co_agent / trusted_user）より**狭い**のがこのゲートの意図なので、
+    /// うっかり bridge 側の集合に揃えた変更を落とせる形にしてある。
+    #[tokio::test]
+    async fn voice_actions_reject_non_trusted_callers() {
+        let (a, _db) = actions();
+        let args = serde_json::json!({"channel_id": "333"});
+
+        for caller in [
+            GatewayCaller::Agent,
+            GatewayCaller::CoAgent {
+                agent_id: "other".to_string(),
+            },
+        ] {
+            let label = caller.label();
+            let joined = a
+                .execute_join_voice_channel(&args, &ctx(caller.clone()))
+                .await;
+            assert!(
+                is_permission_rejection(&joined),
+                "join_voice_channel が {label} を権限で弾いていない: {:?}",
+                joined.error
+            );
+            let left = a
+                .execute_leave_voice_channel(&serde_json::json!({}), &ctx(caller))
+                .await;
+            assert!(
+                is_permission_rejection(&left),
+                "leave_voice_channel が {label} を権限で弾いていない: {:?}",
+                left.error
+            );
+        }
+    }
+
+    /// 上のテストが「常に弾かれるから緑」になっていないことの対照。
+    ///
+    /// owner / trusted_user はゲートを**通り抜け**、その先の「voice 機能が無効」で
+    /// 止まる（= 失敗理由が権限ではない）。ゲートを閉じ切る変異を入れると落ちる。
+    #[tokio::test]
+    async fn voice_actions_let_owner_and_trusted_user_past_the_gate() {
+        let (a, _db) = actions();
+        let args = serde_json::json!({"channel_id": "333"});
+
+        for caller in [GatewayCaller::Owner, GatewayCaller::TrustedUser] {
+            let label = caller.label();
+            let joined = a
+                .execute_join_voice_channel(&args, &ctx(caller.clone()))
+                .await;
+            assert!(
+                !is_permission_rejection(&joined),
+                "join_voice_channel が {label} を権限で弾いている: {:?}",
+                joined.error
+            );
+            assert!(
+                joined.error.as_deref().is_some_and(|e| e.contains("voice")),
+                "{label}: ゲートの先（voice 無効）まで届いていない: {:?}",
+                joined.error
+            );
+            let left = a
+                .execute_leave_voice_channel(&serde_json::json!({}), &ctx(caller))
+                .await;
+            assert!(
+                !is_permission_rejection(&left),
+                "leave_voice_channel が {label} を権限で弾いている: {:?}",
+                left.error
+            );
+        }
+    }
+}

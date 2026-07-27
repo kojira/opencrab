@@ -2363,6 +2363,70 @@ fn test_get_index_node_by_short_id_not_found() {
     assert!(result.is_none());
 }
 
+/// **フル ID のフォールバック検索も agent_id でスコープされる**（#203 の一括点検）。
+///
+/// short_id での引きは SQL に `agent_id = ?1` があるので構造的に守られているが、
+/// 見つからなかったときのフォールバック（`get_index_node`）は **agent_id を条件に
+/// 持たない**ので、取得後の `node.agent_id == agent_id` 再チェックだけが境界になる。
+/// ノード ID は `topic-agent:{name}:{session}-...` という予測可能な形なので、この
+/// 再チェックが外れると他エージェントの非公開会話のタイトル/サマリが ID の推測だけで
+/// 読める。再チェックを削っても落ちるテストが 1 件も無かったため追加する。
+#[test]
+fn test_get_index_node_by_full_id_is_scoped_to_agent() {
+    let conn = setup();
+    let node_id = "topic-agent:nostarou:secret-sess_abc-1-20";
+    insert_index_node(
+        &conn,
+        &IndexNodeRow {
+            id: node_id.to_string(),
+            agent_id: "a1".to_string(),
+            parent_id: None,
+            node_type: "topic".to_string(),
+            source_type: String::new(),
+            title: "a1 の非公開トピック".to_string(),
+            summary: "他エージェントに見えてはならない要約".to_string(),
+            start_log_id: None,
+            end_log_id: None,
+            source_session_id: None,
+            date_from: None,
+            date_to: None,
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            short_id: Some("t42".to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        },
+    )
+    .unwrap();
+
+    // 持ち主は引ける（フォールバック経路が生きていることの対照）。
+    assert!(
+        get_index_node_by_short_or_id(&conn, "a1", node_id)
+            .unwrap()
+            .is_some(),
+        "持ち主はフル ID で引ける"
+    );
+
+    // 別エージェントはフル ID を知っていても引けない。
+    assert!(
+        get_index_node_by_short_or_id(&conn, "a2", node_id)
+            .unwrap()
+            .is_none(),
+        "別エージェントのノードがフル ID 経由で漏れている"
+    );
+
+    // short_id も同様（こちらは SQL 側で守られている）。
+    assert!(
+        get_index_node_by_short_or_id(&conn, "a2", "t42")
+            .unwrap()
+            .is_none(),
+        "別エージェントのノードが short_id 経由で漏れている"
+    );
+}
+
 // ============================================
 // memory_index_fts / キーワード逆引きテスト
 // ============================================

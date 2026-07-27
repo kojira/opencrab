@@ -191,4 +191,79 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "generate_inner_voice");
     }
+
+    /// **README のアクション表が実装と一致する**（#203 の一括点検）。
+    ///
+    /// 記述の腐りは短期間に 4 回起きている: テスト件数が実際と桁違い → 直した数値が次の
+    /// PR で再びずれる → 移設済み 7 ツールの表が誤り → **この表が 9 個のアクションを
+    /// 落としたまま「28 actions」と主張**（実際は 33。落ちていたのは task ledger 5 種・
+    /// スキル 3 種・`search_memory_index`）。しかも実在しない 3 名（`send_speech` /
+    /// `send_noreact` / `no_reply`）を載せていた。いずれも人が手で突き合わせて初めて
+    /// 分かったもので、CI は何も言わなかった。
+    ///
+    /// 分類の網羅性検査と同じく**実装を起点に**走査し、両方向を要求する:
+    /// 新しいアクションを登録したら README に書くまで落ちる（漏れ）。README から名前を
+    /// 消しても落ちる（死名）。絶対数は README に書かない方針なので数えない。
+    #[test]
+    fn readme_action_table_matches_the_dispatcher() {
+        let readme_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
+        let readme = std::fs::read_to_string(readme_path)
+            .unwrap_or_else(|e| panic!("README.md を読めない ({readme_path}): {e}"));
+
+        // 「## Action System」節の**前半の表**だけを見る。同じ節の後半にある gateway
+        // アクション表は別の定義集合なので、`SystemGatewayActions` /
+        // `DiscordGatewayActions` 側の検査が受け持つ。
+        let section = readme
+            .split("## Action System")
+            .nth(1)
+            .expect("README に '## Action System' 節が無い")
+            .split("\n## ")
+            .next()
+            .unwrap()
+            .split("In addition, **gateway actions**")
+            .next()
+            .unwrap();
+
+        // 表の行 `| **Category** | `a`, `b` | 説明 |` の 2 列目からツール名を拾う。
+        let mut documented: Vec<String> = Vec::new();
+        for line in section.lines().filter(|l| l.starts_with("| **")) {
+            let Some(actions_col) = line.split('|').nth(2) else {
+                continue;
+            };
+            for part in actions_col.split('`').skip(1).step_by(2) {
+                documented.push(part.to_string());
+            }
+        }
+        documented.sort();
+        documented.dedup();
+        assert!(
+            !documented.is_empty(),
+            "README の Action System 表からツール名を 1 つも拾えていない\
+             （表の形を変えたならこのパーサも直すこと）"
+        );
+
+        let mut registered = ActionDispatcher::new().action_names();
+        registered.sort();
+
+        let missing: Vec<&String> = registered
+            .iter()
+            .filter(|n| !documented.contains(n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "README の Action System 表に載っていない登録済みアクション: {missing:?}\n\
+             （新しいアクションを登録したら README の表にも足すこと）"
+        );
+
+        let dead: Vec<&String> = documented
+            .iter()
+            .filter(|n| !registered.contains(n))
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "README の Action System 表が実在しないアクションを載せている: {dead:?}\n\
+             （`execute_shell` は config 駆動で ActionDispatcher::new() に入らないため、\
+             表ではなく本文で説明すること）"
+        );
+    }
 }

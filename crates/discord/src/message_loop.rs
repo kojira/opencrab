@@ -1372,6 +1372,12 @@ fn extract_discord_content(content: &opencrab_gateway::MessageContent) -> (Strin
     }
 }
 
+// 本番配線の同一性テスト（#203）。変異注入の実験でこのファイルだけを巻き戻しても
+// テストが消えないよう、別ファイルに置いている。
+#[cfg(test)]
+#[path = "message_loop_wiring_tests.rs"]
+mod wiring_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{discord_context_line, parse_discord_session, parse_seen_message_id};
