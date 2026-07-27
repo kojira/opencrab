@@ -104,10 +104,17 @@ pub(crate) mod capture {
     // （`shared_gateway_warning_fires_exactly_when_it_starts_without_owner` など）が
     // 捕捉側より先に登録してしまう競合が開く。
     //
-    // なのでプロセス全体で subscriber を 1 個だけ張り（最初に踏むのが必ずこの
-    // subscriber になるので `Interest` は常に「出す」で焼き付く）、どのテストの出力を
-    // 捕まえるかは**スレッドローカルの捕捉先**で切り替える。テストは 1 本 1 スレッドで
-    // 走るので、捕捉中でないスレッドの警告は捨てられ、テスト同士は干渉しない。
+    // なのでプロセス全体で subscriber を 1 個だけ張る。以後どのスレッドが先に踏んでも
+    // `get_default` はその subscriber を返すので `Interest` は「出す」で焼き付く。
+    // どのテストの出力を捕まえるかは**スレッドローカルの捕捉先**で切り替える。テストは
+    // 1 本 1 スレッドで走るので、捕捉中でないスレッドの警告は捨てられ、干渉しない。
+    //
+    // **これでも窓は完全には閉じない。** `set_global_default` は内部で `Dispatch::new`
+    // →（登録の副作用で）最大レベルを WARN へ上げてから、大域の受け口を差し込む。
+    // その数命令の間に別スレッドが callsite を**初めて**踏むと、大域の受け口がまだ
+    // 無いので従来と同じ焼き付きが起きる。窓はプロセスで 1 回きり・マイクロ秒未満だが、
+    // 残すと「稀に落ちる」が残る。**張った直後に `rebuild_interest_cache()` を呼んで
+    // 塞ぐ** — 窓の中で焼き付いた `Interest` も大域の受け口を基準に計算し直される。
 
     thread_local! {
         /// このスレッドが捕捉中なら書き込み先。捕捉していなければ `None`（捨てる）。
@@ -151,6 +158,8 @@ pub(crate) mod capture {
             // 意味を失う）ので、握りつぶさず落とす。
             tracing::subscriber::set_global_default(subscriber)
                 .expect("捕捉用 subscriber を張れること（他に global default が居ない）");
+            // 張る途中の窓（上のコメント）で焼き付いた `Interest` を計算し直す。
+            tracing::callsite::rebuild_interest_cache();
         });
 
         /// `f` が panic しても捕捉先を残さない。
