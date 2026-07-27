@@ -23,18 +23,13 @@ pub mod workspace;
 
 /// `owner_discord_id` と呼び出し元 ID が一致するか判定する。
 ///
-/// owner は「未設定」を取り得る。per-agent Discord 設定の DB 既定値が空文字
-/// （`owner_discord_id TEXT NOT NULL DEFAULT ''`）であり、UI/API から owner を
-/// 指定せずに作成された行が存在しうるため、素朴な `==` だと空の呼び出し元 ID が
-/// owner と一致してしまう。TOML 側も `${OWNER_DISCORD_ID}` 参照が未定義のとき
-/// 空文字に展開されるので同じことが起きる。
+/// 実体は [`opencrab_core::owner::is_owner_id`]。判定を下位クレートの 1 実装へ
+/// 集約し、server / discord の両方から同じ述語を使う（#174）。以前はここに実装が
+/// あり、依存方向の都合で `crates/discord` からは使えず生比較が別実装として
+/// 残っていた。この別名は既存の呼び出し元との互換のために残している。
 ///
-/// 空のオーナー ID は「オーナー無し」として誰とも一致させない（安全側）。
-/// 空白のみの値も未設定として扱い、比較前に両辺を trim する。
-pub fn is_owner_id(owner_discord_id: &str, user_id: &str) -> bool {
-    let owner = owner_discord_id.trim();
-    !owner.is_empty() && owner == user_id.trim()
-}
+/// 未設定（空文字・空白のみ）のオーナー ID は誰とも一致しない。
+pub use opencrab_core::owner::is_owner_id;
 
 #[cfg(test)]
 mod tests {

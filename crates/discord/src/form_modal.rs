@@ -31,6 +31,11 @@ fn modal_custom_id(surface_id: &str, action_name: &str) -> String {
 }
 
 /// ボタンの `custom_id` が Form 送信アクションと一致し UI 上に Form がある場合、モーダル表示用データを返す。
+///
+/// 操作できるのはオーナーだけ。**オーナー未設定なら誰も開けない**（#174）。
+/// 以前は「`owner_id` が空なら判定しない」＝誰でも開ける、という fail-open
+/// だったため、オーナー欄を空のまま運用するとオーナー専用 UI の権限ゲートが
+/// 黙って無効化されていた。判定は `opencrab_core::owner::is_owner_id` に集約。
 pub fn resolve_form_modal_for_button(
     registry: &PendingInteractionRegistry,
     custom_id: &str,
@@ -46,7 +51,7 @@ pub fn resolve_form_modal_for_button(
 
     let pending = registry.get(interaction_id)?;
 
-    if !pending.owner_id.is_empty() && user_id != pending.owner_id {
+    if !opencrab_core::owner::is_owner_id(&pending.owner_id, user_id) {
         return None;
     }
 
@@ -111,6 +116,11 @@ mod tests {
         A2uiAction, A2uiComponent, PendingInteraction, RenderTarget, RenderedMessage,
     };
 
+    /// 既定のオーナー。owner 判定は fail-closed（#174）なので、モーダル解決そのものを
+    /// 見たいテストではオーナーを設定した状態を既定にする（未設定だと誰も開けず、
+    /// 「Form が無いから None」なのか「オーナー未設定だから None」なのか区別できない）。
+    const OWNER: &str = "owner99";
+
     fn test_registry() -> PendingInteractionRegistry {
         Arc::new(DashMap::new())
     }
@@ -125,7 +135,7 @@ mod tests {
             },
             surface_id: "interaction:uuid-abc".into(),
             a2ui_components: components,
-            owner_id: String::new(),
+            owner_id: OWNER.into(),
             created_at: chrono::Utc::now(),
             timeout_secs: 300,
             rendered_message: RenderedMessage {
@@ -188,7 +198,7 @@ mod tests {
             "uuid-abc".into(),
             pending_with(vec![button("btn1", "submit")]),
         );
-        let r = resolve_form_modal_for_button(&reg, "interaction:uuid-abc:btn1:submit", "user1");
+        let r = resolve_form_modal_for_button(&reg, "interaction:uuid-abc:btn1:submit", OWNER);
         assert!(r.is_none());
     }
 
@@ -205,7 +215,7 @@ mod tests {
             ]),
         );
 
-        let spec = resolve_form_modal_for_button(&reg, "interaction:uuid-abc:btn1:submit", "user1")
+        let spec = resolve_form_modal_for_button(&reg, "interaction:uuid-abc:btn1:submit", OWNER)
             .expect("modal spec");
         assert_eq!(spec.modal_custom_id, "interaction:uuid-abc:modal:submit");
         assert_eq!(spec.title, "My form");
@@ -214,8 +224,7 @@ mod tests {
 
     #[test]
     fn resolve_respects_owner_only() {
-        let mut pending = pending_with(vec![form("f1", "T", vec![], "go"), button("b1", "go")]);
-        pending.owner_id = "owner99".into();
+        let pending = pending_with(vec![form("f1", "T", vec![], "go"), button("b1", "go")]);
         let reg = test_registry();
         reg.insert("uuid-abc".into(), pending);
 
@@ -224,9 +233,28 @@ mod tests {
                 .is_none()
         );
         // owner なら開く。
-        assert!(
-            resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", "owner99").is_some()
-        );
+        assert!(resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", OWNER).is_some());
+    }
+
+    /// #174: オーナー未設定なら**誰も**開けない（従来は誰でも開けた）。
+    ///
+    /// 空白のみのオーナー ID も未設定と同じ扱いで、空白を送った相手にも開かない。
+    #[test]
+    fn resolve_denies_everyone_when_owner_is_unset() {
+        for owner in ["", "   ", " \n"] {
+            let mut pending = pending_with(vec![form("f1", "T", vec![], "go"), button("b1", "go")]);
+            pending.owner_id = owner.into();
+            let reg = test_registry();
+            reg.insert("uuid-abc".into(), pending);
+
+            for user in ["other_user", "", " ", OWNER] {
+                assert!(
+                    resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", user)
+                        .is_none(),
+                    "owner={owner:?} user={user:?} でモーダルが開いた"
+                );
+            }
+        }
     }
 
     /// 入力欄の組み直しに失敗する部品ツリー（子が実在しない）ではモーダルを開かない。
@@ -241,9 +269,7 @@ mod tests {
                 button("b1", "go"),
             ]),
         );
-        assert!(
-            resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", "user1").is_none()
-        );
+        assert!(resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:go", OWNER).is_none());
     }
 
     #[test]
@@ -258,7 +284,7 @@ mod tests {
         );
         // ボタンの action が Form の action と違う → モーダルではなく通常のボタン応答。
         assert!(
-            resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:open_form", "user1")
+            resolve_form_modal_for_button(&reg, "interaction:uuid-abc:b1:open_form", OWNER)
                 .is_none()
         );
     }

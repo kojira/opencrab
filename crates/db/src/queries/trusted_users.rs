@@ -285,8 +285,12 @@ pub fn is_trusted_user(
 
 /// そのエージェントに **その経路の** 信頼ユーザーが何件登録されているか（#214）。
 ///
-/// DM 許可は「登録が 0 件ならオーナーのみ」という二段構えなので、件数も経路で
-/// 切らないと「ある経路に 1 件あるだけで別経路も『登録あり』」に化ける。
+/// **認可の判定には使わないこと。** かつて DM 許可が「登録が 0 件ならオーナーのみ、
+/// オーナー未設定なら全許可」という二段構えで件数を見ていたが、この
+/// fail-open は #174 で撤去した（許可は `is_trusted_user` とオーナー判定だけで
+/// 決まる）。件数で分岐を切り替える形を復活させると、経路ごとに登録が分かれた
+/// 途端（#159）に権限が緩む方向へ倒れる。
+/// 残しているのは件数の表示・統計用途のため。
 pub fn trusted_user_count(conn: &Connection, platform: &str, agent_id: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM trusted_discord_users WHERE platform = ?1 AND agent_id = ?2",

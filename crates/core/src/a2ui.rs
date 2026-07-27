@@ -175,8 +175,9 @@ pub struct PendingInteraction {
     pub a2ui_components: Vec<A2uiComponent>,
     /// オーナー限定操作のためのオーナー識別子（transport のユーザー ID）。
     ///
-    /// **空文字なら owner 判定を行わない**（誰でも操作できる）。この既定は既存挙動
-    /// なので、配線側で空文字を渡すと権限ゲートが無効化される点に注意。
+    /// **未設定（空文字・空白のみ）なら誰も操作できない**（fail-closed, #174）。
+    /// 以前は「空なら判定しない」＝誰でも操作可だったため、配線側で空文字を渡すと
+    /// 権限ゲートが黙って無効化されていた。判定は [`crate::owner::is_owner_id`]。
     pub owner_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub timeout_secs: u64,
@@ -238,7 +239,8 @@ pub struct A2uiSurface {
     pub renderer: Arc<dyn UiRenderer>,
     /// プラットフォーム名（`RenderTarget.platform` と DB の platform 列に載る）。
     pub platform: String,
-    /// オーナー限定操作の判定に使う識別子。**空文字なら判定しない**。
+    /// オーナー限定操作の判定に使う識別子。
+    /// **未設定（空文字・空白のみ）なら誰も操作できない**（fail-closed, #174）。
     pub owner_id: String,
     /// 応答を受け取れる transport のみ `Some`。
     pub pending: Option<PendingUiSurface>,
