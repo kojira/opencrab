@@ -38,6 +38,14 @@ struct RunObservation {
 #[derive(Clone)]
 struct FakeRunner {
     runs: Arc<Mutex<Vec<RunObservation>>>,
+    /// run を 1 件観測したことの通知。
+    ///
+    /// inbound 経路の応答生成は `SessionRuntime::spawn_serialized` の別タスクで走るため、
+    /// 呼び出しから戻った時点ではまだ観測されていない。ポーリングで待つと「上限内に
+    /// 走らなかった」だけで落ちる（負荷の高い CI で偽陽性）ので、通知で待つ。
+    /// `notify_one` は待ち手が居なくても permit を 1 つ残すため、`notified()` を
+    /// 後から await しても取りこぼさない。
+    run_observed: Arc<tokio::sync::Notify>,
     db: opencrab_db::Db,
 }
 
@@ -45,12 +53,20 @@ impl FakeRunner {
     fn new() -> Self {
         Self {
             runs: Arc::new(Mutex::new(Vec::new())),
+            run_observed: Arc::new(tokio::sync::Notify::new()),
             db: opencrab_db::Db::memory().expect("in-memory DB"),
         }
     }
 
-    fn runs_len(&self) -> usize {
-        self.runs.lock().unwrap().len()
+    /// run が 1 件観測されるまで待つ。上限は「壊れたときに無限に吊らない」ための保険
+    /// であって、正常系の待ち時間ではない（通知が来た瞬間に戻る）。
+    async fn wait_for_run(&self) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.run_observed.notified(),
+        )
+        .await
+        .expect("応答生成が走らなかった（run が 1 件も観測されていない）");
     }
 
     /// 観測した run の登録簿 + sink 有無を取り出す。
@@ -73,6 +89,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
             subtask_registry: req.subtask_registry.clone(),
             has_completion_sink: req.completion_sink.is_some(),
         });
+        self.run_observed.notify_one();
         // 空応答: 転記も Discord 送信も走らない（この fake はネットワークへ出ない）。
         Ok(EngineResult {
             response: String::new(),
@@ -303,14 +320,8 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
     )
     .await;
 
-    // 応答生成は `SessionRuntime::spawn_serialized` の中で走るので、観測されるまで待つ
-    // （上限付き: 無限待ちにはしない）。
-    let mut waited = 0u32;
-    while state.runs_len() == 0 && waited < 200 {
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        waited += 1;
-    }
+    // 応答生成は `SessionRuntime::spawn_serialized` の中で走るので、観測の通知を待つ。
+    state.wait_for_run().await;
 
     let (session_id, observed, has_sink) = state.observed(0);
     assert_eq!(session_id, "discord-crab-111-222");
