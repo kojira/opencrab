@@ -31,10 +31,30 @@
 //! `AppState` の名指しフィールドのまま残す。
 
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use anyhow::Result;
 use async_trait::async_trait;
+
+/// poison を無視して読みガードを取る。
+///
+/// **`unwrap()` にしない理由はこの経路の性質。** 登録簿の読み取りは
+/// [`AgentGatewayLifecycle::is_running`] を通じて「専用ゲートウェイが処理するか、共有側に
+/// フォールバックするか」を決めるルーティング判定に載る。ここで panic すると、
+/// 「分からないから共有側が続ける」ではなく**受信処理そのものが止まる**。
+///
+/// poison が起きうる現実的な経路はほぼ無い（ロック下で走るのは `Vec` の走査と
+/// `Arc` の clone だけで、パニックしうる処理を挟まない）。だが `into_inner()` で
+/// 復帰すれば「起きない」を**構造的に起きえない**にできる。中身は不整合になり得ない
+/// （登録簿は `Arc` の並びだけで、途中で壊れた状態を作る書き込みが無い）。
+fn read_or_recover<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// poison を無視して書きガードを取る（理由は [`read_or_recover`] と同じ）。
+fn write_or_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
 
 /// transport の種別名（[`AgentGatewayLifecycle::kind`] の戻り値 / 登録簿のキー）。
 ///
@@ -134,7 +154,7 @@ impl AgentGatewayRegistry {
     /// マネージャを登録する。同じ種別が既にあれば**置き換える**（登録順は保つ）。
     pub fn register(&self, gateway: SharedAgentGateway) {
         let kind = gateway.kind();
-        let mut gateways = self.gateways.write().unwrap();
+        let mut gateways = write_or_recover(&self.gateways);
         match gateways.iter().position(|g| g.kind() == kind) {
             Some(i) => gateways[i] = gateway,
             None => gateways.push(gateway),
@@ -143,9 +163,7 @@ impl AgentGatewayRegistry {
 
     /// 種別からマネージャを引く（未登録なら `None`）。
     pub fn get(&self, kind: &str) -> Option<SharedAgentGateway> {
-        self.gateways
-            .read()
-            .unwrap()
+        read_or_recover(&self.gateways)
             .iter()
             .find(|g| g.kind() == kind)
             .cloned()
@@ -156,14 +174,12 @@ impl AgentGatewayRegistry {
     /// 返すのはスナップショット（ロックは戻る前に落ちる）。呼び出し側が `.await` を
     /// 挟んで走査してもロックを跨がない。
     pub fn all(&self) -> Vec<SharedAgentGateway> {
-        self.gateways.read().unwrap().clone()
+        read_or_recover(&self.gateways).clone()
     }
 
     /// 登録済みの種別名を**登録順**で返す。
     pub fn kinds(&self) -> Vec<&'static str> {
-        self.gateways
-            .read()
-            .unwrap()
+        read_or_recover(&self.gateways)
             .iter()
             .map(|g| g.kind())
             .collect()
@@ -272,6 +288,37 @@ mod tests {
             !registry.is_running(kinds::NOSTR, "other"),
             "稼働していないエージェントも false"
         );
+    }
+
+    /// **ロックが poison しても登録簿は答え続ける。**
+    ///
+    /// 生存確認はルーティング判定なので、ここで panic すると受信処理が止まる
+    /// （「共有側が続ける」ではなく「誰も処理しない」）。`unwrap()` だとこのテストは
+    /// 落ちる。
+    #[test]
+    fn survives_a_poisoned_lock() {
+        let registry = Arc::new(AgentGatewayRegistry::new());
+        registry.register(FakeGateway::new(kinds::NOSTR, &["crab"]));
+
+        // 書きガードを持ったまま panic させて poison させる。
+        let poisoner = registry.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.gateways.write().unwrap();
+            panic!("ロック下で panic");
+        })
+        .join();
+        assert!(joined.is_err(), "poison させるために panic させている");
+        assert!(registry.gateways.is_poisoned());
+
+        // 読み取り系はすべて答え続ける。
+        assert!(registry.is_running(kinds::NOSTR, "crab"));
+        assert!(!registry.is_running(kinds::DISCORD, "crab"));
+        assert_eq!(registry.kinds(), vec![kinds::NOSTR]);
+        assert_eq!(registry.all().len(), 1);
+        assert!(registry.get(kinds::NOSTR).is_some());
+        // 追加登録（書き込み）も通る。
+        registry.register(FakeGateway::new(kinds::DISCORD, &[]));
+        assert_eq!(registry.kinds(), vec![kinds::NOSTR, kinds::DISCORD]);
     }
 
     /// トレイトオブジェクト越しに 5 操作すべてを呼べる（`dyn` として使える形か）。
