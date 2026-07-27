@@ -10,12 +10,12 @@
 //! InteractionResponse の推論をループ内で await すると、その間**全チャンネル・
 //! 全エージェント**の受信処理が停止する（サブタスクが report_progress するたびに
 //! メインが無応答になる）。現在は全イベントを spawn + セッション単位ロック
-//! （`SessionRuntime::spawn_serialized`）で処理し、直列化の範囲を同一セッションに限定する。
+//! （`SessionLocks::spawn_serialized`）で処理し、直列化の範囲を同一セッションに限定する。
 //!
 //! v3.2 (#156 S2): セッションロック表は Discord 独自実装をやめ、gateway 非依存層の
-//! [`SessionRuntime`](opencrab_actions::SessionRuntime) に統合した（web / Nostr と同一実装）。
+//! [`SessionLocks`](opencrab_actions::SessionLocks) に統合した（web / Nostr と同一実装）。
 //! Discord 固有なのは「結果を待たずに spawn する」形だけで、それも共通側の薄い入口
-//! [`SessionRuntime::spawn_serialized`](opencrab_actions::SessionRuntime::spawn_serialized)
+//! [`SessionLocks::spawn_serialized`](opencrab_actions::SessionLocks::spawn_serialized)
 //! に寄せてある。
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
-use opencrab_actions::SessionRuntime;
+use opencrab_actions::SessionLocks;
 use opencrab_core::a2ui::UiRenderer;
 use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
@@ -204,8 +204,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // 状態で2つ目の会話履歴が構築され、同じ内容を二重回答してしまう。これを防ぐため、
     // 会話履歴の構築・推論・応答ログをセッション単位で直列化する。
     // dispatch registry は既存どおり呼び出し側から受け取る（DiscordGatewayActions と
-    // 同じ Arc を共有する必要があるため、ここでは直列化ロックだけを使う）。
-    let session_runtime = Arc::new(SessionRuntime::new());
+    // 同じ Arc を共有する必要があるため）。そのためここで使うのは登録簿を持たない
+    // `SessionLocks`（#223）。登録簿つきの `SessionRuntime` を持つと、その登録簿を
+    // 「共有のもの」と誤認して dispatch 先を差し替えたときに cancel_subtask が
+    // 走行中 subtask に届かなくなる。型として存在しなければその取り違えは起きない。
+    let session_locks = Arc::new(SessionLocks::new());
 
     loop {
         // 次にフラッシュすべきバッファのデッドラインを計算
@@ -248,7 +251,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let event_tx_c = event_tx.clone();
                         let registry_c = subtask_registry.clone();
                         let sess = session_id.clone();
-                        session_runtime.spawn_serialized(sess, async move {
+                        session_locks.spawn_serialized(sess, async move {
                             process_subtask_completed(
                                 session_id,
                                 agent_id,
@@ -268,7 +271,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             )
                             .await;
                         });
-                        // JoinHandle は破棄する（応答は待たない = 受信ループを止めない）。
+                        // 実行ハンドルは返ってこない（応答は待たない = 受信ループを止めない）。
                     }
                     Some(LoopEvent::InteractionResponse {
                         interaction_id,
@@ -285,7 +288,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
                         let sess = session_id.clone();
-                        session_runtime.spawn_serialized(sess, async move {
+                        session_locks.spawn_serialized(sess, async move {
                             process_interaction_response(
                                 interaction_id,
                                 session_id,
@@ -342,7 +345,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         agent_ids.clone(),
                         gateway_actions.clone(),
                         owner_discord_id.clone(),
-                        session_runtime.clone(),
+                        session_locks.clone(),
                         skip_agents_with_dedicated_gateway,
                         voice.clone(),
                         event_tx.clone(),
@@ -368,7 +371,7 @@ async fn process_incoming_message<T: AgentRunner>(
     agent_ids: Vec<String>,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
     owner_discord_id: String,
-    session_runtime: Arc<SessionRuntime>,
+    session_locks: Arc<SessionLocks>,
     skip_agents_with_dedicated_gateway: bool,
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
@@ -578,7 +581,7 @@ async fn process_incoming_message<T: AgentRunner>(
         let event_tx_spawn = event_tx.clone();
         let registry_spawn = subtask_registry.clone();
 
-        session_runtime.spawn_serialized(session_id.clone(), async move {
+        session_locks.spawn_serialized(session_id.clone(), async move {
             let inbound = opencrab_actions::InboundMessageRecord {
                 session_id: &session_id_spawn,
                 sender_id: &sender_id_spawn,

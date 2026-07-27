@@ -42,7 +42,7 @@ pub use bridge::{
 };
 pub use dispatcher::ActionDispatcher;
 pub use run_request::RunRequest;
-pub use session_runtime::SessionRuntime;
+pub use session_runtime::{SessionLocks, SessionRuntime};
 pub use subtask::{
     cancel_subtask, default_non_dispatch_tools, CancelOutcome, NoopCompletionSink, SettleKind,
     SharedExecutor, SpawnedSubtask, SubtaskCompletionSink, SubtaskLifecycle, SubtaskRegistry,

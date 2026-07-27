@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use opencrab_actions::subtask::SubtaskRegistry;
-use opencrab_actions::{CallerIdentity, RunRequest, SessionRuntime};
+use opencrab_actions::{CallerIdentity, RunRequest, SessionLocks};
 use opencrab_core::EngineResult;
 use opencrab_gateway::{DiscordGateway, IncomingMessage, MessageContent, MessageSource, Sender};
 
@@ -56,7 +56,7 @@ struct FakeRunner {
     inbound_hooks: Arc<Mutex<Vec<InboundHookCall>>>,
     /// run を 1 件観測したことの通知。
     ///
-    /// inbound 経路の応答生成は `SessionRuntime::spawn_serialized` の別タスクで走るため、
+    /// inbound 経路の応答生成は `SessionLocks::spawn_serialized` の別タスクで走るため、
     /// 呼び出しから戻った時点ではまだ観測されていない。ポーリングで待つと「上限内に
     /// 走らなかった」だけで落ちる（負荷の高い CI で偽陽性）ので、通知で待つ。
     /// `notify_one` は待ち手が居なくても permit を 1 つ残すため、`notified()` を
@@ -334,7 +334,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
     let (state, gateway, gateway_actions) = make_deps();
     let (event_tx, _event_rx) = create_event_channel();
     let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
-    let session_runtime = Arc::new(SessionRuntime::new());
+    let session_locks = Arc::new(SessionLocks::new());
 
     let incoming = IncomingMessage::new(
         MessageSource::Discord {
@@ -352,7 +352,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         vec!["crab".to_string()],
         gateway_actions,
         "owner-1".to_string(),
-        session_runtime,
+        session_locks,
         false,
         None,
         event_tx,
@@ -360,7 +360,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
     )
     .await;
 
-    // 応答生成は `SessionRuntime::spawn_serialized` の中で走るので、観測の通知を待つ。
+    // 応答生成は `SessionLocks::spawn_serialized` の中で走るので、観測の通知を待つ。
     state.wait_for_run().await;
 
     let (session_id, observed, has_sink) = state.observed(0);
@@ -388,7 +388,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
     let (state, gateway, gateway_actions) = make_deps();
     let (event_tx, _event_rx) = create_event_channel();
     let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
-    let session_runtime = Arc::new(SessionRuntime::new());
+    let session_locks = Arc::new(SessionLocks::new());
 
     let reply = "[Peer Review] score: 0.7, gaps: none, summary: ok";
     let incoming = IncomingMessage::new(
@@ -407,7 +407,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
         vec!["crab".to_string()],
         gateway_actions,
         "owner-1".to_string(),
-        session_runtime,
+        session_locks,
         false,
         None,
         event_tx,

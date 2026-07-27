@@ -26,7 +26,7 @@ pub const REST_SESSION_PREFIX: &str = "agent-msg-";
 /// 取得は `GET /api/sessions/{id}/logs` で足りる。ここで LLM を回して結果を再注入
 /// （web の `WebCompletionSink` 相当）はしない:
 /// - REST には per-session の直列化が無い（web は `run_and_deliver_serialized`、Discord は
-///   `spawn_serialized_on_session` を持つ）。resume を走らせると同一セッションへの
+///   `SessionLocks::spawn_serialized` を持つ）。resume を走らせると同一セッションへの
 ///   並行 POST と競合し、同じ会話から二重に応答する（RFC §6 の不変条件違反）。
 /// - 完了本文は次の POST の `build_conversation_string` で自然に文脈へ載る
 ///   （heartbeat の「次 tick 拾い」と同じ方式）。
