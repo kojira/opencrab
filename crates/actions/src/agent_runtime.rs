@@ -75,6 +75,35 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// `metadata_json` を書く（#158 S3）。
     fn record_inbound_message(&self, source: TranscriptSource, record: &InboundMessageRecord<'_>);
 
+    /// 受信メッセージを**汎用層の受信処理**へ通す共通フック（#156 S4、best-effort）。
+    ///
+    /// 記録（[`Self::record_inbound_message`]）とは別で、「受信をきっかけに汎用層が
+    /// 走らせたい副作用」の唯一の入口。現在の購読者は**ピアレビュー返信の回収**
+    /// （`[Peer Review]` の解析 → タスク台帳への記録 / #58）1 つで、以前は Discord の
+    /// 受信ループ 1 箇所からしか呼ばれていなかった（＝ Discord 経由の会話でしか
+    /// レビューが回収されない）。フックをここへ置くことで、経路を足すたびに回収コードを
+    /// コピーせずに済む。
+    ///
+    /// 新しい抽象を作らず既存の [`AgentRuntime`] に足しているのは、これが**すでに
+    /// 3 ゲートウェイ共通の境界**（各ゲートウェイの runner トレイトのスーパートレイト）
+    /// であり、実装が `AppState` 1 つに閉じているため。受信フック専用のトレイトや
+    /// 登録簿を新設しても、実装 1・購読者 1 の飾りが増えるだけになる。
+    ///
+    /// 引数は [`Self::record_inbound_message`] と同じ [`InboundMessageRecord`] に
+    /// **受信側エージェントの id** を添えた形（record 側は発言の帰属＝送信者しか
+    /// 持たないが、回収は「誰の台帳か」を必要とする）。
+    ///
+    /// 呼ぶ位置は**会話文字列を組み立てる前**（`[Task Ledger]` は会話の先頭に前置される
+    /// ため、後から呼ぶと回収した verdict がそのターンに現れない）。
+    ///
+    /// 実装は best-effort（失敗しても受信処理を止めない）。
+    fn on_inbound_message(
+        &self,
+        source: TranscriptSource,
+        agent_id: &str,
+        record: &InboundMessageRecord<'_>,
+    );
+
     /// エージェントの応答をセッションログへ記録する（best-effort）。
     ///
     /// このターンの起動要因は [`crate::AgentReplyContext`] で表す（Nostr のように

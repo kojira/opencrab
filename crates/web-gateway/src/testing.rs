@@ -235,6 +235,15 @@ impl AgentRuntime for FakeRunner {
         unimplemented!("web は WebAgentRunner::record_user_message を使う")
     }
 
+    fn on_inbound_message(
+        &self,
+        _source: opencrab_actions::TranscriptSource,
+        _agent_id: &str,
+        _record: &opencrab_actions::InboundMessageRecord<'_>,
+    ) {
+        // 受信フック（#156 S4）。web の受信経路はまだ配線していないので no-op。
+    }
+
     fn record_outbound_reply(
         &self,
         _source: opencrab_actions::TranscriptSource,

@@ -406,6 +406,15 @@ mod tests {
             unimplemented!("nostr の fake は受信転記を使わない")
         }
 
+        fn on_inbound_message(
+            &self,
+            _source: opencrab_actions::TranscriptSource,
+            _agent_id: &str,
+            _record: &opencrab_actions::InboundMessageRecord<'_>,
+        ) {
+            unimplemented!("nostr の fake は受信フックを使わない")
+        }
+
         fn record_interaction_response(
             &self,
             _agent_id: &str,

@@ -16,7 +16,6 @@ use crate::message_loop::LoopEvent;
 use opencrab_core::a2ui::PendingInteractionRegistry;
 
 mod discord_ops;
-mod peer_review;
 mod subtask_engine;
 mod subtask_notifier;
 mod subtask_webhook;
@@ -25,7 +24,10 @@ mod ui;
 mod voice_actions;
 mod webhook;
 
-pub(crate) use peer_review::record_peer_review_reply;
+// ピアレビューは**依頼側も回収側も** gateway 非依存層（`crates/server/src/peer_review.rs`）
+// にある。依頼は #157 S7、返信の回収は #156 S4 で移設した。回収の呼び出し口は
+// `opencrab_actions::AgentRuntime::on_inbound_message`（受信ループから呼ぶ共通フック）。
+// Discord に残るピアレビュー関連は配送口（`text_delivery::DiscordTextDelivery`）だけ。
 pub use subtask_engine::spawn_activity_tool_event_sink;
 pub(crate) use subtask_engine::DiscordCompletionSink;
 pub use subtask_notifier::DiscordWebhookNotifier;

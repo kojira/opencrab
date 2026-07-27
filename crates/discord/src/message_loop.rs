@@ -499,19 +499,6 @@ async fn process_incoming_message<T: AgentRunner>(
         let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
         ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
 
-        // [Peer Review] 返信の自動記録（#58）: このエージェントの active タスクへ
-        // score/gaps/summary を決定的に記録する（LLM のプロンプト規約任せにしない）。
-        // 送信者が登録済み co_agent で、未回収の依頼がある場合のみ記録される。
-        // 追加処理であり、メッセージはこの後通常どおり LLM にも流れる。
-        crate::gateway_actions::record_peer_review_reply(
-            state.db(),
-            agent_id,
-            &session_id,
-            &incoming.sender.id,
-            &incoming.sender.name,
-            &text,
-        );
-
         // NOTE: ユーザーメッセージのログと会話履歴の構築は、推論本体とともに
         // セッション単位ロックの内側（spawn 内）で行う。これにより、割り込みメッセージが
         // 直前の推論完了前に走って履歴が不整合になり、同じ内容を二重回答する問題を防ぐ。
@@ -592,19 +579,29 @@ async fn process_incoming_message<T: AgentRunner>(
         let registry_spawn = subtask_registry.clone();
 
         session_runtime.spawn_serialized(session_id.clone(), async move {
+            let inbound = opencrab_actions::InboundMessageRecord {
+                session_id: &session_id_spawn,
+                sender_id: &sender_id_spawn,
+                sender_name: &sender_name_spawn,
+                avatar_url: sender_avatar_spawn.as_deref(),
+                channel_id: Some(&channel_id_str_spawn),
+                pubkey: None,
+                text: &text_spawn,
+                image_urls: &image_urls_spawn,
+            };
+
             // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
-            state_spawn.record_inbound_message(
+            state_spawn
+                .record_inbound_message(opencrab_actions::TranscriptSource::Discord, &inbound);
+
+            // 受信の共通フック（#156 S4）: 汎用層の受信処理（現状は [Peer Review] 返信の
+            // 回収 / #58）へ通す。Discord 側は**呼ぶだけ**で、解析もゲートも持たない。
+            // 会話文字列を組み立てる**前**に呼ぶこと（回収した verdict は台帳経由で
+            // 会話先頭の [Task Ledger] に載るため、後に回すとこのターンに現れない）。
+            state_spawn.on_inbound_message(
                 opencrab_actions::TranscriptSource::Discord,
-                &opencrab_actions::InboundMessageRecord {
-                    session_id: &session_id_spawn,
-                    sender_id: &sender_id_spawn,
-                    sender_name: &sender_name_spawn,
-                    avatar_url: sender_avatar_spawn.as_deref(),
-                    channel_id: Some(&channel_id_str_spawn),
-                    pubkey: None,
-                    text: &text_spawn,
-                    image_urls: &image_urls_spawn,
-                },
+                &agent_id_spawn,
+                &inbound,
             );
 
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
