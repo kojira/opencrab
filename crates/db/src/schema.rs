@@ -35,8 +35,13 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         description: "trusted_discord_users.display_name (peer reviewer roster, issue #57)",
-        // 新規DB は SCHEMA_SQL 側で列を持つため、column_exists でガードして冪等にする
+        // 新規DB は SCHEMA_SQL 側で列を持つため、column_exists でガードして冪等にする。
+        // #159 (v17) で表は `trusted_users` に改名した。新規DBには旧名の表が存在しない
+        // ので table_exists で先にガードする（無ければ何もしない）。
         up: |conn| {
+            if !table_exists(conn, "trusted_discord_users")? {
+                return Ok(());
+            }
             if !column_exists(conn, "trusted_discord_users", "display_name")? {
                 conn.execute_batch(
                     "ALTER TABLE trusted_discord_users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
@@ -281,12 +286,49 @@ const MIGRATIONS: &[Migration] = &[
         // で生かす。一意制約 (discord_user_id, agent_id) はここでは触らない
         // （変更するとテーブル再構築＝非可逆になるため #159 に合流させる）。
         // 新規DB は SCHEMA_SQL 側で列を持つため column_exists でガードして冪等にする（v3 前例）。
+        // #159 (v17) で表は `trusted_users` に改名したので、v3 と同様 table_exists で
+        // 旧名の表の有無を先に見る（新規DBには無いので何もしない）。
         up: |conn| {
+            if !table_exists(conn, "trusted_discord_users")? {
+                return Ok(());
+            }
             if !column_exists(conn, "trusted_discord_users", "platform")? {
                 conn.execute_batch(
                     "ALTER TABLE trusted_discord_users ADD COLUMN platform TEXT NOT NULL DEFAULT 'discord'",
                 )?;
             }
+            Ok(())
+        },
+    },
+    Migration {
+        version: 17,
+        description:
+            "trusted_discord_users → trusted_users / discord_user_id → user_id (Discord 命名の解消, issue #159)",
+        // **改名のみ。行の追加・削除・書き換えは一切しない。**
+        //
+        // `ALTER TABLE ... RENAME TO` と `ALTER TABLE ... RENAME COLUMN` は
+        // テーブルの再構築を伴わない（SQLite が sqlite_schema の DDL 文字列を
+        // 書き換えるだけ）ので、行はそのまま生き、**逆向きの RENAME で戻せる**
+        // ＝可逆。一意制約 `(user_id, agent_id)` の作り直し（→ `(platform, user_id,
+        // agent_id)`）は再構築が要る非可逆な変更なので、ここには**混ぜない**。
+        //
+        // 冪等性: 新規DB は SCHEMA_SQL 側で既に新しい名前なので、どの分岐も走らない。
+        up: |conn| {
+            if table_exists(conn, "trusted_discord_users")? && !table_exists(conn, "trusted_users")?
+            {
+                conn.execute_batch("ALTER TABLE trusted_discord_users RENAME TO trusted_users")?;
+            }
+            if column_exists(conn, "trusted_users", "discord_user_id")? {
+                conn.execute_batch(
+                    "ALTER TABLE trusted_users RENAME COLUMN discord_user_id TO user_id",
+                )?;
+            }
+            // インデックスは表に追従して残る（名前は旧いまま）。索引は行を持たない
+            // 派生物なので、旧名を落として新名で貼り直す。
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_trusted_discord_users_agent;
+                 CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);",
+            )?;
             Ok(())
         },
     },
@@ -1418,11 +1460,13 @@ CREATE TABLE IF NOT EXISTS trusted_co_agents (
 CREATE INDEX IF NOT EXISTS idx_trusted_co_agents_agent ON trusted_co_agents(agent_id);
 
 -- ============================================
--- 信頼済みDiscordユーザー
+-- 信頼済みユーザー（経路ごとの識別子空間）
 -- ============================================
-CREATE TABLE IF NOT EXISTS trusted_discord_users (
+-- 旧名は `trusted_discord_users` / `discord_user_id`。Discord 以外の経路（web / rest）も
+-- 同じ表を使うので #159 (v17) で改名した。旧DBは v17 の RENAME で追従する。
+CREATE TABLE IF NOT EXISTS trusted_users (
   id TEXT PRIMARY KEY,
-  discord_user_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   permission TEXT NOT NULL DEFAULT 'user',
   created_by TEXT NOT NULL DEFAULT 'owner',
@@ -1430,11 +1474,11 @@ CREATE TABLE IF NOT EXISTS trusted_discord_users (
   display_name TEXT NOT NULL DEFAULT '',
   -- その識別子が「どの経路のものか」（#214）。列追加前の行は全て Discord の
   -- 識別子空間なので DEFAULT 'discord'（`pending_interactions.platform` の前例に倣う）。
-  -- 一意制約は (discord_user_id, agent_id) のまま据え置く（作り直しは非可逆なので #159）。
+  -- 一意制約は (user_id, agent_id) のまま据え置く（作り直しは非可逆なので #159 の最終段）。
   platform TEXT NOT NULL DEFAULT 'discord',
-  UNIQUE (discord_user_id, agent_id)
+  UNIQUE (user_id, agent_id)
 );
-CREATE INDEX IF NOT EXISTS idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
+CREATE INDEX IF NOT EXISTS idx_trusted_users_agent ON trusted_users(agent_id);
 
 -- ============================================
 -- エージェント別メモリインデックス設定
@@ -1931,12 +1975,12 @@ mod migration_tests {
     #[test]
     fn display_name_migration_upgrades_v2_db() {
         let conn = crate::init_memory().expect("init");
-        // 新規 DB には既に列がある（SCHEMA_SQL 由来）
-        assert!(column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来。表名は v17 で改名済みの新しい方）
+        assert!(column_exists(&conn, "trusted_users", "display_name").unwrap());
 
-        // v2 相当の既存 DB を模す: 列なしのテーブルに作り直して version 2 に戻す
+        // v2 相当の既存 DB を模す: 旧表名・列なしのテーブルに作り直して version 2 に戻す
         conn.execute_batch(
-            "DROP TABLE trusted_discord_users;
+            "DROP TABLE trusted_users;
              CREATE TABLE trusted_discord_users (
                id TEXT PRIMARY KEY,
                discord_user_id TEXT NOT NULL,
@@ -1951,8 +1995,9 @@ mod migration_tests {
         .unwrap();
         assert!(!column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
 
-        initialize(&conn).expect("upgrade v2 -> v3");
-        assert!(column_exists(&conn, "trusted_discord_users", "display_name").unwrap());
+        initialize(&conn).expect("upgrade v2 -> latest");
+        // v3 で列が付き、v17 で表ごと改名される
+        assert!(column_exists(&conn, "trusted_users", "display_name").unwrap());
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
         // 再実行しても冪等
@@ -1966,13 +2011,13 @@ mod migration_tests {
     #[test]
     fn platform_migration_keeps_existing_rows_on_discord() {
         let conn = crate::init_memory().expect("init");
-        // 新規 DB には既に列がある（SCHEMA_SQL 由来）
-        assert!(column_exists(&conn, "trusted_discord_users", "platform").unwrap());
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来。表名は v17 で改名済みの新しい方）
+        assert!(column_exists(&conn, "trusted_users", "platform").unwrap());
 
-        // v15 相当の既存 DB を模す: platform 列なしのテーブルに作り直し、行を 1 件入れて
-        // version 15 へ戻す。
+        // v15 相当の既存 DB を模す: 旧表名・platform 列なしのテーブルに作り直し、行を 1 件
+        // 入れて version 15 へ戻す。
         conn.execute_batch(
-            "DROP TABLE trusted_discord_users;
+            "DROP TABLE trusted_users;
              CREATE TABLE trusted_discord_users (
                id TEXT PRIMARY KEY,
                discord_user_id TEXT NOT NULL,
@@ -1991,20 +2036,112 @@ mod migration_tests {
         .unwrap();
         assert!(!column_exists(&conn, "trusted_discord_users", "platform").unwrap());
 
-        initialize(&conn).expect("upgrade v15 -> v16");
-        assert!(column_exists(&conn, "trusted_discord_users", "platform").unwrap());
+        initialize(&conn).expect("upgrade v15 -> latest");
+        // v16 で列が付き、v17 で表ごと改名される
+        assert!(column_exists(&conn, "trusted_users", "platform").unwrap());
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
         // 既存行は残り、従来の経路として引ける（他の列も失われていない）。
         let (platform, permission): (String, String) = conn
             .query_row(
-                "SELECT platform, permission FROM trusted_discord_users WHERE id = 'old-1'",
+                "SELECT platform, permission FROM trusted_users WHERE id = 'old-1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(platform, "discord");
         assert_eq!(permission, "co_agent");
+
+        // 再実行しても冪等
+        initialize(&conn).expect("idempotent");
+    }
+
+    /// v17: `trusted_discord_users` → `trusted_users` / `discord_user_id` → `user_id`（#159）。
+    ///
+    /// 改名のみで、**既存行は 1 件も失われず、値もそのまま**であること。
+    /// 一意制約と索引も新しい名前で生き続けること。
+    #[test]
+    fn trusted_users_rename_migration_preserves_rows() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB は SCHEMA_SQL 由来で既に新しい名前
+        assert!(table_exists(&conn, "trusted_users").unwrap());
+        assert!(!table_exists(&conn, "trusted_discord_users").unwrap());
+
+        // v16 相当の既存 DB を模す: 旧表名・旧列名で作り直し、行を 2 件入れて version 16 へ戻す。
+        conn.execute_batch(
+            "DROP TABLE trusted_users;
+             CREATE TABLE trusted_discord_users (
+               id TEXT PRIMARY KEY,
+               discord_user_id TEXT NOT NULL,
+               agent_id TEXT NOT NULL,
+               permission TEXT NOT NULL DEFAULT 'user',
+               created_by TEXT NOT NULL DEFAULT 'owner',
+               created_at TEXT NOT NULL,
+               display_name TEXT NOT NULL DEFAULT '',
+               platform TEXT NOT NULL DEFAULT 'discord',
+               UNIQUE (discord_user_id, agent_id)
+             );
+             CREATE INDEX idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
+             INSERT INTO trusted_discord_users
+               (id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform)
+               VALUES ('old-1', '42', 'a1', 'co_agent', 'owner', '2026-01-01', 'Crab B', 'discord'),
+                      ('old-2', '43', 'a1', 'user', 'owner', '2026-01-02', '', 'discord');
+             PRAGMA user_version = 16",
+        )
+        .unwrap();
+
+        initialize(&conn).expect("upgrade v16 -> v17");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 表と列が改名され、旧名は消えている
+        assert!(table_exists(&conn, "trusted_users").unwrap());
+        assert!(!table_exists(&conn, "trusted_discord_users").unwrap());
+        assert!(column_exists(&conn, "trusted_users", "user_id").unwrap());
+        assert!(!column_exists(&conn, "trusted_users", "discord_user_id").unwrap());
+
+        // 行は 2 件とも残り、値もそのまま
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trusted_users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+        let (user_id, permission, display_name, platform): (String, String, String, String) = conn
+            .query_row(
+                "SELECT user_id, permission, display_name, platform FROM trusted_users WHERE id = 'old-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(user_id, "42");
+        assert_eq!(permission, "co_agent");
+        assert_eq!(display_name, "Crab B");
+        assert_eq!(platform, "discord");
+
+        // 一意制約は改名後も効いている（列名だけが変わった）
+        assert!(conn
+            .execute(
+                "INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform) \
+                 VALUES ('dup', '42', 'a1', 'user', 'owner', '2026-01-03', '', 'discord')",
+                [],
+            )
+            .is_err());
+
+        // 索引も新しい名前で貼り直されている
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_trusted_users_agent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
+        let old_idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_trusted_discord_users_agent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_idx, 0);
 
         // 再実行しても冪等
         initialize(&conn).expect("idempotent");

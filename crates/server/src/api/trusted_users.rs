@@ -10,7 +10,9 @@ use crate::AppState;
 #[derive(Debug, Serialize)]
 pub struct TrustedUserDto {
     pub id: String,
-    pub discord_user_id: String,
+    /// その経路でのユーザー識別子（#159 で `discord_user_id` から改名）。
+    /// どの経路の識別子かは行の `platform`（現状 REST から登録できるのは `discord` のみ）。
+    pub user_id: String,
     pub agent_id: String,
     pub permission: String,
     pub created_by: String,
@@ -18,10 +20,10 @@ pub struct TrustedUserDto {
     pub display_name: String,
 }
 
-fn row_to_dto(r: opencrab_db::queries::TrustedDiscordUserRow) -> TrustedUserDto {
+fn row_to_dto(r: opencrab_db::queries::TrustedUserRow) -> TrustedUserDto {
     TrustedUserDto {
         id: r.id,
-        discord_user_id: r.discord_user_id,
+        user_id: r.user_id,
         agent_id: r.agent_id,
         permission: r.permission,
         created_by: r.created_by,
@@ -41,7 +43,9 @@ pub async fn list_trusted_users(
 
 #[derive(Debug, Deserialize)]
 pub struct AddTrustedUserRequest {
-    pub discord_user_id: String,
+    /// その経路でのユーザー識別子。旧キー `discord_user_id` も受け付ける（後方互換）。
+    #[serde(alias = "discord_user_id")]
+    pub user_id: String,
     pub permission: Option<String>,
     /// ロスター表示用の名前（ピアレビュアー一覧等）。省略時は空。
     pub display_name: Option<String>,
@@ -49,10 +53,9 @@ pub struct AddTrustedUserRequest {
 
 /// 信頼済みユーザーを登録する（Discord の識別子空間）。
 ///
-/// リクエストのフィールドは `discord_user_id` なので、登録される経路は `discord` 固定
-/// （#214）。web / REST のユーザーを別経路として登録できるようにするのは、DTO の
-/// 作り直しを伴うため #159 の担当。ここで経路を受け取ると request/response の契約が
-/// 二重に変わるので、この PR では触らない。
+/// 登録される経路は `discord` 固定（#214）。web / REST のユーザーを別経路として
+/// 登録できるようにする（リクエストで `platform` を受け取る）のは #159 の後段
+/// 「互換読みの撤去」とセットでやる。ここは命名の改名だけで、挙動は変えていない。
 pub async fn add_trusted_user(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -69,7 +72,7 @@ pub async fn add_trusted_user(
         opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
         &id,
         &agent_id,
-        &req.discord_user_id,
+        &req.user_id,
         &permission,
         "owner",
         &now,
@@ -79,7 +82,7 @@ pub async fn add_trusted_user(
 
     Ok(Json(TrustedUserDto {
         id,
-        discord_user_id: req.discord_user_id,
+        user_id: req.user_id,
         agent_id,
         permission,
         created_by: "owner".to_string(),

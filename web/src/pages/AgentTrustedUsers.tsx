@@ -55,7 +55,7 @@ export default function AgentTrustedUsers() {
     setAdding(true);
     setAddError(null);
     try {
-      await addTrustedUser(agentId, { discord_user_id: uid, permission: newPermission });
+      await addTrustedUser(agentId, { user_id: uid, permission: newPermission });
       setShowAddModal(false);
       setNewUserId("");
       setNewPermission("user");
@@ -158,7 +158,7 @@ export default function AgentTrustedUsers() {
                   className="border-b border-outline-variant last:border-0 hover:bg-surface-variant/30"
                 >
                   <td className="px-4 py-3 text-body-lg text-on-surface font-mono">
-                    {u.discord_user_id}
+                    {u.user_id}
                   </td>
                   <td className="px-4 py-3 text-body-md text-on-surface-variant">
                     {editingId === u.id ? (

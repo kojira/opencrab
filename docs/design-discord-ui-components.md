@@ -804,7 +804,7 @@ async fn handle_component_interaction(
 | レベル | 操作可否 | 判定方法 |
 |--------|----------|----------|
 | オーナー | ✅ | `agent_discord_config.owner_discord_id` と一致 |
-| 信頼済みユーザー | ✅ | `trusted_discord_users` テーブルに登録あり |
+| 信頼済みユーザー | ✅ | `trusted_users` テーブルに登録あり |
 | 一般ユーザー | ❌ | エフェメラルメッセージで拒否 |
 
 ### 8.4 将来拡張: `allow_users` パラメータ
