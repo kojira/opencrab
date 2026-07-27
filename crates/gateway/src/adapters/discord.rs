@@ -14,10 +14,7 @@ use serenity::all::{
 };
 use serenity::http::Http;
 
-use crate::message::{
-    Channel, IncomingMessage, MessageSource, MessageTarget, OutgoingMessage, Sender,
-};
-use crate::traits::Gateway;
+use crate::message::{Channel, IncomingMessage, MessageSource, Sender};
 
 /// A2UI Form 用モーダル応答（ボタン押下時に `CreateInteractionResponse::Modal` で返す）。
 #[derive(Clone)]
@@ -578,53 +575,6 @@ impl EventHandler for DiscordHandler {
             "Discord bot connected as {} (id: {})",
             ready.user.name, ready.user.id,
         );
-    }
-}
-
-// ==================== Gateway Trait Implementation ====================
-
-#[async_trait]
-impl Gateway for DiscordGateway {
-    fn name(&self) -> &str {
-        "discord"
-    }
-
-    async fn receive(&mut self) -> Result<IncomingMessage> {
-        self.recv().await
-    }
-
-    async fn send(&self, message: OutgoingMessage) -> Result<()> {
-        let text = message
-            .content
-            .as_text()
-            .unwrap_or("[unsupported content type]");
-
-        let channel_id = match &message.target {
-            MessageTarget::Channel { id } => id
-                .parse::<u64>()
-                .context("Invalid channel ID for Discord send")?,
-            _ => {
-                if let Some(ch) = message.metadata.get("discord_channel_id") {
-                    ch.as_str()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .context("Invalid discord_channel_id in metadata")?
-                } else {
-                    warn!("Discord send: no target channel specified, dropping message");
-                    return Ok(());
-                }
-            }
-        };
-
-        self.send_to_channel(channel_id, text).await
-    }
-
-    async fn connect(&mut self) -> Result<()> {
-        self.start().await
-    }
-
-    async fn disconnect(&mut self) -> Result<()> {
-        self.shutdown().await;
-        Ok(())
     }
 }
 

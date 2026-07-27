@@ -580,7 +580,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(Mutex::new(None));
     #[cfg(not(feature = "discord"))]
     let heartbeat_discord_http: Arc<Mutex<Option<()>>> = Arc::new(Mutex::new(None));
-    let heartbeat_channel_id_arc: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 
     // Start Discord gateway if configured and feature is enabled.
     #[cfg(feature = "discord")]
@@ -747,9 +746,6 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await;
                 });
-                if let Some(ch_id) = discord_cfg.heartbeat_channel_id {
-                    *heartbeat_channel_id_arc.lock().unwrap() = Some(ch_id);
-                }
 
                 tracing::info!(
                     agents = ?discord_cfg.agent_ids,
@@ -778,10 +774,6 @@ async fn main() -> anyhow::Result<()> {
             *heartbeat_discord_http.lock().unwrap() = Some(http);
             tracing::info!(agent_id = %heartbeat_agent_id_for_http, "Set heartbeat Discord HTTP from per-agent gateway");
         }
-        if let Some(ch_id) = cfg.gateway.discord.heartbeat_channel_id {
-            *heartbeat_channel_id_arc.lock().unwrap() = Some(ch_id);
-            tracing::info!(channel_id = %ch_id, "Set heartbeat channel ID from config");
-        }
 
         tracing::info!("Per-agent Discord gateway manager initialized");
     }
@@ -799,7 +791,6 @@ async fn main() -> anyhow::Result<()> {
     let initial_hb_config = HeartbeatConfig {
         interval_secs: cfg.agent.heartbeat_interval_secs,
         enabled: cfg.agent.heartbeat_enabled,
-        heartbeat_channel_id: cfg.gateway.discord.heartbeat_channel_id,
     };
 
     let (heartbeat_config_tx, mut heartbeat_config_rx) = watch::channel(initial_hb_config.clone());
@@ -840,7 +831,6 @@ async fn main() -> anyhow::Result<()> {
                 let db_for_resolve = heartbeat_db.clone();
                 let agent_id = agent_id.clone();
                 let hb_discord_http = heartbeat_discord_http.clone();
-                let _hb_channel_id = heartbeat_channel_id_arc.clone();
                 let state_for_hb = heartbeat_state.clone();
                 let last_channel_ticks = Arc::new(Mutex::new(std::collections::HashMap::<
                     String,
@@ -875,7 +865,6 @@ async fn main() -> anyhow::Result<()> {
             let new_config = heartbeat_config_rx.borrow().clone();
             if new_config.enabled != prev_config.enabled
                 || new_config.interval_secs != prev_config.interval_secs
-                || new_config.heartbeat_channel_id != prev_config.heartbeat_channel_id
             {
                 tracing::info!(
                     enabled = new_config.enabled,
@@ -888,11 +877,6 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _handles.clear();
 
-                // heartbeat_channel_id_arcも更新
-                if let Ok(mut guard) = heartbeat_channel_id_arc.lock() {
-                    *guard = new_config.heartbeat_channel_id;
-                }
-
                 // 新設定で起動
                 if new_config.enabled {
                     let (tx, rx_tmpl) = watch::channel(false);
@@ -903,7 +887,6 @@ async fn main() -> anyhow::Result<()> {
                         let db_for_resolve = heartbeat_db.clone();
                         let agent_id = agent_id.clone();
                         let hb_discord_http = heartbeat_discord_http.clone();
-                        let _hb_channel_id = heartbeat_channel_id_arc.clone();
                         let state_for_hb = heartbeat_state.clone();
                         let last_channel_ticks = Arc::new(Mutex::new(std::collections::HashMap::<
                             String,

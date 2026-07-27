@@ -2,14 +2,7 @@ pub mod adapters;
 pub mod message;
 pub mod traits;
 
-pub use adapters::cli::CliGateway;
-pub use adapters::rest::RestGateway;
-pub use adapters::websocket::WebSocketGateway;
-pub use message::{
-    Channel, ContentPart, GatewayConfig, IncomingMessage, MessageContent, MessageSource,
-    MessageTarget, OutgoingMessage, Sender,
-};
-pub use traits::Gateway;
+pub use message::{Channel, ContentPart, IncomingMessage, MessageContent, MessageSource, Sender};
 pub use traits::{
     GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
     PEER_REVIEW_REPLY_MARKER, PEER_REVIEW_REQUEST_MARKER,

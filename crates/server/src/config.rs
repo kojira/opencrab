@@ -437,9 +437,6 @@ pub struct DiscordGatewayConfig {
     /// DMに応答するオーナーのDiscord User ID（設定時、このID以外からのDMは無視）
     #[serde(default)]
     pub owner_discord_id: String,
-    /// ハートビートメッセージを送信するDiscordチャンネルID
-    #[serde(default)]
-    pub heartbeat_channel_id: Option<u64>,
     /// spawn_subtask.webhook が省略された時に使うデフォルトの lifecycle webhook。
     ///
     /// **旧キー（後方互換）**: #157 S5 で transport 非依存の `[subtask] default_webhook`

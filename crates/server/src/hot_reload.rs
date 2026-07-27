@@ -94,7 +94,6 @@ pub fn start_config_watcher(
                 let hb_config = opencrab_core::heartbeat::HeartbeatConfig {
                     interval_secs: cfg.agent.heartbeat_interval_secs,
                     enabled: cfg.agent.heartbeat_enabled,
-                    heartbeat_channel_id: cfg.gateway.discord.heartbeat_channel_id,
                 };
                 let _ = heartbeat_config_tx.send(hb_config);
             }

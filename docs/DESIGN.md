@@ -312,30 +312,27 @@ SkillEngine
 
 ## 7. ゲートウェイレイヤー
 
-### 7.1 Gatewayトレイト
+### 7.1 transport の共通抽象は無い（#215）
 
-`Gateway`トレイトは I/O チャネルの抽象として定義されている：
+かつて `connect` / `receive` / `send` / `disconnect` を持つ `Gateway` トレイトがあったが、**実装 4 種（REST / CLI / WebSocket / Discord）に対して利用者ゼロ**（`dyn Gateway` の使用箇所がゼロ、WebSocket は全メソッド `todo!()`）のまま腐っていたため #215 で削除した。
 
-- `connect()`: 接続確立
-- `receive()`: メッセージ受信（ブロッキング）
-- `send()`: メッセージ送信
-- `disconnect()`: 切断
+構造的にも段階2 の受け皿にならなかった：`receive(&mut self)` は `Arc` 共有された状態から呼べない（実運用の transport はすべて push 型）、どのメソッドにも `agent_id` が無く per-agent ゲートウェイ（#40）を表現できない。
 
-**現状の注意**: このトレイトは `gateway` クレート内のアダプタ 4 種が実装しているだけで、**上位からは消費されていない**（`dyn Gateway` の使用箇所がゼロ）。Nostr と web は I/O チャネルだがこのトレイトを実装しておらず、上位は各ゲートウェイを個別のフィールドとして名指しで保持している。この状態を解消して「上位が個々のゲートウェイを知らない」形へ寄せる方針は §2.4 と [design-plugin-architecture.md](design-plugin-architecture.md) を参照。
+**現状**: 上位は各ゲートウェイを個別のフィールドとして具象型で名指しで保持している。「上位が個々のゲートウェイを知らない」形へ寄せる方針は §2.4 と [design-plugin-architecture.md](design-plugin-architecture.md) を参照（#191）。新しい transport 抽象を足すなら、削除済みの型を復活させるのではなくそこの設計から始めること。
 
 ### 7.2 メッセージ型
 
-- **IncomingMessage**: 外部→エージェント。ソース種別(REST/CLI/Discord/WebSocket)、コンテンツ、送信者、チャンネル、メタデータ
-- **OutgoingMessage**: エージェント→外部。コンテンツ、ターゲット(チャンネル/DM/ブロードキャスト)、返信先ID
+- **IncomingMessage**: 外部→エージェント。ソース種別(REST/CLI/Discord/WebSocket)、コンテンツ、送信者、チャンネル、メタデータ。Discord の受信処理と音声セッションで実運用中
+- 対になる `OutgoingMessage` / `MessageTarget` は利用者がいなかったため #215 で削除した。送信は各 transport の具象メソッド（Discord なら `send_to_channel`）で行う
 
 ### 7.3 実装済みゲートウェイ
 
-| ゲートウェイ | 状態 | 依存 | 説明 |
+| ゲートウェイ | 実体 | 依存 | 説明 |
 |-------------|------|------|------|
-| **REST** | 実装済 | なし | mpscチャンネル + oneshotによるリクエスト/レスポンス型 |
-| **CLI** | 実装済 | なし | stdin/stdoutベースの対話型 |
-| **Discord** | 実装済 | `serenity` (feature flag) | Bot接続、メッセージ受信/送信、2000文字自動分割 |
-| **WebSocket** | 未実装 | - | プレースホルダー |
+| **Discord** | `opencrab-gateway` の `DiscordGateway` + `opencrab-discord` のイベントループ | `serenity` / `songbird` (feature flag) | Bot接続、メッセージ受信/送信、2000文字自動分割 |
+| **REST** | `opencrab-server` の axum ハンドラ | なし | `opencrab-gateway` を経由しない |
+| **Nostr** | `opencrab-nostr` | - | - |
+| **Web** | `opencrab-web-gateway` | - | - |
 
 ### 7.4 Discord統合のプラグイン分離
 

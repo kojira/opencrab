@@ -253,7 +253,7 @@ run_discord_loop() (opencrab-discord)
 エージェント処理
     │
     ▼
-OutgoingMessage 生成
+応答テキスト
     │
     ├── チャンネル writable チェック → false なら送信しない
     │
