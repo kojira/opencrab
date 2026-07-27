@@ -86,15 +86,51 @@ pub fn warn_if_agent_gateway_owner_unset(agent_id: &str, owner_discord_id: &str)
 /// per-agent 経路の起動前処理（`manager::prepare_owner_for_gateway`）のテストからも使う。
 #[cfg(test)]
 pub(crate) mod capture {
+    use std::cell::RefCell;
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
 
-    #[derive(Clone, Default)]
-    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    // ---- プロセスで 1 個の subscriber + スレッドローカルの捕捉先 ----
+    //
+    // **`tracing::subscriber::with_default` で捕捉してはいけない。** tracing は
+    // callsite ごとの `Interest`（このイベントを組み立てるか）を**プロセス全体で
+    // 1 度だけ**決めてキャッシュする。誰も subscriber を張っていないスレッドが先に
+    // その callsite を踏むと `Interest::never()` が焼き付き、以後は誰が subscriber を
+    // 張ってもそのイベントは組み立てられない（捕捉バッファが空になる）。
+    //
+    // `with_default` はスレッドローカルなのでこれを止められない: subscriber を作った
+    // 瞬間にグローバルの最大レベルが WARN へ上がり（それまでは OFF で誰も callsite へ
+    // 到達しない）、**その直後から**、同じ警告を subscriber 無しで呼ぶ並行テスト
+    // （`shared_gateway_warning_fires_exactly_when_it_starts_without_owner` など）が
+    // 捕捉側より先に登録してしまう競合が開く。
+    //
+    // なのでプロセス全体で subscriber を 1 個だけ張る。以後どのスレッドが先に踏んでも
+    // `get_default` はその subscriber を返すので `Interest` は「出す」で焼き付く。
+    // どのテストの出力を捕まえるかは**スレッドローカルの捕捉先**で切り替える。テストは
+    // 1 本 1 スレッドで走るので、捕捉中でないスレッドの警告は捨てられ、干渉しない。
+    //
+    // **これでも窓は完全には閉じない。** `set_global_default` は内部で `Dispatch::new`
+    // →（登録の副作用で）最大レベルを WARN へ上げてから、大域の受け口を差し込む。
+    // その数命令の間に別スレッドが callsite を**初めて**踏むと、大域の受け口がまだ
+    // 無いので従来と同じ焼き付きが起きる。窓はプロセスで 1 回きり・マイクロ秒未満だが、
+    // 残すと「稀に落ちる」が残る。**張った直後に `rebuild_interest_cache()` を呼んで
+    // 塞ぐ** — 窓の中で焼き付いた `Interest` も大域の受け口を基準に計算し直される。
 
-    impl io::Write for CaptureWriter {
+    thread_local! {
+        /// このスレッドが捕捉中なら書き込み先。捕捉していなければ `None`（捨てる）。
+        static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct ThreadLocalWriter;
+
+    impl io::Write for ThreadLocalWriter {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            SINK.with(|sink| {
+                if let Some(sink) = sink.borrow().as_ref() {
+                    sink.lock().unwrap().extend_from_slice(buf);
+                }
+            });
             Ok(buf.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -102,22 +138,43 @@ pub(crate) mod capture {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+        type Writer = ThreadLocalWriter;
         fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
-    /// `f` の実行中に出た tracing 出力（WARN 以上）を返す。
+    /// `f` の実行中に**このスレッドで**出た tracing 出力（WARN 以上）を返す。
     pub(crate) fn captured_logs(f: impl FnOnce()) -> String {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalWriter)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
+            // 張れなければ捕捉は成立しない（別の subscriber が先に居る = テストが
+            // 意味を失う）ので、握りつぶさず落とす。
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("捕捉用 subscriber を張れること（他に global default が居ない）");
+            // 張る途中の窓（上のコメント）で焼き付いた `Interest` を計算し直す。
+            tracing::callsite::rebuild_interest_cache();
+        });
+
+        /// `f` が panic しても捕捉先を残さない。
+        struct Capturing;
+        impl Drop for Capturing {
+            fn drop(&mut self) {
+                SINK.with(|sink| *sink.borrow_mut() = None);
+            }
+        }
+
         let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(CaptureWriter(buf.clone()))
-            .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
+        SINK.with(|sink| *sink.borrow_mut() = Some(buf.clone()));
+        let _capturing = Capturing;
+        f();
+        drop(_capturing);
         let bytes = buf.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
     }
