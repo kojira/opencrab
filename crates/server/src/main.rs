@@ -760,12 +760,27 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // DB から per-agent ゲートウェイを復元する（manager 自体はこのブロック冒頭で
-        // 生成・配線済み。復元は共有ゲートウェイ起動後: 起動直後の短い窓では共有側が
-        // メッセージを処理し、専用ゲートウェイが上がり次第 per-message スキップが効く）。
-        manager.restore_from_db().await;
+        // **1 つ目の復元位置。** ここまでに登録簿へ入っていて、まだ復元していない
+        // ゲートウェイを登録順に復元する（#191 段階2 PR5）。この時点で登録済みなのは
+        // 上で登録した 1 つだけなので、実際に走る内容は移設前の
+        // `manager.restore_from_db()` と 1 対 1。
+        //
+        // **この位置は動かせない**（走査を最後の 1 回に畳めない理由でもある）:
+        // 1. 復元は共有（TOML）ゲートウェイの**起動後**。起動直後の短い窓では共有側が
+        //    メッセージを処理し、専用ゲートウェイが上がり次第 per-message スキップが効く。
+        // 2. すぐ下の heartbeat 用 HTTP クライアントの取得が、この復元の**完了**に
+        //    依存する（復元が後ろへずれると per-agent ゲートウェイがまだ無く、
+        //    heartbeat の発話が共有ゲートウェイの HTTP のままになる）。
+        state.gateways.restore_pending().await;
 
         // Per-agentゲートウェイのHTTPクライアントをheartbeatに設定
+        //
+        // **ここは登録簿の走査に畳んでいない**（#191 段階2 PR5）。必要なのは
+        // `Arc<serenity::http::Http>` そのもので、heartbeat の発話経路（`SPEAK:`）が
+        // serenity の API を直に叩く Discord 専用コードだから。PR4 の capability
+        // （`gateway_actions_for`）が返すのは `GatewayActions` であって生の HTTP
+        // クライアントではなく、ここに当てると発話経路ごと書き換えになる（挙動不変で
+        // なくなる）。transport 中立化は heartbeat 側の課題として残す。
         let heartbeat_agent_id_for_http = {
             let conn = state.db.lock().unwrap();
             cfg.gateway
@@ -935,12 +950,17 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も
         // この登録簿から引く（#191 段階2 PR3・PR4）。名指しフィールドは無い。
-        // **復元（`restore_from_db`）の順序は変えない**: Discord は共有ゲートウェイ
-        // 起動後、Nostr はここ（ルータ構築の直前）という現状のままにする。登録簿への
-        // 一般化は PR5。
-        state.gateways.register(manager.clone());
-        manager.restore_from_db().await;
+        state.gateways.register(manager);
     }
+
+    // **2 つ目の復元位置**（ルータ構築の直前 / #191 段階2 PR5）。ここまでで未復元なのは
+    // 直前に登録した Nostr だけなので（Discord は上のブロックで復元済み・MCP は登録簿に
+    // 入れない）、移設前の `manager.restore_from_db()` と 1 対 1。
+    //
+    // Discord を落とした構成（`--no-default-features`）では 1 つ目の走査ごと消えるため、
+    // ここが唯一の復元位置になる。**新しい transport を足すときも呼び出し口は増えない**:
+    // 復元させたい位置より前で `register` すればよい。
+    state.gateways.restore_pending().await;
 
     // Per-agent MCP 接続マネージャ。enabled なサーバへ起動時に接続する。
     //
