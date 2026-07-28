@@ -28,6 +28,7 @@ pub mod manager;
 pub mod runner;
 pub mod session;
 pub mod sink;
+pub mod text_delivery;
 
 pub use actions::NostrGatewayActions;
 pub use cli::{validate_vanity_prefix, GeneratedKey, NostaroCli, MAX_VANITY_PREFIX_LEN};
