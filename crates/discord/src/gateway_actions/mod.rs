@@ -668,6 +668,15 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "create_skill は server 側の実装だけであるべき"
                 );
+            } else if *n == "get_my_nostr_relay" || *n == "set_my_nostr_relay" {
+                // #252 段階 C で server 側の own ツールとして実装。Discord は再定義
+                // しない（合成 gateway の dedup で own 側に食われる）。実在性の検証は
+                // `crates/server/src/agent_nostr_relay.rs` の
+                // `tools_are_own_only_in_definitions` が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は server 側の実装だけであるべき"
+                );
             } else if n.starts_with("nostr_") {
                 // nostr_zap / nostr_dm は Nostr ゲートウェイ側のアクション（この
                 // Discord gateway の definitions には出ない）。ここでは検証対象外。
