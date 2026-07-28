@@ -524,6 +524,54 @@ pub fn record_webhook_delivery_failure(
     opencrab_db::queries::insert_session_log_best_effort(conn, &log);
 }
 
+/// Nostr 受信を Discord へ転記する宛先を **fail-closed** に解決する（issue #252 段階 A）。
+///
+/// エージェント単位設定（`agent_nostr_relay_config`）を読み、有効かつ URL が
+/// Discord webhook として妥当なときだけ配送先 [`WebhookConfig`] を返す。以下は
+/// すべて「転記しない（`None`）」に倒す:
+///
+/// - 行が無い（未設定）
+/// - 読み出しに失敗した（DB が壊れている）
+/// - `enabled = 0`（明示的に無効）
+/// - `webhook_url` が NULL / 空
+/// - `webhook_url` が Discord webhook として不正
+///
+/// 応答生成の判定ではなく**受信ループから同期的に**呼ばれる（軽い PK 読み 1 回）。
+/// 返す `events` は `None`（全イベント相当）: 転記は種別で間引かない。
+pub fn resolve_nostr_relay_webhook(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> Option<WebhookConfig> {
+    let row = match opencrab_db::queries::get_agent_nostr_relay_config(conn, agent_id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(e) => {
+            // 読めない = 壊れている。転記の方向へは倒さない。
+            tracing::warn!(agent_id, "agent_nostr_relay_config の読み出しに失敗: {e}");
+            return None;
+        }
+    };
+    if !row.enabled {
+        return None;
+    }
+    let url = row
+        .webhook_url
+        .map(|u| u.trim().to_string())
+        .unwrap_or_default();
+    if url.is_empty() {
+        return None;
+    }
+    if let Err(reason) = validate_webhook_url(&url) {
+        // 生 URL は載せない（reason は raw url を含まない契約）。
+        tracing::warn!(
+            agent_id,
+            "Nostr 転記先 webhook が不正なので転記しない: {reason}"
+        );
+        return None;
+    }
+    Some(WebhookConfig { url, events: None })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,5 +1236,67 @@ mod tests {
 
         // empty parent_session_id -> no-op
         record_webhook_delivery_failure(&conn, "a1", "", "st1", "s", &redacted, "x");
+    }
+
+    // ---- Nostr 受信 → Discord 転記先の解決（#252 段階 A） ----
+
+    fn set_relay(conn: &rusqlite::Connection, agent_id: &str, enabled: bool, url: Option<&str>) {
+        opencrab_db::queries::upsert_agent_nostr_relay_config(
+            conn,
+            &opencrab_db::queries::AgentNostrRelayConfigRow {
+                agent_id: agent_id.to_string(),
+                enabled,
+                webhook_url: url.map(|s| s.to_string()),
+            },
+        )
+        .unwrap();
+    }
+
+    /// fail-closed: 未設定 / 無効 / URL 欠落・不正 はすべて「転記しない（None）」。
+    #[test]
+    fn test_resolve_nostr_relay_is_fail_closed() {
+        let conn = opencrab_db::init_memory().unwrap();
+
+        // 1. 行が無い → None。
+        assert!(resolve_nostr_relay_webhook(&conn, "a1").is_none());
+
+        // 2. enabled=false（URL はあっても無効なら転記しない）。
+        set_relay(&conn, "a1", false, Some(VALID_URL));
+        assert!(resolve_nostr_relay_webhook(&conn, "a1").is_none());
+
+        // 3. enabled だが URL が NULL。
+        set_relay(&conn, "a1", true, None);
+        assert!(resolve_nostr_relay_webhook(&conn, "a1").is_none());
+
+        // 4. enabled だが URL が空白のみ。
+        set_relay(&conn, "a1", true, Some("   "));
+        assert!(resolve_nostr_relay_webhook(&conn, "a1").is_none());
+
+        // 5. enabled だが Discord webhook として不正な URL。
+        set_relay(&conn, "a1", true, Some("http://evil.com/x/tok"));
+        assert!(resolve_nostr_relay_webhook(&conn, "a1").is_none());
+    }
+
+    /// 有効かつ URL が妥当なら、その宛先を全イベント（events=None）で返す。
+    #[test]
+    fn test_resolve_nostr_relay_returns_target_when_enabled_and_valid() {
+        let conn = opencrab_db::init_memory().unwrap();
+        set_relay(&conn, "a1", true, Some(VALID_URL));
+        let cfg = resolve_nostr_relay_webhook(&conn, "a1").expect("有効なら宛先を返す");
+        assert_eq!(cfg.url, VALID_URL);
+        assert_eq!(cfg.events, None, "転記は種別で間引かない");
+
+        // 前後空白は trim される。
+        set_relay(
+            &conn,
+            "a2",
+            true,
+            Some("  https://discord.com/api/webhooks/9/tok9  "),
+        );
+        let cfg = resolve_nostr_relay_webhook(&conn, "a2").unwrap();
+        assert_eq!(cfg.url, "https://discord.com/api/webhooks/9/tok9");
+
+        // per-agent: 別エージェントは設定を共有しない。
+        assert!(resolve_nostr_relay_webhook(&conn, "a3").is_none());
     }
 }
