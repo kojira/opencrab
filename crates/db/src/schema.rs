@@ -373,6 +373,26 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 19,
+        description: "agent_nostr_relay_config (Nostr 受信を Discord へ転記する宛先, issue #252)",
+        // **表の新設のみ。既存の表・行には一切触れない。**
+        //
+        // 既定は**無効**（`enabled INTEGER NOT NULL DEFAULT 0`）。行を作っただけで転記が
+        // 始まらないよう fail-closed に倒す（#240 の轍）。行が無いエージェントも無効として
+        // 扱う（`opencrab_actions::webhook_target::resolve_nostr_relay_webhook` が fail-closed）。
+        //
+        // 冪等性: `CREATE TABLE IF NOT EXISTS`。2 回目以降は no-op。
+        //
+        // 切り戻し: 表を落とすだけで元に戻る（失われるのはこの表の行だけ）。古いバイナリへ
+        // 戻すときは版番号も戻すこと:
+        //
+        //   BEGIN;
+        //   DROP TABLE IF EXISTS agent_nostr_relay_config;
+        //   PRAGMA user_version = 18;
+        //   COMMIT;
+        up: |conn| conn.execute_batch(AGENT_NOSTR_RELAY_CONFIG_SQL),
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -383,6 +403,25 @@ CREATE TABLE IF NOT EXISTS agent_nostr_config (
     relays_json TEXT NOT NULL DEFAULT '[]',
     filter_json TEXT NOT NULL DEFAULT '{}',
     enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+";
+
+/// per-agent の Nostr 受信転記先設定（issue #252 段階 A）。
+///
+/// エージェントが Nostr で受け取った自分宛の受信を、エージェント単位で設定した 1 つの
+/// Discord チャンネル（webhook）へ転記するための宛先。
+///
+/// - `enabled`: 既定 **0（無効）**。行を作っただけでは転記しない（fail-closed / #240 と同じ轍を
+///   踏まない）。行が無いエージェントも無効として扱う（上位の解決が fail-closed）。
+/// - `webhook_url`: 転記先の webhook URL。NULL / 空なら転記しない。URL の妥当性検証は
+///   db 層では行わず、`opencrab_actions::webhook_target::resolve_nostr_relay_webhook` が担う
+///   （db クレートは Discord/webhook の語彙に依存しない）。
+const AGENT_NOSTR_RELAY_CONFIG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS agent_nostr_relay_config (
+    agent_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    webhook_url TEXT,
     updated_at TEXT NOT NULL
 );
 ";
@@ -1423,6 +1462,17 @@ CREATE TABLE IF NOT EXISTS agent_nostr_config (
 );
 
 -- ============================================
+-- エージェント別 Nostr 受信 → Discord 転記先（issue #252 段階 A）
+-- 既定は無効（行があっても enabled=0 なら転記しない / fail-closed）
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_nostr_relay_config (
+    agent_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    webhook_url TEXT,
+    updated_at TEXT NOT NULL
+);
+
+-- ============================================
 -- Agent Webhook Config (subtask/tool/lifecycle webhook defaults)
 -- ============================================
 CREATE TABLE IF NOT EXISTS agent_webhook_config (
@@ -1992,6 +2042,62 @@ mod migration_tests {
             );
             prev = m.version;
         }
+    }
+
+    /// v19: Nostr 受信転記先の表が増えるだけで、既存の Nostr 設定
+    /// （`agent_nostr_config`）の行は 1 つも動かない（#252 段階 A）。冪等でもある。
+    #[test]
+    fn agent_nostr_relay_config_migration_v19_adds_table_without_touching_existing_rows() {
+        let conn = crate::init_memory().expect("init");
+        // v18 相当の既存 DB を模す: 新表を落として version を 18 へ戻す。
+        // 既存の Nostr 設定に行を 1 件入れておき、移行で動かないことを見る。
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS agent_nostr_relay_config;
+             INSERT INTO agent_nostr_config
+               (agent_id, secret_key, relays_json, filter_json, enabled, updated_at)
+               VALUES ('a1', 'nsec1keep', '[\"wss://yabu.me\"]', '{}', 1, '2026-01-01');
+             PRAGMA user_version = 18",
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "agent_nostr_relay_config").unwrap());
+
+        initialize(&conn).expect("upgrade v18 -> v19");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(table_exists(&conn, "agent_nostr_relay_config").unwrap());
+
+        // 新表は空で始まる（既定は「設定なし」＝無効 / fail-closed）。
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_nostr_relay_config", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // 既存の Nostr 設定は 1 バイトも変わらない。
+        let (secret, enabled): (String, i64) = conn
+            .query_row(
+                "SELECT secret_key, enabled FROM agent_nostr_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((secret.as_str(), enabled), ("nsec1keep", 1));
+
+        // 行を入れてから再実行しても冪等（CREATE TABLE IF NOT EXISTS で消えない）。
+        conn.execute_batch(
+            "INSERT INTO agent_nostr_relay_config (agent_id, enabled, webhook_url, updated_at)
+             VALUES ('a1', 1, 'https://discord.com/api/webhooks/1/tok', '2026-01-02')",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: String = conn
+            .query_row(
+                "SELECT webhook_url FROM agent_nostr_relay_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "https://discord.com/api/webhooks/1/tok");
     }
 
     /// G. v1 DB が v2 マイグレーションでタスク台帳テーブルを獲得する。
