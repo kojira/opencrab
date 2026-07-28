@@ -21,6 +21,13 @@ pub struct NostrGatewayActions {
     cli: NostaroCli,
     sent: Arc<AtomicBool>,
     admin: Option<Arc<dyn NostrIdentityAdmin>>,
+    /// 素テキスト配送口（`text_delivery()`）が焼く agent_id（#246 段階3 PR-B）。
+    ///
+    /// `None` のときは配送口を提供しない（既定＝トレイトの `text_delivery()` が None を
+    /// 返すのと同じ）。bridge 経路（`sink.rs`）は agent_id を焼かずに生成するので従来どおり
+    /// None のまま。`gateway_actions_for`（稼働中の gateway 用）だけが agent_id を焼き、
+    /// そのときだけ自発投稿の配送口が生える。
+    agent_id: Option<String>,
 }
 
 impl NostrGatewayActions {
@@ -29,12 +36,23 @@ impl NostrGatewayActions {
             cli,
             sent: Arc::new(AtomicBool::new(false)),
             admin: None,
+            agent_id: None,
         }
     }
 
     /// identity 切替の実体を注入する（watch ループが稼働時に渡す）。
     pub fn with_admin(mut self, admin: Arc<dyn NostrIdentityAdmin>) -> Self {
         self.admin = Some(admin);
+        self
+    }
+
+    /// 素テキスト配送口（自発 kind:1 投稿）用の agent_id を焼き込む（#246 段階3 PR-B）。
+    ///
+    /// 稼働中の gateway に対して `gateway_actions_for(agent_id)` が呼ぶ。これを設定した
+    /// 実体だけが `text_delivery()` で `Some` を返す（登録簿経由で「テキストを配れる
+    /// gateway」として見えるようになる）。
+    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        self.agent_id = Some(agent_id.into());
         self
     }
 
@@ -303,6 +321,20 @@ impl GatewayActions for NostrGatewayActions {
             other => err(format!("unknown nostr action: {other}")),
         }
     }
+
+    /// 素テキストの配送口（#246 段階3 PR-B）。agent_id を焼いた実体だけが `Some` を返す。
+    ///
+    /// 返すのは Nostr への**自発投稿（kind:1 broadcast）**を行う配送口。宛先はエージェント
+    /// 設定のリレー集合を nostaro が解決するため、`target` 引数は使わない。合成 gateway
+    /// （`SystemGatewayActions`）がここから配送口を 1 度だけ引き、ハートビート等の
+    /// transport 非依存な配送口や `request_peer_review` の汎用層へ渡す。
+    fn text_delivery(&self) -> Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>> {
+        let agent_id = self.agent_id.clone()?;
+        Some(Arc::new(crate::text_delivery::NostrTextDelivery::new(
+            agent_id,
+            self.cli.clone(),
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -467,6 +499,27 @@ mod tests {
                 + opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.len(),
             live.len(),
             "分類集合の合計が definitions() の数と一致しない（新アクションの分類漏れ）"
+        );
+    }
+
+    /// [#246 段階3 PR-B] 配送口は **agent_id を焼いた実体だけ** が提供する。
+    ///
+    /// bridge 経路（`sink.rs`）は agent_id を焼かず生成するので `text_delivery()` は None
+    /// （＝従来どおり配送口を出さない）。`gateway_actions_for` が焼いたときだけ Some。
+    #[test]
+    fn text_delivery_is_gated_on_baked_agent_id() {
+        // 焼かなければ None（既存ターン処理を壊さない）。
+        let plain = NostrGatewayActions::new(NostaroCli::new());
+        assert!(
+            plain.text_delivery().is_none(),
+            "agent_id を焼かない実体は配送口を出さない"
+        );
+
+        // 焼けば Some（自発投稿の配送口が生える）。
+        let baked = NostrGatewayActions::new(NostaroCli::new()).with_agent_id("agent-x");
+        assert!(
+            baked.text_delivery().is_some(),
+            "agent_id を焼いた実体は配送口を出す"
         );
     }
 

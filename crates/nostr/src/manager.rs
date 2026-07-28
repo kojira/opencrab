@@ -273,6 +273,31 @@ impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatew
     fn key_provisioning(&self) -> Option<Arc<dyn opencrab_actions::GatewayKeyProvisioning>> {
         Some(Arc::new(crate::NostrKeyProvisioning::new(self.cli.clone())))
     }
+
+    /// 稼働中の per-agent gateway 向けのツール実行の実体を組む（capability / #246 段階3 PR-B）。
+    ///
+    /// Discord の `gateway_actions_for` と対称。**稼働していなければ `None`**
+    /// （`is_running` ゲート）: config.toml の materialize は stop で消えるため、稼働して
+    /// いない agent へ `nostaro post` を投げても失敗する。稼働中のときだけ agent_id を焼いた
+    /// `NostrGatewayActions` を返し、その `text_delivery()` が自発投稿（kind:1 broadcast）の
+    /// 配送口を提供する（登録簿 `state.gateways` 経由で「テキストを配れる gateway」として
+    /// 見える）。
+    ///
+    /// admin（identity 切替）は**付けない**: それは watch ループが持つ per-connection の状態
+    /// （`start_agent_gateway` が作る self_pubkey セル）に紐づいており、ループの外から組み直す
+    /// と別の状態を指してしまう。Discord が owner / A2UI 描画面を付けないのと同じ理由。
+    /// 自発発話（text_delivery）には admin は要らない。
+    fn gateway_actions_for(
+        &self,
+        agent_id: &str,
+    ) -> Option<Arc<dyn opencrab_gateway::GatewayActions>> {
+        if !self.is_running(agent_id) {
+            return None;
+        }
+        Some(Arc::new(
+            crate::NostrGatewayActions::new(self.cli.clone()).with_agent_id(agent_id),
+        ))
+    }
 }
 
 /// 処理済み event.id の bounded FIFO セット（watch 再購読時の再処理 = 二重返信を防ぐ）。
@@ -1288,5 +1313,51 @@ mod tests {
         // b はまだ保持（直近）… ではなく a 追加で b が最古になり追い出される可能性。
         // 少なくとも直近の c は既知のまま。
         assert!(!seen.check_and_insert("c"));
+    }
+
+    /// [#246 段階3 PR-B] `gateway_actions_for` は **稼働中の agent にだけ** capability を返し、
+    /// その `text_delivery()` が自発投稿の配送口（`Some`）を提供する。稼働していない agent は
+    /// `None`（config.toml が無い＝post が失敗する状態へツールを生やさない / fail-closed）。
+    #[tokio::test]
+    async fn gateway_actions_for_is_gated_on_is_running_and_exposes_text_delivery() {
+        use opencrab_actions::AgentGatewayLifecycle;
+
+        let mgr = NostrGatewayManager::new(SlowRunner::new(Duration::from_millis(1)));
+
+        // 稼働中の agent を模す: 終わらないダミータスクの handle を登録簿へ挿す
+        // （`is_running` は handle の生死で判定する）。
+        let handle = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+        mgr.gateways
+            .write()
+            .unwrap()
+            .insert("agent-live".to_string(), handle);
+
+        // 稼働中 → Some、かつ text_delivery() が Some（テキストを配れる gateway として見える）。
+        assert!(mgr.is_running("agent-live"));
+        let actions = AgentGatewayLifecycle::gateway_actions_for(&mgr, "agent-live");
+        let actions = actions.expect("稼働中の agent には capability を返す");
+        assert!(
+            actions.text_delivery().is_some(),
+            "自発投稿の配送口を提供する"
+        );
+
+        // 稼働していない agent → None（None を返し、post を呼ばない）。
+        assert!(!mgr.is_running("agent-idle"));
+        assert!(
+            AgentGatewayLifecycle::gateway_actions_for(&mgr, "agent-idle").is_none(),
+            "稼働していない agent には capability を返さない（fail-closed）"
+        );
+
+        // ダミータスクを回収する。
+        mgr.gateways
+            .write()
+            .unwrap()
+            .remove("agent-live")
+            .unwrap()
+            .abort();
     }
 }
