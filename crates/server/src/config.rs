@@ -271,6 +271,18 @@ pub struct AgentConfig {
     pub heartbeat_interval_secs: u64,
     #[serde(default = "default_heartbeat_enabled")]
     pub heartbeat_enabled: bool,
+    /// エージェントが自分で設定できるハートビート間隔の**下限**（秒 / #247）。
+    ///
+    /// エージェント自身が間隔を変えられるということは、極端に短い値を要求できると
+    /// いうこと。1 秒にされると費用も負荷も跳ねるので、運用者がここで床を決める。
+    /// 書き込み口（`set_my_heartbeat`）は下限より短い要求を**拒否**する。
+    ///
+    /// 既定 300 秒（5 分）。tick は「LLM の 1 ターン + ツール実行」で、体感で数十秒〜
+    /// 分単位かかる。5 分を下回ると前の tick が終わる前に次が来る領域に入り、間隔を
+    /// 縮めた分だけ費用が増えるだけで自律性は上がらない。もっと速く / 遅くしたい
+    /// 運用者はこの値を動かせばよい（0 を書いても最低 1 秒は残る）。
+    #[serde(default = "default_heartbeat_min_interval")]
+    pub heartbeat_min_interval_secs: u64,
     #[serde(default = "default_max_workspace_size")]
     pub max_workspace_size_mb: u64,
     /// ループ再起動 v1（#52）: depth 0 の run が反復上限で停止し、セッションに
@@ -295,6 +307,7 @@ impl Default for AgentConfig {
             workspace_path: default_workspace_path(),
             heartbeat_interval_secs: default_heartbeat_interval(),
             heartbeat_enabled: default_heartbeat_enabled(),
+            heartbeat_min_interval_secs: default_heartbeat_min_interval(),
             max_workspace_size_mb: default_max_workspace_size(),
             loop_restart_enabled: false,
             memory_maintenance_enabled: default_memory_maintenance_enabled(),
@@ -321,6 +334,56 @@ fn default_max_workspace_size() -> u64 {
 }
 fn default_heartbeat_enabled() -> bool {
     false
+}
+fn default_heartbeat_min_interval() -> u64 {
+    300
+}
+
+/// エージェント単位ハートビート設定の境界値（#247）。
+///
+/// `AppState` に 1 つ持たせて、ツール（`get_my_heartbeat` / `set_my_heartbeat`）と
+/// 解決（`opencrab_db::queries::resolve_agent_heartbeat`）が同じ値を見るようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatLimits {
+    /// エージェントが間隔を指定しなかったときに使う既定（`[agent] heartbeat_interval_secs`）。
+    pub default_interval_secs: u64,
+    /// 下限（`[agent] heartbeat_min_interval_secs`）。
+    pub min_interval_secs: u64,
+}
+
+impl HeartbeatLimits {
+    /// 間隔の**上限**（秒）。24 時間。
+    ///
+    /// 上限は費用のためではない（長いほど安い）。「有効なのに実質発火しない」状態を
+    /// 作らせないためのもので、下限の理由と同じ**思い込みの防止**。u64 の上限値を
+    /// 受け付けると、エージェントは「ハートビートを有効にした」と思ったまま二度と
+    /// 発火しない。1 日に 1 回より疎な自律実行が要るなら、それはハートビートでは
+    /// なく運用者側のスケジューリングの仕事。
+    pub const MAX_INTERVAL_SECS: u64 = 86_400;
+
+    /// 実効下限。運用者が 0 を書いてもビジーループにはしない（最低 1 秒）。
+    pub fn effective_min(&self) -> u64 {
+        self.min_interval_secs.max(1)
+    }
+}
+
+impl Default for HeartbeatLimits {
+    fn default() -> Self {
+        Self {
+            default_interval_secs: default_heartbeat_interval(),
+            min_interval_secs: default_heartbeat_min_interval(),
+        }
+    }
+}
+
+impl AgentConfig {
+    /// 設定ファイルの値から境界値を取り出す。
+    pub fn heartbeat_limits(&self) -> HeartbeatLimits {
+        HeartbeatLimits {
+            default_interval_secs: self.heartbeat_interval_secs,
+            min_interval_secs: self.heartbeat_min_interval_secs,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

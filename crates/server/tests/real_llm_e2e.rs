@@ -68,6 +68,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         subtask_notifiers: std::sync::Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: std::sync::Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
+        heartbeat_limits: Default::default(),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),

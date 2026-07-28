@@ -7,6 +7,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+pub mod agent_heartbeat;
 pub mod agent_log;
 pub mod agent_management;
 pub mod agent_nostr_relay;
@@ -151,6 +152,12 @@ pub struct AppState {
     /// **transport の機能フラグに依存しない形**でここへ持ち上げた
     /// （`config::AppConfig::default_subtask_webhook`）。
     pub default_subtask_webhook: Option<opencrab_actions::webhook_target::WebhookConfig>,
+    /// エージェント単位ハートビート設定の境界値（#247）。
+    ///
+    /// エージェント自身が触るツール（`get_my_heartbeat` / `set_my_heartbeat`）が
+    /// 参照する。下限は設定ファイル（`[agent] heartbeat_min_interval_secs`）由来で、
+    /// 運用者が費用と負荷の許容範囲を決める。
+    pub heartbeat_limits: config::HeartbeatLimits,
 }
 
 impl AppState {
@@ -196,6 +203,7 @@ pub(crate) fn test_app_state() -> AppState {
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
+        heartbeat_limits: config::HeartbeatLimits::default(),
     }
 }
 
