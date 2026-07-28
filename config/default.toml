@@ -1,6 +1,16 @@
 [agent]
 heartbeat_interval_secs = 1800
 heartbeat_enabled = true
+# エージェントが自分で設定できるハートビート間隔の下限（秒 / #247）。
+#
+# エージェントは `set_my_heartbeat` で自分の間隔を変えられる。極端に短い値を
+# 設定されると費用と負荷が跳ねるので、床はここで運用者が決める。下限より短い
+# 要求はツール側で**拒否**される（黙って丸めない）。
+#
+# 既定 300 秒（5 分）: tick は「LLM の 1 ターン + ツール実行」なので、これより
+# 短くすると前の tick が終わる前に次が来る領域に入り、費用だけが増える。
+# 上限は 24 時間（コード側の固定値）。それより疎な自律実行はハートビートの仕事ではない。
+heartbeat_min_interval_secs = 300
 workspace_path = "data/agents/{agent_id}/workspace"
 max_workspace_size_mb = 100
 

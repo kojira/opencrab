@@ -571,6 +571,39 @@ impl SystemGatewayActions {
                     }
                 }),
             },
+            // ---- #247 段階 2: エージェント自身のハートビート設定 ----
+            //
+            // **指示文（`update_heartbeat_instructions`）とは別物**。あちらは
+            // 「動いたとき何をするか」でオーナー限定のまま。こちらは「いつ動くか」で、
+            // エージェント自身が触れる（下限つき）。
+            //
+            // 引数に `agent_id` は**無い**。対象は常に `ctx.agent_id`（呼び出し文脈）。
+            // 実体と「自分のだけ」の保証は `crate::agent_heartbeat` の doc を参照。
+            GatewayActionDef {
+                name: "get_my_heartbeat".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート設定を読み出す。有効か・間隔（秒）・設定できる下限と上限を返す。設定したことが無ければ無効。他のエージェントの設定は読めない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            GatewayActionDef {
+                name: "set_my_heartbeat".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を設定する。対象は常に自分で、他のエージェントの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。なお現時点ではこの設定はまだ発火の判定には使われていない（保存のみ）。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "自律実行を有効にするか。省略すると現在の値を保つ。"
+                        },
+                        "interval_secs": {
+                            "type": "integer",
+                            "description": "ハートビートの間隔（秒）。下限は get_my_heartbeat の min_interval_secs、上限は max_interval_secs。null を渡すと運用者の既定に戻る。省略すると現在の値を保つ。"
+                        }
+                    }
+                }),
+            },
             // ---- #157 S5: 通知先（webhook）の管理ツール（Discord から移設） ----
             //
             // 実装は DB と設定ファイル由来の既定値しか触らないのに Discord gateway に
@@ -1661,6 +1694,10 @@ impl GatewayActions for SystemGatewayActions {
             "set_my_nostr_relay" => {
                 crate::agent_nostr_relay::set_my_nostr_relay(&self.state, args, ctx)
             }
+            // エージェント自身のハートビート設定（#247 段階 2）。対象は常に
+            // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
+            "get_my_heartbeat" => crate::agent_heartbeat::get_my_heartbeat(&self.state, args, ctx),
+            "set_my_heartbeat" => crate::agent_heartbeat::set_my_heartbeat(&self.state, args, ctx),
             // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
             // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
             // 由来のフォールバックは `AppState::default_subtask_webhook` から読むので、
@@ -4665,6 +4702,289 @@ mod tests {
             assert_eq!(merged.iter().filter(|d| d.name == name).count(), 1);
         }
     }
+
+    // ================================================================================
+    // #247 段階 2: エージェント自身のハートビート設定ツール
+    // ================================================================================
+
+    /// 境界値を固定した state（下限 300 / 既定 1800）。
+    fn heartbeat_state() -> AppState {
+        let mut state = crate::test_app_state();
+        state.heartbeat_limits = crate::config::HeartbeatLimits {
+            default_interval_secs: 1800,
+            min_interval_secs: 300,
+        };
+        state
+    }
+
+    /// own 定義に 1 件ずつ露出する（transport の有無に依存しない）。
+    /// 引数スキーマに `agent_id` が**無い**ことも固定する — あると「他人を指す経路」ができる。
+    #[test]
+    fn agent_heartbeat_tools_are_exposed_in_own_definitions() {
+        let defs = SystemGatewayActions::own_definitions();
+        for name in ["get_my_heartbeat", "set_my_heartbeat"] {
+            assert_eq!(
+                defs.iter().filter(|d| d.name == name).count(),
+                1,
+                "{name} は own 定義にちょうど 1 件必要（#247）"
+            );
+            let props = defs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap()
+                .parameters
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !props.contains_key("agent_id"),
+                "{name} に agent_id を生やしてはならない（対象は常に呼び出し元自身）"
+            );
+        }
+        let set = defs.iter().find(|d| d.name == "set_my_heartbeat").unwrap();
+        let props = set.parameters["properties"].as_object().unwrap();
+        for key in ["enabled", "interval_secs"] {
+            assert!(props.contains_key(key), "missing property: {key}");
+        }
+    }
+
+    /// **既定は無効**（#240 の反省）。設定したことが無いエージェントは無効で返る。
+    #[tokio::test]
+    async fn get_my_heartbeat_defaults_to_disabled() {
+        let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+        let r = actions
+            .execute("get_my_heartbeat", &json!({}), &trusted_ctx())
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            r.data.unwrap(),
+            json!({
+                "agent_id": "agent-x",
+                "enabled": false,
+                "interval_secs": 1800,
+                "configured_interval_secs": null,
+                "source": "unset",
+                "min_interval_secs": 300,
+                "max_interval_secs": 86400,
+                "default_interval_secs": 1800,
+            })
+        );
+    }
+
+    /// 有効化 + 間隔の設定が DB に載り、読み出しと一致する。
+    #[tokio::test]
+    async fn set_my_heartbeat_enables_and_sets_interval() {
+        let state = heartbeat_state();
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"enabled": true, "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["success"], true);
+        assert_eq!(data["enabled"], true);
+        assert_eq!(data["interval_secs"], 600);
+        assert_eq!(data["configured_interval_secs"], 600);
+        assert_eq!(data["source"], "agent");
+
+        {
+            let conn = state.db.lock().unwrap();
+            let row = opencrab_db::queries::get_agent_heartbeat_config(&conn, "agent-x")
+                .unwrap()
+                .unwrap();
+            assert!(row.enabled);
+            assert_eq!(row.interval_secs, Some(600));
+        }
+
+        // 片方だけの更新は、もう片方を保つ。
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"enabled": false}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["enabled"], false);
+        assert_eq!(data["configured_interval_secs"], 600);
+    }
+
+    /// **下限より短い要求は拒否**する（丸めない）。DB も書き換わらない。
+    /// エラーには下限が載るので、同じターンで有効な値に直して呼び直せる。
+    #[tokio::test]
+    async fn set_my_heartbeat_rejects_interval_below_floor_without_writing() {
+        let state = heartbeat_state();
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"enabled": true, "interval_secs": 1}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("interval_secsが短すぎます（最小300秒。指定値: 1秒）")
+        );
+        {
+            let conn = state.db.lock().unwrap();
+            assert_eq!(
+                opencrab_db::queries::get_agent_heartbeat_config(&conn, "agent-x").unwrap(),
+                None,
+                "拒否したのに行を作ってはならない（有効化も起きない）"
+            );
+        }
+
+        // 上限超え・非正整数も同様に拒否。
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"interval_secs": 86_401}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("interval_secsが長すぎます（最大86400秒。指定値: 86401秒）")
+        );
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"interval_secs": 0}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("interval_secsは正の整数（秒）で指定してください")
+        );
+    }
+
+    /// 引数が空 / 型違いは明示エラー（黙って no-op にしない）。
+    #[tokio::test]
+    async fn set_my_heartbeat_bad_args() {
+        let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+        let r = actions
+            .execute("set_my_heartbeat", &json!({}), &trusted_ctx())
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("enabled か interval_secs のどちらかが必要です")
+        );
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"enabled": "yes"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert_eq!(
+            r.error.as_deref(),
+            Some("enabledは真偽値で指定してください")
+        );
+    }
+
+    /// **「自分のだけ」の保証**: `agent_id` を渡しても他人の設定は動かず、明示エラーになる。
+    /// 対象は常に `ctx.agent_id`。
+    #[tokio::test]
+    async fn set_my_heartbeat_cannot_target_another_agent() {
+        let state = heartbeat_state();
+        // 別エージェントの設定を先に作っておく（有効・900 秒）。
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent_heartbeat_config(
+                &conn,
+                &opencrab_db::queries::AgentHeartbeatConfigRow {
+                    agent_id: "victim".to_string(),
+                    enabled: true,
+                    interval_secs: Some(900),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        for key in ["agent_id", "target_agent_id", "agent"] {
+            let r = actions
+                .execute(
+                    "set_my_heartbeat",
+                    &json!({key: "victim", "enabled": false, "interval_secs": 600}),
+                    &trusted_ctx(),
+                )
+                .await;
+            assert!(!r.success, "{key} は拒否されるべき");
+            assert_eq!(
+                r.error.as_deref(),
+                Some(
+                    format!("{key}は指定できません（このツールは呼び出し元エージェント自身の設定だけを扱います）")
+                        .as_str()
+                )
+            );
+            // 読み出しも同じ扱い（他人の設定を覗く経路にしない）。
+            let r = actions
+                .execute("get_my_heartbeat", &json!({key: "victim"}), &trusted_ctx())
+                .await;
+            assert!(!r.success, "{key} は読み出しでも拒否されるべき");
+        }
+
+        let conn = state.db.lock().unwrap();
+        let victim = opencrab_db::queries::get_agent_heartbeat_config(&conn, "victim")
+            .unwrap()
+            .unwrap();
+        assert!(victim.enabled, "他エージェントの設定が変わってはならない");
+        assert_eq!(victim.interval_secs, Some(900));
+        assert_eq!(
+            opencrab_db::queries::get_agent_heartbeat_config(&conn, "agent-x").unwrap(),
+            None,
+            "呼び出し元の設定も作られない（拒否なので）"
+        );
+    }
+
+    /// 素の agent（未信頼の外部ユーザー由来のターン）は読み書きとも拒否。
+    /// owner は許可（= エージェント自身が heartbeat / ダッシュボードから触れる）。
+    #[tokio::test]
+    async fn agent_heartbeat_tools_reject_plain_agent_but_allow_owner() {
+        let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+        for name in ["get_my_heartbeat", "set_my_heartbeat"] {
+            let r = actions
+                .execute(name, &json!({"enabled": true}), &agent_ctx())
+                .await;
+            assert!(!r.success, "{name} は素の agent から実行できてはならない");
+            assert_eq!(
+                r.error.as_deref(),
+                Some("このアクションは信頼済みの呼び出し元のみ実行できます")
+            );
+        }
+        let r = actions
+            .execute("set_my_heartbeat", &json!({"enabled": true}), &owner_ctx())
+            .await;
+        assert!(r.success, "{:?}", r.error);
+    }
+
+    /// 可視性でもゲートされる（#45 の「可視性 == 強制」）。owner 限定にはしない。
+    #[test]
+    fn agent_heartbeat_tools_are_trusted_only_but_not_owner_only() {
+        for name in ["get_my_heartbeat", "set_my_heartbeat"] {
+            assert!(
+                opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&name),
+                "{name} は trusted 限定"
+            );
+            assert!(
+                !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&name),
+                "{name} を owner 限定にしてはならない（#247 の目的が自己設定）"
+            );
+        }
+        // 指示文はオーナー限定のまま（開放しない）。
+        assert!(opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"update_heartbeat_instructions"));
+    }
+
     // ---- #156 S3: A2UI 送信（send_ui）の gateway 非依存化 ----
 
     /// A2UI 描画面を提供する inner のフェイク（Discord の代役）。

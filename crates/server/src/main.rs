@@ -546,6 +546,9 @@ async fn main() -> anyhow::Result<()> {
         // 外**で 1 度だけ解決し、以降の利用者（gateway 非依存の管理ツール / lifecycle
         // 通知 / Discord gateway_actions）は全てこの 1 つの値を参照する。
         default_subtask_webhook: cfg.default_subtask_webhook(),
+        // エージェントが自分で触るハートビート設定の境界（#247）。下限は運用者が
+        // `[agent] heartbeat_min_interval_secs` で決める。
+        heartbeat_limits: cfg.agent.heartbeat_limits(),
     };
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
