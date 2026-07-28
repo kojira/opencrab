@@ -12,6 +12,7 @@ pub mod llm_logs;
 pub mod mcp;
 pub mod memory;
 pub mod nostr;
+pub mod nostr_relay;
 pub mod providers;
 pub mod sessions;
 pub mod setup;
