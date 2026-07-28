@@ -420,6 +420,12 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/nostr/stop",
             post(api::nostr::stop_nostr_gateway),
         )
+        // Nostr 受信 → Discord 転記先の per-agent 設定（issue #252 段階 B）
+        .route(
+            "/api/agents/{id}/nostr-relay",
+            get(api::nostr_relay::get_nostr_relay_config)
+                .put(api::nostr_relay::update_nostr_relay_config),
+        )
         // MCP サーバ per-agent 設定
         .route(
             "/api/agents/{id}/mcp",
