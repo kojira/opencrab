@@ -36,6 +36,27 @@ impl NostrEvent {
         self.note_id.as_deref().unwrap_or(&self.id)
     }
 
+    /// 受信の種別ラベル（転記の見出しに付す / issue #252）。
+    ///
+    /// ここに来る受信は既に「自分宛」に絞られている（`nostaro watch` 側でフィルタ済み）ので、
+    /// 種別だけを見分ける:
+    /// - kind 4（NIP-04）/ 1059（NIP-17 gift wrap）= DM
+    /// - `e` タグを持つ kind 1 = 既存ノートへのリプライ
+    /// - それ以外（`e` タグ無し）= メンション
+    pub fn inbound_kind_label(&self) -> &'static str {
+        if self.kind == 4 || self.kind == 1059 {
+            return "DM";
+        }
+        if self
+            .tags
+            .iter()
+            .any(|t| t.first().map(|s| s == "e").unwrap_or(false))
+        {
+            return "リプライ";
+        }
+        "メンション"
+    }
+
     /// 表示用の著者ラベル（author_name 優先、無ければ npub、無ければ短縮 pubkey）。
     pub fn author_label(&self) -> String {
         if let Some(name) = self.author_name.as_deref().filter(|s| !s.is_empty()) {
@@ -89,6 +110,35 @@ mod tests {
         assert!(ev.tags.is_empty());
         assert_eq!(ev.reply_target(), "id1"); // note_id 無し → hex id
         assert_eq!(ev.author_label(), "001122334455…"); // 名前も npub も無し → 短縮
+    }
+
+    #[test]
+    fn test_inbound_kind_label() {
+        let mut ev = NostrEvent {
+            id: "id1".to_string(),
+            pubkey: "pk".to_string(),
+            npub: None,
+            note_id: None,
+            author_name: None,
+            created_at: 0,
+            kind: 1,
+            content: String::new(),
+            tags: Vec::new(),
+        };
+        // e タグ無しの kind 1 → メンション。
+        assert_eq!(ev.inbound_kind_label(), "メンション");
+        // e タグを持つ kind 1 → リプライ。
+        ev.tags = vec![vec!["e".to_string(), "someeventid".to_string()]];
+        assert_eq!(ev.inbound_kind_label(), "リプライ");
+        // p タグだけ（e タグ無し）は依然メンション。
+        ev.tags = vec![vec!["p".to_string(), "somepubkey".to_string()]];
+        assert_eq!(ev.inbound_kind_label(), "メンション");
+        // kind 4 (NIP-04 DM) / 1059 (NIP-17 gift wrap) → DM（タグに関係なく）。
+        ev.kind = 4;
+        ev.tags = vec![vec!["e".to_string(), "x".to_string()]];
+        assert_eq!(ev.inbound_kind_label(), "DM");
+        ev.kind = 1059;
+        assert_eq!(ev.inbound_kind_label(), "DM");
     }
 
     #[test]

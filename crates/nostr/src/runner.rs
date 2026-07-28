@@ -27,4 +27,33 @@ pub trait NostrAgentRunner: AgentRuntime {
 
     /// 本鍵（secret_key）だけを差し替える（identity 切替。relays/filter/enabled は保持）。
     fn set_nostr_secret_key(&self, agent_id: &str, secret_key: &str) -> Result<()>;
+
+    /// エージェント宛の Nostr 受信を転記する宛先を解決する（issue #252 段階 A）。
+    ///
+    /// エージェント単位設定（`agent_nostr_relay_config`）を**同期 DB 読み**で引き、有効かつ
+    /// 宛先が妥当なときだけ [`WebhookConfig`] を返す。未設定 / 無効 / 不正はすべて `None`
+    /// （fail-closed = 転記しない）。受信ループから直接呼ぶので、実装は軽い読み 1 回に留め、
+    /// await しない。
+    ///
+    /// 戻り値は actions 層の gateway 非依存な [`WebhookConfig`] で、Nostr crate は Discord
+    /// 固有の型に触れない（#191 の筋 / issue #252 の層制約）。
+    ///
+    /// [`WebhookConfig`]: opencrab_actions::webhook_target::WebhookConfig
+    fn resolve_nostr_relay_target(
+        &self,
+        agent_id: &str,
+    ) -> Option<opencrab_actions::webhook_target::WebhookConfig>;
+
+    /// 解決済みの宛先へ 1 件の転記本文を**非ブロック**で送る（issue #252 段階 A）。
+    ///
+    /// 送信は実装側で fire-and-forget（受信ループを止めない）。送信失敗は**ログのみ**で、
+    /// 応答生成や他セッションの受信を巻き込まない。宛先型は actions 層の共通口
+    /// （[`WebhookConfig`]）で、Nostr crate は Discord を名指ししない。
+    ///
+    /// [`WebhookConfig`]: opencrab_actions::webhook_target::WebhookConfig
+    fn relay_inbound_notification(
+        &self,
+        target: &opencrab_actions::webhook_target::WebhookConfig,
+        text: String,
+    );
 }

@@ -606,6 +606,24 @@ async fn handle_event<R: NostrAgentRunner>(
         },
     );
 
+    // クロスゲートウェイ転記（issue #252 段階 A）: 自分宛の受信を、エージェント単位で
+    // 設定した Discord チャンネル（webhook）へ転記する。設定が有効なときだけ配送する
+    // （未設定 / 無効 → `resolve_nostr_relay_target` が None を返し、1 件も飛ばない = fail-closed）。
+    //
+    // ここは受信ループ内（#178: await しない）。宛先の解決は同期 DB 読み 1 回、実際の送信は
+    // 実装側で非ブロック（fire-and-forget）。送信失敗は実装側でログのみに留め、応答生成や
+    // 他セッションの受信を巻き込まない。Nostr 側は Discord を型で名指しせず、actions 層の
+    // 共通口（`WebhookConfig`）を通す。
+    if let Some(target) = runner.resolve_nostr_relay_target(agent_id) {
+        let relay_text = format!(
+            "[Nostr / {kind}] {author}\n{body}",
+            kind = event.inbound_kind_label(),
+            author = event.author_label(),
+            body = event.content,
+        );
+        runner.relay_inbound_notification(&target, relay_text);
+    }
+
     let prompt_suffix = format!(
         "[Nostr] {author} さんの投稿への応答です。返信するなら \
          nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
@@ -707,6 +725,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Mutex;
 
+    use opencrab_actions::webhook_target::WebhookConfig;
     use opencrab_actions::RunRequest;
     use opencrab_core::EngineResult;
     use opencrab_db::queries::AgentNostrConfigRow;
@@ -723,6 +742,10 @@ mod tests {
         started: Arc<Mutex<Vec<String>>>,
         /// 応答生成を**完了**した順（reply_target = 実際に返信が飛ぶ順）。
         finished: Arc<Mutex<Vec<String>>>,
+        /// 転記先の解決結果（#252）。`None` = 未設定（転記しない）。
+        relay_target: Option<WebhookConfig>,
+        /// 実際に転記口へ渡った本文（配送口のスパイ / #252）。
+        relayed: Arc<Mutex<Vec<String>>>,
     }
 
     impl SlowRunner {
@@ -734,7 +757,18 @@ mod tests {
                 recorded: Arc::new(Mutex::new(Vec::new())),
                 started: Arc::new(Mutex::new(Vec::new())),
                 finished: Arc::new(Mutex::new(Vec::new())),
+                relay_target: None,
+                relayed: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        /// 転記先を有効化した runner（#252 のフック検証用）。
+        fn with_relay_target(mut self, url: &str) -> Self {
+            self.relay_target = Some(WebhookConfig {
+                url: url.to_string(),
+                events: None,
+            });
+            self
         }
 
         fn finished_len(&self) -> usize {
@@ -858,6 +892,15 @@ mod tests {
         fn set_nostr_secret_key(&self, _a: &str, _s: &str) -> anyhow::Result<()> {
             Ok(())
         }
+
+        fn resolve_nostr_relay_target(&self, _agent_id: &str) -> Option<WebhookConfig> {
+            self.relay_target.clone()
+        }
+
+        fn relay_inbound_notification(&self, _target: &WebhookConfig, text: String) {
+            // 配送口のスパイ: 実際に転記へ回った本文を記録する（HTTP は出さない）。
+            self.relayed.lock().unwrap().push(text);
+        }
     }
 
     struct NoopAdmin;
@@ -900,8 +943,17 @@ mod tests {
 
     impl Harness {
         fn new(agent_id: &str, delay: Duration, permits: usize, capacity: usize) -> Self {
+            Self::with_runner(agent_id, SlowRunner::new(delay), permits, capacity)
+        }
+
+        fn with_runner(
+            agent_id: &str,
+            runner: SlowRunner,
+            permits: usize,
+            capacity: usize,
+        ) -> Self {
             Self {
-                runner: SlowRunner::new(delay),
+                runner,
                 admin: Arc::new(NoopAdmin),
                 runtime: Arc::new(NostrSessionRuntime::new()),
                 permits: Arc::new(Semaphore::new(permits)),
@@ -1174,6 +1226,53 @@ mod tests {
             h.wait_finished(3, Duration::from_secs(5)).await,
             "回収後の再投入が処理されない"
         );
+    }
+
+    /// [#252 段階 A] 転記が有効なら、受信 1 件につき配送口が**ちょうど 1 回**呼ばれる。
+    /// 転記本文には送信者ラベル・種別・本文が載る。転記は受信ループ内で同期的に済む。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_fires_once_per_inbound_when_configured() {
+        const URL: &str = "https://discord.com/api/webhooks/1/tok";
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_relay_target(URL);
+        let h = Harness::with_runner("agent-relay", runner, 8, 32);
+
+        h.feed("r1", "pk-a", "こんにちは").await;
+
+        let relayed = SlowRunner::snapshot(&h.runner.relayed);
+        assert_eq!(relayed.len(), 1, "受信 1 件につき転記は 1 回");
+        assert!(
+            relayed[0].contains("こんにちは"),
+            "本文が載る: {}",
+            relayed[0]
+        );
+        // author_label は name/npub 無しなので短縮 pubkey。種別見出しも載る。
+        assert!(relayed[0].contains("pk-a"), "送信者が載る: {}", relayed[0]);
+        assert!(
+            relayed[0].contains("メンション") || relayed[0].contains("[Nostr"),
+            "種別見出しが載る: {}",
+            relayed[0]
+        );
+
+        // 2 件目も 1 回ずつ増える（受信ごとに 1 回）。
+        h.feed("r2", "pk-a", "ふたつめ").await;
+        assert_eq!(SlowRunner::snapshot(&h.runner.relayed).len(), 2);
+    }
+
+    /// [#252 段階 A / fail-closed] 転記が未設定なら、受信があっても 1 件も飛ばない。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_is_fail_closed_when_unconfigured() {
+        // relay_target を設定しない runner（= resolve が None を返す）。
+        let h = Harness::new("agent-norelay", Duration::from_millis(1), 8, 32);
+
+        h.feed("n1", "pk-a", "本文").await;
+        h.feed("n2", "pk-b", "本文2").await;
+
+        assert!(
+            SlowRunner::snapshot(&h.runner.relayed).is_empty(),
+            "未設定なら転記は 1 件も飛ばない（fail-closed）"
+        );
+        // 受信自体は通常どおり転記（会話履歴）される。
+        assert_eq!(SlowRunner::snapshot(&h.runner.recorded).len(), 2);
     }
 
     #[test]

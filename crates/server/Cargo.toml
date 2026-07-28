@@ -40,6 +40,9 @@ serenity = { workspace = true, optional = true }
 notify = "6"
 notify-debouncer-mini = "0.4"
 tiktoken-rs = "0.9.1"
+# Nostr 受信 → Discord 転記（#252 段階 A）の非ブロック webhook POST。server は
+# 各 gateway の transport を配線する合流点なので、ここで直接 HTTP を出す。
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
