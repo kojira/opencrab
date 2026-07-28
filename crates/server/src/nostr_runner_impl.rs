@@ -57,7 +57,9 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             for chunk in chunks {
-                let body = serde_json::json!({ "content": chunk });
+                // allowed_mentions を必ず抑止して送る（mention 暴発対策）。
+                // 詳細は webhook_target::build_relay_webhook_body の doc を参照。
+                let body = opencrab_actions::webhook_target::build_relay_webhook_body(&chunk);
                 match client.post(&url).json(&body).send().await {
                     Ok(resp) if resp.status().is_success() => {}
                     Ok(resp) => {

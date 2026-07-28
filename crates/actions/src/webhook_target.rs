@@ -115,6 +115,21 @@ pub fn build_part_messages(content: &str, limit: usize) -> Vec<String> {
         .collect()
 }
 
+/// Nostr 受信転記の Discord webhook POST body を組む（issue #252 段階 A）。
+///
+/// **必ず `allowed_mentions: { "parse": [] }` を乗せる**。Discord webhook は
+/// `allowed_mentions` 省略時に content 内のメンション（`@everyone` / `@here` /
+/// `<@userid>` / `<@&roleid>`）を全解決して通知を飛ばす。転記対象は第三者が送れる
+/// 「エージェント宛の受信イベント」なので、抑止しないと第三者が `@everyone` を
+/// 含めるだけで転記先サーバ全員へ通知が飛ぶ（mention 暴発）。空の parse 配列で
+/// 全種別の解決を Discord 側で止める。
+pub fn build_relay_webhook_body(chunk: &str) -> serde_json::Value {
+    json!({
+        "content": chunk,
+        "allowed_mentions": { "parse": [] },
+    })
+}
+
 /// webhook URL のトークン（末尾セグメント）をマスクして返す。ログ・応答用。
 pub fn redact_webhook_url(url: &str) -> String {
     match url.rsplit_once('/') {
@@ -603,6 +618,34 @@ mod tests {
         let chunks = chunk_text("あいうえお", 2);
         assert_eq!(chunks, vec!["あい", "うえ", "お"]);
         assert_eq!(chunks.concat(), "あいうえお");
+    }
+
+    #[test]
+    fn test_build_relay_webhook_body_has_content() {
+        let body = build_relay_webhook_body("hello");
+        assert_eq!(body["content"], json!("hello"));
+    }
+
+    #[test]
+    fn test_build_relay_webhook_body_suppresses_all_mentions() {
+        // allowed_mentions.parse は必ず空配列で乗る（mention 暴発抑止の固定）。
+        let body = build_relay_webhook_body("plain text");
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        // 空配列であること（省略でも非空でもない）を厳密に確認。
+        let parse = body["allowed_mentions"]["parse"]
+            .as_array()
+            .expect("parse must be an array");
+        assert!(parse.is_empty(), "parse must be empty to suppress mentions");
+    }
+
+    #[test]
+    fn test_build_relay_webhook_body_suppresses_everyone_input() {
+        // 第三者が @everyone 等を含むリプライを送っても、body は content をそのまま
+        // 載せつつ allowed_mentions.parse: [] で全解決を止める。
+        let hostile = "@everyone @here <@123> <@&456> pwn";
+        let body = build_relay_webhook_body(hostile);
+        assert_eq!(body["content"], json!(hostile));
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
     }
 
     #[test]
