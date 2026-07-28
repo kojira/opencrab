@@ -195,6 +195,11 @@ pub(crate) fn set_my_nostr_relay(
         return err(format!("Nostr 転記設定の保存に失敗: {e}"));
     }
 
+    let new_has_url = new_url
+        .as_deref()
+        .map(|u| !u.trim().is_empty())
+        .unwrap_or(false);
+
     // 監査ログ。**生 URL は載せない**（有効/無効と「URL 設定あり/なし」まで）。
     tracing::info!(
         target: "nostr_relay_audit",
@@ -203,13 +208,35 @@ pub(crate) fn set_my_nostr_relay(
         old_enabled = old_enabled,
         new_enabled = new_enabled,
         old_has_url = old_url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false),
-        new_has_url = new_url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false),
+        new_has_url = new_has_url,
         "エージェント自身が Nostr 転記設定を更新した"
     );
+
+    // foot-gun: 有効化されているのに転記先が実質空だと、下流の
+    // `resolve_nostr_relay_webhook` が fail-closed で 1 件も飛ばさない。誤配送は無いが、
+    // エージェントは「有効にしたのに転記されない」に静かに陥る。拒否はせず（enabled と
+    // webhook_url を別ターンで設定する順序を許すため）、応答に警告を添えて自分で気づけるようにする。
+    let warn_enabled_without_target = new_enabled && !new_has_url;
+    if warn_enabled_without_target {
+        tracing::warn!(
+            target: "nostr_relay_audit",
+            agent_id = %ctx.agent_id,
+            caller = %ctx.caller.label(),
+            "Nostr 転記が有効だが転記先(webhook_url)が未設定のため転記されない"
+        );
+    }
 
     let mut payload = state_payload(&conn, &ctx.agent_id);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("success".to_string(), json!(true));
+        if warn_enabled_without_target {
+            obj.insert(
+                "warning".to_string(),
+                json!(
+                    "有効化されていますが転記先(webhook_url)が未設定のため、現在は転記されません"
+                ),
+            );
+        }
     }
     GatewayActionResult {
         success: true,
@@ -491,5 +518,60 @@ mod tests {
         let row = stored(&db).unwrap();
         assert!(row.enabled);
         assert!(row.webhook_url.as_deref().unwrap_or("").trim().is_empty());
+    }
+
+    /// **foot-gun 警告**: 有効化だけして転記先を設定しないと、保存は成功するが
+    /// fail-closed で 1 件も飛ばない。拒否はしないが応答に `warning` を添えて自分で
+    /// 気づけるようにする。転記先も設定した正常な有効化には `warning` を付けない。
+    #[tokio::test]
+    async fn enabling_without_target_warns_but_setting_target_does_not() {
+        let (actions, _db) = make_actions();
+
+        // 有効化だけ（転記先未設定）→ success かつ warning あり。
+        let warn = actions
+            .execute(
+                "set_my_nostr_relay",
+                &json!({ "enabled": true }),
+                &ctx(GatewayCaller::Owner),
+            )
+            .await;
+        assert!(warn.success, "{:?}", warn.error);
+        let data = warn.data.unwrap();
+        assert_eq!(data["enabled"], true);
+        assert_eq!(data["webhook_configured"], false);
+        assert!(
+            data.get("warning").and_then(|v| v.as_str()).is_some(),
+            "有効化かつ転記先未設定なら warning が必要: {data}"
+        );
+
+        // 有効化 + 有効な転記先 → warning は付かない。
+        let ok = actions
+            .execute(
+                "set_my_nostr_relay",
+                &json!({ "enabled": true, "webhook_url": WH_VALID_URL }),
+                &ctx(GatewayCaller::Owner),
+            )
+            .await;
+        assert!(ok.success, "{:?}", ok.error);
+        let ok_data = ok.data.unwrap();
+        assert_eq!(ok_data["webhook_configured"], true);
+        assert!(
+            ok_data.get("warning").is_none(),
+            "正常な有効化には warning を付けない: {ok_data}"
+        );
+
+        // 無効化（転記先未設定）でも warning は付かない（有効時だけの注意喚起）。
+        let disabled = actions
+            .execute(
+                "set_my_nostr_relay",
+                &json!({ "enabled": false, "webhook_url": "" }),
+                &ctx(GatewayCaller::Owner),
+            )
+            .await;
+        assert!(disabled.success, "{:?}", disabled.error);
+        assert!(
+            disabled.data.unwrap().get("warning").is_none(),
+            "無効化には warning を付けない"
+        );
     }
 }
