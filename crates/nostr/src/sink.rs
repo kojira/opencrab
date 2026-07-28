@@ -457,6 +457,21 @@ mod tests {
         fn set_nostr_secret_key(&self, _agent_id: &str, _secret_key: &str) -> anyhow::Result<()> {
             Ok(())
         }
+
+        fn resolve_nostr_relay_target(
+            &self,
+            _agent_id: &str,
+        ) -> Option<opencrab_actions::webhook_target::WebhookConfig> {
+            // この経路（応答生成 sink）は転記に関与しないので未設定扱い。
+            None
+        }
+
+        fn relay_inbound_notification(
+            &self,
+            _target: &opencrab_actions::webhook_target::WebhookConfig,
+            _text: String,
+        ) {
+        }
     }
 
     struct NoopAdmin;

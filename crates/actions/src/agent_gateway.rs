@@ -752,7 +752,10 @@ mod tests {
         registry.register(nostr.clone());
         assert_eq!(registry.restore_pending().await, vec![kinds::NOSTR]);
         assert_eq!(nostr.restored.load(Ordering::SeqCst), 1);
-        assert!(!registry.is_restored(kinds::DISCORD), "未登録は復元済みでない");
+        assert!(
+            !registry.is_restored(kinds::DISCORD),
+            "未登録は復元済みでない"
+        );
     }
 
     /// 同じ種別を置き換えたら復元済みの印も落ちる（新しいマネージャは未復元）。
