@@ -85,7 +85,7 @@ async fn deliver_via_non_discord_registry(
         match delivery.send_text(target, content).await {
             Ok(()) => {
                 tracing::info!(
-                    agent_id,
+                    agent_id = %agent_id,
                     kind,
                     target,
                     "Heartbeat spoke via non-Discord transport"
@@ -93,7 +93,7 @@ async fn deliver_via_non_discord_registry(
             }
             Err(e) => {
                 tracing::error!(
-                    agent_id,
+                    agent_id = %agent_id,
                     kind,
                     target,
                     "Heartbeat send via non-Discord transport failed: {e}"
@@ -125,18 +125,18 @@ async fn deliver_via_discord_shared_http(
                 .send_message(&_http, CreateMessage::new().content(content))
                 .await
             {
-                tracing::error!(agent_id, channel_id = %channel_target, "Heartbeat send_speech failed: {e}");
+                tracing::error!(agent_id = %agent_id, channel_id = %channel_target, "Heartbeat send_speech failed: {e}");
             } else {
-                tracing::info!(agent_id, channel_id = %channel_target, "Heartbeat spoke: {}", content);
+                tracing::info!(agent_id = %agent_id, channel_id = %channel_target, "Heartbeat spoke: {}", content);
             }
         }
         #[cfg(not(feature = "discord"))]
         {
-            tracing::info!(agent_id, channel_id = %channel_target, "Heartbeat Speak (discord disabled): {}", content);
+            tracing::info!(agent_id = %agent_id, channel_id = %channel_target, "Heartbeat Speak (discord disabled): {}", content);
         }
     } else {
         tracing::debug!(
-            agent_id,
+            agent_id = %agent_id,
             "Heartbeat Speak: no Discord http or invalid channel_id"
         );
     }
