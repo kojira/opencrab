@@ -393,6 +393,32 @@ const MIGRATIONS: &[Migration] = &[
         //   COMMIT;
         up: |conn| conn.execute_batch(AGENT_NOSTR_RELAY_CONFIG_SQL),
     },
+    Migration {
+        version: 20,
+        description: "agent_heartbeat_config (エージェント単位のハートビート有効/間隔, issue #247)",
+        // **表の新設のみ。既存の表・行には一切触れない。**
+        //
+        // チャンネル単位の設定（`discord_channel_config.heartbeat_enabled` /
+        // `heartbeat_interval_secs`）は**そのまま残す**。発火の判定をどちらから引くかの
+        // 切り替えは段階 3（別 issue）で、この版では「エージェントが自分の設定を持てる」
+        // ところまでしか進めない。
+        //
+        // 既定は**無効**（`enabled INTEGER NOT NULL DEFAULT 0`）。チャンネル設定は
+        // 既定が有効で「行を作っただけで自律実行が始まる」形になっていた（#240）ので、
+        // 同じ轍を踏まないよう逆にする。行が無いエージェントも無効として扱う
+        // （`queries::resolve_agent_heartbeat` が fail-closed）。
+        //
+        // 冪等性: `CREATE TABLE IF NOT EXISTS`。2 回目以降は no-op。
+        //
+        // 切り戻し: 表を落とすだけで元に戻る（失われるのはこの表の行だけ）。
+        // v19 の doc と同じく、古いバイナリへ戻すときは版番号も戻すこと:
+        //
+        //   BEGIN;
+        //   DROP TABLE IF EXISTS agent_heartbeat_config;
+        //   PRAGMA user_version = 19;
+        //   COMMIT;
+        up: |conn| conn.execute_batch(AGENT_HEARTBEAT_CONFIG_SQL),
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -422,6 +448,25 @@ CREATE TABLE IF NOT EXISTS agent_nostr_relay_config (
     agent_id TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 0,
     webhook_url TEXT,
+    updated_at TEXT NOT NULL
+);
+";
+
+/// per-agent のハートビート設定（#247）。**エージェント自身が触れる唯一の自律実行設定**。
+///
+/// - `enabled`: 既定 **0（無効）**。設定を作っただけで自律実行が始まらないようにする（#240）。
+/// - `interval_secs`: NULL = 運用者の既定（設定ファイルの `[agent] heartbeat_interval_secs`）
+///   に従う。値の下限は設定ファイル（`[agent] heartbeat_min_interval_secs`）で運用者が決め、
+///   書き込み口（`set_my_heartbeat`）が下限より短い要求を**拒否**する。DB 側に CHECK は
+///   置かない（下限は運用者が変えられる値なので、スキーマに焼き付けると変更のたびに
+///   マイグレーションが要る）。
+///
+/// 行が無い / 壊れているときは**無効**として扱う（`queries::resolve_agent_heartbeat`）。
+const AGENT_HEARTBEAT_CONFIG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS agent_heartbeat_config (
+    agent_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    interval_secs INTEGER,
     updated_at TEXT NOT NULL
 );
 ";
@@ -2384,6 +2429,64 @@ mod migration_tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(after, spellings);
+    }
+
+    /// v20: エージェント単位ハートビート設定の表が増えるだけで、既存の
+    /// チャンネル単位設定（`discord_channel_config`）の行は 1 つも動かない（#247）。
+    #[test]
+    fn agent_heartbeat_config_migration_v20_adds_table_without_touching_channel_config() {
+        let conn = crate::init_memory().expect("init");
+        // v19 相当の既存 DB を模す: 新表を落として version を 19 へ戻す。
+        // チャンネル単位設定には行を 1 件入れておき、移行で動かないことを見る。
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS agent_heartbeat_config;
+             INSERT INTO discord_channel_config
+               (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted,
+                heartbeat_enabled, heartbeat_interval_secs, updated_at)
+               VALUES ('ch-1', 'a1', 'g1', 'general', 1, 1, 1, 1, 60, '2026-01-01');
+             PRAGMA user_version = 19",
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "agent_heartbeat_config").unwrap());
+
+        initialize(&conn).expect("upgrade v19 -> v20");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(table_exists(&conn, "agent_heartbeat_config").unwrap());
+
+        // 新表は空で始まる（既定は「設定なし」＝無効）。
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_heartbeat_config", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
+
+        // チャンネル単位設定は 1 バイトも変わらない（段階 3 まで残す）。
+        let (hb_enabled, hb_interval): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT heartbeat_enabled, heartbeat_interval_secs FROM discord_channel_config
+                 WHERE channel_id = 'ch-1' AND agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((hb_enabled, hb_interval), (1, Some(60)));
+
+        // 行を入れてから再実行しても冪等（CREATE TABLE IF NOT EXISTS で消えない）。
+        conn.execute_batch(
+            "INSERT INTO agent_heartbeat_config (agent_id, enabled, interval_secs, updated_at)
+             VALUES ('a1', 1, 900, '2026-01-02')",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: i64 = conn
+            .query_row(
+                "SELECT interval_secs FROM agent_heartbeat_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 900);
     }
 
     /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する

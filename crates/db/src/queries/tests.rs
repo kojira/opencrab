@@ -2841,3 +2841,119 @@ fn dashboard_permission_options_match_the_enum() {
         .collect();
     assert_eq!(from_dashboard, from_enum);
 }
+
+// ============================================
+// Agent Heartbeat Config（#247）
+// ============================================
+
+/// 行が無いエージェントは**無効**（fail-closed）。既定間隔は返すが有効にはしない。
+#[test]
+fn agent_heartbeat_defaults_to_disabled_when_unset() {
+    let conn = crate::init_memory().unwrap();
+    assert_eq!(get_agent_heartbeat_config(&conn, "a1").unwrap(), None);
+
+    let r = resolve_agent_heartbeat(&conn, "a1", 1800, 300);
+    assert!(!r.enabled, "設定が無いときは無効");
+    assert_eq!(r.interval_secs, 1800);
+    assert_eq!(r.source, "unset");
+}
+
+/// upsert は作成も更新もする。間隔 None は「運用者既定に従う」。
+#[test]
+fn agent_heartbeat_upsert_creates_then_updates() {
+    let conn = crate::init_memory().unwrap();
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: true,
+            interval_secs: None,
+        },
+    )
+    .unwrap();
+    let r = resolve_agent_heartbeat(&conn, "a1", 1800, 300);
+    assert!(r.enabled);
+    assert_eq!((r.interval_secs, r.source), (1800, "default"));
+
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: true,
+            interval_secs: Some(900),
+        },
+    )
+    .unwrap();
+    let r = resolve_agent_heartbeat(&conn, "a1", 1800, 300);
+    assert_eq!((r.enabled, r.interval_secs, r.source), (true, 900, "agent"));
+
+    // 行は 1 件のまま（PK 衝突で増えない）。
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_heartbeat_config", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// 無効な行は「間隔がいくつでも無効」。他エージェントの設定は混ざらない。
+#[test]
+fn agent_heartbeat_disabled_row_stays_disabled_and_is_per_agent() {
+    let conn = crate::init_memory().unwrap();
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: false,
+            interval_secs: Some(600),
+        },
+    )
+    .unwrap();
+    let r = resolve_agent_heartbeat(&conn, "a1", 1800, 300);
+    assert!(!r.enabled);
+    assert_eq!(r.source, "disabled");
+    // 別エージェントは影響を受けない。
+    assert!(!resolve_agent_heartbeat(&conn, "a2", 1800, 300).enabled);
+    assert_eq!(
+        resolve_agent_heartbeat(&conn, "a2", 1800, 300).source,
+        "unset"
+    );
+}
+
+/// 壊れた値（0 / 負値）は**無効**として扱う。下限未満は下限へ引き上げる。
+#[test]
+fn agent_heartbeat_broken_interval_disables_and_below_floor_clamps_up() {
+    let conn = crate::init_memory().unwrap();
+    for broken in [0i64, -1] {
+        conn.execute(
+            "INSERT INTO agent_heartbeat_config (agent_id, enabled, interval_secs, updated_at)
+             VALUES ('broken', 1, ?1, '2026-01-01')
+             ON CONFLICT(agent_id) DO UPDATE SET interval_secs = excluded.interval_secs",
+            params![broken],
+        )
+        .unwrap();
+        let r = resolve_agent_heartbeat(&conn, "broken", 1800, 300);
+        assert!(!r.enabled, "壊れた間隔 {broken} は無効として扱う");
+        assert_eq!(r.source, "invalid");
+    }
+
+    // 下限を後から引き上げた運用者を模す: 停止させず下限へ引き上げる。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: true,
+            interval_secs: Some(60),
+        },
+    )
+    .unwrap();
+    let r = resolve_agent_heartbeat(&conn, "a1", 1800, 300);
+    assert_eq!(
+        (r.enabled, r.interval_secs, r.source),
+        (true, 300, "clamped")
+    );
+
+    // 下限 0（運用者が下限を外した）でも 0 秒間隔にはしない。
+    let r = resolve_agent_heartbeat(&conn, "a1", 1800, 0);
+    assert_eq!((r.enabled, r.interval_secs, r.source), (true, 60, "agent"));
+}
