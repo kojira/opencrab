@@ -8,6 +8,8 @@ use opencrab_core::heartbeat::{
 use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
 
+mod heartbeat_delivery;
+
 #[cfg(feature = "discord")]
 type DiscordHttpArc = Arc<Mutex<Option<Arc<serenity::http::Http>>>>;
 #[cfg(not(feature = "discord"))]
@@ -355,39 +357,25 @@ fn make_heartbeat_callback(
                 // Speak/Learn後続処理
                 match &decision {
                     HeartbeatDecision::Speak(content) => {
+                        // 発話出口（段階3 PR-A / #246）。まず登録簿（`state.gateways`）の
+                        // 非 Discord transport を試し、配れなければ既存の Discord 共有 http
+                        // 経路へ落ちる。Discord の挙動はバイト単位で不変（詳細は
+                        // `heartbeat_delivery` モジュール doc）。fire-and-forget で発火 tick を
+                        // 塞がない（#178 系）。
                         let content = content.clone();
                         let discord_http = discord_http.clone();
-                        let channel_id_u64: Option<u64> = channel_id_str.parse().ok();
+                        let state = state.clone();
                         let agent_id_log = agent_id_owned.clone();
                         let ch_id_str = channel_id_str.clone();
                         tokio::spawn(async move {
-                            let http_opt = discord_http.lock().unwrap().clone();
-                            if let (Some(_http), Some(_ch_id)) = (http_opt.clone(), channel_id_u64)
-                            {
-                                #[cfg(feature = "discord")]
-                                {
-                                    use serenity::builder::CreateMessage;
-                                    use serenity::model::id::ChannelId;
-                                    let ch = ChannelId::new(_ch_id);
-                                    if let Err(e) = ch
-                                        .send_message(
-                                            &_http,
-                                            CreateMessage::new().content(&content),
-                                        )
-                                        .await
-                                    {
-                                        tracing::error!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat send_speech failed: {e}");
-                                    } else {
-                                        tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat spoke: {}", content);
-                                    }
-                                }
-                                #[cfg(not(feature = "discord"))]
-                                {
-                                    tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat Speak (discord disabled): {}", content);
-                                }
-                            } else {
-                                tracing::debug!(agent_id = %agent_id_log, "Heartbeat Speak: no Discord http or invalid channel_id");
-                            }
+                            heartbeat_delivery::deliver_heartbeat_speech(
+                                &state,
+                                &discord_http,
+                                &agent_id_log,
+                                &ch_id_str,
+                                &content,
+                            )
+                            .await;
                         });
                     }
                     HeartbeatDecision::Learn => {
