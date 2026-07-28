@@ -67,10 +67,13 @@ stop_server() {
 start_web() {
     stop_web 2>/dev/null || true
     echo "==> Starting frontend dev server..."
-    (cd "$SCRIPT_DIR/web" && npx vite --port 3000) > "$SCRIPT_DIR/.web.log" 2>&1 &
+    # --host 0.0.0.0 は必須。省くと vite はループバック（[::1]）だけで listen し、
+    # 127.0.0.1 からも LAN 上の別端末（スマホ等）からもダッシュボードに届かなくなる。
+    (cd "$SCRIPT_DIR/web" && npx vite --port 3000 --host 0.0.0.0) > "$SCRIPT_DIR/.web.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$WEB_PID_FILE"
     echo "    Frontend started (PID: $pid) → http://localhost:3000"
+    echo "    別端末からは .web.log の \"Network:\" 行の URL を使う"
 }
 
 stop_web() {
@@ -122,7 +125,7 @@ case "${1:-}" in
         start_server
         start_web
         echo ""
-        echo "==> Ready: http://localhost:3000"
+        echo "==> Ready: http://localhost:3000 (別端末からは .web.log の Network URL)"
         ;;
     stop)
         stop_server
