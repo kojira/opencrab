@@ -74,9 +74,23 @@ export interface NostrRelayConfigDto {
 }
 
 export interface UpdateNostrRelayBody {
+  /** 省略時は現状維持。 */
+  enabled?: boolean;
+  /**
+   * 三状態: **フィールド省略** = 転記先を保持 / **null** = 消去 / **文字列** = 設定。
+   * enabled トグルだけの保存で既存 webhook を無言で消さないため、保持したいときは
+   * このフィールド自体を送らない（`undefined` は JSON.stringify で除かれる）。
+   */
+  webhook_url?: string | null;
+}
+
+export interface UpdateNostrRelayResult {
+  updated: boolean;
   enabled: boolean;
-  /** webhook URL。空 / 省略で転記先を消去する。 */
-  webhook_url?: string;
+  has_webhook: boolean;
+  webhook_url_masked: string;
+  /** 有効かつ転記先未設定のときだけ付く注意喚起。 */
+  warning?: string;
 }
 
 export function getNostrRelayConfig(agentId: string): Promise<NostrRelayConfigDto> {
@@ -86,11 +100,6 @@ export function getNostrRelayConfig(agentId: string): Promise<NostrRelayConfigDt
 export function updateNostrRelayConfig(
   agentId: string,
   body: UpdateNostrRelayBody,
-): Promise<{
-  updated: boolean;
-  enabled: boolean;
-  has_webhook: boolean;
-  webhook_url_masked: string;
-}> {
+): Promise<UpdateNostrRelayResult> {
   return api.put(`/agents/${agentId}/nostr-relay`, body);
 }

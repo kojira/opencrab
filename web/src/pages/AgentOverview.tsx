@@ -999,15 +999,20 @@ function NostrSection({ agentId }: { agentId: string }) {
  *
  * 自分宛の Nostr 受信（メンション/リプライ/DM）を、指定した Discord チャンネルの
  * webhook へ転記する。webhook URL の生値は API から返らない（伏字のみ）ため、入力欄は
- * 常に空で、現在値は伏字表示する。空欄のまま保存すると転記先を削除する。
+ * 常に空で、現在値は伏字表示する。
+ *
+ * webhook_url は三状態（省略=保持 / null=消去 / 文字列=設定）。保存で入力欄が空なら
+ * webhook_url を**送らず現状維持**する（enabled トグルだけの保存で既存転記先が消えない）。
+ * 消去は「転記先を削除」ボタンの明示操作に分離する。
  */
-function NostrRelaySection({ agentId }: { agentId: string }) {
+export function NostrRelaySection({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const [cfg, setCfg] = useState<NostrRelayConfigDto | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState('');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1025,17 +1030,45 @@ function NostrRelaySection({ agentId }: { agentId: string }) {
     void load();
   }, [load]);
 
+  // 入力欄が空なら webhook_url を送らず（保持）、入力があればそれを設定する。
   const save = async () => {
     setSaving(true);
     setMessage(null);
+    setWarning(null);
     try {
+      const trimmed = webhookUrl.trim();
       const res = await updateNostrRelayConfig(agentId, {
         enabled,
-        webhook_url: webhookUrl.trim(),
+        // 空欄 = 現状維持なのでフィールド自体を送らない（undefined は JSON から除かれる）。
+        ...(trimmed === '' ? {} : { webhook_url: trimmed }),
       });
       setEnabled(res.enabled);
       setWebhookUrl('');
       setMessage(t('common.save') + ' OK');
+      if (res.warning) setWarning(res.warning);
+      await load();
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 転記先を明示的に消去する（null を送る）。誤操作を避けるため確認する。
+  const clearWebhook = async () => {
+    if (!window.confirm(t('agentDetail.nostrRelayDeleteConfirm'))) return;
+    setSaving(true);
+    setMessage(null);
+    setWarning(null);
+    try {
+      const res = await updateNostrRelayConfig(agentId, {
+        enabled,
+        webhook_url: null,
+      });
+      setEnabled(res.enabled);
+      setWebhookUrl('');
+      setMessage(t('common.save') + ' OK');
+      if (res.warning) setWarning(res.warning);
       await load();
     } catch (e) {
       setMessage(String(e));
@@ -1054,6 +1087,7 @@ function NostrRelaySection({ agentId }: { agentId: string }) {
         {t('agentDetail.nostrRelayDesc')}
       </p>
       {message && <p className="text-body-sm mb-2 text-on-surface-variant">{message}</p>}
+      {warning && <p className="text-body-sm mb-2 text-error">{warning}</p>}
       <div className="space-y-3">
         <label className="flex items-center gap-2">
           <input
@@ -1091,6 +1125,16 @@ function NostrRelaySection({ agentId }: { agentId: string }) {
           >
             {t('common.save')}
           </button>
+          {cfg?.has_webhook && (
+            <button
+              type="button"
+              className="btn-text text-error"
+              disabled={saving}
+              onClick={() => void clearWebhook()}
+            >
+              {t('agentDetail.nostrRelayDelete')}
+            </button>
+          )}
         </div>
       </div>
     </div>
