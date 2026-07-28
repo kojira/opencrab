@@ -330,6 +330,13 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     // (5) 純粋な読み取り（#157 S3 で Discord から移設）。移設前は
     //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
     "read_heartbeat_instructions",
+    // エージェント自身の Nostr 受信 → Discord 転記先設定（#252 段階 C）。
+    // (5) 純粋な読み取り: 「今どこへ転記される？」が 2 ターンに割れないよう inline。
+    "get_my_nostr_relay",
+    // (3) 同ターン結果依存: URL の許可リスト検証に落ちると**拒否**される。拒否を同じ
+    //     ターンで受け取って正しい URL で呼び直せないと、エージェントは「設定した」と
+    //     思い込んだままターンが終わる（`set_my_heartbeat` と同じ理由 / #251）。
+    "set_my_nostr_relay",
     // 通知先（webhook）の管理（#157 S5 で Discord から移設）。**移設前の分類を維持する**:
     // 6 個とも `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
     //
@@ -485,6 +492,14 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "create_skill",
     "execute_skill",
     "read_heartbeat_instructions",
+    // エージェント自身の Nostr 受信 → Discord 転記先設定（#252 段階 C）。**owner 限定に
+    // はしない** — 自分の転記先を自分で決めるのがこの機能の目的で、エージェントが自分の
+    // 意思で触るターン（heartbeat tick / ダッシュボード / オーナー会話）は全て
+    // caller=Owner なので妨げられない。一方 caller=Agent は「未信頼の外部ユーザーと
+    // 会話しているターン」なので、そこへ開けると Nostr の会話ターンで自分宛受信を
+    // 任意の Discord チャンネルへ流させられる。`set_my_heartbeat`（#247/#251）と同じ扱い。
+    "get_my_nostr_relay",
+    "set_my_nostr_relay",
     // VC 参加/退出。可視性 == 強制の対称化（#45）: 非 trusted の Agent には
     // 一覧にも出さない。ハンドラ側はさらに厳しく owner/trusted_user のみ許可
     // （co_agent は一覧に見えても実行は拒否される）。

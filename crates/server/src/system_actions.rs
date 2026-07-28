@@ -540,6 +540,37 @@ impl SystemGatewayActions {
                     "required": ["scope"]
                 }),
             },
+            // ---- #252 段階 C: エージェント自身の Nostr 受信 → Discord 転記先設定 ----
+            //
+            // 段階 A（#253）が敷いた `agent_nostr_relay_config` を、エージェント自身が
+            // own ツールで読み書きする。引数に `agent_id` は**無い**。対象は常に
+            // `ctx.agent_id`（呼び出し文脈）で、他エージェントを指す経路は作らない。
+            // 実体と「自分のだけ」の保証・秘匿値の扱いは `crate::agent_nostr_relay` の doc。
+            GatewayActionDef {
+                name: "get_my_nostr_relay".to_string(),
+                description: "自分（呼び出し元エージェント）の Nostr 受信 → Discord 転記の設定を読み出す。転記が有効か・転記先が設定済みか（転記先 URL は伏字で返す）を返す。他のエージェントの設定は読めない。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            GatewayActionDef {
+                name: "set_my_nostr_relay".to_string(),
+                description: "自分（呼び出し元エージェント）が Nostr で受け取った自分宛の受信（メンション/リプライ/DM）を Discord へ転記する設定を更新する。対象は常に自分で、他のエージェントの設定は変えられない。enabled で転記の有効/無効を、webhook_url で転記先の Discord webhook URL を設定する。URL が Discord webhook として不正なら拒否される（丸められない）ので、拒否されたらエラーの理由を見て正しい URL で指定し直すこと。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "転記を有効にするか。省略すると現在の値を保つ。"
+                        },
+                        "webhook_url": {
+                            "type": "string",
+                            "description": "転記先の Discord webhook URL。空文字または null を渡すと転記先を消去する。省略すると現在の値を保つ。"
+                        }
+                    }
+                }),
+            },
             // ---- #157 S5: 通知先（webhook）の管理ツール（Discord から移設） ----
             //
             // 実装は DB と設定ファイル由来の既定値しか触らないのに Discord gateway に
@@ -1621,6 +1652,14 @@ impl GatewayActions for SystemGatewayActions {
             }
             "read_heartbeat_instructions" => {
                 crate::heartbeat_instructions::read_heartbeat_instructions(&self.state, args, ctx)
+            }
+            // エージェント自身の Nostr 転記設定（#252 段階 C）。対象は常に
+            // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
+            "get_my_nostr_relay" => {
+                crate::agent_nostr_relay::get_my_nostr_relay(&self.state, args, ctx)
+            }
+            "set_my_nostr_relay" => {
+                crate::agent_nostr_relay::set_my_nostr_relay(&self.state, args, ctx)
             }
             // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
             // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
