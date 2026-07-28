@@ -677,6 +677,15 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "{n} は server 側の実装だけであるべき"
                 );
+            } else if *n == "get_my_heartbeat" || *n == "set_my_heartbeat" {
+                // エージェント自身のハートビート設定（#247）。最初から server 側
+                // （`SystemGatewayActions`）の own ツールで Discord には無い。実在性の
+                // 検証は `crates/server/src/system_actions.rs` の
+                // `agent_heartbeat_tools_are_exposed_in_own_definitions` が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は server 側の実装だけであるべき"
+                );
             } else if n.starts_with("nostr_") {
                 // nostr_zap / nostr_dm は Nostr ゲートウェイ側のアクション（この
                 // Discord gateway の definitions には出ない）。ここでは検証対象外。
