@@ -121,7 +121,10 @@ export default function AgentLayout() {
       )}
 
       {/* Tab navigation。横スクロール+フェードだと後半のタブ（LLMログ・分析等）が
-          デスクトップ幅でも隠れて存在に気づけないため、折り返して全タブを常時表示する。 */}
+          デスクトップ幅でも隠れて存在に気づけないため、折り返して全タブを常時表示する。
+          ラベルは狭い画面でも必ず出す（以前は sm 未満で hidden にしており、スマホでは
+          アイコンだけになって何のタブか判別できなかった）。狭い画面ではアイコンの下に
+          ラベルを積む縦並び（flex-col）にして、行が折り返しても読めるようにする。 */}
       {!isEditRoute && (
         <div className="flex flex-wrap mb-6 gap-0.5 bg-surface-container-high rounded-xl p-1">
           {tabs.map((tab) => {
@@ -135,14 +138,14 @@ export default function AgentLayout() {
                 key={tab.key}
                 to={tabPath}
                 title={t(tab.labelKey)}
-                className={`flex flex-col sm:flex-row items-center gap-0.5 sm:gap-1.5 px-2 sm:px-3 py-2 text-label-sm sm:text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap ${
+                className={`flex flex-col sm:flex-row items-center gap-0.5 sm:gap-1.5 px-1.5 sm:px-3 py-1.5 sm:py-2 text-label-sm sm:text-label-lg rounded-lg transition-all duration-200 whitespace-nowrap ${
                   active
                     ? 'bg-surface-container shadow-elevation-1 text-primary font-semibold'
                     : 'text-on-surface-variant hover:text-on-surface hover:bg-surface-container/60'
                 }`}
               >
-                <span className="material-symbols-outlined text-xl">{tab.icon}</span>
-                <span className="hidden sm:inline">{t(tab.labelKey)}</span>
+                <span className="material-symbols-outlined text-xl leading-none">{tab.icon}</span>
+                <span>{t(tab.labelKey)}</span>
               </Link>
             );
           })}

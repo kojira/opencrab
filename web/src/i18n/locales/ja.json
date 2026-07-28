@@ -18,6 +18,7 @@
   "common.delete": "削除",
   "common.edit": "編集",
   "common.search": "検索",
+  "common.refresh": "再読み込み",
   "common.send": "送信",
   "common.optional": "任意",
   "common.create": "作成",
