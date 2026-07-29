@@ -212,7 +212,14 @@ impl NostaroCli {
             .context("failed to run nostaro")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("nostaro failed ({}): {}", output.status, stderr.trim());
+            // config パース失敗時、nostaro は config 先頭行（`secret_key = "nsec1..."`）を
+            // stderr にエコーする。そのまま anyhow エラー/ログへ載せると平文 nsec が漏れる
+            // ため、秘密材料をマスクしてから載せる（#262 セキュリティ所見）。
+            anyhow::bail!(
+                "nostaro failed ({}): {}",
+                output.status,
+                mask_secrets(stderr.trim())
+            );
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
@@ -422,6 +429,53 @@ fn sanitize_key_stem(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
+/// nostaro の stderr/エラー文字列から秘密材料をマスクする。
+///
+/// config パース失敗時、nostaro は config 先頭行（`secret_key = "nsec1..."`）を stderr に
+/// エコーする。これを anyhow エラーやログへ載せると平文の秘密鍵が漏れるため、載せる前に
+/// (1) `secret_key = ...` 行の値、(2) 文字列中の任意の `nsec1...`（bech32）トークンを
+/// 伏せ字へ置換する（#262）。regex 依存を持ち込まないよう手書きで処理する。
+fn mask_secrets(input: &str) -> String {
+    let mut lines: Vec<String> = input
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("secret_key") {
+                let indent = &line[..line.len() - trimmed.len()];
+                format!("{indent}secret_key = \"<redacted>\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    for line in &mut lines {
+        *line = redact_nsec_tokens(line);
+    }
+    lines.join("\n")
+}
+
+/// 文字列中の `nsec1<bech32...>` トークンをすべて `nsec1<redacted>` に置換する。
+fn redact_nsec_tokens(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if s[i..].starts_with("nsec1") {
+            out.push_str("nsec1<redacted>");
+            i += "nsec1".len();
+            // bech32 データ部（小文字英数字）を読み飛ばして落とす。
+            while i < bytes.len() && (bytes[i] as char).is_ascii_alphanumeric() {
+                i += 1;
+            }
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 /// config TOML の `secret_key = "..."` 行だけを差し替える（relays/blossom 等は保つ）。
 /// 該当行が無ければ先頭に追加する。値は TOML を壊す文字を除去してから埋め込む。
 fn replace_secret_key_line(toml: &str, nsec: &str) -> String {
@@ -629,6 +683,33 @@ mod tests {
             "default_relays missing: {content}"
         );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    #[test]
+    fn test_mask_secrets_redacts_nsec_and_secret_key() {
+        // config パース失敗時、nostaro が stderr へエコーする先頭行を模す。
+        let stderr = "Error: TOML parse error at line 1, column 1\n  \
+                      secret_key = \"nsec1supersecretkeymaterial\"\nmissing field `default_relays`";
+        let masked = mask_secrets(stderr);
+        assert!(
+            !masked.contains("nsec1supersecretkeymaterial"),
+            "nsec leaked: {masked}"
+        );
+        assert!(
+            masked.contains("<redacted>"),
+            "no redaction marker: {masked}"
+        );
+        // 非秘密の診断情報は残す。
+        assert!(masked.contains("missing field `default_relays`"));
+        assert!(masked.contains("TOML parse error"));
+        // 行途中に現れる nsec トークンも落とす。
+        let inline = mask_secrets("prefix nsec1deadbeefcafe suffix");
+        assert!(
+            !inline.contains("nsec1deadbeefcafe"),
+            "inline leaked: {inline}"
+        );
+        assert!(inline.contains("nsec1<redacted>"));
+        assert!(inline.contains("prefix") && inline.contains("suffix"));
     }
 
     #[test]
