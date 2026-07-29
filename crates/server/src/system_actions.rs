@@ -300,6 +300,28 @@ impl SystemGatewayActions {
                     "properties": {}
                 }),
             },
+            // bootstrap ツール（鍵不要）。生成鍵を本鍵として採用し、**未設定でも自力で
+            // 接続する**（採用時に bounded な self-mention フィルタを自動設定して起動）。
+            // transport 非依存で全ターンに露出する。bridge の `TRUSTED_ONLY_ACTIONS` に
+            // より未信頼の会話ターン（caller=Agent）には出さない（乗っ取り防止 / #264）。
+            GatewayActionDef {
+                name: "nostr_switch_identity".to_string(),
+                description: "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの\
+                              **本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿は\
+                              その鍵で行われる。まだ Nostr に接続していなければ、この操作で自動的に\
+                              接続まで行う（自分への言及を購読する最小フィルタを設定して起動する）。\
+                              npub には nostr_generate_key で作った鍵の npub を渡す。重要な操作なので\
+                              owner（信頼ユーザー）からの依頼時のみ実行される。秘密鍵は扱わない\
+                              （npub 参照のみ）。"
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "npub": {"type": "string", "description": "本鍵に採用する、生成済み鍵の npub。"}
+                    },
+                    "required": ["npub"]
+                }),
+            },
             // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
             // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
             // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
@@ -884,6 +906,49 @@ impl SystemGatewayActions {
                 error: None,
             },
             Err(e) => err(format!("nostr_list_keys 失敗: {e}")),
+        }
+    }
+
+    /// bootstrap 用の identity 採用（#264）。生成鍵を本鍵として採用し、未接続なら
+    /// **自己ブートストラップで接続まで行う**（bounded な self-mention フィルタを自動設定
+    /// して起動）。実体は Nostr transport の `identity_provisioning` capability。
+    ///
+    /// 稼働の有無は capability の内側で判定する（稼働中はホットスワップ、未稼働は bootstrap
+    /// 起動＝接続）。**秘密鍵(nsec)は扱わない**（npub 参照のみ・応答にも出さない）。
+    async fn nostr_switch_identity(
+        &self,
+        args: &Value,
+        ctx: &GatewayCallContext,
+    ) -> GatewayActionResult {
+        let Some(npub) = args
+            .get("npub")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return err("npub パラメータが必要です".to_string());
+        };
+        // Nostr transport の採用 capability を引く。登録が無ければ Nostr 非対応構成。
+        let Some(provisioning) = self
+            .state
+            .gateways
+            .get(opencrab_actions::gateway_kinds::NOSTR)
+            .and_then(|gw| gw.identity_provisioning())
+        else {
+            return err(
+                "この環境では Nostr identity の採用は利用できません（Nostr 未構成）".to_string(),
+            );
+        };
+        match provisioning.adopt_identity(&ctx.agent_id, npub).await {
+            Ok(adopted) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "npub": adopted,
+                    "note": "この鍵を本鍵として採用しました。未接続だった場合は自分への言及を購読する最小フィルタで Nostr に接続済みです。以後の投稿・公開ノート受信はこの identity で行われます。秘密鍵は扱っていません。",
+                })),
+                error: None,
+            },
+            Err(e) => err(format!("nostr_switch_identity 失敗: {e}")),
         }
     }
 
@@ -1689,6 +1754,9 @@ impl GatewayActions for SystemGatewayActions {
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
             // bootstrap 鍵一覧（鍵未設定でも露出）。生成鍵の npub のみ返す（nsec 非返却）。
             "nostr_list_keys" => Self::nostr_list_keys(ctx),
+            // bootstrap identity 採用（鍵未設定でも露出）。未接続なら self-mention フィルタで
+            // 自動接続する。inner より先に own が処理する（#264）。
+            "nostr_switch_identity" => self.nostr_switch_identity(args, ctx).await,
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
             // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
@@ -1938,6 +2006,23 @@ mod tests {
         assert!(
             d.parameters.get("required").is_none(),
             "nostr_list_keys must not require any argument"
+        );
+    }
+
+    /// #264: nostr_switch_identity must be a *own* (bootstrap) definition so an
+    /// unconfigured agent can adopt a generated key and self-connect on any turn
+    /// (not only when a nostr watch loop is already running). It requires `npub`.
+    #[test]
+    fn nostr_switch_identity_is_always_exposed() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "nostr_switch_identity")
+            .expect("nostr_switch_identity must be an own (always-exposed) definition (#264)");
+        let required = d.parameters["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|v| v == "npub"),
+            "nostr_switch_identity must require npub"
         );
     }
 

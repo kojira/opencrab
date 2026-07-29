@@ -203,6 +203,10 @@ impl NostaroCli {
     /// `sanitize_key_stem`（英数字のみ）で焼いたもの。bech32 の npub は英数字だけなので
     /// stem がそのまま npub になる。`generated-keys/` ディレクトリが無ければ空の Vec。
     /// `.config.toml`（`from` 送信用の一時 config）等、`.nsec` 以外は無視する。
+    ///
+    /// **堅牢化（#265 レビュー）**: 通常ファイルのみ対象にし（ディレクトリ / symlink は
+    /// 除外）、stem が `npub1` で始まるものだけを npub として返す（`sanitize_key_stem` の
+    /// hex fallback で焼かれた非 npub な `.nsec` を採用候補に混ぜない）。
     pub fn list_generated_keys(agent_id: &str) -> Result<Vec<String>> {
         let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
         let entries = match std::fs::read_dir(&dir) {
@@ -215,13 +219,20 @@ impl NostaroCli {
         };
         let mut npubs = Vec::new();
         for entry in entries.flatten() {
+            // 通常ファイルのみ（ディレクトリ / symlink を列挙しない）。file_type が取れ
+            // なければスキップ（本文は開かない）。
+            match entry.file_type() {
+                Ok(ft) if ft.is_file() => {}
+                _ => continue,
+            }
             let path = entry.path();
             // `<npub>.nsec` だけを対象にする（拡張子で判定。nsec 本文は開かない）。
             if path.extension().and_then(|e| e.to_str()) != Some("nsec") {
                 continue;
             }
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if !stem.is_empty() {
+                // npub の体裁（`npub1...`）のものだけ採用候補として返す。
+                if stem.starts_with("npub1") {
                     npubs.push(stem.to_string());
                 }
             }
@@ -726,6 +737,41 @@ mod tests {
         for entry in &npubs {
             assert!(!entry.contains("nsec"), "nsec が一覧に漏れている: {entry}");
         }
+
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#265 レビュー堅牢化] ディレクトリ / 非 npub な `.nsec` は列挙しない。
+    #[test]
+    fn test_list_generated_keys_ignores_dirs_and_non_npub() {
+        let agent = "agent-list-keys-robust-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let dir = NostaroCli::agent_nostr_dir(agent)
+            .unwrap()
+            .join("generated-keys");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 正規の npub 鍵。
+        NostaroCli::save_generated_key(
+            agent,
+            &GeneratedKey {
+                nsec: "nsec1ok".to_string(),
+                npub: "npub1good".to_string(),
+                pubkey: "deadbeef".to_string(),
+            },
+        )
+        .unwrap();
+        // `.nsec` 拡張子だが npub でない（hex fallback を模す）→ 除外。
+        std::fs::write(dir.join("deadbeefhex.nsec"), "nsec1hex").unwrap();
+        // `.nsec` 拡張子のディレクトリ → 通常ファイルでないので除外。
+        std::fs::create_dir_all(dir.join("weird.nsec")).unwrap();
+
+        let npubs = NostaroCli::list_generated_keys(agent).unwrap();
+        assert_eq!(
+            npubs,
+            vec!["npub1good".to_string()],
+            "npub1 で始まる通常ファイルだけを返す"
+        );
 
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }

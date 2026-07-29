@@ -29,7 +29,8 @@ pub mod run_request;
 pub use a2ui::{send_ui, send_ui_definition};
 pub use agent_gateway::{
     is_start_declined, kinds as gateway_kinds, AgentGatewayLifecycle, AgentGatewayRegistry,
-    GatewayKeyProvisioning, ProvisionedKey, SharedAgentGateway, StartDeclined,
+    GatewayIdentityProvisioning, GatewayKeyProvisioning, ProvisionedKey, SharedAgentGateway,
+    StartDeclined,
 };
 pub use agent_runtime::AgentRuntime;
 pub use bridge::{
