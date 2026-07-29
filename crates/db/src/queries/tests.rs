@@ -2927,7 +2927,9 @@ fn agent_heartbeat_disabled_row_stays_disabled_and_is_per_agent() {
 fn list_agents_with_heartbeat_enabled_returns_only_enabled_rows() {
     let conn = crate::init_memory().unwrap();
     // 未設定なら空。
-    assert!(list_agents_with_heartbeat_enabled(&conn).unwrap().is_empty());
+    assert!(list_agents_with_heartbeat_enabled(&conn)
+        .unwrap()
+        .is_empty());
 
     // enabled = true（間隔あり）。
     upsert_agent_heartbeat_config(
