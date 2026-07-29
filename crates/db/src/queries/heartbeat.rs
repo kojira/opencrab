@@ -247,6 +247,21 @@ pub fn resolve_agent_heartbeat(
     }
 }
 
+/// `agent_heartbeat_config` で **enabled = 1** のエージェント id を列挙する（#238）。
+///
+/// 発火ループの起動対象を「エージェント単位ハートビートに opt-in 済みのエージェント」
+/// へ広げるために使う。ここでは `enabled` 行を素直に返すだけで、間隔の妥当性
+/// （壊れた値・下限クランプ）判定は発火時の [`resolve_agent_heartbeat`] が握る
+/// （二段構え）。`interval_secs` が壊れていても「ループは起動し、発火は fail-closed で
+/// 止まる」ので、ここで弾く必要はない。
+pub fn list_agents_with_heartbeat_enabled(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id FROM agent_heartbeat_config WHERE enabled = 1 ORDER BY agent_id",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// ハートビート指示の監査ログ1件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatInstructionsAuditRow {

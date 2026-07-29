@@ -26,23 +26,25 @@
 //!
 //! 「Discord も登録簿へ寄せて共有 http を無くす」統一は別 issue（フォローアップ）。
 
-use opencrab_actions::{gateway_kinds, AgentGatewayRegistry};
-use opencrab_server::AppState;
+use opencrab_actions::{chunk_text, gateway_kinds, AgentGatewayRegistry};
 
 /// ハートビート発話を配送する（段階3 PR-A / #246）。
 ///
 /// 手順1（登録簿・非 Discord）で配れなければ手順2（Discord 共有 http・現行不変）へ落ちる。
 /// 呼び出し側は本関数を `tokio::spawn` の中で `.await` し、発火 tick を塞がない
 /// （fire-and-forget を維持。#178 系）。
+///
+/// 第 1 引数は `&AppState` ではなく `&AgentGatewayRegistry` を直接受ける（本関数が使うのは
+/// `state.gateways` だけ。AppState 構築を避けて結線を単体テスト可能にするため / PR-C）。
 pub(crate) async fn deliver_heartbeat_speech(
-    state: &AppState,
+    gateways: &AgentGatewayRegistry,
     discord_http: &crate::DiscordHttpArc,
     agent_id: &str,
     channel_target: &str,
     content: &str,
 ) {
     // 手順1: 非 Discord の登録 transport を registry 経由で試す。
-    if deliver_via_non_discord_registry(&state.gateways, agent_id, channel_target, content).await {
+    if deliver_via_non_discord_registry(gateways, agent_id, channel_target, content).await {
         return;
     }
     // 手順2: 既存の Discord 共有 http 経路（現行 main.rs の直叩きと同一）。
@@ -82,22 +84,37 @@ async fn deliver_via_non_discord_registry(
         };
         // ある transport が引き受けた時点で**それに委ねる**。送信に失敗しても他 transport
         // や Discord へ流し直さない（別チャンネルへの二重発話を避ける）。
-        match delivery.send_text(target, content).await {
-            Ok(()) => {
-                tracing::info!(
-                    agent_id = %agent_id,
-                    kind,
-                    target,
-                    "Heartbeat spoke via non-Discord transport"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    agent_id = %agent_id,
-                    kind,
-                    target,
-                    "Heartbeat send via non-Discord transport failed: {e}"
-                );
+        //
+        // transport の助言 `chunk_limit()` で content を分割してから 1 チャンクずつ送る。
+        // 長文の Nostr 発話がリレーの 1 イベント上限を超えて publish ごと失敗するのを防ぐ
+        // （peer_review が `build_part_messages` でやっているのと同じ発想。ただし heartbeat
+        // 発話は `part X/N` framing を付けない生分割）。1 チャンクでも失敗したらそこで打ち
+        // 切る（後続チャンクを送っても文脈が壊れるだけで、Discord へ流し直しもしない）。
+        let limit = delivery.chunk_limit();
+        let chunks = chunk_text(content, limit);
+        for (i, chunk) in chunks.iter().enumerate() {
+            match delivery.send_text(target, chunk).await {
+                Ok(()) => {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        kind,
+                        target,
+                        part = i + 1,
+                        parts = chunks.len(),
+                        "Heartbeat spoke via non-Discord transport"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        kind,
+                        target,
+                        part = i + 1,
+                        parts = chunks.len(),
+                        "Heartbeat send via non-Discord transport failed: {e}"
+                    );
+                    break;
+                }
             }
         }
         return true;
@@ -135,9 +152,16 @@ async fn deliver_via_discord_shared_http(
             tracing::info!(agent_id = %agent_id, channel_id = %channel_target, "Heartbeat Speak (discord disabled): {}", content);
         }
     } else {
-        tracing::debug!(
+        // 手順1（非 Discord registry）も手順2（Discord 共有 http）も配れなかった＝
+        // 発火したのに発話先が無い。特に AgentScoped で opt-in 済みだが Nostr 等が未稼働／
+        // Discord channel も未設定（channel_target が空/無効）のときに起きる。沈黙で発話を
+        // 見失わないよう WARN で可視化する。Nostr 等で正常に配れた場合は手順1 で早期 return
+        // するのでここへは来ず、Discord 送信成功時も上の分岐で info を出すのでここへは来ない
+        // （＝この WARN は「取りこぼし」時のみ出る）。
+        tracing::warn!(
             agent_id = %agent_id,
-            "Heartbeat Speak: no Discord http or invalid channel_id"
+            channel_target = %channel_target,
+            "Heartbeat: 発火したが発話先が無い（transport 未稼働 / channel 未設定・空/無効）。発話を取りこぼした"
         );
     }
 }
@@ -157,9 +181,10 @@ mod tests {
     /// 記録された送信（target, text）の共有ログ。
     type CallLog = Arc<Mutex<Vec<(String, String)>>>;
 
-    /// 送信を記録するだけの配送口（ネットワークに出ない）。
+    /// 送信を記録するだけの配送口（ネットワークに出ない）。`chunk_limit` は注入可能。
     struct SpyDelivery {
         calls: CallLog,
+        chunk_limit: usize,
     }
 
     #[async_trait]
@@ -171,7 +196,7 @@ mod tests {
             format!("@{user_id}")
         }
         fn chunk_limit(&self) -> usize {
-            2000
+            self.chunk_limit
         }
         async fn send_text(&self, target: &str, text: &str) -> Result<(), String> {
             self.calls
@@ -238,9 +263,14 @@ mod tests {
     }
 
     fn spy() -> (CallLog, Arc<dyn TextDelivery>) {
+        spy_with_limit(2000)
+    }
+
+    fn spy_with_limit(chunk_limit: usize) -> (CallLog, Arc<dyn TextDelivery>) {
         let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
         let delivery: Arc<dyn TextDelivery> = Arc::new(SpyDelivery {
             calls: calls.clone(),
+            chunk_limit,
         });
         (calls, delivery)
     }
@@ -332,5 +362,78 @@ mod tests {
         deliver_via_discord_shared_http(&none_http, "crab", "123456789", "hi").await;
         // 不正な channel（数値でない）。
         deliver_via_discord_shared_http(&none_http, "crab", "not-a-number", "hi").await;
+    }
+
+    /// (e) 長文は transport の `chunk_limit()` で分割され、複数回 `send_text` される。
+    /// 各チャンクは上限以下で、連結すると元の content に戻る（無損失分割）。
+    #[tokio::test]
+    async fn long_content_is_split_by_chunk_limit_into_multiple_sends() {
+        let (calls, delivery) = spy_with_limit(5);
+        let registry = AgentGatewayRegistry::new();
+        registry.register(Arc::new(FakeGateway {
+            kind: gateway_kinds::NOSTR,
+            running: vec!["crab".to_string()],
+            delivery: Some(delivery),
+        }));
+
+        // 13 文字（マルチバイト混在）→ 上限 5 で 3 チャンク（5 + 5 + 3）。
+        let content = "あいうえおかきくけこさしす";
+        let handled =
+            deliver_via_non_discord_registry(&registry, "crab", "note-target", content).await;
+        assert!(handled);
+
+        let sent = calls.lock().unwrap().clone();
+        assert_eq!(sent.len(), 3, "上限 5・13 文字 = 3 チャンク送信");
+        for (target, chunk) in &sent {
+            assert_eq!(target, "note-target", "全チャンク同じ宛先");
+            assert!(
+                chunk.chars().count() <= 5,
+                "各チャンクは chunk_limit 以下: {chunk:?}"
+            );
+        }
+        let joined: String = sent.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(joined, content, "分割は無損失（連結で元に戻る）");
+    }
+
+    /// (f) 結線: `deliver_heartbeat_speech` は手順1（非 Discord registry）が引き受けたら
+    /// **手順2（Discord 共有 http）へ進まない**。稼働中の Nostr spy が content を受け取り、
+    /// 早期 return するので Discord へ流れない（別チャンネル二重発話を避ける核心）。
+    #[tokio::test]
+    async fn deliver_heartbeat_speech_stops_after_step1_handles_it() {
+        let (calls, delivery) = spy();
+        let registry = AgentGatewayRegistry::new();
+        registry.register(Arc::new(FakeGateway {
+            kind: gateway_kinds::NOSTR,
+            running: vec!["crab".to_string()],
+            delivery: Some(delivery),
+        }));
+        // http は None。もし手順2 へ流れても panic はしないが、ここでは手順1 が
+        // 引き受けるので Discord には一切触れない。
+        let none_http: crate::DiscordHttpArc = Arc::new(std::sync::Mutex::new(None));
+
+        deliver_heartbeat_speech(&registry, &none_http, "crab", "note-target", "自律発話").await;
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("note-target".to_string(), "自律発話".to_string())],
+            "手順1 が content を配送し、手順2 へは進まない"
+        );
+    }
+
+    /// (f) 逆側: 稼働中の非 Discord transport が居なければ手順2（Discord 共有 http）へ落ちる。
+    /// http 無しでも panic せず、registry 側 spy には何も渡らない。
+    #[tokio::test]
+    async fn deliver_heartbeat_speech_falls_through_to_discord_when_step1_declines() {
+        let (calls, _delivery) = spy();
+        // 空 registry（手順1 は誰も引き受けない）。
+        let registry = AgentGatewayRegistry::new();
+        let none_http: crate::DiscordHttpArc = Arc::new(std::sync::Mutex::new(None));
+
+        deliver_heartbeat_speech(&registry, &none_http, "crab", "123456789", "hi").await;
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "手順1 が居なければ registry spy には渡らない（手順2 の Discord 経路へ）"
+        );
     }
 }

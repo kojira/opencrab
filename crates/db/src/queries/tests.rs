@@ -2920,6 +2920,68 @@ fn agent_heartbeat_disabled_row_stays_disabled_and_is_per_agent() {
     );
 }
 
+/// `list_agents_with_heartbeat_enabled` は enabled = 1 の行だけを集合として返す。
+/// 無効行・未設定は含めない。壊れた interval でも enabled なら列挙する（発火可否は
+/// resolve が握る二段構え）。
+#[test]
+fn list_agents_with_heartbeat_enabled_returns_only_enabled_rows() {
+    let conn = crate::init_memory().unwrap();
+    // 未設定なら空。
+    assert!(list_agents_with_heartbeat_enabled(&conn)
+        .unwrap()
+        .is_empty());
+
+    // enabled = true（間隔あり）。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "on-with-interval".to_string(),
+            enabled: true,
+            interval_secs: Some(900),
+        },
+    )
+    .unwrap();
+    // enabled = true（間隔 None = 既定に従う）。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "on-default-interval".to_string(),
+            enabled: true,
+            interval_secs: None,
+        },
+    )
+    .unwrap();
+    // enabled = false（除外される）。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "off".to_string(),
+            enabled: false,
+            interval_secs: Some(600),
+        },
+    )
+    .unwrap();
+    // enabled = true だが壊れた interval（それでも列挙する。発火は resolve が止める）。
+    conn.execute(
+        "INSERT INTO agent_heartbeat_config (agent_id, enabled, interval_secs, updated_at)
+         VALUES ('on-broken-interval', 1, 0, '2026-01-01')",
+        [],
+    )
+    .unwrap();
+
+    let mut got = list_agents_with_heartbeat_enabled(&conn).unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            "on-broken-interval".to_string(),
+            "on-default-interval".to_string(),
+            "on-with-interval".to_string(),
+        ],
+        "enabled = 1 の行だけ（無効・未設定は除外、壊れた間隔でも enabled なら含む）"
+    );
+}
+
 /// 壊れた値（0 / 負値）は**無効**として扱う。下限未満は下限へ引き上げる。
 #[test]
 fn agent_heartbeat_broken_interval_disables_and_below_floor_clamps_up() {
