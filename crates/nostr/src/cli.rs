@@ -212,7 +212,14 @@ impl NostaroCli {
             .context("failed to run nostaro")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("nostaro failed ({}): {}", output.status, stderr.trim());
+            // config パース失敗時、nostaro は config 先頭行（`secret_key = "nsec1..."`）を
+            // stderr にエコーする。そのまま anyhow エラー/ログへ載せると平文 nsec が漏れる
+            // ため、秘密材料をマスクしてから載せる（#262 セキュリティ所見）。
+            anyhow::bail!(
+                "nostaro failed ({}): {}",
+                output.status,
+                mask_secrets(stderr.trim())
+            );
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
@@ -344,9 +351,14 @@ impl NostaroCli {
             .map(|r| format!("\"{}\"", esc(r)))
             .collect::<Vec<_>>()
             .join(", ");
+        // nostaro 0.3.0 は `relays` と `default_relays` の**両方**を必須フィールドとして
+        // 要求する（どちらか一方だけだと `missing field ...` で config パースが失敗し、
+        // post/watch/pubkey など Nostr 全操作が止まる。#262）。opencrab は送信/受信リレーを
+        // 常にフラグで明示するため両者は同値でよい（config 側 default に依存しない）。
         let mut toml = format!(
-            "secret_key = \"{}\"\nrelays = [{}]\n",
+            "secret_key = \"{}\"\nrelays = [{}]\ndefault_relays = [{}]\n",
             esc(secret_key),
+            relay_list,
             relay_list
         );
         if let Some(b) = blossom_server.filter(|s| !s.is_empty()) {
@@ -415,6 +427,61 @@ impl NostaroCli {
 /// パストラバーサル/インジェクション防止。空文字は呼び出し側で fallback/拒否する。
 fn sanitize_key_stem(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// nostaro の stderr/エラー文字列から秘密材料をマスクする。
+///
+/// config パース失敗時、nostaro は config 先頭行（`secret_key = "nsec1..."`）を stderr に
+/// エコーする。これを anyhow エラーやログへ載せると平文の秘密鍵が漏れるため、載せる前に
+/// **多層防御**で伏せる（#262）:
+/// - 第1層: `secret_key` を含む行は行ごと伏せる。nostaro は行番号ガター付き
+///   （`1 | secret_key = "..."`）でエコーするため `starts_with` では発火しない。
+///   `contains` にして、ガター付き行も、nsec でない hex 秘密（`secret_key = "<64hex>"`）も
+///   行ごと落とす。潰しすぎても秘密漏れ側には倒れない。
+/// - 第2層: 文字列中の任意の `nsec1...`（bech32）トークンを伏せ字へ置換する。
+///
+/// `secret_key` を含まない診断行（`missing field ...` / `TOML parse error` 等）は残す。
+/// regex 依存を持ち込まないよう手書きで処理する。
+fn mask_secrets(input: &str) -> String {
+    let mut lines: Vec<String> = input
+        .lines()
+        .map(|line| {
+            if line.contains("secret_key") {
+                // ガター（`1 | `）等の前置きは残し、`secret_key` 以降の値部分だけを伏せる。
+                // これで行番号など診断に有用な前置きを保ちつつ、秘密値は確実に落とす。
+                let idx = line.find("secret_key").unwrap();
+                format!("{}secret_key = \"<redacted>\"", &line[..idx])
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    for line in &mut lines {
+        *line = redact_nsec_tokens(line);
+    }
+    lines.join("\n")
+}
+
+/// 文字列中の `nsec1<bech32...>` トークンをすべて `nsec1<redacted>` に置換する。
+fn redact_nsec_tokens(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if s[i..].starts_with("nsec1") {
+            out.push_str("nsec1<redacted>");
+            i += "nsec1".len();
+            // bech32 データ部（小文字英数字）を読み飛ばして落とす。
+            while i < bytes.len() && (bytes[i] as char).is_ascii_alphanumeric() {
+                i += 1;
+            }
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 /// config TOML の `secret_key = "..."` 行だけを差し替える（relays/blossom 等は保つ）。
@@ -594,6 +661,101 @@ mod tests {
         let out2 = replace_secret_key_line("relays = [\"wss://a\"]\n", "nsec1x");
         assert!(out2.starts_with("secret_key = \"nsec1x\""));
         assert!(out2.contains("relays"));
+    }
+
+    #[test]
+    fn test_materialize_config_writes_default_relays() {
+        // nostaro 0.3.0 は `relays` と `default_relays` の両方を必須とする（#262）。
+        // materialize_config の出力に両フィールドが含まれ、同値であることを確認する。
+        let agent = "agent-materialize-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let path = NostaroCli::materialize_config(
+            agent,
+            "nsec1abc",
+            &[
+                "wss://x.kojira.io".to_string(),
+                "wss://relay.two".to_string(),
+            ],
+            None,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("secret_key = \"nsec1abc\""));
+        // relays と default_relays の両方が同じリレー集合で書かれる。
+        assert!(
+            content.contains("relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            "relays missing: {content}"
+        );
+        assert!(
+            content.contains("default_relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            "default_relays missing: {content}"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    #[test]
+    fn test_mask_secrets_redacts_nsec_and_secret_key() {
+        // config パース失敗時、nostaro が stderr へエコーする先頭行を模す。
+        let stderr = "Error: TOML parse error at line 1, column 1\n  \
+                      secret_key = \"nsec1supersecretkeymaterial\"\nmissing field `default_relays`";
+        let masked = mask_secrets(stderr);
+        assert!(
+            !masked.contains("nsec1supersecretkeymaterial"),
+            "nsec leaked: {masked}"
+        );
+        assert!(
+            masked.contains("<redacted>"),
+            "no redaction marker: {masked}"
+        );
+        // 非秘密の診断情報は残す。
+        assert!(masked.contains("missing field `default_relays`"));
+        assert!(masked.contains("TOML parse error"));
+        // 行途中に現れる nsec トークンも落とす。
+        let inline = mask_secrets("prefix nsec1deadbeefcafe suffix");
+        assert!(
+            !inline.contains("nsec1deadbeefcafe"),
+            "inline leaked: {inline}"
+        );
+        assert!(inline.contains("nsec1<redacted>"));
+        assert!(inline.contains("prefix") && inline.contains("suffix"));
+    }
+
+    #[test]
+    fn test_mask_secrets_handles_gutter_and_hex_forms() {
+        // nostaro 0.3.0 の実際のガター付きエラー出力形（行番号 + `|`）を模す。
+        // 値は明らかにダミー（実鍵ではない）。
+        let gutter = "error: TOML parse error at line 1, column 1\n  \
+                      |\n1 | secret_key = \"nsec1dummydummydummydummydummy\"\n  \
+                      | ^^^^^^^^^^^^\nmissing field `default_relays`";
+        let masked = mask_secrets(gutter);
+        assert!(
+            !masked.contains("nsec1dummydummydummydummydummy"),
+            "gutter nsec leaked: {masked}"
+        );
+        // 第1層（行伏せ）で secret_key 行の値そのものが残らない。
+        assert!(masked.contains("secret_key = \"<redacted>\""));
+        // 行番号ガターなど診断の前置きと、別行の診断情報は保持。
+        assert!(masked.contains("1 | secret_key"));
+        assert!(masked.contains("missing field `default_relays`"));
+
+        // nsec でない 64hex 秘密（bech32 でないので第2層に掛からない）も第1層で行ごと落とす。
+        let hex_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let hex_line = format!("1 | secret_key = \"{hex_secret}\"");
+        let masked_hex = mask_secrets(&hex_line);
+        assert!(
+            !masked_hex.contains(hex_secret),
+            "hex secret leaked: {masked_hex}"
+        );
+        assert!(masked_hex.contains("secret_key = \"<redacted>\""));
+
+        // `secret_key` を含んでも秘密値でない診断行は潰しすぎるが漏れ側には倒れない。
+        // 少なくとも他の診断行は残ることを確認（過剰マスクで全滅しない）。
+        let mixed =
+            "note: unknown field `foo`\nsecret_key = \"nsec1dummy\"\nhelp: add default_relays";
+        let masked_mixed = mask_secrets(mixed);
+        assert!(masked_mixed.contains("unknown field `foo`"));
+        assert!(masked_mixed.contains("help: add default_relays"));
+        assert!(!masked_mixed.contains("nsec1dummy"));
     }
 
     #[test]
