@@ -181,6 +181,17 @@ impl GatewayActions for NostrGatewayActions {
                 }),
             },
             GatewayActionDef {
+                name: "nostr_list_keys".to_string(),
+                description: "自分が nostr_generate_key で生成した鍵の一覧（npub のみ）を返す。\
+                              nostr_switch_identity で本鍵に採用する候補を確認するのに使う。\
+                              返るのは公開情報の npub だけで、**秘密鍵(nsec)は一切返らない**。"
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            GatewayActionDef {
                 name: "nostr_switch_identity".to_string(),
                 description: "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの\
                               **本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿は\
@@ -301,6 +312,16 @@ impl GatewayActions for NostrGatewayActions {
                     Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
                 }
             }
+            "nostr_list_keys" => {
+                // 生成鍵の npub 一覧のみ返す（nsec は読まない・返さない）。
+                match NostaroCli::list_generated_keys(agent_id) {
+                    Ok(npubs) => ok(json!({
+                        "npubs": npubs,
+                        "note": "あなたが生成した鍵の npub 一覧です。nostr_switch_identity で本鍵に採用できます。秘密鍵(nsec)はサーバ内に安全に保存されており、ここには含まれません。",
+                    })),
+                    Err(e) => err(format!("nostr_list_keys 失敗: {e}")),
+                }
+            }
             "nostr_switch_identity" => {
                 let Some(npub) = arg_str(args, "npub") else {
                     return err("npub パラメータが必要です");
@@ -352,10 +373,62 @@ mod tests {
             "nostr_zap",
             "nostr_upload",
             "nostr_generate_key",
+            "nostr_list_keys",
             "nostr_switch_identity",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    /// `nostr_list_keys` は生成鍵の npub 一覧のみ返し、nsec を応答に出さない。
+    #[tokio::test]
+    async fn test_list_keys_returns_npubs_without_nsec() {
+        let agent = "agent-actions-list-keys";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        let a = NostrGatewayActions::new(NostaroCli::new());
+        let ctx = GatewayCallContext::for_agent(agent);
+
+        // 生成前は空配列。
+        let r = a.execute("nostr_list_keys", &json!({}), &ctx).await;
+        assert!(r.success);
+        assert_eq!(
+            r.data.as_ref().unwrap()["npubs"].as_array().unwrap().len(),
+            0
+        );
+
+        // 鍵を 2 本保存してから列挙する。
+        for npub in ["npub1keyone", "npub1keytwo"] {
+            NostaroCli::save_generated_key(
+                agent,
+                &crate::cli::GeneratedKey {
+                    nsec: format!("nsec1verysecret-{npub}"),
+                    npub: npub.to_string(),
+                    pubkey: "deadbeef".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        let r = a.execute("nostr_list_keys", &json!({}), &ctx).await;
+        assert!(r.success);
+        let data = r.data.unwrap();
+        let npubs: Vec<&str> = data["npubs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(npubs.contains(&"npub1keyone"));
+        assert!(npubs.contains(&"npub1keytwo"));
+        // 応答全体（note 含む）に nsec の実値が漏れないこと。
+        assert!(
+            !serde_json::to_string(&data)
+                .unwrap()
+                .contains("nsec1verysecret"),
+            "nsec が nostr_list_keys の応答に漏れている"
+        );
+
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     #[tokio::test]
