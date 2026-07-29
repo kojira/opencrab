@@ -248,6 +248,9 @@ pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
 ///   モデルが URL を載せられなくなる。
 /// - `nostr_switch_identity`: 送信ではないが「以後の全送信のアイデンティティを差し替える」。
 ///   親ターンの送信と順序が入れ替わると別 identity で投稿しかねないため inline に留める。
+/// - `nostr_list_keys`: 送信ではない純粋な読み取り（生成鍵の npub 一覧）。戻り値の一覧を
+///   同じターンで `nostr_switch_identity` の引数に使うのが通常の用法なので、background 化
+///   して結果を次ターンへ回さず inline に留める。
 ///
 /// 一方 `nostr_generate_key`（vanity 探索 = 長時間）は dispatch 対象に**残す**
 /// （これを background 化するのが S3a の主目的）。
@@ -262,6 +265,7 @@ pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
     "nostr_zap",
     "nostr_upload",
     "nostr_switch_identity",
+    "nostr_list_keys",
 ];
 
 /// Nostr gateway のツールのうち、**意図的に dispatch を許す**もの
@@ -369,6 +373,10 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     「送る」こと自体が応答なので background 化しない（ヘッダ + part X/N を
     //     順に投稿する配送で、部分失敗の通数を同ターンで返す契約でもある）。
     "request_peer_review",
+    // (5) 純粋な読み取り: 自分が生成した鍵の npub 一覧（bootstrap 用。`nostr_generate_key`
+    //     と対で、鍵未設定でも露出する）。戻り値の一覧を同ターンで `nostr_switch_identity`
+    //     の引数に使うので inline。nsec は返さない。
+    "nostr_list_keys",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -531,6 +539,11 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // 本鍵（アイデンティティ）の切替。外部ユーザーが勝手に乗っ取れないよう owner/
     // trusted のみ（inbound=Agent には一覧にも出さず実行もしない）。
     "nostr_switch_identity",
+    // 生成鍵の npub 一覧。nsec は返さないが、自分の鍵一覧は運用者/自分（caller=Owner の
+    // ターン: heartbeat / ダッシュボード / オーナー会話）だけが見ればよい情報で、外部
+    // ユーザー由来の会話ターン（caller=Agent）へ出す必要は無い。`nostr_switch_identity`
+    // と対で使う管理系ツールなので同じ trusted ゲートに揃える。
+    "nostr_list_keys",
 ];
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
@@ -1596,6 +1609,34 @@ mod tests {
             .await;
         assert!(r2.success, "Owner execution should reach the gateway");
         assert_eq!(r2.data["reached_gateway"], true);
+    }
+
+    /// #264: `nostr_list_keys` は trusted 限定（owner 限定ではない）。未信頼の会話ターン
+    /// （caller=Agent）には出さず実行もしないが、owner/co_agent/trusted_user のターンでは
+    /// 使える（heartbeat / ダッシュボード / オーナー会話は全て trusted 相当の caller）。
+    #[test]
+    fn test_nostr_list_keys_is_trusted_only() {
+        let p = tool_policy("nostr_list_keys");
+        assert!(p.trusted_only, "nostr_list_keys must be trusted_only");
+        assert!(
+            !p.owner_only,
+            "nostr_list_keys should be trusted_only, not owner_only（自分の鍵一覧は自分で見る）"
+        );
+
+        // caller=Agent は可視化されない（policy 表の権威を直接見る）。
+        let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
+        assert!(
+            !agent_exec.policy_allows("nostr_list_keys"),
+            "Agent（未信頼の外部会話ターン）は nostr_list_keys を使えない"
+        );
+        // caller=TrustedUser は使える。
+        let (_d2, trusted_ctx) = test_context_with_caller(CallerIdentity::TrustedUser);
+        let trusted_exec = BridgedExecutor::new(ActionDispatcher::new(), trusted_ctx);
+        assert!(
+            trusted_exec.policy_allows("nostr_list_keys"),
+            "TrustedUser は nostr_list_keys を使える"
+        );
     }
 
     /// 設定変更系（#116）は owner 限定であること（ポリシー表の権威）。

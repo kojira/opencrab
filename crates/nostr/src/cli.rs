@@ -196,6 +196,41 @@ impl NostaroCli {
         Ok(nsec.trim().to_string())
     }
 
+    /// このエージェントが生成した鍵（`generated-keys/<npub>.nsec`）の **npub 一覧**を返す。
+    ///
+    /// **秘密鍵(nsec)は読まない・返さない**（ファイル本文は一切開かず、ファイル名＝npub
+    /// のみを列挙する）。ファイル名の stem は `save_generated_key` が
+    /// `sanitize_key_stem`（英数字のみ）で焼いたもの。bech32 の npub は英数字だけなので
+    /// stem がそのまま npub になる。`generated-keys/` ディレクトリが無ければ空の Vec。
+    /// `.config.toml`（`from` 送信用の一時 config）等、`.nsec` 以外は無視する。
+    pub fn list_generated_keys(agent_id: &str) -> Result<Vec<String>> {
+        let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // ディレクトリ未作成（まだ 1 度も生成していない）＝空一覧。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to read key dir: {}", dir.display()))
+            }
+        };
+        let mut npubs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // `<npub>.nsec` だけを対象にする（拡張子で判定。nsec 本文は開かない）。
+            if path.extension().and_then(|e| e.to_str()) != Some("nsec") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if !stem.is_empty() {
+                    npubs.push(stem.to_string());
+                }
+            }
+        }
+        // 決定的な順序で返す（列挙順は OS 依存）。
+        npubs.sort();
+        Ok(npubs)
+    }
+
     /// 一発実行系（post/reply/dm/zap/upload）を既定 timeout 付きで走らせ stdout を返す。
     async fn run(&self, cmd: Command) -> Result<String> {
         self.run_with_timeout(cmd, self.timeout).await
@@ -645,6 +680,54 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_generated_keys_returns_npubs_only() {
+        let agent = "agent-list-keys-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        // 生成前（ディレクトリ未作成）は空一覧。
+        assert!(NostaroCli::list_generated_keys(agent).unwrap().is_empty());
+
+        // 複数鍵を保存する。
+        for npub in ["npub1alpha", "npub1bravo", "npub1charlie"] {
+            NostaroCli::save_generated_key(
+                agent,
+                &GeneratedKey {
+                    nsec: format!("nsec1secret-{npub}"),
+                    npub: npub.to_string(),
+                    pubkey: "deadbeef".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        // `from` 送信用の一時 config（`.config.toml`）が混ざっていても無視される。
+        let dir = NostaroCli::agent_nostr_dir(agent)
+            .unwrap()
+            .join("generated-keys");
+        std::fs::write(
+            dir.join("npub1alpha.config.toml"),
+            "secret_key = \"nsec1x\"",
+        )
+        .unwrap();
+
+        let npubs = NostaroCli::list_generated_keys(agent).unwrap();
+        assert_eq!(
+            npubs,
+            vec![
+                "npub1alpha".to_string(),
+                "npub1bravo".to_string(),
+                "npub1charlie".to_string()
+            ],
+            "npub 一覧（ソート済み）だけが返る"
+        );
+        // nsec 本文は 1 つも一覧に現れない。
+        for entry in &npubs {
+            assert!(!entry.contains("nsec"), "nsec が一覧に漏れている: {entry}");
+        }
+
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     #[test]

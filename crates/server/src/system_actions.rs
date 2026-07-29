@@ -285,6 +285,21 @@ impl SystemGatewayActions {
                     }
                 }),
             },
+            // bootstrap ツール（鍵不要）。`nostr_generate_key` と対で、生成した鍵の npub
+            // 一覧を返す（採用候補の確認）。transport 非依存で全ターンに露出する。
+            // owner 限定にはしないが、bridge の `TRUSTED_ONLY_ACTIONS` により未信頼の
+            // 会話ターン（caller=Agent）には出さない（`nostr_switch_identity` と同じ扱い）。
+            GatewayActionDef {
+                name: "nostr_list_keys".to_string(),
+                description: "自分が nostr_generate_key で生成した鍵の一覧（npub のみ）を返す。\
+                              nostr_switch_identity で本鍵に採用する候補を確認するのに使う。\
+                              返るのは公開情報の npub だけで、**秘密鍵(nsec)は一切返らない**。"
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
             // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
             // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
             // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
@@ -852,6 +867,23 @@ impl SystemGatewayActions {
                 Err(e) => err(format!("鍵は生成しましたが保存に失敗しました: {e}")),
             },
             Err(e) => err(format!("nostr_generate_key 失敗: {e}")),
+        }
+    }
+
+    /// bootstrap 用の鍵一覧（鍵未設定でも実行可能）。生成鍵（`generated-keys/<npub>.nsec`）の
+    /// **npub のみ**を返す。実体は `NostaroCli::list_generated_keys`（ファイル名だけを列挙し、
+    /// nsec 本文は開かない）。鍵生成と同じく transport の稼働を必要としない。
+    fn nostr_list_keys(ctx: &GatewayCallContext) -> GatewayActionResult {
+        match opencrab_nostr::NostaroCli::list_generated_keys(&ctx.agent_id) {
+            Ok(npubs) => GatewayActionResult {
+                success: true,
+                data: Some(json!({
+                    "npubs": npubs,
+                    "note": "あなたが生成した鍵の npub 一覧です。nostr_switch_identity で本鍵に採用できます。秘密鍵(nsec)はサーバ内に安全に保存されており、ここには含まれません。",
+                })),
+                error: None,
+            },
+            Err(e) => err(format!("nostr_list_keys 失敗: {e}")),
         }
     }
 
@@ -1655,6 +1687,8 @@ impl GatewayActions for SystemGatewayActions {
             "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
             // bootstrap 鍵生成（鍵未設定でも露出）。inner より先に own が処理する。
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
+            // bootstrap 鍵一覧（鍵未設定でも露出）。生成鍵の npub のみ返す（nsec 非返却）。
+            "nostr_list_keys" => Self::nostr_list_keys(ctx),
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
             // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
@@ -1887,6 +1921,23 @@ mod tests {
         assert!(
             d.parameters.get("required").is_none(),
             "nostr_generate_key must not require any argument"
+        );
+    }
+
+    /// #264: nostr_list_keys must also be a *own* (bootstrap) definition so the
+    /// agent can inspect its generated keys before adopting one, even when no
+    /// nostr gateway is running / no key is configured. It must not require args
+    /// and must not leak nsec (it only returns npubs).
+    #[test]
+    fn nostr_list_keys_is_always_exposed() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs
+            .iter()
+            .find(|d| d.name == "nostr_list_keys")
+            .expect("nostr_list_keys must be an own (always-exposed) definition (#264)");
+        assert!(
+            d.parameters.get("required").is_none(),
+            "nostr_list_keys must not require any argument"
         );
     }
 
