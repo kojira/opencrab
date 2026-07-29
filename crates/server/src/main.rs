@@ -121,6 +121,14 @@ fn heartbeat_firing_plan(
     }
 }
 
+/// 発火ループの sleep 周期（秒）を丸める（純粋関数）。0 は `heartbeat_loop` の
+/// `sleep(0)` = 0 秒周期のビジーループになるため下限 1 秒に丸める（運用者が
+/// `heartbeat_interval_secs = 0` を書いても最低 1 秒 sleep させる）。初期起動・reload の
+/// 両経路で同じ丸めを使う。
+fn heartbeat_loop_interval_secs(configured: u64) -> u64 {
+    configured.max(1)
+}
+
 /// 前回発火からの経過が `interval_secs` 以上かを判定する（純粋関数）。
 /// 未発火（`last` が `None`）なら常に発火。エージェント単位 tick も channel tick も同じ
 /// ゲートを使い、`interval_secs` に resolve の値を与えることで「保存済み間隔を実際に
@@ -991,8 +999,10 @@ async fn main() -> anyhow::Result<()> {
                 // core heartbeat_loop は config.enabled=false で即 return するため、起動する
                 // ループの enabled は true に倒す。個々の発火可否（グローバル無効下の未
                 // opt-in エージェントを黙らせる等）は callback 内で fail-closed に判定する。
+                // interval_secs は下限 1 秒に丸める（0 だと heartbeat_loop の sleep が 0 秒
+                // 周期のビジーループになる。運用者が 0 を書いても最低 1 秒 sleep させる）。
                 let config_clone = HeartbeatConfig {
-                    interval_secs: prev_config.interval_secs,
+                    interval_secs: heartbeat_loop_interval_secs(prev_config.interval_secs),
                     enabled: true,
                 };
                 let shutdown_rx = rx_tmpl.clone();
@@ -1053,8 +1063,9 @@ async fn main() -> anyhow::Result<()> {
                     let (tx, rx_tmpl) = watch::channel(false);
                     for agent_id in &heartbeat_agent_ids {
                         // core の early-return 回避のため enabled は true に倒す（初期起動と同じ）。
+                        // interval_secs は下限 1 秒に丸める（0 でビジーループ化を防ぐ・初期起動と同じ）。
                         let config_clone = HeartbeatConfig {
-                            interval_secs: new_config.interval_secs,
+                            interval_secs: heartbeat_loop_interval_secs(new_config.interval_secs),
                             enabled: true,
                         };
                         let shutdown_rx = rx_tmpl.clone();
@@ -1264,6 +1275,18 @@ mod tests {
             HeartbeatFiringPlan::None,
             "未 opt-in × グローバル無効 = 発火しない（挙動不変）"
         );
+    }
+
+    /// 指摘#4: 発火ループの sleep 周期は下限 1 秒に丸める（0 でビジーループ化しない）。
+    #[test]
+    fn loop_interval_floors_zero_to_one_second() {
+        assert_eq!(
+            heartbeat_loop_interval_secs(0),
+            1,
+            "0 は 0 秒 sleep のビジーループになるので 1 秒に丸める"
+        );
+        assert_eq!(heartbeat_loop_interval_secs(1), 1);
+        assert_eq!(heartbeat_loop_interval_secs(29), 29, "1 以上はそのまま");
     }
 
     /// (d) 間隔ゲート: 未発火なら常に発火。経過が interval 以上で発火、未満はスキップ。
