@@ -152,9 +152,16 @@ async fn deliver_via_discord_shared_http(
             tracing::info!(agent_id = %agent_id, channel_id = %channel_target, "Heartbeat Speak (discord disabled): {}", content);
         }
     } else {
-        tracing::debug!(
+        // 手順1（非 Discord registry）も手順2（Discord 共有 http）も配れなかった＝
+        // 発火したのに発話先が無い。特に AgentScoped で opt-in 済みだが Nostr 等が未稼働／
+        // Discord channel も未設定（channel_target が空/無効）のときに起きる。沈黙で発話を
+        // 見失わないよう WARN で可視化する。Nostr 等で正常に配れた場合は手順1 で早期 return
+        // するのでここへは来ず、Discord 送信成功時も上の分岐で info を出すのでここへは来ない
+        // （＝この WARN は「取りこぼし」時のみ出る）。
+        tracing::warn!(
             agent_id = %agent_id,
-            "Heartbeat Speak: no Discord http or invalid channel_id"
+            channel_target = %channel_target,
+            "Heartbeat: 発火したが発話先が無い（transport 未稼働 / channel 未設定・空/無効）。発話を取りこぼした"
         );
     }
 }
