@@ -83,6 +83,103 @@ fn heartbeat_run_request(
     )
 }
 
+/// エージェント単位 tick（channel を持たない発話）のプロンプト内呼称。
+/// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
+const HEARTBEAT_AGENT_SCOPED_LABEL: &str = "（自律ハートビート）";
+
+/// tick の発火計画（#238 の precedence）。純粋関数 [`heartbeat_firing_plan`] が返す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatFiringPlan {
+    /// opt-in 済み: エージェント単位で 1 回発火し、既存の channel 発火はスキップする。
+    /// `interval_secs` は resolve が返した実効間隔（#251 段階3）。
+    AgentScoped { interval_secs: u64 },
+    /// 未 opt-in かつグローバル有効: 従来どおり channel 単位で発火する（互換・不変）。
+    ChannelScoped,
+    /// 未 opt-in かつグローバル無効: 発火しない（他エージェントの opt-in のためだけに
+    /// 立っているループ。既定無効エージェントは 1 バイトも挙動が変わらない）。
+    None,
+}
+
+/// tick の発火計画を決める（#238 の precedence 判定・純粋関数）。
+///
+/// opt-in（`resolved_enabled`）が最優先。opt-in 済みなら **channel 発火とは排他**に
+/// エージェント単位で 1 回だけ発火する（同一 tick で二度喋らせない）。未 opt-in は
+/// グローバル有効時のみ従来の channel 発火。
+fn heartbeat_firing_plan(
+    resolved_enabled: bool,
+    resolved_interval_secs: u64,
+    global_enabled: bool,
+) -> HeartbeatFiringPlan {
+    if resolved_enabled {
+        HeartbeatFiringPlan::AgentScoped {
+            interval_secs: resolved_interval_secs,
+        }
+    } else if global_enabled {
+        HeartbeatFiringPlan::ChannelScoped
+    } else {
+        HeartbeatFiringPlan::None
+    }
+}
+
+/// 前回発火からの経過が `interval_secs` 以上かを判定する（純粋関数）。
+/// 未発火（`last` が `None`）なら常に発火。エージェント単位 tick も channel tick も同じ
+/// ゲートを使い、`interval_secs` に resolve の値を与えることで「保存済み間隔を実際に
+/// 効かせる」（#251 段階3）。
+fn heartbeat_interval_elapsed(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    interval_secs: u64,
+) -> bool {
+    match last {
+        None => true,
+        Some(last_time) => now.duration_since(last_time).as_secs() >= interval_secs,
+    }
+}
+
+/// heartbeat_enabled = true のチャンネルを、当該エージェント向けに解決して返す
+/// （channel_id, channel_name, interval_secs）。グローバル設定（agent_id="")と
+/// エージェント固有設定の両方が同一 channel_id に存在しうるため、(1) 当該エージェント
+/// に無関係な行を除外し、(2) 同一 channel_id ではエージェント固有行をグローバル行より
+/// 優先して重複処理を防ぐ。
+fn list_whitelisted_heartbeat_channels(
+    db: &opencrab_db::Db,
+    agent_id: &str,
+) -> Vec<(String, String, Option<u64>)> {
+    let conn = db.lock().unwrap();
+    match opencrab_db::queries::list_heartbeat_channels(&conn) {
+        Ok(channels) => {
+            // channel_id -> 選択された行。エージェント固有行を優先。
+            let mut selected: std::collections::HashMap<
+                String,
+                opencrab_db::queries::ChannelConfigRow,
+            > = std::collections::HashMap::new();
+            for c in channels {
+                // 当該エージェント向けでもグローバルでもない行は無視。
+                if !c.agent_id.is_empty() && c.agent_id != agent_id {
+                    continue;
+                }
+                match selected.get(&c.channel_id) {
+                    // 既にエージェント固有行を選択済みならグローバル行で上書きしない。
+                    Some(existing) if !existing.agent_id.is_empty() && c.agent_id.is_empty() => {
+                        continue;
+                    }
+                    _ => {
+                        selected.insert(c.channel_id.clone(), c);
+                    }
+                }
+            }
+            selected
+                .into_values()
+                .map(|c| (c.channel_id, c.channel_name, c.heartbeat_interval_secs))
+                .collect()
+        }
+        Err(e) => {
+            tracing::warn!("Failed to list whitelisted channels: {e}");
+            vec![]
+        }
+    }
+}
+
 /// ハートビートコールバックを生成する。
 /// 初期起動とhot-reload再起動の両方で使用。
 fn make_heartbeat_callback(
@@ -91,6 +188,11 @@ fn make_heartbeat_callback(
     discord_http: DiscordHttpArc,
     state: AppState,
     global_interval_secs: u64,
+    // グローバル `[agent] heartbeat_enabled` の実値（ループ起動時に強制 true へ倒す前の
+    // 素の値）。未 opt-in エージェントの channel 単位発火は**これが true のときだけ**
+    // 許す。グローバル無効下でループが立つのは他エージェントの opt-in のためだけであり、
+    // その巻き添えで既定無効エージェントが channel 発火してはならない（#238 の挙動不変）。
+    global_enabled: bool,
     last_channel_ticks: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 ) -> HeartbeatCallback {
     Box::new(move |_agent_id: &str, tick: u64| {
@@ -100,86 +202,91 @@ fn make_heartbeat_callback(
         let discord_http = discord_http.clone();
         let state = state.clone();
         let global_interval_secs = global_interval_secs;
+        let global_enabled = global_enabled;
         let last_channel_ticks = last_channel_ticks.clone();
         Box::pin(async move {
-            // heartbeat_enabled=trueのチャンネルを取得。
-            // グローバル設定（agent_id="")とエージェント固有設定の両方が同一channel_idに
-            // 存在しうるため、(1) 当該エージェントに無関係な行を除外し、
-            // (2) 同一channel_idではエージェント固有行をグローバル行より優先して
-            // 重複処理を防ぐ。
-            let whitelisted_channels: Vec<(String, String, Option<u64>)> = {
+            // #238 / #251 段階3: エージェント単位ハートビートの解決（fail-closed）。
+            // opt-in 済み（resolved.enabled）なら「エージェント単位 tick」で 1 回だけ
+            // 発火し、既存の channel 単位発火はこのエージェントについてスキップする
+            // （二重発火防止の precedence）。未 opt-in なら従来の channel 単位発火のまま
+            // （既定無効エージェントは 1 バイトも挙動が変わらない）。
+            let resolved = {
                 let conn = db.lock().unwrap();
-                match opencrab_db::queries::list_heartbeat_channels(&conn) {
-                    Ok(channels) => {
-                        // channel_id -> 選択された行。エージェント固有行を優先。
-                        let mut selected: std::collections::HashMap<
-                            String,
-                            opencrab_db::queries::ChannelConfigRow,
-                        > = std::collections::HashMap::new();
-                        for c in channels {
-                            // 当該エージェント向けでもグローバルでもない行は無視。
-                            if !c.agent_id.is_empty() && c.agent_id != agent_id_owned {
-                                continue;
-                            }
-                            match selected.get(&c.channel_id) {
-                                // 既にエージェント固有行を選択済みならグローバル行で上書きしない。
-                                Some(existing)
-                                    if !existing.agent_id.is_empty() && c.agent_id.is_empty() =>
-                                {
-                                    continue;
-                                }
-                                _ => {
-                                    selected.insert(c.channel_id.clone(), c);
-                                }
-                            }
-                        }
-                        selected
-                            .into_values()
-                            .map(|c| (c.channel_id, c.channel_name, c.heartbeat_interval_secs))
-                            .collect()
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to list whitelisted channels: {e}");
-                        vec![]
-                    }
-                }
+                opencrab_db::queries::resolve_agent_heartbeat(
+                    &conn,
+                    &agent_id_owned,
+                    state.heartbeat_limits.default_interval_secs,
+                    state.heartbeat_limits.min_interval_secs,
+                )
             };
 
-            if whitelisted_channels.is_empty() {
-                tracing::debug!(agent_id = %agent_id_owned, tick, "No whitelisted channels, skipping heartbeat tick");
+            // 発火対象（channel_id, channel_name, interval_secs）。channel_id が空文字なら
+            // 「エージェント単位 tick」（channel を持たない発話）を表す。
+            let targets: Vec<(String, String, Option<u64>)> =
+                match heartbeat_firing_plan(resolved.enabled, resolved.interval_secs, global_enabled)
+                {
+                    HeartbeatFiringPlan::AgentScoped { interval_secs } => {
+                        // opt-in 済み: エージェント単位で 1 回発火。channel 発火はしない。
+                        // 間隔は resolve の値（#251 段階3 の「保存済み間隔を実際に効かせる」）。
+                        // 宛先 channel_id は空。deliver_heartbeat_speech が Nostr 稼働なら
+                        // registry 経由で Nostr へ、Discord 共有 http フォールバックは空 channel
+                        // で「ログのみ」に縮退する（Discord エージェントの代表 channel 選択は
+                        // 別 PR / スコープ外）。
+                        vec![(
+                            String::new(),
+                            HEARTBEAT_AGENT_SCOPED_LABEL.to_string(),
+                            Some(interval_secs),
+                        )]
+                    }
+                    HeartbeatFiringPlan::ChannelScoped => {
+                        // 未 opt-in かつグローバル有効: 従来の channel 単位発火（互換・不変）。
+                        list_whitelisted_heartbeat_channels(&db, &agent_id_owned)
+                    }
+                    HeartbeatFiringPlan::None => {
+                        // 未 opt-in かつグローバル無効: 何もしない。このループは他エージェント
+                        // の opt-in のために立っているだけで、既定無効エージェントは発火しない。
+                        vec![]
+                    }
+                };
+
+            if targets.is_empty() {
+                tracing::debug!(agent_id = %agent_id_owned, tick, "No heartbeat targets, skipping tick");
                 return HeartbeatDecision::Idle;
             }
 
-            // 最後の決定を返す（全チャンネルを処理した後）
+            // 最後の決定を返す（全ターゲットを処理した後）
             let mut last_decision = HeartbeatDecision::Idle;
 
-            for (channel_id_str, channel_name, channel_interval_secs) in &whitelisted_channels {
-                // per-channel interval チェック
+            for (channel_id_str, channel_name, channel_interval_secs) in &targets {
+                // per-target interval チェック。エージェント単位 tick（空 channel_id）は
+                // last_channel_ticks を channel_id と衝突しない合成キーで引く。
+                let tick_key = if channel_id_str.is_empty() {
+                    format!("agent:{agent_id_owned}")
+                } else {
+                    channel_id_str.clone()
+                };
                 let effective_interval = channel_interval_secs.unwrap_or(global_interval_secs);
                 let should_fire = {
                     let ticks = last_channel_ticks.lock().unwrap();
-                    let now = std::time::Instant::now();
-                    let last = ticks.get(channel_id_str.as_str());
-                    match last {
-                        None => true,
-                        Some(last_time) => {
-                            now.duration_since(*last_time).as_secs() >= effective_interval
-                        }
-                    }
+                    heartbeat_interval_elapsed(
+                        ticks.get(tick_key.as_str()).copied(),
+                        std::time::Instant::now(),
+                        effective_interval,
+                    )
                 };
                 if !should_fire {
                     tracing::debug!(
                         agent_id = %agent_id_owned,
                         channel_id = %channel_id_str,
                         effective_interval,
-                        "Heartbeat: channel interval not elapsed, skipping"
+                        "Heartbeat: interval not elapsed, skipping"
                     );
                     continue;
                 }
                 // last_tickを更新
                 {
                     let mut ticks = last_channel_ticks.lock().unwrap();
-                    ticks.insert(channel_id_str.clone(), std::time::Instant::now());
+                    ticks.insert(tick_key.clone(), std::time::Instant::now());
                 }
 
                 tracing::debug!(
@@ -807,14 +914,54 @@ async fn main() -> anyhow::Result<()> {
     let (heartbeat_config_tx, mut heartbeat_config_rx) = watch::channel(initial_hb_config.clone());
 
     let agent_ids: Vec<String> = {
-        #[cfg(feature = "discord")]
-        {
-            cfg.gateway.discord.agent_ids.clone()
+        let base: Vec<String> = {
+            #[cfg(feature = "discord")]
+            {
+                cfg.gateway.discord.agent_ids.clone()
+            }
+            #[cfg(not(feature = "discord"))]
+            {
+                vec!["default".to_string()]
+            }
+        };
+        // #238: エージェント単位ハートビートに opt-in 済み（agent_heartbeat_config で
+        // enabled）のエージェントにも発火ループを立てる。これで Discord チャンネルに
+        // 紐づかない Nostr 専用エージェントにもループが立つ。config 由来の id は
+        // 名前かもしれないので resolve して UUID で重複除去する（同一エージェントに
+        // 二重にループを立てて二重発火させない）。DB 有効化の**動的**反映はスコープ外
+        // （起動時列挙のみ。反映は再起動時 / #251 の set_my_heartbeat 応答と整合）。
+        if let Ok(conn) = state.db.lock() {
+            let mut covered: std::collections::HashSet<String> =
+                base.iter().map(|id| resolve_agent_id(&conn, id)).collect();
+            let mut out = base;
+            match opencrab_db::queries::list_agents_with_heartbeat_enabled(&conn) {
+                Ok(enabled_ids) => {
+                    for id in enabled_ids {
+                        let resolved = resolve_agent_id(&conn, &id);
+                        if covered.insert(resolved) {
+                            out.push(id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to list heartbeat-enabled agents: {e}");
+                }
+            }
+            out
+        } else {
+            base
         }
-        #[cfg(not(feature = "discord"))]
-        {
-            vec!["default".to_string()]
-        }
+    };
+
+    // #238: agent_heartbeat_config に enabled 行が 1 つでもあるか。グローバル無効でも
+    // opt-in 済みエージェントが居ればループ群を起動する二段ゲートの上段（下段＝個々の
+    // 発火可否は callback 内 resolve_agent_heartbeat が握る）。起動時 1 回だけ判定する
+    // （動的反映はスコープ外）。
+    let heartbeat_has_optin = match state.db.lock() {
+        Ok(conn) => opencrab_db::queries::list_agents_with_heartbeat_enabled(&conn)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
+        Err(_) => false,
     };
 
     // heartbeat設定変更を監視してループを再起動するタスク
@@ -827,16 +974,25 @@ async fn main() -> anyhow::Result<()> {
         let mut _handles: Vec<tokio::task::JoinHandle<()>> = vec![];
 
         // ハートビートループを起動するヘルパークロージャ的ブロック
-        // 初期起動
-        if prev_config.enabled {
+        // 初期起動。グローバル有効 OR opt-in 済みエージェントが居ればループ群を起動する。
+        if prev_config.enabled || heartbeat_has_optin {
             tracing::info!(
                 agent_ids = ?heartbeat_agent_ids,
                 interval_secs = prev_config.interval_secs,
+                global_enabled = prev_config.enabled,
+                has_optin = heartbeat_has_optin,
                 "Starting heartbeat loops"
             );
+            let global_enabled = prev_config.enabled;
             let (tx, rx_tmpl) = watch::channel(false);
             for agent_id in &heartbeat_agent_ids {
-                let config_clone = prev_config.clone();
+                // core heartbeat_loop は config.enabled=false で即 return するため、起動する
+                // ループの enabled は true に倒す。個々の発火可否（グローバル無効下の未
+                // opt-in エージェントを黙らせる等）は callback 内で fail-closed に判定する。
+                let config_clone = HeartbeatConfig {
+                    interval_secs: prev_config.interval_secs,
+                    enabled: true,
+                };
                 let shutdown_rx = rx_tmpl.clone();
                 let db = heartbeat_db.clone();
                 let db_for_resolve = heartbeat_db.clone();
@@ -859,6 +1015,7 @@ async fn main() -> anyhow::Result<()> {
                         hb_discord_http,
                         state_for_hb,
                         config_clone.interval_secs,
+                        global_enabled,
                         last_channel_ticks,
                     );
                     heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
@@ -888,11 +1045,16 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _handles.clear();
 
-                // 新設定で起動
-                if new_config.enabled {
+                // 新設定で起動。初期起動と同じ二段ゲート（グローバル有効 OR opt-in）。
+                if new_config.enabled || heartbeat_has_optin {
+                    let global_enabled = new_config.enabled;
                     let (tx, rx_tmpl) = watch::channel(false);
                     for agent_id in &heartbeat_agent_ids {
-                        let config_clone = new_config.clone();
+                        // core の early-return 回避のため enabled は true に倒す（初期起動と同じ）。
+                        let config_clone = HeartbeatConfig {
+                            interval_secs: new_config.interval_secs,
+                            enabled: true,
+                        };
                         let shutdown_rx = rx_tmpl.clone();
                         let db = heartbeat_db.clone();
                         let db_for_resolve = heartbeat_db.clone();
@@ -916,6 +1078,7 @@ async fn main() -> anyhow::Result<()> {
                                 hb_discord_http,
                                 state_for_hb,
                                 config_clone.interval_secs,
+                                global_enabled,
                                 last_channel_ticks,
                             );
                             heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
@@ -1060,5 +1223,62 @@ mod tests {
                 kind: SettleKind::Completed,
                 reply_target: None,
             });
+    }
+
+    // ── #238 発火のエージェント単位化: precedence と間隔ゲート ──────────────
+
+    /// (b)(d) opt-in 済み（resolved.enabled）は **エージェント単位で発火**し、channel 発火
+    /// はしない。間隔は resolve の値がそのまま実効間隔になる（#251 段階3）。
+    #[test]
+    fn firing_plan_optin_is_agent_scoped_and_uses_resolved_interval() {
+        // グローバル有効でも無効でも、opt-in が最優先で AgentScoped。
+        for global in [true, false] {
+            assert_eq!(
+                heartbeat_firing_plan(true, 900, global),
+                HeartbeatFiringPlan::AgentScoped { interval_secs: 900 },
+                "opt-in 済みは channel 発火より優先してエージェント単位で発火（二重発火なし）"
+            );
+        }
+        // 実効間隔は resolve の値をそのまま反映する。
+        assert_eq!(
+            heartbeat_firing_plan(true, 1800, true),
+            HeartbeatFiringPlan::AgentScoped {
+                interval_secs: 1800
+            }
+        );
+    }
+
+    /// (c) 未 opt-in はグローバル有効時のみ従来の channel 発火（互換）。グローバル無効なら
+    /// 何も発火しない（既定無効エージェントは挙動不変）。
+    #[test]
+    fn firing_plan_non_optin_preserves_legacy_behavior() {
+        assert_eq!(
+            heartbeat_firing_plan(false, 900, true),
+            HeartbeatFiringPlan::ChannelScoped,
+            "未 opt-in × グローバル有効 = 従来の channel 発火"
+        );
+        assert_eq!(
+            heartbeat_firing_plan(false, 900, false),
+            HeartbeatFiringPlan::None,
+            "未 opt-in × グローバル無効 = 発火しない（挙動不変）"
+        );
+    }
+
+    /// (d) 間隔ゲート: 未発火なら常に発火。経過が interval 以上で発火、未満はスキップ。
+    #[test]
+    fn interval_elapsed_gates_on_resolved_interval() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        // 未発火は常に発火。
+        assert!(heartbeat_interval_elapsed(None, now, 300));
+        // 100 秒前に発火・間隔 300 → まだ。
+        let last = now - Duration::from_secs(100);
+        assert!(!heartbeat_interval_elapsed(Some(last), now, 300));
+        // 300 秒前に発火・間隔 300 → 発火（>=）。
+        let last = now - Duration::from_secs(300);
+        assert!(heartbeat_interval_elapsed(Some(last), now, 300));
+        // 間隔を縮めれば（resolve の値が効く）同じ経過でも発火する。
+        let last = now - Duration::from_secs(100);
+        assert!(heartbeat_interval_elapsed(Some(last), now, 60));
     }
 }
