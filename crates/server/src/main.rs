@@ -222,32 +222,34 @@ fn make_heartbeat_callback(
 
             // 発火対象（channel_id, channel_name, interval_secs）。channel_id が空文字なら
             // 「エージェント単位 tick」（channel を持たない発話）を表す。
-            let targets: Vec<(String, String, Option<u64>)> =
-                match heartbeat_firing_plan(resolved.enabled, resolved.interval_secs, global_enabled)
-                {
-                    HeartbeatFiringPlan::AgentScoped { interval_secs } => {
-                        // opt-in 済み: エージェント単位で 1 回発火。channel 発火はしない。
-                        // 間隔は resolve の値（#251 段階3 の「保存済み間隔を実際に効かせる」）。
-                        // 宛先 channel_id は空。deliver_heartbeat_speech が Nostr 稼働なら
-                        // registry 経由で Nostr へ、Discord 共有 http フォールバックは空 channel
-                        // で「ログのみ」に縮退する（Discord エージェントの代表 channel 選択は
-                        // 別 PR / スコープ外）。
-                        vec![(
-                            String::new(),
-                            HEARTBEAT_AGENT_SCOPED_LABEL.to_string(),
-                            Some(interval_secs),
-                        )]
-                    }
-                    HeartbeatFiringPlan::ChannelScoped => {
-                        // 未 opt-in かつグローバル有効: 従来の channel 単位発火（互換・不変）。
-                        list_whitelisted_heartbeat_channels(&db, &agent_id_owned)
-                    }
-                    HeartbeatFiringPlan::None => {
-                        // 未 opt-in かつグローバル無効: 何もしない。このループは他エージェント
-                        // の opt-in のために立っているだけで、既定無効エージェントは発火しない。
-                        vec![]
-                    }
-                };
+            let targets: Vec<(String, String, Option<u64>)> = match heartbeat_firing_plan(
+                resolved.enabled,
+                resolved.interval_secs,
+                global_enabled,
+            ) {
+                HeartbeatFiringPlan::AgentScoped { interval_secs } => {
+                    // opt-in 済み: エージェント単位で 1 回発火。channel 発火はしない。
+                    // 間隔は resolve の値（#251 段階3 の「保存済み間隔を実際に効かせる」）。
+                    // 宛先 channel_id は空。deliver_heartbeat_speech が Nostr 稼働なら
+                    // registry 経由で Nostr へ、Discord 共有 http フォールバックは空 channel
+                    // で「ログのみ」に縮退する（Discord エージェントの代表 channel 選択は
+                    // 別 PR / スコープ外）。
+                    vec![(
+                        String::new(),
+                        HEARTBEAT_AGENT_SCOPED_LABEL.to_string(),
+                        Some(interval_secs),
+                    )]
+                }
+                HeartbeatFiringPlan::ChannelScoped => {
+                    // 未 opt-in かつグローバル有効: 従来の channel 単位発火（互換・不変）。
+                    list_whitelisted_heartbeat_channels(&db, &agent_id_owned)
+                }
+                HeartbeatFiringPlan::None => {
+                    // 未 opt-in かつグローバル無効: 何もしない。このループは他エージェント
+                    // の opt-in のために立っているだけで、既定無効エージェントは発火しない。
+                    vec![]
+                }
+            };
 
             if targets.is_empty() {
                 tracing::debug!(agent_id = %agent_id_owned, tick, "No heartbeat targets, skipping tick");
@@ -476,7 +478,7 @@ fn make_heartbeat_callback(
                         let ch_id_str = channel_id_str.clone();
                         tokio::spawn(async move {
                             heartbeat_delivery::deliver_heartbeat_speech(
-                                &state,
+                                &state.gateways,
                                 &discord_http,
                                 &agent_id_log,
                                 &ch_id_str,
