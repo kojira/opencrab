@@ -344,9 +344,14 @@ impl NostaroCli {
             .map(|r| format!("\"{}\"", esc(r)))
             .collect::<Vec<_>>()
             .join(", ");
+        // nostaro 0.3.0 は `relays` と `default_relays` の**両方**を必須フィールドとして
+        // 要求する（どちらか一方だけだと `missing field ...` で config パースが失敗し、
+        // post/watch/pubkey など Nostr 全操作が止まる。#262）。opencrab は送信/受信リレーを
+        // 常にフラグで明示するため両者は同値でよい（config 側 default に依存しない）。
         let mut toml = format!(
-            "secret_key = \"{}\"\nrelays = [{}]\n",
+            "secret_key = \"{}\"\nrelays = [{}]\ndefault_relays = [{}]\n",
             esc(secret_key),
+            relay_list,
             relay_list
         );
         if let Some(b) = blossom_server.filter(|s| !s.is_empty()) {
@@ -594,6 +599,36 @@ mod tests {
         let out2 = replace_secret_key_line("relays = [\"wss://a\"]\n", "nsec1x");
         assert!(out2.starts_with("secret_key = \"nsec1x\""));
         assert!(out2.contains("relays"));
+    }
+
+    #[test]
+    fn test_materialize_config_writes_default_relays() {
+        // nostaro 0.3.0 は `relays` と `default_relays` の両方を必須とする（#262）。
+        // materialize_config の出力に両フィールドが含まれ、同値であることを確認する。
+        let agent = "agent-materialize-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let path = NostaroCli::materialize_config(
+            agent,
+            "nsec1abc",
+            &[
+                "wss://x.kojira.io".to_string(),
+                "wss://relay.two".to_string(),
+            ],
+            None,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("secret_key = \"nsec1abc\""));
+        // relays と default_relays の両方が同じリレー集合で書かれる。
+        assert!(
+            content.contains("relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            "relays missing: {content}"
+        );
+        assert!(
+            content.contains("default_relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
+            "default_relays missing: {content}"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     #[test]
