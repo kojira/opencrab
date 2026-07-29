@@ -433,16 +433,24 @@ fn sanitize_key_stem(s: &str) -> String {
 ///
 /// config パース失敗時、nostaro は config 先頭行（`secret_key = "nsec1..."`）を stderr に
 /// エコーする。これを anyhow エラーやログへ載せると平文の秘密鍵が漏れるため、載せる前に
-/// (1) `secret_key = ...` 行の値、(2) 文字列中の任意の `nsec1...`（bech32）トークンを
-/// 伏せ字へ置換する（#262）。regex 依存を持ち込まないよう手書きで処理する。
+/// **多層防御**で伏せる（#262）:
+/// - 第1層: `secret_key` を含む行は行ごと伏せる。nostaro は行番号ガター付き
+///   （`1 | secret_key = "..."`）でエコーするため `starts_with` では発火しない。
+///   `contains` にして、ガター付き行も、nsec でない hex 秘密（`secret_key = "<64hex>"`）も
+///   行ごと落とす。潰しすぎても秘密漏れ側には倒れない。
+/// - 第2層: 文字列中の任意の `nsec1...`（bech32）トークンを伏せ字へ置換する。
+///
+/// `secret_key` を含まない診断行（`missing field ...` / `TOML parse error` 等）は残す。
+/// regex 依存を持ち込まないよう手書きで処理する。
 fn mask_secrets(input: &str) -> String {
     let mut lines: Vec<String> = input
         .lines()
         .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("secret_key") {
-                let indent = &line[..line.len() - trimmed.len()];
-                format!("{indent}secret_key = \"<redacted>\"")
+            if line.contains("secret_key") {
+                // ガター（`1 | `）等の前置きは残し、`secret_key` 以降の値部分だけを伏せる。
+                // これで行番号など診断に有用な前置きを保ちつつ、秘密値は確実に落とす。
+                let idx = line.find("secret_key").unwrap();
+                format!("{}secret_key = \"<redacted>\"", &line[..idx])
             } else {
                 line.to_string()
             }
@@ -710,6 +718,44 @@ mod tests {
         );
         assert!(inline.contains("nsec1<redacted>"));
         assert!(inline.contains("prefix") && inline.contains("suffix"));
+    }
+
+    #[test]
+    fn test_mask_secrets_handles_gutter_and_hex_forms() {
+        // nostaro 0.3.0 の実際のガター付きエラー出力形（行番号 + `|`）を模す。
+        // 値は明らかにダミー（実鍵ではない）。
+        let gutter = "error: TOML parse error at line 1, column 1\n  \
+                      |\n1 | secret_key = \"nsec1dummydummydummydummydummy\"\n  \
+                      | ^^^^^^^^^^^^\nmissing field `default_relays`";
+        let masked = mask_secrets(gutter);
+        assert!(
+            !masked.contains("nsec1dummydummydummydummydummy"),
+            "gutter nsec leaked: {masked}"
+        );
+        // 第1層（行伏せ）で secret_key 行の値そのものが残らない。
+        assert!(masked.contains("secret_key = \"<redacted>\""));
+        // 行番号ガターなど診断の前置きと、別行の診断情報は保持。
+        assert!(masked.contains("1 | secret_key"));
+        assert!(masked.contains("missing field `default_relays`"));
+
+        // nsec でない 64hex 秘密（bech32 でないので第2層に掛からない）も第1層で行ごと落とす。
+        let hex_secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let hex_line = format!("1 | secret_key = \"{hex_secret}\"");
+        let masked_hex = mask_secrets(&hex_line);
+        assert!(
+            !masked_hex.contains(hex_secret),
+            "hex secret leaked: {masked_hex}"
+        );
+        assert!(masked_hex.contains("secret_key = \"<redacted>\""));
+
+        // `secret_key` を含んでも秘密値でない診断行は潰しすぎるが漏れ側には倒れない。
+        // 少なくとも他の診断行は残ることを確認（過剰マスクで全滅しない）。
+        let mixed =
+            "note: unknown field `foo`\nsecret_key = \"nsec1dummy\"\nhelp: add default_relays";
+        let masked_mixed = mask_secrets(mixed);
+        assert!(masked_mixed.contains("unknown field `foo`"));
+        assert!(masked_mixed.contains("help: add default_relays"));
+        assert!(!masked_mixed.contains("nsec1dummy"));
     }
 
     #[test]
