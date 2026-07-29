@@ -62,9 +62,24 @@ const MAX_CONCURRENT_RESPONSES: usize = 8;
 /// 溢れたぶんは**ログに残して**捨てる（本文は転記済みなので次の応答の会話履歴に載る）。
 const SESSION_QUEUE_CAPACITY: usize = 32;
 
+/// 稼働中 gateway の登録簿（agent_id → watch ループの JoinHandle）。
+///
+/// `Arc`: identity 採用 capability（[`NostrIdentityProvisioner`]）が同じ登録簿を見て
+/// 起動・生存確認できるようにするため（マネージャ本体と capability が別インスタンスでも
+/// 同一の登録簿を共有する）。
+type GatewayMap = Arc<RwLock<HashMap<String, JoinHandle<()>>>>;
+
+/// 稼働中 gateway の per-agent ホットスワップ admin（agent_id → identity 切替の実体）。
+///
+/// watch ループ起動時に登録し、停止時に外す。identity 採用 capability が「稼働中なら
+/// この admin で in-place ホットスワップ、無ければ bootstrap 起動」を判定するのに使う。
+type AdminMap = Arc<RwLock<HashMap<String, Arc<dyn NostrIdentityAdmin>>>>;
+
 pub struct NostrGatewayManager<R: NostrAgentRunner> {
     // std RwLock: is_running を同期メソッドにするため。ガードは await を跨がない。
-    gateways: RwLock<HashMap<String, JoinHandle<()>>>,
+    gateways: GatewayMap,
+    /// 稼働中の per-agent 採用 admin（#264）。`gateways` と生死を揃える。
+    admins: AdminMap,
     runner: R,
     cli: NostaroCli,
     /// per-session 直列化ロック + dispatch registry（#168）。全エージェント横断で 1 つ。
@@ -76,7 +91,8 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     pub fn new(runner: R) -> Self {
         Self {
-            gateways: RwLock::new(HashMap::new()),
+            gateways: Arc::new(RwLock::new(HashMap::new())),
+            admins: Arc::new(RwLock::new(HashMap::new())),
             runner,
             cli: NostaroCli::new(),
             runtime: Arc::new(NostrSessionRuntime::new()),
@@ -96,88 +112,29 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     /// エージェントの Nostr ゲートウェイを起動する。
     ///
     /// 秘密鍵/リレーから per-agent config.toml を materialize（0600）し、自分の pubkey を
-    /// 取得（自己返信ループ防止）して watch ループを spawn する。
+    /// 取得（自己返信ループ防止）して watch ループを spawn する。起動の実体は共有 free fn
+    /// [`spawn_agent_gateway`]（identity 採用 capability も同じ経路を通る）。
     pub async fn start_agent_gateway(
         &self,
         agent_id: &str,
         secret_key: &str,
         config: NostrConfig,
     ) -> anyhow::Result<()> {
-        // 資格情報のガード（#191 段階2 PR3）。空 / 空白だけの nsec では nostaro が
-        // 動かないので、materialize（0600 のファイル書き出し）や `pubkey` 取得より
-        // **手前**で拒否する。REST の PUT が呼び出しの手前で行っていた「鍵が無ければ
-        // 400」と同じ判定を、呼び出し口によらず必ず通る位置へ置き直したもの。
-        if secret_key.trim().is_empty() {
-            return Err(opencrab_actions::StartDeclined::err(
-                opencrab_actions::gateway_kinds::NOSTR,
-                agent_id,
-                "秘密鍵（nsec）が未設定です。先に鍵を生成してください",
-            ));
-        }
-
-        // 全ノート購読（author も keyword も無い）は洪水/資源浪費になるため、
-        // ここ（単一チョークポイント）で拒否する（PUT enabled=false→/start バイパス封じ）。
-        if config.filter_is_unbounded() {
-            anyhow::bail!(
-                "Nostr フィルタが空です。author か keyword を最低1つ指定してください（全ノート購読は不可）"
-            );
-        }
-
-        self.stop_agent_gateway(agent_id).await;
-
-        // nsec を含む config を 0600 で書き出す。
-        NostaroCli::materialize_config(agent_id, secret_key, &config.effective_relays(), None)?;
-
-        // 自分の pubkey は自己返信ループ防止に必須。取得できなければ **起動しない**
-        // （fail-closed: 自己フィルタ無しで走ると keyword フィルタ時に自分の返信を
-        // 拾って無限ループ＋LLM 支出になる）。
-        let self_pubkey = self
-            .cli
-            .pubkey(agent_id)
-            .await
-            .map(|pk| pk.trim().to_string())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "自分の pubkey を取得できませんでした（`nostaro pubkey` 必須）。\
-                     自己返信ループ防止のため起動を中止します"
-                )
-            })?;
-
-        let runner = self.runner.clone();
-        let cli = self.cli.clone();
-        let agent = agent_id.to_string();
-        // self_pubkey は共有セル。identity 切替（本鍵採用）時に新 pubkey へ更新できる
-        // ようにする（watch は鍵非依存なのでプロセス再起動不要。セル更新だけで自己
-        // スキップが新 identity に追従する）。
-        let self_pubkey_cell = Arc::new(RwLock::new(self_pubkey));
-        // identity 切替の実体（runner+cli+セルを capture）。ツールから呼ばれる。
-        let admin: Arc<dyn NostrIdentityAdmin> = Arc::new(LoopIdentityAdmin {
-            runner: runner.clone(),
-            cli: cli.clone(),
-            self_pubkey: self_pubkey_cell.clone(),
-        });
-        let runtime = self.runtime.clone();
-        let handle = tokio::spawn(async move {
-            run_nostr_loop(runner, cli, agent, config, self_pubkey_cell, admin, runtime).await;
-        });
-
-        self.gateways
-            .write()
-            .unwrap()
-            .insert(agent_id.to_string(), handle);
-        info!(agent_id, "Per-agent Nostr gateway started");
-        Ok(())
+        spawn_agent_gateway(
+            &self.gateways,
+            &self.admins,
+            &self.runner,
+            &self.cli,
+            &self.runtime,
+            agent_id,
+            secret_key,
+            config,
+        )
+        .await
     }
 
     pub async fn stop_agent_gateway(&self, agent_id: &str) {
-        let handle = self.gateways.write().unwrap().remove(agent_id);
-        if let Some(handle) = handle {
-            // abort でループ frame を drop → 子 nostaro は kill_on_drop で kill される。
-            handle.abort();
-            info!(agent_id, "Per-agent Nostr gateway stopped");
-        }
+        stop_gateway(&self.gateways, &self.admins, agent_id);
     }
 
     pub fn is_running(&self, agent_id: &str) -> bool {
@@ -187,6 +144,20 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             .get(agent_id)
             .map(|h| !h.is_finished())
             .unwrap_or(false)
+    }
+
+    /// 生成鍵の採用（identity 切替）capability を返す（#264）。
+    ///
+    /// `gateways` / `admins` の**同じ登録簿**（Arc）を共有する実体を返すので、採用時の
+    /// bootstrap 起動・稼働中判定・ホットスワップが本体と一貫する。
+    pub fn identity_provisioner(&self) -> Arc<NostrIdentityProvisioner<R>> {
+        Arc::new(NostrIdentityProvisioner {
+            gateways: self.gateways.clone(),
+            admins: self.admins.clone(),
+            runner: self.runner.clone(),
+            cli: self.cli.clone(),
+            runtime: self.runtime.clone(),
+        })
     }
 
     /// enabled な設定を DB から復元して起動する。
@@ -205,6 +176,8 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     pub async fn shutdown_all(&self) {
         let handles: Vec<(String, JoinHandle<()>)> =
             self.gateways.write().unwrap().drain().collect();
+        // 採用 admin も一緒に落とす（生死を gateways と揃える）。
+        self.admins.write().unwrap().clear();
         for (agent_id, handle) in handles {
             handle.abort();
             info!(agent_id, "Nostr gateway stopped (shutdown_all)");
@@ -297,6 +270,17 @@ impl<R: NostrAgentRunner> opencrab_actions::AgentGatewayLifecycle for NostrGatew
         Some(Arc::new(
             crate::NostrGatewayActions::new(self.cli.clone()).with_agent_id(agent_id),
         ))
+    }
+
+    /// 生成鍵の採用（identity 切替）capability（#264）。
+    ///
+    /// server-own の `nostr_switch_identity` がここから引く。稼働の有無を必要としない
+    /// （未稼働なら bootstrap 起動＝接続、稼働中ならホットスワップ）ので、`key_provisioning`
+    /// と同じく `is_running` に関わらず常に `Some` を返す。
+    fn identity_provisioning(
+        &self,
+    ) -> Option<Arc<dyn opencrab_actions::GatewayIdentityProvisioning>> {
+        Some(self.identity_provisioner())
     }
 }
 
@@ -744,6 +728,216 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
     }
 }
 
+/// gateway を停止する（handle abort + 採用 admin 除去）。稼働していなければ何もしない。
+fn stop_gateway(gateways: &GatewayMap, admins: &AdminMap, agent_id: &str) {
+    let handle = gateways.write().unwrap().remove(agent_id);
+    // 採用 admin も一緒に外す（gateways と生死を揃える＝停止後に稼働中と誤判定させない）。
+    admins.write().unwrap().remove(agent_id);
+    if let Some(handle) = handle {
+        // abort でループ frame を drop → 子 nostaro は kill_on_drop で kill される。
+        handle.abort();
+        info!(agent_id, "Per-agent Nostr gateway stopped");
+    }
+}
+
+/// watch ループを起動して登録簿（gateways/admins）へ登録する**単一チョークポイント**。
+///
+/// `NostrGatewayManager::start_agent_gateway`（通常起動・restore）と identity 採用の
+/// bootstrap（[`NostrIdentityProvisioner`]）が同じこの経路を通ることで、資格情報ガード
+/// （空 nsec 拒否）・購読ガード（unbounded フィルタ拒否）・自己 pubkey 取得の fail-closed
+/// が呼び出し口によらず必ず効く（PUT enabled=false→/start バイパス封じと同じ設計）。
+#[allow(clippy::too_many_arguments)]
+async fn spawn_agent_gateway<R: NostrAgentRunner>(
+    gateways: &GatewayMap,
+    admins: &AdminMap,
+    runner: &R,
+    cli: &NostaroCli,
+    runtime: &Arc<NostrSessionRuntime>,
+    agent_id: &str,
+    secret_key: &str,
+    config: NostrConfig,
+) -> anyhow::Result<()> {
+    // 資格情報のガード（#191 段階2 PR3）。空 / 空白だけの nsec では nostaro が動かないので、
+    // materialize（0600 のファイル書き出し）や `pubkey` 取得より **手前**で拒否する。
+    if secret_key.trim().is_empty() {
+        return Err(opencrab_actions::StartDeclined::err(
+            opencrab_actions::gateway_kinds::NOSTR,
+            agent_id,
+            "秘密鍵（nsec）が未設定です。先に鍵を生成してください",
+        ));
+    }
+    // 全ノート購読（author も keyword も無い）は洪水/資源浪費になるため、ここ（単一
+    // チョークポイント）で拒否する。identity 採用の bootstrap は bounded な self-mention
+    // フィルタを設定してから来るので、ここは通過する（#264）。
+    if config.filter_is_unbounded() {
+        anyhow::bail!(
+            "Nostr フィルタが空です。author か keyword を最低1つ指定してください（全ノート購読は不可）"
+        );
+    }
+
+    stop_gateway(gateways, admins, agent_id);
+
+    // nsec を含む config を 0600 で書き出す。
+    NostaroCli::materialize_config(agent_id, secret_key, &config.effective_relays(), None)?;
+
+    // 自分の pubkey は自己返信ループ防止に必須。取得できなければ **起動しない**
+    // （fail-closed: 自己フィルタ無しで走ると keyword フィルタ時に自分の返信を拾って
+    // 無限ループ＋LLM 支出になる）。
+    let self_pubkey = cli
+        .pubkey(agent_id)
+        .await
+        .map(|pk| pk.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "自分の pubkey を取得できませんでした（`nostaro pubkey` 必須）。\
+                 自己返信ループ防止のため起動を中止します"
+            )
+        })?;
+
+    let runner_c = runner.clone();
+    let cli_c = cli.clone();
+    let agent = agent_id.to_string();
+    // self_pubkey は共有セル。identity 切替（本鍵採用）時に新 pubkey へ更新できる
+    // ようにする（watch は鍵非依存なのでプロセス再起動不要）。
+    let self_pubkey_cell = Arc::new(RwLock::new(self_pubkey));
+    // identity 切替の実体（runner+cli+セルを capture）。稼働中の採用（ホットスワップ）で使う。
+    let admin: Arc<dyn NostrIdentityAdmin> = Arc::new(LoopIdentityAdmin {
+        runner: runner_c.clone(),
+        cli: cli_c.clone(),
+        self_pubkey: self_pubkey_cell.clone(),
+    });
+    // 採用 admin を登録簿へ（handle と同時に入れる＝稼働中の判定と生死が揃う）。
+    admins
+        .write()
+        .unwrap()
+        .insert(agent_id.to_string(), admin.clone());
+    let runtime_c = runtime.clone();
+    let handle = tokio::spawn(async move {
+        run_nostr_loop(
+            runner_c,
+            cli_c,
+            agent,
+            config,
+            self_pubkey_cell,
+            admin,
+            runtime_c,
+        )
+        .await;
+    });
+
+    gateways
+        .write()
+        .unwrap()
+        .insert(agent_id.to_string(), handle);
+    info!(agent_id, "Per-agent Nostr gateway started");
+    Ok(())
+}
+
+/// 生成鍵の採用（identity 切替）capability の実体（#264）。
+///
+/// マネージャと**同じ登録簿**（`gateways` / `admins` の Arc）を共有する。判定は 2 モード:
+/// - **稼働中** → per-agent admin で in-place ホットスワップ（self_pubkey セル更新・再接続
+///   なし）。既存挙動をそのまま維持する。
+/// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**bounded な
+///   self-mention フィルタ**を enabled=false で書き、[`spawn_agent_gateway`] で起動＝接続、
+///   成功後に enabled=true。これで「未設定エージェントが `nostr_generate_key`→
+///   `nostr_switch_identity` を呼ぶだけで自力で載る」が成立する。
+pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
+    gateways: GatewayMap,
+    admins: AdminMap,
+    runner: R,
+    cli: NostaroCli,
+    runtime: Arc<NostrSessionRuntime>,
+}
+
+impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
+    /// bootstrap 採用で書き込む [`NostrConfig`] を組む。
+    ///
+    /// - **relays**: 既存設定があればそれを尊重、無ければ [`crate::config::DEFAULT_RELAYS`]。
+    /// - **filter**: 既存が **bounded** ならそれを尊重（オペレーターが絞り込みを設定済みの
+    ///   ケースを壊さない）。そうでなければ **bounded な self-mention フィルタ**
+    ///   （`keywords=[npub]`）を自動設定する。keyword が 1 つでもあれば
+    ///   `filter_is_unbounded()` は false になり `spawn_agent_gateway` の unbounded 拒否を
+    ///   通過する。狙いは「自分の npub を含む投稿＝自分への言及だけ購読」で firehose に
+    ///   しないこと。自分の投稿は watch ループが author 一致でスキップするので自己ループに
+    ///   ならない。
+    fn bootstrap_config(&self, agent_id: &str, npub: &str) -> NostrConfig {
+        let existing = self
+            .runner
+            .get_nostr_config(agent_id)
+            .map(|r| crate::config_from_row(&r));
+        let relays = existing
+            .as_ref()
+            .map(|c| c.relays.clone())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| {
+                crate::config::DEFAULT_RELAYS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            });
+        let filter = match existing {
+            Some(c) if !c.filter_is_unbounded() => c.filter,
+            _ => crate::config::NostrFilter {
+                authors: Vec::new(),
+                keywords: vec![npub.to_string()],
+                kinds: Vec::new(),
+            },
+        };
+        NostrConfig { relays, filter }
+    }
+}
+
+#[async_trait::async_trait]
+impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
+    for NostrIdentityProvisioner<R>
+{
+    async fn adopt_identity(&self, agent_id: &str, npub: &str) -> anyhow::Result<String> {
+        // 稼働中なら既存のホットスワップ経路（self_pubkey セルを in-place 更新・再接続なし）。
+        let running_admin = self.admins.read().unwrap().get(agent_id).cloned();
+        if let Some(admin) = running_admin {
+            return admin.adopt_generated_identity(agent_id, npub).await;
+        }
+
+        // 未稼働＝自己ブートストラップ。生成鍵（自分のもの）の nsec を読む。存在チェックで
+        // 「自分が生成した鍵のみ採用可」を担保。秘密鍵は外へ出さない・返さない。
+        let nsec = NostaroCli::read_generated_key(agent_id, npub)?;
+        let config = self.bootstrap_config(agent_id, npub);
+
+        // 1) agent_nostr_config を **enabled=false で先に書く**（順序ガード: 起動成功後に
+        //    enabled=true。失敗時に「enabled だが未稼働」の不整合を残さない / manager.rs の
+        //    「enabled を見ない」設計と整合）。
+        let row = opencrab_db::queries::AgentNostrConfigRow {
+            agent_id: agent_id.to_string(),
+            secret_key: nsec.clone(),
+            relays_json: serde_json::to_string(&config.relays).unwrap_or_else(|_| "[]".to_string()),
+            filter_json: serde_json::to_string(&config.filter).unwrap_or_else(|_| "{}".to_string()),
+            enabled: false,
+        };
+        self.runner.upsert_nostr_config(&row)?;
+
+        // 2) 起動＝接続（bounded フィルタなので unbounded 拒否を通過する）。失敗時は
+        //    enabled=false のまま（inert: restore で起動されず、is_running も false）。
+        spawn_agent_gateway(
+            &self.gateways,
+            &self.admins,
+            &self.runner,
+            &self.cli,
+            &self.runtime,
+            agent_id,
+            &nsec,
+            config,
+        )
+        .await?;
+
+        // 3) 起動成功後に enabled=true（次回のプロセス再起動で restore_from_db が復元する）。
+        self.runner.set_nostr_enabled(agent_id, true)?;
+        Ok(npub.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,6 +965,14 @@ mod tests {
         relay_target: Option<WebhookConfig>,
         /// 実際に転記口へ渡った本文（配送口のスパイ / #252）。
         relayed: Arc<Mutex<Vec<String>>>,
+        /// upsert された agent_nostr_config 行（自己ブートストラップ採用の検証 / #264）。
+        upserted: Arc<Mutex<Vec<AgentNostrConfigRow>>>,
+        /// set_nostr_enabled の呼び出し履歴（順序ガードの検証 / #264）。
+        enabled_calls: Arc<Mutex<Vec<bool>>>,
+        /// set_nostr_secret_key に渡った nsec（ホットスワップ経路の検証 / #264）。
+        secret_sets: Arc<Mutex<Vec<String>>>,
+        /// get_nostr_config が返す既存行（`None`=未設定 / #264）。
+        preset_config: Option<AgentNostrConfigRow>,
     }
 
     impl SlowRunner {
@@ -784,7 +986,17 @@ mod tests {
                 finished: Arc::new(Mutex::new(Vec::new())),
                 relay_target: None,
                 relayed: Arc::new(Mutex::new(Vec::new())),
+                upserted: Arc::new(Mutex::new(Vec::new())),
+                enabled_calls: Arc::new(Mutex::new(Vec::new())),
+                secret_sets: Arc::new(Mutex::new(Vec::new())),
+                preset_config: None,
             }
+        }
+
+        /// get_nostr_config が返す既存設定を仕込む（ホットスワップ経路の検証 / #264）。
+        fn with_preset_config(mut self, row: AgentNostrConfigRow) -> Self {
+            self.preset_config = Some(row);
+            self
         }
 
         /// 転記先を有効化した runner（#252 のフック検証用）。
@@ -911,10 +1123,21 @@ mod tests {
         }
 
         fn get_nostr_config(&self, _agent_id: &str) -> Option<AgentNostrConfigRow> {
-            None
+            self.preset_config.clone()
         }
 
-        fn set_nostr_secret_key(&self, _a: &str, _s: &str) -> anyhow::Result<()> {
+        fn set_nostr_secret_key(&self, _a: &str, s: &str) -> anyhow::Result<()> {
+            self.secret_sets.lock().unwrap().push(s.to_string());
+            Ok(())
+        }
+
+        fn upsert_nostr_config(&self, cfg: &AgentNostrConfigRow) -> anyhow::Result<()> {
+            self.upserted.lock().unwrap().push(cfg.clone());
+            Ok(())
+        }
+
+        fn set_nostr_enabled(&self, _agent_id: &str, enabled: bool) -> anyhow::Result<()> {
+            self.enabled_calls.lock().unwrap().push(enabled);
             Ok(())
         }
 
@@ -1359,5 +1582,223 @@ mod tests {
             .remove("agent-live")
             .unwrap()
             .abort();
+    }
+
+    /// pubkey を返す fake nostaro（実リレーへは繋がない / #264）。
+    ///
+    /// `pubkey` サブコマンドのときだけ `pubkey_out` を stdout に返す。それ以外（`watch`
+    /// など）は即終了する（受信ループは EOF → backoff で再試行するので handle は生き続け、
+    /// `is_running` は true を保つ）。`pubkey_out` が空なら pubkey も空を返す（起動失敗を模す）。
+    fn fake_nostaro(pubkey_out: &str) -> (tempfile::TempDir, NostaroCli) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro.sh");
+        let body = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = pubkey ]; then\n    printf '%s' '{pubkey_out}'\n    exit 0\n  fi\ndone\nexit 0\n"
+        );
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
+        (dir, cli)
+    }
+
+    /// [#264] 未設定エージェントが自力で採用＝接続する。`nostr_switch_identity`（採用）を
+    /// 未稼働状態で呼ぶと、鍵・DEFAULT リレー・**bounded な self-mention フィルタ**を
+    /// enabled=false で書き、ゲートウェイを起動して is_running=true にし、成功後に
+    /// enabled=true にする（順序ガード）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopt_identity_bootstraps_unconfigured_agent_and_connects() {
+        use opencrab_actions::GatewayIdentityProvisioning;
+
+        let agent = "agent-bootstrap-264";
+        let npub = "npub1selfbootstrap";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        // 自分の生成鍵を保存（read_generated_key の存在チェック＝「自分の鍵のみ」を満たす）。
+        NostaroCli::save_generated_key(
+            agent,
+            &crate::cli::GeneratedKey {
+                nsec: "nsec1bootstrapsecret".to_string(),
+                npub: npub.to_string(),
+                pubkey: "hexpub".to_string(),
+            },
+        )
+        .unwrap();
+
+        let runner = SlowRunner::new(Duration::from_millis(1));
+        let (_fake, cli) = fake_nostaro("selfpubkeyhex");
+        let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
+
+        assert!(!mgr.is_running(agent), "採用前は未稼働（未設定）");
+
+        let adopted = mgr
+            .identity_provisioner()
+            .adopt_identity(agent, npub)
+            .await
+            .unwrap();
+        assert_eq!(adopted, npub);
+        // 返り値は npub のみ（nsec を出さない）。
+        assert!(!adopted.contains("nsec"), "nsec を返さない");
+
+        // 起動して接続済み（配送対象になれる状態）。
+        assert!(
+            mgr.is_running(agent),
+            "採用で自力接続する（is_running=true）"
+        );
+
+        // upsert された config: 鍵＋DEFAULT relays＋bounded self-mention フィルタ、enabled=false。
+        let upserted = runner.upserted.lock().unwrap().clone();
+        assert_eq!(upserted.len(), 1, "config を 1 回 upsert する");
+        let row = &upserted[0];
+        assert_eq!(row.secret_key, "nsec1bootstrapsecret");
+        assert!(!row.enabled, "先に enabled=false で書く（順序ガード）");
+        let cfg = crate::config_from_row(row);
+        assert!(
+            !cfg.filter_is_unbounded(),
+            "bounded フィルタでなければ start の unbounded 拒否に弾かれる"
+        );
+        assert_eq!(
+            cfg.filter.keywords,
+            vec![npub.to_string()],
+            "self-mention フィルタ（keyword=自分の npub）"
+        );
+        assert_eq!(
+            cfg.effective_relays(),
+            crate::config::DEFAULT_RELAYS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "未設定なら DEFAULT リレー"
+        );
+
+        // 起動成功後にだけ enabled=true。
+        assert_eq!(
+            *runner.enabled_calls.lock().unwrap(),
+            vec![true],
+            "起動成功後に enabled=true（1 回だけ）"
+        );
+
+        mgr.stop_agent_gateway(agent).await;
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#264 / 配送誤爆防止] 起動に失敗したら未接続のまま（is_running=false）で、
+    /// enabled=true にしない（「enabled だが未稼働」の不整合＝配送誤爆を残さない）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopt_identity_failure_leaves_agent_disconnected_and_disabled() {
+        use opencrab_actions::GatewayIdentityProvisioning;
+
+        let agent = "agent-bootstrap-fail-264";
+        let npub = "npub1failboot";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        NostaroCli::save_generated_key(
+            agent,
+            &crate::cli::GeneratedKey {
+                nsec: "nsec1failsecret".to_string(),
+                npub: npub.to_string(),
+                pubkey: "x".to_string(),
+            },
+        )
+        .unwrap();
+
+        let runner = SlowRunner::new(Duration::from_millis(1));
+        // pubkey を返さない fake → 起動が pubkey ガード（fail-closed）で失敗する。
+        let (_fake, cli) = fake_nostaro("");
+        let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
+
+        let res = mgr.identity_provisioner().adopt_identity(agent, npub).await;
+        assert!(res.is_err(), "pubkey 取得不可なら採用は失敗する");
+
+        assert!(
+            !mgr.is_running(agent),
+            "起動失敗なら is_running=false（配送対象に数えない）"
+        );
+        assert!(
+            !runner.enabled_calls.lock().unwrap().contains(&true),
+            "起動失敗時に enabled=true にしない（不整合を残さない）"
+        );
+
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#264 回帰] 稼働中エージェントの採用は**既存のホットスワップ経路**を通る
+    /// （bootstrap の upsert / enabled 書き込みをせず、本鍵だけ差し替える＝再接続なし）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopt_identity_uses_hotswap_when_gateway_running() {
+        use opencrab_actions::GatewayIdentityProvisioning;
+
+        let agent = "agent-hotswap-264";
+        let npub_new = "npub1hotswapnew";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        // 稼働中エージェント: bounded な既存設定を持つ（ホットスワップは既存 relays を継承）。
+        let existing = AgentNostrConfigRow {
+            agent_id: agent.to_string(),
+            secret_key: "nsec1old".to_string(),
+            relays_json: r#"["wss://yabu.me"]"#.to_string(),
+            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
+            enabled: true,
+        };
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
+        let (_fake, cli) = fake_nostaro("newpubkeyhex");
+        let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
+
+        // 稼働させる（admin が admins 登録簿へ入る）。
+        let bounded = crate::config::NostrConfig {
+            relays: vec!["wss://yabu.me".to_string()],
+            filter: crate::config::NostrFilter {
+                authors: vec![],
+                keywords: vec!["opencrab".to_string()],
+                kinds: vec![],
+            },
+        };
+        mgr.start_agent_gateway(agent, "nsec1old", bounded)
+            .await
+            .unwrap();
+        assert!(mgr.is_running(agent));
+
+        // 新しい生成鍵を保存して採用。
+        NostaroCli::save_generated_key(
+            agent,
+            &crate::cli::GeneratedKey {
+                nsec: "nsec1newhot".to_string(),
+                npub: npub_new.to_string(),
+                pubkey: "y".to_string(),
+            },
+        )
+        .unwrap();
+
+        let adopted = mgr
+            .identity_provisioner()
+            .adopt_identity(agent, npub_new)
+            .await
+            .unwrap();
+        assert_eq!(adopted, npub_new);
+
+        // ホットスワップ経路: bootstrap の upsert も enabled 書き込みもしない。
+        assert!(
+            runner.upserted.lock().unwrap().is_empty(),
+            "稼働中はホットスワップ（config を upsert しない）"
+        );
+        assert!(
+            runner.enabled_calls.lock().unwrap().is_empty(),
+            "ホットスワップは enabled を触らない"
+        );
+        // 本鍵だけ差し替える（set_nostr_secret_key に新 nsec）。
+        assert_eq!(
+            *runner.secret_sets.lock().unwrap(),
+            vec!["nsec1newhot".to_string()],
+            "ホットスワップは本鍵だけ差し替える"
+        );
+        assert!(
+            mgr.is_running(agent),
+            "ホットスワップは再接続しない（稼働継続）"
+        );
+
+        mgr.stop_agent_gateway(agent).await;
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 }

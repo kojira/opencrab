@@ -28,6 +28,19 @@ pub trait NostrAgentRunner: AgentRuntime {
     /// 本鍵（secret_key）だけを差し替える（identity 切替。relays/filter/enabled は保持）。
     fn set_nostr_secret_key(&self, agent_id: &str, secret_key: &str) -> Result<()>;
 
+    /// `agent_nostr_config` 行を丸ごと書き込む（自己ブートストラップの採用時 / #264）。
+    ///
+    /// 未設定エージェントが自力で鍵を採用するとき、secret_key＋relays＋bounded フィルタを
+    /// **enabled=false で先に書く**（起動成功後に [`Self::set_nostr_enabled`] で有効化する
+    /// 順序ガードのため）。既存行があれば上書きする（upsert）。
+    fn upsert_nostr_config(&self, cfg: &AgentNostrConfigRow) -> Result<()>;
+
+    /// `agent_nostr_config` の enabled フラグだけを立て下げする（#264）。
+    ///
+    /// **起動が成功してから `true` にする**（失敗時に「enabled だが未稼働」の不整合を
+    /// 残さない）。この順序は呼び出し側（採用 capability）が守る。
+    fn set_nostr_enabled(&self, agent_id: &str, enabled: bool) -> Result<()>;
+
     /// エージェント宛の Nostr 受信を転記する宛先を解決する（issue #252 段階 A）。
     ///
     /// エージェント単位設定（`agent_nostr_relay_config`）を**同期 DB 読み**で引き、有効かつ

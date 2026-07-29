@@ -29,6 +29,21 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         Ok(())
     }
 
+    fn upsert_nostr_config(
+        &self,
+        cfg: &opencrab_db::queries::AgentNostrConfigRow,
+    ) -> anyhow::Result<()> {
+        let conn = self.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent_nostr_config(&conn, cfg)?;
+        Ok(())
+    }
+
+    fn set_nostr_enabled(&self, agent_id: &str, enabled: bool) -> anyhow::Result<()> {
+        let conn = self.db.lock().unwrap();
+        opencrab_db::queries::set_agent_nostr_config_enabled(&conn, agent_id, enabled)?;
+        Ok(())
+    }
+
     /// エージェント宛の Nostr 受信を転記する宛先を解決する（issue #252 段階 A）。
     ///
     /// 同期 DB 読み 1 回。fail-closed（未設定 / 無効 / 不正 → `None`）の判定は actions 層の

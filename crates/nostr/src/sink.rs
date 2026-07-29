@@ -458,6 +458,14 @@ mod tests {
             Ok(())
         }
 
+        fn upsert_nostr_config(&self, _cfg: &AgentNostrConfigRow) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_nostr_enabled(&self, _agent_id: &str, _enabled: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn resolve_nostr_relay_target(
             &self,
             _agent_id: &str,

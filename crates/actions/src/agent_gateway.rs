@@ -184,6 +184,32 @@ pub trait GatewayKeyProvisioning: Send + Sync {
     fn store_generated_key(&self, agent_id: &str, key: &ProvisionedKey) -> Result<()>;
 }
 
+/// transport 固有の **identity 採用**（生成鍵を本鍵に切り替える）（capability / #264）。
+///
+/// `GatewayKeyProvisioning`（鍵の払い出し）と対になる capability。持つ実装だけが
+/// [`AgentGatewayLifecycle::identity_provisioning`] から `Some` を返す。
+///
+/// ## なぜ 2 モードを実装側に閉じるか
+///
+/// 「採用」は gateway の稼働状態で意味が変わる:
+/// - **稼働中** → 走行中の watch ループが握る接続状態（self_pubkey セル）を in-place で
+///   差し替える（再接続なし）。この状態はループの外から組み直せないので実装が握る。
+/// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**bounded な
+///   フィルタ**を書き、ゲートウェイを起動して接続する（＝未設定エージェントが自力で載る）。
+///
+/// この分岐と「起動成功してから `enabled=true`」の順序を呼び出し側に晒すと呼び出し口
+/// ごとに間違えうるため、capability の内側へ閉じる。呼び出し側は npub を渡すだけ。
+///
+/// **秘密値（nsec）は戻り値に出さない**（採用した npub のみ返す）。
+#[async_trait]
+pub trait GatewayIdentityProvisioning: Send + Sync {
+    /// 生成鍵 `npub`（**そのエージェント自身が生成した鍵のみ**）を本鍵として採用する。
+    ///
+    /// 稼働中なら in-place ホットスワップ、未稼働なら bootstrap（config 書き込み＋bounded
+    /// フィルタ設定＋起動＝接続）。成功時は採用した npub を返す。秘密鍵は返さない。
+    async fn adopt_identity(&self, agent_id: &str, npub: &str) -> Result<String>;
+}
+
 /// 受信を持つ transport の per-agent ライフサイクル管理。
 ///
 /// 実装するのは**マネージャ**（`DiscordGatewayManager` / `NostrGatewayManager`）であって
@@ -275,6 +301,15 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
     /// エージェント単位ではなくマネージャ単位（払い出しは外部コマンドの設定を継承する
     /// だけで、稼働中の接続を必要としない）。既定は `None`（鍵を作らない transport）。
     fn key_provisioning(&self) -> Option<Arc<dyn GatewayKeyProvisioning>> {
+        None
+    }
+
+    /// この transport が**生成鍵の採用（identity 切替）**を提供するなら返す
+    /// （capability / #264）。
+    ///
+    /// `key_provisioning`（鍵の払い出し）と対。「生成鍵を本鍵にして接続する」操作を
+    /// 持つ transport（Nostr）だけが `Some` を返す。既定は `None`。
+    fn identity_provisioning(&self) -> Option<Arc<dyn GatewayIdentityProvisioning>> {
         None
     }
 }

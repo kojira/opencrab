@@ -377,6 +377,12 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     と対で、鍵未設定でも露出する）。戻り値の一覧を同ターンで `nostr_switch_identity`
     //     の引数に使うので inline。nsec は返さない。
     "nostr_list_keys",
+    // (4) 設定の書き込み: 生成鍵を本鍵に採用する（bootstrap 用。`nostr_generate_key` と
+    //     対で、鍵未設定でも露出する）。採用は以後の Nostr identity を差し替える run 内
+    //     共有状態の書き込みで、成否（起動できたか）を同ターンで確認して次へ進むので
+    //     inline。**採用時に bounded な self-mention フィルタを自動設定して接続する**
+    //     （未設定エージェントの自己ブートストラップ / #264）。nsec は返さない。
+    "nostr_switch_identity",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -1636,6 +1642,28 @@ mod tests {
         assert!(
             trusted_exec.policy_allows("nostr_list_keys"),
             "TrustedUser は nostr_list_keys を使える"
+        );
+    }
+
+    /// #264: `nostr_switch_identity`（採用＝接続）は trusted 限定。外部ユーザー由来の
+    /// 会話ターン（caller=Agent）には出さず実行もしない（乗っ取り防止）。owner/trusted の
+    /// ターン（heartbeat / ダッシュボード / オーナー会話）でだけ自分の意思で採用できる。
+    #[test]
+    fn test_nostr_switch_identity_is_trusted_only() {
+        let p = tool_policy("nostr_switch_identity");
+        assert!(p.trusted_only, "nostr_switch_identity must be trusted_only");
+
+        let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
+        assert!(
+            !agent_exec.policy_allows("nostr_switch_identity"),
+            "Agent（未信頼の外部会話ターン）は nostr_switch_identity を使えない（乗っ取り防止）"
+        );
+        let (_d2, owner_ctx) = test_context_with_caller(CallerIdentity::Owner);
+        let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), owner_ctx);
+        assert!(
+            owner_exec.policy_allows("nostr_switch_identity"),
+            "Owner は nostr_switch_identity を使える"
         );
     }
 
