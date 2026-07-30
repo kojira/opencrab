@@ -2184,8 +2184,11 @@ mod tests {
     /// README に書くまで落ち（漏れ）、README から消しても落ちる（死名）。
     ///
     /// 対象は露出範囲の列が「all turns」で始まる行だけ。transport 固有の行
-    /// （`Discord turns only` / `Nostr turns only`）は別の定義集合なので、
-    /// `DiscordGatewayActions` / `NostrGatewayActions` 側の検査が受け持つ。
+    /// （`Discord turns only` / `Nostr turns only`）は**どのテストも README と
+    /// 突き合わせていない**（`test_definitions_returns_expected_count` 等は定数と
+    /// `definitions()` のドリフトを見るだけで、README の行は見ない）。つまりこの表の
+    /// transport 行は今も無検査で腐りうる。埋めるなら transport 側にも同型のテストを
+    /// 足すこと。
     #[test]
     fn server_gateway_action_table_matches_own_definitions() {
         let readme_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");

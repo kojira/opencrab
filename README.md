@@ -38,7 +38,7 @@
 - **Trusted User Whitelist** — Per-agent Discord user trust management
 - **Sandboxed Workspace** — Per-agent file operations with path traversal protection
 - **Heartbeat Loop** — Periodic autonomous agent activity with configurable interval and graceful shutdown. Firing is **per agent**: an agent that opted in gets its own tick (so an agent with no Discord channel — a Nostr-only one, for example — still runs), and agents that have not opted in keep the older per-channel firing. The speech outlet is transport-independent, so what a tick produces is delivered by whichever gateway the agent has
-- **Self-Configured Heartbeat** — Agents read and write their own heartbeat settings (`get_my_heartbeat` / `set_my_heartbeat`); intervals below the configured floor are rejected in the same turn so the agent can retry with a valid value. The set of agents that get their own tick is enumerated at startup, so a newly opted-in agent starts firing after the next restart
+- **Self-Configured Heartbeat** — Agents read and write their own heartbeat settings (`get_my_heartbeat` / `set_my_heartbeat`); intervals below the configured floor are rejected in the same turn so the agent can retry with a valid value. The stored settings are re-read on every tick, so an agent that already has a heartbeat loop running switches to per-agent firing immediately; what is fixed at startup is only the *set of agents a loop is started for*, so an agent with no loop yet (a Nostr-only one, with no entry under `gateway.discord.agent_ids`) begins firing after the next restart
 - **Attachment Anchors** — Discord attachments leave a trace in the stored conversation, not just in the model call: images are passed as vision content parts *and* noted in the message body as `[画像添付: name (type)]`, non-image files as `[添付ファイル: name (type), NB]`. Without the anchor an image left no record in `session_logs`, and later turns concluded the agent had made it up
 - **Self-Learning** — Experience-based learning, peer learning, reflection, and skill creation
 - **LLM Self-Selection** — Agents dynamically select LLMs per task based on past experience
@@ -246,7 +246,8 @@ only exist on that transport's turns.
 | **Nostr identity** | `nostr_generate_key`, `nostr_list_keys`, `nostr_switch_identity` | all turns (`crates/server/src/system_actions.rs`) — bootstrap tools, exposed **before** any key exists (see [Nostr](#nostr)) |
 | **Nostr passthrough** | `nostr_run` | all turns (`crates/server/src/system_actions.rs`) — thin nostaro passthrough (see [Nostr](#nostr)) |
 | **Nostr relay target** | `get_my_nostr_relay`, `set_my_nostr_relay` | all turns (`crates/server/src/agent_nostr_relay.rs`) — where the agent's inbound Nostr events get mirrored (a Discord webhook URL); also editable from the dashboard |
-| **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_dm`, `nostr_zap`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event |
+| **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event |
+| **Nostr messaging (gated)** | `nostr_dm`, `nostr_zap` | Nostr turns only (`crates/nostr`), *and* trusted-only — an inbound event drives a `caller=Agent` turn, so these are neither listed nor executable there; they are reachable only from a turn a trusted caller started |
 | **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
 | **Delivery** | `send_ui`, `request_peer_review` | all turns whose transport can render UI (`send_ui`) or send text (`request_peer_review`) — implementations in `crates/actions/src/a2ui.rs` and `crates/server/src/peer_review.rs`; the transport only supplies the surface (`GatewayActions::a2ui_surface` / `text_delivery`) |
 | **Webhook targets** | `list_webhooks`, `get_default_webhook`, `set_default_webhook`, `list_subtask_webhooks`, `get_default_subtask_webhook`, `set_default_subtask_webhook` | all turns (`crates/server/src/webhook_targets.rs`) |
@@ -269,10 +270,14 @@ them to equal `own_definitions()` in both directions,
 `server_tools_are_classified_for_dispatch` requires every own definition to be classified and
 rejects dead names on the constant side, and `test_definitions_returns_expected_count` pins the
 Discord set (including that the actions relocated in #157 S1/S2/S3/S5/S6/S7 are no longer
-defined there).
+defined there). Note the gap: only the "all turns" rows are checked against this file. The
+`Discord turns only` / `Nostr turns only` rows are **not** — the transport-side tests pin their
+definition sets against constants, not against this table, so those rows can still go stale
+without a test failing.
 
-Visibility is not uniform. `configure_*`, `manage_allowed_commands` and
-`update_heartbeat_instructions` are owner-only. `nostr_list_keys`, `nostr_switch_identity`,
+Visibility is not uniform. `configure_*`, `manage_allowed_commands`,
+`update_heartbeat_instructions` and the core action `update_instructions` are owner-only —
+that is `OWNER_ONLY_ACTIONS` in full. `nostr_list_keys`, `nostr_switch_identity`,
 `nostr_run`, `nostr_dm`, `nostr_zap`, the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
 `read_heartbeat_instructions`, the voice actions and `create_skill` are trusted-only, meaning
 they are neither listed nor executable on a turn driven by an untrusted external user. That gate
@@ -300,13 +305,18 @@ another's key.
 has a key and on turns where no Nostr gateway is running (the latter two on trusted turns only).
 The agent generates a key (optionally with a vanity npub prefix), looks up the resulting npub,
 and adopts it — and adopting is what starts the gateway: if the agent was not connected yet,
-`nostr_switch_identity` also writes a bounded filter that subscribes to mentions of itself and
-brings the connection up. No dashboard step and no restart in between. The private key is
+`nostr_switch_identity` also writes a bounded filter and brings the connection up. That filter is
+`keywords = [npub]` (`crates/nostr/src/manager.rs`), which becomes
+`nostaro watch --keyword=<npub>` — a **body keyword match, not a `#p` tag subscription**. See the
+coverage note at the end of this section for what that costs.
+No dashboard step and no restart in between. The private key is
 generated and stored server-side (mode 0600) and is never returned to the model; `nsec` is
 masked out of tool results and error strings.
 
 **`nostr_run` is a thin passthrough, not a wrapper.** It forwards a `nostaro` subcommand and its
-arguments straight through, so whatever nostaro can do the agent can do: arbitrary-kind `event`,
+arguments straight through, so once the agent has adopted a key (no `config.toml` means no
+passthrough — the tool errors out instead of spawning nostaro), whatever nostaro can do the agent
+can do: arbitrary-kind `event`,
 `profile` (kind:0), NIP-28 `channel` creation and posting, `upload`, `react`, `repost`,
 `follow`, `get` / `timeline` / `search`, and so on. Only three subcommands are denied —
 `init` (key creation/overwrite, which belongs to the tools above), `watch` (unbounded inbound,
@@ -325,15 +335,20 @@ What OpenCrab guarantees about that passthrough is deliberately just two things:
 Judgements about the Nostr protocol itself — which kind, which tags, what a valid event looks
 like — are left to nostaro. That is the point: OpenCrab does not reimplement the spec, so a
 nostaro capability does not need a matching OpenCrab tool before an agent can use it.
+`docs/nostaro-interface.md` records the subcommands and output shapes this crate relies on.
 
 Inbound events matching the agent's filter can also be mirrored into a Discord channel via
 webhook. The target is set from the dashboard, or by the agent itself with `get_my_nostr_relay`
 / `set_my_nostr_relay`.
 
-Inbound coverage is **not** complete. Which events actually reach the agent depends on what the
-underlying `nostaro` subscription hands back, and replies to an agent's own notes are known to be
-dropped in some cases (fix in progress upstream: `kojira/nostaro#6`, unmerged). Outbound —
-posting, and replying to an event the agent did receive — is the part that is exercised today.
+**Inbound coverage is not complete, and the cause is on this side.** The bootstrap filter written
+by `nostr_switch_identity` matches the agent's npub as a **keyword in the note body**, so a reply
+that only references the agent through `e` / `p` tags — which is what a normal Nostr client
+produces — matches nothing and is dropped **systematically**, not occasionally. Fixing it takes
+changes in both places: the filter this repo writes (`kojira/opencrab#271`) and the subscription
+nostaro builds from it (`kojira/nostaro#6`, unmerged). Until then, do not assume every mention
+produces a turn. Outbound — posting, and replying to an event the agent did receive — is the part
+that is exercised today.
 
 ## Skills
 
@@ -357,7 +372,7 @@ Standard skills defined in `skills/`:
 
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:
 
-- **Agent settings** — `heartbeat_interval_secs` (default 1800), `heartbeat_enabled` (default false), `workspace_path`, `max_workspace_size_mb`. These are the global defaults; an agent that has opted in via `set_my_heartbeat` fires on its own stored interval instead (the dashboard's heartbeat fields under Agent Channels are the older per-Discord-channel setting, a separate table)
+- **Agent settings** — `heartbeat_interval_secs`, `heartbeat_enabled`, `heartbeat_min_interval_secs` (the floor `set_my_heartbeat` enforces, 300; the ceiling is a code constant of 24h), `workspace_path`, `max_workspace_size_mb`. Watch the two layers of default: the shipped `config/default.toml` sets `heartbeat_interval_secs = 1800` and `heartbeat_enabled = true`, while the code fallbacks used when a key is *absent* are 29 and `false` (`crates/server/src/config.rs`). These are the global values; an agent that has opted in via `set_my_heartbeat` fires on its own stored interval instead (the dashboard's heartbeat fields under Agent Channels are the older per-Discord-channel setting, a separate table)
 - **LLM providers** — Default provider (hermit-shell proxy at localhost:8765 by default), per-use-case model selection, fallback chains, model aliases, self-selection toggle
 - **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), per-agent Nostr key/relays/filter (DB-persisted), CLI toggle
 - **Database** — SQLite path
