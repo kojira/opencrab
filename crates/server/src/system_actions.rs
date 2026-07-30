@@ -2171,6 +2171,91 @@ mod tests {
         );
     }
 
+    /// **README の gateway アクション表が実装と一致する**。
+    ///
+    /// 「## Action System」節の**前半**（core アクション表）には
+    /// `readme_action_table_matches_the_dispatcher`（`crates/actions/src/dispatcher.rs`）が
+    /// あるが、**後半の gateway 表には同じ検査が無かった**。その結果、実装だけが進んで
+    /// 表が 7 個（`nostr_list_keys` / `nostr_switch_identity` / `nostr_run` /
+    /// `get_my_nostr_relay` / `set_my_nostr_relay` / `get_my_heartbeat` /
+    /// `set_my_heartbeat`）を落としたまま誰も気付かず、README は「Config 行に
+    /// `nostr_generate_key` だけ」という状態で残っていた。分類の網羅性検査と同じく
+    /// **実装（`own_definitions()`）を起点に**走査し、両方向を要求する: ツールを足したら
+    /// README に書くまで落ち（漏れ）、README から消しても落ちる（死名）。
+    ///
+    /// 対象は露出範囲の列が「all turns」で始まる行だけ。transport 固有の行
+    /// （`Discord turns only` / `Nostr turns only`）は別の定義集合なので、
+    /// `DiscordGatewayActions` / `NostrGatewayActions` 側の検査が受け持つ。
+    #[test]
+    fn server_gateway_action_table_matches_own_definitions() {
+        let readme_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
+        let readme = std::fs::read_to_string(readme_path)
+            .unwrap_or_else(|e| panic!("README.md を読めない ({readme_path}): {e}"));
+
+        // 「## Action System」節のうち、gateway アクション表の導入文より後だけを見る
+        // （それより前は core アクション表 = dispatcher 側の検査の担当）。
+        let table = readme
+            .split("## Action System")
+            .nth(1)
+            .expect("README に '## Action System' 節が無い")
+            .split("\n## ")
+            .next()
+            .unwrap()
+            .split("In addition, **gateway actions**")
+            .nth(1)
+            .expect("README の Action System 節に gateway アクション表の導入文が無い");
+
+        // 表の行 `| **Category** | `a`, `b` | 露出範囲 |` から、露出範囲が「all turns」で
+        // 始まる行の 2 列目だけを拾う。
+        let mut documented: Vec<String> = Vec::new();
+        for line in table.lines().filter(|l| l.starts_with("| **")) {
+            let cols: Vec<&str> = line.split('|').collect();
+            let (Some(actions_col), Some(available_col)) = (cols.get(2), cols.get(3)) else {
+                continue;
+            };
+            if !available_col.trim_start().starts_with("all turns") {
+                continue;
+            }
+            for part in actions_col.split('`').skip(1).step_by(2) {
+                documented.push(part.to_string());
+            }
+        }
+        documented.sort();
+        documented.dedup();
+        assert!(
+            !documented.is_empty(),
+            "README の gateway アクション表から「all turns」行のツール名を 1 つも拾えていない\
+             （表の形を変えたならこのパーサも直すこと）"
+        );
+
+        let mut registered: Vec<String> = SystemGatewayActions::own_definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        registered.sort();
+
+        let missing: Vec<&String> = registered
+            .iter()
+            .filter(|n| !documented.contains(n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "README の gateway アクション表に載っていない own 定義: {missing:?}\n\
+             （SystemGatewayActions にツールを足したら README の表にも足すこと）"
+        );
+
+        let dead: Vec<&String> = documented
+            .iter()
+            .filter(|n| !registered.contains(n))
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "README の gateway アクション表の「all turns」行が own 定義に無い名前を載せている: \
+             {dead:?}\n（transport 固有のツールなら露出範囲の列を \
+             `Discord turns only` / `Nostr turns only` のように書くこと）"
+        );
+    }
+
     /// **fail-closed な dispatch 分類ガード（#152）**。
     ///
     /// `own_definitions()` の全名が「非ブロック dispatch の除外集合（inline）」か
