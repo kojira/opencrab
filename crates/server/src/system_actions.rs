@@ -327,22 +327,23 @@ impl SystemGatewayActions {
             // 会話/heartbeat/オーナーの trusted ターンから使えるようにする（既存の inner
             // `nostr_post`/`reply` は Nostr 受信ターン用にそのまま残る）。opencrab が守るのは
             // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
-            // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）
-            // と `watch`（無制限受信）だけ拒否する。
+            // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
+            // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）だけ拒否する。
             GatewayActionDef {
                 name: "nostr_run".to_string(),
                 description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
                               nostaro のサブコマンド（例: event / post / reply / dm / zap / upload / \
                               react / repost / follow / unfollow / profile / channel / get / timeline / \
-                              search / decode / pubkey / relay など）を、`args` にそのサブコマンドの\
+                              search / decode / pubkey など）を、`args` にそのサブコマンドの\
                               フラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"event\", \
                               args=[\"--kind\",\"0\",\"--content\",\"{...}\"] で kind:0 プロフィールを設定）。\
                               投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を\
                               すべて使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
                               扱わない・見えない。鍵の作成/採用は nostr_generate_key / \
                               nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
-                              ここからは起動できない。まだ鍵を採用していない場合は先に \
-                              nostr_switch_identity で採用すること。"
+                              ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
+                              ダッシュボード）で管理するため relay サブコマンドは不可。まだ鍵を採用して\
+                              いない場合は先に nostr_switch_identity で採用すること。"
                     .to_string(),
                 parameters: json!({
                     "type": "object",

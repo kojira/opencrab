@@ -340,10 +340,15 @@ impl NostaroCli {
     ///   `nostr_switch_identity` に閉じる（passthrough から鍵をいじらせない）。
     /// - `watch`: 受信は per-agent ゲートウェイ管理（bounded フィルタ）が担う。passthrough
     ///   から無制限 watch を上げさせない（かつ長時間ブロックを避ける）。
+    /// - `relay`: リレー設定の真実源は opencrab の DB（`agent_nostr_config`）で、config.toml は
+    ///   materialize で毎回上書きされる。passthrough から `relay add/remove` すると config.toml
+    ///   だけ書き換わって DB と desync し、次の gateway start / switch_identity で黙って揮発する。
+    ///   よってリレー管理は opencrab の DB 経路（configure_nostr / ダッシュボード）に閉じる。
+    ///   壊れている（揮発する）機能を塞ぐので**非劣化ではない**。
     ///
     /// これ以外のサブコマンドは**そのまま nostaro に委ねる**（Nostr 仕様の判断は
     /// opencrab で再実装せず nostaro に委譲する＝非劣化）。
-    pub const PASSTHROUGH_DENIED_SUBCOMMANDS: &'static [&'static str] = &["init", "watch"];
+    pub const PASSTHROUGH_DENIED_SUBCOMMANDS: &'static [&'static str] = &["init", "watch", "relay"];
 
     /// nostaro サブコマンドを**薄く passthrough 実行**する（#268）。
     ///
@@ -355,8 +360,8 @@ impl NostaroCli {
     /// 2. **nsec 隠蔽**: agent は nsec を引数に持たない前提に加え、`init` を拒否して鍵の
     ///    作成/上書きを塞ぎ、stdout / エラー出力の双方を [`mask_secrets`] に通す。
     ///
-    /// `init`/`watch` は拒否し、それ以外は素通しする。config.toml 未 materialize（鍵未採用）
-    /// なら nostaro を spawn せず明示エラーを返す。
+    /// `init`/`watch`/`relay` は拒否し、それ以外は素通しする。config.toml 未 materialize
+    /// （鍵未採用）なら nostaro を spawn せず明示エラーを返す。
     pub async fn run_passthrough(
         &self,
         agent_id: &str,
@@ -367,11 +372,14 @@ impl NostaroCli {
         if sub.is_empty() {
             anyhow::bail!("subcommand が空です");
         }
-        // deny: 鍵の作成/上書き（init）と無制限受信（watch）。
+        // deny: 鍵の作成/上書き（init）・無制限受信（watch）・リレー編集（relay）。
+        // relay は config.toml だけ書き換えて DB(agent_nostr_config) と desync し次の
+        // gateway start / switch_identity で揮発するため塞ぐ。
         if Self::PASSTHROUGH_DENIED_SUBCOMMANDS.contains(&sub) {
             anyhow::bail!(
                 "nostr_run では '{sub}' は実行できません（init は nostr_generate_key / \
-                 nostr_switch_identity に、watch はゲートウェイ管理に閉じています）"
+                 nostr_switch_identity に、watch はゲートウェイ管理に閉じています。リレー設定は \
+                 opencrab 側（configure_nostr / ダッシュボード）で管理してください）"
             );
         }
         // `--config` の上書きを封じる（config は常にあなた自身の鍵設定＝鍵混同防止を回避
@@ -1099,8 +1107,11 @@ mod tests {
         .unwrap();
     }
 
-    /// `init` / `watch` は materialize の有無に関わらず**拒否**（鍵管理・受信は passthrough
-    /// の外）。deny チェックは config 存在チェックより手前なので nostaro を spawn しない。
+    /// `init` / `watch` / `relay` は materialize の有無に関わらず**拒否**（鍵管理・受信・
+    /// リレー設定は passthrough の外）。deny チェックは config 存在チェックより手前なので
+    /// nostaro を spawn しない。`relay` は config.toml だけ書き換わって DB と desync し次の
+    /// gateway start / switch_identity で揮発するため塞ぐ（configure_nostr / ダッシュボード
+    /// の DB 経路に閉じる）。
     #[cfg(unix)]
     #[tokio::test]
     async fn passthrough_denies_init_and_watch() {
@@ -1108,12 +1119,22 @@ mod tests {
         materialize_for(agent);
         let (_d, cli) = fake_echo_nostaro();
 
-        for sub in ["init", "watch"] {
+        for sub in ["init", "watch", "relay"] {
             let r = cli.run_passthrough(agent, sub, &[]).await;
             assert!(r.is_err(), "{sub} は拒否されるべき");
             let msg = r.unwrap_err().to_string();
             assert!(msg.contains(sub), "拒否理由に {sub} が含まれること: {msg}");
         }
+        // relay の拒否理由には opencrab 側で管理する旨を明示する（誘導）。
+        let msg = cli
+            .run_passthrough(agent, "relay", &["add".to_string(), "wss://x".to_string()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("configure_nostr") || msg.contains("ダッシュボード"),
+            "relay の拒否理由に opencrab 側の管理経路を含めること: {msg}"
+        );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
