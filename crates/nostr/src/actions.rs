@@ -448,6 +448,13 @@ mod tests {
 
     /// ドリフト検出: `TRUSTED_ONLY_ACTIONS` の nostr_* は実在の nostr アクションを
     /// 指していること（片方をリネームするとゲートが死に名を指して黙って無効化される）。
+    ///
+    /// ただし **server-own の nostr_* は inner の `definitions()` には無い**（#268 の
+    /// `nostr_run` は薄い passthrough として server 側だけに定義し、inner には持たせない）。
+    /// server-own 名の liveness は server crate 側の
+    /// `nostr_run_is_own_trusted_only_and_inline`（`own_definitions()` に実在することを
+    /// 主張）が担保するので、ここでは対象外にする。
+    const SERVER_OWN_NOSTR_TRUSTED: &[&str] = &["nostr_run"];
     #[test]
     fn test_trusted_only_nostr_names_are_live() {
         let a = NostrGatewayActions::new(NostaroCli::new());
@@ -455,6 +462,7 @@ mod tests {
         for n in opencrab_actions::TRUSTED_ONLY_ACTIONS
             .iter()
             .filter(|n| n.starts_with("nostr_"))
+            .filter(|n| !SERVER_OWN_NOSTR_TRUSTED.contains(n))
         {
             assert!(
                 names.contains(&n.to_string()),

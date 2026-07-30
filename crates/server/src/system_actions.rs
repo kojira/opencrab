@@ -322,6 +322,45 @@ impl SystemGatewayActions {
                     "required": ["npub"]
                 }),
             },
+            // 薄い nostaro passthrough（#268）。server-own / TRUSTED_ONLY。投稿・返信・
+            // kind:0 プロフィール設定・チャンネル・取得など nostaro が持つ操作を**すべて**
+            // 会話/heartbeat/オーナーの trusted ターンから使えるようにする（既存の inner
+            // `nostr_post`/`reply` は Nostr 受信ターン用にそのまま残る）。opencrab が守るのは
+            // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
+            // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
+            // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）だけ拒否する。
+            GatewayActionDef {
+                name: "nostr_run".to_string(),
+                description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
+                              nostaro のサブコマンド（例: event / post / reply / dm / zap / upload / \
+                              react / repost / follow / unfollow / profile / channel / get / timeline / \
+                              search / decode / pubkey など）を、`args` にそのサブコマンドの\
+                              フラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"event\", \
+                              args=[\"--kind\",\"0\",\"--content\",\"{...}\"] で kind:0 プロフィールを設定）。\
+                              投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を\
+                              すべて使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
+                              扱わない・見えない。鍵の作成/採用は nostr_generate_key / \
+                              nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
+                              ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
+                              ダッシュボード）で管理するため relay サブコマンドは不可。まだ鍵を採用して\
+                              いない場合は先に nostr_switch_identity で採用すること。"
+                    .to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "subcommand": {
+                            "type": "string",
+                            "description": "nostaro のサブコマンド（init/watch は不可）。"
+                        },
+                        "args": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "サブコマンドの引数。フラグと値を 1 要素ずつ配列で渡す（省略可）。"
+                        }
+                    },
+                    "required": ["subcommand"]
+                }),
+            },
             // 実行中の subtask を停止するツール（#161）。Discord gateway 実装だけに
             // あった cancel_subtask を server-neutral 層へ露出し、web/Nostr/REST でも
             // 自動 dispatch された subtask を停止できるようにする。認可（親セッション/
@@ -949,6 +988,65 @@ impl SystemGatewayActions {
                 error: None,
             },
             Err(e) => err(format!("nostr_switch_identity 失敗: {e}")),
+        }
+    }
+
+    /// 薄い nostaro passthrough（#268）。server-own / TRUSTED_ONLY。
+    ///
+    /// 稼働中（登録済み）の Nostr transport の passthrough capability
+    /// （[`opencrab_actions::GatewayNostrPassthrough`]）へ委譲する。config は常に
+    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch` の拒否・`--config` 上書きの封じ・
+    /// 未 materialize（鍵未採用）の明示エラー・nsec マスクは capability の内側
+    /// （`NostaroCli::run_passthrough`）で行う。呼び出し側はここで subcommand と args を
+    /// 取り出して渡すだけ。
+    async fn nostr_run(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
+        let Some(subcommand) = args
+            .get("subcommand")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return err("subcommand パラメータが必要です".to_string());
+        };
+        // args は文字列配列（フラグと値を 1 要素ずつ）。省略可。非文字列要素は弾く
+        // （引数はそのまま argv になるので、数値等は文字列で渡させる）。
+        let sub_args: Vec<String> = match args.get("args") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => {
+                let mut out = Vec::with_capacity(items.len());
+                for it in items {
+                    match it.as_str() {
+                        Some(s) => out.push(s.to_string()),
+                        None => {
+                            return err(
+                                "args の要素はすべて文字列で指定してください（数値も文字列で）"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                }
+                out
+            }
+            Some(_) => return err("args は文字列の配列で指定してください".to_string()),
+        };
+        // Nostr transport の passthrough capability を引く。登録が無ければ Nostr 非対応構成。
+        let Some(passthrough) = self
+            .state
+            .gateways
+            .get(opencrab_actions::gateway_kinds::NOSTR)
+            .and_then(|gw| gw.nostr_passthrough())
+        else {
+            return err(
+                "この環境では Nostr passthrough は利用できません（Nostr 未構成）".to_string(),
+            );
+        };
+        match passthrough.run(&ctx.agent_id, subcommand, &sub_args).await {
+            Ok(out) => GatewayActionResult {
+                success: true,
+                data: Some(json!({ "result": out })),
+                error: None,
+            },
+            Err(e) => err(format!("nostr_run 失敗: {e}")),
         }
     }
 
@@ -1757,6 +1855,9 @@ impl GatewayActions for SystemGatewayActions {
             // bootstrap identity 採用（鍵未設定でも露出）。未接続なら self-mention フィルタで
             // 自動接続する。inner より先に own が処理する（#264）。
             "nostr_switch_identity" => self.nostr_switch_identity(args, ctx).await,
+            // 薄い nostaro passthrough（#268）。稼働中の Nostr transport の passthrough
+            // capability へ委譲する。inner へは委譲しない（own が処理する）。
+            "nostr_run" => self.nostr_run(args, ctx).await,
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
             // 汎用エージェント管理ツール（#157 S1）。Discord 側の実装は撤去済みなので
@@ -5755,5 +5856,203 @@ mod tests {
             "own must not delegate: {:?}",
             inner.calls.lock().unwrap()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // #268: nostr_run 薄い passthrough（server-own / TRUSTED_ONLY）
+    // ------------------------------------------------------------------
+
+    /// `nostr_run` の委譲先を検証する fake passthrough capability。
+    /// 呼ばれた (agent_id, subcommand, args) を記録し、固定文字列 or エラーを返す。
+    #[derive(Default)]
+    struct RecordingPassthrough {
+        calls: std::sync::Mutex<Vec<(String, String, Vec<String>)>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl opencrab_actions::GatewayNostrPassthrough for RecordingPassthrough {
+        async fn run(
+            &self,
+            agent_id: &str,
+            subcommand: &str,
+            args: &[String],
+        ) -> anyhow::Result<String> {
+            self.calls.lock().unwrap().push((
+                agent_id.to_string(),
+                subcommand.to_string(),
+                args.to_vec(),
+            ));
+            if self.fail {
+                anyhow::bail!("passthrough boom");
+            }
+            Ok(format!("ran {subcommand}"))
+        }
+    }
+
+    /// NOSTR 種別で `nostr_passthrough` capability だけを提供する fake gateway。
+    struct FakeNostrGateway {
+        passthrough: Arc<RecordingPassthrough>,
+    }
+
+    #[async_trait]
+    impl opencrab_actions::AgentGatewayLifecycle for FakeNostrGateway {
+        fn kind(&self) -> &'static str {
+            opencrab_actions::gateway_kinds::NOSTR
+        }
+        async fn start(&self, _agent_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self, _agent_id: &str) {}
+        fn is_running(&self, _agent_id: &str) -> bool {
+            false
+        }
+        async fn restore_all(&self) {}
+        async fn shutdown_all(&self) {}
+        fn nostr_passthrough(&self) -> Option<Arc<dyn opencrab_actions::GatewayNostrPassthrough>> {
+            Some(self.passthrough.clone())
+        }
+    }
+
+    fn register_fake_nostr(state: &AppState, fail: bool) -> Arc<RecordingPassthrough> {
+        let passthrough = Arc::new(RecordingPassthrough {
+            fail,
+            ..Default::default()
+        });
+        state.gateways.register(Arc::new(FakeNostrGateway {
+            passthrough: passthrough.clone(),
+        }));
+        passthrough
+    }
+
+    /// `nostr_run` は own（全 trusted ターンで露出）かつ TRUSTED_ONLY（caller=Agent 不可）。
+    /// 分類は inline（同ターンで結果を使う / 送信は送ること自体が応答）。
+    #[test]
+    fn nostr_run_is_own_trusted_only_and_inline() {
+        let names: Vec<String> = SystemGatewayActions::own_definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            names.contains(&"nostr_run".to_string()),
+            "nostr_run は own 定義（全 trusted ターンで露出）でなければならない"
+        );
+        // 可視性 == 実行時強制（#45）: caller=Agent には出さない・実行させない。
+        let policy = opencrab_actions::tool_policy("nostr_run");
+        assert!(policy.trusted_only, "nostr_run は TRUSTED_ONLY");
+        assert!(!policy.owner_only, "owner 限定ではない（trusted なら可）");
+        // 分類は inline（dispatch 対象外）。
+        assert!(
+            opencrab_actions::default_non_dispatch_tools().contains("nostr_run"),
+            "nostr_run は inline（同ターン結果依存 / 配送系）"
+        );
+    }
+
+    /// caller=Agent（外部ユーザー由来の会話）では `nostr_run` を露出しない。
+    #[test]
+    fn nostr_run_is_hidden_from_untrusted_caller() {
+        assert!(opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&"nostr_run"));
+        // owner / trusted は可、素の Agent は不可、を tool_policy が表す。
+        assert!(opencrab_actions::tool_policy("nostr_run").trusted_only);
+    }
+
+    /// 稼働中（登録済み）の Nostr passthrough capability へ、ctx.agent_id・subcommand・args
+    /// をそのまま委譲する。
+    #[tokio::test]
+    async fn nostr_run_delegates_to_capability() {
+        let state = crate::test_app_state();
+        let rec = register_fake_nostr(&state, false);
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-268");
+
+        let r = actions
+            .execute(
+                "nostr_run",
+                &json!({
+                    "subcommand": "event",
+                    "args": ["--kind", "0", "hello; rm -rf /"]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "error: {:?}", r.error);
+        assert_eq!(r.data.unwrap()["result"], "ran event");
+
+        let calls = rec.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (agent, sub, args) = &calls[0];
+        assert_eq!(agent, "agent-268", "config は常に ctx.agent_id のもの");
+        assert_eq!(sub, "event");
+        assert_eq!(
+            args,
+            &vec![
+                "--kind".to_string(),
+                "0".to_string(),
+                "hello; rm -rf /".to_string()
+            ],
+            "args は 1 要素ずつそのまま渡る（注入されない）"
+        );
+    }
+
+    /// Nostr 未構成（capability 未登録）なら明示エラー（inner へ黙って落とさない）。
+    #[tokio::test]
+    async fn nostr_run_errors_when_nostr_not_configured() {
+        let state = crate::test_app_state();
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
+        let r = actions
+            .execute("nostr_run", &json!({"subcommand": "post"}), &ctx)
+            .await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("Nostr"));
+    }
+
+    /// subcommand 欠落・args 非文字列は capability を呼ばず即エラー。
+    #[tokio::test]
+    async fn nostr_run_validates_args() {
+        let state = crate::test_app_state();
+        let rec = register_fake_nostr(&state, false);
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
+
+        // subcommand 無し。
+        let r = actions.execute("nostr_run", &json!({}), &ctx).await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("subcommand"));
+
+        // args に非文字列（数値）。
+        let r = actions
+            .execute(
+                "nostr_run",
+                &json!({"subcommand": "event", "args": ["--kind", 0]}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("文字列"));
+
+        // どちらも capability を呼んでいない。
+        assert!(rec.calls.lock().unwrap().is_empty());
+    }
+
+    /// capability のエラー（未 materialize / init/watch 拒否 / nostaro 失敗）はそのまま
+    /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
+    #[tokio::test]
+    async fn nostr_run_propagates_capability_error() {
+        let state = crate::test_app_state();
+        register_fake_nostr(&state, true);
+        let actions = SystemGatewayActions::new(state, None, None, None);
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
+        let r = actions
+            .execute(
+                "nostr_run",
+                &json!({"subcommand": "post", "args": ["hi"]}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        let msg = r.error.unwrap();
+        assert!(msg.contains("nostr_run 失敗"), "got: {msg}");
+        assert!(msg.contains("passthrough boom"), "got: {msg}");
     }
 }

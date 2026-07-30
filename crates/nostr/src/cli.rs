@@ -334,6 +334,82 @@ impl NostaroCli {
         self.run(cmd).await
     }
 
+    /// `nostr_run`（server-own passthrough / #268）で**拒否**するサブコマンド。
+    ///
+    /// - `init`: 鍵の作成/上書き。鍵管理は opencrab の `nostr_generate_key` /
+    ///   `nostr_switch_identity` に閉じる（passthrough から鍵をいじらせない）。
+    /// - `watch`: 受信は per-agent ゲートウェイ管理（bounded フィルタ）が担う。passthrough
+    ///   から無制限 watch を上げさせない（かつ長時間ブロックを避ける）。
+    /// - `relay`: リレー設定の真実源は opencrab の DB（`agent_nostr_config`）で、config.toml は
+    ///   materialize で毎回上書きされる。passthrough から `relay add/remove` すると config.toml
+    ///   だけ書き換わって DB と desync し、次の gateway start / switch_identity で黙って揮発する。
+    ///   よってリレー管理は opencrab の DB 経路（configure_nostr / ダッシュボード）に閉じる。
+    ///   壊れている（揮発する）機能を塞ぐので**非劣化ではない**。
+    ///
+    /// これ以外のサブコマンドは**そのまま nostaro に委ねる**（Nostr 仕様の判断は
+    /// opencrab で再実装せず nostaro に委譲する＝非劣化）。
+    pub const PASSTHROUGH_DENIED_SUBCOMMANDS: &'static [&'static str] = &["init", "watch", "relay"];
+
+    /// nostaro サブコマンドを**薄く passthrough 実行**する（#268）。
+    ///
+    /// `nostaro --config <data/agents/{agent_id}/nostr/config.toml> <subcommand> [args]` を
+    /// **構造化引数**で起動する（シェル文字列を組まないので注入不可）。守るのは 2 点だけ:
+    ///
+    /// 1. **鍵のエージェント間混同防止**: config は常に `agent_id` のもの
+    ///    （[`base_command`](Self::base_command)）。`--config` を args で上書きさせない。
+    /// 2. **nsec 隠蔽**: agent は nsec を引数に持たない前提に加え、`init` を拒否して鍵の
+    ///    作成/上書きを塞ぎ、stdout / エラー出力の双方を [`mask_secrets`] に通す。
+    ///
+    /// `init`/`watch`/`relay` は拒否し、それ以外は素通しする。config.toml 未 materialize
+    /// （鍵未採用）なら nostaro を spawn せず明示エラーを返す。
+    pub async fn run_passthrough(
+        &self,
+        agent_id: &str,
+        subcommand: &str,
+        args: &[String],
+    ) -> Result<String> {
+        let sub = subcommand.trim();
+        if sub.is_empty() {
+            anyhow::bail!("subcommand が空です");
+        }
+        // deny: 鍵の作成/上書き（init）・無制限受信（watch）・リレー編集（relay）。
+        // relay は config.toml だけ書き換えて DB(agent_nostr_config) と desync し次の
+        // gateway start / switch_identity で揮発するため塞ぐ。
+        if Self::PASSTHROUGH_DENIED_SUBCOMMANDS.contains(&sub) {
+            anyhow::bail!(
+                "nostr_run では '{sub}' は実行できません（init は nostr_generate_key / \
+                 nostr_switch_identity に、watch はゲートウェイ管理に閉じています。リレー設定は \
+                 opencrab 側（configure_nostr / ダッシュボード）で管理してください）"
+            );
+        }
+        // `--config` の上書きを封じる（config は常にあなた自身の鍵設定＝鍵混同防止を回避
+        // させない）。それ以外のフラグは nostaro にそのまま委ねる。
+        if args
+            .iter()
+            .any(|a| a == "--config" || a.starts_with("--config="))
+        {
+            anyhow::bail!(
+                "--config は指定できません（config は常にあなた自身の Nostr 鍵設定を使います）"
+            );
+        }
+        // config.toml が無い＝まだ本鍵を採用していない。nostaro を spawn せず明示エラー。
+        let config_path = Self::agent_config_path(agent_id)?;
+        if !config_path.exists() {
+            anyhow::bail!(
+                "Nostr の鍵がまだ採用されていません（config.toml が未生成）。先に \
+                 nostr_switch_identity で鍵を採用してください"
+            );
+        }
+        let mut cmd = self.base_command(agent_id)?;
+        cmd.arg(sub);
+        for a in args {
+            cmd.arg(a);
+        }
+        // `run` は失敗時に stderr を mask する。成功時の stdout も念のため mask を通す
+        // （config を表示しうる系のサブコマンドで万一 nsec が混じっても伏せる / 多層防御 #263）。
+        self.run(cmd).await.map(|out| mask_secrets(&out))
+    }
+
     /// `nostaro pubkey` — このエージェント（config）の公開鍵（hex）を返す。
     /// 自分の投稿への自己返信ループを防ぐために使う。
     pub async fn pubkey(&self, agent_id: &str) -> Result<String> {
@@ -978,5 +1054,196 @@ mod tests {
         assert!(args
             .iter()
             .any(|a| a.contains("data/agents/agent-1/nostr/config.toml")));
+    }
+
+    // ------------------------------------------------------------------
+    // nostr_run 薄い passthrough（#268）
+    // ------------------------------------------------------------------
+
+    /// 各 argv を 1 行ずつ echo する fake nostaro（引数の中身を検証するため）。
+    /// シェルは介さず `"$@"` をそのまま出すので、`;` や空白入りの値も 1 引数として現れる。
+    #[cfg(unix)]
+    fn fake_echo_nostaro() -> (tempfile::TempDir, NostaroCli) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
+        (dir, cli)
+    }
+
+    /// stdout / stderr に nsec を吐く fake nostaro（マスク検証用）。`leak_to_stderr` で
+    /// 出力先と終了コードを切り替える（stderr なら exit 1 = 失敗経路）。
+    #[cfg(unix)]
+    fn fake_leaky_nostaro(leak_to_stderr: bool) -> (tempfile::TempDir, NostaroCli) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro.sh");
+        let body = if leak_to_stderr {
+            "#!/bin/sh\nprintf 'secret_key = \"nsec1leakedsecretmaterial\"\\n' 1>&2\nexit 1\n"
+        } else {
+            "#!/bin/sh\nprintf 'secret_key = \"nsec1leakedsecretmaterial\"\\n'\nexit 0\n"
+        };
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
+        (dir, cli)
+    }
+
+    /// config.toml を materialize して「鍵採用済み」状態を作る。
+    fn materialize_for(agent: &str) {
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        NostaroCli::materialize_config(
+            agent,
+            "nsec1dummy",
+            &["wss://relay.test".to_string()],
+            None,
+        )
+        .unwrap();
+    }
+
+    /// `init` / `watch` / `relay` は materialize の有無に関わらず**拒否**（鍵管理・受信・
+    /// リレー設定は passthrough の外）。deny チェックは config 存在チェックより手前なので
+    /// nostaro を spawn しない。`relay` は config.toml だけ書き換わって DB と desync し次の
+    /// gateway start / switch_identity で揮発するため塞ぐ（configure_nostr / ダッシュボード
+    /// の DB 経路に閉じる）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_denies_init_and_watch() {
+        let agent = "agent-pt-deny";
+        materialize_for(agent);
+        let (_d, cli) = fake_echo_nostaro();
+
+        for sub in ["init", "watch", "relay"] {
+            let r = cli.run_passthrough(agent, sub, &[]).await;
+            assert!(r.is_err(), "{sub} は拒否されるべき");
+            let msg = r.unwrap_err().to_string();
+            assert!(msg.contains(sub), "拒否理由に {sub} が含まれること: {msg}");
+        }
+        // relay の拒否理由には opencrab 側で管理する旨を明示する（誘導）。
+        let msg = cli
+            .run_passthrough(agent, "relay", &["add".to_string(), "wss://x".to_string()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("configure_nostr") || msg.contains("ダッシュボード"),
+            "relay の拒否理由に opencrab 側の管理経路を含めること: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// config 未 materialize（鍵未採用）なら nostaro を spawn せず明示エラー。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_errors_when_config_missing() {
+        let agent = "agent-pt-noconfig";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let (_d, cli) = fake_echo_nostaro();
+
+        let r = cli
+            .run_passthrough(agent, "post", &["hi".to_string()])
+            .await;
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("config.toml") || msg.contains("採用"),
+            "未 materialize は明示エラー: {msg}"
+        );
+    }
+
+    /// 素通しは常に `--config <このエージェントの config>` を前置し、subcommand と args を
+    /// **1 argv ずつ**そのまま渡す。`;`・空白入りの値もシェル解釈されず 1 引数として届く
+    /// （＝シェルインジェクション不可）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_uses_agent_config_and_passes_args_verbatim() {
+        let agent = "agent-pt-args";
+        materialize_for(agent);
+        let (_d, cli) = fake_echo_nostaro();
+
+        let injection = "hello; rm -rf / && echo pwned".to_string();
+        let out = cli
+            .run_passthrough(
+                agent,
+                "event",
+                &["--kind".to_string(), "0".to_string(), injection.clone()],
+            )
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        // 先頭は必ず --config <このエージェントの config.toml>。
+        assert_eq!(lines[0], "--config");
+        assert!(
+            lines[1].contains(&format!("data/agents/{agent}/nostr/config.toml")),
+            "config は常に ctx.agent_id のもの: {}",
+            lines[1]
+        );
+        assert_eq!(lines[2], "event");
+        assert_eq!(lines[3], "--kind");
+        assert_eq!(lines[4], "0");
+        // インジェクション文字列は 1 argv として丸ごと届く（分割・実行されない）。
+        assert_eq!(lines[5], injection);
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// args で `--config` を上書きさせない（config 固定＝鍵混同防止を回避されない）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_rejects_config_override() {
+        let agent = "agent-pt-cfgoverride";
+        materialize_for(agent);
+        let (_d, cli) = fake_echo_nostaro();
+
+        for bad in [
+            vec!["--config".to_string(), "/etc/other".to_string()],
+            vec!["--config=/etc/other".to_string()],
+        ] {
+            let r = cli.run_passthrough(agent, "get", &bad).await;
+            assert!(r.is_err(), "--config 上書きは拒否: {bad:?}");
+            assert!(r.unwrap_err().to_string().contains("--config"));
+        }
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// 成功時の stdout も nsec マスクを通す（config を表示しうる系のサブコマンドで万一
+    /// 秘密が混じっても伏せる / 多層防御 #263）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_masks_nsec_in_stdout() {
+        let agent = "agent-pt-stdoutmask";
+        materialize_for(agent);
+        let (_d, cli) = fake_leaky_nostaro(false);
+
+        let out = cli.run_passthrough(agent, "get", &[]).await.unwrap();
+        assert!(
+            !out.contains("nsec1leakedsecretmaterial"),
+            "stdout に nsec が漏れている: {out}"
+        );
+        assert!(out.contains("<redacted>"), "マスク痕跡が無い: {out}");
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// 失敗時の stderr（nostaro が config 先頭行をエコーする経路）も nsec を伏せる。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_masks_nsec_in_error_output() {
+        let agent = "agent-pt-errmask";
+        materialize_for(agent);
+        let (_d, cli) = fake_leaky_nostaro(true);
+
+        let r = cli.run_passthrough(agent, "get", &[]).await;
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            !msg.contains("nsec1leakedsecretmaterial"),
+            "エラー出力に nsec が漏れている: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 }
