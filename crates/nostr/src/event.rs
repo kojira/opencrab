@@ -30,6 +30,22 @@ pub struct NostrEvent {
     pub tags: Vec<Vec<String>>,
 }
 
+/// アンカーへ差し込む値の無害化: 制御文字（改行含む）を落とし、長すぎれば切り詰める。
+/// アンカーは**必ず 1 行**に収める（履歴の他の行と混ざらないため）。
+fn sanitize_anchor_field(s: &str) -> String {
+    const MAX: usize = 128;
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    if cleaned.chars().count() <= MAX {
+        cleaned
+    } else {
+        cleaned
+            .chars()
+            .take(MAX - 1)
+            .chain(std::iter::once('…'))
+            .collect()
+    }
+}
+
 impl NostrEvent {
     /// 返信の宛先に使う識別子（note_id 優先、無ければ hex id）。
     pub fn reply_target(&self) -> &str {
@@ -41,11 +57,19 @@ impl NostrEvent {
     /// ここに来る受信は既に「自分宛」に絞られている（`nostaro watch` 側でフィルタ済み）ので、
     /// 種別だけを見分ける:
     /// - kind 4（NIP-04）/ 1059（NIP-17 gift wrap）= DM
+    /// - kind 7（NIP-25）= リアクション（本文返信は不自然 / #282）
+    /// - kind 30023（NIP-23）= 長文
     /// - `e` タグを持つ kind 1 = 既存ノートへのリプライ
     /// - それ以外（`e` タグ無し）= メンション
     pub fn inbound_kind_label(&self) -> &'static str {
         if self.kind == 4 || self.kind == 1059 {
             return "DM";
+        }
+        if self.kind == 7 {
+            return "リアクション";
+        }
+        if self.kind == 30023 {
+            return "長文";
         }
         if self
             .tags
@@ -55,6 +79,55 @@ impl NostrEvent {
             return "リプライ";
         }
         "メンション"
+    }
+
+    /// メンション等に使える著者識別子（npub 優先、無ければ hex pubkey）。
+    ///
+    /// [`Self::author_label`] は表示名を優先するため「誰か」は分かっても
+    /// **返信・メンションには使えない**。こちらは常に鍵そのものを返す。
+    pub fn author_key(&self) -> &str {
+        self.npub
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.pubkey)
+    }
+
+    /// 会話履歴の本文へ焼き込む受信メタ情報のアンカー（#282）。
+    ///
+    /// #272/#274 の画像アンカー（`[画像添付: …]`）と同じ発想＝**情報が存在した痕跡を
+    /// 本文側に残す**。本文だけを記録していたため、次ターン以降のエージェントは
+    /// 「誰の・どのノートの・どの kind の投稿だったか」を一切参照できなかった。
+    ///
+    /// 書式は `[Nostr kind:{kind} {種別} from={npub|pubkey} target={note|id}]`。
+    /// `target` は [`Self::reply_target`] と同じ値で、`nostr_reply(target=…)` にそのまま渡せる。
+    /// `npub` / `note_id` が `None` でも hex へフォールバックするので**欠けた項目は出ない**
+    /// （空の `from=` や `target=` が並ぶことはない）。
+    ///
+    /// created_at / tags は載せない: 履歴の行には既に受信時刻が付き、`e` タグの有無は
+    /// 種別ラベルへ畳まれている。毎ターン積む情報を増やしすぎない（#282 の「冗長に
+    /// なりすぎない」）。
+    pub fn inbound_anchor(&self) -> String {
+        format!(
+            "[Nostr kind:{kind} {label} from={author} target={target}]",
+            kind = self.kind,
+            label = self.inbound_kind_label(),
+            author = sanitize_anchor_field(self.author_key()),
+            target = sanitize_anchor_field(self.reply_target()),
+        )
+    }
+
+    /// 会話履歴・転記に載せる本文（本文 + 受信メタアンカー / #282）。
+    ///
+    /// 転記（Discord webhook）とエージェント向けの記録で**同じ文字列**を使い、
+    /// 「転記には kind が載るのにエージェントには載らない」非対称を解消する。
+    pub fn inbound_text(&self) -> String {
+        let anchor = self.inbound_anchor();
+        if self.content.trim().is_empty() {
+            // 本文なし（リアクション等）。先頭に空行を作らない。
+            anchor
+        } else {
+            format!("{}\n{}", self.content, anchor)
+        }
     }
 
     /// 表示用の著者ラベル（author_name 優先、無ければ npub、無ければ短縮 pubkey）。
@@ -139,6 +212,103 @@ mod tests {
         assert_eq!(ev.inbound_kind_label(), "DM");
         ev.kind = 1059;
         assert_eq!(ev.inbound_kind_label(), "DM");
+    }
+
+    fn ev(kind: u32) -> NostrEvent {
+        NostrEvent {
+            id: "deadbeefid".to_string(),
+            pubkey: "0011223344556677".to_string(),
+            npub: Some("npub1author".to_string()),
+            note_id: Some("note1target".to_string()),
+            author_name: Some("kojira".to_string()),
+            created_at: 1_700_000_000,
+            kind,
+            content: "こんにちは".to_string(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// [#282] kind 別のラベル（テキスト / リアクション / DM / 長文の区別）。
+    #[test]
+    fn test_inbound_kind_label_covers_reaction_and_long_form() {
+        let mut e = ev(1);
+        assert_eq!(e.inbound_kind_label(), "メンション");
+        e.kind = 7; // NIP-25 リアクション: e タグを持っていてもリプライ扱いにしない。
+        e.tags = vec![vec!["e".to_string(), "x".to_string()]];
+        assert_eq!(e.inbound_kind_label(), "リアクション");
+        e.kind = 30023;
+        assert_eq!(e.inbound_kind_label(), "長文");
+        e.kind = 4;
+        assert_eq!(e.inbound_kind_label(), "DM");
+        e.kind = 1059;
+        assert_eq!(e.inbound_kind_label(), "DM");
+        e.kind = 1; // e タグ持ちの kind 1 はリプライのまま（既存挙動）。
+        assert_eq!(e.inbound_kind_label(), "リプライ");
+    }
+
+    /// [#282] アンカーに npub / note id / kind / 種別が載る。
+    #[test]
+    fn test_inbound_anchor_carries_author_note_and_kind() {
+        assert_eq!(
+            ev(1).inbound_anchor(),
+            "[Nostr kind:1 メンション from=npub1author target=note1target]"
+        );
+        assert_eq!(
+            ev(7).inbound_anchor(),
+            "[Nostr kind:7 リアクション from=npub1author target=note1target]"
+        );
+    }
+
+    /// [#282] Option が None でもアンカーは壊れない（hex へフォールバックし、空の
+    /// `from=` / `target=` を出さない）。
+    #[test]
+    fn test_inbound_anchor_falls_back_when_optional_fields_missing() {
+        let mut e = ev(1);
+        e.npub = None;
+        e.note_id = None;
+        e.author_name = None;
+        assert_eq!(
+            e.inbound_anchor(),
+            "[Nostr kind:1 メンション from=0011223344556677 target=deadbeefid]"
+        );
+        // 空文字（欠落と同義）も hex へフォールバックする。
+        e.npub = Some(String::new());
+        assert!(e.inbound_anchor().contains("from=0011223344556677"));
+    }
+
+    /// [#282] アンカーは必ず 1 行（制御文字は落とす）。
+    #[test]
+    fn test_inbound_anchor_is_single_line() {
+        let mut e = ev(1);
+        e.npub = Some("npub1\nfake] [Nostr kind:1".to_string());
+        let anchor = e.inbound_anchor();
+        assert!(!anchor.contains('\n'), "改行が混ざらない: {anchor}");
+    }
+
+    /// [#282] 履歴に載せる本文は「本文 + アンカー」。本文が空なら先頭に空行を作らない。
+    #[test]
+    fn test_inbound_text_appends_anchor() {
+        let e = ev(1);
+        assert_eq!(
+            e.inbound_text(),
+            "こんにちは\n[Nostr kind:1 メンション from=npub1author target=note1target]"
+        );
+        let mut empty = ev(7);
+        empty.content = String::new();
+        assert_eq!(
+            empty.inbound_text(),
+            "[Nostr kind:7 リアクション from=npub1author target=note1target]"
+        );
+    }
+
+    /// [#282] `author_key` は表示名ではなく常に鍵（メンションに使える識別子）を返す。
+    #[test]
+    fn test_author_key_prefers_npub_over_name() {
+        assert_eq!(ev(1).author_key(), "npub1author");
+        assert_eq!(ev(1).author_label(), "kojira");
+        let mut e = ev(1);
+        e.npub = None;
+        assert_eq!(e.author_key(), "0011223344556677");
     }
 
     #[test]

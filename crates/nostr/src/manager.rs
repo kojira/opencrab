@@ -611,6 +611,13 @@ async fn handle_event<R: NostrAgentRunner>(
     // author 単位のセッション（1 相手 = 1 会話）。
     let session_id = nostr_session_id(agent_id, &event.pubkey);
 
+    // 会話履歴・転記に載せる本文（#282）。本文だけを記録していたため、次ターン以降の
+    // エージェントは author の npub も note id も kind も参照できなかった（nostaro 本体
+    // より劣化）。#272/#274 の画像アンカーと同じく、受信メタ情報を本文側に焼き込む。
+    // 転記とエージェント向けで**同じ文字列**を使い、従来の非対称（転記にだけ kind が
+    // 載る）を解消する。
+    let inbound_text = event.inbound_text();
+
     runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}", "nostr");
     runner.record_inbound_message(
         opencrab_actions::TranscriptSource::Nostr,
@@ -621,7 +628,7 @@ async fn handle_event<R: NostrAgentRunner>(
             avatar_url: None,
             channel_id: None,
             pubkey: Some(&event.pubkey),
-            text: &event.content,
+            text: &inbound_text,
             image_urls: &[],
         },
     );
@@ -639,17 +646,28 @@ async fn handle_event<R: NostrAgentRunner>(
             "[Nostr / {kind}] {author}\n{body}",
             kind = event.inbound_kind_label(),
             author = event.author_label(),
-            body = event.content,
+            // #282: エージェントの会話履歴に残るのと同一の本文（メタアンカー込み）。
+            body = inbound_text,
         );
         runner.relay_inbound_notification(&target, relay_text);
     }
 
+    // #282: 「返信先はこれ」という指示だけでなく、受信イベントの**事実**（誰の / どのノート /
+    // どの kind）を明示する。すべて公開情報なので隠す理由はない（nsec は当然出さない）。
     let prompt_suffix = format!(
-        "[Nostr] {author} さんの投稿への応答です。返信するなら \
-         nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
-         返信不要なら NO_REPLY とだけ答えてください。",
+        "[Nostr] {author} さんの投稿への応答です。\n\
+         - 送信者: {author_key}（pubkey={pubkey}）\n\
+         - 対象ノート: {target}\n\
+         - 種別: kind:{kind}（{label}）\n\
+         返信するなら nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
+         種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
+         NO_REPLY とだけ答えてください。",
         author = event.author_label(),
+        author_key = event.author_key(),
+        pubkey = event.pubkey,
         target = event.reply_target(),
+        kind = event.kind,
+        label = event.inbound_kind_label(),
     );
 
     let responder = NostrResponder::new(
@@ -981,6 +999,8 @@ mod tests {
         relay_target: Option<WebhookConfig>,
         /// 実際に転記口へ渡った本文（配送口のスパイ / #252）。
         relayed: Arc<Mutex<Vec<String>>>,
+        /// 応答生成へ渡った system_prompt（= base + prompt_suffix / #282）。
+        system_prompts: Arc<Mutex<Vec<String>>>,
         /// upsert された agent_nostr_config 行（自己ブートストラップ採用の検証 / #264）。
         upserted: Arc<Mutex<Vec<AgentNostrConfigRow>>>,
         /// set_nostr_enabled の呼び出し履歴（順序ガードの検証 / #264）。
@@ -1002,6 +1022,7 @@ mod tests {
                 finished: Arc::new(Mutex::new(Vec::new())),
                 relay_target: None,
                 relayed: Arc::new(Mutex::new(Vec::new())),
+                system_prompts: Arc::new(Mutex::new(Vec::new())),
                 upserted: Arc::new(Mutex::new(Vec::new())),
                 enabled_calls: Arc::new(Mutex::new(Vec::new())),
                 secret_sets: Arc::new(Mutex::new(Vec::new())),
@@ -1037,6 +1058,10 @@ mod tests {
     impl opencrab_actions::AgentRuntime for SlowRunner {
         async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
             let target = req.reply_target.clone().unwrap_or_default();
+            self.system_prompts
+                .lock()
+                .unwrap()
+                .push(req.system_prompt.clone());
             self.started.lock().unwrap().push(target.clone());
             let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             self.max_inflight.fetch_max(now, AtomicOrdering::SeqCst);
@@ -1229,6 +1254,11 @@ mod tests {
 
         /// watch ループが 1 行読んだのと同じ処理（同期・await 無し）。
         async fn feed(&self, id: &str, pubkey: &str, content: &str) {
+            self.feed_event(event(id, pubkey, content)).await;
+        }
+
+        /// 任意のイベントを1件流す（メタ情報の検証用 / #282）。
+        async fn feed_event(&self, ev: NostrEvent) {
             handle_event(
                 &self.runner,
                 &self.cli,
@@ -1237,7 +1267,7 @@ mod tests {
                 &self.runtime,
                 &self.permits,
                 &self.queues,
-                event(id, pubkey, content),
+                ev,
             )
             .await;
         }
@@ -1280,8 +1310,12 @@ mod tests {
             );
 
             // 転記順・開始順・完了順（= 返信が飛ぶ順）がすべて投入順と一致する。
+            // 転記本文は「本文 + 受信メタアンカー」（#282）なので本文の先頭一致で見る。
             assert_eq!(
-                SlowRunner::snapshot(&h.runner.recorded),
+                SlowRunner::snapshot(&h.runner.recorded)
+                    .iter()
+                    .map(|t| t.lines().next().unwrap_or_default().to_string())
+                    .collect::<Vec<_>>(),
                 IDS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                 "試行{trial}: 会話への転記順が投入順と違う"
             );
@@ -1326,8 +1360,12 @@ mod tests {
             "受信ループが応答生成でブロックしている: {elapsed:?}"
         );
         // 受信の転記はループ内で同期的に済んでいる（順序も保たれる）。
+        // 本文の後ろに受信メタアンカーが付く（#282）ので先頭行で比べる。
         assert_eq!(
-            SlowRunner::snapshot(&h.runner.recorded),
+            SlowRunner::snapshot(&h.runner.recorded)
+                .iter()
+                .map(|t| t.lines().next().unwrap_or_default().to_string())
+                .collect::<Vec<_>>(),
             vec!["1件目".to_string(), "2件目".to_string()]
         );
 
@@ -1537,6 +1575,119 @@ mod tests {
         );
         // 受信自体は通常どおり転記（会話履歴）される。
         assert_eq!(SlowRunner::snapshot(&h.runner.recorded).len(), 2);
+    }
+
+    /// メタ情報の検証用イベント（npub / note_id / kind を明示的に持つ / #282）。
+    fn rich_event(kind: u32) -> NostrEvent {
+        NostrEvent {
+            id: "deadbeefid".to_string(),
+            pubkey: "0011223344556677".to_string(),
+            npub: Some("npub1author".to_string()),
+            note_id: Some("note1target".to_string()),
+            author_name: Some("kojira".to_string()),
+            created_at: 1_700_000_000,
+            kind,
+            content: "こんにちは".to_string(),
+            tags: Vec::new(),
+        }
+    }
+
+    /// [#282] 会話履歴に残る本文へ、author の npub / note id / kind が焼き込まれる。
+    /// 本文だけを記録していた劣化（nostaro 本体より情報が少ない）の回帰防止。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_record_carries_author_note_and_kind() {
+        let h = Harness::new("agent-meta", Duration::from_millis(1), 8, 32);
+        h.feed_event(rich_event(1)).await;
+
+        let recorded = SlowRunner::snapshot(&h.runner.recorded);
+        assert_eq!(recorded.len(), 1);
+        let text = &recorded[0];
+        assert!(text.contains("こんにちは"), "本文が残る: {text}");
+        assert!(
+            text.contains("npub1author"),
+            "author の npub が残る: {text}"
+        );
+        assert!(text.contains("note1target"), "note id が残る: {text}");
+        assert!(text.contains("kind:1"), "kind が残る: {text}");
+        assert!(text.contains("メンション"), "種別ラベルが残る: {text}");
+    }
+
+    /// [#282] npub / note_id が無い（None）受信でも、アンカーは壊れず hex へフォールバック
+    /// する（空の `from=` / `target=` が並ばない）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_record_anchor_survives_missing_optional_fields() {
+        let h = Harness::new("agent-meta-none", Duration::from_millis(1), 8, 32);
+        let mut ev = rich_event(1);
+        ev.npub = None;
+        ev.note_id = None;
+        h.feed_event(ev).await;
+
+        let recorded = SlowRunner::snapshot(&h.runner.recorded);
+        let text = &recorded[0];
+        assert!(
+            !text.contains("from=]") && !text.contains("from= "),
+            "空の from= が残らない: {text}"
+        );
+        assert!(
+            text.contains("from=0011223344556677"),
+            "pubkey へフォールバックする: {text}"
+        );
+        assert!(
+            text.contains("target=deadbeefid"),
+            "hex id へフォールバックする: {text}"
+        );
+    }
+
+    /// [#282] `prompt_suffix` にも npub / pubkey / note id / kind が事実として載る
+    /// （「target=… を使え」という指示だけだった劣化の回帰防止）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_suffix_carries_author_note_and_kind() {
+        let h = Harness::new("agent-suffix", Duration::from_millis(1), 8, 32);
+        h.feed_event(rich_event(7)).await;
+        assert!(
+            h.wait_finished(1, Duration::from_secs(5)).await,
+            "応答生成が完了しない"
+        );
+
+        let prompts = SlowRunner::snapshot(&h.runner.system_prompts);
+        assert_eq!(prompts.len(), 1);
+        let p = &prompts[0];
+        assert!(p.contains("npub1author"), "npub が載る: {p}");
+        assert!(p.contains("0011223344556677"), "pubkey が載る: {p}");
+        assert!(p.contains("note1target"), "note id が載る: {p}");
+        assert!(p.contains("kind:7"), "kind が載る: {p}");
+        assert!(p.contains("リアクション"), "種別ラベルが載る: {p}");
+        assert!(
+            p.contains("nostr_reply(target=\"note1target\")"),
+            "従来の返信指示も残る: {p}"
+        );
+    }
+
+    /// [#282] 転記（Discord webhook）とエージェント向けの記録は**同じ本文**を出す
+    /// （転記にだけ kind が載る非対称の解消）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_and_agent_record_carry_the_same_information() {
+        const URL: &str = "https://discord.com/api/webhooks/1/tok";
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_relay_target(URL);
+        let h = Harness::with_runner("agent-parity", runner, 8, 32);
+
+        h.feed_event(rich_event(1)).await;
+
+        let recorded = SlowRunner::snapshot(&h.runner.recorded);
+        let relayed = SlowRunner::snapshot(&h.runner.relayed);
+        assert_eq!(relayed.len(), 1);
+        assert!(
+            relayed[0].contains(&recorded[0]),
+            "転記本文がエージェントの記録本文を丸ごと含む: relayed={} recorded={}",
+            relayed[0],
+            recorded[0]
+        );
+        for needle in ["npub1author", "note1target", "kind:1"] {
+            assert!(
+                relayed[0].contains(needle) && recorded[0].contains(needle),
+                "{needle} が両方に載る"
+            );
+        }
     }
 
     #[test]
