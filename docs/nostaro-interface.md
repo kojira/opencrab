@@ -107,17 +107,63 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 ```
 nostaro --config <p> watch --json \
   --relay wss://yabu.me --relay wss://r.kojira.io \
-  [--author <npub|hex>]... [--keyword <kw>]... [--kind <n>]...
+  [--author <npub|hex>]... [--keyword <kw>]... --kind <n>...
 ```
 
 ### 改造 2: `watch` にフィルタフラグ追加（汎用）
 
-- `--author <npub|hex>`（複数可）: 指定 author のみ。
-- `--keyword <kw>`（複数可）: content にいずれかを含むもののみ。
-- `--kind <n>`（複数可）: 指定 kind のみ（未指定は kind:1）。
+`watch` の購読条件は **p タグ（mention-only）／keyword／author の 3 つ**で、これを
+`--match` でどう結合するかが決まる（kojira/nostaro#6 以降）。
+
+- `--mention-only` / `--no-mention-only`: **既定は mention-only = true**（`--json` でも
+  効く）。監視対象は `--npub` 未指定なら自分自身なので、既定で**自分宛の p タグ**
+  （メンション・リプライ・リアクション・DM）が購読される。両方を同時に指定すると
+  パースエラー。
+- `--match any|all`: 3 条件の結合方法。**既定は `any`（OR）**。`all` は AND
+  （`--author X --keyword foo --match all` = 「X が書いた foo を含む投稿」）。
+  **絞り条件が 1 つも無いときだけ全通し**になる。
+- `--author <npub|hex>`（複数可）: この author の投稿を拾う（`any` では OR 条件、
+  `all` では排他スコープ）。
+- `--keyword <kw>`（複数可）: content にいずれかを含む投稿を拾う（同上）。keyword は
+  リレー側で絞れないのでローカル一致判定。
+- `--kind <n>`（複数可）: 指定 kind のみ。**未指定時の `--json` 既定は kind:1 + kind:7**
+  （旧版は kind:1 のみ）。OpenCrab は `effective_kinds()` で必ず 1 つ以上の `--kind` を
+  明示するのでこの既定には依存しない。
 - `--relay <url>`（複数可）: **このフラグで指定したリレーのみに接続**する
   （config の `relays`/`default_relays` は使わない）。OpenCrab は許可リレーを
   明示フラグで渡すため、config 由来の別リレーに繋がせない。
+- 自分のイベントは `--json` でも**除外される**（旧版の json には自己除外が無かった）。
+  OpenCrab 側も受信ループで `nostaro pubkey` 一致をスキップしており、二重の防御になる。
+
+### OpenCrab が渡すフラグ（受信セマンティクスの契約 / #278）
+
+| フラグ | OpenCrab の扱い |
+|---|---|
+| `--json` | 常に渡す |
+| `--match=any` | **常に渡す**（既定と同値だが明示する） |
+| `--mention-only` / `--no-mention-only` | **どちらも渡さない**（nostaro の既定 true に委ねる） |
+| `--relay` | `effective_relays()` を全て明示 |
+| `--kind` | `effective_kinds()`（設定が空なら `1`）を全て明示 |
+| `--author` / `--keyword` | **運用者が設定したときだけ**渡す（OpenCrab は自動設定しない） |
+
+**`--match=any` を選ぶ理由**: nostaro では mention-only も 1 つの条件なので、`all` にすると
+「自分宛（p タグ）**かつ** keyword 一致」という AND になる。運用者が keyword を設定して
+いるエージェントでは、(a) 本文に keyword を含まない e/p タグだけの返信が落ち（#271 で
+直した事象そのもの）、(b) 本文が暗号文/絵文字である kind:4・1059（DM）や kind:7
+（リアクション）は keyword に一致しえず全部落ち、(c)「自分宛でない keyword 一致投稿を
+拾う」という keyword 監視の意図も落ちる。`any` なら「自分宛は必ず届く＋運用者が明示した
+分が上乗せされる」となり、旧挙動を狭めない。既定と同値でも明示するのは、nostaro 側の既定
+が将来また変わっても OpenCrab の受信が黙って変わらないようにするため。
+
+**トレードオフ**: `any` では authors と keywords を**両方**設定したエージェントの結合が
+旧版の AND から OR に変わる（受信量が増える）。「使うかどうかはエージェントに決めさせる」
+方針に沿って `--match` をエージェント/運用者が選べるようにするのは #275 の範囲。
+
+**購読が無制限にならない担保**: `--no-mention-only` を渡さない限り p タグ条件が必ず効くので、
+OpenCrab のフィルタ設定が空でも購読は「自分宛のみ」＝**最も狭い**。逆に keywords を足すほど
+（nostaro が keyword 用に kind 全体の購読を張るぶん）広くなる。したがって OpenCrab 側に
+「フィルタが空なら起動拒否」というガードは**置かない**（旧版のガードは、旧 nostaro の json が
+mention-only を無視して kind:1 を全件購読していたから必要だった）。
 
 ### 改造 3: `watch --json`（汎用）
 

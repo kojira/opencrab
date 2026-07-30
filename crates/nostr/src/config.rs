@@ -17,15 +17,19 @@ pub struct NostrConfig {
     pub filter: NostrFilter,
 }
 
-/// 受信イベントの絞り込み。空の項目は「その軸では絞らない」を意味する。
-/// 少なくとも1軸は指定させる想定（全 kind の全 author を拾うと洪水になるため、
-/// 呼び出し側で空フィルタを弾く）。
+/// 受信イベントの**上乗せ**購読条件。空の項目は「その軸では上乗せしない」を意味する。
+///
+/// 全項目が空でも購読は無制限にならない。`nostaro watch` は **mention-only 既定**
+/// （自分宛の p タグ）で購読し、opencrab は `--no-mention-only` を渡さないので、
+/// 空フィルタ＝「自分宛のみ」という**最も狭い**購読になる（#271/#278）。
+/// authors / keywords は `--match=any`（OR）で**その上に足す**条件であり、
+/// 絞り込みではない。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NostrFilter {
-    /// 対象 author（npub か hex pubkey）。空なら author で絞らない。
+    /// 追加で拾う author（npub か hex pubkey）。空なら author では上乗せしない。
     #[serde(default)]
     pub authors: Vec<String>,
-    /// content に含まれるべきキーワード（いずれか1つでも一致で採用）。
+    /// 追加で拾う content キーワード（いずれか1つでも一致で採用）。
     #[serde(default)]
     pub keywords: Vec<String>,
     /// 対象 kind。空なら kind:1（テキストノート）を既定にする。
@@ -52,10 +56,28 @@ impl NostrConfig {
         }
     }
 
-    /// フィルタが実質空（author も keyword も無い）か。全ノート洪水を防ぐため
-    /// 呼び出し側でこれを弾く。
-    pub fn filter_is_unbounded(&self) -> bool {
-        self.filter.authors.is_empty() && self.filter.keywords.is_empty()
+    /// 自分宛（p タグ）**以外**も拾う設定か（authors か keywords を上乗せしている）。
+    ///
+    /// かつてここには「author も keyword も無い＝全ノート洪水」として起動を拒否する
+    /// `filter_is_unbounded()` があった。旧 nostaro の `--json` は mention-only を
+    /// 無視して kind:1 を全件購読していたので、その時は正しい判定だった。
+    ///
+    /// **新 nostaro では判定が逆転する**（#271/#278）。`--json` でも mention-only が
+    /// 既定で効き、opencrab は `--no-mention-only` を渡さないので、
+    ///
+    /// - フィルタ**未指定** → 購読は「自分宛の p タグのみ」＝**最も狭い**（洪水ではない）、
+    /// - keywords 指定 → nostaro が keyword 用に kind 全体の購読を別途張る（内容一致は
+    ///   ローカル判定）＝相対的に**広い**、
+    ///
+    /// となる。つまり旧ガードは「一番狭い設定だけを拒否する」ものになっていたので撤去し、
+    /// 「自分宛は必ず届く」という不変条件は
+    /// [`NostaroCli::build_watch_command`](crate::cli::NostaroCli::build_watch_command) が
+    /// `--no-mention-only` を渡さないこと（テストで固定）で担保する。
+    ///
+    /// この述語自体は「運用者が上乗せ条件を設定済みか」を見るためだけに残す（判定であって
+    /// ガードではない）。
+    pub fn watches_beyond_self_mentions(&self) -> bool {
+        !self.filter.authors.is_empty() || !self.filter.keywords.is_empty()
     }
 }
 
@@ -112,16 +134,30 @@ mod tests {
         assert_eq!(c2.effective_kinds(), vec![1, 30023]);
     }
 
+    /// [#271/#278] フィルタ未指定は「自分宛のみ」＝**最も狭い**購読であって洪水ではない。
+    /// 旧 `filter_is_unbounded()` はここを起動拒否していた（旧 nostaro の json が
+    /// mention-only を無視していた頃の判定）。上乗せ条件の有無だけを見る述語に置き換えた。
     #[test]
-    fn test_unbounded_filter_detection() {
-        assert!(NostrConfig::default().filter_is_unbounded());
-        let bounded = NostrConfig {
+    fn test_empty_filter_is_self_mentions_only() {
+        assert!(
+            !NostrConfig::default().watches_beyond_self_mentions(),
+            "未指定は自分宛のみ（上乗せ無し）"
+        );
+        let with_keyword = NostrConfig {
             relays: vec![],
             filter: NostrFilter {
                 keywords: vec!["opencrab".to_string()],
                 ..Default::default()
             },
         };
-        assert!(!bounded.filter_is_unbounded());
+        assert!(with_keyword.watches_beyond_self_mentions());
+        let with_author = NostrConfig {
+            relays: vec![],
+            filter: NostrFilter {
+                authors: vec!["npub1abc".to_string()],
+                ..Default::default()
+            },
+        };
+        assert!(with_author.watches_beyond_self_mentions());
     }
 }

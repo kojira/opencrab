@@ -818,11 +818,16 @@ mod gateway_registry_tests {
     /// 有効フラグのガードを足すと、その正しい経路が毎回自分のガードに弾かれて Nostr が
     /// 二度と起動しなくなる（無効化ではなく**機能停止**）。
     ///
-    /// 鍵はあるがフィルタが無制限（＝全ノート購読）の行で `start` を呼び、返ってくる
-    /// のが**フィルタの拒否**であることを見る。有効フラグや鍵のガードが先に弾いていれば
-    /// この文言にはならないので、「`enabled=false` を素通りして購読条件の検査まで到達
-    /// している」ことが分かる。フィルタの拒否は設定ファイルを書き出す**手前**なので、
-    /// 実プロセスもファイルシステムも触らない。
+    /// `enabled=false` の行で `start` を呼び、返ってくるのが**秘密鍵の拒否**であることを
+    /// 見る。有効フラグのガードが先に弾いていればこの文言にはならないので、「`enabled=false`
+    /// を素通りして資格情報の検査まで到達している」ことが分かる。
+    ///
+    /// [#271/#278] 以前はここで「フィルタが無制限（author も keyword も無い）」の拒否文言を
+    /// 見ていた。新 nostaro では `watch` が mention-only 既定で自分宛だけを購読するため
+    /// **空フィルタは洪水ではなく最も狭い購読**で、そのガード自体が無くなった。テストの意図
+    /// （`enabled` を見ずに検査へ到達する）はそのままに、到達を確かめる対象を今も残っている
+    /// 資格情報ガードへ移した。鍵の拒否は設定ファイルを書き出す**手前**なので、実プロセスも
+    /// ファイルシステムも触らないという性質も変わらない。
     #[tokio::test]
     async fn nostr_start_does_not_look_at_the_enabled_flag() {
         let state = test_app_state();
@@ -834,9 +839,9 @@ mod gateway_registry_tests {
                 &conn,
                 &opencrab_db::queries::AgentNostrConfigRow {
                     agent_id: "agent-191-pr3".to_string(),
-                    secret_key: "nsec1testonlynotarealkey".to_string(),
+                    // 空白だけの nsec = 資格情報ガードに弾かれる（起動は試みられる）。
+                    secret_key: "  ".to_string(),
                     relays_json: "[]".to_string(),
-                    // author も keyword も無い = 無制限フィルタ（起動は拒否される）。
                     filter_json: r#"{"authors":[],"keywords":[],"kinds":[1]}"#.to_string(),
                     // `PUT /nostr` が start を呼ぶ瞬間の状態そのもの。
                     enabled: false,
@@ -848,13 +853,15 @@ mod gateway_registry_tests {
         let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
         let err = gw.start("agent-191-pr3").await.unwrap_err();
         assert!(
-            err.to_string().contains("フィルタ"),
-            "enabled=false / 鍵ありの行が購読条件の検査より手前で弾かれている\
+            err.to_string().contains("秘密鍵"),
+            "enabled=false の行が資格情報の検査より手前で弾かれている\
              （enabled を見るガードを足すと PUT /nostr が通らなくなる）: {err}"
         );
         assert!(
-            !opencrab_actions::is_start_declined(&err),
-            "起動条件のガードで弾かれている: {err}"
+            !state
+                .gateways
+                .is_running(gateway_kinds::NOSTR, "agent-191-pr3"),
+            "弾かれたのに稼働してはいけない"
         );
     }
 }

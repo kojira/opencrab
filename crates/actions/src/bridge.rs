@@ -380,8 +380,8 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     // (4) 設定の書き込み: 生成鍵を本鍵に採用する（bootstrap 用。`nostr_generate_key` と
     //     対で、鍵未設定でも露出する）。採用は以後の Nostr identity を差し替える run 内
     //     共有状態の書き込みで、成否（起動できたか）を同ターンで確認して次へ進むので
-    //     inline。**採用時に bounded な self-mention フィルタを自動設定して接続する**
-    //     （未設定エージェントの自己ブートストラップ / #264）。nsec は返さない。
+    //     inline。**採用時にそのまま接続する**（絞り込みは自動設定せず、自分宛のみを
+    //     購読する / 未設定エージェントの自己ブートストラップ #264・#271）。nsec は返さない。
     "nostr_switch_identity",
     // (3) 同ターン結果依存 + (2) 配送系: 薄い nostaro passthrough（#268）。post/event 等の
     //     送信は「送る」こと自体が応答で、get/timeline/search 等の取得は戻り値（stdout）を

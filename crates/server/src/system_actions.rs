@@ -301,7 +301,8 @@ impl SystemGatewayActions {
                 }),
             },
             // bootstrap ツール（鍵不要）。生成鍵を本鍵として採用し、**未設定でも自力で
-            // 接続する**（採用時に bounded な self-mention フィルタを自動設定して起動）。
+            // 接続する**（採用時は絞り込みを自動設定せず、nostaro の mention-only 既定に
+            // 委ねて自分宛のみを購読する / #271）。
             // transport 非依存で全ターンに露出する。bridge の `TRUSTED_ONLY_ACTIONS` に
             // より未信頼の会話ターン（caller=Agent）には出さない（乗っ取り防止 / #264）。
             GatewayActionDef {
@@ -949,8 +950,9 @@ impl SystemGatewayActions {
     }
 
     /// bootstrap 用の identity 採用（#264）。生成鍵を本鍵として採用し、未接続なら
-    /// **自己ブートストラップで接続まで行う**（bounded な self-mention フィルタを自動設定
-    /// して起動）。実体は Nostr transport の `identity_provisioning` capability。
+    /// **自己ブートストラップで接続まで行う**（絞り込みは自動設定せず、nostaro の
+    /// mention-only 既定に委ねて自分宛のみを購読する / #271）。実体は Nostr transport の
+    /// `identity_provisioning` capability。
     ///
     /// 稼働の有無は capability の内側で判定する（稼働中はホットスワップ、未稼働は bootstrap
     /// 起動＝接続）。**秘密鍵(nsec)は扱わない**（npub 参照のみ・応答にも出さない）。
@@ -1852,8 +1854,8 @@ impl GatewayActions for SystemGatewayActions {
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
             // bootstrap 鍵一覧（鍵未設定でも露出）。生成鍵の npub のみ返す（nsec 非返却）。
             "nostr_list_keys" => Self::nostr_list_keys(ctx),
-            // bootstrap identity 採用（鍵未設定でも露出）。未接続なら self-mention フィルタで
-            // 自動接続する。inner より先に own が処理する（#264）。
+            // bootstrap identity 採用（鍵未設定でも露出）。未接続なら自分宛のみを購読する
+            // 設定で自動接続する。inner より先に own が処理する（#264）。
             "nostr_switch_identity" => self.nostr_switch_identity(args, ctx).await,
             // 薄い nostaro passthrough（#268）。稼働中の Nostr transport の passthrough
             // capability へ委譲する。inner へは委譲しない（own が処理する）。

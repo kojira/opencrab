@@ -191,9 +191,10 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
 /// 引数に取らない（transport ごとに形が違う）ので、ここで DB の設定行を読んで
 /// [`crate::config_from_row`] で `NostrConfig` に組み直す。
 ///
-/// **フィルタの無制限チェックはここでは行わない。** `start_agent_gateway` の中の
-/// `filter_is_unbounded` が単一チョークポイントとして担う（トレイト経由でも生の
-/// 呼び出しでも同じ 1 箇所を通る）。秘密鍵の空検査も同じ理由で同じ場所にある。
+/// **起動条件の検査はここでは行わない。** 秘密鍵の空検査は `start_agent_gateway` の中が
+/// 単一チョークポイントとして担う（トレイト経由でも生の呼び出しでも同じ 1 箇所を通る）。
+/// 購読が「自分宛」に閉じることの担保は `NostaroCli::build_watch_command`（`--match=any` /
+/// `--no-mention-only` を渡さない）に移した（#271/#278）。
 ///
 /// ## `enabled` を見ない理由（#191 段階2 PR3）
 ///
@@ -754,8 +755,8 @@ fn stop_gateway(gateways: &GatewayMap, admins: &AdminMap, agent_id: &str) {
 ///
 /// `NostrGatewayManager::start_agent_gateway`（通常起動・restore）と identity 採用の
 /// bootstrap（[`NostrIdentityProvisioner`]）が同じこの経路を通ることで、資格情報ガード
-/// （空 nsec 拒否）・購読ガード（unbounded フィルタ拒否）・自己 pubkey 取得の fail-closed
-/// が呼び出し口によらず必ず効く（PUT enabled=false→/start バイパス封じと同じ設計）。
+/// （空 nsec 拒否）・自己 pubkey 取得の fail-closed が呼び出し口によらず必ず効く
+/// （PUT enabled=false→/start バイパス封じと同じ設計）。
 #[allow(clippy::too_many_arguments)]
 async fn spawn_agent_gateway<R: NostrAgentRunner>(
     gateways: &GatewayMap,
@@ -776,14 +777,17 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
             "秘密鍵（nsec）が未設定です。先に鍵を生成してください",
         ));
     }
-    // 全ノート購読（author も keyword も無い）は洪水/資源浪費になるため、ここ（単一
-    // チョークポイント）で拒否する。identity 採用の bootstrap は bounded な self-mention
-    // フィルタを設定してから来るので、ここは通過する（#264）。
-    if config.filter_is_unbounded() {
-        anyhow::bail!(
-            "Nostr フィルタが空です。author か keyword を最低1つ指定してください（全ノート購読は不可）"
-        );
-    }
+    // 【フィルタ空を拒否するガードはここに**無い**】（#271/#278）
+    //
+    // 以前は「author も keyword も無い＝全ノート洪水」として起動を拒否していた。旧 nostaro の
+    // `watch --json` が mention-only を無視して kind:1 を全件購読していたので、当時は正しかった。
+    // 新 nostaro では `--json` でも mention-only が既定で効き、`build_watch_command` は
+    // `--no-mention-only` を渡さないので、**フィルタ未指定の購読は「自分宛の p タグのみ」＝
+    // 最も狭い**。逆に keywords を足すほど（nostaro が keyword 用に kind 全体の購読を張るぶん）
+    // 広くなる。旧ガードは一番狭い設定だけを拒否する裏返しの判定になっていたので撤去した。
+    //
+    // 洪水を防ぐ不変条件は `NostaroCli::build_watch_command` が持つ（`--no-mention-only` を
+    // 渡さない / `--match=any` を明示する）。どちらもテストで固定している。
 
     stop_gateway(gateways, admins, agent_id);
 
@@ -850,8 +854,9 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
 /// マネージャと**同じ登録簿**（`gateways` / `admins` の Arc）を共有する。判定は 2 モード:
 /// - **稼働中** → per-agent admin で in-place ホットスワップ（self_pubkey セル更新・再接続
 ///   なし）。既存挙動をそのまま維持する。
-/// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**bounded な
-///   self-mention フィルタ**を enabled=false で書き、[`spawn_agent_gateway`] で起動＝接続、
+/// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**空フィルタ**
+///   （＝nostaro の mention-only 既定に委ねて自分宛のみ / #271）を enabled=false で書き、
+///   [`spawn_agent_gateway`] で起動＝接続、
 ///   成功後に enabled=true。これで「未設定エージェントが `nostr_generate_key`→
 ///   `nostr_switch_identity` を呼ぶだけで自力で載る」が成立する。
 pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
@@ -866,14 +871,20 @@ impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
     /// bootstrap 採用で書き込む [`NostrConfig`] を組む。
     ///
     /// - **relays**: 既存設定があればそれを尊重、無ければ [`crate::config::DEFAULT_RELAYS`]。
-    /// - **filter**: 既存が **bounded** ならそれを尊重（オペレーターが絞り込みを設定済みの
-    ///   ケースを壊さない）。そうでなければ **bounded な self-mention フィルタ**
-    ///   （`keywords=[npub]`）を自動設定する。keyword が 1 つでもあれば
-    ///   `filter_is_unbounded()` は false になり `spawn_agent_gateway` の unbounded 拒否を
-    ///   通過する。狙いは「自分の npub を含む投稿＝自分への言及だけ購読」で firehose に
-    ///   しないこと。自分の投稿は watch ループが author 一致でスキップするので自己ループに
-    ///   ならない。
-    fn bootstrap_config(&self, agent_id: &str, npub: &str) -> NostrConfig {
+    /// - **filter**: 既存設定を**そのまま**尊重する。無ければ**空**（＝自分宛のみ）。
+    ///
+    /// ## keyword を自動設定しない（#271）
+    ///
+    /// #264 の初版はここで `keywords=[自分の npub]` を自動設定していた。当時の
+    /// `filter_is_unbounded()` ガードを通すためだったが、これは本文に npub 文字列を含む
+    /// 投稿しか拾わないという条件を足すことになり、**e/p タグだけの返信（本文に npub を
+    /// 含まない普通のリプライ）が丸ごと落ちていた**（実機で確認済み）。
+    ///
+    /// nostaro の `watch` は **mention-only 既定**で自分宛の p タグを購読するので、
+    /// 「自分への言及だけ購読」は**フィルタを空にするだけで成立する**。opencrab 側で
+    /// 条件を足すのは劣化にしかならないので外した。自分の投稿は watch ループが
+    /// author 一致でスキップするので自己ループにもならない。
+    fn bootstrap_config(&self, agent_id: &str) -> NostrConfig {
         let existing = self
             .runner
             .get_nostr_config(agent_id)
@@ -888,14 +899,9 @@ impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
                     .map(|s| s.to_string())
                     .collect()
             });
-        let filter = match existing {
-            Some(c) if !c.filter_is_unbounded() => c.filter,
-            _ => crate::config::NostrFilter {
-                authors: Vec::new(),
-                keywords: vec![npub.to_string()],
-                kinds: Vec::new(),
-            },
-        };
+        // 運用者が設定済みならそのまま（勝手に足さない・勝手に外さない）。未設定なら空＝
+        // 「自分宛のみ」。npub は使わない（#271: keyword 自動設定が返信を落としていた）。
+        let filter = existing.map(|c| c.filter).unwrap_or_default();
         NostrConfig { relays, filter }
     }
 }
@@ -914,7 +920,7 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
         // 未稼働＝自己ブートストラップ。生成鍵（自分のもの）の nsec を読む。存在チェックで
         // 「自分が生成した鍵のみ採用可」を担保。秘密鍵は外へ出さない・返さない。
         let nsec = NostaroCli::read_generated_key(agent_id, npub)?;
-        let config = self.bootstrap_config(agent_id, npub);
+        let config = self.bootstrap_config(agent_id);
 
         // 1) agent_nostr_config を **enabled=false で先に書く**（順序ガード: 起動成功後に
         //    enabled=true。失敗時に「enabled だが未稼働」の不整合を残さない / manager.rs の
@@ -928,7 +934,7 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
         };
         self.runner.upsert_nostr_config(&row)?;
 
-        // 2) 起動＝接続（bounded フィルタなので unbounded 拒否を通過する）。失敗時は
+        // 2) 起動＝接続。失敗時は
         //    enabled=false のまま（inert: restore で起動されず、is_running も false）。
         spawn_agent_gateway(
             &self.gateways,
@@ -1616,9 +1622,12 @@ mod tests {
     }
 
     /// [#264] 未設定エージェントが自力で採用＝接続する。`nostr_switch_identity`（採用）を
-    /// 未稼働状態で呼ぶと、鍵・DEFAULT リレー・**bounded な self-mention フィルタ**を
-    /// enabled=false で書き、ゲートウェイを起動して is_running=true にし、成功後に
-    /// enabled=true にする（順序ガード）。
+    /// 未稼働状態で呼ぶと、鍵・DEFAULT リレー・**空フィルタ**を enabled=false で書き、
+    /// ゲートウェイを起動して is_running=true にし、成功後に enabled=true にする
+    /// （順序ガード）。
+    ///
+    /// [#271] フィルタは**空**であること。旧実装は `keywords=[自分の npub]` を自動設定して
+    /// おり、本文に npub 文字列を含まない e/p タグだけの返信を落としていた。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn adopt_identity_bootstraps_unconfigured_agent_and_connects() {
         use opencrab_actions::GatewayIdentityProvisioning;
@@ -1659,7 +1668,7 @@ mod tests {
             "採用で自力接続する（is_running=true）"
         );
 
-        // upsert された config: 鍵＋DEFAULT relays＋bounded self-mention フィルタ、enabled=false。
+        // upsert された config: 鍵＋DEFAULT relays＋空フィルタ、enabled=false。
         let upserted = runner.upserted.lock().unwrap().clone();
         assert_eq!(upserted.len(), 1, "config を 1 回 upsert する");
         let row = &upserted[0];
@@ -1667,13 +1676,18 @@ mod tests {
         assert!(!row.enabled, "先に enabled=false で書く（順序ガード）");
         let cfg = crate::config_from_row(row);
         assert!(
-            !cfg.filter_is_unbounded(),
-            "bounded フィルタでなければ start の unbounded 拒否に弾かれる"
+            cfg.filter.keywords.is_empty(),
+            "[#271] keyword を自動設定しない（本文一致の条件を足すと p/e タグだけの返信が落ちる）: {:?}",
+            cfg.filter.keywords
         );
-        assert_eq!(
-            cfg.filter.keywords,
-            vec![npub.to_string()],
-            "self-mention フィルタ（keyword=自分の npub）"
+        assert!(
+            cfg.filter.authors.is_empty(),
+            "author も自動設定しない: {:?}",
+            cfg.filter.authors
+        );
+        assert!(
+            !cfg.watches_beyond_self_mentions(),
+            "上乗せ条件無し＝nostaro の mention-only 既定で自分宛のみを購読する"
         );
         assert_eq!(
             cfg.effective_relays(),
@@ -1689,6 +1703,71 @@ mod tests {
             *runner.enabled_calls.lock().unwrap(),
             vec![true],
             "起動成功後に enabled=true（1 回だけ）"
+        );
+
+        mgr.stop_agent_gateway(agent).await;
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#271] 運用者が明示した絞り込みは採用時に**そのまま**残す。
+    ///
+    /// 自動 keyword は付けない（前のテスト）が、逆に運用者が設定した keywords/authors を
+    /// 勝手に外しもしない。relays も既存を継承する。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopt_identity_bootstrap_keeps_operator_configured_filter() {
+        use opencrab_actions::GatewayIdentityProvisioning;
+
+        let agent = "agent-bootstrap-271-operator";
+        let npub = "npub1operatorset";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        NostaroCli::save_generated_key(
+            agent,
+            &crate::cli::GeneratedKey {
+                nsec: "nsec1operatorsecret".to_string(),
+                npub: npub.to_string(),
+                pubkey: "hexpub".to_string(),
+            },
+        )
+        .unwrap();
+
+        // 未稼働だが設定行はある（運用者がダッシュボードで絞り込みだけ入れた状態）。
+        let existing = AgentNostrConfigRow {
+            agent_id: agent.to_string(),
+            secret_key: String::new(),
+            relays_json: r#"["wss://relay.example"]"#.to_string(),
+            filter_json: r#"{"authors":["npub1watched"],"keywords":["opencrab"],"kinds":[1,7]}"#
+                .to_string(),
+            enabled: false,
+        };
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
+        let (_fake, cli) = fake_nostaro("selfpubkeyhex");
+        let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
+
+        mgr.identity_provisioner()
+            .adopt_identity(agent, npub)
+            .await
+            .unwrap();
+
+        let upserted = runner.upserted.lock().unwrap().clone();
+        let cfg = crate::config_from_row(&upserted[0]);
+        assert_eq!(
+            cfg.filter.keywords,
+            vec!["opencrab".to_string()],
+            "運用者の keyword を保つ"
+        );
+        assert_eq!(
+            cfg.filter.authors,
+            vec!["npub1watched".to_string()],
+            "運用者の author を保つ"
+        );
+        assert_eq!(cfg.filter.kinds, vec![1, 7], "運用者の kind を保つ");
+        assert!(
+            !cfg.filter.keywords.contains(&npub.to_string()),
+            "自分の npub を勝手に足さない"
+        );
+        assert_eq!(
+            cfg.effective_relays(),
+            vec!["wss://relay.example".to_string()]
         );
 
         mgr.stop_agent_gateway(agent).await;
@@ -1744,7 +1823,7 @@ mod tests {
         let npub_new = "npub1hotswapnew";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
 
-        // 稼働中エージェント: bounded な既存設定を持つ（ホットスワップは既存 relays を継承）。
+        // 稼働中エージェント: 運用者が設定した既存フィルタを持つ（ホットスワップは既存 relays を継承）。
         let existing = AgentNostrConfigRow {
             agent_id: agent.to_string(),
             secret_key: "nsec1old".to_string(),
@@ -1757,7 +1836,7 @@ mod tests {
         let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
 
         // 稼働させる（admin が admins 登録簿へ入る）。
-        let bounded = crate::config::NostrConfig {
+        let configured = crate::config::NostrConfig {
             relays: vec!["wss://yabu.me".to_string()],
             filter: crate::config::NostrFilter {
                 authors: vec![],
@@ -1765,7 +1844,7 @@ mod tests {
                 kinds: vec![],
             },
         };
-        mgr.start_agent_gateway(agent, "nsec1old", bounded)
+        mgr.start_agent_gateway(agent, "nsec1old", configured)
             .await
             .unwrap();
         assert!(mgr.is_running(agent));

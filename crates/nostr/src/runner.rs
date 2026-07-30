@@ -30,7 +30,8 @@ pub trait NostrAgentRunner: AgentRuntime {
 
     /// `agent_nostr_config` 行を丸ごと書き込む（自己ブートストラップの採用時 / #264）。
     ///
-    /// 未設定エージェントが自力で鍵を採用するとき、secret_key＋relays＋bounded フィルタを
+    /// 未設定エージェントが自力で鍵を採用するとき、secret_key＋relays＋フィルタ（既存が無ければ
+    /// 空＝自分宛のみ / #271）を
     /// **enabled=false で先に書く**（起動成功後に [`Self::set_nostr_enabled`] で有効化する
     /// 順序ガードのため）。既存行があれば上書きする（upsert）。
     fn upsert_nostr_config(&self, cfg: &AgentNostrConfigRow) -> Result<()>;
