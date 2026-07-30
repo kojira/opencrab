@@ -30,13 +30,16 @@
 - **Memory Management** — Curated memories, session logs with FTS5 search, and hierarchical memory index with LLM-powered Agentic RAG
 - **Conversation Compaction** — Token-budget-based automatic compaction; replaces older messages with memory index topic summaries, keeping recent logs in full
 - **Skill System** — Standard and acquired skills with effectiveness tracking, usage metrics, and guidance-based execution where the LLM dynamically calls `execute_shell`
-- **Multi-Channel Communication** — REST API, CLI, WebSocket, and Discord gateway adapters
+- **Multi-Channel Communication** — REST API, CLI, WebSocket, web dashboard, Discord and Nostr gateway adapters
 - **Per-Agent Discord Gateway** — DB-persisted Discord config per agent with independent start/stop lifecycle management
+- **Per-Agent Nostr Gateway** — DB-persisted key and relay config per agent; an agent can generate a key and adopt it as its own identity, which also brings the gateway up (see [Nostr](#nostr))
 - **Message Debounce** — Per (channel, sender) debounce window batches rapid messages into a single request
 - **Co-Agent Management** — Trust relationships between agents with configurable permission levels (owner/agent/co-agent)
 - **Trusted User Whitelist** — Per-agent Discord user trust management
 - **Sandboxed Workspace** — Per-agent file operations with path traversal protection
-- **Heartbeat Loop** — Per-channel periodic autonomous agent activity with configurable interval and graceful shutdown
+- **Heartbeat Loop** — Periodic autonomous agent activity with configurable interval and graceful shutdown. Firing is **per agent**: an agent that opted in gets its own tick (so an agent with no Discord channel — a Nostr-only one, for example — still runs), and agents that have not opted in keep the older per-channel firing. The speech outlet is transport-independent, so what a tick produces is delivered by whichever gateway the agent has
+- **Self-Configured Heartbeat** — Agents read and write their own heartbeat settings (`get_my_heartbeat` / `set_my_heartbeat`); intervals below the configured floor are rejected in the same turn so the agent can retry with a valid value. The stored settings are re-read on every tick, so an agent that already has a heartbeat loop running switches to per-agent firing immediately; what is fixed at startup is only the *set of agents a loop is started for*, so an agent with no loop yet (a Nostr-only one, with no entry under `gateway.discord.agent_ids`) begins firing after the next restart
+- **Attachment Anchors** — Discord attachments leave a trace in the stored conversation, not just in the model call: images are passed as vision content parts *and* noted in the message body as `[画像添付: name (type)]`, non-image files as `[添付ファイル: name (type), NB]`. Without the anchor an image left no record in `session_logs`, and later turns concluded the agent had made it up
 - **Self-Learning** — Experience-based learning, peer learning, reflection, and skill creation
 - **LLM Self-Selection** — Agents dynamically select LLMs per task based on past experience
 - **Response Evaluation** — Quality scoring after each interaction
@@ -61,7 +64,8 @@ opencrab/
 │   ├── server/     # Axum REST API server (hot-reload config watcher), agent response pipeline
 │   ├── cli/        # Interactive REPL CLI
 │   ├── discord/    # Discord gateway with per-agent manager and message loop
-│   ├── nostr/      # Nostr gateway (per-session queue, concurrency cap)
+│   ├── nostr/      # Nostr gateway: per-agent key/relay config, per-session queue,
+│   │               #   concurrency cap, and a thin `nostaro` CLI passthrough
 │   ├── web-gateway/# Dashboard gateway: axum router/handlers (POST web/send, SSE GET web/stream),
 │   │               #   per-session SSE fan-out, web-{agent}-{conversation} session-id convention,
 │   │               #   subtask-completion sink, per-session-serialized response entry point.
@@ -234,11 +238,16 @@ only exist on that transport's turns.
 
 | Category | Actions | Available on |
 |----------|---------|--------------|
-| **Config** | `configure_llm_provider`, `configure_self`, `configure_nostr`, `configure_mcp_server`, `nostr_generate_key` | all turns (`crates/server/src/system_actions.rs`) |
+| **Config** | `configure_llm_provider`, `configure_self`, `configure_nostr`, `configure_mcp_server` | all turns (`crates/server/src/system_actions.rs`) |
 | **Memory** | `rebuild_memory_index`, `update_memory_index_config` | all turns (`crates/server`) |
 | **Tool Permissions** | `add_allowed_command`, `list_allowed_commands`, `remove_allowed_command`, `manage_allowed_commands` | all turns (`crates/server/src/agent_management.rs`, `system_actions.rs`) |
 | **Subtask** | `spawn_subtask`, `cancel_subtask`, `report_progress` | all turns (`crates/server`) |
-| **Heartbeat** | `update_heartbeat_instructions`, `read_heartbeat_instructions` | all turns (`crates/server/src/heartbeat_instructions.rs`) — but channel-scoped overrides only mean something on Discord |
+| **Heartbeat** | `update_heartbeat_instructions`, `read_heartbeat_instructions`, `get_my_heartbeat`, `set_my_heartbeat` | all turns (`crates/server/src/heartbeat_instructions.rs`, `agent_heartbeat.rs`) — channel-scoped instruction overrides only mean something on Discord, but the `*_my_heartbeat` pair (an agent's own enable flag and interval) applies anywhere |
+| **Nostr identity** | `nostr_generate_key`, `nostr_list_keys`, `nostr_switch_identity` | all turns (`crates/server/src/system_actions.rs`) — bootstrap tools, exposed **before** any key exists (see [Nostr](#nostr)) |
+| **Nostr passthrough** | `nostr_run` | all turns (`crates/server/src/system_actions.rs`) — thin nostaro passthrough (see [Nostr](#nostr)) |
+| **Nostr relay target** | `get_my_nostr_relay`, `set_my_nostr_relay` | all turns (`crates/server/src/agent_nostr_relay.rs`) — where the agent's inbound Nostr events get mirrored (a Discord webhook URL); also editable from the dashboard |
+| **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event |
+| **Nostr messaging (gated)** | `nostr_dm`, `nostr_zap` | Nostr turns only (`crates/nostr`), *and* trusted-only — an inbound event drives a `caller=Agent` turn, so these are neither listed nor executable there; they are reachable only from a turn a trusted caller started |
 | **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
 | **Delivery** | `send_ui`, `request_peer_review` | all turns whose transport can render UI (`send_ui`) or send text (`request_peer_review`) — implementations in `crates/actions/src/a2ui.rs` and `crates/server/src/peer_review.rs`; the transport only supplies the surface (`GatewayActions::a2ui_surface` / `text_delivery`) |
 | **Webhook targets** | `list_webhooks`, `get_default_webhook`, `set_default_webhook`, `list_subtask_webhooks`, `get_default_subtask_webhook`, `set_default_subtask_webhook` | all turns (`crates/server/src/webhook_targets.rs`) |
@@ -251,16 +260,95 @@ rows) and every action in `DiscordGatewayActions::definitions()`. Each action is
 exactly one place: `cancel_subtask`, the two heartbeat-instruction actions, the six
 webhook-target actions, `create_skill` and `request_peer_review` used to be defined by Discord
 as well, but #157 S2/S3/S5/S6/S7 removed those definitions so the transport-independent
-implementation is the only one. Drift is caught by tests rather than by
-review — `server_tools_are_classified_for_dispatch` requires every own definition to be
-classified and rejects dead names on the constant side, and
-`test_definitions_returns_expected_count` pins the Discord set (including that the actions
-relocated in #157 S1/S2/S3/S5/S6/S7 are no longer defined there).
+implementation is the only one. The three Nostr bootstrap tools are the reverse case: they are
+defined by both `SystemGatewayActions` and `crates/nostr`, and `definitions()` de-duplicates by
+name so the transport-independent one wins — which is what makes them usable on turns where no
+Nostr gateway is running yet. Drift is caught by tests rather than by
+review — `server_gateway_action_table_matches_own_definitions`
+(`crates/server/src/system_actions.rs`) parses the "all turns" rows of this table and requires
+them to equal `own_definitions()` in both directions,
+`server_tools_are_classified_for_dispatch` requires every own definition to be classified and
+rejects dead names on the constant side, and `test_definitions_returns_expected_count` pins the
+Discord set (including that the actions relocated in #157 S1/S2/S3/S5/S6/S7 are no longer
+defined there). Note the gap: only the "all turns" rows are checked against this file. The
+`Discord turns only` / `Nostr turns only` rows are **not** — the transport-side tests pin their
+definition sets against constants, not against this table, so those rows can still go stale
+without a test failing.
+
+Visibility is not uniform. `configure_*`, `manage_allowed_commands`,
+`update_heartbeat_instructions` and the core action `update_instructions` are owner-only —
+that is `OWNER_ONLY_ACTIONS` in full. `nostr_list_keys`, `nostr_switch_identity`,
+`nostr_run`, `nostr_dm`, `nostr_zap`, the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
+`read_heartbeat_instructions`, the voice actions and `create_skill` are trusted-only, meaning
+they are neither listed nor executable on a turn driven by an untrusted external user. That gate
+is what keeps an inbound Nostr note from talking the agent into swapping its own key or spending
+its funds. `nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
+adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
+`crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both
+tool listing and execution.
 
 `create_skill` (a gateway action, `source_type="acquired"`) and `create_my_skill` (a core
 action, `source_type="self_created"`, `situation_pattern` required) are deliberately kept as
 two separate tools: #157 only moves generic implementations out of the transport layer, and
 dropping a tool name would break calls recorded in past conversation logs.
+
+## Nostr
+
+The Nostr gateway is per-agent, like the Discord one: each agent has its own key, its own relay
+set and its own subscription filter, persisted in the DB. Nostr protocol work is not
+reimplemented here — `crates/nostr` drives the `nostaro` CLI as a subprocess, with a config path
+pinned per agent (`data/agents/{id}/nostr/config.toml`) so one agent can never sign with
+another's key.
+
+**An agent can put itself on Nostr.** `nostr_generate_key`, `nostr_list_keys` and
+`nostr_switch_identity` are defined by `SystemGatewayActions`, so they exist *before* the agent
+has a key and on turns where no Nostr gateway is running (the latter two on trusted turns only).
+The agent generates a key (optionally with a vanity npub prefix), looks up the resulting npub,
+and adopts it — and adopting is what starts the gateway: if the agent was not connected yet,
+`nostr_switch_identity` also writes a bounded filter and brings the connection up. That filter is
+`keywords = [npub]` (`crates/nostr/src/manager.rs`), which becomes
+`nostaro watch --keyword=<npub>` — a **body keyword match, not a `#p` tag subscription**. See the
+coverage note at the end of this section for what that costs.
+No dashboard step and no restart in between. The private key is
+generated and stored server-side (mode 0600) and is never returned to the model; `nsec` is
+masked out of tool results and error strings.
+
+**`nostr_run` is a thin passthrough, not a wrapper.** It forwards a `nostaro` subcommand and its
+arguments straight through, so once the agent has adopted a key (no `config.toml` means no
+passthrough — the tool errors out instead of spawning nostaro), whatever nostaro can do the agent
+can do: arbitrary-kind `event`,
+`profile` (kind:0), NIP-28 `channel` creation and posting, `upload`, `react`, `repost`,
+`follow`, `get` / `timeline` / `search`, and so on. Only three subcommands are denied —
+`init` (key creation/overwrite, which belongs to the tools above), `watch` (unbounded inbound,
+which belongs to the gateway) and `relay` (it would edit `config.toml` only, desyncing from the
+DB that owns relay settings and silently evaporating on the next gateway start). Everything else
+is passed through unexamined.
+
+What OpenCrab guarantees about that passthrough is deliberately just two things:
+
+1. **No key mix-up between agents** — the config is always the calling agent's
+   (`--config` cannot be overridden through the arguments), and the command is built as
+   structured argv, never as a shell string.
+2. **`nsec` stays hidden** — the agent never handles a private key, and both stdout and error
+   output are masked.
+
+Judgements about the Nostr protocol itself — which kind, which tags, what a valid event looks
+like — are left to nostaro. That is the point: OpenCrab does not reimplement the spec, so a
+nostaro capability does not need a matching OpenCrab tool before an agent can use it.
+`docs/nostaro-interface.md` records the subcommands and output shapes this crate relies on.
+
+Inbound events matching the agent's filter can also be mirrored into a Discord channel via
+webhook. The target is set from the dashboard, or by the agent itself with `get_my_nostr_relay`
+/ `set_my_nostr_relay`.
+
+**Inbound coverage is not complete, and the cause is on this side.** The bootstrap filter written
+by `nostr_switch_identity` matches the agent's npub as a **keyword in the note body**, so a reply
+that only references the agent through `e` / `p` tags — which is what a normal Nostr client
+produces — matches nothing and is dropped **systematically**, not occasionally. Fixing it takes
+changes in both places: the filter this repo writes (`kojira/opencrab#271`) and the subscription
+nostaro builds from it (`kojira/nostaro#6`, unmerged). Until then, do not assume every mention
+produces a turn. Outbound — posting, and replying to an event the agent did receive — is the part
+that is exercised today.
 
 ## Skills
 
@@ -284,9 +372,9 @@ Standard skills defined in `skills/`:
 
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:
 
-- **Agent settings** — `heartbeat_interval_secs` (default 1800), `heartbeat_enabled` (default false), `workspace_path`, `max_workspace_size_mb`
+- **Agent settings** — `heartbeat_interval_secs`, `heartbeat_enabled`, `heartbeat_min_interval_secs` (the floor `set_my_heartbeat` enforces, 300; the ceiling is a code constant of 24h), `workspace_path`, `max_workspace_size_mb`. Watch the two layers of default: the shipped `config/default.toml` sets `heartbeat_interval_secs = 1800` and `heartbeat_enabled = true`, while the code fallbacks used when a key is *absent* are 29 and `false` (`crates/server/src/config.rs`). These are the global values; an agent that has opted in via `set_my_heartbeat` fires on its own stored interval instead (the dashboard's heartbeat fields under Agent Channels are the older per-Discord-channel setting, a separate table)
 - **LLM providers** — Default provider (hermit-shell proxy at localhost:8765 by default), per-use-case model selection, fallback chains, model aliases, self-selection toggle
-- **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), CLI toggle
+- **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), per-agent Nostr key/relays/filter (DB-persisted), CLI toggle
 - **Database** — SQLite path
 - **Tools** — Shell commands with per-command permission levels (`agent` / `owner`)
 - **Background tool execution** — `[subtask] auto_dispatch` (default `true`). Tool calls run in the background so the response loop never blocks; results are re-injected into the conversation when they finish. Set it to `false` (or export `OPENCRAB_SUBTASK_AUTO_DISPATCH=0`, which takes precedence) to fall back to fully synchronous tool execution. See "非ブロックツール実行" in `docs/DESIGN.md` for which tools stay inline and why.
@@ -338,6 +426,7 @@ examples.
 | Frontend | React + Vite + Tailwind CSS |
 | i18n | react-i18next (English / Japanese) |
 | Discord | serenity (per-agent gateway) |
+| Nostr | `nostaro` CLI driven as a subprocess (per-agent config/key) |
 | Serialization | serde / serde_json |
 | Error Handling | anyhow / thiserror |
 | Logging | tracing / tracing-subscriber |
