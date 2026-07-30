@@ -322,6 +322,86 @@ fn is_image_attachment(a: &serenity::model::channel::Attachment) -> bool {
         || (a.width.is_some() && a.height.is_some())
 }
 
+/// 添付ファイルの注記／画像パート生成に必要な最小情報の射影。
+///
+/// serenity の `Attachment` はテストから組み立てられない（非公開/非exhaustive）ため、
+/// 本文組み立てのロジックをこの型の上に閉じてテスト可能にしている。
+#[derive(Debug, Clone, PartialEq)]
+struct AttachmentInfo {
+    filename: String,
+    content_type: Option<String>,
+    size: u32,
+    url: String,
+    is_image: bool,
+}
+
+impl AttachmentInfo {
+    fn from_serenity(a: &serenity::model::channel::Attachment) -> Self {
+        Self {
+            filename: a.filename.clone(),
+            content_type: a.content_type.clone(),
+            size: a.size,
+            url: a.url.clone(),
+            is_image: is_image_attachment(a),
+        }
+    }
+
+    /// 本文テキストへ焼き込む注記行。
+    ///
+    /// #272: 画像添付だけ注記が無いと `session_logs.content` に「画像があった」痕跡が
+    /// 一切残らず、次ターン以降の履歴が「画像に触れていないユーザー発言 + 画像に言及した
+    /// 自分の応答」という証拠の非対称になる。モデルはこれを見て「画像など無かったのに
+    /// 作話した」と誤って自己否認する。画像も非画像と同じ経路・同じ書式でアンカーを残す。
+    /// URL は Discord CDN の署名付きで失効するため**含めない**（必要なのは存在の痕跡のみ）。
+    fn note(&self) -> String {
+        let ct = self.content_type.as_deref().unwrap_or("unknown");
+        if self.is_image {
+            format!("[画像添付: {} ({})]", self.filename, ct)
+        } else {
+            format!("[添付ファイル: {} ({}), {}B]", self.filename, ct, self.size)
+        }
+    }
+}
+
+/// 本文と添付注記を結合した「履歴に残るテキスト」を作る。
+/// 注記は添付の並び順を保つ（画像と非画像を混ぜても Discord 上の順序どおり）。
+fn build_full_text(content: &str, attachments: &[AttachmentInfo]) -> String {
+    let notes: Vec<String> = attachments.iter().map(AttachmentInfo::note).collect();
+    if notes.is_empty() {
+        content.to_string()
+    } else {
+        format!("{}\n{}", content, notes.join("\n"))
+    }
+}
+
+/// 受信メッセージの `MessageContent` を組み立てる。
+/// 画像は従来どおり `ContentPart::Image` としても載せる（vision 経路は不変）。
+/// 本文アンカー（`build_full_text`）と画像パートの**両方**が出る形になる。
+fn build_message_content(
+    content: &str,
+    attachments: &[AttachmentInfo],
+) -> crate::message::MessageContent {
+    let full_text = build_full_text(content, attachments);
+    let image_parts: Vec<crate::message::ContentPart> = attachments
+        .iter()
+        .filter(|a| a.is_image)
+        .map(|a| crate::message::ContentPart::Image {
+            url: a.url.clone(),
+            alt: Some(a.filename.clone()),
+        })
+        .collect();
+
+    if image_parts.is_empty() {
+        crate::message::MessageContent::text(&full_text)
+    } else if full_text.trim().is_empty() {
+        crate::message::MessageContent::Multi(image_parts)
+    } else {
+        let mut parts = vec![crate::message::ContentPart::Text(full_text)];
+        parts.extend(image_parts);
+        crate::message::MessageContent::Multi(parts)
+    }
+}
+
 // ==================== Serenity Event Handler ====================
 
 struct DiscordHandler {
@@ -341,52 +421,29 @@ impl EventHandler for DiscordHandler {
             }
         }
 
+        // 添付ファイルの処理（#272: 画像も本文アンカーを持つ）
+        let attachments: Vec<AttachmentInfo> = msg
+            .attachments
+            .iter()
+            .map(AttachmentInfo::from_serenity)
+            .collect();
+        let image_count = attachments.iter().filter(|a| a.is_image).count();
+
+        // #272 P1: 切り分けに body_len の逆算を強いられたので、受信段で件数を残す
+        // （ファイル名/URL は出さない）。
         info!(
             author = %msg.author.name,
             bot = msg.author.bot,
             content = %msg.content.chars().take(50).collect::<String>(),
+            attachments = attachments.len(),
+            images = image_count,
             "Discord message event received"
         );
 
         let guild_id = msg.guild_id.map(|id| id.to_string()).unwrap_or_default();
         let channel_id = msg.channel_id.to_string();
 
-        // 画像添付ファイルの処理
-        let non_image_notes: Vec<String> = msg
-            .attachments
-            .iter()
-            .filter(|a| !is_image_attachment(a))
-            .map(|a| {
-                let ct = a.content_type.as_deref().unwrap_or("unknown");
-                format!("[添付ファイル: {} ({}), {}B]", a.filename, ct, a.size)
-            })
-            .collect();
-
-        let full_text = if non_image_notes.is_empty() {
-            msg.content.clone()
-        } else {
-            format!("{}\n{}", msg.content, non_image_notes.join("\n"))
-        };
-
-        let image_parts: Vec<crate::message::ContentPart> = msg
-            .attachments
-            .iter()
-            .filter(|a| is_image_attachment(a))
-            .map(|a| crate::message::ContentPart::Image {
-                url: a.url.clone(),
-                alt: Some(a.filename.clone()),
-            })
-            .collect();
-
-        let content = if image_parts.is_empty() {
-            crate::message::MessageContent::text(&full_text)
-        } else if full_text.trim().is_empty() {
-            crate::message::MessageContent::Multi(image_parts)
-        } else {
-            let mut parts = vec![crate::message::ContentPart::Text(full_text.clone())];
-            parts.extend(image_parts);
-            crate::message::MessageContent::Multi(parts)
-        };
+        let content = build_message_content(&msg.content, &attachments);
 
         let sender = build_sender(
             msg.author.id.get(),
@@ -581,6 +638,150 @@ impl EventHandler for DiscordHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image_att(filename: &str, ct: Option<&str>) -> AttachmentInfo {
+        AttachmentInfo {
+            filename: filename.to_string(),
+            content_type: ct.map(str::to_string),
+            size: 1234,
+            url: format!("https://cdn.example/{filename}?ex=deadbeef"),
+            is_image: true,
+        }
+    }
+
+    fn file_att(filename: &str, ct: Option<&str>, size: u32) -> AttachmentInfo {
+        AttachmentInfo {
+            filename: filename.to_string(),
+            content_type: ct.map(str::to_string),
+            size,
+            url: format!("https://cdn.example/{filename}"),
+            is_image: false,
+        }
+    }
+
+    fn text_of(content: &crate::message::MessageContent) -> String {
+        match content {
+            crate::message::MessageContent::Text(t) => t.clone(),
+            crate::message::MessageContent::Image { .. } => String::new(),
+            crate::message::MessageContent::Multi(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::message::ContentPart::Text(t) => Some(t.clone()),
+                    crate::message::ContentPart::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    fn image_urls_of(content: &crate::message::MessageContent) -> Vec<String> {
+        match content {
+            crate::message::MessageContent::Text(_) => vec![],
+            crate::message::MessageContent::Image { url, .. } => vec![url.clone()],
+            crate::message::MessageContent::Multi(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::message::ContentPart::Image { url, .. } => Some(url.clone()),
+                    crate::message::ContentPart::Text(_) => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// #272 P0: 画像添付は本文テキストにもアンカーが残る（履歴に痕跡が残る）。
+    #[test]
+    fn image_attachment_leaves_text_anchor() {
+        let content = build_message_content(
+            "これ見て",
+            &[image_att("screenshot.png", Some("image/png"))],
+        );
+        let text = text_of(&content);
+        assert!(
+            text.contains("[画像添付: screenshot.png (image/png)]"),
+            "画像の注記が本文に無い: {text}"
+        );
+        assert!(text.starts_with("これ見て"));
+        // URL は失効するので本文には書かない
+        assert!(
+            !text.contains("https://"),
+            "本文に URL が混入している: {text}"
+        );
+    }
+
+    /// vision 経路は不変: 本文アンカーと `ContentPart::Image` の**両方**が出る。
+    #[test]
+    fn image_attachment_still_yields_image_part() {
+        let content = build_message_content("これ見て", &[image_att("a.png", Some("image/png"))]);
+        assert_eq!(
+            image_urls_of(&content),
+            vec!["https://cdn.example/a.png?ex=deadbeef".to_string()]
+        );
+        assert!(text_of(&content).contains("[画像添付: a.png (image/png)]"));
+    }
+
+    /// 本文が空でも画像アンカーは残る（画像だけ投稿しても痕跡が消えない）。
+    #[test]
+    fn image_only_message_still_has_anchor_and_part() {
+        let content = build_message_content("", &[image_att("only.jpg", Some("image/jpeg"))]);
+        assert!(text_of(&content).contains("[画像添付: only.jpg (image/jpeg)]"));
+        assert_eq!(image_urls_of(&content).len(), 1);
+    }
+
+    /// content_type が無い（width/height 判定）画像でも注記は出る。
+    #[test]
+    fn image_without_content_type_uses_unknown() {
+        let content = build_message_content("x", &[image_att("noct.webp", None)]);
+        assert!(text_of(&content).contains("[画像添付: noct.webp (unknown)]"));
+    }
+
+    /// 既存の非画像添付の書式・挙動は不変（回帰防止）。
+    #[test]
+    fn non_image_attachment_format_unchanged() {
+        let content = build_message_content(
+            "資料です",
+            &[file_att("report.pdf", Some("application/pdf"), 4096)],
+        );
+        assert_eq!(
+            text_of(&content),
+            "資料です\n[添付ファイル: report.pdf (application/pdf), 4096B]"
+        );
+        // 画像パートは出ない（Text のまま）
+        assert!(matches!(content, crate::message::MessageContent::Text(_)));
+    }
+
+    #[test]
+    fn non_image_attachment_without_content_type_unchanged() {
+        assert_eq!(
+            build_full_text("", &[file_att("blob.bin", None, 7)]),
+            "\n[添付ファイル: blob.bin (unknown), 7B]"
+        );
+    }
+
+    /// 画像と非画像の混在: 添付の並び順どおりに注記が出る。
+    #[test]
+    fn mixed_attachments_keep_order() {
+        let text = build_full_text(
+            "mix",
+            &[
+                image_att("1.png", Some("image/png")),
+                file_att("2.txt", Some("text/plain"), 10),
+                image_att("3.gif", Some("image/gif")),
+            ],
+        );
+        assert_eq!(
+            text,
+            "mix\n[画像添付: 1.png (image/png)]\n[添付ファイル: 2.txt (text/plain), 10B]\n[画像添付: 3.gif (image/gif)]"
+        );
+    }
+
+    /// 添付なしなら余計な注記も改行も付かない。
+    #[test]
+    fn no_attachments_leaves_content_untouched() {
+        let content = build_message_content("ただのテキスト", &[]);
+        assert_eq!(text_of(&content), "ただのテキスト");
+        assert!(matches!(content, crate::message::MessageContent::Text(_)));
+        assert_eq!(build_full_text("ただのテキスト", &[]), "ただのテキスト");
+    }
 
     #[test]
     fn form_modal_spec_builds_serenity_modal() {
