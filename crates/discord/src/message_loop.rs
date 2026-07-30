@@ -615,11 +615,22 @@ async fn process_incoming_message<T: AgentRunner>(
                 &agent_id_spawn,
                 budget,
             ) {
-                Ok(raw) => Some(prepend_runtime_context_discord(
-                    &raw,
-                    "Discord conversation",
-                    &discord_message_id_spawn,
-                )),
+                Ok(raw) => {
+                    // #272 P1: 履歴が痩せた/欠けたときの切り分け用。会話文字列の中身は
+                    // 秘匿・肥大のため出さず長さのみ（含まれた log_id の範囲は
+                    // `build_full_conversation` 側で debug 出力する）。
+                    debug!(
+                        session_id = %session_id_spawn,
+                        agent_id = %agent_id_spawn,
+                        conversation_len = raw.len(),
+                        "build_conversation_string ok"
+                    );
+                    Some(prepend_runtime_context_discord(
+                        &raw,
+                        "Discord conversation",
+                        &discord_message_id_spawn,
+                    ))
+                }
                 Err(e) => {
                     tracing::error!(session_id = %session_id_spawn, agent_id = %agent_id_spawn, "build_conversation_string failed: {e}");
                     None

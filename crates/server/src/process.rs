@@ -561,6 +561,15 @@ fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> Str
     if logs.is_empty() {
         return "No messages yet.".to_string();
     }
+    // #272 P1: どの範囲のログが会話文字列に入ったかを後追いできるようにする。
+    // 会話文字列そのものは秘匿・肥大のため出さず、件数と最古/最新 log_id のみ。
+    tracing::debug!(
+        session_id = %session_id,
+        log_count = logs.len(),
+        oldest_log_id = ?logs.first().and_then(|l| l.id),
+        newest_log_id = ?logs.last().and_then(|l| l.id),
+        "build_full_conversation: logs included"
+    );
     format_logs(&logs)
 }
 
@@ -1145,8 +1154,10 @@ fn merge_image_urls(
                 }
             }
         }
+        // #272 P1: 画像がどのターンで LLM に載ったかを後追いできるよう INFO に上げる。
+        // 署名付き URL は秘匿情報になりうるので件数のみ出す。
         if !urls.is_empty() {
-            tracing::debug!(
+            tracing::info!(
                 session_id = %session_id,
                 count = urls.len(),
                 "run_agent_response: merging image_urls for LLM"
