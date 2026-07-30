@@ -383,6 +383,11 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     inline。**採用時に bounded な self-mention フィルタを自動設定して接続する**
     //     （未設定エージェントの自己ブートストラップ / #264）。nsec は返さない。
     "nostr_switch_identity",
+    // (3) 同ターン結果依存 + (2) 配送系: 薄い nostaro passthrough（#268）。post/event 等の
+    //     送信は「送る」こと自体が応答で、get/timeline/search 等の取得は戻り値（stdout）を
+    //     同じターンで使うのが通常の用法。background 化すると結果が次ターンへ回り、投稿系は
+    //     確認が、取得系は本文が同ターンで得られない。よって inline。
+    "nostr_run",
 ];
 
 /// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
@@ -550,6 +555,13 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // ユーザー由来の会話ターン（caller=Agent）へ出す必要は無い。`nostr_switch_identity`
     // と対で使う管理系ツールなので同じ trusted ゲートに揃える。
     "nostr_list_keys",
+    // 薄い nostaro passthrough（#268）。任意の nostaro サブコマンド（投稿・kind:0・DM・
+    // zap・チャンネル等）を実行できる server-own ツール。外部ユーザー由来の会話ターン
+    // （caller=Agent）へ開けると、プロンプトインジェクションで任意投稿・なりすまし・資金
+    // 流出（zap）に使われうる。owner/trusted のターン（会話・heartbeat・ダッシュボード）
+    // でのみ露出・実行する（inbound=Agent には一覧にも出さず実行もしない）。既存の inner
+    // `nostr_post`/`reply`（受信ターンの返信用）とは別枠で、こちらは受信ターンには出ない。
+    "nostr_run",
 ];
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。

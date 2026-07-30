@@ -210,6 +210,24 @@ pub trait GatewayIdentityProvisioning: Send + Sync {
     async fn adopt_identity(&self, agent_id: &str, npub: &str) -> Result<String>;
 }
 
+/// transport 固有の **nostaro passthrough**（薄い CLI 通し / capability / #268）。
+///
+/// `GatewayKeyProvisioning`（鍵の払い出し）と同じ流儀の capability。持つ transport
+/// （Nostr）だけが [`AgentGatewayLifecycle::nostr_passthrough`] から `Some` を返す。
+///
+/// opencrab が Nostr で担保するのは「鍵のエージェント間混同防止」と「nsec 隠蔽」の 2 点
+/// だけで、Nostr 操作そのもの（投稿・kind:0 プロフィール・チャンネル・取得 等）は nostaro
+/// にそのまま委ねる（再実装しない＝非劣化）。config は常に `agent_id` のもの、`init`/`watch`
+/// は拒否、エラー/出力は nsec マスクを通す——という安全ガードは**実装側**（`NostaroCli`）に
+/// 閉じる。呼び出し側（server-own の `nostr_run`）は subcommand と args を渡すだけ。
+#[async_trait]
+pub trait GatewayNostrPassthrough: Send + Sync {
+    /// `nostaro --config <agent の config> <subcommand> [args]` を構造化引数で実行し
+    /// stdout を返す。config は常に `agent_id` のもの。`init`/`watch` は拒否。config 未
+    /// materialize（鍵未採用）は明示エラー。**秘密値（nsec）は出力に出さない**。
+    async fn run(&self, agent_id: &str, subcommand: &str, args: &[String]) -> Result<String>;
+}
+
 /// 受信を持つ transport の per-agent ライフサイクル管理。
 ///
 /// 実装するのは**マネージャ**（`DiscordGatewayManager` / `NostrGatewayManager`）であって
@@ -310,6 +328,17 @@ pub trait AgentGatewayLifecycle: Send + Sync + 'static {
     /// `key_provisioning`（鍵の払い出し）と対。「生成鍵を本鍵にして接続する」操作を
     /// 持つ transport（Nostr）だけが `Some` を返す。既定は `None`。
     fn identity_provisioning(&self) -> Option<Arc<dyn GatewayIdentityProvisioning>> {
+        None
+    }
+
+    /// この transport が**薄い CLI passthrough**（[`GatewayNostrPassthrough`]）を提供する
+    /// なら返す（capability / #268）。
+    ///
+    /// server-own の `nostr_run` がここから引く。`key_provisioning` と同じく稼働の有無を
+    /// 必要としない（config.toml さえ materialize されていれば投稿できる）ので、実装は
+    /// `is_running` に関わらず常に `Some` を返してよい（未 materialize の判定は実装内側）。
+    /// 既定は `None`（CLI passthrough を持たない transport）。
+    fn nostr_passthrough(&self) -> Option<Arc<dyn GatewayNostrPassthrough>> {
         None
     }
 }
@@ -666,6 +695,10 @@ mod tests {
         assert!(
             gw.key_provisioning().is_none(),
             "実装しない transport は鍵を払い出せない"
+        );
+        assert!(
+            gw.nostr_passthrough().is_none(),
+            "実装しない transport は CLI passthrough を持たない"
         );
     }
 
