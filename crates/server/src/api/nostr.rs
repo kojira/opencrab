@@ -138,13 +138,14 @@ pub(crate) async fn apply_nostr_settings(
         ));
     }
 
-    // author も keyword も無い購読は全ノート洪水になるため拒否（enabled 時のみ）。
-    if enabled && authors.is_empty() && keywords.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "author か keyword を少なくとも1つ指定してください（全ノート購読は不可）".to_string(),
-        ));
-    }
+    // 【author/keyword が空でも拒否しない】（#271/#278）
+    //
+    // 以前は「author も keyword も無い＝全ノート洪水」として弾いていた。旧 nostaro の
+    // `watch --json` が mention-only を無視して kind:1 を全件購読していたので当時は正しい。
+    // 新 nostaro では `--json` でも mention-only が既定で効き、opencrab は
+    // `--no-mention-only` を渡さないので、**空フィルタの購読は「自分宛の p タグのみ」＝
+    // 最も狭い**（詳細は `docs/nostaro-interface.md`）。ここで弾くと「自分宛だけ受信する」
+    // という一番普通の設定がダッシュボードから作れなくなる。
 
     let row = AgentNostrConfigRow {
         agent_id: agent_id.to_string(),

@@ -194,8 +194,9 @@ pub trait GatewayKeyProvisioning: Send + Sync {
 /// 「採用」は gateway の稼働状態で意味が変わる:
 /// - **稼働中** → 走行中の watch ループが握る接続状態（self_pubkey セル）を in-place で
 ///   差し替える（再接続なし）。この状態はループの外から組み直せないので実装が握る。
-/// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**bounded な
-///   フィルタ**を書き、ゲートウェイを起動して接続する（＝未設定エージェントが自力で載る）。
+/// - **未稼働（自己ブートストラップ）** → `agent_nostr_config` に鍵・リレー・**既存の
+///   フィルタ（無ければ空＝自分宛のみ）**を書き、ゲートウェイを起動して接続する
+///   （＝未設定エージェントが自力で載る）。
 ///
 /// この分岐と「起動成功してから `enabled=true`」の順序を呼び出し側に晒すと呼び出し口
 /// ごとに間違えうるため、capability の内側へ閉じる。呼び出し側は npub を渡すだけ。
@@ -205,8 +206,8 @@ pub trait GatewayKeyProvisioning: Send + Sync {
 pub trait GatewayIdentityProvisioning: Send + Sync {
     /// 生成鍵 `npub`（**そのエージェント自身が生成した鍵のみ**）を本鍵として採用する。
     ///
-    /// 稼働中なら in-place ホットスワップ、未稼働なら bootstrap（config 書き込み＋bounded
-    /// フィルタ設定＋起動＝接続）。成功時は採用した npub を返す。秘密鍵は返さない。
+    /// 稼働中なら in-place ホットスワップ、未稼働なら bootstrap（config 書き込み＋起動＝
+    /// 接続）。成功時は採用した npub を返す。秘密鍵は返さない。
     async fn adopt_identity(&self, agent_id: &str, npub: &str) -> Result<String>;
 }
 

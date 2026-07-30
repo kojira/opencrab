@@ -276,7 +276,7 @@
   "agentDetail.nostrAuthors": "Authors (npub, comma-separated)",
   "agentDetail.nostrKeywords": "Keywords (comma-separated)",
   "agentDetail.nostrKinds": "Kinds (comma-separated, default 1)",
-  "agentDetail.nostrFilterHint": "Specify at least one author or keyword (subscribing to all notes is not allowed).",
+  "agentDetail.nostrFilterHint": "Authors and keywords are picked up in addition to events addressed to you (mentions and replies). Leave them empty to receive only what is addressed to you.",
   "agentDetail.nostrEnable": "Enable & start",
   "agentDetail.nostrSaveRestart": "Save & restart",
   "agentDetail.nostrDisable": "Stop",

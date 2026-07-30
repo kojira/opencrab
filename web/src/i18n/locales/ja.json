@@ -276,7 +276,7 @@
   "agentDetail.nostrAuthors": "author（npub、カンマ区切り）",
   "agentDetail.nostrKeywords": "キーワード（カンマ区切り）",
   "agentDetail.nostrKinds": "kind（カンマ区切り、既定 1）",
-  "agentDetail.nostrFilterHint": "author か keyword を少なくとも1つ指定してください（全ノート購読は不可）。",
+  "agentDetail.nostrFilterHint": "author / keyword は「自分宛（メンション・リプライ）」に追加で拾う条件です。空にすると自分宛のみを受信します。",
   "agentDetail.nostrEnable": "有効化して起動",
   "agentDetail.nostrSaveRestart": "保存して再起動",
   "agentDetail.nostrDisable": "停止",
