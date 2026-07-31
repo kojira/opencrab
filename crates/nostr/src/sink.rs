@@ -194,6 +194,7 @@ fn resume_prompt_suffix(reply_target: &str, subtask_id: &str, exit_reason: &str)
         "[Nostr] 依頼されていたバックグラウンド処理が完了しました。結果は直前の会話ログの \
          subtask_completed に入っています。相手へ伝えるなら nostr_reply(target=\"{reply_target}\") \
          を使ってください（target は返信先ノート）。伝える必要がなければ NO_REPLY とだけ答えてください。\
+         ただし相手（人間）がまだ答えを待っている質問があるなら NO_REPLY は使わず必ず応答すること（#287）。\
          \n[subtask_completed: subtask_id={subtask_id}, exit_reason={exit_reason}]"
     )
 }

@@ -629,10 +629,15 @@ async fn process_incoming_message<T: AgentRunner>(
         // なり、同じ内容を二重回答する問題を防ぐ。
 
         let (base_prompt, agent_name) = state.build_agent_context(agent_id);
+        // #287: このターンの起点が人間なら「黙るな」を**そのターンの事実**として足す。
+        // 送信者が Bot かどうかは受信側が知っているので LLM に推測させない。
+        // Bot 投稿（他 Bot / Peer Review / webhook 通知）には足さない — Silent Reply の
+        // Bot ループ防止をそのまま残すため。
         let system_prompt = format!(
-            "{}\n\n{}",
+            "{}\n\n{}{}",
             base_prompt,
-            discord_context_line(&guild_id, &channel_id_str)
+            discord_context_line(&guild_id, &channel_id_str),
+            human_inbound_prompt_section(incoming.sender.is_bot),
         );
 
         let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
@@ -1382,6 +1387,20 @@ fn prepend_runtime_context_discord(
     )
 }
 
+/// 人間からの受信ターンにだけ足す system prompt 断片（#287）。
+///
+/// 本文は [`opencrab_core::runtime_context::HUMAN_INBOUND_TURN_NOTE`]。ここでは
+/// 「空でなければ空行を挟んで連結する」区切りだけを持つ。Bot 投稿では空文字を返すので
+/// system prompt は従来と 1 バイトも変わらない（Bot ループ防止の非退行）。
+fn human_inbound_prompt_section(sender_is_bot: bool) -> String {
+    let note = opencrab_core::runtime_context::human_inbound_turn_note(sender_is_bot);
+    if note.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{note}")
+    }
+}
+
 /// 処理対象として確定したユーザー投稿に 👀 リアクションを付ける（非致命的）。
 ///
 /// 失敗（権限不足・削除済みメッセージ・無効なID等）してもエラーは握りつぶし、
@@ -1513,9 +1532,32 @@ mod wiring_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_context_line, parse_discord_session, parse_seen_message_id, recv_retry_backoff,
-        should_alert_inbound_stalled, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX,
+        discord_context_line, human_inbound_prompt_section, parse_discord_session,
+        parse_seen_message_id, recv_retry_backoff, should_alert_inbound_stalled,
+        RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX,
     };
+
+    /// #287: 人間からの受信ターンにだけ「NO_REPLY を返すな」が system prompt に載る。
+    ///
+    /// 送信者が Bot かは受信側の**事実**なので、LLM の判断に委ねない。
+    #[test]
+    fn human_inbound_adds_the_no_silence_section() {
+        let section = human_inbound_prompt_section(false);
+        assert!(
+            section.starts_with("\n\n## Direct Message From Human"),
+            "空行区切りで足す: {section:?}"
+        );
+        assert!(
+            section.contains("NO_REPLY を返してはいけません"),
+            "{section}"
+        );
+    }
+
+    /// Bot 投稿では system prompt が 1 バイトも変わらない（Bot ループ防止の非退行）。
+    #[test]
+    fn bot_inbound_leaves_the_prompt_untouched() {
+        assert_eq!(human_inbound_prompt_section(true), "");
+    }
 
     /// #286: エスカレーションは 1 度きりで終わらない。
     ///

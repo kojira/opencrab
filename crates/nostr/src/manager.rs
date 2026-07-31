@@ -670,8 +670,11 @@ async fn handle_event<R: NostrAgentRunner>(
          - 対象ノート: {target}\n\
          - 種別: kind:{kind}（{label}）\n\
          返信するなら nostr_reply(target=\"{target}\") を使ってください（target は返信先ノート）。\
-         種別的に本文返信が不自然なもの（リアクション等）や、返信不要なら \
-         NO_REPLY とだけ答えてください。",
+         種別的に本文返信が不自然なもの（リアクション等）や、Bot 同士のループになる場合は \
+         NO_REPLY とだけ答えてください。\n\
+         ただしこれは**自分に向けられた言及・返信**です。人間からの言及・質問に対しては \
+         NO_REPLY を使わず必ず応答してください（#287）。作業中なら「今これをやっている」と \
+         現状を返す。作業中であることは黙ってよい理由になりません。",
         author = event.author_label(),
         author_key = event.author_key(),
         pubkey = event.pubkey,
@@ -1671,6 +1674,34 @@ mod tests {
         assert!(
             p.contains("nostr_reply(target=\"note1target\")"),
             "従来の返信指示も残る: {p}"
+        );
+    }
+
+    /// [#287] 受信は「自分に向けられた言及」なので、人間からの質問に NO_REPLY で
+    /// 黙るのを禁じる。Bot 同士のループ回避とリアクション等の除外は残す。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_suffix_forbids_silence_toward_humans() {
+        let h = Harness::new("agent-no-silence", Duration::from_millis(1), 8, 32);
+        h.feed_event(rich_event(1)).await;
+        assert!(
+            h.wait_finished(1, Duration::from_secs(5)).await,
+            "応答生成が完了しない"
+        );
+
+        let prompts = SlowRunner::snapshot(&h.runner.system_prompts);
+        let p = &prompts[0];
+        assert!(
+            p.contains("人間からの言及・質問に対しては NO_REPLY を使わず必ず応答してください"),
+            "人間への応答義務が載る: {p}"
+        );
+        // 元の意図（ループ防止 / 返信が不自然な kind）は消えていない。
+        assert!(
+            p.contains("Bot 同士のループになる場合は NO_REPLY"),
+            "Bot ループ防止が残る: {p}"
+        );
+        assert!(
+            p.contains("リアクション等"),
+            "本文返信が不自然な kind の除外が残る: {p}"
         );
     }
 

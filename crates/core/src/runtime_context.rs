@@ -18,6 +18,36 @@ pub fn prepend_runtime_context(user_message: &str, session_theme: &str) -> Strin
     )
 }
 
+/// 人間からの直接メッセージで始まるターンの system prompt へ足す注意書き（#287）。
+///
+/// `## Silent Reply`（NO_REPLY の規約）は Bot 同士のループを止めるために必要だが、
+/// **人間の直接の質問にまで効いてしまう**。実測（#284 の llm_logs）では、オーナーの
+/// 「既存フォローはわたしだけなのでは？」に対しエージェントが `NO_REPLY` を返し、
+/// 黙ったままツールを回し続けていた。
+///
+/// 「送信者が Bot かどうか」は受信側が**知っている事実**であり、LLM に推測させる必要は
+/// ない。そこで人間からの受信ターンに限りこの注意書きを system prompt へ足し、
+/// Silent Reply の例外をそのターンの事実として宣言する。Bot からの受信ターンや、
+/// ハートビート等の自発ターンには足さない（従来どおり NO_REPLY が正常）。
+pub const HUMAN_INBOUND_TURN_NOTE: &str = "## Direct Message From Human\n\
+     このターンは人間（Bot ではない送信者）があなたに宛てて送ったメッセージで始まっています。\n\
+     - NO_REPLY を返してはいけません。**Silent Reply よりこの指示が優先されます。**\n\
+     - 作業中でも必ず返してください: 質問には答える。答えがまだ出ていなければ「今これをやっている」と現状を返す。\n\
+     - 同じ文言の繰り返しは避けますが、「繰り返しになるから黙る」は禁止です。新しく報告できることが無くても、相手の発言には必ず一言返してください。";
+
+/// 直近の受信が人間からなら [`HUMAN_INBOUND_TURN_NOTE`]、Bot からなら空文字を返す。
+///
+/// 呼び出し側は `opencrab_gateway::Sender::is_bot` をそのまま渡せばよい。空文字を
+/// 返すのは「Bot ループ防止のための NO_REPLY は従来どおり残す」という意図の表明であり、
+/// 呼び出し側で `if` を書き分けさせないためである。
+pub fn human_inbound_turn_note(sender_is_bot: bool) -> &'static str {
+    if sender_is_bot {
+        ""
+    } else {
+        HUMAN_INBOUND_TURN_NOTE
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +67,20 @@ mod tests {
     fn empty_message_keeps_header() {
         let out = prepend_runtime_context("", "theme");
         assert!(out.contains("Current discussion topic: theme"));
+    }
+
+    /// 人間からの受信ターンには「NO_REPLY を返すな」が載る（#287）。
+    #[test]
+    fn human_sender_gets_the_no_silence_note() {
+        let note = human_inbound_turn_note(false);
+        assert!(!note.is_empty());
+        assert!(note.contains("NO_REPLY を返してはいけません"));
+        assert!(note.contains("Silent Reply よりこの指示が優先されます"));
+    }
+
+    /// Bot からの受信ターンには載らない（Bot 同士のループ防止を壊さない / #287）。
+    #[test]
+    fn bot_sender_gets_no_note() {
+        assert_eq!(human_inbound_turn_note(true), "");
     }
 }
