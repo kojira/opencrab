@@ -54,6 +54,11 @@ struct FakeRunner {
     runs: Arc<Mutex<Vec<RunObservation>>>,
     /// 受信フックの観測（呼ばれた順）。
     inbound_hooks: Arc<Mutex<Vec<InboundHookCall>>>,
+    /// 受信発言の**記録**（`record_inbound_message`）の観測（本文、呼ばれた順）。
+    /// フック（`on_inbound_message`）とは別物で、こちらが会話履歴に残る本体。
+    inbound_records: Arc<Mutex<Vec<String>>>,
+    /// `record_inbound_message` が false（記録失敗）を返すよう強制するフラグ。
+    inbound_record_fails: Arc<std::sync::atomic::AtomicBool>,
     /// run を 1 件観測したことの通知。
     ///
     /// inbound 経路の応答生成は `SessionLocks::spawn_serialized` の別タスクで走るため、
@@ -70,6 +75,8 @@ impl FakeRunner {
         Self {
             runs: Arc::new(Mutex::new(Vec::new())),
             inbound_hooks: Arc::new(Mutex::new(Vec::new())),
+            inbound_records: Arc::new(Mutex::new(Vec::new())),
+            inbound_record_fails: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             run_observed: Arc::new(tokio::sync::Notify::new()),
             db: opencrab_db::Db::memory().expect("in-memory DB"),
         }
@@ -143,8 +150,15 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
     fn record_inbound_message(
         &self,
         _source: opencrab_actions::TranscriptSource,
-        _record: &opencrab_actions::InboundMessageRecord<'_>,
-    ) {
+        record: &opencrab_actions::InboundMessageRecord<'_>,
+    ) -> bool {
+        self.inbound_records
+            .lock()
+            .unwrap()
+            .push(record.text.to_string());
+        !self
+            .inbound_record_fails
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn on_inbound_message(
@@ -429,4 +443,120 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
     assert_eq!(call.sender_id, "user-1");
     assert_eq!(call.sender_name, "crab-b");
     assert_eq!(call.text, reply);
+}
+
+/// **ユーザー発言の記録はセッションロックの外（＝ロック待ちより前）で確定する。**（#284 P0-1）
+///
+/// 以前は `spawn_serialized` の内側で記録していたため、そのセッションで長い推論が
+/// 走っている間に届いた発言は、推論が終わるまで DB に入らなかった。その窓でプロセスが
+/// 落ちる／タスクが失われると**発言が永久に消える**（実際に起きた #284 の症状）。
+///
+/// ここでは同一セッションのロックをテスト側で握ったまま `process_incoming_message` を
+/// 呼び、**ロックを握ったままでも記録が済んでいる**ことを固定する。実装をロックの
+/// 内側へ戻すと、記録がロック解放待ちになりこのテストが落ちる。
+#[tokio::test]
+async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    let session_locks = Arc::new(SessionLocks::new());
+    let session_id = "discord-crab-111-222";
+
+    // 同一セッションのロックを掴んだまま離さないタスク（＝走行中の長い推論の代役）。
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+    let holder_locks = session_locks.clone();
+    let holder = tokio::spawn(async move {
+        holder_locks
+            .run_serialized(session_id, async move {
+                let _ = held_tx.send(());
+                let _ = release_rx.await;
+            })
+            .await;
+    });
+    held_rx.await.expect("ロックが取得されなかった");
+
+    let incoming = IncomingMessage::new(
+        MessageSource::Discord {
+            guild_id: "111".to_string(),
+            channel_id: "222".to_string(),
+        },
+        MessageContent::Text("全員フォローして".to_string()),
+        Sender::user("user-1", "owner"),
+    );
+
+    process_incoming_message(
+        incoming,
+        gateway,
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        session_locks,
+        false,
+        None,
+        event_tx,
+        registry,
+    )
+    .await;
+
+    // ロックはまだ握られている（応答生成は 1 件も走れていない）。
+    assert!(
+        state.runs.lock().unwrap().is_empty(),
+        "テストの前提が崩れている: ロックを握ったままなのに応答生成が走った"
+    );
+    // それでも発言は記録済みでなければならない。
+    let records = state.inbound_records.lock().unwrap().clone();
+    assert_eq!(
+        records,
+        vec!["全員フォローして".to_string()],
+        "ユーザー発言がセッションロックの解放待ちになっている（ロック中に失うと消える）"
+    );
+
+    let _ = release_tx.send(());
+    holder.await.unwrap();
+}
+
+/// **記録に失敗したら黙って進まない。**（#284 P0-3）
+///
+/// `record_inbound_message` は best-effort ではなく成否を返す。false を無視すると、
+/// エージェントはその発言を一度も見ないまま応答する（＝ #284 の症状そのもの）。
+/// 呼び出し側が戻り値を評価していることを固定する（評価していなければ `#[must_use]`
+/// と警告で気づけるが、警告はビルド設定で消せるのでテストでも縛る）。
+#[tokio::test]
+async fn failed_inbound_record_is_detected_not_swallowed() {
+    let (state, gateway, gateway_actions) = make_deps();
+    state
+        .inbound_record_fails
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    let session_locks = Arc::new(SessionLocks::new());
+
+    let incoming = IncomingMessage::new(
+        MessageSource::Discord {
+            guild_id: "111".to_string(),
+            channel_id: "222".to_string(),
+        },
+        MessageContent::Text("つらい".to_string()),
+        Sender::user("user-1", "owner"),
+    );
+
+    process_incoming_message(
+        incoming,
+        gateway,
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        session_locks,
+        false,
+        None,
+        event_tx,
+        registry,
+    )
+    .await;
+
+    // 記録は試みられている（＝呼び出し自体は消えていない）。
+    assert_eq!(state.inbound_records.lock().unwrap().len(), 1);
 }

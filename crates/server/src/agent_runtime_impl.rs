@@ -59,13 +59,22 @@ impl AgentRuntime for AppState {
 
     // ---- 転記（#42: 行の形は transcript モジュールが所有。#158 S3 で gateway 非依存に）
 
+    /// #284 P0-3: ユーザー発言の記録だけは成否を返す（他の転記は best-effort のまま）。
+    /// ロック取得に失敗した場合も「記録できていない」ので `false`。
     fn record_inbound_message(
         &self,
         source: opencrab_actions::TranscriptSource,
         record: &opencrab_actions::InboundMessageRecord<'_>,
-    ) {
-        if let Ok(conn) = self.db.lock() {
-            crate::transcript::record_inbound_message(&conn, source, record);
+    ) -> bool {
+        match self.db.lock() {
+            Ok(conn) => crate::transcript::record_inbound_message(&conn, source, record),
+            Err(e) => {
+                tracing::error!(
+                    session_id = %record.session_id,
+                    "failed to lock the database to record an inbound message: {e}"
+                );
+                false
+            }
         }
     }
 

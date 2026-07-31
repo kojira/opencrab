@@ -332,6 +332,18 @@ pub fn split_llm_model_spec(full: &str) -> (&str, &str) {
 
 /// コンパクション時に最低限保持する最近のログ件数。
 const RECENT_MIN_LOGS: usize = 10;
+/// コンパクション時に**必ず**保持する直近ユーザー発言の件数（#284）。
+///
+/// `RECENT_MIN_LOGS` は「直近 N 件のログ」しか保証しない。ツール往復が走ると
+/// 直近 10 件が tool_call / tool_result だけで埋まり、ユーザー発言が 1 件も
+/// プロンプトに載らないまま応答する（= #284 の事故）。ログ種別に関係なく
+/// 「直近のユーザー発言 N 件」を別枠で確保し、予算配分でも最優先で取る。
+///
+/// 5 件の根拠: 実例では直近 10 件が tool_result 5 + evaluation 2 + 自分の発言 3 で
+/// 埋まり、ユーザー発言が 0 件になっていた。ユーザーは指示を短文で連投する
+/// （「全員フォローして」「無視？」「つらい」）ため、1〜2 件では直前の言い直しだけを
+/// 拾って元の指示を落とす。5 件なら一連の連投をまたいで意図が読める。
+const RECENT_MIN_USER_SPEECHES: usize = 5;
 /// context_window が不明な場合のデフォルト予算（トークン数）。
 const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
 
@@ -458,6 +470,7 @@ fn build_conversation_inner(
         return Ok(build_truncated_conversation(
             conn,
             session_id,
+            agent_id,
             context_budget_tokens,
         ));
     }
@@ -526,6 +539,9 @@ fn build_conversation_inner(
         recent_logs = logs;
     }
 
+    // #284: 直近のユーザー発言が要約境界より前に落ちていても必ず混ぜ戻す。
+    let recent_logs = merge_recent_user_speeches(conn, session_id, agent_id, recent_logs);
+
     // 予算内に収まるようにログを後ろから詰める
     let recent_text = fit_logs_to_budget(&recent_logs, remaining_budget);
 
@@ -576,6 +592,7 @@ fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> Str
 fn build_truncated_conversation(
     conn: &rusqlite::Connection,
     session_id: &str,
+    agent_id: &str,
     budget_tokens: usize,
 ) -> String {
     let mut logs = match opencrab_db::queries::list_recent_session_logs(conn, session_id, 500) {
@@ -586,6 +603,8 @@ fn build_truncated_conversation(
         }
     };
     logs.reverse();
+    // #284: 500 件の窓から溢れていてもユーザー発言だけは必ず含める。
+    let logs = merge_recent_user_speeches(conn, session_id, agent_id, logs);
 
     let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
     let header_tokens = estimate_tokens(header);
@@ -595,8 +614,72 @@ fn build_truncated_conversation(
     format!("{header}{recent_text}")
 }
 
+/// 中略した区間に差し込む印（会話が連続していないことを LLM に明示する）。
+const OMITTED_MARKER: &str = "[... older messages omitted due to context length ...]";
+
+/// エージェント自身ではない話者の発言か（= ユーザー／他エージェントの生発言）。
+fn is_user_speech(log: &opencrab_db::queries::SessionLogRow) -> bool {
+    log.log_type == "speech"
+        && log
+            .speaker_id
+            .as_deref()
+            .is_some_and(|s| s != log.agent_id.as_str())
+}
+
+/// 直近のユーザー発言をログ列へ混ぜ戻す（#284）。
+///
+/// `logs` は「要約境界より後ろ」や「直近 N 件」で切られているため、ツール往復が
+/// 長引くとユーザーの生発言が 1 件も入らないことがある。セッション全体から直近
+/// `RECENT_MIN_USER_SPEECHES` 件のユーザー発言を取り、id で重複排除して時系列へ
+/// マージする。取得に失敗しても会話構築は続行する（best-effort）。
+fn merge_recent_user_speeches(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    mut logs: Vec<opencrab_db::queries::SessionLogRow>,
+) -> Vec<opencrab_db::queries::SessionLogRow> {
+    let speeches = match opencrab_db::queries::list_recent_user_speech_logs(
+        conn,
+        session_id,
+        agent_id,
+        RECENT_MIN_USER_SPEECHES,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "failed to load recent user speeches: {e}");
+            return logs;
+        }
+    };
+    let present: std::collections::HashSet<i64> = logs.iter().filter_map(|l| l.id).collect();
+    let mut added = 0usize;
+    for s in speeches {
+        match s.id {
+            Some(id) if !present.contains(&id) => {
+                logs.push(s);
+                added += 1;
+            }
+            _ => {}
+        }
+    }
+    if added > 0 {
+        tracing::info!(
+            session_id = %session_id,
+            added,
+            "re-injected recent user speeches that fell outside the recent-log window"
+        );
+        // id 未設定の行（テスト等）は末尾に寄せる。
+        logs.sort_by_key(|l| l.id.unwrap_or(i64::MAX));
+    }
+    logs
+}
+
 /// ログを末尾（最新）から逆順に辿り、予算内に収まる分だけ返す。
-/// 最低 RECENT_MIN_LOGS 件は常に含める。
+///
+/// 保証は 2 つ:
+/// - 最低 `RECENT_MIN_LOGS` 件は常に含める（従来どおり）。
+/// - 直近 `RECENT_MIN_USER_SPEECHES` 件のユーザー発言は**予算より先に枠を取り**、
+///   末尾の連続区間から外れていても必ず含める（#284）。巨大なツール結果が
+///   末尾を占めてもユーザーの指示は消えない。
 fn fit_logs_to_budget(
     logs: &[opencrab_db::queries::SessionLogRow],
     budget_tokens: usize,
@@ -607,23 +690,56 @@ fn fit_logs_to_budget(
 
     // まず各ログを文字列化
     let formatted: Vec<String> = logs.iter().map(format_single_log).collect();
+    let line_tokens: Vec<usize> = formatted
+        .iter()
+        .map(|line| estimate_tokens(line) + 1) // +1 for newline
+        .collect();
 
-    // 後ろから詰めていく
+    // #284: 直近のユーザー発言を必須枠として先に確保する。
+    let must: std::collections::BTreeSet<usize> = logs
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, log)| is_user_speech(log))
+        .take(RECENT_MIN_USER_SPEECHES)
+        .map(|(i, _)| i)
+        .collect();
+    let must_tokens: usize = must.iter().map(|&i| line_tokens[i]).sum();
+
+    // 残り予算で末尾から詰めていく
+    let tail_budget = budget_tokens.saturating_sub(must_tokens);
     let mut used_tokens = 0;
     let mut start_idx = formatted.len();
 
-    for (i, line) in formatted.iter().enumerate().rev() {
-        let line_tokens = estimate_tokens(line) + 1; // +1 for newline
-        if used_tokens + line_tokens > budget_tokens
+    for i in (0..formatted.len()).rev() {
+        if must.contains(&i) {
+            // 予算確保済み。ここまでは連続区間として取り込む。
+            start_idx = i;
+            continue;
+        }
+        if used_tokens + line_tokens[i] > tail_budget
             && (formatted.len() - start_idx) >= RECENT_MIN_LOGS
         {
             break;
         }
-        used_tokens += line_tokens;
+        used_tokens += line_tokens[i];
         start_idx = i;
     }
 
-    formatted[start_idx..].join("\n")
+    // 連続区間 + それより古い必須ユーザー発言を時系列で結合する。
+    let mut selected: Vec<usize> = must.iter().copied().filter(|&i| i < start_idx).collect();
+    selected.extend(start_idx..formatted.len());
+
+    let mut parts: Vec<String> = Vec::with_capacity(selected.len());
+    let mut prev: Option<usize> = None;
+    for i in selected {
+        if prev.is_some_and(|p| i > p + 1) {
+            parts.push(OMITTED_MARKER.to_string());
+        }
+        parts.push(formatted[i].clone());
+        prev = Some(i);
+    }
+    parts.join("\n")
 }
 
 fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
@@ -1500,6 +1616,11 @@ pub async fn run_agent_response(
         max_iterations,
     );
 
+    // #284: LLM へ返す tool_result のサイズ上限と退避先。engine 側で上限を効かせ、
+    // 全文はワークスペースへ残す（エージェントが read_file で続きを読める）。
+    // 退避先は inline のログ callback / dispatch 経路と**同じ root**を使う。
+    engine.set_tool_result_offload(session_id.to_string(), Some(tool_result_workspace.clone()));
+
     // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
     // されているときだけ有効化する。sink 未配線（REST 一発呼び等）や sub-engine は
     // 従来どおり全ツール inline 実行（後方互換・非破壊）。
@@ -2280,5 +2401,144 @@ mod redact_secret_fields_tests {
         let out = redact_secret_fields_json(bad);
         assert!(!out.contains("nsec1raw"));
         assert!(out.contains("redacted"));
+    }
+}
+
+/// #284: コンテキストが逼迫しても**直近のユーザー発言は必ずプロンプトに載る**。
+///
+/// 事故当時、直近 10 件（`RECENT_MIN_LOGS`）が tool_result / evaluation / エージェント
+/// 自身の発言で埋まり、ユーザーの生発言が 1 件も入らなかった。エージェントは指示を
+/// 一度も見ないまま応答していた。ここで固定するのは「ログ種別に関係なく、直近の
+/// ユーザー発言 N 件が優先で残る」こと。
+#[cfg(test)]
+mod recent_user_speech_guarantee_tests {
+    use super::{build_conversation_string, RECENT_MIN_USER_SPEECHES};
+
+    fn insert(conn: &rusqlite::Connection, log_type: &str, speaker: &str, content: &str) -> i64 {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                log_type: log_type.to_string(),
+                content: content.to_string(),
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// ユーザー発言のあとに巨大なツール結果が大量に積まれても、発言は残る。
+    #[test]
+    fn user_speech_survives_a_flood_of_tool_results() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert(
+            &conn,
+            "speech",
+            "kojira",
+            "もういっそ全員フォローすればいいよ",
+        );
+        // 直近 10 件を tool_result / 自分の発言で埋める（当時と同じ形）。
+        for i in 0..12 {
+            insert(
+                &conn,
+                "tool_result",
+                "a1",
+                &format!("Following 979 user(s): {}", "npub1xxxx ".repeat(200 + i)),
+            );
+        }
+        for i in 0..3 {
+            insert(&conn, "speech", "a1", &format!("確認中です（{i}）"));
+        }
+
+        // 全文が入らない予算（＝コンパクション経路）。
+        let out = build_conversation_string(&conn, "s1", "a1", 500).unwrap();
+        assert!(
+            out.contains("もういっそ全員フォローすればいいよ"),
+            "直近のユーザー発言がプロンプトから落ちている: {out}"
+        );
+    }
+
+    /// ユーザー発言が要約境界より前に落ちていても混ぜ戻される。
+    #[test]
+    fn user_speech_is_reinjected_from_before_the_summary_boundary() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let user_log = insert(&conn, "speech", "kojira", "つらい");
+        for _ in 0..20 {
+            insert(&conn, "tool_result", "a1", &"x".repeat(400));
+        }
+        // 現セッションの topic 要約が user_log を含む範囲をカバーしている状態を作る。
+        opencrab_db::queries::insert_index_node(
+            &conn,
+            &opencrab_db::queries::IndexNodeRow {
+                id: "t1".to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
+                title: "過去の話題".to_string(),
+                summary: "過去の要約".to_string(),
+                start_log_id: Some(1),
+                end_log_id: Some(user_log + 10),
+                source_session_id: Some("s1".to_string()),
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: "2026-07-31T00:00:00Z".to_string(),
+                updated_at: "2026-07-31T00:00:00Z".to_string(),
+                short_id: Some("t1".to_string()),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
+            },
+        )
+        .unwrap();
+
+        let out = build_conversation_string(&conn, "s1", "a1", 400).unwrap();
+        assert!(
+            out.contains("[Past context summary"),
+            "テストの前提が崩れている（コンパクション経路に入っていない）: {out}"
+        );
+        assert!(
+            out.contains("つらい"),
+            "要約境界より前のユーザー発言が混ぜ戻されていない: {out}"
+        );
+    }
+
+    /// 保証するのは**直近 N 件**であって全件ではない（古い発言まで無条件に積むと
+    /// 予算保証が壊れる）。
+    #[test]
+    fn only_the_most_recent_user_speeches_are_forced_in() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert(&conn, "speech", "kojira", "とても古い発言マーカー");
+        for i in 0..RECENT_MIN_USER_SPEECHES {
+            insert(&conn, "speech", "kojira", &format!("新しい発言 {i}"));
+        }
+        for _ in 0..15 {
+            insert(&conn, "tool_result", "a1", &"y".repeat(400));
+        }
+        let out = build_conversation_string(&conn, "s1", "a1", 300).unwrap();
+        assert!(
+            !out.contains("とても古い発言マーカー"),
+            "N 件を超えて古い発言まで強制的に載せている: {out}"
+        );
+        assert!(out.contains(&format!("新しい発言 {}", RECENT_MIN_USER_SPEECHES - 1)));
+    }
+
+    /// 予算に余裕があるときは従来どおり全文が出る（回帰防止）。
+    #[test]
+    fn full_conversation_is_unchanged_when_it_fits() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert(&conn, "speech", "kojira", "こんにちは");
+        insert(&conn, "speech", "a1", "はい");
+        let out = build_conversation_string(&conn, "s1", "a1", 100_000).unwrap();
+        assert!(out.contains("こんにちは"));
+        assert!(out.contains("はい"));
+        assert!(!out.contains("omitted"));
     }
 }

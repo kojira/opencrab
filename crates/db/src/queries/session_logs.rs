@@ -213,6 +213,40 @@ pub fn list_recent_session_logs(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// List the most recent N **user** speech logs of a session (returned in id DESC order).
+///
+/// 「ユーザーの発言」= `log_type='speech'` かつ発話者がエージェント自身でない行。
+/// #284: ツール往復でログが埋まると、単純な「直近 N 件」ではユーザー発言が 1 件も
+/// 残らずプロンプトから消える。会話の再構築時に**必ず**混ぜ戻すために使う。
+pub fn list_recent_user_speech_logs(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions
+         WHERE session_id = ?1 AND log_type = 'speech'
+           AND speaker_id IS NOT NULL AND speaker_id != ?2
+         ORDER BY id DESC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![session_id, agent_id, limit as i64], |row| {
+        Ok(SessionLogRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            session_id: row.get(2)?,
+            log_type: row.get(3)?,
+            content: row.get(4)?,
+            speaker_id: row.get(5)?,
+            turn_number: row.get(6)?,
+            metadata_json: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Get topic nodes for a specific session, ordered by start_log_id ASC.
 pub fn get_topic_nodes_for_session(
     conn: &Connection,

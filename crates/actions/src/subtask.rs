@@ -992,7 +992,7 @@ impl ToolDispatcher for SubtaskToolDispatcher {
 
                 // inline 経路（process.rs の on_tool_result）と**同一**の無害化を通す:
                 // 秘密フィールドのマスク ＋ サイズ上限/ワークスペース退避。
-                let sanitized = crate::tool_result_log::sanitize_tool_result_for_log(
+                let sanitized = opencrab_core::tool_result_log::sanitize_tool_result_for_log(
                     &call.tool_name,
                     &raw.0,
                     &parent_session_id,
