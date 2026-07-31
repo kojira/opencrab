@@ -543,7 +543,7 @@ fn build_conversation_inner(
     let recent_logs = merge_recent_user_speeches(conn, session_id, agent_id, recent_logs);
 
     // 予算内に収まるようにログを後ろから詰める
-    let recent_text = fit_logs_to_budget(&recent_logs, remaining_budget);
+    let recent_text = fit_logs_to_budget(&recent_logs, agent_id, remaining_budget);
 
     Ok(format!(
         "{summary_header}{summary_section}{recent_header}{recent_text}"
@@ -609,7 +609,7 @@ fn build_truncated_conversation(
     let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
     let header_tokens = estimate_tokens(header);
     let remaining = budget_tokens.saturating_sub(header_tokens);
-    let recent_text = fit_logs_to_budget(&logs, remaining);
+    let recent_text = fit_logs_to_budget(&logs, agent_id, remaining);
 
     format!("{header}{recent_text}")
 }
@@ -618,12 +618,19 @@ fn build_truncated_conversation(
 const OMITTED_MARKER: &str = "[... older messages omitted due to context length ...]";
 
 /// エージェント自身ではない話者の発言か（= ユーザー／他エージェントの生発言）。
-fn is_user_speech(log: &opencrab_db::queries::SessionLogRow) -> bool {
-    log.log_type == "speech"
-        && log
-            .speaker_id
-            .as_deref()
-            .is_some_and(|s| s != log.agent_id.as_str())
+///
+/// **判定は行の `agent_id` 列ではなく、`agent_id` 引数（＝ 応答するエージェント）と
+/// 比べること**（#286）。ゲートウェイ受信の行は `agent_id` 列にも**送信者 ID** が入る
+/// （`transcript::record_inbound_message` の注意書き）ため、行内の 2 列を突き合わせる
+/// と Discord / Nostr の受信行は常に `agent_id == speaker_id` になり、この述語が
+/// 恒偽になる。実際それで #284 の保証が本番経路では丸ごと no-op だった
+/// （本番 DB の該当 4,490 件すべてが `==`）。
+///
+/// DB 側の `list_recent_user_speech_logs` は最初から `speaker_id != <agent_id 引数>`
+/// で比較しており、こちらを合わせる形になる（2 つの述語は必ず一致させること。
+/// 片方だけ直すと、混ぜ戻した行がここで捨てられて元の症状に戻る）。
+fn is_user_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
+    log.log_type == "speech" && log.speaker_id.as_deref().is_some_and(|s| s != agent_id)
 }
 
 /// 直近のユーザー発言をログ列へ混ぜ戻す（#284）。
@@ -682,6 +689,7 @@ fn merge_recent_user_speeches(
 ///   末尾を占めてもユーザーの指示は消えない。
 fn fit_logs_to_budget(
     logs: &[opencrab_db::queries::SessionLogRow],
+    agent_id: &str,
     budget_tokens: usize,
 ) -> String {
     if logs.is_empty() {
@@ -700,7 +708,7 @@ fn fit_logs_to_budget(
         .iter()
         .enumerate()
         .rev()
-        .filter(|(_, log)| is_user_speech(log))
+        .filter(|(_, log)| is_user_speech(log, agent_id))
         .take(RECENT_MIN_USER_SPEECHES)
         .map(|(i, _)| i)
         .collect();
@@ -2410,20 +2418,56 @@ mod redact_secret_fields_tests {
 /// 自身の発言で埋まり、ユーザーの生発言が 1 件も入らなかった。エージェントは指示を
 /// 一度も見ないまま応答していた。ここで固定するのは「ログ種別に関係なく、直近の
 /// ユーザー発言 N 件が優先で残る」こと。
+///
+/// **行の形は本番と同じでなければならない**（#286）。ゲートウェイ受信の行は
+/// `agent_id` 列にも**送信者 ID** が入る（`transcript::record_inbound_message` の
+/// 注意書き。`agent_id == speaker_id`）。以前のテストは `agent_id = "a1"` /
+/// `speaker_id = "kojira"` という REST/web 経路だけの形で書かれていたため、
+/// 「`speaker_id != log.agent_id`」という誤った述語が Discord / Nostr では常に
+/// false になるバグをすり抜けた（本番 DB では該当 4,490 件すべてが `==`）。
+/// ユーザー発言は**必ず `record_inbound_message` 経由で**入れること。
 #[cfg(test)]
 mod recent_user_speech_guarantee_tests {
     use super::{build_conversation_string, RECENT_MIN_USER_SPEECHES};
+    use opencrab_actions::transcript::{InboundMessageRecord, TranscriptSource};
 
-    fn insert(conn: &rusqlite::Connection, log_type: &str, speaker: &str, content: &str) -> i64 {
+    const AGENT: &str = "a1";
+    const USER: &str = "kojira";
+    const SESSION: &str = "s1";
+
+    /// ユーザー発言を**本番と同じ書き手**（`record_inbound_message`）で入れる。
+    /// 行の形（`agent_id` 列 = 送信者 ID）を再現するのがこのテストの肝。
+    fn insert_user_speech(conn: &rusqlite::Connection, text: &str) {
+        assert!(
+            crate::transcript::record_inbound_message(
+                conn,
+                TranscriptSource::Discord,
+                &InboundMessageRecord {
+                    session_id: SESSION,
+                    sender_id: USER,
+                    sender_name: "kojira",
+                    avatar_url: None,
+                    channel_id: Some("222"),
+                    pubkey: None,
+                    text,
+                    image_urls: &[],
+                },
+            ),
+            "テストの前提: 受信発言が記録できること"
+        );
+    }
+
+    /// エージェント自身の行（発言 / ツール往復）。こちらは `agent_id == speaker_id == AGENT`。
+    fn insert_agent_row(conn: &rusqlite::Connection, log_type: &str, content: &str) -> i64 {
         opencrab_db::queries::insert_session_log(
             conn,
             &opencrab_db::queries::SessionLogRow {
                 id: None,
-                agent_id: "a1".to_string(),
-                session_id: "s1".to_string(),
+                agent_id: AGENT.to_string(),
+                session_id: SESSION.to_string(),
                 log_type: log_type.to_string(),
                 content: content.to_string(),
-                speaker_id: Some(speaker.to_string()),
+                speaker_id: Some(AGENT.to_string()),
                 turn_number: None,
                 metadata_json: None,
                 created_at: None,
@@ -2432,31 +2476,30 @@ mod recent_user_speech_guarantee_tests {
         .unwrap()
     }
 
+    fn last_log_id(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT MAX(id) FROM memory_sessions", [], |r| r.get(0))
+            .unwrap()
+    }
+
     /// ユーザー発言のあとに巨大なツール結果が大量に積まれても、発言は残る。
     #[test]
     fn user_speech_survives_a_flood_of_tool_results() {
         let conn = opencrab_db::init_memory().unwrap();
-        insert(
-            &conn,
-            "speech",
-            "kojira",
-            "もういっそ全員フォローすればいいよ",
-        );
+        insert_user_speech(&conn, "もういっそ全員フォローすればいいよ");
         // 直近 10 件を tool_result / 自分の発言で埋める（当時と同じ形）。
         for i in 0..12 {
-            insert(
+            insert_agent_row(
                 &conn,
                 "tool_result",
-                "a1",
                 &format!("Following 979 user(s): {}", "npub1xxxx ".repeat(200 + i)),
             );
         }
         for i in 0..3 {
-            insert(&conn, "speech", "a1", &format!("確認中です（{i}）"));
+            insert_agent_row(&conn, "speech", &format!("確認中です（{i}）"));
         }
 
         // 全文が入らない予算（＝コンパクション経路）。
-        let out = build_conversation_string(&conn, "s1", "a1", 500).unwrap();
+        let out = build_conversation_string(&conn, SESSION, AGENT, 500).unwrap();
         assert!(
             out.contains("もういっそ全員フォローすればいいよ"),
             "直近のユーザー発言がプロンプトから落ちている: {out}"
@@ -2467,16 +2510,17 @@ mod recent_user_speech_guarantee_tests {
     #[test]
     fn user_speech_is_reinjected_from_before_the_summary_boundary() {
         let conn = opencrab_db::init_memory().unwrap();
-        let user_log = insert(&conn, "speech", "kojira", "つらい");
+        insert_user_speech(&conn, "つらい");
+        let user_log = last_log_id(&conn);
         for _ in 0..20 {
-            insert(&conn, "tool_result", "a1", &"x".repeat(400));
+            insert_agent_row(&conn, "tool_result", &"x".repeat(400));
         }
         // 現セッションの topic 要約が user_log を含む範囲をカバーしている状態を作る。
         opencrab_db::queries::insert_index_node(
             &conn,
             &opencrab_db::queries::IndexNodeRow {
                 id: "t1".to_string(),
-                agent_id: "a1".to_string(),
+                agent_id: AGENT.to_string(),
                 parent_id: None,
                 node_type: "topic".to_string(),
                 source_type: "session_log".to_string(),
@@ -2484,7 +2528,7 @@ mod recent_user_speech_guarantee_tests {
                 summary: "過去の要約".to_string(),
                 start_log_id: Some(1),
                 end_log_id: Some(user_log + 10),
-                source_session_id: Some("s1".to_string()),
+                source_session_id: Some(SESSION.to_string()),
                 date_from: None,
                 date_to: None,
                 depth: 0,
@@ -2499,7 +2543,7 @@ mod recent_user_speech_guarantee_tests {
         )
         .unwrap();
 
-        let out = build_conversation_string(&conn, "s1", "a1", 400).unwrap();
+        let out = build_conversation_string(&conn, SESSION, AGENT, 400).unwrap();
         assert!(
             out.contains("[Past context summary"),
             "テストの前提が崩れている（コンパクション経路に入っていない）: {out}"
@@ -2515,14 +2559,14 @@ mod recent_user_speech_guarantee_tests {
     #[test]
     fn only_the_most_recent_user_speeches_are_forced_in() {
         let conn = opencrab_db::init_memory().unwrap();
-        insert(&conn, "speech", "kojira", "とても古い発言マーカー");
+        insert_user_speech(&conn, "とても古い発言マーカー");
         for i in 0..RECENT_MIN_USER_SPEECHES {
-            insert(&conn, "speech", "kojira", &format!("新しい発言 {i}"));
+            insert_user_speech(&conn, &format!("新しい発言 {i}"));
         }
         for _ in 0..15 {
-            insert(&conn, "tool_result", "a1", &"y".repeat(400));
+            insert_agent_row(&conn, "tool_result", &"y".repeat(400));
         }
-        let out = build_conversation_string(&conn, "s1", "a1", 300).unwrap();
+        let out = build_conversation_string(&conn, SESSION, AGENT, 300).unwrap();
         assert!(
             !out.contains("とても古い発言マーカー"),
             "N 件を超えて古い発言まで強制的に載せている: {out}"
@@ -2534,11 +2578,45 @@ mod recent_user_speech_guarantee_tests {
     #[test]
     fn full_conversation_is_unchanged_when_it_fits() {
         let conn = opencrab_db::init_memory().unwrap();
-        insert(&conn, "speech", "kojira", "こんにちは");
-        insert(&conn, "speech", "a1", "はい");
-        let out = build_conversation_string(&conn, "s1", "a1", 100_000).unwrap();
+        insert_user_speech(&conn, "こんにちは");
+        insert_agent_row(&conn, "speech", "はい");
+        let out = build_conversation_string(&conn, SESSION, AGENT, 100_000).unwrap();
         assert!(out.contains("こんにちは"));
         assert!(out.contains("はい"));
         assert!(!out.contains("omitted"));
+    }
+
+    /// #286 の回帰そのもの: **Discord/Nostr の行の形**（`agent_id == speaker_id`）でも
+    /// 直近ユーザー発言が優先枠に入ること。
+    ///
+    /// 旧述語（`speaker_id != log.agent_id`）ではこの形が常に「エージェント自身の発言」
+    /// と判定され、必須枠が空になっていた（＝ 本番では保証が丸ごと no-op）。
+    #[test]
+    fn gateway_shaped_rows_are_recognized_as_user_speech() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_user_speech(&conn, "この発言が消えたら対話が成立しない");
+        // 予算を食い潰す巨大なツール往復（末尾の連続区間を占有する）。
+        for _ in 0..30 {
+            insert_agent_row(&conn, "tool_result", &"z".repeat(600));
+        }
+        // 受信行が本番と同じ形（agent_id 列にも送信者 ID）で入っていることを固定する。
+        let (row_agent, row_speaker): (String, String) = conn
+            .query_row(
+                "SELECT agent_id, speaker_id FROM memory_sessions \
+                 WHERE log_type = 'speech' AND speaker_id = ?1 LIMIT 1",
+                [USER],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row_agent, row_speaker,
+            "テストの前提が崩れている: ゲートウェイ受信行は agent_id 列にも送信者 ID が入る"
+        );
+
+        let out = build_conversation_string(&conn, SESSION, AGENT, 300).unwrap();
+        assert!(
+            out.contains("この発言が消えたら対話が成立しない"),
+            "ゲートウェイ形状のユーザー発言が優先枠に入っていない: {out}"
+        );
     }
 }
