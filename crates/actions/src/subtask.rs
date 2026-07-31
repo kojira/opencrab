@@ -873,8 +873,8 @@ struct CallOutcome {
 /// （`serde_json::from_str` を試す）。文字列のまま入れると
 /// `"result":"[{\"result\":\"{\\\"success\\\":true…"` のような三重エスケープになり、
 /// 会話へ再注入するときの整形でさらにエスケープが増えてモデルが読めなくなる。
-/// 退避ポインタ（`[Tool Result: file://…]`）や切り詰めで JSON にならない場合だけ
-/// 文字列で入れる。
+/// 上限超過時のメタ情報案内（`[Tool result withheld: … bytes, … lines …]`）のように
+/// JSON にならない場合だけ文字列で入れる。
 ///
 /// `tool_call_id` も必ず載せる（同じツールを複数回呼んだバッチは順序でしか対応が
 /// 取れなかった）。
@@ -2510,7 +2510,7 @@ mod tests {
     }
 
     /// [P1 回帰] dispatch 経路も inline と同じ無害化を通す:
-    /// 大きい結果はワークスペースへ退避し、DB にはポインタだけを残す。
+    /// 大きい結果はワークスペースへ退避し、DB にはメタ情報だけを残す（#294）。
     #[tokio::test]
     async fn dispatch_offloads_large_result_like_inline() {
         struct BigExecutor;
@@ -2551,13 +2551,13 @@ mod tests {
 
         let body = completed_log_body(&db, parent);
         assert!(
-            body.contains("[Tool Result: file://tmp/"),
-            "上限超過はファイルへ退避してポインタだけ残す: {}",
-            &body[..body.len().min(200)]
+            body.contains("Tool result withheld") && body.contains("tmp/"),
+            "上限超過はファイルへ退避してメタ情報だけ残す: {}",
+            &body[..body.len().min(300)]
         );
         assert!(
-            !body.contains(&"Z".repeat(1_000)),
-            "巨大本文が session_logs に入ってはならない"
+            !body.contains("ZZZ"),
+            "巨大本文（プレビューを含む）が session_logs に入ってはならない"
         );
         assert!(dir.path().join("tmp").read_dir().unwrap().count() > 0);
     }

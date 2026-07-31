@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
+tiktoken-rs = { workspace = true }
 rusqlite = { workspace = true }
 opencrab-db = { workspace = true }
 opencrab-llm-types = { workspace = true }
