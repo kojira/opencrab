@@ -189,11 +189,6 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          いずれも下記 Peer Review セクションに従うこと\n\
          - 既に話が完結している場合\n\
          \n\
-         **最優先の例外**: 人間（Bot ではない送信者）があなたに宛てて発言した場合は\n\
-         NO_REPLY を使わない。上の3条件に当てはまるように見えても、人間からの直接の発言\n\
-         には必ず何か返すこと — 質問には答える、答えがまだ出ていなければ「今これをやって\n\
-         いる」と現状を返す。作業中であることは黙ってよい理由にならない。\n\
-         \n\
          ## Async Behavior\n\
          \n\
          You work asynchronously. When you call a tool, the result arrives later — and you\n\
@@ -212,8 +207,7 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          - Check what the result contains\n\
          - If there's more to do: continue with the next step\n\
          - If the task is done: summarize and reply to the user\n\
-         - If no reply is needed: respond with NO_REPLY — **unless a human is waiting for an\n\
-         answer** (see below), in which case you must reply\n\
+         - If no reply is needed: respond with NO_REPLY\n\
          \n\
          Do NOT repeat what you already said in the previous turn.\n\
          Do NOT re-explain what you're about to do if you already said it.\n\
@@ -221,13 +215,8 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          \n\
          Before responding after [subtask_completed: ...]:\n\
          1. Check your last message in the conversation history\n\
-         2. If a human spoke to you after your last message and you have not answered them yet,\n\
-         you MUST reply — answer their question, or tell them what you are currently working on.\n\
-         **This rule wins over 3.** \"It would repeat what I already said\" is not a reason to\n\
-         stay silent when a human asked you something; say what is new, or say where you are.\n\
-         3. If your last message already covers the same result AND no human is waiting for an\n\
-         answer → NO_REPLY\n\
-         4. Otherwise, respond when you have genuinely NEW information to report\n\
+         2. If your last message already covers the same result → NO_REPLY\n\
+         3. Only respond if you have genuinely NEW information to report\n\
          \n\
          ## Memory & Context\n\
          \n\
@@ -2170,70 +2159,6 @@ mod shared_prompt_is_transport_neutral_tests {
             "shared system prompt must not name a transport destination argument:\n{prompt}"
         );
         assert!(prompt.contains("taken from the current conversation"));
-    }
-}
-
-/// Silent Reply（NO_REPLY 規約）が人間の直接の発言まで黙らせないことの検査（#287）。
-///
-/// 実測（#284 の llm_logs）では、オーナーの明確な質問に対しエージェントが `NO_REPLY`
-/// を返して黙り、ツールを回し続けていた。規約側に「人間には必ず返す」が無かったため。
-#[cfg(test)]
-mod silent_reply_exception_tests {
-    use super::build_agent_context;
-
-    /// Silent Reply セクションに「人間には NO_REPLY を使わない」例外が載っていること。
-    #[test]
-    fn silent_reply_exempts_direct_human_messages() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
-
-        assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
-        assert!(
-            prompt.contains("最優先の例外"),
-            "human exception missing from Silent Reply:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("人間（Bot ではない送信者）があなたに宛てて発言した場合は"),
-            "human exception missing from Silent Reply:\n{prompt}"
-        );
-    }
-
-    /// Bot 同士のループ防止（元の意図）は残っていること — 例外追加の非退行検査。
-    #[test]
-    fn bot_loop_prevention_survives() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
-
-        assert!(
-            prompt.contains("他のBotが話している場合（Bot同士のループを防ぐ）"),
-            "bot loop prevention was lost:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("グループチャットで自分に関係ない会話の場合"),
-            "off-topic silence rule was lost:\n{prompt}"
-        );
-    }
-
-    /// subtask 完了後の「繰り返すな → NO_REPLY」が、未応答の人間の質問に負けること。
-    /// 「繰り返しになるから黙る」が勝つ限り、作業中の質問は黙殺され続ける。
-    #[test]
-    fn repeat_suppression_yields_to_a_waiting_human() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
-
-        assert!(
-            prompt.contains("If a human spoke to you after your last message"),
-            "waiting-human rule missing from the subtask_completed checklist:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("**This rule wins over 3.**"),
-            "waiting-human rule must be declared as the winner:\n{prompt}"
-        );
-        // 「同じ内容なら黙る」は残るが、人間待ちでないことが条件に付いた。
-        assert!(
-            prompt.contains("AND no human is waiting for an\nanswer → NO_REPLY"),
-            "repeat-suppression must be conditioned on nobody waiting:\n{prompt}"
-        );
     }
 }
 
