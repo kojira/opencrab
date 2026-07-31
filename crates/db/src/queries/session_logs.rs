@@ -247,6 +247,49 @@ pub fn list_recent_user_speech_logs(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// 指定 id より**後**に記録されたユーザー発言を古い順（id ASC）に返す（#289）。
+///
+/// 走行中のターンへ新着だけを注入するための差分クエリ。「ユーザーの発言」の述語は
+/// [`list_recent_user_speech_logs`] と同一（`log_type='speech'` かつ発話者が
+/// `agent_id` 引数と異なる）で、両者は必ず一致させること。
+///
+/// 呼び出し側は前回取得した最大 id を `after_id` に渡す。同じ発言を二度返さない
+/// のはこの単調増加の id によって保証される。`limit` は暴走時の安全弁で、超過分は
+/// 次の呼び出しで拾われる（id は進むので取りこぼしはない）。
+pub fn list_user_speech_logs_after(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<SessionLogRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
+         FROM memory_sessions
+         WHERE session_id = ?1 AND log_type = 'speech'
+           AND speaker_id IS NOT NULL AND speaker_id != ?2
+           AND id > ?3
+         ORDER BY id ASC LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(
+        params![session_id, agent_id, after_id, limit as i64],
+        |row| {
+            Ok(SessionLogRow {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                session_id: row.get(2)?,
+                log_type: row.get(3)?,
+                content: row.get(4)?,
+                speaker_id: row.get(5)?,
+                turn_number: row.get(6)?,
+                metadata_json: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        },
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Get topic nodes for a specific session, ordered by start_log_id ASC.
 pub fn get_topic_nodes_for_session(
     conn: &Connection,

@@ -189,11 +189,6 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          いずれも下記 Peer Review セクションに従うこと\n\
          - 既に話が完結している場合\n\
          \n\
-         **最優先の例外**: 人間（Bot ではない送信者）があなたに宛てて発言した場合は\n\
-         NO_REPLY を使わない。上の3条件に当てはまるように見えても、人間からの直接の発言\n\
-         には必ず何か返すこと — 質問には答える、答えがまだ出ていなければ「今これをやって\n\
-         いる」と現状を返す。作業中であることは黙ってよい理由にならない。\n\
-         \n\
          ## Async Behavior\n\
          \n\
          You work asynchronously. When you call a tool, the result arrives later — and you\n\
@@ -212,8 +207,7 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          - Check what the result contains\n\
          - If there's more to do: continue with the next step\n\
          - If the task is done: summarize and reply to the user\n\
-         - If no reply is needed: respond with NO_REPLY — **unless a human is waiting for an\n\
-         answer** (see below), in which case you must reply\n\
+         - If no reply is needed: respond with NO_REPLY\n\
          \n\
          Do NOT repeat what you already said in the previous turn.\n\
          Do NOT re-explain what you're about to do if you already said it.\n\
@@ -221,13 +215,8 @@ pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (Stri
          \n\
          Before responding after [subtask_completed: ...]:\n\
          1. Check your last message in the conversation history\n\
-         2. If a human spoke to you after your last message and you have not answered them yet,\n\
-         you MUST reply — answer their question, or tell them what you are currently working on.\n\
-         **This rule wins over 3.** \"It would repeat what I already said\" is not a reason to\n\
-         stay silent when a human asked you something; say what is new, or say where you are.\n\
-         3. If your last message already covers the same result AND no human is waiting for an\n\
-         answer → NO_REPLY\n\
-         4. Otherwise, respond when you have genuinely NEW information to report\n\
+         2. If your last message already covers the same result → NO_REPLY\n\
+         3. Only respond if you have genuinely NEW information to report\n\
          \n\
          ## Memory & Context\n\
          \n\
@@ -689,6 +678,104 @@ fn merge_recent_user_speeches(
         logs.sort_by_key(|l| l.id.unwrap_or(i64::MAX));
     }
     logs
+}
+
+/// 1 回の poll で注入する新着発言の上限（#289）。
+///
+/// 溢れた分は捨てない。watermark は返した行まで進むので、次のイテレーションで続きが
+/// 拾われる。上限は「1 イテレーションでプロンプトが跳ねない」ための安全弁である。
+const LIVE_INBOUND_POLL_LIMIT: usize = 20;
+
+/// 走行中のターンへ新着ユーザー発言を届ける実体（#289）。
+///
+/// 会話履歴はターン開始時に 1 度だけ組まれるので、ツール往復が長引く間に届いた発言は
+/// 次ターンまでエンジンから見えなかった。この実体はエンジンのループから毎イテレーション
+/// 引かれ、**前回以降の差分だけ**を返す。
+///
+/// 重複注入の防止は `watermark`（取得済みの最大 log id）で行う。id は単調増加なので、
+/// 一度返した行が再び返ることはない。初期値は**会話文字列を組んだ後**の最大 id
+/// （＝この時点までの発言は履歴側に載っている）。
+struct SessionLiveInbound {
+    db: opencrab_db::Db,
+    session_id: String,
+    /// 応答するエージェント。`speaker_id != agent_id` が「自分以外の発言」の述語で、
+    /// DB 側（`list_user_speech_logs_after`）と同じ比較をする（#286 の注意書き参照）。
+    agent_id: String,
+    /// 取得済みの最大 log id。これより後の行だけを次回返す。
+    watermark: std::sync::atomic::AtomicI64,
+}
+
+impl SessionLiveInbound {
+    /// 現在の最新 log id を watermark の初期値として組み立てる。
+    ///
+    /// 取得に失敗した場合は `i64::MAX` を置く（＝何も注入しない）。走行中の注入は
+    /// あくまで改善であって、失敗しても既存のターンを壊さないことを優先する。
+    fn new(db: opencrab_db::Db, session_id: &str, agent_id: &str) -> Self {
+        let latest = match db.lock() {
+            Ok(conn) => opencrab_db::queries::list_recent_session_logs(&conn, session_id, 1)
+                .ok()
+                .and_then(|rows| rows.first().and_then(|l| l.id))
+                .unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, "live inbound watermark unavailable: {e}");
+                i64::MAX
+            }
+        };
+        Self {
+            db,
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            watermark: std::sync::atomic::AtomicI64::new(latest),
+        }
+    }
+}
+
+impl opencrab_core::LiveInboundSource for SessionLiveInbound {
+    fn poll_new_messages(&self) -> Vec<String> {
+        use std::sync::atomic::Ordering;
+
+        let after_id = self.watermark.load(Ordering::Relaxed);
+        let conn = match self.db.lock() {
+            Ok(conn) => conn,
+            // ロックが取れないだけでターンを落とさない（次のイテレーションで拾える）。
+            Err(_) => return Vec::new(),
+        };
+        let rows = match opencrab_db::queries::list_user_speech_logs_after(
+            &conn,
+            &self.session_id,
+            &self.agent_id,
+            after_id,
+            LIVE_INBOUND_POLL_LIMIT,
+        ) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(session_id = %self.session_id, "live inbound poll failed: {e}");
+                return Vec::new();
+            }
+        };
+        drop(conn);
+
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        // 返した行まで watermark を進める（＝同じ発言を二度注入しない）。
+        if let Some(max_id) = rows.iter().filter_map(|r| r.id).max() {
+            self.watermark.store(max_id, Ordering::Relaxed);
+        }
+        rows.iter().map(format_live_inbound).collect()
+    }
+}
+
+/// 走行中に届いた発言を LLM へ見せる形に整える（#289）。
+///
+/// 本文の整形は履歴と同じ [`format_single_log`] を使い、走行中に届いたという**事実**
+/// だけを 1 行足す。ここに「必ず返せ」等の指示は書かない — 届けるのが仕事であって、
+/// 応答するかどうかはエージェントの判断に委ねる。
+fn format_live_inbound(log: &opencrab_db::queries::SessionLogRow) -> String {
+    format!(
+        "[新着メッセージ: あなたがこのターンを処理している間に届きました]\n{}",
+        format_single_log(log)
+    )
 }
 
 /// ログを末尾（最新）から逆順に辿り、予算内に収まる分だけ返す。
@@ -1640,6 +1727,26 @@ pub async fn run_agent_response(
     // 退避先は inline のログ callback / dispatch 経路と**同じ root**を使う。
     engine.set_tool_result_offload(session_id.to_string(), Some(tool_result_workspace.clone()));
 
+    // #289: 走行中のターンにも新着ユーザー発言を届ける。
+    //
+    // `conversation` は呼び出し側がこの関数に入る**前**に組んでおり、以後ターン内では
+    // 組み直さない。ツール往復が長引くとその間の発言が次ターンまで見えず、「やめて」の
+    // ような緊急の指示ほど効かなかった（#289 のエビデンス）。ここで注入口を挿し、
+    // ツール往復のたびに差分だけを入力へ足す。
+    //
+    // watermark をここ（会話構築の**後**）で取ることで、履歴に載っている発言を二重に
+    // 見せない。届けるだけで応答は強制しない（#288 の強制は撤回済み）。
+    //
+    // depth 0 限定。サブタスク（depth>0）は背景処理であって対話の当事者ではなく、
+    // 親ターンが同じ発言を注入する以上、こちらにも足すと同じ発言が二重に流れる。
+    if depth == 0 {
+        engine.set_live_inbound(std::sync::Arc::new(SessionLiveInbound::new(
+            state.db.clone(),
+            session_id,
+            agent_id,
+        )));
+    }
+
     // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
     // されているときだけ有効化する。sink 未配線（REST 一発呼び等）や sub-engine は
     // 従来どおり全ツール inline 実行（後方互換・非破壊）。
@@ -2173,70 +2280,6 @@ mod shared_prompt_is_transport_neutral_tests {
     }
 }
 
-/// Silent Reply（NO_REPLY 規約）が人間の直接の発言まで黙らせないことの検査（#287）。
-///
-/// 実測（#284 の llm_logs）では、オーナーの明確な質問に対しエージェントが `NO_REPLY`
-/// を返して黙り、ツールを回し続けていた。規約側に「人間には必ず返す」が無かったため。
-#[cfg(test)]
-mod silent_reply_exception_tests {
-    use super::build_agent_context;
-
-    /// Silent Reply セクションに「人間には NO_REPLY を使わない」例外が載っていること。
-    #[test]
-    fn silent_reply_exempts_direct_human_messages() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
-
-        assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
-        assert!(
-            prompt.contains("最優先の例外"),
-            "human exception missing from Silent Reply:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("人間（Bot ではない送信者）があなたに宛てて発言した場合は"),
-            "human exception missing from Silent Reply:\n{prompt}"
-        );
-    }
-
-    /// Bot 同士のループ防止（元の意図）は残っていること — 例外追加の非退行検査。
-    #[test]
-    fn bot_loop_prevention_survives() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
-
-        assert!(
-            prompt.contains("他のBotが話している場合（Bot同士のループを防ぐ）"),
-            "bot loop prevention was lost:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("グループチャットで自分に関係ない会話の場合"),
-            "off-topic silence rule was lost:\n{prompt}"
-        );
-    }
-
-    /// subtask 完了後の「繰り返すな → NO_REPLY」が、未応答の人間の質問に負けること。
-    /// 「繰り返しになるから黙る」が勝つ限り、作業中の質問は黙殺され続ける。
-    #[test]
-    fn repeat_suppression_yields_to_a_waiting_human() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
-
-        assert!(
-            prompt.contains("If a human spoke to you after your last message"),
-            "waiting-human rule missing from the subtask_completed checklist:\n{prompt}"
-        );
-        assert!(
-            prompt.contains("**This rule wins over 3.**"),
-            "waiting-human rule must be declared as the winner:\n{prompt}"
-        );
-        // 「同じ内容なら黙る」は残るが、人間待ちでないことが条件に付いた。
-        assert!(
-            prompt.contains("AND no human is waiting for an\nanswer → NO_REPLY"),
-            "repeat-suppression must be conditioned on nobody waiting:\n{prompt}"
-        );
-    }
-}
-
 #[cfg(test)]
 mod format_log_tests {
     use super::format_single_log;
@@ -2692,6 +2735,170 @@ mod recent_user_speech_guarantee_tests {
         assert!(
             out.contains("この発言が消えたら対話が成立しない"),
             "ゲートウェイ形状のユーザー発言が優先枠に入っていない: {out}"
+        );
+    }
+}
+
+/// 走行中ターンへ届ける新着発言の差分取得（#289）。
+///
+/// `SessionLiveInbound` の契約は 3 つ: (1) ターン開始後に記録された発言だけを返す、
+/// (2) 一度返した発言は二度返さない、(3) エージェント自身の発言は返さない。
+#[cfg(test)]
+mod live_inbound_source_tests {
+    use super::SessionLiveInbound;
+    use opencrab_actions::transcript::{InboundMessageRecord, TranscriptSource};
+    use opencrab_core::LiveInboundSource;
+
+    const AGENT: &str = "a1";
+    const USER: &str = "kojira";
+    const SESSION: &str = "s1";
+
+    /// ユーザー発言を本番と同じ書き手（`record_inbound_message`）で入れる。
+    /// この経路の行は `agent_id` 列にも**送信者 ID** が入るため、述語を
+    /// `speaker_id != <agent_id 引数>` に合わせてあることの検査でもある（#286）。
+    fn insert_user_speech(db: &opencrab_db::Db, text: &str) {
+        let conn = db.lock().unwrap();
+        assert!(
+            crate::transcript::record_inbound_message(
+                &conn,
+                TranscriptSource::Discord,
+                &InboundMessageRecord {
+                    session_id: SESSION,
+                    sender_id: USER,
+                    sender_name: "kojira",
+                    avatar_url: None,
+                    channel_id: Some("222"),
+                    pubkey: None,
+                    text,
+                    image_urls: &[],
+                },
+            ),
+            "テストの前提: 受信発言が記録できること"
+        );
+    }
+
+    fn insert_agent_speech(db: &opencrab_db::Db, text: &str) {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::insert_session_log(
+            &conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: SESSION.to_string(),
+                log_type: "speech".to_string(),
+                content: text.to_string(),
+                speaker_id: Some(AGENT.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// ターン開始後に記録された発言が届く。走行中の注入はここから始まる。
+    #[test]
+    fn speech_recorded_during_the_turn_is_delivered() {
+        let db = opencrab_db::Db::memory().unwrap();
+        insert_user_speech(&db, "調べておいて");
+        // ここまでが会話履歴に載っている状態でターンが始まる。
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT);
+
+        insert_user_speech(&db, "やめて");
+
+        let out = source.poll_new_messages();
+        assert_eq!(out.len(), 1, "新着 1 件だけ: {out:?}");
+        assert!(out[0].contains("やめて"), "{}", out[0]);
+        assert!(
+            out[0].contains("処理している間に届きました"),
+            "走行中に届いた事実を添える: {}",
+            out[0]
+        );
+        assert!(
+            !out[0].contains("調べておいて"),
+            "履歴に載っている発言は再送しない: {}",
+            out[0]
+        );
+    }
+
+    /// 一度返した発言は二度返さない（毎イテレーション足すとプロンプトが膨らむ）。
+    #[test]
+    fn the_same_speech_is_delivered_once() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT);
+
+        insert_user_speech(&db, "やめて");
+        assert_eq!(source.poll_new_messages().len(), 1);
+        assert!(
+            source.poll_new_messages().is_empty(),
+            "2 回目の poll では同じ発言を返さない"
+        );
+
+        // その後の新着はきちんと拾える（watermark が進んだだけで塞がっていない）。
+        insert_user_speech(&db, "やっぱり続けて");
+        let out = source.poll_new_messages();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("やっぱり続けて"), "{}", out[0]);
+    }
+
+    /// 新着が無ければ何も返さない（＝プロンプトは 1 バイトも変わらない）。
+    #[test]
+    fn nothing_is_delivered_without_new_speech() {
+        let db = opencrab_db::Db::memory().unwrap();
+        insert_user_speech(&db, "調べておいて");
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT);
+
+        assert!(source.poll_new_messages().is_empty());
+    }
+
+    /// エージェント自身の発言は注入しない（自分の声が入力へ戻ると自己参照ループになる）。
+    #[test]
+    fn the_agents_own_speech_is_not_delivered() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT);
+
+        insert_agent_speech(&db, "調べています");
+
+        assert!(source.poll_new_messages().is_empty());
+    }
+}
+
+/// #288 の強制（NO_REPLY 禁止 / 必ず返せ）がプロンプトから消えていること（#289）。
+///
+/// 方針は「届いているか」を直すことであって「答えるか」を縛ることではない。判断材料は
+/// 与えてよいが、判断そのものはエージェントに委ねる。Bot ループ防止（元の意図）は残す。
+#[cfg(test)]
+mod no_forced_reply_tests {
+    use super::build_agent_context;
+
+    #[test]
+    fn the_prompt_does_not_force_a_reply() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _name) = build_agent_context(&conn, "a1");
+
+        for forbidden in [
+            "最優先の例外",
+            "人間（Bot ではない送信者）があなたに宛てて発言した場合は",
+            "If a human spoke to you after your last message",
+            "This rule wins over 3.",
+        ] {
+            assert!(
+                !prompt.contains(forbidden),
+                "#288 の強制文言が残っている: {forbidden}"
+            );
+        }
+    }
+
+    /// Bot 同士のループ防止（Silent Reply の元の意図）は残る — 撤回の非退行検査。
+    #[test]
+    fn bot_loop_prevention_survives_the_revert() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let (prompt, _name) = build_agent_context(&conn, "a1");
+
+        assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
+        assert!(
+            prompt.contains("他のBotが話している場合（Bot同士のループを防ぐ）"),
+            "bot loop prevention was lost:\n{prompt}"
         );
     }
 }
