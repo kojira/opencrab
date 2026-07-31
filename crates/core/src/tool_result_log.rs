@@ -38,10 +38,6 @@ use std::path::Path;
 ///   会話本文の枠を残せる上限。
 pub const TOOL_RESULT_SIZE_LIMIT: usize = 10_000;
 
-/// LLM へ返す切り詰めメッセージのうち、案内文（ヘッダ）に確保する枠。
-/// プレビューはこの分を差し引いた残りに収める。
-const LLM_NOTICE_RESERVE: usize = 600;
-
 /// tool_result JSON から秘密鍵フィールド（`nsec`）をマスクする。永続化前に呼ぶ。
 ///
 /// ここに渡るのは `ActionResult` ラッパ全体の serialize
@@ -206,7 +202,11 @@ pub fn sanitize_tool_result_for_llm(
         ),
     };
 
-    let preview_budget = TOOL_RESULT_SIZE_LIMIT.saturating_sub(LLM_NOTICE_RESERVE);
+    // 案内文の実長から逆算する（#286）。固定枠を引くやり方だと、案内文に埋め込む
+    // `session_id` / `tool_call_id` が長い場合に枠を食い破って全体が上限を超え、
+    // 永続化側（`sanitize_tool_result_for_log`）の「上限未満なら素通り」を通過して
+    // **LLM が見た本文と DB に残る本文が食い違う**。`+ 1` は連結する改行の分。
+    let preview_budget = TOOL_RESULT_SIZE_LIMIT.saturating_sub(notice.len() + 1);
     let preview = truncate_on_char_boundary(&result_json, preview_budget);
     format!("{notice}\n{preview}")
 }
@@ -329,6 +329,34 @@ mod tests {
         assert!(out.len() <= TOOL_RESULT_SIZE_LIMIT);
         assert!(out.contains("truncated"));
         assert!(out.contains("could not be saved"));
+    }
+
+    /// #286: 案内文が長くなっても（session_id / tool_call_id が長い）上限を超えない。
+    ///
+    /// 固定枠を引く実装だと枠を食い破り、永続化側の「上限未満なら素通り」を通過して
+    /// LLM が見た本文と DB に残る本文が食い違う。
+    #[test]
+    fn llm_notice_with_long_ids_still_fits_the_limit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let big = "q".repeat(50_000);
+        let long_session = "s".repeat(2_000);
+        let long_call_id = "c".repeat(2_000);
+        let out = sanitize_tool_result_for_llm(
+            "read_file",
+            &big,
+            &long_session,
+            &long_call_id,
+            Some(dir.path()),
+        );
+        assert!(
+            out.len() <= TOOL_RESULT_SIZE_LIMIT,
+            "案内文が枠を食い破っている: {}",
+            out.len()
+        );
+        // 永続化側を通しても no-op（＝ DB と LLM の本文が一致する）。
+        let logged =
+            sanitize_tool_result_for_log("read_file", &out, &long_session, &long_call_id, None);
+        assert_eq!(logged, out);
     }
 
     /// LLM 経路でも秘密フィールドはマスクされる。

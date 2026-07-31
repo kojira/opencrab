@@ -523,40 +523,62 @@ async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
 /// エージェントはその発言を一度も見ないまま応答する（＝ #284 の症状そのもの）。
 /// 呼び出し側が戻り値を評価していることを固定する（評価していなければ `#[must_use]`
 /// と警告で気づけるが、警告はビルド設定で消せるのでテストでも縛る）。
-#[tokio::test]
-async fn failed_inbound_record_is_detected_not_swallowed() {
-    let (state, gateway, gateway_actions) = make_deps();
-    state
-        .inbound_record_fails
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (event_tx, _event_rx) = create_event_channel();
-    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
-    let session_locks = Arc::new(SessionLocks::new());
+#[test]
+fn failed_inbound_record_is_detected_not_swallowed() {
+    // `captured_logs` はスレッドローカルの捕捉先に依存するので、`#[tokio::test]` ではなく
+    // 「捕捉クロージャの中で current-thread ランタイムを回す」形にする（同じスレッドで
+    // 走らせないと warn を拾えない）。
+    let logs = crate::owner_warning::capture::captured_logs(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (state, gateway, gateway_actions) = make_deps();
+            state
+                .inbound_record_fails
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let (event_tx, _event_rx) = create_event_channel();
+            let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+            let session_locks = Arc::new(SessionLocks::new());
 
-    let incoming = IncomingMessage::new(
-        MessageSource::Discord {
-            guild_id: "111".to_string(),
-            channel_id: "222".to_string(),
-        },
-        MessageContent::Text("つらい".to_string()),
-        Sender::user("user-1", "owner"),
+            let incoming = IncomingMessage::new(
+                MessageSource::Discord {
+                    guild_id: "111".to_string(),
+                    channel_id: "222".to_string(),
+                },
+                MessageContent::Text("つらい".to_string()),
+                Sender::user("user-1", "owner"),
+            );
+
+            process_incoming_message(
+                incoming,
+                gateway,
+                state.clone(),
+                vec!["crab".to_string()],
+                gateway_actions,
+                "owner-1".to_string(),
+                session_locks,
+                false,
+                None,
+                event_tx,
+                registry,
+            )
+            .await;
+
+            // 記録は試みられている（＝呼び出し自体は消えていない）。
+            assert_eq!(state.inbound_records.lock().unwrap().len(), 1);
+        });
+    });
+
+    // #286: 「呼ばれたこと」だけを見るとトートロジーになる。**false を受けて実際に
+    // エスカレーションが出る**ところまで検査する（戻り値を捨てる実装に戻ると落ちる）。
+    assert!(
+        logs.contains("failed to persist an inbound user message"),
+        "記録失敗が握り潰されている（警告が出ていない）: {logs}"
     );
-
-    process_incoming_message(
-        incoming,
-        gateway,
-        state.clone(),
-        vec!["crab".to_string()],
-        gateway_actions,
-        "owner-1".to_string(),
-        session_locks,
-        false,
-        None,
-        event_tx,
-        registry,
-    )
-    .await;
-
-    // 記録は試みられている（＝呼び出し自体は消えていない）。
-    assert_eq!(state.inbound_records.lock().unwrap().len(), 1);
+    assert!(
+        logs.contains("discord-crab-111-222"),
+        "どのセッションで落ちたか分からない: {logs}"
+    );
 }

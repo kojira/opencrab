@@ -49,6 +49,16 @@ const RECV_RETRY_MAX: Duration = Duration::from_secs(30);
 /// （= 概ね 8 秒以上復旧しない）なら「沈黙したまま受信が死んでいる」疑いが濃い。
 const RECV_FAILURES_BEFORE_ALERT: u32 = 5;
 
+/// この回数の失敗ごとにエスカレーションを繰り返す（#286）。
+///
+/// 「N 回目ちょうど」で 1 度だけ鳴らすと、以後いくら失敗し続けても二度と警告が出ない
+/// ＝ 復旧しないまま沈黙する（この機構が防ぎたかった状態そのもの）。バックオフが
+/// 上限 30 秒で頭打ちなので、5 回ごと ≒ 2〜3 分おきの再通知になる。
+fn should_alert_inbound_stalled(consecutive_failures: u32) -> bool {
+    consecutive_failures >= RECV_FAILURES_BEFORE_ALERT
+        && consecutive_failures.is_multiple_of(RECV_FAILURES_BEFORE_ALERT)
+}
+
 /// 連続失敗回数に対する再試行間隔（指数バックオフ、上限あり）。
 fn recv_retry_backoff(consecutive_failures: u32) -> Duration {
     let shift = consecutive_failures.saturating_sub(1).min(16);
@@ -170,9 +180,16 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // #284 P0-2: **このタスクは recv エラーで死んではいけない。**
     // 以前は `recv()` が `Err` を返した時点で `break` していた。以後 `IncomingMessage` は
     // 二度と流れないが、`SubtaskCompleted` 等は別経路で届き続けるため、外からは
-    // 「ループは生きているのにユーザーの発言だけが永久に届かない」状態に見える
-    // （＝ 実際の事故の観測と一致: エージェントは動き続けるがオーナーの発言に反応しない）。
+    // 「ループは生きているのにユーザーの発言だけが永久に届かない」状態に見える。
     // 抜けてよいのはイベントループ側が畳まれたとき（送信先チャンネルが閉じたとき）だけ。
+    //
+    // **ただしこれは #284 の真因ではない**（#286 のレビューで判明）。現在の
+    // `DiscordGateway::recv`（`crates/gateway/src/adapters/discord.rs`）が `Err` を返すのは
+    // 受信チャンネルの全 Sender が drop されたときだけで、その `tx` は `DiscordGateway`
+    // 構造体のフィールドとして保持されている。ゲートウェイが生きている限り `Err` は
+    // 起きず、旧コードの `break` は**到達不能**だった。真因は別（イベントループの滞留が
+    // 有力）。ここに残すのは、実装が変わって `Err` が起きうるようになったときに
+    // 「沈黙して死ぬ」形へ戻らないための防御であって、事故の説明ではない。
     {
         let gw = gateway.clone();
         let tx = event_tx.clone();
@@ -199,7 +216,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                             retry_in_ms = backoff.as_millis() as u64,
                             "Discord recv error: {e}"
                         );
-                        if consecutive_failures == RECV_FAILURES_BEFORE_ALERT {
+                        if should_alert_inbound_stalled(consecutive_failures) {
                             crate::owner_warning::warn_inbound_stalled(
                                 consecutive_failures,
                                 last_ok.elapsed().as_secs(),
@@ -569,6 +586,32 @@ async fn process_incoming_message<T: AgentRunner>(
             }
         }
 
+        let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
+        ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
+
+        // #284 P0-1 / #286: ユーザー発言の記録は**この処理で最初に行う副作用**でなければ
+        // ならない。セッションロックより前なのはもちろん、**Discord API 呼び出しよりも前**。
+        //
+        // 経緯:
+        // - 元は `spawn_serialized` の内側（ロック取得後）だった。長い推論の最中に届いた
+        //   発言は推論完了まで DB に入らず、その窓で失われる。
+        // - #285 でロックの外へ出したが、まだ 👀 リアクション付与と typing 表示の**後**
+        //   だった。この 2 つはイベントループ内で `await` される Discord HTTP 呼び出しで、
+        //   レートリミットやハングで詰まると記録に到達しない（かつ全メッセージ処理が
+        //   止まる）。「ボットは生きているのに人間の発言だけ残らない」という実観測と整合する。
+        //
+        // ネットワーク越しの飾り（リアクション・typing）より、発言を残すことが先。
+        // 二重回答を防ぐ不変条件（履歴構築 → 推論 → 応答ログがロック内で不可分）は
+        // 壊れない。記録の方が先に確定するので、ロック内で組み立てる履歴には必ず載る。
+        record_discord_inbound(
+            &state,
+            &session_id,
+            &channel_id_str,
+            &incoming,
+            &text,
+            &image_urls,
+        );
+
         // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。
         // 失敗は非致命的。複数エージェントが同一投稿を処理しても一度だけ付与する。
         if !reaction_added {
@@ -580,27 +623,6 @@ async fn process_incoming_message<T: AgentRunner>(
         if let Err(e) = gateway.start_typing(channel_id).await {
             warn!("Failed to start typing indicator: {e}");
         }
-
-        let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
-        ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
-
-        // #284 P0-1: ユーザー発言の記録は**セッションロックを取る前**に行う。
-        //
-        // 以前は `spawn_serialized` の内側（＝ロック取得後）で記録していた。長い推論が
-        // 走っている間に届いた発言は、その推論が終わるまで DB に入らず、その間に
-        // プロセスが落ちる／タスクが失われると**発言が永久に消える**。実際に
-        // 「オーナーの発言が 1 件も DB に無い」事故（#284）を起こしている。
-        //
-        // 二重回答を防ぐ不変条件（会話履歴の構築 → 推論 → 応答ログがロック内で不可分）は
-        // 壊れない。記録の方が先に確定するので、ロック内で組み立てる履歴には必ず載る。
-        record_discord_inbound(
-            &state,
-            &session_id,
-            &channel_id_str,
-            &incoming,
-            &text,
-            &image_urls,
-        );
 
         // NOTE: 会話履歴の構築は、推論本体とともにセッション単位ロックの内側（spawn 内）で
         // 行う。これにより、割り込みメッセージが直前の推論完了前に走って履歴が不整合に
@@ -1492,8 +1514,27 @@ mod wiring_tests;
 mod tests {
     use super::{
         discord_context_line, parse_discord_session, parse_seen_message_id, recv_retry_backoff,
-        RECV_RETRY_BASE, RECV_RETRY_MAX,
+        should_alert_inbound_stalled, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX,
     };
+
+    /// #286: エスカレーションは 1 度きりで終わらない。
+    ///
+    /// 「N 回目ちょうど」だけで鳴らすと、復旧しないまま失敗し続けても二度と警告が
+    /// 出ず、この機構が防ぎたかった「沈黙したまま受信が死ぬ」状態に戻る。
+    #[test]
+    fn stalled_alert_repeats_instead_of_firing_once() {
+        let n = RECV_FAILURES_BEFORE_ALERT;
+        // 閾値未満では鳴らさない（一過性の切断でノイズを出さない）。
+        for failures in 0..n {
+            assert!(!should_alert_inbound_stalled(failures), "{failures}");
+        }
+        // 閾値ちょうど、およびその倍数で鳴る。
+        assert!(should_alert_inbound_stalled(n));
+        assert!(should_alert_inbound_stalled(n * 2));
+        assert!(should_alert_inbound_stalled(n * 20));
+        // 間は鳴らさない（毎回鳴らすとログが埋まる）。
+        assert!(!should_alert_inbound_stalled(n + 1));
+    }
 
     /// #284 P0-2: 再試行間隔は指数で伸び、上限で頭打ちになる（0 にならない）。
     ///
