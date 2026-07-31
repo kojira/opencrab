@@ -70,7 +70,10 @@ pub use transcript::{
     TranscriptSource,
 };
 pub use webhook_target::{
-    build_part_messages, chunk_text, has_activity_default, record_webhook_delivery_failure,
+    attachment_filename, build_message_with_optional_attachment, build_part_messages,
+    build_webhook_body, chunk_text, has_activity_default, record_webhook_delivery_failure,
     redact_secrets, redact_webhook_url, resolve_activity_webhook, resolve_subtask_webhook,
-    validate_webhook_url, WebhookConfig, WebhookResolution, WebhookSource,
+    validate_webhook_url, WebhookAttachment, WebhookConfig, WebhookMessage, WebhookResolution,
+    WebhookSource, ATTACHMENT_CONTENT_TYPE, ATTACHMENT_MAX_BYTES, ATTACHMENT_PREVIEW_CHARS,
+    ATTACHMENT_THRESHOLD_CHARS,
 };

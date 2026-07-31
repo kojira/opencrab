@@ -330,7 +330,8 @@ impl opencrab_actions::ToolEventSink for WebhookToolEventSink {
                 messages: vec![format!(
                     "(+ further tool events suppressed after {} this run)",
                     self.cap
-                )],
+                )
+                .into()],
             });
             return;
         }
@@ -423,6 +424,14 @@ fn short_json_preview(data: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 1 バッチ分の「実際に届く全文」を連結する（添付があれば添付本体）。
+    fn join_delivered(msgs: &[webhook::WebhookMessage]) -> String {
+        msgs.iter()
+            .map(|m| m.delivered_text())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     use super::*;
     use opencrab_actions::subtask::SettleKind;
 
@@ -665,7 +674,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("a batch should be sent");
-        let msg = batch.messages.join("");
+        let msg = join_delivered(&batch.messages);
         assert!(msg.contains("tool_call_completed"));
         assert!(msg.contains("exit_code"));
         // covered 経路: stdout の secret はそのまま届く（masking しない）。
@@ -719,7 +728,7 @@ mod tests {
         opencrab_actions::ToolEventSink::on_event(&sink, &rejected);
 
         let failed_batch = rx.try_recv().expect("failed batch");
-        let failed_msg = failed_batch.messages.join("");
+        let failed_msg = join_delivered(&failed_batch.messages);
         assert!(failed_msg.contains("tool_call_failed"));
         assert!(failed_msg.contains("exit_code"));
         // covered 経路: stderr の secret はそのまま届く（masking しない）。
@@ -732,7 +741,7 @@ mod tests {
             "masking marker present: {failed_msg}"
         );
         let rejected_batch = rx.try_recv().expect("rejected batch");
-        let rejected_msg = &rejected_batch.messages[0];
+        let rejected_msg = &rejected_batch.messages[0].content;
         assert!(rejected_msg.contains("tool_call_rejected"));
         assert!(rejected_msg.contains("permission denied"));
     }
@@ -842,7 +851,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         assert!(msg.contains("args:"), "args line missing: {msg}");
         assert!(msg.contains("git status --short"), "command missing: {msg}");
@@ -876,7 +885,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         assert!(msg.contains("echo"), "command missing: {msg}");
         assert!(msg.contains("hello"), "first arg missing: {msg}");
@@ -910,7 +919,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         assert!(msg.contains("notes/todo.md"), "args missing: {msg}");
     }
@@ -942,7 +951,7 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        let msg = batch.messages.join("");
+        let msg = join_delivered(&batch.messages);
         assert!(msg.contains("tool_call_started"), "msg: {msg}");
         // every secret-like token survives unmodified, and no masking markers appear.
         assert!(
@@ -968,8 +977,9 @@ mod tests {
     }
 
     #[test]
-    fn test_webhook_tool_event_sink_long_args_chunked_losslessly() {
-        // 長大な引数はクランプ（…）せず、Discord 上限内の part X/N へロスレス分割する。
+    fn test_webhook_tool_event_sink_long_args_go_out_as_one_attachment() {
+        // #293: 長大な引数はクランプ（…）も part X/N 連投もせず、**1 通**の
+        // 「プレビュー + 全文添付」で出る。全文は添付側にロスなく入る。
         let conn = opencrab_db::init_memory().unwrap();
         insert_activity_row(&conn, "https://discord.com/api/webhooks/1/tok", true);
         let db = opencrab_db::Db::from_connection(conn);
@@ -992,27 +1002,26 @@ mod tests {
         };
         opencrab_actions::ToolEventSink::on_event(&sink, &ev);
         let batch = rx.try_recv().expect("started batch should be sent");
-        assert!(batch.messages.len() > 1, "long args must split into parts");
-        // each part within Discord hard limit, labelled in order.
-        for (i, m) in batch.messages.iter().enumerate() {
-            assert!(
-                m.chars().count() <= 2000,
-                "part exceeds limit: {}",
-                m.chars().count()
-            );
-            assert!(
-                m.starts_with(&format!("part {}/{}\n", i + 1, batch.messages.len())),
-                "part marker/order wrong: {m}"
-            );
-        }
-        // reconstruct -> all 2000 'word' tokens present, no ellipsis loss.
-        let reconstructed: String = batch
-            .messages
-            .iter()
-            .map(|m| m.splitn(2, '\n').nth(1).unwrap_or("").to_string())
-            .collect();
-        assert!(!reconstructed.contains('…'), "clamp ellipsis introduced");
-        assert_eq!(reconstructed.matches("word").count(), 2_000, "lost args");
+        assert_eq!(batch.messages.len(), 1, "長文でも連投せず 1 通のはず");
+        let m = &batch.messages[0];
+        assert!(m.has_attachment(), "全文は添付になるはず");
+        assert!(
+            m.content.chars().count() <= 2000,
+            "preview exceeds Discord limit: {}",
+            m.content.chars().count()
+        );
+        assert!(
+            !m.content.starts_with("part 1/"),
+            "part framing must be gone: {}",
+            m.content
+        );
+        // 添付本体 -> 2000 個の 'word' が欠けずに入っている。
+        let full = m.delivered_text();
+        assert_eq!(full.matches("word").count(), 2_000, "lost args");
+        let att = m.attachment.as_ref().unwrap();
+        assert_eq!(att.filename, "tool_call_started-execute_shell.txt");
+        assert_eq!(att.content_type, "text/plain; charset=utf-8");
+        assert!(!att.truncated);
     }
 
     // ---- summarize_tool_args: unredacted, lossless ----
@@ -1133,7 +1142,7 @@ mod tests {
         // lifecycle 相当の batch を共有 tx へ先に送る。
         tx.send(DeliveryBatch {
             url: "https://discord.com/api/webhooks/1/tok".to_string(),
-            messages: vec!["lifecycle: started".to_string()],
+            messages: vec!["lifecycle: started".into()],
         })
         .unwrap();
 
@@ -1158,9 +1167,9 @@ mod tests {
 
         // 受信順: lifecycle が先、tool_call が後。
         let first = rx.try_recv().expect("lifecycle batch");
-        assert!(first.messages[0].contains("lifecycle: started"));
+        assert!(first.messages[0].content.contains("lifecycle: started"));
         let second = rx.try_recv().expect("tool_call batch");
-        assert!(second.messages[0].contains("tool_call_completed"));
+        assert!(second.messages[0].content.contains("tool_call_completed"));
     }
 
     #[test]
@@ -1185,7 +1194,7 @@ mod tests {
         )
         .expect("diagnostic should route to activity default");
         assert_eq!(batch.url, "https://discord.com/api/webhooks/1/tok");
-        let msg = &batch.messages[0];
+        let msg = &batch.messages[0].content;
         assert!(msg.contains("webhook_resolution_error"));
         assert!(msg.contains("invalid_webhook_url"));
         assert!(msg.contains("source: explicit"));

@@ -6,14 +6,15 @@
 //! 設計: docs/subtask-webhook-tracking-design.md (Phase 1)
 //!
 //! - raw task text はそのまま送る（要約も redact もしない）
-//! - 長文は安全な長さに chunk 化し、part X/N を付けて順次送信する
+//! - 長文は **分割連投しない**。出だしのプレビューを本文に載せ、全文は
+//!   multipart/form-data の添付ファイルとして **1 通**で送る（#293。閾値・プレビュー長・
+//!   ファイル名・サイズ上限のポリシーは `opencrab_actions::webhook_target` が持つ）
 //! - 同一 run の配送は 1 本の mpsc チャネル + 1 worker で直列化し、ordering を保証する
 //!   （別 run の worker とは並行に動くため interleave しうるが、同一 run 内は順序維持）
 //! - 429 は Retry-After を尊重し、その他失敗は best-effort backoff retry する
 
 use std::time::Duration;
 
-use serde_json::json;
 use tokio::sync::mpsc;
 
 // 通知先（webhook）の設定型・解決・URL 検証・秘匿処理・テキスト分割は gateway 非依存層
@@ -24,14 +25,25 @@ use tokio::sync::mpsc;
 // 汎用の秘匿ユーティリティ `redact_secrets` は Discord 側に利用者が居ないため re-export せず、
 // 必要なら `opencrab_actions::webhook_target::redact_secrets` を直接参照する。
 pub use opencrab_actions::webhook_target::{
-    build_part_messages, chunk_text, has_activity_default, record_webhook_delivery_failure,
-    redact_webhook_url, resolve_activity_webhook, resolve_subtask_webhook, validate_webhook_url,
-    WebhookConfig, WebhookResolution, WebhookSource,
+    build_message_with_attachment_preview, build_message_with_optional_attachment,
+    build_webhook_body, has_activity_default, record_webhook_delivery_failure, redact_webhook_url,
+    resolve_activity_webhook, resolve_subtask_webhook, validate_webhook_url, WebhookConfig,
+    WebhookMessage, WebhookResolution, WebhookSource,
 };
 
 /// Discord メッセージの安全な本文長（2000 上限に対し metadata 用の余裕を残す）。
 pub const DISCORD_CHUNK_LIMIT: usize = 1900;
 const DISCORD_MESSAGE_LIMIT: usize = 2000;
+
+/// 1 回の webhook POST に許すハングの上限。
+///
+/// Discord webhook の応答は通常 1 秒未満。添付付き（multipart）は本文全体をボディに載せる
+/// ぶん明確に重いので、遅い回線でも 8 MiB を送り切れる余裕として 60 秒を取る。ここで必ず
+/// 打ち切ることで、接続が黙って死んだときに配送 worker が永久待ちに入るのを防ぐ
+/// （worker が止まるとその run の後続イベントが全部止まる）。JSON のみの送信は軽いので
+/// 短く倒す。
+const SEND_TIMEOUT_JSON: Duration = Duration::from_secs(30);
+const SEND_TIMEOUT_MULTIPART: Duration = Duration::from_secs(60);
 
 /// lifecycle イベントの共通メタ情報（payload 整形用）。
 #[derive(Clone, Debug)]
@@ -42,28 +54,34 @@ pub struct LifecycleMeta {
 }
 
 /// 配送 worker に渡す 1 バッチ。messages は同一 run 内で順序通りに送る。
+///
+/// 1 要素 = 1 POST。長文はもう分割されないので、要素数は「メタ情報 + 本体」程度に収まる。
 #[derive(Clone, Debug)]
 pub struct DeliveryBatch {
     pub url: String,
-    pub messages: Vec<String>,
+    pub messages: Vec<WebhookMessage>,
 }
 
 /// started 用のメッセージ列を組み立てる。
 ///
-/// 1 通目: メタ情報（label / runId / sessionKey / status / part count）
-/// 続く複数通: raw task text の chunk（part X/N 付き）
-pub fn build_started_messages(
-    meta: &LifecycleMeta,
-    raw_task_text: &str,
-    limit: usize,
-) -> Vec<String> {
-    let parts = build_part_messages(raw_task_text, limit);
-    let mut msgs = Vec::with_capacity(parts.len() + 1);
-    msgs.push(format!(
+/// 1 通目: メタ情報（label / runId / sessionKey / status / body 通数）
+/// 2 通目: raw task text 本体。長ければ**出だしのプレビュー + 全文添付**の 1 通に畳む
+/// （#293。従来の `part X/N` 連投はやめた）。task が空なら 2 通目は無い。
+pub fn build_started_messages(meta: &LifecycleMeta, raw_task_text: &str) -> Vec<WebhookMessage> {
+    let body = if raw_task_text.is_empty() {
+        None
+    } else {
+        Some(build_message_with_optional_attachment(
+            raw_task_text,
+            "subtask-task",
+        ))
+    };
+    let mut msgs = Vec::with_capacity(2);
+    msgs.push(WebhookMessage::text(format!(
         "🟢 **subtask started**\nlabel: `{}`\nrunId: `{}`\nsessionKey: `{}`\nstatus: `started`\nparts: {}",
-        meta.label, meta.run_id, meta.session_key, parts.len()
-    ));
-    msgs.extend(parts);
+        meta.label, meta.run_id, meta.session_key, usize::from(body.is_some())
+    )));
+    msgs.extend(body);
     msgs
 }
 
@@ -161,12 +179,18 @@ pub fn spawn_run_worker_with_sink(
     tx
 }
 
-/// 1 メッセージを Discord webhook へ送る。429 は Retry-After を尊重し、
-/// その他失敗は best-effort backoff retry する。
+/// 1 メッセージ（本文 + 任意の添付）を Discord webhook へ **1 POST** で送る。
+/// 429 は Retry-After を尊重し、その他失敗は best-effort backoff retry する。
+///
+/// 添付があるときは multipart/form-data（`payload_json` + `files[0]`）で送る。添付が
+/// 4xx（413 Payload Too Large / 400 等、429 を除く）で弾かれた場合だけは、同じ body を
+/// 何度投げても通らないので **添付を落として本文（プレビュー）だけを JSON で送り直す**
+/// ところまで劣化させる。要旨が Discord に残るほうが「全部消える」より良いため。
+/// 5xx / ネットワークエラーは従来どおりそのまま backoff retry する。
 async fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
-    content: &str,
+    message: &WebhookMessage,
     on_giveup: Option<&std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
 ) {
     // 即時 / 2s / 10s / 30s / 120s
@@ -176,9 +200,31 @@ async fn send_with_retry(
     // 配送先の特定・障害切り分けが困難になりデバッグ性を損なうため、生 URL をそのまま記録する
     // （docs/design-webhook-output-lossless.md §2 P4: 漏洩時は webhook を無効化して回復する）。
     let mut last_error;
+    let mut attachment = message.attachment.as_ref();
     loop {
-        let body = json!({ "content": content });
-        match client.post(url).json(&body).send().await {
+        let body = build_webhook_body(&message.content, false);
+        let req = match attachment {
+            Some(att) => {
+                let part = reqwest::multipart::Part::bytes(att.data.clone())
+                    .file_name(att.filename.clone())
+                    .mime_str(&att.content_type)
+                    .unwrap_or_else(|_| {
+                        reqwest::multipart::Part::bytes(att.data.clone())
+                            .file_name(att.filename.clone())
+                    });
+                // Discord webhook の multipart 仕様: メッセージ本体は `payload_json`、
+                // 添付は `files[0]`（複数なら files[1]...）。
+                let form = reqwest::multipart::Form::new()
+                    .text("payload_json", body.to_string())
+                    .part("files[0]", part);
+                client
+                    .post(url)
+                    .timeout(SEND_TIMEOUT_MULTIPART)
+                    .multipart(form)
+            }
+            None => client.post(url).timeout(SEND_TIMEOUT_JSON).json(&body),
+        };
+        match req.send().await {
             Ok(resp) => {
                 let status = resp.status();
                 if status.as_u16() == 429 {
@@ -200,9 +246,23 @@ async fn send_with_retry(
                     response = %response_preview,
                     "discord webhook non-success"
                 );
+                if attachment.is_some() && status.is_client_error() {
+                    // 添付が拒否された。再送しても同じなので添付を捨て、本文だけで続行する。
+                    tracing::warn!(
+                        url = %url,
+                        status = status.as_u16(),
+                        "discord webhook rejected the attachment; retrying without it (preview only)"
+                    );
+                    attachment = None;
+                    continue;
+                }
             }
             Err(e) => {
-                last_error = "request error".to_string();
+                last_error = if e.is_timeout() {
+                    "timeout".to_string()
+                } else {
+                    "request error".to_string()
+                };
                 tracing::warn!(url = %url, error = %e, "discord webhook request error");
             }
         }
@@ -274,17 +334,24 @@ pub struct ToolEventView {
     pub stderr_summary: Option<String>,
     pub truncated: bool,
     pub rejection_reason: Option<String>,
-    pub max_chars: usize, // 0 → default 1500
+    /// 本文プレビューの上限ヒント（0 なら既定）。#293 以降、長文は分割ではなく添付に
+    /// 畳まれるため、この値は**プレビューを既定より更に短くしたいとき**にだけ効く
+    /// （既定 `ATTACHMENT_PREVIEW_CHARS` との小さいほうを採る）。
+    pub max_chars: usize,
 }
 
 /// ツールイベントを Discord 用メッセージへ整形する。
 /// - covered 経路（work-channel 出力）のため redaction/masking は一切行わない。
 ///   command/args/result/stdout/stderr/rejection をそのまま載せる
 ///   （docs/design-webhook-output-lossless.md §2 P4）。
-/// - Discord の 1 通上限に収まれば 1 通。超える場合のみ `part X/N` を付けて順序通りに
-///   分割し、ロスレスに送る（head/tail/midpoint の切り捨てはしない）。順序は配送 worker
-///   （単一 run = 単一 mpsc）が保証する。
-pub fn build_tool_event_message(view: &ToolEventView) -> Vec<String> {
+/// - Discord の 1 通上限に収まれば従来どおり JSON 1 通。超える場合は **分割連投せず**、
+///   出だしのプレビューを本文に載せて**全文を添付ファイルにした 1 通**を返す（#293）。
+///   ロスレス性は維持される（全文は添付に入る。上限超過分の扱いは
+///   `ATTACHMENT_MAX_BYTES` の doc 参照）。
+/// - 添付本体は本文と**同じ文字列**から作る。したがって stdout/stderr に上流で掛かって
+///   いるマスク（nostr の `nsec` マスク等）は添付側にもそのまま効く。添付だけが別経路で
+///   生データを拾うことは構造的に起きない。
+pub fn build_tool_event_message(view: &ToolEventView) -> Vec<WebhookMessage> {
     let emoji = match view.status.as_str() {
         "started" => "▶️",
         "completed" => "✅",
@@ -325,24 +392,16 @@ pub fn build_tool_event_message(view: &ToolEventView) -> Vec<String> {
              full data (upstream source limit); the omitted bytes are not available here.",
         );
     }
-    // ロスレス配送: 1 通に収まればそのまま、Discord 上限を超える場合のみ順序分割する。
-    if s.chars().count() <= DISCORD_MESSAGE_LIMIT {
-        return vec![s];
-    }
-    // chunk サイズは max_chars（プレビュー上限のヒント）を尊重しつつ Discord 安全長で頭打ち。
-    // どちらでもロスは発生しない（分割するだけ）。
-    let chunk_size = if view.max_chars == 0 {
-        DISCORD_CHUNK_LIMIT
-    } else {
-        view.max_chars.min(DISCORD_CHUNK_LIMIT).max(1)
-    };
-    let parts = chunk_text(&s, chunk_size);
-    let total = parts.len();
-    parts
-        .iter()
-        .enumerate()
-        .map(|(i, c)| format!("part {}/{}\n{}", i + 1, total, c))
-        .collect()
+    // ロスレス配送: 1 通に収まればそのまま JSON で。超える場合は
+    // 「出だしのプレビュー + 全文添付」の 1 通に畳む（分割連投しない / #293）。
+    // ファイル名には静的な語彙（イベント名 + ツール名）だけを載せる。callId や引数は
+    // 秘密・個人情報を含みうるので名前には入れない（中身は添付本体に入る）。
+    // max_chars（webhook 設定の出力上限）はプレビューを既定より短くする方向にだけ効く。
+    vec![build_message_with_attachment_preview(
+        &s,
+        &format!("{}-{}", view.event, view.tool_name),
+        view.max_chars,
+    )]
 }
 
 /// Retry-After ヘッダ（秒）を読む。
@@ -368,51 +427,57 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn test_build_started_messages_metadata_first_then_chunks() {
-        let meta = LifecycleMeta {
+    fn meta() -> LifecycleMeta {
+        LifecycleMeta {
             label: "lbl".to_string(),
             run_id: "run1".to_string(),
             session_key: "sess1".to_string(),
-        };
-        let msgs = build_started_messages(&meta, "abcdef", 3);
-        // metadata + 2 chunks
-        assert_eq!(msgs.len(), 3);
-        assert!(msgs[0].contains("subtask started"));
-        assert!(msgs[0].contains("run1"));
-        assert!(msgs[0].contains("sess1"));
-        assert!(msgs[0].contains("parts: 2"));
-        assert!(msgs[1].starts_with("part 1/2\n"));
-        assert!(msgs[1].ends_with("abc"));
-        assert!(msgs[2].starts_with("part 2/2\n"));
-        assert!(msgs[2].ends_with("def"));
+        }
+    }
+
+    #[test]
+    fn test_build_started_messages_metadata_then_short_body_without_attachment() {
+        let msgs = build_started_messages(&meta(), "abcdef");
+        // metadata + 本体 1 通。短いので添付なし（従来どおり JSON 送信）。
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].content.contains("subtask started"));
+        assert!(msgs[0].content.contains("run1"));
+        assert!(msgs[0].content.contains("sess1"));
+        assert!(msgs[0].content.contains("parts: 1"));
+        assert!(!msgs[0].has_attachment());
+        assert_eq!(msgs[1].content, "abcdef");
+        assert!(!msgs[1].has_attachment());
     }
 
     #[test]
     fn test_build_started_messages_empty_task() {
-        let meta = LifecycleMeta {
-            label: "lbl".to_string(),
-            run_id: "run1".to_string(),
-            session_key: "sess1".to_string(),
-        };
-        let msgs = build_started_messages(&meta, "", 100);
+        let msgs = build_started_messages(&meta(), "");
         assert_eq!(msgs.len(), 1);
-        assert!(msgs[0].contains("parts: 0"));
+        assert!(msgs[0].content.contains("parts: 0"));
     }
 
+    /// #293: 長い task text は part X/N の連投にならず、
+    /// 「メタ情報 1 通 + プレビュー&添付 1 通」の **2 通**で出る。
     #[test]
-    fn test_build_started_messages_chunks_within_limit() {
-        let meta = LifecycleMeta {
-            label: "lbl".to_string(),
-            run_id: "r".to_string(),
-            session_key: "s".to_string(),
-        };
+    fn test_build_started_messages_long_task_becomes_single_attachment() {
         let long = "x".repeat(5000);
-        let msgs = build_started_messages(&meta, &long, DISCORD_CHUNK_LIMIT);
-        // each message (incl. part prefix) must stay under Discord's 2000 hard limit
-        for m in &msgs {
-            assert!(m.chars().count() < 2000, "message too long: {}", m.len());
-        }
+        let msgs = build_started_messages(&meta(), &long);
+        assert_eq!(msgs.len(), 2, "連投しない");
+        assert!(msgs[0].content.contains("parts: 1"));
+        let body = &msgs[1];
+        assert!(body.has_attachment());
+        // 本文は Discord の 1 通上限に収まる。
+        assert!(
+            body.content.chars().count() <= DISCORD_MESSAGE_LIMIT,
+            "preview too long: {}",
+            body.content.chars().count()
+        );
+        assert!(!body.content.starts_with("part 1/"));
+        // 添付本体は全文（ロスなし）。
+        assert_eq!(body.delivered_text(), long);
+        let att = body.attachment.as_ref().unwrap();
+        assert_eq!(att.filename, "subtask-task.txt");
+        assert_eq!(att.content_type, "text/plain; charset=utf-8");
     }
 
     #[test]
@@ -523,7 +588,9 @@ mod tests {
         };
         let msgs = build_tool_event_message(&view);
         assert_eq!(msgs.len(), 1);
-        let m = &msgs[0];
+        // 短いので従来どおり添付なしのテキスト 1 通（回帰なし）。
+        assert!(!msgs[0].has_attachment());
+        let m = &msgs[0].content;
         assert!(m.contains("tool_call_completed"));
         assert!(m.contains("execute_shell"));
         assert!(m.contains("exit_code"));
@@ -545,9 +612,10 @@ mod tests {
         assert!(!m.contains("[redacted]"), "redacted marker present: {m}");
     }
 
+    /// #293: 長い出力は part X/N 連投をやめ、「プレビュー 1 通 + 全文添付」になる。
+    /// ロスレス性（全文が届くこと）は添付側で維持される。
     #[test]
-    fn test_build_tool_event_message_chunks_long_output_losslessly() {
-        // 長い出力は head/tail/midpoint で捨てず、part X/N で順序分割して全文を運ぶ。
+    fn test_build_tool_event_message_long_output_becomes_one_attachment() {
         let stdout = "z".repeat(5000);
         let view = ToolEventView {
             event: "tool_call_completed".to_string(),
@@ -560,36 +628,97 @@ mod tests {
             ..Default::default()
         };
         let msgs = build_tool_event_message(&view);
+        assert_eq!(msgs.len(), 1, "分割連投しない（送信は 1 回）");
+        let m = &msgs[0];
+        assert!(m.has_attachment(), "長文は添付になる");
+        // 本文は Discord の 1 通上限に収まり、part framing は無い。
         assert!(
-            msgs.len() > 1,
-            "long output must be split into multiple parts"
+            m.content.chars().count() <= DISCORD_MESSAGE_LIMIT,
+            "preview too long: {}",
+            m.content.chars().count()
         );
-        // every part is within Discord's hard limit and labelled in order.
-        for (i, m) in msgs.iter().enumerate() {
-            assert!(
-                m.chars().count() <= DISCORD_MESSAGE_LIMIT,
-                "part too long: {}",
-                m.len()
-            );
-            assert!(
-                m.starts_with(&format!("part {}/{}\n", i + 1, msgs.len())),
-                "part marker/order wrong: {m}"
-            );
-        }
-        // reconstruct: strip the one-line part marker from each, concat -> full message.
-        let reconstructed: String = msgs
-            .iter()
-            .map(|m| m.splitn(2, '\n').nth(1).unwrap_or("").to_string())
-            .collect();
         assert!(
-            reconstructed.contains(&stdout),
-            "reconstruction lost stdout"
+            !m.content.starts_with("part 1/"),
+            "part framing must be gone"
         );
-        // no ellipsis/omission/masking introduced.
-        assert!(!reconstructed.contains('…'), "ellipsis introduced");
-        assert!(!reconstructed.contains("[REDACTED]"));
-        // the full 5000 chars are present.
-        assert_eq!(reconstructed.matches('z').count(), 5000);
+        // 本文は出だしのプレビュー + 添付の案内。
+        assert!(m.content.starts_with("✅ **tool_call_completed**"));
+        assert!(
+            m.content.contains("full text attached"),
+            "no attachment notice: {}",
+            m.content
+        );
+        // 添付本体に全文が入る（head/tail/midpoint の切り捨て無し）。
+        let full = m.delivered_text();
+        assert!(full.contains(&stdout), "attachment lost stdout");
+        assert_eq!(full.matches('z').count(), 5000);
+        assert!(!full.contains("[REDACTED]"));
+        let att = m.attachment.as_ref().unwrap();
+        assert_eq!(att.filename, "tool_call_completed-execute_shell.txt");
+        assert!(!att.truncated);
+    }
+
+    /// 添付の中身は**本文と同じ文字列**から作られる。したがって上流でマスク済みの
+    /// stdout（例: nostr の `nsec` マスク）は添付側にもそのまま効き、添付だけが生の
+    /// 秘密を運ぶことは起きない。
+    #[test]
+    fn test_build_tool_event_message_attachment_carries_upstream_masking() {
+        // 上流（crates/nostr の mask_secrets）を通った後の形を模す。
+        let masked_line = "secret_key = \"<redacted>\" key nsec1<redacted>\n";
+        let stdout = masked_line.repeat(200); // 閾値超え
+        let view = ToolEventView {
+            event: "tool_call_completed".to_string(),
+            tool_name: "nostr_cli".to_string(),
+            tool_call_id: "c".to_string(),
+            depth: 0,
+            status: "completed".to_string(),
+            stdout_summary: Some(stdout),
+            ..Default::default()
+        };
+        let msgs = build_tool_event_message(&view);
+        let m = &msgs[0];
+        assert!(m.has_attachment());
+        let full = m.delivered_text();
+        assert!(
+            !full.contains("nsec1supersecret"),
+            "attachment leaked an unmasked nsec"
+        );
+        assert!(full.contains("nsec1<redacted>"), "mask lost in attachment");
+        assert!(
+            full.contains("secret_key = \"<redacted>\""),
+            "mask lost in attachment"
+        );
+        // プレビュー側も同じ（本文と添付は同一文字列由来）。
+        assert!(!m.content.contains("nsec1supersecret"));
+    }
+
+    /// サイズ上限を超える全文は**送信前に**切り詰め、省略した旨を本文と添付の両方に残す。
+    #[test]
+    fn test_build_tool_event_message_truncates_oversized_attachment() {
+        let stdout = "q".repeat(opencrab_actions::ATTACHMENT_MAX_BYTES + 4096);
+        let view = ToolEventView {
+            event: "tool_call_completed".to_string(),
+            tool_name: "execute_shell".to_string(),
+            tool_call_id: "c".to_string(),
+            depth: 0,
+            status: "completed".to_string(),
+            stdout_summary: Some(stdout),
+            ..Default::default()
+        };
+        let msgs = build_tool_event_message(&view);
+        let att = msgs[0].attachment.as_ref().expect("attachment");
+        assert!(att.truncated);
+        assert!(
+            att.data.len() <= opencrab_actions::ATTACHMENT_MAX_BYTES,
+            "attachment exceeds cap: {}",
+            att.data.len()
+        );
+        assert!(msgs[0].delivered_text().contains("[truncated]"));
+        assert!(
+            msgs[0].content.contains("truncated"),
+            "本文に省略の明示が無い: {}",
+            msgs[0].content
+        );
     }
 
     #[test]
@@ -607,11 +736,255 @@ mod tests {
             ..Default::default()
         };
         let msgs = build_tool_event_message(&view);
-        let joined = msgs.join("");
+        let joined = msgs[0].content.clone();
         assert!(
             joined.contains("partial output"),
             "must mark partial: {joined}"
         );
+    }
+
+    // ---- transport: multipart 送信（#293） ----
+    //
+    // 実 Discord へは一切出さない。ローカルの最小 HTTP モックを立てて、
+    // **何回・どんな Content-Type で・何を送ったか**を検査する。
+
+    /// モックが受け取った 1 リクエスト。
+    #[derive(Clone, Debug)]
+    struct Recorded {
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    /// 依存を増やさない最小の HTTP モック（1 リクエスト = 1 接続、Connection: close）。
+    struct MockWebhook {
+        url: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<Recorded>>>,
+        _handle: tokio::task::JoinHandle<()>,
+    }
+
+    impl MockWebhook {
+        /// `status` を返すモックを立てる。`delay` は応答前の遅延（遅い相手の模擬）。
+        /// `statuses` は 1 リクエスト目, 2 リクエスト目 ... に返すステータス（尽きたら最後を反復）。
+        async fn start(statuses: Vec<u16>, delay: Duration) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Recorded>::new()));
+            let sink = requests.clone();
+            let handle = tokio::spawn(async move {
+                let mut n = 0usize;
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let sink = sink.clone();
+                    let status = *statuses.get(n).unwrap_or(statuses.last().unwrap());
+                    n += 1;
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 8192];
+                        // ヘッダ終端まで読む。
+                        let head_end = loop {
+                            let read = match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => n,
+                            };
+                            buf.extend_from_slice(&chunk[..read]);
+                            if let Some(p) =
+                                buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+                            {
+                                break p;
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                        let lower = head.to_ascii_lowercase();
+                        let header = |name: &str| -> Option<String> {
+                            lower.split("\r\n").find_map(|l| {
+                                l.strip_prefix(&format!("{name}: "))
+                                    .map(|v| v.trim().to_string())
+                            })
+                        };
+                        let len: usize = header("content-length")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0);
+                        while buf.len() < head_end + len {
+                            let read = match stream.read(&mut chunk).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            buf.extend_from_slice(&chunk[..read]);
+                        }
+                        sink.lock().unwrap().push(Recorded {
+                            content_type: header("content-type").unwrap_or_default(),
+                            body: buf[head_end..].to_vec(),
+                        });
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        let resp = format!(
+                            "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                    });
+                }
+            });
+            MockWebhook {
+                url: format!("http://{addr}/api/webhooks/1/tok"),
+                requests,
+                _handle: handle,
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+
+        fn take(&self) -> Vec<Recorded> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        /// 指定件数に達するまで待つ（達しなければ panic）。
+        async fn wait_for(&self, n: usize, within: Duration) {
+            let deadline = std::time::Instant::now() + within;
+            while std::time::Instant::now() < deadline {
+                if self.count() >= n {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("expected {n} request(s), got {}", self.count());
+        }
+    }
+
+    /// 閾値超過は **1 回の multipart 送信**になり、分割連投しない。
+    /// プレビューは payload_json 側、全文は添付側に入る。
+    #[tokio::test]
+    async fn long_message_is_one_multipart_request_not_many() {
+        let mock = MockWebhook::start(vec![204], Duration::ZERO).await;
+        let long = "L".repeat(6000);
+        let msg = build_message_with_optional_attachment(&long, "unit-test");
+        let tx = spawn_run_worker_with_sink(reqwest::Client::new(), None);
+        tx.send(DeliveryBatch {
+            url: mock.url.clone(),
+            messages: vec![msg.clone()],
+        })
+        .unwrap();
+        mock.wait_for(1, Duration::from_secs(5)).await;
+        // 追加の POST が来ないことを確認する猶予。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(mock.count(), 1, "長文でも送信は 1 回だけ");
+
+        let req = &mock.take()[0];
+        assert!(
+            req.content_type.starts_with("multipart/form-data"),
+            "content-type: {}",
+            req.content_type
+        );
+        let body = String::from_utf8_lossy(&req.body).to_string();
+        assert!(body.contains("name=\"payload_json\""), "payload_json 欠落");
+        assert!(body.contains("name=\"files[0]\""), "files[0] 欠落");
+        assert!(body.contains("filename=\"unit-test.txt\""));
+        assert!(body.contains("text/plain; charset=utf-8"));
+        // 全文が添付として乗っている。
+        assert!(body.contains(&long), "添付本文が全文でない");
+        // プレビューは指定長 + 案内文。
+        assert!(msg.content.contains("full text attached"));
+        assert_eq!(
+            msg.content.chars().take_while(|c| *c == 'L').count(),
+            opencrab_actions::ATTACHMENT_PREVIEW_CHARS
+        );
+    }
+
+    /// 閾値以下は**従来どおり JSON のみ**（添付しない）。回帰テスト。
+    #[tokio::test]
+    async fn short_message_stays_plain_json() {
+        let mock = MockWebhook::start(vec![204], Duration::ZERO).await;
+        let tx = spawn_run_worker_with_sink(reqwest::Client::new(), None);
+        tx.send(DeliveryBatch {
+            url: mock.url.clone(),
+            messages: vec![WebhookMessage::text("hello short")],
+        })
+        .unwrap();
+        mock.wait_for(1, Duration::from_secs(5)).await;
+        let req = &mock.take()[0];
+        assert_eq!(req.content_type, "application/json");
+        assert_eq!(
+            String::from_utf8_lossy(&req.body),
+            r#"{"content":"hello short"}"#
+        );
+    }
+
+    /// 添付本文にも上流のマスクが効いている（本文と添付は同一文字列由来）。
+    #[tokio::test]
+    async fn attachment_body_keeps_upstream_masking() {
+        let mock = MockWebhook::start(vec![204], Duration::ZERO).await;
+        // 上流（crates/nostr の mask_secrets）を通った後の形。
+        let masked = "nsec1<redacted> line\n".repeat(300);
+        let msg = build_message_with_optional_attachment(&masked, "masked");
+        let tx = spawn_run_worker_with_sink(reqwest::Client::new(), None);
+        tx.send(DeliveryBatch {
+            url: mock.url.clone(),
+            messages: vec![msg],
+        })
+        .unwrap();
+        mock.wait_for(1, Duration::from_secs(5)).await;
+        let body = String::from_utf8_lossy(&mock.take()[0].body).to_string();
+        assert!(body.contains("nsec1<redacted>"));
+        assert!(
+            !body.contains("nsec1qqq"),
+            "添付に生の nsec が乗ってはいけない"
+        );
+    }
+
+    /// 添付が 4xx で弾かれたら、添付を落として本文だけを JSON で送り直す。
+    /// リトライの backoff を挟まないので即座に 2 通目が出る。
+    #[tokio::test]
+    async fn rejected_attachment_falls_back_to_preview_only_json() {
+        let mock = MockWebhook::start(vec![413, 204], Duration::ZERO).await;
+        let msg = build_message_with_optional_attachment(&"Z".repeat(5000), "big");
+        let tx = spawn_run_worker_with_sink(reqwest::Client::new(), None);
+        tx.send(DeliveryBatch {
+            url: mock.url.clone(),
+            messages: vec![msg],
+        })
+        .unwrap();
+        mock.wait_for(2, Duration::from_secs(5)).await;
+        let reqs = mock.take();
+        assert!(reqs[0].content_type.starts_with("multipart/form-data"));
+        assert_eq!(reqs[1].content_type, "application/json");
+        let fallback = String::from_utf8_lossy(&reqs[1].body).to_string();
+        assert!(fallback.contains("full text attached"), "本文が違う");
+    }
+
+    /// **配送は呼び出し元をブロックしない**。相手が遅くても `tx.send` は即座に戻り、
+    /// 呼び出し元の後続処理はそのまま進む（HTTP は spawn 済み worker の中だけ）。
+    #[tokio::test]
+    async fn delivery_never_blocks_the_caller() {
+        let slow = Duration::from_millis(600);
+        let mock = MockWebhook::start(vec![204], slow).await;
+        let msg = build_message_with_optional_attachment(&"S".repeat(5000), "slow");
+        let tx = spawn_run_worker_with_sink(reqwest::Client::new(), None);
+
+        let start = std::time::Instant::now();
+        tx.send(DeliveryBatch {
+            url: mock.url.clone(),
+            messages: vec![msg],
+        })
+        .unwrap();
+        // 呼び出し元の「後続処理」。遅い相手を待たずに完了できること。
+        let mut work = 0u64;
+        for i in 0..1000 {
+            work += i;
+        }
+        assert_eq!(work, 499_500);
+        assert!(
+            start.elapsed() < slow,
+            "呼び出し元が配送に引きずられた: {:?}",
+            start.elapsed()
+        );
+        // それでも配送自体はちゃんと出る。
+        mock.wait_for(1, Duration::from_secs(5)).await;
     }
 
     // ---- live E2E (env-gated, #[ignore] by default) ----
@@ -679,13 +1052,12 @@ mod tests {
         let messages = build_started_messages(
             &meta,
             "E2E: empty explicit webhook url fell back to default (this is a test message).",
-            DISCORD_CHUNK_LIMIT,
         );
         let client = reqwest::Client::new();
         for msg in &messages {
             let resp = client
                 .post(&url)
-                .json(&json!({ "content": msg }))
+                .json(&build_webhook_body(&msg.content, false))
                 .send()
                 .await
                 .expect("discord webhook POST should complete");
