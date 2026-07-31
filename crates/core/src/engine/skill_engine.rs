@@ -111,11 +111,11 @@ impl SkillEngine {
 
     /// 上限超過 tool_result の退避先を設定する（#284）。
     ///
-    /// 設定しなくても [`TOOL_RESULT_SIZE_LIMIT`] は効く（退避せず切り詰める）が、
+    /// 設定しなくても [`TOOL_RESULT_TOKEN_LIMIT`] は効く（退避できず本文は捨てる）が、
     /// 設定すると全文が `<workspace_root>/tmp/` に残り、エージェントが
-    /// `read_file` / `execute_shell` で続きを読めるようになる。
+    /// `read_file` / `execute_shell` などで自分の選んだ方法で参照できるようになる。
     ///
-    /// [`TOOL_RESULT_SIZE_LIMIT`]: crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT
+    /// [`TOOL_RESULT_TOKEN_LIMIT`]: crate::tool_result_log::TOOL_RESULT_TOKEN_LIMIT
     pub fn set_tool_result_offload(
         &mut self,
         session_id: impl Into<String>,
@@ -127,7 +127,7 @@ impl SkillEngine {
         });
     }
 
-    /// LLM へ返す直前の tool_result にサイズ上限を効かせる（#284）。
+    /// LLM へ返す直前の tool_result にトークン上限を効かせる（#284 / #294）。
     ///
     /// **これを通さずに `Message::tool` へ積んではいけない。** 素通りさせると
     /// 1 件の巨大な結果（実例: 76,661 バイトのフォロー一覧）がプロンプトを占有し、
@@ -136,9 +136,8 @@ impl SkillEngine {
     /// 同じ退避先を使うので、同ターンで見える本文と次ターンに再注入される本文が
     /// 一致する。
     fn cap_tool_result(&self, tool_name: &str, tool_call_id: &str, result_json: String) -> String {
-        if result_json.len() < crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT {
-            return result_json;
-        }
+        // 上限判定は `sanitize_tool_result_for_llm` 側が持つ（トークン数で測るため
+        // ここでバイト数の早期 return を二重に置くと物差しがズレる）。
         let (session_id, workspace_root) = match &self.tool_result_offload {
             Some(o) => (o.session_id.as_str(), o.workspace_root.as_deref()),
             // 退避先未設定（sub-engine / テスト）でも上限は必ず効かせる。
@@ -151,12 +150,15 @@ impl SkillEngine {
             tool_call_id,
             workspace_root,
         );
-        tracing::warn!(
-            tool = %tool_name,
-            original_bytes = result_json.len(),
-            capped_bytes = capped.len(),
-            "tool result exceeded the inline size limit; truncated before sending to the LLM"
-        );
+        if capped != result_json {
+            tracing::warn!(
+                tool = %tool_name,
+                original_bytes = result_json.len(),
+                capped_bytes = capped.len(),
+                "tool result exceeded the inline token limit; \
+                 replaced with a metadata-only pointer before sending to the LLM"
+            );
+        }
         capped
     }
 
@@ -1258,16 +1260,27 @@ mod tests {
             .first()
             .expect("LLM が tool メッセージを受け取っていない");
         assert!(
-            tool_msg.len() <= crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT,
-            "LLM へ {} バイトの tool_result が渡っている（上限 {}）",
-            tool_msg.len(),
-            crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT
+            crate::tokens::estimate_tokens(tool_msg)
+                < crate::tool_result_log::TOOL_RESULT_TOKEN_LIMIT,
+            "LLM へ {} トークンの tool_result が渡っている（上限 {}）",
+            crate::tokens::estimate_tokens(tool_msg),
+            crate::tool_result_log::TOOL_RESULT_TOKEN_LIMIT
         );
-        assert!(tool_msg.contains("truncated"), "切り詰めの案内が無い");
+        // #294: 生データは 1 バイトも渡らない（プレビューも無い）。
+        assert!(
+            !tool_msg.contains("npub1abcdefgh"),
+            "生データが LLM へ渡っている: {tool_msg}"
+        );
+        assert!(
+            tool_msg.contains("withheld"),
+            "退避の案内が無い: {tool_msg}"
+        );
         assert!(
             tool_msg.contains("tmp/sess1_tc_1.json"),
             "全文の在り処が案内されていない: {tool_msg}"
         );
+        assert!(tool_msg.contains("lines"), "行数が無い: {tool_msg}");
+        assert!(tool_msg.contains("tokens"), "トークン数が無い: {tool_msg}");
         // 全文はワークスペースに残り、エージェントが読める。
         assert!(workspace.path().join("tmp/sess1_tc_1.json").exists());
         // 同ターンで見えた本文と、DB へ渡る本文が一致する（次ターンで内容が変わらない）。
@@ -1323,8 +1336,16 @@ mod tests {
 
         let seen = seen.lock().unwrap();
         let tool_msg = seen.first().unwrap();
-        assert!(tool_msg.len() <= crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT);
+        assert!(
+            crate::tokens::estimate_tokens(tool_msg)
+                < crate::tool_result_log::TOOL_RESULT_TOKEN_LIMIT
+        );
         assert!(tool_msg.contains("could not be saved"));
+        // 退避できなくても生データは流さない（#294）。
+        assert!(
+            !tool_msg.contains("zzz"),
+            "生データが流れている: {tool_msg}"
+        );
     }
 
     /// control 系ツール（report_progress 等）は dispatch されず inline 実行される。
