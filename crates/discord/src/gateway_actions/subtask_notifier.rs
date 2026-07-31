@@ -269,8 +269,7 @@ impl SubtaskRunNotifier for DiscordWebhookRunNotifier {
                 run_id: self.subtask_id.clone(),
                 session_key: self.sub_session_id.clone(),
             };
-            let messages =
-                webhook::build_started_messages(&meta, task, webhook::DISCORD_CHUNK_LIMIT);
+            let messages = webhook::build_started_messages(&meta, task);
             let _ = tx.send(DeliveryBatch {
                 url: cfg.url.clone(),
                 messages,
@@ -284,7 +283,7 @@ impl SubtaskRunNotifier for DiscordWebhookRunNotifier {
                 webhook::build_progress_message(&self.subtask_id, &self.sub_session_id, detail);
             let _ = tx.send(DeliveryBatch {
                 url: cfg.url.clone(),
-                messages: vec![msg],
+                messages: vec![msg.into()],
             });
         }
     }
@@ -301,7 +300,7 @@ impl SubtaskRunNotifier for DiscordWebhookRunNotifier {
             );
             let _ = tx.send(DeliveryBatch {
                 url: cfg.url.clone(),
-                messages: vec![msg],
+                messages: vec![msg.into()],
             });
         }
     }
@@ -319,7 +318,7 @@ impl SubtaskRunNotifier for DiscordWebhookRunNotifier {
             );
             let _ = tx.send(DeliveryBatch {
                 url: cfg.url.clone(),
-                messages: vec![msg],
+                messages: vec![msg.into()],
             });
         }
     }
@@ -371,7 +370,6 @@ mod tests {
                 session_key: "subtask-st-1".to_string(),
             },
             "do the thing",
-            webhook::DISCORD_CHUNK_LIMIT,
         );
         assert_eq!(batch.messages, expected);
     }
@@ -384,11 +382,7 @@ mod tests {
         let batch = rx.try_recv().expect("進捗通知が送られる");
         assert_eq!(
             batch.messages,
-            vec![webhook::build_progress_message(
-                "st-1",
-                "subtask-st-1",
-                "halfway"
-            )]
+            vec![webhook::build_progress_message("st-1", "subtask-st-1", "halfway").into()]
         );
     }
 
@@ -412,7 +406,8 @@ mod tests {
                     "subtask-st-1",
                     Some(1234),
                     "result body"
-                )],
+                )
+                .into()],
                 "exit_reason={exit_reason}"
             );
         }
@@ -432,7 +427,8 @@ mod tests {
                 "subtask-st-1",
                 Some(99),
                 "cancelled by request"
-            )]
+            )
+            .into()]
         );
     }
 

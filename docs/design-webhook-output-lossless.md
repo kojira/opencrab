@@ -5,6 +5,11 @@
 > 対象 / Scope: opencrab Discord webhook 出力経路（agent / tool / session work-channel 通知）
 > 参照 / Refs: `docs/design-agent-tool-webhooks.md`, `docs/design-discord-file-attachment.md`, `docs/discord.md`
 > 注: 本ドキュメントは **設計提案のみ**。コード変更は含まない。
+> 追記（2026-08-01 / #293）: 本書 §3.3 の 3 つの戦略のうち **file attachment** を実装済み。
+> 長文（Discord の 1 通上限 2000 文字超）は chunk 投稿（§3.3-2）ではなく
+> 「出だしのプレビュー + 全文ファイル添付」1 通で送るようになった。
+> 決定パラメータは `docs/design-webhook-long-text-attachment.md` を参照。
+> 本書中の「chunk 投稿 / `part X/N` で送る」という現状記述はその範囲で古い。
 
 ---
 

@@ -29,7 +29,8 @@
   - `wants(event)` でフィルタ。`subtask.` プレフィックスを正規化し、`started` 指定時は後方互換で `progress` も許可。
 - **配送ワーカー**: `webhook.rs::spawn_run_worker(client)` が **run ごとに** `mpsc::UnboundedSender<DeliveryBatch>` と 1 ワーカーを起動。`DeliveryBatch { url, messages }` を受け取り、`send_with_retry` で**直列**送信する。
   - 同一 run 内は 1 チャネル + 1 ワーカーで**順序保証**。別 run のワーカーとは並行 → run をまたぐと interleave しうる。
-  - メッセージ整形: `build_started_messages`（メタ + raw task の chunk）、`build_terminal_message`（概要 1 通）、`build_progress_message`（短い 1 通）。`DISCORD_CHUNK_LIMIT = 1900`、ハード上限 2000。
+  - メッセージ整形: `build_started_messages`（メタ 1 通 + raw task 本体 1 通）、`build_terminal_message`（概要 1 通）、`build_progress_message`（短い 1 通）。ハード上限 2000。
+  - **長文は分割連投しない**（#293）。2000 文字を超える本文は「出だしのプレビュー + 全文をファイル添付」の **1 通**（multipart/form-data）で送る。決定パラメータと理由は `docs/design-webhook-long-text-attachment.md`。
   - 429 は `Retry-After` を尊重し attempt を進めず再送（順序維持）。それ以外は `[0,2,10,30,120]` 秒の best-effort backoff。
   - ログでは `redact_webhook_url`（最終パスセグメントを `[redacted]` 化）で URL を秘匿。
 - **emit 箇所**: `crates/discord/src/gateway_actions/subtask_engine.rs`

@@ -10,6 +10,8 @@
 //! - URL 検証（[`validate_webhook_url`]）と秘匿化（[`redact_webhook_url`] /
 //!   [`redact_secrets`]）
 //! - 送信先の文字数上限で分ける処理（[`chunk_text`] / [`build_part_messages`]）
+//! - 長文を「出だしプレビュー + 全文ファイル添付」1 通に畳むポリシー
+//!   （[`build_message_with_optional_attachment`] / [`WebhookMessage`] / #293）
 //! - 配送失敗の記録（[`record_webhook_delivery_failure`]。raw url は受け取らない）
 //!
 //! だけが入る。**実際の HTTP 送信（transport）と Discord 固有の整形は含めない**
@@ -115,6 +117,227 @@ pub fn build_part_messages(content: &str, limit: usize) -> Vec<String> {
         .collect()
 }
 
+// ---- 長文の「出だしプレビュー + 全文ファイル添付」（#293） ----
+//
+// ## なぜ分割連投をやめたか
+//
+// 従来は長文を [`chunk_text`] で 1900〜2000 文字ごとに割り、`part X/N` を付けて
+// **複数メッセージとして連投**していた。これは
+//
+// - Discord のチャンネルが同一内容の断片で埋まって読みづらい
+// - 1 論理メッセージあたり N 回 POST するため **Discord のレート制限（429）に当たり
+//   やすい**（リトライで大量に飛んだ実例あり）
+// - 断片が別メッセージなので**全文をコピーしづらい**
+//
+// という 3 つの問題を抱えていた。そこで **1 通の multipart 送信**（出だしのプレビュー
+// テキスト + 全文を添付ファイル）へ切り替える。送信回数は長さに依らず常に 1 回。
+//
+// この module は **ポリシー（どこで切るか・何を添えるか）だけ**を持ち、HTTP は持たない
+// （module doc の依存方針どおり）。実際の multipart POST は transport 側
+// （`crates/discord/src/gateway_actions/webhook.rs` と Nostr 転記の送信箇所）にある。
+
+/// これを **超えたら**添付方式へ切り替える文字数。
+///
+/// 値は Discord の 1 メッセージ上限そのもの（2000 文字）。つまり「1 通に収まるものは
+/// 従来どおり素のテキスト 1 通、収まらないものだけ添付」という単純な境界で、**短い
+/// メッセージの見え方・送られ方は一切変わらない**（JSON 1 本のまま。回帰しない）。
+pub const ATTACHMENT_THRESHOLD_CHARS: usize = 2000;
+
+/// 添付に切り替えたとき、本文に載せる出だしプレビューの文字数。
+///
+/// 「数百文字」＝Discord で 5〜10 行程度、スクロールせずに要旨が掴める量。プレビュー
+/// + 案内文を足しても 2000 文字上限に対して十分な余裕がある（案内文は 150 文字程度）。
+pub const ATTACHMENT_PREVIEW_CHARS: usize = 600;
+
+/// 添付ファイルの最大バイト数（これを超える分は切り詰めて明示する）。
+///
+/// Discord の無課金サーバのアップロード上限は 25 MiB だが、その 1/3 弱の 8 MiB で頭打ち
+/// にする。理由は 2 つ:
+/// 1. boost 状況に依らず確実に通る安全側の値であること。
+/// 2. **1 回の multipart POST が長時間化しないこと**。配送は spawn 済みタスク内とはいえ、
+///    巨大ボディの送信が延々と続くとその run の後続配送が詰まる。切り詰めは**送信前**に
+///    行う（ここ）。
+pub const ATTACHMENT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// 添付ファイルの content_type。全文はプレーンテキストなので固定。
+pub const ATTACHMENT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+
+/// 添付ファイル名の最大長（拡張子込み）。
+const ATTACHMENT_SLUG_MAX: usize = 48;
+
+/// webhook に添える 1 ファイル。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebhookAttachment {
+    /// 送信時のファイル名。**秘密・個人情報を含めない**（[`attachment_filename`] 参照）。
+    pub filename: String,
+    pub content_type: String,
+    /// ファイル本体。`content` と**同一の文字列**から作る（マスク済みの本文がそのまま
+    /// 添付になり、添付側だけ生の秘密が漏れることが構造的に起きない）。
+    pub data: Vec<u8>,
+    /// [`ATTACHMENT_MAX_BYTES`] を超えたため末尾を落としたか。
+    pub truncated: bool,
+}
+
+/// webhook へ送る 1 通（本文 + 任意の添付）。
+///
+/// 添付が `None` なら従来どおり JSON 1 本で送る。`Some` なら multipart 1 本で送る。
+/// どちらも **1 通 = 1 POST**。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebhookMessage {
+    pub content: String,
+    pub attachment: Option<WebhookAttachment>,
+}
+
+impl WebhookMessage {
+    /// 添付なしの素のテキスト 1 通。
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            attachment: None,
+        }
+    }
+
+    pub fn has_attachment(&self) -> bool {
+        self.attachment.is_some()
+    }
+
+    /// この 1 通で受け手に届く**全文**。添付があれば添付本体（＝プレビュー元の全文）、
+    /// 無ければ本文そのもの。「分割されていた頃の part を連結した文字列」に相当する
+    /// ので、検証や表示でロスの有無を見るときはこちらを使う。
+    pub fn delivered_text(&self) -> String {
+        match &self.attachment {
+            Some(att) => String::from_utf8_lossy(&att.data).into_owned(),
+            None => self.content.clone(),
+        }
+    }
+}
+
+impl From<String> for WebhookMessage {
+    fn from(s: String) -> Self {
+        WebhookMessage::text(s)
+    }
+}
+
+impl From<&str> for WebhookMessage {
+    fn from(s: &str) -> Self {
+        WebhookMessage::text(s)
+    }
+}
+
+/// slug から安全な添付ファイル名（`<slug>.txt`）を作る。
+///
+/// **秘密・個人情報をファイル名に載せない**ため、呼び出し側には「イベント名 / ツール名 /
+/// 用途」といった静的な語彙だけを渡させ、ここで更に ASCII 英数と `-` `_` `.` 以外を
+/// `-` へ潰し、長さも切り詰める（ユーザ名・URL・トークンが混ざっても素通ししない）。
+/// 空になった場合は `output.txt` にフォールバックする。
+pub fn attachment_filename(slug: &str) -> String {
+    let cleaned: String = slug
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(['-', '.']).to_string();
+    let stem: String = trimmed.chars().take(ATTACHMENT_SLUG_MAX).collect();
+    if stem.is_empty() {
+        "output.txt".to_string()
+    } else {
+        format!("{stem}.txt")
+    }
+}
+
+/// `text` を [`ATTACHMENT_MAX_BYTES`] 以下のバイト列にする（UTF-8 境界を壊さない）。
+/// 切り詰めた場合は末尾に省略マーカーを足し、`truncated = true` を返す。
+fn attachment_bytes(text: &str) -> (Vec<u8>, bool) {
+    if text.len() <= ATTACHMENT_MAX_BYTES {
+        return (text.as_bytes().to_vec(), false);
+    }
+    const MARKER: &str =
+        "\n\n--- [truncated] the rest was omitted because the attachment hit the size cap ---\n";
+    let budget = ATTACHMENT_MAX_BYTES.saturating_sub(MARKER.len());
+    let mut end = budget.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + MARKER.len());
+    out.push_str(&text[..end]);
+    out.push_str(MARKER);
+    (out.into_bytes(), true)
+}
+
+/// 長文を「出だしのプレビュー + 全文添付」の **1 通**に畳む。
+///
+/// - [`ATTACHMENT_THRESHOLD_CHARS`] 以下なら添付せず、`text` をそのまま本文にする
+///   （＝従来どおり JSON 1 本で飛ぶ。回帰なし）。
+/// - 超えたら先頭 [`ATTACHMENT_PREVIEW_CHARS`] 文字だけを本文に載せ、**全文をそのまま**
+///   添付する。添付本体は本文と同じ `text` から作るので、呼び出し前に掛かっている
+///   マスク（nostr の `nsec` マスク等）は添付側にもそのまま効く。
+///
+/// `slug` は追跡用のファイル名の素。静的な語彙のみを渡すこと
+/// （[`attachment_filename`] が更にサニタイズする）。
+pub fn build_message_with_optional_attachment(text: &str, slug: &str) -> WebhookMessage {
+    build_message_with_attachment_preview(text, slug, ATTACHMENT_PREVIEW_CHARS)
+}
+
+/// [`build_message_with_optional_attachment`] のプレビュー長を指定できる版。
+///
+/// `preview_chars` は [`ATTACHMENT_PREVIEW_CHARS`] を上限とするクランプで、既定より
+/// **短く**したいとき（webhook 設定の `max_chars` 等）に使う。0 は既定扱い。
+pub fn build_message_with_attachment_preview(
+    text: &str,
+    slug: &str,
+    preview_chars: usize,
+) -> WebhookMessage {
+    let total_chars = text.chars().count();
+    if total_chars <= ATTACHMENT_THRESHOLD_CHARS {
+        return WebhookMessage::text(text);
+    }
+    let preview_chars = if preview_chars == 0 {
+        ATTACHMENT_PREVIEW_CHARS
+    } else {
+        preview_chars.min(ATTACHMENT_PREVIEW_CHARS)
+    };
+    let filename = attachment_filename(slug);
+    let (data, truncated) = attachment_bytes(text);
+    let preview: String = text.chars().take(preview_chars).collect();
+    let note = if truncated {
+        format!(
+            "\n…\n\n📎 full text attached as `{filename}` ({total_chars} chars; the file was \
+             truncated at {ATTACHMENT_MAX_BYTES} bytes and the tail is omitted)"
+        )
+    } else {
+        format!("\n…\n\n📎 full text attached as `{filename}` ({total_chars} chars)")
+    };
+    WebhookMessage {
+        content: format!("{preview}{note}"),
+        attachment: Some(WebhookAttachment {
+            filename,
+            content_type: ATTACHMENT_CONTENT_TYPE.to_string(),
+            data,
+            truncated,
+        }),
+    }
+}
+
+/// Discord webhook の JSON body を組む。multipart のときは同じ JSON を `payload_json`
+/// パートに載せる（Discord webhook の仕様）。
+///
+/// `suppress_mentions` は [`build_relay_webhook_body`] の doc を参照。
+pub fn build_webhook_body(content: &str, suppress_mentions: bool) -> serde_json::Value {
+    if suppress_mentions {
+        json!({
+            "content": content,
+            "allowed_mentions": { "parse": [] },
+        })
+    } else {
+        json!({ "content": content })
+    }
+}
+
 /// Nostr 受信転記の Discord webhook POST body を組む（issue #252 段階 A）。
 ///
 /// **必ず `allowed_mentions: { "parse": [] }` を乗せる**。Discord webhook は
@@ -124,10 +347,7 @@ pub fn build_part_messages(content: &str, limit: usize) -> Vec<String> {
 /// 含めるだけで転記先サーバ全員へ通知が飛ぶ（mention 暴発）。空の parse 配列で
 /// 全種別の解決を Discord 側で止める。
 pub fn build_relay_webhook_body(chunk: &str) -> serde_json::Value {
-    json!({
-        "content": chunk,
-        "allowed_mentions": { "parse": [] },
-    })
+    build_webhook_body(chunk, true)
 }
 
 /// webhook URL のトークン（末尾セグメント）をマスクして返す。ログ・応答用。
@@ -624,6 +844,144 @@ mod tests {
     fn test_build_relay_webhook_body_has_content() {
         let body = build_relay_webhook_body("hello");
         assert_eq!(body["content"], json!("hello"));
+    }
+
+    // ---- プレビュー + 全文添付（#293） ----
+
+    /// 閾値以下は添付せず、本文もそのまま（従来どおり JSON 1 本で飛ぶ）。回帰テスト。
+    #[test]
+    fn short_text_is_not_attached() {
+        for len in [0usize, 1, 100, ATTACHMENT_THRESHOLD_CHARS] {
+            let text = "a".repeat(len);
+            let m = build_message_with_optional_attachment(&text, "x");
+            assert!(!m.has_attachment(), "len={len} が添付になった");
+            assert_eq!(m.content, text, "len={len} で本文が改変された");
+        }
+    }
+
+    /// 閾値を 1 文字でも超えたら「プレビュー + 全文添付」に切り替わる。
+    #[test]
+    fn long_text_becomes_preview_plus_attachment() {
+        let text = "b".repeat(ATTACHMENT_THRESHOLD_CHARS + 1);
+        let m = build_message_with_optional_attachment(&text, "unit");
+        let att = m.attachment.as_ref().expect("添付されるはず");
+        assert_eq!(att.filename, "unit.txt");
+        assert_eq!(att.content_type, ATTACHMENT_CONTENT_TYPE);
+        assert!(!att.truncated);
+        // 全文がそのまま添付になる（ロスなし）。
+        assert_eq!(att.data, text.as_bytes());
+        assert_eq!(m.delivered_text(), text);
+        // プレビューは指定長ちょうど。
+        assert_eq!(
+            m.content.chars().take_while(|c| *c == 'b').count(),
+            ATTACHMENT_PREVIEW_CHARS
+        );
+        assert!(m.content.contains("full text attached as `unit.txt`"));
+        assert!(m
+            .content
+            .contains(&format!("{} chars", text.chars().count())));
+        // 本文は Discord の 1 通上限に収まる。
+        assert!(m.content.chars().count() <= 2000);
+    }
+
+    /// プレビュー長は既定より**短く**する方向にだけ効く（webhook 設定の max_chars）。
+    #[test]
+    fn preview_length_can_be_shortened_but_not_extended() {
+        let text = "c".repeat(5000);
+        let short = build_message_with_attachment_preview(&text, "u", 50);
+        assert_eq!(short.content.chars().take_while(|c| *c == 'c').count(), 50);
+        // 上へは伸びない（既定で頭打ち）。
+        let long = build_message_with_attachment_preview(&text, "u", 100_000);
+        assert_eq!(
+            long.content.chars().take_while(|c| *c == 'c').count(),
+            ATTACHMENT_PREVIEW_CHARS
+        );
+        // 0 は既定扱い。
+        let zero = build_message_with_attachment_preview(&text, "u", 0);
+        assert_eq!(zero.content, long.content);
+    }
+
+    /// マルチバイトでもプレビューは文字単位で切り、添付は全文のまま。
+    #[test]
+    fn preview_respects_utf8_boundaries() {
+        let text = "あ".repeat(ATTACHMENT_THRESHOLD_CHARS + 10);
+        let m = build_message_with_optional_attachment(&text, "u");
+        assert_eq!(
+            m.content.chars().take_while(|c| *c == 'あ').count(),
+            ATTACHMENT_PREVIEW_CHARS
+        );
+        assert_eq!(m.delivered_text(), text);
+    }
+
+    /// サイズ上限超過は**送信前に**切り詰め、省略した旨を本文にも添付にも残す。
+    #[test]
+    fn oversized_attachment_is_truncated_before_send() {
+        let text = "d".repeat(ATTACHMENT_MAX_BYTES + 10_000);
+        let m = build_message_with_optional_attachment(&text, "u");
+        let att = m.attachment.as_ref().unwrap();
+        assert!(att.truncated);
+        assert!(
+            att.data.len() <= ATTACHMENT_MAX_BYTES,
+            "cap を超えた: {}",
+            att.data.len()
+        );
+        assert!(m.delivered_text().contains("[truncated]"));
+        assert!(m.content.contains("truncated"));
+    }
+
+    /// 切り詰めは UTF-8 境界を壊さない。
+    #[test]
+    fn truncation_keeps_utf8_valid() {
+        // 3 バイト文字で埋めて境界をまたぐようにする。
+        let text = "漢".repeat(ATTACHMENT_MAX_BYTES / 3 + 100);
+        let m = build_message_with_optional_attachment(&text, "u");
+        let att = m.attachment.as_ref().unwrap();
+        assert!(att.truncated);
+        std::str::from_utf8(&att.data).expect("添付が不正な UTF-8 になった");
+    }
+
+    /// ファイル名は静的な語彙だけを通し、秘密や個人情報が混ざりうる文字は潰す。
+    #[test]
+    fn attachment_filename_is_sanitized() {
+        assert_eq!(attachment_filename("subtask-task"), "subtask-task.txt");
+        assert_eq!(
+            attachment_filename("tool_call_completed-execute_shell"),
+            "tool_call_completed-execute_shell.txt"
+        );
+        // パス区切り・空白・記号は潰れる（ディレクトリ脱出も起きない）。
+        assert_eq!(attachment_filename("../../etc/passwd"), "etc-passwd.txt");
+        assert_eq!(attachment_filename("a b\tc"), "a-b-c.txt");
+        // 非 ASCII だけの slug（名前・本文の断片）は丸ごと落ちて既定名になる。
+        assert_eq!(attachment_filename("のすたろう"), "output.txt");
+        // 空・記号のみは既定名へフォールバック。
+        assert_eq!(attachment_filename(""), "output.txt");
+        assert_eq!(attachment_filename("..."), "output.txt");
+        // 長すぎる名前は切り詰める。
+        let long = attachment_filename(&"z".repeat(500));
+        assert!(long.len() <= 52, "filename too long: {long}");
+        assert!(long.ends_with(".txt"));
+    }
+
+    /// 添付は本文と**同じ文字列**から作られる ＝ 上流のマスクが添付にも効く。
+    #[test]
+    fn attachment_is_built_from_the_same_masked_string() {
+        // 上流（crates/nostr の mask_secrets）を通った後の形を模す。
+        let masked = "secret_key = \"<redacted>\" nsec1<redacted>\n".repeat(200);
+        let m = build_message_with_optional_attachment(&masked, "u");
+        let full = m.delivered_text();
+        assert!(full.contains("nsec1<redacted>"));
+        assert!(!full.contains("nsec1qqqqqqq"));
+        // 添付本体はプレビュー元の文字列そのもの。
+        assert!(full.starts_with(&m.content.chars().take(40).collect::<String>()));
+    }
+
+    #[test]
+    fn webhook_body_shape() {
+        assert_eq!(build_webhook_body("hi", false), json!({ "content": "hi" }));
+        assert_eq!(
+            build_webhook_body("hi", true),
+            json!({ "content": "hi", "allowed_mentions": { "parse": [] } })
+        );
     }
 
     #[test]
