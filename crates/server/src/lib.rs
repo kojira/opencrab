@@ -82,7 +82,9 @@ pub struct AppState {
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
     pub compaction_ratio: f64,
-    /// verify 段（evaluator）の設定。
+    /// evaluator（契約に対する独立 rubric 評価）の設定。
+    /// #291 で対話ターンからの呼び出しを撤去したため現在は未参照。
+    /// スリープ側へ評価を移す配線（別 issue）で使う。
     pub evaluator: config::EvaluatorConfig,
     /// スリープ時スキル棚卸し（自己 curation ループ）の設定。
     pub skill_consolidation: config::SkillConsolidationConfig,

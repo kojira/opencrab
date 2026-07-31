@@ -183,7 +183,9 @@ permission = "agent"
 name = "cat"
 permission = "agent"
 
-# verify 段（evaluator）: 契約付き active タスクの run 終了時に独立 context で評価。
+# evaluator: 契約付きタスクを独立 context で rubric 評価する設定。
+# #291 で対話ターン中の採点は撤去済み（評価はスリープ中へ寄せる。配線は別 issue）。
+# 現在この設定は読まれない。
 [evaluator]
 enabled = true
 threshold = 0.7
