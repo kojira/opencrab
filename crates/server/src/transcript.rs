@@ -39,28 +39,61 @@ use opencrab_actions::transcript::{
 use opencrab_db::queries::{insert_session_log_best_effort, SessionLogRow};
 use rusqlite::Connection;
 
-/// ゲートウェイから受信した発言（Discord / Nostr 共通）。
+/// 受信発言の記録をあきらめるまでの試行回数（#284 P0-3）。
+///
+/// 現実的な失敗は SQLITE_BUSY（同一 DB への並行書き込み）で、数十 ms 待てば通る。
+/// ディスク満杯・権限のような回復しない失敗で長く粘っても意味は無いので 3 回で切り、
+/// 呼び出し側にエスカレーションさせる。
+const INBOUND_RECORD_ATTEMPTS: usize = 3;
+/// 再試行の待機（n 回目の失敗後に `INBOUND_RETRY_DELAY * n` 待つ）。
+const INBOUND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// ゲートウェイから受信した発言（Discord / Nostr 共通）。記録できたら `true`。
 ///
 /// 注意: 既存の慣習として `agent_id` 列には送信者IDが入る（発言の帰属が送信者）。
+///
+/// **ここだけは best-effort にしない**（#284 P0-3）。他の転記（応答・NO_REPLY）は
+/// 落ちても会話は続くが、ユーザー発言が落ちるとその指示は**二度と会話履歴に現れず**、
+/// エージェントは見ないまま応答する。実際に「オーナーの発言が DB に 1 件も無い」
+/// 事故が起きており、当時のログには warn が 1 行残るだけだった。
+/// 失敗は戻り値で呼び出し側へ返し、呼び出し側がオーナーへエスカレーションする。
 pub fn record_inbound_message(
     conn: &Connection,
     source: TranscriptSource,
     record: &InboundMessageRecord<'_>,
-) {
-    insert_session_log_best_effort(
-        conn,
-        &SessionLogRow {
-            id: None,
-            agent_id: record.sender_id.to_string(),
-            session_id: record.session_id.to_string(),
-            log_type: "speech".to_string(),
-            content: record.text.to_string(),
-            speaker_id: Some(record.sender_id.to_string()),
-            turn_number: None,
-            metadata_json: Some(inbound_metadata_json(source, record)),
-            created_at: None,
-        },
+) -> bool {
+    let row = SessionLogRow {
+        id: None,
+        agent_id: record.sender_id.to_string(),
+        session_id: record.session_id.to_string(),
+        log_type: "speech".to_string(),
+        content: record.text.to_string(),
+        speaker_id: Some(record.sender_id.to_string()),
+        turn_number: None,
+        metadata_json: Some(inbound_metadata_json(source, record)),
+        created_at: None,
+    };
+    for attempt in 1..=INBOUND_RECORD_ATTEMPTS {
+        match opencrab_db::queries::insert_session_log(conn, &row) {
+            Ok(_) => return true,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %row.session_id,
+                    attempt,
+                    "inbound message insert failed: {e}"
+                );
+                if attempt < INBOUND_RECORD_ATTEMPTS {
+                    std::thread::sleep(INBOUND_RETRY_DELAY * attempt as u32);
+                }
+            }
+        }
+    }
+    tracing::error!(
+        session_id = %row.session_id,
+        attempts = INBOUND_RECORD_ATTEMPTS,
+        "inbound user message could NOT be persisted; the agent will not see it"
     );
+    false
 }
 
 /// NO_REPLY（沈黙の明示）。

@@ -17,7 +17,6 @@ pub mod subtask;
 pub mod subtask_notify;
 pub mod subtask_registries;
 pub mod task_ledger;
-pub mod tool_result_log;
 pub mod tools;
 pub mod traits;
 pub mod transcript;
@@ -55,8 +54,13 @@ pub use subtask_notify::{
     SubtaskRunNotifier,
 };
 pub use subtask_registries::SubtaskRegistries;
-pub use tool_result_log::{
-    redact_secret_fields_json, sanitize_tool_result_for_log, TOOL_RESULT_SIZE_LIMIT,
+// tool_result の無害化は core 側（`opencrab_core::tool_result_log`）に一本化した
+// （#284）。LLM へ返す経路（`SkillEngine`）と DB 永続化経路（server / dispatch）で
+// **同一の上限と退避**を使う必要があり、core は actions に依存できないため。
+// 既存の呼び出し元互換のためここから re-export する。
+pub use opencrab_core::tool_result_log::{
+    redact_secret_fields_json, sanitize_tool_result_for_llm, sanitize_tool_result_for_log,
+    TOOL_RESULT_SIZE_LIMIT,
 };
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;

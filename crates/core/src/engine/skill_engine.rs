@@ -54,6 +54,17 @@ pub struct SkillEngine {
     /// `{status:"spawned", ...}` を tool_result として返す。engine 外（executor 経由の
     /// 合成 runtime）から注入する。None なら従来どおり全ツールを inline 実行する。
     tool_dispatcher: Option<Arc<dyn ToolDispatcher>>,
+    /// 上限超過の tool_result を退避する先（#284）。未設定でも上限自体は効く
+    /// （退避できないぶん、案内付きで切り詰めるだけ）。
+    tool_result_offload: Option<ToolResultOffload>,
+}
+
+/// LLM へ返す tool_result の退避先設定（#284）。
+struct ToolResultOffload {
+    /// 退避ファイル名に使うセッション ID。
+    session_id: String,
+    /// エージェントのワークスペース root。`<root>/tmp/` へ全文を書き出す。
+    workspace_root: Option<std::path::PathBuf>,
 }
 
 impl SkillEngine {
@@ -75,7 +86,59 @@ impl SkillEngine {
             reasoning_effort: None,
             web_search: false,
             tool_dispatcher: None,
+            tool_result_offload: None,
         }
+    }
+
+    /// 上限超過 tool_result の退避先を設定する（#284）。
+    ///
+    /// 設定しなくても [`TOOL_RESULT_SIZE_LIMIT`] は効く（退避せず切り詰める）が、
+    /// 設定すると全文が `<workspace_root>/tmp/` に残り、エージェントが
+    /// `read_file` / `execute_shell` で続きを読めるようになる。
+    ///
+    /// [`TOOL_RESULT_SIZE_LIMIT`]: crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT
+    pub fn set_tool_result_offload(
+        &mut self,
+        session_id: impl Into<String>,
+        workspace_root: Option<std::path::PathBuf>,
+    ) {
+        self.tool_result_offload = Some(ToolResultOffload {
+            session_id: session_id.into(),
+            workspace_root,
+        });
+    }
+
+    /// LLM へ返す直前の tool_result にサイズ上限を効かせる（#284）。
+    ///
+    /// **これを通さずに `Message::tool` へ積んではいけない。** 素通りさせると
+    /// 1 件の巨大な結果（実例: 76,661 バイトのフォロー一覧）がプロンプトを占有し、
+    /// 同ターンのユーザー発言が 1 件も載らなくなる。
+    /// 永続化側（`on_tool_result` → `sanitize_tool_result_for_log`）と同じ上限・
+    /// 同じ退避先を使うので、同ターンで見える本文と次ターンに再注入される本文が
+    /// 一致する。
+    fn cap_tool_result(&self, tool_name: &str, tool_call_id: &str, result_json: String) -> String {
+        if result_json.len() < crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT {
+            return result_json;
+        }
+        let (session_id, workspace_root) = match &self.tool_result_offload {
+            Some(o) => (o.session_id.as_str(), o.workspace_root.as_deref()),
+            // 退避先未設定（sub-engine / テスト）でも上限は必ず効かせる。
+            None => ("session", None),
+        };
+        let capped = crate::tool_result_log::sanitize_tool_result_for_llm(
+            tool_name,
+            &result_json,
+            session_id,
+            tool_call_id,
+            workspace_root,
+        );
+        tracing::warn!(
+            tool = %tool_name,
+            original_bytes = result_json.len(),
+            capped_bytes = capped.len(),
+            "tool result exceeded the inline size limit; truncated before sending to the LLM"
+        );
+        capped
     }
 
     /// 自動 dispatch フックを注入する（RFC #152 S3a）。以後、`should_dispatch` が真の
@@ -473,6 +536,11 @@ impl SkillEngine {
                     let result_json = serde_json::to_string(&result).unwrap_or_else(|_| {
                         r#"{"error": "Failed to serialize result"}"#.to_string()
                     });
+
+                    // #284: LLM へ返す前に上限を効かせる。以降（messages / callback）は
+                    // すべてこの capped 本文を使い、同ターンのプロンプトと DB に残る
+                    // 本文を一致させる。
+                    let result_json = self.cap_tool_result(tool_name, &tool_call.id, result_json);
 
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
 
@@ -1058,6 +1126,149 @@ mod tests {
         // エージェントは自分のターンで継続して最終応答を出す。
         assert_eq!(result.response, "鍵の生成を開始しました");
         assert_eq!(result.iterations, 2);
+    }
+
+    /// #284: **巨大なツール結果を生のまま LLM へ返さない。**
+    ///
+    /// 実事故では 76,661 バイトのフォロー一覧がそのままプロンプトへ積まれ、同ターンの
+    /// 会話（ユーザー発言を含む）が押し出された。DB 永続化側には上限があったのに
+    /// `messages.push(Message::tool(...))` だけが素通りしていた非対称が原因。
+    /// ここでは「LLM が次の呼び出しで実際に見る tool メッセージ」を捕まえて上限内で
+    /// あることと、全文の在り処が案内されることを固定する。
+    #[tokio::test]
+    async fn huge_tool_result_is_capped_before_reaching_the_llm() {
+        use std::sync::{Arc, Mutex};
+
+        /// 2 回目の呼び出しで受け取った messages を記録する LLM。
+        struct CapturingLlm {
+            responses: Mutex<Vec<ChatResponse>>,
+            seen_tool_messages: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for CapturingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                for m in &request.messages {
+                    if m.role == Role::Tool {
+                        if let Some(MessageContent::Text(t)) = &m.content {
+                            self.seen_tool_messages.lock().unwrap().push(t.clone());
+                        }
+                    }
+                }
+                let mut responses = self.responses.lock().unwrap();
+                if responses.is_empty() {
+                    anyhow::bail!("no more mock responses");
+                }
+                Ok(responses.remove(0))
+            }
+        }
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let seen_tool_messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let llm = CapturingLlm {
+            responses: Mutex::new(vec![
+                tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
+                text_response("ok"),
+            ]),
+            seen_tool_messages: seen_tool_messages.clone(),
+        };
+        // 事故と同規模の結果を返すツール。
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({ "list": "npub1abcdefgh ".repeat(7_000) }),
+                error: None,
+            },
+        );
+
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.set_tool_result_offload("sess1", Some(workspace.path().to_path_buf()));
+        // DB へ渡る本文（callback）も同じ capped 本文であること。
+        let logged: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let logged_clone = logged.clone();
+        engine.set_on_tool_result(move |_id, _name, json, _err| {
+            logged_clone.lock().unwrap().push(json);
+        });
+
+        let result = engine
+            .run("system", "一覧を見せて", "test-model")
+            .await
+            .unwrap();
+        assert_eq!(result.response, "ok");
+
+        let seen = seen_tool_messages.lock().unwrap();
+        let tool_msg = seen
+            .first()
+            .expect("LLM が tool メッセージを受け取っていない");
+        assert!(
+            tool_msg.len() <= crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT,
+            "LLM へ {} バイトの tool_result が渡っている（上限 {}）",
+            tool_msg.len(),
+            crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT
+        );
+        assert!(tool_msg.contains("truncated"), "切り詰めの案内が無い");
+        assert!(
+            tool_msg.contains("tmp/sess1_tc_1.json"),
+            "全文の在り処が案内されていない: {tool_msg}"
+        );
+        // 全文はワークスペースに残り、エージェントが読める。
+        assert!(workspace.path().join("tmp/sess1_tc_1.json").exists());
+        // 同ターンで見えた本文と、DB へ渡る本文が一致する（次ターンで内容が変わらない）。
+        assert_eq!(
+            logged.lock().unwrap().as_slice(),
+            std::slice::from_ref(tool_msg)
+        );
+    }
+
+    /// 退避先が未設定でも上限は効く（sub-engine / 直呼びでも素通りさせない）。
+    #[tokio::test]
+    async fn tool_result_is_capped_even_without_an_offload_target() {
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingLlm {
+            responses: Mutex<Vec<ChatResponse>>,
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl LlmClient for CapturingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                for m in &request.messages {
+                    if m.role == Role::Tool {
+                        if let Some(MessageContent::Text(t)) = &m.content {
+                            self.seen.lock().unwrap().push(t.clone());
+                        }
+                    }
+                }
+                let mut responses = self.responses.lock().unwrap();
+                Ok(responses.remove(0))
+            }
+        }
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let llm = CapturingLlm {
+            responses: Mutex::new(vec![
+                tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
+                text_response("ok"),
+            ]),
+            seen: seen.clone(),
+        };
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({ "blob": "z".repeat(100_000) }),
+                error: None,
+            },
+        );
+        let engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        engine.run("system", "やって", "test-model").await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        let tool_msg = seen.first().unwrap();
+        assert!(tool_msg.len() <= crate::tool_result_log::TOOL_RESULT_SIZE_LIMIT);
+        assert!(tool_msg.contains("could not be saved"));
     }
 
     /// control 系ツール（report_progress 等）は dispatch されず inline 実行される。

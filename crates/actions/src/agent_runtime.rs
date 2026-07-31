@@ -68,12 +68,22 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
 
-    /// ゲートウェイから受信した発言をセッションログへ記録する（best-effort）。
+    /// ゲートウェイから受信した発言をセッションログへ記録する。**記録できたら `true`**。
     ///
     /// 由来（`metadata_json` の `source`）は [`TranscriptSource`] で受ける。行の形は
     /// `crates/server` の transcript モジュールが所有し、移設前とバイト等価な
     /// `metadata_json` を書く（#158 S3）。
-    fn record_inbound_message(&self, source: TranscriptSource, record: &InboundMessageRecord<'_>);
+    ///
+    /// 他の転記メソッドと違い **best-effort ではない**（#284 P0-3）。ユーザー発言が
+    /// 記録されないと、その発言は会話履歴に一切現れず、エージェントは**見ないまま**
+    /// 応答する（＝対話が成立しない）。実装はリトライした上で、それでも駄目なら
+    /// `false` を返すこと。呼び出し側は `false` を無視せずエスカレーションする。
+    #[must_use]
+    fn record_inbound_message(
+        &self,
+        source: TranscriptSource,
+        record: &InboundMessageRecord<'_>,
+    ) -> bool;
 
     /// 受信メッセージを**汎用層の受信処理**へ通す共通フック（#156 S4、best-effort）。
     ///

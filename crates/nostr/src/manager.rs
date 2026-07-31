@@ -619,7 +619,9 @@ async fn handle_event<R: NostrAgentRunner>(
     let inbound_text = event.inbound_text();
 
     runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}", "nostr");
-    runner.record_inbound_message(
+    // #284 P0-3: 受信発言の記録失敗は握り潰さない。落ちた発言は会話履歴に現れず、
+    // エージェントはその投稿を見ないまま応答することになる。
+    let recorded = runner.record_inbound_message(
         opencrab_actions::TranscriptSource::Nostr,
         &opencrab_actions::InboundMessageRecord {
             session_id: &session_id,
@@ -632,6 +634,14 @@ async fn handle_event<R: NostrAgentRunner>(
             image_urls: &[],
         },
     );
+    if !recorded {
+        tracing::error!(
+            session_id = %session_id,
+            agent_id = %agent_id,
+            "failed to persist an inbound Nostr message after retries; the agent will answer \
+             WITHOUT ever seeing it. Check database health."
+        );
+    }
 
     // クロスゲートウェイ転記（issue #252 段階 A）: 自分宛の受信を、エージェント単位で
     // 設定した Discord チャンネル（webhook）へ転記する。設定が有効なときだけ配送する
@@ -1105,9 +1115,10 @@ mod tests {
             &self,
             source: opencrab_actions::TranscriptSource,
             record: &opencrab_actions::InboundMessageRecord<'_>,
-        ) {
+        ) -> bool {
             assert_eq!(source, opencrab_actions::TranscriptSource::Nostr);
             self.recorded.lock().unwrap().push(record.text.to_string());
+            true
         }
 
         fn on_inbound_message(

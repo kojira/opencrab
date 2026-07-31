@@ -80,6 +80,44 @@ pub fn warn_if_agent_gateway_owner_unset(agent_id: &str, owner_discord_id: &str)
     true
 }
 
+/// 受信転送が連続で失敗しているときの警告（#284 P0-2）。警告したら `true`。
+///
+/// **沈黙して死ぬのが最悪**という前提でこの関数がある。以前は `recv()` が失敗すると
+/// 転送タスクが黙って終了し、他のイベント（サブタスク完了など）は流れ続けるため
+/// 「ボットは動いているのに人間の発言にだけ反応しない」状態が誰にも気づかれないまま
+/// 続いた。再試行しても復旧しないことをここで表面化させる。
+///
+/// 配送手段が `warn!` なのは意図的で、`recv()` が壊れている局面ではゲートウェイ経由の
+/// DM 送信も同時に壊れている可能性が高く、通知自体が黙って失敗しうるため。ログなら
+/// 落ちない（このモジュールの他の警告と同じ扱い）。
+pub fn warn_inbound_stalled(consecutive_failures: u32, secs_since_last_message: u64) -> bool {
+    warn!(
+        failures = consecutive_failures,
+        secs_since_last_message,
+        "Discord inbound receive has failed {consecutive_failures} times in a row and has not \
+         delivered a message for {secs_since_last_message}s. The forwarder keeps retrying with \
+         backoff, but user messages are NOT reaching agents while this lasts. Check the Discord \
+         gateway connection / token."
+    );
+    true
+}
+
+/// ユーザー発言をセッションログに記録できなかったときの警告（#284 P0-3）。警告したら `true`。
+///
+/// 発言の欠落は「副作用の取りこぼし」ではない。記録されなかった発言は会話履歴に
+/// 載らず、エージェントは**その指示を一度も見ないまま**応答する（#284 の症状そのもの）。
+/// 本文は出さない（プライバシー）。切り分けに要るのは「どのセッションで落ちたか」。
+pub fn warn_inbound_message_dropped(session_id: &str, sender_id: &str, text_len: usize) -> bool {
+    warn!(
+        session_id = %session_id,
+        sender_id = %sender_id,
+        text_len,
+        "failed to persist an inbound user message after retries. The agent will answer WITHOUT \
+         ever seeing this message. Check database health (disk full / locked / permissions)."
+    );
+    true
+}
+
 /// テスト用: `tracing` 出力を文字列として捕まえるヘルパー。
 ///
 /// 「警告条件を満たす」だけでなく「実際に warn イベントが出る」ことを検証するため。
@@ -257,6 +295,42 @@ mod tests {
             logs.contains("agent-under-test"),
             "どのエージェントか分かること: {logs}"
         );
+    }
+
+    /// #284 P0-2: 受信が止まっていることが**沈黙ではなくログ**として出ること。
+    /// 以前は転送タスクが黙って死に、「ボットは生きているのに人間の発言だけ届かない」
+    /// 状態が誰にも見えなかった。
+    #[test]
+    fn inbound_stalled_warning_is_emitted() {
+        let logs = captured_logs(|| {
+            assert!(warn_inbound_stalled(5, 42));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("inbound receive has failed"),
+            "本文が出ること: {logs}"
+        );
+        // 「何回失敗したか」「何秒受信が無いか」が無いと切り分けできない。
+        assert!(logs.contains('5') && logs.contains("42"), "計測値: {logs}");
+    }
+
+    /// #284 P0-3: ユーザー発言を記録できなかったことが表面化すること。
+    /// 本文（プライバシー）は出さず、どのセッションかだけ出す。
+    #[test]
+    fn dropped_inbound_message_warning_is_emitted() {
+        let logs = captured_logs(|| {
+            assert!(warn_inbound_message_dropped(
+                "discord-crab-111-222",
+                "user-1",
+                12
+            ));
+        });
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("failed to persist an inbound user message"),
+            "本文が出ること: {logs}"
+        );
+        assert!(logs.contains("discord-crab-111-222"), "session_id: {logs}");
     }
 
     #[test]

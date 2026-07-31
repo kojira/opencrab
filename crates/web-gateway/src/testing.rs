@@ -231,7 +231,7 @@ impl AgentRuntime for FakeRunner {
         &self,
         _source: opencrab_actions::TranscriptSource,
         _record: &opencrab_actions::InboundMessageRecord<'_>,
-    ) {
+    ) -> bool {
         unimplemented!("web は WebAgentRunner::record_user_message を使う")
     }
 

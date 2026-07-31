@@ -402,7 +402,7 @@ mod tests {
             &self,
             _source: opencrab_actions::TranscriptSource,
             _record: &opencrab_actions::InboundMessageRecord<'_>,
-        ) {
+        ) -> bool {
             unimplemented!("nostr の fake は受信転記を使わない")
         }
 

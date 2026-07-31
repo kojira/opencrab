@@ -35,6 +35,28 @@ use crate::AgentRunner;
 /// 同一(channel, sender)のメッセージをまとめるまでの待機時間。
 const DEBOUNCE_DELAY: Duration = Duration::from_secs(2);
 
+/// 受信転送タスクが `recv()` エラーから再試行するまでの初回待機（#284 P0-2）。
+///
+/// 短くしすぎるとゲートウェイ切断中に error ログでディスクを埋める。長くしすぎると
+/// 復旧後の受信再開が遅れる。500ms から始めて指数で伸ばし、上限で頭打ちにする。
+const RECV_RETRY_BASE: Duration = Duration::from_millis(500);
+/// 再試行間隔の上限。切断が長引いても 30 秒以内には必ず再接続を試す
+/// （Discord 側の再接続が済んでいれば次の `recv()` で受信が戻る）。
+const RECV_RETRY_MAX: Duration = Duration::from_secs(30);
+/// これだけ連続で失敗したらオーナーへエスカレーションする。
+///
+/// 一過性の切断は数回の再試行で戻るので、単発では鳴らさない。5 回連続
+/// （= 概ね 8 秒以上復旧しない）なら「沈黙したまま受信が死んでいる」疑いが濃い。
+const RECV_FAILURES_BEFORE_ALERT: u32 = 5;
+
+/// 連続失敗回数に対する再試行間隔（指数バックオフ、上限あり）。
+fn recv_retry_backoff(consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(16);
+    RECV_RETRY_BASE
+        .saturating_mul(1u32 << shift)
+        .min(RECV_RETRY_MAX)
+}
+
 /// メッセージループへの内部イベント。
 pub enum LoopEvent {
     /// Discordからの新規メッセージ。
@@ -144,18 +166,46 @@ pub async fn run_discord_loop<T: AgentRunner>(
     };
 
     // Discord受信をイベントに変換するタスク（P1: メインループをブロックしない）
+    //
+    // #284 P0-2: **このタスクは recv エラーで死んではいけない。**
+    // 以前は `recv()` が `Err` を返した時点で `break` していた。以後 `IncomingMessage` は
+    // 二度と流れないが、`SubtaskCompleted` 等は別経路で届き続けるため、外からは
+    // 「ループは生きているのにユーザーの発言だけが永久に届かない」状態に見える
+    // （＝ 実際の事故の観測と一致: エージェントは動き続けるがオーナーの発言に反応しない）。
+    // 抜けてよいのはイベントループ側が畳まれたとき（送信先チャンネルが閉じたとき）だけ。
     {
         let gw = gateway.clone();
         let tx = event_tx.clone();
         tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
+            let mut last_ok = Instant::now();
             loop {
                 match gw.recv().await {
                     Ok(msg) => {
-                        let _ = tx.send(LoopEvent::IncomingMessage(msg));
+                        consecutive_failures = 0;
+                        last_ok = Instant::now();
+                        if tx.send(LoopEvent::IncomingMessage(msg)).is_err() {
+                            // 受け手（イベントループ）が終了した。ここでだけ抜ける。
+                            warn!("Discord event loop receiver closed; stopping inbound forwarder");
+                            break;
+                        }
                     }
                     Err(e) => {
-                        error!("Discord recv error: {e}");
-                        break;
+                        consecutive_failures += 1;
+                        let backoff = recv_retry_backoff(consecutive_failures);
+                        error!(
+                            failures = consecutive_failures,
+                            secs_since_last_message = last_ok.elapsed().as_secs(),
+                            retry_in_ms = backoff.as_millis() as u64,
+                            "Discord recv error: {e}"
+                        );
+                        if consecutive_failures == RECV_FAILURES_BEFORE_ALERT {
+                            crate::owner_warning::warn_inbound_stalled(
+                                consecutive_failures,
+                                last_ok.elapsed().as_secs(),
+                            );
+                        }
+                        tokio::time::sleep(backoff).await;
                     }
                 }
             }
@@ -360,6 +410,38 @@ pub async fn run_discord_loop<T: AgentRunner>(
     info!("Discord event loop v3 ended");
 }
 
+/// ユーザー発言をセッションログへ記録する（#284 P0-1 / P0-3）。
+///
+/// セッションロックを取る**前**に呼ぶこと。記録に失敗したら握り潰さず、
+/// オーナーへ届くレベルでエスカレーションする（ユーザー発言の欠落は副作用の
+/// 取りこぼしではなく、対話そのものが成立しなくなる致命傷）。
+fn record_discord_inbound<T: AgentRunner>(
+    state: &T,
+    session_id: &str,
+    channel_id_str: &str,
+    incoming: &IncomingMessage,
+    text: &str,
+    image_urls: &[String],
+) {
+    let inbound = opencrab_actions::InboundMessageRecord {
+        session_id,
+        sender_id: &incoming.sender.id,
+        sender_name: &incoming.sender.name,
+        avatar_url: incoming.sender.avatar_url.as_deref(),
+        channel_id: Some(channel_id_str),
+        pubkey: None,
+        text,
+        image_urls,
+    };
+    if !state.record_inbound_message(opencrab_actions::TranscriptSource::Discord, &inbound) {
+        crate::owner_warning::warn_inbound_message_dropped(
+            session_id,
+            &incoming.sender.id,
+            text.len(),
+        );
+    }
+}
+
 /// 受信メッセージを処理する。
 ///
 /// バリデーション・セッション設定・エージェント処理のスポーンを行い、即座にリターン（P1）。
@@ -502,9 +584,27 @@ async fn process_incoming_message<T: AgentRunner>(
         let session_id = format!("discord-{}-{}-{}", agent_id, guild_id, channel_id);
         ensure_discord_session(&state, &session_id, &[agent_id.clone()], &incoming);
 
-        // NOTE: ユーザーメッセージのログと会話履歴の構築は、推論本体とともに
-        // セッション単位ロックの内側（spawn 内）で行う。これにより、割り込みメッセージが
-        // 直前の推論完了前に走って履歴が不整合になり、同じ内容を二重回答する問題を防ぐ。
+        // #284 P0-1: ユーザー発言の記録は**セッションロックを取る前**に行う。
+        //
+        // 以前は `spawn_serialized` の内側（＝ロック取得後）で記録していた。長い推論が
+        // 走っている間に届いた発言は、その推論が終わるまで DB に入らず、その間に
+        // プロセスが落ちる／タスクが失われると**発言が永久に消える**。実際に
+        // 「オーナーの発言が 1 件も DB に無い」事故（#284）を起こしている。
+        //
+        // 二重回答を防ぐ不変条件（会話履歴の構築 → 推論 → 応答ログがロック内で不可分）は
+        // 壊れない。記録の方が先に確定するので、ロック内で組み立てる履歴には必ず載る。
+        record_discord_inbound(
+            &state,
+            &session_id,
+            &channel_id_str,
+            &incoming,
+            &text,
+            &image_urls,
+        );
+
+        // NOTE: 会話履歴の構築は、推論本体とともにセッション単位ロックの内側（spawn 内）で
+        // 行う。これにより、割り込みメッセージが直前の推論完了前に走って履歴が不整合に
+        // なり、同じ内容を二重回答する問題を防ぐ。
 
         let (base_prompt, agent_name) = state.build_agent_context(agent_id);
         let system_prompt = format!(
@@ -593,9 +693,8 @@ async fn process_incoming_message<T: AgentRunner>(
                 image_urls: &image_urls_spawn,
             };
 
-            // ユーザーメッセージをDBにログ（ロック内で履歴の一部として確定させる）。
-            state_spawn
-                .record_inbound_message(opencrab_actions::TranscriptSource::Discord, &inbound);
+            // NOTE: ユーザーメッセージの記録（`record_inbound_message`）はロックを取る
+            // **前**に済んでいる（#284 P0-1）。ここでやり直すと二重に記録される。
 
             // 受信の共通フック（#156 S4）: 汎用層の受信処理（現状は [Peer Review] 返信の
             // 回収 / #58）へ通す。Discord 側は**呼ぶだけ**で、解析もゲートも持たない。
@@ -1391,7 +1490,27 @@ mod wiring_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{discord_context_line, parse_discord_session, parse_seen_message_id};
+    use super::{
+        discord_context_line, parse_discord_session, parse_seen_message_id, recv_retry_backoff,
+        RECV_RETRY_BASE, RECV_RETRY_MAX,
+    };
+
+    /// #284 P0-2: 再試行間隔は指数で伸び、上限で頭打ちになる（0 にならない）。
+    ///
+    /// 0 に落ちると切断中にビジーループでログを埋める。頭打ちが無いと、長い切断の後に
+    /// 復旧しても受信再開が何時間も遅れる。
+    #[test]
+    fn recv_backoff_grows_then_caps() {
+        assert_eq!(recv_retry_backoff(1), RECV_RETRY_BASE);
+        assert_eq!(recv_retry_backoff(2), RECV_RETRY_BASE * 2);
+        assert_eq!(recv_retry_backoff(3), RECV_RETRY_BASE * 4);
+        // 何回失敗しても上限を超えず、かつ 0 にはならない（overflow で 0 に落ちない）。
+        for failures in [8u32, 20, 1_000, u32::MAX] {
+            let d = recv_retry_backoff(failures);
+            assert_eq!(d, RECV_RETRY_MAX, "failures={failures}");
+        }
+        assert!(recv_retry_backoff(0) > std::time::Duration::ZERO);
+    }
 
     #[test]
     fn parse_discord_session_guild_channel() {
