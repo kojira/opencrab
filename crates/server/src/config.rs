@@ -227,15 +227,19 @@ fn default_sc_include_archived() -> i64 {
     3
 }
 
-/// verify 段（evaluator）の設定。
+/// evaluator（契約に対する独立 rubric 評価）の設定。
 ///
-/// active タスクに contract（受け入れ条件）があるセッションの run 終了時、
-/// 新しい context の LLM 呼び出しで rubric 評価し、結果を session_logs と
-/// タスク台帳に記録する（record-only — エージェントは次ターンで gaps を見て
-/// 自己修正する）。
+/// **#291 で対話ターンからの呼び出しは撤去した**。毎ターンの採点結果が
+/// `session_logs` へ `evaluation` として積まれ、指示文つきで会話に割り込み、
+/// 直前のユーザー発言より採点の圧が勝つ事故が起きたため。評価そのものの設計
+/// （自己採点させない・別 context で rubric 評価する）は正しいので、呼ぶ場所を
+/// スリープ中（非対話時）へ移す — その配線は別 issue で行う。
+///
+/// そのため現在この設定はどこからも読まれない。既存の TOML を壊さないようキーは
+/// 残してあり、スリープ側の配線でそのまま使う想定。
 #[derive(Debug, Deserialize, Clone)]
 pub struct EvaluatorConfig {
-    /// verify 段を有効にするか。
+    /// 評価を有効にするか。
     #[serde(default = "default_evaluator_enabled")]
     pub enabled: bool,
     /// 合格スコア閾値 (0.0-1.0)。
