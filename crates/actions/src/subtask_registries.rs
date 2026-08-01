@@ -121,6 +121,7 @@ mod tests {
             tool_name: "spawn_subtask".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: None,
+            caller: crate::traits::CallerIdentity::Agent,
             lifecycle: crate::subtask::SubtaskLifecycle::new(),
         }
     }

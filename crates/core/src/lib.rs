@@ -14,6 +14,7 @@
 
 pub mod a2ui;
 pub mod agent;
+pub mod caller;
 pub mod engine;
 pub mod evaluator;
 pub mod heartbeat;
@@ -34,6 +35,7 @@ pub mod workspace;
 
 // Re-export primary types for convenience.
 pub use agent::{Agent, AgentLlmConfig, AgentModels, ModelRef};
+pub use caller::CallerIdentity;
 pub use engine::{
     ActionExecutor, ActionResult, ChatRequest, ChatResponse, DispatchCall, DispatchOutcome,
     EngineResult, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient, SkillEngine,

@@ -82,6 +82,11 @@ pub enum LoopEvent {
         channel_id_str: String,
         guild_id: String,
         is_dm: bool,
+        /// resume する親ターンの呼び出し元（#298）。subtask を spawn した run の
+        /// caller をそのまま引き継ぐ。ここを `Agent` 固定にすると、オーナー発の
+        /// ターンが subtask 決着で降格し、owner/trusted のツールが list_tools からも
+        /// dispatch からも丸ごと消える。
+        caller: opencrab_actions::CallerIdentity,
     },
     /// A2UIインタラクション応答（ボタンクリック or タイムアウト）。
     InteractionResponse {
@@ -93,6 +98,14 @@ pub enum LoopEvent {
         guild_id: String,
         response: opencrab_core::a2ui::A2uiUserAction,
         is_dm: bool,
+        /// resume する run の呼び出し元 =**その UI を描いた run の caller**
+        /// （`PendingInteraction.caller` / #298 / #302）。
+        ///
+        /// 応答者（`response.responder_id`）から導出しては**いけない**。`send_ui` の
+        /// `channel_id` は自由引数で、描画先チャンネルと resume 先セッションは
+        /// 独立している。応答者から導くと `Agent` / `TrustedUser` のターンが描いた UI を
+        /// オーナーが押した瞬間にそのセッションが `Owner` で resume する（昇格経路）。
+        caller: opencrab_actions::CallerIdentity,
     },
 }
 
@@ -305,6 +318,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         channel_id_str,
                         guild_id,
                         is_dm,
+                        caller,
                     }) => {
                         // 推論をイベントループ内で await しない。以前はここでフル推論を
                         // 直列実行していたため、サブタスクの report_progress / 完了のたびに
@@ -335,6 +349,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 voice_c,
                                 event_tx_c,
                                 registry_c,
+                                caller,
                             )
                             .await;
                         });
@@ -349,6 +364,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         guild_id,
                         response,
                         is_dm,
+                        caller,
                     }) => {
                         // SubtaskCompleted と同じ理由でループ内では await しない。
                         let gateway_c = gateway.clone();
@@ -368,6 +384,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 gateway_c,
                                 state_c,
                                 ga_c,
+                                caller,
                             )
                             .await;
                         });
@@ -848,6 +865,12 @@ async fn handle_agent_response<T: AgentRunner>(
 }
 
 /// サブタスク完了イベントを処理する（P2: イベントループで直列実行）。
+///
+/// `caller` は subtask を spawn した**元のターンの呼び出し元**（#298）。resume は
+/// 元の会話の続きなので、ここで最小権限へ落とすと owner/trusted のツールが
+/// `policy_allows` で list_tools からも dispatch からも消える。引き継ぐだけで、
+/// 昇格はしない（元が `Agent` のターンは `Agent` のまま）。
+#[allow(clippy::too_many_arguments)]
 async fn process_subtask_completed<T: AgentRunner>(
     session_id: String,
     agent_id: String,
@@ -864,6 +887,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    caller: opencrab_actions::CallerIdentity,
 ) {
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
 
@@ -913,7 +937,10 @@ async fn process_subtask_completed<T: AgentRunner>(
                 &system_prompt,
                 &conversation,
                 "discord",
-                opencrab_actions::CallerIdentity::Agent,
+                // 元のターンの呼び出し元をそのまま使う（#298）。以前はここが
+                // `CallerIdentity::Agent` 固定で、subtask が決着した瞬間に権限が
+                // 降格していた。
+                caller,
             )
             .with_gateway_actions(gateway_actions)
             // 返信先（gateway 不透明 token / #158 S1）= resume 対象チャンネルの数値文字列。
@@ -1013,6 +1040,12 @@ async fn handle_component_interaction(
                     false,
                     pending.surface_id.clone(),
                     pending.rendered_message.clone(),
+                    // resume の呼び出し元は**この UI を描いた run の caller**（#302）。
+                    // クリックした本人からは導出しない: 上の owner-only ゲートで
+                    // 押せるのはオーナーだけなので、応答者から導くと
+                    // 「`Agent` のターンが描いた UI をオーナーが押す」＝昇格に
+                    // なってしまう。
+                    pending.caller.clone(),
                 ))
             }
             None => {
@@ -1025,11 +1058,19 @@ async fn handle_component_interaction(
         }
     };
 
-    let (session_id, agent_id, channel_id, channel_id_str, is_dm, surface_id, rendered_message) =
-        match pending_data {
-            Some(d) => d,
-            None => return,
-        };
+    let (
+        session_id,
+        agent_id,
+        channel_id,
+        channel_id_str,
+        is_dm,
+        surface_id,
+        rendered_message,
+        caller,
+    ) = match pending_data {
+        Some(d) => d,
+        None => return,
+    };
 
     // Handle ModalSubmit: extract field values and merge into context
     if data.interaction_kind == opencrab_gateway::InteractionKind::ModalSubmit {
@@ -1059,6 +1100,7 @@ async fn handle_component_interaction(
                 responder_id: data.user_id,
             },
             is_dm,
+            caller: caller.clone(),
         });
         return;
     }
@@ -1110,6 +1152,7 @@ async fn handle_component_interaction(
                 responder_id: data.user_id,
             },
             is_dm,
+            caller: caller.clone(),
         });
         return;
     }
@@ -1148,6 +1191,7 @@ async fn handle_component_interaction(
             responder_id: data.user_id,
         },
         is_dm,
+        caller,
     });
 }
 
@@ -1155,6 +1199,17 @@ async fn handle_component_interaction(
 ///
 /// SubtaskCompletedと同様のパターンで、応答情報をシステムプロンプトに含めて
 /// エージェントを再呼び出しする。
+///
+/// `caller` は**この UI を描いた run の呼び出し元**（`PendingInteraction.caller` /
+/// #298 / #302）。subtask 決着の resume（[`process_subtask_completed`]）とまったく
+/// 同じ方針で、元のターンの呼び出し元を**引き継ぐだけ**。
+///
+/// `CallerIdentity::Agent` 固定にすると owner/trusted のツールが `policy_allows` で
+/// 丸ごと消える（降格）。逆に応答者（`response.responder_id`）から導出すると昇格経路に
+/// なる: `send_ui` の `channel_id` は自由引数なので、描画先チャンネルと resume 先
+/// セッションは独立している。`Agent` のターンがオーナーの見るチャンネルへ UI を描き、
+/// オーナーが押すとそのセッションが `Owner` で resume してしまう。
+#[allow(clippy::too_many_arguments)]
 async fn process_interaction_response<T: AgentRunner>(
     interaction_id: String,
     session_id: String,
@@ -1167,6 +1222,7 @@ async fn process_interaction_response<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+    caller: opencrab_actions::CallerIdentity,
 ) {
     info!(
         interaction_id = %interaction_id,
@@ -1252,7 +1308,7 @@ async fn process_interaction_response<T: AgentRunner>(
                 &system_prompt,
                 &conversation,
                 "discord",
-                opencrab_actions::CallerIdentity::Agent,
+                caller,
             )
             .with_gateway_actions(gateway_actions)
             // 返信先（gateway 不透明 token / #158 S1）= UI 応答が来たチャンネルの数値文字列。

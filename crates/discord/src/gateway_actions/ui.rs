@@ -52,6 +52,10 @@ impl UiResponseSink for DiscordUiResponseSink {
             guild_id: String::new(),
             response: ev.response,
             is_dm: false,
+            // resume の呼び出し元は保留エントリ由来（= UI を描いた run の caller）を
+            // そのまま運ぶ（#302）。この sink はタイムアウト経路なので応答者
+            // （`responder_id = "system"`）が存在せず、応答者から導出する余地は無い。
+            caller: ev.caller,
         });
     }
 }
@@ -92,6 +96,13 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn event(channel_id: &str) -> UiResponseEvent {
+        event_with_caller(channel_id, opencrab_actions::CallerIdentity::Owner)
+    }
+
+    fn event_with_caller(
+        channel_id: &str,
+        caller: opencrab_actions::CallerIdentity,
+    ) -> UiResponseEvent {
         UiResponseEvent {
             interaction_id: "i1".into(),
             session_id: "discord-a1-111-222".into(),
@@ -107,6 +118,7 @@ mod tests {
                 context: None,
                 responder_id: "system".into(),
             },
+            caller,
         }
     }
 
@@ -125,6 +137,7 @@ mod tests {
                 guild_id,
                 response,
                 is_dm,
+                caller,
             } => {
                 assert_eq!(interaction_id, "i1");
                 assert_eq!(session_id, "discord-a1-111-222");
@@ -135,8 +148,34 @@ mod tests {
                 assert_eq!(guild_id, "");
                 assert!(!is_dm);
                 assert_eq!(response.action_name, "timeout");
+                assert_eq!(caller, opencrab_actions::CallerIdentity::Owner);
             }
             _ => panic!("unexpected loop event"),
+        }
+    }
+
+    /// #302: タイムアウト通知の呼び出し元（= UI を描いた run の caller）をそのまま運ぶ。
+    ///
+    /// ここで `Agent` へ倒すと、オーナー発のターンが「誰も押さなかった」だけで降格して
+    /// owner/trusted のツールが消える（#298 と同じ症状）。逆に元が `Agent` のターンは
+    /// `Agent` のまま = 昇格経路にならない。
+    #[test]
+    fn sink_forwards_the_drawing_run_caller() {
+        for expected in [
+            opencrab_actions::CallerIdentity::Owner,
+            opencrab_actions::CallerIdentity::TrustedUser,
+            opencrab_actions::CallerIdentity::Agent,
+        ] {
+            let (tx, mut rx) = mpsc::unbounded_channel::<LoopEvent>();
+            let sink = DiscordUiResponseSink { event_tx: tx };
+            sink.on_ui_response(event_with_caller("222", expected.clone()));
+            match rx.try_recv().expect("event") {
+                LoopEvent::InteractionResponse { caller, .. } => assert_eq!(
+                    caller, expected,
+                    "タイムアウト resume が UI を描いた run の呼び出し元を運んでいない"
+                ),
+                _ => panic!("unexpected loop event"),
+            }
         }
     }
 

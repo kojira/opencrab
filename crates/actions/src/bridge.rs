@@ -1538,6 +1538,88 @@ mod tests {
         );
     }
 
+    /// #298: subtask 決着で resume したターンでも owner/trusted のツールが残る。
+    ///
+    /// `policy_allows` がこのバグの実体（`trusted_only && !caller_is_trusted()` で
+    /// **list_tools からも dispatch からも**落ちる）なので、ここで固定するのは
+    /// 「決着通知が運ぶ呼び出し元でツール一覧を組めば元ターンと同じ集合になる」こと。
+    /// 通知の caller は `settle_completed` が registry のエントリから読む実物を使う。
+    #[tokio::test]
+    async fn resumed_turn_keeps_owner_and_trusted_tools() {
+        use crate::subtask::{
+            settle_completed, SettleContext, SpawnedSubtask, SubtaskCompletionSink,
+            SubtaskLifecycle, SubtaskRegistry, SubtaskSettled,
+        };
+
+        /// 決着通知を 1 件だけ捕まえる sink。
+        #[derive(Default)]
+        struct CaptureSink(std::sync::Mutex<Option<SubtaskSettled>>);
+        impl SubtaskCompletionSink for CaptureSink {
+            fn on_subtask_settled(&self, ev: SubtaskSettled) {
+                *self.0.lock().unwrap() = Some(ev);
+            }
+        }
+
+        // owner 発のターンが subtask を spawn した状態を作る。
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = std::sync::Arc::new(dashmap::DashMap::new());
+        registry.insert(
+            "st-1".to_string(),
+            SpawnedSubtask {
+                abort_handle: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+                session_id: "subtask-st-1".to_string(),
+                parent_session_id: "discord-agent-1-1-2".to_string(),
+                agent_id: "agent-1".to_string(),
+                label: "job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                caller: CallerIdentity::Owner,
+                lifecycle: SubtaskLifecycle::new(),
+            },
+        );
+
+        let sink = CaptureSink::default();
+        settle_completed(
+            &registry,
+            &db,
+            &sink,
+            SettleContext {
+                parent_session_id: "discord-agent-1-1-2".to_string(),
+                agent_id: "agent-1".to_string(),
+                subtask_id: "st-1".to_string(),
+                sub_session_id: "subtask-st-1".to_string(),
+                exit_reason: "completed".to_string(),
+                lifecycle: SubtaskLifecycle::new(),
+            },
+            "done",
+        );
+        let ev = sink.0.lock().unwrap().take().expect("sink が発火する");
+
+        // resume 側は決着通知の caller で実行文脈を組む。
+        let (_dir, ctx) = test_context_with_caller(ev.caller);
+        let resumed = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
+        let names: Vec<String> = resumed.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(
+            names.iter().any(|n| n == "create_skill"),
+            "resume 後に trusted_only のツールが消えている: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "update_instructions"),
+            "resume 後に owner_only のツールが消えている: {names:?}"
+        );
+
+        // 対照: 最小権限へ降格すると同じツールが丸ごと消える（= このバグの実害）。
+        let (_dir2, ctx2) = test_context_with_caller(CallerIdentity::Agent);
+        let demoted = BridgedExecutor::new(ActionDispatcher::new(), ctx2)
+            .with_gateway_actions(Arc::new(MockGatewayActionsWithSkills));
+        let demoted_names: Vec<String> = demoted.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(!demoted_names.iter().any(|n| n == "create_skill"));
+        assert!(!demoted_names.iter().any(|n| n == "update_instructions"));
+    }
+
     // ---- owner_only_actions filtering ----
 
     #[test]

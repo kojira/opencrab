@@ -7,7 +7,7 @@
 //! （兄弟モジュールの private 項目）。resume は必ず直列化込みの
 //! [`run_and_deliver_serialized`] を通る = ロック取得の忘れがコンパイル時に不可能。
 
-use opencrab_actions::{CallerIdentity, SettleKind, SubtaskCompletionSink, SubtaskSettled};
+use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
 
 use crate::gateway::WEB_SESSION_PREFIX;
 use crate::respond::run_and_deliver_serialized;
@@ -72,7 +72,10 @@ impl<R: WebAgentRunner> SubtaskCompletionSink for WebCompletionSink<R> {
                 &runner,
                 &ev.agent_id,
                 &ev.session_id,
-                CallerIdentity::Agent,
+                // 元のターン（subtask を spawn した run）の呼び出し元で再開する
+                // （#298）。以前は `CallerIdentity::Agent` 固定だったため、オーナー発の
+                // ターンでも resume の瞬間に owner/trusted のツールが消えていた。
+                ev.caller,
                 Some(&note),
                 "subtask_resume",
             )
@@ -84,12 +87,18 @@ impl<R: WebAgentRunner> SubtaskCompletionSink for WebCompletionSink<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrab_actions::CallerIdentity;
     use std::time::Duration;
 
     use crate::gateway::web_session_id;
     use crate::testing::FakeRunner;
 
     fn settled(session_id: &str, kind: SettleKind) -> SubtaskSettled {
+        settled_as(session_id, kind, CallerIdentity::Agent)
+    }
+
+    /// 親ターンの呼び出し元を明示した決着イベント（#298）。
+    fn settled_as(session_id: &str, kind: SettleKind, caller: CallerIdentity) -> SubtaskSettled {
         SubtaskSettled {
             session_id: session_id.to_string(),
             agent_id: "a".to_string(),
@@ -97,6 +106,7 @@ mod tests {
             exit_reason: "completed".to_string(),
             kind,
             reply_target: None,
+            caller,
         }
     }
 
@@ -121,6 +131,41 @@ mod tests {
         assert!(runs[0]
             .system_prompt
             .contains("[subtask_completed: subtask_id=st-1, exit_reason=completed]"));
+    }
+
+    /// #298: resume は subtask を spawn した元ターンの呼び出し元で走る。
+    ///
+    /// `CallerIdentity::Agent` 固定にすると、`policy_allows` が owner/trusted の
+    /// ツールを list_tools からも dispatch からも落とす（= 決着した瞬間にツールが消える）。
+    #[tokio::test]
+    async fn resume_preserves_the_original_caller() {
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::TrustedUser,
+            // 昇格経路は作らない（元が Agent なら Agent のまま）。
+            CallerIdentity::Agent,
+        ] {
+            let runner = FakeRunner::new("ok");
+            let sid = web_session_id("a", "caller");
+            WebCompletionSink::new(runner.clone()).on_subtask_settled(settled_as(
+                &sid,
+                SettleKind::Completed,
+                caller.clone(),
+            ));
+
+            for _ in 0..100 {
+                if !runner.runs().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let runs = runner.runs();
+            assert_eq!(runs.len(), 1, "resume が走っていない");
+            assert_eq!(
+                runs[0].caller, caller,
+                "resume が元ターンの呼び出し元を引き継いでいない"
+            );
+        }
     }
 
     /// 進捗通知（Progress）では resume しない（走行中の run への二重応答の防止）。

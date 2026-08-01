@@ -1240,6 +1240,7 @@ mod tests {
                 exit_reason: "completed".to_string(),
                 kind: SettleKind::Completed,
                 reply_target: None,
+                caller: opencrab_actions::CallerIdentity::Agent,
             });
     }
 

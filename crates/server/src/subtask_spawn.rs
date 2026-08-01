@@ -343,6 +343,11 @@ pub async fn spawn_subtask(
             started_at: started_instant,
             // 明示 spawn の返信先は親セッションから復元する（sink 側の責務 / #167）。
             reply_target: None,
+            // 親ターンの呼び出し元を保持する（#298）。sub-engine 自身は最小権限
+            // （上の `CallerIdentity::Agent`）で走るが、決着後に**親会話を resume**
+            // する sink は元の権限で再開しなければならない。ここで落とすと、
+            // オーナー発のターンが subtask 決着の瞬間に Agent へ降格する。
+            caller: opencrab_actions::CallerIdentity::from(&ctx.caller),
             lifecycle,
         },
     );
@@ -707,6 +712,55 @@ mod tests {
             wait_until(|| reg.is_empty()).await,
             "登録簿にエントリが残った"
         );
+    }
+
+    /// #298: spawn した subtask は**親ターンの呼び出し元**を登録簿に持つ。
+    ///
+    /// 決着時に `settle_completed` がこれを読んで sink へ渡し、resume が元の権限で
+    /// 走る。sub-engine 自身は最小権限（`CallerIdentity::Agent`）のままで、ここで
+    /// 保持するのは resume の宛先権限だけ。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawned_subtask_records_the_parent_caller() {
+        let state = state_with_stub_llm("never", true);
+        let reg = registry();
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(reg.clone()), None);
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("discord-agent-x-1-2");
+        let res = actions
+            .execute("spawn_subtask", &json!({ "task": "長い仕事" }), &ctx)
+            .await;
+        assert!(res.success, "spawn_subtask: {:?}", res.error);
+
+        let subtask_id = spawned_id(&res);
+        let entry = reg.get(&subtask_id).expect("登録簿に載る");
+        assert_eq!(
+            entry.caller,
+            opencrab_actions::CallerIdentity::Owner,
+            "親ターンの呼び出し元が登録簿に保持されていない（resume で降格する）"
+        );
+        entry.abort_handle.abort();
+    }
+
+    /// 昇格経路にはしない: 親が `Agent` なら登録簿の caller も `Agent`。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawned_subtask_does_not_escalate_agent_callers() {
+        let state = state_with_stub_llm("never", true);
+        let reg = registry();
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(reg.clone()), None);
+
+        let res = actions
+            .execute(
+                "spawn_subtask",
+                &json!({ "task": "長い仕事" }),
+                &parent_ctx("web-parent-1"),
+            )
+            .await;
+        assert!(res.success, "{:?}", res.error);
+        let subtask_id = spawned_id(&res);
+        let entry = reg.get(&subtask_id).expect("登録簿に載る");
+        assert_eq!(entry.caller, opencrab_actions::CallerIdentity::Agent);
+        entry.abort_handle.abort();
     }
 
     /// セッション必須ガード（fail-closed）: session_id が無い文脈では起動できない。

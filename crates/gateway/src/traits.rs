@@ -31,6 +31,31 @@ impl GatewayCaller {
     }
 }
 
+/// gateway 境界の caller から dispatcher 側の識別子へ戻す（#298）。
+///
+/// 逆向き（`CallerIdentity` → [`GatewayCaller`]）は
+/// `BridgedExecutor::gateway_call_context` が行う。両者は同型なので写像は無損失で、
+/// `GatewayCallContext` しか持たないツールハンドラ（`spawn_subtask` / `send_ui`）が
+/// 「この run の呼び出し元」をそのまま記録できるようにするために必要。
+/// **権限を変換しない**（昇格も降格もしない）。
+///
+/// 実装がここ（gateway）にあるのは孤児規則のため: `CallerIdentity` は core、
+/// `GatewayCaller` は gateway にあるので、両方が外部型になる `opencrab-actions`
+/// では書けない。
+impl From<&GatewayCaller> for opencrab_core::caller::CallerIdentity {
+    fn from(caller: &GatewayCaller) -> Self {
+        use opencrab_core::caller::CallerIdentity;
+        match caller {
+            GatewayCaller::Owner => CallerIdentity::Owner,
+            GatewayCaller::Agent => CallerIdentity::Agent,
+            GatewayCaller::CoAgent { agent_id } => CallerIdentity::CoAgent {
+                agent_id: agent_id.clone(),
+            },
+            GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,
+        }
+    }
+}
+
 /// ゲートウェイアクション実行時の呼び出しコンテキスト（#36）。
 ///
 /// bridge（実行境界）が構築し、gateway 実装へ型付きで渡す。ツール引数 JSON には

@@ -24,6 +24,8 @@ use opencrab_core::{
 };
 use tokio::task::AbortHandle;
 
+use crate::traits::CallerIdentity;
+
 /// dispatch した subtask の既定タイムアウト（秒）。`spawn_subtask` の既定と揃える
 /// （`crates/discord/src/gateway_actions/subtask_engine.rs` の `timeout_secs`）。
 ///
@@ -176,6 +178,19 @@ pub struct SubtaskSettled {
     /// できる sink は `None` のままでよい（無視する）。`None` は「返信配送先の
     /// 指定なし」を意味し、sink 側の既存挙動を変えない。
     pub reply_target: Option<String>,
+    /// **この subtask を生んだ親 run の呼び出し元**（#298）。
+    ///
+    /// resume する sink（Discord / web）はこの値で `RunRequest` を組む。以前は
+    /// resume 側が `CallerIdentity::Agent` をハードコードしていたため、オーナー発の
+    /// ターンでも subtask が決着した瞬間に権限が降格し、owner/trusted のツールが
+    /// list_tools からも dispatch からも丸ごと消えていた（`report_progress` を
+    /// 呼ぶと自分の権限が落ちる、という自爆的な挙動）。
+    ///
+    /// ランタイム（`settle_completed` / `cancel_subtask`）が registry のエントリ
+    /// （`SpawnedSubtask.caller`）から読んで載せる。**引き継ぐだけ**で、権限を昇格
+    /// させる経路ではない（元が `Agent` のターンは `Agent` のまま）。registry から
+    /// 引けなかった場合は最小権限（`Agent`）へ倒す（fail-closed）。
+    pub caller: CallerIdentity,
 }
 
 /// subtask 完了通知の抽象（`LoopEvent` 直依存を置換する）。
@@ -272,6 +287,14 @@ pub struct SpawnedSubtask {
     /// settle 時にランタイムが registry から引いて sink へ渡す。
     /// `None` なら返信配送しない。
     pub reply_target: Option<String>,
+    /// **この subtask を生んだ親 run の呼び出し元**（#298）。
+    ///
+    /// 決着時に `settle_completed` / `cancel_subtask` が読み出して
+    /// [`SubtaskSettled::caller`] へ載せ、resume する sink が同じ権限で親ターンを
+    /// 再開できるようにする。registry はプロセス内メモリで、resume も同一プロセス内
+    /// （sink 呼び出し）なので永続化は不要 — プロセスが落ちれば走行中 subtask 自体が
+    /// 消え、resume も起きない。
+    pub caller: CallerIdentity,
     /// 「停止」と「決着」の排他ラッチ。`cancel_subtask` が `claim_cancel` を、
     /// 走行タスク側の `settle_completed` が `claim_settle` を主張し、先に主張した
     /// 一方だけが有効になる（cancel 後の完了 sink 発火を防ぐ）。
@@ -374,11 +397,27 @@ pub fn settle_completed(
         }
     }
 
-    // 2. registry から除去し、除去したエントリから reply_target を回収する。
-    //    remove 後は引けないため、remove の戻り値から読み出す（#167）。
-    let reply_target = registry
-        .remove(&ctx.subtask_id)
-        .and_then(|(_, subtask)| subtask.reply_target);
+    // 2. registry から除去し、除去したエントリから reply_target と caller を回収する。
+    //    remove 後は引けないため、remove の戻り値から読み出す（#167 / #298）。
+    let removed = registry.remove(&ctx.subtask_id).map(|(_, subtask)| subtask);
+    let reply_target = removed.as_ref().and_then(|s| s.reply_target.clone());
+    // registry に載っていない一発呼び（テスト等）は最小権限へ倒す（fail-closed）。
+    //
+    // 本番でここに来るのは「insert した registry と settle に渡す registry の食い違い」
+    // ＝配線バグで、#298 が直した降格（owner/trusted のツールが resume の瞬間に
+    // 消える）が無言で復活する。黙って倒さず必ず記録する（#302）。
+    let caller = match removed {
+        Some(subtask) => subtask.caller,
+        None => {
+            tracing::warn!(
+                subtask_id = %ctx.subtask_id,
+                session_id = %ctx.parent_session_id,
+                "subtask registry entry missing at settlement; resuming with least privilege \
+                 (registry wiring mismatch?)"
+            );
+            crate::traits::CallerIdentity::Agent
+        }
+    };
 
     // 3. sink を発火する（本文は運ばない = DB 永続化済み）。
     sink.on_subtask_settled(SubtaskSettled {
@@ -388,6 +427,7 @@ pub fn settle_completed(
         exit_reason: ctx.exit_reason,
         kind: SettleKind::Completed,
         reply_target,
+        caller,
     });
 }
 
@@ -562,6 +602,7 @@ pub fn cancel_subtask(
                     exit_reason: "cancelled".to_string(),
                     kind: SettleKind::Cancelled,
                     reply_target: subtask.reply_target.clone(),
+                    caller: subtask.caller.clone(),
                 });
             }
             CancelOutcome::Cancelled
@@ -746,6 +787,12 @@ pub struct SubtaskToolDispatcher {
     /// そのまま全 dispatch へ引き継ぐ。`None` なら返信配送先の指定なし（Discord は
     /// session_id から復元するため `None` のままでよい）。
     reply_target: Option<String>,
+    /// 親 run（この dispatcher を持つターン）の呼び出し元（#298）。
+    ///
+    /// dispatch した `SpawnedSubtask.caller` に載り、settle 時に
+    /// `SubtaskSettled.caller` として sink へ届く。resume が元の権限を落とさない
+    /// ための引き継ぎで、既定は最小権限（`Agent`）。
+    caller: CallerIdentity,
     /// バッチ全体の実行時間上限。超過すると `exit_reason="timeout"` で settle する。
     timeout: std::time::Duration,
     /// 上限超過の tool_result を退避するエージェントのワークスペース root
@@ -772,6 +819,7 @@ impl SubtaskToolDispatcher {
             parent_session_id: parent_session_id.into(),
             non_dispatch: default_non_dispatch_tools(),
             reply_target: None,
+            caller: CallerIdentity::Agent,
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
             workspace_root: None,
         }
@@ -804,6 +852,16 @@ impl SubtaskToolDispatcher {
     /// へ載せるため、sink は session_id に依らず返信先を得られる。
     pub fn with_reply_target(mut self, reply_target: Option<String>) -> Self {
         self.reply_target = reply_target;
+        self
+    }
+
+    /// dispatch する subtask に載せる**親 run の呼び出し元**を設定する（#298）。
+    ///
+    /// settle 時に `settle_completed` が registry から引いて `SubtaskSettled` へ載せる
+    /// ため、resume する sink は元のターンと同じ権限で親を再開できる。未設定なら
+    /// 最小権限（`Agent`）のまま = 従来挙動。
+    pub fn with_caller(mut self, caller: CallerIdentity) -> Self {
+        self.caller = caller;
         self
     }
 }
@@ -1088,6 +1146,8 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 tool_name: tool_names,
                 started_at: std::time::Instant::now(),
                 reply_target: self.reply_target.clone(),
+                // 親ターンの呼び出し元をそのまま引き継ぐ（#298）。
+                caller: self.caller.clone(),
                 lifecycle,
             },
         );
@@ -1156,6 +1216,7 @@ mod tests {
             exit_reason: "completed".to_string(),
             kind: SettleKind::Completed,
             reply_target: None,
+            caller: CallerIdentity::Agent,
         });
 
         // downcast せずに検証するため、具象型で1つ生成しても振る舞いを確認できる。
@@ -1167,6 +1228,7 @@ mod tests {
             exit_reason: "progress".to_string(),
             kind: SettleKind::Progress,
             reply_target: None,
+            caller: CallerIdentity::Agent,
         });
         let events = recording.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -1197,6 +1259,7 @@ mod tests {
                 tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                caller: CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
             },
         );
@@ -1253,6 +1316,14 @@ mod tests {
     /// 「DB 永続化 → registry 除去 → sink 発火」の順序契約もここで併せて検証する
     /// （sink 発火時点で完了ログが着地済み・registry から除去済み）。
     async fn settle_and_capture(reply_target: Option<&str>) -> SubtaskSettled {
+        settle_and_capture_as(reply_target, CallerIdentity::Agent).await
+    }
+
+    /// `settle_and_capture` の呼び出し元指定版（#298）。
+    async fn settle_and_capture_as(
+        reply_target: Option<&str>,
+        caller: CallerIdentity,
+    ) -> SubtaskSettled {
         use std::sync::atomic::{AtomicI64, Ordering};
 
         let conn = opencrab_db::init_memory().unwrap();
@@ -1272,6 +1343,7 @@ mod tests {
                 tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: reply_target.map(|s| s.to_string()),
+                caller,
                 lifecycle: SubtaskLifecycle::new(),
             },
         );
@@ -1351,6 +1423,24 @@ mod tests {
         assert_eq!(ev.reply_target.as_deref(), Some("nostr:note1abcdef"));
         assert_eq!(ev.kind, SettleKind::Completed);
         assert_eq!(ev.subtask_id, "sub-rt");
+    }
+
+    /// #298: settle 時に registry の `caller`（= subtask を spawn した親 run の
+    /// 呼び出し元）を読み出して sink へ渡す。resume する sink はこれで元の権限のまま
+    /// 親ターンを再開できる。落とすと owner/trusted のツールが `policy_allows` で
+    /// list_tools からも dispatch からも消える。
+    #[tokio::test]
+    async fn settle_completed_passes_caller_to_sink() {
+        let ev = settle_and_capture_as(None, CallerIdentity::Owner).await;
+        assert_eq!(
+            ev.caller,
+            CallerIdentity::Owner,
+            "決着通知が呼び出し元を落としている（resume が最小権限へ降格する）"
+        );
+
+        // 昇格経路は作らない: 元が Agent なら Agent のまま。
+        let ev = settle_and_capture_as(None, CallerIdentity::Agent).await;
+        assert_eq!(ev.caller, CallerIdentity::Agent);
     }
 
     /// #167 非退行: `reply_target` が None（Discord 経路）なら None のまま渡り、
@@ -1521,6 +1611,61 @@ mod tests {
             "RunRequest の reply_target が settle 時に sink まで届く"
         );
         assert_eq!(events[0].session_id, "nostr-agent-a-npub1sender");
+    }
+
+    /// #298: `RunRequest.caller` が（`process.rs` と同じ配線で）dispatcher →
+    /// `SpawnedSubtask` → settle → sink まで一貫して運ばれる。
+    ///
+    /// 非ブロック dispatch は**普通のツール呼び出し**を background 化するので、
+    /// オーナー発のターンでツールを 1 つ呼んだだけで resume が起きる。ここで
+    /// 呼び出し元が落ちると、その resume 以降 owner/trusted のツールが丸ごと消える。
+    #[tokio::test]
+    async fn run_request_caller_reaches_sink_via_dispatcher() {
+        use crate::RunRequest;
+
+        for caller in [CallerIdentity::Owner, CallerIdentity::Agent] {
+            let conn = opencrab_db::init_memory().unwrap();
+            let db = opencrab_db::Db::from_connection(conn);
+            let registry: SubtaskRegistry = Arc::new(DashMap::new());
+            let sink = Arc::new(RecordingSink::default());
+
+            let req = RunRequest::new(
+                "agent-a",
+                "A",
+                "discord-agent-a-1-2",
+                "sys",
+                "conv",
+                "discord",
+                caller.clone(),
+            )
+            .with_dispatch(Some(registry.clone()), sink.clone());
+
+            let executor: Arc<dyn ActionExecutor> = Arc::new(FakeExecutor { pending: false });
+            let dispatcher = SubtaskToolDispatcher::new(
+                executor,
+                registry.clone(),
+                db.clone(),
+                sink.clone(),
+                req.agent_id.clone(),
+                req.session_id.clone(),
+            )
+            .with_caller(req.caller.clone());
+
+            dispatch_one(&dispatcher, "some_tool", serde_json::json!({}), "tc-1");
+
+            for _ in 0..200 {
+                if !sink.events.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let events = sink.events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].caller, caller,
+                "RunRequest の caller が settle 時に sink まで届いていない"
+            );
+        }
     }
 
     /// #167: `NoopCompletionSink` は sink 実装を書かずに `with_dispatch`
@@ -1818,6 +1963,7 @@ mod tests {
                 tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                caller: CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
             },
         );
@@ -1845,6 +1991,41 @@ mod tests {
         assert!(
             logs.iter().any(|l| l.log_type == "tool_cancelled"),
             "親ログに tool_cancelled が記録される"
+        );
+    }
+
+    /// #302: 停止通知も registry のエントリの呼び出し元をそのまま運ぶ。
+    ///
+    /// `on_subtask_cancelled` の既定実装は resume しないので現状は無害だが、sink が
+    /// これを override した瞬間に「停止だけ最小権限へ降格する」が復活しうる。
+    #[tokio::test]
+    async fn cancel_subtask_carries_the_parent_caller_to_the_sink() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let _handle = insert_fake_subtask(&registry, "st-1", parent);
+        // オーナー発のターンが spawn した状態にする。
+        registry.get_mut("st-1").unwrap().caller = CallerIdentity::Owner;
+
+        let sink = RecordingSink::default();
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            Some(&sink),
+            None,
+            "st-1",
+            false,
+            Some(parent),
+        );
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let cancelled = sink.cancelled.lock().unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            cancelled[0].caller,
+            CallerIdentity::Owner,
+            "停止通知が元ターンの呼び出し元を落としている"
         );
     }
 
@@ -1919,6 +2100,7 @@ mod tests {
             tool_name: "spawn_subtask".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: Some("channel:456".to_string()),
+            caller: CallerIdentity::Agent,
             lifecycle: SubtaskLifecycle::new(),
         };
         registry.insert("sub-1".to_string(), entry);

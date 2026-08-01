@@ -269,6 +269,11 @@ pub async fn send_ui(
             // 未設定（空文字・空白のみ）なら誰も操作できない（fail-closed, #174）。
             // ここが空のまま登録すると、その UI は誰の操作にも応答しない。
             owner_id: surface.owner_id.clone(),
+            // この UI を描いた run の呼び出し元をそのまま保持する（#298 / #302）。
+            // 応答（クリック・タイムアウト）の resume はここから引き継ぐ。
+            // 応答者から導出すると、`channel_id` が自由引数で描画先と resume 先が
+            // 独立しているせいで昇格経路になる。
+            caller: crate::traits::CallerIdentity::from(&ctx.caller),
             created_at: chrono::Utc::now(),
             timeout_secs,
             rendered_message: rendered.clone(),
@@ -314,6 +319,11 @@ pub async fn send_ui(
                         context: None,
                         responder_id: "system".into(),
                     },
+                    // タイムアウトも「UI を描いた run の続き」なので、保留エントリの
+                    // caller をそのまま運ぶ（#302）。ここで `Agent` へ倒すと、オーナー発の
+                    // ターンが「誰も押さなかった」だけで降格する = #298 と同じ症状。
+                    // 元が `Agent` のターンなら `Agent` のまま（昇格経路にならない）。
+                    caller: pending.caller.clone(),
                 });
             }
         });
@@ -634,6 +644,7 @@ mod tests {
                 context: None,
                 responder_id: "system".into(),
             },
+            caller: pending.caller.clone(),
         });
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -642,6 +653,97 @@ mod tests {
         assert_eq!(events[0].response.action_name, "timeout");
         assert_eq!(events[0].response.responder_id, "system");
         assert!(reg.get(&id).is_none());
+    }
+
+    /// #302: タイムアウト経路も**UI を描いた run の呼び出し元**で resume する。
+    ///
+    /// 実際の監視タスクを回す（時計は止めて即進める）。誰も押さなかっただけで
+    /// `Agent` へ倒すと、オーナー発のターンが降格して owner/trusted のツールが
+    /// `policy_allows` で丸ごと消える（#298 と同じ症状）。逆に元が `Agent` の
+    /// ターンは `Agent` のまま = 昇格経路にはならない。
+    #[tokio::test(start_paused = true)]
+    async fn timeout_resume_inherits_the_drawing_run_caller() {
+        async fn fire_timeout(caller: GatewayCaller) -> crate::traits::CallerIdentity {
+            let db = opencrab_db::Db::memory().unwrap();
+            let (s, sink) = surface(true, "o");
+            let ctx = GatewayCallContext::new(caller, "a1").with_session_id("sess-1");
+            let r = send_ui(
+                &db,
+                &s,
+                &json!({"channel_id": "77", "components": text_component(), "timeout_secs": 10}),
+                &ctx,
+            )
+            .await;
+            assert!(r.success);
+            // 監視タスクの sleep(10s) を消化させる（start_paused なので実時間は進まない）。
+            tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+            tokio::task::yield_now().await;
+            let events = sink.events.lock().unwrap();
+            assert_eq!(events.len(), 1, "タイムアウトが sink へ届いていない");
+            assert_eq!(events[0].response.action_name, "timeout");
+            events[0].caller.clone()
+        }
+
+        assert_eq!(
+            fire_timeout(GatewayCaller::Owner).await,
+            crate::traits::CallerIdentity::Owner,
+            "タイムアウトで resume したオーナー発のターンが降格している"
+        );
+        assert_eq!(
+            fire_timeout(GatewayCaller::Agent).await,
+            crate::traits::CallerIdentity::Agent,
+            "タイムアウトの resume が権限の昇格経路になってはならない"
+        );
+    }
+
+    /// #302: 保留登録は**UI を描いた run の呼び出し元**を保持する。
+    ///
+    /// 応答（クリック・タイムアウト）の resume はここから引き継ぐ。応答者から
+    /// 導出しないのは、`channel_id` が自由引数で描画先チャンネルと resume 先
+    /// セッション（`ctx.session_id`）が独立しているため。
+    #[tokio::test]
+    async fn pending_registration_records_the_drawing_run_caller() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let (s, _sink) = surface(true, "owner-42");
+
+        // オーナー発のターンが描いた UI。
+        let r = send_ui(
+            &db,
+            &s,
+            &json!({"channel_id": "555", "components": text_component()}),
+            &ctx_with_session(),
+        )
+        .await;
+        let id = r.data.unwrap()["interaction_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let reg = s.pending.as_ref().unwrap().registry.clone();
+        assert_eq!(
+            reg.get(&id).unwrap().caller,
+            crate::traits::CallerIdentity::Owner,
+            "オーナー発のターンが描いた UI の resume が降格する"
+        );
+
+        // 最小権限のターンが描いた UI は `Agent` のまま（昇格経路にならない）。
+        let agent_ctx =
+            GatewayCallContext::new(GatewayCaller::Agent, "a1").with_session_id("sess-1");
+        let r = send_ui(
+            &db,
+            &s,
+            &json!({"channel_id": "555", "components": text_component()}),
+            &agent_ctx,
+        )
+        .await;
+        let id = r.data.unwrap()["interaction_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            reg.get(&id).unwrap().caller,
+            crate::traits::CallerIdentity::Agent,
+            "UI 応答が権限の昇格経路になってはならない"
+        );
     }
 
     /// プロセス再起動を模す: メモリ上の登録簿は空、DB には `pending` の行だけがある。
@@ -720,6 +822,7 @@ mod tests {
                 context: None,
                 responder_id: "r".into(),
             },
+            caller: crate::traits::CallerIdentity::Owner,
         };
         // 分解束縛で全フィールドを列挙する。本文フィールドを足すとここが落ちる。
         let UiResponseEvent {
@@ -728,11 +831,13 @@ mod tests {
             agent_id,
             target,
             response,
+            caller,
         } = ev;
         assert_eq!(interaction_id, "i");
         assert_eq!(session_id, "s");
         assert_eq!(agent_id, "a");
         assert_eq!(target.platform, "p");
         assert_eq!(response.action_name, "an");
+        assert_eq!(caller, crate::traits::CallerIdentity::Owner);
     }
 }
