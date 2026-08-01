@@ -833,7 +833,7 @@ async fn a_normal_reply_gets_no_no_reply_reaction() {
 
 /// **どんな送信者の投稿にも 👀 が付く**（#317: bot を特別扱いしない）。
 ///
-/// 以前は `reaction_added` を `incoming.sender.is_bot` で初期化していたため、
+/// 以前は `reaction_added` を「送信者が bot か」で初期化していたため、
 /// 他エージェントの投稿には 👀 が付かなかった（＝エージェント同士の会話で
 /// 「受け取った」が見えない）。無限ループを止めるのは**自分自身の投稿の除外**
 /// （`crates/gateway/src/adapters/discord.rs` の `is_own_message`）であって、
