@@ -2212,6 +2212,38 @@ mod format_log_tests {
         );
         assert!(out.contains("tc-9"), "legacy tool id must render: {out}");
     }
+
+    /// [#323] 1 つのセッションに複数の相手の発言が混ざっても、**誰の発言かが分かる**。
+    ///
+    /// Nostr の session を agent 単位（`nostr-{agent_id}`）へ寄せたことで、以前は
+    /// 相手ごとに分かれていた会話が 1 本に集まる。会話文字列は `[{speaker_id}]:` 形式で
+    /// 出るので、発言者は session ではなく行の `speaker_id` が区別する（Nostr の受信転記は
+    /// `speaker_id` に相手の pubkey を入れる）。**新しい概念を足す必要は無い**ことの固定。
+    #[test]
+    fn different_speakers_in_one_session_stay_distinguishable() {
+        let speech = |speaker: &str, text: &str| SessionLogRow {
+            id: None,
+            agent_id: speaker.to_string(),
+            session_id: "nostr-agent-1".to_string(),
+            log_type: "speech".to_string(),
+            content: text.to_string(),
+            speaker_id: Some(speaker.to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        let alice = format_single_log(&speech("pubkey-alice", "こんばんは"));
+        let bob = format_single_log(&speech("pubkey-bob", "こんばんは"));
+        let agent = format_single_log(&speech("agent-1", "こんばんは"));
+
+        assert!(alice.starts_with("[pubkey-alice]"), "{alice}");
+        assert!(bob.starts_with("[pubkey-bob]"), "{bob}");
+        assert!(agent.starts_with("[agent-1]"), "{agent}");
+        // 本文が同じでも行としては別物（発言者が潰れていない）。
+        assert_ne!(alice, bob);
+        assert_ne!(alice, agent);
+    }
 }
 
 #[cfg(test)]

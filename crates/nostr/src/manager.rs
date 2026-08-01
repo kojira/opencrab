@@ -6,17 +6,24 @@
 //! **受信ループは応答生成でブロックしない**（#178）。応答生成（会話再構築 → LLM →
 //! 返信）は受信ループの外へ出し、ループは即次の行へ進む。
 //!
-//! ただし単純に `tokio::spawn` へ投げると、**同一相手からの連投の処理順が
-//! 「どの spawn タスクが先に session ロックを取るか」で決まる**（= ランダム）。
-//! 5 通目への返信が 1 通目より先に届きうる。そこで [`SessionQueues`] を挟み、
-//! **session ごとに 1 本の consumer タスク**が bounded な mpsc から FIFO で
-//! 取り出して処理する（per-session 直列 + 順序保証、別セッションは並行）。
-//! consumer はキューが空になったら自分ごと回収される（task/チャネルのリーク防止）。
+//! ただし単純に `tokio::spawn` へ投げると、**連投の処理順が「どの spawn タスクが先に
+//! session ロックを取るか」で決まる**（= ランダム）。5 通目への返信が 1 通目より先に
+//! 届きうる。そこで [`SessionQueues`] を挟み、**session ごとに 1 本の consumer タスク**
+//! が bounded な mpsc から FIFO で取り出して処理する（per-session 直列 + 順序保証、
+//! 別セッションは並行）。consumer はキューが空になったら自分ごと回収される
+//! （task/チャネルのリーク防止）。
+//!
+//! **#323 以降、Nostr の session は agent 単位で 1 本**（`nostr-{agent_id}`）なので、
+//! このループが持つ consumer は実質 1 本になり、そのエージェントの応答生成は相手が
+//! 誰であれ 1 件ずつ直列に走る（オーナー方針「発言し終わるまで次の LLM を呼ばない」）。
+//! [`SessionQueues`] は「1 本前提」に作り替えていない: キュー束は session_id をキーに
+//! した写像のままで、1 本になっても回収・再投入・溢れの扱いは変わらない。permit も
+//! consumer の内側で取り、`await` が終われば返るのでデッドロックにも枯渇にもならない。
 //!
 //! 同時実行上限（[`MAX_CONCURRENT_RESPONSES`]）の permit は **consumer タスクの内側**
 //! で取る。受信ループ側で取ると「session ロック待ちで何もしていないタスク」が permit を
-//! 占有し、上限が埋まった時点でループ全体（＝全相手の受信）が止まる（head-of-line
-//! blocking / #178 が直そうとしたバグと同型）。
+//! 占有し、上限が埋まった時点でループ全体（＝そのエージェントの全受信）が止まる
+//! （head-of-line blocking / #178 が直そうとしたバグと同型）。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -53,13 +60,23 @@ const WATCH_RESTART_DELAY: Duration = Duration::from_secs(5);
 /// LLM 呼び出しとメモリが暴走する。permit で「同時に走る応答生成は最大 N 本」に絞る。
 /// permit の取得は **consumer タスクの内側**（[`SessionQueues::run_consumer`]）で行う。
 /// 受信ループ側で取ると待機中のタスクが permit を占有してループが止まる。
+///
+/// #323 で session が agent 単位の 1 本になったため、このエージェントが実際に使う
+/// permit は常に 1 枚（実効同時実行数 = 1）。**値は変えない**: 上限は「暴走したときの
+/// 天井」であって目標値ではなく、1 本になったからといって天井を下げる理由も、
+/// 並行を取り戻すために上げる理由も無い（直列化は意図した挙動）。
 const MAX_CONCURRENT_RESPONSES: usize = 8;
 
 /// per-session の inbound キュー容量（per-agent / #168）。
 ///
-/// 応答生成は LLM 1 往復ぶんかかるので、1 人の相手が連投し続けるとキューは伸びる。
+/// 応答生成は LLM 1 往復ぶんかかるので、連投され続けるとキューは伸びる。
 /// 無制限に伸ばすとメモリと「もう誰も待っていない返信」が溜まるだけなので上限を置き、
 /// 溢れたぶんは**ログに残して**捨てる（本文は転記済みなので次の応答の会話履歴に載る）。
+///
+/// #323 の挙動変化: session が agent 単位の 1 本になったので、この 32 件は
+/// 「相手 1 人あたり」ではなく**そのエージェント宛の受信の合計**になる。**値は変えない**
+/// （新しい上限を足さない / 元の上限を据え置く）。溢れても本文は転記済みで、次の応答の
+/// 会話履歴には載る — 1 本化で履歴が揃うぶん、捨てられた回のぶんも文脈からは追える。
 const SESSION_QUEUE_CAPACITY: usize = 32;
 
 /// 稼働中 gateway の登録簿（agent_id → watch ループの JoinHandle）。
@@ -608,8 +625,10 @@ async fn handle_event<R: NostrAgentRunner>(
     queues: &Arc<SessionQueues>,
     event: NostrEvent,
 ) {
-    // author 単位のセッション（1 相手 = 1 会話）。
-    let session_id = nostr_session_id(agent_id, &event.pubkey);
+    // agent 単位のセッション（**1 エージェント = 1 会話** / #323）。誰から来た受信も
+    // ここへ落ちるので、エージェントは自分の発言も含めて 1 本の履歴として読める。
+    // 誰の発言かは下の `sender_id`（= 相手の pubkey）が担う。
+    let session_id = nostr_session_id(agent_id);
 
     // 会話履歴・転記に載せる本文（#282）。本文だけを記録していたため、次ターン以降の
     // エージェントは author の npub も note id も kind も参照できなかった（nostaro 本体
@@ -1010,6 +1029,12 @@ mod tests {
         max_inflight: Arc<AtomicUsize>,
         /// 転記された受信メッセージ（順序の検証用）。
         recorded: Arc<Mutex<Vec<String>>>,
+        /// 受信の転記先 session_id（session_id 規約の検証用 / #323）。
+        recorded_sessions: Arc<Mutex<Vec<String>>>,
+        /// 受信の発言者 id（1 セッションに混ざっても誰の発言か分かることの検証用 / #323）。
+        recorded_speakers: Arc<Mutex<Vec<String>>>,
+        /// 応答生成へ渡った session_id（#323）。
+        run_sessions: Arc<Mutex<Vec<String>>>,
         /// 応答生成を**開始**した順（reply_target）。
         started: Arc<Mutex<Vec<String>>>,
         /// 応答生成を**完了**した順（reply_target = 実際に返信が飛ぶ順）。
@@ -1043,6 +1068,9 @@ mod tests {
                 inflight: Arc::new(AtomicUsize::new(0)),
                 max_inflight: Arc::new(AtomicUsize::new(0)),
                 recorded: Arc::new(Mutex::new(Vec::new())),
+                recorded_sessions: Arc::new(Mutex::new(Vec::new())),
+                recorded_speakers: Arc::new(Mutex::new(Vec::new())),
+                run_sessions: Arc::new(Mutex::new(Vec::new())),
                 started: Arc::new(Mutex::new(Vec::new())),
                 finished: Arc::new(Mutex::new(Vec::new())),
                 relay_target: None,
@@ -1093,6 +1121,10 @@ mod tests {
         async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
             let target = req.reply_target.clone().unwrap_or_default();
             self.callers.lock().unwrap().push(req.caller.clone());
+            self.run_sessions
+                .lock()
+                .unwrap()
+                .push(req.session_id.clone());
             self.system_prompts
                 .lock()
                 .unwrap()
@@ -1143,6 +1175,14 @@ mod tests {
         ) -> bool {
             assert_eq!(source, opencrab_actions::TranscriptSource::Nostr);
             self.recorded.lock().unwrap().push(record.text.to_string());
+            self.recorded_sessions
+                .lock()
+                .unwrap()
+                .push(record.session_id.to_string());
+            self.recorded_speakers
+                .lock()
+                .unwrap()
+                .push(record.sender_id.to_string());
             true
         }
 
@@ -1308,10 +1348,20 @@ mod tests {
 
         /// 任意のイベントを1件流す（メタ情報の検証用 / #282）。
         async fn feed_event(&self, ev: NostrEvent) {
+            self.feed_event_as(&self.agent_id, ev).await;
+        }
+
+        /// **別エージェント**として1件流す（= 別セッション / #323）。
+        ///
+        /// session が agent 単位になったので、「別セッション」を作る唯一の軸が
+        /// エージェントになった。本番では `permits` / `queues` はエージェント毎に
+        /// 作られるが（[`run_nostr_loop`]）、ここで見たいのは [`SessionQueues`] が
+        /// 複数 session を持ったときの挙動なので、意図的に 1 束を共有して流す。
+        async fn feed_event_as(&self, agent_id: &str, ev: NostrEvent) {
             handle_event(
                 &self.runner,
                 &self.cli,
-                &self.agent_id,
+                agent_id,
                 &self.admin,
                 &self.runtime,
                 &self.permits,
@@ -1319,6 +1369,12 @@ mod tests {
                 ev,
             )
             .await;
+        }
+
+        /// [`Self::feed`] の別エージェント版（#323）。
+        async fn feed_as(&self, agent_id: &str, id: &str, pubkey: &str, content: &str) {
+            self.feed_event_as(agent_id, event(id, pubkey, content))
+                .await;
         }
 
         /// 応答生成が `n` 件完了するまで待つ（タイムアウトしたら false）。
@@ -1453,20 +1509,90 @@ mod tests {
         }
     }
 
+    /// [#323] 相手が違っても受信は**同じ session**に落ちる（agent 単位で 1 会話）。
+    ///
+    /// 旧規約 `nostr-{agent}-{author_pubkey}` は会話を相手ごとに割っていたため、
+    /// エージェントは「自分がさっき誰に何を言ったか」を跨いで見られず、同じ内容を
+    /// 繰り返したり自分の発言と食い違うことを言った（#323）。Nostr のスレッドは
+    /// そもそも多人数なので、「1 相手 = 1 会話」という前提自体が合っていない。
+    ///
+    /// **発言者の区別は session ではなく `speaker_id` が担う**。転記の `sender_id`
+    /// （= 相手の pubkey）はイベントごとに入るので、1 本に混ざっても誰の発言かは
+    /// 失われない（会話文字列は `[{speaker_id}]:` で出る）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn events_from_different_authors_share_one_session() {
+        let h = Harness::new("agent-one-session", Duration::from_millis(5), 8, 32);
+
+        h.feed("m1", "pk-alice", "1件目").await;
+        h.feed("m2", "pk-bob", "2件目").await;
+        assert!(
+            h.wait_finished(2, Duration::from_secs(5)).await,
+            "応答生成が完了しない"
+        );
+
+        let expected = vec!["nostr-agent-one-session".to_string(); 2];
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.recorded_sessions),
+            expected,
+            "相手が違っても転記先の session は 1 本"
+        );
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.run_sessions),
+            expected,
+            "応答生成も同じ session で走る（履歴が揃う）"
+        );
+        // 1 本に混ざっても「誰の発言か」は転記の speaker_id で区別が付く。
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.recorded_speakers),
+            vec!["pk-alice".to_string(), "pk-bob".to_string()],
+            "発言者が session に潰されている（プロンプトで相手を区別できない）"
+        );
+    }
+
+    /// [#323] 同一エージェントの応答生成は、**相手が違っても**直列化される。
+    ///
+    /// 「発言し終わるまで次の LLM を呼ばない」（オーナー方針）。直列化の鍵は
+    /// `SessionRuntime` の session_id なので、session が agent 単位で 1 本になれば
+    /// 追加の仕掛け無しにそのまま成り立つ。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn responses_of_one_agent_are_serialized_across_authors() {
+        let h = Harness::new("agent-serial", Duration::from_millis(80), 8, 32);
+
+        h.feed("s1", "pk-alice", "1").await;
+        h.feed("s2", "pk-bob", "2").await;
+        assert!(
+            h.wait_finished(2, Duration::from_secs(5)).await,
+            "応答生成が完了しない"
+        );
+
+        assert_eq!(
+            h.runner.max_inflight.load(AtomicOrdering::SeqCst),
+            1,
+            "同一エージェントの応答生成が並行した（相手ごとに割れている）"
+        );
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.finished),
+            vec!["note1s1".to_string(), "note1s2".to_string()],
+            "投入順どおりに 1 件ずつ返る"
+        );
+    }
+
     /// [P1 回帰 / #178] 受信ループは応答生成を await しない。
     ///
     /// 以前は `respond_serialized(...).await` をループ内で直接呼んでいたため、長い応答の
     /// あいだ**全セッション・全相手**の受信が止まった（`nostaro watch` の stdout も
     /// 読まれず滞留）。ここでは 2 件の `handle_event` が即座に返ること、かつ別セッション
     /// の応答が並行することを見る。
+    ///
+    /// #323 で session は agent 単位になったので、「別セッション」= 別エージェント。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn handle_event_does_not_block_the_receive_loop() {
         let h = Harness::new("agent-loop", Duration::from_millis(300), 8, 32);
 
         let started = std::time::Instant::now();
-        // 別々の相手（別セッション）から 2 件。ループ相当の直列呼び出し。
+        // 別セッション（別エージェント）から 2 件。ループ相当の直列呼び出し。
         h.feed("e1", "pk-a", "1件目").await;
-        h.feed("e2", "pk-b", "2件目").await;
+        h.feed_as("agent-loop-2", "e2", "pk-b", "2件目").await;
         let elapsed = started.elapsed();
 
         // ループは応答生成（300ms）を待たずに次へ進んでいる。
@@ -1500,20 +1626,22 @@ mod tests {
     /// [P1 回帰 / #178] permit 待ちが**受信を止めない**（head-of-line blocking なし）。
     ///
     /// permit を受信ループ内で取っていたときは、ロック待ちで何もしていないタスクが permit
-    /// を占有し、上限が埋まった時点でループ全体（＝全相手の受信）が停止した。レビュアーの
+    /// を占有し、上限が埋まった時点でループ全体（＝全受信）が停止した。レビュアーの
     /// 実験と同型: permits=2 / 同一セッション 2 件 → 別セッション 1 件。別セッションの
     /// 応答生成が、詰まっているセッションの完了を待たずに始まることを見る。
+    ///
+    /// #323 で session は agent 単位になったので、「別セッション」= 別エージェント。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn permit_starvation_does_not_stall_the_receive_loop() {
         for trial in 0..3 {
             let h = Harness::new("agent-starve", Duration::from_millis(300), 2, 32);
 
-            // 多弁な相手（同一セッション）が permit を使い切ろうとする。
+            // 多弁なセッションが permit を使い切ろうとする。
             h.feed("s1", "pk-chatty", "1").await;
             h.feed("s2", "pk-chatty", "2").await;
-            // 別の相手。ここでループが止まってはいけない。
+            // 別セッション。ここでループが止まってはいけない。
             let started = std::time::Instant::now();
-            h.feed("s3", "pk-quiet", "3").await;
+            h.feed_as("agent-starve-2", "s3", "pk-quiet", "3").await;
             let loop_stall = started.elapsed();
 
             assert!(
@@ -1550,14 +1678,18 @@ mod tests {
     ///
     /// permit=1 なら別セッション 3 件でも応答生成は 1 本ずつ（`max_inflight == 1`）。
     /// ループ自体はブロックしない（上限は実同時実行だけを絞る）。
+    ///
+    /// #323 以降、別セッション = 別エージェント。同一セッションで流すと per-session
+    /// 直列化だけで `max_inflight == 1` になり、**permit の有無を検知できない**
+    /// （上限を消しても緑のままになる）ので、必ずセッションを分けて流す。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_responses_are_capped_by_permits() {
         let h = Harness::new("agent-cap", Duration::from_millis(80), 1, 32);
 
         let started = std::time::Instant::now();
-        h.feed("c1", "pk-a", "1").await;
-        h.feed("c2", "pk-b", "2").await;
-        h.feed("c3", "pk-c", "3").await;
+        h.feed_as("agent-cap-1", "c1", "pk-a", "1").await;
+        h.feed_as("agent-cap-2", "c2", "pk-b", "2").await;
+        h.feed_as("agent-cap-3", "c3", "pk-c", "3").await;
         let loop_stall = started.elapsed();
         assert!(
             loop_stall < Duration::from_millis(50),
@@ -1612,14 +1744,18 @@ mod tests {
     }
 
     /// [#168] アイドルになった session の consumer タスク / チャネルは回収される。
+    ///
+    /// #323 でセッションが 1 本になっても回収が壊れないことを、複数セッション
+    /// （= 複数エージェント）を並べたまま確かめる。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn idle_session_queue_is_reclaimed() {
         let h = Harness::new("agent-reclaim", Duration::from_millis(5), 8, 32);
         h.feed("r1", "pk-a", "1").await;
-        h.feed("r2", "pk-b", "2").await;
-        assert!(
-            h.queues.active_sessions() > 0,
-            "投入直後は session キューが存在する"
+        h.feed_as("agent-reclaim-2", "r2", "pk-b", "2").await;
+        assert_eq!(
+            h.queues.active_sessions(),
+            2,
+            "投入直後は session ごとにキューが存在する"
         );
 
         assert!(

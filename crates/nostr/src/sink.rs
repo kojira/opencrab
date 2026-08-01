@@ -13,8 +13,9 @@
 //!   resume は `build_conversation_string` で DB から会話を再構築するため、完了本文を
 //!   sink で運ぶ必要がない。
 //! - **per-session 直列化**: inbound と resume の応答生成をどちらも
-//!   [`NostrSessionRuntime::run_serialized`] の下で走らせる。同一セッション（相手）に
-//!   対して 2 本の応答生成が並行しないので、二重投稿にならない。
+//!   [`NostrSessionRuntime::run_serialized`] の下で走らせる。同一セッション
+//!   （#323 以降は **エージェント単位**）に対して 2 本の応答生成が並行しないので、
+//!   二重投稿にならない。
 //! - **二重投稿しない（Nostr 固有）**: モデルが `nostr_*` で明示送信していれば
 //!   `sent_flag` が立ち、ループ側の暗黙返信を抑制する。この判定が成り立つのは
 //!   配送系ツールが **inline 実行**（`NOSTR_DELIVERY_ACTIONS` = dispatch 除外）で
@@ -242,7 +243,8 @@ impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
         // 返信先が無ければ **resume しない**（方針 / #168）。
         //
         // Nostr は「返信して初めて相手に届く」gateway で、session_id からは返信先ノート
-        // を復元できない（相手 pubkey しか入っていない）。宛先不明のまま resume すると
+        // を復元できない（#323 以降は agent_id しか入っていない。それ以前も相手 pubkey
+        // までで、ノート id は入っていなかった）。宛先不明のまま resume すると
         // (1) 届かない応答を生成して LLM 費用を払い、(2) その本文を会話ログに転記して
         // しまう（送っていないのに送ったことになり、以後の文脈が実際の Nostr 上のやり取り
         // と食い違う）。完了本文は `settle_completed` が既に DB へ永続化しているので、
@@ -617,7 +619,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("鍵ができました");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+        let sid = nostr_session_id("agent-sink-test");
 
         r.on_subtask_settled(settled(&sid, Some("note1target")));
 
@@ -722,7 +724,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("届かない応答");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+        let sid = nostr_session_id("agent-sink-test");
 
         r.on_subtask_settled(settled(&sid, None));
         // 空文字も「指定なし」扱い。
@@ -761,7 +763,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("NO_REPLY");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+        let sid = nostr_session_id("agent-sink-test");
 
         let out = r
             .respond_serialized(&sid, "note1target", "suffix", None, CallerIdentity::Agent)
@@ -784,7 +786,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("本文").with_explicit_reply("note1explicit");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-dup");
+        let sid = nostr_session_id("agent-sink-test");
 
         let out = r
             .respond_serialized(
@@ -819,7 +821,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("暗黙で返す");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-implicit");
+        let sid = nostr_session_id("agent-sink-test");
 
         r.respond_serialized(
             &sid,
@@ -841,7 +843,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("ok").with_delay(Duration::from_millis(120));
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-serial");
+        let sid = nostr_session_id("agent-sink-test");
 
         // inbound 相当（watch ループと同じ入口）を走らせつつ、途中で完了 sink を発火。
         let r2 = r.clone();
@@ -870,21 +872,15 @@ mod tests {
         assert_eq!(runner.runs.lock().unwrap().len(), 2);
     }
 
-    /// 別セッション（別の相手）は直列化されず並行する。
+    /// 別セッション（#323 以降は**別エージェント**）は直列化されず並行する。
     #[tokio::test]
     async fn different_sessions_are_not_serialized() {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("ok").with_delay(Duration::from_millis(150));
         let r = responder(runner.clone(), fake.cli());
 
-        r.on_subtask_settled(settled(
-            &nostr_session_id("agent-sink-test", "pk-a"),
-            Some("note1a"),
-        ));
-        r.on_subtask_settled(settled(
-            &nostr_session_id("agent-sink-test", "pk-b"),
-            Some("note1b"),
-        ));
+        r.on_subtask_settled(settled(&nostr_session_id("agent-sink-a"), Some("note1a")));
+        r.on_subtask_settled(settled(&nostr_session_id("agent-sink-b"), Some("note1b")));
 
         assert!(fake.wait_for("note1a").await);
         assert!(fake.wait_for("note1b").await);
@@ -901,7 +897,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("ok");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-reg");
+        let sid = nostr_session_id("agent-sink-test");
 
         let inbound_registry = r.runtime().registry_for(&sid);
 
