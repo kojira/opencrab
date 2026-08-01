@@ -6,7 +6,7 @@
 //! 経路で組む）。リレー/フィルタは watch のフラグで渡し、nostaro の config 側 default
 //! に依存しない（指定リレー以外に繋がせない）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +20,10 @@ use crate::config::NostrConfig;
 
 const DEFAULT_NOSTARO_PATH: &str = "nostaro";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// nostaro を起動する作業ディレクトリ（= エージェントの workspace ルート）のテンプレート。
+/// `config/default.toml` の `agent.workspace_path` と同じ既定値で、実配線ではそこから
+/// [`NostaroCli::with_workspace_base`] で渡される（#299）。
+const DEFAULT_WORKSPACE_BASE: &str = "data/agents/{agent_id}/workspace";
 /// vanity 生成は prefix が長いと探索に非常に時間がかかる。上限を撤廃したため、
 /// timeout で強制的に打ち切らず「実質無制限」にし、停止はキャンセル
 /// （`CancellationToken` → タスク abort → future drop → `kill_on_drop` で nostaro を
@@ -64,6 +68,9 @@ pub fn validate_vanity_prefix(prefix: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct NostaroCli {
     binary_path: String,
+    /// エージェント workspace のベーステンプレート（`{agent_id}` を含む）。nostaro を
+    /// **その workspace ルートを cwd にして**起動するために使う（#299）。
+    workspace_base: String,
     timeout: Duration,
     vanity_timeout: Duration,
     /// vanity 生成の同時実行を絞るゲート。`Arc` 共有なので clone 間で同じ制限が効く
@@ -82,6 +89,7 @@ impl NostaroCli {
     pub fn new() -> Self {
         Self {
             binary_path: DEFAULT_NOSTARO_PATH.to_string(),
+            workspace_base: DEFAULT_WORKSPACE_BASE.to_string(),
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             vanity_timeout: Duration::from_secs(DEFAULT_VANITY_TIMEOUT_SECS),
             vanity_gate: Arc::new(Semaphore::new(1)),
@@ -92,6 +100,17 @@ impl NostaroCli {
         let p = path.into();
         if !p.trim().is_empty() {
             self.binary_path = p;
+        }
+        self
+    }
+
+    /// エージェント workspace のベーステンプレート（`agent.workspace_path`）を設定する。
+    /// 空は無視（既定を保つ）。`execute_shell` / `ws_*` と**同じテンプレート**を渡すことで、
+    /// nostaro の cwd がそれらと同じディレクトリになる（#299）。
+    pub fn with_workspace_base(mut self, base: impl Into<String>) -> Self {
+        let b = base.into();
+        if !b.trim().is_empty() {
+            self.workspace_base = b;
         }
         self
     }
@@ -123,6 +142,97 @@ impl NostaroCli {
         Ok(Self::agent_nostr_dir(agent_id)?.join("config.toml"))
     }
 
+    /// エージェントの workspace ルート（`execute_shell` / `ws_*` と同じディレクトリ）。
+    /// nostaro の cwd に使う（#299）。
+    pub fn agent_workspace_dir(&self, agent_id: &str) -> Result<PathBuf> {
+        resolve_agent_workspace(&self.workspace_base, agent_id)
+    }
+
+    /// cwd（= エージェント workspace ルート）と `--config` の絶対パスを**セットで**決める
+    /// （#299 / #301 レビュー反映）。
+    ///
+    /// cwd を workspace に移す以上、プロセス cwd 基準で組まれた `--config` は絶対化しないと
+    /// `<workspace>/data/agents/...` を探して必ず見失う。逆に「config だけ絶対・cwd はそのまま」
+    /// も基準ズレは直らない。よって**両方成功したときだけ両方適用**し、途中で失敗したら
+    /// `None` を返して**両方見送る**（＝ #299 修正前の挙動そのままに degrade する。cwd は
+    /// サーバプロセスのものを継承し、config は従来どおり相対のまま渡る）。片方だけ適用された
+    /// 中間状態は作らない。
+    ///
+    /// 失敗しうるのは次の 3 つで、いずれも degrade（`warn` を 1 行出す）：
+    /// - workspace テンプレートの解決失敗
+    /// - `current_dir()` の取得失敗（相対パスの解決基準が無い）
+    /// - workspace ディレクトリの作成失敗（同名ファイルで塞がれている等）。ここで無理に
+    ///   `current_dir` を設定すると spawn が `ENOENT`/`ENOTDIR` で落ち、「nostaro が PATH に
+    ///   無い」場合と区別の付かないエラー文面になるため、設定しない方が安全。
+    fn plan_cwd_and_config(
+        &self,
+        agent_id: &str,
+        config_path: &Path,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let root = match self.agent_workspace_dir(agent_id) {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "nostr: workspace パスを解決できないため cwd 固定と --config 絶対化を見送る（従来どおりサーバ cwd で起動）"
+                );
+                return None;
+            }
+        };
+        // 相対パスの解決基準は **1 回だけ**取る（cwd と config で別々に取らない）。
+        let process_cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "nostr: current_dir を取得できないため cwd 固定と --config 絶対化を見送る（従来どおりサーバ cwd で起動）"
+                );
+                return None;
+            }
+        };
+        let root = absolutize_with(&root, &process_cwd);
+        // ディレクトリを用意する（gateway の restore_from_db は「一度も走っていない＝
+        // Workspace 未作成」のエージェントでも watch を張りうるので、ここは実際に仕事をする）。
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "nostr: workspace ディレクトリを用意できないため cwd 固定と --config 絶対化を見送る（従来どおりサーバ cwd で起動）"
+            );
+            return None;
+        }
+        Some((root, absolutize_with(config_path, &process_cwd)))
+    }
+
+    /// `--config <path>` 付きの Command を組み、可能なら cwd をエージェントの workspace
+    /// ルートに固定する（#299）。
+    ///
+    /// これが無いと nostaro は opencrab-server プロセスの cwd（リポジトリルート）を継承し、
+    /// `execute_shell` / `ws_*`（`cmd.current_dir(ctx.workspace.root())`）と基準がズレる。
+    /// その結果、エージェントが `ws_write` で書いたファイルを `--file <相対パス>` に渡すと
+    /// 見つからず、`--out <相対パス>` の出力は `ws_read` から見えなかった。
+    ///
+    /// cwd 固定と `--config` 絶対化は [`Self::plan_cwd_and_config`] で「両方成功 or
+    /// 両方見送り」になる。`base_command` と `generated_key_command` は**この 1 箇所**を
+    /// 共有する（片方だけ直す退行を作らない）。
+    fn command_with_config(&self, agent_id: &str, config_path: &Path) -> Command {
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.kill_on_drop(true);
+        match self.plan_cwd_and_config(agent_id, config_path) {
+            Some((cwd, config)) => {
+                cmd.arg("--config").arg(config);
+                cmd.current_dir(cwd);
+            }
+            // degrade：cwd は設定せず、config も従来どおり（絶対化しない）渡す。
+            None => {
+                cmd.arg("--config").arg(config_path);
+            }
+        }
+        cmd
+    }
+
     /// 共通の base command（`nostaro --config <per-agent> <subcommand>...`）。
     fn base_command(&self, agent_id: &str) -> Result<Command> {
         let config_path = Self::agent_config_path(agent_id)?;
@@ -130,10 +240,7 @@ impl NostaroCli {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.kill_on_drop(true);
-        cmd.arg("--config").arg(&config_path);
-        Ok(cmd)
+        Ok(self.command_with_config(agent_id, &config_path))
     }
 
     /// 送信系の command を組む。`from` が None なら本鍵（config.toml）、Some(npub) なら
@@ -172,10 +279,10 @@ impl NostaroCli {
         let from_toml = replace_secret_key_line(&main_toml, nsec);
         let from_config = dir.join(format!("{stem}.config.toml"));
         write_secret_file(&from_config, &from_toml)?;
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.kill_on_drop(true);
-        cmd.arg("--config").arg(&from_config);
-        Ok(cmd)
+        // base_command と同じ入口を通す（config 絶対化 + cwd = workspace ルート、#299）。
+        // `from` の有無で `upload <相対パス>` 等の基準が変わらないようにする。degrade 条件も
+        // base_command と同一（両方成功 or 両方見送り）。
+        Ok(self.command_with_config(agent_id, &from_config))
     }
 
     /// generated key の nsec をサーバ内から読む（**サーバ側専用**。LLM には渡さない）。
@@ -570,6 +677,22 @@ impl NostaroCli {
     }
 }
 
+/// 相対パスを `base`（＝プロセス cwd）基準で絶対化する（存在は要求しない）。
+///
+/// nostaro は**エージェント workspace を cwd にして**起動する（#299）ので、プロセス cwd
+/// 基準で組まれた `data/agents/{id}/nostr/config.toml` のような相対パスをそのまま渡すと
+/// workspace 配下を探して見失う。spawn 前にここで絶対化して基準ズレを断つ。
+///
+/// 基準は呼び出し側（[`NostaroCli::plan_cwd_and_config`]）が**1 回だけ**取得して渡す。
+/// 取得できない場合は絶対化も cwd 固定も行わない（両方見送り）ので、ここでは fallback を
+/// 持たない。
+fn absolutize_with(path: &Path, base: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    base.join(path)
+}
+
 /// 鍵ファイル名の stem を英数字のみに安全化する（bech32 npub / hex pubkey は満たす）。
 /// パストラバーサル/インジェクション防止。空文字は呼び出し側で fallback/拒否する。
 fn sanitize_key_stem(s: &str) -> String {
@@ -744,6 +867,209 @@ mod tests {
         assert!(NostaroCli::agent_config_path("agent-1")
             .unwrap()
             .ends_with("data/agents/agent-1/nostr/config.toml"));
+    }
+
+    /// [#299] nostaro は**エージェントの workspace ルート**を cwd にして起動する。
+    ///
+    /// `execute_shell` / `ws_*` は `data/agents/{id}/workspace` を cwd にしている
+    /// （`shell.rs` の `cmd.current_dir(ctx.workspace.root())`）。ここが揃っていないと
+    /// `nostr_run event --file <相対>` が ws_write したファイルを見つけられず、
+    /// `--out <相対>` の出力も ws_read から見えない。
+    #[test]
+    fn test_base_command_runs_in_agent_workspace() {
+        let cli = NostaroCli::new();
+        let agent = "agent-cwd-test";
+        let cmd = cli.base_command(agent).unwrap();
+        let cwd = cmd
+            .as_std()
+            .get_current_dir()
+            .expect("cwd がエージェント workspace に固定されていない（#299）");
+        assert!(
+            cwd.ends_with(format!("data/agents/{agent}/workspace")),
+            "cwd は execute_shell / ws_* と同じ workspace ルート: {}",
+            cwd.display()
+        );
+        // 相対パスの解決基準がプロセス cwd に左右されないよう絶対パスで渡す。
+        assert!(cwd.is_absolute(), "cwd は絶対パス: {}", cwd.display());
+        // ディレクトリは用意されている（spawn 時に「そんなディレクトリは無い」で落ちない）。
+        assert!(cwd.is_dir(), "workspace ルートが無い: {}", cwd.display());
+        let _ = std::fs::remove_dir_all(cli.agent_workspace_dir(agent).unwrap());
+    }
+
+    /// [#299] cwd を変えても `--config` が解決できる（＝絶対パスで渡す）。
+    ///
+    /// config は `data/agents/{id}/nostr/config.toml` とプロセス cwd 基準の相対パスで
+    /// 組まれる。cwd を workspace へ移す以上、相対のまま渡すと
+    /// `<workspace>/data/agents/...` を探して**必ず見失う**。
+    #[test]
+    fn test_base_command_passes_absolute_config_path() {
+        let cli = NostaroCli::new();
+        let agent = "agent-cfgabs-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        NostaroCli::materialize_config(
+            agent,
+            "nsec1dummy",
+            &["wss://relay.test".to_string()],
+            None,
+        )
+        .unwrap();
+
+        let cmd = cli.base_command(agent).unwrap();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "--config");
+        let config_arg = std::path::PathBuf::from(&args[1]);
+        assert!(
+            config_arg.is_absolute(),
+            "--config は絶対パスで渡す（cwd を変えるため）: {}",
+            config_arg.display()
+        );
+        assert!(
+            config_arg.ends_with(format!("data/agents/{agent}/nostr/config.toml")),
+            "config は常にこのエージェントのもの: {}",
+            config_arg.display()
+        );
+        // cwd（workspace）を基準にしても、そのパスは実在する config を指す。
+        assert!(
+            config_arg.is_file(),
+            "cwd 変更後も解決できない config パス: {}",
+            config_arg.display()
+        );
+
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let _ = std::fs::remove_dir_all(cli.agent_workspace_dir(agent).unwrap());
+    }
+
+    /// [#299] cwd の元になる workspace テンプレートは `agent.workspace_path` 由来
+    /// （`with_workspace_base` で配線される）。既定値を焼き込まない。
+    #[test]
+    fn test_workspace_base_is_configurable() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("agents/{agent_id}/ws");
+        let cli = NostaroCli::new().with_workspace_base(base.to_string_lossy().to_string());
+        let cmd = cli.base_command("agent-wsbase").unwrap();
+        let cwd = cmd.as_std().get_current_dir().unwrap();
+        assert!(
+            cwd.ends_with("agents/agent-wsbase/ws"),
+            "設定した workspace_base が使われていない: {}",
+            cwd.display()
+        );
+        // 空文字は無視して既定を保つ（他の with_* と同じ扱い）。
+        let cli = NostaroCli::new().with_workspace_base("  ");
+        let cwd = cli
+            .base_command("agent-wsbase2")
+            .unwrap()
+            .as_std()
+            .get_current_dir()
+            .unwrap()
+            .to_path_buf();
+        assert!(cwd.ends_with("data/agents/agent-wsbase2/workspace"));
+        let _ = std::fs::remove_dir_all(
+            NostaroCli::new()
+                .agent_workspace_dir("agent-wsbase2")
+                .unwrap(),
+        );
+    }
+
+    /// workspace ルートを**同名ファイル**で塞ぎ、`create_dir_all` を失敗させる。
+    /// degrade 経路（cwd 設定も `--config` 絶対化も見送り）のテスト用。
+    fn blocked_workspace_base(dir: &std::path::Path, agent_id: &str) -> String {
+        let blocked = dir.join(format!("agents/{agent_id}/ws"));
+        std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+        // ディレクトリを作らせない：同名の通常ファイルを置く。
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        dir.join("agents/{agent_id}/ws")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// [#301 レビュー] workspace ディレクトリを用意できないときは **cwd を設定しない**。
+    ///
+    /// ここで `current_dir` だけ設定すると spawn が `ENOENT`/`ENOTDIR` で落ち、
+    /// 「nostaro が PATH に無い」場合と同じ文面（`failed to run nostaro: No such file or
+    /// directory`）になって切り分け不能になる。cwd を諦めれば #299 修正前の挙動のまま
+    /// post/reply/watch/pubkey は動き続ける。
+    ///
+    /// 併せて **`--config` も従来どおり**（絶対化しない）ことを見る。cwd だけ移して config が
+    /// 相対、という中間状態こそ #299 で実測した壊れ方（`CONFIG_MISSING`）なので、
+    /// 「両方成功 or 両方見送り」を固定する。
+    #[test]
+    fn test_base_command_degrades_when_workspace_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = "agent-degrade-base";
+        let cli = NostaroCli::new().with_workspace_base(blocked_workspace_base(dir.path(), agent));
+
+        let cmd = cli.base_command(agent).unwrap();
+        assert!(
+            cmd.as_std().get_current_dir().is_none(),
+            "workspace を用意できないのに cwd を設定している（spawn が ENOTDIR で落ちる）: {:?}",
+            cmd.as_std().get_current_dir()
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "--config");
+        let config_arg = std::path::PathBuf::from(&args[1]);
+        assert!(
+            !config_arg.is_absolute(),
+            "cwd を見送ったのに config だけ絶対化している（片方だけ適用の中間状態）: {}",
+            config_arg.display()
+        );
+        assert_eq!(
+            config_arg,
+            NostaroCli::agent_config_path(agent).unwrap(),
+            "degrade 時の --config は従来どおりのパス"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#301 レビュー] `from`（生成鍵）経路も同じく「両方成功 or 両方見送り」。
+    /// `base_command` だけ直して `generated_key_command` が取り残される退行を防ぐ。
+    #[test]
+    fn test_from_command_degrades_when_workspace_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = "agent-degrade-from";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        NostaroCli::materialize_config(agent, "nsec1main", &["wss://relay.test".to_string()], None)
+            .unwrap();
+        let key = GeneratedKey {
+            nsec: "nsec1gen".into(),
+            npub: "npub1degrade".into(),
+            pubkey: "hex".into(),
+        };
+        NostaroCli::save_generated_key(agent, &key).unwrap();
+        let cli = NostaroCli::new().with_workspace_base(blocked_workspace_base(dir.path(), agent));
+
+        let cmd = cli.generated_key_command(agent, "npub1degrade").unwrap();
+        assert!(
+            cmd.as_std().get_current_dir().is_none(),
+            "from 経路が degrade していない（cwd を設定している）"
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args[0], "--config");
+        let config_arg = std::path::PathBuf::from(&args[1]);
+        assert!(
+            !config_arg.is_absolute(),
+            "from 経路で config だけ絶対化している: {}",
+            config_arg.display()
+        );
+        assert_eq!(
+            config_arg,
+            NostaroCli::agent_nostr_dir(agent)
+                .unwrap()
+                .join("generated-keys/npub1degrade.config.toml"),
+            "degrade 時の --config は従来どおりのパス"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     #[test]
@@ -1021,9 +1347,19 @@ mod tests {
         assert!(content.contains("secret_key = \"nsec1gen\""));
         assert!(content.contains("wss://yabu.me"));
         assert!(!content.contains("nsec1main"));
+        // [#299] `from` 経路も cwd はエージェント workspace（`upload <相対>` 等の基準が
+        // from の有無で変わらない）。config は絶対パス。
+        let cwd = cmd.as_std().get_current_dir().unwrap();
+        assert!(
+            cwd.ends_with(format!("data/agents/{agent}/workspace")),
+            "from 経路の cwd が workspace でない: {}",
+            cwd.display()
+        );
+        assert!(std::path::Path::new(&args[1]).is_absolute(), "{:?}", args);
         // 存在しない npub は拒否（自分が生成した鍵のみ from 指定可）。
         assert!(cli.generated_key_command(agent, "npub1missing").is_err());
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let _ = std::fs::remove_dir_all(cli.agent_workspace_dir(agent).unwrap());
     }
 
     #[test]
@@ -1350,6 +1686,62 @@ mod tests {
         );
         assert!(out.contains("<redacted>"), "マスク痕跡が無い: {out}");
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#299] passthrough で起動した nostaro は**エージェント workspace の中**で動き、
+    /// そこにある相対パスのファイルを読める。`--config` は cwd を移しても解決できる。
+    ///
+    /// `nostr_run event --file <相対>` が `ws_write` / `execute_shell` の作ったファイルと
+    /// 噛み合うことを、fake nostaro の `pwd` / 相対 `cat` / config 存在チェックで固定する。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn passthrough_runs_in_agent_workspace() {
+        use std::os::unix::fs::PermissionsExt;
+        let agent = "agent-pt-cwd";
+        materialize_for(agent);
+        let cli_probe = NostaroCli::new();
+        let ws = cli_probe.agent_workspace_dir(agent).unwrap();
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        // エージェントが ws_write / execute_shell で置いたファイルを模す。
+        std::fs::write(ws.join("payload.json"), "MARKER_FROM_WORKSPACE").unwrap();
+
+        // cwd と「相対パスの中身」と「--config が読めるか」を出力する fake nostaro。
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-nostaro.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\npwd\ncat payload.json 2>/dev/null || printf 'NO_FILE'\nprintf '\\n'\n\
+             if [ -f \"$2\" ]; then printf 'CONFIG_OK\\n'; else printf 'CONFIG_MISSING\\n'; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
+
+        let out = cli
+            .run_passthrough(
+                agent,
+                "event",
+                &["--file".to_string(), "payload.json".to_string()],
+            )
+            .await
+            .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            std::path::Path::new(lines[0]).ends_with(format!("data/agents/{agent}/workspace")),
+            "nostaro の cwd が workspace でない: {out}"
+        );
+        assert_eq!(
+            lines[1], "MARKER_FROM_WORKSPACE",
+            "workspace 相対のファイルが読めていない: {out}"
+        );
+        assert_eq!(
+            lines[2], "CONFIG_OK",
+            "cwd を移したあと --config が解決できていない: {out}"
+        );
+
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// 失敗時の stderr（nostaro が config 先頭行をエコーする経路）も nsec を伏せる。

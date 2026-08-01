@@ -1113,8 +1113,13 @@ async fn main() -> anyhow::Result<()> {
     // Per-agent Nostr sub-gateway マネージャ（discord と同様に、state clone より前に
     // 生成して配線する。nostr は重い依存が無いので feature ゲート無しの常時配線）。
     {
+        // nostaro は**エージェントの workspace ルートを cwd にして**起動する（#299）。
+        // `execute_shell` / `ws_*` と同じ `agent.workspace_path` を渡して基準を揃える
+        // （`nostr_run event --file <相対>` / `--out <相対>` がそれらと噛み合う）。
+        let cli =
+            opencrab_nostr::NostaroCli::new().with_workspace_base(state.workspace_base.clone());
         let manager: opencrab_server::SharedNostrManager =
-            Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+            Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()).with_cli(cli));
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も
         // この登録簿から引く（#191 段階2 PR3・PR4）。名指しフィールドは無い。
         state.gateways.register(manager);
