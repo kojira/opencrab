@@ -376,7 +376,8 @@ impl SystemGatewayActions {
                               `timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、\
                               足りない分だけリレーから補われる）。フォローしていない人のノートを\
                               含むリレー全体の新着を見るには `timeline --global` を使う\
-                              （件数が多くなるので `--out` / `--out-format json` と組み合わせられる）。\
+                              （件数が多くなるので `--out <相対パス> --out-format json` を併せて\
+                              渡せる。`--out-format` は `--out` とセットで指定する）。\
                               `--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ\
                               **あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま\
                               `--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。"
@@ -6350,6 +6351,9 @@ mod tests {
     ///
     /// 素の `timeline` との違いも要求する。「`timeline` を叩けばフォロー外も見える」という
     /// 誤解こそが 26 回の空振りの原因なので、`--global` の名前だけ書いても効かない。
+    ///
+    /// needle は表現をそのまま拾うので、description を言い換えるときは needle も一緒に直す
+    /// （守りたいのは文字列ではなく「グローバルの取り方が書いてある」ことの方）。
     #[test]
     fn nostr_run_description_documents_the_global_timeline() {
         let defs = SystemGatewayActions::own_definitions();
