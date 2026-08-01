@@ -30,6 +30,13 @@ const IMPRESSION_SPEAKER_WINDOW: usize = 20;
 /// 1 フィールドの描画上限（chars）。
 const IMPRESSION_FIELD_MAX_CHARS: usize = 300;
 
+/// 見出しの識別子（`target_name` / `target_id`）の描画上限（chars）。
+///
+/// 本文フィールドと同じく**描画上の上限**であって、書ける内容の制約ではない
+/// （DB に入る値には手を付けない）。`target_name` は `update_impression` の引数が
+/// そのまま入るので、これが無いと本文だけ 300 字で丸めても見出しが無制限に伸びる。
+const IMPRESSION_LABEL_MAX_CHARS: usize = 64;
+
 /// 直近の発話者（新しい順・重複除去）を返す。
 fn recent_speaker_ids(conn: &Connection, agent_id: &str, session_id: &str) -> Result<Vec<String>> {
     let logs = queries::list_recent_user_speech_logs(
@@ -75,16 +82,14 @@ fn render_impression(imp: &queries::ImpressionRow) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    let name = if imp.target_name.trim().is_empty() {
-        imp.target_id.clone()
+    let raw_name = if imp.target_name.trim().is_empty() {
+        imp.target_id.trim()
     } else {
-        imp.target_name.clone()
+        imp.target_name.trim()
     };
-    Some(format!(
-        "- {name} ({})\n{}",
-        imp.target_id,
-        lines.join("\n")
-    ))
+    let name = truncate_chars(raw_name, IMPRESSION_LABEL_MAX_CHARS);
+    let id = truncate_chars(imp.target_id.trim(), IMPRESSION_LABEL_MAX_CHARS);
+    Some(format!("- {name} ({id})\n{}", lines.join("\n")))
 }
 
 /// いま話している相手の `[Impressions]` セクションを組み立てる。
@@ -243,6 +248,30 @@ mod tests {
             .expect("section");
         assert!(section.contains('…'));
         assert!(section.chars().count() < IMPRESSION_FIELD_MAX_CHARS * 3);
+    }
+
+    /// 見出しの `target_name` / `target_id` も描画時に丸められる
+    /// （本文フィールドだけでなく、見出しにも上限が掛かっている）。
+    #[test]
+    fn section_truncates_long_target_name_and_id() {
+        let conn = setup();
+        let long_id = "i".repeat(IMPRESSION_LABEL_MAX_CHARS * 4);
+        let mut imp = impression("a1", "s1", &long_id);
+        imp.target_name = "な".repeat(IMPRESSION_LABEL_MAX_CHARS * 4);
+        queries::upsert_impression(&conn, &imp).unwrap();
+        insert_speech(&conn, "s1", &long_id);
+
+        let section = build_impression_section(&conn, "a1", "s1")
+            .unwrap()
+            .expect("section");
+        let head = section.lines().nth(2).expect("entry head line");
+        // 見出し行は「名前 + id + 装飾」なので、上限 2 本ぶんに収まる。
+        assert!(
+            head.chars().count() <= IMPRESSION_LABEL_MAX_CHARS * 2 + 16,
+            "head line is capped: {head}"
+        );
+        assert!(!head.contains(&"な".repeat(IMPRESSION_LABEL_MAX_CHARS + 1)));
+        assert!(!head.contains(&"i".repeat(IMPRESSION_LABEL_MAX_CHARS + 1)));
     }
 
     /// 中身が全部空の人物像は行を作らない。

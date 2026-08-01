@@ -443,20 +443,32 @@ const MIGRATIONS: &[Migration] = &[
         // なり (agent_id, session_id) を引かなくなるので貼り直さない
         // （UNIQUE(agent_id, target_id) の索引が agent_id 前方一致を賄う）。
         //
-        // 冪等性: 旧制約を持つ表のときだけ再構築する。新規DB は SCHEMA_SQL 側で既に
-        // 新しい制約なので何もしない。
+        // 冪等性: **新しい制約が既にあるときだけ** no-op（肯定形の判定）。新規DB は
+        // SCHEMA_SQL 側で既に `UNIQUE(agent_id, target_id)` を持つので何もしない。
+        //
+        // 判定は `pragma_index_list` / `pragma_index_info` で**実際の索引の列を見る**
+        // （v5 の `pragma_foreign_key_list`・v3 の `column_exists` と同じ流儀）。
+        // `sqlite_master.sql` の文字列一致に頼ると、空白・大文字小文字・列順など表記の
+        // 揺れで判定が外れる。外れ方が「旧制約のまま `user_version = 21` がスタンプ
+        // される」方向だと、`upsert_impression` の `ON CONFLICT(agent_id, target_id)` が
+        // 以後**毎回**失敗し、版が進んでいるので再起動しても直らない。肯定形なら
+        // 判定が外れても「再構築が走る」側に倒れる（再構築は冪等）。
         //
         // 切り戻し: 統合で落ちた重複行は戻らない（重複が無ければ完全に可逆）。古い
         // バイナリへ戻すときは旧制約で再構築し直し、版番号も戻すこと。
         up: |conn| {
-            let legacy: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type='table' AND name='impressions'
-                   AND sql LIKE '%UNIQUE(agent_id, session_id, target_id)%'",
+            // `(agent_id, target_id)` ちょうど 2 列の UNIQUE 索引があれば移行済み。
+            // `id TEXT PRIMARY KEY` の自動索引は 1 列なので列数の条件で外れる。
+            let already_migrated: i64 = conn.query_row(
+                r#"SELECT COUNT(*) FROM pragma_index_list('impressions') il
+                    WHERE il."unique" = 1
+                      AND (SELECT COUNT(*) FROM pragma_index_info(il.name)) = 2
+                      AND (SELECT COUNT(*) FROM pragma_index_info(il.name) ii
+                            WHERE ii.name IN ('agent_id', 'target_id')) = 2"#,
                 [],
                 |r| r.get(0),
             )?;
-            if legacy == 0 {
+            if already_migrated > 0 {
                 return Ok(());
             }
             conn.execute_batch(
@@ -2707,6 +2719,67 @@ mod migration_tests {
             .expect("bob");
         assert_eq!(bob.id, "keep");
         assert_eq!(bob.personality, "bob-note");
+    }
+
+    /// v21: 旧制約の判定は `sqlite_master.sql` の文字列ではなく実際の索引の列を見る。
+    ///
+    /// 同じ旧制約でも表記（空白・列の並べ方）は DB を作ったバイナリによって揺れる。
+    /// 表記が違っても再構築が走り、`upsert_impression` の `ON CONFLICT(agent_id,
+    /// target_id)` が通ること。
+    #[test]
+    fn impressions_agent_scope_migration_v21_detects_reformatted_legacy_schema() {
+        let conn = crate::init_memory().expect("init");
+        // 旧制約と等価だが `sql LIKE '%UNIQUE(agent_id, session_id, target_id)%'` には
+        // 引っ掛からない表記（`UNIQUE (` と余分な空白）。
+        conn.execute_batch(
+            "DROP TABLE impressions;
+             CREATE TABLE impressions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                personality TEXT DEFAULT '',
+                communication_style TEXT DEFAULT '',
+                recent_behavior TEXT DEFAULT '',
+                agreement TEXT DEFAULT '中立',
+                notes TEXT DEFAULT '',
+                last_updated_turn INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE  (agent_id,session_id,target_id)
+             );
+             PRAGMA user_version = 20",
+        )
+        .unwrap();
+
+        initialize(&conn).expect("upgrade v20 -> v21");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 新制約になっているので upsert（ON CONFLICT(agent_id, target_id)）が通る。
+        let row = crate::queries::ImpressionRow {
+            id: "i1".to_string(),
+            agent_id: "a1".to_string(),
+            session_id: "s-discord".to_string(),
+            target_id: "u1".to_string(),
+            target_name: "Alice".to_string(),
+            personality: "p1".to_string(),
+            communication_style: String::new(),
+            recent_behavior: String::new(),
+            agreement: "中立".to_string(),
+            notes: String::new(),
+            last_updated_turn: 0,
+        };
+        crate::queries::upsert_impression(&conn, &row).expect("upsert on new constraint");
+        let mut again = row.clone();
+        again.session_id = "s-nostr".to_string();
+        again.personality = "p2".to_string();
+        crate::queries::upsert_impression(&conn, &again).expect("upsert across sessions");
+        assert_eq!(
+            crate::queries::get_impressions(&conn, "a1").unwrap().len(),
+            1,
+            "別セッションからでも同じ 1 行を更新する"
+        );
     }
 
     /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する
