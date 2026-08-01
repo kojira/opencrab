@@ -373,6 +373,11 @@ impl SystemGatewayActions {
                               ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
                               ダッシュボード）で管理するため relay サブコマンドは不可。まだ鍵を採用して\
                               いない場合は先に nostr_switch_identity で採用すること。\
+                              `timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、\
+                              足りない分だけリレーから補われる）。フォローしていない人のノートを\
+                              含むリレー全体の新着を見るには `timeline --global` を使う\
+                              （件数が多くなるので `--out <相対パス> --out-format json` を併せて\
+                              渡せる。`--out-format` は `--out` とセットで指定する）。\
                               `--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ\
                               **あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま\
                               `--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。"
@@ -6333,6 +6338,41 @@ mod tests {
             opencrab_actions::default_non_dispatch_tools().contains("nostr_run"),
             "nostr_run は inline（同ターン結果依存 / 配送系）"
         );
+    }
+
+    /// description は **グローバルタイムラインの取り方**を書いてある（#312）。
+    ///
+    /// `nostr_run` は subcommand しか検査せず args は素通しなので、`timeline --global` は
+    /// 実装を 1 行も足さずに使える。**にもかかわらず使われなかった**のは、description に
+    /// 書いていなかったからで、実測では約 5.5 時間の `nostr_run` 36 件のうち 26 件が
+    /// `timeline`（＝フォロー基準の同じ範囲を取り直していた）だった。description は LLM が
+    /// ツールの使い方を知る唯一の手がかりなので、ここが消えると「機能はあるのに誰も使わない」
+    /// 状態へ黙って戻る。
+    ///
+    /// 素の `timeline` との違いも要求する。「`timeline` を叩けばフォロー外も見える」という
+    /// 誤解こそが 26 回の空振りの原因なので、`--global` の名前だけ書いても効かない。
+    ///
+    /// needle は表現をそのまま拾うので、description を言い換えるときは needle も一緒に直す
+    /// （守りたいのは文字列ではなく「グローバルの取り方が書いてある」ことの方）。
+    #[test]
+    fn nostr_run_description_documents_the_global_timeline() {
+        let defs = SystemGatewayActions::own_definitions();
+        let d = defs.iter().find(|d| d.name == "nostr_run").unwrap();
+        for needle in [
+            // グローバルの取り方そのもの。
+            "timeline --global",
+            // 素の timeline がフォロー基準であること（違いの明示）。
+            "フォロー基準",
+            // 件数が多いときの逃がし先。
+            "--out-format json",
+        ] {
+            assert!(
+                d.description.contains(needle),
+                "nostr_run の description から「{needle}」が消えている\
+                 （グローバルタイムラインの取り方は description にしか書けない / #312）:\n{}",
+                d.description
+            );
+        }
     }
 
     /// caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）でも `nostr_run` は
