@@ -45,6 +45,35 @@ pub(crate) fn resolve_run_tools_config(
     tools_cfg
 }
 
+/// そのエージェントが `execute_shell` で**実際に実行できる**コマンド名の一覧（#300）。
+///
+/// [`resolve_run_tools_config`] の結果に `ShellToolConfig::effective_commands()` を
+/// 掛けただけのもの。つまり LLM へ渡る `execute_shell` の `Allowed: ...` と
+/// **同じ経路・同じ順序・同じ重複排除**で作られる。
+///
+/// 許可コマンド一覧ツール（`crate::agent_management::list_allowed_commands` /
+/// `SystemGatewayActions::manage_allowed_commands` の `action="list"`）は
+/// **必ずこの関数を通す**こと。ここを迂回して DB 行だけを返していたのが #300 の不具合で、
+/// エージェントが「シェルは DB 行の 2 個しか使えない」と誤認して作業を止めた
+/// （実際には設定ファイル由来の 10 個も同じターンで実行できていた）。
+/// 出力先ごとに合成を書き直すと、片方だけ実態からずれて同じ誤認が再発する。
+///
+/// DB 読み取りに失敗した場合は [`resolve_run_tools_config`] と同様に設定ファイル分だけを
+/// 返す。**これは意図的**で、その run が実際に許可する集合と一致させるためである
+/// （一覧だけがエラーを返しても、実行側は設定ファイル分を許可したまま動く）。
+pub(crate) fn effective_allowed_commands(state: &AppState, agent_id: &str) -> Vec<String> {
+    resolve_run_tools_config(state, agent_id)
+        .shell
+        .map(|shell| {
+            shell
+                .effective_commands()
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// sub-engine のツール呼び出しを進捗テキストへ要約する（#175 S4）。
 ///
 /// 旧 Discord 実装（`execute_spawn_subtask`）から移設。`{function:{name}}`（正準）と

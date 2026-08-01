@@ -9,6 +9,8 @@
 //!
 //! 移設で維持している不変条件（壊すと重大。順に対応するテストがある）:
 //! - **レスポンス JSON のキーと文言**（エラー文言も含む）を Discord 実装と 1 文字も変えない。
+//!   唯一の例外は `list_allowed_commands` の **`commands` の中身**で、#300 で
+//!   DB 行だけ → 実効リスト（設定ファイル分を含む）へ広げた。キーは増減していない。
 //! - **オーナー限定のハンドラ内検査**（add / remove）。bridge の `OWNER_ONLY_ACTIONS` は
 //!   これらの名前を**持っていない**ため、このハンドラ内検査が唯一のゲートである。
 //! - **コマンド名の文字種検査**（英数字・`-`・`_` のみ）。同系統の
@@ -325,35 +327,40 @@ pub(crate) fn add_allowed_command(
     }
 }
 
-/// 許可コマンドの一覧（DB のみ・純粋な読み取り）。
+/// 許可コマンドの一覧（**実効リスト**・純粋な読み取り）。
 ///
 /// 旧 `DiscordGatewayActions::execute_list_allowed_commands` の移設。
+///
+/// # 実効リストであること（#300）
+///
+/// 移設時点では **DB 行だけ**を返していた。設定ファイル（`[[tools.shell.commands]]` /
+/// `allowed_commands`）由来のコマンドは per-agent の DB には無いため、
+/// 「DB に 2 行あるエージェント」は `{"commands":["cargo","mkdir"],"count":2}` を受け取り、
+/// **同じターンで実行できている `python3` / `jq` / `grep` / `ls` / `cat` を「使えない」と
+/// 誤認して作業を止めた**。プロンプト側（`execute_shell` の `Allowed: ...`）は
+/// 設定 10 個 + DB 2 個 = 12 個を正しく合成していたので、食い違っていたのはこの戻り値だけ。
+///
+/// そのため合成は自前で書かず、応答生成が毎 run 使う解決点
+/// （`crate::process::effective_allowed_commands` → `resolve_run_tools_config`）を
+/// **そのまま**通す。`execute_shell` の description と同一の関数から作るので、
+/// 出力先ごとに実装が分かれて片方だけ実態からずれることが原理的に起きない。
+///
+/// レスポンスのキー（`commands` / `count` / `agent_id`）は移設前のまま。中身が
+/// DB 行から実効リストへ広がるだけで、既存の読み手は壊れない。
 pub(crate) fn list_allowed_commands(
     state: &AppState,
     ctx: &GatewayCallContext,
 ) -> GatewayActionResult {
-    let conn = state.db.lock().unwrap();
-    match opencrab_db::queries::list_agent_allowed_commands(&conn, &ctx.agent_id) {
-        Ok(commands) => {
-            let count = commands.len();
-            GatewayActionResult {
-                success: true,
-                data: Some(json!({
-                    "commands": commands,
-                    "count": count,
-                    "agent_id": ctx.agent_id,
-                })),
-                error: None,
-            }
-        }
-        Err(e) => {
-            tracing::error!("list_agent_allowed_commands failed: {e}");
-            GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some(format!("許可コマンドの取得に失敗: {e}")),
-            }
-        }
+    let commands = crate::process::effective_allowed_commands(state, &ctx.agent_id);
+    let count = commands.len();
+    GatewayActionResult {
+        success: true,
+        data: Some(json!({
+            "commands": commands,
+            "count": count,
+            "agent_id": ctx.agent_id,
+        })),
+        error: None,
     }
 }
 
