@@ -1416,6 +1416,8 @@ pub async fn run_agent_response(
         gateway: gateway.to_string(),
     };
 
+    // dispatch した subtask にも同じ呼び出し元を載せる（#298）ので、ここでは複製する。
+    let run_caller = req.caller.clone();
     let ctx = opencrab_actions::ActionContext {
         caller: req.caller,
         agent_id: agent_id.to_string(),
@@ -1602,6 +1604,10 @@ pub async fn run_agent_response(
                 session_id.to_string(),
             )
             .with_reply_target(req.reply_target.clone())
+            // このターンの呼び出し元を dispatch した subtask へ引き継ぐ（#298）。
+            // 決着で親会話を resume する sink が、元の権限のまま再開できる
+            // （落とすと owner/trusted のツールが resume 後に丸ごと消える）。
+            .with_caller(run_caller.clone())
             // 大きい tool_result は inline 経路と同様にワークスペースへ退避する
             // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
             .with_workspace_root(Some(tool_result_workspace.clone()));

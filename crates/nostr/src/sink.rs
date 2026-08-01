@@ -563,6 +563,8 @@ mod tests {
             exit_reason: "completed".to_string(),
             kind: SettleKind::Completed,
             reply_target: reply_target.map(|s| s.to_string()),
+            // Nostr は inbound も resume も最小権限（`respond` が Agent 固定）。
+            caller: opencrab_actions::CallerIdentity::Agent,
         }
     }
 
@@ -807,6 +809,7 @@ mod tests {
                 tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: Some("note1target".to_string()),
+                caller: opencrab_actions::CallerIdentity::Agent,
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
             },
         );

@@ -70,6 +70,9 @@ impl SubtaskCompletionSink for DiscordCompletionSink {
             channel_id_str: channel_id.to_string(),
             guild_id,
             is_dm,
+            // 元のターンの呼び出し元を resume まで運ぶ（#298）。ここで落とすと
+            // `process_subtask_completed` が最小権限で再開してしまう。
+            caller: ev.caller,
         });
     }
 }
@@ -452,6 +455,21 @@ mod tests {
     }
 
     fn settled(session_id: &str, kind: SettleKind, exit_reason: &str) -> SubtaskSettled {
+        settled_as(
+            session_id,
+            kind,
+            exit_reason,
+            opencrab_actions::CallerIdentity::Agent,
+        )
+    }
+
+    /// 親ターンの呼び出し元を明示した決着イベント（#298）。
+    fn settled_as(
+        session_id: &str,
+        kind: SettleKind,
+        exit_reason: &str,
+        caller: opencrab_actions::CallerIdentity,
+    ) -> SubtaskSettled {
         SubtaskSettled {
             session_id: session_id.to_string(),
             agent_id: "agent-x".to_string(),
@@ -459,6 +477,7 @@ mod tests {
             exit_reason: exit_reason.to_string(),
             kind,
             reply_target: None,
+            caller,
         }
     }
 
@@ -484,8 +503,10 @@ mod tests {
                 channel_id_str,
                 guild_id,
                 is_dm,
+                caller,
             } => {
                 assert_eq!(session_id, "discord-agent-x-111222333-444555666");
+                assert_eq!(caller, opencrab_actions::CallerIdentity::Agent);
                 assert_eq!(agent_id, "agent-x");
                 assert_eq!(subtask_id, "st-1");
                 // 本文は DB（session_logs）から読み直す契約（RFC §1.3）。
@@ -499,6 +520,36 @@ mod tests {
             _ => panic!("SubtaskCompleted 以外のイベントが流れた"),
         }
         assert!(rx.try_recv().is_err(), "余分なイベントを送ってはならない");
+    }
+
+    /// #298: 決着通知の呼び出し元をそのまま `LoopEvent` へ載せる。
+    ///
+    /// resume は `process_subtask_completed` が受けて `RunRequest` を組むので、
+    /// ここで落とすと元ターンが最小権限へ降格し、owner/trusted のツールが消える。
+    #[test]
+    fn discord_sink_forwards_the_original_caller() {
+        for caller in [
+            opencrab_actions::CallerIdentity::Owner,
+            opencrab_actions::CallerIdentity::TrustedUser,
+            opencrab_actions::CallerIdentity::Agent,
+        ] {
+            let (sink, mut rx) = sink_with_channel();
+            sink.on_subtask_settled(settled_as(
+                "discord-agent-x-111222333-444555666",
+                SettleKind::Completed,
+                "progress",
+                caller.clone(),
+            ));
+            match rx.try_recv().expect("完了は LoopEvent を 1 本送る") {
+                LoopEvent::SubtaskCompleted {
+                    caller: forwarded, ..
+                } => assert_eq!(
+                    forwarded, caller,
+                    "決着通知の呼び出し元が resume まで運ばれていない"
+                ),
+                _ => panic!("SubtaskCompleted 以外のイベントが流れた"),
+            }
+        }
     }
 
     /// DM（guild_id 空）の親セッションでも復元でき、`is_dm` が立つ。

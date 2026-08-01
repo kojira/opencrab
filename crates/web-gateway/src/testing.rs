@@ -29,6 +29,8 @@ pub struct RunObservation {
     ///
     /// 中身（`SpawnedSubtask`）は `Debug` を実装しないため、`Debug` は手実装で伏せる。
     pub subtask_registry: Option<opencrab_actions::SubtaskRegistry>,
+    /// この run の呼び出し元（#298）。resume が元の権限を落としていないかの検査に使う。
+    pub caller: CallerIdentity,
 }
 
 impl std::fmt::Debug for RunObservation {
@@ -39,6 +41,7 @@ impl std::fmt::Debug for RunObservation {
             .field("conversation", &self.conversation)
             .field("dispatch_enabled", &self.dispatch_enabled)
             .field("subtask_registry", &self.subtask_registry.is_some())
+            .field("caller", &self.caller)
             .finish()
     }
 }
@@ -182,6 +185,7 @@ impl AgentRuntime for FakeRunner {
             conversation: req.conversation.clone(),
             dispatch_enabled: req.completion_sink.is_some() && req.subtask_registry.is_some(),
             subtask_registry: req.subtask_registry.clone(),
+            caller: req.caller.clone(),
         });
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;

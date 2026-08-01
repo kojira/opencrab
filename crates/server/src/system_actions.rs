@@ -63,6 +63,33 @@ pub struct SystemGatewayActions {
     text_delivery: Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>>,
 }
 
+/// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
+///
+/// 登録簿のエントリ（`SpawnedSubtask`）は shard ロック下でしか読めないので、必要な
+/// フィールドをここへ写してからロックを離す。
+struct ProgressSubtaskEntry {
+    /// 解決済みの subtask ID（引数省略時は session_id からの逆引き結果）。
+    subtask_id: String,
+    /// subtask 自身のセッション ID（所有権ゲート用）。
+    session_id: String,
+    /// 親セッション ID（進捗ログと resume の宛先）。
+    parent_session_id: String,
+    /// **親ターンの呼び出し元**（#298）。進捗デバウンス発火は親会話を resume する
+    /// ので、resume 先の権限は元のターンのものでなければならない。
+    caller: opencrab_actions::CallerIdentity,
+}
+
+impl ProgressSubtaskEntry {
+    fn from_entry(subtask_id: String, entry: &opencrab_actions::SpawnedSubtask) -> Self {
+        Self {
+            subtask_id,
+            session_id: entry.session_id.clone(),
+            parent_session_id: entry.parent_session_id.clone(),
+            caller: entry.caller.clone(),
+        }
+    }
+}
+
 impl SystemGatewayActions {
     pub fn new(
         state: AppState,
@@ -1165,6 +1192,10 @@ impl SystemGatewayActions {
     /// 3. 所有権ゲート（自分自身の subtask か、自分が親のもののみ）
     /// 4. 親セッションログへ `subtask_progress` を記録（本文の永続化はここだけ）
     /// 5. デバウンス後に完了 sink へ `SettleKind::Progress` を通知（メインエンジン再呼び出し）
+    ///
+    /// 5 の通知は**親会話の resume** を起こすので、親ターンの呼び出し元
+    /// （`SpawnedSubtask.caller`）をそのまま載せる（#298）。`ctx.caller` は sub-engine
+    /// 自身（最小権限）なので使えない。
     async fn report_progress(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
         let Some(message) = args.get("message").and_then(|v| v.as_str()) else {
             return err("report_progress: 'message' is required".to_string());
@@ -1187,29 +1218,19 @@ impl SystemGatewayActions {
             .to_string();
         let agent_id = ctx.agent_id.clone();
 
-        // 登録簿から (subtask_id, session_id, parent_session_id) を引く。registry 未配線
-        // （`None`）は「登録簿に無い」と同じ扱い（= 自己申告として親ログにだけ残す）。
-        let subtask_entry: Option<(String, String, String)> =
+        // 登録簿から進捗の宛先と、resume に必要な親ターンの呼び出し元を引く。registry
+        // 未配線（`None`）は「登録簿に無い」と同じ扱い（= 自己申告として親ログにだけ残す）。
+        let subtask_entry: Option<ProgressSubtaskEntry> =
             self.subtask_registry.as_ref().and_then(|registry| {
                 if !subtask_id_arg.is_empty() {
-                    registry.get(&subtask_id_arg).map(|e| {
-                        (
-                            subtask_id_arg.clone(),
-                            e.session_id.clone(),
-                            e.parent_session_id.clone(),
-                        )
-                    })
+                    registry
+                        .get(&subtask_id_arg)
+                        .map(|e| ProgressSubtaskEntry::from_entry(subtask_id_arg.clone(), &e))
                 } else {
                     registry
                         .iter()
                         .find(|e| e.session_id == current_session_id)
-                        .map(|e| {
-                            (
-                                e.key().clone(),
-                                e.value().session_id.clone(),
-                                e.value().parent_session_id.clone(),
-                            )
-                        })
+                        .map(|e| ProgressSubtaskEntry::from_entry(e.key().clone(), e.value()))
                 }
             });
 
@@ -1217,8 +1238,11 @@ impl SystemGatewayActions {
         // サブタスク（自分自身 = session_id 一致、または自分の子 = parent_session_id 一致）
         // 以外は拒否する。無検証だと他セッションへの進捗ログ書き込み・メインエンジン
         // 再呼び出しを誘発できてしまう。
-        if let Some((id, session_id, parent_session_id)) = &subtask_entry {
-            if session_id != &current_session_id && parent_session_id != &current_session_id {
+        if let Some(entry) = &subtask_entry {
+            if entry.session_id != current_session_id
+                && entry.parent_session_id != current_session_id
+            {
+                let id = &entry.subtask_id;
                 return err(format!(
                     "{REJECTION_CODE_PREFIX}report_progress: subtask '{id}' は呼び出し元セッションのサブタスクではありません"
                 ));
@@ -1227,12 +1251,18 @@ impl SystemGatewayActions {
 
         let subtask_id = subtask_entry
             .as_ref()
-            .map(|(id, _, _)| id.clone())
+            .map(|e| e.subtask_id.clone())
             .unwrap_or(subtask_id_arg);
         let parent_session_id = subtask_entry
             .as_ref()
-            .map(|(_, _, parent)| parent.clone())
+            .map(|e| e.parent_session_id.clone())
             .unwrap_or_else(|| current_session_id.clone());
+        // resume 時の呼び出し元（#298）。登録簿に無い自己申告は最小権限へ倒す。
+        // ここで `ctx.caller`（= sub-engine 自身 = Agent）を使ってはならない。
+        let resume_caller = subtask_entry
+            .as_ref()
+            .map(|e| e.caller.clone())
+            .unwrap_or(opencrab_actions::CallerIdentity::Agent);
 
         // 進捗本文は親セッションログ（DB）へ永続化する。sink には本文を運ばない
         // （RFC §1.3）ので、受け口が未配線でも本文自体はここで残る。
@@ -1262,8 +1292,8 @@ impl SystemGatewayActions {
         // 進捗を lifecycle 通知口へ流す（#175 S4）。通知口は登録簿と対の随伴マップ
         // （`AppState.subtask_notifiers`）から引く。旧 Discord 実装が webhook へ
         // progress を出していた経路の置き換えで、宛先の解決も整形も実装側に閉じている。
-        if let Some((resolved_subtask_id, _, _)) = &subtask_entry {
-            if let Some(notifier) = self.state.subtask_notifiers.get(resolved_subtask_id) {
+        if let Some(entry) = &subtask_entry {
+            if let Some(notifier) = self.state.subtask_notifiers.get(&entry.subtask_id) {
                 notifier.on_progress(&message);
             }
         }
@@ -1314,6 +1344,9 @@ impl SystemGatewayActions {
                 kind: SettleKind::Progress,
                 // 進捗の宛先は親セッション。返信先の復元は sink 側の責務（#167）。
                 reply_target: None,
+                // 親ターンの呼び出し元を引き継ぐ（#298）。ここを Agent 固定にすると
+                // 「進捗を報告すると自分の権限が落ちる」自爆的な挙動になる。
+                caller: resume_caller,
             });
         });
 
@@ -2635,6 +2668,21 @@ mod tests {
         session_id: &str,
         parent_session_id: &str,
     ) -> SubtaskRegistry {
+        registry_with_caller(
+            subtask_id,
+            session_id,
+            parent_session_id,
+            opencrab_actions::CallerIdentity::Agent,
+        )
+    }
+
+    /// 親ターンの呼び出し元を指定して 1 件登録した registry（#298）。
+    fn registry_with_caller(
+        subtask_id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+        caller: opencrab_actions::CallerIdentity,
+    ) -> SubtaskRegistry {
         let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
         registry.insert(
             subtask_id.to_string(),
@@ -2647,6 +2695,7 @@ mod tests {
                 tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                caller,
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
             },
         );
@@ -2936,6 +2985,81 @@ mod tests {
             "デバウンスは gateway の作り直しを跨いで効かなければならない（AppState 側に置く）。届いた: {settled:?}"
         );
         assert_eq!(settled[0].kind, SettleKind::Progress);
+    }
+
+    /// **#298 の直接のトリガ**: `report_progress` のデバウンス発火は親会話を resume
+    /// するので、通知には**親ターンの呼び出し元**を載せる。
+    ///
+    /// `ctx.caller`（= sub-engine 自身 = `Agent`）を載せると、進捗を報告した瞬間に
+    /// 親ターンが最小権限へ降格し、owner/trusted のツールが丸ごと消える。
+    #[tokio::test(start_paused = true)]
+    async fn report_progress_carries_the_parent_caller_to_the_sink() {
+        let state = crate::test_app_state();
+        let registry = registry_with_caller(
+            "st-1",
+            "subtask-st-1",
+            "web-parent-1",
+            opencrab_actions::CallerIdentity::Owner,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        assert!(
+            actions
+                .execute(
+                    "report_progress",
+                    &json!({ "message": "掘っています" }),
+                    // 呼ぶのは sub-engine（最小権限）。ここの caller を使ってはならない。
+                    &sub_ctx("subtask-st-1"),
+                )
+                .await
+                .success
+        );
+        tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
+
+        let settled = sink.settled();
+        assert_eq!(settled.len(), 1, "進捗通知は 1 本: {settled:?}");
+        assert_eq!(settled[0].kind, SettleKind::Progress);
+        assert_eq!(
+            settled[0].caller,
+            opencrab_actions::CallerIdentity::Owner,
+            "進捗を報告すると親ターンの権限が落ちる（#298 の自爆的な挙動）"
+        );
+    }
+
+    /// 昇格経路にはしない: 親が `Agent` なら進捗通知の caller も `Agent`。
+    #[tokio::test(start_paused = true)]
+    async fn report_progress_does_not_escalate_agent_callers() {
+        let state = crate::test_app_state();
+        let registry = registry_with("st-1", "subtask-st-1", "web-parent-1");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        assert!(
+            actions
+                .execute(
+                    "report_progress",
+                    &json!({ "message": "掘っています" }),
+                    &sub_ctx("subtask-st-1"),
+                )
+                .await
+                .success
+        );
+        tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
+
+        let settled = sink.settled();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].caller, opencrab_actions::CallerIdentity::Agent);
     }
 
     // ---- #157 S1: 汎用管理ツール 4 個の gateway 非依存化 ----
@@ -4263,6 +4387,7 @@ mod tests {
                 tool_name: tool_name.to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                caller: opencrab_actions::CallerIdentity::Agent,
                 lifecycle: opencrab_actions::SubtaskLifecycle::new(),
             },
         );

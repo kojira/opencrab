@@ -82,6 +82,11 @@ pub enum LoopEvent {
         channel_id_str: String,
         guild_id: String,
         is_dm: bool,
+        /// resume する親ターンの呼び出し元（#298）。subtask を spawn した run の
+        /// caller をそのまま引き継ぐ。ここを `Agent` 固定にすると、オーナー発の
+        /// ターンが subtask 決着で降格し、owner/trusted のツールが list_tools からも
+        /// dispatch からも丸ごと消える。
+        caller: opencrab_actions::CallerIdentity,
     },
     /// A2UIインタラクション応答（ボタンクリック or タイムアウト）。
     InteractionResponse {
@@ -305,6 +310,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         channel_id_str,
                         guild_id,
                         is_dm,
+                        caller,
                     }) => {
                         // 推論をイベントループ内で await しない。以前はここでフル推論を
                         // 直列実行していたため、サブタスクの report_progress / 完了のたびに
@@ -335,6 +341,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 voice_c,
                                 event_tx_c,
                                 registry_c,
+                                caller,
                             )
                             .await;
                         });
@@ -355,6 +362,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         let state_c = state.clone();
                         let ga_c = gateway_actions.clone();
                         let sess = session_id.clone();
+                        let owner_c = owner_discord_id.clone();
                         session_locks.spawn_serialized(sess, async move {
                             process_interaction_response(
                                 interaction_id,
@@ -368,6 +376,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 gateway_c,
                                 state_c,
                                 ga_c,
+                                owner_c,
                             )
                             .await;
                         });
@@ -848,6 +857,12 @@ async fn handle_agent_response<T: AgentRunner>(
 }
 
 /// サブタスク完了イベントを処理する（P2: イベントループで直列実行）。
+///
+/// `caller` は subtask を spawn した**元のターンの呼び出し元**（#298）。resume は
+/// 元の会話の続きなので、ここで最小権限へ落とすと owner/trusted のツールが
+/// `policy_allows` で list_tools からも dispatch からも消える。引き継ぐだけで、
+/// 昇格はしない（元が `Agent` のターンは `Agent` のまま）。
+#[allow(clippy::too_many_arguments)]
 async fn process_subtask_completed<T: AgentRunner>(
     session_id: String,
     agent_id: String,
@@ -864,6 +879,7 @@ async fn process_subtask_completed<T: AgentRunner>(
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    caller: opencrab_actions::CallerIdentity,
 ) {
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
 
@@ -913,7 +929,10 @@ async fn process_subtask_completed<T: AgentRunner>(
                 &system_prompt,
                 &conversation,
                 "discord",
-                opencrab_actions::CallerIdentity::Agent,
+                // 元のターンの呼び出し元をそのまま使う（#298）。以前はここが
+                // `CallerIdentity::Agent` 固定で、subtask が決着した瞬間に権限が
+                // 降格していた。
+                caller,
             )
             .with_gateway_actions(gateway_actions)
             // 返信先（gateway 不透明 token / #158 S1）= resume 対象チャンネルの数値文字列。
@@ -1155,6 +1174,12 @@ async fn handle_component_interaction(
 ///
 /// SubtaskCompletedと同様のパターンで、応答情報をシステムプロンプトに含めて
 /// エージェントを再呼び出しする。
+///
+/// 呼び出し元は**UI に応答した本人**（`response.responder_id`）から解決する（#298）。
+/// これも元の会話の resume なので、`CallerIdentity::Agent` 固定にすると owner/trusted の
+/// ツールが `policy_allows` で丸ごと消える。判定は inbound と同じ
+/// [`AgentRunner::resolve_caller`] なので、権限の導出経路を新設していない。
+#[allow(clippy::too_many_arguments)]
 async fn process_interaction_response<T: AgentRunner>(
     interaction_id: String,
     session_id: String,
@@ -1167,6 +1192,7 @@ async fn process_interaction_response<T: AgentRunner>(
     gateway: Arc<DiscordGateway>,
     state: T,
     gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+    owner_discord_id: String,
 ) {
     info!(
         interaction_id = %interaction_id,
@@ -1243,6 +1269,15 @@ async fn process_interaction_response<T: AgentRunner>(
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
+    // UI に応答した本人の権限で resume する（#298）。inbound と同じ解決関数を使う
+    // （owner > trusted_users の permission > Agent）。エージェント一覧は**この
+    // セッションのエージェント 1 体**に絞る（他エージェント宛の信頼行を拾わない）。
+    let caller = state.resolve_caller(
+        &response.responder_id,
+        std::slice::from_ref(&agent_id),
+        &owner_discord_id,
+    );
+
     match state
         .run_agent_response(
             opencrab_actions::RunRequest::new(
@@ -1252,7 +1287,7 @@ async fn process_interaction_response<T: AgentRunner>(
                 &system_prompt,
                 &conversation,
                 "discord",
-                opencrab_actions::CallerIdentity::Agent,
+                caller,
             )
             .with_gateway_actions(gateway_actions)
             // 返信先（gateway 不透明 token / #158 S1）= UI 応答が来たチャンネルの数値文字列。

@@ -53,6 +53,26 @@ pub enum CallerIdentity {
     TrustedUser,
 }
 
+/// gateway 境界の caller から dispatcher 側の識別子へ戻す（#298）。
+///
+/// 逆向き（`CallerIdentity` → [`opencrab_gateway::GatewayCaller`]）は
+/// `BridgedExecutor::gateway_call_context` が行う。両者は同型なので写像は無損失で、
+/// `GatewayCallContext` しか持たないツールハンドラ（`spawn_subtask`）が
+/// 「この run の呼び出し元」をそのまま記録できるようにするために必要。
+/// **権限を変換しない**（昇格も降格もしない）。
+impl From<&opencrab_gateway::GatewayCaller> for CallerIdentity {
+    fn from(caller: &opencrab_gateway::GatewayCaller) -> Self {
+        match caller {
+            opencrab_gateway::GatewayCaller::Owner => CallerIdentity::Owner,
+            opencrab_gateway::GatewayCaller::Agent => CallerIdentity::Agent,
+            opencrab_gateway::GatewayCaller::CoAgent { agent_id } => CallerIdentity::CoAgent {
+                agent_id: agent_id.clone(),
+            },
+            opencrab_gateway::GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,
+        }
+    }
+}
+
 /// アクション実行コンテキスト
 pub struct ActionContext {
     pub caller: CallerIdentity,

@@ -21,7 +21,10 @@ use opencrab_actions::{CallerIdentity, RunRequest, SessionLocks};
 use opencrab_core::EngineResult;
 use opencrab_gateway::{DiscordGateway, IncomingMessage, MessageContent, MessageSource, Sender};
 
-use super::{create_event_channel, process_incoming_message, process_subtask_completed};
+use super::{
+    create_event_channel, process_incoming_message, process_interaction_response,
+    process_subtask_completed,
+};
 
 /// `run_agent_response` の観測 1 件。
 ///
@@ -31,6 +34,8 @@ struct RunObservation {
     session_id: String,
     subtask_registry: Option<SubtaskRegistry>,
     has_completion_sink: bool,
+    /// この run の呼び出し元（#298）。resume が元の権限を落としていないことの検査に使う。
+    caller: CallerIdentity,
 }
 
 /// 受信フック（`AgentRuntime::on_inbound_message`）の観測 1 件。
@@ -103,6 +108,15 @@ impl FakeRunner {
             r.has_completion_sink,
         )
     }
+
+    /// 観測した run の呼び出し元（#298）。
+    fn observed_caller(&self, index: usize) -> CallerIdentity {
+        let runs = self.runs.lock().unwrap();
+        runs.get(index)
+            .expect("run が観測されていない")
+            .caller
+            .clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -112,6 +126,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
             session_id: req.session_id.clone(),
             subtask_registry: req.subtask_registry.clone(),
             has_completion_sink: req.completion_sink.is_some(),
+            caller: req.caller.clone(),
         });
         self.run_observed.notify_one();
         // 空応答: 転記も Discord 送信も走らない（この fake はネットワークへ出ない）。
@@ -190,7 +205,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         _session_id: &str,
         _record: &opencrab_actions::InteractionRecord<'_>,
     ) {
-        unimplemented!("この fake は A2UI interaction を使わない")
+        // 記録の中身はこのファイルの検査対象ではない（#298 では resume の権限だけを見る）。
     }
 
     fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
@@ -206,7 +221,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         _response_json: Option<&str>,
         _responder_id: Option<&str>,
     ) {
-        unimplemented!("この fake は A2UI interaction を使わない")
+        // 同上（#298）。
     }
 
     fn cleanup_stale_interactions(&self) {
@@ -322,6 +337,7 @@ async fn resume_run_carries_the_caller_registry_so_cancel_can_reach_it() {
         None,
         event_tx,
         registry.clone(),
+        opencrab_actions::CallerIdentity::Agent,
     )
     .await;
 
@@ -580,5 +596,121 @@ fn failed_inbound_record_is_detected_not_swallowed() {
     assert!(
         logs.contains("discord-crab-111-222"),
         "どのセッションで落ちたか分からない: {logs}"
+    );
+}
+
+// ================================================================================
+// #298: resume で呼び出し元（CallerIdentity）を落とさない
+//
+// `policy_allows`（`crates/actions/src/bridge.rs`）は owner_only / trusted_only の
+// ツールを **list_tools からも dispatch からも** 落とす。resume の RunRequest を
+// `CallerIdentity::Agent` 固定で組むと、オーナー発のターンが subtask 決着の瞬間に
+// 降格し、owner/trusted のツールが丸ごと消える（`report_progress` を呼ぶと自分の
+// 権限が落ちる、という自爆的な挙動）。
+// ================================================================================
+
+/// subtask 完了 resume は、subtask を spawn した元ターンの呼び出し元を保つ。
+#[tokio::test]
+async fn subtask_resume_preserves_the_original_caller() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+
+    process_subtask_completed(
+        "discord-crab-111-222".to_string(),
+        "crab".to_string(),
+        "st-1".to_string(),
+        "結果本文".to_string(),
+        "progress".to_string(),
+        222,
+        "222".to_string(),
+        "111".to_string(),
+        false,
+        gateway,
+        state.clone(),
+        gateway_actions,
+        None,
+        event_tx,
+        registry,
+        CallerIdentity::Owner,
+    )
+    .await;
+
+    assert_eq!(
+        state.observed_caller(0),
+        CallerIdentity::Owner,
+        "オーナー発のターンが subtask 決着で降格している（owner/trusted のツールが消える）"
+    );
+}
+
+/// 昇格はしない: 元が `Agent` のターンは resume でも `Agent` のまま。
+#[tokio::test]
+async fn subtask_resume_keeps_agent_turns_as_agent() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+
+    process_subtask_completed(
+        "discord-crab-111-222".to_string(),
+        "crab".to_string(),
+        "st-1".to_string(),
+        String::new(),
+        "completed".to_string(),
+        222,
+        "222".to_string(),
+        "111".to_string(),
+        false,
+        gateway,
+        state.clone(),
+        gateway_actions,
+        None,
+        event_tx,
+        registry,
+        CallerIdentity::Agent,
+    )
+    .await;
+
+    assert_eq!(
+        state.observed_caller(0),
+        CallerIdentity::Agent,
+        "resume が権限の昇格経路になってはならない"
+    );
+}
+
+/// A2UI 応答の resume は、応答した本人（`responder_id`）から呼び出し元を解決する。
+///
+/// この fake の `resolve_caller` は `TrustedUser` を返すので、`Agent` 固定のままなら
+/// 落ちる。判定そのものは inbound と同じ `resolve_caller` に委ねている（権限の
+/// 導出経路を新設していない）。
+#[tokio::test]
+async fn interaction_response_resume_resolves_caller_from_the_responder() {
+    let (state, gateway, gateway_actions) = make_deps();
+
+    process_interaction_response(
+        "int-1".to_string(),
+        "discord-crab-111-222".to_string(),
+        "crab".to_string(),
+        222,
+        "222".to_string(),
+        "111".to_string(),
+        opencrab_core::a2ui::A2uiUserAction {
+            surface_id: "s-1".to_string(),
+            component_id: "btn-1".to_string(),
+            action_name: "approve".to_string(),
+            context: None,
+            responder_id: "user-1".to_string(),
+        },
+        false,
+        gateway,
+        state.clone(),
+        gateway_actions,
+        "owner-1".to_string(),
+    )
+    .await;
+
+    assert_eq!(
+        state.observed_caller(0),
+        CallerIdentity::TrustedUser,
+        "UI 応答の resume が最小権限へ降格している（responder の権限で再開していない）"
     );
 }

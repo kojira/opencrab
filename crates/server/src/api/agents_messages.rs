@@ -366,6 +366,7 @@ mod tests {
             exit_reason: "cancelled".to_string(),
             kind,
             reply_target: None,
+            caller: opencrab_actions::CallerIdentity::Agent,
         }
     }
 
@@ -439,6 +440,7 @@ mod tests {
                 tool_name: "spawn_subtask".to_string(),
                 started_at: std::time::Instant::now(),
                 reply_target: None,
+                caller: opencrab_actions::CallerIdentity::Agent,
                 lifecycle: SubtaskLifecycle::new(),
             },
         );

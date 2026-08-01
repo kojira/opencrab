@@ -2119,6 +2119,7 @@ fn insert_running_subtask(
             tool_name: "spawn_subtask".to_string(),
             started_at: std::time::Instant::now(),
             reply_target: None,
+            caller: opencrab_actions::CallerIdentity::Agent,
             lifecycle: opencrab_actions::SubtaskLifecycle::new(),
         },
     );
@@ -2507,6 +2508,7 @@ async fn test_web_progress_settlement_does_not_resume() {
         exit_reason: "progress".to_string(),
         kind,
         reply_target: None,
+        caller: opencrab_actions::CallerIdentity::Agent,
     };
 
     // 進捗通知: resume しない = LLM を一度も呼ばない / SSE へ何も流れない。
