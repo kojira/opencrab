@@ -344,7 +344,10 @@ impl SystemGatewayActions {
                               nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
                               ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
                               ダッシュボード）で管理するため relay サブコマンドは不可。まだ鍵を採用して\
-                              いない場合は先に nostr_switch_identity で採用すること。"
+                              いない場合は先に nostr_switch_identity で採用すること。\
+                              `--file` / `--out` などに渡す相対パスは、ws_* / execute_shell と同じ\
+                              **あなた自身の workspace** が基準（ws_write で作ったファイルをそのまま\
+                              `--file <相対パス>` に渡せるし、`--out <相対パス>` の出力は ws_read で読める）。"
                     .to_string(),
                 parameters: json!({
                     "type": "object",
