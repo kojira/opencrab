@@ -419,6 +419,85 @@ const MIGRATIONS: &[Migration] = &[
         //   COMMIT;
         up: |conn| conn.execute_batch(AGENT_HEARTBEAT_CONFIG_SQL),
     },
+    Migration {
+        version: 21,
+        description: "impressions: UNIQUE(agent_id, session_id, target_id) → UNIQUE(agent_id, target_id)（人物像を agent スコープへ, issue #314）",
+        // **一意制約の付け替えのみ。列は 1 つも増減しない。**
+        //
+        // 人物像は「同じ人は同じ人」なので、Discord と Nostr で話しても同じ 1 行を
+        // 見るべきだった。旧制約はセッション毎に別レコードを作るため、経路が増えると
+        // 必ず分断する（#314）。
+        //
+        // `session_id` 列は**残す**。スコープからは外れるが「最後にどのセッションで
+        // 更新されたか」は時系列を辿る手掛かりとして意味があり、落とすと復元できない。
+        //
+        // 統合方針（同一 (agent_id, target_id) が複数セッションにある場合）:
+        // - **`updated_at` が最新の行を残す**（同着は rowid が大きい方＝後に入った方）。
+        // - `created_at` だけは統合対象の**最小値**を引き継ぐ（「いつからの知り合いか」を
+        //   落とさない）。それ以外の列は勝った行の値をそのまま使う。テキストの機械的な
+        //   結合はしない（人物像の中身に手を入れないため）。
+        // - 重複が無ければ全行がそのまま残る（本番データはこれに該当）。
+        //
+        // 一意制約の変更はテーブル再構築が要る（`ALTER TABLE` では付け替えられない）。
+        // 索引 `idx_impressions_session` は再構築で消える。読み出しが agent スコープに
+        // なり (agent_id, session_id) を引かなくなるので貼り直さない
+        // （UNIQUE(agent_id, target_id) の索引が agent_id 前方一致を賄う）。
+        //
+        // 冪等性: 旧制約を持つ表のときだけ再構築する。新規DB は SCHEMA_SQL 側で既に
+        // 新しい制約なので何もしない。
+        //
+        // 切り戻し: 統合で落ちた重複行は戻らない（重複が無ければ完全に可逆）。古い
+        // バイナリへ戻すときは旧制約で再構築し直し、版番号も戻すこと。
+        up: |conn| {
+            let legacy: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='impressions'
+                   AND sql LIKE '%UNIQUE(agent_id, session_id, target_id)%'",
+                [],
+                |r| r.get(0),
+            )?;
+            if legacy == 0 {
+                return Ok(());
+            }
+            conn.execute_batch(
+                "CREATE TABLE impressions_new (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    personality TEXT DEFAULT '',
+                    communication_style TEXT DEFAULT '',
+                    recent_behavior TEXT DEFAULT '',
+                    agreement TEXT DEFAULT '中立',
+                    notes TEXT DEFAULT '',
+                    last_updated_turn INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(agent_id, target_id)
+                );
+                INSERT INTO impressions_new
+                    (id, agent_id, session_id, target_id, target_name, personality,
+                     communication_style, recent_behavior, agreement, notes,
+                     last_updated_turn, created_at, updated_at)
+                    SELECT o.id, o.agent_id, o.session_id, o.target_id, o.target_name,
+                           o.personality, o.communication_style, o.recent_behavior,
+                           o.agreement, o.notes, o.last_updated_turn,
+                           (SELECT MIN(m.created_at) FROM impressions m
+                             WHERE m.agent_id = o.agent_id AND m.target_id = o.target_id),
+                           o.updated_at
+                      FROM impressions o
+                     WHERE o.rowid = (
+                           SELECT w.rowid FROM impressions w
+                            WHERE w.agent_id = o.agent_id AND w.target_id = o.target_id
+                            ORDER BY w.updated_at DESC, w.rowid DESC
+                            LIMIT 1);
+                DROP TABLE impressions;
+                ALTER TABLE impressions_new RENAME TO impressions;",
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -1305,6 +1384,9 @@ CREATE INDEX IF NOT EXISTS idx_skills_active ON skills(agent_id, is_active);
 -- ============================================
 -- Impressions: 心象
 -- ============================================
+-- スコープは **agent × target**（#314）。同じ相手なら Discord でも Nostr でも
+-- 同じ 1 行を更新・参照する（「同じ人は同じ人」）。`session_id` は
+-- 「**最後に更新されたセッション**」の記録として残す（時系列の辿り先）。
 CREATE TABLE IF NOT EXISTS impressions (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -1319,9 +1401,8 @@ CREATE TABLE IF NOT EXISTS impressions (
     last_updated_turn INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(agent_id, session_id, target_id)
+    UNIQUE(agent_id, target_id)
 );
-CREATE INDEX IF NOT EXISTS idx_impressions_session ON impressions(agent_id, session_id);
 
 -- ============================================
 -- LLM利用メトリクス
@@ -2487,6 +2568,145 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept, 900);
+    }
+
+    /// v20 相当（旧一意制約）の `impressions` を作り直し、行を入れて version 20 へ戻す。
+    fn seed_legacy_impressions(conn: &Connection, rows: &str) {
+        conn.execute_batch(&format!(
+            "DROP TABLE impressions;
+             CREATE TABLE impressions (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                personality TEXT DEFAULT '',
+                communication_style TEXT DEFAULT '',
+                recent_behavior TEXT DEFAULT '',
+                agreement TEXT DEFAULT '中立',
+                notes TEXT DEFAULT '',
+                last_updated_turn INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(agent_id, session_id, target_id)
+             );
+             CREATE INDEX idx_impressions_session ON impressions(agent_id, session_id);
+             INSERT INTO impressions
+               (id, agent_id, session_id, target_id, target_name, personality,
+                communication_style, recent_behavior, agreement, notes,
+                last_updated_turn, created_at, updated_at)
+               VALUES {rows};
+             PRAGMA user_version = 20"
+        ))
+        .unwrap();
+    }
+
+    /// v21: 人物像を agent スコープへ（#314）。
+    ///
+    /// **重複が無い実データでは 1 行も失われない**こと。一意制約が
+    /// `(agent_id, target_id)` に付け替わり、同じ相手なら別セッションからでも
+    /// 同じ行を更新するようになること。
+    #[test]
+    fn impressions_agent_scope_migration_v21_preserves_rows() {
+        let conn = crate::init_memory().expect("init");
+        seed_legacy_impressions(
+            &conn,
+            "('i1', 'a1', 's-discord', 'u1', 'Alice', 'p1', '', '', '中立', '', 0, '2026-01-01', '2026-01-01'),
+             ('i2', 'a1', 's-discord', 'u2', 'Bob',   'p2', '', '', '中立', '', 0, '2026-01-02', '2026-01-02'),
+             ('i3', 'a1', 's-nostr',   'u3', 'Carol', 'p3', '', '', '中立', '', 0, '2026-01-03', '2026-01-03'),
+             ('i4', 'a2', 's-discord', 'u1', 'Alice', 'p4', '', '', '中立', '', 0, '2026-01-04', '2026-01-04')",
+        );
+
+        initialize(&conn).expect("upgrade v20 -> v21");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 4 行すべて残る（重複が無いので統合は起きない）。
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM impressions ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, vec!["i1", "i2", "i3", "i4"]);
+        // 中身も session_id も動かない。
+        let (session_id, personality): (String, String) = conn
+            .query_row(
+                "SELECT session_id, personality FROM impressions WHERE id = 'i3'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(session_id, "s-nostr");
+        assert_eq!(personality, "p3");
+
+        // 新しい一意制約: 同じ (agent_id, target_id) は別セッションでも 1 行。
+        assert!(conn
+            .execute(
+                "INSERT INTO impressions (id, agent_id, session_id, target_id, target_name, created_at, updated_at) \
+                 VALUES ('dup', 'a1', 's-other', 'u1', 'Alice', '2026-02-01', '2026-02-01')",
+                [],
+            )
+            .is_err());
+        // エージェントが違えば別の行（agent スコープは維持）。
+        assert_eq!(
+            crate::queries::get_impressions(&conn, "a1").unwrap().len(),
+            3
+        );
+        assert_eq!(
+            crate::queries::get_impressions(&conn, "a2").unwrap().len(),
+            1
+        );
+
+        // 再実行しても冪等（再構築は走らない）。
+        initialize(&conn).expect("idempotent");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM impressions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4);
+    }
+
+    /// v21: 同じ相手が複数セッションに散っている（＝旧スキーマで分断していた）DB でも
+    /// 壊れない。統合方針は「`updated_at` が最新の行を残す・`created_at` は最古を継ぐ」。
+    #[test]
+    fn impressions_agent_scope_migration_v21_merges_duplicates() {
+        let conn = crate::init_memory().expect("init");
+        seed_legacy_impressions(
+            &conn,
+            "('old', 'a1', 's-discord', 'u1', 'Alice', 'old-note', '', '', '中立', '', 1, '2026-01-01', '2026-01-01'),
+             ('new', 'a1', 's-nostr',   'u1', 'Alice2','new-note', '', '', '中立', '', 2, '2026-03-01', '2026-03-01'),
+             ('keep','a1', 's-discord', 'u2', 'Bob',   'bob-note', '', '', '中立', '', 0, '2026-02-01', '2026-02-01')",
+        );
+
+        initialize(&conn).expect("upgrade v20 -> v21");
+
+        let rows = crate::queries::get_impressions(&conn, "a1").unwrap();
+        assert_eq!(rows.len(), 2, "u1 の 2 行が 1 行に統合される");
+
+        let merged = crate::queries::get_impression(&conn, "a1", "u1")
+            .unwrap()
+            .expect("merged row");
+        assert_eq!(merged.id, "new", "updated_at が新しい行が残る");
+        assert_eq!(merged.personality, "new-note");
+        assert_eq!(merged.target_name, "Alice2");
+        assert_eq!(merged.session_id, "s-nostr");
+        assert_eq!(merged.last_updated_turn, 2);
+        // 「いつからの知り合いか」は統合対象の最古を引き継ぐ。
+        let created_at: String = conn
+            .query_row(
+                "SELECT created_at FROM impressions WHERE target_id = 'u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(created_at, "2026-01-01");
+
+        // 重複していない相手は影響を受けない。
+        let bob = crate::queries::get_impression(&conn, "a1", "u2")
+            .unwrap()
+            .expect("bob");
+        assert_eq!(bob.id, "keep");
+        assert_eq!(bob.personality, "bob-note");
     }
 
     /// H. SCHEMA_SQL 側と TASK_LEDGER_SQL 側で生成されるテーブル定義が一致する
