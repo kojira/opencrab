@@ -13,6 +13,10 @@
 //! ファイルを分けている理由: `message_loop.rs` へ変異（mutation）を入れて
 //! `git checkout -- crates/discord/src/message_loop.rs` で戻すとき、テストごと
 //! 巻き戻さないようにするため。
+//!
+//! **未固定の範囲**: `handle_agent_response` を直接呼ぶテスト（NO_REPLY の 🤐）は、
+//! 呼び出し側が渡す引数（`&discord_message_id_spawn` を `""` に差し替える／`channel_id`
+//! を取り違える等）の変異を検出できない。**配線側は未固定。実機確認で補う。**
 
 use std::sync::{Arc, Mutex};
 
@@ -372,7 +376,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
             channel_id: "222".to_string(),
         },
         MessageContent::Text("掘削して".to_string()),
-        Sender::user("user-1", "だれか"),
+        Sender::new("user-1", "だれか"),
     );
 
     process_incoming_message(
@@ -427,7 +431,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
             channel_id: "222".to_string(),
         },
         MessageContent::Text(reply.to_string()),
-        Sender::user("user-1", "crab-b"),
+        Sender::new("user-1", "crab-b"),
     );
 
     process_incoming_message(
@@ -498,7 +502,7 @@ async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
             channel_id: "222".to_string(),
         },
         MessageContent::Text("全員フォローして".to_string()),
-        Sender::user("user-1", "owner"),
+        Sender::new("user-1", "owner"),
     );
 
     process_incoming_message(
@@ -564,7 +568,7 @@ fn failed_inbound_record_is_detected_not_swallowed() {
                     channel_id: "222".to_string(),
                 },
                 MessageContent::Text("つらい".to_string()),
-                Sender::user("user-1", "owner"),
+                Sender::new("user-1", "owner"),
             );
 
             process_incoming_message(
@@ -748,7 +752,7 @@ struct FakeReactionGateway {
 
 #[async_trait::async_trait]
 impl super::ReactionAdder for FakeReactionGateway {
-    async fn add_reaction(
+    async fn add_unicode_reaction(
         &self,
         channel_id: u64,
         message_id: u64,
@@ -824,6 +828,70 @@ async fn a_normal_reply_gets_no_no_reply_reaction() {
     assert!(
         calls.is_empty(),
         "返答したターンに NO_REPLY のリアクションが付いている"
+    );
+}
+
+/// **どんな送信者の投稿にも 👀 が付く**（#317: bot を特別扱いしない）。
+///
+/// 以前は `reaction_added` を `incoming.sender.is_bot` で初期化していたため、
+/// 他エージェントの投稿には 👀 が付かなかった（＝エージェント同士の会話で
+/// 「受け取った」が見えない）。無限ループを止めるのは**自分自身の投稿の除外**
+/// （`crates/gateway/src/adapters/discord.rs` の `is_own_message`）であって、
+/// bot フラグではない。
+///
+/// 観測は warn ログで行う。ここは本物の `DiscordGateway`（`test-token`）なので
+/// 付与は必ず失敗するが、**付与を試みたこと**（＝配線が生きていること）はログに残る。
+/// 付与をスキップした場合は絵文字がログに一切現れない。
+#[test]
+fn every_sender_gets_the_seen_reaction_including_other_bots() {
+    let logs = crate::owner_warning::capture::captured_logs(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (state, gateway, gateway_actions) = make_deps();
+            let (event_tx, _event_rx) = create_event_channel();
+            let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+            let session_locks = Arc::new(SessionLocks::new());
+
+            let incoming = IncomingMessage::new(
+                MessageSource::Discord {
+                    guild_id: "111".to_string(),
+                    channel_id: "222".to_string(),
+                },
+                MessageContent::Text("ねえ".to_string()),
+                Sender::new("bot-2", "となりのエージェント"),
+            )
+            .with_metadata(
+                "discord_message_id",
+                serde_json::Value::String("1234567890123456789".to_string()),
+            );
+
+            process_incoming_message(
+                incoming,
+                gateway,
+                state.clone(),
+                vec!["crab".to_string()],
+                gateway_actions,
+                "owner-1".to_string(),
+                session_locks,
+                false,
+                None,
+                event_tx,
+                registry,
+            )
+            .await;
+        });
+    });
+
+    assert!(
+        logs.contains("👀"),
+        "他エージェントの投稿に 👀 を付けようとしていない（bot を特別扱いしている）: {logs}"
+    );
+    assert!(
+        logs.contains("1234567890123456789"),
+        "👀 の付与先メッセージが元の投稿になっていない: {logs}"
     );
 }
 

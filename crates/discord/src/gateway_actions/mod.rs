@@ -849,6 +849,13 @@ mod tests {
             "リアクションだけで応じてよいことが description から消えている: {}",
             def.description
         );
+        // `NO_REPLY` に触れているだけだと、文意が反転した書き換え（「NO_REPLY に
+        // してはいけない」）でも通る。**許している側**の語も一緒に固定する。
+        assert!(
+            def.description.contains("リアクションだけ"),
+            "「リアクションだけで応じてよい」が反転／消失している: {}",
+            def.description
+        );
     }
 
     #[test]

@@ -302,15 +302,21 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
-/// 受信メッセージの Sender を構築する。bot 投稿は `is_bot` が立った `Sender::bot` になる
-/// （message_loop 側の「bot 投稿には👀リアクションを付けない」分岐が機能するために必要）。
-fn build_sender(author_id: u64, author_name: &str, is_bot: bool, avatar_url: String) -> Sender {
-    let base = if is_bot {
-        Sender::bot(author_id.to_string(), author_name)
-    } else {
-        Sender::user(author_id.to_string(), author_name)
-    };
-    base.with_avatar(avatar_url)
+/// 受信メッセージの Sender を構築する。
+///
+/// **投稿者が bot かどうかで作り分けない。** 無限ループを止めるのは `is_own_message`
+/// （自分自身の投稿の除外）であって、bot フラグではない。bot を別扱いすると
+/// エージェント同士が会話できなくなる。
+fn build_sender(author_id: u64, author_name: &str, avatar_url: String) -> Sender {
+    Sender::new(author_id.to_string(), author_name).with_avatar(avatar_url)
+}
+
+/// 自分自身の投稿か（無限ループを防ぐ唯一の判定）。
+///
+/// `self_user_id` は `ready` イベントで確定する自分の Discord user id。**他の bot
+/// （＝他エージェント）は自分ではない**ので通す — それが会話。
+fn is_own_message(self_user_id: Option<u64>, author_id: u64) -> bool {
+    self_user_id == Some(author_id)
 }
 
 /// Discord添付ファイルが画像かどうかを判定する
@@ -448,11 +454,10 @@ struct DiscordHandler {
 #[async_trait]
 impl EventHandler for DiscordHandler {
     async fn message(&self, ctx: Context, msg: SerenityMessage) {
-        // 自分自身のメッセージは無視（無限ループ防止）
-        if let Some(self_id) = self.self_user_id.get().copied() {
-            if msg.author.id.get() == self_id {
-                return;
-            }
+        // 自分自身のメッセージは無視（無限ループ防止）。
+        // ここで弾くのは**自分だけ**。他の bot（他エージェント）は通す。
+        if is_own_message(self.self_user_id.get().copied(), msg.author.id.get()) {
+            return;
         }
 
         // 添付ファイルの処理（#272: 画像も本文アンカーを持つ）
@@ -479,12 +484,7 @@ impl EventHandler for DiscordHandler {
 
         let content = build_message_content(&msg.content, &attachments);
 
-        let sender = build_sender(
-            msg.author.id.get(),
-            &msg.author.name,
-            msg.author.bot,
-            msg.author.face(),
-        );
+        let sender = build_sender(msg.author.id.get(), &msg.author.name, msg.author.face());
 
         let mut incoming = IncomingMessage::new(
             MessageSource::Discord {
@@ -960,15 +960,35 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sender_bot_flag() {
-        let bot = build_sender(42, "peer-bot", true, "http://a/x.png".to_string());
-        assert!(bot.is_bot);
-        assert_eq!(bot.id, "42");
-        assert_eq!(bot.avatar_url.as_deref(), Some("http://a/x.png"));
+    fn test_build_sender_keeps_id_name_avatar() {
+        let peer = build_sender(42, "peer-bot", "http://a/x.png".to_string());
+        assert_eq!(peer.id, "42");
+        assert_eq!(peer.name, "peer-bot");
+        assert_eq!(peer.avatar_url.as_deref(), Some("http://a/x.png"));
 
-        let human = build_sender(7, "alice", false, String::new());
-        assert!(!human.is_bot);
+        let human = build_sender(7, "alice", String::new());
+        assert_eq!(human.id, "7");
         assert_eq!(human.name, "alice");
+    }
+
+    /// **弾くのは自分自身の投稿だけ。**
+    ///
+    /// 無限ループを止めるのはこの 1 点で、bot フラグではない。他エージェント（bot）を
+    /// ここで弾くと、エージェント同士が Discord で会話できなくなる（#317）。
+    #[test]
+    fn own_message_is_the_only_thing_excluded() {
+        assert!(
+            is_own_message(Some(100), 100),
+            "自分自身の投稿を弾いていない（自分の発言に自分で反応する無限ループになる）"
+        );
+        assert!(
+            !is_own_message(Some(100), 200),
+            "他の投稿者を自分と誤認して弾いている（他エージェントと会話できない）"
+        );
+        assert!(
+            !is_own_message(None, 100),
+            "自分の id が未確定のときに全部を弾いている"
+        );
     }
 
     #[test]

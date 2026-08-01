@@ -60,30 +60,23 @@ pub enum ContentPart {
     Image { url: String, alt: Option<String> },
 }
 
-/// メッセージ送信者
+/// メッセージ送信者。
+///
+/// **送信者が bot かどうかは持たない。** 無限ループを止めるのは「自分自身の投稿か」
+/// の判定（Discord なら `adapters::discord::is_own_message`）であって、bot フラグでは
+/// ない。bot を別扱いすると**エージェント同士が会話できなくなる**。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sender {
     pub id: String,
     pub name: String,
-    pub is_bot: bool,
     pub avatar_url: Option<String>,
 }
 
 impl Sender {
-    pub fn user(id: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
-            is_bot: false,
-            avatar_url: None,
-        }
-    }
-
-    pub fn bot(id: impl Into<String>, name: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            is_bot: true,
             avatar_url: None,
         }
     }
@@ -149,10 +142,33 @@ mod tests {
                 request_id: "req-1".to_string(),
             },
             MessageContent::text("test message"),
-            Sender::user("user-1", "User One"),
+            Sender::new("user-1", "User One"),
         );
         assert!(!msg.id.is_empty());
         assert_eq!(msg.content.as_text(), Some("test message"));
+    }
+
+    /// **送信者に「bot か人間か」の区別を持ち込まない。**
+    ///
+    /// 無限ループを防ぐのは「自分自身の投稿か」の判定（`adapters/discord.rs` の
+    /// `is_own_message`）であって、bot フラグではない。bot を別扱いすると
+    /// **エージェント同士が会話できなくなる**（実際 👀 が付かず、VC の声も拾えなかった）。
+    /// フィールドを 1 つ足すだけで「bot なら〜」の分岐が復活するので、形で塞ぐ。
+    #[test]
+    fn sender_does_not_classify_the_author() {
+        let value = serde_json::to_value(Sender::new("u-1", "だれか")).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("Sender は object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["avatar_url", "id", "name"],
+            "送信者に bot/人間の区別が復活している（bot を特別扱いするとエージェント同士が会話できない）"
+        );
     }
 
     #[test]
