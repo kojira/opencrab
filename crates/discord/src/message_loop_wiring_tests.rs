@@ -293,9 +293,11 @@ impl crate::AgentRunner for FakeRunner {
     }
 }
 
-/// 本番と同じ形の依存一式（ネットワークへは出ない）。
+/// 本番と同じ形の依存一式。
 ///
-/// `DiscordGateway::new` は HTTP クライアントとチャンネルを組むだけで接続しない。
+/// `DiscordGateway::new` は HTTP クライアントとチャンネルを組むだけで接続しないが、
+/// `process_incoming_message` まで通すテストでは typing / リアクションの送信が
+/// discord.com へ出て 401 になる（テストはその失敗ログを観測する）。
 fn make_deps() -> (
     FakeRunner,
     Arc<DiscordGateway>,
@@ -888,6 +890,13 @@ fn every_sender_gets_the_seen_reaction_including_other_bots() {
     assert!(
         logs.contains("👀"),
         "他エージェントの投稿に 👀 を付けようとしていない（bot を特別扱いしている）: {logs}"
+    );
+    // スキップ枝（"Skip reaction: invalid message_id"）も emoji と message_id を
+    // ログに出すので、上の assert だけでは「試みた」と「諦めた」を区別できない。
+    // 付与を**実際に試みた**（= 送信して 401 で失敗した）ことまで固定する。
+    assert!(
+        logs.contains("Failed to add reaction"),
+        "リアクション付与を試みていない（message_id の解析でスキップされている）: {logs}"
     );
     assert!(
         logs.contains("1234567890123456789"),

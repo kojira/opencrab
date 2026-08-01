@@ -1516,7 +1516,7 @@ async fn add_reaction_non_fatal<G: ReactionAdder>(
     message_id: &str,
     emoji: &str,
 ) {
-    let msg_id = match parse_seen_message_id(message_id) {
+    let msg_id = match parse_reaction_message_id(message_id) {
         Some(id) => id,
         None => {
             if !message_id.is_empty() {
@@ -1555,7 +1555,7 @@ const NO_REPLY_EMOJI: &str = "🤐";
 ///
 /// 空文字（message_idがメタデータに無い）や数値でない場合は `None` を返し、
 /// 呼び出し側はリアクション付与をスキップする。
-fn parse_seen_message_id(message_id: &str) -> Option<u64> {
+fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     if message_id.is_empty() {
         return None;
     }
@@ -1647,7 +1647,7 @@ mod wiring_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_context_line, parse_discord_session, parse_seen_message_id, recv_retry_backoff,
+        discord_context_line, parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
         should_alert_inbound_stalled, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX,
     };
 
@@ -1741,22 +1741,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_seen_message_id_accepts_valid_numeric_id() {
+    fn parse_reaction_message_id_accepts_valid_numeric_id() {
         assert_eq!(
-            parse_seen_message_id("1234567890123456789"),
+            parse_reaction_message_id("1234567890123456789"),
             Some(1234567890123456789)
         );
     }
 
     #[test]
-    fn parse_seen_message_id_rejects_empty() {
+    fn parse_reaction_message_id_rejects_empty() {
         // メタデータに discord_message_id が無いケース → スキップ
-        assert_eq!(parse_seen_message_id(""), None);
+        assert_eq!(parse_reaction_message_id(""), None);
     }
 
     #[test]
-    fn parse_seen_message_id_rejects_non_numeric() {
-        assert_eq!(parse_seen_message_id("not-a-number"), None);
-        assert_eq!(parse_seen_message_id("123abc"), None);
+    fn parse_reaction_message_id_rejects_non_numeric() {
+        assert_eq!(parse_reaction_message_id("not-a-number"), None);
+        assert_eq!(parse_reaction_message_id("123abc"), None);
     }
 }

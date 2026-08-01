@@ -105,13 +105,17 @@ Anthropicの仕様では `assistant` ロールは「自分自身の過去の発�
 他Botは `user` ロールで、発言者名をコンテンツ内に含める（例: `[らぼみbot]: ...`）。
 
 **実装上の判定方法:**
-`Sender.is_bot` フィールド（`crates/gateway/src/message.rs`）が `true` の場合でも、
 発言者が「自エージェント (`agent_id`)」でない限り `user` ロールを使用する。
 
 ```
 is_own_agent = (speaker_id == agent_id)
 role = if is_own_agent { "assistant" } else { "user" }
 ```
+
+> **注記（2026-08-01 / #317）:** 本節は当初 `Sender.is_bot` フィールド
+> （`crates/gateway/src/message.rs`）を判定の入口として書いていたが、`is_bot` は
+> #317 で削除した。ロール判定は `speaker_id == agent_id` だけで行う（上記の式のまま）
+> ため、結論は変わらない。
 
 ### 2-3. 変動値の配置
 
@@ -395,7 +399,8 @@ pub fn prepend_runtime_context_discord(
 ```
 
 **Phase 2変更:** マルチターン形式への移行。`build_conversation_messages()` を使用するよう変更。
-`is_bot` フラグは `Sender.is_bot` から取得可能だが、role判定はすでに `speaker_id == agent_id` の比較で十分。
+role判定は `speaker_id == agent_id` の比較で十分（`Sender.is_bot` は #317 で削除済み。
+元々使っていなかったので影響なし）。
 
 ---
 
@@ -731,13 +736,19 @@ pub fn build_conversation_messages(
 ```
 
 ### 5-11. `is_bot` フラグとロール判定の関係
-`Sender.is_bot` は現状Discordから受信したメッセージのフィールドとして存在するが、
+> **注記（2026-08-01 / #317）:** `Sender.is_bot` は削除した。ロール判定は
+> `speaker_id == agent_id` で行う。本節の結論（DB に `is_bot` を保存しない・
+> `speaker_id == agent_id` だけで足りる）はそのまま有効で、削除によって
+> 「保存しない」がむしろ既定になった。以下は削除前の記述。
+
+~~`Sender.is_bot` は現状Discordから受信したメッセージのフィールドとして存在するが、~~
 **セッションログDB (`session_logs`)には `is_bot` が保存されていない**。
 Phase 2の `build_conversation_messages()` 実装では、`speaker_id == agent_id` の比較のみで
 ロールを判定する（DBに `is_bot` を保存するスキーマ変更は不要）。
 
-必要であれば `session_logs.metadata_json` に `is_bot` フラグを保存する拡張も可能だが、
-現時点では不要（他Botは `user` ロールにすれば十分）。
+~~必要であれば `session_logs.metadata_json` に `is_bot` フラグを保存する拡張も可能だが、
+現時点では不要（他Botは `user` ロールにすれば十分）。~~ → フィールド自体が無くなったため
+この拡張は成立しない。他Botは `user` ロールにすれば十分。
 
 ### 5-12. `[Discord context]` の `message_id` 問題 → Phase 1で対応（実装手順3参照）
 

@@ -472,7 +472,6 @@ impl EventHandler for DiscordHandler {
         // （ファイル名/URL は出さない）。
         info!(
             author = %msg.author.name,
-            bot = msg.author.bot,
             content = %msg.content.chars().take(50).collect::<String>(),
             attachments = attachments.len(),
             images = image_count,
