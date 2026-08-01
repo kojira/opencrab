@@ -573,9 +573,10 @@ async fn process_incoming_message<T: AgentRunner>(
         .unwrap_or("")
         .to_string();
 
-    // 処理対象として確定したメッセージに付ける 👀 を一度だけ付与するためのフラグ。
-    // bot投稿（自bot/他bot）には付けない。自botは受信側で除外済みだが念のためここでも弾く。
-    let mut reaction_added = incoming.sender.is_bot;
+    // 処理対象として確定したメッセージに付ける 👀 を**一度だけ**付与するためのフラグ。
+    // 複数エージェントが同じ投稿を処理しても 1 個で済ませる、それだけの役目。
+    // 送信者で付け外しはしない（自分自身の投稿は受信側 `is_own_message` で既に除外済み）。
+    let mut reaction_added = false;
 
     for agent_id in &agent_ids {
         // Per-agent channel whitelist check
@@ -632,7 +633,14 @@ async fn process_incoming_message<T: AgentRunner>(
         // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。
         // 失敗は非致命的。複数エージェントが同一投稿を処理しても一度だけ付与する。
         if !reaction_added {
-            add_seen_reaction(&gateway, channel_id, &channel_id_str, &discord_message_id).await;
+            add_reaction_non_fatal(
+                gateway.as_ref(),
+                channel_id,
+                &channel_id_str,
+                &discord_message_id,
+                SEEN_EMOJI,
+            )
+            .await;
             reaction_added = true;
         }
 
@@ -712,6 +720,8 @@ async fn process_incoming_message<T: AgentRunner>(
         let caller_spawn = caller.clone();
         let image_urls_spawn = image_urls.clone();
         let discord_message_id_spawn = discord_message_id.clone();
+        // NO_REPLY の可視化（#317）で使う。`gateway_for_cb`（:657）と同じ形の持ち込み。
+        let gateway_spawn = gateway.clone();
         let channel_id_str_spawn = channel_id_str.clone();
         let sender_id_spawn = incoming.sender.id.clone();
         let sender_name_spawn = incoming.sender.name.clone();
@@ -820,8 +830,11 @@ async fn process_incoming_message<T: AgentRunner>(
                     result,
                     &agent_id_spawn,
                     &session_id_spawn,
+                    channel_id,
                     &channel_id_str_spawn,
                     &state_spawn,
+                    gateway_spawn.as_ref(),
+                    &discord_message_id_spawn,
                 )
                 .await;
             }
@@ -830,18 +843,35 @@ async fn process_incoming_message<T: AgentRunner>(
 }
 
 /// エージェント応答結果を処理してDiscordに送信する。
-async fn handle_agent_response<T: AgentRunner>(
+///
+/// `gateway` / `channel_id` / `message_id` は `NO_REPLY` の可視化（#317）にだけ使う。
+/// `message_id` は元のユーザー投稿の Discord ID（空なら付与をスキップ）。
+#[allow(clippy::too_many_arguments)]
+async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
     result: anyhow::Result<opencrab_core::EngineResult>,
     agent_id: &str,
     session_id: &str,
+    channel_id: u64,
     channel_id_str: &str,
     state: &T,
+    gateway: &G,
+    message_id: &str,
 ) {
     match result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
                 debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
                 state.record_agent_no_reply(agent_id, session_id);
+                // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
+                // ＝ NO_REPLY のまま終わるのは変わらない。
+                add_reaction_non_fatal(
+                    gateway,
+                    channel_id,
+                    channel_id_str,
+                    message_id,
+                    NO_REPLY_EMOJI,
+                )
+                .await;
                 return;
             }
             state.record_outbound_reply(
@@ -1438,46 +1468,94 @@ fn prepend_runtime_context_discord(
     )
 }
 
-/// 処理対象として確定したユーザー投稿に 👀 リアクションを付ける（非致命的）。
+/// リアクション付与だけを切り出した継ぎ目（#317）。
 ///
-/// 失敗（権限不足・削除済みメッセージ・無効なID等）してもエラーは握りつぶし、
-/// channel_id/message_id とエラー内容のみログに残す（秘密値は含めない）。
-async fn add_seen_reaction(
-    gateway: &DiscordGateway,
+/// 本番の実体は [`DiscordGateway`]。テストは Discord へ実際に HTTP を出せないため、
+/// 付与要求を記録する fake を差し替えて配線を固定する。gateway 非依存層には何も
+/// 足さない — この trait は `crates/discord` に閉じている。
+#[async_trait::async_trait]
+pub(crate) trait ReactionAdder: Send + Sync {
+    /// 固有メソッド `DiscordGateway::add_reaction` と**名前を分ける**。同名にすると
+    /// 実装本体（`DiscordGateway::add_reaction(self, ..)`）が固有メソッドではなく
+    /// この trait メソッド自身へ解決されうる。いまは固有メソッドが優先されるので
+    /// 動くが、固有側が改名・削除された瞬間に**コンパイルは通ったまま無限再帰**になる。
+    async fn add_unicode_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ReactionAdder for DiscordGateway {
+    async fn add_unicode_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        self.add_reaction(channel_id, message_id, emoji).await
+    }
+}
+
+/// 元の投稿に Unicode 絵文字のリアクションを 1 個付ける（非致命的）。
+///
+/// 使い分けは**絵文字だけ**で、手続きは共通:
+/// - 👀 = 処理対象として確定した（受け取った）
+/// - 🤐 = エージェントが `NO_REPLY` を選んだ（読んで黙ると**決めた**）。
+///   これが無いと投稿者からは「読んで黙った」のか「落ちて返せなかった」のか区別できない（#317）
+///
+/// 絵文字は呼び出し側のハードコード（設定項目にしない）。付与失敗（権限不足・削除済み
+/// メッセージ・無効なID等）は握りつぶし、channel_id/message_id/絵文字とエラー内容だけを
+/// ログに残す（秘密値は含めない）。message_id が空/非数値なら付与自体を諦める。
+async fn add_reaction_non_fatal<G: ReactionAdder>(
+    gateway: &G,
     channel_id: u64,
     channel_id_str: &str,
     message_id: &str,
+    emoji: &str,
 ) {
-    const SEEN_EMOJI: &str = "👀";
-
-    let msg_id = match parse_seen_message_id(message_id) {
+    let msg_id = match parse_reaction_message_id(message_id) {
         Some(id) => id,
         None => {
             if !message_id.is_empty() {
                 warn!(
                     channel_id = %channel_id_str,
                     message_id = %message_id,
-                    "Skip 👀 reaction: invalid message_id"
+                    emoji = %emoji,
+                    "Skip reaction: invalid message_id"
                 );
             }
             return;
         }
     };
-    if let Err(e) = gateway.add_reaction(channel_id, msg_id, SEEN_EMOJI).await {
+    if let Err(e) = gateway
+        .add_unicode_reaction(channel_id, msg_id, emoji)
+        .await
+    {
         warn!(
             channel_id = %channel_id_str,
             message_id = %message_id,
+            emoji = %emoji,
             error = %e,
-            "Failed to add 👀 reaction (non-fatal)"
+            "Failed to add reaction (non-fatal)"
         );
     }
 }
 
-/// 👀 リアクションを付ける対象の message_id を解析する。
+/// 処理対象として確定した投稿に付ける「受け取った」の印。
+const SEEN_EMOJI: &str = "👀";
+
+/// エージェントが `NO_REPLY` を選んだことを示す印（#317）。
+/// 👀 と同じ絵文字にすると 2 つの状態が区別できなくなる。
+const NO_REPLY_EMOJI: &str = "🤐";
+
+/// リアクションを付ける対象の message_id を解析する。
 ///
 /// 空文字（message_idがメタデータに無い）や数値でない場合は `None` を返し、
 /// 呼び出し側はリアクション付与をスキップする。
-fn parse_seen_message_id(message_id: &str) -> Option<u64> {
+fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     if message_id.is_empty() {
         return None;
     }
@@ -1569,7 +1647,7 @@ mod wiring_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_context_line, parse_discord_session, parse_seen_message_id, recv_retry_backoff,
+        discord_context_line, parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
         should_alert_inbound_stalled, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX,
     };
 
@@ -1663,22 +1741,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_seen_message_id_accepts_valid_numeric_id() {
+    fn parse_reaction_message_id_accepts_valid_numeric_id() {
         assert_eq!(
-            parse_seen_message_id("1234567890123456789"),
+            parse_reaction_message_id("1234567890123456789"),
             Some(1234567890123456789)
         );
     }
 
     #[test]
-    fn parse_seen_message_id_rejects_empty() {
+    fn parse_reaction_message_id_rejects_empty() {
         // メタデータに discord_message_id が無いケース → スキップ
-        assert_eq!(parse_seen_message_id(""), None);
+        assert_eq!(parse_reaction_message_id(""), None);
     }
 
     #[test]
-    fn parse_seen_message_id_rejects_non_numeric() {
-        assert_eq!(parse_seen_message_id("not-a-number"), None);
-        assert_eq!(parse_seen_message_id("123abc"), None);
+    fn parse_reaction_message_id_rejects_non_numeric() {
+        assert_eq!(parse_reaction_message_id("not-a-number"), None);
+        assert_eq!(parse_reaction_message_id("123abc"), None);
     }
 }
