@@ -28,19 +28,37 @@ pub(crate) fn resolve_run_tools_config(
     agent_id: &str,
 ) -> opencrab_actions::tools::ToolsConfig {
     let mut tools_cfg = state.tools_config.read().unwrap().clone();
-    if let Ok(conn) = state.db.lock() {
-        if let Ok(agent_cmds) = opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id) {
-            if !agent_cmds.is_empty() {
-                let shell = tools_cfg
-                    .shell
-                    .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
-                for cmd in agent_cmds {
-                    if !shell.allowed_commands.contains(&cmd) {
-                        shell.allowed_commands.push(cmd);
+    // DB 障害時は設定ファイル分だけで続行する（許可を落とす方向の degrade なので
+    // run を止めるより安全）。ただし**黙って**落とさない: per-agent の許可が丸ごと
+    // 消えたことは、ログが無いと誰も気づけない。本番の `Db` は r2d2 プールなので
+    // 枯渇時の `lock()` は既定で 30 秒ブロックしてから `Err` になり得る。
+    match state.db.lock() {
+        Ok(conn) => match opencrab_db::queries::list_agent_allowed_commands(&conn, agent_id) {
+            Ok(agent_cmds) => {
+                if !agent_cmds.is_empty() {
+                    let shell = tools_cfg
+                        .shell
+                        .get_or_insert_with(opencrab_actions::tools::ShellToolConfig::default);
+                    for cmd in agent_cmds {
+                        if !shell.allowed_commands.contains(&cmd) {
+                            shell.allowed_commands.push(cmd);
+                        }
                     }
                 }
             }
-        }
+            Err(e) => tracing::warn!(
+                agent_id,
+                error = %e,
+                "per-agent 許可コマンドの取得に失敗。設定ファイル由来の許可だけで続行する\
+                 （この run では追加分が効かない）"
+            ),
+        },
+        Err(e) => tracing::warn!(
+            agent_id,
+            error = %e,
+            "DB 接続の取得に失敗。設定ファイル由来の許可だけで続行する\
+             （この run では per-agent の追加分が効かない）"
+        ),
     }
     tools_cfg
 }
@@ -57,6 +75,10 @@ pub(crate) fn resolve_run_tools_config(
 /// エージェントが「シェルは DB 行の 2 個しか使えない」と誤認して作業を止めた
 /// （実際には設定ファイル由来の 10 個も同じターンで実行できていた）。
 /// 出力先ごとに合成を書き直すと、片方だけ実態からずれて同じ誤認が再発する。
+///
+/// 一方、ダッシュボードの REST（`crate::api::allowed_commands::list_allowed_commands`）は
+/// **この関数を通さない**。線引きは「LLM に露出する口 = 実効リスト / HTTP 管理 API =
+/// DB 行」で、後者は add/remove と対の管理用ゆえに消せない行を混ぜてはならない。
 ///
 /// DB 読み取りに失敗した場合は [`resolve_run_tools_config`] と同様に設定ファイル分だけを
 /// 返す。**これは意図的**で、その run が実際に許可する集合と一致させるためである

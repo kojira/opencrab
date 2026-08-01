@@ -12,6 +12,14 @@ pub struct AllowedCommandDto {
     pub command: String,
 }
 
+/// 許可コマンドの一覧（**DB 行のみ**）。
+///
+/// 線引きは「**LLM に露出する口は実効リスト / HTTP 管理 API は DB 行**」（#300）。
+/// エージェント向けツール（`list_allowed_commands` /
+/// `manage_allowed_commands(action="list")`）は「自分が実行できる全部」を知る必要があるので
+/// `process::effective_allowed_commands` を通すが、この REST は add/remove と対の管理用で、
+/// 設定ファイル由来のコマンドを混ぜると **remove できない行**がダッシュボードに並ぶ。
+/// 「揃っていない」ように見えても、ここを実効リストへ変えないこと。
 pub async fn list_allowed_commands(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,

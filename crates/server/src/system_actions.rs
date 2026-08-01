@@ -4005,9 +4005,11 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
+        // このパースは `crates/actions/src/tools/shell.rs` の書式
+        // （`... Allowed: a, b, c` で末尾がコマンド列）に依存している。
         let from_prompt: Vec<String> = desc
             .split_once("Allowed: ")
-            .expect("`Allowed: ` を含む説明文")
+            .expect("`Allowed: ` を含む説明文（書式は crates/actions/src/tools/shell.rs）")
             .1
             .split(", ")
             .map(str::to_string)
@@ -4016,7 +4018,10 @@ mod tests {
         assert_eq!(
             listed_commands(&state).await,
             from_prompt,
-            "一覧ツールの戻り値とプロンプトの Allowed が食い違っている（#300 の実害そのもの）"
+            "一覧ツールの戻り値とプロンプトの Allowed が食い違っている（#300 の実害そのもの）。\
+             ただし `Allowed: ` の後ろに文を足した場合もここが落ちる — 差分が末尾要素だけなら\
+             まず `crates/actions/src/tools/shell.rs` の description 書式を確認し、\
+             書式を変えたならこのパースを追随させること"
         );
     }
 
