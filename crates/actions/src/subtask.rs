@@ -402,9 +402,22 @@ pub fn settle_completed(
     let removed = registry.remove(&ctx.subtask_id).map(|(_, subtask)| subtask);
     let reply_target = removed.as_ref().and_then(|s| s.reply_target.clone());
     // registry に載っていない一発呼び（テスト等）は最小権限へ倒す（fail-closed）。
-    let caller = removed
-        .map(|s| s.caller)
-        .unwrap_or(crate::traits::CallerIdentity::Agent);
+    //
+    // 本番でここに来るのは「insert した registry と settle に渡す registry の食い違い」
+    // ＝配線バグで、#298 が直した降格（owner/trusted のツールが resume の瞬間に
+    // 消える）が無言で復活する。黙って倒さず必ず記録する（#302）。
+    let caller = match removed {
+        Some(subtask) => subtask.caller,
+        None => {
+            tracing::warn!(
+                subtask_id = %ctx.subtask_id,
+                session_id = %ctx.parent_session_id,
+                "subtask registry entry missing at settlement; resuming with least privilege \
+                 (registry wiring mismatch?)"
+            );
+            crate::traits::CallerIdentity::Agent
+        }
+    };
 
     // 3. sink を発火する（本文は運ばない = DB 永続化済み）。
     sink.on_subtask_settled(SubtaskSettled {
@@ -1978,6 +1991,41 @@ mod tests {
         assert!(
             logs.iter().any(|l| l.log_type == "tool_cancelled"),
             "親ログに tool_cancelled が記録される"
+        );
+    }
+
+    /// #302: 停止通知も registry のエントリの呼び出し元をそのまま運ぶ。
+    ///
+    /// `on_subtask_cancelled` の既定実装は resume しないので現状は無害だが、sink が
+    /// これを override した瞬間に「停止だけ最小権限へ降格する」が復活しうる。
+    #[tokio::test]
+    async fn cancel_subtask_carries_the_parent_caller_to_the_sink() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "web-agent-a-conv1";
+        let _handle = insert_fake_subtask(&registry, "st-1", parent);
+        // オーナー発のターンが spawn した状態にする。
+        registry.get_mut("st-1").unwrap().caller = CallerIdentity::Owner;
+
+        let sink = RecordingSink::default();
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            Some(&sink),
+            None,
+            "st-1",
+            false,
+            Some(parent),
+        );
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let cancelled = sink.cancelled.lock().unwrap();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(
+            cancelled[0].caller,
+            CallerIdentity::Owner,
+            "停止通知が元ターンの呼び出し元を落としている"
         );
     }
 

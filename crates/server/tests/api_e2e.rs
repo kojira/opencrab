@@ -2256,8 +2256,10 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
             .await
             .expect("dispatch する run が失敗した");
 
+        // 非ブロック dispatch なので決着は別タスク。CI 負荷時に取りこぼさないよう
+        // 上限は 5 秒（成功時は最初の観測で即抜けるので通常はほぼ待たない）。
         let mut observed = None;
-        for _ in 0..100 {
+        for _ in 0..250 {
             observed = capture
                 .0
                 .lock()
