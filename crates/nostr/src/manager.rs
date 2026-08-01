@@ -690,6 +690,14 @@ async fn handle_event<R: NostrAgentRunner>(
     let reply_target = event.reply_target().to_string();
     let event_id = event.id.clone();
     let job_session_id = session_id.clone();
+    // 呼び出し元は**発言者**から決める（#319）。以前は応答生成側が
+    // `CallerIdentity::Agent` 固定で、オーナーが話しかけても外部の誰かが話しかけても
+    // 同じ扱いだった（＝エージェントが Nostr 発のターンから自分の設定を変更できない）。
+    //
+    // 解決は `event.pubkey` を**持っているここ**で行う（同期 DB 読みのみ / await しない）。
+    // 応答生成側で session_id から逆算すると、セッション規約を変えた瞬間に権限判定が
+    // 壊れる。オーナー未設定・未登録なら従来どおり `Agent`（fail-closed）。
+    let caller = runner.resolve_nostr_caller(agent_id, &event.pubkey);
     // 流量制限（permit）は **consumer タスクの内側**で取る（`run_consumer` 参照）。
     // ここ（受信ループ内）で取ると、session ロック待ちで何もしていないタスクが permit を
     // 占有し、受信ループ全体＝そのエージェントの全相手の受信が止まる。
@@ -700,6 +708,7 @@ async fn handle_event<R: NostrAgentRunner>(
                 &reply_target,
                 &prompt_suffix,
                 Some(&event_id),
+                caller,
             )
             .await;
     });
@@ -989,7 +998,7 @@ mod tests {
     use std::sync::Mutex;
 
     use opencrab_actions::webhook_target::WebhookConfig;
-    use opencrab_actions::RunRequest;
+    use opencrab_actions::{CallerIdentity, RunRequest};
     use opencrab_core::EngineResult;
     use opencrab_db::queries::AgentNostrConfigRow;
 
@@ -1019,6 +1028,12 @@ mod tests {
         secret_sets: Arc<Mutex<Vec<String>>>,
         /// get_nostr_config が返す既存行（`None`=未設定 / #264）。
         preset_config: Option<AgentNostrConfigRow>,
+        /// `resolve_nostr_caller` が Owner と答える相手の pubkey（#319）。
+        owner_pubkey: Option<String>,
+        /// `resolve_nostr_caller` に渡された pubkey（発言者を見ているかの検証 / #319）。
+        caller_queries: Arc<Mutex<Vec<String>>>,
+        /// 応答生成へ渡った呼び出し元（#319）。
+        callers: Arc<Mutex<Vec<CallerIdentity>>>,
     }
 
     impl SlowRunner {
@@ -1037,7 +1052,16 @@ mod tests {
                 enabled_calls: Arc::new(Mutex::new(Vec::new())),
                 secret_sets: Arc::new(Mutex::new(Vec::new())),
                 preset_config: None,
+                owner_pubkey: None,
+                caller_queries: Arc::new(Mutex::new(Vec::new())),
+                callers: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        /// 「この pubkey がオーナー」という解決結果を仕込む（#319）。
+        fn with_owner_pubkey(mut self, pubkey: &str) -> Self {
+            self.owner_pubkey = Some(pubkey.to_string());
+            self
         }
 
         /// get_nostr_config が返す既存設定を仕込む（ホットスワップ経路の検証 / #264）。
@@ -1068,6 +1092,7 @@ mod tests {
     impl opencrab_actions::AgentRuntime for SlowRunner {
         async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
             let target = req.reply_target.clone().unwrap_or_default();
+            self.callers.lock().unwrap().push(req.caller.clone());
             self.system_prompts
                 .lock()
                 .unwrap()
@@ -1170,6 +1195,19 @@ mod tests {
     }
 
     impl NostrAgentRunner for SlowRunner {
+        /// 「オーナーの pubkey なら Owner」を模す（#319。解決の実体は server 側でテスト）。
+        /// 問い合わせられた pubkey を記録して、**発言者を見ているか**を検証できるようにする。
+        fn resolve_nostr_caller(&self, _agent_id: &str, author_pubkey: &str) -> CallerIdentity {
+            self.caller_queries
+                .lock()
+                .unwrap()
+                .push(author_pubkey.to_string());
+            match self.owner_pubkey.as_deref() {
+                Some(owner) if owner == author_pubkey => CallerIdentity::Owner,
+                _ => CallerIdentity::Agent,
+            }
+        }
+
         fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
             Vec::new()
         }
@@ -1294,6 +1332,72 @@ mod tests {
             }
             self.runner.finished_len() >= n
         }
+    }
+
+    // ---- #319: 受信ターンの呼び出し元は発言者から決まる ----
+
+    /// ダミー鍵（実在の pubkey は書かない）。
+    const OWNER_PK: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    const STRANGER_PK: &str = "0000000000000000000000000000000000000000000000000000000000000002";
+
+    /// **本丸**: オーナーの pubkey から届いた受信ターンは `Owner` で走る。
+    ///
+    /// 以前は応答生成側が `CallerIdentity::Agent` 固定で、OWNER_ONLY / TRUSTED_ONLY の
+    /// ツールが list にも dispatch にも出なかった（#319）。
+    #[tokio::test]
+    async fn inbound_from_owner_runs_as_owner() {
+        let h = Harness::with_runner(
+            "agent-caller",
+            SlowRunner::new(Duration::from_millis(0)).with_owner_pubkey(OWNER_PK),
+            4,
+            8,
+        );
+        h.feed("evt-owner", OWNER_PK, "設定を変えて").await;
+        assert!(h.wait_finished(1, Duration::from_secs(2)).await);
+
+        assert_eq!(
+            h.runner.callers.lock().unwrap().as_slice(),
+            [CallerIdentity::Owner],
+            "オーナー発の受信ターンが Owner で走っていない"
+        );
+        // 解決には**受信イベントの pubkey** を渡している（session_id ではない）。
+        assert_eq!(
+            h.runner.caller_queries.lock().unwrap().as_slice(),
+            [OWNER_PK.to_string()]
+        );
+    }
+
+    /// **本丸**: 他人の pubkey から届いたターンは `Agent` のまま（昇格しない）。
+    #[tokio::test]
+    async fn inbound_from_stranger_stays_agent() {
+        let h = Harness::with_runner(
+            "agent-caller",
+            SlowRunner::new(Duration::from_millis(0)).with_owner_pubkey(OWNER_PK),
+            4,
+            8,
+        );
+        h.feed("evt-stranger", STRANGER_PK, "設定を変えて").await;
+        assert!(h.wait_finished(1, Duration::from_secs(2)).await);
+
+        assert_eq!(
+            h.runner.callers.lock().unwrap().as_slice(),
+            [CallerIdentity::Agent],
+            "他人の pubkey が昇格した"
+        );
+    }
+
+    /// オーナー未設定なら誰も Owner にならない（fail-closed）。
+    #[tokio::test]
+    async fn inbound_without_configured_owner_stays_agent() {
+        // with_owner_pubkey を仕込まない＝解決側がオーナー無しと答える。
+        let h = Harness::new("agent-caller", Duration::from_millis(0), 4, 8);
+        h.feed("evt-1", OWNER_PK, "設定を変えて").await;
+        assert!(h.wait_finished(1, Duration::from_secs(2)).await);
+
+        assert_eq!(
+            h.runner.callers.lock().unwrap().as_slice(),
+            [CallerIdentity::Agent]
+        );
     }
 
     /// [P1 回帰 / #168] 同一セッション（同一相手）の連投は**投入順どおり**に処理される。

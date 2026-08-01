@@ -36,6 +36,12 @@ pub async fn get_nostr_config(
     // 未登録（マネージャ未生成）は false。
     let running = state.gateways.is_running(gateway_kinds::NOSTR, &id);
 
+    // オーナー識別子は公開情報（pubkey）なのでマスクしない。未設定は空文字。
+    let owner_pubkey = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_nostr_owner_pubkey(&conn, &id).unwrap_or_default()
+    };
+
     match row {
         Some(cfg) => {
             let parsed = config_from_row(&cfg);
@@ -45,6 +51,7 @@ pub async fn get_nostr_config(
                 "running": running,
                 "has_secret_key": !cfg.secret_key.is_empty(),
                 "secret_key_masked": mask_secret(&cfg.secret_key),
+                "owner_pubkey": owner_pubkey,
                 "relays": parsed.effective_relays(),
                 "filter": {
                     "authors": parsed.filter.authors,
@@ -59,6 +66,7 @@ pub async fn get_nostr_config(
             "running": running,
             "has_secret_key": false,
             "secret_key_masked": "",
+            "owner_pubkey": "",
             "relays": opencrab_nostr::DEFAULT_RELAYS,
             "filter": {"authors": [], "keywords": [], "kinds": []},
         })),
@@ -81,6 +89,12 @@ pub struct PutNostrBody {
     /// 有効化して即起動するか。
     #[serde(default)]
     pub enabled: bool,
+    /// Nostr 経路のオーナー識別子（npub / hex）。未指定なら現状維持、`""` で未設定に戻す。
+    ///
+    /// `owner_discord_id` を per-agent Discord 設定 API で設定できるのと同じ位置づけ
+    /// （#319）。ダッシュボード / REST からも設定できる。
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
 }
 
 /// PUT /api/agents/{id}/nostr — 設定を保存し、enabled なら起動する。
@@ -98,9 +112,39 @@ pub async fn update_nostr_config(
         &body.kinds,
         body.enabled,
         body.secret_key.as_deref(),
+        body.owner_pubkey.as_deref(),
     )
     .await?;
     Ok(Json(json!({"updated": true, "enabled": body.enabled})))
+}
+
+/// オーナー識別子の入力を保存形（64 桁小文字 hex）へ正規化する。
+///
+/// - `None`（未指定）→ `None`（現状維持）
+/// - 空文字 → `Some("")`（未設定へ戻す）
+/// - npub / hex → `Some(hex)`
+/// - それ以外 → 400
+///
+/// **黙って落とさない**のが要点。正規化できない値をそのまま保存すると、設定できた
+/// ように見えて永久に誰とも一致しない行になる（＝オーナーが居ないことに気づけない）。
+pub(crate) fn normalize_owner_pubkey_input(
+    raw: Option<&str>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(String::new()));
+    }
+    opencrab_nostr::normalize_pubkey(trimmed)
+        .map(Some)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "owner_pubkey は npub1... か 64 桁の hex で指定してください".to_string(),
+            )
+        })
 }
 
 /// Nostr 設定を保存し、マネージャに反映（enabled なら起動、else 停止）する共通処理。
@@ -110,6 +154,10 @@ pub async fn update_nostr_config(
 /// （更新で誤って鍵をクリアしない）。既存も無ければ 400（先に鍵生成が必要）。
 /// 起動失敗時に「enabled だが未稼働」の不整合を残さないよう、まず enabled=false で
 /// 保存し、起動成功後にのみ enabled=true にする。
+// 引数が多いのは「省略されたフィールドは現状維持」という部分更新の形をそのまま
+// 引数で表しているため（`manager::handle_event` と同じ扱い）。構造体へまとめると
+// REST とツールの 2 つの呼び出し口で組み立て方が分かれ、片方だけ更新漏れが起きる。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_nostr_settings(
     state: &AppState,
     agent_id: &str,
@@ -119,7 +167,11 @@ pub(crate) async fn apply_nostr_settings(
     kinds: &[u32],
     enabled: bool,
     secret_key_override: Option<&str>,
+    owner_pubkey_override: Option<&str>,
 ) -> Result<(), (StatusCode, String)> {
+    // 不正なオーナー識別子は**何も保存する前に**弾く（他の設定だけ通って
+    // オーナーが黙って未設定のまま、を作らない）。
+    let owner_pubkey = normalize_owner_pubkey_input(owner_pubkey_override)?;
     let existing = {
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::get_agent_nostr_config(&conn, agent_id).unwrap_or(None)
@@ -163,6 +215,13 @@ pub(crate) async fn apply_nostr_settings(
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::upsert_agent_nostr_config(&conn, &row)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // オーナー識別子は行の他の列とは独立に持つ（`upsert` は触らない）ので、
+        // 明示指定があったときだけ書く。同じロックの中で行の作成に続けて書き、
+        // 「行はできたがオーナーは入っていない」中間状態を外から見せない。
+        if let Some(ref owner) = owner_pubkey {
+            opencrab_db::queries::set_agent_nostr_owner_pubkey(&conn, agent_id, owner)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
     }
 
     // マネージャ反映。**「起動が成功してから enabled=true」の順序はここ（ハンドラ側）の
@@ -344,4 +403,58 @@ pub async fn delete_nostr_config(
         opencrab_db::queries::delete_agent_nostr_config(&conn, &id).unwrap_or(false)
     };
     Json(json!({"deleted": deleted}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ダミー鍵（実在の pubkey は書かない）。
+    const DUMMY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    /// 未指定は現状維持、空文字は未設定へ戻す。
+    #[test]
+    fn owner_pubkey_input_absent_keeps_and_empty_clears() {
+        assert_eq!(normalize_owner_pubkey_input(None).unwrap(), None);
+        assert_eq!(
+            normalize_owner_pubkey_input(Some("")).unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(
+            normalize_owner_pubkey_input(Some("   ")).unwrap(),
+            Some(String::new())
+        );
+    }
+
+    /// **本丸**: npub でも hex でも受け付け、保存形（hex）へ揃う。
+    #[test]
+    fn owner_pubkey_input_normalizes_npub_and_hex_to_the_same_value() {
+        let npub = opencrab_nostr::to_npub(DUMMY_HEX).unwrap();
+        assert_eq!(
+            normalize_owner_pubkey_input(Some(&npub)).unwrap(),
+            Some(DUMMY_HEX.to_string()),
+            "npub が保存形の hex に揃わない"
+        );
+        assert_eq!(
+            normalize_owner_pubkey_input(Some(DUMMY_HEX)).unwrap(),
+            Some(DUMMY_HEX.to_string())
+        );
+        // 大文字 hex や前後の空白も同じ値へ。
+        assert_eq!(
+            normalize_owner_pubkey_input(Some(&format!("  {}\n", DUMMY_HEX.to_ascii_uppercase())))
+                .unwrap(),
+            Some(DUMMY_HEX.to_string())
+        );
+    }
+
+    /// 正規化できない値は 400。**黙って保存しない**
+    /// （設定できたように見えて永久に誰とも一致しない行を作らせない）。
+    #[test]
+    fn malformed_owner_pubkey_input_is_rejected() {
+        for bad in ["abcd", "npub1broken", "nsec1whatever"] {
+            let (code, _msg) =
+                normalize_owner_pubkey_input(Some(bad)).expect_err("不正値を通した: {bad}");
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
 }

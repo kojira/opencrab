@@ -87,14 +87,24 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
     /// inbound（watch ループ）と resume（完了 sink）が同じロックを通るので、同一
     /// セッションに対して 2 本の応答生成が並行しない = 二重投稿しない。ロック取得を
     /// 呼び出し側の責務にすると 1 箇所の忘れで不変条件が壊れるため、ここに閉じ込める。
+    /// `caller` は**このターンの呼び出し元**（#319）。inbound は受信イベントの発言者から
+    /// 解決した値を、resume は親 run から運ばれてきた値（`SubtaskSettled.caller`）を渡す。
+    /// 呼び出し側が持っている情報をそのまま受け取るだけで、ここでは導出も昇格もしない。
     pub async fn respond_serialized(
         &self,
         session_id: &str,
         reply_target: &str,
         prompt_suffix: &str,
         trigger_message_id: Option<&str>,
+        caller: CallerIdentity,
     ) -> Option<String> {
-        let fut = self.respond(session_id, reply_target, prompt_suffix, trigger_message_id);
+        let fut = self.respond(
+            session_id,
+            reply_target,
+            prompt_suffix,
+            trigger_message_id,
+            caller,
+        );
         self.runtime.run_serialized(session_id, fut).await
     }
 
@@ -109,6 +119,7 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         reply_target: &str,
         prompt_suffix: &str,
         trigger_message_id: Option<&str>,
+        caller: CallerIdentity,
     ) -> Option<String> {
         let agent_id = self.agent_id.as_str();
         let (base_prompt, agent_name) = self.runner.build_agent_context(agent_id);
@@ -131,6 +142,16 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         let registry = self.runtime.registry_for(session_id);
         let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(self.clone());
 
+        // 呼び出し元（`caller`）は引数で受け取る（#319）。以前はここが
+        // `CallerIdentity::Agent` 固定で、オーナーが話しかけても外部の誰かが話しかけても
+        // 同じ扱いだった。その結果 OWNER_ONLY / TRUSTED_ONLY のツールが list にも
+        // dispatch にも出ず、エージェントは Nostr 発のターンから**自分の設定を一切変更
+        // できなかった**。Discord は同じ場面で `resolve_caller` を通して発言者を見ている。
+        //
+        // **ここで導出しない**のが要点。inbound は受信イベントの `pubkey` を持っている
+        // 場所（`handle_event`）で解決し、resume は親 run から運ばれた値
+        // （`SubtaskSettled.caller` / #298）をそのまま使う。session_id から発言者を
+        // 逆算するような再構築を挟むと、セッション規約を変えた瞬間に権限判定が壊れる。
         let mut req = RunRequest::new(
             agent_id,
             agent_name,
@@ -138,8 +159,7 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
             system_prompt,
             conversation,
             "nostr",
-            // Nostr の投稿者は外部ユーザー。最小権限（Agent）で扱う。
-            CallerIdentity::Agent,
+            caller,
         )
         .with_gateway_actions(actions)
         .with_dispatch(Some(registry), sink)
@@ -240,13 +260,18 @@ impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
 
         let responder = self.clone();
         let sid = ev.session_id.clone();
+        // **親 run の呼び出し元をそのまま引き継ぐ**（#298 が運んでいる値 / #319）。
+        // ここを `CallerIdentity::Agent` 固定にしていたため、オーナー発のターンでも
+        // subtask が決着した瞬間に権限が降格していた（Discord / web の sink は既に
+        // `ev.caller` を使っている）。**引き継ぐだけ**で昇格はしない。
+        let caller = ev.caller.clone();
         // sink は同期関数。resume は非同期なので spawn する（web gateway と同じ。
         // ここで待つと dispatch した subtask の完了処理を塞ぐ）。
         tokio::spawn(async move {
             let suffix = resume_prompt_suffix(&reply_target, &ev.subtask_id, &ev.exit_reason);
             // inbound の応答生成と直列化する（同一セッションで二重に返信しない）。
             responder
-                .respond_serialized(&sid, &reply_target, &suffix, None)
+                .respond_serialized(&sid, &reply_target, &suffix, None, caller)
                 .await;
         });
     }
@@ -270,11 +295,14 @@ mod tests {
     ///
     /// 4 番目は **`Arc` の同一性**を見るために保持する。「dispatch が有効か」（3 番目の
     /// bool）だけでは、別インスタンスの登録簿を渡す壊れ方を検知できない。
+    /// 5 番目は **run に載った呼び出し元**（#319）。以前はここが常に `Agent` 固定で、
+    /// オーナー発のターンでも OWNER_ONLY / TRUSTED_ONLY のツールが出なかった。
     type RunObservation = (
         String,
         Option<String>,
         bool,
         Option<opencrab_actions::subtask::SubtaskRegistry>,
+        CallerIdentity,
     );
     /// 転記された応答 1 件（agent_id, session_id, text）。
     type ReplyObservation = (String, String, String);
@@ -329,6 +357,7 @@ mod tests {
                 req.reply_target.clone(),
                 req.completion_sink.is_some() && req.subtask_registry.is_some(),
                 req.subtask_registry.clone(),
+                req.caller.clone(),
             ));
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
@@ -446,6 +475,12 @@ mod tests {
     }
 
     impl NostrAgentRunner for FakeRunner {
+        /// この sink は呼び出し元を**導出しない**（受け取るだけ）。解決の配線は
+        /// 受信ループ側（`manager` のテスト）と server 側の実体でテストする。
+        fn resolve_nostr_caller(&self, _agent_id: &str, _author_pubkey: &str) -> CallerIdentity {
+            unreachable!("応答生成経路は呼び出し元を導出しない（引数で受け取る / #319）")
+        }
+
         fn list_enabled_nostr_configs(&self) -> Vec<AgentNostrConfigRow> {
             Vec::new()
         }
@@ -555,7 +590,11 @@ mod tests {
         )
     }
 
-    fn settled(session_id: &str, reply_target: Option<&str>) -> SubtaskSettled {
+    fn settled_with_caller(
+        session_id: &str,
+        reply_target: Option<&str>,
+        caller: CallerIdentity,
+    ) -> SubtaskSettled {
         SubtaskSettled {
             session_id: session_id.to_string(),
             agent_id: "agent-sink-test".to_string(),
@@ -563,9 +602,13 @@ mod tests {
             exit_reason: "completed".to_string(),
             kind: SettleKind::Completed,
             reply_target: reply_target.map(|s| s.to_string()),
-            // Nostr は inbound も resume も最小権限（`respond` が Agent 固定）。
-            caller: opencrab_actions::CallerIdentity::Agent,
+            caller,
         }
+    }
+
+    /// 呼び出し元を指定しない既定（最小権限）の `settled`。
+    fn settled(session_id: &str, reply_target: Option<&str>) -> SubtaskSettled {
+        settled_with_caller(session_id, reply_target, CallerIdentity::Agent)
     }
 
     /// sink は `reply_target` 宛に返信する（session_id からは復元できない宛先）。
@@ -592,6 +635,85 @@ mod tests {
         assert_eq!(runs[0].0, sid);
         assert_eq!(runs[0].1.as_deref(), Some("note1target"));
         assert!(runs[0].2, "resume も非ブロック dispatch を有効化する");
+    }
+
+    // ---- #319: 呼び出し元は導出せず、呼び出し側から受け取る ----
+
+    /// **本丸（inbound）**: 渡された呼び出し元がそのまま run に載る。
+    ///
+    /// 以前はここが `CallerIdentity::Agent` 固定で、オーナー発のターンでも
+    /// OWNER_ONLY / TRUSTED_ONLY のツールが list にも dispatch にも出なかった（#319）。
+    /// 発言者の解決は受信イベントの `pubkey` を持つ `handle_event` の責務で、
+    /// ここでは**受け取った値をそのまま使う**（session_id からの逆算はしない）。
+    #[tokio::test]
+    async fn inbound_turn_uses_the_caller_it_was_given() {
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::TrustedUser,
+            CallerIdentity::Agent,
+        ] {
+            let fake = FakeNostaro::new();
+            let runner = FakeRunner::new("応答");
+            let r = responder(runner.clone(), fake.cli());
+            let sid = nostr_session_id("agent-sink-test", "pk-abc");
+
+            r.respond_serialized(&sid, "note1target", "suffix", Some("evt-1"), caller.clone())
+                .await;
+
+            let runs = runner.runs.lock().unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].4, caller, "渡した呼び出し元が run に載っていない");
+        }
+    }
+
+    /// **本丸（resume）**: subtask 完了 resume は親 run の呼び出し元
+    /// （`SubtaskSettled.caller` / #298）を引き継ぐ。
+    ///
+    /// ここが `Agent` 固定だったため、オーナー発のターンでも subtask が決着した瞬間に
+    /// 権限が降格していた（`report_progress` を呼ぶと自分の権限が落ちる、という自爆）。
+    #[tokio::test]
+    async fn resume_turn_inherits_the_parent_caller() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("完了しました");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+
+        r.on_subtask_settled(settled_with_caller(
+            &sid,
+            Some("note1target"),
+            CallerIdentity::Owner,
+        ));
+        assert!(fake.wait_for("note1target").await, "resume が走ること");
+
+        let runs = runner.runs.lock().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].4,
+            CallerIdentity::Owner,
+            "resume で親ターンの権限が落ちている"
+        );
+    }
+
+    /// 引き継ぐだけで**昇格はしない**: 親が最小権限なら resume も最小権限のまま。
+    #[tokio::test]
+    async fn resume_does_not_escalate_a_least_privileged_parent() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("完了しました");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+
+        r.on_subtask_settled(settled_with_caller(
+            &sid,
+            Some("note1target"),
+            CallerIdentity::Agent,
+        ));
+        assert!(fake.wait_for("note1target").await);
+
+        assert_eq!(
+            runner.runs.lock().unwrap()[0].4,
+            CallerIdentity::Agent,
+            "resume で権限が上がった"
+        );
     }
 
     /// `reply_target` が None のときは graceful にスキップ（resume も送信もしない）。
@@ -642,7 +764,7 @@ mod tests {
         let sid = nostr_session_id("agent-sink-test", "pk-abc");
 
         let out = r
-            .respond_serialized(&sid, "note1target", "suffix", None)
+            .respond_serialized(&sid, "note1target", "suffix", None, CallerIdentity::Agent)
             .await;
         assert!(out.is_none());
         assert!(fake.sent().is_empty());
@@ -665,7 +787,13 @@ mod tests {
         let sid = nostr_session_id("agent-sink-test", "pk-dup");
 
         let out = r
-            .respond_serialized(&sid, "note1implicit", "suffix", Some("evt-1"))
+            .respond_serialized(
+                &sid,
+                "note1implicit",
+                "suffix",
+                Some("evt-1"),
+                CallerIdentity::Agent,
+            )
             .await;
         assert_eq!(out.as_deref(), Some("本文"));
 
@@ -693,8 +821,14 @@ mod tests {
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test", "pk-implicit");
 
-        r.respond_serialized(&sid, "note1implicit", "suffix", Some("evt-1"))
-            .await;
+        r.respond_serialized(
+            &sid,
+            "note1implicit",
+            "suffix",
+            Some("evt-1"),
+            CallerIdentity::Agent,
+        )
+        .await;
         let sent = fake.sent();
         assert!(sent.contains("note1implicit"), "{sent}");
         assert!(sent.contains("暗黙で返す"), "{sent}");
@@ -713,8 +847,14 @@ mod tests {
         let r2 = r.clone();
         let sid2 = sid.clone();
         let inbound = tokio::spawn(async move {
-            r2.respond_serialized(&sid2, "note1inbound", "suffix", Some("evt-1"))
-                .await;
+            r2.respond_serialized(
+                &sid2,
+                "note1inbound",
+                "suffix",
+                Some("evt-1"),
+                CallerIdentity::Agent,
+            )
+            .await;
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         r.on_subtask_settled(settled(&sid, Some("note1resume")));
@@ -776,8 +916,14 @@ mod tests {
         //
         // inbound（watch ループの入口）と resume（完了 sink）の**両経路**を見る:
         // どちらか一方だけ配線が外れても停止が届かなくなる。
-        r.respond_serialized(&sid, "note1inbound", "suffix", Some("evt-1"))
-            .await;
+        r.respond_serialized(
+            &sid,
+            "note1inbound",
+            "suffix",
+            Some("evt-1"),
+            CallerIdentity::Agent,
+        )
+        .await;
         r.on_subtask_settled(settled(&sid, Some("note1resume")));
         assert!(fake.wait_for("note1resume").await, "resume が走ること");
 

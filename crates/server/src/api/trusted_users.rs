@@ -291,7 +291,8 @@ mod tests {
     #[tokio::test]
     async fn unknown_platform_is_rejected() {
         let state = crate::test_app_state();
-        for bad in ["nostr", "Web", " web", ""] {
+        // `nostr` は #319 で読み出し側が引く経路になったので、ここには置けない。
+        for bad in ["mastodon", "Nostr", "Web", " web", ""] {
             let err = add_trusted_user(
                 State(state.clone()),
                 Path("agent-1".to_string()),

@@ -1844,6 +1844,48 @@ mod tests {
         );
     }
 
+    /// #319: Nostr 受信ターンの呼び出し元が `Owner` なら、設定変更系（OWNER_ONLY 7 個）
+    /// と自分の設定を触る TRUSTED_ONLY が**実際に通る**。
+    ///
+    /// 発言者からの解決（`NostrAgentRunner::resolve_nostr_caller`）で `Owner` に
+    /// なったターンが、ポリシー層でどう扱われるかをここに固定する。以前は Nostr の
+    /// 呼び出し元が `Agent` 固定だったため、この一覧が丸ごと消えていた（issue 本文の表）。
+    #[test]
+    fn test_owner_caller_unlocks_the_tools_missing_from_nostr_turns() {
+        // issue #319 で「消えている」と記録されたツール。
+        const OWNER_ONLY_FROM_ISSUE: [&str; 7] = [
+            "configure_self",
+            "configure_nostr",
+            "configure_llm_provider",
+            "configure_mcp_server",
+            "update_instructions",
+            "update_heartbeat_instructions",
+            "manage_allowed_commands",
+        ];
+        const TRUSTED_ONLY_FROM_ISSUE: [&str; 4] = [
+            "set_my_heartbeat",
+            "get_my_heartbeat",
+            "nostr_list_keys",
+            "nostr_switch_identity",
+        ];
+
+        let (_d, owner_ctx) = test_context_with_caller(CallerIdentity::Owner);
+        let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), owner_ctx);
+        let (_d2, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
+
+        for name in OWNER_ONLY_FROM_ISSUE.iter().chain(&TRUSTED_ONLY_FROM_ISSUE) {
+            assert!(
+                owner_exec.policy_allows(name),
+                "オーナー発のターンで {name} が通らない"
+            );
+            assert!(
+                !agent_exec.policy_allows(name),
+                "他人発のターン（最小権限）で {name} が通ってしまう"
+            );
+        }
+    }
+
     /// 設定変更系（#116）は owner 限定であること（ポリシー表の権威）。
     #[test]
     fn test_settings_tools_are_owner_only() {

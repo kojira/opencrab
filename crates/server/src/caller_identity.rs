@@ -55,6 +55,54 @@ pub fn resolve_caller_identity(
     }
 }
 
+/// オーナー識別子を呼び出し側が与える版（#319）。
+///
+/// Discord 設定の owner を見る [`resolve_caller_identity`] と違い、**その経路自身の
+/// オーナー識別子**で判定する。Nostr のように識別子空間が Discord とまったく別の経路
+/// 用（Nostr の pubkey が Discord の user_id と一致することはないので、Discord の owner を
+/// 流用すると誰もオーナーになれない）。
+///
+/// 動かしてはいけない線は [`resolve_caller_identity`] と同じ:
+/// - **fail-closed**: オーナー未設定（空 / 空白のみ）は誰とも一致しない
+///   （[`opencrab_core::owner::is_owner_id`]）。
+/// - **経路をまたがない**: 引くのは渡された `platform` の行だけ。
+/// - **表の `owner` を `Owner` にしない**: この経路で `Owner` になれるのは
+///   「発言者がオーナー識別子と一致した」ときだけ。表の権限から `Owner` へ上げると、
+///   オーナー識別子を持たない相手が設定変更へ届く**別の昇格経路**を新設することになる。
+///
+/// 順序は Discord の `resolve_caller` に合わせて**オーナー判定が先**（オーナーが
+/// 信頼済みユーザーとしても登録されていたら `Owner` を採る）。
+///
+/// `user_ids` は同じ呼び出し元を指す**表記ゆれ違いの識別子**（Nostr なら hex と npub）。
+/// 先頭から順に引き、最初に見つかった行の権限を使う。先頭には正規化済みの表現を置くこと。
+pub fn resolve_caller_identity_with_owner(
+    conn: &rusqlite::Connection,
+    platform: &str,
+    user_ids: &[&str],
+    agent_id: &str,
+    owner_id: &str,
+) -> CallerIdentity {
+    if user_ids
+        .iter()
+        .any(|uid| crate::api::is_owner_id(owner_id, uid))
+    {
+        return CallerIdentity::Owner;
+    }
+    let permission = user_ids.iter().find_map(|uid| {
+        opencrab_db::queries::get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission)
+    });
+    match permission {
+        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
+            // どの表記で登録されていても、名乗る識別子は先頭（正規化済みの表現）で揃える。
+            agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
+        },
+        Some(TrustedUserPermission::Owner) | Some(TrustedUserPermission::User) => {
+            CallerIdentity::TrustedUser
+        }
+        None => CallerIdentity::Agent,
+    }
+}
+
 /// 撤去した互換読み（#214→#159）に依存していた行を運用者へ知らせる。警告したら `true`。
 ///
 /// 「自経路の行は無いが、同じ識別子の従来経路（`discord`）の行はある」= 互換読みが
