@@ -452,9 +452,15 @@ mod tests {
     /// ただし **server-own の nostr_* は inner の `definitions()` には無い**（#268 の
     /// `nostr_run` は薄い passthrough として server 側だけに定義し、inner には持たせない）。
     /// server-own 名の liveness は server crate 側の
-    /// `nostr_run_is_own_trusted_only_and_inline`（`own_definitions()` に実在することを
+    /// `nostr_run_is_own_unrestricted_and_inline`（`own_definitions()` に実在することを
     /// 主張）が担保するので、ここでは対象外にする。
-    const SERVER_OWN_NOSTR_TRUSTED: &[&str] = &["nostr_run"];
+    ///
+    /// `nostr_run` が `TRUSTED_ONLY_ACTIONS` から外れた（#303）今、この除外は空振りする。
+    /// それでも定数を残すのは、server-own の nostr_* 名に将来 caller ゲートが付いたときに
+    /// この drift 検出が「inner の definitions に無い」で誤検知しないようにするため。
+    /// 名前から "TRUSTED" を落としたのは、除外の理由が trusted かどうかではなく
+    /// **server-own かどうか**だから（#303）。
+    const SERVER_OWN_NOSTR_ACTIONS: &[&str] = &["nostr_run"];
     #[test]
     fn test_trusted_only_nostr_names_are_live() {
         let a = NostrGatewayActions::new(NostaroCli::new());
@@ -462,7 +468,7 @@ mod tests {
         for n in opencrab_actions::TRUSTED_ONLY_ACTIONS
             .iter()
             .filter(|n| n.starts_with("nostr_"))
-            .filter(|n| !SERVER_OWN_NOSTR_TRUSTED.contains(n))
+            .filter(|n| !SERVER_OWN_NOSTR_ACTIONS.contains(n))
         {
             assert!(
                 names.contains(&n.to_string()),
