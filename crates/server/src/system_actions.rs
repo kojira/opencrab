@@ -202,7 +202,7 @@ impl SystemGatewayActions {
                         "action": {
                             "type": "string",
                             "enum": ["list", "add", "remove"],
-                            "description": "list=一覧 / add=追加 / remove=削除。"
+                            "description": "list=一覧（設定ファイル由来 + 自分に追加した分の実効リスト）/ add=追加 / remove=削除。"
                         },
                         "command": {
                             "type": "string",
@@ -531,7 +531,9 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "list_allowed_commands".to_string(),
-                description: "現在DBに保存されている許可コマンドの一覧を取得する。".to_string(),
+                description: "execute_shell で実行できる許可コマンドの一覧（実効リスト）を\
+                取得する。設定ファイル由来のものと自分に追加されたものを合わせて返す（#300）。"
+                    .to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {},
@@ -1449,19 +1451,26 @@ impl SystemGatewayActions {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string());
 
+        // `list` は DB ロックを取る前に片付ける。実効リストの解決
+        // （`effective_allowed_commands`）が内部で同じ Mutex を取るため、ここで
+        // 掴んだまま呼ぶと自己デッドロックする。
+        if action == "list" {
+            // `list_allowed_commands` と**同じ解決点**を通す。DB 行だけを返すと
+            // 設定ファイル由来のコマンドが消えて「使えない」と誤認される（#300）。
+            return GatewayActionResult {
+                success: true,
+                data: Some(
+                    json!({ "commands": crate::process::effective_allowed_commands(&self.state, &agent_id) }),
+                ),
+                error: None,
+            };
+        }
+
         let conn = match self.state.db.lock() {
             Ok(c) => c,
             Err(_) => return err("db lock failed".to_string()),
         };
         match action {
-            "list" => match opencrab_db::queries::list_agent_allowed_commands(&conn, &agent_id) {
-                Ok(cmds) => GatewayActionResult {
-                    success: true,
-                    data: Some(json!({ "commands": cmds })),
-                    error: None,
-                },
-                Err(e) => err(e.to_string()),
-            },
             "add" => {
                 let Some(cmd) = command.filter(|s| !s.is_empty()) else {
                     return err("command is required for add".to_string());
@@ -3881,6 +3890,163 @@ mod tests {
             .await;
         assert!(r.success);
         assert_eq!(r.data.unwrap()["commands"], json!(["curl"]));
+    }
+
+    // ---- #300: 一覧が「実効リスト」であること ----
+    //
+    // 不具合そのものは「`list_allowed_commands` が DB 行しか返さず、設定ファイル由来の
+    // コマンドが落ちる」。エージェントは戻り値を「これが使える全部だ」と読むので、
+    // 落ちた分は「使えない」と誤認され、実際には実行できる作業が止まった。
+
+    /// 設定ファイル相当の shell 設定（構造化 `commands` + 素の `allowed_commands`）を
+    /// 持つ `AppState`。実運用の `config/default.toml` は `[[tools.shell.commands]]`
+    /// （構造化）で 10 個を与えるので、そちら側も再現できないと #300 を覆えない。
+    fn state_with_shell_commands(structured: &[&str], plain: &[&str]) -> AppState {
+        let state = state_with_shell(plain);
+        {
+            let mut cfg = state.tools_config.write().unwrap();
+            let shell = cfg.shell.as_mut().unwrap();
+            shell.commands = structured
+                .iter()
+                .map(|name| opencrab_actions::tools::config::CommandConfig {
+                    name: name.to_string(),
+                    permission: opencrab_actions::tools::config::CommandPermission::Agent,
+                    timeout_secs: None,
+                    description: None,
+                })
+                .collect();
+        }
+        state
+    }
+
+    async fn listed_commands(state: &AppState) -> Vec<String> {
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute("list_allowed_commands", &json!({}), &agent_ctx())
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        serde_json::from_value(r.data.unwrap()["commands"].clone()).unwrap()
+    }
+
+    /// **DB に 1 行も無くても設定ファイル由来のコマンドが返る**（#300 の中核）。
+    ///
+    /// 修正前はここが `[]` / `count: 0` になり、エージェントは「シェルは何も使えない」と
+    /// 読んだ。実際には設定ファイル分がそのまま実行できる。
+    #[tokio::test]
+    async fn list_allowed_commands_includes_config_base_without_any_db_row() {
+        let state = state_with_shell_commands(&["ls", "cat", "grep"], &["python3"]);
+        assert!(
+            db_allowed_commands(&state, "agent-x").is_empty(),
+            "前提: DB に per-agent の行は無い"
+        );
+
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute("list_allowed_commands", &json!({}), &agent_ctx())
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(
+            data["commands"],
+            json!(["ls", "cat", "grep", "python3"]),
+            "設定ファイル由来のコマンドが戻り値から落ちている（#300）"
+        );
+        // `count` は `commands` と必ず一致する（片方だけ古い値だと誤認の材料になる）。
+        assert_eq!(data["count"], json!(4));
+        assert_eq!(data["agent_id"], json!("agent-x"));
+    }
+
+    /// **設定ファイル分と DB 行が合成され、重複しない**。
+    ///
+    /// 合成規則は `resolve_run_tools_config` +
+    /// `ShellToolConfig::effective_commands()` のものをそのまま使う:
+    /// 構造化 `commands` が先、その後ろに `allowed_commands`（設定 → DB の順）、
+    /// 既出の名前は積まない。`cargo` は設定と DB の両方にあるが 1 個だけ出る。
+    #[tokio::test]
+    async fn list_allowed_commands_merges_db_rows_with_config_without_duplicates() {
+        let state = state_with_shell_commands(&["cargo"], &["ls", "cat"]);
+        {
+            let conn = state.db.lock().unwrap();
+            for cmd in ["cargo", "mkdir"] {
+                opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", cmd, "owner")
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            listed_commands(&state).await,
+            vec!["cargo", "ls", "cat", "mkdir"],
+            "設定 + DB の合成が実効リストと一致しない（#300）"
+        );
+    }
+
+    /// **戻り値が `execute_shell` の `Allowed: ...` と 1 コマンドも食い違わない**。
+    ///
+    /// #300 の実害はこの 2 つのズレそのもの。プロンプト側は正しく 12 個を並べていたのに
+    /// 一覧は 2 個しか返さず、エージェントは一覧を信じて止まった。両者を同じ解決点
+    /// （`process::effective_allowed_commands` / `resolve_run_tools_config`）から作る
+    /// 限りズレは起き得ないが、片方だけ書き換えられたらここで落ちる。
+    #[tokio::test]
+    async fn list_allowed_commands_matches_the_execute_shell_description() {
+        let state = state_with_shell_commands(&["curl", "echo", "jq", "cargo"], &["python3"]);
+        {
+            let conn = state.db.lock().unwrap();
+            for cmd in ["cargo", "mkdir"] {
+                opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", cmd, "owner")
+                    .unwrap();
+            }
+        }
+
+        // LLM に実際に渡る `execute_shell` の引数説明を、run と同じ手順で組み立てる。
+        let shell_cfg = crate::process::resolve_run_tools_config(&state, "agent-x")
+            .shell
+            .expect("shell 設定");
+        let shell_action = opencrab_actions::tools::shell::ShellToolAction::new(shell_cfg);
+        let desc = opencrab_actions::Action::parameters(&shell_action)["properties"]["command"]
+            ["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // このパースは `crates/actions/src/tools/shell.rs` の書式
+        // （`... Allowed: a, b, c` で末尾がコマンド列）に依存している。
+        let from_prompt: Vec<String> = desc
+            .split_once("Allowed: ")
+            .expect("`Allowed: ` を含む説明文（書式は crates/actions/src/tools/shell.rs）")
+            .1
+            .split(", ")
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            listed_commands(&state).await,
+            from_prompt,
+            "一覧ツールの戻り値とプロンプトの Allowed が食い違っている（#300 の実害そのもの）。\
+             ただし `Allowed: ` の後ろに文を足した場合もここが落ちる — 差分が末尾要素だけなら\
+             まず `crates/actions/src/tools/shell.rs` の description 書式を確認し、\
+             書式を変えたならこのパースを追随させること"
+        );
+    }
+
+    /// owner 向けの `manage_allowed_commands(action="list")` も同じ実効リストを返す。
+    ///
+    /// 一覧を返す口が 2 つあるので、片方だけ直すと「どちらを読んだか」で挙動が割れる。
+    #[tokio::test]
+    async fn manage_allowed_commands_list_returns_the_same_effective_list() {
+        let state = state_with_shell_commands(&["cargo"], &["ls"]);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", "mkdir", "owner")
+                .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "manage_allowed_commands",
+                &json!({"action": "list"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(r.data.unwrap()["commands"], json!(["cargo", "ls", "mkdir"]));
     }
 
     /// **レスポンス JSON が移設前と同一**（記憶インデックス設定）。
