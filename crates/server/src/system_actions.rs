@@ -350,9 +350,10 @@ impl SystemGatewayActions {
                     "required": ["npub"]
                 }),
             },
-            // 薄い nostaro passthrough（#268）。server-own / TRUSTED_ONLY。投稿・返信・
-            // kind:0 プロフィール設定・チャンネル・取得など nostaro が持つ操作を**すべて**
-            // 会話/heartbeat/オーナーの trusted ターンから使えるようにする（既存の inner
+            // 薄い nostaro passthrough（#268）。server-own で、caller による制限は持たない
+            // （#303 で `TRUSTED_ONLY_ACTIONS` から外した）。投稿・返信・kind:0 プロフィール
+            // 設定・チャンネル・取得など nostaro が持つ操作を**すべて**、あらゆるターン
+            // （Nostr 受信ターン = caller=Agent を含む）から使えるようにする（既存の inner
             // `nostr_post`/`reply` は Nostr 受信ターン用にそのまま残る）。opencrab が守るのは
             // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
             // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
@@ -1023,7 +1024,7 @@ impl SystemGatewayActions {
         }
     }
 
-    /// 薄い nostaro passthrough（#268）。server-own / TRUSTED_ONLY。
+    /// 薄い nostaro passthrough（#268）。server-own で caller 制限は持たない（#303）。
     ///
     /// 稼働中（登録済み）の Nostr transport の passthrough capability
     /// （[`opencrab_actions::GatewayNostrPassthrough`]）へ委譲する。config は常に
@@ -6077,7 +6078,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // #268: nostr_run 薄い passthrough（server-own / TRUSTED_ONLY）
+    // #268: nostr_run 薄い passthrough（server-own / caller 制限なし・#303）
     // ------------------------------------------------------------------
 
     /// `nostr_run` の委譲先を検証する fake passthrough capability。
@@ -6143,22 +6144,24 @@ mod tests {
         passthrough
     }
 
-    /// `nostr_run` は own（全 trusted ターンで露出）かつ TRUSTED_ONLY（caller=Agent 不可）。
+    /// `nostr_run` は own（全ターンで露出）で、caller による制限を持たない（#303）。
     /// 分類は inline（同ターンで結果を使う / 送信は送ること自体が応答）。
     #[test]
-    fn nostr_run_is_own_trusted_only_and_inline() {
+    fn nostr_run_is_own_unrestricted_and_inline() {
         let names: Vec<String> = SystemGatewayActions::own_definitions()
             .into_iter()
             .map(|d| d.name)
             .collect();
         assert!(
             names.contains(&"nostr_run".to_string()),
-            "nostr_run は own 定義（全 trusted ターンで露出）でなければならない"
+            "nostr_run は own 定義（全ターンで露出）でなければならない"
         );
-        // 可視性 == 実行時強制（#45）: caller=Agent には出さない・実行させない。
         let policy = opencrab_actions::tool_policy("nostr_run");
-        assert!(policy.trusted_only, "nostr_run は TRUSTED_ONLY");
-        assert!(!policy.owner_only, "owner 限定ではない（trusted なら可）");
+        assert!(
+            !policy.trusted_only,
+            "nostr_run に trusted ゲートを付けない"
+        );
+        assert!(!policy.owner_only, "nostr_run に owner ゲートを付けない");
         // 分類は inline（dispatch 対象外）。
         assert!(
             opencrab_actions::default_non_dispatch_tools().contains("nostr_run"),
@@ -6166,22 +6169,39 @@ mod tests {
         );
     }
 
-    /// caller=Agent（外部ユーザー由来の会話）では `nostr_run` を露出しない。
+    /// caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）でも `nostr_run` は
+    /// 使える。heartbeat tick は caller=Owner なので元から対象外（`crates/server/src/main.rs`）。
+    ///
+    /// ここを塞ぐと「Nostr 上で自律的に活動する」という目的そのものが成立しない。
+    /// opencrab が担保するのは ①鍵の混同防止 ②nsec の隠蔽 の 2 点だけで、
+    /// どちらも caller による露出制限を必要としない（#303）。
+    ///
+    /// ゲートを実際に通す検証は crate 内部の `policy_allows` を呼べる
+    /// `opencrab_actions` 側（`nostr_run_passes_the_gate_for_agent_caller`）が持つ。
+    /// ここは権限リストの写像（`tool_policy`）だけを固定する。
     #[test]
-    fn nostr_run_is_hidden_from_untrusted_caller() {
-        assert!(opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&"nostr_run"));
-        // owner / trusted は可、素の Agent は不可、を tool_policy が表す。
-        assert!(opencrab_actions::tool_policy("nostr_run").trusted_only);
+    fn nostr_run_is_available_to_agent_caller() {
+        assert!(
+            !opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&"nostr_run"),
+            "nostr_run を TRUSTED_ONLY_ACTIONS へ戻さない"
+        );
+        assert!(
+            !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"nostr_run"),
+            "nostr_run を OWNER_ONLY_ACTIONS へ入れない"
+        );
     }
 
     /// 稼働中（登録済み）の Nostr passthrough capability へ、ctx.agent_id・subcommand・args
     /// をそのまま委譲する。
+    ///
+    /// caller は **`Agent`**（Nostr 受信ターン相当）で回す（#303）。ハンドラ内に後日
+    /// typed な caller gate を足されたらここで落ちる。
     #[tokio::test]
     async fn nostr_run_delegates_to_capability() {
         let state = crate::test_app_state();
         let rec = register_fake_nostr(&state, false);
         let actions = SystemGatewayActions::new(state, None, None, None);
-        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-268");
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-268");
 
         let r = actions
             .execute(

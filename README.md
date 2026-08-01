@@ -278,11 +278,17 @@ without a test failing.
 Visibility is not uniform. `configure_*`, `manage_allowed_commands`,
 `update_heartbeat_instructions` and the core action `update_instructions` are owner-only —
 that is `OWNER_ONLY_ACTIONS` in full. `nostr_list_keys`, `nostr_switch_identity`,
-`nostr_run`, `nostr_dm`, `nostr_zap`, the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
+`nostr_dm`, `nostr_zap`, the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
 `read_heartbeat_instructions`, the voice actions and `create_skill` are trusted-only, meaning
 they are neither listed nor executable on a turn driven by an untrusted external user. That gate
-is what keeps an inbound Nostr note from talking the agent into swapping its own key or spending
-its funds. `nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
+is what keeps an inbound Nostr note from talking the agent into swapping its own key:
+`nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
+`init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** keep
+the agent from spending its funds — `nostr_run` carries no caller gate (#303) and the passthrough
+denies only `init`, `watch` and `relay`, so `nostr_run zap` and `nostr_run dm` go through on the
+very turns where the inner `nostr_zap` / `nostr_dm` are hidden. Their trusted-only entries tidy up
+which inner tool names get listed; they do not bound what the turn can do.
+`nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
 adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
 `crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both
 tool listing and execution.
