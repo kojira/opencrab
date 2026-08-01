@@ -736,3 +736,111 @@ async fn interaction_response_resume_does_not_escalate_agent_turns() {
         "UI 応答の resume が権限の昇格経路になってはならない"
     );
 }
+
+// ---- NO_REPLY の可視化（#317） ----
+
+/// リアクション付与だけを観測する fake（Discord へは出ない）。
+#[derive(Default)]
+struct FakeReactionGateway {
+    /// (channel_id, message_id, emoji) を呼ばれた順に記録する。
+    calls: Mutex<Vec<(u64, u64, String)>>,
+}
+
+#[async_trait::async_trait]
+impl super::ReactionAdder for FakeReactionGateway {
+    async fn add_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((channel_id, message_id, emoji.to_string()));
+        Ok(())
+    }
+}
+
+fn engine_result(response: &str) -> EngineResult {
+    EngineResult {
+        response: response.to_string(),
+        iterations: 1,
+        tool_calls_made: 0,
+        stopped_by_limit: false,
+        xml_fallback_parses: 0,
+    }
+}
+
+async fn no_reply_reaction_calls(response: &str, message_id: &str) -> Vec<(u64, u64, String)> {
+    let state = FakeRunner::new();
+    let gateway = FakeReactionGateway::default();
+
+    super::handle_agent_response(
+        Ok(engine_result(response)),
+        "crab",
+        "discord-crab-111-222",
+        222,
+        "222",
+        &state,
+        &gateway,
+        message_id,
+    )
+    .await;
+
+    let calls = gateway.calls.lock().unwrap();
+    calls.clone()
+}
+
+/// **`NO_REPLY` を選んだターンは、元の投稿にリアクションが付く。**
+///
+/// 付かないと、投稿者からは「読んで黙った」のか「落ちて返せなかった」のか区別が
+/// つかない（これが #317 の要望そのもの）。宛先（チャンネル・メッセージ）と絵文字まで
+/// 固定する — 宛先を取り違えると無関係な投稿にリアクションが付く。
+#[tokio::test]
+async fn no_reply_marks_the_original_message_with_a_reaction() {
+    let calls = no_reply_reaction_calls("NO_REPLY", "1234567890123456789").await;
+    assert_eq!(
+        calls.len(),
+        1,
+        "NO_REPLY なのにリアクションが付いていない（黙ったことが誰にも見えない）"
+    );
+    assert_eq!(calls[0].0, 222, "リアクション先のチャンネルが違う");
+    assert_eq!(
+        calls[0].1, 1234567890123456789,
+        "リアクション先のメッセージが違う"
+    );
+    // 👀（受け取った）と同じ絵文字にすると 2 つの状態が区別できなくなる。
+    assert_eq!(calls[0].2, "🤐", "NO_REPLY の絵文字が変わっている");
+    assert_ne!(calls[0].2, "👀", "受信済みマークと同じ絵文字になっている");
+}
+
+/// **普通に返答したターンにはリアクションを付けない。**
+///
+/// 返答があるのに「黙った」マークが付くと意味が反転する。
+#[tokio::test]
+async fn a_normal_reply_gets_no_no_reply_reaction() {
+    let calls = no_reply_reaction_calls("ふつうの返事", "1234567890123456789").await;
+    assert!(
+        calls.is_empty(),
+        "返答したターンに NO_REPLY のリアクションが付いている"
+    );
+}
+
+/// **message_id が無いターンでも落ちない**（付与を諦めるだけ）。
+///
+/// message_id はメタデータ由来で、欠けることがある。ここで panic すると
+/// `spawn_serialized` のタスクごと落ち、セッションの応答経路が壊れる。
+#[tokio::test]
+async fn no_reply_without_a_message_id_is_skipped_not_fatal() {
+    assert!(
+        no_reply_reaction_calls("NO_REPLY", "").await.is_empty(),
+        "message_id が空なのにリアクションを試みている"
+    );
+    assert!(
+        no_reply_reaction_calls("NO_REPLY", "not-a-number")
+            .await
+            .is_empty(),
+        "数値でない message_id でリアクションを試みている"
+    );
+}

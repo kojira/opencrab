@@ -712,6 +712,8 @@ async fn process_incoming_message<T: AgentRunner>(
         let caller_spawn = caller.clone();
         let image_urls_spawn = image_urls.clone();
         let discord_message_id_spawn = discord_message_id.clone();
+        // NO_REPLY の可視化（#317）で使う。`gateway_for_cb`（:657）と同じ形の持ち込み。
+        let gateway_spawn = gateway.clone();
         let channel_id_str_spawn = channel_id_str.clone();
         let sender_id_spawn = incoming.sender.id.clone();
         let sender_name_spawn = incoming.sender.name.clone();
@@ -820,8 +822,11 @@ async fn process_incoming_message<T: AgentRunner>(
                     result,
                     &agent_id_spawn,
                     &session_id_spawn,
+                    channel_id,
                     &channel_id_str_spawn,
                     &state_spawn,
+                    gateway_spawn.as_ref(),
+                    &discord_message_id_spawn,
                 )
                 .await;
             }
@@ -830,18 +835,28 @@ async fn process_incoming_message<T: AgentRunner>(
 }
 
 /// エージェント応答結果を処理してDiscordに送信する。
-async fn handle_agent_response<T: AgentRunner>(
+///
+/// `gateway` / `channel_id` / `message_id` は `NO_REPLY` の可視化（#317）にだけ使う。
+/// `message_id` は元のユーザー投稿の Discord ID（空なら付与をスキップ）。
+#[allow(clippy::too_many_arguments)]
+async fn handle_agent_response<T: AgentRunner, G: ReactionAdder + ?Sized>(
     result: anyhow::Result<opencrab_core::EngineResult>,
     agent_id: &str,
     session_id: &str,
+    channel_id: u64,
     channel_id_str: &str,
     state: &T,
+    gateway: &G,
+    message_id: &str,
 ) {
     match result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
             if engine_result.response.trim() == "NO_REPLY" {
                 debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
                 state.record_agent_no_reply(agent_id, session_id);
+                // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
+                // ＝ NO_REPLY のまま終わるのは変わらない。
+                add_no_reply_reaction(gateway, channel_id, channel_id_str, message_id).await;
                 return;
             }
             state.record_outbound_reply(
@@ -1438,6 +1453,33 @@ fn prepend_runtime_context_discord(
     )
 }
 
+/// リアクション付与だけを切り出した継ぎ目（#317）。
+///
+/// 本番の実体は [`DiscordGateway`]。テストは Discord へ実際に HTTP を出せないため、
+/// 付与要求を記録する fake を差し替えて配線を固定する。gateway 非依存層には何も
+/// 足さない — この trait は `crates/discord` に閉じている。
+#[async_trait::async_trait]
+pub(crate) trait ReactionAdder: Send + Sync {
+    async fn add_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl ReactionAdder for DiscordGateway {
+    async fn add_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        DiscordGateway::add_reaction(self, channel_id, message_id, emoji).await
+    }
+}
+
 /// 処理対象として確定したユーザー投稿に 👀 リアクションを付ける（非致命的）。
 ///
 /// 失敗（権限不足・削除済みメッセージ・無効なID等）してもエラーは握りつぶし、
@@ -1469,6 +1511,47 @@ async fn add_seen_reaction(
             message_id = %message_id,
             error = %e,
             "Failed to add 👀 reaction (non-fatal)"
+        );
+    }
+}
+
+/// エージェントが `NO_REPLY` を選んだユーザー投稿に 🤐 リアクションを付ける（#317）。
+///
+/// 👀（受け取った）だけでは「読んで黙った」のか「落ちて返せなかった」のかが投稿者に
+/// 区別できない。返信しないと**決めた**ことをその場に残すのがこの関数の役目。
+///
+/// 絵文字は 👀 と同じくハードコード（設定項目にしない）。付与失敗は非致命で、
+/// `add_seen_reaction` と同じく warn だけ残して握りつぶす。
+async fn add_no_reply_reaction<G: ReactionAdder + ?Sized>(
+    gateway: &G,
+    channel_id: u64,
+    channel_id_str: &str,
+    message_id: &str,
+) {
+    const NO_REPLY_EMOJI: &str = "🤐";
+
+    let msg_id = match parse_seen_message_id(message_id) {
+        Some(id) => id,
+        None => {
+            if !message_id.is_empty() {
+                warn!(
+                    channel_id = %channel_id_str,
+                    message_id = %message_id,
+                    "Skip 🤐 reaction: invalid message_id"
+                );
+            }
+            return;
+        }
+    };
+    if let Err(e) = gateway
+        .add_reaction(channel_id, msg_id, NO_REPLY_EMOJI)
+        .await
+    {
+        warn!(
+            channel_id = %channel_id_str,
+            message_id = %message_id,
+            error = %e,
+            "Failed to add 🤐 reaction (non-fatal)"
         );
     }
 }

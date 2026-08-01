@@ -241,7 +241,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_add_reaction".to_string(),
-                description: "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。".to_string(),
+                description: "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -826,6 +826,30 @@ mod tests {
     }
 
     // ---- definitions ----
+
+    /// **リアクションだけで応じる道は description に書いてある**（#317）。
+    ///
+    /// ツールも権限も既に揃っていて（`discord_add_reaction` は inline 実行が保証済み、
+    /// message_id は毎ターン会話の先頭に載る）、足りないのはエージェントがその使い方を
+    /// 知る手段だけだった。この 1 文が消えると「テキストで返すほどでもない反応」は
+    /// また全部テキストで返るようになる — コードは壊れないので他のテストでは検出できない。
+    ///
+    /// 置き場所も固定する: Discord 固有の運用なので、transport 非依存の共通プロンプト
+    /// （`crates/server/src/process.rs` の Silent Reply 節）ではなくここに書く。
+    #[test]
+    fn add_reaction_tells_the_agent_it_can_answer_with_a_reaction_alone() {
+        let (actions, _db) = make_test_actions();
+        let defs = actions.definitions();
+        let def = defs
+            .iter()
+            .find(|d| d.name == "discord_add_reaction")
+            .expect("discord_add_reaction が定義から消えている");
+        assert!(
+            def.description.contains("NO_REPLY"),
+            "リアクションだけで応じてよいことが description から消えている: {}",
+            def.description
+        );
+    }
 
     #[test]
     fn test_definitions_returns_expected_count() {
