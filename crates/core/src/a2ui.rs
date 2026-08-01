@@ -179,6 +179,18 @@ pub struct PendingInteraction {
     /// 以前は「空なら判定しない」＝誰でも操作可だったため、配線側で空文字を渡すと
     /// 権限ゲートが黙って無効化されていた。判定は [`crate::owner::is_owner_id`]。
     pub owner_id: String,
+    /// **この UI を描いた run の呼び出し元**（#298 / #302）。
+    ///
+    /// 応答（クリック・タイムアウト）で親セッションを resume するとき、この値を
+    /// そのまま `RunRequest` の caller に使う。`SpawnedSubtask.caller` と同じ方針で、
+    /// **引き継ぐだけ**（昇格も降格もしない）。
+    ///
+    /// 応答した本人から導出しては**いけない**: `send_ui` の `channel_id` は自由引数で、
+    /// 描画先チャンネルと resume 先セッション（`session_id`）は独立している。
+    /// 応答者から導くと、`Agent` / `TrustedUser` のターンがオーナーの見るチャンネルへ
+    /// UI を描き、オーナーが押した瞬間にそのセッションが `Owner` で resume する
+    /// ＝ 昇格経路になる。
+    pub caller: crate::caller::CallerIdentity,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub timeout_secs: u64,
     pub rendered_message: RenderedMessage,
@@ -206,6 +218,10 @@ pub struct UiResponseEvent {
     pub target: RenderTarget,
     /// ユーザーの操作内容（タイムアウトは `action_name = "timeout"`）。
     pub response: A2uiUserAction,
+    /// resume する run の呼び出し元 = [`PendingInteraction::caller`]（#298 / #302）。
+    ///
+    /// `SubtaskSettled.caller` と同じで、保留エントリの値をそのまま運ぶだけ。
+    pub caller: crate::caller::CallerIdentity,
 }
 
 /// UI 応答通知の抽象（transport のイベントループへの直接依存を置換する）。

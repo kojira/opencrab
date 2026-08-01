@@ -44,34 +44,13 @@ pub enum SideEffect {
     LlmSwitched { purpose: String, model: String },
 }
 
-/// 呼び出し元の識別子
-#[derive(Debug, Clone, PartialEq)]
-pub enum CallerIdentity {
-    Owner,
-    Agent,
-    CoAgent { agent_id: String },
-    TrustedUser,
-}
-
-/// gateway 境界の caller から dispatcher 側の識別子へ戻す（#298）。
+/// 呼び出し元の識別子。
 ///
-/// 逆向き（`CallerIdentity` → [`opencrab_gateway::GatewayCaller`]）は
-/// `BridgedExecutor::gateway_call_context` が行う。両者は同型なので写像は無損失で、
-/// `GatewayCallContext` しか持たないツールハンドラ（`spawn_subtask`）が
-/// 「この run の呼び出し元」をそのまま記録できるようにするために必要。
-/// **権限を変換しない**（昇格も降格もしない）。
-impl From<&opencrab_gateway::GatewayCaller> for CallerIdentity {
-    fn from(caller: &opencrab_gateway::GatewayCaller) -> Self {
-        match caller {
-            opencrab_gateway::GatewayCaller::Owner => CallerIdentity::Owner,
-            opencrab_gateway::GatewayCaller::Agent => CallerIdentity::Agent,
-            opencrab_gateway::GatewayCaller::CoAgent { agent_id } => CallerIdentity::CoAgent {
-                agent_id: agent_id.clone(),
-            },
-            opencrab_gateway::GatewayCaller::TrustedUser => CallerIdentity::TrustedUser,
-        }
-    }
-}
+/// 実体は [`opencrab_core::caller::CallerIdentity`]。A2UI の保留状態
+/// （`opencrab_core::a2ui::PendingInteraction`）が「その UI を描いた run の
+/// 呼び出し元」を持つため core 側に置いてある（core は actions に依存できない）。
+/// `opencrab_actions::CallerIdentity` の参照パスは従来どおり。
+pub use opencrab_core::caller::CallerIdentity;
 
 /// アクション実行コンテキスト
 pub struct ActionContext {

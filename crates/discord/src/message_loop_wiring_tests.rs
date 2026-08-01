@@ -677,13 +677,16 @@ async fn subtask_resume_keeps_agent_turns_as_agent() {
     );
 }
 
-/// A2UI 応答の resume は、応答した本人（`responder_id`）から呼び出し元を解決する。
+/// A2UI 応答の resume を 1 回走らせ、`RunRequest` に載った呼び出し元を返す。
 ///
-/// この fake の `resolve_caller` は `TrustedUser` を返すので、`Agent` 固定のままなら
-/// 落ちる。判定そのものは inbound と同じ `resolve_caller` に委ねている（権限の
-/// 導出経路を新設していない）。
-#[tokio::test]
-async fn interaction_response_resume_resolves_caller_from_the_responder() {
+/// 引き継ぐのは**その UI を描いた run の呼び出し元**（`PendingInteraction.caller`）で、
+/// 応答した本人（`responder_id`）からは導出しない（#302）。`send_ui` の `channel_id` は
+/// 自由引数で、描画先チャンネルと resume 先セッション（`ctx.session_id`）は独立して
+/// いるため、応答者から導くと「`Agent` のターンがオーナーの見るチャンネルへ UI を描き、
+/// オーナーが押した瞬間にそのセッションが `Owner` で resume する」＝昇格経路になる。
+/// クリックは `handle_component_interaction` の owner-only ゲートで既にオーナー限定
+/// なので、応答者から導く実利も無い。
+async fn interaction_resume_caller(caller: CallerIdentity) -> CallerIdentity {
     let (state, gateway, gateway_actions) = make_deps();
 
     process_interaction_response(
@@ -698,19 +701,38 @@ async fn interaction_response_resume_resolves_caller_from_the_responder() {
             component_id: "btn-1".to_string(),
             action_name: "approve".to_string(),
             context: None,
-            responder_id: "user-1".to_string(),
+            // 押せるのはオーナーだけ（owner-only ゲート）。この fake の
+            // `resolve_caller` は誰であれ `TrustedUser` を返すので、応答者から
+            // 導出する実装に戻すと下の 2 本が両方落ちる。
+            responder_id: "owner-1".to_string(),
         },
         false,
         gateway,
         state.clone(),
         gateway_actions,
-        "owner-1".to_string(),
+        caller,
     )
     .await;
 
+    state.observed_caller(0)
+}
+
+/// 降格しない: 元がオーナー発のターンなら resume も `Owner`。
+#[tokio::test]
+async fn interaction_response_resume_preserves_the_drawing_run_caller() {
     assert_eq!(
-        state.observed_caller(0),
-        CallerIdentity::TrustedUser,
-        "UI 応答の resume が最小権限へ降格している（responder の権限で再開していない）"
+        interaction_resume_caller(CallerIdentity::Owner).await,
+        CallerIdentity::Owner,
+        "UI 応答の resume が最小権限へ降格している（owner/trusted のツールが消える）"
+    );
+}
+
+/// 昇格しない: 元が `Agent` のターンが描いた UI は、**オーナーが押しても** `Agent` のまま。
+#[tokio::test]
+async fn interaction_response_resume_does_not_escalate_agent_turns() {
+    assert_eq!(
+        interaction_resume_caller(CallerIdentity::Agent).await,
+        CallerIdentity::Agent,
+        "UI 応答の resume が権限の昇格経路になってはならない"
     );
 }

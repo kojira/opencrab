@@ -139,6 +139,7 @@ mod tests {
             surface_id: "interaction:uuid-abc".into(),
             a2ui_components: components,
             owner_id: OWNER.into(),
+            caller: opencrab_actions::CallerIdentity::Owner,
             created_at: chrono::Utc::now(),
             timeout_secs: 300,
             rendered_message: RenderedMessage {
