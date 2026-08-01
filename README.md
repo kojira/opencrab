@@ -285,10 +285,11 @@ is what keeps an inbound Nostr note from talking the agent into swapping its own
 `init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** bound
 what an inbound turn can send or spend, and it is not meant to: `nostr_run` carries no caller gate
 (#303) and the passthrough denies only `init`, `watch` and `relay`, so `nostr_run zap` and
-`nostr_run dm` always went through. Gating the inner `nostr_zap` / `nostr_dm` only changed which
-tool names got listed, so #306 dropped that gate rather than adding a matching one to the
-passthrough — the consistency is taken in the direction of fewer constraints, and whether to send
-a DM or a zap is the agent's own call.
+`nostr_run dm` have gone through ever since #303 — before that, `nostr_run` itself was
+trusted-only, so the whole passthrough was out of reach from a `caller=Agent` turn. Gating the
+inner `nostr_zap` / `nostr_dm` only changed which tool names got listed, so #306 dropped that
+gate rather than adding a matching one to the passthrough — the consistency is taken in the
+direction of fewer constraints, and whether to send a DM or a zap is the agent's own call.
 `nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
 adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
 `crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both

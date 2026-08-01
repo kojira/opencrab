@@ -16,7 +16,7 @@ use crate::identity::NostrIdentityAdmin;
 ///
 /// `sent` は「このターンで明示的に送信（post/reply/dm/zap）した」フラグ。ループ側が
 /// これを見て暗黙返信の二重送信を防ぐ。`admin` は identity 切替（本鍵採用）の実体で、
-/// watch ループ稼働時のみ Some（owner 限定ツール `nostr_switch_identity` から使う）。
+/// watch ループ稼働時のみ Some（owner/trusted 限定ツール `nostr_switch_identity` から使う）。
 pub struct NostrGatewayActions {
     cli: NostaroCli,
     sent: Arc<AtomicBool>,

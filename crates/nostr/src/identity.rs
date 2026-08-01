@@ -2,7 +2,7 @@
 //!
 //! 実体は watch ループ側（`manager.rs`）が握る（runner+cli+self_pubkey セルを capture）。
 //! `NostrGatewayActions` は trait object として保持し、`nostr_switch_identity`
-//! （owner 限定）ツールから呼ぶ。
+//! （owner/trusted 限定）ツールから呼ぶ。
 
 use async_trait::async_trait;
 
