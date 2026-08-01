@@ -6077,7 +6077,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // #268: nostr_run 薄い passthrough（server-own / TRUSTED_ONLY）
+    // #268: nostr_run 薄い passthrough（server-own / caller 制限なし・#303）
     // ------------------------------------------------------------------
 
     /// `nostr_run` の委譲先を検証する fake passthrough capability。
@@ -6143,22 +6143,24 @@ mod tests {
         passthrough
     }
 
-    /// `nostr_run` は own（全 trusted ターンで露出）かつ TRUSTED_ONLY（caller=Agent 不可）。
+    /// `nostr_run` は own（全ターンで露出）で、caller による制限を持たない（#303）。
     /// 分類は inline（同ターンで結果を使う / 送信は送ること自体が応答）。
     #[test]
-    fn nostr_run_is_own_trusted_only_and_inline() {
+    fn nostr_run_is_own_unrestricted_and_inline() {
         let names: Vec<String> = SystemGatewayActions::own_definitions()
             .into_iter()
             .map(|d| d.name)
             .collect();
         assert!(
             names.contains(&"nostr_run".to_string()),
-            "nostr_run は own 定義（全 trusted ターンで露出）でなければならない"
+            "nostr_run は own 定義（全ターンで露出）でなければならない"
         );
-        // 可視性 == 実行時強制（#45）: caller=Agent には出さない・実行させない。
         let policy = opencrab_actions::tool_policy("nostr_run");
-        assert!(policy.trusted_only, "nostr_run は TRUSTED_ONLY");
-        assert!(!policy.owner_only, "owner 限定ではない（trusted なら可）");
+        assert!(
+            !policy.trusted_only,
+            "nostr_run に trusted ゲートを付けない"
+        );
+        assert!(!policy.owner_only, "nostr_run に owner ゲートを付けない");
         // 分類は inline（dispatch 対象外）。
         assert!(
             opencrab_actions::default_non_dispatch_tools().contains("nostr_run"),
@@ -6166,12 +6168,23 @@ mod tests {
         );
     }
 
-    /// caller=Agent（外部ユーザー由来の会話）では `nostr_run` を露出しない。
+    /// caller=Agent（Nostr 受信ターン / heartbeat の自律ターン）でも `nostr_run` は使える。
+    ///
+    /// ここを塞ぐと「Nostr 上で自律的に活動する」という目的そのものが成立しない。
+    /// opencrab が担保するのは ①鍵の混同防止 ②nsec の隠蔽 の 2 点だけで、
+    /// どちらも caller による露出制限を必要としない（#303）。
     #[test]
-    fn nostr_run_is_hidden_from_untrusted_caller() {
-        assert!(opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&"nostr_run"));
-        // owner / trusted は可、素の Agent は不可、を tool_policy が表す。
-        assert!(opencrab_actions::tool_policy("nostr_run").trusted_only);
+    fn nostr_run_is_available_to_agent_caller() {
+        assert!(
+            !opencrab_actions::TRUSTED_ONLY_ACTIONS.contains(&"nostr_run"),
+            "nostr_run を TRUSTED_ONLY_ACTIONS へ戻さない"
+        );
+        assert!(
+            !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"nostr_run"),
+            "nostr_run を OWNER_ONLY_ACTIONS へ入れない"
+        );
+        let policy = opencrab_actions::tool_policy("nostr_run");
+        assert!(!policy.trusted_only && !policy.owner_only);
     }
 
     /// 稼働中（登録済み）の Nostr passthrough capability へ、ctx.agent_id・subcommand・args

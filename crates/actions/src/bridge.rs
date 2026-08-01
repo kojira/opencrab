@@ -555,14 +555,14 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // ユーザー由来の会話ターン（caller=Agent）へ出す必要は無い。`nostr_switch_identity`
     // と対で使う管理系ツールなので同じ trusted ゲートに揃える。
     "nostr_list_keys",
-    // 薄い nostaro passthrough（#268）。任意の nostaro サブコマンド（投稿・kind:0・DM・
-    // zap・チャンネル等）を実行できる server-own ツール。外部ユーザー由来の会話ターン
-    // （caller=Agent）へ開けると、プロンプトインジェクションで任意投稿・なりすまし・資金
-    // 流出（zap）に使われうる。owner/trusted のターン（会話・heartbeat・ダッシュボード）
-    // でのみ露出・実行する（inbound=Agent には一覧にも出さず実行もしない）。既存の inner
-    // `nostr_post`/`reply`（受信ターンの返信用）とは別枠で、こちらは受信ターンには出ない。
-    "nostr_run",
 ];
+
+// `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。
+// opencrab が Nostr 連携で担保するのは ①鍵のエージェント間混同防止 ②nsec の隠蔽 の
+// 2 点だけで、①は常に当該エージェント自身の `--config` を渡す passthrough の構造が、
+// ②は出力マスクが担保している。caller による露出制限はどちらにも要らない。
+// caller=Agent は Nostr 受信ターンや heartbeat の自律ターンを含むため、ここへ入れると
+// 「Nostr 上で自律的に活動する」という目的そのものを塞ぐ。
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
 ///
