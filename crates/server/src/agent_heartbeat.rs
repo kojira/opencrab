@@ -14,7 +14,8 @@
 //! 解決される。
 //!
 //! 発火形態の関係（重要）: エージェント単位で `enabled=true` にすると発火は**エージェント
-//! 単位（全チャンネルまとめて 1 回）**になり、チャンネル単位設定は使われない（#238 の
+//! 単位で 1 回**（空 `channel_id` の単一発話。Discord の代表チャンネル選択は別 PR / 現状は
+//! ログのみに縮退）になり、チャンネル単位設定は使われない（#238 の
 //! precedence）。チャンネルごとに間隔・有効を効かせたい場合はエージェント単位を
 //! `enabled` にせず、`scope="channel"` で各チャンネルを設定する。Nostr など channel の
 //! 概念が無い gateway は agent スコープのまま（channel scope は Discord 用）。
@@ -176,6 +177,11 @@ fn agent_state_payload(
 /// は当該エージェントの `(channel_id, agent_id)` 行の値（行が無ければ enabled=false /
 /// interval=null）。`interval_secs` は `resolve_channel_heartbeat_interval`（channel → agent →
 /// 既定, 下限クランプ）の実効値。
+///
+/// 注意（既存 precedence / #238）: ここは `(channel_id, agent_id)` 固有行だけを読む。global 行
+/// （agent_id=""）しか無いチャンネルでは `enabled=false` を返すが、実発火は
+/// `list_whitelisted_heartbeat_channels` 経由で global 行により起こりうる（get の表示と実発火が
+/// 乖離する edge）。本 PR では precedence を変えないため、この乖離は残る。
 fn channel_state_payload(
     state: &AppState,
     conn: &rusqlite::Connection,
@@ -332,12 +338,12 @@ fn set_agent_scope(
     let mut payload = agent_state_payload(state, &conn, &ctx.agent_id);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("success".to_string(), json!(true));
-        // #336: agent スコープの enabled は「エージェント単位発火（有効時は全チャンネル
-        // まとめて 1 回）」を意味する。チャンネルごとに間隔・有効を分けたいなら
+        // #336: agent スコープの enabled は「エージェント単位発火（有効時はエージェント
+        // 単位で 1 回、空 channel_id の単一発話）」を意味する。チャンネルごとに間隔・有効を分けたいなら
         // scope=channel を使う（agent を enabled にすると channel 設定は使われない）。
         obj.insert(
             "note".to_string(),
-            json!("agent スコープを enabled にするとエージェント単位で発火する（有効時は全チャンネルまとめて1回）。チャンネルごとに間隔・有効を分けたい場合は scope=channel で設定する。"),
+            json!("agent スコープを enabled にするとエージェント単位で発火する（有効時は 1 回のみ、空 channel_id の単一発話）。チャンネルごとに間隔・有効を分けたい場合は scope=channel で設定する。"),
         );
     }
     GatewayActionResult {
@@ -370,12 +376,13 @@ fn set_channel_scope(
             .ok()
             .flatten();
 
-    // 新規作成時のみ guild_id が要る（既存行はその guild_id を尊重する）。
+    // guild_id は下の None ブランチ（新規作成）だけが使う。既存行は自分の guild_id を
+    // そのまま保持する（Some(mut c) ブランチは guild_id を触らない）ので、ここで existing
+    // から補完する必要はない。
     let guild_id = args
         .get("guild_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| existing.as_ref().map(|c| c.guild_id.clone()));
+        .map(|s| s.to_string());
 
     let old_enabled = existing.as_ref().map(|c| c.heartbeat_enabled);
     let old_interval = existing.as_ref().and_then(|c| c.heartbeat_interval_secs);
