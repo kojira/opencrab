@@ -234,22 +234,30 @@ pub async fn run_maintenance_tick(
     // sleep 中にのみ整理する（対話ターンでは走らせない = #291 の再来を避ける）。既存の
     // rollup と同じく「1 tick 1 LLM コール / ロックを await 跨ぎで保持しない / sticky で冪等」。
     // category/meta ノードは同一テーブルなので browse/search/retrieve から能動的に引ける。
-    match opencrab_core::memory_index::category::maintain_categories(
-        &state.db,
-        agent_id,
-        &llm,
-        &effective_model,
-        &persona_name,
-        personality.as_deref(),
-    )
-    .await
-    {
-        Ok((seeded, assigned)) => {
-            report.categories_seeded = seeded;
-            report.topics_categorized = assigned;
-        }
-        Err(e) => {
-            tracing::warn!(agent_id = %agent_id, error = %e, "category maintenance failed");
+    //
+    // #345: #313 の方針が「エージェント自身に整理させる（一期一会）」へ変わり、いまの
+    // 単一ラベル・sticky・12件ずつの割当は作り直しになるため、作り直す前提の処理へ LLM
+    // 費用を払い続けないよう、config で丸ごと止められるようにする（既定オフ）。
+    // `skill_consolidation` と同じく LLM を消費する自律処理なので同じ opt-in の流儀に揃える。
+    // 機能そのものは #313 で作り直す際に参照するので残す（既存データ・スキーマは触らない）。
+    if state.category_maintenance.enabled {
+        match opencrab_core::memory_index::category::maintain_categories(
+            &state.db,
+            agent_id,
+            &llm,
+            &effective_model,
+            &persona_name,
+            personality.as_deref(),
+        )
+        .await
+        {
+            Ok((seeded, assigned)) => {
+                report.categories_seeded = seeded;
+                report.topics_categorized = assigned;
+            }
+            Err(e) => {
+                tracing::warn!(agent_id = %agent_id, error = %e, "category maintenance failed");
+            }
         }
     }
 

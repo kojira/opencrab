@@ -679,6 +679,7 @@ async fn main() -> anyhow::Result<()> {
         compaction_ratio: cfg.llm.compaction_ratio,
         evaluator: cfg.evaluator.clone(),
         skill_consolidation: cfg.skill_consolidation.clone(),
+        category_maintenance: cfg.category_maintenance.clone(),
         loop_restart_enabled: cfg.agent.loop_restart_enabled,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
         mcp_manager: None,

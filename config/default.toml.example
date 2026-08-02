@@ -200,6 +200,12 @@ time_cap_hours = 24       # あるいは前回からこの時間経過で発火�
 min_interval_secs = 3600  # 最短間隔
 include_archived_in_review = 3  # 棚卸し時に再検討する引退済みスキル数
 
+# 記憶カテゴリ層（#313/#344）の sleep 中自動割当。エージェントがアイドル時に未分類 topic を
+# LLM でカテゴリへ割り当てる。#313 の方針が「エージェント自身に整理させる（一期一会）」へ
+# 変わり作り直しになるため、既定は無効（opt-in / #345）。有効化すると従来どおり動く。
+[category_maintenance]
+enabled = false           # 有効化で opt-in
+
 # VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
 # [voice]
 # enabled = true

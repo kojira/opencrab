@@ -89,6 +89,8 @@ pub struct AppState {
     pub evaluator: config::EvaluatorConfig,
     /// スリープ時スキル棚卸し（自己 curation ループ）の設定。
     pub skill_consolidation: config::SkillConsolidationConfig,
+    /// 記憶カテゴリ層（#313/#344）の sleep 中自動割当の設定。既定オフ（#345）。
+    pub category_maintenance: config::CategoryMaintenanceConfig,
     /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
     pub loop_restart_enabled: bool,
     /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
@@ -196,6 +198,7 @@ pub(crate) fn test_app_state() -> AppState {
         compaction_ratio: 0.5,
         evaluator: config::EvaluatorConfig::default(),
         skill_consolidation: config::SkillConsolidationConfig::default(),
+        category_maintenance: config::CategoryMaintenanceConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
         mcp_manager: None,
