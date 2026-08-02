@@ -561,9 +561,21 @@ const MIGRATIONS: &[Migration] = &[
         // カテゴリと topic の紐付けは `memory_category_members`（参照表）で持つ。parent 軸を
         // 使わないので topic は session 親を保持し、日付から辿る道が切れない（#313 要件）。
         //
-        // 冪等性（v21 の流儀＝肯定形）: 現行スキーマの CHECK が既に `'category'` と `'meta'` を
-        // 含むなら再構築しない。判定が外れても「再構築が走る」側に倒れる（再構築は冪等）。
-        // 新規DB は SCHEMA_SQL 側で既に広い CHECK を持つのでここでは再構築されない。
+        // 冪等性（極性は v21 と同じ「肯定形」だが、機構は v21 とは逆になる点に注意）:
+        // v21 は `sqlite_master.sql` の文字列一致を**避け**て `pragma_index_list` /
+        // `pragma_index_info` で索引の構造を見た（空白・大小・列順の表記揺れで判定が
+        // 外れないため）。一方ここで見たいのは索引ではなく **`node_type` の CHECK 制約の
+        // 許可値**で、CHECK は `pragma_table_info` 等の構造 pragma では取り出せない。よって
+        // 已むを得ず `sqlite_master.sql`（テーブル定義 SQL）の文字列判定を採る。v21 が退けた
+        // 方式そのものだが、判定対象が「索引の列」ではなく「CHECK に現れるリテラル」なので
+        // 表記揺れの当たり方が違う（下記の安全性を参照）。
+        //
+        // 安全性: 現行スキーマの CHECK に `'category'` と `'meta'` の**両方**が現れるときだけ
+        // 再構築を skip する。危険な外れ方は「まだ狭いのに広いと誤判定して skip する」方向
+        // だが、狭い CHECK のテーブル SQL に `'category'`/`'meta'` の文字列が現れる余地は無い
+        // （列名・既定値・他のどの CHECK にも含まれない）ので、この誤判定は起こり得ない。
+        // 逆に「広いのに狭いと誤判定して再構築する」方向へ外れても再構築は冪等なので無害
+        // （肯定形の利点）。新規DB は SCHEMA_SQL 側で既に広い CHECK を持つので再構築されない。
         //
         // 切り戻し（データは可逆・古いバイナリは版番号も戻すこと）: category/meta ノードと
         // member 行は sleep 中に作られる派生データなので、削除すれば原状復帰する。
@@ -2660,6 +2672,100 @@ mod migration_tests {
             .is_err(),
             "同一 topic の二重割当は PK で拒否される（sticky）"
         );
+    }
+
+    /// v20 起点の一気通貫（v20→v21→v22→v23）。稼働中の本番 DB は v22 なので実運用の
+    /// 経路は v22→v23 だが、新規環境や古い DB からの復元では v20 から連鎖する。この道で
+    /// (1) memory_index の時系列ツリーが 1 件も失われず CHECK が広がること、(2) 途中の
+    /// v21（impressions を agent スコープへ）と v22（owner_pubkey 追加）も併せて適用され
+    /// 最終版へ到達することを固定する（従来は user_version=22 を手で置いた単独移行のみ）。
+    #[test]
+    fn migration_chain_from_v20_reaches_latest_and_preserves_memory_index() {
+        let conn = crate::init_memory().expect("init");
+
+        // --- v22 相当の memory_index_nodes（狭い CHECK）へ戻し、時系列ツリーを積む ---
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        conn.execute_batch(
+            "DROP TABLE memory_index_nodes;
+             CREATE TABLE memory_index_nodes (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
+                node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')),
+                source_type TEXT NOT NULL DEFAULT 'session_log',
+                title TEXT NOT NULL, summary TEXT NOT NULL,
+                start_log_id INTEGER, end_log_id INTEGER, source_session_id TEXT,
+                date_from TEXT, date_to TEXT,
+                depth INTEGER NOT NULL DEFAULT 0, child_count INTEGER NOT NULL DEFAULT 0,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, short_id TEXT,
+                keywords_json TEXT NOT NULL DEFAULT '[]', summary_refreshed_at TEXT
+             );
+             INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, created_at, updated_at)
+             VALUES ('r', 'a1', NULL, 'root', 'root', 's', '2026-01-01', '2026-01-01'),
+                    ('p', 'a1', 'r', 'period', '2026-01', 's', '2026-01-01', '2026-01-01'),
+                    ('sess', 'a1', 'p', 'session', 'S', 's', '2026-01-01', '2026-01-01'),
+                    ('t', 'a1', 'sess', 'topic', 'Rust入門', 's', '2026-01-02', '2026-01-02');
+             DROP TABLE IF EXISTS memory_category_members;",
+        )
+        .unwrap();
+
+        // --- v21 相当の agent_nostr_config（owner_pubkey 無し）へ戻す（v22 を実際に走らせる）---
+        conn.execute_batch("ALTER TABLE agent_nostr_config DROP COLUMN owner_pubkey")
+            .unwrap();
+        assert!(!column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
+
+        // --- v20 相当の impressions（旧一意制約）へ戻し、user_version を 20 に落とす ---
+        // 同一 (agent_id, target_id) を別セッションで 2 行 + 別 target を 1 行（v21 の統合を確認）。
+        seed_legacy_impressions(
+            &conn,
+            "('i1','a1','s1','u1','U','','','','中立','',0,'2026-01-01','2026-01-02'),\
+             ('i2','a1','s2','u1','U','','','','中立','',0,'2026-01-03','2026-01-01'),\
+             ('i3','a1','s1','u2','V','','','','中立','',0,'2026-01-01','2026-01-01')",
+        );
+        assert_eq!(schema_version(&conn).unwrap(), 20);
+
+        // 一気通貫で v20 → 最新へ。
+        run_migrations(&conn, MIGRATIONS).expect("v20 -> latest chain");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // (1) memory_index: 時系列ツリーは 1 件も失われない。
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM memory_index_nodes ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, vec!["p", "r", "sess", "t"]);
+        // CHECK は広がり、category が実際に保存できる（OR IGNORE の沈黙が起きない）。
+        conn.execute(
+            "INSERT INTO memory_index_nodes (id, agent_id, node_type, source_type, title, summary, created_at, updated_at)
+             VALUES ('cat1', 'a1', 'category', 'category', 'X', '', '2026-02-01', '2026-02-01')",
+            [],
+        )
+        .expect("移行後は category を登録できる");
+        assert!(table_exists(&conn, "memory_category_members").unwrap());
+
+        // (2) v21 が適用され、impressions が (agent_id, target_id) スコープへ畳まれている。
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM impressions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "同一 (agent_id, target_id) は 1 行へ統合される");
+        let u1_created: String = conn
+            .query_row(
+                "SELECT created_at FROM impressions WHERE agent_id='a1' AND target_id='u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            u1_created, "2026-01-01",
+            "created_at は統合対象の最小値を引き継ぐ"
+        );
+
+        // (3) v22 が適用され、owner_pubkey 列が復活している。
+        assert!(column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
     }
 
     /// G. v1 DB が v2 マイグレーションでタスク台帳テーブルを獲得する。

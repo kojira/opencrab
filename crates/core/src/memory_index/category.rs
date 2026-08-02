@@ -167,6 +167,17 @@ pub async fn assign_unassigned_topics(
     }
 
     // 適用（ロック再取得・await を跨がない）。
+    //
+    // このバッチは**原子的ではない**。ロックは 1 回だけ取るが、カテゴリ新設
+    // （`insert_category_node`）と各割当（`assign_topic_to_category`）はそれぞれ
+    // autocommit の個別書き込みで、明示トランザクションで括っていない。ループの途中で
+    // DB エラーが出ると、そこまでの割当と `resolve` が新設したカテゴリは commit 済みで
+    // 残る（部分適用）。ただし壊れる方向には進まない＝**前進のみ**:
+    // 割当は sticky（`INSERT OR IGNORE` + PK(agent_id, topic_id)）なので二重には付かず、
+    // 残った未割当 topic は次 tick で `list_unassigned_topics` に再び現れ、既存カテゴリは
+    // `get_category_node_by_title` で再利用される。よって部分適用は自己修復し、破損しない。
+    // await を跨いでロックを保持しないため（LLM 呼び出しは上の chat で完了済み）、ここを
+    // 明示トランザクションで括ることも可能だが、上記の自己修復で十分なので括っていない。
     let db = conn
         .lock()
         .map_err(|e| anyhow::anyhow!("DB lock failed: {e}"))?;

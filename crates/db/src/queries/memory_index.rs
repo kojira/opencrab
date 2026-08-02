@@ -1253,6 +1253,16 @@ pub fn get_category_node_by_title(
 /// カテゴリノードを 1 件作る（`node_type='category'`, `source_type='category'`）。
 /// short_id を採番して返り値に含める。呼び出し側は事前に `ensure_category_root` で
 /// 親 id を用意すること。重複作成防止（同名スキップ）は呼び出し側の責務。
+///
+/// `ensure_category_root` は決定的 id（`catroot-<agent_id>`）を「先に get してから
+/// insert」で確保するが、ここは `title` 一致で束ねるべきもので id は決定的にできない
+/// （同名カテゴリを別 tick で作れば別 id になる）。そのため同名スキップは id ではなく
+/// `get_category_node_by_title` による**タイトル判定**として呼び出し側（core の
+/// `assign_unassigned_topics` の resolve）が担う。ここは id を新規計算して
+/// `INSERT OR IGNORE` するだけ。id は `cat-<64bit hash>+<nanos>` で、OR IGNORE が
+/// 実際に no-op になるのは既存の**別ノード**と id が丸ごと衝突したときだけだが、その
+/// 確率は無視できる（hash と nanos が同時一致する必要がある）。衝突時は返り値の id が
+/// 実在行を指さないが、呼び出し側が事前にタイトル判定で弾くため到達しない。
 pub fn insert_category_node(
     conn: &Connection,
     agent_id: &str,
