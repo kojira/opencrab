@@ -687,8 +687,9 @@ mod tests {
                     "{n} は server 側の実装だけであるべき"
                 );
             } else if n.starts_with("nostr_") {
-                // nostr_zap / nostr_dm は Nostr ゲートウェイ側のアクション（この
-                // Discord gateway の definitions には出ない）。ここでは検証対象外。
+                // nostr_switch_identity / nostr_list_keys は Nostr ゲートウェイ側の
+                // アクション（この Discord gateway の definitions には出ない）。
+                // ここでは検証対象外。
                 continue;
             } else {
                 assert!(names.contains(&n.to_string()), "{n} が definitions に無い");

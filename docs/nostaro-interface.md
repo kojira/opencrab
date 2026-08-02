@@ -82,7 +82,7 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 
-### identity 切替（`nostr_switch_identity`・owner 限定）
+### identity 切替（`nostr_switch_identity`・owner/trusted 限定）
 
 `nostr_switch_identity(npub=...)` で、`nostr_generate_key` で生成した鍵をゲートウェイの
 **本鍵**に採用する。OpenCrab 側は DB の secret_key を差し替え、`config.toml` を新鍵で

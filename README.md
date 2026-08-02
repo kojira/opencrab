@@ -246,8 +246,7 @@ only exist on that transport's turns.
 | **Nostr identity** | `nostr_generate_key`, `nostr_list_keys`, `nostr_switch_identity` | all turns (`crates/server/src/system_actions.rs`) — bootstrap tools, exposed **before** any key exists (see [Nostr](#nostr)) |
 | **Nostr passthrough** | `nostr_run` | all turns (`crates/server/src/system_actions.rs`) — thin nostaro passthrough (see [Nostr](#nostr)) |
 | **Nostr relay target** | `get_my_nostr_relay`, `set_my_nostr_relay` | all turns (`crates/server/src/agent_nostr_relay.rs`) — where the agent's inbound Nostr events get mirrored (a Discord webhook URL); also editable from the dashboard |
-| **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event |
-| **Nostr messaging (gated)** | `nostr_dm`, `nostr_zap` | Nostr turns only (`crates/nostr`), *and* trusted-only — an inbound event drives a `caller=Agent` turn, so these are neither listed nor executable there; they are reachable only from a turn a trusted caller started |
+| **Nostr messaging** | `nostr_post`, `nostr_reply`, `nostr_dm`, `nostr_zap`, `nostr_upload` | Nostr turns only (`crates/nostr`) — the reply path used while handling an inbound Nostr event; `nostr_dm` and `nostr_zap` carried a trusted-only gate until #306 dropped it (see [Nostr](#nostr)) |
 | **Discord** | `discord_list_guilds`, `discord_list_channels`, `discord_channel_config`, `discord_add_reaction`, `discord_send_file`, `discord_create_channel` | Discord turns only (`crates/discord`) |
 | **Delivery** | `send_ui`, `request_peer_review` | all turns whose transport can render UI (`send_ui`) or send text (`request_peer_review`) — implementations in `crates/actions/src/a2ui.rs` and `crates/server/src/peer_review.rs`; the transport only supplies the surface (`GatewayActions::a2ui_surface` / `text_delivery`) |
 | **Webhook targets** | `list_webhooks`, `get_default_webhook`, `set_default_webhook`, `list_subtask_webhooks`, `get_default_subtask_webhook`, `set_default_subtask_webhook` | all turns (`crates/server/src/webhook_targets.rs`) |
@@ -278,16 +277,19 @@ without a test failing.
 Visibility is not uniform. `configure_*`, `manage_allowed_commands`,
 `update_heartbeat_instructions` and the core action `update_instructions` are owner-only —
 that is `OWNER_ONLY_ACTIONS` in full. `nostr_list_keys`, `nostr_switch_identity`,
-`nostr_dm`, `nostr_zap`, the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
+the `*_my_nostr_relay` and `*_my_heartbeat` pairs,
 `read_heartbeat_instructions`, the voice actions and `create_skill` are trusted-only, meaning
 they are neither listed nor executable on a turn driven by an untrusted external user. That gate
 is what keeps an inbound Nostr note from talking the agent into swapping its own key:
 `nostr_switch_identity` is unreachable from a `caller=Agent` turn, and the passthrough refuses
-`init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** keep
-the agent from spending its funds — `nostr_run` carries no caller gate (#303) and the passthrough
-denies only `init`, `watch` and `relay`, so `nostr_run zap` and `nostr_run dm` go through on the
-very turns where the inner `nostr_zap` / `nostr_dm` are hidden. Their trusted-only entries tidy up
-which inner tool names get listed; they do not bound what the turn can do.
+`init`, so neither adopting nor minting-over a key is possible from inbound. It does **not** bound
+what an inbound turn can send or spend, and it is not meant to: `nostr_run` carries no caller gate
+(#303) and the passthrough denies only `init`, `watch` and `relay`, so `nostr_run zap` and
+`nostr_run dm` have gone through ever since #303 — before that, `nostr_run` itself was
+trusted-only, so the whole passthrough was out of reach from a `caller=Agent` turn. Gating the
+inner `nostr_zap` / `nostr_dm` only changed which tool names got listed, so #306 dropped that
+gate rather than adding a matching one to the passthrough — the consistency is taken in the
+direction of fewer constraints, and whether to send a DM or a zap is the agent's own call.
 `nostr_generate_key` is deliberately *not* gated: it only mints a key that nobody has
 adopted yet, and adopting one is what `nostr_switch_identity` gates. The single table is
 `crates/actions/src/bridge.rs` (`OWNER_ONLY_ACTIONS` / `TRUSTED_ONLY_ACTIONS`), consulted by both

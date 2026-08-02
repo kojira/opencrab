@@ -541,19 +541,6 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // （co_agent は一覧に見えても実行は拒否される）。
     "join_voice_channel",
     "leave_voice_channel",
-    // Nostr の送金（zap）と任意宛先 DM。Nostr 受信イベントは外部ユーザー由来で
-    // caller=Agent（最小権限）のため、**この 2 つの inner ツール名**は inbound では
-    // 見えず実行もされない。
-    //
-    // ただしこれは**能力の遮断ではない**（#303）。passthrough の deny は
-    // `init`/`watch`/`relay` の 3 つだけ（`crates/nostr/src/cli.rs`）で、`nostr_run` は
-    // caller 制限を持たないので `nostr_run dm` / `nostr_run zap` は同じターンから通る。
-    // つまりこのゲートが与えるのは **inner ツールの露出整理**であって、
-    // 「プロンプトインジェクションで資金流出/なりすまし DM されるのを防ぐ」効果ではない。
-    // （その主張は `nostr_run` が TRUSTED_ONLY だった頃のもので、もう真ではない。）
-    // これらを外すかどうかは #303 のスコープ外の別判断なので、現状維持のまま残す。
-    "nostr_zap",
-    "nostr_dm",
     // 本鍵（アイデンティティ）の切替。外部ユーザーが勝手に乗っ取れないよう owner/
     // trusted のみ（inbound=Agent には一覧にも出さず実行もしない）。
     "nostr_switch_identity",
@@ -572,6 +559,15 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
 // 相手の会話ターン。ここへ入れると Nostr 受信ターンから `nostr_run` が丸ごと消えるため、
 // 「Nostr 上で自律的に活動する」という目的そのものを塞ぐ。
 // （heartbeat tick は caller=Owner なので元から塞がれていない。上の各コメントも同じ。）
+//
+// `nostr_zap` / `nostr_dm` も同じ理由で**ここに入れない**（#306）。以前は入っていたが、
+// `nostr_run` を開けた時点で `nostr_run zap` / `nostr_run dm` が同じターンから通るように
+// なり（passthrough の deny は `init`/`watch`/`relay` の 3 つだけ / `crates/nostr/src/cli.rs`）、
+// inner ツール名だけを隠しても能力は塞げていなかった。一貫性は**制約を増やす方向ではなく
+// 減らす方向**で取る、というのがオーナーの決定（#306）。使うかどうかはエージェントが自分で
+// 判断する。上の nostr_switch_identity / nostr_list_keys は残る — こちらは①鍵の混同防止に
+// 直接効き、`nostr_run` 側でも `init` が deny されていて迂回路が無い。
+// ゲートを外した状態は `nostr_messaging_passes_the_gate_for_agent_caller` が実測で固定する。
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
 ///
@@ -1882,6 +1878,87 @@ mod tests {
             assert!(
                 !agent_exec.policy_allows(name),
                 "他人発のターン（最小権限）で {name} が通ってしまう"
+            );
+        }
+    }
+
+    /// #306: `nostr_dm` / `nostr_zap` は caller=Agent のターンで**実際にゲートを通る**。
+    ///
+    /// 以前は `TRUSTED_ONLY_ACTIONS` に入っていたが、`nostr_run` を開けた（#303）時点で
+    /// `nostr_run dm` / `nostr_run zap` が同じターンから通るため、inner ツール名を隠す
+    /// だけのゲートになっていた。一貫性を**制約を減らす方向**で取るというオーナーの決定
+    /// （#306）に従い外した。ここはその決定を実測で固定する。
+    ///
+    /// `nostr_run` 側（`nostr_run_passes_the_gate_for_agent_caller`）と同じく、リストに
+    /// 無いことだけを見ても**別の場所に新しいゲートが足された**場合を捕まえられないので、
+    /// `policy_allows` / `list_tools` / `dispatch_inner`（= `execute`）の 3 経路を通す。
+    #[tokio::test]
+    async fn nostr_messaging_passes_the_gate_for_agent_caller() {
+        /// `nostr_dm` / `nostr_zap` を定義するだけの fake gateway
+        /// （本体は `crates/nostr` にあり、この crate からは参照できない）。
+        struct GwNostrMessaging;
+        #[async_trait::async_trait]
+        impl GatewayActions for GwNostrMessaging {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                ["nostr_dm", "nostr_zap"]
+                    .into_iter()
+                    .map(|name| GatewayActionDef {
+                        name: name.to_string(),
+                        description: "x".to_string(),
+                        parameters: json!({"type": "object"}),
+                    })
+                    .collect()
+            }
+            async fn execute(
+                &self,
+                _n: &str,
+                _a: &serde_json::Value,
+                _c: &opencrab_gateway::GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({"reached_gateway": true})),
+                    error: None,
+                }
+            }
+        }
+
+        let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx)
+            .with_gateway_actions(Arc::new(GwNostrMessaging));
+        let listed: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        for name in ["nostr_dm", "nostr_zap"] {
+            // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
+            assert!(
+                agent_exec.policy_allows(name),
+                "caller=Agent（Nostr 受信ターン）で {name} が policy_allows を通らない \
+                 — TRUSTED_ONLY_ACTIONS へ戻されたか、別の場所に caller ゲートが足された"
+            );
+            // 2. 可視性: モデルに見えていること。
+            assert!(
+                listed.iter().any(|n| n == name),
+                "caller=Agent の list_tools に {name} が出ない"
+            );
+            // 3. 実行時強制: 名前指定の実行が gateway まで到達すること。
+            let r = agent_exec.execute(name, &json!({})).await;
+            assert!(
+                r.success,
+                "caller=Agent の {name} 実行が拒否された: {:?}",
+                r.error
+            );
+            assert_eq!(r.data["reached_gateway"], true);
+        }
+
+        // 対照: 他ツールの trusted ゲートは維持されている（一律に開けたのではない）。
+        for name in ["create_skill", "nostr_switch_identity", "nostr_list_keys"] {
+            assert!(
+                !agent_exec.policy_allows(name),
+                "{name} の trusted ゲートは維持されるべき（#306 は nostr_dm/nostr_zap だけ）"
             );
         }
     }
