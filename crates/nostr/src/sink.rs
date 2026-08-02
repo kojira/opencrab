@@ -98,6 +98,7 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         prompt_suffix: &str,
         trigger_message_id: Option<&str>,
         caller: CallerIdentity,
+        live_inbound_scope: opencrab_actions::LiveInboundScope,
     ) -> Option<String> {
         let fut = self.respond(
             session_id,
@@ -105,6 +106,7 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
             prompt_suffix,
             trigger_message_id,
             caller,
+            live_inbound_scope,
         );
         self.runtime.run_serialized(session_id, fut).await
     }
@@ -121,6 +123,7 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         prompt_suffix: &str,
         trigger_message_id: Option<&str>,
         caller: CallerIdentity,
+        live_inbound_scope: opencrab_actions::LiveInboundScope,
     ) -> Option<String> {
         let agent_id = self.agent_id.as_str();
         let (base_prompt, agent_name) = self.runner.build_agent_context(agent_id);
@@ -164,7 +167,10 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         )
         .with_gateway_actions(actions)
         .with_dispatch(Some(registry), sink)
-        .with_reply_target(reply_target);
+        .with_reply_target(reply_target)
+        // #323 / B2: 走行中注入を返信中の相手に絞り、別相手の新着が reply_target と
+        // 食い違う本文を公開リレーへ誤爆させない。
+        .with_live_inbound_scope(live_inbound_scope);
         if let Some(id) = trigger_message_id {
             req = req.with_trigger_message_id(id);
         }
@@ -177,13 +183,24 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                     return None;
                 }
                 // 最終応答テキストを転記（会話履歴の継続性）。
+                //
+                // #323 / B1: 返信先アンカーを焼く。1 セッションに複数の相手が同居する
+                // （#323）ため、宛先を残さないと後続ターンが「この返信が誰宛だったか」を
+                // 隣接推測でしか復元できない（暗黙返信は tool_call 行も作らず痕跡ゼロ）。
+                // アンカーは**記録専用**で、公開リレーへ送る本文（下の `cli.reply` /
+                // 明示 `nostr_reply`）には混ぜない（inbound_anchor と対称）。この記録は
+                // `sent` 判定より前なので、暗黙返信・明示送信の**両経路**でアンカーが残る。
+                let recorded = format!(
+                    "{reply}\n{anchor}",
+                    anchor = crate::event::outbound_reply_anchor(reply_target)
+                );
                 self.runner.record_outbound_reply(
                     opencrab_actions::TranscriptSource::Nostr,
                     &opencrab_actions::OutboundReplyRecord {
                         agent_id,
                         session_id,
                         channel_id: None,
-                        text: &reply,
+                        text: &recorded,
                         context: None,
                     },
                 );
@@ -272,8 +289,18 @@ impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
         tokio::spawn(async move {
             let suffix = resume_prompt_suffix(&reply_target, &ev.subtask_id, &ev.exit_reason);
             // inbound の応答生成と直列化する（同一セッションで二重に返信しない）。
+            // resume は生きた相手の識別子を持たない（`SubtaskSettled` に相手 pubkey は
+            // 載っていない）ので走行中注入は `Silent`（#323 / B2）。別相手の新着が
+            // reply_target と食い違う本文を公開リレーへ誤爆させない。
             responder
-                .respond_serialized(&sid, &reply_target, &suffix, None, caller)
+                .respond_serialized(
+                    &sid,
+                    &reply_target,
+                    &suffix,
+                    None,
+                    caller,
+                    opencrab_actions::LiveInboundScope::Silent,
+                )
                 .await;
         });
     }
@@ -305,6 +332,9 @@ mod tests {
         bool,
         Option<opencrab_actions::subtask::SubtaskRegistry>,
         CallerIdentity,
+        // 6 番目: 走行中注入の対象範囲（#323 / B2）。sink が respond の scope を
+        // RunRequest へ配線していることを検査する（ラベル文字列で保持）。
+        String,
     );
     /// 転記された応答 1 件（agent_id, session_id, text）。
     type ReplyObservation = (String, String, String);
@@ -354,12 +384,18 @@ mod tests {
         async fn run_agent_response(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
             let now = self.inflight.fetch_add(1, AtomicOrdering::SeqCst) + 1;
             self.max_inflight.fetch_max(now, AtomicOrdering::SeqCst);
+            let scope_label = match &req.live_inbound_scope {
+                opencrab_actions::LiveInboundScope::AllOthers => "all".to_string(),
+                opencrab_actions::LiveInboundScope::OnlySpeaker(pk) => format!("only:{pk}"),
+                opencrab_actions::LiveInboundScope::Silent => "silent".to_string(),
+            };
             self.runs.lock().unwrap().push((
                 req.session_id.clone(),
                 req.reply_target.clone(),
                 req.completion_sink.is_some() && req.subtask_registry.is_some(),
                 req.subtask_registry.clone(),
                 req.caller.clone(),
+                scope_label,
             ));
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
@@ -637,6 +673,46 @@ mod tests {
         assert_eq!(runs[0].0, sid);
         assert_eq!(runs[0].1.as_deref(), Some("note1target"));
         assert!(runs[0].2, "resume も非ブロック dispatch を有効化する");
+        // #323 / B2: resume は相手が不定なので走行中注入は Silent（別相手の誤爆防止）。
+        assert_eq!(runs[0].5, "silent", "resume の走行中注入は Silent");
+    }
+
+    /// [#323 / B1] outbound の記録には返信先アンカーが載り、公開リレーへ送る本文には
+    /// 載らない（記録専用 / inbound_anchor と対称）。修正前は記録が本文のみで、暗黙
+    /// 返信経路は tool_call 行も作らないため「この返信が誰宛か」を復元できなかった。
+    #[tokio::test]
+    async fn outbound_record_carries_reply_target_anchor_not_relayed() {
+        let fake = FakeNostaro::new();
+        let runner = FakeRunner::new("返答本文");
+        let r = responder(runner.clone(), fake.cli());
+        let sid = nostr_session_id("agent-sink-test");
+
+        r.respond_serialized(
+            &sid,
+            "note1target",
+            "suffix",
+            Some("evt-1"),
+            CallerIdentity::Agent,
+            opencrab_actions::LiveInboundScope::OnlySpeaker("pk-peer".to_string()),
+        )
+        .await;
+
+        // 記録された outbound には宛先アンカーが載る（誰宛か復元可能）。
+        let replies = runner.replies.lock().unwrap();
+        assert_eq!(replies.len(), 1);
+        assert!(
+            replies[0].2.contains("返答本文")
+                && replies[0].2.contains("[Nostr reply target=note1target]"),
+            "記録は本文 + 宛先アンカー: {}",
+            replies[0].2
+        );
+        // 公開リレーへ送る本文はアンカー抜きの本文だけ。
+        let sent = fake.sent();
+        assert!(sent.contains("返答本文"), "本文はリレーへ届く: {sent}");
+        assert!(
+            !sent.contains("[Nostr reply target="),
+            "アンカーはリレーへ送らない（記録専用）: {sent}"
+        );
     }
 
     // ---- #319: 呼び出し元は導出せず、呼び出し側から受け取る ----
@@ -657,10 +733,17 @@ mod tests {
             let fake = FakeNostaro::new();
             let runner = FakeRunner::new("応答");
             let r = responder(runner.clone(), fake.cli());
-            let sid = nostr_session_id("agent-sink-test", "pk-abc");
+            let sid = nostr_session_id("agent-sink-test");
 
-            r.respond_serialized(&sid, "note1target", "suffix", Some("evt-1"), caller.clone())
-                .await;
+            r.respond_serialized(
+                &sid,
+                "note1target",
+                "suffix",
+                Some("evt-1"),
+                caller.clone(),
+                opencrab_actions::LiveInboundScope::AllOthers,
+            )
+            .await;
 
             let runs = runner.runs.lock().unwrap();
             assert_eq!(runs.len(), 1);
@@ -678,7 +761,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("完了しました");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+        let sid = nostr_session_id("agent-sink-test");
 
         r.on_subtask_settled(settled_with_caller(
             &sid,
@@ -702,7 +785,7 @@ mod tests {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("完了しました");
         let r = responder(runner.clone(), fake.cli());
-        let sid = nostr_session_id("agent-sink-test", "pk-abc");
+        let sid = nostr_session_id("agent-sink-test");
 
         r.on_subtask_settled(settled_with_caller(
             &sid,
@@ -766,7 +849,14 @@ mod tests {
         let sid = nostr_session_id("agent-sink-test");
 
         let out = r
-            .respond_serialized(&sid, "note1target", "suffix", None, CallerIdentity::Agent)
+            .respond_serialized(
+                &sid,
+                "note1target",
+                "suffix",
+                None,
+                CallerIdentity::Agent,
+                opencrab_actions::LiveInboundScope::AllOthers,
+            )
             .await;
         assert!(out.is_none());
         assert!(fake.sent().is_empty());
@@ -795,6 +885,7 @@ mod tests {
                 "suffix",
                 Some("evt-1"),
                 CallerIdentity::Agent,
+                opencrab_actions::LiveInboundScope::OnlySpeaker("pk-peer".to_string()),
             )
             .await;
         assert_eq!(out.as_deref(), Some("本文"));
@@ -812,7 +903,18 @@ mod tests {
             "送信は 1 回だけ: {sent}"
         );
         // 応答本文の転記は行う（会話履歴の継続性）。
-        assert_eq!(runner.replies.lock().unwrap().len(), 1);
+        let replies = runner.replies.lock().unwrap();
+        assert_eq!(replies.len(), 1);
+        // #323 / B1: 明示送信経路でも記録には宛先アンカーが焼かれる（暗黙・明示の両経路
+        // で「誰宛か」を復元できる）。アンカーの target はこのターンの reply_target。
+        assert!(
+            replies[0].2.contains("[Nostr reply target=note1implicit]"),
+            "明示送信でも記録に宛先アンカーが載る: {}",
+            replies[0].2
+        );
+        // #323 / B2: respond の scope が RunRequest まで配線されている。
+        let runs = runner.runs.lock().unwrap();
+        assert_eq!(runs[0].5, "only:pk-peer", "走行中注入の対象範囲を配線する");
     }
 
     /// 明示送信が無ければ `reply_target` 宛に暗黙返信する（従来挙動の保持）。
@@ -829,12 +931,25 @@ mod tests {
             "suffix",
             Some("evt-1"),
             CallerIdentity::Agent,
+            opencrab_actions::LiveInboundScope::AllOthers,
         )
         .await;
         let sent = fake.sent();
         assert!(sent.contains("note1implicit"), "{sent}");
         assert!(sent.contains("暗黙で返す"), "{sent}");
         assert_eq!(sent.lines().filter(|l| l.contains("reply")).count(), 1);
+        // #323 / B1: 暗黙返信経路でも記録に宛先アンカーが焼かれる（tool_call 行を作らない
+        // 経路なので、これが無いと痕跡ゼロ）。ただしリレーへ送る本文には混ぜない。
+        let replies = runner.replies.lock().unwrap();
+        assert!(
+            replies[0].2.contains("[Nostr reply target=note1implicit]"),
+            "暗黙返信でも記録に宛先アンカー: {}",
+            replies[0].2
+        );
+        assert!(
+            !sent.contains("[Nostr reply target="),
+            "アンカーは公開リレーへ送らない（記録専用）: {sent}"
+        );
     }
 
     /// 同一セッションでは inbound 相当の respond と resume が直列化される。
@@ -855,6 +970,7 @@ mod tests {
                 "suffix",
                 Some("evt-1"),
                 CallerIdentity::Agent,
+                opencrab_actions::LiveInboundScope::AllOthers,
             )
             .await;
         });
@@ -918,6 +1034,7 @@ mod tests {
             "suffix",
             Some("evt-1"),
             CallerIdentity::Agent,
+            opencrab_actions::LiveInboundScope::AllOthers,
         )
         .await;
         r.on_subtask_settled(settled(&sid, Some("note1resume")));

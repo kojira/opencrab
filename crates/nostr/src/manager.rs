@@ -708,6 +708,10 @@ async fn handle_event<R: NostrAgentRunner>(
     );
     let reply_target = event.reply_target().to_string();
     let event_id = event.id.clone();
+    // #323 / B2: このターンの返信相手（= 転記の speaker_id）。走行中注入をこの相手の
+    // 連投だけに絞り、別相手の新着が reply_target と食い違う本文を公開リレーへ誤爆
+    // させない（旧 per-相手 セッションの性質の復元）。
+    let speaker_pubkey = event.pubkey.clone();
     let job_session_id = session_id.clone();
     // 呼び出し元は**発言者**から決める（#319）。以前は応答生成側が
     // `CallerIdentity::Agent` 固定で、オーナーが話しかけても外部の誰かが話しかけても
@@ -728,6 +732,7 @@ async fn handle_event<R: NostrAgentRunner>(
                 &prompt_suffix,
                 Some(&event_id),
                 caller,
+                opencrab_actions::LiveInboundScope::OnlySpeaker(speaker_pubkey),
             )
             .await;
     });

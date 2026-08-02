@@ -779,6 +779,8 @@ struct SessionLiveInbound {
     agent_id: String,
     /// 取得済みの最大 log id。これより後の行だけを次回返す。
     watermark: std::sync::atomic::AtomicI64,
+    /// 注入の対象範囲（#323 / B2）。Nostr だけが相手を絞る（既定は全ての他者）。
+    scope: opencrab_actions::LiveInboundScope,
 }
 
 impl SessionLiveInbound {
@@ -802,13 +804,28 @@ impl SessionLiveInbound {
             session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
             watermark: std::sync::atomic::AtomicI64::new(latest),
+            scope: opencrab_actions::LiveInboundScope::AllOthers,
         }
+    }
+
+    /// 注入の対象範囲を差し替える（#323 / B2）。既定（`AllOthers`）は Discord / heartbeat
+    /// の従来挙動。Nostr は inbound で `OnlySpeaker`、resume で `Silent` を渡す。
+    fn with_scope(mut self, scope: opencrab_actions::LiveInboundScope) -> Self {
+        self.scope = scope;
+        self
     }
 }
 
 impl opencrab_core::LiveInboundSource for SessionLiveInbound {
     fn poll_new_messages(&self) -> Vec<String> {
         use std::sync::atomic::Ordering;
+
+        // 対象範囲（#323 / B2）。Silent は相手が不定なので DB を引くまでもなく空。
+        let only_speaker = match &self.scope {
+            opencrab_actions::LiveInboundScope::AllOthers => None,
+            opencrab_actions::LiveInboundScope::OnlySpeaker(pk) => Some(pk.as_str()),
+            opencrab_actions::LiveInboundScope::Silent => return Vec::new(),
+        };
 
         let after_id = self.watermark.load(Ordering::Relaxed);
         let conn = match self.db.lock() {
@@ -821,6 +838,7 @@ impl opencrab_core::LiveInboundSource for SessionLiveInbound {
             &self.session_id,
             &self.agent_id,
             after_id,
+            only_speaker,
             LIVE_INBOUND_POLL_LIMIT,
         ) {
             Ok(rows) => rows,
@@ -1647,11 +1665,13 @@ pub async fn run_agent_response(
     // depth 0 限定。サブタスク（depth>0）は背景処理であって対話の当事者ではなく、
     // 親ターンが同じ発言を注入する以上、こちらにも足すと同じ発言が二重に流れる。
     if depth == 0 {
-        engine.set_live_inbound(std::sync::Arc::new(SessionLiveInbound::new(
-            state.db.clone(),
-            session_id,
-            agent_id,
-        )));
+        // #323 / B2: Nostr は 1 セッションに全相手が同居するため、走行中注入を返信中の
+        // 相手（inbound=`OnlySpeaker` / resume=`Silent`）に絞る。他ゲートウェイは既定
+        // （`AllOthers`）のままで挙動は変わらない。
+        engine.set_live_inbound(std::sync::Arc::new(
+            SessionLiveInbound::new(state.db.clone(), session_id, agent_id)
+                .with_scope(req.live_inbound_scope.clone()),
+        ));
     }
 
     // 自動 dispatch（非ブロック）フックの注入。depth0 かつ完了再注入 sink が配線
@@ -2769,6 +2789,78 @@ mod live_inbound_source_tests {
         insert_agent_speech(&db, "調べています");
 
         assert!(source.poll_new_messages().is_empty());
+    }
+
+    /// 特定の話者（pubkey）の受信発言を入れる（#323 / B2）。`speaker_id` 列に入る。
+    fn insert_speech_from(db: &opencrab_db::Db, speaker: &str, text: &str) {
+        let conn = db.lock().unwrap();
+        assert!(crate::transcript::record_inbound_message(
+            &conn,
+            TranscriptSource::Nostr,
+            &InboundMessageRecord {
+                session_id: SESSION,
+                sender_id: speaker,
+                sender_name: speaker,
+                avatar_url: None,
+                channel_id: None,
+                pubkey: Some(speaker),
+                text,
+                image_urls: &[],
+            },
+        ));
+    }
+
+    /// [#323 / B2] `OnlySpeaker` は返信中の相手の連投だけ注入し、別相手の新着は落とす。
+    ///
+    /// 1 セッションに全相手が同居する（#323）ため、無制限だと A への返信ターン中に B の
+    /// 新着が注入され、B に答えた本文が A への返信として公開リレーへ誤爆する。修正前
+    /// （`AllOthers` 相当のまま）はこのテストが落ちる（B の発言も返る）。
+    #[test]
+    fn only_speaker_scope_injects_only_the_replied_peer() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT).with_scope(
+            opencrab_actions::LiveInboundScope::OnlySpeaker("pk-A".to_string()),
+        );
+
+        insert_speech_from(&db, "pk-A", "Aの追撃");
+        insert_speech_from(&db, "pk-B", "Bの割り込み");
+
+        let out = source.poll_new_messages();
+        assert_eq!(out.len(), 1, "返信中の相手の連投だけ: {out:?}");
+        assert!(out[0].contains("Aの追撃"), "{}", out[0]);
+        assert!(
+            !out.iter().any(|s| s.contains("Bの割り込み")),
+            "別相手の新着は走行中に注入しない（公開リレーへの誤爆防止）: {out:?}"
+        );
+    }
+
+    /// [#323 / B2] `Silent` は何も注入しない（resume = 生きた相手が不定）。
+    #[test]
+    fn silent_scope_injects_nothing() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT)
+            .with_scope(opencrab_actions::LiveInboundScope::Silent);
+
+        insert_speech_from(&db, "pk-A", "追撃");
+        insert_speech_from(&db, "pk-B", "割り込み");
+
+        assert!(
+            source.poll_new_messages().is_empty(),
+            "Silent は DB を引くまでもなく空"
+        );
+    }
+
+    /// [#323 / B2] 既定（`AllOthers`）は従来どおり自分以外の全発言を注入する（非退行）。
+    #[test]
+    fn all_others_scope_injects_every_peer() {
+        let db = opencrab_db::Db::memory().unwrap();
+        let source = SessionLiveInbound::new(db.clone(), SESSION, AGENT);
+
+        insert_speech_from(&db, "pk-A", "Aの発言");
+        insert_speech_from(&db, "pk-B", "Bの発言");
+
+        let out = source.poll_new_messages();
+        assert_eq!(out.len(), 2, "全相手が注入される: {out:?}");
     }
 }
 

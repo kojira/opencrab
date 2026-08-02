@@ -256,11 +256,17 @@ pub fn list_recent_user_speech_logs(
 /// 呼び出し側は前回取得した最大 id を `after_id` に渡す。同じ発言を二度返さない
 /// のはこの単調増加の id によって保証される。`limit` は暴走時の安全弁で、超過分は
 /// 次の呼び出しで拾われる（id は進むので取りこぼしはない）。
+///
+/// `only_speaker` を `Some(pk)` にすると、その `speaker_id` の発言だけへ絞る（#323 / B2）。
+/// Nostr は 1 セッションに全相手が同居する（#323）ため、返信中の相手以外の新着を走行中に
+/// 注入すると、返信先（`reply_target`）と食い違う本文を公開リレーへ誤爆させる。`None` なら
+/// 従来どおり自分以外の全発言（Discord / heartbeat の既定）。
 pub fn list_user_speech_logs_after(
     conn: &Connection,
     session_id: &str,
     agent_id: &str,
     after_id: i64,
+    only_speaker: Option<&str>,
     limit: usize,
 ) -> Result<Vec<SessionLogRow>> {
     let mut stmt = conn.prepare(
@@ -269,10 +275,11 @@ pub fn list_user_speech_logs_after(
          WHERE session_id = ?1 AND log_type = 'speech'
            AND speaker_id IS NOT NULL AND speaker_id != ?2
            AND id > ?3
-         ORDER BY id ASC LIMIT ?4",
+           AND (?4 IS NULL OR speaker_id = ?4)
+         ORDER BY id ASC LIMIT ?5",
     )?;
     let rows = stmt.query_map(
-        params![session_id, agent_id, after_id, limit as i64],
+        params![session_id, agent_id, after_id, only_speaker, limit as i64],
         |row| {
             Ok(SessionLogRow {
                 id: row.get(0)?,
