@@ -75,10 +75,82 @@ impl ArchiveReport {
     }
 }
 
+/// 前回 tick を成功させた時刻を残すマーカー名（archive_dir 直下）。
+///
+/// **なぜ永続化するか**: 素朴に `loop { sleep(interval); … }` にすると、タイマは
+/// プロセス起動時刻を起点にする。このワークスペースは再起動が頻繁で、`interval`
+/// （既定 86400 秒）より短い間隔で再起動すると tick が一度も来ず、DB 縮小が黙って
+/// 達成されない。マーカーに前回実行時刻を書いておき、**経過時間**で発火判定すれば
+/// 再起動をまたいでも「前回から interval 経った / 一度も走っていない」なら発火する。
+const LAST_RUN_MARKER: &str = ".llm_log_archive_last_run";
+
+/// 起動直後のブートストームを避けるための初回判定までの待ち。判定自体は経過時間ベース
+/// なので、この待ちの後すぐ（マーカーが無い / 古ければ）初回 tick が走る。
+const STARTUP_DELAY: Duration = Duration::from_secs(180);
+
+/// 「まだ発火時刻でない」ときの再判定間隔の上限。再起動直後にマーカー起点で速やかに
+/// 発火できるよう、長くても 1 時間で一度は判定に戻る。
+const POLL_CAP: Duration = Duration::from_secs(3600);
+
+fn last_run_path(archive_dir: &Path) -> PathBuf {
+    archive_dir.join(LAST_RUN_MARKER)
+}
+
+/// マーカーから前回実行時刻を読む。無い / 壊れていれば `None`（= 一度も走っていない扱い）。
+fn read_last_run(path: &Path) -> Option<DateTime<Utc>> {
+    let s = std::fs::read_to_string(path).ok()?;
+    DateTime::parse_from_rfc3339(s.trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// 前回実行時刻を書き込む（原子性は不要: 次回はここを読むだけ、壊れていれば None 扱い）。
+fn write_last_run(path: &Path, when: DateTime<Utc>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, when.to_rfc3339())
+        .with_context(|| format!("write last-run marker: {}", path.display()))?;
+    Ok(())
+}
+
+/// 発火すべきか。**マーカーが無ければ常に発火**（一度も走っていない = すぐ回す）。
+/// あれば「now - 前回 >= interval」で判定する。プロセス起動時刻には依らないので
+/// 再起動をまたいでも成り立つ。
+fn is_due(last_run: Option<DateTime<Utc>>, now: DateTime<Utc>, interval: chrono::Duration) -> bool {
+    match last_run {
+        None => true,
+        Some(prev) => now.signed_duration_since(prev) >= interval,
+    }
+}
+
+/// 発火時刻なら 1 回ぶんアーカイブし、成功したらマーカーを更新する（同期・テスト可能）。
+///
+/// - まだ発火時刻でなければ `Ok(None)`（マーカーは触らない）。
+/// - `archive_llm_logs` が Err を返したらマーカーを更新しない（次回また発火して再試行）。
+/// - 月単位の失敗は `report.errors` に積むだけで tick 自体は成功とみなし、マーカーを更新する
+///   （失敗した月は次の interval でまた対象になる）。
+fn run_tick_if_due(
+    db: &Db,
+    archive_dir: &Path,
+    retention_days: i64,
+    interval: chrono::Duration,
+    now: DateTime<Utc>,
+) -> Result<Option<ArchiveReport>> {
+    let marker = last_run_path(archive_dir);
+    if !is_due(read_last_run(&marker), now, interval) {
+        return Ok(None);
+    }
+    let report = archive_llm_logs(db, archive_dir, retention_days, now)?;
+    write_last_run(&marker, now)?;
+    Ok(Some(report))
+}
+
 /// アーカイブループを起動する（プロセス生存期間の常駐タスク）。
 ///
 /// 日次程度で十分なので `interval_secs` は最低 3600 秒に丸める。重い I/O と同期 DB を
-/// 触るので `spawn_blocking` に載せ、async ランタイムを塞がない。
+/// 触るので `spawn_blocking` に載せ、async ランタイムを塞がない。発火判定は永続化した
+/// マーカー起点の経過時間で行うので、**再起動を頻繁に挟んでも発火する**（`LAST_RUN_MARKER`）。
 pub fn spawn_llm_log_archive_loop(
     db: Db,
     archive_dir: PathBuf,
@@ -86,40 +158,50 @@ pub fn spawn_llm_log_archive_loop(
     interval_secs: u64,
 ) {
     tokio::spawn(async move {
-        let interval = Duration::from_secs(interval_secs.max(3600));
+        let interval_secs = interval_secs.max(3600);
+        let interval = Duration::from_secs(interval_secs);
+        let chrono_interval = chrono::Duration::seconds(interval_secs as i64);
         tracing::info!(
-            interval_secs = interval.as_secs(),
+            interval_secs,
             retention_days,
             archive_dir = %archive_dir.display(),
             "llm_log archive loop started"
         );
+        // 起動直後の集中 I/O を避けるため少しだけ待ってから初回判定に入る。
+        tokio::time::sleep(STARTUP_DELAY).await;
         loop {
-            tokio::time::sleep(interval).await;
             let db = db.clone();
             let dir = archive_dir.clone();
             let res = tokio::task::spawn_blocking(move || {
-                archive_llm_logs(&db, &dir, retention_days, Utc::now())
+                run_tick_if_due(&db, &dir, retention_days, chrono_interval, Utc::now())
             })
             .await;
             match res {
-                Ok(Ok(report)) if report.did_anything() => {
+                Ok(Ok(Some(report))) => {
+                    // 動いたことを必ず観測できるよう、対象ゼロでも INFO を出す。
                     tracing::info!(
                         months = report.months.len(),
                         archived_rows = report.total_archived(),
                         deleted_rows = report.total_deleted(),
                         errors = report.errors.len(),
-                        "llm_log archive tick"
+                        "llm_log archive tick ran"
                     );
                     for e in &report.errors {
                         tracing::warn!(detail = %e, "llm_log archive month failed (not deleted)");
                     }
+                    tokio::time::sleep(interval).await;
                 }
-                Ok(Ok(_)) => {}
+                Ok(Ok(None)) => {
+                    // まだ発火時刻でない。上限つきで待って再判定（再起動直後の取りこぼし防止）。
+                    tokio::time::sleep(interval.min(POLL_CAP)).await;
+                }
                 Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "llm_log archive tick failed");
+                    tracing::warn!(error = %format!("{e:#}"), "llm_log archive tick failed");
+                    tokio::time::sleep(interval).await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "llm_log archive task join failed");
+                    tokio::time::sleep(interval).await;
                 }
             }
         }
@@ -196,6 +278,17 @@ fn first_of_next_month(month: &str) -> Option<DateTime<Utc>> {
 /// 書き出し（`write_jsonl_zip`）か検証（`verify_zip`）が失敗すると `?` で早期 return し、
 /// **削除に到達しない**。これが「書き出せていないログを消さない」の実装本体。
 fn archive_one_month(db: &Db, dir: &Path, month: &str) -> Result<Option<MonthArchived>> {
+    archive_one_month_with(db, dir, month, write_jsonl_zip)
+}
+
+/// `archive_one_month` の本体。書き出し関数を注入できるようにして、テストで
+/// **検証を失敗させたときにフル経路で削除へ到達しない**ことを固定できるようにする。
+fn archive_one_month_with(
+    db: &Db,
+    dir: &Path,
+    month: &str,
+    write_fn: impl Fn(&Path, &str, &[LlmLogRow]) -> Result<()>,
+) -> Result<Option<MonthArchived>> {
     // ① 対象行を確定（DB ロックは読み出しの間だけ保持）。
     let rows = {
         let conn = db
@@ -207,12 +300,28 @@ fn archive_one_month(db: &Db, dir: &Path, month: &str) -> Result<Option<MonthArc
         return Ok(None);
     }
 
-    let final_path = dir.join(format!("llm_logs-{month}.jsonl.zip"));
-    let tmp_path = dir.join(format!("llm_logs-{month}.jsonl.zip.tmp"));
     let inner_name = format!("llm_logs-{month}.jsonl");
+    let canonical = dir.join(format!("llm_logs-{month}.jsonl.zip"));
+    // 既に同月の zip があるなら**上書きしない**（#341 提案2）。通常は「空になった古い月へ
+    // 遅延 insert / クロック巻き戻しで 1 行だけ入る」希少ケースで、素朴に上書きすると
+    // その 1 行だけの zip が過去にアーカイブ済みの行を持つ旧 zip を潰し、「消えて zip も無い」
+    // 唯一の残存経路になる。別名で書くことで旧 zip を保全する（クラッシュ復旧の再書き出しも
+    // 別名になるだけで、内容は決定的・削除は id 指定なので安全）。
+    let final_path = if canonical.exists() {
+        let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        dir.join(format!("llm_logs-{month}-{stamp}.jsonl.zip"))
+    } else {
+        canonical
+    };
+    let final_name = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("llm_logs-{month}.jsonl.zip"));
+    let tmp_path = dir.join(format!("{final_name}.tmp"));
 
-    // ② tmp に書き出す（I/O 失敗はここで Err → 削除しない）。
-    write_jsonl_zip(&tmp_path, &inner_name, &rows)
+    // ② tmp に書き出す（I/O 失敗はここで Err → 削除しない）。書き出しの中で zip 本体を
+    //    fsync するので、page cache に残ったまま消える窓を塞ぐ。
+    write_fn(&tmp_path, &inner_name, &rows)
         .with_context(|| format!("failed to write archive for {month}"))?;
 
     // ③ 書いた tmp を読み直して検証（不一致は Err → 削除しない）。
@@ -222,6 +331,18 @@ fn archive_one_month(db: &Db, dir: &Path, month: &str) -> Result<Option<MonthArc
     // rename は原子的（同一ディレクトリ）。tmp と最終の内容は同一なので tmp の検証で足りる。
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("failed to finalize archive for {month}"))?;
+
+    // rename を永続化するため親ディレクトリも fsync する（電源断/カーネルパニックで
+    // 「DB の削除は永続・zip は page cache のまま消失」の窓を塞ぐ）。ディレクトリ fsync は
+    // 一部の FS/プラットフォームで非対応なので**ベストエフォート**（失敗しても削除は止めない:
+    // zip 本体は既に fsync 済みで、最悪でも rename の耐久性が従来どおりに戻るだけ）。
+    if let Err(e) = fsync_dir(dir) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            dir = %dir.display(),
+            "failed to fsync archive dir (continuing; rename durability unchanged)"
+        );
+    }
 
     // ④ 検証済みの id だけを単一トランザクションで削除。
     let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
@@ -255,7 +376,21 @@ fn write_jsonl_zip(path: &Path, inner_name: &str, rows: &[LlmLogRow]) -> Result<
         zip.write_all(line.as_bytes())?;
         zip.write_all(b"\n")?;
     }
-    zip.finish()?;
+    // `finish` は内側の `File` を返す。削除する前に zip 本体を fsync して、page cache に
+    // 残ったまま電源断で消える窓を塞ぐ（親ディレクトリの fsync は rename 後に別途行う）。
+    let file = zip.finish()?;
+    file.sync_all()
+        .with_context(|| format!("fsync zip file: {}", path.display()))?;
+    Ok(())
+}
+
+/// ディレクトリを fsync する（`rename` の耐久性確保）。unix では dir fd を fsync する。
+/// 呼び出し側はこれをベストエフォート扱いする（失敗しても削除は止めない）。
+fn fsync_dir(dir: &Path) -> Result<()> {
+    let f = std::fs::File::open(dir)
+        .with_context(|| format!("open dir for fsync: {}", dir.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync dir: {}", dir.display()))?;
     Ok(())
 }
 
@@ -458,5 +593,153 @@ mod tests {
             mk_row("r2", "2026-05-11T10:00:00+00:00"),
         ];
         assert!(verify_zip(&path, "x.jsonl", &expected).is_err());
+    }
+
+    // 最重要（#341-3）: 検証を強制失敗させたとき、フル経路（archive_one_month）で
+    // **削除に到達しない**ことを固定する。書き出し関数を差し替え、DB は 2 行なのに
+    // zip には 1 行しか書かせず、verify を不一致で落とす。
+    #[test]
+    fn verify_failure_deletes_nothing_full_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = vec![
+            mk_row("old-a", "2026-05-10T10:00:00+00:00"),
+            mk_row("old-b", "2026-05-20T10:00:00+00:00"),
+        ];
+        let db = mk_db(&rows);
+
+        // 検証を必ず失敗させる書き出し（渡された行のうち先頭 1 行だけ書く）。
+        let bad_writer =
+            |path: &Path, inner: &str, rows: &[LlmLogRow]| write_jsonl_zip(path, inner, &rows[..1]);
+        let res = archive_one_month_with(&db, dir.path(), "2026-05", bad_writer);
+
+        assert!(res.is_err(), "verify 不一致で Err になるはず");
+        // フル経路で削除に到達していない（2 行のまま）。
+        assert_eq!(count_rows(&db), 2);
+        // verify で弾かれるので rename されず、最終 zip は存在しない。
+        assert!(!dir.path().join("llm_logs-2026-05.jsonl.zip").exists());
+    }
+
+    // #341-1: 再起動をまたいでも「プロセス開始時刻」ではなくマーカー起点で発火する。
+    #[test]
+    fn is_due_fires_on_first_run_and_after_interval() {
+        let day = chrono::Duration::seconds(86400);
+        // マーカー無し（= 一度も走っていない）は即発火。
+        assert!(is_due(None, now(), day));
+        // 直近に走っていれば発火しない。
+        assert!(!is_due(
+            Some(now() - chrono::Duration::hours(1)),
+            now(),
+            day
+        ));
+        // interval を過ぎていれば発火。
+        assert!(is_due(
+            Some(now() - chrono::Duration::hours(25)),
+            now(),
+            day
+        ));
+    }
+
+    #[test]
+    fn restart_still_fires_via_persisted_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = vec![mk_row("old-a", "2026-05-10T10:00:00+00:00")];
+        let db = mk_db(&rows);
+        let day = chrono::Duration::seconds(86400);
+
+        // 1) 初回起動（マーカー無し）: interval を待たずに即発火して書き出し・削除。
+        let r1 = run_tick_if_due(&db, dir.path(), 30, day, now()).unwrap();
+        assert!(r1.is_some(), "初回はマーカーが無いので即発火するはず");
+        assert_eq!(count_rows(&db), 0);
+        assert!(read_last_run(&last_run_path(dir.path())).is_some());
+
+        // 2) すぐ再起動（1 分後）: 直近に走ったので発火しない（= 再起動連打でも二重実行しない）。
+        let r2 = run_tick_if_due(
+            &db,
+            dir.path(),
+            30,
+            day,
+            now() + chrono::Duration::minutes(1),
+        )
+        .unwrap();
+        assert!(r2.is_none(), "直近に走ったばかりなら発火しない");
+
+        // 3) interval 経過後の再起動: マーカー起点で判定して再び発火する。
+        let r3 = run_tick_if_due(
+            &db,
+            dir.path(),
+            30,
+            day,
+            now() + chrono::Duration::hours(25),
+        )
+        .unwrap();
+        assert!(
+            r3.is_some(),
+            "前回から interval 経てば再起動をまたいでも発火する"
+        );
+    }
+
+    #[test]
+    fn last_run_marker_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = last_run_path(dir.path());
+        assert!(read_last_run(&path).is_none());
+        write_last_run(&path, now()).unwrap();
+        assert_eq!(read_last_run(&path), Some(now()));
+    }
+
+    // #341 提案2: 空になった古い月へ遅延 insert された 1 行が、過去にアーカイブ済みの
+    // 旧 zip を上書きして「消えて zip も無い」状態を作らないことを固定する。
+    #[test]
+    fn stray_late_insert_does_not_overwrite_existing_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = vec![
+            mk_row("a", "2026-05-10T10:00:00+00:00"),
+            mk_row("b", "2026-05-20T10:00:00+00:00"),
+        ];
+        let db = mk_db(&rows);
+
+        // 1 回目: 2026-05 を書き出して削除。canonical zip ができる。
+        let r1 = archive_llm_logs(&db, dir.path(), 30, now()).unwrap();
+        assert_eq!(r1.total_deleted(), 2);
+        let canonical = dir.path().join("llm_logs-2026-05.jsonl.zip");
+        assert!(canonical.exists());
+
+        // 空になった 2026-05 へ遅延 insert（バックフィル / クロック巻き戻し相当）で 1 行。
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::insert_llm_log(
+                &conn,
+                &mk_row("stray", "2026-05-15T10:00:00+00:00"),
+            )
+            .unwrap();
+        }
+
+        // 2 回目: stray を書き出して削除するが、canonical zip は上書きしない。
+        let r2 = archive_llm_logs(&db, dir.path(), 30, now()).unwrap();
+        assert_eq!(r2.total_deleted(), 1);
+        assert_eq!(count_rows(&db), 0);
+
+        // canonical zip は元の 2 行（a, b）のまま = 上書きされていない。
+        let file = std::fs::File::open(&canonical).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name("llm_logs-2026-05.jsonl").unwrap();
+        let mut content = String::new();
+        entry.read_to_string(&mut content).unwrap();
+        let restored: Vec<LlmLogRow> = content
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(restored.len(), 2);
+        let ids: HashSet<&str> = restored.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains("a") && ids.contains("b"));
+
+        // stray は別名の zip に保存されている（旧 zip とは別ファイル）。
+        let extra: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("llm_logs-2026-05-") && n.ends_with(".jsonl.zip"))
+            .collect();
+        assert_eq!(extra.len(), 1, "stray 用の別名 zip が 1 つできる");
     }
 }
