@@ -62,9 +62,6 @@ pub async fn add_skill(
         is_active: true,
         permission: req.permission.unwrap_or_else(|| "\"agent\"".to_string()),
         archived: false,
-        // #335: REST の手動追加はオーナーのダッシュボード由来。None = legacy grandfather
-        // （Owner 相当）。
-        created_caller: None,
     };
 
     let conn = state.db.lock().unwrap();

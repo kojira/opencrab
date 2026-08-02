@@ -902,19 +902,6 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE skills ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")?;
     }
 
-    // skills.created_caller カラム追加（#335: 作成時 caller の trust class を記録）。
-    // NULL 許容で追加するため既存行は NULL のまま = legacy grandfather（Owner 相当）。
-    // バックフィルはしない（既存 58 個の本来の作成 caller は復元できず、NULL→Owner 扱いで
-    // 従来どおり読める＝壊さない。新規作成分は実 caller を記録して穴を塞ぐ）。
-    let has_created_caller_col: bool = conn
-        .prepare("SELECT COUNT(*) FROM pragma_table_info('skills') WHERE name='created_caller'")?
-        .query_row([], |row| row.get::<_, i64>(0))
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if !has_created_caller_col {
-        conn.execute_batch("ALTER TABLE skills ADD COLUMN created_caller TEXT")?;
-    }
-
     // discord_channel_config.whitelisted カラム追加
     let has_whitelisted_col: bool = conn
         .prepare("SELECT COUNT(*) FROM pragma_table_info('discord_channel_config') WHERE name='whitelisted'")?
@@ -1550,10 +1537,6 @@ CREATE TABLE IF NOT EXISTS skills (
     is_active INTEGER NOT NULL DEFAULT 1,
     permission TEXT NOT NULL DEFAULT '"agent"',
     archived INTEGER NOT NULL DEFAULT 0,
-    -- 作成時の caller の trust class（'owner' / 'trusted' / 'agent'）。NULL = この列より
-    -- 前に作られた既存スキル（legacy grandfather = Owner 相当扱い）。read_skill が
-    -- 「強いターンが弱いスキルを借りる」confused deputy を塞ぐために参照する（#335）。
-    created_caller TEXT,
     last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

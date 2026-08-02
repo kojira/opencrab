@@ -197,8 +197,6 @@ fn import_skill(
             is_active: true,
             permission: "agent".to_string(),
             archived: false,
-            // #335: import はオーナーのセットアップ由来。None = legacy grandfather（Owner 相当）。
-            created_caller: None,
         };
         opencrab_db::queries::update_skill(conn, &updated)?;
     } else {
@@ -217,8 +215,6 @@ fn import_skill(
             is_active: true,
             permission: "agent".to_string(),
             archived: false,
-            // #335: import はオーナーのセットアップ由来。None = legacy grandfather（Owner 相当）。
-            created_caller: None,
         };
         opencrab_db::queries::insert_skill(conn, &row)?;
     }

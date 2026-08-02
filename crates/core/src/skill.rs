@@ -134,9 +134,6 @@ impl SkillManager {
             is_active: true,
             permission: SkillPermission::Agent.as_db_str().to_string(),
             archived: false,
-            // #335: 実行時 caller は持たない汎用取得経路。None = legacy grandfather
-            // （read_skill では Owner 相当扱い）。
-            created_caller: None,
         };
 
         queries::insert_skill(&conn, &row)?;

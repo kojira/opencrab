@@ -30,52 +30,12 @@ impl CallerIdentity {
     /// 受信ターン）では現状どちらの caller も生成されない（受信は Owner / Agent のみ）ので、
     /// この同列扱いは実害が出ない。将来 CoAgent / TrustedUser をこの経路へ流す場合は、
     /// 両者を分離すべきか改めて検討すること。
-    pub fn trust_level(&self) -> u8 {
+    fn trust_level(&self) -> u8 {
         match self {
             CallerIdentity::Owner => 2,
             CallerIdentity::CoAgent { .. } | CallerIdentity::TrustedUser => 1,
             CallerIdentity::Agent => 0,
         }
-    }
-
-    /// スキルの **作成者 caller** を DB へ格納する短いタグ（trust class の射影）。
-    ///
-    /// `skills.created_caller` に入れる。`CoAgent { agent_id }` の agent_id は落として
-    /// trust class（owner / trusted / agent）だけ残す。読み出し時のゲート
-    /// （[`Self::may_exercise_skill`]）は trust_level しか見ないため、これで十分。
-    /// 新しい権限概念ではなく、既存 [`CallerIdentity`] の trust_level の射影にすぎない。
-    pub fn skill_origin_tag(&self) -> &'static str {
-        match self {
-            CallerIdentity::Owner => "owner",
-            CallerIdentity::CoAgent { .. } | CallerIdentity::TrustedUser => "trusted",
-            CallerIdentity::Agent => "agent",
-        }
-    }
-
-    /// `skills.created_caller` タグ（[`Self::skill_origin_tag`]）を trust_level へ戻す。
-    ///
-    /// `None`（＝記録の無い既存スキル）と未知タグは **Owner 相当**として扱う
-    /// （legacy grandfather）。この PR より前に作られた 58 個はすべて `created_caller`
-    /// が NULL なので、Owner ターンからも従来どおり読める（＝既存が壊れない）。
-    pub fn skill_origin_trust(tag: Option<&str>) -> u8 {
-        match tag {
-            Some("agent") => CallerIdentity::Agent.trust_level(),
-            Some("trusted") => CallerIdentity::TrustedUser.trust_level(),
-            // "owner" / None / 未知タグ = legacy grandfather → Owner 相当
-            _ => CallerIdentity::Owner.trust_level(),
-        }
-    }
-
-    /// このターンの呼び出し元（`self`）が、`origin_tag` の caller が作ったスキルの
-    /// **本文（行動指針）を読んで実行に移して**よいか（`read_skill` のゲート / #335）。
-    ///
-    /// 許可条件は「**このターンの信頼度が作成者を超えないこと**」。より強いターン
-    /// （例: caller=Owner の heartbeat）が、弱いターン（例: 外部 Nostr の caller=Agent）で
-    /// 仕込まれたスキルの本文を借りて owner 権限のローカル操作へ届く confused deputy を
-    /// 塞ぐ。逆向き（弱いターンが強いスキルを読む）は許すが、実際のアクションは
-    /// dispatch 側の caller ゲート（`policy_allows`）で弾かれるため昇格は起きない。
-    pub fn may_exercise_skill(&self, origin_tag: Option<&str>) -> bool {
-        self.trust_level() <= CallerIdentity::skill_origin_trust(origin_tag)
     }
 
     /// このターンの呼び出し元が、`spawner`（subtask を spawn した親ターンの呼び出し元 /
@@ -91,48 +51,5 @@ impl CallerIdentity {
     /// self 経路を先に許可する）。ここへ適用するとサブエージェント自身の進捗報告が壊れる。
     pub fn can_manage_subtask_of(&self, spawner: &CallerIdentity) -> bool {
         self.trust_level() >= spawner.trust_level()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn skill_origin_tag_projects_trust_class() {
-        assert_eq!(CallerIdentity::Owner.skill_origin_tag(), "owner");
-        assert_eq!(CallerIdentity::TrustedUser.skill_origin_tag(), "trusted");
-        assert_eq!(
-            CallerIdentity::CoAgent {
-                agent_id: "x".into()
-            }
-            .skill_origin_tag(),
-            "trusted"
-        );
-        assert_eq!(CallerIdentity::Agent.skill_origin_tag(), "agent");
-    }
-
-    #[test]
-    fn null_and_unknown_origin_grandfather_to_owner() {
-        assert_eq!(
-            CallerIdentity::skill_origin_trust(None),
-            CallerIdentity::Owner.trust_level()
-        );
-        assert_eq!(
-            CallerIdentity::skill_origin_trust(Some("legacy-unknown")),
-            CallerIdentity::Owner.trust_level()
-        );
-    }
-
-    #[test]
-    fn may_exercise_blocks_stronger_turn_from_weaker_skill() {
-        // Owner ターンは agent 作成スキルを実行できない（confused deputy 封じ）。
-        assert!(!CallerIdentity::Owner.may_exercise_skill(Some("agent")));
-        // Owner ターンは owner 作成 / legacy(NULL) は実行できる。
-        assert!(CallerIdentity::Owner.may_exercise_skill(Some("owner")));
-        assert!(CallerIdentity::Owner.may_exercise_skill(None));
-        // 弱いターンは強いスキルを読めるが、昇格はしない（実アクションは dispatch で弾かれる）。
-        assert!(CallerIdentity::Agent.may_exercise_skill(Some("owner")));
-        assert!(CallerIdentity::Agent.may_exercise_skill(Some("agent")));
     }
 }
