@@ -511,6 +511,31 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "configure_self",
     // MCP サーバ設定の管理（外部プロセス起動・env に秘密を含みうる）。owner のみ。
     "configure_mcp_server",
+    // --- ローカルのシェル実行 / ファイル操作 / 実行許可リストの自己拡張（#330） ---
+    // これらは「Nostr 上での活動」や「未信頼ユーザーとの会話」とは無関係の、
+    // ホスト機の制御そのものであり、最上位の権限面。caller=Agent（Nostr 受信ターン /
+    // 非オーナー相手の会話ターン）へ出す理由が無い。オーナー指示は「オーナー以外の指示で
+    // ローカルのファイルを見る/変えるのも駄目」なので trusted_only ではなく **owner_only**
+    // に揃える（CoAgent / TrustedUser にも開けない）。
+    //
+    // heartbeat tick / ダッシュボード / オーナー会話は全て caller=Owner なので、自律活動と
+    // オーナー操作は従来どおり通る。sub-engine（depth>=1）は spawn 元の caller を継承する
+    // （`subtask.rs` の `with_caller`）ので、Owner ターンから起動した実装用サブタスクは
+    // caller=Owner のまま execute_shell を使える。
+    //
+    // シェルの許可リスト管理は `manage_allowed_commands`（上）が既に owner_only。同じことを
+    // する `add_allowed_command` / `remove_allowed_command` が分類上素通しだった是正でもある
+    // （bridge policy 層に owner ゲートを設ける。server ハンドラ側の owner 検査は多層防御と
+    // して残る）。
+    "execute_shell",
+    "ws_read",
+    "ws_list",
+    "ws_write",
+    "ws_delete",
+    "ws_edit",
+    "ws_mkdir",
+    "add_allowed_command",
+    "remove_allowed_command",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
@@ -1959,6 +1984,197 @@ mod tests {
             assert!(
                 !agent_exec.policy_allows(name),
                 "{name} の trusted ゲートは維持されるべき（#306 は nostr_dm/nostr_zap だけ）"
+            );
+        }
+    }
+
+    /// #330 で塞ぐローカル操作系ツール（policy 表の権威 = owner_only、trusted_only ではない）。
+    const LOCAL_OWNER_ONLY_TOOLS: &[&str] = &[
+        "execute_shell",
+        "ws_read",
+        "ws_list",
+        "ws_write",
+        "ws_delete",
+        "ws_edit",
+        "ws_mkdir",
+        "add_allowed_command",
+        "remove_allowed_command",
+    ];
+
+    /// #330: ローカルのシェル実行 / ファイル操作 / 実行許可リストの自己拡張は owner 限定。
+    /// ポリシー表（`tool_policy`）の権威を直接見る。`manage_allowed_commands` と同じ
+    /// owner_only（trusted_only ではない）に揃っていること。
+    #[test]
+    fn local_tools_are_owner_only_in_policy_table() {
+        for name in LOCAL_OWNER_ONLY_TOOLS {
+            let p = tool_policy(name);
+            assert!(p.owner_only, "{name} must be owner_only (#330)");
+            assert!(
+                !p.trusted_only,
+                "{name} は owner_only であるべき（CoAgent / TrustedUser にも開けない / #330）"
+            );
+        }
+    }
+
+    /// #330: caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは、上記
+    /// ローカル操作系ツールが **3 経路すべて**（`policy_allows` / `list_tools` /
+    /// `dispatch_inner`）で落ちること。`nostr_run_passes_the_gate_for_agent_caller` の逆。
+    ///
+    /// 対照として caller=Owner（heartbeat tick / ダッシュボード / オーナー会話）では 3 経路
+    /// すべてで従来どおり使える（gateway まで到達する）ことも固定する。
+    #[tokio::test]
+    async fn local_tools_are_blocked_for_agent_caller() {
+        /// 対象 9 ツールを定義するだけの fake gateway（実装は別 crate / config 駆動なので）。
+        struct GwLocal;
+        #[async_trait::async_trait]
+        impl GatewayActions for GwLocal {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                LOCAL_OWNER_ONLY_TOOLS
+                    .iter()
+                    .map(|n| GatewayActionDef {
+                        name: n.to_string(),
+                        description: "x".to_string(),
+                        parameters: json!({"type": "object"}),
+                    })
+                    .collect()
+            }
+            async fn execute(
+                &self,
+                _n: &str,
+                _a: &serde_json::Value,
+                _c: &opencrab_gateway::GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: Some(json!({"reached_gateway": true})),
+                    error: None,
+                }
+            }
+        }
+
+        // caller=Agent: 3 経路すべてで落ちる。
+        let (_d, actx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), actx)
+            .with_gateway_actions(Arc::new(GwLocal));
+        let agent_tools: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for name in LOCAL_OWNER_ONLY_TOOLS {
+            // 1. ポリシー述語。
+            assert!(
+                !agent_exec.policy_allows(name),
+                "caller=Agent が {name} を policy_allows で通してしまう（#330）"
+            );
+            // 2. 可視性: モデルに見えない。
+            assert!(
+                !agent_tools.iter().any(|t| t == name),
+                "caller=Agent の list_tools に {name} が出てはいけない（#330）"
+            );
+            // 3. 実行時強制: 名前指定の実行が owner ゲートで拒否される（gateway へ到達しない）。
+            let r = agent_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.success,
+                "caller=Agent の {name} 実行は拒否されるべき（#330）"
+            );
+            assert!(
+                r.error.unwrap_or_default().to_lowercase().contains("owner"),
+                "{name} の拒否理由は owner ゲートであるべき（#330）"
+            );
+        }
+
+        // 対照: caller=Owner（heartbeat 相当）では 3 経路すべてで従来どおり使える。
+        let (_d2, octx) = test_context_with_caller(CallerIdentity::Owner);
+        let owner_exec = BridgedExecutor::new(ActionDispatcher::new(), octx)
+            .with_gateway_actions(Arc::new(GwLocal));
+        let owner_tools: Vec<String> = owner_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for name in LOCAL_OWNER_ONLY_TOOLS {
+            assert!(
+                owner_exec.policy_allows(name),
+                "caller=Owner は {name} を使えるべき（heartbeat / 自律活動が死ぬ / #330）"
+            );
+            assert!(
+                owner_tools.iter().any(|t| t == name),
+                "caller=Owner の list_tools に {name} が出るべき（#330）"
+            );
+            // 実行時強制: owner ゲートで**止まらず**先の実装（dispatcher / gateway）へ
+            // 到達する。`ws_*` は `ActionDispatcher::new()` に実在するため fake gateway では
+            // なく本物の dispatcher が処理する（空引数で失敗しうるが、その失敗は owner
+            // ゲート由来ではない）。よって「owner 拒否文言が出ないこと」で到達を判定する。
+            let r = owner_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("requires owner"),
+                "caller=Owner の {name} が owner ゲートで拒否された: {:?}（#330）",
+                r.error
+            );
+        }
+
+        // heartbeat 相当（caller=Owner）で `execute_shell` が gateway まで到達すること
+        // （dispatcher に無い config 駆動ツールなので fake gateway が処理し、往復を確認できる）。
+        let r = owner_exec.execute("execute_shell", &json!({})).await;
+        assert!(
+            r.success,
+            "caller=Owner の execute_shell 実行が拒否された: {:?}（#330）",
+            r.error
+        );
+        assert_eq!(
+            r.data["reached_gateway"], true,
+            "execute_shell が gateway へ到達しない（heartbeat 経路が死ぬ / #330）"
+        );
+    }
+
+    /// #330/#333: 判定軸は caller だけで、depth は増えても owner の可否を変えない。
+    ///
+    /// #333 で sub-engine は親ターンの caller を継承するようになった
+    /// （`subtask_spawn.rs` が `spawn_subtask` の sub-run に親 caller を渡す）。したがって
+    /// **Owner ターンから起動したサブ（caller=Owner・depth>=1）は実在する構成**で、そこで
+    /// `execute_shell` / `ws_*` が使える必要がある（メインで直接やるのと同じ = 委譲都合の
+    /// 非対称を作らない）。逆に **Agent ターンから起動したサブ（caller=Agent・depth>=1）は
+    /// 塞がったまま**でなければならない（`spawn_subtask` を挟んだ迂回の封鎖）。
+    ///
+    /// これらは `blocked_in_subengine`（`DISCORD_ACTIONS`）ではないので、判定は caller のみ。
+    #[test]
+    fn local_tools_gated_by_caller_only_regardless_of_depth() {
+        // Owner: depth 0 でも depth>=1 でも使える（実在するサブ構成 = 親 Owner → サブ Owner）。
+        let (_d, octx) = test_context_with_caller(CallerIdentity::Owner);
+        let owner_depth0 = BridgedExecutor::new(ActionDispatcher::new(), octx);
+        let (_d2, octx2) = test_context_with_caller(CallerIdentity::Owner);
+        let owner_depth1 = BridgedExecutor::new(ActionDispatcher::new(), octx2).with_depth(1);
+        // Agent: どの depth でも塞がる（親 Agent → サブ Agent の迂回封鎖）。
+        let (_d3, actx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_depth0 = BridgedExecutor::new(ActionDispatcher::new(), actx);
+        let (_d4, actx2) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_depth1 = BridgedExecutor::new(ActionDispatcher::new(), actx2).with_depth(1);
+        for name in LOCAL_OWNER_ONLY_TOOLS {
+            assert!(
+                !tool_policy(name).blocked_in_subengine,
+                "{name} に depth ゲートを足していないこと（#330）"
+            );
+            assert_eq!(
+                owner_depth0.policy_allows(name),
+                owner_depth1.policy_allows(name),
+                "{name} の owner 可否が depth 0 と depth>=1 で食い違ってはいけない（#330）"
+            );
+            assert!(
+                owner_depth1.policy_allows(name),
+                "caller=Owner のサブ（depth>=1）で {name} が使えないと実装作業が死ぬ（#333）"
+            );
+            assert!(
+                !agent_depth1.policy_allows(name),
+                "caller=Agent のサブ（depth>=1）で {name} が通ると spawn_subtask 迂回が開く（#333）"
+            );
+            assert_eq!(
+                agent_depth0.policy_allows(name),
+                agent_depth1.policy_allows(name),
+                "{name} の agent 可否が depth で変わってはいけない（#333）"
             );
         }
     }

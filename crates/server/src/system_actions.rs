@@ -3452,18 +3452,18 @@ mod tests {
 
     /// **オーナー限定検査が移設後も効く**（add）。
     ///
-    /// bridge の `OWNER_ONLY_ACTIONS` は `add_allowed_command` /
-    /// `remove_allowed_command` を**持っていない**（持っているのは新系統の
-    /// `manage_allowed_commands` だけ）。つまりこのハンドラ内検査が唯一のゲートで、
-    /// 落とすと非オーナーがシェル実行範囲を広げられる。
+    /// #330 以降は多層防御になった: bridge policy 層（`OWNER_ONLY_ACTIONS`）でも
+    /// `add_allowed_command` / `remove_allowed_command` を owner_only にゲートし、加えて
+    /// この server ハンドラ内検査も残る。SystemGatewayActions を直接叩くこのテストは
+    /// bridge 層を通らないので、ハンドラ側の owner 検査が単独で効くことを固定する。
     ///
     /// エラー文言はバイト単位で移設前と同一（移設で文言が変わっていないことの防波堤）。
     #[tokio::test]
     async fn add_allowed_command_rejects_non_owner_without_side_effects() {
-        // このゲートが bridge 側に無いことを固定する（多層防御ではなく単層である事実）。
+        // bridge policy 層でも owner_only であること（#330 の多層防御）。
         assert!(
-            !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"add_allowed_command"),
-            "bridge 側に owner ゲートが増えたなら、この単層前提のコメントを見直すこと"
+            opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"add_allowed_command"),
+            "#330: add_allowed_command は bridge policy 層でも owner_only であるべき"
         );
 
         let state = state_with_shell(&[]);
@@ -3493,9 +3493,10 @@ mod tests {
     /// 非オーナーの呼び出しで消えないこと。
     #[tokio::test]
     async fn remove_allowed_command_rejects_non_owner_without_side_effects() {
+        // bridge policy 層でも owner_only であること（#330 の多層防御）。
         assert!(
-            !opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"remove_allowed_command"),
-            "bridge 側に owner ゲートが増えたなら、この単層前提のコメントを見直すこと"
+            opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"remove_allowed_command"),
+            "#330: remove_allowed_command は bridge policy 層でも owner_only であるべき"
         );
 
         let state = state_with_shell(&["git"]);
