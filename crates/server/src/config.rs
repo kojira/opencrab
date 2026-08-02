@@ -34,6 +34,57 @@ pub struct AppConfig {
     /// 非ブロックツール実行（dispatch / RFC #152 S3a）。
     #[serde(default)]
     pub subtask: SubtaskConfig,
+    /// 古い LLM ログの zip アーカイブ（#337）。
+    #[serde(default)]
+    pub llm_log_archive: LlmLogArchiveConfig,
+}
+
+/// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。
+///
+/// `llm_logs` は 1 行に「プロンプト全文 + 応答」を丸ごと保存するため肥大しやすく
+/// （実測で DB の 97%）、バックアップを重くする。デバッグに使う直近は残し、保持期間
+/// より古い**月**を丸ごと `data/archive/llm_logs-YYYY-MM.jsonl.zip` へ書き出して DB
+/// から外す。**書き出して検証してから削除する**（`llm_log_archive` モジュール参照）。
+///
+/// `memory_sessions`（会話ログ = 記憶の本体）には手を出さない。対象は `llm_logs` のみ。
+#[derive(Debug, Deserialize, Clone)]
+pub struct LlmLogArchiveConfig {
+    /// アーカイブループの on/off。既定 true（#337 の目的そのもの）。
+    /// 自動削除を止めたい運用者はここを false にすれば再ビルド無しで無効化できる。
+    #[serde(default = "default_archive_enabled")]
+    pub enabled: bool,
+    /// 保持日数。これより**古い月**（月末がカットオフより前）だけをアーカイブする。
+    /// 既定 30 日。境界の月は丸ごと残す（実際の保持は最大 1 か月ぶん長くなりうる）。
+    #[serde(default = "default_archive_retention_days")]
+    pub retention_days: i64,
+    /// アーカイブ tick の間隔（秒）。既定 86400（日次）。最低 3600 秒に丸める。
+    #[serde(default = "default_archive_interval_secs")]
+    pub interval_secs: u64,
+    /// 出力ディレクトリ。空なら DB ファイルの親 + `archive`（例: `data/archive`）に
+    /// 導出する。**内蔵ディスクに置かない**方針のため、既定は DB と同じボリューム。
+    #[serde(default)]
+    pub dir: String,
+}
+
+impl Default for LlmLogArchiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_archive_enabled(),
+            retention_days: default_archive_retention_days(),
+            interval_secs: default_archive_interval_secs(),
+            dir: String::new(),
+        }
+    }
+}
+
+fn default_archive_enabled() -> bool {
+    true
+}
+fn default_archive_retention_days() -> i64 {
+    30
+}
+fn default_archive_interval_secs() -> u64 {
+    86400
 }
 
 /// 非ブロックツール実行（dispatch）の設定（RFC #152 S3a）。

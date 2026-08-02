@@ -18,6 +18,7 @@ pub mod config;
 pub mod heartbeat_instructions;
 pub mod hot_reload;
 pub mod llm_adapter;
+pub mod llm_log_archive;
 pub mod memory_maintenance;
 pub mod nostr_runner_impl;
 pub mod peer_review;
