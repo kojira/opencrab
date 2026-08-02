@@ -958,6 +958,27 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // 古い llm_logs の zip アーカイブ（#337）。メンテナンスループが per-agent かつ
+    // 高頻度（既定 600 秒）なのに対し、こちらは全 llm_logs を対象にした日次の重い I/O
+    // なので別ループにする。出力先は未指定なら DB ファイルの親 + `archive`（DB と同じ
+    // ボリューム = 内蔵ディスクに置かない方針）へ導出する。
+    if cfg.llm_log_archive.enabled {
+        let archive_dir = if cfg.llm_log_archive.dir.trim().is_empty() {
+            std::path::Path::new(&cfg.database.path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("archive")
+        } else {
+            std::path::PathBuf::from(&cfg.llm_log_archive.dir)
+        };
+        opencrab_server::llm_log_archive::spawn_llm_log_archive_loop(
+            state.db.clone(),
+            archive_dir,
+            cfg.llm_log_archive.retention_days,
+            cfg.llm_log_archive.interval_secs,
+        );
+    }
+
     // ハートビートの初期設定
     let initial_hb_config = HeartbeatConfig {
         interval_secs: cfg.agent.heartbeat_interval_secs,
