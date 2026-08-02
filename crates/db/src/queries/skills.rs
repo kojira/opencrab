@@ -26,6 +26,34 @@ pub struct SkillRow {
     pub is_active: bool,
     pub permission: String,
     pub archived: bool,
+    /// 作成時 caller の trust class（`"owner"` / `"trusted"` / `"agent"`）。
+    /// `None` = この列より前に作られた既存スキル（legacy grandfather = Owner 相当）。
+    /// `read_skill` が confused deputy を塞ぐために参照する（#335）。
+    pub created_caller: Option<String>,
+}
+
+/// 全 skills SELECT が共有する列並び。順序は [`skill_row_from_row`] の `row.get` と一致させる。
+const SKILL_COLUMNS: &str = "id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_caller";
+
+/// [`SKILL_COLUMNS`] の並びで 1 行を [`SkillRow`] へ写す。全 SELECT の重複を 1 箇所に集約する。
+fn skill_row_from_row(row: &rusqlite::Row) -> rusqlite::Result<SkillRow> {
+    Ok(SkillRow {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        situation_pattern: row.get(4)?,
+        guidance: row.get(5)?,
+        source_type: row.get(6)?,
+        source_context: row.get(7)?,
+        file_path: row.get(8)?,
+        effectiveness: row.get(9)?,
+        usage_count: row.get(10)?,
+        is_active: row.get(11)?,
+        permission: row.get(12)?,
+        archived: row.get(13)?,
+        created_caller: row.get(14)?,
+    })
 }
 
 pub fn list_skills(conn: &Connection, agent_id: &str, active_only: bool) -> Result<Vec<SkillRow>> {
@@ -39,47 +67,27 @@ pub fn list_skills_filtered(
     include_archived: bool,
 ) -> Result<Vec<SkillRow>> {
     let sql = match (active_only, include_archived) {
-        (true, _) => {
-            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-             FROM skills WHERE agent_id = ?1 AND is_active = 1 AND archived = 0 ORDER BY usage_count DESC"
-        }
-        (false, true) => {
-            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-             FROM skills WHERE agent_id = ?1 ORDER BY usage_count DESC"
-        }
-        (false, false) => {
-            "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-             FROM skills WHERE agent_id = ?1 AND archived = 0 ORDER BY usage_count DESC"
-        }
+        (true, _) => format!(
+            "SELECT {SKILL_COLUMNS} FROM skills WHERE agent_id = ?1 AND is_active = 1 AND archived = 0 ORDER BY usage_count DESC"
+        ),
+        (false, true) => format!(
+            "SELECT {SKILL_COLUMNS} FROM skills WHERE agent_id = ?1 ORDER BY usage_count DESC"
+        ),
+        (false, false) => format!(
+            "SELECT {SKILL_COLUMNS} FROM skills WHERE agent_id = ?1 AND archived = 0 ORDER BY usage_count DESC"
+        ),
     };
 
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![agent_id], |row| {
-        Ok(SkillRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            name: row.get(2)?,
-            description: row.get(3)?,
-            situation_pattern: row.get(4)?,
-            guidance: row.get(5)?,
-            source_type: row.get(6)?,
-            source_context: row.get(7)?,
-            file_path: row.get(8)?,
-            effectiveness: row.get(9)?,
-            usage_count: row.get(10)?,
-            is_active: row.get(11)?,
-            permission: row.get(12)?,
-            archived: row.get(13)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![agent_id], skill_row_from_row)?;
 
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
 pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
     conn.execute(
-        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO skills (id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived, created_caller, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             skill.id,
             skill.agent_id,
@@ -95,6 +103,7 @@ pub fn insert_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
             skill.is_active,
             skill.permission,
             skill.archived,
+            skill.created_caller,
             Utc::now().to_rfc3339(),
             Utc::now().to_rfc3339(),
         ],
@@ -124,27 +133,11 @@ pub fn find_skill_by_name(
     name: &str,
 ) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-         FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) AND archived = 0 LIMIT 1",
+        &format!(
+            "SELECT {SKILL_COLUMNS} FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) AND archived = 0 LIMIT 1"
+        ),
         params![agent_id, name],
-        |row| {
-            Ok(SkillRow {
-                id: row.get(0)?,
-                agent_id: row.get(1)?,
-                name: row.get(2)?,
-                description: row.get(3)?,
-                situation_pattern: row.get(4)?,
-                guidance: row.get(5)?,
-                source_type: row.get(6)?,
-                source_context: row.get(7)?,
-                file_path: row.get(8)?,
-                effectiveness: row.get(9)?,
-                usage_count: row.get(10)?,
-                is_active: row.get(11)?,
-                permission: row.get(12)?,
-                archived: row.get(13)?,
-            })
-        },
+        skill_row_from_row,
     );
 
     match result {
@@ -160,27 +153,11 @@ pub fn find_skill_by_name_any(
     name: &str,
 ) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-         FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) LIMIT 1",
+        &format!(
+            "SELECT {SKILL_COLUMNS} FROM skills WHERE agent_id = ?1 AND LOWER(name) = LOWER(?2) LIMIT 1"
+        ),
         params![agent_id, name],
-        |row| {
-            Ok(SkillRow {
-                id: row.get(0)?,
-                agent_id: row.get(1)?,
-                name: row.get(2)?,
-                description: row.get(3)?,
-                situation_pattern: row.get(4)?,
-                guidance: row.get(5)?,
-                source_type: row.get(6)?,
-                source_context: row.get(7)?,
-                file_path: row.get(8)?,
-                effectiveness: row.get(9)?,
-                usage_count: row.get(10)?,
-                is_active: row.get(11)?,
-                permission: row.get(12)?,
-                archived: row.get(13)?,
-            })
-        },
+        skill_row_from_row,
     );
 
     match result {
@@ -192,27 +169,9 @@ pub fn find_skill_by_name_any(
 
 pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<SkillRow>> {
     let result = conn.query_row(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-         FROM skills WHERE id = ?1 LIMIT 1",
+        &format!("SELECT {SKILL_COLUMNS} FROM skills WHERE id = ?1 LIMIT 1"),
         params![skill_id],
-        |row| {
-            Ok(SkillRow {
-                id: row.get(0)?,
-                agent_id: row.get(1)?,
-                name: row.get(2)?,
-                description: row.get(3)?,
-                situation_pattern: row.get(4)?,
-                guidance: row.get(5)?,
-                source_type: row.get(6)?,
-                source_context: row.get(7)?,
-                file_path: row.get(8)?,
-                effectiveness: row.get(9)?,
-                usage_count: row.get(10)?,
-                is_active: row.get(11)?,
-                permission: row.get(12)?,
-                archived: row.get(13)?,
-            })
-        },
+        skill_row_from_row,
     );
 
     match result {
@@ -223,8 +182,10 @@ pub fn find_skill_by_id(conn: &Connection, skill_id: &str) -> Result<Option<Skil
 }
 
 pub fn update_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
+    // created_caller も書き戻す。create_my_skill の dedup 更新で「弱い caller が
+    // 上書きしたら trust class を下げる」（昇格させない）ために更新経路でも反映する（#335）。
     conn.execute(
-        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, is_active = ?5, archived = ?6, file_path = ?7, updated_at = ?8 WHERE id = ?9",
+        "UPDATE skills SET name = ?1, description = ?2, situation_pattern = ?3, guidance = ?4, is_active = ?5, archived = ?6, file_path = ?7, created_caller = ?8, updated_at = ?9 WHERE id = ?10",
         params![
             skill.name,
             skill.description,
@@ -233,6 +194,7 @@ pub fn update_skill(conn: &Connection, skill: &SkillRow) -> Result<()> {
             skill.is_active,
             skill.archived,
             skill.file_path,
+            skill.created_caller,
             Utc::now().to_rfc3339(),
             skill.id,
         ],
@@ -304,29 +266,11 @@ pub fn find_unused_skills(
     days_old: i64,
 ) -> Result<Vec<SkillRow>> {
     let cutoff = (Utc::now() - chrono::Duration::days(days_old)).to_rfc3339();
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, name, description, situation_pattern, guidance, source_type, source_context, file_path, effectiveness, usage_count, is_active, permission, archived
-         FROM skills
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SKILL_COLUMNS} FROM skills
          WHERE agent_id = ?1 AND usage_count = 0 AND archived = 0 AND created_at <= ?2
-         ORDER BY created_at ASC",
-    )?;
-    let rows = stmt.query_map(params![agent_id, cutoff], |row| {
-        Ok(SkillRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            name: row.get(2)?,
-            description: row.get(3)?,
-            situation_pattern: row.get(4)?,
-            guidance: row.get(5)?,
-            source_type: row.get(6)?,
-            source_context: row.get(7)?,
-            file_path: row.get(8)?,
-            effectiveness: row.get(9)?,
-            usage_count: row.get(10)?,
-            is_active: row.get(11)?,
-            permission: row.get(12)?,
-            archived: row.get(13)?,
-        })
-    })?;
+         ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![agent_id, cutoff], skill_row_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }

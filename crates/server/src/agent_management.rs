@@ -164,6 +164,9 @@ pub(crate) fn create_skill(
         is_active: true,
         permission: "\"agent\"".to_string(),
         archived: false,
+        // #335: create_skill は TRUSTED_ONLY（素の Agent は到達不可）。None = legacy
+        // grandfather（Owner 相当）。
+        created_caller: None,
     };
 
     if let Err(e) = opencrab_db::queries::insert_skill(&conn, &row) {

@@ -367,6 +367,8 @@ pub async fn seed_standard_skills(
             is_active: true,
             permission: parsed.permission_db,
             archived: false,
+            // #335: セットアップ投入（standard）はオーナー由来。None = legacy grandfather。
+            created_caller: None,
         };
         match opencrab_db::queries::insert_skill(&conn, &row) {
             Ok(()) => seeded.push(parsed.name),
