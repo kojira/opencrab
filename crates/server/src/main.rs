@@ -149,6 +149,16 @@ fn heartbeat_interval_elapsed(
 /// エージェント固有設定の両方が同一 channel_id に存在しうるため、(1) 当該エージェント
 /// に無関係な行を除外し、(2) 同一 channel_id ではエージェント固有行をグローバル行より
 /// 優先して重複処理を防ぐ。
+///
+/// 前提（既存 precedence / #238。本 PR で変えない）: 同一 channel に global 行
+/// （agent_id="", heartbeat_enabled=1）と agent 固有行が併存する場合、agent 固有行を
+/// `enabled=false` にすると (2) の dedup で固有行がリストから外れ、**代わりに global 行が
+/// 採用されて発火が続く**。つまり「このチャンネルだけ自律を止める」は agent 固有行の
+/// 無効化だけでは達成できない（global 行も無効化するか、global 行が無い前提が要る）。
+/// 塞ぐと global 行で運用しているチャンネルの挙動が変わるため、本 PR では塞がない。
+/// なお `channel_state_payload`（get_my_heartbeat scope=channel）は (channel_id, agent_id)
+/// 固有行のみを読むので、global 行しか無いチャンネルでは get が `enabled=false` を返しても
+/// 実発火は global 行で起こりうる（get の表示と実発火が乖離する edge）。
 fn list_whitelisted_heartbeat_channels(
     db: &opencrab_db::Db,
     agent_id: &str,
@@ -249,8 +259,41 @@ fn make_heartbeat_callback(
                     )]
                 }
                 HeartbeatFiringPlan::ChannelScoped => {
-                    // 未 opt-in かつグローバル有効: 従来の channel 単位発火（互換・不変）。
-                    list_whitelisted_heartbeat_channels(&db, &agent_id_owned)
+                    // 未 opt-in かつグローバル有効: channel 単位発火。#336: 各チャンネルの
+                    // 実効間隔を **channel → agent → 運用者既定** で解決し、下限へクランプ
+                    // した値を Some で載せる（下段の `unwrap_or` はもう当たらない）。
+                    // チャンネル未設定でエージェント設定も無ければ既定に落ちるので、
+                    // 従来（channel か既定）の挙動を包含しつつ、床とエージェント設定
+                    // フォールバックだけを足す。
+                    let channels = list_whitelisted_heartbeat_channels(&db, &agent_id_owned);
+                    let conn = db.lock().unwrap();
+                    channels
+                        .into_iter()
+                        .map(|(cid, name, ch_interval)| {
+                            let resolved = opencrab_db::queries::resolve_channel_heartbeat_interval(
+                                &conn,
+                                &agent_id_owned,
+                                ch_interval,
+                                state.heartbeat_limits.default_interval_secs,
+                                state.heartbeat_limits.min_interval_secs,
+                            );
+                            // #336: 下限へ引き上げた（source="clamped"）ことは実発火経路の
+                            // ログには出ておらず、get_my_heartbeat scope=channel の payload
+                            // でしか観測できなかった。実発火でも 1 行残す（新しい制約は
+                            // 足さず、ログのみ）。元値=ch_interval（channel 未設定なら None、
+                            // その場合は agent/既定側の値が床未満だった）、床=min_interval_secs。
+                            if resolved.source == "clamped" {
+                                tracing::debug!(
+                                    agent_id = %agent_id_owned,
+                                    channel_id = %cid,
+                                    channel_interval_secs = ?ch_interval,
+                                    floor_interval_secs = resolved.interval_secs,
+                                    "channel heartbeat 間隔を下限へ引き上げた (source=clamped)"
+                                );
+                            }
+                            (cid, name, Some(resolved.interval_secs))
+                        })
+                        .collect()
                 }
                 HeartbeatFiringPlan::None => {
                     // 未 opt-in かつグローバル無効: 何もしない。このループは他エージェント
