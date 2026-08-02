@@ -125,6 +125,10 @@ pub async fn spawn_subtask(
 
     let agent_id = ctx.agent_id.clone();
     let depth = ctx.depth + 1;
+    // 親ターンの呼び出し元。sub-engine の実行 caller にも、決着後に親会話を resume
+    // する登録簿の caller にも、この同一の値を使う（#333）。両者が食い違うと、実行時に
+    // 見えていたツールと resume 後に見えるツールがズレる。
+    let parent_caller = opencrab_actions::CallerIdentity::from(&ctx.caller);
     let subtask_id = Uuid::new_v4().to_string();
     let sub_session_id = format!("subtask-{subtask_id}");
     let spawned_at = Utc::now().to_rfc3339();
@@ -247,6 +251,9 @@ pub async fn spawn_subtask(
     let run_sink: Arc<dyn SubtaskCompletionSink> =
         sink.unwrap_or_else(|| Arc::new(opencrab_actions::NoopCompletionSink));
     let run_notifiers = state.subtask_notifiers.clone();
+    // sub-run（クロージャ）へ渡す実行 caller。登録簿 insert 用に `parent_caller` は
+    // クロージャ外へ残す（同一値のクローン）。
+    let run_caller = parent_caller.clone();
 
     let join_handle = tokio::spawn(async move {
         // insert 完了を待つ（送信側が drop された場合も先へ進む）。
@@ -260,9 +267,16 @@ pub async fn spawn_subtask(
             run_task,
             // RuntimeInfo の gateway 名。旧実装と同じく "subtask"。
             "subtask",
-            // 最小権限。旧実装（`execute_spawn_subtask`）と同じく、親の caller を
-            // 引き継がず素の Agent で走らせる（owner 限定ツールへ昇格させない）。
-            opencrab_actions::CallerIdentity::Agent,
+            // 親ターンの呼び出し元を継承する（#333）。旧実装は素の `Agent` に固定して
+            // いたが、それは「守るものが無い」制約だった: 同じ作業をメインターン
+            // （caller=親のまま）で直接やれば通るのに、サブへ委譲した瞬間だけ owner 限定
+            // ツールが消える、という委譲都合の非対称を生むだけで、外部由来ターンは
+            // `spawn_subtask` を挟めば逆に制限を迂回できた（サブ = 素の Agent でも
+            // execute_shell 等が無ゲートで通っていた / #330 で塞ぐ前）。継承すれば軸が
+            // 「誰の指示か」だけに揃う: 親 Owner → サブ Owner（当然使える）、親 Agent →
+            // サブ Agent（**昇格しない**。外部由来のサブは制限されたまま = 迂回封鎖）。
+            // `from` は親より強い identity を生まないので昇格経路にはならない。
+            run_caller,
         )
         .with_depth(depth)
         .with_run_notifier(run_notifier.clone());
@@ -343,11 +357,11 @@ pub async fn spawn_subtask(
             started_at: started_instant,
             // 明示 spawn の返信先は親セッションから復元する（sink 側の責務 / #167）。
             reply_target: None,
-            // 親ターンの呼び出し元を保持する（#298）。sub-engine 自身は最小権限
-            // （上の `CallerIdentity::Agent`）で走るが、決着後に**親会話を resume**
-            // する sink は元の権限で再開しなければならない。ここで落とすと、
-            // オーナー発のターンが subtask 決着の瞬間に Agent へ降格する。
-            caller: opencrab_actions::CallerIdentity::from(&ctx.caller),
+            // 親ターンの呼び出し元を保持する（#298）。sub-engine の実行 caller
+            // （上の `parent_caller`）と同一の値で、決着後に**親会話を resume** する
+            // sink も元の権限で再開する。ここで落とすと、オーナー発のターンが subtask
+            // 決着の瞬間に Agent へ降格する。
+            caller: parent_caller.clone(),
             lifecycle,
         },
     );
@@ -412,6 +426,47 @@ mod tests {
                 choices: vec![opencrab_llm::message::Choice {
                     index: 0,
                     message: opencrab_llm::message::Message::assistant(&self.reply),
+                    finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
+                }],
+                usage: Default::default(),
+                created: 0,
+            })
+        }
+    }
+
+    /// sub-run が LLM へ提示したツール名（`ChatRequest.functions`）を毎コール記録する
+    /// stub。sub-engine の**実行 caller** を、その caller で見えるはずのツールの有無で
+    /// 観測するために使う（#333）。`Stop` で 1 反復で終わる。
+    struct CapturingStub {
+        seen: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl opencrab_llm::traits::LlmProvider for CapturingStub {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(
+            &self,
+            request: opencrab_llm::message::ChatRequest,
+        ) -> anyhow::Result<opencrab_llm::message::ChatResponse> {
+            let names = request
+                .functions
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| f.name)
+                .collect::<Vec<_>>();
+            self.seen.lock().unwrap().push(names);
+            Ok(opencrab_llm::message::ChatResponse {
+                id: "resp-1".to_string(),
+                model: request.model,
+                choices: vec![opencrab_llm::message::Choice {
+                    index: 0,
+                    message: opencrab_llm::message::Message::assistant("done"),
                     finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
                 }],
                 usage: Default::default(),
@@ -714,11 +769,11 @@ mod tests {
         );
     }
 
-    /// #298: spawn した subtask は**親ターンの呼び出し元**を登録簿に持つ。
+    /// #298/#333: spawn した subtask は**親ターンの呼び出し元**を登録簿に持つ。
     ///
-    /// 決着時に `settle_completed` がこれを読んで sink へ渡し、resume が元の権限で
-    /// 走る。sub-engine 自身は最小権限（`CallerIdentity::Agent`）のままで、ここで
-    /// 保持するのは resume の宛先権限だけ。
+    /// 決着時に `settle_completed` がこれを読んで sink へ渡し、resume が元の権限で走る。
+    /// #333 以降は sub-engine の実行 caller も同じ親 caller（`parent_caller`）なので、
+    /// 登録簿の caller は「実行時に見えていた権限」と一致する（resume でズレない）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawned_subtask_records_the_parent_caller() {
         let state = state_with_stub_llm("never", true);
@@ -761,6 +816,104 @@ mod tests {
         let entry = reg.get(&subtask_id).expect("登録簿に載る");
         assert_eq!(entry.caller, opencrab_actions::CallerIdentity::Agent);
         entry.abort_handle.abort();
+    }
+
+    /// shell を有効化した `AppState` に capturing stub を挿す。
+    fn state_with_shell_and_capture(seen: Arc<Mutex<Vec<Vec<String>>>>) -> AppState {
+        let state = crate::test_app_state();
+        {
+            let mut cfg = state.tools_config.write().unwrap();
+            cfg.enabled = true;
+            cfg.shell = Some(opencrab_actions::tools::ShellToolConfig {
+                enabled: true,
+                allowed_commands: vec!["ls".to_string()],
+                timeout_secs: 30,
+                max_timeout_secs: 300,
+                working_dir: None,
+                inherit_env: false,
+                allowed_env_vars: Vec::new(),
+                max_output_bytes: 1024,
+                commands: Vec::new(),
+            });
+        }
+        let mut router = opencrab_llm::router::LlmRouter::new();
+        router.add_provider(Arc::new(CapturingStub { seen }));
+        state.llm_router.swap(router);
+        state
+    }
+
+    /// #333 の本丸: sub-engine の**実行 caller** が親ターンの caller を継承すること、
+    /// および `spawn_subtask` 経由の迂回が閉じること。
+    ///
+    /// sub-run が LLM へ提示するツール一覧を観測する。`execute_shell` / `ws_read` は
+    /// #330 で owner_only なので、提示されていれば sub-run の実行 caller は Owner、
+    /// 提示されていなければ Agent。
+    /// - **親 Owner → サブ Owner**: `execute_shell` / `ws_read` が見える（実装作業が死なない）。
+    /// - **親 Agent（外部由来ターン相当）→ サブ Agent**: どちらも消える
+    ///   （`spawn_subtask` を挟んでローカル操作へ昇格する迂回路の封鎖）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sub_engine_inherits_parent_caller_and_closes_spawn_bypass() {
+        let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let state = state_with_shell_and_capture(seen.clone());
+        let reg = registry();
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(reg.clone()), None);
+
+        // --- 親 Owner ---
+        let owner_ctx =
+            GatewayCallContext::new(GatewayCaller::Owner, "agent-x").with_session_id("sub-owner-1");
+        let res = actions
+            .execute("spawn_subtask", &json!({ "task": "t" }), &owner_ctx)
+            .await;
+        assert!(res.success, "spawn(owner): {:?}", res.error);
+        assert!(
+            wait_until(|| !seen.lock().unwrap().is_empty()).await,
+            "親 Owner の sub-run が LLM を呼ばない"
+        );
+        let owner_tools = seen.lock().unwrap().last().unwrap().clone();
+        assert!(
+            owner_tools.iter().any(|t| t == "execute_shell"),
+            "親 Owner のサブ run に execute_shell が出ない（継承されていない / #333）: {owner_tools:?}"
+        );
+        assert!(
+            owner_tools.iter().any(|t| t == "ws_read"),
+            "親 Owner のサブ run に ws_read が出ない（#333）: {owner_tools:?}"
+        );
+
+        // 観測を混ぜないよう、次の spawn の前に走行中サブを止めて登録簿を空にする。
+        let owner_calls = seen.lock().unwrap().len();
+        for id in reg.iter().map(|e| e.key().clone()).collect::<Vec<_>>() {
+            if let Some(e) = reg.get(&id) {
+                e.abort_handle.abort();
+            }
+        }
+        reg.clear();
+
+        // --- 親 Agent（外部由来ターン相当）---
+        let agent_ctx =
+            GatewayCallContext::new(GatewayCaller::Agent, "agent-x").with_session_id("sub-agent-1");
+        let res2 = actions
+            .execute("spawn_subtask", &json!({ "task": "t" }), &agent_ctx)
+            .await;
+        assert!(res2.success, "spawn(agent): {:?}", res2.error);
+        assert!(
+            wait_until(|| seen.lock().unwrap().len() > owner_calls).await,
+            "親 Agent の sub-run が LLM を呼ばない"
+        );
+        let agent_tools = seen.lock().unwrap().last().unwrap().clone();
+        assert!(
+            !agent_tools.iter().any(|t| t == "execute_shell"),
+            "外部 Agent 親のサブ run に execute_shell が出た = spawn_subtask 迂回が開いている（#333）: {agent_tools:?}"
+        );
+        assert!(
+            !agent_tools.iter().any(|t| t == "ws_read"),
+            "外部 Agent 親のサブ run に ws_read が出た（#333）: {agent_tools:?}"
+        );
+
+        for id in reg.iter().map(|e| e.key().clone()).collect::<Vec<_>>() {
+            if let Some(e) = reg.get(&id) {
+                e.abort_handle.abort();
+            }
+        }
     }
 
     /// セッション必須ガード（fail-closed）: session_id が無い文脈では起動できない。
