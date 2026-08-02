@@ -31,8 +31,8 @@ use crate::subtask::SubtaskRegistry;
 /// キーの意味は経路が決める:
 /// - REST（`POST /api/agents/{id}/messages`）: session_id（`agent-msg-{agent}-{user}`）。
 ///   1 セッションの走行中 subtask をまとめ、session の `status` 整合にも使う。
-/// - web / Nostr: session_id（`web-...` / `nostr-{agent}-{pubkey}`）。inbound と
-///   完了 resume で同一 registry を共有する。
+/// - web / Nostr: session_id（`web-...` / `nostr-{agent}`）。inbound と完了 resume で
+///   同一 registry を共有する（Nostr は #323 で agent 単位の 1 本）。
 /// - heartbeat: agent_id。tick / チャンネルを跨いで同一 registry を共有し、
 ///   前 tick で dispatch した subtask を後続 tick の `cancel_subtask` から停止できる。
 #[derive(Default)]

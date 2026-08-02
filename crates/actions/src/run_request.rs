@@ -13,6 +13,34 @@ use crate::subtask::{SubtaskCompletionSink, SubtaskRegistry};
 use crate::subtask_notify::SubtaskRunNotifier;
 use crate::traits::CallerIdentity;
 
+/// 走行中注入（#289）の対象範囲（#323 / B2）。
+///
+/// #289 の走行中注入はターン開始後に届いたユーザー発言を、走っているターンの入力へ
+/// 差分で足す。session スコープ（`speaker_id != agent_id`）で引くため、ゲートウェイ既定は
+/// 「自分以外の全発言」（[`Self::AllOthers`]）。
+///
+/// Nostr は #323 で **1 エージェント = 1 セッション**になり、全ての相手が 1 本の履歴に
+/// 同居する。ここで走行中注入を session スコープのまま使うと、`reply_target`（返信先）を
+/// 相手 A のノートに固定したターンの最中に相手 B の新着が注入され、**B に答えた本文が
+/// A のノートへの返信として公開リレーへ飛ぶ**（誤爆）。旧規約（`nostr-{agent}-{pubkey}`）
+/// では session が相手ごとに分かれていたため「同じ相手の連投」しか注入されず、注入内容と
+/// 返信先が常に一致していた。その性質を範囲で復元する:
+/// - [`Self::OnlySpeaker`]: inbound は返信中の相手（`event.pubkey`）の連投だけ注入する
+///   （旧 per-相手 挙動の復元）。
+/// - [`Self::Silent`]: resume は生きた相手の識別子を持たない（`SubtaskSettled` に相手
+///   pubkey は載っていない）ので、何も注入しない。相手の連投は転記済みで、次の inbound
+///   ターンで自然に拾われるため取りこぼしにはならない。
+#[derive(Debug, Clone, Default)]
+pub enum LiveInboundScope {
+    /// 自分（agent_id）以外の全発言を注入する（Discord / heartbeat / REST の既定）。
+    #[default]
+    AllOthers,
+    /// この `speaker_id` の発言だけ注入する（Nostr inbound = 返信中の相手）。
+    OnlySpeaker(String),
+    /// 何も注入しない（Nostr resume = 生きた相手が不定）。
+    Silent,
+}
+
 /// 1回のエージェント応答実行の要求。
 ///
 /// `RunRequest::new(...)` が必須項目、`with_*` が省略可能項目。
@@ -52,6 +80,9 @@ pub struct RunRequest {
     ///
     /// depth0 の通常ターンでは使わない（サブタスクの lifecycle 通知は spawn 側が持つ）。
     pub run_notifier: Option<Arc<dyn SubtaskRunNotifier>>,
+    /// 走行中注入（#289）の対象範囲（#323 / B2）。既定は [`LiveInboundScope::AllOthers`]
+    /// （Discord / heartbeat / REST の従来挙動）。Nostr だけが相手を絞る。
+    pub live_inbound_scope: LiveInboundScope,
 }
 
 impl RunRequest {
@@ -82,6 +113,7 @@ impl RunRequest {
             subtask_registry: None,
             reply_target: None,
             run_notifier: None,
+            live_inbound_scope: LiveInboundScope::AllOthers,
         }
     }
 
@@ -143,6 +175,13 @@ impl RunRequest {
     /// 再入した `run_agent_response` が進捗フックとツールイベント sink を配線する。
     pub fn with_run_notifier(mut self, notifier: Arc<dyn SubtaskRunNotifier>) -> Self {
         self.run_notifier = Some(notifier);
+        self
+    }
+
+    /// 走行中注入（#289）の対象範囲を指定する（#323 / B2）。既定は `AllOthers`。
+    /// Nostr の inbound は返信中の相手（`OnlySpeaker`）に、resume は `Silent` に絞る。
+    pub fn with_live_inbound_scope(mut self, scope: LiveInboundScope) -> Self {
+        self.live_inbound_scope = scope;
         self
     }
 }

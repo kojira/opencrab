@@ -143,6 +143,27 @@ impl NostrEvent {
     }
 }
 
+/// 会話履歴へ焼き込む outbound（エージェント自身の返信）の宛先アンカー（#323 / B1）。
+///
+/// [`NostrEvent::inbound_anchor`] の対。inbound は `from` / `target` を本文へ残すが、
+/// エージェント自身の返信行は宛先を持たない。#323 で 1 セッションに複数の相手が同居する
+/// ようになったため、宛先を残さないと履歴は `[相手A] 発言 / [agent] 返信 / [相手B] 発言 /
+/// [agent] 返信` と並び、**どの返信が誰宛だったかを隣接推測でしか復元できない**。
+/// 明示 `nostr_reply(target=…)` のターンは tool_call 行に痕跡が残るが、暗黙返信経路
+/// （`sink.rs` の `cli.reply`）は tool_call 行を作らないので痕跡ゼロだった。
+/// 返信先ノート（`reply_target` = 対応する inbound の `target` と同じ値）を焼き、
+/// inbound_anchor との対応関係を明示する。
+///
+/// **公開リレーへ送る本文には混ぜない**（記録専用）。inbound_anchor が受信本文の記録・
+/// 転記だけに載りリレーへ出ないのと対称に、この値も `record_outbound_reply` の記録テキスト
+/// にだけ付け、`cli.reply` / 明示 `nostr_reply` で送る本文には一切付けない。
+pub fn outbound_reply_anchor(reply_target: &str) -> String {
+    format!(
+        "[Nostr reply target={target}]",
+        target = sanitize_anchor_field(reply_target),
+    )
+}
+
 /// nostaro watch の stdout 1行を [`NostrEvent`] にパースする。
 /// JSON でない行（ログ・空行）は `None`（呼び出し側でスキップ）。
 pub fn parse_watch_line(line: &str) -> Option<NostrEvent> {
@@ -309,6 +330,28 @@ mod tests {
         let mut e = ev(1);
         e.npub = None;
         assert_eq!(e.author_key(), "0011223344556677");
+    }
+
+    /// [#323/B1] outbound アンカーは inbound の `target` と同じ値を焼き、1 行に収まる。
+    #[test]
+    fn test_outbound_reply_anchor_carries_target() {
+        assert_eq!(
+            outbound_reply_anchor("note1target"),
+            "[Nostr reply target=note1target]"
+        );
+        // inbound_anchor の target と突き合わせられる（同じ note を指す）。
+        assert!(ev(1).inbound_anchor().contains(
+            outbound_reply_anchor("note1target")
+                .trim_start_matches("[Nostr reply ")
+                .trim_end_matches(']')
+        ));
+    }
+
+    /// [#323/B1] 制御文字は落とし必ず 1 行（履歴の他行と混ざらない）。
+    #[test]
+    fn test_outbound_reply_anchor_is_single_line() {
+        let anchor = outbound_reply_anchor("note1\nfake]\n[Nostr reply target=evil");
+        assert!(!anchor.contains('\n'), "改行が混ざらない: {anchor}");
     }
 
     #[test]

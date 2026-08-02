@@ -1176,7 +1176,11 @@ impl SystemGatewayActions {
             // dispatch 未配線（走行中 subtask を追跡していない）→ 不在扱い。
             return err(format!("cancel_subtask: subtask '{subtask_id}' not found"));
         };
-        let is_owner = ctx.caller == GatewayCaller::Owner;
+        // 停止の認可は caller で決める（#331）。Owner は常に許可、非オーナーは親セッション
+        // 一致に加えて subtask を spawn したターンの呼び出し元以上の信頼度が要る。
+        // `is_owner` bool ではなく caller を丸ごと渡すのは、1本化で「セッション一致」だけでは
+        // 見知らぬ相手のターンから Owner 由来の subtask を止められてしまうため。
+        let caller: opencrab_actions::CallerIdentity = (&ctx.caller).into();
         match neutral_cancel_subtask(
             registry,
             &self.state.db,
@@ -1185,7 +1189,7 @@ impl SystemGatewayActions {
             // `spawn_subtask` が insert したものと同一 Arc（`AppState` 共有）。
             Some(&self.state.subtask_notifiers),
             subtask_id,
-            is_owner,
+            caller,
             ctx.session_id.as_deref(),
         ) {
             CancelOutcome::Cancelled => GatewayActionResult {
@@ -1254,18 +1258,35 @@ impl SystemGatewayActions {
                 }
             });
 
-        // 所有権ゲート（#64）: subtask_id は LLM 由来の引数なので、呼び出し元セッションの
-        // サブタスク（自分自身 = session_id 一致、または自分の子 = parent_session_id 一致）
-        // 以外は拒否する。無検証だと他セッションへの進捗ログ書き込み・メインエンジン
-        // 再呼び出しを誘発できてしまう。
+        // 所有権ゲート（#64 / #331）: subtask_id は LLM 由来の引数なので、呼び出し元
+        // セッションのサブタスク（自分自身 = session_id 一致、または自分の子 =
+        // parent_session_id 一致）以外は拒否する。無検証だと他セッションへの進捗ログ
+        // 書き込み・メインエンジン再呼び出しを誘発できてしまう。
         if let Some(entry) = &subtask_entry {
-            if entry.session_id != current_session_id
-                && entry.parent_session_id != current_session_id
-            {
+            let is_self = entry.session_id == current_session_id;
+            let is_parent = entry.parent_session_id == current_session_id;
+            if !is_self && !is_parent {
                 let id = &entry.subtask_id;
                 return err(format!(
                     "{REJECTION_CODE_PREFIX}report_progress: subtask '{id}' は呼び出し元セッションのサブタスクではありません"
                 ));
+            }
+            // 親経由の代理報告（`is_parent`）は、subtask を spawn したターンの呼び出し元
+            // （`entry.caller`）を自分の権限で管理できるときだけ許す（#331）。セッションを
+            // agent 単位で 1 本にした（#323）ため、`is_parent` だけだと見知らぬ相手
+            // （caller=Agent）のターンから Owner 由来の subtask へ進捗を差し込み、親会話の
+            // resume（メインエンジン再呼び出し）を誘発できてしまう。
+            // **`is_self`（subtask 本人 = depth>=1 の自己申告）は無条件で許す** — ここに
+            // caller 判定を掛けるとサブエージェント自身の進捗報告が壊れる（自セッションは
+            // 本人しか名乗れないので攻撃経路にならない）。
+            if !is_self {
+                let caller: opencrab_actions::CallerIdentity = (&ctx.caller).into();
+                if !caller.can_manage_subtask_of(&entry.caller) {
+                    let id = &entry.subtask_id;
+                    return err(format!(
+                        "{REJECTION_CODE_PREFIX}report_progress: subtask '{id}' は別の権限で起動されたため、このターンからは進捗報告できません"
+                    ));
+                }
             }
         }
 
@@ -2910,6 +2931,143 @@ mod tests {
                 .any(|m| m.contains("親からの代理報告")),
             "親セッションのログへ記録される"
         );
+    }
+
+    /// #331: セッションを 1 本にした（#323）結果、親経路（`parent_session_id` 一致）だけでは
+    /// 見知らぬ相手（caller=Agent）のターンから Owner 由来の subtask へ進捗を差し込め、親会話の
+    /// resume（メインエンジン再呼び出し）を誘発できてしまう。caller ゲートでこれを塞ぐ。
+    #[tokio::test]
+    async fn report_progress_non_owner_cannot_report_owner_spawned_via_parent() {
+        let state = crate::test_app_state();
+        // オーナー発のターンが spawn した subtask。親は 1本化セッション（呼び出し元と一致）。
+        let registry = registry_with_caller(
+            "st-1",
+            "subtask-st-1",
+            "nostr-agent-a",
+            opencrab_actions::CallerIdentity::Owner,
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        // 見知らぬ相手（caller=Agent）のターン。session は親と一致している（1本化）。
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
+            .with_session_id("nostr-agent-a");
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "sneaky", "subtask_id": "st-1" }),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success, "非オーナーは Owner 由来へ進捗を差し込めない");
+        assert!(
+            r.error.unwrap().starts_with(REJECTION_CODE_PREFIX),
+            "権限拒否は構造的マーカー付き"
+        );
+        // 親ログを汚さない & resume も起こさない。
+        assert!(progress_messages(&state, "nostr-agent-a").is_empty());
+        tokio::time::sleep(PROGRESS_DEBOUNCE_DELAY + Duration::from_secs(1)).await;
+        assert!(sink.settled().is_empty(), "resume を誘発しない");
+    }
+
+    /// #331: 同じ状況でも Owner のターンからは従来どおり進捗を代理報告できる。
+    #[tokio::test]
+    async fn report_progress_owner_can_report_owner_spawned_via_parent() {
+        let state = crate::test_app_state();
+        let registry = registry_with_caller(
+            "st-1",
+            "subtask-st-1",
+            "nostr-agent-a",
+            opencrab_actions::CallerIdentity::Owner,
+        );
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+
+        let ctx = GatewayCallContext::new(GatewayCaller::Owner, "agent-x")
+            .with_session_id("nostr-agent-a");
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "owner 代理報告", "subtask_id": "st-1" }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "Owner のターンからは通る: {:?}", r.error);
+        assert!(progress_messages(&state, "nostr-agent-a")
+            .iter()
+            .any(|m| m.contains("owner 代理報告")));
+    }
+
+    /// #331: サブエージェント自身（depth>=1・自セッション）の進捗報告は、subtask が Owner 由来
+    /// でも通る。self 経路には caller ゲートを掛けない（掛けると進捗報告が死ぬ）。自セッションは
+    /// 本人しか名乗れないので攻撃経路にはならない。
+    #[tokio::test]
+    async fn report_progress_subagent_self_report_survives_for_owner_spawned() {
+        let state = crate::test_app_state();
+        let registry = registry_with_caller(
+            "st-1",
+            "subtask-st-1",
+            "nostr-agent-a",
+            opencrab_actions::CallerIdentity::Owner,
+        );
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(registry), None);
+
+        // subtask 本人（sub-engine = caller Agent, depth 1, 自セッション）。
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "作業中です" }),
+                &sub_ctx("subtask-st-1"),
+            )
+            .await;
+        assert!(
+            r.success,
+            "サブエージェント自身の進捗報告は Owner 由来でも通る: {:?}",
+            r.error
+        );
+        assert!(progress_messages(&state, "nostr-agent-a")
+            .iter()
+            .any(|m| m == "作業中です"));
+    }
+
+    /// #331: Agent 由来の subtask は従来どおり Agent のターンから親経由で代理報告できる
+    /// （正常系を壊さない）。cancel 側の `cancel_subtask_agent_can_cancel_agent_spawned` に
+    /// 対応する report_progress 版。caller=Agent / spawner=Agent なので caller ゲートを通る。
+    #[tokio::test]
+    async fn report_progress_agent_can_report_agent_spawned_via_parent() {
+        let state = crate::test_app_state();
+        // 既定の caller=Agent。親は 1本化セッション（呼び出し元と一致）、subtask 本体は別セッション。
+        let registry = registry_with("st-1", "subtask-st-1", "nostr-agent-a");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        // Agent のターン。session は親と一致（is_parent 経路）だが subtask 本体とは別。
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
+            .with_session_id("nostr-agent-a");
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "agent 代理報告", "subtask_id": "st-1" }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            r.success,
+            "Agent 由来の subtask は Agent のターンから親経由で代理報告できる: {:?}",
+            r.error
+        );
+        assert!(progress_messages(&state, "nostr-agent-a")
+            .iter()
+            .any(|m| m.contains("agent 代理報告")));
     }
 
     /// セッション必須ガード（fail-closed）: session_id が無い文脈では実行できない。
