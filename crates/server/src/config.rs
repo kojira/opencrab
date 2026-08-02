@@ -28,6 +28,9 @@ pub struct AppConfig {
     /// スリープ時スキル棚卸し（自己 curation ループ）。
     #[serde(default)]
     pub skill_consolidation: SkillConsolidationConfig,
+    /// 記憶カテゴリ層（#313/#344）の sleep 中自動割当。既定オフ（#345）。
+    #[serde(default)]
+    pub category_maintenance: CategoryMaintenanceConfig,
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
@@ -276,6 +279,32 @@ fn default_sc_min_interval() -> i64 {
 }
 fn default_sc_include_archived() -> i64 {
     3
+}
+
+/// 記憶カテゴリ層の sleep 中自動割当の設定（#345）。
+///
+/// #313/#344 で入ったカテゴリ層は、sleep 中に「種まき + 未分類 topic の LLM 割当」を
+/// 毎 tick 行う。#313 の方針が「エージェント自身に整理させる（一期一会）」へ変わり、
+/// いまの単一ラベル・sticky・12件ずつの割当は作り直しになるため、作り直す前提の処理へ
+/// LLM 費用を払い続けないよう、`enabled` で丸ごと止められるようにする。**既定オフ**。
+/// `skill_consolidation` と同じく LLM を消費する自律処理なので同じ流儀（opt-in）に揃える。
+#[derive(Debug, Deserialize, Clone)]
+pub struct CategoryMaintenanceConfig {
+    /// 種まき + 割当ブロック全体の on/off。既定 false（#345）。
+    #[serde(default = "default_category_maintenance_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for CategoryMaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_category_maintenance_enabled(),
+        }
+    }
+}
+
+fn default_category_maintenance_enabled() -> bool {
+    false
 }
 
 /// evaluator（契約に対する独立 rubric 評価）の設定。
