@@ -2,9 +2,11 @@
 //!
 //! web ゲートウェイ（[`crate::web_runner_impl`]）と REST
 //! （[`crate::api::agents_messages`]）は、申告された経路（`platform`）が違うだけで
-//! まったく同じ手順で呼び出し元を導出する: 信頼済みユーザーの表を
-//! `(経路, 識別子, エージェント)` で引き、無ければ Discord 設定の owner と突き合わせる。
-//! 2 箇所に写経されていると片方だけ緩められる余地が残るので、ここに閉じる。
+//! まったく同じ手順で呼び出し元を導出する: Discord 設定の owner と突き合わせ、
+//! 一致しなければ信頼済みユーザーの表を `(経路, 識別子, エージェント)` で引く。
+//! 2 箇所に写経されていると片方だけ緩められる余地が残るので、ここに閉じる。判定本体は
+//! Nostr（#319）と共有する [`resolve_caller_identity_with_owner`] の**1 実装**で、
+//! [`resolve_caller_identity`] は Discord 設定の owner を取り出してそこへ委譲するだけ。
 //!
 //! ## 動かしてはいけない線
 //! - **owner の判定に使う設定は Discord の owner のまま**（web / REST 専用の owner を
@@ -21,38 +23,38 @@ use opencrab_db::queries::TrustedUserPermission;
 
 /// `(経路, 識別子, エージェント)` から呼び出し元の権限を導出する。
 ///
-/// 優先順: 自経路の信頼済みユーザー行 → Discord 設定の owner → `Agent`（最小権限）。
+/// **owner 識別子を Discord 設定から取り出して [`resolve_caller_identity_with_owner`] に
+/// 委譲する**（Nostr と共有する 1 実装）。web / REST は専用の owner を持たず、Discord
+/// 設定の owner だけが owner 判定を決める（モジュール冒頭の「動かしてはいけない線」）。
+///
+/// 優先順は委譲先に従い **owner 判定が先** → 自経路の信頼済みユーザー行 → `Agent`
+/// （最小権限）。owner が信頼済みユーザーとしても登録されていれば `Owner` を採る
+/// （Discord の [`crate::agent_runner_impl`] の `resolve_caller` と同じ向き）。
+///
+/// 撤去した互換読み（#214→#159）の手掛かりは、判定が最小権限（`Agent`）に落ちた
+/// ときだけ出す。`Agent` になるのは「owner でもなく自経路の行も無い」ときだけなので、
+/// これは旧実装の `None` 分岐（表 miss かつ非 owner）と同じ条件。
 pub fn resolve_caller_identity(
     conn: &rusqlite::Connection,
     platform: &str,
     user_id: &str,
     agent_id: &str,
 ) -> CallerIdentity {
-    match opencrab_db::queries::get_trusted_user(conn, platform, user_id, agent_id)
-        .map(|u| u.permission)
-    {
-        Some(TrustedUserPermission::CoAgent) => CallerIdentity::CoAgent {
-            agent_id: user_id.to_string(),
-        },
-        // **表の `owner` はここでは Owner にしない**（従来どおり）。web / REST の
-        // owner 判定は Discord 設定の owner だけが決める（上の「動かしてはいけない線」）。
-        // 列挙型にしたので、この意図的な差は網羅的な match として明示できる。
-        Some(TrustedUserPermission::Owner) | Some(TrustedUserPermission::User) => {
-            CallerIdentity::TrustedUser
-        }
-        None => {
-            let cfg = opencrab_db::queries::get_agent_discord_config(conn, agent_id);
-            let is_owner = matches!(cfg, Ok(Some(ref c)) if crate::api::is_owner_id(&c.owner_discord_id, user_id));
-            if is_owner {
-                CallerIdentity::Owner
-            } else {
-                // ここへ落ちた＝この呼び出し元は信頼されない。互換読みの時代なら
-                // 通っていたかもしれないので、そのときだけ移行の手掛かりを出す。
-                warn_legacy_row_no_longer_read(conn, platform, user_id, agent_id);
-                CallerIdentity::Agent
-            }
-        }
+    // web / REST の owner 判定は Discord 設定の owner が決める（専用 owner を新設しない）。
+    // 設定行が無い / 引けない = オーナー未設定（空文字は誰とも一致しない）。
+    let owner_id = opencrab_db::queries::get_agent_discord_config(conn, agent_id)
+        .ok()
+        .flatten()
+        .map(|c| c.owner_discord_id)
+        .unwrap_or_default();
+    let identity =
+        resolve_caller_identity_with_owner(conn, platform, &[user_id], agent_id, &owner_id);
+    if matches!(identity, CallerIdentity::Agent) {
+        // ここへ落ちた＝この呼び出し元は信頼されない。互換読みの時代なら通っていた
+        // かもしれないので、そのときだけ移行の手掛かりを出す（判定には使わない）。
+        warn_legacy_row_no_longer_read(conn, platform, user_id, agent_id);
     }
+    identity
 }
 
 /// オーナー識別子を呼び出し側が与える版（#319）。
@@ -364,6 +366,70 @@ mod tests {
             CallerIdentity::CoAgent {
                 agent_id: "rest-bot".to_string()
             }
+        );
+    }
+
+    /// Discord 設定に owner を置く（web / REST の owner 判定の出どころ）。
+    fn set_discord_owner(conn: &rusqlite::Connection, agent_id: &str, owner_discord_id: &str) {
+        opencrab_db::queries::upsert_agent_discord_config(
+            conn,
+            &opencrab_db::queries::AgentDiscordConfigRow {
+                agent_id: agent_id.to_string(),
+                bot_token: String::new(),
+                owner_discord_id: owner_discord_id.to_string(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+    }
+
+    /// owner 判定が先（委譲後の順序）。owner が信頼済みユーザーとしても登録されて
+    /// いれば `Owner` を採る。旧実装（表が先）では `TrustedUser` / `CoAgent` に
+    /// 止まっていた場面。owner を最小権限へ降格させないための固定。
+    #[test]
+    fn owner_takes_priority_over_a_trusted_row() {
+        let conn = opencrab_db::init_memory().unwrap();
+        set_discord_owner(&conn, "agent-1", "owner-id");
+        // owner が自経路の行としても User / CoAgent で登録されている。
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "owner-id",
+            TrustedUserPermission::User,
+        );
+        assert_eq!(
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "owner-id", "agent-1"),
+            CallerIdentity::Owner,
+            "owner が表の行に隠れて降格した"
+        );
+        let conn = opencrab_db::init_memory().unwrap();
+        set_discord_owner(&conn, "agent-1", "owner-id");
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "owner-id",
+            TrustedUserPermission::CoAgent,
+        );
+        assert_eq!(
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "owner-id", "agent-1"),
+            CallerIdentity::Owner
+        );
+    }
+
+    /// owner でない自経路の行は従来どおり効く（委譲で表照合が消えていない）。
+    #[test]
+    fn non_owner_trusted_row_is_unchanged_after_delegation() {
+        let conn = opencrab_db::init_memory().unwrap();
+        set_discord_owner(&conn, "agent-1", "owner-id");
+        register(
+            &conn,
+            TRUSTED_PLATFORM_REST,
+            "someone-else",
+            TrustedUserPermission::User,
+        );
+        assert_eq!(
+            resolve_caller_identity(&conn, TRUSTED_PLATFORM_REST, "someone-else", "agent-1"),
+            CallerIdentity::TrustedUser
         );
     }
 
