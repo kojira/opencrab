@@ -545,7 +545,111 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 23,
+        description: "memory index: node_type に 'category'/'meta' を追加 + カテゴリ層メンバー表 (issue #313)",
+        // **CHECK 制約の拡張（許可値を増やす）＋ 参照表の新設のみ。既存の行・列は保持する。**
+        //
+        // 背景: `memory_index_nodes.node_type` には CHECK 制約があり、`'category'` /
+        // `'meta'` は許可集合に無かった（`crates/db/src/schema.rs` の SCHEMA_SQL / v5）。
+        // 加えて `insert_index_node` は `INSERT OR IGNORE` なので、CHECK 違反は**エラーに
+        // ならず黙って無視される**（＝カテゴリノードを作ったつもりで消える）。SQLite は
+        // CHECK を `ALTER` で広げられないため、v5 / v21 と同じ**テーブル再構築**で許可値を
+        // 2 つ足す。全行を無条件コピーするので時系列ツリー（period/session/topic/daily）は
+        // 無傷。孤児 parent_id は NULL に落とす（v5 の流儀）。
+        //
+        // カテゴリと topic の紐付けは `memory_category_members`（参照表）で持つ。parent 軸を
+        // 使わないので topic は session 親を保持し、日付から辿る道が切れない（#313 要件）。
+        //
+        // 冪等性（v21 の流儀＝肯定形）: 現行スキーマの CHECK が既に `'category'` と `'meta'` を
+        // 含むなら再構築しない。判定が外れても「再構築が走る」側に倒れる（再構築は冪等）。
+        // 新規DB は SCHEMA_SQL 側で既に広い CHECK を持つのでここでは再構築されない。
+        //
+        // 切り戻し（データは可逆・古いバイナリは版番号も戻すこと）: category/meta ノードと
+        // member 行は sleep 中に作られる派生データなので、削除すれば原状復帰する。
+        //   BEGIN;
+        //   DELETE FROM memory_index_nodes WHERE node_type IN ('category','meta');
+        //   DROP TABLE IF EXISTS memory_category_members;
+        //   -- （厳密に旧 CHECK へ戻すなら v5 と同型の再構築で狭める）
+        //   PRAGMA user_version = 22;
+        //   COMMIT;
+        up: |conn| {
+            let widened: bool = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_index_nodes'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(|sql| sql.contains("'category'") && sql.contains("'meta'"))
+                .unwrap_or(false);
+            if !widened {
+                conn.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+                conn.execute_batch(
+                    "CREATE TABLE memory_index_nodes_new (
+                        id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL,
+                        parent_id TEXT REFERENCES memory_index_nodes_new(id) ON DELETE CASCADE,
+                        node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly','category','meta')),
+                        source_type TEXT NOT NULL DEFAULT 'session_log',
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        start_log_id INTEGER,
+                        end_log_id INTEGER,
+                        source_session_id TEXT,
+                        date_from TEXT,
+                        date_to TEXT,
+                        depth INTEGER NOT NULL DEFAULT 0,
+                        child_count INTEGER NOT NULL DEFAULT 0,
+                        token_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        short_id TEXT,
+                        keywords_json TEXT NOT NULL DEFAULT '[]',
+                        summary_refreshed_at TEXT
+                    );
+                    INSERT INTO memory_index_nodes_new
+                        (id, agent_id, parent_id, node_type, source_type, title, summary,
+                         start_log_id, end_log_id, source_session_id, date_from, date_to,
+                         depth, child_count, token_count, created_at, updated_at, short_id,
+                         keywords_json, summary_refreshed_at)
+                        SELECT id, agent_id, parent_id, node_type, source_type, title, summary,
+                               start_log_id, end_log_id, source_session_id, date_from, date_to,
+                               depth, child_count, token_count, created_at, updated_at, short_id,
+                               keywords_json, summary_refreshed_at
+                        FROM memory_index_nodes;
+                    UPDATE memory_index_nodes_new SET parent_id = NULL
+                        WHERE parent_id IS NOT NULL
+                          AND parent_id NOT IN (SELECT id FROM memory_index_nodes_new);
+                    DROP TABLE memory_index_nodes;
+                    ALTER TABLE memory_index_nodes_new RENAME TO memory_index_nodes;
+                    CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
+                    CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
+                    CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_memory_index_nodes_source_type ON memory_index_nodes(agent_id, source_type);",
+                )?;
+            }
+            conn.execute_batch(MEMORY_CATEGORY_MEMBERS_SQL)?;
+            Ok(())
+        },
+    },
 ];
+
+/// カテゴリ層メンバー表（topic ↔ category の参照, issue #313）。
+///
+/// SCHEMA_SQL 内の同名ブロックと文面を揃える（新規DBは SCHEMA_SQL、既存DBは v23 で
+/// 同じ表に収束する）。FK は張らない（追記的・可逆を優先: category/meta を切り戻しで
+/// 消しても member 行が残るだけで害が無い）。
+const MEMORY_CATEGORY_MEMBERS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS memory_category_members (
+    agent_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_category_members_cat ON memory_category_members(agent_id, category_id);
+";
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
 const AGENT_NOSTR_CONFIG_SQL: &str = "
@@ -1676,7 +1780,7 @@ CREATE TABLE IF NOT EXISTS memory_index_nodes (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
     parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
-    node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')),
+    node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly','category','meta')),
     source_type TEXT NOT NULL DEFAULT 'session_log',
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
@@ -1696,6 +1800,23 @@ CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
 CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL;
+
+-- ============================================
+-- 記憶インデックス: カテゴリ層メンバー（topic ↔ category の参照, issue #313）
+-- ============================================
+-- 時系列ツリー（root→period→session→topic）の parent_id を壊さないため、topic の
+-- カテゴリ所属は parent 軸ではなく**参照**で持つ。1 topic = 高々 1 category（sticky
+-- 割当）。一度付いたら動かさない＝「同じ入力→同じ結果」の冪等性の土台。
+-- node への FK は張らない（category/meta を切り戻しで消しても member 行が残るだけで
+-- 害が無く、join 側で解決する。追記的・可逆を優先）。
+CREATE TABLE IF NOT EXISTS memory_category_members (
+    agent_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_category_members_cat ON memory_category_members(agent_id, category_id);
 
 -- ============================================
 -- 記憶インデックス: ウォーターマーク（進捗管理）
@@ -2451,6 +2572,94 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(unique_pairs, 1, "新規 DB に v21 の一意制約が無い");
+    }
+
+    /// v23: node_type の CHECK を `'category'`/`'meta'` へ拡張し、参照表を新設する。
+    /// v22 相当（狭い CHECK）の既存 DB から、既存の時系列ノードを1件も失わずに
+    /// 移行できること、移行後は category/meta が実際に**保存できる**こと（`INSERT OR
+    /// IGNORE` による沈黙が起きないこと）を固定する。
+    #[test]
+    fn memory_index_category_migration_v23_widens_check_and_preserves_rows() {
+        let conn = crate::init_memory().expect("init");
+
+        // v22 相当の既存 DB を模す: 狭い CHECK のテーブルへ作り直し、時系列ツリーを積む。
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        conn.execute_batch(
+            "DROP TABLE memory_index_nodes;
+             CREATE TABLE memory_index_nodes (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
+                node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')),
+                source_type TEXT NOT NULL DEFAULT 'session_log',
+                title TEXT NOT NULL, summary TEXT NOT NULL,
+                start_log_id INTEGER, end_log_id INTEGER, source_session_id TEXT,
+                date_from TEXT, date_to TEXT,
+                depth INTEGER NOT NULL DEFAULT 0, child_count INTEGER NOT NULL DEFAULT 0,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, short_id TEXT,
+                keywords_json TEXT NOT NULL DEFAULT '[]', summary_refreshed_at TEXT
+             );
+             INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, title, summary, created_at, updated_at)
+             VALUES ('r', 'a1', NULL, 'root', 'root', 's', '2026-01-01', '2026-01-01'),
+                    ('p', 'a1', 'r', 'period', '2026-01', 's', '2026-01-01', '2026-01-01'),
+                    ('sess', 'a1', 'p', 'session', 'S', 's', '2026-01-01', '2026-01-01'),
+                    ('t', 'a1', 'sess', 'topic', 'Rust入門', 's', '2026-01-02', '2026-01-02');
+             DROP TABLE IF EXISTS memory_category_members;
+             PRAGMA user_version = 22;",
+        )
+        .unwrap();
+
+        // 狭い CHECK では category ノードは拒否される（＝移行が必要な証拠）。
+        assert!(
+            conn.execute(
+                "INSERT INTO memory_index_nodes (id, agent_id, node_type, title, summary, created_at, updated_at)
+                 VALUES ('c0', 'a1', 'category', 'X', '', '2026-01-01', '2026-01-01')",
+                [],
+            )
+            .is_err(),
+            "移行前は category が CHECK で拒否されるはず"
+        );
+
+        run_migrations(&conn, MIGRATIONS).expect("v23 migration");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 時系列ツリーは1件も失われていない。
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM memory_index_nodes ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, vec!["p", "r", "sess", "t"]);
+
+        // 移行後は category / meta が実際に保存できる（OR IGNORE の沈黙が起きない）。
+        conn.execute(
+            "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, created_at, updated_at)
+             VALUES ('cat1', 'a1', NULL, 'category', 'category', 'kojiraさんの教え', '', '2026-02-01', '2026-02-01'),
+                    ('meta1', 'a1', NULL, 'meta', 'category', 'ルール群', '', '2026-02-01', '2026-02-01')",
+            [],
+        )
+        .expect("移行後は category/meta を登録できる");
+
+        // 参照表が存在し、割当を保存できる（1 topic = 1 category の sticky）。
+        assert!(table_exists(&conn, "memory_category_members").unwrap());
+        conn.execute(
+            "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
+             VALUES ('a1', 't', 'cat1', '2026-02-01')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
+                 VALUES ('a1', 't', 'meta1', '2026-02-02')",
+                [],
+            )
+            .is_err(),
+            "同一 topic の二重割当は PK で拒否される（sticky）"
+        );
     }
 
     /// G. v1 DB が v2 マイグレーションでタスク台帳テーブルを獲得する。

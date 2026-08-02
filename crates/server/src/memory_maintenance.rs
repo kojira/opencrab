@@ -61,6 +61,10 @@ pub struct MaintenanceReport {
     pub keywords_backfilled: usize,
     pub rolled_up_month: Option<String>,
     pub skill_consolidated: bool,
+    /// カテゴリ層（#313）: 種まきで新設したカテゴリ数。
+    pub categories_seeded: usize,
+    /// カテゴリ層（#313）: 既存カテゴリへ割り当てた topic 数。
+    pub topics_categorized: usize,
 }
 
 impl MaintenanceReport {
@@ -69,6 +73,8 @@ impl MaintenanceReport {
             || self.keywords_backfilled > 0
             || self.rolled_up_month.is_some()
             || self.skill_consolidated
+            || self.categories_seeded > 0
+            || self.topics_categorized > 0
     }
 }
 
@@ -100,6 +106,8 @@ pub fn spawn_memory_maintenance_loop(state: AppState, interval_secs: u64) {
                             logs_indexed = report.logs_indexed,
                             keywords_backfilled = report.keywords_backfilled,
                             rolled_up_month = ?report.rolled_up_month,
+                            categories_seeded = report.categories_seeded,
+                            topics_categorized = report.topics_categorized,
                             "memory maintenance tick"
                         );
                     }
@@ -222,7 +230,30 @@ pub async fn run_maintenance_tick(
         }
     }
 
-    // ④ スキル棚卸し（自己 curation）。メモリ統合の後に走らせる（設計: 統合→振り返り）。
+    // ④ カテゴリ層（issue #313）: 種まき（LLM ゼロコール）＋ 未分類 topic の割当（≤1 コール）。
+    // sleep 中にのみ整理する（対話ターンでは走らせない = #291 の再来を避ける）。既存の
+    // rollup と同じく「1 tick 1 LLM コール / ロックを await 跨ぎで保持しない / sticky で冪等」。
+    // category/meta ノードは同一テーブルなので browse/search/retrieve から能動的に引ける。
+    match opencrab_core::memory_index::category::maintain_categories(
+        &state.db,
+        agent_id,
+        &llm,
+        &effective_model,
+        &persona_name,
+        personality.as_deref(),
+    )
+    .await
+    {
+        Ok((seeded, assigned)) => {
+            report.categories_seeded = seeded;
+            report.topics_categorized = assigned;
+        }
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "category maintenance failed");
+        }
+    }
+
+    // ⑤ スキル棚卸し（自己 curation）。メモリ統合の後に走らせる（設計: 統合→振り返り）。
     // 既定は無効（config skill_consolidation.enabled）。トリガ未達なら即 return。
     match crate::skill_consolidation::maybe_run_skill_consolidation(state, agent_id).await {
         Ok(ran) => report.skill_consolidated = ran,

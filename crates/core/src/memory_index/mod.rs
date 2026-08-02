@@ -1,5 +1,6 @@
 //! 階層型記憶インデックス
 
+pub mod category;
 pub mod context_section;
 pub mod graph_query;
 pub mod index_builder;
