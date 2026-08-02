@@ -3077,6 +3077,237 @@ fn agent_heartbeat_broken_interval_disables_and_below_floor_clamps_up() {
 }
 
 // ============================================
+// カテゴリ層（issue #313）
+// ============================================
+
+/// **回帰ガード**: `insert_index_node` は `INSERT OR IGNORE` なので、node_type の CHECK に
+/// `'category'`/`'meta'` が無いと**エラーにならず黙って落ちる**（作ったつもりで消える）。
+/// この沈黙を固定する: 挿入後に実際に読み戻せることを assert する。CHECK を狭めて
+/// 退行させたら、OR IGNORE で行が入らず get_index_node が None になりこのテストが落ちる。
+#[test]
+fn category_and_meta_nodes_persist_through_or_ignore_insert() {
+    let conn = setup();
+    for (id, ntype, sid) in [("cat1", "category", "c1"), ("meta1", "meta", "g1")] {
+        insert_index_node(
+            &conn,
+            &IndexNodeRow {
+                id: id.to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: ntype.to_string(),
+                source_type: "category".to_string(),
+                title: format!("title-{id}"),
+                summary: String::new(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                short_id: Some(sid.to_string()),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
+            },
+        )
+        .unwrap();
+        // 沈黙が起きていないこと（OR IGNORE で握り潰されず実際に保存されている）。
+        assert!(
+            get_index_node(&conn, id).unwrap().is_some(),
+            "{ntype} ノードが INSERT OR IGNORE で黙って落ちた（CHECK に {ntype} が無い退行）"
+        );
+    }
+}
+
+#[test]
+fn category_seed_and_assignment_queries_roundtrip() {
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+
+    // 種: curated long_term/<名前> を 2 件。
+    for (i, name) in ["Rustの学び", "Discord運用"].iter().enumerate() {
+        upsert_curated_memory(
+            &conn,
+            &CuratedMemoryRow {
+                id: format!("cm{i}"),
+                agent_id: "a1".to_string(),
+                category: format!("long_term/{name}"),
+                content: "…".to_string(),
+                created_at: now.to_string(),
+            },
+        )
+        .unwrap();
+    }
+    let seeds = list_long_term_category_seeds(&conn, "a1").unwrap();
+    assert_eq!(
+        seeds,
+        vec!["Discord運用".to_string(), "Rustの学び".to_string()]
+    );
+
+    // カテゴリツリーの根を確保（冪等）。
+    let root = ensure_category_root(&conn, "a1", now).unwrap();
+    assert_eq!(ensure_category_root(&conn, "a1", now).unwrap(), root);
+
+    // カテゴリノードを作り、トップレベルに現れる。
+    let cat = insert_category_node(&conn, "a1", &root, "Rustの学び", "", now).unwrap();
+    assert!(get_category_node_by_title(&conn, "a1", "Rustの学び")
+        .unwrap()
+        .is_some());
+    let tops = list_top_level_categories(&conn, "a1").unwrap();
+    assert_eq!(tops.len(), 1);
+
+    // topic を積み、未割当 → 割当 → sticky。
+    for (id, sid) in [("t1", "t1"), ("t2", "t2")] {
+        insert_index_node(
+            &conn,
+            &IndexNodeRow {
+                id: id.to_string(),
+                agent_id: "a1".to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
+                title: format!("topic-{id}"),
+                summary: "s".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: now.to_string(),
+                updated_at: now.to_string(),
+                short_id: Some(sid.to_string()),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(list_unassigned_topics(&conn, "a1", 10).unwrap().len(), 2);
+    assert!(assign_topic_to_category(&conn, "a1", "t1", &cat.id, now).unwrap());
+    // 二重割当は sticky で false（同じ入力で結果が変わらない）。
+    assert!(!assign_topic_to_category(&conn, "a1", "t1", &cat.id, now).unwrap());
+    assert_eq!(list_unassigned_topics(&conn, "a1", 10).unwrap().len(), 1);
+    let counts = count_category_members(&conn, "a1").unwrap();
+    assert_eq!(counts.get(&cat.id).copied(), Some(1));
+}
+
+/// 実データに近い規模（topic 数千件）でカテゴリ層のクエリが破綻しないことを確認する。
+/// LLM は使わず、割当の「頭脳」以外（未割当抽出・sticky 割当・件数集計・冪等性）を
+/// 実規模で検証する。CI を重くしないため #[ignore]（`--ignored` で明示実行）。
+#[test]
+#[ignore]
+fn category_layer_scales_to_thousands_of_topics() {
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+    let root = ensure_category_root(&conn, "a1", now).unwrap();
+    // 5 カテゴリを種として用意。
+    let cats: Vec<String> = (0..5)
+        .map(|i| {
+            insert_category_node(&conn, "a1", &root, &format!("カテゴリ{i}"), "", now)
+                .unwrap()
+                .id
+        })
+        .collect();
+
+    // 3,000 topic を積む（session_log ツリー）。
+    let n: i64 = 3000;
+    insert_index_node(
+        &conn,
+        &IndexNodeRow {
+            id: "s1".to_string(),
+            agent_id: "a1".to_string(),
+            parent_id: None,
+            node_type: "session".to_string(),
+            source_type: "session_log".to_string(),
+            title: "S".to_string(),
+            summary: String::new(),
+            start_log_id: None,
+            end_log_id: None,
+            source_session_id: None,
+            date_from: None,
+            date_to: None,
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            short_id: Some("s1".to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        },
+    )
+    .unwrap();
+    for i in 0..n {
+        insert_index_node(
+            &conn,
+            &IndexNodeRow {
+                id: format!("t{i}"),
+                agent_id: "a1".to_string(),
+                parent_id: Some("s1".to_string()),
+                node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
+                title: format!("topic {i}"),
+                summary: "s".to_string(),
+                start_log_id: None,
+                end_log_id: None,
+                source_session_id: None,
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: format!("2026-06-01T00:00:{:02}Z", i % 60),
+                updated_at: now.to_string(),
+                short_id: Some(format!("t{i}")),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    // バッチ 12 件ずつ、未割当が尽きるまで sticky 割当する（LLM の代わりに round-robin）。
+    let started = std::time::Instant::now();
+    let mut total = 0usize;
+    let mut batches = 0usize;
+    loop {
+        let batch = list_unassigned_topics(&conn, "a1", 12).unwrap();
+        if batch.is_empty() {
+            break;
+        }
+        for (k, t) in batch.iter().enumerate() {
+            assert!(
+                assign_topic_to_category(&conn, "a1", &t.id, &cats[(total + k) % 5], now).unwrap()
+            );
+        }
+        total += batch.len();
+        batches += 1;
+        assert!((batches as i64) < n, "バッチが前進していない（無限ループ）");
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(total, n as usize, "全 topic が割り当てられる");
+    // 未割当が尽き、再度引いても空（sticky・冪等）。
+    assert!(list_unassigned_topics(&conn, "a1", 12).unwrap().is_empty());
+    // 件数集計はカテゴリ数ぶんに収まる（トップレベルが 5 のまま膨らまない）。
+    let counts = count_category_members(&conn, "a1").unwrap();
+    assert_eq!(counts.values().sum::<i64>(), n);
+    assert_eq!(counts.len(), 5);
+    assert_eq!(list_top_level_categories(&conn, "a1").unwrap().len(), 5);
+    // 冪等: 既割当への再割当は false（結果が変わらない）。
+    assert!(!assign_topic_to_category(&conn, "a1", "t0", &cats[0], now).unwrap());
+    eprintln!(
+        "[scale] {n} topics assigned in {batches} batches, {} ms",
+        elapsed.as_millis()
+    );
+}
+
+// ============================================
 // Channel Heartbeat Interval 解決（#336）
 // ============================================
 
