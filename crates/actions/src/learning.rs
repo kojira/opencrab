@@ -69,6 +69,8 @@ impl Action for LearnFromExperienceAction {
             is_active: true,
             permission: "\"agent\"".to_string(),
             archived: false,
+            // #335: 作成時 caller の trust class を記録（read_skill のゲートで参照）。
+            created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
         };
 
         if let Ok(conn) = ctx.db.lock() {
@@ -153,6 +155,8 @@ impl Action for LearnFromPeerAction {
             is_active: true,
             permission: "\"agent\"".to_string(),
             archived: false,
+            // #335: 作成時 caller の trust class を記録（read_skill のゲートで参照）。
+            created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
         };
 
         if let Ok(conn) = ctx.db.lock() {

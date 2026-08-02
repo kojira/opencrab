@@ -646,6 +646,7 @@ fn test_skills_crud() {
         is_active: true,
         permission: "\"agent\"".to_string(),
         archived: false,
+        created_caller: None,
     };
 
     insert_skill(&conn, &skill).unwrap();
@@ -657,6 +658,55 @@ fn test_skills_crud() {
     assert!(skills[0].is_active);
     assert_eq!(skills[0].usage_count, 0);
     assert_eq!(skills[0].source_type, "acquired");
+}
+
+// 9b. created_caller が insert / select / update で往復すること（#335）。
+#[test]
+fn test_skill_created_caller_roundtrip() {
+    let conn = setup();
+
+    let mut skill = SkillRow {
+        id: "skill-cc".to_string(),
+        agent_id: "agent-1".to_string(),
+        name: "Gated".to_string(),
+        description: "d".to_string(),
+        situation_pattern: String::new(),
+        guidance: "g".to_string(),
+        source_type: "self_created".to_string(),
+        source_context: None,
+        file_path: None,
+        effectiveness: None,
+        usage_count: 0,
+        is_active: true,
+        permission: "\"agent\"".to_string(),
+        archived: false,
+        created_caller: Some("agent".to_string()),
+    };
+    insert_skill(&conn, &skill).unwrap();
+
+    let got = find_skill_by_id(&conn, "skill-cc").unwrap().unwrap();
+    assert_eq!(got.created_caller.as_deref(), Some("agent"));
+
+    // update_skill も created_caller を書き戻す。
+    skill.created_caller = Some("owner".to_string());
+    update_skill(&conn, &skill).unwrap();
+    let got = find_skill_by_id(&conn, "skill-cc").unwrap().unwrap();
+    assert_eq!(got.created_caller.as_deref(), Some("owner"));
+
+    // NULL（legacy）も往復する。
+    let legacy = SkillRow {
+        id: "skill-legacy".to_string(),
+        created_caller: None,
+        ..skill.clone()
+    };
+    // 別 id / 別 name で入れ直す（同名 UNIQUE 衝突回避）。
+    let legacy = SkillRow {
+        name: "LegacyGate".to_string(),
+        ..legacy
+    };
+    insert_skill(&conn, &legacy).unwrap();
+    let got = find_skill_by_id(&conn, "skill-legacy").unwrap().unwrap();
+    assert!(got.created_caller.is_none());
 }
 
 // 10. test_skill_usage_increment
@@ -679,6 +729,7 @@ fn test_skill_usage_increment() {
         is_active: true,
         permission: "\"agent\"".to_string(),
         archived: false,
+        created_caller: None,
     };
 
     insert_skill(&conn, &skill).unwrap();
@@ -709,6 +760,7 @@ fn test_find_skill_by_name_any_includes_archived() {
         is_active: false,
         permission: "\"agent\"".to_string(),
         archived: true,
+        created_caller: None,
     };
     insert_skill(&conn, &skill).unwrap();
 
@@ -748,6 +800,7 @@ fn test_update_skill_full_fields() {
         is_active: true,
         permission: "\"agent\"".to_string(),
         archived: true,
+        created_caller: None,
     };
     insert_skill(&conn, &skill).unwrap();
 
