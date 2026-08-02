@@ -249,8 +249,27 @@ fn make_heartbeat_callback(
                     )]
                 }
                 HeartbeatFiringPlan::ChannelScoped => {
-                    // 未 opt-in かつグローバル有効: 従来の channel 単位発火（互換・不変）。
-                    list_whitelisted_heartbeat_channels(&db, &agent_id_owned)
+                    // 未 opt-in かつグローバル有効: channel 単位発火。#336: 各チャンネルの
+                    // 実効間隔を **channel → agent → 運用者既定** で解決し、下限へクランプ
+                    // した値を Some で載せる（下段の `unwrap_or` はもう当たらない）。
+                    // チャンネル未設定でエージェント設定も無ければ既定に落ちるので、
+                    // 従来（channel か既定）の挙動を包含しつつ、床とエージェント設定
+                    // フォールバックだけを足す。
+                    let channels = list_whitelisted_heartbeat_channels(&db, &agent_id_owned);
+                    let conn = db.lock().unwrap();
+                    channels
+                        .into_iter()
+                        .map(|(cid, name, ch_interval)| {
+                            let resolved = opencrab_db::queries::resolve_channel_heartbeat_interval(
+                                &conn,
+                                &agent_id_owned,
+                                ch_interval,
+                                state.heartbeat_limits.default_interval_secs,
+                                state.heartbeat_limits.min_interval_secs,
+                            );
+                            (cid, name, Some(resolved.interval_secs))
+                        })
+                        .collect()
                 }
                 HeartbeatFiringPlan::None => {
                     // 未 opt-in かつグローバル無効: 何もしない。このループは他エージェント

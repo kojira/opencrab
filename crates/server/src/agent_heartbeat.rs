@@ -1,7 +1,23 @@
-//! エージェントが**自分自身の**ハートビート設定を読み書きするツール（#247 段階 2）。
+//! エージェントが**自分自身の**ハートビート設定を読み書きするツール（#247 / #336）。
 //!
 //! - `get_my_heartbeat`: 現在の有効/無効と間隔、そして境界値（下限・上限・既定）を返す。
 //! - `set_my_heartbeat`: 有効/無効と間隔を更新する。
+//!
+//! # スコープ（#336）
+//!
+//! 既定は `scope="agent"`（エージェント単位、`agent_heartbeat_config`）。`scope="channel"`
+//! を渡すと **そのチャンネルの** 有効/無効と間隔（`discord_channel_config` の
+//! `heartbeat_enabled` / `heartbeat_interval_secs`）を触る。指示文
+//! （`read/update_heartbeat_instructions`）の scope の扱いに揃えてある（channel scope は
+//! `discord_channel_config` を読み書きする）。チャンネル発火時の間隔は
+//! `resolve_channel_heartbeat_interval`（channel → agent → 運用者既定、下限クランプ）で
+//! 解決される。
+//!
+//! 発火形態の関係（重要）: エージェント単位で `enabled=true` にすると発火は**エージェント
+//! 単位（全チャンネルまとめて 1 回）**になり、チャンネル単位設定は使われない（#238 の
+//! precedence）。チャンネルごとに間隔・有効を効かせたい場合はエージェント単位を
+//! `enabled` にせず、`scope="channel"` で各チャンネルを設定する。Nostr など channel の
+//! 概念が無い gateway は agent スコープのまま（channel scope は Discord 用）。
 //!
 //! # 「自分のだけ」をどう保証しているか
 //!
@@ -26,12 +42,6 @@
 //! ハートビートの**指示文**（`update_heartbeat_instructions`）はオーナー限定のまま。
 //! 「いつ動くか」を自分で決めるのと「動いたとき何をするか」を自分で書き換えるのは
 //! 意味が違う（#247 の設計判断）。
-//!
-//! # 発火の判定はまだ切り替えない
-//!
-//! 段階 2 の時点では、実際に tick を発火させているのは従来どおりチャンネル単位の
-//! 設定（`discord_channel_config.heartbeat_enabled`）である。ここで保存した値を
-//! 発火の判定に使うのは段階 3（別 issue）。ツールの説明文にもその旨を書いてある。
 
 use serde_json::json;
 
@@ -73,8 +83,67 @@ fn reject_foreign_target(args: &serde_json::Value) -> Option<GatewayActionResult
     None
 }
 
-/// 現在の設定 + 境界値を 1 つの JSON にまとめる。読み出しも更新後も同じ形を返す。
-fn state_payload(
+/// `error` だけを持つ失敗レスポンスを組む短縮子。
+fn err(msg: impl Into<String>) -> GatewayActionResult {
+    GatewayActionResult {
+        success: false,
+        data: None,
+        error: Some(msg.into()),
+    }
+}
+
+/// `scope` を読む（既定は `"agent"`）。
+fn scope_arg(args: &serde_json::Value) -> &str {
+    args.get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agent")
+}
+
+/// `enabled` 引数を解釈する。`None` = 未指定 / `Some(b)` = 明示。型違いは Err。
+fn parse_enabled_arg(args: &serde_json::Value) -> Result<Option<bool>, GatewayActionResult> {
+    match args.get("enabled") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(err("enabledは真偽値で指定してください")),
+    }
+}
+
+/// `interval_secs` 引数を解釈する。
+/// - `None` = 未指定（現在値を保つ）
+/// - `Some(None)` = 明示 null（= 運用者既定に戻す）
+/// - `Some(Some(secs))` = 明示値（下限・上限・正整数を検証済み）
+///
+/// 下限より短い / 上限より長い / 非正整数は**拒否**する（丸めない）。agent / channel の
+/// どちらの scope でも同じ床・天井を効かせる（#336 決定3: 下限をチャンネル単位でも維持）。
+fn parse_interval_arg(
+    args: &serde_json::Value,
+    min: u64,
+    max: u64,
+) -> Result<Option<Option<i64>>, GatewayActionResult> {
+    match args.get("interval_secs") {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(v) => match v.as_i64() {
+            Some(secs) if secs > 0 => {
+                if (secs as u64) < min {
+                    return Err(err(format!(
+                        "interval_secsが短すぎます（最小{min}秒。指定値: {secs}秒）"
+                    )));
+                }
+                if (secs as u64) > max {
+                    return Err(err(format!(
+                        "interval_secsが長すぎます（最大{max}秒。指定値: {secs}秒）"
+                    )));
+                }
+                Ok(Some(Some(secs)))
+            }
+            _ => Err(err("interval_secsは正の整数（秒）で指定してください")),
+        },
+    }
+}
+
+/// agent scope の現在の設定 + 境界値を 1 つの JSON にまとめる。読み出しも更新後も同じ形。
+fn agent_state_payload(
     state: &AppState,
     conn: &rusqlite::Connection,
     agent_id: &str,
@@ -92,6 +161,7 @@ fn state_payload(
         .and_then(|r| r.interval_secs);
     json!({
         "agent_id": agent_id,
+        "scope": "agent",
         "enabled": resolved.enabled,
         "interval_secs": resolved.interval_secs,
         "configured_interval_secs": configured,
@@ -102,7 +172,47 @@ fn state_payload(
     })
 }
 
-/// 自分のハートビート設定を読み出す。
+/// channel scope の現在の設定 + 境界値をまとめる（#336）。`enabled` / `configured_interval_secs`
+/// は当該エージェントの `(channel_id, agent_id)` 行の値（行が無ければ enabled=false /
+/// interval=null）。`interval_secs` は `resolve_channel_heartbeat_interval`（channel → agent →
+/// 既定, 下限クランプ）の実効値。
+fn channel_state_payload(
+    state: &AppState,
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    channel_id: &str,
+) -> serde_json::Value {
+    let limits = state.heartbeat_limits;
+    let existing = opencrab_db::queries::get_channel_config_for_agent(conn, channel_id, agent_id)
+        .ok()
+        .flatten();
+    let configured = existing.as_ref().and_then(|c| c.heartbeat_interval_secs);
+    let enabled = existing
+        .as_ref()
+        .map(|c| c.heartbeat_enabled)
+        .unwrap_or(false);
+    let resolved = opencrab_db::queries::resolve_channel_heartbeat_interval(
+        conn,
+        agent_id,
+        configured,
+        limits.default_interval_secs,
+        limits.min_interval_secs,
+    );
+    json!({
+        "agent_id": agent_id,
+        "scope": "channel",
+        "channel_id": channel_id,
+        "enabled": enabled,
+        "interval_secs": resolved.interval_secs,
+        "configured_interval_secs": configured,
+        "source": resolved.source,
+        "min_interval_secs": limits.effective_min(),
+        "max_interval_secs": crate::config::HeartbeatLimits::MAX_INTERVAL_SECS,
+        "default_interval_secs": limits.default_interval_secs,
+    })
+}
+
+/// 自分のハートビート設定を読み出す。`scope="channel"` なら当該チャンネルの設定を返す。
 pub(crate) fn get_my_heartbeat(
     state: &AppState,
     args: &serde_json::Value,
@@ -116,14 +226,33 @@ pub(crate) fn get_my_heartbeat(
     }
 
     let conn = state.db.lock().unwrap();
-    GatewayActionResult {
-        success: true,
-        data: Some(state_payload(state, &conn, &ctx.agent_id)),
-        error: None,
+    match scope_arg(args) {
+        "agent" => GatewayActionResult {
+            success: true,
+            data: Some(agent_state_payload(state, &conn, &ctx.agent_id)),
+            error: None,
+        },
+        "channel" => {
+            let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => id,
+                _ => return err("scope=channelのときはchannel_idが必要です"),
+            };
+            GatewayActionResult {
+                success: true,
+                data: Some(channel_state_payload(
+                    state,
+                    &conn,
+                    &ctx.agent_id,
+                    channel_id,
+                )),
+                error: None,
+            }
+        }
+        other => err(format!("不明なscope: {other}（agent または channel）")),
     }
 }
 
-/// 自分のハートビート設定を更新する。
+/// 自分のハートビート設定を更新する。`scope="channel"` なら当該チャンネルの設定を更新する。
 ///
 /// 下限より短い間隔は**拒否**する（丸めない）。丸めると、エージェントは要求した値で
 /// 動いていると思い込んだまま別の間隔で走る。エラーには下限を載せるので、同じターンで
@@ -144,62 +273,33 @@ pub(crate) fn set_my_heartbeat(
     let min = limits.effective_min();
     let max = crate::config::HeartbeatLimits::MAX_INTERVAL_SECS;
 
-    let enabled_arg = match args.get("enabled") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::Bool(b)) => Some(*b),
-        Some(_) => {
-            return GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("enabledは真偽値で指定してください".to_string()),
-            }
-        }
+    let enabled_arg = match parse_enabled_arg(args) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
-
-    // 間隔は「指定なし」と「明示的な null（= 既定に戻す）」を区別する。
-    let interval_arg: Option<Option<i64>> = match args.get("interval_secs") {
-        None => None,
-        Some(serde_json::Value::Null) => Some(None),
-        Some(v) => match v.as_i64() {
-            Some(secs) if secs > 0 => {
-                if (secs as u64) < min {
-                    return GatewayActionResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!(
-                            "interval_secsが短すぎます（最小{min}秒。指定値: {secs}秒）"
-                        )),
-                    };
-                }
-                if (secs as u64) > max {
-                    return GatewayActionResult {
-                        success: false,
-                        data: None,
-                        error: Some(format!(
-                            "interval_secsが長すぎます（最大{max}秒。指定値: {secs}秒）"
-                        )),
-                    };
-                }
-                Some(Some(secs))
-            }
-            _ => {
-                return GatewayActionResult {
-                    success: false,
-                    data: None,
-                    error: Some("interval_secsは正の整数（秒）で指定してください".to_string()),
-                }
-            }
-        },
+    let interval_arg = match parse_interval_arg(args, min, max) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
     if enabled_arg.is_none() && interval_arg.is_none() {
-        return GatewayActionResult {
-            success: false,
-            data: None,
-            error: Some("enabled か interval_secs のどちらかが必要です".to_string()),
-        };
+        return err("enabled か interval_secs のどちらかが必要です");
     }
 
+    match scope_arg(args) {
+        "agent" => set_agent_scope(state, ctx, enabled_arg, interval_arg),
+        "channel" => set_channel_scope(state, args, ctx, enabled_arg, interval_arg),
+        other => err(format!("不明なscope: {other}（agent または channel）")),
+    }
+}
+
+/// agent scope の更新（`agent_heartbeat_config`）。
+fn set_agent_scope(
+    state: &AppState,
+    ctx: &GatewayCallContext,
+    enabled_arg: Option<bool>,
+    interval_arg: Option<Option<i64>>,
+) -> GatewayActionResult {
     let conn = state.db.lock().unwrap();
     let existing = opencrab_db::queries::get_agent_heartbeat_config(&conn, &ctx.agent_id)
         .ok()
@@ -216,11 +316,7 @@ pub(crate) fn set_my_heartbeat(
     };
 
     if let Err(e) = opencrab_db::queries::upsert_agent_heartbeat_config(&conn, &row) {
-        return GatewayActionResult {
-            success: false,
-            data: None,
-            error: Some(format!("ハートビート設定の保存に失敗: {e}")),
-        };
+        return err(format!("ハートビート設定の保存に失敗: {e}"));
     }
 
     tracing::info!(
@@ -233,14 +329,112 @@ pub(crate) fn set_my_heartbeat(
         "エージェント単位のハートビート設定を更新した"
     );
 
-    let mut payload = state_payload(state, &conn, &ctx.agent_id);
+    let mut payload = agent_state_payload(state, &conn, &ctx.agent_id);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("success".to_string(), json!(true));
-        // 段階 2 では保存するだけ。発火はまだチャンネル単位の設定が決める（段階 3）。
+        // #336: agent スコープの enabled は「エージェント単位発火（有効時は全チャンネル
+        // まとめて 1 回）」を意味する。チャンネルごとに間隔・有効を分けたいなら
+        // scope=channel を使う（agent を enabled にすると channel 設定は使われない）。
         obj.insert(
             "note".to_string(),
-            json!("この設定はまだ発火の判定に使われていない（段階3で切り替え予定）。現在の発火はチャンネル単位の設定が決める。"),
+            json!("agent スコープを enabled にするとエージェント単位で発火する（有効時は全チャンネルまとめて1回）。チャンネルごとに間隔・有効を分けたい場合は scope=channel で設定する。"),
         );
+    }
+    GatewayActionResult {
+        success: true,
+        data: Some(payload),
+        error: None,
+    }
+}
+
+/// channel scope の更新（`discord_channel_config` の `heartbeat_enabled` /
+/// `heartbeat_interval_secs`）。指示文の scope=channel と同じテーブルを触る（#336）。
+///
+/// 既存行があればその設定を尊重して該当カラムだけ上書きし、無ければ既定値で新規作成する
+/// （新規作成には `guild_id` が要る。指示文 scope=channel と同じ流儀）。
+fn set_channel_scope(
+    state: &AppState,
+    args: &serde_json::Value,
+    ctx: &GatewayCallContext,
+    enabled_arg: Option<bool>,
+    interval_arg: Option<Option<i64>>,
+) -> GatewayActionResult {
+    let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id,
+        _ => return err("scope=channelのときはchannel_idが必要です"),
+    };
+
+    let conn = state.db.lock().unwrap();
+    let existing =
+        opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, &ctx.agent_id)
+            .ok()
+            .flatten();
+
+    // 新規作成時のみ guild_id が要る（既存行はその guild_id を尊重する）。
+    let guild_id = args
+        .get("guild_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| existing.as_ref().map(|c| c.guild_id.clone()));
+
+    let old_enabled = existing.as_ref().map(|c| c.heartbeat_enabled);
+    let old_interval = existing.as_ref().and_then(|c| c.heartbeat_interval_secs);
+
+    // interval_arg を channel 行の `Option<u64>` へ落とす。
+    //   Some(Some(secs)) = 明示値 / Some(None) = 既定に戻す(NULL) / None = 現在値を保つ
+    let next_interval: Option<u64> = match interval_arg {
+        Some(v) => v.map(|secs| secs as u64),
+        None => old_interval,
+    };
+
+    let cfg = match existing {
+        Some(mut c) => {
+            if let Some(e) = enabled_arg {
+                c.heartbeat_enabled = e;
+            }
+            c.heartbeat_interval_secs = next_interval;
+            c
+        }
+        None => {
+            let guild_id = match guild_id {
+                Some(g) if !g.is_empty() => g,
+                _ => return err("新規チャンネル設定の作成にはguild_idが必要です"),
+            };
+            opencrab_db::queries::ChannelConfigRow {
+                channel_id: channel_id.to_string(),
+                agent_id: ctx.agent_id.clone(),
+                guild_id,
+                channel_name: String::new(),
+                readable: true,
+                writable: true,
+                whitelisted: false,
+                // 新規行の既定は有効（discord_channel_config の既定・指示文 scope=channel と
+                // 同じ）。enabled 明示があればそれを尊重する。
+                heartbeat_enabled: enabled_arg.unwrap_or(true),
+                heartbeat_interval_secs: next_interval,
+                heartbeat_instructions: String::new(),
+            }
+        }
+    };
+
+    if let Err(e) = opencrab_db::queries::upsert_channel_config(&conn, &cfg) {
+        return err(format!("チャンネルのハートビート設定の保存に失敗: {e}"));
+    }
+
+    tracing::info!(
+        agent_id = %ctx.agent_id,
+        channel_id = %channel_id,
+        caller = %ctx.caller.label(),
+        old_enabled = old_enabled,
+        old_interval_secs = old_interval,
+        new_enabled = cfg.heartbeat_enabled,
+        new_interval_secs = cfg.heartbeat_interval_secs,
+        "チャンネル単位のハートビート設定を更新した"
+    );
+
+    let mut payload = channel_state_payload(state, &conn, &ctx.agent_id, channel_id);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("success".to_string(), json!(true));
     }
     GatewayActionResult {
         success: true,

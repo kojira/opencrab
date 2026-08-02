@@ -705,21 +705,44 @@ impl SystemGatewayActions {
             // 実体と「自分のだけ」の保証は `crate::agent_heartbeat` の doc を参照。
             GatewayActionDef {
                 name: "get_my_heartbeat".to_string(),
-                description: "自分（呼び出し元エージェント）のハートビート設定を読み出す。有効か・間隔（秒）・設定できる下限と上限を返す。設定したことが無ければ無効。他のエージェントの設定は読めない。".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート設定を読み出す。有効か・間隔（秒）・設定できる下限と上限を返す。設定したことが無ければ無効。他のエージェントの設定は読めない。scope=\"channel\"（要 channel_id）を渡すとそのチャンネルの設定と実効間隔を返す。".to_string(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "channel"],
+                            "description": "読み出す範囲。省略時は agent（エージェント単位）。channel はそのチャンネルの設定（channel_id 必須）。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "scope=channel のとき対象チャンネル。"
+                        }
+                    }
                 }),
             },
             GatewayActionDef {
                 name: "set_my_heartbeat".to_string(),
-                description: "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を設定する。対象は常に自分で、他のエージェントの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。なお現時点ではこの設定はまだ発火の判定には使われていない（保存のみ）。".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を設定する。対象は常に自分で、他のエージェントの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。scope 省略時は agent（エージェント単位）で、有効にすると全チャンネルまとめて1回発火する。チャンネルごとに間隔・有効を分けたい場合は scope=\"channel\"（channel_id 必須）で設定する。間隔の解決順は channel→agent→運用者既定で、下限はどちらのスコープでも効く。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": ["agent", "channel"],
+                            "description": "設定する範囲。省略時は agent（エージェント単位）。channel はそのチャンネルの設定（channel_id 必須。新規チャンネル行の作成時のみ guild_id も必要）。"
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "description": "scope=channel のとき対象チャンネル。"
+                        },
+                        "guild_id": {
+                            "type": "string",
+                            "description": "scope=channel で該当チャンネルの設定行がまだ無いときのみ必要（既存行があれば不要）。"
+                        },
                         "enabled": {
                             "type": "boolean",
-                            "description": "自律実行を有効にするか。省略すると現在の値を保つ。"
+                            "description": "自律実行を有効にするか。scope=channel ではそのチャンネルの有効/無効。省略すると現在の値を保つ。"
                         },
                         "interval_secs": {
                             "type": "integer",
@@ -5575,6 +5598,7 @@ mod tests {
             r.data.unwrap(),
             json!({
                 "agent_id": "agent-x",
+                "scope": "agent",
                 "enabled": false,
                 "interval_secs": 1800,
                 "configured_interval_secs": null,
@@ -5797,6 +5821,308 @@ mod tests {
         }
         // 指示文はオーナー限定のまま（開放しない）。
         assert!(opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"update_heartbeat_instructions"));
+    }
+
+    // ================================================================================
+    // #336: set_my_heartbeat の channel スコープ
+    // ================================================================================
+
+    /// scope=channel は `discord_channel_config` に書く（agent_heartbeat_config ではない）。
+    /// 既存行があればその行の該当カラムだけ更新する。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_updates_existing_channel_row() {
+        let state = heartbeat_state();
+        // 既存の (channel, agent-x) 行を仕込む（interval 未設定・有効）。
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "agent-x".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: "雑談".to_string(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: true,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: "既存の指示".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "interval_secs": 900}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["scope"], "channel");
+        assert_eq!(data["channel_id"], "ch1");
+        assert_eq!(data["interval_secs"], 900);
+        assert_eq!(data["configured_interval_secs"], 900);
+        assert_eq!(data["source"], "channel");
+
+        // discord_channel_config に載り、他カラム（指示文・whitelisted・channel_name）は保つ。
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.heartbeat_interval_secs, Some(900));
+        assert!(row.heartbeat_enabled);
+        assert_eq!(row.heartbeat_instructions, "既存の指示", "指示文は触らない");
+        assert_eq!(row.channel_name, "雑談");
+        assert!(row.whitelisted);
+        // agent スコープ設定は作られない（channel スコープなので）。
+        assert_eq!(
+            opencrab_db::queries::get_agent_heartbeat_config(&conn, "agent-x").unwrap(),
+            None,
+            "channel スコープは agent_heartbeat_config を書かない"
+        );
+    }
+
+    /// scope=channel で行が無ければ guild_id を渡せば新規作成できる。既定は有効。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_creates_row_with_guild_id() {
+        let state = heartbeat_state();
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        // guild_id 無しは拒否（新規作成に必要）。
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "chNew", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("新規チャンネル設定の作成にはguild_idが必要です")
+        );
+        {
+            let conn = state.db.lock().unwrap();
+            assert!(
+                opencrab_db::queries::get_channel_config_for_agent(&conn, "chNew", "agent-x")
+                    .unwrap()
+                    .is_none(),
+                "拒否したのに行を作ってはならない"
+            );
+        }
+
+        // guild_id を渡せば作成できる。
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "chNew", "guild_id": "g9", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "chNew", "agent-x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.heartbeat_interval_secs, Some(600));
+        assert_eq!(row.guild_id, "g9");
+        assert!(row.heartbeat_enabled, "新規行の既定は有効");
+    }
+
+    /// enabled=false のチャンネルは heartbeat_enabled=0 になる（発火対象から外れる）。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_can_disable_channel() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "agent-x".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: true,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: Some(900),
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "enabled": false}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(r.data.unwrap()["enabled"], false);
+
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .unwrap();
+        assert!(!row.heartbeat_enabled, "無効化された");
+        assert_eq!(row.heartbeat_interval_secs, Some(900), "間隔は保つ");
+        // heartbeat_enabled=0 の行は発火対象から外れる。
+        let listed = opencrab_db::queries::list_heartbeat_channels(&conn).unwrap();
+        assert!(
+            !listed
+                .iter()
+                .any(|c| c.channel_id == "ch1" && c.agent_id == "agent-x"),
+            "無効チャンネルは list_heartbeat_channels に出ない"
+        );
+    }
+
+    /// 下限はチャンネル単位でも効く（#336 決定3）。下限未満は拒否し、書き換えない。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_rejects_below_floor() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "agent-x".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: true,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: Some(900),
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "interval_secs": 1}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("interval_secsが短すぎます（最小300秒。指定値: 1秒）")
+        );
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.heartbeat_interval_secs,
+            Some(900),
+            "拒否時は書き換えない"
+        );
+    }
+
+    /// scope=channel は channel_id が要る。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_requires_channel_id() {
+        let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("scope=channelのときはchannel_idが必要です")
+        );
+    }
+
+    /// 不明な scope は拒否。
+    #[tokio::test]
+    async fn set_my_heartbeat_rejects_unknown_scope() {
+        let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "guild", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("不明なscope: guild（agent または channel）")
+        );
+    }
+
+    /// get_my_heartbeat scope=channel はそのチャンネルの設定と実効間隔を返す。
+    #[tokio::test]
+    async fn get_my_heartbeat_channel_scope_reads_channel_config() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "agent-x".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: true,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: Some(1200),
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "get_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1"}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["scope"], "channel");
+        assert_eq!(data["channel_id"], "ch1");
+        assert_eq!(data["enabled"], true);
+        assert_eq!(data["interval_secs"], 1200);
+        assert_eq!(data["configured_interval_secs"], 1200);
+        assert_eq!(data["source"], "channel");
+        assert_eq!(data["min_interval_secs"], 300);
+
+        // 行が無いチャンネルは enabled=false・実効は agent/既定へフォールバック。
+        let r = actions
+            .execute(
+                "get_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "unknown"}),
+                &trusted_ctx(),
+            )
+            .await;
+        let data = r.data.unwrap();
+        assert_eq!(data["enabled"], false);
+        assert_eq!(data["configured_interval_secs"], serde_json::Value::Null);
+        assert_eq!(data["interval_secs"], 1800, "既定へフォールバック");
+        assert_eq!(data["source"], "default");
     }
 
     // ---- #156 S3: A2UI 送信（send_ui）の gateway 非依存化 ----

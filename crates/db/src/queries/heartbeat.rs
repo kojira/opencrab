@@ -262,6 +262,72 @@ pub fn list_agents_with_heartbeat_enabled(conn: &Connection) -> Result<Vec<Strin
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// チャンネル単位ハートビート間隔の解決結果（#336）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedChannelHeartbeat {
+    /// 実際に使う間隔（秒）。必ず下限（`min_interval_secs`）以上。
+    pub interval_secs: u64,
+    /// どこから来た値か。
+    /// `"channel"`（チャンネルの値）/ `"agent"`（エージェント設定の値）/
+    /// `"default"`（運用者既定）/ `"clamped"`（元の値が下限未満だったので下限へ引き上げ）。
+    pub source: &'static str,
+}
+
+/// チャンネル単位のハートビート間隔を **チャンネル → エージェント → 運用者既定** の
+/// 順で解決する（#336）。指示文の `effective`（channel が agent を上書きし、無ければ
+/// 既定へ落ちる）と同じ形。
+///
+/// - `channel_interval_secs`: そのチャンネルの `discord_channel_config.heartbeat_interval_secs`
+///   （`None` = チャンネルでは未設定）。
+/// - チャンネル未設定なら `agent_heartbeat_config.interval_secs`（`enabled` は問わない。
+///   間隔値は有効/無効と独立した「このエージェントの希望間隔」なので発火形態に関わらず
+///   フォールバックに使う）。壊れた値（0 以下）は未設定として扱う。
+/// - それも無ければ運用者既定（`default_interval_secs`）。
+///
+/// 最後に **下限（`min_interval_secs`）へクランプ**する（#247 の床をチャンネル単位でも
+/// 効かせる）。読み出し側なので `resolve_agent_heartbeat` と同様に**拒否ではなく引き上げ**
+/// （運用者が床を上げても既存のチャンネル発火が全部止まらないように、費用が減る方向へ倒す）。
+/// 書き込み口（`set_my_heartbeat` scope=channel）は逆に下限未満を**拒否**する。
+pub fn resolve_channel_heartbeat_interval(
+    conn: &Connection,
+    agent_id: &str,
+    channel_interval_secs: Option<u64>,
+    default_interval_secs: u64,
+    min_interval_secs: u64,
+) -> ResolvedChannelHeartbeat {
+    let min = min_interval_secs.max(1);
+    // 0 秒間隔はビジーループなので、運用者既定が 0 でも最低 min には収める。
+    let fallback = default_interval_secs.max(min);
+
+    let (base, origin) = match channel_interval_secs {
+        Some(v) if v > 0 => (v, "channel"),
+        _ => {
+            let agent_interval = get_agent_heartbeat_config(conn, agent_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.interval_secs)
+                .filter(|v| *v > 0)
+                .map(|v| v as u64);
+            match agent_interval {
+                Some(v) => (v, "agent"),
+                None => (fallback, "default"),
+            }
+        }
+    };
+
+    if base < min {
+        ResolvedChannelHeartbeat {
+            interval_secs: min,
+            source: "clamped",
+        }
+    } else {
+        ResolvedChannelHeartbeat {
+            interval_secs: base,
+            source: origin,
+        }
+    }
+}
+
 /// ハートビート指示の監査ログ1件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatInstructionsAuditRow {
