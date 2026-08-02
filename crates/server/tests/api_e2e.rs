@@ -2034,6 +2034,7 @@ async fn test_skill_consolidation_curates_and_audits() {
                 is_active: true,
                 permission: "\"agent\"".into(),
                 archived: false,
+                created_caller: None,
             },
         )
         .unwrap();

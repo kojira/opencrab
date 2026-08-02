@@ -645,6 +645,39 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 24,
+        description: "skills.created_caller: 作成時 caller の trust class を記録 (issue #335 / #347 / #349)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #335（confused deputy 塞ぎ）で skills に作成時 caller の trust class
+        // （'owner' / 'trusted' / 'agent'）を持たせ、read_skill が「このターンの caller が
+        // 作成 caller を超えるなら本文を渡さない」でゲートする。NULL 許容で追加するため
+        // 既存行は NULL のまま = legacy grandfather（Owner 相当）として従来どおり読める。
+        // バックフィルはしない（既存スキルの本来の作成 caller は復元できないが、NULL→Owner
+        // 扱いで壊さない。新規作成分は実 caller を記録して穴を塞ぐ）。
+        //
+        // #349: 当初この列追加は凍結された `migrate()` の guarded ALTER として書かれたが、
+        // `migrate()` は新規 DB（`user_version < BASELINE_VERSION`）でしか呼ばれず、本番の
+        // 既存 DB（`user_version = 23`）には効かず全スキル SELECT が `no such column` で落ちた。
+        // 既存 DB に届かせるため番号付きマイグレーションへ移す。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE skills` 側で列を持つので
+        // `column_exists` でガードする（v12 / v16 / v22 の前例）。2 回目以降は no-op。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 23;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "skills", "created_caller")? {
+                conn.execute_batch("ALTER TABLE skills ADD COLUMN created_caller TEXT")?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表（topic ↔ category の参照, issue #313）。
@@ -864,9 +897,14 @@ fn run_migrations(conn: &Connection, migrations: &[Migration]) -> rusqlite::Resu
 
 /// FROZEN — schema version 1 baseline。
 ///
-/// この関数へは**今後追記しないこと**。スキーマ変更は version 2 以降の番号付き
-/// [`MIGRATIONS`] エントリとして追加する。ここは version 1 として確定した履歴であり、
-/// `backfill_short_ids` 呼び出しや `migrate_soul_identity_to_agents` 含めて凍結する。
+/// ⚠️ **警告: ここへ ALTER / 列追加を足しても既存 DB には一切効かない。**
+/// この関数は [`initialize`] から `user_version < BASELINE_VERSION`（＝新規 DB / 版管理
+/// 導入前の DB）のときしか呼ばれない。本番など既に版がスタンプ済みの DB は
+/// `run_migrations` しか通らないため、ここへ書いた変更は永久に no-op になる
+/// （#347 でこの罠を踏み、本番の全スキル SELECT が `no such column` で落ちた。#349）。
+/// **既存 DB に効かせる変更は必ず version 2 以降の番号付き [`MIGRATIONS`] エントリへ**
+/// 追加すること。ここは version 1 として確定した履歴であり、`backfill_short_ids` 呼び出しや
+/// `migrate_soul_identity_to_agents` 含めて凍結する。
 ///
 /// 既存テーブルへのマイグレーション（カラム追加など）。
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -1537,6 +1575,10 @@ CREATE TABLE IF NOT EXISTS skills (
     is_active INTEGER NOT NULL DEFAULT 1,
     permission TEXT NOT NULL DEFAULT '"agent"',
     archived INTEGER NOT NULL DEFAULT 0,
+    -- 作成時の caller の trust class（'owner' / 'trusted' / 'agent'）。NULL = この列より
+    -- 前に作られた既存スキル（legacy grandfather = Owner 相当扱い）。read_skill が
+    -- 「強いターンが弱いスキルを借りる」confused deputy を塞ぐために参照する（#335）。
+    created_caller TEXT,
     last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -2474,6 +2516,76 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept, "ff");
+    }
+
+    /// v24: 既存 DB（`user_version = 23`, `created_caller` 列なし）へ番号付き
+    /// マイグレーションが届き、列が追加され、既存行は NULL のまま保たれることを検証する。
+    ///
+    /// これは #349 の本番事故の再現ガード。#347 は列追加を凍結 `migrate()` に置いたため、
+    /// 既に版がスタンプ済みの本番 DB では走らず、全スキル SELECT が
+    /// `no such column: created_caller` で落ちた。CI は毎回新規 DB（`migrate()` が走る）
+    /// なので検出できなかった。ここでは **既存 DB を模して** `run_migrations` 経路のみで
+    /// 列が届くことを固定する。
+    #[test]
+    fn skills_created_caller_migration_v24_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(column_exists(&conn, "skills", "created_caller").unwrap());
+
+        // v23 相当の既存 DB を模す: 列を落とし version を 23 へ戻す。
+        // 列を持たない状態で入れた行は、移行後 NULL（legacy grandfather = Owner 相当）に
+        // なること（＝既存行が壊れないこと）を見るための実データ。
+        conn.execute_batch(
+            "ALTER TABLE skills DROP COLUMN created_caller;
+             INSERT INTO skills
+               (id, agent_id, name, description, situation_pattern, guidance,
+                source_type, usage_count, is_active, permission, archived,
+                created_at, updated_at)
+               VALUES ('legacy1', 'a1', 'n', 'd', 'sp', 'g',
+                       'experience', 0, 1, '\"agent\"', 0,
+                       '2026-01-01', '2026-01-01');
+             PRAGMA user_version = 23",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "skills", "created_caller").unwrap());
+
+        // 起動経路（initialize → run_migrations）で v24 が届く。migrate() は
+        // user_version >= BASELINE_VERSION のため走らない（本番と同じ経路）。
+        initialize(&conn).expect("upgrade v23 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(column_exists(&conn, "skills", "created_caller").unwrap());
+
+        // 既存行は残り、新しい列は NULL（legacy grandfather）。
+        let (name, created_caller): (String, Option<String>) = conn
+            .query_row(
+                "SELECT name, created_caller FROM skills WHERE id = 'legacy1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("既存行が失われた");
+        assert_eq!(name, "n");
+        assert_eq!(created_caller, None, "既存行は NULL のまま = Owner 相当");
+
+        // #349 の直接の症状: 列を含む SELECT が通ること。
+        conn.query_row(
+            "SELECT id, agent_id, name, created_caller FROM skills WHERE id = 'legacy1'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .expect("created_caller を含む SELECT が通らない");
+
+        // 冪等性: 再実行しても落ちず、書いた値も消えない（column_exists ガード）。
+        conn.execute_batch("UPDATE skills SET created_caller = 'agent' WHERE id = 'legacy1'")
+            .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT created_caller FROM skills WHERE id = 'legacy1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("agent"));
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を
