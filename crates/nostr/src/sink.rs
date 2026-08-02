@@ -1082,7 +1082,7 @@ mod tests {
             None,
             None,
             "st-live",
-            false,
+            opencrab_actions::CallerIdentity::Agent,
             Some(&sid),
         );
         assert_eq!(outcome, opencrab_actions::CancelOutcome::Cancelled);

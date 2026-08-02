@@ -468,11 +468,14 @@ pub enum CancelOutcome {
 ///    人間可読なテーマを持つが、自動 dispatch は sub-session の行を作らないため theme を
 ///    引けず、そのままだと親ログが `subtask '' was cancelled` になる（#176）。
 ///
-/// 認可（#64）: `is_owner` なら常に許可。そうでなければ「呼び出し元セッションが親
-/// （`parent_session_id == caller_session_id`）」の subtask のみ停止できる（自己/兄弟/
-/// 他セッションのものは不可）。`remove_if` は shard ロック下で述語を評価するため、
-/// 「認可確認 → 削除」の間にエントリが差し替わる TOCTOU が無い（所有権フィールドは
-/// insert 後不変）。
+/// 認可（#64 / #331）: `caller` が Owner なら常に許可。そうでなければ「呼び出し元
+/// セッションが親（`parent_session_id == caller_session_id`）」**かつ**「呼び出し元の
+/// 信頼度が subtask を spawn した親ターンの呼び出し元（`s.caller`）以上」の subtask のみ
+/// 停止できる（自己/兄弟/他セッションのもの、および格上の呼び出し元が spawn したものは
+/// 不可）。後者の caller 判定はセッション 1 本化（#323）で「セッション一致」だけでは素の
+/// Agent ターンから Owner 由来の subtask を止められてしまうため（#331）。`remove_if` は
+/// shard ロック下で述語を評価するため、「認可確認 → 削除」の間にエントリが差し替わる
+/// TOCTOU が無い（所有権フィールドは insert 後不変）。
 ///
 /// 成功時: **停止を主張（`claim_cancel`）** → `abort_handle.abort()` → registry から
 /// 除去 → 通知口へ `on_cancelled` → 親セッションログへ `tool_cancelled` を best-effort
@@ -497,14 +500,21 @@ pub fn cancel_subtask(
     sink: Option<&dyn SubtaskCompletionSink>,
     notifiers: Option<&crate::subtask_notify::SubtaskNotifiers>,
     subtask_id: &str,
-    is_owner: bool,
+    caller: CallerIdentity,
     caller_session_id: Option<&str>,
 ) -> CancelOutcome {
+    let is_owner = matches!(caller, CallerIdentity::Owner);
     let authorized = |s: &SpawnedSubtask| -> bool {
         if is_owner {
             return true;
         }
+        // 非オーナー: 「親セッション一致」に加えて、この subtask を spawn したターンの
+        // 呼び出し元（`s.caller`）を自分の権限で管理できることを要する（#331）。セッションを
+        // agent 単位で 1 本にした（#323）ため、セッション一致だけだと見知らぬ相手
+        // （caller=Agent）のターンから Owner 由来の subtask を停止できてしまう。旧 per-相手
+        // セッションでは別セッションで構造的に不可能だった性質の復元。
         matches!(caller_session_id, Some(cs) if !cs.is_empty() && s.parent_session_id == cs)
+            && caller.can_manage_subtask_of(&s.caller)
     };
 
     // 述語は shard ロック下で評価される。認可 → 停止の主張（CAS）→ 除去を 1 操作に
@@ -1980,7 +1990,15 @@ mod tests {
         let parent = "web-agent-a-conv1";
         let handle = insert_fake_subtask(&registry, "st-1", parent);
 
-        let outcome = cancel_subtask(&registry, &db, None, None, "st-1", false, Some(parent));
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-1",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
         assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(registry.is_empty(), "cancel 後に registry から除去される");
         // 実際に abort された。
@@ -2009,13 +2027,14 @@ mod tests {
         registry.get_mut("st-1").unwrap().caller = CallerIdentity::Owner;
 
         let sink = RecordingSink::default();
+        // オーナー由来の subtask なので、停止できるのもオーナーのターン（#331）。
         let outcome = cancel_subtask(
             &registry,
             &db,
             Some(&sink),
             None,
             "st-1",
-            false,
+            CallerIdentity::Owner,
             Some(parent),
         );
         assert_eq!(outcome, CancelOutcome::Cancelled);
@@ -2035,7 +2054,15 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         let db = opencrab_db::Db::from_connection(conn);
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
-        let outcome = cancel_subtask(&registry, &db, None, None, "nope", false, Some("web-a-c1"));
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "nope",
+            CallerIdentity::Agent,
+            Some("web-a-c1"),
+        );
         assert_eq!(outcome, CancelOutcome::NotFound);
     }
 
@@ -2047,7 +2074,15 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-x", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, None, None, "st-x", false, Some("web-me-c1"));
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-x",
+            CallerIdentity::Agent,
+            Some("web-me-c1"),
+        );
         assert_eq!(outcome, CancelOutcome::Unauthorized);
         // 拒否したのでエントリは残り、abort もされない。
         assert!(registry.contains_key("st-x"));
@@ -2062,7 +2097,15 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-ns", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, None, None, "st-ns", false, None);
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-ns",
+            CallerIdentity::Agent,
+            None,
+        );
         assert_eq!(outcome, CancelOutcome::Unauthorized);
         assert!(registry.contains_key("st-ns"));
         handle.abort();
@@ -2076,9 +2119,95 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let handle = insert_fake_subtask(&registry, "st-any", "web-other-c9");
 
-        let outcome = cancel_subtask(&registry, &db, None, None, "st-any", true, None);
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-any",
+            CallerIdentity::Owner,
+            None,
+        );
         assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(registry.is_empty());
+        assert!(handle.await.unwrap_err().is_cancelled());
+    }
+
+    /// #331: セッションを 1 本にした（#323）結果、親セッションが一致していても、Owner 由来の
+    /// subtask は非オーナー（caller=Agent）のターンからは停止できない。旧 per-相手 セッションでは
+    /// 別セッションで構造的に不可能だった性質を caller で復元する。
+    #[tokio::test]
+    async fn cancel_subtask_non_owner_cannot_cancel_owner_spawned() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "nostr-agent-a"; // 1本化セッション（親＝呼び出し元セッション）。
+        let handle = insert_fake_subtask(&registry, "st-owner", parent);
+        // オーナー発のターンが spawn した subtask にする。
+        registry.get_mut("st-owner").unwrap().caller = CallerIdentity::Owner;
+
+        // 見知らぬ相手（caller=Agent）のターン。session は親と一致している。
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-owner",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
+        assert_eq!(
+            outcome,
+            CancelOutcome::Unauthorized,
+            "非オーナーは Owner 由来の subtask を止められない"
+        );
+        assert!(registry.contains_key("st-owner"), "拒否したので残る");
+        handle.abort();
+    }
+
+    /// #331: 同じ状況でも Owner のターンからは従来どおり停止できる。
+    #[tokio::test]
+    async fn cancel_subtask_owner_can_cancel_owner_spawned() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "nostr-agent-a";
+        let handle = insert_fake_subtask(&registry, "st-owner", parent);
+        registry.get_mut("st-owner").unwrap().caller = CallerIdentity::Owner;
+
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-owner",
+            CallerIdentity::Owner,
+            Some(parent),
+        );
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+        assert!(handle.await.unwrap_err().is_cancelled());
+    }
+
+    /// #331: Agent 由来の subtask は従来どおり Agent のターンから止められる（正常系を壊さない）。
+    #[tokio::test]
+    async fn cancel_subtask_agent_can_cancel_agent_spawned() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let parent = "nostr-agent-a";
+        // 既定の caller=Agent。
+        let handle = insert_fake_subtask(&registry, "st-agent", parent);
+
+        let outcome = cancel_subtask(
+            &registry,
+            &db,
+            None,
+            None,
+            "st-agent",
+            CallerIdentity::Agent,
+            Some(parent),
+        );
+        assert_eq!(outcome, CancelOutcome::Cancelled);
         assert!(handle.await.unwrap_err().is_cancelled());
     }
 
@@ -2230,7 +2359,15 @@ mod tests {
                     .next()
                     .map(|e| e.key().clone())
                     .expect("dispatch した subtask が registry にある");
-                let outcome = cancel_subtask(&self.registry, &self.db, None, None, &id, true, None);
+                let outcome = cancel_subtask(
+                    &self.registry,
+                    &self.db,
+                    None,
+                    None,
+                    &id,
+                    CallerIdentity::Owner,
+                    None,
+                );
                 *self.outcome.lock().unwrap() = Some(outcome);
                 ActionResult {
                     success: true,
@@ -2304,7 +2441,7 @@ mod tests {
             Some(&sink),
             None,
             "st-1",
-            false,
+            CallerIdentity::Agent,
             Some(parent),
         );
         assert_eq!(outcome, CancelOutcome::Cancelled);
@@ -2583,7 +2720,7 @@ mod tests {
             Some(sink.as_ref()),
             None,
             &outcome.subtask_id,
-            true,
+            CallerIdentity::Owner,
             None,
         );
         assert_eq!(cancelled, CancelOutcome::Cancelled);
