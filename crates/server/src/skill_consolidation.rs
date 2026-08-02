@@ -437,6 +437,9 @@ fn apply_decisions(
                         is_active: true,
                         permission: "\"agent\"".to_string(),
                         archived: false,
+                        // #335: スリープ棚卸しは caller=Owner のターンで走る。None = legacy
+                        // grandfather（Owner 相当）。
+                        created_caller: None,
                     };
                     if opencrab_db::queries::insert_skill(&conn, &row).is_ok() {
                         effective = "created";
