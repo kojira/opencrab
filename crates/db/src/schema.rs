@@ -510,6 +510,41 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 22,
+        description: "agent_nostr_config.owner_pubkey (Nostr のオーナー識別子, issue #319)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // Discord は per-agent 設定に `agent_discord_config.owner_discord_id` を持ち、
+        // 発言者がオーナーかをそこで判定している。Nostr には対応する置き場所が無く、
+        // 受信ターンの呼び出し元が一律 `Agent` に固定されていた（#319）。同じ形にする
+        // ための列で、**既定は空文字＝オーナー未設定**（誰もオーナーにならない /
+        // `opencrab_core::owner::is_owner_id` の fail-closed）。列を足しただけでは
+        // どのエージェントの挙動も変わらない。
+        //
+        // 表現は **64 桁小文字 hex に正規化して保存する**（Nostr 受信イベントの
+        // `pubkey` が hex なので、比較の基準を受信側に合わせる）。入口
+        // （`configure_nostr` / REST）が npub でも hex でも受け取って正規化するため、
+        // この列に npub が入ることは無い。
+        //
+        // 冪等性: 新規DB は `SCHEMA_SQL` 側で列を持つので `column_exists` でガードする
+        // （v12 / v16 の前例）。2 回目以降は no-op。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 21;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_nostr_config", "owner_pubkey")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_nostr_config ADD COLUMN owner_pubkey TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// per-agent の Nostr sub-gateway 設定。秘密鍵はエージェント毎に隔離（鍵の共有防止）。
@@ -1596,6 +1631,10 @@ CREATE TABLE IF NOT EXISTS agent_nostr_config (
     relays_json TEXT NOT NULL DEFAULT '[]',
     filter_json TEXT NOT NULL DEFAULT '{}',
     enabled INTEGER NOT NULL DEFAULT 0,
+    -- Nostr 経路のオーナー識別子（#319）。`agent_discord_config.owner_discord_id` の
+    -- Nostr 版。**64 桁小文字 hex に正規化して保存**し、既定の空文字は「オーナー未設定
+    -- ＝誰もオーナーにならない」を意味する（fail-closed）。
+    owner_pubkey TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 
@@ -2236,6 +2275,182 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept, "https://discord.com/api/webhooks/1/tok");
+    }
+
+    /// v22: `agent_nostr_config.owner_pubkey` の付与（#319）。
+    ///
+    /// **既存の行を失わない**こと（秘密鍵・リレー・有効フラグがそのまま残る）と、
+    /// 既存行の新しい列が **空＝オーナー未設定**（誰もオーナーにならない）で始まる
+    /// ことを見る。冪等性（新規 DB は SCHEMA_SQL 側で列を持つ）も確認する。
+    #[test]
+    fn nostr_owner_pubkey_migration_v22_preserves_existing_rows() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
+
+        // v20 相当の既存 DB を模す: 列を持たない表を作り直して version を 20 へ戻す。
+        // 行の内容は「移行後も 1 バイトも変わらない」ことを見るための実データ。
+        conn.execute_batch(
+            "DROP TABLE agent_nostr_config;
+             CREATE TABLE agent_nostr_config (
+                agent_id TEXT PRIMARY KEY,
+                secret_key TEXT NOT NULL,
+                relays_json TEXT NOT NULL DEFAULT '[]',
+                filter_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO agent_nostr_config
+               (agent_id, secret_key, relays_json, filter_json, enabled, updated_at)
+               VALUES ('a1', 'nsec1keep', '[\"wss://relay.example\"]', '{\"keywords\":[\"x\"]}', 1, '2026-01-01');
+             PRAGMA user_version = 20",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
+
+        initialize(&conn).expect("upgrade v20 -> v22");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
+
+        // 既存行はそのまま残り、新しい列は空（＝オーナー未設定 / fail-closed）。
+        let (secret, relays, filter, enabled, owner): (String, String, String, i64, String) = conn
+            .query_row(
+                "SELECT secret_key, relays_json, filter_json, enabled, owner_pubkey
+                 FROM agent_nostr_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("既存行が失われた");
+        assert_eq!(secret, "nsec1keep");
+        assert_eq!(relays, r#"["wss://relay.example"]"#);
+        assert_eq!(filter, r#"{"keywords":["x"]}"#);
+        assert_eq!(enabled, 1);
+        assert_eq!(owner, "", "移行直後にオーナーが居てはいけない");
+
+        // 再実行しても列は 1 つのまま（column_exists ガード）で、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_nostr_config SET owner_pubkey = 'ff' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: String = conn
+            .query_row(
+                "SELECT owner_pubkey FROM agent_nostr_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "ff");
+    }
+
+    /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を
+    /// 順に通り、**どちらのデータも失われない**（#314 と #319 が同じ版列に並ぶ）。
+    ///
+    /// v21 は表の再構築（`DROP TABLE impressions`）を伴い、v22 は別の表への列追加。
+    /// 別々のマイグレーションが独立に通ることは各テストで見ているが、**同じ 1 回の
+    /// 起動で連続して流れる**のは実運用の経路（v20 で止まっていた DB が今回の
+    /// バイナリで初めて起動する）なので、ここで両方を 1 本の流れとして固定する。
+    #[test]
+    fn v20_db_upgrades_through_v21_and_v22_without_losing_data() {
+        let conn = crate::init_memory().expect("init");
+
+        // (1) 旧一意制約の impressions に行を入れ、version 20 へ戻す。
+        seed_legacy_impressions(
+            &conn,
+            "('i1', 'a1', 's-discord', 'u1', 'Alice', 'p1', '', '', '中立', '', 0, '2026-01-01', '2026-01-01'),
+             ('i2', 'a1', 's-nostr',   'u2', 'Bob',   'p2', '', '', '中立', '', 0, '2026-01-02', '2026-01-02')",
+        );
+        // (2) 同じ DB の agent_nostr_config も v20 相当（owner_pubkey 無し）へ戻す。
+        //     `seed_legacy_impressions` が既に version 20 を刻んでいるので、ここでも
+        //     刻み直して「両方が v20 の状態」を作る。
+        conn.execute_batch(
+            "DROP TABLE agent_nostr_config;
+             CREATE TABLE agent_nostr_config (
+                agent_id TEXT PRIMARY KEY,
+                secret_key TEXT NOT NULL,
+                relays_json TEXT NOT NULL DEFAULT '[]',
+                filter_json TEXT NOT NULL DEFAULT '{}',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO agent_nostr_config
+               (agent_id, secret_key, relays_json, filter_json, enabled, updated_at)
+               VALUES ('a1', 'nsec1keep', '[\"wss://relay.example\"]', '{}', 1, '2026-01-01');
+             PRAGMA user_version = 20",
+        )
+        .unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 20);
+        assert!(!column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
+
+        // (3) 1 回の起動で v21 → v22 が順に流れる。
+        initialize(&conn).expect("upgrade v20 -> v21 -> v22");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // (4a) v21 の結果: 行は 2 件とも残り、一意制約が agent スコープになっている。
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM impressions ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, vec!["i1", "i2"], "v21 で人物像の行が失われた");
+        // 別セッションからでも同じ (agent_id, target_id) は 1 行に収束する
+        // （旧制約のままなら 2 行目が入ってしまう）。
+        conn.execute_batch(
+            "INSERT INTO impressions
+               (id, agent_id, session_id, target_id, target_name, personality,
+                communication_style, recent_behavior, agreement, notes,
+                last_updated_turn, created_at, updated_at)
+               VALUES ('i3', 'a1', 's-other', 'u1', 'Alice', 'p9', '', '', '中立', '', 0, '2026-01-05', '2026-01-05')
+             ON CONFLICT(agent_id, target_id) DO UPDATE SET personality = excluded.personality",
+        )
+        .expect("新しい一意制約で upsert できる");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM impressions WHERE agent_id = 'a1' AND target_id = 'u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // (4b) v22 の結果: Nostr 設定の行はそのまま残り、オーナーは未設定で始まる。
+        let (secret, relays, enabled, owner): (String, String, i64, String) = conn
+            .query_row(
+                "SELECT secret_key, relays_json, enabled, owner_pubkey
+                 FROM agent_nostr_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("v22 で Nostr 設定の行が失われた");
+        assert_eq!(secret, "nsec1keep");
+        assert_eq!(relays, r#"["wss://relay.example"]"#);
+        assert_eq!(enabled, 1);
+        assert_eq!(owner, "", "移行直後にオーナーが居てはいけない");
+    }
+
+    /// 新規 DB は最初から最新版で、**v21 と v22 の両方の構造**を持つ
+    /// （`SCHEMA_SQL` と `MIGRATIONS` が食い違っていない）。
+    #[test]
+    fn fresh_db_has_both_v21_and_v22_structures() {
+        let conn = crate::init_memory().expect("init");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        // v22: 列がある。
+        assert!(column_exists(&conn, "agent_nostr_config", "owner_pubkey").unwrap());
+        // v21: `(agent_id, target_id)` ちょうど 2 列の UNIQUE 索引がある。
+        let unique_pairs: i64 = conn
+            .query_row(
+                r#"SELECT COUNT(*) FROM pragma_index_list('impressions') il
+                    WHERE il."unique" = 1
+                      AND (SELECT COUNT(*) FROM pragma_index_info(il.name)) = 2
+                      AND (SELECT COUNT(*) FROM pragma_index_info(il.name) ii
+                            WHERE ii.name IN ('agent_id', 'target_id')) = 2"#,
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unique_pairs, 1, "新規 DB に v21 の一意制約が無い");
     }
 
     /// G. v1 DB が v2 マイグレーションでタスク台帳テーブルを獲得する。

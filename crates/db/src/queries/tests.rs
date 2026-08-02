@@ -159,14 +159,19 @@ fn legacy_discord_rows_no_longer_grant_trust_on_other_platforms() {
 }
 
 /// 登録 API が受け付ける経路の集合＝読み出し側が引く経路の集合。
+///
+/// `nostr` は #319 で読み出し側（Nostr 受信ターンの呼び出し元解決）が引くように
+/// なったので、登録 API も受け付ける。
 #[test]
-fn known_platforms_are_exactly_the_three_read_paths() {
+fn known_platforms_are_exactly_the_read_paths() {
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_DISCORD));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_WEB));
     assert!(is_known_trusted_platform(TRUSTED_PLATFORM_REST));
+    assert!(is_known_trusted_platform(TRUSTED_PLATFORM_NOSTR));
     // 綴り間違い・未定義の経路は弾く（登録できても誰とも一致しない行になるため）。
     assert!(!is_known_trusted_platform("Discord"));
-    assert!(!is_known_trusted_platform("nostr"));
+    assert!(!is_known_trusted_platform("Nostr"));
+    assert!(!is_known_trusted_platform("mastodon"));
     assert!(!is_known_trusted_platform(""));
 }
 

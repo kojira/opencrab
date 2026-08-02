@@ -10,10 +10,24 @@
 
 use anyhow::Result;
 
-use opencrab_actions::AgentRuntime;
+use opencrab_actions::{AgentRuntime, CallerIdentity};
 use opencrab_db::queries::AgentNostrConfigRow;
 
 pub trait NostrAgentRunner: AgentRuntime {
+    /// 受信イベントの発言者から呼び出し元の権限を決める（#319）。
+    ///
+    /// Discord の `resolve_caller` と同じ形: **オーナーなら `Owner`、そのエージェントの
+    /// Nostr 経路の信頼済みユーザーならその権限、どちらでもなければ `Agent`**（最小権限）。
+    /// 以前はここが `CallerIdentity::Agent` 固定で、オーナーが話しかけても外部の誰かが
+    /// 話しかけても同じ扱いだった（＝エージェントが自分の設定を一切変更できなかった）。
+    ///
+    /// 契約:
+    /// - **オーナー未設定なら誰もオーナーにならない**（fail-closed）。
+    /// - `author_pubkey` は npub / hex のどちらで来ても同じ鍵として扱う（実装側で正規化）。
+    /// - 照合するのは **Nostr 経路の行だけ**（Discord の識別子空間と混ぜない）。
+    /// - 「発言者がオーナー」以外の昇格経路を作らない。
+    fn resolve_nostr_caller(&self, agent_id: &str, author_pubkey: &str) -> CallerIdentity;
+
     // 転記（受信イベント / エージェント返信）は [`AgentRuntime`] が持つ（#158 S3）。
     // `record_inbound_message` / `record_outbound_reply` を
     // `TranscriptSource::Nostr` で呼ぶ。Discord と行の形が同じなので、gateway ごとに

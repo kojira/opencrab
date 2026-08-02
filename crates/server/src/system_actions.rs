@@ -216,7 +216,8 @@ impl SystemGatewayActions {
                 name: "configure_nostr".to_string(),
                 description:
                     "自分の Nostr 連携設定（購読リレー・フィルタ authors/keywords/kinds・\
-                有効/無効）を変更する（owner 限定）。秘密鍵は変更も取得もできない（鍵生成は別手段）。\
+                有効/無効・Nostr でのオーナーの公開鍵）を変更する（owner 限定）。\
+                秘密鍵は変更も取得もできない（鍵生成は別手段）。\
                 省略したフィールドは現状維持。enabled=true にするには author か keyword が必要。\
                 設定は保存と同時にマネージャへ反映（enabled なら起動 / 無効なら停止）。"
                         .to_string(),
@@ -242,6 +243,14 @@ impl SystemGatewayActions {
                         "enabled": {
                             "type": "boolean",
                             "description": "有効化して起動 / 無効化して停止。"
+                        },
+                        "owner_pubkey": {
+                            "type": "string",
+                            "description": "Nostr でのオーナーの公開鍵（npub1... または 64 桁 hex）。\
+                            この鍵から届いたメッセージだけが owner 権限のターンになる。\
+                            未設定のうちは Nostr からは誰も owner にならないので、\
+                            最初の 1 回は Discord など owner 権限のある経路から設定する。\
+                            \"\" を渡すと未設定に戻る。"
                         }
                     }
                 }),
@@ -1572,6 +1581,10 @@ impl SystemGatewayActions {
             .get("enabled")
             .and_then(|v| v.as_bool())
             .unwrap_or(existing.enabled);
+        // Nostr のオーナー公開鍵（#319）。未指定なら現状維持。**owner 権限のあるターン
+        // （実際には Discord など）からしか触れない**ので、この口が Nostr 側の
+        // 「オーナー未設定 → 誰も owner になれない → 設定できない」の鶏卵を解く。
+        let owner_pubkey = args.get("owner_pubkey").and_then(|v| v.as_str());
 
         match crate::api::nostr::apply_nostr_settings(
             &self.state,
@@ -1582,22 +1595,37 @@ impl SystemGatewayActions {
             &kinds,
             enabled,
             None,
+            owner_pubkey,
         )
         .await
         {
-            Ok(()) => GatewayActionResult {
-                success: true,
-                // secret_key は返さない。
-                data: Some(json!({
-                    "agent_id": agent_id,
-                    "relays": relays,
-                    "authors": authors,
-                    "keywords": keywords,
-                    "kinds": kinds,
-                    "enabled": enabled,
-                })),
-                error: None,
-            },
+            Ok(()) => {
+                // 保存後の値を読み直して返す（入力が npub でも保存形の hex が返る＝
+                // どちらの表現で渡しても同じ鍵になったことをモデルが確認できる）。
+                let stored = self
+                    .state
+                    .db
+                    .lock()
+                    .ok()
+                    .and_then(|conn| {
+                        opencrab_db::queries::get_agent_nostr_owner_pubkey(&conn, &agent_id).ok()
+                    })
+                    .unwrap_or_default();
+                GatewayActionResult {
+                    success: true,
+                    // secret_key は返さない。
+                    data: Some(json!({
+                        "agent_id": agent_id,
+                        "relays": relays,
+                        "authors": authors,
+                        "keywords": keywords,
+                        "kinds": kinds,
+                        "enabled": enabled,
+                        "owner_pubkey": stored,
+                    })),
+                    error: None,
+                }
+            }
             Err((_code, msg)) => err(msg),
         }
     }
