@@ -24,6 +24,12 @@ impl CallerIdentity {
     /// 信頼度の序列。`bridge::policy_allows` の owner_only / trusted_only と同じ区分
     /// （owner > trusted{co_agent, trusted_user} > agent）を数値化しただけで、新しい
     /// 権限概念ではない。
+    ///
+    /// `CoAgent` と `TrustedUser` を同列（=1）に置いているため、この判定だけでは両者は
+    /// 互いの subtask を管理できてしまう。ただし本判定を使う subtask ゲート（Nostr の
+    /// 受信ターン）では現状どちらの caller も生成されない（受信は Owner / Agent のみ）ので、
+    /// この同列扱いは実害が出ない。将来 CoAgent / TrustedUser をこの経路へ流す場合は、
+    /// 両者を分離すべきか改めて検討すること。
     fn trust_level(&self) -> u8 {
         match self {
             CallerIdentity::Owner => 2,

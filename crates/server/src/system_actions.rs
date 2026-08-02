@@ -3034,6 +3034,42 @@ mod tests {
             .any(|m| m == "作業中です"));
     }
 
+    /// #331: Agent 由来の subtask は従来どおり Agent のターンから親経由で代理報告できる
+    /// （正常系を壊さない）。cancel 側の `cancel_subtask_agent_can_cancel_agent_spawned` に
+    /// 対応する report_progress 版。caller=Agent / spawner=Agent なので caller ゲートを通る。
+    #[tokio::test]
+    async fn report_progress_agent_can_report_agent_spawned_via_parent() {
+        let state = crate::test_app_state();
+        // 既定の caller=Agent。親は 1本化セッション（呼び出し元と一致）、subtask 本体は別セッション。
+        let registry = registry_with("st-1", "subtask-st-1", "nostr-agent-a");
+        let sink = Arc::new(RecordingSink::default());
+        let actions = SystemGatewayActions::new(
+            state.clone(),
+            None,
+            Some(registry),
+            Some(sink.clone() as Arc<dyn SubtaskCompletionSink>),
+        );
+
+        // Agent のターン。session は親と一致（is_parent 経路）だが subtask 本体とは別。
+        let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-x")
+            .with_session_id("nostr-agent-a");
+        let r = actions
+            .execute(
+                "report_progress",
+                &json!({ "message": "agent 代理報告", "subtask_id": "st-1" }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            r.success,
+            "Agent 由来の subtask は Agent のターンから親経由で代理報告できる: {:?}",
+            r.error
+        );
+        assert!(progress_messages(&state, "nostr-agent-a")
+            .iter()
+            .any(|m| m.contains("agent 代理報告")));
+    }
+
     /// セッション必須ガード（fail-closed）: session_id が無い文脈では実行できない。
     #[tokio::test]
     async fn report_progress_requires_session_context() {
