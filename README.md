@@ -25,7 +25,7 @@
 
 ## Features
 
-- **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, llama.cpp with intelligent routing and automatic fallback
+- **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, OpenRouter, Ollama, llama.cpp, plus local CLI/agent backends (Codex CLI, Cursor CLI, ChatGPT direct API via `~/.codex/auth.json`, and ACP agents) — with per-use-case routing and automatic fallback
 - **Agent Personality System** — Soul/Identity model with personality text and saveable presets
 - **Memory Management** — Curated memories, session logs with FTS5 search, and hierarchical memory index with LLM-powered Agentic RAG
 - **Conversation Compaction** — Token-budget-based automatic compaction; replaces older messages with memory index topic summaries, keeping recent logs in full
@@ -111,9 +111,9 @@ cp config/default.toml.example config/default.toml
 
 ### 3. Set environment variables (required for Discord, optional otherwise)
 
-By default, OpenCrab uses [hermit-shell](https://github.com/kojira/hermit-shell) (`localhost:8765`) as the LLM backend. hermit-shell is a macOS-native OpenAI-compatible proxy for Anthropic that retrieves API keys from the macOS Keychain automatically.
-
-LLM providers can be configured from the dashboard, so API keys are optional here.
+OpenCrab talks to LLMs through pluggable providers, chosen by `[llm] default_provider`
+in `config/default.toml` or from the dashboard setup wizard. Because providers and their
+API keys can be configured from the dashboard and saved to the DB, API keys are optional here.
 Discord is different: `config/default.toml` no longer holds an owner ID of its own —
 it reads `${OWNER_DISCORD_ID}` from the environment — so the Discord gateway needs a
 `.env` file (or exported variables) to know who the owner is.
@@ -379,7 +379,7 @@ Standard skills defined in `skills/`:
 Configuration is loaded from `config/default.toml` and **hot-reloaded** when files in `config/` change:
 
 - **Agent settings** — `heartbeat_interval_secs`, `heartbeat_enabled`, `heartbeat_min_interval_secs` (the floor `set_my_heartbeat` enforces, 300; the ceiling is a code constant of 24h), `workspace_path`, `max_workspace_size_mb`. Watch the two layers of default: the shipped `config/default.toml` sets `heartbeat_interval_secs = 1800` and `heartbeat_enabled = true`, while the code fallbacks used when a key is *absent* are 29 and `false` (`crates/server/src/config.rs`). These are the global values; an agent that has opted in via `set_my_heartbeat` fires on its own stored interval instead (the dashboard's heartbeat fields under Agent Channels are the older per-Discord-channel setting, a separate table)
-- **LLM providers** — Default provider (hermit-shell proxy at localhost:8765 by default), per-use-case model selection, fallback chains, model aliases, self-selection toggle
+- **LLM providers** — Default provider and default model (`[llm] default_provider` / `default_model`), per-use-case model selection, fallback chains, model aliases, self-selection toggle. Provider settings are also editable from the dashboard and saved to the DB, which then takes precedence over this file
 - **Gateway settings** — REST port (8080), per-agent Discord token (DB-persisted), per-agent Nostr key/relays/filter (DB-persisted), CLI toggle
 - **Database** — SQLite path
 - **Tools** — Shell commands with per-command permission levels (`agent` / `owner`)
