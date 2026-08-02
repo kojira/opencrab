@@ -3306,3 +3306,132 @@ fn category_layer_scales_to_thousands_of_topics() {
         elapsed.as_millis()
     );
 }
+
+// ============================================
+// Channel Heartbeat Interval 解決（#336）
+// ============================================
+
+/// テスト用にチャンネルのハートビート間隔を仕込む。
+fn seed_channel_interval(
+    conn: &Connection,
+    channel_id: &str,
+    agent_id: &str,
+    interval: Option<u64>,
+) {
+    upsert_channel_config(
+        conn,
+        &ChannelConfigRow {
+            channel_id: channel_id.to_string(),
+            agent_id: agent_id.to_string(),
+            guild_id: "g1".to_string(),
+            channel_name: String::new(),
+            readable: true,
+            writable: true,
+            whitelisted: false,
+            heartbeat_enabled: true,
+            heartbeat_interval_secs: interval,
+            heartbeat_instructions: String::new(),
+        },
+    )
+    .unwrap();
+}
+
+/// チャンネルの値が最優先（channel → agent → 既定）。
+#[test]
+fn resolve_channel_heartbeat_prefers_channel_value() {
+    let conn = crate::init_memory().unwrap();
+    // agent 設定（フォールバック候補）。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: false,
+            interval_secs: Some(7200),
+        },
+    )
+    .unwrap();
+
+    // channel=Some(900): channel が勝つ。
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", Some(900), 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (900, "channel"));
+}
+
+/// チャンネル未設定なら agent 設定へフォールバック（enabled は問わない）。
+#[test]
+fn resolve_channel_heartbeat_falls_back_to_agent() {
+    let conn = crate::init_memory().unwrap();
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: false, // 無効でも interval 値はフォールバックに使う
+            interval_secs: Some(7200),
+        },
+    )
+    .unwrap();
+
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", None, 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (7200, "agent"));
+}
+
+/// チャンネルも agent も無ければ運用者既定。
+#[test]
+fn resolve_channel_heartbeat_falls_back_to_default() {
+    let conn = crate::init_memory().unwrap();
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", None, 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (1800, "default"));
+
+    // agent 行はあるが interval None（既定に従う）→ 既定。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: true,
+            interval_secs: None,
+        },
+    )
+    .unwrap();
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", None, 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (1800, "default"));
+}
+
+/// 下限はチャンネル単位でも効く（#336 決定3）。channel 値が下限未満なら引き上げる。
+#[test]
+fn resolve_channel_heartbeat_clamps_below_floor() {
+    let conn = crate::init_memory().unwrap();
+    // channel=60 < floor 300 → 300 へ引き上げ。
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", Some(60), 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (300, "clamped"));
+
+    // agent フォールバック値が下限未満でも引き上げる。
+    upsert_agent_heartbeat_config(
+        &conn,
+        &AgentHeartbeatConfigRow {
+            agent_id: "a1".to_string(),
+            enabled: false,
+            interval_secs: Some(120),
+        },
+    )
+    .unwrap();
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", None, 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (300, "clamped"));
+
+    // 壊れた channel 値（0）は未設定扱い → agent 120 → clamp 300。
+    let r = resolve_channel_heartbeat_interval(&conn, "a1", Some(0), 1800, 300);
+    assert_eq!((r.interval_secs, r.source), (300, "clamped"));
+}
+
+/// 実データが失われないこと（既存の他エージェントの channel 行が混ざらない）。
+#[test]
+fn resolve_channel_heartbeat_is_per_agent() {
+    let conn = crate::init_memory().unwrap();
+    seed_channel_interval(&conn, "ch1", "a1", Some(900));
+    seed_channel_interval(&conn, "ch1", "a2", Some(1200));
+
+    // a1 の channel 行の値を渡せば a1 用に解決される（channel_interval は呼び出し側が
+    // 該当行から取り出して渡す設計）。
+    let r1 = resolve_channel_heartbeat_interval(&conn, "a1", Some(900), 1800, 300);
+    assert_eq!(r1.interval_secs, 900);
+    let r2 = resolve_channel_heartbeat_interval(&conn, "a2", Some(1200), 1800, 300);
+    assert_eq!(r2.interval_secs, 1200);
+}
