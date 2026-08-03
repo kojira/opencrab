@@ -712,13 +712,80 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 26,
+        description: "記憶の分類レイヤを白紙化 + memory_category_members を多対多 PK へ (issue #358)",
+        // **分類レイヤ（#344 の単一ラベル sticky 割当）を破棄し、タグを多対多にする。**
+        // 段階1（#313 の設計・2026-08-03 確定）。ここでは既存データの破棄と PK 変更のみで、
+        // タグ道具も整理ランも足さない（段階2以降）。
+        //
+        // やること:
+        //  (1) `memory_index_nodes` の `node_type IN ('category','meta')` を削除。
+        //      #344 が 12 件ずつ LLM に単一ラベルを sticky に割り当てて作った派生ノード。
+        //      仕組みごと作り直すので破棄する（#346 で既に生成は停止済み）。
+        //  (2) `memory_category_members` を PK `(agent_id, topic_id)`（1 topic = 高々 1
+        //      category）から **`(agent_id, topic_id, category_id)`** へ作り直す。1 topic は
+        //      複数の関心にまたがるのでタグは複数付けられる必要がある。旧行（本番 1,350 件）は
+        //      どうせ白紙化するので DROP+CREATE で作り直すのが素直。
+        //
+        // **絶対に触らないもの**（#358 受け入れ条件）:
+        //  - `memory_curated` の全行（特に `long_term/*` の記憶本文）。この表は参照しない。
+        //  - 時系列ツリー: `node_type` が root/period/session/topic/daily/hourly/weekly/
+        //    monthly/yearly のノード。DELETE は category/meta にしか当たらない。
+        //  - topic の `keywords_json` 等の付随データ。
+        //  - `node_type` の CHECK。category/meta は許可集合に残す（段階2でタグとして使い直す）。
+        //    ＝ 本移行はテーブル再構築で CHECK を狭めたりしない。
+        //
+        // FTS 整合: `insert_index_node` は全 node_type を `memory_index_fts` へ入れる。
+        // 生 SQL の `DELETE FROM memory_index_nodes` は FTS 孤児を残す（同ファイルの
+        // `delete_index_node` の警告参照）ので、**先に category/meta の FTS 行を消してから**
+        // ノードを消す。category/meta は parent 軸を使わない葉ノードなので CASCADE の子は無い。
+        //
+        // 冪等性（肯定形。v23 と同じ流儀）: members の PK に `category_id` が含まれるかを
+        // `pragma_table_info.pk` で見て、既に多対多なら作り直しを skip する。新規 DB は
+        // SCHEMA_SQL 側で既に多対多 PK なので再構築されない。DELETE 2 本は 2 回目は 0 件。
+        //
+        // 切り戻し（削除した分類データは #344 の sleep が作る派生なので再生成可能。古い
+        // バイナリへ戻すなら版番号も戻すこと）:
+        //   BEGIN;
+        //   -- （厳密に旧 PK へ戻すなら (agent_id, topic_id) で同型に作り直す）
+        //   PRAGMA user_version = 25;
+        //   COMMIT;
+        up: |conn| {
+            // (1) 分類ノードを FTS ごと削除（時系列ツリーには当たらない）。
+            conn.execute_batch(
+                "DELETE FROM memory_index_fts
+                     WHERE node_id IN (
+                         SELECT id FROM memory_index_nodes WHERE node_type IN ('category','meta')
+                     );
+                 DELETE FROM memory_index_nodes WHERE node_type IN ('category','meta');",
+            )?;
+            // (2) members を多対多 PK へ作り直す（旧行は白紙化されるので破棄）。
+            let already_multi: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('memory_category_members')
+                         WHERE name = 'category_id' AND pk > 0",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c == 1)
+                .unwrap_or(false);
+            if !already_multi {
+                conn.execute_batch(MEMORY_CATEGORY_MEMBERS_MM_SQL)?;
+            }
+            Ok(())
+        },
+    },
 ];
 
-/// カテゴリ層メンバー表（topic ↔ category の参照, issue #313）。
+/// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
 ///
-/// SCHEMA_SQL 内の同名ブロックと文面を揃える（新規DBは SCHEMA_SQL、既存DBは v23 で
-/// 同じ表に収束する）。FK は張らない（追記的・可逆を優先: category/meta を切り戻しで
-/// 消しても member 行が残るだけで害が無い）。
+/// PK は `(agent_id, topic_id)` = 1 topic 高々 1 category（sticky）。**これは v23 が
+/// 作った履歴の形**であり、v26（#358）で多対多 PK（[`MEMORY_CATEGORY_MEMBERS_MM_SQL`]）
+/// へ作り直す。最終形（新規 DB の SCHEMA_SQL / 既存 DB の v26 収束先）は多対多の方。
+/// この const は v23 マイグレーション専用として残す（凍結された履歴の再現）。FK は
+/// 張らない（追記的・可逆を優先: category/meta を切り戻しで消しても member 行が残る
+/// だけで害が無い）。
 const MEMORY_CATEGORY_MEMBERS_SQL: &str = "
 CREATE TABLE IF NOT EXISTS memory_category_members (
     agent_id TEXT NOT NULL,
@@ -726,6 +793,24 @@ CREATE TABLE IF NOT EXISTS memory_category_members (
     category_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_category_members_cat ON memory_category_members(agent_id, category_id);
+";
+
+/// カテゴリ層メンバー表 — **多対多 PK の最終形**（issue #358 / v26）。
+///
+/// PK を `(agent_id, topic_id, category_id)` にして 1 topic に複数の category を付けられる
+/// ようにする。SQLite は PK 変更＝テーブル再構築なので DROP+CREATE で作り直す（v26 の時点で
+/// 旧行は白紙化対象なので保全しない）。**SCHEMA_SQL 内の同名ブロックと文面を揃えること**
+/// （新規 DB は SCHEMA_SQL、既存 DB は v26 で同じ形に収束する）。FK は張らない（v23 と同方針）。
+const MEMORY_CATEGORY_MEMBERS_MM_SQL: &str = "
+DROP TABLE IF EXISTS memory_category_members;
+CREATE TABLE memory_category_members (
+    agent_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, topic_id, category_id)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_category_members_cat ON memory_category_members(agent_id, category_id);
 ";
@@ -1899,16 +1984,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_inde
 -- 記憶インデックス: カテゴリ層メンバー（topic ↔ category の参照, issue #313）
 -- ============================================
 -- 時系列ツリー（root→period→session→topic）の parent_id を壊さないため、topic の
--- カテゴリ所属は parent 軸ではなく**参照**で持つ。1 topic = 高々 1 category（sticky
--- 割当）。一度付いたら動かさない＝「同じ入力→同じ結果」の冪等性の土台。
+-- カテゴリ所属は parent 軸ではなく**参照**で持つ。PK は `(agent_id, topic_id, category_id)`
+-- の多対多（issue #358）。1 topic は複数の関心にまたがるのでタグは複数付けられる。
 -- node への FK は張らない（category/meta を切り戻しで消しても member 行が残るだけで
 -- 害が無く、join 側で解決する。追記的・可逆を優先）。
+-- ※ 既存 DB は v26 で同じ形に収束する（[`MEMORY_CATEGORY_MEMBERS_MM_SQL`] と文面一致）。
 CREATE TABLE IF NOT EXISTS memory_category_members (
     agent_id TEXT NOT NULL,
     topic_id TEXT NOT NULL,
     category_id TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    PRIMARY KEY (agent_id, topic_id)
+    PRIMARY KEY (agent_id, topic_id, category_id)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_category_members_cat ON memory_category_members(agent_id, category_id);
 
@@ -2883,22 +2969,155 @@ mod migration_tests {
         )
         .expect("移行後は category/meta を登録できる");
 
-        // 参照表が存在し、割当を保存できる（1 topic = 1 category の sticky）。
+        // 参照表が存在し、割当を保存できる。全チェーンは v26 まで走るので PK は多対多
+        // （`(agent_id, topic_id, category_id)`）＝同じ topic に複数の category を付けられる。
         assert!(table_exists(&conn, "memory_category_members").unwrap());
         conn.execute(
             "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
-             VALUES ('a1', 't', 'cat1', '2026-02-01')",
+             VALUES ('a1', 't', 'cat1', '2026-02-01'),
+                    ('a1', 't', 'meta1', '2026-02-02')",
             [],
         )
+        .expect("v26 の多対多 PK では同一 topic に複数 category を付けられる");
+    }
+
+    /// v26: 分類レイヤの白紙化 + members の多対多 PK 化（issue #358）。本番相当の v25 DB
+    /// （分類ノード + その FTS 行 + 旧 PK の members 行 + 記憶本文 memory_curated + 時系列
+    /// ツリー）を模し、`run_migrations` 経路のみで:
+    ///  - category/meta ノードと**その FTS 行**が消えること（FTS 孤児を残さない）
+    ///  - 時系列ツリー（node_type 別）と memory_curated が 1 行も減らないこと
+    ///  - members が空になり、PK が多対多になって同一 topic に複数 category を入れられること
+    ///  - user_version が上がり、2 回実行しても落ちないこと
+    /// を固定する。
+    #[test]
+    fn memory_index_reset_and_multi_tag_migration_v26() {
+        let conn = crate::init_memory().expect("init");
+
+        // --- v25 相当へ戻す: members を旧 PK (agent_id, topic_id) で作り直し、user_version=25 ---
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS memory_category_members;
+             CREATE TABLE memory_category_members (
+                agent_id TEXT NOT NULL,
+                topic_id TEXT NOT NULL,
+                category_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (agent_id, topic_id)
+             );",
+        )
         .unwrap();
+
+        // 時系列ツリー（root/period/session/topic/daily）+ 分類ノード（category/meta）を積む。
+        // 分類ノードは insert_index_node と同様に FTS へも入れて「孤児が残らない」ことを見る。
+        conn.execute_batch(
+            "INSERT INTO memory_index_nodes (id, agent_id, parent_id, node_type, source_type, title, summary, created_at, updated_at)
+             VALUES ('r', 'a1', NULL, 'root', 'session_log', 'root', 's', '2026-01-01', '2026-01-01'),
+                    ('p', 'a1', 'r', 'period', 'session_log', '2026-01', 's', '2026-01-01', '2026-01-01'),
+                    ('sess', 'a1', 'p', 'session', 'session_log', 'S', 's', '2026-01-01', '2026-01-01'),
+                    ('t', 'a1', 'sess', 'topic', 'session_log', 'Rust入門', 's', '2026-01-02', '2026-01-02'),
+                    ('d', 'a1', NULL, 'daily', 'daily_log', '2026-01-02', 's', '2026-01-02', '2026-01-02'),
+                    ('cat1', 'a1', NULL, 'category', 'category', 'kojiraさんの教え', '', '2026-02-01', '2026-02-01'),
+                    ('meta1', 'a1', NULL, 'meta', 'category', 'ルール群', '', '2026-02-01', '2026-02-01');
+             -- 全ノードを FTS へ（分類ノードも。孤児掃除の対象になる）。
+             INSERT INTO memory_index_fts (title, summary, keywords, node_id, agent_id, node_type, source_type)
+             SELECT title, summary, '', id, agent_id, node_type, source_type FROM memory_index_nodes;
+             -- 旧 PK members に割当を積む（白紙化される）。
+             INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
+             VALUES ('a1', 't', 'cat1', '2026-02-01');
+             -- 記憶本文（絶対に消さない）。
+             INSERT INTO memory_curated (id, agent_id, category, content, updated_at)
+             VALUES ('m1', 'a1', 'long_term/rule', '送金は必ず二重確認', '2026-02-01'),
+                    ('m2', 'a1', 'reflection', '振り返り', '2026-02-01');
+             PRAGMA user_version = 25;",
+        )
+        .unwrap();
+
+        // --- 適用前のスナップショット ---
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let curated_before = count("SELECT COUNT(*) FROM memory_curated");
+        let timeline_before = count(
+            "SELECT COUNT(*) FROM memory_index_nodes
+                 WHERE node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')",
+        );
+        assert_eq!(curated_before, 2);
+        assert_eq!(timeline_before, 5);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_index_nodes WHERE node_type IN ('category','meta')"),
+            2
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM memory_category_members"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_fts"), 7);
+
+        // --- v26 を適用（run_migrations 経路のみ。本番と同じ道）---
+        run_migrations(&conn, MIGRATIONS).expect("v26 migration");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 分類ノードは消え、時系列ツリーと memory_curated は 1 行も減らない。
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_index_nodes WHERE node_type IN ('category','meta')"),
+            0,
+            "分類ノードが白紙化される"
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM memory_index_nodes
+                     WHERE node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly')",
+            ),
+            timeline_before,
+            "時系列ツリーは 1 行も減らない"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_curated"),
+            curated_before,
+            "記憶本文は 1 行も減らない"
+        );
+        // FTS 孤児が残らない: 分類ノードの 2 行が消え、時系列 5 行だけが残る。
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_index_fts"),
+            5,
+            "FTS 孤児を残さない"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_index_fts WHERE node_type IN ('category','meta')"),
+            0
+        );
+        // node_type の CHECK からは category/meta を外さない（段階2で使い直す）: 再登録できる。
+        conn.execute(
+            "INSERT INTO memory_index_nodes (id, agent_id, node_type, source_type, title, summary, created_at, updated_at)
+             VALUES ('cat2', 'a1', 'category', 'category', 'Y', '', '2026-03-01', '2026-03-01')",
+            [],
+        )
+        .expect("category は CHECK に残っているので再登録できる");
+
+        // members は空になり、PK が多対多。同一 topic に複数 category を入れられる。
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_category_members"),
+            0,
+            "members は白紙化"
+        );
+        conn.execute(
+            "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
+             VALUES ('a1', 't', 'cat2', '2026-03-01'),
+                    ('a1', 't', 'meta9', '2026-03-02')",
+            [],
+        )
+        .expect("多対多 PK では同一 topic に複数 category を付けられる");
         assert!(
             conn.execute(
                 "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
-                 VALUES ('a1', 't', 'meta1', '2026-02-02')",
+                 VALUES ('a1', 't', 'cat2', '2026-03-03')",
                 [],
             )
             .is_err(),
-            "同一 topic の二重割当は PK で拒否される（sticky）"
+            "同一 (agent_id, topic_id, category_id) の重複は PK で拒否される"
+        );
+
+        // --- 冪等性: 2 回目は落ちず、既に多対多なので members を作り直さない（行が残る）---
+        run_migrations(&conn, MIGRATIONS).expect("v26 は冪等（2 回目も落ちない）");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_category_members"),
+            2,
+            "2 回目は members を作り直さない（多対多を検知して skip）"
         );
     }
 
