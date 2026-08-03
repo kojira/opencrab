@@ -776,6 +776,42 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 27,
+        description:
+            "agent_memory_index_config.last_organize_at: スリープ整理ランのマーカー列 (issue #313 段階3 / #361)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #313 段階3（#361）の整理ランが「前回いつ走ったか」を刻むマーカー。
+        // `last_skill_consolidation_at`（v22）と同型。用途は 2 つ:
+        //  (1) 日次ゲート（`now - last_organize_at >= 間隔`）
+        //  (2) bounded worklist の下端（このマーカー以降に作られた topic だけを整理対象に）
+        //
+        // **NULL 既定 = 未実行**。整理ラン側は NULL のとき「初回遭遇」として `now` を
+        // シードするだけで走らない（既存の全 topic を一気に対象化しない）。config 既定オフ
+        // なので有効化するまでこの列は書かれない。
+        //
+        // #349 の罠を踏まないため **番号付き MIGRATIONS へ置く**（凍結された `migrate()` は
+        // 新規 DB でしか走らず、本番の既存 DB には届かない）。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE agent_memory_index_config` 側で
+        // 列を持つので `column_exists` でガードする（v24 / v25 の前例）。2 回目以降は no-op。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 26;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_memory_index_config", "last_organize_at")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN last_organize_at TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2057,7 +2093,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     batch_size INTEGER NOT NULL DEFAULT 50,
     threshold INTEGER NOT NULL DEFAULT 20,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_skill_consolidation_at TEXT
+    last_skill_consolidation_at TEXT,
+    last_organize_at TEXT
 );
 
 -- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
@@ -2788,6 +2825,72 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept, 1, "再実行で露出許可が消えてはならない");
+    }
+
+    /// v27（#361 / #313 段階3）: `agent_memory_index_config.last_organize_at` が
+    /// **既存 DB に届く**こと、既定 NULL であること、既存行が壊れないこと、再実行で
+    /// 落ちないこと（#349 の事故ガード）。本番は v26 なので v26 → latest の経路を模す。
+    #[test]
+    fn agent_memory_index_config_last_organize_at_migration_v27_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(column_exists(&conn, "agent_memory_index_config", "last_organize_at").unwrap());
+
+        // v26 相当の既存 DB を模す: last_organize_at 列を落とし version を 26 へ戻す。
+        // 既存の設定行（last_skill_consolidation_at には値あり）を入れておき、移行で
+        // その値が消えないこと・新列が NULL で足されることを見る。
+        conn.execute_batch(
+            "ALTER TABLE agent_memory_index_config DROP COLUMN last_organize_at;
+             INSERT INTO agent_memory_index_config
+               (agent_id, batch_size, threshold, updated_at, last_skill_consolidation_at)
+               VALUES ('a1', 50, 20, '2026-01-01', '2026-07-01T00:00:00Z');
+             PRAGMA user_version = 26",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "agent_memory_index_config", "last_organize_at").unwrap());
+
+        // 起動経路（initialize → run_migrations）で v27 が届く。
+        initialize(&conn).expect("upgrade v26 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(column_exists(&conn, "agent_memory_index_config", "last_organize_at").unwrap());
+
+        // 既存行が残り、新列は NULL（未実行）、隣の列の値は消えていない。
+        let (organize, consolidation): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT last_organize_at, last_skill_consolidation_at
+                 FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("last_organize_at を含む SELECT が通らない");
+        assert_eq!(
+            organize, None,
+            "新列は既定 NULL（未実行）でなければならない"
+        );
+        assert_eq!(
+            consolidation.as_deref(),
+            Some("2026-07-01T00:00:00Z"),
+            "隣の列の既存値が失われた"
+        );
+
+        // 冪等性: 値を書いた後に再実行しても落ちず、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_memory_index_config SET last_organize_at = '2026-08-03T00:00:00Z' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT last_organize_at FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kept.as_deref(),
+            Some("2026-08-03T00:00:00Z"),
+            "再実行でマーカーが消えてはならない"
+        );
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を

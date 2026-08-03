@@ -899,6 +899,112 @@ pub fn set_last_skill_consolidation_at(conn: &Connection, agent_id: &str, ts: &s
     Ok(())
 }
 
+/// スリープ整理ラン（#313 段階3）のカーソルを取得する。行が無い/NULL なら `None`。
+///
+/// `last_skill_consolidation_at` と同じ TEXT 1 列だが、中身は
+/// **`"{created_at}|{id}"` の複合カーソル**（呼び出し側 `memory_organize` が組み立てる）。
+/// 整理ランはこれを 2 つの用途に使う: (1) 日次ゲート（`created_at` 部分を刻時として
+/// `now - T >= 間隔`）、(2) bounded worklist の下端（[`list_organize_topics`] の
+/// `(created_at, id)` カーソル）。初回シードは `id` 部を持たない素の刻時でよい（`|` が
+/// 無ければ全体を `created_at` として解釈する）。`None`（初回遭遇）は呼び出し側が `now` を
+/// シードして 1 回スキップする（既存の全 topic を一気に対象化しない）。
+pub fn get_last_organize_at(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT last_organize_at FROM agent_memory_index_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// スリープ整理ランの最終実行時刻を UPSERT で永続化する（行が無ければ作る）。
+/// config 行は自動生成されないため、初回シード/整理ラン後にこれで明示的に刻む。
+pub fn set_last_organize_at(conn: &Connection, agent_id: &str, ts: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agent_memory_index_config
+             (agent_id, batch_size, threshold, updated_at, last_organize_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             last_organize_at = excluded.last_organize_at",
+        params![
+            agent_id,
+            BATCH_SIZE_DEFAULT,
+            THRESHOLD_DEFAULT,
+            chrono::Utc::now().to_rfc3339(),
+            ts,
+        ],
+    )?;
+    Ok(())
+}
+
+/// スリープ整理ラン（#313 段階3）の worklist 対象 topic 数を数える（発火の下限ゲート用）。
+///
+/// 対象 = `node_type='topic'` かつ `source_type='session_log'` で、
+/// (a) 前回カーソル `since = (created_at, id)` より**後**、(b) スナップショット
+/// `snapshot_log_id`（`memory_index_watermark.last_indexed_log_id`）以下に収まっているもの。
+/// `since=None` なら下端制約なし。`end_log_id IS NULL` の topic はスナップショット内とみなす。
+///
+/// **カーソルは `created_at` 単体でなく `(created_at, id)` の単調タプル**にしている。索引
+/// ビルドは 1 パスの全 topic に**同一 `created_at`** を刻む（`index_builder.rs`）ため、
+/// `created_at` 単体で `> T` すると、切り口が同着群の内側に落ちたとき同じ `created_at` を持つ
+/// 未提示分が二度と対象にならず取りこぼす。`id` を副キーにして境界を跨いで残余を引き継ぐ。
+pub fn count_organize_topics(
+    conn: &Connection,
+    agent_id: &str,
+    since: Option<(&str, &str)>,
+    snapshot_log_id: i64,
+) -> Result<i64> {
+    let (since_ts, since_id) = match since {
+        Some((ts, id)) => (Some(ts), id),
+        None => (None, ""),
+    };
+    let n = conn.query_row(
+        "SELECT COUNT(*) FROM memory_index_nodes n
+         WHERE n.agent_id = ?1 AND n.node_type = 'topic' AND n.source_type = 'session_log'
+           AND (?2 IS NULL OR n.created_at > ?2 OR (n.created_at = ?2 AND n.id > ?3))
+           AND (n.end_log_id IS NULL OR n.end_log_id <= ?4)",
+        params![agent_id, since_ts, since_id, snapshot_log_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(n)
+}
+
+/// スリープ整理ランの worklist（対象 topic を `(created_at, id)` 昇順で最大 `limit` 件）を返す。
+///
+/// フィルタは [`count_organize_topics`] と同一の `(created_at, id)` カーソル。並び順も
+/// `created_at ASC, id ASC` で揃えてあるので、`limit` で切った残り（＝カーソルより後）は、
+/// 呼び出し側が**末尾の `(created_at, id)` をマーカーへ刻めば**次回そこから引き継げる
+/// （前進のみ / 残りは次回 / 同着 created_at 群を N で分断しても取りこぼさない）。
+pub fn list_organize_topics(
+    conn: &Connection,
+    agent_id: &str,
+    since: Option<(&str, &str)>,
+    snapshot_log_id: i64,
+    limit: i64,
+) -> Result<Vec<IndexNodeRow>> {
+    let (since_ts, since_id) = match since {
+        Some((ts, id)) => (Some(ts), id),
+        None => (None, ""),
+    };
+    let sql = format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes n
+         WHERE n.agent_id = ?1 AND n.node_type = 'topic' AND n.source_type = 'session_log'
+           AND (?2 IS NULL OR n.created_at > ?2 OR (n.created_at = ?2 AND n.id > ?3))
+           AND (n.end_log_id IS NULL OR n.end_log_id <= ?4)
+         ORDER BY n.created_at ASC, n.id ASC LIMIT ?5"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params![agent_id, since_ts, since_id, snapshot_log_id, limit],
+        index_node_from_row,
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn next_short_id(conn: &Connection, agent_id: &str, prefix: &str) -> Result<String> {
     let max: Option<i64> = conn
         .query_row(
@@ -1352,8 +1458,13 @@ pub fn list_unassigned_topics(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-/// topic を category に割り当てる（sticky・冪等）。既に割当済みなら false を返して
-/// 何もしない（`INSERT OR IGNORE` + PK(agent_id, topic_id)）。
+/// topic にタグ（category ノード）を 1 つ付ける。多対多 PK
+/// `(agent_id, topic_id, category_id)`（v26 / #358）なので 1 topic に複数タグを付けられる。
+/// 既に同じ 3 つ組が付いていれば `false` を返す（`INSERT OR IGNORE` が PK で弾く＝冪等）。
+///
+/// **sticky ではない**。v26 で単一ラベル sticky（旧 PK `(agent_id, topic_id)`）はやめ、
+/// 付け直し・統合（`merge_tags`）・取り消し（`remove_tag_member`）ができる一期一会の
+/// 付与にした（#313）。「未分類」フォールバックは作らない。
 pub fn assign_topic_to_category(
     conn: &Connection,
     agent_id: &str,

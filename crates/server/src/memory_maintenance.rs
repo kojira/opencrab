@@ -65,6 +65,8 @@ pub struct MaintenanceReport {
     pub categories_seeded: usize,
     /// カテゴリ層（#313）: 既存カテゴリへ割り当てた topic 数。
     pub topics_categorized: usize,
+    /// 整理ラン（#313 段階3 / #361）を実際に起動したか。既定オフ・ゲート未達では false。
+    pub organized: bool,
 }
 
 impl MaintenanceReport {
@@ -75,6 +77,7 @@ impl MaintenanceReport {
             || self.skill_consolidated
             || self.categories_seeded > 0
             || self.topics_categorized > 0
+            || self.organized
     }
 }
 
@@ -108,6 +111,7 @@ pub fn spawn_memory_maintenance_loop(state: AppState, interval_secs: u64) {
                             rolled_up_month = ?report.rolled_up_month,
                             categories_seeded = report.categories_seeded,
                             topics_categorized = report.topics_categorized,
+                            organized = report.organized,
                             "memory maintenance tick"
                         );
                     }
@@ -267,6 +271,17 @@ pub async fn run_maintenance_tick(
         Ok(ran) => report.skill_consolidated = ran,
         Err(e) => {
             tracing::warn!(agent_id = %agent_id, error = %e, "skill consolidation failed");
+        }
+    }
+
+    // ⑥ エージェンティック整理ラン（#313 段階3 / #361）。①〜③で索引を確定させた**後**に、
+    // 本人が別セッション・本人の人格で自分の記憶（topic）にタグを付けて整理する。
+    // **既定オフ**（config memory_organize.enabled）。ゲート（日次 + 下限）未達なら
+    // ゼロコールで即 return。対話ターンでは走らせない（呼び出し元はこの sleep ループのみ / #291）。
+    match crate::memory_organize::maybe_run_memory_organize(state, agent_id).await {
+        Ok(ran) => report.organized = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory organize failed");
         }
     }
 
