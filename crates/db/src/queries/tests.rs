@@ -3717,3 +3717,207 @@ fn resolve_channel_heartbeat_is_per_agent() {
     let r2 = resolve_channel_heartbeat_interval(&conn, "a2", Some(1200), 1800, 300);
     assert_eq!(r2.interval_secs, 1200);
 }
+
+// ============================================
+// スリープ整理ラン（#313 段階3 / #361）: マーカー + worklist クエリ
+// ============================================
+
+/// テスト用に topic ノードを 1 件入れる（created_at / end_log_id / source_type を指定）。
+fn seed_topic(
+    conn: &Connection,
+    agent_id: &str,
+    id: &str,
+    short: &str,
+    created_at: &str,
+    end_log_id: Option<i64>,
+    source_type: &str,
+) {
+    insert_index_node(
+        conn,
+        &IndexNodeRow {
+            id: id.to_string(),
+            agent_id: agent_id.to_string(),
+            parent_id: None,
+            node_type: "topic".to_string(),
+            source_type: source_type.to_string(),
+            title: format!("題 {short}"),
+            summary: "s".to_string(),
+            start_log_id: None,
+            end_log_id,
+            source_session_id: None,
+            date_from: None,
+            date_to: None,
+            depth: 3,
+            child_count: 0,
+            token_count: 0,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+            short_id: Some(short.to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn organize_marker_get_set_roundtrip_and_default_none() {
+    let conn = setup();
+    // config 行が無ければ None（get_memory_index_config の非永続デフォルトに引きずられない）。
+    assert_eq!(get_last_organize_at(&conn, "a1").unwrap(), None);
+    // set は行を作る（UPSERT）。
+    set_last_organize_at(&conn, "a1", "2026-08-03T00:00:00Z").unwrap();
+    assert_eq!(
+        get_last_organize_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-03T00:00:00Z")
+    );
+    // 上書きは last_organize_at のみを更新し、他エージェントに漏れない。
+    set_last_organize_at(&conn, "a1", "2026-08-04T00:00:00Z").unwrap();
+    assert_eq!(
+        get_last_organize_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-04T00:00:00Z")
+    );
+    assert_eq!(get_last_organize_at(&conn, "a2").unwrap(), None);
+}
+
+#[test]
+fn organize_marker_does_not_disturb_skill_consolidation_marker() {
+    let conn = setup();
+    // 既存の skill 棚卸しマーカーが立っている状態で organize マーカーを刻んでも、
+    // 隣の列は消えない（同じ config 行を共有するため）。
+    set_last_skill_consolidation_at(&conn, "a1", "2026-07-01T00:00:00Z").unwrap();
+    set_last_organize_at(&conn, "a1", "2026-08-03T00:00:00Z").unwrap();
+    assert_eq!(
+        get_last_skill_consolidation_at(&conn, "a1")
+            .unwrap()
+            .as_deref(),
+        Some("2026-07-01T00:00:00Z")
+    );
+    assert_eq!(
+        get_last_organize_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-03T00:00:00Z")
+    );
+}
+
+#[test]
+fn organize_worklist_respects_since_snapshot_limit_and_order() {
+    let conn = setup();
+    // スナップショット内（end_log_id <= 100）で、マーカー(2026-08-02)以降の topic を古い順に。
+    seed_topic(
+        &conn,
+        "a1",
+        "old",
+        "t1",
+        "2026-08-01T00:00:00Z",
+        Some(10),
+        "session_log",
+    ); // マーカー前 → 除外
+    seed_topic(
+        &conn,
+        "a1",
+        "n1",
+        "t2",
+        "2026-08-03T00:00:00Z",
+        Some(50),
+        "session_log",
+    );
+    seed_topic(
+        &conn,
+        "a1",
+        "n2",
+        "t3",
+        "2026-08-04T00:00:00Z",
+        Some(80),
+        "session_log",
+    );
+    seed_topic(
+        &conn,
+        "a1",
+        "future",
+        "t4",
+        "2026-08-05T00:00:00Z",
+        Some(200),
+        "session_log",
+    ); // snapshot 超過 → 除外
+       // topic 以外・他エージェント・category は対象外。
+    seed_topic(
+        &conn,
+        "a1",
+        "cat",
+        "c1",
+        "2026-08-03T00:00:00Z",
+        Some(60),
+        "category",
+    );
+    seed_topic(
+        &conn,
+        "a2",
+        "other",
+        "o1",
+        "2026-08-03T00:00:00Z",
+        Some(60),
+        "session_log",
+    );
+
+    let since = Some("2026-08-02T00:00:00Z");
+    // 件数ゲート（下限判定用）。
+    assert_eq!(count_organize_topics(&conn, "a1", since, 100).unwrap(), 2);
+    // worklist は古い順で n1, n2。
+    let wl = list_organize_topics(&conn, "a1", since, 100, 50).unwrap();
+    let ids: Vec<&str> = wl.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, vec!["n1", "n2"]);
+
+    // since=None なら下端制約なし（マーカー前の old も入る。future は依然 snapshot 超過で除外）。
+    assert_eq!(count_organize_topics(&conn, "a1", None, 100).unwrap(), 3);
+}
+
+#[test]
+fn organize_worklist_limit_leaves_remainder_for_next_time() {
+    let conn = setup();
+    for i in 1..=5 {
+        // created_at を昇順に振る（08-03T00:0i）。
+        let ts = format!("2026-08-03T00:0{i}:00Z");
+        seed_topic(
+            &conn,
+            "a1",
+            &format!("n{i}"),
+            &format!("t{i}"),
+            &ts,
+            Some(10 + i),
+            "session_log",
+        );
+    }
+    let since = Some("2026-08-02T00:00:00Z");
+    // 下限判定は全 5 件を数える。
+    assert_eq!(count_organize_topics(&conn, "a1", since, 100).unwrap(), 5);
+    // N=3 で切ると古い順 3 件。残りの n4/n5 はより新しい created_at なので、
+    // マーカーを n3 の created_at へ進めれば次回に拾える（前進のみ / 残りは次回）。
+    let wl = list_organize_topics(&conn, "a1", since, 100, 3).unwrap();
+    let ids: Vec<&str> = wl.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, vec!["n1", "n2", "n3"]);
+    let boundary = wl.iter().map(|t| t.created_at.clone()).max().unwrap();
+
+    // 次回: since を boundary に進めると残り 2 件だけが対象（重複しない）。
+    let next = list_organize_topics(&conn, "a1", Some(&boundary), 100, 3).unwrap();
+    let next_ids: Vec<&str> = next.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(next_ids, vec!["n4", "n5"]);
+}
+
+#[test]
+fn organize_worklist_includes_null_end_log_id() {
+    let conn = setup();
+    // end_log_id NULL（索引済みとみなす）は snapshot 内として拾う。
+    seed_topic(
+        &conn,
+        "a1",
+        "n1",
+        "t1",
+        "2026-08-03T00:00:00Z",
+        None,
+        "session_log",
+    );
+    assert_eq!(
+        count_organize_topics(&conn, "a1", Some("2026-08-02T00:00:00Z"), 5).unwrap(),
+        1
+    );
+}

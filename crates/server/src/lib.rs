@@ -20,6 +20,7 @@ pub mod hot_reload;
 pub mod llm_adapter;
 pub mod llm_log_archive;
 pub mod memory_maintenance;
+pub mod memory_organize;
 pub mod nostr_runner_impl;
 pub mod peer_review;
 pub mod process;
@@ -91,6 +92,8 @@ pub struct AppState {
     pub skill_consolidation: config::SkillConsolidationConfig,
     /// 記憶カテゴリ層（#313/#344）の sleep 中自動割当の設定。既定オフ（#345）。
     pub category_maintenance: config::CategoryMaintenanceConfig,
+    /// スリープ整理ラン（#313 段階3 / #361）の設定。既定オフ（opt-in / #346）。
+    pub memory_organize: config::MemoryOrganizeConfig,
     /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
     pub loop_restart_enabled: bool,
     /// エージェント単位のインデックスビルド in-flight フラグ（post-run トリガーと
@@ -199,6 +202,7 @@ pub(crate) fn test_app_state() -> AppState {
         evaluator: config::EvaluatorConfig::default(),
         skill_consolidation: config::SkillConsolidationConfig::default(),
         category_maintenance: config::CategoryMaintenanceConfig::default(),
+        memory_organize: config::MemoryOrganizeConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
         mcp_manager: None,

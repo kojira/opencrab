@@ -31,6 +31,9 @@ pub struct AppConfig {
     /// 記憶カテゴリ層（#313/#344）の sleep 中自動割当。既定オフ（#345）。
     #[serde(default)]
     pub category_maintenance: CategoryMaintenanceConfig,
+    /// スリープ整理ラン（#313 段階3 / #361）。既定オフ（opt-in / #346）。
+    #[serde(default)]
+    pub memory_organize: MemoryOrganizeConfig,
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
@@ -305,6 +308,63 @@ impl Default for CategoryMaintenanceConfig {
 
 fn default_category_maintenance_enabled() -> bool {
     false
+}
+
+/// スリープ整理ラン（#313 段階3 / #361）の設定。
+///
+/// エージェント本人が**別セッションの新規 context**で、自分の記憶（topic）に自分の人格で
+/// タグを付けて整理する（`browse/search/retrieve_memory` + `tag_topic`/`untag_topic`/
+/// `merge_tags`）。呼び出し元は sleep の memory maintenance ループのみ（対話ターンでは
+/// 走らせない = #291）。LLM を消費する自律ランなので `skill_consolidation` /
+/// `category_maintenance` と同じく **既定オフ（opt-in / #346）**。
+///
+/// `max_topics`（1 回の worklist 上限 N）・`min_new_topics`（発火下限）・`min_interval_hours`
+/// （日次ゲート）は**実測してから既定を確定する**ため config 可変にする（#313 の設計）。
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryOrganizeConfig {
+    /// 整理ラン全体の on/off。既定 false。
+    #[serde(default = "default_mo_enabled")]
+    pub enabled: bool,
+    /// 1 回の worklist に載せる新規 topic の上限 N（bounded worklist）。初期 50。
+    #[serde(default = "default_mo_max_topics")]
+    pub max_topics: i64,
+    /// 発火の下限。スナップショット以下の新規 topic がこの件数以上溜まったら発火。初期 20。
+    #[serde(default = "default_mo_min_new_topics")]
+    pub min_new_topics: i64,
+    /// 日次ゲート。前回マーカーからこの時間以上経っていないと発火しない。初期 24。
+    #[serde(default = "default_mo_min_interval_hours")]
+    pub min_interval_hours: i64,
+    /// 整理ラン 1 回のタイムアウト（秒）。超えたら partial 扱いでマーカーを前進させない。
+    #[serde(default = "default_mo_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MemoryOrganizeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_mo_enabled(),
+            max_topics: default_mo_max_topics(),
+            min_new_topics: default_mo_min_new_topics(),
+            min_interval_hours: default_mo_min_interval_hours(),
+            timeout_secs: default_mo_timeout_secs(),
+        }
+    }
+}
+
+fn default_mo_enabled() -> bool {
+    false
+}
+fn default_mo_max_topics() -> i64 {
+    50
+}
+fn default_mo_min_new_topics() -> i64 {
+    20
+}
+fn default_mo_min_interval_hours() -> i64 {
+    24
+}
+fn default_mo_timeout_secs() -> u64 {
+    600
 }
 
 /// evaluator（契約に対する独立 rubric 評価）の設定。

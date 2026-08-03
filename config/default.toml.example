@@ -206,6 +206,17 @@ include_archived_in_review = 3  # 棚卸し時に再検討する引退済みス�
 [category_maintenance]
 enabled = false           # 有効化で opt-in
 
+# スリープ整理ラン（#313 段階3 / #361）。エージェント本人が別セッションの新規 context で、
+# 自分の記憶（topic）に自分の人格でタグを付けて整理する（一期一会）。呼び出し元は sleep の
+# memory maintenance ループのみ（対話ターンでは走らせない）。LLM を消費する自律ランなので
+# 既定は無効（opt-in）。N・下限・間隔は実測してから確定するため config 可変にしている。
+[memory_organize]
+enabled = false           # 有効化で opt-in（既定オフ = 1 コールも呼ばない）
+max_topics = 50           # 1 回の worklist に載せる新規 topic の上限 N
+min_new_topics = 20       # この件数以上の新規 topic が溜まったら発火（下限ゲート）
+min_interval_hours = 24   # 前回からこの時間以上経つまで発火しない（日次ゲート）
+timeout_secs = 600        # 整理ラン 1 回のタイムアウト（超過は partial 扱いで前進しない）
+
 # VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。
 # [voice]
 # enabled = true
