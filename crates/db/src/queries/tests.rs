@@ -3255,6 +3255,230 @@ fn category_seed_and_assignment_queries_roundtrip() {
     assert_eq!(counts.get(&cat.id).copied(), Some(1));
 }
 
+// ---- タグ操作（issue #359 / #313 段階2）----
+
+/// テスト用に topic ノードを 1 件積む（`node_type='topic'`, `source_type='session_log'`）。
+fn insert_test_topic(conn: &Connection, agent_id: &str, id: &str, short_id: &str) {
+    insert_index_node(
+        conn,
+        &IndexNodeRow {
+            id: id.to_string(),
+            agent_id: agent_id.to_string(),
+            parent_id: None,
+            node_type: "topic".to_string(),
+            source_type: "session_log".to_string(),
+            title: format!("topic-{id}"),
+            summary: "s".to_string(),
+            start_log_id: None,
+            end_log_id: None,
+            source_session_id: None,
+            date_from: None,
+            date_to: None,
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            short_id: Some(short_id.to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        },
+    )
+    .unwrap();
+}
+
+/// #359: 1 つの topic に複数タグが付き（多対多）、付け直し・外しができる（sticky でない）。
+/// 二重付与は PK 冪等。無いタグ名は新設され、既存タグは title 一致で束ねて二重作成しない。
+#[test]
+fn tag_topic_multi_tag_untag_retag() {
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+    insert_test_topic(&conn, "a1", "t1", "t1");
+
+    // 2 つのタグを付ける（両方新設）。1 topic に複数タグ。
+    tag_topic(
+        &conn,
+        "a1",
+        "t1",
+        &["Rust".to_string(), "設計".to_string()],
+        now,
+    )
+    .unwrap();
+    let counts = count_category_members(&conn, "a1").unwrap();
+    let total: i64 = counts.values().sum();
+    assert_eq!(total, 2, "1 topic に 2 タグが付く（多対多）");
+    // タグは category ノードとして browse で引ける。
+    assert!(get_category_node_by_title(&conn, "a1", "Rust")
+        .unwrap()
+        .is_some());
+    assert!(get_category_node_by_title(&conn, "a1", "設計")
+        .unwrap()
+        .is_some());
+    assert_eq!(list_top_level_categories(&conn, "a1").unwrap().len(), 2);
+
+    // 同じタグの二重付与は冪等（PK で弾かれ、件数もノード数も増えない）。
+    tag_topic(&conn, "a1", "t1", &["Rust".to_string()], now).unwrap();
+    let total2: i64 = count_category_members(&conn, "a1").unwrap().values().sum();
+    assert_eq!(total2, 2, "二重付与は冪等（増えない）");
+    assert_eq!(list_top_level_categories(&conn, "a1").unwrap().len(), 2);
+
+    // 外せる（member を削除。タグノード自体は残る）。
+    assert!(remove_tag_member(&conn, "a1", "t1", "Rust").unwrap());
+    let rust_id = get_category_node_by_title(&conn, "a1", "Rust")
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_eq!(
+        count_category_members(&conn, "a1")
+            .unwrap()
+            .get(&rust_id)
+            .copied(),
+        None,
+        "外したタグの member は 0 件"
+    );
+    assert!(
+        get_category_node_by_title(&conn, "a1", "Rust")
+            .unwrap()
+            .is_some(),
+        "外してもタグノード自体は消えない"
+    );
+    // 二度目の外しは false（もう付いていない）。
+    assert!(!remove_tag_member(&conn, "a1", "t1", "Rust").unwrap());
+
+    // 付け直せる（sticky でない = 一期一会）。
+    tag_topic(&conn, "a1", "t1", &["Rust".to_string()], now).unwrap();
+    assert_eq!(
+        count_category_members(&conn, "a1")
+            .unwrap()
+            .get(&rust_id)
+            .copied(),
+        Some(1),
+        "外した後にまた付けられる（sticky でない）"
+    );
+}
+
+/// #359: タグ新設が黙って失敗しない。`resolve_or_create_tag` は新設したノードを read-back
+/// で検証してから id を返す（`insert_index_node` の `INSERT OR IGNORE` が CHECK 違反等を
+/// 握り潰しても、実在しなければ Err にする / #344 の教訓）。返る id は必ず実在する。
+/// 既存タグは title 一致で束ねて二重作成しない＝冪等。空白のみの名前は拒否する。
+#[test]
+fn resolve_or_create_tag_is_verified_and_idempotent() {
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+
+    // 新設: 返る id は必ず実在ノードを指す（黙って失敗＝ダングリング id を返さない）。
+    let id1 = resolve_or_create_tag(&conn, "a1", "Rust", now).unwrap();
+    assert!(
+        get_index_node(&conn, &id1).unwrap().is_some(),
+        "新設タグの id が実在ノードを指す（read-back 検証）"
+    );
+
+    // 冪等: 同名は同じ id を返し、ノードを二重に作らない。
+    let id2 = resolve_or_create_tag(&conn, "a1", "Rust", now).unwrap();
+    assert_eq!(id1, id2, "同名タグは同じ id（二重作成しない）");
+    assert_eq!(
+        list_top_level_categories(&conn, "a1").unwrap().len(),
+        1,
+        "ノードは 1 つだけ"
+    );
+    // 前後の空白は正規化される（別タグにならない）。
+    let id3 = resolve_or_create_tag(&conn, "a1", "  Rust ", now).unwrap();
+    assert_eq!(id1, id3, "前後空白は正規化されて同じタグ");
+
+    // 空白のみ / 空文字は拒否（無名タグを作らない）。
+    assert!(resolve_or_create_tag(&conn, "a1", "", now).is_err());
+    assert!(resolve_or_create_tag(&conn, "a1", "   ", now).is_err());
+    assert_eq!(
+        list_top_level_categories(&conn, "a1").unwrap().len(),
+        1,
+        "拒否時にノードを増やさない"
+    );
+}
+
+/// #359: `merge_tags` は from の member を into へ付け替え、from ノードを削除する。
+/// - 付け替え先に同じ (topic, into) 行が既にあっても落ちない（OR IGNORE でスキップ）。
+/// - from タグノード削除で **FTS 孤児を残さない**（`delete_index_node` の subtree CTE 経由）。
+#[test]
+fn merge_tags_reassigns_without_collision_and_cleans_fts() {
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+    insert_test_topic(&conn, "a1", "t1", "t1");
+    insert_test_topic(&conn, "a1", "t2", "t2");
+
+    // t1 は from と into の両方、t2 は from だけ。統合すると t1 が付け替え衝突を起こす。
+    tag_topic(
+        &conn,
+        "a1",
+        "t1",
+        &["旧".to_string(), "新".to_string()],
+        now,
+    )
+    .unwrap();
+    tag_topic(&conn, "a1", "t2", &["旧".to_string()], now).unwrap();
+
+    let from_id = get_category_node_by_title(&conn, "a1", "旧")
+        .unwrap()
+        .unwrap()
+        .id;
+    // from ノードの FTS 行が存在することを事前確認（後で孤児が残らないことを見るため）。
+    let fts_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_index_fts WHERE node_id = ?1",
+            params![from_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts_before, 1, "from タグは FTS に載っている");
+
+    // 統合（付け替え衝突を含む）: t1 は既に「新」を持つので OR IGNORE でスキップされ落ちない。
+    let outcome = merge_tags(&conn, "a1", "旧", "新", now).unwrap();
+    assert_eq!(outcome.from_category_id, from_id);
+
+    // from ノードは消え、from の member も残らない（孤児 member 無し）。
+    assert!(
+        get_category_node_by_title(&conn, "a1", "旧")
+            .unwrap()
+            .is_none(),
+        "統合後 from タグノードは削除される"
+    );
+    assert_eq!(
+        count_category_members(&conn, "a1")
+            .unwrap()
+            .get(&from_id)
+            .copied(),
+        None,
+        "from の member は残らない"
+    );
+    // into には t1・t2 の 2 件（t1 は元々あった 1 件のまま、衝突で二重にならない）。
+    let into_id = get_category_node_by_title(&conn, "a1", "新")
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_eq!(
+        count_category_members(&conn, "a1")
+            .unwrap()
+            .get(&into_id)
+            .copied(),
+        Some(2),
+        "into に 2 topic（衝突で二重にならない）"
+    );
+
+    // FTS 孤児が残らない: 消えた from ノードの FTS 行が無い。
+    let fts_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_index_fts WHERE node_id = ?1",
+            params![from_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts_after, 0, "from タグ削除で FTS 孤児を残さない");
+
+    // 自己統合（from == into）は拒否（from を消すと into も消えるため）。
+    assert!(merge_tags(&conn, "a1", "新", "新", now).is_err());
+    // 存在しない from の統合も拒否。
+    assert!(merge_tags(&conn, "a1", "無", "新", now).is_err());
+}
+
 /// 実データに近い規模（topic 数千件）でカテゴリ層のクエリが破綻しないことを確認する。
 /// LLM は使わず、割当の「頭脳」以外（未割当抽出・sticky 割当・件数集計・冪等性）を
 /// 実規模で検証する。CI を重くしないため #[ignore]（`--ignored` で明示実行）。

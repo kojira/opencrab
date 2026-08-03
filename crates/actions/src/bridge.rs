@@ -472,6 +472,14 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     //     書き込みを background 化すると雑音が増えるだけ。
     "update_impression",
     "save_model_insight",
+    // (6) タグ操作（#359 / #313 段階2）。整理ラン（段階3）の中で「topic を読む → タグを
+    //     決める → 付ける/外す/統合する」という短い書き込みループを回す。結果（新設できたか /
+    //     何件付け替えたか）を同ターンで見て次の操作を決めるので background 化しない。短時間の
+    //     書き込みで、dispatch すると resume ターンの雑音が増えるだけ。呼び出し元は
+    //     `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）から触らせない。
+    "tag_topic",
+    "untag_topic",
+    "merge_tags",
 ];
 
 /// core アクションのうち、**意図的に dispatch を許す**もの。
@@ -616,6 +624,18 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // OWNER_ONLY（#330）だが、その許可リストの読み取りは素通しだった。
     // `SystemGatewayActions`（server 側 own ツール / #157 S1）の実装。
     "list_allowed_commands",
+    // 記憶へのタグ付け（#359 / #313 段階2）。Nostr は誰でも話しかけられるので、会話の
+    // 流れで記憶にタグを付けさせ続ければタグ語彙をスパムで汚染できる（#351/#353 と同じ
+    // 論拠）。整理ラン（段階3）は caller=Owner で走る（heartbeat と同じ前例）ので支障は
+    // 無い。`OWNER_ONLY` ではなく **trusted_only** — owner だけでなく CoAgent /
+    // TrustedUser も従来どおり使える。owner / co_agent / trusted_user が自分の意思で触る
+    // ターン（heartbeat tick / ダッシュボード / オーナー会話 / 信頼済みユーザー会話）は
+    // 全て caller!=Agent なので通る。いずれも core dispatcher のアクション
+    // （`CORE_INLINE_ACTIONS` / `crates/actions/src/memory_access.rs`）で、既存の caller
+    // ゲートへの追加のみ＝新しい概念・列・設定は足していない。
+    "tag_topic",
+    "untag_topic",
+    "merge_tags",
 ];
 
 // `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。
@@ -2280,6 +2300,100 @@ mod tests {
                 assert!(
                     listed.iter().any(|n| n == name),
                     "caller={caller:?} の list_tools に {name} が出ない（#356）"
+                );
+            }
+        }
+    }
+
+    /// #359 で trusted ゲートへ載せるタグ操作 3 個（core inline dispatcher アクション）。
+    const TAG_ACTIONS_TRUSTED_ONLY: &[&str] = &["tag_topic", "untag_topic", "merge_tags"];
+
+    /// #359: タグ操作 3 個は trusted_only（owner_only ではない）。owner_only にすると
+    /// CoAgent / TrustedUser も塞がれてしまう（オーナー決定は「TRUSTED_ONLY / OWNER_ONLY
+    /// ではない」）。ポリシー表の権威で固定する。
+    #[test]
+    fn tag_actions_are_trusted_only_in_policy_table() {
+        for name in TAG_ACTIONS_TRUSTED_ONLY {
+            let p = tool_policy(name);
+            assert!(p.trusted_only, "{name} must be trusted_only (#359)");
+            assert!(
+                !p.owner_only,
+                "{name} は trusted_only であるべき（owner_only にすると CoAgent / \
+                 TrustedUser も塞がれる / #359）"
+            );
+        }
+    }
+
+    /// #359: caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは、タグ操作
+    /// 3 個が **3 経路すべて**（`policy_allows` / `list_tools` / `dispatch_inner`）で落ちる
+    /// こと。名前がリストから消えただけでは別の場所に caller ゲートが足された場合を捕まえ
+    /// られないので `passthrough_actions_gated_from_agent_caller`（#356）と同じ 3 経路を通す。
+    ///
+    /// これらは core dispatcher に**実在**するアクション（`ActionDispatcher::new` に登録済み）
+    /// なので、もし policy が拒否しなければ execute が実際に走ってしまう（引数不足で
+    /// `!success` にはなるが policy 拒否ではない）。よって実行時強制は「拒否された
+    /// （`!success`）」だけでなく **policy 由来の拒否であること**（`is_rejection` =
+    /// REJECTION_CODE_PREFIX 付き）まで見て、ゲートが効いていることを区別する（#357 に倣う）。
+    ///
+    /// 対照: caller=Owner / CoAgent / TrustedUser（heartbeat tick / ダッシュボード /
+    /// オーナー会話 / 信頼済みユーザー会話）では従来どおり 3 経路すべてで通る。
+    #[tokio::test]
+    async fn tag_actions_gated_from_agent_caller() {
+        // caller=Agent: 3 経路すべてで落ちる。
+        let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
+        let agent_listed: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        for name in TAG_ACTIONS_TRUSTED_ONLY {
+            // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
+            assert!(
+                !agent_exec.policy_allows(name),
+                "caller=Agent が {name} を policy_allows で通してしまう（#359）"
+            );
+            // 2. 可視性: モデルに見えていないこと。
+            assert!(
+                !agent_listed.iter().any(|n| n == name),
+                "caller=Agent の list_tools に {name} が出てしまう（#359）"
+            );
+            // 3. 実行時強制: 名前指定の実行が policy で拒否されること（記憶で名前を呼んでも
+            //    素通ししない）。実在アクションなので「引数不足エラー」ではなく policy 拒否で
+            //    あることまで見る。
+            let r = agent_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.success,
+                "caller=Agent の {name} 実行が拒否されない（#359）"
+            );
+            assert!(
+                is_rejection(r.error.as_deref()),
+                "caller=Agent の {name} 実行が policy 拒否になっていない（error={:?} / #359）",
+                r.error
+            );
+        }
+
+        // 対照: Owner / CoAgent / TrustedUser では policy_allows を通り list_tools に出る。
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::CoAgent {
+                agent_id: "peer".to_string(),
+            },
+            CallerIdentity::TrustedUser,
+        ] {
+            let (_d, ctx) = test_context_with_caller(caller.clone());
+            let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            for name in TAG_ACTIONS_TRUSTED_ONLY {
+                assert!(
+                    exec.policy_allows(name),
+                    "caller={caller:?} で {name} が policy_allows を通らない（#359 は \
+                     trusted を塞がない）"
+                );
+                assert!(
+                    listed.iter().any(|n| n == name),
+                    "caller={caller:?} の list_tools に {name} が出ない（#359）"
                 );
             }
         }

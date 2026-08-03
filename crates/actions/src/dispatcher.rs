@@ -54,6 +54,10 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(BrowseMemoryIndexAction));
         dispatcher.register(Arc::new(RetrieveMemoryNodesAction));
         dispatcher.register(Arc::new(SearchMemoryIndexAction));
+        // タグ操作（#359 / #313 段階2）。TRUSTED_ONLY で Nostr から触らせない。
+        dispatcher.register(Arc::new(TagTopicAction));
+        dispatcher.register(Arc::new(UntagTopicAction));
+        dispatcher.register(Arc::new(MergeTagsAction));
 
         // LLM関連アクション登録
         dispatcher.register(Arc::new(SelectLlmAction));
