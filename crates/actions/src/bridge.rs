@@ -544,6 +544,19 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
 pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "create_skill",
     "execute_skill",
+    // スキル生成（core 版）と自律学習（#351）。Nostr は誰でも話しかけられるので、会話の
+    // 流れでスキルを作らせ続ければスキル棚をスパムで汚染できる。オーナー明示の要望
+    // （2026-08-03「スキルを作るのもなし。スパム的に作らされる可能性あるからだめ」）で
+    // caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは一覧にも出さず
+    // 実行もしない。gateway 版の `create_skill`（上）と同じ棚に揃える。owner/co_agent/
+    // trusted_user が自分の意思で触るターン（heartbeat tick / ダッシュボード / オーナー
+    // 会話）は全て caller=Owner なので従来どおり通る。`learn_from_experience` /
+    // `learn_from_peer` / `reflect_and_learn` はいずれも新スキル（または記憶）を生成する
+    // 学習系で、`create_my_skill` と同じく棚へ書き込むため同じゲートに揃える。
+    "create_my_skill",
+    "learn_from_experience",
+    "learn_from_peer",
+    "reflect_and_learn",
     "read_heartbeat_instructions",
     // エージェント自身の Nostr 受信 → Discord 転記先設定（#252 段階 C）。**owner 限定に
     // はしない** — 自分の転記先を自分で決めるのがこの機能の目的で、エージェントが自分の
@@ -1985,6 +1998,94 @@ mod tests {
                 !agent_exec.policy_allows(name),
                 "{name} の trusted ゲートは維持されるべき（#306 は nostr_dm/nostr_zap だけ）"
             );
+        }
+    }
+
+    /// #351 で trusted ゲートへ載せるスキル生成 / 自律学習系（core dispatcher アクション）。
+    const SKILL_LEARNING_TRUSTED_ONLY: &[&str] = &[
+        "create_my_skill",
+        "learn_from_experience",
+        "learn_from_peer",
+        "reflect_and_learn",
+    ];
+
+    /// #351: スキル生成（`create_my_skill`）と自律学習（`learn_from_experience` /
+    /// `learn_from_peer` / `reflect_and_learn`）は trusted_only（owner_only ではない）。
+    /// gateway 版 `create_skill` と同じ棚に揃っていることをポリシー表の権威で固定する。
+    #[test]
+    fn skill_and_learning_actions_are_trusted_only_in_policy_table() {
+        for name in SKILL_LEARNING_TRUSTED_ONLY {
+            let p = tool_policy(name);
+            assert!(p.trusted_only, "{name} must be trusted_only (#351)");
+            assert!(
+                !p.owner_only,
+                "{name} は trusted_only であるべき（owner_only にすると CoAgent / \
+                 TrustedUser も塞がれる / #351）"
+            );
+        }
+    }
+
+    /// #351: caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは、スキル
+    /// 生成 / 自律学習系が **3 経路すべて**（`policy_allows` / `list_tools` /
+    /// `dispatch_inner`）で落ちること。オーナー要望「スキルを作るのもなし」を実測で固定
+    /// する。名前がリストから消えただけでは、別の場所に caller ゲートが足された場合を
+    /// 捕まえられないので `nostr_run_passes_the_gate_for_agent_caller` と同じ 3 経路を通す。
+    ///
+    /// 対照: caller=Owner / CoAgent / TrustedUser（heartbeat tick / ダッシュボード /
+    /// オーナー会話 / 信頼済みユーザー会話）では従来どおり 3 経路すべてで通る。
+    #[tokio::test]
+    async fn skill_and_learning_actions_gated_from_agent_caller() {
+        // caller=Agent: 3 経路すべてで落ちる。
+        let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
+        let agent_listed: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        for name in SKILL_LEARNING_TRUSTED_ONLY {
+            // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
+            assert!(
+                !agent_exec.policy_allows(name),
+                "caller=Agent が {name} を policy_allows で通してしまう（#351）"
+            );
+            // 2. 可視性: モデルに見えていないこと。
+            assert!(
+                !agent_listed.iter().any(|n| n == name),
+                "caller=Agent の list_tools に {name} が出てしまう（#351）"
+            );
+            // 3. 実行時強制: 名前指定の実行が拒否されること（記憶で名前を呼んでも素通し
+            //    しない）。
+            let r = agent_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.success,
+                "caller=Agent の {name} 実行が拒否されない（#351）"
+            );
+        }
+
+        // 対照: Owner / CoAgent / TrustedUser では 3 経路すべてで通る。
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::CoAgent {
+                agent_id: "peer".to_string(),
+            },
+            CallerIdentity::TrustedUser,
+        ] {
+            let (_d, ctx) = test_context_with_caller(caller.clone());
+            let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            for name in SKILL_LEARNING_TRUSTED_ONLY {
+                assert!(
+                    exec.policy_allows(name),
+                    "caller={caller:?} で {name} が policy_allows を通らない（#351 は \
+                     trusted を塞がない）"
+                );
+                assert!(
+                    listed.iter().any(|n| n == name),
+                    "caller={caller:?} の list_tools に {name} が出ない（#351）"
+                );
+            }
         }
     }
 
