@@ -23,9 +23,13 @@ impl AgentRuntime for AppState {
         process::run_agent_response(self, req).await
     }
 
-    fn build_agent_context(&self, agent_id: &str) -> (String, String) {
+    fn build_agent_context(
+        &self,
+        agent_id: &str,
+        caller: &opencrab_actions::CallerIdentity,
+    ) -> (String, String) {
         let conn = self.db.lock().unwrap();
-        process::build_agent_context(&conn, agent_id)
+        process::build_agent_context(&conn, agent_id, caller)
     }
 
     fn build_conversation_string(

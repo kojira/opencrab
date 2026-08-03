@@ -390,8 +390,13 @@ fn make_heartbeat_callback(
                 // 3-4. エージェントコンテキストと会話文字列を構築
                 let (system_prompt, agent_name, conversation) = {
                     let conn = db.lock().unwrap();
-                    let (sp, name) =
-                        opencrab_server::process::build_agent_context(&conn, &agent_id_owned);
+                    // heartbeat は caller=Owner で走る（`heartbeat_run_request`）。index も
+                    // 同じ caller で組み立て、Owner には全 skill を見せる（#352）。
+                    let (sp, name) = opencrab_server::process::build_agent_context(
+                        &conn,
+                        &agent_id_owned,
+                        &opencrab_actions::CallerIdentity::Owner,
+                    );
                     // Use per-agent model from DB, fallback to global default
                     let agent_model = opencrab_db::queries::effective_model_for_agent(
                         &conn,

@@ -239,10 +239,11 @@ pub async fn send_agent_message(
         .get(gateway_kinds::DISCORD)
         .and_then(|gw| gw.gateway_actions_for(&id));
 
-    // 7. Build agent context.
+    // 7. Build agent context. 本ターンの caller（上で resolve 済み）で index を絞る。
+    // 同じ caller を下の RunRequest にも載せる（index と実行権限を一致させる / #352）。
     let (system_prompt, agent_name) = {
         let conn = state.db.lock().unwrap();
-        process::build_agent_context(&conn, &id)
+        process::build_agent_context(&conn, &id, &caller)
     };
 
     // 8. Build conversation string.

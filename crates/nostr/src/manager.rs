@@ -1150,7 +1150,11 @@ mod tests {
             })
         }
 
-        fn build_agent_context(&self, _agent_id: &str) -> (String, String) {
+        fn build_agent_context(
+            &self,
+            _agent_id: &str,
+            _caller: &CallerIdentity,
+        ) -> (String, String) {
             ("base".to_string(), "テストくん".to_string())
         }
 

@@ -1730,7 +1730,12 @@ mod tests {
             // (2) 名簿にその表示名が載る（依頼側のプロンプトに出る / #218）
             let prompt = {
                 let conn = state.db.lock().unwrap();
-                crate::process::build_agent_context(&conn, AGENT).0
+                crate::process::build_agent_context(
+                    &conn,
+                    AGENT,
+                    &opencrab_actions::CallerIdentity::Owner,
+                )
+                .0
             };
             assert!(
                 prompt.contains(&format!("- {REVIEWER_NAME}")),

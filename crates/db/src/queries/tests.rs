@@ -647,6 +647,7 @@ fn test_skills_crud() {
         permission: "\"agent\"".to_string(),
         archived: false,
         created_caller: None,
+        agent_visible: false,
     };
 
     insert_skill(&conn, &skill).unwrap();
@@ -681,6 +682,7 @@ fn test_skill_created_caller_roundtrip() {
         permission: "\"agent\"".to_string(),
         archived: false,
         created_caller: Some("agent".to_string()),
+        agent_visible: false,
     };
     insert_skill(&conn, &skill).unwrap();
 
@@ -730,6 +732,7 @@ fn test_skill_usage_increment() {
         permission: "\"agent\"".to_string(),
         archived: false,
         created_caller: None,
+        agent_visible: false,
     };
 
     insert_skill(&conn, &skill).unwrap();
@@ -761,6 +764,7 @@ fn test_find_skill_by_name_any_includes_archived() {
         permission: "\"agent\"".to_string(),
         archived: true,
         created_caller: None,
+        agent_visible: false,
     };
     insert_skill(&conn, &skill).unwrap();
 
@@ -801,6 +805,7 @@ fn test_update_skill_full_fields() {
         permission: "\"agent\"".to_string(),
         archived: true,
         created_caller: None,
+        agent_visible: false,
     };
     insert_skill(&conn, &skill).unwrap();
 

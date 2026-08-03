@@ -184,10 +184,11 @@ pub async fn send_message(
             continue;
         }
 
-        // Build agent context from DB.
+        // Build agent context from DB. この経路の run は caller=Owner（下の RunRequest と
+        // 一致）。Owner には全 skill を見せる（#352）。
         let (system_prompt, agent_name) = {
             let conn = state.db.lock().unwrap();
-            process::build_agent_context(&conn, agent_id)
+            process::build_agent_context(&conn, agent_id, &opencrab_actions::CallerIdentity::Owner)
         };
 
         // Build conversation history from session logs.
