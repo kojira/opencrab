@@ -3859,10 +3859,10 @@ fn organize_worklist_respects_since_snapshot_limit_and_order() {
         "session_log",
     );
 
-    let since = Some("2026-08-02T00:00:00Z");
+    let since = Some(("2026-08-02T00:00:00Z", ""));
     // 件数ゲート（下限判定用）。
     assert_eq!(count_organize_topics(&conn, "a1", since, 100).unwrap(), 2);
-    // worklist は古い順で n1, n2。
+    // worklist は (created_at, id) 昇順で n1, n2。
     let wl = list_organize_topics(&conn, "a1", since, 100, 50).unwrap();
     let ids: Vec<&str> = wl.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["n1", "n2"]);
@@ -3887,18 +3887,19 @@ fn organize_worklist_limit_leaves_remainder_for_next_time() {
             "session_log",
         );
     }
-    let since = Some("2026-08-02T00:00:00Z");
+    let since = Some(("2026-08-02T00:00:00Z", ""));
     // 下限判定は全 5 件を数える。
     assert_eq!(count_organize_topics(&conn, "a1", since, 100).unwrap(), 5);
-    // N=3 で切ると古い順 3 件。残りの n4/n5 はより新しい created_at なので、
-    // マーカーを n3 の created_at へ進めれば次回に拾える（前進のみ / 残りは次回）。
+    // N=3 で切ると (created_at, id) 昇順 3 件。残りの n4/n5 はより新しいので、
+    // 末尾の (created_at, id) カーソルを刻めば次回に拾える（前進のみ / 残りは次回）。
     let wl = list_organize_topics(&conn, "a1", since, 100, 3).unwrap();
     let ids: Vec<&str> = wl.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["n1", "n2", "n3"]);
-    let boundary = wl.iter().map(|t| t.created_at.clone()).max().unwrap();
+    let last = wl.last().unwrap();
+    let cursor = (last.created_at.as_str(), last.id.as_str());
 
-    // 次回: since を boundary に進めると残り 2 件だけが対象（重複しない）。
-    let next = list_organize_topics(&conn, "a1", Some(&boundary), 100, 3).unwrap();
+    // 次回: カーソルを進めると残り 2 件だけが対象（重複しない）。
+    let next = list_organize_topics(&conn, "a1", Some(cursor), 100, 3).unwrap();
     let next_ids: Vec<&str> = next.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(next_ids, vec!["n4", "n5"]);
 }
@@ -3917,7 +3918,48 @@ fn organize_worklist_includes_null_end_log_id() {
         "session_log",
     );
     assert_eq!(
-        count_organize_topics(&conn, "a1", Some("2026-08-02T00:00:00Z"), 5).unwrap(),
+        count_organize_topics(&conn, "a1", Some(("2026-08-02T00:00:00Z", "")), 5).unwrap(),
+        1
+    );
+}
+
+/// 回帰（blocker / PR #364 レビュー）: 索引ビルドは 1 パスの全 topic に**同一 created_at**
+/// を刻む（`index_builder.rs`）。新規が N を超え、切り口が同着群の内側に落ちても、
+/// `(created_at, id)` カーソルなら残余を次回に引き継いで取りこぼさないこと。
+#[test]
+fn organize_worklist_same_created_at_group_not_dropped_across_runs() {
+    let conn = setup();
+    let ts = "2026-08-03T00:00:00Z";
+    // 同着 created_at の 51 件（id は昇順で相異）。本番の topic id 形に寄せる。
+    for i in 0..51 {
+        seed_topic(
+            &conn,
+            "a1",
+            &format!("topic-a1-s-{i:03}"),
+            &format!("t{i:03}"),
+            ts,
+            Some(10),
+            "session_log",
+        );
+    }
+    let since = Some(("2026-08-02T00:00:00Z", ""));
+    // run1: N=50。
+    let wl1 = list_organize_topics(&conn, "a1", since, 100, 50).unwrap();
+    assert_eq!(wl1.len(), 50);
+    // マーカー前進 = 提示した末尾の (created_at, id) カーソル。
+    let last = wl1.last().unwrap();
+    let cursor = (last.created_at.as_str(), last.id.as_str());
+    // run2: 残り 1 件が次回に拾える（同着でも取りこぼさない）。
+    let wl2 = list_organize_topics(&conn, "a1", Some(cursor), 100, 50).unwrap();
+    assert_eq!(wl2.len(), 1, "同着 created_at 群の残余が取りこぼされている");
+    // run1 と run2 は重複しない（カーソルより後の 1 件だけ）。
+    assert!(
+        wl1.iter().all(|t| t.id != wl2[0].id),
+        "run1 と run2 の topic が重複している"
+    );
+    // count も同じカーソルで残余 1 を返す（ゲートと worklist の整合）。
+    assert_eq!(
+        count_organize_topics(&conn, "a1", Some(cursor), 100).unwrap(),
         1
     );
 }

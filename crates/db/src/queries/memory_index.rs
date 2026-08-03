@@ -899,12 +899,15 @@ pub fn set_last_skill_consolidation_at(conn: &Connection, agent_id: &str, ts: &s
     Ok(())
 }
 
-/// スリープ整理ラン（#313 段階3）の最終実行時刻を取得する。行が無い/NULL なら `None`。
+/// スリープ整理ラン（#313 段階3）のカーソルを取得する。行が無い/NULL なら `None`。
 ///
-/// `last_skill_consolidation_at` と同型のマーカー。整理ランはこれを 2 つの用途に使う:
-/// (1) 日次ゲート（`now - last_organize_at >= 間隔`）、(2) bounded worklist の下端
-/// （このマーカー以降に作られた topic だけを整理対象にする）。`None`（初回遭遇）は
-/// 呼び出し側が `now` をシードして 1 回スキップする（既存の全 topic を一気に対象化しない）。
+/// `last_skill_consolidation_at` と同じ TEXT 1 列だが、中身は
+/// **`"{created_at}|{id}"` の複合カーソル**（呼び出し側 `memory_organize` が組み立てる）。
+/// 整理ランはこれを 2 つの用途に使う: (1) 日次ゲート（`created_at` 部分を刻時として
+/// `now - T >= 間隔`）、(2) bounded worklist の下端（[`list_organize_topics`] の
+/// `(created_at, id)` カーソル）。初回シードは `id` 部を持たない素の刻時でよい（`|` が
+/// 無ければ全体を `created_at` として解釈する）。`None`（初回遭遇）は呼び出し側が `now` を
+/// シードして 1 回スキップする（既存の全 topic を一気に対象化しない）。
 pub fn get_last_organize_at(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
     let result = conn.query_row(
         "SELECT last_organize_at FROM agent_memory_index_config WHERE agent_id = ?1",
@@ -941,48 +944,62 @@ pub fn set_last_organize_at(conn: &Connection, agent_id: &str, ts: &str) -> Resu
 /// スリープ整理ラン（#313 段階3）の worklist 対象 topic 数を数える（発火の下限ゲート用）。
 ///
 /// 対象 = `node_type='topic'` かつ `source_type='session_log'` で、
-/// (a) `since`（前回マーカー）より後に作られ、(b) スナップショット `snapshot_log_id`
-/// （`memory_index_watermark.last_indexed_log_id`）以下に収まっているもの。`since=None`
-/// なら下端制約なし。`end_log_id IS NULL` の topic はスナップショット内とみなす。
+/// (a) 前回カーソル `since = (created_at, id)` より**後**、(b) スナップショット
+/// `snapshot_log_id`（`memory_index_watermark.last_indexed_log_id`）以下に収まっているもの。
+/// `since=None` なら下端制約なし。`end_log_id IS NULL` の topic はスナップショット内とみなす。
+///
+/// **カーソルは `created_at` 単体でなく `(created_at, id)` の単調タプル**にしている。索引
+/// ビルドは 1 パスの全 topic に**同一 `created_at`** を刻む（`index_builder.rs`）ため、
+/// `created_at` 単体で `> T` すると、切り口が同着群の内側に落ちたとき同じ `created_at` を持つ
+/// 未提示分が二度と対象にならず取りこぼす。`id` を副キーにして境界を跨いで残余を引き継ぐ。
 pub fn count_organize_topics(
     conn: &Connection,
     agent_id: &str,
-    since: Option<&str>,
+    since: Option<(&str, &str)>,
     snapshot_log_id: i64,
 ) -> Result<i64> {
+    let (since_ts, since_id) = match since {
+        Some((ts, id)) => (Some(ts), id),
+        None => (None, ""),
+    };
     let n = conn.query_row(
         "SELECT COUNT(*) FROM memory_index_nodes n
          WHERE n.agent_id = ?1 AND n.node_type = 'topic' AND n.source_type = 'session_log'
-           AND (?2 IS NULL OR n.created_at > ?2)
-           AND (n.end_log_id IS NULL OR n.end_log_id <= ?3)",
-        params![agent_id, since, snapshot_log_id],
+           AND (?2 IS NULL OR n.created_at > ?2 OR (n.created_at = ?2 AND n.id > ?3))
+           AND (n.end_log_id IS NULL OR n.end_log_id <= ?4)",
+        params![agent_id, since_ts, since_id, snapshot_log_id],
         |row| row.get::<_, i64>(0),
     )?;
     Ok(n)
 }
 
-/// スリープ整理ランの worklist（対象 topic を古い順で最大 `limit` 件）を返す。
+/// スリープ整理ランの worklist（対象 topic を `(created_at, id)` 昇順で最大 `limit` 件）を返す。
 ///
-/// フィルタは [`count_organize_topics`] と同一。古い順（`created_at ASC`）なので、
-/// `limit` で切ったときの残り（＝より新しい topic）は次回のマーカー前進後に自然と拾える
-/// （前進のみ / 残りは次回）。
+/// フィルタは [`count_organize_topics`] と同一の `(created_at, id)` カーソル。並び順も
+/// `created_at ASC, id ASC` で揃えてあるので、`limit` で切った残り（＝カーソルより後）は、
+/// 呼び出し側が**末尾の `(created_at, id)` をマーカーへ刻めば**次回そこから引き継げる
+/// （前進のみ / 残りは次回 / 同着 created_at 群を N で分断しても取りこぼさない）。
 pub fn list_organize_topics(
     conn: &Connection,
     agent_id: &str,
-    since: Option<&str>,
+    since: Option<(&str, &str)>,
     snapshot_log_id: i64,
     limit: i64,
 ) -> Result<Vec<IndexNodeRow>> {
+    let (since_ts, since_id) = match since {
+        Some((ts, id)) => (Some(ts), id),
+        None => (None, ""),
+    };
     let sql = format!(
         "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes n
          WHERE n.agent_id = ?1 AND n.node_type = 'topic' AND n.source_type = 'session_log'
-           AND (?2 IS NULL OR n.created_at > ?2)
-           AND (n.end_log_id IS NULL OR n.end_log_id <= ?3)
-         ORDER BY n.created_at ASC LIMIT ?4"
+           AND (?2 IS NULL OR n.created_at > ?2 OR (n.created_at = ?2 AND n.id > ?3))
+           AND (n.end_log_id IS NULL OR n.end_log_id <= ?4)
+         ORDER BY n.created_at ASC, n.id ASC LIMIT ?5"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![agent_id, since, snapshot_log_id, limit],
+        params![agent_id, since_ts, since_id, snapshot_log_id, limit],
         index_node_from_row,
     )?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)

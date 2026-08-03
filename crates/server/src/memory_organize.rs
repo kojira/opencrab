@@ -110,9 +110,11 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
     };
 
     // --- 前進（前進のみ / 残りは次回）---
-    // clean 完了時のみマーカーを worklist の上端（提示した最新 topic の created_at）へ進める。
-    //  - worklist 全件が範囲に収まった場合: 次回はこの上端より後の topic だけが対象。
-    //  - 件数が N を超えた場合: N で切った残り（より新しい topic）は上端より後なので次回拾う。
+    // clean 完了時のみマーカーを worklist 末尾の (created_at, id) カーソルへ進める。
+    //  - worklist 全件が範囲に収まった場合: 次回はこのカーソルより後の topic だけが対象。
+    //  - 件数が N を超えた場合: N で切った残りはカーソルより後なので次回拾う。**索引ビルドは
+    //    1 パスの全 topic に同一 created_at を刻むため、created_at 単体でなく id を副キーに
+    //    持つカーソルにしている**（さもないと同着群の残余を恒久的に取りこぼす / #364 blocker）。
     // partial（timeout / ターン上限 / エラー）ではマーカーを進めない。タグ付与は PK 冪等
     // （`assign_topic_to_category`）なので、同じ範囲を次回に再挑戦しても重複しない。
     if clean {
@@ -171,14 +173,14 @@ struct OrganizePlan {
     personality: Option<String>,
     instructions: String,
     snapshot_log_id: i64,
-    /// worklist（提示する topic）。古い順。
+    /// worklist（提示する topic）。`(created_at, id)` 昇順。
     worklist: Vec<IndexNodeRow>,
     worklist_size: usize,
     /// スナップショット以下の新規 topic 総数（N で切る前）。監査・ゲート表示用。
     new_topic_count: i64,
     /// 既存タグ（title, 付与件数）。プロンプトに現行の語彙として同梱する。
     tags: Vec<(String, i64)>,
-    /// clean 完了時にマーカーを進める先（提示した topic のうち最新の created_at）。
+    /// clean 完了時にマーカーへ刻む複合カーソル `"{created_at}|{id}"`（提示末尾の topic）。
     marker_advance_to: String,
 }
 
@@ -212,11 +214,14 @@ fn decide_organize(
     // ゲート1: 日次 + 初回シード。
     let last_at = opencrab_db::queries::get_last_organize_at(&conn, agent_id)?;
     let Some(last_at) = last_at else {
-        // 初回遭遇: now をシードして終了（既存履歴を「新規」に数えない）。
+        // 初回遭遇: now をシードして終了（既存履歴を「新規」に数えない）。id 部を持たない
+        // 素の刻時でよい（次回 parse_cursor が `|` 無しを (now, "") と解釈する）。
         opencrab_db::queries::set_last_organize_at(&conn, agent_id, &now.to_rfc3339())?;
         return Ok(OrganizeDecision::Seeded);
     };
-    let elapsed = last_at
+    // カーソルを (created_at, id) に分解する。日次ゲートは created_at 部だけを使う。
+    let (since_ts, since_id) = parse_cursor(&last_at);
+    let elapsed = since_ts
         .parse::<DateTime<Utc>>()
         .map(|dt| now.signed_duration_since(dt))
         .unwrap_or_else(|_| Duration::zero());
@@ -230,34 +235,29 @@ fn decide_organize(
         .unwrap_or(0);
 
     // ゲート2: 下限（スナップショット以下の新規 topic 数）。
-    let new_topic_count = opencrab_db::queries::count_organize_topics(
-        &conn,
-        agent_id,
-        Some(&last_at),
-        snapshot_log_id,
-    )?;
+    let cursor = Some((since_ts.as_str(), since_id.as_str()));
+    let new_topic_count =
+        opencrab_db::queries::count_organize_topics(&conn, agent_id, cursor, snapshot_log_id)?;
     if new_topic_count < cfg.min_new_topics.max(1) {
         return Ok(OrganizeDecision::Skip("below_floor"));
     }
 
-    // worklist（最大 N 件・古い順）。
+    // worklist（最大 N 件・(created_at, id) 昇順）。
     let worklist = opencrab_db::queries::list_organize_topics(
         &conn,
         agent_id,
-        Some(&last_at),
+        cursor,
         snapshot_log_id,
         cfg.max_topics.max(1),
     )?;
-    if worklist.is_empty() {
+    let Some(last_row) = worklist.last() else {
         // 下限は満たすが LIMIT クエリで 0 件（理論上起きないが fail-safe）。
         return Ok(OrganizeDecision::Skip("empty_worklist"));
-    }
-    // マーカー前進先 = 提示した topic のうち最新の created_at（古い順なので末尾）。
-    let marker_advance_to = worklist
-        .iter()
-        .map(|t| t.created_at.clone())
-        .max()
-        .unwrap_or_else(|| now.to_rfc3339());
+    };
+    // マーカー前進先 = 提示した末尾の (created_at, id) カーソル。並び順が
+    // `created_at ASC, id ASC` なので末尾が最大。同着 created_at 群を N で切っても、
+    // id を副キーに持つカーソルが残余を次回へ引き継ぐ（取りこぼさない）。
+    let marker_advance_to = format_cursor(&last_row.created_at, &last_row.id);
 
     // 人格（モデル解決は run_agent_response 側が effective_model で行うのでここでは不要）。
     let (persona_name, personality, instructions) =
@@ -365,6 +365,23 @@ fn format_topic_line(t: &IndexNodeRow) -> String {
         format!("- [{id}] {title}")
     } else {
         format!("- [{id}] {title} — {summary}")
+    }
+}
+
+/// マーカー（`last_organize_at`）の複合カーソル `"{created_at}|{id}"` を組む。
+///
+/// `created_at`（rfc3339）にも `id`（`topic-{agent}-{session}-{first}-{last}` 等）にも `|`
+/// は現れないので、最初の `|` を区切りに使える。
+fn format_cursor(created_at: &str, id: &str) -> String {
+    format!("{created_at}|{id}")
+}
+
+/// マーカーを `(created_at, id)` へ分解する。`|` が無ければ全体を `created_at` とみなし
+/// `id` は空（初回シードした素の刻時や、旧形式との後方互換）。
+fn parse_cursor(marker: &str) -> (String, String) {
+    match marker.split_once('|') {
+        Some((ts, id)) => (ts.to_string(), id.to_string()),
+        None => (marker.to_string(), String::new()),
     }
 }
 
@@ -558,9 +575,16 @@ mod tests {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_topic_count, 5, "下限判定は全 5 件");
                 assert_eq!(plan.worklist_size, 3, "worklist は N=3 で bounded");
-                // 前進先は提示した 3 件のうち最新の created_at（= n3）。
-                let expected = plan.worklist.last().unwrap().created_at.clone();
-                assert_eq!(plan.marker_advance_to, expected);
+                // 前進先は提示した末尾の (created_at, id) 複合カーソル（= n3）。
+                let last = plan.worklist.last().unwrap();
+                assert_eq!(
+                    plan.marker_advance_to,
+                    format_cursor(&last.created_at, &last.id)
+                );
+                // 再解釈すると (created_at, id) に戻る（parse ⇄ format の一貫性）。
+                let (ts, id) = parse_cursor(&plan.marker_advance_to);
+                assert_eq!(ts, last.created_at);
+                assert_eq!(id, last.id);
                 // 既存タグの語彙がプロンプト材料に載る。
                 assert!(plan.tags.iter().any(|(n, _)| n == "既存タグ"));
             }
@@ -643,6 +667,25 @@ mod tests {
         );
         let sp = build_system_prompt(&plan);
         assert!(sp.contains("まだタグはありません"));
+    }
+
+    #[test]
+    fn cursor_roundtrips_and_tolerates_bare_timestamp() {
+        // format → parse で往復する。
+        let m = format_cursor("2026-08-03T00:00:00Z", "topic-a1-s-000");
+        assert_eq!(m, "2026-08-03T00:00:00Z|topic-a1-s-000");
+        assert_eq!(
+            parse_cursor(&m),
+            (
+                "2026-08-03T00:00:00Z".to_string(),
+                "topic-a1-s-000".to_string()
+            )
+        );
+        // `|` 無し（初回シードの素の刻時 / 旧形式）は id 空で解釈する。
+        assert_eq!(
+            parse_cursor("2026-08-03T00:00:00Z"),
+            ("2026-08-03T00:00:00Z".to_string(), String::new())
+        );
     }
 
     #[test]
