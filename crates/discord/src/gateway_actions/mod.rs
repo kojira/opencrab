@@ -686,6 +686,21 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "{n} は server 側の実装だけであるべき"
                 );
+            } else if *n == "create_my_skill"
+                || *n == "learn_from_experience"
+                || *n == "learn_from_peer"
+                || *n == "reflect_and_learn"
+            {
+                // #351: スキル生成（core 版）と自律学習系。これらは Discord gateway では
+                // なく **core dispatcher** のアクション（`CORE_DISPATCHABLE_ACTIONS`）で、
+                // Discord の definitions には出ない。実在性の検証は
+                // `crates/actions/src/subtask.rs` の
+                // `core_actions_are_classified_for_dispatch`（CORE_DISPATCHABLE_ACTIONS が
+                // ActionDispatcher に実在することを確認）が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は core dispatcher のアクションで Discord gateway には無いはず"
+                );
             } else if n.starts_with("nostr_") {
                 // nostr_switch_identity / nostr_list_keys は Nostr ゲートウェイ側の
                 // アクション（この Discord gateway の definitions には出ない）。
