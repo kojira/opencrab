@@ -216,6 +216,7 @@ The ActionDispatcher registers these actions, invokable by agents during convers
 | **Learning** | `learn_from_experience`, `learn_from_peer`, `reflect_and_learn` | Self-improvement through experience and reflection |
 | **Skills** | `create_my_skill`, `retire_my_skill`, `restore_my_skill`, `read_skill` | Self-created skill lifecycle |
 | **Search & Memory** | `search_my_history`, `summarize_and_save`, `browse_memory_index`, `retrieve_memory_nodes`, `search_memory_index` | Memory search, curation, and Agentic RAG |
+| **Memory tags** | `tag_topic`, `untag_topic`, `merge_tags` | Trusted-only tagging of memory topics (many-to-many) |
 | **LLM** | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
 | **Soul** | `update_instructions` | Owner-only agent behavioral instruction update |
 | **Task ledger** | `open_task`, `update_task_contract`, `record_task_progress`, `close_task`, `get_task` | Long-running task bookkeeping |
