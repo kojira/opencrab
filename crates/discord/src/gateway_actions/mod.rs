@@ -701,6 +701,37 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "{n} は core dispatcher のアクションで Discord gateway には無いはず"
                 );
+            } else if *n == "set_default_webhook"
+                || *n == "set_default_subtask_webhook"
+                || *n == "get_default_webhook"
+                || *n == "get_default_subtask_webhook"
+                || *n == "list_webhooks"
+                || *n == "list_subtask_webhooks"
+                || *n == "update_memory_index_config"
+                || *n == "list_allowed_commands"
+            {
+                // #356: caller=Agent 素通しだった 9 個のうち、これら 8 個は
+                // `SystemGatewayActions`（server 側 own ツール）の実装で Discord から移設
+                // 済み（webhook 6 個 = #157 S5、`update_memory_index_config` /
+                // `list_allowed_commands` = #157 S1）。Discord が再定義すると合成 gateway の
+                // dedup で own 側に食われるので、Discord definitions には出ない。実在性の
+                // 検証は `crates/server/src/system_actions.rs` の
+                // `webhook_target_tools_are_exposed_in_own_definitions` /
+                // `generic_management_tools_are_exposed_in_own_definitions` が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は server 側 own ツールの実装だけであるべき"
+                );
+            } else if *n == "get_system_info" {
+                // #356: 素通しだった 9 個のうち `get_system_info` は core inline アクション
+                // （`CORE_INLINE_ACTIONS`）で Discord gateway には無い。実在性の検証は
+                // `crates/actions/src/subtask.rs` の
+                // `core_actions_are_classified_for_dispatch`（CORE_INLINE_ACTIONS が
+                // ActionDispatcher に実在することを確認）が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は core inline アクションで Discord gateway には無いはず"
+                );
             } else if n.starts_with("nostr_") {
                 // nostr_switch_identity / nostr_list_keys は Nostr ゲートウェイ側の
                 // アクション（この Discord gateway の definitions には出ない）。

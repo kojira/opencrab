@@ -587,6 +587,35 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // ユーザー由来の会話ターン（caller=Agent）へ出す必要は無い。`nostr_switch_identity`
     // と対で使う管理系ツールなので同じ trusted ゲートに揃える。
     "nostr_list_keys",
+    // caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）に素通しだった 9 個
+    // （#356）。棚卸しで OWNER_ONLY にも TRUSTED_ONLY にも入っておらず外部ユーザー由来の
+    // 会話ターンから使えていたもの。オーナー要望（2026-08-03「記憶検索はいいと思う。他の
+    // ツールさえ使えなければ」）に従い 9 個すべて **trusted_only**（owner_only ではない）。
+    // owner / co_agent / trusted_user が自分の意思で触るターン（heartbeat tick /
+    // ダッシュボード / オーナー会話 / 信頼済みユーザー会話）は全て caller!=Agent なので
+    // 従来どおり通る。#351/#353 と同じ手口＝既存の caller ゲートへの追加のみで、新しい
+    // 概念・列・設定は足していない。
+    //
+    // 通知転送先（webhook）の設定・読み取り。一番危険なのは `set_default_*` — Nostr で
+    // 話しかけた第三者にエージェントの通知先 URL を自分のサーバへ向け替えられると、以後の
+    // 通知内容がそこへ流れる。読み取り側（`get_*` / `list_*`）も設定済み URL を露出する。
+    // これら 6 個は `SystemGatewayActions`（server 側 own ツール / #157 S5）の実装。
+    "set_default_webhook",
+    "set_default_subtask_webhook",
+    "get_default_webhook",
+    "get_default_subtask_webhook",
+    "list_webhooks",
+    "list_subtask_webhooks",
+    // 記憶インデックス設定の書き込み。他の `configure_*` は全て OWNER_ONLY なのにこれだけ
+    // 素通しだった漏れの是正。owner_only ではなく trusted_only に揃える（#356 のオーナー
+    // 決定）。`SystemGatewayActions`（server 側 own ツール / #157 S1）の実装。
+    "update_memory_index_config",
+    // ホスト・システム情報の露出。core inline アクション（`CORE_INLINE_ACTIONS`）。
+    "get_system_info",
+    // `execute_shell` の許可コマンド一覧＝ローカル構成の露出。`execute_shell` 本体は
+    // OWNER_ONLY（#330）だが、その許可リストの読み取りは素通しだった。
+    // `SystemGatewayActions`（server 側 own ツール / #157 S1）の実装。
+    "list_allowed_commands",
 ];
 
 // `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。
@@ -1257,6 +1286,42 @@ mod tests {
                     data: None,
                     error: Some(format!("Unknown gateway action: {name}")),
                 },
+            }
+        }
+    }
+
+    /// #356: server 側 own ツール（webhook 6 個 + `update_memory_index_config` +
+    /// `list_allowed_commands`）を露出するモック。これらは本番では `SystemGatewayActions`
+    /// が定義するが、`BridgedExecutor::new` は `gateway_actions: None` なので、list_tools の
+    /// 可視性フィルタ（`policy_allows` による gateway merge の絞り込み）を実測するには
+    /// gateway 源を注入する必要がある。`get_system_info` は core dispatcher 側にあるので
+    /// ここには入れない（二重登録を避ける）。
+    struct MockGatewayServerSlot8;
+
+    #[async_trait]
+    impl GatewayActions for MockGatewayServerSlot8 {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            PASSTHROUGH_9_SERVER_SLOT
+                .iter()
+                .map(|name| GatewayActionDef {
+                    name: name.to_string(),
+                    description: format!("server slot {name}"),
+                    parameters: json!({"type": "object", "properties": {}}),
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
+            // caller ゲートを通過した owner/trusted のときだけここへ来る（本番では実処理）。
+            GatewayActionResult {
+                success: true,
+                data: Some(json!({"ok": name})),
+                error: None,
             }
         }
     }
@@ -2084,6 +2149,137 @@ mod tests {
                 assert!(
                     listed.iter().any(|n| n == name),
                     "caller={caller:?} の list_tools に {name} が出ない（#351）"
+                );
+            }
+        }
+    }
+
+    /// #356 で trusted ゲートへ載せる、caller=Agent に素通しだった 9 個。
+    const PASSTHROUGH_9_TRUSTED_ONLY: &[&str] = &[
+        "set_default_webhook",
+        "set_default_subtask_webhook",
+        "get_default_webhook",
+        "get_default_subtask_webhook",
+        "list_webhooks",
+        "list_subtask_webhooks",
+        "update_memory_index_config",
+        "get_system_info",
+        "list_allowed_commands",
+    ];
+
+    /// #356 の 9 個のうち、`SystemGatewayActions`（server 側 own ツール）で定義される 8 個。
+    /// 残る 1 個 `get_system_info` は core dispatcher（`ActionDispatcher::new`）側。
+    const PASSTHROUGH_9_SERVER_SLOT: &[&str] = &[
+        "set_default_webhook",
+        "set_default_subtask_webhook",
+        "get_default_webhook",
+        "get_default_subtask_webhook",
+        "list_webhooks",
+        "list_subtask_webhooks",
+        "update_memory_index_config",
+        "list_allowed_commands",
+    ];
+
+    /// #356: 素通しだった 9 個はいずれも trusted_only（owner_only ではない）。owner_only に
+    /// すると CoAgent / TrustedUser も塞がれてしまう（オーナー決定は「9 個すべて
+    /// trusted_only」）。ポリシー表の権威で固定する。
+    #[test]
+    fn passthrough_actions_are_trusted_only_in_policy_table() {
+        assert_eq!(
+            PASSTHROUGH_9_TRUSTED_ONLY.len(),
+            9,
+            "#356 の対象は 9 個（棚卸しで見つかった素通し分）"
+        );
+        for name in PASSTHROUGH_9_TRUSTED_ONLY {
+            let p = tool_policy(name);
+            assert!(p.trusted_only, "{name} must be trusted_only (#356)");
+            assert!(
+                !p.owner_only,
+                "{name} は trusted_only であるべき（owner_only にすると CoAgent / \
+                 TrustedUser も塞がれる / #356）"
+            );
+        }
+    }
+
+    /// #356: caller=Agent（Nostr 受信ターン / 非オーナー相手の会話ターン）からは、素通し
+    /// だった 9 個が **3 経路すべて**（`policy_allows` / `list_tools` / `dispatch_inner`）で
+    /// 落ちること。名前がリストから消えただけでは別の場所に caller ゲートが足された場合を
+    /// 捕まえられないので `skill_and_learning_actions_gated_from_agent_caller`（#351）と同じ
+    /// 3 経路を通す。
+    ///
+    /// 実行時強制の確認は「拒否された（`!success`）」だけでなく **policy 由来の拒否である
+    /// こと**（`is_rejection` = REJECTION_CODE_PREFIX 付き）まで見る。8 個は
+    /// `SystemGatewayActions` 由来で、`BridgedExecutor::new` は gateway を注入しないため、
+    /// もし policy が拒否しなければ「Unknown action」で `!success` になってしまい、ゲートの
+    /// 有無を区別できない。policy 拒否まで確認して初めて「trusted ゲートが効いている」と
+    /// 言える（dispatch_inner の policy 判定はルーティングより前 / #45）。
+    ///
+    /// 対照: caller=Owner / CoAgent / TrustedUser（heartbeat tick / ダッシュボード /
+    /// オーナー会話 / 信頼済みユーザー会話）では従来どおり通る（`policy_allows` true、かつ
+    /// gateway を注入した list_tools に出る）。
+    #[tokio::test]
+    async fn passthrough_actions_gated_from_agent_caller() {
+        // gateway 源（8 個の server ツール）を注入した executor で list_tools を実測する。
+        // get_system_info は dispatcher 側にあるので gateway には入れない。
+        let build_exec = |caller: CallerIdentity| {
+            let (dir, ctx) = test_context_with_caller(caller);
+            let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+                .with_gateway_actions(Arc::new(MockGatewayServerSlot8));
+            (dir, exec)
+        };
+
+        // caller=Agent: 3 経路すべてで落ちる。
+        let (_d, agent_exec) = build_exec(CallerIdentity::Agent);
+        let agent_listed: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for name in PASSTHROUGH_9_TRUSTED_ONLY {
+            // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
+            assert!(
+                !agent_exec.policy_allows(name),
+                "caller=Agent が {name} を policy_allows で通してしまう（#356）"
+            );
+            // 2. 可視性: モデルに見えていないこと（gateway を注入しても policy で除外される）。
+            assert!(
+                !agent_listed.iter().any(|n| n == name),
+                "caller=Agent の list_tools に {name} が出てしまう（#356）"
+            );
+            // 3. 実行時強制: 名前指定の実行が policy で拒否されること（記憶で名前を呼んでも
+            //    素通ししない）。Unknown action ではなく policy 拒否であることまで見る。
+            let r = agent_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.success,
+                "caller=Agent の {name} 実行が拒否されない（#356）"
+            );
+            assert!(
+                is_rejection(r.error.as_deref()),
+                "caller=Agent の {name} 実行が policy 拒否になっていない \
+                 （error={:?} / #356）",
+                r.error
+            );
+        }
+
+        // 対照: Owner / CoAgent / TrustedUser では policy_allows を通り list_tools に出る。
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::CoAgent {
+                agent_id: "peer".to_string(),
+            },
+            CallerIdentity::TrustedUser,
+        ] {
+            let (_d, exec) = build_exec(caller.clone());
+            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            for name in PASSTHROUGH_9_TRUSTED_ONLY {
+                assert!(
+                    exec.policy_allows(name),
+                    "caller={caller:?} で {name} が policy_allows を通らない（#356 は \
+                     trusted を塞がない）"
+                );
+                assert!(
+                    listed.iter().any(|n| n == name),
+                    "caller={caller:?} の list_tools に {name} が出ない（#356）"
                 );
             }
         }
