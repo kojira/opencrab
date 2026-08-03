@@ -369,6 +369,8 @@ pub async fn seed_standard_skills(
             archived: false,
             // #335: セットアップ投入（standard）はオーナー由来。None = legacy grandfather。
             created_caller: None,
+            // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
+            agent_visible: false,
         };
         match opencrab_db::queries::insert_skill(&conn, &row) {
             Ok(()) => seeded.push(parsed.name),

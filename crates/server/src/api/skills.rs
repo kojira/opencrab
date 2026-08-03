@@ -39,6 +39,8 @@ pub struct AddSkillRequest {
     pub situation_pattern: String,
     pub guidance: String,
     pub permission: Option<String>,
+    /// caller=Agent のターンへ露出してよいか（#352）。省略時は false（fail-closed）。
+    pub agent_visible: Option<bool>,
 }
 
 pub async fn add_skill(
@@ -65,6 +67,8 @@ pub async fn add_skill(
         // #335: REST の手動追加はオーナーのダッシュボード由来。None = legacy grandfather
         // （Owner 相当）。
         created_caller: None,
+        // #352: 新規追加は Agent 非露出が既定（fail-closed）。露出は update_skill で切り替える。
+        agent_visible: req.agent_visible.unwrap_or(false),
     };
 
     let conn = state.db.lock().unwrap();
@@ -96,6 +100,12 @@ pub struct UpdateSkillRequest {
     pub description: Option<String>,
     pub guidance: Option<String>,
     pub situation_pattern: Option<String>,
+    /// caller=Agent のターンへ露出してよいか（#352）。
+    ///
+    /// この REST 経路はダッシュボード（オーナー操作）専用。エージェントのアクションは
+    /// HTTP ではなく action dispatch を通るため、ここには到達できない
+    /// （＝caller=Agent から自分でこのフラグを立てられない）。
+    pub agent_visible: Option<bool>,
 }
 
 pub async fn update_skill(
@@ -120,6 +130,9 @@ pub async fn update_skill(
         }
         if let Some(pattern) = req.situation_pattern {
             skill.situation_pattern = pattern;
+        }
+        if let Some(agent_visible) = req.agent_visible {
+            skill.agent_visible = agent_visible;
         }
 
         opencrab_db::queries::update_skill(&conn, &skill).unwrap();

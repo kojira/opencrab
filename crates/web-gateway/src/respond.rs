@@ -68,7 +68,8 @@ async fn run_and_deliver<R: WebAgentRunner>(
     let gateway = runner.web_gateway();
 
     // 1. system prompt（+ resume 時は [subtask_completed] 注入）。
-    let (mut system_prompt, agent_name) = runner.build_agent_context(agent_id);
+    //    #352: 本ターンの caller で index を絞る（同じ caller を下の RunRequest にも載せる）。
+    let (mut system_prompt, agent_name) = runner.build_agent_context(agent_id, &caller);
     if let Some(suffix) = system_prompt_suffix {
         system_prompt = format!("{system_prompt}\n\n{suffix}");
     }

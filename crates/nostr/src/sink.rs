@@ -126,7 +126,9 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         live_inbound_scope: opencrab_actions::LiveInboundScope,
     ) -> Option<String> {
         let agent_id = self.agent_id.as_str();
-        let (base_prompt, agent_name) = self.runner.build_agent_context(agent_id);
+        // #352: 本ターンの caller で index を絞る。caller=Agent（外部 Nostr の受信ターンが
+        // 典型）には露出許可した skill だけを見せる。同じ caller を下の RunRequest にも載せる。
+        let (base_prompt, agent_name) = self.runner.build_agent_context(agent_id, &caller);
         let system_prompt = format!("{base_prompt}\n\n{prompt_suffix}");
 
         let budget = self.runner.context_budget_tokens(agent_id);
@@ -428,7 +430,11 @@ mod tests {
             })
         }
 
-        fn build_agent_context(&self, _agent_id: &str) -> (String, String) {
+        fn build_agent_context(
+            &self,
+            _agent_id: &str,
+            _caller: &CallerIdentity,
+        ) -> (String, String) {
             ("base prompt".to_string(), "テストくん".to_string())
         }
 

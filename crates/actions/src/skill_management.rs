@@ -162,6 +162,9 @@ impl Action for CreateMySkillAction {
                         // caller=Agent が仕込んだスキルは "agent" になり、後で Owner の
                         // heartbeat が read_skill しても本文を渡さず（塞がる）。
                         created_caller: Some(ctx.caller.skill_origin_tag().to_string()),
+                        // #352: Agent が作った skill を Agent 自身へ露出しない（fail-closed）。
+                        // オーナーが REST で許可するまで false。
+                        agent_visible: false,
                     };
 
                     if let Ok(conn) = ctx.db.lock() {
@@ -279,6 +282,18 @@ impl Action for ReadSkillAction {
         };
         match opencrab_db::queries::find_skill_by_name_any(&conn, &ctx.agent_id, name) {
             Ok(Some(s)) => {
+                // #352: caller=Agent のターン（素の Agent 権限で走る run。外部 Nostr の受信
+                // ターンが典型例だが判定軸は transport ではなく caller=Agent）には、オーナーが
+                // 露出を許可（`agent_visible`）した skill 以外は本文を渡さない。index 側
+                // （process.rs）と AND で二重化する — index を隠すだけでは名前を直打ちで
+                // read_skill されるため本文でも塞ぐ。#335 の may_exercise_skill ゲート（向きが逆）
+                // は残したまま両方を満たすときだけ本文を返す（既存ゲートを弱めない）。
+                //
+                // エラーメッセージは **存在しない場合（Ok(None)）と同一**にする。パス・構成・
+                // 露出可否といった内部の事情を一切漏らさない（要望の核心 / #352）。
+                if matches!(ctx.caller, CallerIdentity::Agent) && !s.agent_visible {
+                    return ActionResult::error(&format!("skill not found: {name}"));
+                }
                 // #335: confused deputy 対策。read_skill は本文（行動指針）を渡す＝スキルの
                 // 「実行」入口。作成 caller より強いターン（例: 外部 Nostr の caller=Agent が
                 // 仕込んだスキルを Owner の heartbeat が読む）には本文を渡さない。より強い
@@ -426,7 +441,27 @@ mod tests {
             "owner turn must NOT read an agent-planted skill body"
         );
 
-        // 同じ Agent 権限のターンからは従来どおり読める（機能は維持）。
+        // #352: 同じ Agent 権限のターンでも、既定では本文を読めない（fail-closed）。
+        // #335 の逆向き許可（弱いターンが読む）は #352 の露出ゲートと **AND** で重なる。
+        let denied_agent = ReadSkillAction
+            .execute(&json!({ "name": "Planted" }), &agent_ctx)
+            .await;
+        assert!(
+            !denied_agent.success,
+            "agent turn must NOT read a non-visible skill body (#352 default)"
+        );
+
+        // オーナーが露出を許可すると、Agent ターンから本文を読める（#335 の逆向き許可が
+        // #352 の露出下で維持されていることの確認）。
+        {
+            let conn = agent_ctx.db.lock().unwrap();
+            let mut row =
+                opencrab_db::queries::find_skill_by_name_any(&conn, &agent_ctx.agent_id, "Planted")
+                    .unwrap()
+                    .unwrap();
+            row.agent_visible = true;
+            opencrab_db::queries::update_skill(&conn, &row).unwrap();
+        }
         let ok = ReadSkillAction
             .execute(&json!({ "name": "Planted" }), &agent_ctx)
             .await;
@@ -465,6 +500,120 @@ mod tests {
             .await;
         assert!(ok.success);
         assert_eq!(ok.data.unwrap()["guidance"], "owner guidance");
+    }
+
+    // #352: オーナー作成スキル（agent_visible 既定 false）は、caller=Agent のターンからは
+    // read_skill しても本文を渡さない。エラーメッセージは「存在しない」場合と **完全に同一**で、
+    // 内部の事情（パス・構成・露出可否）を一切漏らさない。
+    #[tokio::test]
+    async fn agent_caller_cannot_read_non_visible_skill_body() {
+        let (_dir, owner_ctx) = test_context();
+        let agent_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::Agent);
+
+        CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": "Internal",
+                    "description": "d",
+                    "situation_pattern": "s",
+                    "guidance": "local path /Volumes/... internal steps"
+                }),
+                &owner_ctx,
+            )
+            .await;
+
+        // 既定 false なので Agent ターンには本文を渡さない。
+        let denied = ReadSkillAction
+            .execute(&json!({ "name": "Internal" }), &agent_ctx)
+            .await;
+        assert!(
+            !denied.success,
+            "agent turn must NOT read a non-visible body"
+        );
+
+        // 情報漏洩の核心: エラーは **存在しない場合と同一形式**の汎用メッセージのみで、
+        // 露出可否・パス・構成といった内部の事情を一切漏らさない。存在するのに隠された
+        // "Internal" の応答が、実在しない同名の応答（`skill not found: Internal`）と
+        // 文字列として一致することを固定する。
+        assert_eq!(
+            denied.error.as_deref(),
+            Some("skill not found: Internal"),
+            "hidden skill must return the same generic not-found message as a nonexistent one"
+        );
+        // ガードの本文（露出可否）を漏らす語が混ざっていないこと。
+        let err = denied.error.unwrap_or_default();
+        for leak in [
+            "agent_visible",
+            "visible",
+            "許可",
+            "露出",
+            "path",
+            "/Volumes",
+        ] {
+            assert!(
+                !err.contains(leak),
+                "error message leaks internal detail {leak:?}: {err}"
+            );
+        }
+
+        // Owner ターンからは従来どおり読める（絞りは caller=Agent のみ）。
+        let ok = ReadSkillAction
+            .execute(&json!({ "name": "Internal" }), &owner_ctx)
+            .await;
+        assert!(ok.success);
+    }
+
+    // #352: オーナーが agent_visible を立てた skill は caller=Agent のターンからも本文を読める。
+    // Owner / CoAgent / TrustedUser は露出フラグに関わらず従来どおり読める。
+    #[tokio::test]
+    async fn all_callers_read_skill_after_owner_grants_visibility() {
+        let (_dir, owner_ctx) = test_context();
+        let agent_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::Agent);
+        let co_agent_ctx = ctx_with_caller(
+            &owner_ctx,
+            CallerIdentity::CoAgent {
+                agent_id: "peer".to_string(),
+            },
+        );
+        let trusted_ctx = ctx_with_caller(&owner_ctx, CallerIdentity::TrustedUser);
+
+        CreateMySkillAction
+            .execute(
+                &json!({
+                    "name": "WebSearch",
+                    "description": "d",
+                    "situation_pattern": "s",
+                    "guidance": "search the web"
+                }),
+                &owner_ctx,
+            )
+            .await;
+
+        // オーナーが露出を許可する（REST の update_skill 相当 = queries::update_skill）。
+        {
+            let conn = owner_ctx.db.lock().unwrap();
+            let mut row = opencrab_db::queries::find_skill_by_name_any(
+                &conn,
+                &owner_ctx.agent_id,
+                "WebSearch",
+            )
+            .unwrap()
+            .unwrap();
+            row.agent_visible = true;
+            opencrab_db::queries::update_skill(&conn, &row).unwrap();
+        }
+
+        for ctx in [&agent_ctx, &co_agent_ctx, &trusted_ctx, &owner_ctx] {
+            let ok = ReadSkillAction
+                .execute(&json!({ "name": "WebSearch" }), ctx)
+                .await;
+            assert!(
+                ok.success,
+                "caller {:?} must read a visible skill",
+                ctx.caller
+            );
+            assert_eq!(ok.data.unwrap()["guidance"], "search the web");
+        }
     }
 
     // #335: 昇格しないこと。弱い caller が Owner スキルの本文を上書きしても trust class は
@@ -540,6 +689,7 @@ mod tests {
                 permission: "\"agent\"".to_string(),
                 archived: false,
                 created_caller: None,
+                agent_visible: false,
             };
             opencrab_db::queries::insert_skill(&conn, &row).unwrap();
         }

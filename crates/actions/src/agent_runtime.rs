@@ -45,7 +45,15 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     async fn run_agent_response(&self, req: RunRequest) -> Result<EngineResult>;
 
     /// system prompt と表示名を組み立てる（`(system_prompt, agent_name)`）。
-    fn build_agent_context(&self, agent_id: &str) -> (String, String);
+    ///
+    /// `caller` は本ターンの呼び出し元。caller=Agent のときだけ skill index を露出許可
+    /// （`agent_visible`）のものへ絞る（#352）。ここへ渡す caller は、同じターンの
+    /// [`RunRequest`] に載せる caller と一致させること（index と実行権限を揃える）。
+    fn build_agent_context(
+        &self,
+        agent_id: &str,
+        caller: &crate::CallerIdentity,
+    ) -> (String, String);
 
     /// セッションの会話履歴文字列（コンパクション込み）を組み立てる。
     ///

@@ -653,7 +653,8 @@ async fn process_incoming_message<T: AgentRunner>(
         // 行う。これにより、割り込みメッセージが直前の推論完了前に走って履歴が不整合に
         // なり、同じ内容を二重回答する問題を防ぐ。
 
-        let (base_prompt, agent_name) = state.build_agent_context(agent_id);
+        // #352: 本ターンの caller（resolve_caller の結果）で index を絞る。
+        let (base_prompt, agent_name) = state.build_agent_context(agent_id, &caller);
         let system_prompt = format!(
             "{}\n\n{}",
             base_prompt,
@@ -919,7 +920,8 @@ async fn process_subtask_completed<T: AgentRunner>(
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
     caller: opencrab_actions::CallerIdentity,
 ) {
-    let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
+    // #352: 本ターンの caller で index を絞る（resume は元ターンの caller を引き継ぐ）。
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
 
     // Get task description from subtask session
     let task_description = {
@@ -1301,7 +1303,8 @@ async fn process_interaction_response<T: AgentRunner>(
     }
 
     // 3. Re-invoke agent (same pattern as SubtaskCompleted)
-    let (base_prompt, agent_name) = state.build_agent_context(&agent_id);
+    // #352: 本ターンの caller で index を絞る（resume は元ターンの caller を引き継ぐ）。
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
 
     let context_str = response
         .context

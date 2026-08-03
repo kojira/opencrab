@@ -199,6 +199,8 @@ fn import_skill(
             archived: false,
             // #335: import はオーナーのセットアップ由来。None = legacy grandfather（Owner 相当）。
             created_caller: None,
+            // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
+            agent_visible: false,
         };
         opencrab_db::queries::update_skill(conn, &updated)?;
     } else {
@@ -219,6 +221,8 @@ fn import_skill(
             archived: false,
             // #335: import はオーナーのセットアップ由来。None = legacy grandfather（Owner 相当）。
             created_caller: None,
+            // #352: Agent 露出は既定 false（オーナーが REST で切り替える）。
+            agent_visible: false,
         };
         opencrab_db::queries::insert_skill(conn, &row)?;
     }

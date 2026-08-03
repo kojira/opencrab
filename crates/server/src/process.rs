@@ -132,11 +132,25 @@ fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> Strin
 /// DBからエージェントの agents 行と skills を読み込んでシステムプロンプトを構築する。
 ///
 /// 返り値: (system_prompt, agent_name)
-pub fn build_agent_context(conn: &rusqlite::Connection, agent_id: &str) -> (String, String) {
+pub fn build_agent_context(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    caller: &opencrab_actions::CallerIdentity,
+) -> (String, String) {
     let agent = opencrab_db::queries::get_agent(conn, agent_id)
         .ok()
         .flatten();
-    let skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
+    let mut skills = opencrab_db::queries::list_skills(conn, agent_id, true).unwrap_or_default();
+    // #352: caller=Agent のターン（素の Agent 権限で走る run。外部 Nostr の受信ターンが
+    // 典型例だが、判定軸は transport ではなく caller=Agent）には、オーナーが露出を許可
+    // （`agent_visible`）した skill だけを index に出す。既定 false なので、許可が無ければ
+    // 1 件も残らず、下の `skills.is_empty()` 分岐で skill セクションごと出さない
+    // （空の見出しは残さない）。Owner / CoAgent / TrustedUser は絞らない（従来どおり全部
+    // 見える）。read_skill 側の本文ゲート（skill_management.rs）と AND で二重化する。名前を
+    // 隠すだけでは read_skill を名前直打ちされるため index と本文の両方で絞る。
+    if matches!(caller, opencrab_actions::CallerIdentity::Agent) {
+        skills.retain(|s| s.agent_visible);
+    }
     let curated_categories = ["long_term", "user_profile", "agent_rules"];
     let curated_sections: Vec<String> = curated_categories
         .iter()
@@ -2151,7 +2165,8 @@ mod shared_prompt_is_transport_neutral_tests {
         )
         .unwrap();
 
-        let (prompt, _name) = build_agent_context(&conn, "a1");
+        let (prompt, _name) =
+            build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         // ロスターが載っている（= 空プロンプトを検査して通っているのではない）
         assert!(prompt.contains("- Crab B"), "roster missing: {prompt}");
@@ -2168,12 +2183,96 @@ mod shared_prompt_is_transport_neutral_tests {
     #[test]
     fn shared_prompt_does_not_teach_destination_lookup() {
         let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
+        let (prompt, _name) =
+            build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
         assert!(
             !prompt.contains("channel_id"),
             "shared system prompt must not name a transport destination argument:\n{prompt}"
         );
         assert!(prompt.contains("taken from the current conversation"));
+    }
+}
+
+/// #352: caller=Agent のターンには、オーナーが露出許可（`agent_visible`）した skill だけを
+/// system prompt の index へ出す。Owner / CoAgent / TrustedUser は絞らない。
+#[cfg(test)]
+mod agent_visible_skill_index_tests {
+    use super::build_agent_context;
+    use opencrab_actions::CallerIdentity;
+    use opencrab_db::queries::SkillRow;
+
+    fn insert_skill(conn: &rusqlite::Connection, name: &str, agent_visible: bool) {
+        let row = SkillRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: "a1".to_string(),
+            name: name.to_string(),
+            description: format!("{name} desc"),
+            situation_pattern: "sp".to_string(),
+            guidance: "g".to_string(),
+            source_type: "experience".to_string(),
+            source_context: None,
+            file_path: None,
+            effectiveness: None,
+            usage_count: 0,
+            is_active: true,
+            permission: "\"agent\"".to_string(),
+            archived: false,
+            created_caller: None,
+            agent_visible,
+        };
+        opencrab_db::queries::insert_skill(conn, &row).unwrap();
+    }
+
+    #[test]
+    fn agent_caller_sees_only_visible_skills_in_index() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert_skill(&conn, "VisibleSkill", true);
+        insert_skill(&conn, "HiddenSkill", false);
+
+        let (agent_prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Agent);
+        assert!(
+            agent_prompt.contains("VisibleSkill"),
+            "visible skill missing from agent index:\n{agent_prompt}"
+        );
+        assert!(
+            !agent_prompt.contains("HiddenSkill"),
+            "hidden skill leaked into agent index:\n{agent_prompt}"
+        );
+
+        // Owner / CoAgent / TrustedUser は両方見える（従来どおり / 絞りは caller=Agent のみ）。
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::CoAgent {
+                agent_id: "peer".to_string(),
+            },
+            CallerIdentity::TrustedUser,
+        ] {
+            let (p, _) = build_agent_context(&conn, "a1", &caller);
+            assert!(
+                p.contains("VisibleSkill") && p.contains("HiddenSkill"),
+                "caller {caller:?} must see all skills:\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_caller_with_no_visible_skills_gets_no_skill_section() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 既定 false のみ = Agent には 1 件も見えない。
+        insert_skill(&conn, "HiddenOnly", false);
+
+        let (agent_prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Agent);
+        assert!(!agent_prompt.contains("HiddenOnly"));
+        // 空の見出しだけ残さない（セクションごと出さない）。
+        assert!(
+            !agent_prompt.contains("Your skills (index only"),
+            "empty skill section header must not appear for agent caller:\n{agent_prompt}"
+        );
+
+        // 同じ DB でも Owner にはセクションと skill が出る。
+        let (owner_prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Owner);
+        assert!(owner_prompt.contains("Your skills (index only"));
+        assert!(owner_prompt.contains("HiddenOnly"));
     }
 }
 
@@ -2875,7 +2974,8 @@ mod no_forced_reply_tests {
     #[test]
     fn the_prompt_does_not_force_a_reply() {
         let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
+        let (prompt, _name) =
+            build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         for forbidden in [
             "最優先の例外",
@@ -2894,7 +2994,8 @@ mod no_forced_reply_tests {
     #[test]
     fn bot_loop_prevention_survives_the_revert() {
         let conn = opencrab_db::init_memory().unwrap();
-        let (prompt, _name) = build_agent_context(&conn, "a1");
+        let (prompt, _name) =
+            build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
         assert!(

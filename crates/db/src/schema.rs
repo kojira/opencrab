@@ -678,6 +678,40 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 25,
+        description: "skills.agent_visible: caller=Agent のターンへ露出してよいかの許可列 (issue #352)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #352: caller=Agent のターン（素の Agent 権限で走る run。外部 Nostr の受信ターンが
+        // 典型例だが、判定軸は transport ではなく caller=Agent）には、許可した skill 以外を
+        // index にも出さず read_skill の本文も渡さない。その許可を持たせる列。
+        //
+        // **既定 0（fail-closed）** で追加する。NOT NULL DEFAULT 0 なので既存の全行は自動的に
+        // 0 = 「Agent には見せない」になる（＝オーナーが REST で 1 を立てるまで 1 件も見えない）。
+        // Owner / CoAgent / TrustedUser の見え方は不変（絞りは caller=Agent のみ）。
+        //
+        // #349 の罠を踏まないため **番号付き MIGRATIONS へ置く**（凍結された `migrate()` は
+        // 新規 DB でしか走らず、本番の既存 DB には届かない）。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE skills` 側で列を持つので
+        // `column_exists` でガードする（v24 の前例）。2 回目以降は no-op。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 24;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "skills", "agent_visible")? {
+                conn.execute_batch(
+                    "ALTER TABLE skills ADD COLUMN agent_visible INTEGER NOT NULL DEFAULT 0",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表（topic ↔ category の参照, issue #313）。
@@ -1579,6 +1613,12 @@ CREATE TABLE IF NOT EXISTS skills (
     -- 前に作られた既存スキル（legacy grandfather = Owner 相当扱い）。read_skill が
     -- 「強いターンが弱いスキルを借りる」confused deputy を塞ぐために参照する（#335）。
     created_caller TEXT,
+    -- caller=Agent のターン（＝素の Agent 権限で走る run。外部 Nostr の受信ターンが
+    -- 典型例だが、判定軸は transport ではなく **caller=Agent** である）に、この skill を
+    -- index（system prompt）へ出し read_skill の本文を渡してよいか。既定 0 = 見せない
+    -- （fail-closed）。オーナーがダッシュボード（REST）で少数だけ 1 に切り替える。
+    -- Owner / CoAgent / TrustedUser の見え方には影響しない（従来どおり全部見える）。issue #352。
+    agent_visible INTEGER NOT NULL DEFAULT 0,
     last_used_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -2586,6 +2626,82 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept.as_deref(), Some("agent"));
+    }
+
+    /// v25: 既存 DB（`user_version = 24`, `agent_visible` 列なし）へ番号付き
+    /// マイグレーションが届き、列が **既定 0（fail-closed）** で追加され、既存行が
+    /// すべて 0（＝Agent には見せない）になることを検証する（#352 / #349 の事故ガード）。
+    #[test]
+    fn skills_agent_visible_migration_v25_reaches_existing_db_default_zero() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(column_exists(&conn, "skills", "agent_visible").unwrap());
+
+        // v24 相当の既存 DB を模す: agent_visible 列を落とし version を 24 へ戻す。
+        // 列を持たない状態で複数行を入れ、移行後すべて 0 になること（既存が壊れず、
+        // かつ既定で Agent 非露出になること）を見る。
+        conn.execute_batch(
+            "ALTER TABLE skills DROP COLUMN agent_visible;
+             INSERT INTO skills
+               (id, agent_id, name, description, situation_pattern, guidance,
+                source_type, usage_count, is_active, permission, archived,
+                created_at, updated_at)
+               VALUES
+               ('s1', 'a1', 'n1', 'd', 'sp', 'g', 'experience', 0, 1, '\"agent\"', 0,
+                '2026-01-01', '2026-01-01'),
+               ('s2', 'a1', 'n2', 'd', 'sp', 'g', 'experience', 0, 1, '\"agent\"', 0,
+                '2026-01-01', '2026-01-01');
+             PRAGMA user_version = 24",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "skills", "agent_visible").unwrap());
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 2, "移行前の行数");
+
+        // 起動経路（initialize → run_migrations）で v25 が届く。
+        initialize(&conn).expect("upgrade v24 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(column_exists(&conn, "skills", "agent_visible").unwrap());
+
+        // 既存の全行が残り、agent_visible は既定 0（fail-closed）。
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, 2, "行が失われた");
+        let visible_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM skills WHERE agent_visible = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            visible_count, 0,
+            "既存行はすべて非露出（既定 0）でなければならない"
+        );
+
+        // 列を含む SELECT が通ること（#349 の症状の非退行）。
+        conn.query_row(
+            "SELECT id, agent_visible FROM skills WHERE id = 's1'",
+            [],
+            |r| r.get::<_, i64>(1),
+        )
+        .expect("agent_visible を含む SELECT が通らない");
+
+        // 冪等性: オーナーが 1 行を露出許可した後に再実行しても落ちず、値も消えない。
+        conn.execute_batch("UPDATE skills SET agent_visible = 1 WHERE id = 's1'")
+            .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: i64 = conn
+            .query_row(
+                "SELECT agent_visible FROM skills WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "再実行で露出許可が消えてはならない");
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を
