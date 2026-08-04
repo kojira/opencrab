@@ -214,7 +214,7 @@ enabled = false           # 有効化で opt-in
 enabled = false           # 有効化で opt-in（既定オフ = 1 コールも呼ばない）
 max_topics = 50           # 1 回の worklist に載せる新規 topic の上限 N
 min_new_topics = 20       # この件数以上の新規 topic が溜まったら発火（下限ゲート）
-min_interval_hours = 24   # 前回からこの時間以上経つまで発火しない（日次ゲート）
+min_interval_minutes = 1440  # 前回からこの分数以上経つまで発火しない（既定 1440 = 24 時間）
 timeout_secs = 600        # 整理ラン 1 回のタイムアウト（超過は partial 扱いで前進しない）
 
 # VC（ボイスチャンネル）対話。使う場合はコメントを外して設定する。

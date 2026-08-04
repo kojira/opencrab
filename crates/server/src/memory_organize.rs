@@ -376,7 +376,7 @@ fn decide_organize(
         .parse::<DateTime<Utc>>()
         .map(|dt| now.signed_duration_since(dt))
         .unwrap_or_else(|_| Duration::zero());
-    if elapsed < Duration::hours(cfg.min_interval_hours.max(1)) {
+    if elapsed < Duration::minutes(cfg.min_interval_minutes.max(1)) {
         return Ok(OrganizeDecision::Skip("interval_not_elapsed"));
     }
     let (since_ts, since_id) = parse_cursor(&last_at);
@@ -638,7 +638,7 @@ mod tests {
             enabled,
             max_topics,
             min_new_topics: min_new,
-            min_interval_hours: 24,
+            min_interval_minutes: 1440,
             timeout_secs: 600,
         }
     }
@@ -732,6 +732,11 @@ mod tests {
         (Utc::now() - Duration::hours(hours)).to_rfc3339()
     }
 
+    /// 現在から `minutes` 分前の rfc3339。
+    fn minutes_ago(minutes: i64) -> String {
+        (Utc::now() - Duration::minutes(minutes)).to_rfc3339()
+    }
+
     #[tokio::test]
     async fn default_off_is_zero_call_and_writes_nothing() {
         let mut state = crate::test_app_state();
@@ -781,6 +786,62 @@ mod tests {
         set_marker(&state, "a1", &hours_ago(1)); // 1h 前 = 24h 未満
         let d = decide_organize(&state.db, &cfg(true, 3, 2), "a1").unwrap();
         assert!(matches!(d, OrganizeDecision::Skip("interval_not_elapsed")));
+    }
+
+    /// 間隔ゲートは**分単位**（#390）。既定 1440 分は 24 時間ゲートのまま（現行挙動を維持）で、
+    /// config で分を指定するとその間隔で発火する。0 は無効化ではなく 1 分に丸める。
+    #[test]
+    fn interval_gate_is_minutes_with_24h_default() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48)); // 位置（新規/過去の境界）は開けておく
+        disable_backlog(&state, "a1"); // 新規側の間隔ゲートだけを見る
+        seed_topic(&state, "a1", "n1", &hours_ago(3), 10);
+        seed_topic(&state, "a1", "n2", &hours_ago(2), 11);
+        assert_eq!(
+            MemoryOrganizeConfig::default().min_interval_minutes,
+            1440,
+            "既定は 1440 分 = 24 時間（現行挙動）"
+        );
+
+        // 既定（1440 分）: throttle 刻時が 23h 前では通らない。
+        let mut c = cfg(true, 10, 2);
+        assert_eq!(c.min_interval_minutes, 1440);
+        set_last_run(&state, "a1", &minutes_ago(23 * 60));
+        assert!(matches!(
+            decide_organize(&state.db, &c, "a1").unwrap(),
+            OrganizeDecision::Skip("interval_not_elapsed")
+        ));
+
+        // 10 分に詰めると、同じ刻時でも発火する。
+        c.min_interval_minutes = 10;
+        assert!(matches!(
+            decide_organize(&state.db, &c, "a1").unwrap(),
+            OrganizeDecision::Run(_)
+        ));
+        // 5 分前 < 10 分 → まだ弾かれる（分の刻みが効いている）。
+        set_last_run(&state, "a1", &minutes_ago(5));
+        assert!(matches!(
+            decide_organize(&state.db, &c, "a1").unwrap(),
+            OrganizeDecision::Skip("interval_not_elapsed")
+        ));
+
+        // 0 でもゲートは外れない（1 分に丸める）: 直後は弾かれ、2 分後は通る。
+        c.min_interval_minutes = 0;
+        set_last_run(
+            &state,
+            "a1",
+            &(Utc::now() - Duration::seconds(10)).to_rfc3339(),
+        );
+        assert!(matches!(
+            decide_organize(&state.db, &c, "a1").unwrap(),
+            OrganizeDecision::Skip("interval_not_elapsed")
+        ));
+        set_last_run(&state, "a1", &minutes_ago(2));
+        assert!(matches!(
+            decide_organize(&state.db, &c, "a1").unwrap(),
+            OrganizeDecision::Run(_)
+        ));
     }
 
     #[test]
