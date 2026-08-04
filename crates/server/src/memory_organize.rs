@@ -131,7 +131,12 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
             .iter()
             .map(|s| s.to_string())
             .collect(),
-    );
+    )
+    // #370: 整理ランは隔離実行（本番 DB のコピーに対しても走る）。gateway_actions=None で
+    // 会話へは出さないが、depth0 の run 構築が DB の activity 宛先から webhook sink を暗黙に
+    // 挿すため、以前はツール活動が本物の Discord へ飛んだ。この口を止め、「このランは外へ
+    // 何も出さない」を設定漏れではなくコードで担保する。
+    .suppress_default_activity_sink();
 
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(

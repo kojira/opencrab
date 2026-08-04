@@ -92,6 +92,23 @@ pub struct RunRequest {
     /// 「眠っている間に外へ手が出る」ツール（`execute_shell` / `nostr_run` / `ws_write` 等）を
     /// 落とす。
     pub tool_allowlist: Option<Vec<String>>,
+    /// この run に **既定の外向き配送口を自動で挿さない**（#370）。`true` のとき、
+    /// run 構築が depth0 で暗黙に挿す activity webhook sink
+    /// （`spawn_activity_tool_event_sink` = DB の activity 宛先へツール活動を実況する
+    /// 外向き HTTP）を**組まない**。webhook worker すら起動しないので、外向き HTTP は
+    /// 1 件も発生しない。
+    ///
+    /// `false`（既定）は従来どおり。対話ターン・heartbeat・subtask は `false` のままで
+    /// 一切変わらない。run 構築の中で **呼び出し側の注入なしに暗黙で外へ出る唯一の口**が
+    /// この既定 activity sink であり、このフラグがその唯一のゲート。今後 run 構築へ
+    /// 暗黙の外向き経路を足す場合も、必ずここで塞げるよう同じフラグで gate すること
+    /// （呼び出し側の注入で入る run_notifier / completion_sink / gateway_actions /
+    /// on_response_text は、そもそも渡さなければ出ないので対象外）。
+    ///
+    /// 隔離実行（DB コピーに対する記憶整理ラン等）が `true` を渡すことで、「このランは外へ
+    /// 何も出さない」を**設定漏れではなくコードで**担保する。#370 の事故（隔離ランの
+    /// ツール活動が本物の Discord へ飛んだ）はこの口を止められなかったのが原因。
+    pub suppress_default_activity_sink: bool,
 }
 
 impl RunRequest {
@@ -124,6 +141,7 @@ impl RunRequest {
             run_notifier: None,
             live_inbound_scope: LiveInboundScope::AllOthers,
             tool_allowlist: None,
+            suppress_default_activity_sink: false,
         }
     }
 
@@ -200,6 +218,14 @@ impl RunRequest {
     /// sleep 整理ランだけが使う。
     pub fn with_tool_allowlist(mut self, tools: Vec<String>) -> Self {
         self.tool_allowlist = Some(tools);
+        self
+    }
+
+    /// この run で既定の外向き配送口（activity webhook sink）を自動挿入しない（#370）。
+    /// 隔離実行が「このランは外へ何も出さない」をコードで担保するために渡す。既定は挿入する
+    /// （従来挙動）。詳細は [`RunRequest::suppress_default_activity_sink`] のドキュメント。
+    pub fn suppress_default_activity_sink(mut self) -> Self {
+        self.suppress_default_activity_sink = true;
         self
     }
 }

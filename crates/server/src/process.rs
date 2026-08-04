@@ -129,6 +129,36 @@ fn summarize_tool_calls(assistant_content: &str, tool_calls_json: &str) -> Strin
     }
 }
 
+/// depth0 run のツールイベント sink を選ぶ（#370）。run 構築の「暗黙に外へ出る唯一の口」
+/// である既定 activity webhook sink を、呼び出し側が止められるようにするための判定点。
+///
+/// 優先順位:
+/// 1. `notifier_sink`（run_notifier が供給した sink = subtask 走行）があればそれ。呼び出し側が
+///    明示注入したものなので `suppress_default` の対象外。
+/// 2. `suppress_default == true` なら **`None`**。`default_factory` は**呼ばれない**ので、
+///    webhook worker も HTTP も一切発生しない（隔離実行の担保）。
+/// 3. それ以外は `default_factory()`（DB の activity 宛先から既定 sink を遅延生成）。
+///
+/// `default_factory` を `FnOnce` で受けるのは、抑止時に生成コスト（DB ロック / worker spawn /
+/// 外向き HTTP）を**発生させない**ため。この関数を通すことで「止めたランでは配送試行が 0 件」
+/// をモック factory の呼び出し回数で assert できる（本番ルートと同じ分岐を単体で検証可能）。
+fn select_tool_event_sink<F>(
+    notifier_sink: Option<Arc<dyn opencrab_actions::ToolEventSink>>,
+    suppress_default: bool,
+    default_factory: F,
+) -> Option<Arc<dyn opencrab_actions::ToolEventSink>>
+where
+    F: FnOnce() -> Option<Arc<dyn opencrab_actions::ToolEventSink>>,
+{
+    if let Some(sink) = notifier_sink {
+        return Some(sink);
+    }
+    if suppress_default {
+        return None;
+    }
+    default_factory()
+}
+
 /// DBからエージェントの agents 行と skills を読み込んでシステムプロンプトを構築する。
 ///
 /// 返り値: (system_prompt, agent_name)
@@ -1623,13 +1653,21 @@ pub async fn run_agent_response(
     //   factory で組む。activity 行が無ければ factory は None を返し、配送 worker も
     //   起動しない（best-effort）。無効/不正なデフォルトは sink 側で診断を残し、黙って
     //   fall through しない。
+    // 既定 activity sink の遅延生成（#370）。呼び出し側が `suppress_default_activity_sink`
+    // を立てたランでは `select_tool_event_sink` がこの factory を呼ばないので、DB ロックも
+    // webhook worker の spawn も外向き HTTP も発生しない。
+    #[cfg(feature = "discord")]
+    let default_activity_sink_factory =
+        || opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id);
+    #[cfg(not(feature = "discord"))]
+    let default_activity_sink_factory = || None;
     let run_notifier = req.run_notifier.clone();
     let notifier_tool_sink = run_notifier.as_ref().and_then(|n| n.tool_event_sink());
-    #[cfg(feature = "discord")]
-    let tool_event_sink = notifier_tool_sink
-        .or_else(|| opencrab_discord::spawn_activity_tool_event_sink(state.db.clone(), agent_id));
-    #[cfg(not(feature = "discord"))]
-    let tool_event_sink = notifier_tool_sink;
+    let tool_event_sink = select_tool_event_sink(
+        notifier_tool_sink,
+        req.suppress_default_activity_sink,
+        default_activity_sink_factory,
+    );
     let executor = match tool_event_sink {
         Some(sink) => executor.with_tool_event_sink(sink),
         None => executor,
@@ -3241,5 +3279,88 @@ mod impression_section_injection_tests {
         let out = build_conversation_string(&conn, "s1", AGENT, 100_000).unwrap();
         assert!(!out.contains("[Impressions]"), "{out}");
         assert!(out.contains("こんにちは"), "{out}");
+    }
+}
+
+/// #370: 既定の外向き配送口（activity webhook sink）を呼び出し側から止められること、
+/// 止めたランでは配送口の生成すら試みられない（= 外向き HTTP が 0 件）ことの検証。
+///
+/// `run_agent_response` 全体は AppState / DB / 実 webhook 宛先を要するため、run 構築で
+/// sink を選ぶ**本番と同じ分岐**（`select_tool_event_sink`）を直接叩き、既定 sink を組む
+/// factory の呼び出し回数を数えて「配送試行 0 件」を機構で示す。
+#[cfg(test)]
+mod tool_event_sink_selection_tests {
+    use super::select_tool_event_sink;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use opencrab_actions::bridge::{ToolEvent, ToolEventSink};
+
+    /// on_event は使わない（sink が選ばれたか否かだけを見る）ダミー sink。
+    struct DummySink;
+    impl ToolEventSink for DummySink {
+        fn on_event(&self, _event: &ToolEvent<'_>) {}
+    }
+
+    /// 既定 activity sink の生成回数を数えるモック factory。本番では DB ロック → webhook
+    /// worker spawn → 外向き HTTP を伴う口。ここでの呼び出し回数が「配送試行の回数」に相当。
+    fn counting_factory(
+        calls: &AtomicUsize,
+    ) -> impl FnOnce() -> Option<Arc<dyn ToolEventSink>> + '_ {
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some(Arc::new(DummySink))
+        }
+    }
+
+    #[test]
+    fn suppressed_run_never_builds_default_sink() {
+        // 呼び出し側が止めたラン: sink は None、factory は 1 度も呼ばれない（HTTP 0 件）。
+        let calls = AtomicUsize::new(0);
+        let sink = select_tool_event_sink(
+            None,
+            /* suppress_default */ true,
+            counting_factory(&calls),
+        );
+        assert!(sink.is_none(), "止めたランに既定 sink が挿さってはいけない");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "止めたランでは既定 sink の生成（=配送試行）を 1 度も行ってはいけない"
+        );
+    }
+
+    #[test]
+    fn default_run_builds_default_sink() {
+        // 既定（止めない）: 従来どおり factory から既定 sink を組む。
+        let calls = AtomicUsize::new(0);
+        let sink = select_tool_event_sink(
+            None,
+            /* suppress_default */ false,
+            counting_factory(&calls),
+        );
+        assert!(sink.is_some(), "既定では従来どおり sink が挿さる");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "既定では factory を 1 度だけ呼ぶ"
+        );
+    }
+
+    #[test]
+    fn notifier_sink_takes_priority_and_skips_factory() {
+        // run_notifier が供給した sink（subtask 走行）は最優先。既定 factory は呼ばれない。
+        // suppress の値に依らず notifier が優先されること（subtask の実況が変わらないこと）。
+        for suppress in [false, true] {
+            let calls = AtomicUsize::new(0);
+            let notifier: Arc<dyn ToolEventSink> = Arc::new(DummySink);
+            let sink = select_tool_event_sink(Some(notifier), suppress, counting_factory(&calls));
+            assert!(sink.is_some(), "notifier sink は常に採用される");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "notifier sink があるとき既定 factory は呼ばれない (suppress={suppress})"
+            );
+        }
     }
 }
