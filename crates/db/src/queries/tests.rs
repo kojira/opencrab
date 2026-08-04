@@ -3988,12 +3988,31 @@ fn organize_backlog_cursor_get_set_roundtrip_and_default_none() {
 }
 
 #[test]
-fn organize_backlog_cursor_does_not_disturb_new_and_skill_markers() {
+fn organize_last_run_at_get_set_roundtrip_and_default_none() {
     let conn = setup();
-    // 2 軸 + skill 棚卸しマーカーが同じ config 行を共有しても互いに消えない。
+    assert_eq!(get_organize_last_run_at(&conn, "a1").unwrap(), None);
+    set_organize_last_run_at(&conn, "a1", "2026-08-03T00:00:00Z").unwrap();
+    assert_eq!(
+        get_organize_last_run_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-03T00:00:00Z")
+    );
+    set_organize_last_run_at(&conn, "a1", "2026-08-04T00:00:00Z").unwrap();
+    assert_eq!(
+        get_organize_last_run_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-04T00:00:00Z")
+    );
+    assert_eq!(get_organize_last_run_at(&conn, "a2").unwrap(), None);
+}
+
+#[test]
+fn organize_markers_three_axes_do_not_disturb_each_other() {
+    let conn = setup();
+    // 3 マーカー（新規位置 / 遡り位置 / throttle 刻時）+ skill 棚卸しが同じ config 行を
+    // 共有しても互いに消えない。
     set_last_skill_consolidation_at(&conn, "a1", "2026-07-01T00:00:00Z").unwrap();
     set_last_organize_at(&conn, "a1", "2026-08-04T00:00:00Z|n5").unwrap();
     set_organize_backlog_cursor(&conn, "a1", "2026-06-01T00:00:00Z|old3").unwrap();
+    set_organize_last_run_at(&conn, "a1", "2026-08-05T00:00:00Z").unwrap();
     assert_eq!(
         get_last_skill_consolidation_at(&conn, "a1")
             .unwrap()
@@ -4007,6 +4026,10 @@ fn organize_backlog_cursor_does_not_disturb_new_and_skill_markers() {
     assert_eq!(
         get_organize_backlog_cursor(&conn, "a1").unwrap().as_deref(),
         Some("2026-06-01T00:00:00Z|old3")
+    );
+    assert_eq!(
+        get_organize_last_run_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-05T00:00:00Z")
     );
 }
 

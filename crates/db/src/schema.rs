@@ -853,6 +853,49 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 29,
+        description:
+            "agent_memory_index_config.organize_last_run_at: 整理ランの日次 throttle 用刻時 (issue #313 段階3b / #365)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #365 レビュー修正: 段階3b 初版は「新規 0 件の日」に新規側マーカー（`last_organize_at`）を
+        // 壁時計 `now` へ前進させて日次 throttle を保っていた。しかし増分ビルドは topic 挿入と
+        // watermark 更新が別ロック・非トランザクション（`memory_maintenance.rs` はビルドの Err を
+        // warn で握って同 tick の整理ランまで進む）。その隙に **commit 済みだが `end_log_id >
+        // watermark`（snapshot 外）の topic** があると `count_organize_topics` から漏れて
+        // 新規 0 と判定され、`now` へ飛ばした新規側カーソルがその topic の `created_at` を追い越し、
+        // watermark 追従後も新規側から拾えず遡り境界より新しいので遡り側からも届かず**恒久ロス**
+        // （#364 blocker と同型）。
+        //
+        // 対処: 新規側カーソルは**実際に提示した新規 topic の位置**にしか進めない（0 件なら据え置き）。
+        // 壁時計へは飛ばさない。ただしそれだと「静かな日/エージェント」で throttle 基準が過去へ
+        // 留まり tick 毎起動になるため、**日次 throttle 専用の壁時計刻時**をこの列に分離する
+        // （clean 完了ごとに `now` を刻む）。位置（新規/遡りの 2 軸カーソル）と時刻（この列）を
+        // 別に持つことで両立させる。列を増やさずには両立できない（安全な位置前進は静かな日に
+        // 過去へ退き、壁時計前進は上記の恒久ロスを生む）と判断した。
+        //
+        // **NULL 既定 = 未刻**。整理ラン側は初回遭遇（`last_organize_at` が NULL）で 3 マーカーを
+        // 同時に `now` へシードする。移行 DB（段階3/3b で先に有効化）で本列だけ NULL の場合は
+        // 日次ゲートが `last_organize_at` の created_at 部へフォールバックする（旧挙動）。config
+        // 既定オフなので有効化するまで書かれない。
+        //
+        // #349 の罠を踏まないため **番号付き MIGRATIONS へ置く**。冪等性は `column_exists` ガード。
+        //
+        // 切り戻し: 列は読まれなくなるだけ。版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 28;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_memory_index_config", "organize_last_run_at")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN organize_last_run_at TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2136,7 +2179,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_skill_consolidation_at TEXT,
     last_organize_at TEXT,
-    organize_backlog_cursor TEXT
+    organize_backlog_cursor TEXT,
+    organize_last_run_at TEXT
 );
 
 -- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
@@ -3019,6 +3063,62 @@ mod migration_tests {
             Some("2026-06-01T00:00:00Z|old3"),
             "再実行でマーカーが消えてはならない"
         );
+    }
+
+    /// v29（#365 レビュー / #313 段階3b）: `agent_memory_index_config.organize_last_run_at` が
+    /// **既存 DB に届く**こと、既定 NULL であること、既存の 2 軸マーカー・隣の列が壊れないこと、
+    /// 再実行で落ちないこと。本番は v27 なので v28 相当（列 3 本目だけ欠く）→ latest を模す。
+    #[test]
+    fn agent_memory_index_config_last_run_at_migration_v29_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        assert!(column_exists(&conn, "agent_memory_index_config", "organize_last_run_at").unwrap());
+
+        // v28 相当の既存 DB を模す: organize_last_run_at 列を落とし version を 28 へ戻す。
+        // 2 軸マーカーに値を入れておき、移行で消えないこと・新列が NULL で足されることを見る。
+        conn.execute_batch(
+            "ALTER TABLE agent_memory_index_config DROP COLUMN organize_last_run_at;
+             INSERT INTO agent_memory_index_config
+               (agent_id, batch_size, threshold, updated_at, last_organize_at, organize_backlog_cursor)
+               VALUES ('a1', 50, 20, '2026-01-01', '2026-08-04T00:00:00Z|n5', '2026-06-01T00:00:00Z|old3');
+             PRAGMA user_version = 28",
+        )
+        .unwrap();
+        assert!(
+            !column_exists(&conn, "agent_memory_index_config", "organize_last_run_at").unwrap()
+        );
+
+        // 起動経路（initialize → run_migrations）で v29 が届く。
+        initialize(&conn).expect("upgrade v28 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(column_exists(&conn, "agent_memory_index_config", "organize_last_run_at").unwrap());
+
+        // 既存の 2 軸マーカーは残り、新列は NULL（未刻）。
+        let (last_run, organize, backlog): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT organize_last_run_at, last_organize_at, organize_backlog_cursor
+                 FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("organize_last_run_at を含む SELECT が通らない");
+        assert_eq!(last_run, None, "新列は既定 NULL（未刻）でなければならない");
+        assert_eq!(organize.as_deref(), Some("2026-08-04T00:00:00Z|n5"));
+        assert_eq!(backlog.as_deref(), Some("2026-06-01T00:00:00Z|old3"));
+
+        // 冪等性: 値を書いた後に再実行しても落ちず、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_memory_index_config SET organize_last_run_at = '2026-08-05T00:00:00Z' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT organize_last_run_at FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("2026-08-05T00:00:00Z"));
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を
