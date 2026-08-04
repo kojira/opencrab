@@ -340,7 +340,8 @@ impl Action for ReadMyHistoryAction {
         }
         if mode_count > 1 {
             return ActionResult::error(
-                "範囲指定は 1 つだけにしてください（session_id / id 範囲 / around / 時刻範囲）",
+                "範囲指定は 1 つだけにしてください（session_id / id 範囲 / around / 時刻範囲）。\
+                 使わない範囲は 0 か空文字にしてください",
             );
         }
 
@@ -1109,7 +1110,13 @@ mod tests {
             )
             .await;
         assert!(!r.success);
-        assert!(r.error.unwrap().contains("1 つだけ"));
+        let err = r.error.unwrap();
+        assert!(err.contains("1 つだけ"));
+        // 全プロパティを埋めるモデルが 1 回で復帰できるよう「他をどう消すか」を示す。
+        assert!(
+            err.contains("0 か空文字"),
+            "拒否メッセージに復帰方法が無い: {err}"
+        );
     }
 
     /// 全プロパティ埋め＋around＋estimate_only=true → 範囲判定を抜けて estimate が返る。
