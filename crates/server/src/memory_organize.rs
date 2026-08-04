@@ -23,9 +23,47 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 
 use crate::config::MemoryOrganizeConfig;
+use crate::memory_maintenance::IndexBuildInflight;
 use crate::AppState;
 use opencrab_actions::{CallerIdentity, RunRequest};
+use opencrab_core::EngineResult;
 use opencrab_db::queries::IndexNodeRow;
+
+/// 整理ランが「エージェント的な1ターンを回す」ために必要とする**唯一の手足**（#370）。
+///
+/// 整理ラン（sleep）のロジック本体（ゲート判定・worklist 組み立て・マーカー前進・partial の
+/// 扱い・監査）は、外へ出る口も LLM も**持たない**。唯一「1 ターンを実際に走らせて結果を得る」
+/// 部分だけをこの狭い口に切り出す。
+///
+/// - **本番**は [`AppStateTurnRunner`]（`run_agent_response` を呼ぶ実装）を渡す。ラン構築一式
+///   （dispatcher / gateway スロット / MCP / activity webhook sink / metrics / LLM client /
+///   engine）はこの実装の**内側**にだけ存在する。
+/// - **テスト**は結果（[`EngineResult`]）を差し替えるフェイクを渡す。フェイクは何も構築しない
+///   ので、webhook も gateway も MCP も LLM も**そもそも sleep の依存に入らない**（隔離実験の
+///   つもりが本番 Discord へ飛んだ #370 の再発を、症状の個別封じではなく構造で防ぐ）。
+///
+/// タイムアウトは呼び出し側（[`run_organize`]）が sleep ポリシーとして被せる。ここは「1 ターンを
+/// 走らせる」ことだけに責務を絞る。
+#[async_trait::async_trait]
+pub trait OrganizeTurnRunner: Send + Sync {
+    /// 与えた [`RunRequest`] で 1 ターンを走らせ、結果を返す。`Err` は run 自体の失敗。
+    async fn run_turn(&self, req: RunRequest) -> anyhow::Result<EngineResult>;
+}
+
+/// 本番の [`OrganizeTurnRunner`]。`run_agent_response`（本番のラン構築経路）へ委譲する。
+///
+/// この型より外側（sleep ロジック）は `AppState` を持たないため、gateway/MCP/webhook を
+/// 構築する術がない。ラン構築が必要とする `state` はこの実装の中だけに閉じ込める。
+pub struct AppStateTurnRunner<'a> {
+    pub state: &'a AppState,
+}
+
+#[async_trait::async_trait]
+impl OrganizeTurnRunner for AppStateTurnRunner<'_> {
+    async fn run_turn(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
+        crate::process::run_agent_response(self.state, req).await
+    }
+}
 
 /// 1 回の worklist に載せる 1 topic あたりの要約の最大文字数（プロンプト肥大の抑制）。
 /// 実測平均は要約 102 字（#313）。振れ幅を吸収しつつ上限を持たせる。
@@ -68,19 +106,47 @@ pub const ORGANIZE_ALLOWED_TOOLS: &[&str] = &[
     "declare_done",
 ];
 
-/// このエージェントの整理ランを（ゲートを満たせば）実行する。
+/// このエージェントの整理ランを（ゲートを満たせば）実行する。**本番エントリ**。
+///
+/// 本番のラン構築（`run_agent_response`）を [`AppStateTurnRunner`] に閉じ込め、sleep の
+/// ロジック本体は [`run_organize`] に委譲する。sleep 本体は `AppState` を持たないので、
+/// gateway/MCP/webhook を構築する術がない（#370）。
 ///
 /// 戻り値: 整理ラン（LLM）を実際に起動したら `true`。既定オフ・ゲート未達・初回シードは
 /// `false`（＝ LLM ゼロコール）。
 pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyhow::Result<bool> {
-    let cfg = state.memory_organize.clone();
+    let runner = AppStateTurnRunner { state };
+    run_organize(
+        &state.db,
+        &state.memory_organize,
+        &state.index_build_inflight,
+        agent_id,
+        &runner,
+    )
+    .await
+}
+
+/// 整理ラン（sleep）のロジック本体。**必要な手足だけ**を引数で受け取る（#370）:
+/// DB・設定・二重起動スロット・1 ターンを回す [`OrganizeTurnRunner`]。
+///
+/// `AppState` を受け取らないので、この関数からは gateway/MCP/activity webhook を構築できない
+/// （構造的に外へ出ない）。1 ターンを走らせる部分だけを `runner` に委ね、本番は
+/// `run_agent_response` 実装、テストは結果差し替えのフェイクを渡す。これにより本番のラン構築を
+/// 通さずにゲート判定・worklist 組み立て・マーカー前進/据え置き・partial の扱いを単体検証できる。
+async fn run_organize(
+    db: &opencrab_db::Db,
+    cfg: &MemoryOrganizeConfig,
+    inflight: &IndexBuildInflight,
+    agent_id: &str,
+    runner: &dyn OrganizeTurnRunner,
+) -> anyhow::Result<bool> {
     // 既定オフ: ここで即 return する。RunRequest も DB 書き込みも一切しない（ゼロコール）。
     if !cfg.enabled {
         return Ok(false);
     }
 
     // --- ゲート判定 + worklist 組み立て（DB 読みのみ。ロックは await を跨がない）---
-    let plan = match decide_organize(state, agent_id, &cfg)? {
+    let plan = match decide_organize(db, cfg, agent_id)? {
         OrganizeDecision::Skip(reason) => {
             tracing::debug!(agent_id, reason, "memory organize: skipped by gate");
             return Ok(false);
@@ -96,7 +162,7 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
     // 整理ランは sleep ループからしか呼ばれない（対話ターン非経由）ので実質競合しないが、
     // ①増分ビルドや skill 棚卸しと同じスロット機構で二重起動を防ぐ。
     let guard = crate::memory_maintenance::try_acquire_build_slot(
-        &state.index_build_inflight,
+        inflight,
         &format!("organize:{agent_id}"),
     );
     let Some(_guard) = guard else {
@@ -134,9 +200,11 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
     );
 
     let started = std::time::Instant::now();
+    // タイムアウトは sleep ポリシー（「どこまで待つか」）としてここで被せる。1 ターンを走らせる
+    // 実体は `runner` に委ねる（本番＝run_agent_response / テスト＝フェイク）。
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(cfg.timeout_secs.max(1)),
-        crate::process::run_agent_response(state, req),
+        runner.run_turn(req),
     )
     .await;
     let latency_ms = started.elapsed().as_millis() as i64;
@@ -169,10 +237,7 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
     // partial（timeout / ターン上限 / エラー）ではどれも進めない。タグ付与は PK 冪等
     // （`assign_topic_to_category`）なので、同じ範囲を次回に再挑戦しても重複しない。
     {
-        let conn = state
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         advance_markers(&conn, agent_id, &plan, clean)?;
     }
 
@@ -195,10 +260,7 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
             "last_run_at": if clean { Some(plan.run_at.clone()) } else { None },
             "cost": { "latency_ms": latency_ms },
         });
-        let conn = state
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         let row = opencrab_db::queries::AgentLogRow {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: Some(agent_id.to_string()),
@@ -279,15 +341,12 @@ enum OrganizeDecision {
 /// DB 読みのみ（初回シードの 1 write を除く）。ロックは関数内で完結し、`run_agent_response`
 /// の await を跨いで保持しない。
 fn decide_organize(
-    state: &AppState,
-    agent_id: &str,
+    db: &opencrab_db::Db,
     cfg: &MemoryOrganizeConfig,
+    agent_id: &str,
 ) -> anyhow::Result<OrganizeDecision> {
     let now = Utc::now();
-    let conn = state
-        .db
-        .lock()
-        .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+    let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
 
     // ゲート1: 日次 + 初回シード。
     let last_at = opencrab_db::queries::get_last_organize_at(&conn, agent_id)?;
@@ -564,6 +623,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // --- ゲート判定（decide_organize）用のセットアップ ---
 
@@ -689,7 +749,7 @@ mod tests {
             seed_topic(&state, "a1", &format!("n{i}"), &hours_ago(1), 10 + i);
         }
         // マーカー未設定（None）。初回遭遇は両軸を now にシードしてスキップ（既存を一気に対象化しない）。
-        let d = decide_organize(&state, "a1", &cfg(true, 3, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 3, 2), "a1").unwrap();
         assert!(matches!(d, OrganizeDecision::Seeded));
         assert!(
             get_marker(&state, "a1").is_some(),
@@ -713,7 +773,7 @@ mod tests {
             seed_topic(&state, "a1", &format!("n{i}"), &hours_ago(1), 10 + i);
         }
         set_marker(&state, "a1", &hours_ago(1)); // 1h 前 = 24h 未満
-        let d = decide_organize(&state, "a1", &cfg(true, 3, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 3, 2), "a1").unwrap();
         assert!(matches!(d, OrganizeDecision::Skip("interval_not_elapsed")));
     }
 
@@ -725,7 +785,7 @@ mod tests {
         set_marker(&state, "a1", &hours_ago(48));
         disable_backlog(&state, "a1"); // 過去分が無い日を模す（新規側の下限だけを見る）。
         seed_topic(&state, "a1", "n0", &hours_ago(1), 10);
-        let d = decide_organize(&state, "a1", &cfg(true, 3, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 3, 2), "a1").unwrap();
         assert!(matches!(
             d,
             OrganizeDecision::Skip("below_floor_no_backlog")
@@ -743,7 +803,7 @@ mod tests {
         seed_topic(&state, "a1", "in2", &hours_ago(2), 80);
         seed_topic(&state, "a1", "out1", &hours_ago(1), 200);
         seed_topic(&state, "a1", "out2", &hours_ago(1), 300);
-        let d = decide_organize(&state, "a1", &cfg(true, 10, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 10, 2), "a1").unwrap();
         match d {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_topic_count, 2, "snapshot 超過は数えない");
@@ -778,7 +838,7 @@ mod tests {
             let ts = (Utc::now() - Duration::hours(10 - i)).to_rfc3339();
             seed_topic(&state, "a1", &format!("n{i}"), &ts, 10 + i);
         }
-        let d = decide_organize(&state, "a1", &cfg(true, 3, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 3, 2), "a1").unwrap();
         match d {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_topic_count, 5, "下限判定は全 5 件");
@@ -829,7 +889,7 @@ mod tests {
             );
         }
         // budget=2 を新規が使い切る。
-        let d = decide_organize(&state, "a1", &cfg(true, 2, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 2, 2), "a1").unwrap();
         match d {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_presented, 2, "新規が budget=2 を使い切る");
@@ -856,7 +916,7 @@ mod tests {
             seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
         }
         // budget=5: 新規 2 + 過去分 3（残り 1 は次回）。
-        let d = decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 5, 2), "a1").unwrap();
         match d {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_presented, 2);
@@ -891,7 +951,7 @@ mod tests {
             seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
         }
         // 新規 0（下限 2 未満）だが過去分があるので発火する。
-        let d = decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 5, 2), "a1").unwrap();
         match d {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_topic_count, 0, "新規は無い");
@@ -924,7 +984,7 @@ mod tests {
         for h in [300, 290] {
             seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
         }
-        let d = decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap();
+        let d = decide_organize(&state.db, &cfg(true, 5, 2), "a1").unwrap();
         assert!(matches!(
             d,
             OrganizeDecision::Skip("below_floor_no_backlog")
@@ -942,7 +1002,7 @@ mod tests {
             seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
         }
         // run1: budget=2 → 遡り降順で old280, old290 を提示（タグ付けは一切しない）。
-        let plan1 = match decide_organize(&state, "a1", &cfg(true, 2, 2)).unwrap() {
+        let plan1 = match decide_organize(&state.db, &cfg(true, 2, 2), "a1").unwrap() {
             OrganizeDecision::Run(p) => p,
             other => panic!("expected Run, got {other:?}"),
         };
@@ -958,7 +1018,7 @@ mod tests {
         // run1 の前進位置のまま = 別軸なので影響しない）。
         set_last_run(&state, "a1", &hours_ago(48));
         // run2: 次は old300 だけ（提示済みの old280/old290 は二度と出ない）。
-        let plan2 = match decide_organize(&state, "a1", &cfg(true, 2, 2)).unwrap() {
+        let plan2 = match decide_organize(&state.db, &cfg(true, 2, 2), "a1").unwrap() {
             OrganizeDecision::Run(p) => p,
             other => panic!("expected Run, got {other:?}"),
         };
@@ -980,7 +1040,7 @@ mod tests {
         for h in [300, 290] {
             seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
         }
-        let plan = match decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap() {
+        let plan = match decide_organize(&state.db, &cfg(true, 5, 2), "a1").unwrap() {
             OrganizeDecision::Run(p) => p,
             other => panic!("expected Run, got {other:?}"),
         };
@@ -1057,7 +1117,7 @@ mod tests {
         seed_topic(&state, "a1", "old300", &hours_ago(300), 10);
         seed_topic(&state, "a1", "old290", &hours_ago(290), 11);
         // run1: stale は snapshot 外で除外 → 新規 0。過去分で発火（下限 1 で run2 の 1 件でも発火）。
-        let plan1 = match decide_organize(&state, "a1", &cfg(true, 5, 1)).unwrap() {
+        let plan1 = match decide_organize(&state.db, &cfg(true, 5, 1), "a1").unwrap() {
             OrganizeDecision::Run(p) => p,
             other => panic!("expected Run, got {other:?}"),
         };
@@ -1074,7 +1134,7 @@ mod tests {
         set_watermark(&state, "a1", 300);
         set_last_run(&state, "a1", &hours_ago(48));
         // run2: stale が新規側で拾える（恒久ロスしない）。
-        let plan2 = match decide_organize(&state, "a1", &cfg(true, 5, 1)).unwrap() {
+        let plan2 = match decide_organize(&state.db, &cfg(true, 5, 1), "a1").unwrap() {
             OrganizeDecision::Run(p) => p,
             other => panic!("expected Run, got {other:?}"),
         };
@@ -1405,5 +1465,249 @@ mod tests {
         let mut dump = visible.clone();
         dump.sort();
         eprintln!("[#368] 整理ランが実際に受け取るツール: {dump:?}");
+    }
+
+    // --- 本番のラン構築を通さない全経路テスト（#370）---
+    //
+    // `run_organize` は `AppState` を受け取らず、1 ターンを回す口（`OrganizeTurnRunner`）だけを
+    // 外から受ける。テストは結果を差し替えるフェイクを渡す。フェイクは `run_agent_response` を
+    // 呼ばないので、webhook も gateway も MCP も LLM も**一切構築されない**（構造的に sleep の依存に
+    // 入らない = 隔離実験が本番へ飛んだ #370 の再発を症状封じでなく構造で防ぐ）。ゲート → 実行 →
+    // clean/partial 判定 → マーカー前進/据え置き → 監査、までを LLM ゼロコールで検証する。
+
+    enum FakeOutcome {
+        Completed,
+        StoppedByLimit,
+        Error,
+    }
+
+    /// テスト用の [`OrganizeTurnRunner`]。受け取った `RunRequest` の要点を記録し、設定した結果を
+    /// 返すだけ。何も構築しない（外向きの口は一切現れない）。
+    struct FakeRunner {
+        outcome: FakeOutcome,
+        calls: AtomicUsize,
+        captured: std::sync::Mutex<Option<CapturedReq>>,
+    }
+
+    /// フェイクが観測した `RunRequest` の要点（本番配線が保たれているかの検証用）。
+    struct CapturedReq {
+        gateway: String,
+        caller_is_owner: bool,
+        tool_allowlist: Option<Vec<String>>,
+        has_gateway_actions: bool,
+    }
+
+    impl FakeRunner {
+        fn new(outcome: FakeOutcome) -> Self {
+            Self {
+                outcome,
+                calls: AtomicUsize::new(0),
+                captured: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OrganizeTurnRunner for FakeRunner {
+        async fn run_turn(&self, req: RunRequest) -> anyhow::Result<EngineResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.captured.lock().unwrap() = Some(CapturedReq {
+                gateway: req.gateway.clone(),
+                caller_is_owner: matches!(req.caller, CallerIdentity::Owner),
+                tool_allowlist: req.tool_allowlist.clone(),
+                has_gateway_actions: req.gateway_actions.is_some(),
+            });
+            match self.outcome {
+                FakeOutcome::Completed => Ok(engine_result(false)),
+                FakeOutcome::StoppedByLimit => Ok(engine_result(true)),
+                FakeOutcome::Error => Err(anyhow::anyhow!("simulated run failure")),
+            }
+        }
+    }
+
+    fn engine_result(stopped_by_limit: bool) -> EngineResult {
+        EngineResult {
+            response: String::new(),
+            iterations: 1,
+            tool_calls_made: 0,
+            stopped_by_limit,
+            xml_fallback_parses: 0,
+        }
+    }
+
+    /// ゲートが「新規を提示して発火」する状態に DB を整える（新規側だけを見る）。
+    fn seed_passing_gate(state: &AppState) {
+        set_watermark(state, "a1", 1000);
+        set_marker(state, "a1", &hours_ago(48)); // last_organize_at（新規/過去の境界）
+        set_backlog_marker(state, "a1", EPOCH); // 過去分は out（新規側だけ見る）
+        set_last_run(state, "a1", &hours_ago(48)); // 日次 throttle を開ける（48h > 24h）
+                                                   // 新規（境界より後）を下限（min_new）以上そろえる。順は created_at ASC で n1 → n2。
+        seed_topic(state, "a1", "n1", &hours_ago(5), 50);
+        seed_topic(state, "a1", "n2", &hours_ago(3), 60);
+    }
+
+    /// context="sleep" の最新監査 message を JSON で返す。
+    fn latest_sleep_audit(state: &AppState) -> Option<serde_json::Value> {
+        let conn = state.db.lock().unwrap();
+        let rows = opencrab_db::queries::list_agent_logs(&conn, Some("a1"), None, 10).ok()?;
+        rows.into_iter()
+            .find(|r| r.context == "sleep")
+            .and_then(|r| serde_json::from_str(&r.message).ok())
+    }
+
+    /// clean 完了: マーカーが前進し、監査に completed が残る。本番のラン構築は一切通らない。
+    #[tokio::test]
+    async fn clean_run_advances_markers_without_production_build() {
+        let state = crate::test_app_state();
+        seed_passing_gate(&state);
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+
+        let ran = run_organize(
+            &state.db,
+            &cfg(true, 5, 2),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+
+        assert!(ran, "ゲート通過 → 起動して true");
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "ターンは 1 回だけ回る"
+        );
+        // clean → 新規側マーカーが提示末尾（最新 = n2）へ前進する。
+        let marker = get_marker(&state, "a1").expect("新規側マーカー");
+        assert!(
+            marker.contains("n2"),
+            "clean で新規側マーカーが提示末尾(n2)へ前進する: {marker}"
+        );
+        let audit = latest_sleep_audit(&state).expect("監査ログが書かれる");
+        assert_eq!(audit["outcome"], "completed");
+        assert_eq!(audit["marker_advanced"], true);
+    }
+
+    /// partial（ターン上限）: マーカーは据え置き、監査は stopped_by_limit。差し替えた結果だけで
+    /// partial 経路を検証できる（LLM もラン構築も不要）。
+    #[tokio::test]
+    async fn stopped_by_limit_run_holds_markers() {
+        let state = crate::test_app_state();
+        seed_passing_gate(&state);
+        let before = get_marker(&state, "a1");
+        let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
+
+        let ran = run_organize(
+            &state.db,
+            &cfg(true, 5, 2),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+
+        assert!(ran, "起動はした（partial でも true）");
+        assert_eq!(
+            get_marker(&state, "a1"),
+            before,
+            "partial（ターン上限）では新規側マーカーを進めない"
+        );
+        let audit = latest_sleep_audit(&state).expect("監査ログが書かれる");
+        assert_eq!(audit["outcome"], "stopped_by_limit");
+        assert_eq!(audit["marker_advanced"], false);
+    }
+
+    /// run 自体が Err: マーカーは据え置き、監査は error。エラー経路も差し替えで検証できる。
+    #[tokio::test]
+    async fn errored_run_holds_markers() {
+        let state = crate::test_app_state();
+        seed_passing_gate(&state);
+        let before = get_marker(&state, "a1");
+        let fake = FakeRunner::new(FakeOutcome::Error);
+
+        let ran = run_organize(
+            &state.db,
+            &cfg(true, 5, 2),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+
+        assert!(ran, "起動はした（error でも true）");
+        assert_eq!(
+            get_marker(&state, "a1"),
+            before,
+            "error では新規側マーカーを進めない"
+        );
+        let audit = latest_sleep_audit(&state).expect("監査ログが書かれる");
+        assert_eq!(audit["outcome"], "error");
+    }
+
+    /// 口に渡る `RunRequest` が本番配線を保っていること（#368/#369 を壊していない）:
+    /// gateway="sleep" / caller=Owner / ツール許可リスト=ORGANIZE_ALLOWED_TOOLS /
+    /// 送信経路（gateway_actions）なし。
+    #[tokio::test]
+    async fn run_request_carries_expected_wiring() {
+        let state = crate::test_app_state();
+        seed_passing_gate(&state);
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+
+        run_organize(
+            &state.db,
+            &cfg(true, 5, 2),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+
+        let captured = fake.captured.lock().unwrap();
+        let req = captured.as_ref().expect("ターンが回れば記録される");
+        assert_eq!(req.gateway, "sleep", "RuntimeInfo の gateway 名");
+        assert!(req.caller_is_owner, "caller は Owner");
+        assert!(
+            !req.has_gateway_actions,
+            "送信経路（会話への出口）は渡さない"
+        );
+        let expected: Vec<String> = ORGANIZE_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            req.tool_allowlist.as_ref(),
+            Some(&expected),
+            "#369 のツール許可リストがそのまま載る"
+        );
+    }
+
+    /// 既定オフ: ゲートに入る前にゼロコールで返る。**口（LLM）は 1 度も呼ばれない**。
+    #[tokio::test]
+    async fn disabled_never_calls_the_runner() {
+        let state = crate::test_app_state();
+        // ゲートが通る材料を揃えても、既定オフなら口を呼ばない。
+        seed_passing_gate(&state);
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+
+        let ran = run_organize(
+            &state.db,
+            &cfg(false, 5, 2),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+
+        assert!(!ran, "既定オフでは起動しない");
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            0,
+            "既定オフでは 1 ターンも回さない（LLM ゼロコール）"
+        );
     }
 }
