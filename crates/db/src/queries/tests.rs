@@ -4569,6 +4569,12 @@ fn survey_my_history_aggregates_and_caps_buckets() {
     assert_eq!(day1.session_count, 2);
     assert_eq!(day1.type_counts.get("message").copied(), Some(2));
     assert_eq!(day1.type_counts.get("reaction").copied(), Some(1));
+    // サイズ地図（#386）: content='x' が 3 件で 3 文字、est は 3*2/3=2。
+    assert_eq!(day1.content_chars, 3);
+    assert_eq!(day1.est_tokens, 2);
+    // 全体の総文字数・概算トークンも返す（バケットを落としても残る）。
+    assert_eq!(survey.total_content_chars, 4);
+    assert_eq!(survey.total_est_tokens, 2);
     // バケット上限で古い側を落とす。
     let capped = survey_my_history(&conn, "a1", "day", 1).unwrap();
     assert_eq!(capped.buckets.len(), 1);

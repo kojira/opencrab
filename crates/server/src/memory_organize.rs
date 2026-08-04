@@ -567,7 +567,9 @@ fn build_system_prompt(plan: &OrganizePlan) -> String {
          - `tag_topic(topic_id, tags[])`: topic にタグを付ける（無いタグ名はその場で新設）\n\
          - `untag_topic(topic_id, tag)`: topic からタグ 1 個を外す\n\
          - `merge_tags(from, into)`: 2 つのタグを統合する（実質リネームにもなる）\n\
-         メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶整理の時間です。\n\n\
+         メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶整理の時間です。\n\
+         【サイズの約束】1 回のツール結果が inline_limit_tokens（約 2,500 トークン）を超えると本文は捨てられます。\
+         survey_my_history の est_tokens や read_my_history の estimated_tokens（estimate_only=true で本文なしに測れる）を見て、大きい範囲は狭めて読んでください。\n\n\
          # 現在のタグ（あなたの語彙・付与件数）\n{tags_txt}\n\n\
          # 今回の対象（{size} 件 / あなたの記憶（topic））\n\
          最近の分と、まだ見ていない過去の分が混ざっています。どれもあなた自身の記憶です。\

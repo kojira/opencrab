@@ -211,7 +211,10 @@ fn oversized_notice(result_json: &str, saved_to: Option<&str>) -> String {
              content is included here. The full output was saved to `{rel}` (path relative to \
              your workspace root). It is up to you how to use it: read part of it, search it, \
              transform it, or pass the path straight to the next command without reading it at \
-             all. Do NOT re-run the same tool just to see the output again.]"
+             all. If you cannot read that file (some runs have no file-reading tool), instead \
+             re-run with a narrower request (smaller id/time window, fewer rows, or estimate \
+             the size first) so the result fits under the limit. Do NOT re-run the same tool \
+             with the same arguments just to see the output again.]"
         ),
         None => format!(
             "[Tool result withheld: {bytes} bytes, {lines} lines, ~{tokens} tokens{hint}. \
@@ -417,8 +420,8 @@ mod tests {
             "生データが流れている: {out}"
         );
         assert!(!out.contains("user0000"), "生データが流れている: {out}");
-        // 案内はメタ情報だけで数百バイトに収まる（76KB → 数百バイト）。
-        assert!(out.len() < 600, "案内が肥大している: {} bytes", out.len());
+        // 案内はメタ情報＋狭めて取り直す導線だけで、1KB 未満に収まる（76KB → 数百バイト）。
+        assert!(out.len() < 800, "案内が肥大している: {} bytes", out.len());
 
         // 全文は退避され、そこを指している。
         assert!(out.contains("tmp/sessA_tc1.json"), "{out}");
