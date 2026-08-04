@@ -1044,6 +1044,104 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 32,
+        description:
+            "既存の受信行の agent_id を送信者→受信側エージェントへ付け替え、索引/FTS に載せる (issue #380 / #377)",
+        // **値の付け替えのみ。スキーマも行数も生ログ本文も変えない**（`agent_id` 列の値だけ）。
+        //
+        // 背景（#377 / #382）: 受信発言の記録は以前 `agent_id` 列にも `speaker_id` 列にも
+        // **送信者ID**を入れていた。索引ビルドも FTS 記憶検索も `WHERE agent_id = <当該
+        // エージェント>` で走るため、送信者名義の受信行は受信側エージェントの索引にも検索にも
+        // 一切載らなかった。#382 で**これから書く**受信行は受信側名義へ直したが、**既存の
+        // 受信行はそのまま**残る（Nostr は最初からこの形なので相手の発言が一度も載っていない）。
+        //
+        // このマイグレーションは**既存の受信行だけ**を受信側エージェント名義へ付け替える。
+        // `speaker_id`（送信者）は変えない。FTS は `WHERE agent_id` で絞るだけなので、
+        // `agent_id` を直せば topic 再索引なしで `search_my_history` から即引ける（#380）。
+        //
+        // ## 対象の特定（安全性の核心）
+        // 受信側エージェントは **`session_id` に埋め込まれた agent_id** から復元する。
+        // 現行の session_id は受信側エージェント自身のループが `discord-{agent_id}-{guild}-{channel}`
+        // / `nostr-{agent_id}`（`nostr-{agent_id}-{pubkey}` の旧形も）で組み立てる（
+        // `crates/discord/src/message_loop.rs` / `crates/nostr/src/manager.rs`）。よって
+        // session_id に現れる agent_id が受信側の権威的な印。**実在する `agents` 表と JOIN
+        // して**該当する 1 エージェントが定まる行だけを対象にする（推測しない）。
+        //
+        // 対象行の述語（3 つ全て満たす。これが**旧形の受信行**を正確に選ぶ）:
+        //   - `log_type = 'speech'`
+        //   - `metadata_json` の `source` が `'discord'` / `'nostr'`（＝受信 / `record_inbound_message`。
+        //     `*_response` は応答なので除外、metadata 無しの旧々形も除外）
+        //   - `agent_id = speaker_id`（旧形は両列とも送信者。#382 以降の新形は
+        //     `agent_id`≠`speaker_id` なので**自動で除外**される＝二重移行しない）
+        //
+        // ## 触らない行（重要）
+        //   - **session_id から受信側が一意に定まらない行**（旧い `discord-{guild}-{channel}`
+        //     形式で agent_id が埋まっておらず、複数エージェントが同居した共有チャンネル等）は
+        //     **1 行も触らない**（`agents` と JOIN しても該当なし＝`new_agent IS NULL`）。
+        //     誤って別人の記憶に混ぜるより、載らないまま残す方が安全（#377「エージェント間で
+        //     記憶を混ぜない（絶対）」）。本番コピー実測で 390 行がこれに該当し保留した。
+        //   - metadata 無しの旧々形（`agent_id` は既に受信側で正しく載っている）
+        //   - 応答行（`*_response`）・NO_REPLY・その他
+        //
+        // ## 本番コピーでの実測（適用前 user_version=31 / memory_sessions 47,497 行）
+        // 述語に掛かるのは 5,047 行（issue #380 の件数と一致）。うち **4,657 行が一意に復元でき、
+        // 390 行が復元不能**。**複数エージェントに match して曖昧になる行は 0 行**（`LIMIT 1` が
+        // 選択を隠していない）。復元不能 390 は全て 2 セグメントの `discord-{guild}-{channel}` で、
+        // 同一 session の応答者から推定する案も検討したが最大の 1 session に応答者が 3 人おり
+        // 一意に決まらないため、推定はせず保留した。適用後は行数（全 39 テーブル）・`content` /
+        // `speaker_id` / `session_id` / `metadata_json` / `created_at` とも一切変化なし。
+        //
+        // ## FTS も同時に直す
+        // `memory_sessions_fts` は本体と手動同期する fts5 で、`agent_id` を UNINDEXED 列として
+        // 持つ。ここを直し忘れると検索に載らないので、本体と**同一の rowid 集合**へ同じ値を書く。
+        // 一時表 `_v32_inbound_remap` に「(rowid, 新 agent_id)」を一度だけ確定させ、本体と FTS の
+        // 双方へ適用することで両者の集合を一致させる。
+        //
+        // ## 冪等性
+        // 番号付き MIGRATIONS は `user_version` で 1 回しか走らない（#349 の凍結 `migrate()` は
+        // 既存 DB に届かないのでここへ置く）。加えて SQL 自体も自然冪等: 付け替え後は
+        // `agent_id`≠`speaker_id` になり述語から外れる。`new_agent` が現在値と同じ行（自己宛の
+        // 縮退ケース）は remap から除くので二重に動かない。2 回目は対象 0 行。
+        //
+        // ## 切り戻し
+        // 付け替え後の受信行は「新形の受信行」と値の上で区別できない（どちらも
+        // `agent_id`≠`speaker_id`）。よって**データの機械的な巻き戻しはしない**。古いバイナリへ
+        // 戻す場合も版番号だけ戻せばよい（古いバイナリは `agent_id` を読むだけで、受信側名義で
+        // 載っていても壊れない＝むしろ望ましい状態）。厳密な原状復帰が要るなら v32 前のバックアップ
+        // から復元する:
+        //   BEGIN; PRAGMA user_version = 31; COMMIT;
+        up: |conn| {
+            // 受信側が一意に定まる旧形の受信行だけを (rowid, 新 agent_id) へ確定させる。
+            // agents との JOIN で該当なし（＝復元不能）や自己宛（付け替え不要）は除く。
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS _v32_inbound_remap AS
+                 SELECT ms.id AS row_id,
+                        (SELECT a.agent_id FROM agents a
+                          WHERE ms.session_id = 'nostr-' || a.agent_id
+                             OR ms.session_id LIKE 'nostr-' || a.agent_id || '-%'
+                             OR ms.session_id LIKE 'discord-' || a.agent_id || '-%'
+                          LIMIT 1) AS new_agent
+                 FROM memory_sessions ms
+                 WHERE ms.log_type = 'speech'
+                   AND ms.agent_id = ms.speaker_id
+                   AND json_extract(ms.metadata_json, '$.source') IN ('discord', 'nostr');
+                 DELETE FROM _v32_inbound_remap WHERE new_agent IS NULL;
+                 DELETE FROM _v32_inbound_remap
+                     WHERE new_agent = (SELECT agent_id FROM memory_sessions WHERE id = row_id);
+
+                 UPDATE memory_sessions
+                     SET agent_id = (SELECT new_agent FROM _v32_inbound_remap WHERE row_id = memory_sessions.id)
+                     WHERE id IN (SELECT row_id FROM _v32_inbound_remap);
+                 UPDATE memory_sessions_fts
+                     SET agent_id = (SELECT new_agent FROM _v32_inbound_remap WHERE row_id = memory_sessions_fts.rowid)
+                     WHERE rowid IN (SELECT row_id FROM _v32_inbound_remap);
+
+                 DROP TABLE _v32_inbound_remap;",
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -3674,6 +3772,229 @@ mod migration_tests {
             count("SELECT COUNT(*) FROM memory_category_members"),
             2,
             "2 回目は members を作り直さない（多対多を検知して skip）"
+        );
+    }
+
+    /// v32: 既存の受信行（送信者名義）を受信側エージェント名義へ付け替え、索引/FTS に
+    /// 載せる（#380）。session_id に埋まった agent_id で受信側を復元できる行だけを対象にし、
+    /// 復元できない行・新形・旧々形・応答は 1 行も触らないこと、FTS も同時に直ること、
+    /// 索引/検索へ受信側名義で載ること、冪等であることを固定する。
+    #[test]
+    fn v32_remaps_inbound_agent_id_to_recipient_and_indexes() {
+        use crate::queries::{
+            get_unindexed_session_logs, insert_session_log, search_session_logs, SessionLogRow,
+        };
+        let conn = crate::init_memory().expect("init");
+
+        // 受信側エージェント（session_id に UUID が埋まる）。migration は agents と JOIN する。
+        let recipient = "aaaaaaaa-1111-2222-3333-444444444444";
+        conn.execute(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES (?1, 'r', 'p')",
+            [recipient],
+        )
+        .unwrap();
+
+        let mk = |agent: &str, session: &str, speaker: &str, content: &str, meta: Option<&str>| {
+            SessionLogRow {
+                id: None,
+                agent_id: agent.to_string(),
+                session_id: session.to_string(),
+                log_type: "speech".to_string(),
+                content: content.to_string(),
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: meta.map(|m| m.to_string()),
+                created_at: None,
+            }
+        };
+
+        // (1) 旧形の受信行・discord（復元可能）: agent=speaker=送信者、session に recipient が埋まる。
+        let id_discord = insert_session_log(
+            &conn,
+            &mk(
+                "sender-d",
+                &format!("discord-{recipient}-100-200"),
+                "sender-d",
+                "discord inbound apple",
+                Some(r#"{"source":"discord"}"#),
+            ),
+        )
+        .unwrap();
+        // (2) 旧形の受信行・nostr（復元可能, pubkey 付き session）。
+        let id_nostr = insert_session_log(
+            &conn,
+            &mk(
+                "sender-n",
+                &format!("nostr-{recipient}-deadbeef"),
+                "sender-n",
+                "nostr inbound banana",
+                Some(r#"{"source":"nostr"}"#),
+            ),
+        )
+        .unwrap();
+        // (3) 旧形の受信行・nostr（復元可能, recipient 単独 session）。
+        let id_nostr2 = insert_session_log(
+            &conn,
+            &mk(
+                "sender-n2",
+                &format!("nostr-{recipient}"),
+                "sender-n2",
+                "nostr inbound cherry",
+                Some(r#"{"source":"nostr"}"#),
+            ),
+        )
+        .unwrap();
+        // (4) 復元不能: discord-{guild}-{channel}（agent_id が埋まっていない）→ 触らない。
+        let id_unresolved = insert_session_log(
+            &conn,
+            &mk(
+                "sender-u",
+                "discord-100-200",
+                "sender-u",
+                "unresolved inbound durian",
+                Some(r#"{"source":"discord"}"#),
+            ),
+        )
+        .unwrap();
+        // (5) 新形の受信行（既に受信側名義, agent≠speaker）→ 触らない。
+        let id_newform = insert_session_log(
+            &conn,
+            &mk(
+                recipient,
+                &format!("discord-{recipient}-100-200"),
+                "sender-x",
+                "newform inbound elder",
+                Some(r#"{"source":"discord"}"#),
+            ),
+        )
+        .unwrap();
+        // (6) 旧々形（metadata 無し・既に受信側名義）→ 触らない。
+        let id_oldold = insert_session_log(
+            &conn,
+            &mk(
+                recipient,
+                &format!("discord-{recipient}-100-200"),
+                "sender-y",
+                "oldold inbound fig",
+                None,
+            ),
+        )
+        .unwrap();
+        // (7) 応答行（source discord_response, agent=speaker=recipient）→ 触らない。
+        let id_reply = insert_session_log(
+            &conn,
+            &mk(
+                recipient,
+                &format!("discord-{recipient}-100-200"),
+                recipient,
+                "reply grape",
+                Some(r#"{"source":"discord_response"}"#),
+            ),
+        )
+        .unwrap();
+
+        // v31 起点へ落として run_migrations で v32 を実際に走らせる。
+        conn.execute_batch("PRAGMA user_version = 31").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v32");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        let agent_of = |id: i64| -> String {
+            conn.query_row(
+                "SELECT agent_id FROM memory_sessions WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let fts_agent_of = |id: i64| -> String {
+            conn.query_row(
+                "SELECT agent_id FROM memory_sessions_fts WHERE rowid=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let speaker_of = |id: i64| -> String {
+            conn.query_row(
+                "SELECT speaker_id FROM memory_sessions WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // (1)(2)(3) 受信側名義へ付け替わり、FTS も追随、speaker_id は送信者のまま。
+        for (id, sender) in [
+            (id_discord, "sender-d"),
+            (id_nostr, "sender-n"),
+            (id_nostr2, "sender-n2"),
+        ] {
+            assert_eq!(agent_of(id), recipient, "本体 agent_id が受信側へ");
+            assert_eq!(fts_agent_of(id), recipient, "FTS agent_id が受信側へ");
+            assert_eq!(speaker_of(id), sender, "speaker_id は送信者のまま");
+        }
+
+        // (4)(5)(6)(7) 触っていない。
+        assert_eq!(agent_of(id_unresolved), "sender-u", "復元不能行は不変");
+        assert_eq!(
+            fts_agent_of(id_unresolved),
+            "sender-u",
+            "復元不能行の FTS も不変"
+        );
+        assert_eq!(agent_of(id_newform), recipient, "新形は不変");
+        assert_eq!(agent_of(id_oldold), recipient, "旧々形は不変");
+        assert_eq!(agent_of(id_reply), recipient, "応答行は不変");
+
+        // 索引ビルド入力に受信側名義で載る（送信者名義では載らない）。
+        let indexed = get_unindexed_session_logs(&conn, recipient, 0, 100).unwrap();
+        assert!(indexed.iter().any(|r| r.content == "discord inbound apple"));
+        assert!(indexed.iter().any(|r| r.content == "nostr inbound banana"));
+        assert!(
+            get_unindexed_session_logs(&conn, "sender-d", 0, 100)
+                .unwrap()
+                .is_empty(),
+            "受信行が送信者名義で索引入力に残っている"
+        );
+
+        // FTS 記憶検索で受信側が相手の発言を引ける。送信者名義では引けない。
+        let hits = search_session_logs(&conn, recipient, "apple", 10).unwrap();
+        assert!(hits.iter().any(|h| h.content == "discord inbound apple"));
+        assert!(search_session_logs(&conn, "sender-d", "apple", 10)
+            .unwrap()
+            .is_empty());
+        // 復元不能行は送信者名義のまま（付け替えていない証拠 = 誤って混ぜていない）。
+        assert!(search_session_logs(&conn, "sender-u", "durian", 10)
+            .unwrap()
+            .iter()
+            .any(|h| h.content == "unresolved inbound durian"));
+
+        // 冪等: 版を 31 へ戻して up() を再実行しても、付け替えは二重に起きない。
+        let same_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_sessions WHERE agent_id = speaker_id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute_batch("PRAGMA user_version = 31").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v32 再実行");
+        let same_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_sessions WHERE agent_id = speaker_id",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(same_before, same_after, "2 回目で付け替えが二重に起きない");
+        assert_eq!(
+            agent_of(id_discord),
+            recipient,
+            "再実行後も (1) は受信側のまま"
+        );
+        assert_eq!(
+            agent_of(id_unresolved),
+            "sender-u",
+            "再実行後も復元不能行は不変"
         );
     }
 
