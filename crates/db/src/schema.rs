@@ -999,6 +999,51 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 31,
+        description:
+            "agent_memory_index_config.memory_declare_cursor: 宣言ラン（記憶の単位）の進捗マーカー列 (issue #384 / #376 段階2)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #376 段階2（#384）: エージェント自身が自分の生ログ（memory_sessions）を俯瞰し、
+        // 「どこからどこまでが 1 つの記憶か」を宣言するスリープラン（宣言ラン）が、
+        // **どこまで宣言し終えたか**を刻む単一マーカー。タグ整理ラン（v27〜v29 の 3 列）とは
+        // 入力も進捗も別物なので**別ラン・別マーカー**にする（設計 #376: 別ラン / 足回りは共有）。
+        //
+        // 中身は複合カーソル **`"{last_run_at_rfc3339}|{cursor_log_id}"`**（1 列に 2 情報）:
+        //  - `last_run_at`: 日次 throttle の壁時計（clean 完了ごとに `now`）。
+        //  - `cursor_log_id`: 生ログ id 上の**昇順・前進のみ**の位置（提示し終えた末尾）。
+        // タグ整理ランが位置と throttle を別列に分けたのは、非トランザクションな索引ビルドが
+        // 残す snapshot 外 topic を壁時計カーソルが追い越して恒久ロスする罠（#365）を避けるため。
+        // 宣言ランは**生ログ（不変・append-only・id 単調増加）**を直接読むので snapshot も
+        // watermark も関与せず、位置を id で持てば追い越しは起きない。ゆえに 1 列で両立できる。
+        //
+        // **NULL 既定 = 未実行**。宣言ラン側は NULL を `(throttle 無し, cursor=0)` と解釈し、
+        // 初回は生ログの先頭（最古）から枠 N 件ぶんを提示する（タグ整理ランの「初回シードして
+        // 1 回スキップ」は既存 topic の一斉対象化を防ぐためで、宣言ランは枠が毎回 N 件に有界な
+        // ので不要 / seed-skip は入れない）。config 既定オフなので有効化するまで書かれない。
+        //
+        // #349 の罠を踏まないため **番号付き MIGRATIONS へ置く**（凍結された `migrate()` は
+        // 新規 DB でしか走らず、本番の既存 DB（現在 v30）には届かない）。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE agent_memory_index_config` 側で
+        // 列を持つので `column_exists` でガードする（v24 / v25 / v27〜v29 の前例）。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 30;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_memory_index_config", "memory_declare_cursor")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN memory_declare_cursor TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2283,7 +2328,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     last_skill_consolidation_at TEXT,
     last_organize_at TEXT,
     organize_backlog_cursor TEXT,
-    organize_last_run_at TEXT
+    organize_last_run_at TEXT,
+    memory_declare_cursor TEXT
 );
 
 -- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
@@ -3222,6 +3268,82 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept.as_deref(), Some("2026-08-05T00:00:00Z"));
+    }
+
+    /// v31（#384 / #376 段階2）: `agent_memory_index_config.memory_declare_cursor` が
+    /// **既存 DB に届く**こと、既定 NULL であること、既存行・隣の列（タグ整理ランの 3 列）が
+    /// 壊れないこと、再実行で落ちないこと（#349 の事故ガード）。本番は v30 なので v30 →
+    /// latest の経路を模す。
+    #[test]
+    fn agent_memory_index_config_declare_cursor_migration_v31_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(
+            column_exists(&conn, "agent_memory_index_config", "memory_declare_cursor").unwrap()
+        );
+
+        // v30 相当の既存 DB を模す: memory_declare_cursor 列を落とし version を 30 へ戻す。
+        // タグ整理ランの 3 マーカーに値を入れておき、移行でそれらが消えないこと・新列が
+        // NULL で足されることを見る。
+        conn.execute_batch(
+            "ALTER TABLE agent_memory_index_config DROP COLUMN memory_declare_cursor;
+             INSERT INTO agent_memory_index_config
+               (agent_id, batch_size, threshold, updated_at, last_organize_at,
+                organize_backlog_cursor, organize_last_run_at)
+               VALUES ('a1', 50, 20, '2026-01-01', '2026-08-04T00:00:00Z|n5',
+                       '2026-06-01T00:00:00Z|old3', '2026-08-05T00:00:00Z');
+             PRAGMA user_version = 30",
+        )
+        .unwrap();
+        assert!(
+            !column_exists(&conn, "agent_memory_index_config", "memory_declare_cursor").unwrap()
+        );
+
+        // 起動経路（initialize → run_migrations）で v31 が届く。
+        initialize(&conn).expect("upgrade v30 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(
+            column_exists(&conn, "agent_memory_index_config", "memory_declare_cursor").unwrap()
+        );
+
+        // 新列は NULL（未実行）、タグ整理ランの 3 マーカーは残る。
+        let (declare, organize, backlog, last_run): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT memory_declare_cursor, last_organize_at, organize_backlog_cursor,
+                        organize_last_run_at
+                 FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("memory_declare_cursor を含む SELECT が通らない");
+        assert_eq!(declare, None, "新列は既定 NULL（未実行）でなければならない");
+        assert_eq!(organize.as_deref(), Some("2026-08-04T00:00:00Z|n5"));
+        assert_eq!(backlog.as_deref(), Some("2026-06-01T00:00:00Z|old3"));
+        assert_eq!(last_run.as_deref(), Some("2026-08-05T00:00:00Z"));
+
+        // 冪等性: 値を書いた後に再実行しても落ちず、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_memory_index_config SET memory_declare_cursor = '2026-08-06T00:00:00Z|4242' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT memory_declare_cursor FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kept.as_deref(),
+            Some("2026-08-06T00:00:00Z|4242"),
+            "再実行でマーカーが消えてはならない"
+        );
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を

@@ -67,6 +67,8 @@ pub struct MaintenanceReport {
     pub topics_categorized: usize,
     /// 整理ラン（#313 段階3 / #361）を実際に起動したか。既定オフ・ゲート未達では false。
     pub organized: bool,
+    /// 宣言ラン（#384 / #376 段階2）を実際に起動したか。既定オフ・ゲート未達では false。
+    pub declared: bool,
 }
 
 impl MaintenanceReport {
@@ -78,6 +80,7 @@ impl MaintenanceReport {
             || self.categories_seeded > 0
             || self.topics_categorized > 0
             || self.organized
+            || self.declared
     }
 }
 
@@ -112,6 +115,7 @@ pub fn spawn_memory_maintenance_loop(state: AppState, interval_secs: u64) {
                             categories_seeded = report.categories_seeded,
                             topics_categorized = report.topics_categorized,
                             organized = report.organized,
+                            declared = report.declared,
                             "memory maintenance tick"
                         );
                     }
@@ -274,7 +278,19 @@ pub async fn run_maintenance_tick(
         }
     }
 
-    // ⑥ エージェンティック整理ラン（#313 段階3 / #361）。①〜③で索引を確定させた**後**に、
+    // ⑥ 宣言ラン（#384 / #376 段階2）。本人が別セッション・本人の人格で自分の生ログを俯瞰し、
+    // 「どこからどこまでが一つの記憶か」を宣言する。宣言（何が 1 つの記憶か）はタグ付け（どう
+    // 分類するか）の一段下＝先なので、⑦のタグ整理ランより**前**に置く（設計 #376: 宣言 → タグ）。
+    // **既定オフ**（config memory_declare.enabled）。ゲート未達ならゼロコールで即 return。
+    // 対話ターンでは走らせない（呼び出し元はこの sleep ループのみ / #291）。
+    match crate::memory_declare::maybe_run_memory_declare(state, agent_id).await {
+        Ok(ran) => report.declared = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory declare failed");
+        }
+    }
+
+    // ⑦ エージェンティック整理ラン（#313 段階3 / #361）。①〜③で索引を確定させた**後**に、
     // 本人が別セッション・本人の人格で自分の記憶（topic）にタグを付けて整理する。
     // **既定オフ**（config memory_organize.enabled）。ゲート（日次 + 下限）未達なら
     // ゼロコールで即 return。対話ターンでは走らせない（呼び出し元はこの sleep ループのみ / #291）。

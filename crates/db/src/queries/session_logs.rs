@@ -697,3 +697,87 @@ pub fn log_range_meta(
         max_created_at: max_ts.unwrap_or_default(),
     }))
 }
+
+/// 宣言ラン（#384 / #376 段階2）が 1 回で提示する「未宣言の枠」。
+///
+/// マーカー（`memory_declare_cursor` の位置部）より新しい生ログを昇順（最古）から
+/// `limit` 件だけ切り出した窓。中身（本文）は含めない — **地図（集計）だけ**を渡す設計
+/// （要約を渡すと本人が読まない / #313 の実測）。本文はエージェントが `read_my_history` で
+/// 自分で読む。窓が空（未宣言ログ 0）なら `from_id`/`to_id` は `None`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclareWindow {
+    /// 窓の下端（このエージェントの生ログ id）。未宣言ログが無ければ `None`。
+    pub from_id: Option<i64>,
+    /// 窓の上端。clean 完了時にマーカーの位置部をここへ前進させる。
+    pub to_id: Option<i64>,
+    /// 窓に入った生ログ件数（`<= limit`）。
+    pub log_count: i64,
+    /// 窓に含まれるセッション数（切れ目の目安）。
+    pub session_count: i64,
+    /// マーカーより新しい生ログの総数（窓で切る前）。発火の下限ゲートに使う。
+    pub total_remaining: i64,
+    /// 窓の開始時刻（最古行の created_at）。
+    pub date_from: Option<String>,
+    /// 窓の終了時刻（最新行の created_at）。
+    pub date_to: Option<String>,
+}
+
+/// マーカー位置 `cursor_id`（この id は宣言済みとして除外）より新しい生ログの窓を返す。
+///
+/// **前進のみ**の設計: 窓は id 昇順で `cursor_id` の次から `limit` 件。「どの生ログが既に
+/// 宣言ユニットに含まれるか」は判定条件にしない（提示したら位置を進める＝一期一会。意図的に
+/// 宣言しなかった範囲を毎回拾い直さない / タグ整理ランと同じ流儀）。全クエリ `agent_id` 固定
+/// （他エージェントの記憶を混ぜない）。生ログは読むだけ。
+pub fn declare_window(
+    conn: &Connection,
+    agent_id: &str,
+    cursor_id: i64,
+    limit: i64,
+) -> Result<DeclareWindow> {
+    let total_remaining: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        params![agent_id, cursor_id],
+        |r| r.get(0),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, created_at FROM memory_sessions
+         WHERE agent_id = ?1 AND id > ?2
+         ORDER BY id ASC LIMIT ?3",
+    )?;
+    let rows: Vec<(i64, String, String)> = stmt
+        .query_map(params![agent_id, cursor_id, limit.max(1)], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+
+    if rows.is_empty() {
+        return Ok(DeclareWindow {
+            from_id: None,
+            to_id: None,
+            log_count: 0,
+            session_count: 0,
+            total_remaining,
+            date_from: None,
+            date_to: None,
+        });
+    }
+
+    let from_id = rows.first().map(|r| r.0);
+    let to_id = rows.last().map(|r| r.0);
+    let date_from = rows.first().map(|r| r.2.clone());
+    let date_to = rows.last().map(|r| r.2.clone());
+    let mut sessions: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (_, sid, _) in &rows {
+        sessions.insert(sid.as_str());
+    }
+    Ok(DeclareWindow {
+        from_id,
+        to_id,
+        log_count: rows.len() as i64,
+        session_count: sessions.len() as i64,
+        total_remaining,
+        date_from,
+        date_to,
+    })
+}

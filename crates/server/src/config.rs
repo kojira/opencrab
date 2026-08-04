@@ -34,6 +34,9 @@ pub struct AppConfig {
     /// スリープ整理ラン（#313 段階3 / #361）。既定オフ（opt-in / #346）。
     #[serde(default)]
     pub memory_organize: MemoryOrganizeConfig,
+    /// スリープ宣言ラン（#384 / #376 段階2）。既定オフ（opt-in / #346）。
+    #[serde(default)]
+    pub memory_declare: MemoryDeclareConfig,
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
@@ -364,6 +367,66 @@ fn default_mo_min_interval_hours() -> i64 {
     24
 }
 fn default_mo_timeout_secs() -> u64 {
+    600
+}
+
+/// スリープ宣言ラン（#384 / #376 段階2）の設定。
+///
+/// エージェント本人が**別セッションの新規 context**で、自分の生ログ（memory_sessions）を
+/// 俯瞰し、「どこからどこまでが 1 つの記憶か」を宣言する（`survey_my_history` /
+/// `read_my_history` / `record_memory_unit` / `retract_memory_unit`）。タグ整理ラン
+/// （[`MemoryOrganizeConfig`]）とは**入力も進捗マーカーも別**の独立したランで、足回り
+/// （`OrganizeTurnRunner` / 排他スロット / caller=Owner / ツール許可リスト）だけを共有する。
+/// 呼び出し元は sleep の memory maintenance ループのみ（対話ターンでは走らせない = #291）。
+/// LLM を消費する自律ランなので `memory_organize` と同じく **既定オフ（opt-in / #346）**。
+///
+/// `max_logs`（1 回で提示する未宣言ログの枠）・`min_new_logs`（発火下限）・`min_interval_hours`
+/// （日次ゲート）は**実測してから既定を確定する**ため config 可変にする。既定は #313 の実測に
+/// 倣う: 20 件では材料が薄く抽象タグしか出ず、100 件で情緒の軸が出た → 枠 100・下限 100。
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryDeclareConfig {
+    /// 宣言ラン全体の on/off。既定 false。
+    #[serde(default = "default_md_enabled")]
+    pub enabled: bool,
+    /// 1 回で提示する未宣言の生ログ件数の枠（有界）。初期 100（#313 の実測）。
+    #[serde(default = "default_md_max_logs")]
+    pub max_logs: i64,
+    /// 発火の下限。マーカーより新しい未宣言ログがこの件数以上溜まったら発火。初期 100。
+    #[serde(default = "default_md_min_new_logs")]
+    pub min_new_logs: i64,
+    /// 日次ゲート。前回実行からこの時間以上経っていないと発火しない。初期 24。
+    #[serde(default = "default_md_min_interval_hours")]
+    pub min_interval_hours: i64,
+    /// 宣言ラン 1 回のタイムアウト（秒）。超えたら partial 扱いでマーカーを前進させない。
+    #[serde(default = "default_md_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MemoryDeclareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_md_enabled(),
+            max_logs: default_md_max_logs(),
+            min_new_logs: default_md_min_new_logs(),
+            min_interval_hours: default_md_min_interval_hours(),
+            timeout_secs: default_md_timeout_secs(),
+        }
+    }
+}
+
+fn default_md_enabled() -> bool {
+    false
+}
+fn default_md_max_logs() -> i64 {
+    100
+}
+fn default_md_min_new_logs() -> i64 {
+    100
+}
+fn default_md_min_interval_hours() -> i64 {
+    24
+}
+fn default_md_timeout_secs() -> u64 {
     600
 }
 
