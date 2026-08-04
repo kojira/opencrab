@@ -1026,6 +1026,48 @@ pub fn set_organize_last_run_at(conn: &Connection, agent_id: &str, ts: &str) -> 
     Ok(())
 }
 
+/// 宣言ラン（#384 / #376 段階2）の**進捗マーカー**を取得する。行が無い/NULL なら `None`。
+///
+/// タグ整理ランの 3 列（`last_organize_at` / `organize_backlog_cursor` /
+/// `organize_last_run_at`）とは別の**単一マーカー**。中身は複合カーソル
+/// **`"{last_run_at_rfc3339}|{cursor_log_id}"`**（呼び出し側 `memory_declare` が組み立てる）:
+/// 左が日次 throttle 用の壁時計、右が生ログ id 上の昇順・前進のみの位置（提示し終えた末尾）。
+/// 生ログは不変・append-only・id 単調増加なので、位置を id で持てば snapshot/watermark に
+/// 依存せず追い越しの罠（#365）を避けられ、throttle と位置を 1 列で両立できる。`None`
+/// （未実行）は呼び出し側が `(throttle 無し, cursor=0)` と解釈し、生ログの先頭から始める。
+pub fn get_memory_declare_cursor(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT memory_declare_cursor FROM agent_memory_index_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// 宣言ランの進捗マーカーを UPSERT で永続化する（行が無ければ作る）。
+/// 隣の列（タグ整理ランの 3 マーカー・skill 棚卸し）は触らない。
+pub fn set_memory_declare_cursor(conn: &Connection, agent_id: &str, cursor: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agent_memory_index_config
+             (agent_id, batch_size, threshold, updated_at, memory_declare_cursor)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             memory_declare_cursor = excluded.memory_declare_cursor",
+        params![
+            agent_id,
+            BATCH_SIZE_DEFAULT,
+            THRESHOLD_DEFAULT,
+            chrono::Utc::now().to_rfc3339(),
+            cursor,
+        ],
+    )?;
+    Ok(())
+}
+
 /// スリープ整理ラン（#313 段階3）の worklist 対象 topic 数を数える（発火の下限ゲート用）。
 ///
 /// 対象 = `node_type='topic'` かつ `source_type='session_log'` で、
