@@ -2596,6 +2596,7 @@ mod recent_user_speech_guarantee_tests {
                 TranscriptSource::Discord,
                 &InboundMessageRecord {
                     session_id: SESSION,
+                    recipient_agent_id: AGENT,
                     sender_id: USER,
                     sender_name: "kojira",
                     avatar_url: None,
@@ -2751,7 +2752,8 @@ mod recent_user_speech_guarantee_tests {
         for _ in 0..30 {
             insert_agent_row(&conn, "tool_result", &"z".repeat(600));
         }
-        // 受信行が本番と同じ形（agent_id 列にも送信者 ID）で入っていることを固定する。
+        // 受信行が本番と同じ形（agent_id 列＝受信側エージェント / speaker_id 列＝送信者、
+        // #377）で入っていることを固定する。
         let (row_agent, row_speaker): (String, String) = conn
             .query_row(
                 "SELECT agent_id, speaker_id FROM memory_sessions \
@@ -2761,8 +2763,9 @@ mod recent_user_speech_guarantee_tests {
             )
             .unwrap();
         assert_eq!(
-            row_agent, row_speaker,
-            "テストの前提が崩れている: ゲートウェイ受信行は agent_id 列にも送信者 ID が入る"
+            (row_agent.as_str(), row_speaker.as_str()),
+            (AGENT, USER),
+            "受信行は agent_id 列＝受信側エージェント / speaker_id 列＝送信者（#377）"
         );
 
         let out = build_conversation_string(&conn, SESSION, AGENT, 300).unwrap();
@@ -2798,6 +2801,7 @@ mod live_inbound_source_tests {
                 TranscriptSource::Discord,
                 &InboundMessageRecord {
                     session_id: SESSION,
+                    recipient_agent_id: AGENT,
                     sender_id: USER,
                     sender_name: "kojira",
                     avatar_url: None,
@@ -2904,6 +2908,7 @@ mod live_inbound_source_tests {
             TranscriptSource::Nostr,
             &InboundMessageRecord {
                 session_id: SESSION,
+                recipient_agent_id: AGENT,
                 sender_id: speaker,
                 sender_name: speaker,
                 avatar_url: None,

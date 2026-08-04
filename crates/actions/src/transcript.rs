@@ -52,7 +52,13 @@ impl TranscriptSource {
 #[derive(Debug, Clone)]
 pub struct InboundMessageRecord<'a> {
     pub session_id: &'a str,
-    /// 発言の帰属。`session_logs.agent_id` / `speaker_id` の両列に入る
+    /// **受信側**エージェントの id（`session_logs.agent_id` 列に入る）。
+    ///
+    /// 記憶索引・FTS 記憶検索は `WHERE agent_id = <当該エージェント>` で走査するため、
+    /// 受信（相手の発言）も**受信側エージェントの名義**で記録しないと、そのエージェントの
+    /// 索引・検索に一切載らない（#377）。相手の識別は下の `sender_id`（`speaker_id` 列）が担う。
+    pub recipient_agent_id: &'a str,
+    /// 発言者（送信者）の id。`session_logs.speaker_id` 列に入る
     /// （Discord のユーザー ID / Nostr の送信者 pubkey）。
     pub sender_id: &'a str,
     /// 表示名（metadata `user_name`）。
