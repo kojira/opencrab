@@ -123,6 +123,24 @@ pub fn search_session_logs(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// クエリにマッチする生ログの**総件数**（LIMIT なし）。`search_my_history` の
+/// estimate モードが「何件ヒットするか（絞るべきか）」を返すのに使う（#386）。
+/// 検索式の組み立ては [`search_session_logs`] と同一。
+pub fn count_matching_session_logs(conn: &Connection, agent_id: &str, query: &str) -> Result<i64> {
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    let fts_query = tokens.join(" AND ");
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_sessions_fts fts
+         WHERE fts.agent_id = ?1 AND memory_sessions_fts MATCH ?2",
+        params![agent_id, fts_query],
+        |r| r.get(0),
+    )?;
+    Ok(count)
+}
+
 /// List all session logs for a given session, ordered by creation time.
 /// Used for building conversation history in send_message.
 pub fn list_session_logs_by_session(
@@ -360,6 +378,18 @@ pub fn list_recent_evaluations_by_agent(
 // 生ログは読むだけ（消さない・変えない）。読み取りは**有界**にする（687 発話の塊を
 // 一度に吐かせない）: `read_my_history` は行数 + 総文字数のハードキャップ + カーソル。
 
+/// 生ログ本文の**概算**トークン数を文字数から出す係数（#386）。
+///
+/// 地図（survey）は「どこに何がどれだけあるか」の当たりを付けるための道具で、全履歴を
+/// tiktoken に掛けるのは高い。そこで content の**文字数**から概算する。本番コピーの実測
+/// （最大 3 エージェント）で `tok/char` は 0.45〜0.60 だった。**過小評価は危険**（収まると
+/// 思って読んで #294 で潰される）なので、実測上限より上の `2/3`（≈0.667）で丸め、
+/// **やや多めに見積もる**。読み取り（`read_my_history` / `search_my_history`）は範囲が
+/// 有界なので tiktoken で実測する（そちらは概算しない）。
+fn approx_tokens_from_chars(chars: i64) -> i64 {
+    chars.max(0) * 2 / 3
+}
+
 /// `survey_my_history` の 1 バケット分の集計（地図の 1 行）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryBucket {
@@ -369,6 +399,11 @@ pub struct HistoryBucket {
     pub session_count: i64,
     pub min_id: i64,
     pub max_id: i64,
+    /// このバケットの content 総文字数（`SUM(LENGTH(content))`）。
+    pub content_chars: i64,
+    /// content_chars からの**概算**トークン数（[`approx_tokens_from_chars`]）。
+    /// この範囲を `read_my_history` で読むとおよそ何トークン積むかの目安。多めに見積もる。
+    pub est_tokens: i64,
     /// log_type 別の件数（種別内訳）。
     pub type_counts: std::collections::BTreeMap<String, i64>,
 }
@@ -381,6 +416,10 @@ pub struct HistorySurvey {
     pub total_sessions: i64,
     pub min_id: Option<i64>,
     pub max_id: Option<i64>,
+    /// 全 content の総文字数（バケットを落としても全体量が分かるよう常に返す）。
+    pub total_content_chars: i64,
+    /// total_content_chars からの**概算**トークン数（全履歴を読む場合の目安）。
+    pub total_est_tokens: i64,
     pub total_buckets: i64,
     pub returned_buckets: usize,
     /// バケット数上限で古いバケットを落としたか。
@@ -406,12 +445,18 @@ pub fn survey_my_history(
         "week" => "strftime('%Y-W%W', created_at)",
         _ => "substr(created_at, 1, 10)", // day（既定）
     };
-    let (total_logs, total_sessions, min_id, max_id): (i64, i64, Option<i64>, Option<i64>) = conn
-        .query_row(
-        "SELECT COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id)
+    let (total_logs, total_sessions, min_id, max_id, total_content_chars): (
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        i64,
+    ) = conn.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
+                COALESCE(SUM(LENGTH(content)), 0)
              FROM memory_sessions WHERE agent_id = ?1",
         params![agent_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let total_buckets: i64 = conn.query_row(
         &format!(
@@ -423,18 +468,22 @@ pub fn survey_my_history(
     )?;
     let mut buckets: Vec<HistoryBucket> = {
         let sql = format!(
-            "SELECT {bucket_expr} AS bkt, COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id)
+            "SELECT {bucket_expr} AS bkt, COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
+                    COALESCE(SUM(LENGTH(content)), 0)
              FROM memory_sessions WHERE agent_id = ?1
              GROUP BY bkt ORDER BY bkt DESC LIMIT ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![agent_id, max_buckets as i64], |r| {
+            let content_chars: i64 = r.get(5)?;
             Ok(HistoryBucket {
                 bucket: r.get(0)?,
                 log_count: r.get(1)?,
                 session_count: r.get(2)?,
                 min_id: r.get(3)?,
                 max_id: r.get(4)?,
+                content_chars,
+                est_tokens: approx_tokens_from_chars(content_chars),
                 type_counts: std::collections::BTreeMap::new(),
             })
         })?;
@@ -474,6 +523,8 @@ pub fn survey_my_history(
         total_sessions,
         min_id,
         max_id,
+        total_content_chars,
+        total_est_tokens: approx_tokens_from_chars(total_content_chars),
         total_buckets,
         returned_buckets: buckets.len(),
         truncated,

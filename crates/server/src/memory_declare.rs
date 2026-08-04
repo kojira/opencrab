@@ -389,13 +389,15 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
          範囲を `record_memory_unit` で宣言してください。どこで切るか・いくつ宣言するか・そもそも\
          読むかどうかは、あなたが決めます。\n\n\
          # 使える道具\n\
-         - `survey_my_history`: 生ログを日/時/週で俯瞰する（地図）\n\
-         - `read_my_history`: 範囲を指定して生ログの中身を読む（session_id / id 範囲 / around / 時刻範囲）\n\
+         - `survey_my_history`: 生ログを日/時/週で俯瞰する（地図）。各バケットに est_tokens（概算トークン数）が付く\n\
+         - `read_my_history`: 範囲を指定して生ログの中身を読む（session_id / id 範囲 / around / 時刻範囲）。取る前に estimate_only=true で大きさを測れる\n\
          - `search_my_history`: 生ログを全文検索する（関連する場面を探す）\n\
          - `record_memory_unit(from_id, to_id, title, summary?, tags?)`: 範囲を一つの記憶として宣言する\n\
          - `retract_memory_unit(unit_id)`: 宣言を取り消す\n\
          メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶を宣言する時間です。\
-         生ログは読むだけで、消えも変わりもしません。宣言は何度でもやり直せます。\n\n\
+         生ログは読むだけで、消えも変わりもしません。宣言は何度でもやり直せます。\n\
+         【サイズの約束】1 回のツール結果が inline_limit_tokens（約 2,500 トークン）を超えると本文は捨てられます。\
+         地図の est_tokens や read_my_history の estimated_tokens を見て、大きい範囲は id 窓を狭めるか cursor_from_id で刻んで読んでください。\n\n\
          # あなたの記憶の地図（生ログ全体の分布・day 粒度）\n{survey_txt}\n\n\
          # 今回の範囲（未宣言 / id {from}〜{to} / {count} 件 / {span}）\n\
          この範囲の生ログには、まだあなたの記憶の単位が宣言されていません。ここを読んで、あなたに\
@@ -446,12 +448,13 @@ fn render_survey(s: &HistorySurvey) -> String {
     )];
     for b in &s.buckets {
         lines.push(format!(
-            "- {bucket}: {logs} 件 / {sessions} セッション（id {min}〜{max}）",
+            "- {bucket}: {logs} 件 / {sessions} セッション（id {min}〜{max} / 約 {est} トークン）",
             bucket = b.bucket,
             logs = b.log_count,
             sessions = b.session_count,
             min = b.min_id,
             max = b.max_id,
+            est = b.est_tokens,
         ));
     }
     lines.join("\n")

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::memory_units::HISTORY_RESULT_TOKEN_BUDGET;
+use crate::memory_units::{HISTORY_RESULT_TOKEN_BUDGET, INLINE_LIMIT_TOKENS};
 use crate::traits::{Action, ActionContext, ActionResult, SideEffect};
 
 /// `search_my_history` が受け付けるヒット件数の上限（clamp）。
@@ -80,7 +80,7 @@ impl Action for SearchMyHistoryAction {
     }
 
     fn description(&self) -> &str {
-        "自分の過去のやりとりを生ログから全文検索する。関連する場面の特定に使う。本文はプレビュー（先頭の一部）で返る。全文が要るときはヒットの id を read_my_history(around_id=…) に渡して読む。"
+        "自分の過去のやりとりを生ログから全文検索する。関連する場面の特定に使う。本文はプレビュー（先頭の一部）で返り、estimated_tokens と inline_limit_tokens も返る。全文が要るときはヒットの id を read_my_history(around_id=…) に渡して読む。取る前に規模を知りたいときは estimate_only=true で、本文を返さずマッチ総件数（match_total）と推定トークン数だけ返す。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -96,6 +96,10 @@ impl Action for SearchMyHistoryAction {
                     "type": "integer",
                     "description": format!("取得件数（デフォルト: 10 / 最大: {SEARCH_HIT_LIMIT_MAX}）"),
                     "default": 10
+                },
+                "estimate_only": {
+                    "type": "boolean",
+                    "description": "true なら本文を返さず、マッチ総件数（match_total）と、実際に取ったときの推定トークン数（estimated_tokens）と fits だけ返す。"
                 }
             }
         })
@@ -106,18 +110,31 @@ impl Action for SearchMyHistoryAction {
             Some(q) => q,
             None => return ActionResult::error("query is required"),
         };
+        let estimate_only = args["estimate_only"].as_bool().unwrap_or(false);
         let limit = args["limit"]
             .as_u64()
             .unwrap_or(10)
             .clamp(1, SEARCH_HIT_LIMIT_MAX) as usize;
 
-        let results = if let Ok(conn) = ctx.db.lock() {
-            match opencrab_db::queries::search_session_logs(&conn, &ctx.agent_id, query, limit) {
-                Ok(r) => r,
-                Err(e) => return ActionResult::error(&format!("Search failed: {e}")),
-            }
-        } else {
-            return ActionResult::error("Failed to acquire DB lock");
+        let (results, match_total) = {
+            let conn = match ctx.db.lock() {
+                Ok(c) => c,
+                Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+            };
+            let results =
+                match opencrab_db::queries::search_session_logs(&conn, &ctx.agent_id, query, limit)
+                {
+                    Ok(r) => r,
+                    Err(e) => return ActionResult::error(&format!("Search failed: {e}")),
+                };
+            // estimate_only のときだけ総マッチ件数（LIMIT なし）を数える。
+            let match_total = if estimate_only {
+                opencrab_db::queries::count_matching_session_logs(&conn, &ctx.agent_id, query)
+                    .unwrap_or(results.len() as i64)
+            } else {
+                results.len() as i64
+            };
+            (results, match_total)
         };
 
         // 生ログ本文をそのまま返すと 1 件で数十 KB になり、#294 のキャップで丸ごと
@@ -144,11 +161,39 @@ impl Action for SearchMyHistoryAction {
         // スニペット化しても日本語ヒットはトークンが重い。予算に収まるヒット数まで
         // スコア下位から落とす（上位は残る）。
         let dropped = fit_hits_to_budget(query, &mut hits, HISTORY_RESULT_TOKEN_BUDGET);
+        let estimated_tokens = opencrab_core::tokens::estimate_tokens(
+            &serde_json::to_string(&json!({
+                "query": query,
+                "count": hits.len(),
+                "results": hits,
+            }))
+            .unwrap_or_default(),
+        );
+
+        // estimate_only: 本文を返さず規模だけ返す（#386）。取る前に「絞るべきか」を判断できる。
+        if estimate_only {
+            return ActionResult::success(json!({
+                "estimate_only": true,
+                "query": query,
+                "match_total": match_total,
+                "returned_if_read": hits.len(),
+                "estimated_tokens": estimated_tokens,
+                "inline_limit_tokens": INLINE_LIMIT_TOKENS,
+                "fits": estimated_tokens <= INLINE_LIMIT_TOKENS,
+                "suggestion": if match_total > hits.len() as i64 {
+                    "マッチが多い。クエリを絞るか、上位ヒットの id を read_my_history で読む"
+                } else {
+                    "そのまま search_my_history で読める"
+                },
+            }));
+        }
 
         let mut data = json!({
             "query": query,
             "count": hits.len(),
             "results": hits,
+            "estimated_tokens": estimated_tokens,
+            "inline_limit_tokens": INLINE_LIMIT_TOKENS,
         });
         // 本文を切った / 件数を落としたときだけ、全文への導線を 1 行添える。
         if any_content_truncated || dropped > 0 {
@@ -437,5 +482,29 @@ mod tests {
         assert_eq!(hit["content_truncated"], false);
         // 切っても落としてもいないので note は付かない。
         assert!(data.get("note").is_none());
+        // サイズ情報は常に載る（#386）。
+        assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
+        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+    }
+
+    /// estimate_only は本文を返さず、マッチ総件数と推定トークン数だけ返す（#386）。
+    #[tokio::test]
+    async fn search_estimate_only_reports_match_total_without_bodies() {
+        let (_dir, ctx) = test_context();
+        for i in 0..12 {
+            insert_log(&ctx, &format!("s{i}"), &format!("keyword body {i}"));
+        }
+        let r = SearchMyHistoryAction
+            .execute(&json!({"query": "keyword", "estimate_only": true}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["estimate_only"], true);
+        // 全 12 件マッチ（limit=10 clamp とは独立に総数を数える）。
+        assert_eq!(data["match_total"], 12);
+        assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
+        assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+        // 本文（results）は返さない。
+        assert!(data.get("results").is_none());
     }
 }
