@@ -941,6 +941,91 @@ pub fn set_last_organize_at(conn: &Connection, agent_id: &str, ts: &str) -> Resu
     Ok(())
 }
 
+/// スリープ整理ラン（#313 段階3b / #365）の**遡り消化マーカー**を取得する。
+/// 行が無い/NULL なら `None`。
+///
+/// `last_organize_at`（新規側 / 前進 / 昇順）とは**別軸**の、過去分の遡り消化の進捗。
+/// 中身は `last_organize_at` と同形の**複合カーソル `"{created_at}|{id}"`**（呼び出し側
+/// `memory_organize` が組み立てる）だが、進む向きが逆で、有効化時の境界（`now`）から
+/// **古い方向（降順）**へ「どこまで遡ったか」を刻む。[`list_organize_backlog_topics`] の
+/// 上端（＝この位置より古いものが残りの遡り対象）として使う。`None`（未シード）は
+/// 呼び出し側が初回遭遇時に `now` をシードする（既存 topic を一気に対象化しない）。
+pub fn get_organize_backlog_cursor(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT organize_backlog_cursor FROM agent_memory_index_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// スリープ整理ランの遡り消化マーカーを UPSERT で永続化する（行が無ければ作る）。
+/// config 行は自動生成されないため、初回シード/遡り前進後にこれで明示的に刻む。
+/// 隣の列（`last_organize_at` / `last_skill_consolidation_at`）は触らない。
+pub fn set_organize_backlog_cursor(conn: &Connection, agent_id: &str, cursor: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agent_memory_index_config
+             (agent_id, batch_size, threshold, updated_at, organize_backlog_cursor)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             organize_backlog_cursor = excluded.organize_backlog_cursor",
+        params![
+            agent_id,
+            BATCH_SIZE_DEFAULT,
+            THRESHOLD_DEFAULT,
+            chrono::Utc::now().to_rfc3339(),
+            cursor,
+        ],
+    )?;
+    Ok(())
+}
+
+/// スリープ整理ラン（#313 段階3b / #365）の**日次 throttle 用の最終実行刻時**を取得する。
+/// 行が無い/NULL なら `None`。
+///
+/// 2 軸の位置マーカー（`last_organize_at` / `organize_backlog_cursor`）とは別で、これは
+/// **壁時計の刻時**。整理ランは clean 完了ごとにこれを `now` へ進め、日次ゲート
+/// （`now - organize_last_run_at >= 間隔`）の基準にする。位置マーカーを壁時計へ飛ばすと、
+/// 非トランザクションなビルドが途中失敗して `end_log_id > watermark`（snapshot 外）の
+/// topic を残したとき、その topic を新規側カーソルが追い越して恒久ロスするため、時刻と
+/// 位置を分離する（#365 レビュー修正 / #364 blocker と同型の取りこぼし回避）。
+pub fn get_organize_last_run_at(conn: &Connection, agent_id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT organize_last_run_at FROM agent_memory_index_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// 整理ランの最終実行刻時（throttle）を UPSERT で永続化する（行が無ければ作る）。
+/// 隣の列（2 軸の位置マーカー・skill 棚卸し）は触らない。
+pub fn set_organize_last_run_at(conn: &Connection, agent_id: &str, ts: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agent_memory_index_config
+             (agent_id, batch_size, threshold, updated_at, organize_last_run_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             organize_last_run_at = excluded.organize_last_run_at",
+        params![
+            agent_id,
+            BATCH_SIZE_DEFAULT,
+            THRESHOLD_DEFAULT,
+            chrono::Utc::now().to_rfc3339(),
+            ts,
+        ],
+    )?;
+    Ok(())
+}
+
 /// スリープ整理ラン（#313 段階3）の worklist 対象 topic 数を数える（発火の下限ゲート用）。
 ///
 /// 対象 = `node_type='topic'` かつ `source_type='session_log'` で、
@@ -1000,6 +1085,65 @@ pub fn list_organize_topics(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params![agent_id, since_ts, since_id, snapshot_log_id, limit],
+        index_node_from_row,
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// スリープ整理ラン（#313 段階3b / #365）の**遡り消化**の残数を数える（監査・先頭到達判定用）。
+///
+/// 対象 = `node_type='topic'` かつ `source_type='session_log'` で、遡りカーソル
+/// `before = (created_at, id)` より**古い方（降順で後ろ）**にあるもの:
+/// `created_at < before_ts OR (created_at = before_ts AND id < before_id)`。境界に置いた
+/// `now`（有効化時のシード）より古い＝過去分だけが対象になる。スナップショット
+/// `snapshot_log_id` 以下に絞るのは新規側 [`count_organize_topics`] と同じ（過去 topic は
+/// 全て索引済みなので実質恒真だが、対称性と防御のため残す）。
+///
+/// **カーソルは `created_at` 単体でなく `(created_at, id)` の単調タプル**。索引ビルドは 1 パスの
+/// 全 topic に**同一 `created_at`** を刻むため、`created_at` 単体で `< T` すると同着群を N で
+/// 切ったとき残余を恒久的に取りこぼす。遡りは**降順**なので比較は `<`（新規側の `>` と逆向き）。
+pub fn count_organize_backlog_topics(
+    conn: &Connection,
+    agent_id: &str,
+    before: (&str, &str),
+    snapshot_log_id: i64,
+) -> Result<i64> {
+    let (before_ts, before_id) = before;
+    let n = conn.query_row(
+        "SELECT COUNT(*) FROM memory_index_nodes n
+         WHERE n.agent_id = ?1 AND n.node_type = 'topic' AND n.source_type = 'session_log'
+           AND (n.created_at < ?2 OR (n.created_at = ?2 AND n.id < ?3))
+           AND (n.end_log_id IS NULL OR n.end_log_id <= ?4)",
+        params![agent_id, before_ts, before_id, snapshot_log_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(n)
+}
+
+/// スリープ整理ランの遡り worklist（過去 topic を `(created_at, id)` **降順**で最大 `limit` 件）を返す。
+///
+/// フィルタは [`count_organize_backlog_topics`] と同一の `(created_at, id)` 遡りカーソル。並び順は
+/// `created_at DESC, id DESC` で、`limit` で切った末尾（＝提示した中で**最も古い** `(created_at, id)`）を
+/// マーカーへ刻めば、次回はそこより古い分だけが対象になる（前進のみ / 残りは次回 / 同着 created_at 群を
+/// N で分断しても取りこぼさない）。先頭（最古）に到達すると 0 件を返して止まる（無限に走らない）。
+pub fn list_organize_backlog_topics(
+    conn: &Connection,
+    agent_id: &str,
+    before: (&str, &str),
+    snapshot_log_id: i64,
+    limit: i64,
+) -> Result<Vec<IndexNodeRow>> {
+    let (before_ts, before_id) = before;
+    let sql = format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes n
+         WHERE n.agent_id = ?1 AND n.node_type = 'topic' AND n.source_type = 'session_log'
+           AND (n.created_at < ?2 OR (n.created_at = ?2 AND n.id < ?3))
+           AND (n.end_log_id IS NULL OR n.end_log_id <= ?4)
+         ORDER BY n.created_at DESC, n.id DESC LIMIT ?5"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params![agent_id, before_ts, before_id, snapshot_log_id, limit],
         index_node_from_row,
     )?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)

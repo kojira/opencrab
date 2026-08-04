@@ -3963,3 +3963,231 @@ fn organize_worklist_same_created_at_group_not_dropped_across_runs() {
         1
     );
 }
+
+// ============================================
+// スリープ整理ラン（#313 段階3b / #365）: 過去分の遡り消化マーカー + 降順 worklist
+// ============================================
+
+#[test]
+fn organize_backlog_cursor_get_set_roundtrip_and_default_none() {
+    let conn = setup();
+    // 行が無ければ None。
+    assert_eq!(get_organize_backlog_cursor(&conn, "a1").unwrap(), None);
+    set_organize_backlog_cursor(&conn, "a1", "2026-08-03T00:00:00Z|old1").unwrap();
+    assert_eq!(
+        get_organize_backlog_cursor(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-03T00:00:00Z|old1")
+    );
+    // 上書きは当該列のみ。他エージェントに漏れない。
+    set_organize_backlog_cursor(&conn, "a1", "2026-08-01T00:00:00Z|old9").unwrap();
+    assert_eq!(
+        get_organize_backlog_cursor(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-01T00:00:00Z|old9")
+    );
+    assert_eq!(get_organize_backlog_cursor(&conn, "a2").unwrap(), None);
+}
+
+#[test]
+fn organize_last_run_at_get_set_roundtrip_and_default_none() {
+    let conn = setup();
+    assert_eq!(get_organize_last_run_at(&conn, "a1").unwrap(), None);
+    set_organize_last_run_at(&conn, "a1", "2026-08-03T00:00:00Z").unwrap();
+    assert_eq!(
+        get_organize_last_run_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-03T00:00:00Z")
+    );
+    set_organize_last_run_at(&conn, "a1", "2026-08-04T00:00:00Z").unwrap();
+    assert_eq!(
+        get_organize_last_run_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-04T00:00:00Z")
+    );
+    assert_eq!(get_organize_last_run_at(&conn, "a2").unwrap(), None);
+}
+
+#[test]
+fn organize_markers_three_axes_do_not_disturb_each_other() {
+    let conn = setup();
+    // 3 マーカー（新規位置 / 遡り位置 / throttle 刻時）+ skill 棚卸しが同じ config 行を
+    // 共有しても互いに消えない。
+    set_last_skill_consolidation_at(&conn, "a1", "2026-07-01T00:00:00Z").unwrap();
+    set_last_organize_at(&conn, "a1", "2026-08-04T00:00:00Z|n5").unwrap();
+    set_organize_backlog_cursor(&conn, "a1", "2026-06-01T00:00:00Z|old3").unwrap();
+    set_organize_last_run_at(&conn, "a1", "2026-08-05T00:00:00Z").unwrap();
+    assert_eq!(
+        get_last_skill_consolidation_at(&conn, "a1")
+            .unwrap()
+            .as_deref(),
+        Some("2026-07-01T00:00:00Z")
+    );
+    assert_eq!(
+        get_last_organize_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-04T00:00:00Z|n5")
+    );
+    assert_eq!(
+        get_organize_backlog_cursor(&conn, "a1").unwrap().as_deref(),
+        Some("2026-06-01T00:00:00Z|old3")
+    );
+    assert_eq!(
+        get_organize_last_run_at(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-05T00:00:00Z")
+    );
+}
+
+#[test]
+fn organize_backlog_respects_boundary_snapshot_and_desc_order() {
+    let conn = setup();
+    // 境界（遡りカーソル）= 2026-08-02。これより古い topic だけが過去分。
+    seed_topic(
+        &conn,
+        "a1",
+        "b1",
+        "t1",
+        "2026-08-01T00:00:00Z",
+        Some(30),
+        "session_log",
+    );
+    seed_topic(
+        &conn,
+        "a1",
+        "b2",
+        "t2",
+        "2026-07-15T00:00:00Z",
+        Some(20),
+        "session_log",
+    );
+    seed_topic(
+        &conn,
+        "a1",
+        "b3",
+        "t3",
+        "2026-07-01T00:00:00Z",
+        Some(10),
+        "session_log",
+    );
+    // 境界より新しい（=新規側の領域）→ 過去分に入らない。
+    seed_topic(
+        &conn,
+        "a1",
+        "recent",
+        "t4",
+        "2026-08-05T00:00:00Z",
+        Some(40),
+        "session_log",
+    );
+    // snapshot 超過（end_log_id > 100）→ 除外。
+    seed_topic(
+        &conn,
+        "a1",
+        "beyond",
+        "t5",
+        "2026-07-10T00:00:00Z",
+        Some(200),
+        "session_log",
+    );
+    // 別エージェント・category → 対象外。
+    seed_topic(
+        &conn,
+        "a2",
+        "o1",
+        "o",
+        "2026-07-05T00:00:00Z",
+        Some(20),
+        "session_log",
+    );
+    seed_topic(
+        &conn,
+        "a1",
+        "cat",
+        "c1",
+        "2026-07-05T00:00:00Z",
+        Some(20),
+        "category",
+    );
+
+    let before = ("2026-08-02T00:00:00Z", "");
+    // 残数（監査・先頭到達判定）= b1,b2,b3 の 3 件。
+    assert_eq!(
+        count_organize_backlog_topics(&conn, "a1", before, 100).unwrap(),
+        3
+    );
+    // worklist は created_at **降順**（新しい過去分から遡る）: b1(08-01) → b2(07-15) → b3(07-01)。
+    let wl = list_organize_backlog_topics(&conn, "a1", before, 100, 50).unwrap();
+    let ids: Vec<&str> = wl.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, vec!["b1", "b2", "b3"]);
+}
+
+/// 回帰（#364 blocker と同型・**降順側**）: 索引ビルドは 1 パスの全 topic に同一 created_at を
+/// 刻む。遡りが N を超え、切り口が同着群の内側に落ちても、`(created_at, id)` カーソル（降順）
+/// なら残余を次回に引き継いで取りこぼさないこと。
+#[test]
+fn organize_backlog_same_created_at_group_not_dropped_descending() {
+    let conn = setup();
+    let ts = "2026-07-01T00:00:00Z"; // 境界より古い同着 created_at
+    for i in 0..51 {
+        seed_topic(
+            &conn,
+            "a1",
+            &format!("topic-a1-s-{i:03}"),
+            &format!("t{i:03}"),
+            ts,
+            Some(10),
+            "session_log",
+        );
+    }
+    // 境界は同着群より新しい任意時刻。id="" 付きなので created_at < 境界 の全件が対象。
+    let before = ("2026-08-01T00:00:00Z", "");
+    // run1: N=50（降順 = id 降順で上位 50 = 050..001）。
+    let wl1 = list_organize_backlog_topics(&conn, "a1", before, 100, 50).unwrap();
+    assert_eq!(wl1.len(), 50);
+    // 遡りマーカー = 提示した中で最も古い（降順の末尾）の (created_at, id)。
+    let oldest = wl1.last().unwrap();
+    let cursor = (oldest.created_at.as_str(), oldest.id.as_str());
+    // run2: 残り 1 件（同着でも取りこぼさない）。
+    let wl2 = list_organize_backlog_topics(&conn, "a1", cursor, 100, 50).unwrap();
+    assert_eq!(
+        wl2.len(),
+        1,
+        "同着 created_at 群の残余が降順側で取りこぼされている"
+    );
+    assert!(
+        wl1.iter().all(|t| t.id != wl2[0].id),
+        "run1 と run2 の topic が重複している"
+    );
+    // count も同じカーソルで残余 1（ゲートと worklist の整合）。
+    assert_eq!(
+        count_organize_backlog_topics(&conn, "a1", cursor, 100).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn organize_backlog_reaches_head_returns_empty() {
+    let conn = setup();
+    seed_topic(
+        &conn,
+        "a1",
+        "b1",
+        "t1",
+        "2026-07-01T00:00:00Z",
+        Some(10),
+        "session_log",
+    );
+    seed_topic(
+        &conn,
+        "a1",
+        "b2",
+        "t2",
+        "2026-06-01T00:00:00Z",
+        Some(11),
+        "session_log",
+    );
+    // カーソルを最古（b2）ちょうどに置く: b2 は `id < ""`不成立で除外、b1 は created_at>cursor で除外。
+    let before = ("2026-06-01T00:00:00Z", "");
+    assert_eq!(
+        count_organize_backlog_topics(&conn, "a1", before, 100).unwrap(),
+        0,
+        "先頭到達で残数 0"
+    );
+    let wl = list_organize_backlog_topics(&conn, "a1", before, 100, 50).unwrap();
+    assert!(wl.is_empty(), "先頭到達で 0 件（無限に走らない）");
+}

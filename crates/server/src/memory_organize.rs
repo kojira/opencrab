@@ -109,20 +109,23 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
         Err(_) => ("timeout", false),
     };
 
-    // --- 前進（前進のみ / 残りは次回）---
-    // clean 完了時のみマーカーを worklist 末尾の (created_at, id) カーソルへ進める。
-    //  - worklist 全件が範囲に収まった場合: 次回はこのカーソルより後の topic だけが対象。
-    //  - 件数が N を超えた場合: N で切った残りはカーソルより後なので次回拾う。**索引ビルドは
-    //    1 パスの全 topic に同一 created_at を刻むため、created_at 単体でなく id を副キーに
-    //    持つカーソルにしている**（さもないと同着群の残余を恒久的に取りこぼす / #364 blocker）。
-    // partial（timeout / ターン上限 / エラー）ではマーカーを進めない。タグ付与は PK 冪等
+    // --- 前進（前進のみ / 残りは次回 / 位置 2 軸 + throttle 刻時）---
+    // clean 完了時のみ前進する（詳細は `advance_markers`）:
+    //  - **新規側**（`last_organize_at` / 昇順）: **提示した新規 topic があるときだけ**末尾へ。0 件なら
+    //    据え置き（壁時計へは飛ばさない = snapshot 外の取り残しを追い越さない / #365 レビュー修正）。
+    //  - **遡り側**（`organize_backlog_cursor` / 降順）: 過去分を提示したときだけ、提示した中で
+    //    最も古い (created_at, id) より古い分を次回の対象に。**索引ビルドは 1 パスの全 topic に
+    //    同一 created_at を刻むため、created_at 単体でなく id を副キーに持つカーソルにしている**
+    //    （降順側でも同着群の残余を取りこぼさない / #364 blocker と同型）。
+    //  - **throttle**（`organize_last_run_at`）: 常に `now`。位置と分離して日次ゲートを支える。
+    // partial（timeout / ターン上限 / エラー）ではどれも進めない。タグ付与は PK 冪等
     // （`assign_topic_to_category`）なので、同じ範囲を次回に再挑戦しても重複しない。
-    if clean {
+    {
         let conn = state
             .db
             .lock()
             .map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-        opencrab_db::queries::set_last_organize_at(&conn, agent_id, &plan.marker_advance_to)?;
+        advance_markers(&conn, agent_id, &plan, clean)?;
     }
 
     // --- 監査（層1: agent_logs / context="sleep"）---
@@ -133,10 +136,15 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
             "outcome": outcome,
             "worklist_size": plan.worklist_size,
             "new_topic_count": plan.new_topic_count,
+            "new_presented": plan.new_presented,
+            "backlog_presented": plan.backlog_presented,
+            "backlog_remaining": plan.backlog_remaining,
             "snapshot_log_id": plan.snapshot_log_id,
             "session_id": session_id,
             "marker_advanced": clean,
-            "marker_advanced_to": if clean { Some(plan.marker_advance_to.clone()) } else { None },
+            "new_marker_advanced_to": if clean { plan.new_marker_advance_to.clone() } else { None },
+            "backlog_marker_advanced_to": if clean { plan.backlog_marker_advance_to.clone() } else { None },
+            "last_run_at": if clean { Some(plan.run_at.clone()) } else { None },
             "cost": { "latency_ms": latency_ms },
         });
         let conn = state
@@ -167,21 +175,42 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
 }
 
 /// 整理ランの実行計画（ゲート通過時のみ組む）。
+///
+/// worklist は **新規（前進 / 昇順）を優先し、枠が余ったら過去分（遡り / 降順）で埋める**
+/// （#365）。合計は `max_topics` を超えない。2 つの軸のマーカーは独立に前進させる。
 #[derive(Debug)]
 struct OrganizePlan {
     persona_name: String,
     personality: Option<String>,
     instructions: String,
     snapshot_log_id: i64,
-    /// worklist（提示する topic）。`(created_at, id)` 昇順。
+    /// worklist（提示する topic）。前半が新規（`(created_at, id)` 昇順）、後半が過去分
+    /// （遡り / `(created_at, id)` 降順）。
     worklist: Vec<IndexNodeRow>,
     worklist_size: usize,
     /// スナップショット以下の新規 topic 総数（N で切る前）。監査・ゲート表示用。
     new_topic_count: i64,
+    /// 提示した新規の件数（前半）。
+    new_presented: usize,
+    /// 提示した過去分の件数（後半 / 遡り）。
+    backlog_presented: usize,
+    /// 遡り側の残数（提示分を除く前の残り。監査・先頭到達の把握用）。
+    backlog_remaining: i64,
     /// 既存タグ（title, 付与件数）。プロンプトに現行の語彙として同梱する。
     tags: Vec<(String, i64)>,
-    /// clean 完了時にマーカーへ刻む複合カーソル `"{created_at}|{id}"`（提示末尾の topic）。
-    marker_advance_to: String,
+    /// clean 完了時に**新規側マーカー**（位置 / `last_organize_at`）へ刻む複合カーソル
+    /// `"{created_at}|{id}"`。**実際に提示した新規 topic の末尾（最新）のときだけ `Some`**。
+    /// 新規 0 件なら `None`（据え置き）。**壁時計 `now` へは絶対に飛ばさない** — 非トランザクションな
+    /// ビルドが途中失敗して `end_log_id > watermark`（snapshot 外）の topic を残したとき、その
+    /// `created_at`（`now` より前）を追い越して恒久ロスするため（#365 レビュー修正 / #364 と同型）。
+    new_marker_advance_to: Option<String>,
+    /// clean 完了時に**遡り側マーカー**へ刻む複合カーソル。過去分を提示したときのみ
+    /// `Some`（提示末尾＝提示した中で最も古い `(created_at, id)`）。0 件なら `None`（据え置き）。
+    backlog_marker_advance_to: Option<String>,
+    /// clean 完了時に**日次 throttle 用刻時**（`organize_last_run_at`）へ刻む壁時計。位置マーカーと
+    /// 分離することで、位置は「見た topic」までしか進めず（安全）、時刻は毎回 `now` へ進める
+    /// （静かな日でも tick 毎起動しない）を両立させる。
+    run_at: String,
 }
 
 /// ゲート判定の結果。
@@ -192,8 +221,9 @@ enum OrganizeDecision {
     /// 初回遭遇: `now` をマーカーにシードして今回はスキップ（既存の全 topic を一気に
     /// 対象化しない）。次回以降、シード後に増えた topic が下限に達したら発火する。
     Seeded,
-    /// 発火する。
-    Run(OrganizePlan),
+    /// 発火する。`OrganizePlan` は大きいので Box して enum の variant 間サイズ差を抑える
+    /// （clippy::large_enum_variant）。
+    Run(Box<OrganizePlan>),
 }
 
 /// ゲート（日次 + 下限）を判定し、通れば worklist と人格を積んだ計画を返す。
@@ -214,50 +244,106 @@ fn decide_organize(
     // ゲート1: 日次 + 初回シード。
     let last_at = opencrab_db::queries::get_last_organize_at(&conn, agent_id)?;
     let Some(last_at) = last_at else {
-        // 初回遭遇: now をシードして終了（既存履歴を「新規」に数えない）。id 部を持たない
-        // 素の刻時でよい（次回 parse_cursor が `|` 無しを (now, "") と解釈する）。
-        opencrab_db::queries::set_last_organize_at(&conn, agent_id, &now.to_rfc3339())?;
+        // 初回遭遇: **3 マーカーを now にシード**して終了（既存履歴を「新規」に数えない）。
+        // id 部を持たない素の刻時でよい（次回 parse_cursor が `|` 無しを (now, "") と解釈する）。
+        // 新規側は now より後を「新規」に、遡り側は now より前を「過去分」に分ける境界になる。
+        // throttle（organize_last_run_at）も now を刻んで最初の 1 回を throttle する。
+        let now_s = now.to_rfc3339();
+        opencrab_db::queries::set_last_organize_at(&conn, agent_id, &now_s)?;
+        opencrab_db::queries::set_organize_backlog_cursor(&conn, agent_id, &now_s)?;
+        opencrab_db::queries::set_organize_last_run_at(&conn, agent_id, &now_s)?;
         return Ok(OrganizeDecision::Seeded);
     };
-    // カーソルを (created_at, id) に分解する。日次ゲートは created_at 部だけを使う。
-    let (since_ts, since_id) = parse_cursor(&last_at);
-    let elapsed = since_ts
+    // 日次ゲートは**位置マーカーではなく throttle 用刻時**（organize_last_run_at）で判定する。
+    // 位置（新規側カーソル）は「見た topic」までしか進まず、静かな日には過去へ留まるため
+    // throttle の基準に使えない（tick 毎起動になる）。刻時は clean 完了ごとに `now` へ進む。
+    // 移行 DB（段階3/3b で先に有効化・本列 NULL）は last_organize_at の created_at 部へ
+    // フォールバックする（旧挙動 / 本番は未有効化なので通らない）。
+    let last_run_ts = opencrab_db::queries::get_organize_last_run_at(&conn, agent_id)?
+        .unwrap_or_else(|| parse_cursor(&last_at).0);
+    let elapsed = last_run_ts
         .parse::<DateTime<Utc>>()
         .map(|dt| now.signed_duration_since(dt))
         .unwrap_or_else(|_| Duration::zero());
     if elapsed < Duration::hours(cfg.min_interval_hours.max(1)) {
         return Ok(OrganizeDecision::Skip("interval_not_elapsed"));
     }
+    let (since_ts, since_id) = parse_cursor(&last_at);
 
     // スナップショット（①〜③で最新化済みの索引の上端）。
     let snapshot_log_id = opencrab_db::queries::get_index_watermark(&conn, agent_id)?
         .map(|w| w.last_indexed_log_id)
         .unwrap_or(0);
 
-    // ゲート2: 下限（スナップショット以下の新規 topic 数）。
+    // --- 新規側（前進 / 昇順）を優先で組む ---
     let cursor = Some((since_ts.as_str(), since_id.as_str()));
     let new_topic_count =
         opencrab_db::queries::count_organize_topics(&conn, agent_id, cursor, snapshot_log_id)?;
-    if new_topic_count < cfg.min_new_topics.max(1) {
-        return Ok(OrganizeDecision::Skip("below_floor"));
-    }
-
-    // worklist（最大 N 件・(created_at, id) 昇順）。
-    let worklist = opencrab_db::queries::list_organize_topics(
+    let budget = cfg.max_topics.max(1);
+    let new_worklist = opencrab_db::queries::list_organize_topics(
         &conn,
         agent_id,
         cursor,
         snapshot_log_id,
-        cfg.max_topics.max(1),
+        budget,
     )?;
-    let Some(last_row) = worklist.last() else {
-        // 下限は満たすが LIMIT クエリで 0 件（理論上起きないが fail-safe）。
-        return Ok(OrganizeDecision::Skip("empty_worklist"));
+    let new_presented = new_worklist.len();
+    // 新規側マーカー前進先 = **実際に提示した新規 topic の末尾（最新）の (created_at, id) だけ**。
+    // 新規 0 件なら `None`（据え置き）— 壁時計 `now` へは飛ばさない（snapshot 外に取り残された
+    // topic を追い越して恒久ロスするため / #365 レビュー）。並び順が `created_at ASC, id ASC`
+    // なので末尾が最大。同着 created_at 群を N で切っても id 副キーで残余を次回へ引き継ぐ。
+    let new_marker_advance_to = new_worklist
+        .last()
+        .map(|r| format_cursor(&r.created_at, &r.id));
+
+    // --- 枠が余ったら過去分（遡り / 降順）で埋める ---
+    // 遡りカーソルは新規側と**別軸**。未シードなら now を境界にシードする（初回遭遇では
+    // 上でシード済み。ここに来るのは段階3 で先に有効化された移行 DB のみ）。
+    let backlog_cursor_raw =
+        match opencrab_db::queries::get_organize_backlog_cursor(&conn, agent_id)? {
+            Some(c) => c,
+            None => {
+                let now_s = now.to_rfc3339();
+                opencrab_db::queries::set_organize_backlog_cursor(&conn, agent_id, &now_s)?;
+                now_s
+            }
+        };
+    let (before_ts, before_id) = parse_cursor(&backlog_cursor_raw);
+    let backlog_remaining = opencrab_db::queries::count_organize_backlog_topics(
+        &conn,
+        agent_id,
+        (&before_ts, &before_id),
+        snapshot_log_id,
+    )?;
+    let remaining_budget = budget - new_presented as i64;
+    let backlog_worklist = if remaining_budget > 0 {
+        opencrab_db::queries::list_organize_backlog_topics(
+            &conn,
+            agent_id,
+            (&before_ts, &before_id),
+            snapshot_log_id,
+            remaining_budget,
+        )?
+    } else {
+        Vec::new()
     };
-    // マーカー前進先 = 提示した末尾の (created_at, id) カーソル。並び順が
-    // `created_at ASC, id ASC` なので末尾が最大。同着 created_at 群を N で切っても、
-    // id を副キーに持つカーソルが残余を次回へ引き継ぐ（取りこぼさない）。
-    let marker_advance_to = format_cursor(&last_row.created_at, &last_row.id);
+    let backlog_presented = backlog_worklist.len();
+    // 遡り側マーカー前進先 = 提示末尾（提示した中で最も古い / 降順の末尾）の (created_at, id)。
+    // 過去分を提示したときのみ刻む。0 件なら据え置き（先頭到達なら二度と進めない＝止まる）。
+    let backlog_marker_advance_to = backlog_worklist
+        .last()
+        .map(|r| format_cursor(&r.created_at, &r.id));
+
+    // ゲート2: 発火判定。**新規が下限に達する**か、または**過去分の消化余地がある**なら
+    // 発火する。過去分だけの日（新規 0）でも消化が進むようにするため、下限は新規側だけを
+    // 塞ぐ（過去分があれば通す / #365 受け入れ条件）。両方とも無いときだけスキップ。
+    if new_topic_count < cfg.min_new_topics.max(1) && backlog_worklist.is_empty() {
+        return Ok(OrganizeDecision::Skip("below_floor_no_backlog"));
+    }
+
+    // 提示順は「新規 → 過去分」（新規優先）。合計は budget 以下。
+    let mut worklist = new_worklist;
+    worklist.extend(backlog_worklist);
 
     // 人格（モデル解決は run_agent_response 側が effective_model で行うのでここでは不要）。
     let (persona_name, personality, instructions) =
@@ -276,7 +362,7 @@ fn decide_organize(
         .collect();
 
     let worklist_size = worklist.len();
-    Ok(OrganizeDecision::Run(OrganizePlan {
+    Ok(OrganizeDecision::Run(Box::new(OrganizePlan {
         persona_name,
         personality,
         instructions,
@@ -284,9 +370,41 @@ fn decide_organize(
         worklist,
         worklist_size,
         new_topic_count,
+        new_presented,
+        backlog_presented,
+        backlog_remaining,
         tags,
-        marker_advance_to,
-    }))
+        new_marker_advance_to,
+        backlog_marker_advance_to,
+        run_at: now.to_rfc3339(),
+    })))
+}
+
+/// clean 完了時のみ、位置マーカー（2 軸）と throttle 刻時を前進させる（partial では**進めない**
+/// / #364 と同じ流儀）。
+///
+/// - 新規側（`last_organize_at`）: **提示した新規 topic があるときだけ**前進（末尾へ）。0 件なら
+///   据え置き。壁時計へは飛ばさない（snapshot 外の取り残しを追い越さない / #365）。
+/// - 遡り側（`organize_backlog_cursor`）: 過去分を提示したときだけ前進（先頭到達なら据え置き＝止まる）。
+/// - throttle（`organize_last_run_at`）: **常に** `now` を刻む。位置と分離して日次ゲートを支える。
+fn advance_markers(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    plan: &OrganizePlan,
+    clean: bool,
+) -> anyhow::Result<()> {
+    if !clean {
+        return Ok(());
+    }
+    if let Some(new_to) = &plan.new_marker_advance_to {
+        opencrab_db::queries::set_last_organize_at(conn, agent_id, new_to)?;
+    }
+    if let Some(backlog_to) = &plan.backlog_marker_advance_to {
+        opencrab_db::queries::set_organize_backlog_cursor(conn, agent_id, backlog_to)?;
+    }
+    // 位置の前進有無に関わらず throttle は毎回進める（静かな日でも tick 毎起動しない）。
+    opencrab_db::queries::set_organize_last_run_at(conn, agent_id, &plan.run_at)?;
+    Ok(())
 }
 
 /// system プロンプト（本人の人格 + 整理の枠組み + 現行タグ + worklist）を組む。
@@ -340,10 +458,10 @@ fn build_system_prompt(plan: &OrganizePlan) -> String {
          - `merge_tags(from, into)`: 2 つのタグを統合する（実質リネームにもなる）\n\
          メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶整理の時間です。\n\n\
          # 現在のタグ（あなたの語彙・付与件数）\n{tags_txt}\n\n\
-         # 今回の対象（{size} 件 / スナップショット log_id={snap} 以下の新規 topic）\n\
+         # 今回の対象（{size} 件 / あなたの記憶（topic））\n\
+         最近の分と、まだ見ていない過去の分が混ざっています。どれもあなた自身の記憶です。\
          各行は `[短縮ID] タイトル — 要約` です。`短縮ID` を `topic_id` に渡してください。\n{worklist_txt}",
         size = plan.worklist_size,
-        snap = plan.snapshot_log_id,
     ) + &instructions_section
 }
 
@@ -467,6 +585,34 @@ mod tests {
         opencrab_db::queries::get_last_organize_at(&conn, agent_id).unwrap()
     }
 
+    fn set_backlog_marker(state: &AppState, agent_id: &str, cursor: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_organize_backlog_cursor(&conn, agent_id, cursor).unwrap();
+    }
+
+    fn get_backlog_marker(state: &AppState, agent_id: &str) -> Option<String> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_organize_backlog_cursor(&conn, agent_id).unwrap()
+    }
+
+    /// throttle 用刻時（`organize_last_run_at`）を刻む。日次ゲートを開け閉めするテストで使う。
+    fn set_last_run(state: &AppState, agent_id: &str, ts: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_organize_last_run_at(&conn, agent_id, ts).unwrap();
+    }
+
+    fn get_last_run(state: &AppState, agent_id: &str) -> Option<String> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_organize_last_run_at(&conn, agent_id).unwrap()
+    }
+
+    /// 遡り側マーカーを最古（epoch）に置く。過去分（`created_at < epoch`）は 0 件になるので、
+    /// 新規側だけを見たいゲート/worklist テストで遡りの影響を消せる。
+    const EPOCH: &str = "1970-01-01T00:00:00Z";
+    fn disable_backlog(state: &AppState, agent_id: &str) {
+        set_backlog_marker(state, agent_id, EPOCH);
+    }
+
     /// 現在から `hours` 時間前の rfc3339。
     fn hours_ago(hours: i64) -> String {
         (Utc::now() - Duration::hours(hours)).to_rfc3339()
@@ -494,12 +640,20 @@ mod tests {
         for i in 0..5 {
             seed_topic(&state, "a1", &format!("n{i}"), &hours_ago(1), 10 + i);
         }
-        // マーカー未設定（None）。初回遭遇は now をシードしてスキップ（既存を一気に対象化しない）。
+        // マーカー未設定（None）。初回遭遇は両軸を now にシードしてスキップ（既存を一気に対象化しない）。
         let d = decide_organize(&state, "a1", &cfg(true, 3, 2)).unwrap();
         assert!(matches!(d, OrganizeDecision::Seeded));
         assert!(
             get_marker(&state, "a1").is_some(),
-            "初回でマーカーがシードされる"
+            "初回で新規側マーカーがシードされる"
+        );
+        assert!(
+            get_backlog_marker(&state, "a1").is_some(),
+            "初回で遡り側マーカーもシードされる（2軸）"
+        );
+        assert!(
+            get_last_run(&state, "a1").is_some(),
+            "初回で throttle 刻時もシードされる"
         );
     }
 
@@ -521,9 +675,13 @@ mod tests {
         set_watermark(&state, "a1", 1000);
         // マーカーは 48h 前（間隔は通る）。新規 topic は 1 件だけ（下限 2 未満）。
         set_marker(&state, "a1", &hours_ago(48));
+        disable_backlog(&state, "a1"); // 過去分が無い日を模す（新規側の下限だけを見る）。
         seed_topic(&state, "a1", "n0", &hours_ago(1), 10);
         let d = decide_organize(&state, "a1", &cfg(true, 3, 2)).unwrap();
-        assert!(matches!(d, OrganizeDecision::Skip("below_floor")));
+        assert!(matches!(
+            d,
+            OrganizeDecision::Skip("below_floor_no_backlog")
+        ));
     }
 
     #[test]
@@ -531,7 +689,8 @@ mod tests {
         let state = crate::test_app_state();
         set_watermark(&state, "a1", 100);
         set_marker(&state, "a1", &hours_ago(48));
-        // snapshot 内 2 件 + snapshot 超過 2 件。超過分は下限にも worklist にも入らない。
+        disable_backlog(&state, "a1"); // 新規側の snapshot 上端だけを見る（遡りは別テスト）。
+                                       // snapshot 内 2 件 + snapshot 超過 2 件。超過分は下限にも worklist にも入らない。
         seed_topic(&state, "a1", "in1", &hours_ago(3), 50);
         seed_topic(&state, "a1", "in2", &hours_ago(2), 80);
         seed_topic(&state, "a1", "out1", &hours_ago(1), 200);
@@ -552,8 +711,9 @@ mod tests {
         let state = crate::test_app_state();
         set_watermark(&state, "a1", 1000);
         set_marker(&state, "a1", &hours_ago(48));
-        // 既存タグを 1 つ用意（プロンプト同梱の語彙）。tag_topic はタグノードを新設する
-        // （付与先 topic の実在はここでは問わない — 語彙の存在だけ用意する）。
+        disable_backlog(&state, "a1"); // このテストは新規側の bounded worklist と前進先を見る。
+                                       // 既存タグを 1 つ用意（プロンプト同梱の語彙）。tag_topic はタグノードを新設する
+                                       // （付与先 topic の実在はここでは問わない — 語彙の存在だけ用意する）。
         {
             let conn = state.db.lock().unwrap();
             opencrab_db::queries::tag_topic(
@@ -575,14 +735,19 @@ mod tests {
             OrganizeDecision::Run(plan) => {
                 assert_eq!(plan.new_topic_count, 5, "下限判定は全 5 件");
                 assert_eq!(plan.worklist_size, 3, "worklist は N=3 で bounded");
-                // 前進先は提示した末尾の (created_at, id) 複合カーソル（= n3）。
+                assert_eq!(plan.new_presented, 3, "全て新規（過去分は無効化済み）");
+                assert_eq!(plan.backlog_presented, 0, "過去分は 0 件");
+                // 遡り側の枠は新規で埋まった（budget=3 を新規が使い切った）。
+                assert!(plan.backlog_marker_advance_to.is_none(), "遡り側は据え置き");
+                // 新規側の前進先は提示した末尾の (created_at, id) 複合カーソル（= n3）。
                 let last = plan.worklist.last().unwrap();
-                assert_eq!(
-                    plan.marker_advance_to,
-                    format_cursor(&last.created_at, &last.id)
-                );
+                let advance = plan
+                    .new_marker_advance_to
+                    .as_deref()
+                    .expect("新規を提示したので Some");
+                assert_eq!(advance, format_cursor(&last.created_at, &last.id));
                 // 再解釈すると (created_at, id) に戻る（parse ⇄ format の一貫性）。
-                let (ts, id) = parse_cursor(&plan.marker_advance_to);
+                let (ts, id) = parse_cursor(advance);
                 assert_eq!(ts, last.created_at);
                 assert_eq!(id, last.id);
                 // 既存タグの語彙がプロンプト材料に載る。
@@ -590,6 +755,286 @@ mod tests {
             }
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    // --- 過去分の遡り消化（#365 段階3b）---
+
+    /// 新規が枠を使い切ったら過去分は 0 件（新規優先）。
+    #[test]
+    fn new_fills_budget_leaves_no_room_for_backlog() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48)); // 間隔は通る
+        set_backlog_marker(&state, "a1", &hours_ago(240)); // 過去分の境界（10日前）
+                                                           // 新規 3 件（境界 48h より後）。
+        for i in 1..=3 {
+            seed_topic(&state, "a1", &format!("n{i}"), &hours_ago(10 - i), 50 + i);
+        }
+        // 過去分も 3 件（境界 240h より古い）。
+        for i in 1..=3 {
+            seed_topic(
+                &state,
+                "a1",
+                &format!("old{i}"),
+                &hours_ago(300 - i),
+                10 + i,
+            );
+        }
+        // budget=2 を新規が使い切る。
+        let d = decide_organize(&state, "a1", &cfg(true, 2, 2)).unwrap();
+        match d {
+            OrganizeDecision::Run(plan) => {
+                assert_eq!(plan.new_presented, 2, "新規が budget=2 を使い切る");
+                assert_eq!(plan.backlog_presented, 0, "枠が無いので過去分は 0 件");
+                assert_eq!(plan.worklist_size, 2);
+                assert!(plan.backlog_marker_advance_to.is_none(), "遡り側は据え置き");
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 枠が余ったら過去分で埋める（新規 → 過去分の順 / 合計 <= max_topics）。
+    #[test]
+    fn backlog_fills_leftover_after_new() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48));
+        set_backlog_marker(&state, "a1", &hours_ago(240));
+        // 新規 2 件（昇順 n1<n2）。
+        seed_topic(&state, "a1", "n1", &hours_ago(5), 50);
+        seed_topic(&state, "a1", "n2", &hours_ago(3), 60);
+        // 過去分 4 件（270/280/290/300h 前）。
+        for h in [270, 280, 290, 300] {
+            seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
+        }
+        // budget=5: 新規 2 + 過去分 3（残り 1 は次回）。
+        let d = decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap();
+        match d {
+            OrganizeDecision::Run(plan) => {
+                assert_eq!(plan.new_presented, 2);
+                assert_eq!(plan.backlog_presented, 3, "残り枠 3 を過去分で埋める");
+                assert_eq!(plan.worklist_size, 5, "合計は max_topics 以下");
+                // 提示順は新規 → 過去分。先頭 2 件が新規。
+                let ids: Vec<&str> = plan.worklist.iter().map(|t| t.id.as_str()).collect();
+                assert_eq!(&ids[0..2], &["n1", "n2"], "新規が先");
+                // 過去分は遡り（降順）: 270 → 280 → 290。
+                assert_eq!(&ids[2..5], &["old270", "old280", "old290"]);
+                // 遡り側マーカーは提示した中で最も古い old290 へ進む（old300 は次回）。
+                let oldest = plan.worklist.last().unwrap();
+                assert_eq!(oldest.id, "old290");
+                assert_eq!(
+                    plan.backlog_marker_advance_to.as_deref(),
+                    Some(format_cursor(&oldest.created_at, &oldest.id).as_str())
+                );
+                assert_eq!(plan.backlog_remaining, 4, "遡り残数は提示前の 4 件");
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 新規が無い日でも過去分が進む（下限は新規側だけを塞ぐ）。
+    #[test]
+    fn no_new_day_still_progresses_backlog() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48)); // 間隔は通る / 新規は 0 件
+        set_backlog_marker(&state, "a1", &hours_ago(240));
+        for h in [300, 290, 280] {
+            seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
+        }
+        // 新規 0（下限 2 未満）だが過去分があるので発火する。
+        let d = decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap();
+        match d {
+            OrganizeDecision::Run(plan) => {
+                assert_eq!(plan.new_topic_count, 0, "新規は無い");
+                assert_eq!(plan.new_presented, 0);
+                assert_eq!(plan.backlog_presented, 3, "過去分だけで発火・進行する");
+                // 新規側マーカーは**据え置き**（新規 0 件では壁時計 now へ飛ばさない / 恒久ロス防止）。
+                assert!(
+                    plan.new_marker_advance_to.is_none(),
+                    "新規 0 件では新規側を進めない（None）"
+                );
+                // 遡り側は進む。日次 throttle は throttle 刻時（run_at）が担う。
+                assert!(plan.backlog_marker_advance_to.is_some());
+                assert!(
+                    plan.run_at.parse::<DateTime<Utc>>().is_ok(),
+                    "throttle 刻時は now"
+                );
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 遡りが先頭（最古）に到達したら止まる: 過去分 0 かつ新規 0 ならスキップ（無限に走らない）。
+    #[test]
+    fn backlog_head_reached_and_no_new_skips() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48));
+        set_backlog_marker(&state, "a1", EPOCH); // 遡りカーソルが先頭 → 過去分 0
+                                                 // 過去 topic はあるが、全て境界（epoch）より新しい＝もう遡る先が無い。
+        for h in [300, 290] {
+            seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
+        }
+        let d = decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap();
+        assert!(matches!(
+            d,
+            OrganizeDecision::Skip("below_floor_no_backlog")
+        ));
+    }
+
+    /// 同じ topic を毎日拾い直さない（タグを付けなかったものも含めて / 位置マーカーで進む）。
+    #[test]
+    fn backlog_does_not_repick_presented_topics_across_runs() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48));
+        set_backlog_marker(&state, "a1", &hours_ago(240));
+        for h in [300, 290, 280] {
+            seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
+        }
+        // run1: budget=2 → 遡り降順で old280, old290 を提示（タグ付けは一切しない）。
+        let plan1 = match decide_organize(&state, "a1", &cfg(true, 2, 2)).unwrap() {
+            OrganizeDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        let ids1: Vec<String> = plan1.worklist.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(ids1, vec!["old280", "old290"]);
+        // clean 完了として前進させる（タグは付けていない）。run1 は過去分だけなので新規側は
+        // 据え置き、遡り側と throttle 刻時が進む。
+        {
+            let conn = state.db.lock().unwrap();
+            advance_markers(&conn, "a1", &plan1, true).unwrap();
+        }
+        // 翌日を模す: throttle 刻時を 48h 前へ戻して日次ゲートを開ける（遡りカーソルは
+        // run1 の前進位置のまま = 別軸なので影響しない）。
+        set_last_run(&state, "a1", &hours_ago(48));
+        // run2: 次は old300 だけ（提示済みの old280/old290 は二度と出ない）。
+        let plan2 = match decide_organize(&state, "a1", &cfg(true, 2, 2)).unwrap() {
+            OrganizeDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        let ids2: Vec<String> = plan2.worklist.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(ids2, vec!["old300"], "提示済みを拾い直さない（未タグでも）");
+    }
+
+    /// partial（clean でない）では 2 軸マーカーも throttle 刻時も進めない。clean では全て進む。
+    #[test]
+    fn partial_run_does_not_advance_markers() {
+        let state = crate::test_app_state();
+        set_watermark(&state, "a1", 1000);
+        set_marker(&state, "a1", &hours_ago(48));
+        set_backlog_marker(&state, "a1", &hours_ago(240));
+        set_last_run(&state, "a1", &hours_ago(48));
+        // 新規 2 件 + 過去分（両軸が進む計画にして、どちらも partial で止まることを見る）。
+        seed_topic(&state, "a1", "n1", &hours_ago(5), 50);
+        seed_topic(&state, "a1", "n2", &hours_ago(3), 60);
+        for h in [300, 290] {
+            seed_topic(&state, "a1", &format!("old{h}"), &hours_ago(h), 10 + h);
+        }
+        let plan = match decide_organize(&state, "a1", &cfg(true, 5, 2)).unwrap() {
+            OrganizeDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert!(plan.new_marker_advance_to.is_some(), "新規を提示（Some）");
+        assert!(
+            plan.backlog_marker_advance_to.is_some(),
+            "過去分を提示（Some）"
+        );
+        let new_before = get_marker(&state, "a1");
+        let backlog_before = get_backlog_marker(&state, "a1");
+        let run_before = get_last_run(&state, "a1");
+        // partial: clean=false → 何も進めない。
+        {
+            let conn = state.db.lock().unwrap();
+            advance_markers(&conn, "a1", &plan, false).unwrap();
+        }
+        assert_eq!(
+            get_marker(&state, "a1"),
+            new_before,
+            "partial で新規側は不変"
+        );
+        assert_eq!(
+            get_backlog_marker(&state, "a1"),
+            backlog_before,
+            "partial で遡り側は不変"
+        );
+        assert_eq!(
+            get_last_run(&state, "a1"),
+            run_before,
+            "partial で throttle 刻時も不変"
+        );
+        // clean=true → 2 軸 + throttle が計画どおり進む。
+        {
+            let conn = state.db.lock().unwrap();
+            advance_markers(&conn, "a1", &plan, true).unwrap();
+        }
+        assert_eq!(
+            get_marker(&state, "a1"),
+            plan.new_marker_advance_to,
+            "clean で新規側が進む"
+        );
+        assert_eq!(
+            get_backlog_marker(&state, "a1"),
+            plan.backlog_marker_advance_to,
+            "clean で遡り側が進む"
+        );
+        assert_eq!(
+            get_last_run(&state, "a1").as_deref(),
+            Some(plan.run_at.as_str()),
+            "clean で throttle 刻時が now へ進む"
+        );
+    }
+
+    /// 回帰（#365 レビュー / #364 と同型）: 非トランザクションなビルドが途中失敗して
+    /// `end_log_id > watermark`（snapshot 外）の topic を残した状態で、過去分により整理ランが
+    /// 発火し clean 完了しても、その topic を**新規側が恒久ロスしない**こと。
+    ///
+    /// 初版（新規 0 件で新規側を壁時計 `now` へ飛ばす）ではこのテストが落ちる:
+    /// `new_marker_advance_to` が `Some(now)` になり（`is_none()` で失敗）、仮に進めれば run2 で
+    /// stale が新規側カーソルに追い越されて worklist から消える。
+    #[test]
+    fn stale_topic_beyond_watermark_not_lost_on_zero_new_day() {
+        let state = crate::test_app_state();
+        // 位置・throttle を 48h 前に（間隔は通る）。遡り境界は 10 日前。
+        set_marker(&state, "a1", &hours_ago(48));
+        set_last_run(&state, "a1", &hours_ago(48));
+        set_backlog_marker(&state, "a1", &hours_ago(240));
+        // ビルドが step5(topic commit) 後 step7(watermark 更新) 前に失敗した状態を模す:
+        // topic は commit 済みだが end_log_id=200 > watermark=100（snapshot 外）。created_at は現在より前。
+        set_watermark(&state, "a1", 100);
+        seed_topic(&state, "a1", "stale", &hours_ago(2), 200);
+        // 過去分（遡り発火のトリガ）。end_log_id は watermark(100) 内にして snapshot に入れる
+        // （stale だけが snapshot 外という状況を作る）。
+        seed_topic(&state, "a1", "old300", &hours_ago(300), 10);
+        seed_topic(&state, "a1", "old290", &hours_ago(290), 11);
+        // run1: stale は snapshot 外で除外 → 新規 0。過去分で発火（下限 1 で run2 の 1 件でも発火）。
+        let plan1 = match decide_organize(&state, "a1", &cfg(true, 5, 1)).unwrap() {
+            OrganizeDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert_eq!(plan1.new_presented, 0, "stale は snapshot 外なので新規 0");
+        assert!(
+            plan1.new_marker_advance_to.is_none(),
+            "新規 0 では新規側を壁時計へ飛ばさない（恒久ロス防止の肝）"
+        );
+        {
+            let conn = state.db.lock().unwrap();
+            advance_markers(&conn, "a1", &plan1, true).unwrap();
+        }
+        // ビルド再開で watermark が追いつく（stale が snapshot 内へ）。翌日を模す。
+        set_watermark(&state, "a1", 300);
+        set_last_run(&state, "a1", &hours_ago(48));
+        // run2: stale が新規側で拾える（恒久ロスしない）。
+        let plan2 = match decide_organize(&state, "a1", &cfg(true, 5, 1)).unwrap() {
+            OrganizeDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        let ids: Vec<&str> = plan2.worklist.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            ids.contains(&"stale"),
+            "snapshot 外だった topic が新規側から恒久ロスした: {ids:?}"
+        );
     }
 
     // --- プロンプト組み立て ---
@@ -629,8 +1074,13 @@ mod tests {
             worklist,
             worklist_size,
             new_topic_count: worklist_size as i64,
+            new_presented: worklist_size,
+            backlog_presented: 0,
+            backlog_remaining: 0,
             tags,
-            marker_advance_to: "2026-08-02T00:00:00Z".to_string(),
+            new_marker_advance_to: Some("2026-08-02T00:00:00Z".to_string()),
+            backlog_marker_advance_to: None,
+            run_at: "2026-08-02T00:00:00Z".to_string(),
         }
     }
 
@@ -655,8 +1105,8 @@ mod tests {
         // タグ道具の名が載る（発散させないための道具の明示）
         assert!(sp.contains("tag_topic"));
         assert!(sp.contains("merge_tags"));
-        // スナップショットの明示
-        assert!(sp.contains("log_id=100"));
+        // 新規と過去分が混ざりうる旨の明示（#365）。
+        assert!(sp.contains("過去の分が混ざっています"));
     }
 
     #[test]
