@@ -321,7 +321,7 @@ fn default_category_maintenance_enabled() -> bool {
 /// 走らせない = #291）。LLM を消費する自律ランなので `skill_consolidation` /
 /// `category_maintenance` と同じく **既定オフ（opt-in / #346）**。
 ///
-/// `max_topics`（1 回の worklist 上限 N）・`min_new_topics`（発火下限）・`min_interval_hours`
+/// `max_topics`（1 回の worklist 上限 N）・`min_new_topics`（発火下限）・`min_interval_minutes`
 /// （日次ゲート）は**実測してから既定を確定する**ため config 可変にする（#313 の設計）。
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryOrganizeConfig {
@@ -334,9 +334,10 @@ pub struct MemoryOrganizeConfig {
     /// 発火の下限。スナップショット以下の新規 topic がこの件数以上溜まったら発火。初期 20。
     #[serde(default = "default_mo_min_new_topics")]
     pub min_new_topics: i64,
-    /// 日次ゲート。前回マーカーからこの時間以上経っていないと発火しない。初期 24。
-    #[serde(default = "default_mo_min_interval_hours")]
-    pub min_interval_hours: i64,
+    /// 日次ゲート。前回マーカーからこの**分数**以上経っていないと発火しない。既定 1440（= 24 時間）。
+    /// 分単位なのはバックログ消化（#390）で一時的に間隔を詰めるため。定常運用では既定のまま使う。
+    #[serde(default = "default_mo_min_interval_minutes")]
+    pub min_interval_minutes: i64,
     /// 整理ラン 1 回のタイムアウト（秒）。超えたら partial 扱いでマーカーを前進させない。
     #[serde(default = "default_mo_timeout_secs")]
     pub timeout_secs: u64,
@@ -348,7 +349,7 @@ impl Default for MemoryOrganizeConfig {
             enabled: default_mo_enabled(),
             max_topics: default_mo_max_topics(),
             min_new_topics: default_mo_min_new_topics(),
-            min_interval_hours: default_mo_min_interval_hours(),
+            min_interval_minutes: default_mo_min_interval_minutes(),
             timeout_secs: default_mo_timeout_secs(),
         }
     }
@@ -363,8 +364,8 @@ fn default_mo_max_topics() -> i64 {
 fn default_mo_min_new_topics() -> i64 {
     20
 }
-fn default_mo_min_interval_hours() -> i64 {
-    24
+fn default_mo_min_interval_minutes() -> i64 {
+    1440
 }
 fn default_mo_timeout_secs() -> u64 {
     600
@@ -380,7 +381,7 @@ fn default_mo_timeout_secs() -> u64 {
 /// 呼び出し元は sleep の memory maintenance ループのみ（対話ターンでは走らせない = #291）。
 /// LLM を消費する自律ランなので `memory_organize` と同じく **既定オフ（opt-in / #346）**。
 ///
-/// `max_logs`（1 回で提示する未宣言ログの枠）・`min_new_logs`（発火下限）・`min_interval_hours`
+/// `max_logs`（1 回で提示する未宣言ログの枠）・`min_new_logs`（発火下限）・`min_interval_minutes`
 /// （日次ゲート）は**実測してから既定を確定する**ため config 可変にする。既定は #313 の実測に
 /// 倣う: 20 件では材料が薄く抽象タグしか出ず、100 件で情緒の軸が出た → 枠 100・下限 100。
 #[derive(Debug, Deserialize, Clone)]
@@ -394,9 +395,10 @@ pub struct MemoryDeclareConfig {
     /// 発火の下限。マーカーより新しい未宣言ログがこの件数以上溜まったら発火。初期 100。
     #[serde(default = "default_md_min_new_logs")]
     pub min_new_logs: i64,
-    /// 日次ゲート。前回実行からこの時間以上経っていないと発火しない。初期 24。
-    #[serde(default = "default_md_min_interval_hours")]
-    pub min_interval_hours: i64,
+    /// 日次ゲート。前回実行からこの**分数**以上経っていないと発火しない。既定 1440（= 24 時間）。
+    /// 分単位なのはバックログ消化（#390）で一時的に間隔を詰めるため。定常運用では既定のまま使う。
+    #[serde(default = "default_md_min_interval_minutes")]
+    pub min_interval_minutes: i64,
     /// 宣言ラン 1 回のタイムアウト（秒）。超えたら partial 扱いでマーカーを前進させない。
     #[serde(default = "default_md_timeout_secs")]
     pub timeout_secs: u64,
@@ -408,7 +410,7 @@ impl Default for MemoryDeclareConfig {
             enabled: default_md_enabled(),
             max_logs: default_md_max_logs(),
             min_new_logs: default_md_min_new_logs(),
-            min_interval_hours: default_md_min_interval_hours(),
+            min_interval_minutes: default_md_min_interval_minutes(),
             timeout_secs: default_md_timeout_secs(),
         }
     }
@@ -423,8 +425,8 @@ fn default_md_max_logs() -> i64 {
 fn default_md_min_new_logs() -> i64 {
     100
 }
-fn default_md_min_interval_hours() -> i64 {
-    24
+fn default_md_min_interval_minutes() -> i64 {
+    1440
 }
 fn default_md_timeout_secs() -> u64 {
     600

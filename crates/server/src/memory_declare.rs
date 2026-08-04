@@ -291,7 +291,7 @@ fn decide_declare(
             .parse::<DateTime<Utc>>()
             .map(|dt| now.signed_duration_since(dt))
             .unwrap_or_else(|_| Duration::zero());
-        if elapsed < Duration::hours(cfg.min_interval_hours.max(1)) {
+        if elapsed < Duration::minutes(cfg.min_interval_minutes.max(1)) {
             return Ok(DeclareDecision::Skip("interval_not_elapsed"));
         }
     }
@@ -548,13 +548,17 @@ mod tests {
             enabled,
             max_logs,
             min_new_logs: min_new,
-            min_interval_hours: 24,
+            min_interval_minutes: 1440,
             timeout_secs: 600,
         }
     }
 
     fn hours_ago(hours: i64) -> String {
         (Utc::now() - Duration::hours(hours)).to_rfc3339()
+    }
+
+    fn minutes_ago(minutes: i64) -> String {
+        (Utc::now() - Duration::minutes(minutes)).to_rfc3339()
     }
 
     // --- マーカー parse/format ---
@@ -611,6 +615,58 @@ mod tests {
         set_marker(&state, "a1", &format_marker(&hours_ago(1), 0));
         let d = decide_declare(&state.db, &cfg(true, 3, 2), "a1").unwrap();
         assert!(matches!(d, DeclareDecision::Skip("interval_not_elapsed")));
+    }
+
+    /// 間隔ゲートは**分単位**（#390）。既定 1440 分は 24 時間ゲートのまま（現行挙動を維持）で、
+    /// config で分を指定するとその間隔で発火する。0 は無効化ではなく 1 分に丸める。
+    #[test]
+    fn interval_gate_is_minutes_with_24h_default() {
+        let state = crate::test_app_state();
+        seed_logs(&state, "a1", "s1", 5);
+        assert_eq!(
+            MemoryDeclareConfig::default().min_interval_minutes,
+            1440,
+            "既定は 1440 分 = 24 時間（現行挙動）"
+        );
+
+        // 既定（1440 分）: 23h 前では通らない。
+        let mut c = cfg(true, 3, 2);
+        assert_eq!(c.min_interval_minutes, 1440);
+        set_marker(&state, "a1", &format_marker(&minutes_ago(23 * 60), 0));
+        assert!(matches!(
+            decide_declare(&state.db, &c, "a1").unwrap(),
+            DeclareDecision::Skip("interval_not_elapsed")
+        ));
+
+        // 10 分に詰めると、同じマーカーでも発火する。
+        c.min_interval_minutes = 10;
+        assert!(matches!(
+            decide_declare(&state.db, &c, "a1").unwrap(),
+            DeclareDecision::Run(_)
+        ));
+        // 5 分前 < 10 分 → まだ弾かれる（分の刻みが効いている）。
+        set_marker(&state, "a1", &format_marker(&minutes_ago(5), 0));
+        assert!(matches!(
+            decide_declare(&state.db, &c, "a1").unwrap(),
+            DeclareDecision::Skip("interval_not_elapsed")
+        ));
+
+        // 0 でもゲートは外れない（1 分に丸める）: 直前に走った直後は弾かれ、2 分後は通る。
+        c.min_interval_minutes = 0;
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&(Utc::now() - Duration::seconds(10)).to_rfc3339(), 0),
+        );
+        assert!(matches!(
+            decide_declare(&state.db, &c, "a1").unwrap(),
+            DeclareDecision::Skip("interval_not_elapsed")
+        ));
+        set_marker(&state, "a1", &format_marker(&minutes_ago(2), 0));
+        assert!(matches!(
+            decide_declare(&state.db, &c, "a1").unwrap(),
+            DeclareDecision::Run(_)
+        ));
     }
 
     #[test]
