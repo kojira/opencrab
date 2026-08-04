@@ -451,6 +451,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
 /// 取りこぼしではなく、対話そのものが成立しなくなる致命傷）。
 fn record_discord_inbound<T: AgentRunner>(
     state: &T,
+    agent_id: &str,
     session_id: &str,
     channel_id_str: &str,
     incoming: &IncomingMessage,
@@ -459,6 +460,7 @@ fn record_discord_inbound<T: AgentRunner>(
 ) {
     let inbound = opencrab_actions::InboundMessageRecord {
         session_id,
+        recipient_agent_id: agent_id,
         sender_id: &incoming.sender.id,
         sender_name: &incoming.sender.name,
         avatar_url: incoming.sender.avatar_url.as_deref(),
@@ -623,6 +625,7 @@ async fn process_incoming_message<T: AgentRunner>(
         // 壊れない。記録の方が先に確定するので、ロック内で組み立てる履歴には必ず載る。
         record_discord_inbound(
             &state,
+            agent_id,
             &session_id,
             &channel_id_str,
             &incoming,
@@ -734,6 +737,7 @@ async fn process_incoming_message<T: AgentRunner>(
         session_locks.spawn_serialized(session_id.clone(), async move {
             let inbound = opencrab_actions::InboundMessageRecord {
                 session_id: &session_id_spawn,
+                recipient_agent_id: &agent_id_spawn,
                 sender_id: &sender_id_spawn,
                 sender_name: &sender_name_spawn,
                 avatar_url: sender_avatar_spawn.as_deref(),

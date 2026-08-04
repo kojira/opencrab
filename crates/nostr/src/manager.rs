@@ -644,6 +644,7 @@ async fn handle_event<R: NostrAgentRunner>(
         opencrab_actions::TranscriptSource::Nostr,
         &opencrab_actions::InboundMessageRecord {
             session_id: &session_id,
+            recipient_agent_id: agent_id,
             sender_id: &event.pubkey,
             sender_name: &event.author_label(),
             avatar_url: None,

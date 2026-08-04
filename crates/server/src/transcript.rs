@@ -50,7 +50,12 @@ const INBOUND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_milli
 
 /// ゲートウェイから受信した発言（Discord / Nostr 共通）。記録できたら `true`。
 ///
-/// 注意: 既存の慣習として `agent_id` 列には送信者IDが入る（発言の帰属が送信者）。
+/// 行の帰属: `agent_id` 列＝**受信側エージェント**（`record.recipient_agent_id`）、
+/// `speaker_id` 列＝**送信者**（`record.sender_id`）。以前は両列に送信者を入れていたが、
+/// 記憶索引・FTS 記憶検索は `WHERE agent_id = <当該エージェント>` で走査するため、
+/// 受信を送信者名義にすると相手の発言が索引・検索へ一切載らなかった（#377）。相手の
+/// 識別は `speaker_id` が担うので、`is_user_speech`（`speaker_id != <引数の agent_id>`）
+/// や impressions（`speaker_id` で相手を引く）はこの変更で挙動が変わらない。
 ///
 /// **ここだけは best-effort にしない**（#284 P0-3）。他の転記（応答・NO_REPLY）は
 /// 落ちても会話は続くが、ユーザー発言が落ちるとその指示は**二度と会話履歴に現れず**、
@@ -64,7 +69,7 @@ pub fn record_inbound_message(
 ) -> bool {
     let row = SessionLogRow {
         id: None,
-        agent_id: record.sender_id.to_string(),
+        agent_id: record.recipient_agent_id.to_string(),
         session_id: record.session_id.to_string(),
         log_type: "speech".to_string(),
         content: record.text.to_string(),
@@ -267,6 +272,7 @@ mod tests {
     ) -> InboundMessageRecord<'a> {
         InboundMessageRecord {
             session_id: "sess-1",
+            recipient_agent_id: "agent-1",
             sender_id: "111",
             sender_name: "のすたろう",
             avatar_url,
@@ -304,6 +310,7 @@ mod tests {
     fn nostr_inbound_metadata_is_byte_identical() {
         let record = InboundMessageRecord {
             session_id: "sess-1",
+            recipient_agent_id: "agent-1",
             sender_id: "npub-hex",
             sender_name: "だれか",
             avatar_url: None,
@@ -393,6 +400,9 @@ mod tests {
     }
 
     /// 書き込みまで通した行の形（agent_id / speaker_id / log_type / metadata）。
+    ///
+    /// 受信行は `agent_id`＝受信側エージェント（`recipient_agent_id`="agent-1"）、
+    /// `speaker_id`＝送信者（"111"）。#377 以前は両列とも送信者だった。
     #[test]
     fn recorded_rows_match_pre_merge_shape() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -423,7 +433,7 @@ mod tests {
             rows,
             vec![
                 (
-                    "111".to_string(),
+                    "agent-1".to_string(),
                     "111".to_string(),
                     "speech".to_string(),
                     r#"{"channel_id":"222","source":"discord","user_name":"のすたろう"}"#
@@ -438,5 +448,60 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// #377: 受信行が「受信側エージェント名義」で入り、そのエージェントの
+    /// 索引ビルド入力（`get_unindexed_session_logs`）と FTS 記憶検索に載る。
+    /// 送信者名義では載らない（旧規約の回帰ガード）。
+    #[test]
+    fn inbound_is_indexed_and_searchable_under_the_recipient() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let record = InboundMessageRecord {
+            session_id: "nostr-agent-1",
+            recipient_agent_id: "agent-1",
+            sender_id: "peer-9",
+            sender_name: "peer",
+            avatar_url: None,
+            channel_id: None,
+            pubkey: Some("peer-9"),
+            text: "how many grams does pasta weigh",
+            image_urls: &[],
+        };
+        assert!(record_inbound_message(
+            &conn,
+            TranscriptSource::Nostr,
+            &record
+        ));
+
+        // 索引ビルド入力（`WHERE agent_id = ?`）に受信側名義で入る。
+        let for_agent =
+            opencrab_db::queries::get_unindexed_session_logs(&conn, "agent-1", 0, 100).unwrap();
+        let row = for_agent
+            .iter()
+            .find(|r| r.content == "how many grams does pasta weigh")
+            .expect("受信行が受信側エージェントの索引入力に入っていない");
+        assert_eq!(row.agent_id, "agent-1");
+        assert_eq!(row.speaker_id.as_deref(), Some("peer-9"));
+
+        // 送信者名義では索引入力に入らない（旧規約の回帰ガード）。
+        let for_sender =
+            opencrab_db::queries::get_unindexed_session_logs(&conn, "peer-9", 0, 100).unwrap();
+        assert!(
+            for_sender.is_empty(),
+            "受信行が送信者名義で索引入力に残っている（#377 回帰）"
+        );
+
+        // FTS 記憶検索が受信側エージェントでヒットする（= 目的）。
+        let hits =
+            opencrab_db::queries::search_session_logs(&conn, "agent-1", "pasta", 10).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.content == "how many grams does pasta weigh"),
+            "受信側エージェントの FTS 検索で相手の発言が引けない"
+        );
+        // 送信者名義では FTS でも引けない。
+        let sender_hits =
+            opencrab_db::queries::search_session_logs(&conn, "peer-9", "pasta", 10).unwrap();
+        assert!(sender_hits.is_empty());
     }
 }

@@ -1569,6 +1569,7 @@ mod tests {
         let reply = "[Peer Review] score: 0.6 summary: ok";
         let record = InboundMessageRecord {
             session_id: "s1",
+            recipient_agent_id: "agent-a",
             sender_id: "42",
             sender_name: "crab-b",
             avatar_url: None,
@@ -1688,6 +1689,7 @@ mod tests {
         fn inbound<'a>(sender_id: &'a str, text: &'a str) -> InboundMessageRecord<'a> {
             InboundMessageRecord {
                 session_id: SESSION,
+                recipient_agent_id: AGENT,
                 sender_id,
                 sender_name: REVIEWER_NAME,
                 avatar_url: None,
