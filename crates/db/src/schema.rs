@@ -812,6 +812,47 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 28,
+        description:
+            "agent_memory_index_config.organize_backlog_cursor: 過去分の遡り消化マーカー (issue #313 段階3b / #365)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #313 段階3b（#365）: 段階3 の整理ランは有効化時にマーカー（`last_organize_at`）を
+        // `now` へ置くため、**有効化以前の過去 topic には永久にタグが付かない**（本番 6,551 件）。
+        // オーナー判断「古い分も少しずつ消化する」に応え、日次の枠に過去分を N 件混ぜる。
+        //
+        // 過去分の消化は**新規側とは独立した進捗マーカー**（軸）が要る。`last_organize_at` は
+        // 新規側（前進 / 昇順）なので**混ぜない**。この列は**遡り側（後退 / 降順）**の位置を
+        // 刻む複合カーソル `"{created_at}|{id}"` で、有効化時の境界（`now`）から古い方向へ、
+        // 「どこまで遡ったか」を記録する。「タグが付いていない」を判定条件にすると意図的に
+        // 付けなかった topic を毎回拾い直すため、**位置マーカー**で進める（一期一会の尊重）。
+        //
+        // **NULL 既定 = 未シード**。整理ラン側は初回遭遇（`last_organize_at` が NULL）の
+        // タイミングで両マーカーを `now` にシードする。config 既定オフなので有効化するまで
+        // この列は書かれない。
+        //
+        // #349 の罠を踏まないため **番号付き MIGRATIONS へ置く**（凍結された `migrate()` は
+        // 新規 DB でしか走らず、本番の既存 DB（現在 v27）には届かない）。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE` 側で列を持つので `column_exists`
+        // でガードする（v24 / v25 / v27 の前例）。2 回目以降は no-op。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 27;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_memory_index_config", "organize_backlog_cursor")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN organize_backlog_cursor TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2094,7 +2135,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     threshold INTEGER NOT NULL DEFAULT 20,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_skill_consolidation_at TEXT,
-    last_organize_at TEXT
+    last_organize_at TEXT,
+    organize_backlog_cursor TEXT
 );
 
 -- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
@@ -2889,6 +2931,92 @@ mod migration_tests {
         assert_eq!(
             kept.as_deref(),
             Some("2026-08-03T00:00:00Z"),
+            "再実行でマーカーが消えてはならない"
+        );
+    }
+
+    /// v28（#365 / #313 段階3b）: `agent_memory_index_config.organize_backlog_cursor` が
+    /// **既存 DB に届く**こと、既定 NULL であること、既存行・隣の列が壊れないこと、再実行で
+    /// 落ちないこと（#349 の事故ガード）。本番は v27 なので v27 → latest の経路を模す。
+    #[test]
+    fn agent_memory_index_config_backlog_cursor_migration_v28_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(column_exists(
+            &conn,
+            "agent_memory_index_config",
+            "organize_backlog_cursor"
+        )
+        .unwrap());
+
+        // v27 相当の既存 DB を模す: organize_backlog_cursor 列を落とし version を 27 へ戻す。
+        // 既存の設定行（last_organize_at / last_skill_consolidation_at に値あり）を入れておき、
+        // 移行でその値が消えないこと・新列が NULL で足されることを見る。
+        conn.execute_batch(
+            "ALTER TABLE agent_memory_index_config DROP COLUMN organize_backlog_cursor;
+             INSERT INTO agent_memory_index_config
+               (agent_id, batch_size, threshold, updated_at, last_skill_consolidation_at, last_organize_at)
+               VALUES ('a1', 50, 20, '2026-01-01', '2026-07-01T00:00:00Z', '2026-08-03T00:00:00Z|n5');
+             PRAGMA user_version = 27",
+        )
+        .unwrap();
+        assert!(!column_exists(
+            &conn,
+            "agent_memory_index_config",
+            "organize_backlog_cursor"
+        )
+        .unwrap());
+
+        // 起動経路（initialize → run_migrations）で v28 が届く。
+        initialize(&conn).expect("upgrade v27 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(column_exists(
+            &conn,
+            "agent_memory_index_config",
+            "organize_backlog_cursor"
+        )
+        .unwrap());
+
+        // 既存行が残り、新列は NULL（未シード）、隣の 2 列の値は消えていない。
+        let (backlog, organize, consolidation): (Option<String>, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT organize_backlog_cursor, last_organize_at, last_skill_consolidation_at
+                 FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("organize_backlog_cursor を含む SELECT が通らない");
+        assert_eq!(
+            backlog, None,
+            "新列は既定 NULL（未シード）でなければならない"
+        );
+        assert_eq!(
+            organize.as_deref(),
+            Some("2026-08-03T00:00:00Z|n5"),
+            "新規側マーカーの既存値が失われた"
+        );
+        assert_eq!(
+            consolidation.as_deref(),
+            Some("2026-07-01T00:00:00Z"),
+            "隣の列の既存値が失われた"
+        );
+
+        // 冪等性: 値を書いた後に再実行しても落ちず、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_memory_index_config SET organize_backlog_cursor = '2026-06-01T00:00:00Z|old3' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT organize_backlog_cursor FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kept.as_deref(),
+            Some("2026-06-01T00:00:00Z|old3"),
             "再実行でマーカーが消えてはならない"
         );
     }
