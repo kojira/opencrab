@@ -404,18 +404,23 @@ impl IndexBuilder {
                     })
                 }
                 Err(e) => {
+                    // LLM 呼び出し自体が失敗したケース（JSON パース失敗ではない）。
+                    // 以前は "Summary generation failed" というプレースホルダ topic を
+                    // 作っていたが、中身ゼロのノードが索引・FTS に恒久的に残り続けるだけで
+                    // 意味がなかった（#378）。ここでは topic を作らずスキップする。
+                    // watermark（max_log_id）はループ冒頭（220-222 行）で既に前進済みなので、
+                    // topic を作らなくても毎 tick 同じログを取り直す無限ループにはならない
+                    // （#374 と同じ罠を回避）。ただし失敗レンジはその分二度と再要約されない
+                    // ため、何が抜けたか後から分かるよう warn に範囲とエラーを残す。
                     tracing::warn!(
                         agent_id = %agent_id,
-                        first_log_id = first_log_id,
-                        last_log_id = last_log_id,
+                        session_id = %session_id,
+                        start_log_id = first_log_id,
+                        end_log_id = last_log_id,
                         error = %e,
-                        "LLM summary generation failed, using fallback"
+                        "LLM summary generation failed, skipping topic (watermark still advances)"
                     );
-                    LlmSummary {
-                        title: format!("Topic (logs {first_log_id}-{last_log_id})"),
-                        summary: "Summary generation failed".to_string(),
-                        keywords: Vec::new(),
-                    }
+                    continue;
                 }
             };
             let keywords = normalize_keywords(summary.keywords, &summary.title);
@@ -1124,6 +1129,126 @@ mod tests {
                 .unwrap();
         assert_eq!(r2.nodes_created, 0);
         assert_eq!(r2.logs_indexed, 0);
+    }
+
+    /// LLM 呼び出しそのものが失敗するモック（#378）。
+    struct FailingLlm;
+
+    #[async_trait]
+    impl LlmClient for FailingLlm {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Err(anyhow::anyhow!("simulated provider failure"))
+        }
+    }
+
+    /// JSON ではない応答を返すモック（要約経路の `Ok` だがパース失敗ケース）。
+    struct InvalidJsonMockLlm;
+
+    #[async_trait]
+    impl LlmClient for InvalidJsonMockLlm {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse::text(
+                "これはJSONではない普通の文章です".to_string(),
+            ))
+        }
+    }
+
+    /// #378: LLM 呼び出しが Err のときはプレースホルダ topic を作らずスキップする。
+    /// ただし watermark は前進させ、同じログを毎 tick 取り直す無限ループ（#374 の罠）を防ぐ。
+    #[tokio::test]
+    async fn test_llm_error_skips_topic_but_advances_watermark() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        insert_logs(&db_conn, "agent-1", "session-1", 2);
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let result = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &FailingLlm,
+            "test-model",
+            50,
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+
+        // logs は取得されている（スキップされたのは topic 生成だけ）
+        assert_eq!(result.logs_indexed, 2);
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        // topic ノードは 1 件も作られない（"Summary generation failed" プレースホルダを作らない）
+        assert!(
+            !tree.iter().any(|n| n.node_type == "topic"),
+            "LLM エラー時に topic を作ってはならない"
+        );
+        assert!(
+            !tree
+                .iter()
+                .any(|n| n.summary == "Summary generation failed"),
+            "'Summary generation failed' プレースホルダを作ってはならない"
+        );
+
+        // watermark は最終ログ ID まで前進している（再ビルドで再取得しない）
+        let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wm.last_indexed_log_id, 2,
+            "watermark は失敗レンジを追い越して前進すべき"
+        );
+        drop(db);
+
+        // 再ビルドしても新しいログは取得されない（毎 tick 再取得ループにならない）
+        let r2 = IndexBuilder::build_incremental(
+            &conn,
+            "agent-1",
+            &FailingLlm,
+            "test-model",
+            50,
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r2.logs_indexed, 0, "watermark 前進済みなので再取得しない");
+    }
+
+    /// #378: JSON パース失敗（応答は返っている）ケースは従来どおり topic を作る。
+    /// 先頭ログ本文の先頭 100 字を summary に使う既存挙動を変えない。
+    #[tokio::test]
+    async fn test_invalid_json_still_creates_topic() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let content = "Rust の所有権について議論した内容のログ".to_string();
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            log_type: "message".to_string(),
+            content: content.clone(),
+            speaker_id: Some("user-1".to_string()),
+            turn_number: Some(1),
+            metadata_json: None,
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(&db_conn, &log).unwrap();
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &InvalidJsonMockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        let topic = tree
+            .iter()
+            .find(|n| n.node_type == "topic")
+            .expect("パース失敗時も topic は作られるべき");
+        // 100 字未満なので先頭ログ本文がそのまま summary になる
+        assert_eq!(topic.summary, content);
+        assert_ne!(topic.summary, "Summary generation failed");
+        assert_eq!(topic.title, "Topic (logs 1-1)");
     }
 
     /// ヘルパー: 指定セッションにN件のログを投入
