@@ -83,6 +83,15 @@ pub struct RunRequest {
     /// 走行中注入（#289）の対象範囲（#323 / B2）。既定は [`LiveInboundScope::AllOthers`]
     /// （Discord / heartbeat / REST の従来挙動）。Nostr だけが相手を絞る。
     pub live_inbound_scope: LiveInboundScope,
+    /// この run で使えるツール名の許可リスト（#368）。`Some` のとき、可視性と実行の
+    /// 両方をここに載る名前だけに絞る（全スロット = dispatcher / gateway own / MCP に効く。
+    /// caller/depth ゲートの**上乗せ**で、既存の権限は弱めない）。
+    ///
+    /// `None`（既定）は無制限で従来どおり。対話ターン・heartbeat・subtask は `None` の
+    /// ままで一切変わらない。**sleep 整理ラン（`memory_organize`）だけ**が `Some` を渡し、
+    /// 「眠っている間に外へ手が出る」ツール（`execute_shell` / `nostr_run` / `ws_write` 等）を
+    /// 落とす。
+    pub tool_allowlist: Option<Vec<String>>,
 }
 
 impl RunRequest {
@@ -114,6 +123,7 @@ impl RunRequest {
             reply_target: None,
             run_notifier: None,
             live_inbound_scope: LiveInboundScope::AllOthers,
+            tool_allowlist: None,
         }
     }
 
@@ -182,6 +192,14 @@ impl RunRequest {
     /// Nostr の inbound は返信中の相手（`OnlySpeaker`）に、resume は `Silent` に絞る。
     pub fn with_live_inbound_scope(mut self, scope: LiveInboundScope) -> Self {
         self.live_inbound_scope = scope;
+        self
+    }
+
+    /// この run のツール許可リストを指定する（#368）。`Some` のとき可視性と実行の両方を
+    /// 渡した名前だけに絞る（全スロットに効く / caller ゲートの上乗せ）。既定 `None`（無制限）。
+    /// sleep 整理ランだけが使う。
+    pub fn with_tool_allowlist(mut self, tools: Vec<String>) -> Self {
+        self.tool_allowlist = Some(tools);
         self
     }
 }

@@ -1562,7 +1562,13 @@ pub async fn run_agent_response(
         // gateway アクションが、引数省略時のフォールバックとして読む。
         let bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx)
             .with_depth(depth)
-            .with_reply_target(req.reply_target.clone());
+            .with_reply_target(req.reply_target.clone())
+            // この run のツール許可リスト（#368）。`Some` のときだけ有効で、可視性
+            // （`list_tools`）と実行（`dispatch_inner`）の両方を、全スロット
+            // （dispatcher / gateway own = `SystemGatewayActions` / MCP）にわたって
+            // 許可リスト内に絞る。既存 caller/depth ゲートの**上乗せ**。sleep 整理ラン
+            // だけが渡し、他ターン（`None`）は従来どおり無制限。
+            .with_tool_allowlist(req.tool_allowlist.clone());
         // サーバ内設定ツール（configure_llm_provider 等）を transport 非依存で全ターンに
         // 供給する。既存 gateway（Discord/Nostr）は inner として委譲される（composite）。
         // owner 限定ツールは bridge の OWNER_ONLY_ACTIONS が可視性/実行を強制する。

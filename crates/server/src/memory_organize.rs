@@ -31,6 +31,43 @@ use opencrab_db::queries::IndexNodeRow;
 /// 実測平均は要約 102 字（#313）。振れ幅を吸収しつつ上限を持たせる。
 const SUMMARY_MAX_CHARS: usize = 240;
 
+/// sleep 整理ランに渡すツール許可リスト（#368）。
+///
+/// **眠っている間に外へ手が出せる状態にしない。** 整理ランの用途は「自分の記憶を読んで
+/// タグを付ける／統合する」に固定されているので、必要なのは**記憶の読み取り**と**タグ操作**、
+/// そして**ターンを終える最小限のラン制御**だけ。`execute_shell` / `nostr_run`（外向き投稿）/
+/// `spawn_subtask` / `ws_write` / `ws_delete` / `configure_*` / `update_instructions` 等は
+/// 一切渡さない。
+///
+/// この許可リストは `RunRequest.tool_allowlist` 経由で `BridgedExecutor` に載り、可視性
+/// （`list_tools`）と実行（`dispatch_inner`）の**両方**を、**全スロット**（dispatcher /
+/// gateway own = `SystemGatewayActions` / MCP）にわたって絞る。既存の caller ゲート
+/// （`tool_policy`。タグ道具は `TRUSTED_ONLY`）は弱めず、その**上に重ねる**。
+///
+/// 内訳:
+/// - 読み取り: `browse_memory_index` / `search_memory_index` / `retrieve_memory_nodes` /
+///   `search_my_history`（対象 topic の中身をもっと知りたいときに引く）。
+/// - タグ操作: `tag_topic` / `untag_topic` / `merge_tags`（整理の本体）。
+/// - ラン制御: `declare_done`（そのターンを終える宣言）。整理ランは system プロンプトで
+///   「終わったら観点を一言残す」と促しており、モデルは通常ツール無しの最終テキストで
+///   自然終了するが、`declare_done` は「これ以上やることが無い」を明示する既存の終了シグナル
+///   なので載せる（外向きの副作用は無い / `CORE_INLINE_ACTIONS`）。他のラン制御
+///   （`report_progress` / `spawn_subtask` / `cancel_subtask`）は subtask ライフサイクル用で、
+///   整理ラン（inline・非 subtask）には不要なので入れない。
+pub const ORGANIZE_ALLOWED_TOOLS: &[&str] = &[
+    // 読み取り
+    "browse_memory_index",
+    "search_memory_index",
+    "retrieve_memory_nodes",
+    "search_my_history",
+    // タグ操作
+    "tag_topic",
+    "untag_topic",
+    "merge_tags",
+    // ラン制御（ターンを終える宣言のみ）
+    "declare_done",
+];
+
 /// このエージェントの整理ランを（ゲートを満たせば）実行する。
 ///
 /// 戻り値: 整理ラン（LLM）を実際に起動したら `true`。既定オフ・ゲート未達・初回シードは
@@ -74,6 +111,11 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
 
     // gateway_actions=None（送信経路を渡さない = 会話へ出さない）。dispatch なし
     // （ツールは inline 実行。background subtask 化しない）。
+    //
+    // ツール許可リスト（#368）: caller=Owner なので放置すると Owner の全ツール
+    // （`execute_shell` / `nostr_run` / `ws_write` / `configure_*` / `update_instructions` …）が
+    // 届く。整理ランは「眠っている」内向きのランなので、記憶の読み取り・タグ操作・ターン終了
+    // 宣言だけに絞る（`ORGANIZE_ALLOWED_TOOLS`）。可視性と実行の両方を全スロットで絞る。
     let req = RunRequest::new(
         agent_id.to_string(),
         plan.persona_name.clone(),
@@ -83,6 +125,12 @@ pub async fn maybe_run_memory_organize(state: &AppState, agent_id: &str) -> anyh
         // RuntimeInfo の gateway 名。監査 context と揃えて "sleep"。
         "sleep",
         CallerIdentity::Owner,
+    )
+    .with_tool_allowlist(
+        ORGANIZE_ALLOWED_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     );
 
     let started = std::time::Instant::now();
@@ -1152,5 +1200,210 @@ mod tests {
     fn topic_line_omits_dash_when_summary_empty() {
         let line = format_topic_line(&topic("id1", "t1", "無要約", ""));
         assert_eq!(line, "- [t1] 無要約");
+    }
+
+    // --- 整理ランのツール許可リスト（#368 / 実測）---
+
+    /// MCP スロット検証用: `mcp__` 名前空間の外部ツールを 1 つ定義するモック。
+    /// 整理ランは depth 0 なので本番でも MCP が注入されうる。許可リストが MCP スロットも
+    /// 覆うことを実測する。
+    struct MockMcpSlot;
+
+    #[async_trait::async_trait]
+    impl opencrab_gateway::GatewayActions for MockMcpSlot {
+        fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
+            vec![opencrab_gateway::GatewayActionDef {
+                name: "mcp__ext__send".to_string(),
+                description: "external send".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }]
+        }
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> opencrab_gateway::GatewayActionResult {
+            opencrab_gateway::GatewayActionResult {
+                success: true,
+                data: Some(serde_json::json!({ "reached": name })),
+                error: None,
+            }
+        }
+    }
+
+    /// 整理ランが**実際に受け取る合成 executor**を、`process::run_agent_response` の run
+    /// 構築と同じ配線で組む（dispatcher core + config 駆動の execute_shell + gateway own =
+    /// `SystemGatewayActions` + MCP スロット）。`with_allowlist=true` で
+    /// `ORGANIZE_ALLOWED_TOOLS` を載せる（整理ランと同じ）。
+    fn build_organize_executor(
+        state: &AppState,
+        with_allowlist: bool,
+    ) -> opencrab_actions::BridgedExecutor {
+        // dispatcher: core アクション + config 駆動の execute_shell。
+        let mut dispatcher = opencrab_actions::ActionDispatcher::new();
+        let tools_cfg = opencrab_actions::tools::ToolsConfig {
+            enabled: true,
+            shell: Some(opencrab_actions::tools::ShellToolConfig {
+                enabled: true,
+                allowed_commands: vec!["echo".to_string()],
+                ..Default::default()
+            }),
+        };
+        opencrab_actions::register_tools_from_config(&tools_cfg, &mut dispatcher);
+
+        let ws_path = std::env::temp_dir().join(format!("organize-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&ws_path).unwrap();
+        let workspace = opencrab_core::workspace::Workspace::from_root(&ws_path).unwrap();
+
+        // 整理ランと同じ caller=Owner。放置すると Owner の全ツールが届く前提を再現する。
+        let ctx = opencrab_actions::ActionContext {
+            caller: CallerIdentity::Owner,
+            agent_id: "a1".to_string(),
+            agent_name: "a1".to_string(),
+            session_id: Some("sleep-organize-a1-1".to_string()),
+            db: state.db.clone(),
+            workspace: std::sync::Arc::new(workspace),
+            last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            runtime_info: std::sync::Arc::new(std::sync::Mutex::new(
+                opencrab_actions::RuntimeInfo {
+                    default_model: "mock:test".to_string(),
+                    active_model: None,
+                    available_providers: vec!["mock".to_string()],
+                    gateway: "sleep".to_string(),
+                },
+            )),
+        };
+
+        // gateway own = SystemGatewayActions（configure_* / nostr_run / spawn_subtask を own で持つ）。
+        // depth 0 なので本番でもこの合成 gateway がそのまま渡る（sub-engine の絞りは通らない）。
+        let system_actions: std::sync::Arc<dyn opencrab_gateway::GatewayActions> =
+            std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
+                state.clone(),
+                None,
+                None,
+                None,
+            ));
+
+        let mut bridged = opencrab_actions::BridgedExecutor::new(dispatcher, ctx)
+            .with_depth(0)
+            .with_gateway_actions(system_actions)
+            .with_mcp_actions(std::sync::Arc::new(MockMcpSlot));
+        if with_allowlist {
+            bridged = bridged.with_tool_allowlist(Some(
+                ORGANIZE_ALLOWED_TOOLS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ));
+        }
+        bridged
+    }
+
+    /// 整理ランに渡すツールセットは、記憶の読み取り・タグ操作・終了宣言だけ。
+    /// **眠っている間に外へ手が出る**ツール（`execute_shell` / `nostr_run` / `spawn_subtask` /
+    /// `ws_write` / `ws_delete` / `configure_*` / `update_instructions`）は 3 経路すべてで塞ぐ:
+    ///   経路1: `run_allows` 相当（許可リスト定数の内容）
+    ///   経路2: `list_tools`（可視性）
+    ///   経路3: `dispatch`（実行）
+    #[tokio::test]
+    async fn organize_run_tool_allowlist_excludes_outward_tools() {
+        // list_tools / execute は ActionExecutor トレイト経由。
+        use opencrab_core::ActionExecutor;
+        let state = crate::test_app_state();
+
+        // 眠っている間に外へ手が出る／状態を書き換えるツール（全スロットにまたがる）。
+        let forbidden = [
+            "execute_shell",          // dispatcher（config 駆動）
+            "ws_write",               // dispatcher core
+            "ws_delete",              // dispatcher core
+            "update_instructions",    // dispatcher core（owner 専用の指示書書き換え）
+            "nostr_run",              // gateway own（外向き投稿）
+            "spawn_subtask",          // gateway own
+            "configure_llm_provider", // gateway own
+            "configure_nostr",        // gateway own
+            "configure_self",         // gateway own
+            "configure_mcp_server",   // gateway own
+            "mcp__ext__send",         // MCP スロット
+        ];
+        // 整理に要る読み取り・タグ・終了宣言。
+        let allowed = [
+            "browse_memory_index",
+            "search_memory_index",
+            "retrieve_memory_nodes",
+            "search_my_history",
+            "tag_topic",
+            "untag_topic",
+            "merge_tags",
+            "declare_done",
+        ];
+
+        // 経路1: 許可リスト定数そのものの内容。
+        for f in forbidden {
+            assert!(
+                !ORGANIZE_ALLOWED_TOOLS.contains(&f),
+                "許可リストに外向きツール {f} が入っている"
+            );
+        }
+        for a in allowed {
+            assert!(
+                ORGANIZE_ALLOWED_TOOLS.contains(&a),
+                "許可リストに {a} が無い（整理に必要）"
+            );
+        }
+
+        // --- 対照: 許可リスト無し（None）なら Owner の全ツールが届く（危険の再現） ---
+        let unrestricted = build_organize_executor(&state, false);
+        let base: Vec<String> = unrestricted
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for f in forbidden {
+            assert!(
+                base.contains(&f.to_string()),
+                "許可リスト無しでは {f} が届くはず（許可リストが効いている証跡の対照）: {base:?}"
+            );
+        }
+
+        // --- 整理ラン（許可リスト有り） ---
+        let executor = build_organize_executor(&state, true);
+
+        // 経路2: list_tools（可視性）。許可外は 1 つも出ない。
+        let visible: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
+        for f in forbidden {
+            assert!(
+                !visible.contains(&f.to_string()),
+                "整理ランの list_tools に外向きツール {f} が出ている: {visible:?}"
+            );
+        }
+        for a in allowed {
+            assert!(
+                visible.contains(&a.to_string()),
+                "整理ランの list_tools に {a} が無い: {visible:?}"
+            );
+        }
+
+        // 経路3: dispatch（実行）。許可外は構造的拒否で、実装へは届かない。
+        for f in forbidden {
+            let r = executor.execute(f, &serde_json::json!({})).await;
+            assert!(!r.success, "整理ランで {f} の実行が成功してはならない");
+            let err = r.error.unwrap_or_default();
+            assert!(
+                err.starts_with(opencrab_actions::REJECTION_CODE_PREFIX),
+                "整理ランで {f} は構造的拒否であるべき: {err}"
+            );
+            assert!(
+                r.data.get("reached").is_none(),
+                "整理ランで {f} が実装へ届いてはならない"
+            );
+        }
+
+        // 実測の記録（推定でなく実際に受け取るツール名。テスト出力に残す）。
+        let mut dump = visible.clone();
+        dump.sort();
+        eprintln!("[#368] 整理ランが実際に受け取るツール: {dump:?}");
     }
 }

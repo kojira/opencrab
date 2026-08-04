@@ -749,6 +749,18 @@ pub struct BridgedExecutor {
     /// `gateway_call_context` が `GatewayCallContext.reply_target` に載せ、宛先引数を
     /// 省略したツール呼び出しのフォールバックにする。既定 `None`。
     reply_target: Option<String>,
+    /// この run で使えるツール名の許可リスト（#368）。`Some` のとき、可視性
+    /// （`list_tools`）と実行（`dispatch_inner`）の**両方**を、ここに載る名前だけに絞る。
+    /// caller/depth ゲート（`tool_policy` / `policy_allows`）は弱めず、その**上に重ねる**
+    /// 追加の deny-by-default。
+    ///
+    /// **全スロット（dispatcher / gateway own / MCP）に効く**のが要点。3 スロットとも
+    /// 可視は `list_tools`、実行は `dispatch_inner` を通るので、この 1 箇所で覆える
+    /// （スロット個別のフィルタを別々に足す必要がない）。
+    ///
+    /// 既定 `None`（無制限 = 従来挙動）。対話ターン・heartbeat・subtask は `None` の
+    /// ままで一切変わらない。sleep 整理ラン（`memory_organize`）だけが `Some` を渡す。
+    tool_allowlist: Option<std::collections::HashSet<String>>,
 }
 
 impl BridgedExecutor {
@@ -761,6 +773,7 @@ impl BridgedExecutor {
             depth: 0,
             tool_event_sink: None,
             reply_target: None,
+            tool_allowlist: None,
         }
     }
 
@@ -793,6 +806,25 @@ impl BridgedExecutor {
     pub fn with_reply_target(mut self, reply_target: Option<String>) -> Self {
         self.reply_target = reply_target;
         self
+    }
+
+    /// この run のツール許可リストを注入する（#368）。`Some` のとき、可視性と実行の
+    /// 両方を、渡した名前だけに絞る（caller/depth ゲートの**上乗せ**）。`None`（既定）は
+    /// 無制限で従来どおり。sleep 整理ランだけが渡す。
+    pub fn with_tool_allowlist(mut self, allowlist: Option<Vec<String>>) -> Self {
+        self.tool_allowlist = allowlist.map(|v| v.into_iter().collect());
+        self
+    }
+
+    /// この run のツール許可リストが `name` を許すか（#368）。`None`（未設定）なら常に
+    /// 許可（無制限）。`Some` のときは集合に載る名前だけを許す。`policy_allows`（caller/depth
+    /// ゲート）とは独立の**追加**述語で、`list_tools`（可視）と `dispatch_inner`（実行）の
+    /// 両方が同じこの述語を通すことで「見えるが呼べない / 見えないが呼べる」の食い違いを防ぐ。
+    fn run_allows(&self, name: &str) -> bool {
+        match &self.tool_allowlist {
+            None => true,
+            Some(set) => set.contains(name),
+        }
     }
 
     /// dispatcher の CallerIdentity を gateway 境界の型付き caller に写像する。
@@ -887,6 +919,14 @@ impl BridgedExecutor {
             return reject(format!(
                 "{name} is not available at depth {} (max nesting: {MAX_DEPTH})",
                 self.depth
+            ));
+        }
+        // この run の許可リスト（#368）: caller/depth ゲートを通っても、許可リストの外なら
+        // 実行を拒否する。MCP/dispatcher/gateway のどのスロットへ振り分ける**前**に効かせる
+        // ことで、全スロットを 1 箇所で覆う（見えないが呼べる、を塞ぐ）。
+        if !self.run_allows(name) {
+            return reject(format!(
+                "action '{name}' is not available in this run (tool allowlist)"
             ));
         }
 
@@ -1043,7 +1083,7 @@ impl ActionExecutor for BridgedExecutor {
             .dispatcher
             .get_definitions(&[])
             .into_iter()
-            .filter(|d| self.policy_allows(&d.name))
+            .filter(|d| self.policy_allows(&d.name) && self.run_allows(&d.name))
             .map(|d| FunctionDefinition {
                 name: d.name,
                 description: opt_desc(d.description),
@@ -1054,7 +1094,7 @@ impl ActionExecutor for BridgedExecutor {
         // Merge gateway action definitions（同じポリシー述語でフィルタ）。
         if let Some(ref gw) = self.gateway_actions {
             for def in gw.definitions() {
-                if !self.policy_allows(&def.name) {
+                if !self.policy_allows(&def.name) || !self.run_allows(&def.name) {
                     continue;
                 }
                 tools.push(FunctionDefinition {
@@ -1069,7 +1109,7 @@ impl ActionExecutor for BridgedExecutor {
         // caller で既にフィルタ済み（本ターンの caller で構築される）。静的 policy も一応適用。
         if let Some(ref mcp) = self.mcp_actions {
             for def in mcp.definitions() {
-                if !self.policy_allows(&def.name) {
+                if !self.policy_allows(&def.name) || !self.run_allows(&def.name) {
                     continue;
                 }
                 tools.push(FunctionDefinition {
@@ -1487,6 +1527,120 @@ mod tests {
         // ゲートウェイアクションもマージされる
         assert!(names.contains(&"gw_action_a"));
         assert!(names.contains(&"gw_action_b"));
+    }
+
+    // ---- run 単位のツール許可リスト（#368）----
+
+    /// MCP スロット検証用: `mcp__` 名前空間の外部ツールを 1 つ定義するモック。
+    struct MockMcpSlot;
+
+    #[async_trait]
+    impl GatewayActions for MockMcpSlot {
+        fn definitions(&self) -> Vec<GatewayActionDef> {
+            vec![GatewayActionDef {
+                name: "mcp__ext__send".to_string(),
+                description: "external send".to_string(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }]
+        }
+        async fn execute(
+            &self,
+            name: &str,
+            _args: &serde_json::Value,
+            _ctx: &opencrab_gateway::GatewayCallContext,
+        ) -> GatewayActionResult {
+            GatewayActionResult {
+                success: true,
+                data: Some(json!({ "reached": name })),
+                error: None,
+            }
+        }
+    }
+
+    /// 許可リストは **3 スロット全て**（dispatcher core / gateway own / MCP）を、
+    /// **可視性（list_tools）と実行（dispatch）の両方**で絞る。許可リスト無し（None）なら
+    /// 従来どおり全部見える（＝対話ターン・heartbeat・subtask の不変性の裏付け）。
+    #[tokio::test]
+    async fn tool_allowlist_gates_all_slots_visibility_and_execution() {
+        // 許可リスト: 読み取り 1 + タグ 1 + 終了宣言 1（整理ランの最小形）。
+        let allow = vec![
+            "browse_memory_index".to_string(),
+            "tag_topic".to_string(),
+            "declare_done".to_string(),
+        ];
+
+        // --- 許可リスト無し（None）: 全スロットのツールが見える（不変性の対照） ---
+        let (_dir0, ctx0) = test_context();
+        let unrestricted = BridgedExecutor::new(ActionDispatcher::new(), ctx0)
+            .with_gateway_actions(Arc::new(MockGatewayActions)) // gw_action_a/b（gateway own 相当）
+            .with_mcp_actions(Arc::new(MockMcpSlot)); // mcp__ext__send（MCP スロット）
+        let base: Vec<String> = unrestricted
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        // dispatcher core / gateway own / MCP がどれも見える。
+        assert!(
+            base.contains(&"ws_delete".to_string()),
+            "core が見える: {base:?}"
+        );
+        assert!(
+            base.contains(&"gw_action_a".to_string()),
+            "gateway own が見える"
+        );
+        assert!(base.contains(&"mcp__ext__send".to_string()), "MCP が見える");
+
+        // --- 許可リスト有り（Some）: 許可外は全スロットで消える ---
+        let (_dir1, ctx1) = test_context();
+        let restricted = BridgedExecutor::new(ActionDispatcher::new(), ctx1)
+            .with_gateway_actions(Arc::new(MockGatewayActions))
+            .with_mcp_actions(Arc::new(MockMcpSlot))
+            .with_tool_allowlist(Some(allow.clone()));
+        let visible: Vec<String> = restricted
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        // 経路2（list_tools 可視性）: 許可されたものだけ見える。
+        assert!(visible.contains(&"browse_memory_index".to_string()));
+        assert!(visible.contains(&"tag_topic".to_string()));
+        assert!(visible.contains(&"declare_done".to_string()));
+        // 3 スロットの許可外ツールがどれも消える。
+        for forbidden in ["ws_delete", "gw_action_a", "mcp__ext__send"] {
+            assert!(
+                !visible.contains(&forbidden.to_string()),
+                "許可外 {forbidden} が list_tools に残っている: {visible:?}"
+            );
+        }
+
+        // 経路3（実行）: 許可外は dispatch で拒否（rejected: マーカー）。
+        for (forbidden, slot) in [
+            ("ws_delete", "dispatcher core"),
+            ("gw_action_a", "gateway own"),
+            ("mcp__ext__send", "MCP"),
+        ] {
+            let r = restricted.execute(forbidden, &json!({})).await;
+            assert!(!r.success, "{slot} の {forbidden} は拒否されるべき");
+            let err = r.error.unwrap_or_default();
+            assert!(
+                err.starts_with(REJECTION_CODE_PREFIX),
+                "{slot} の {forbidden} は構造的拒否であるべき: {err}"
+            );
+            // gateway/MCP には届いていない（実行痕跡 reached が無い）。
+            assert!(
+                r.data.get("reached").is_none(),
+                "{slot} の {forbidden} は実装へ届いてはならない"
+            );
+        }
+
+        // 許可されたツールは実行が拒否されない（tag_topic は書き込み・DB 依存だが、
+        // 少なくとも許可リストでの拒否は受けない）。
+        let ok = restricted.execute("browse_memory_index", &json!({})).await;
+        assert!(
+            !is_rejection(ok.error.as_deref()),
+            "許可ツールが許可リストで拒否されてはならない: {:?}",
+            ok.error
+        );
     }
 
     // ---- execute ----
