@@ -59,7 +59,7 @@ fn normalize_keywords(keywords: Vec<String>, fallback_title: &str) -> Vec<String
     out
 }
 
-/// heartbeat セッションの speech 行が idle（静観）かどうかを判定する。
+/// heartbeat セッションの speech 行が「エージェント自身の idle（静観）応答」かどうかを判定する。
 ///
 /// 判定基準は発生源（`crates/server/src/main.rs` の `HeartbeatDecision` 分類）と
 /// 揃える: 応答本文に非空の `SPEAK:` があれば発話、`LEARN` を含めば学習、
@@ -67,10 +67,20 @@ fn normalize_keywords(keywords: Vec<String>, fallback_title: &str) -> Vec<String
 /// 生成タイトルの揺れや本文の微差で取りこぼすため、「実のある decision に
 /// 分類されないこと」をもって idle とみなす。
 ///
-/// 対象は heartbeat セッションの `speech` 行のみ。それ以外の log_type は常に
-/// 「実あり」として残す（呼び出し側で heartbeat セッションに限定する）。
-fn is_idle_heartbeat_speech(log: &opencrab_db::queries::SessionLogRow) -> bool {
+/// **話者ガード**: idle として捨ててよいのは `speaker_id == agent_id`、つまり
+/// エージェント自身の応答行に限る。本番のハートビートセッションは実測で
+/// 単一話者（全 speech が自分）だが、万一「他者の発言」が混ざっても、それは
+/// 相手の言葉という実質なので idle 扱いにせず材料に残す（本文が SPEAK:/LEARN を
+/// 含まなくても落とさない）。
+///
+/// 対象は `speech` 行のみ。それ以外の log_type は常に「実あり」として残す
+/// （呼び出し側で heartbeat セッションに限定する）。
+fn is_idle_heartbeat_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
     if log.log_type != "speech" {
+        return false;
+    }
+    // 自分以外の発話（他者の言葉）は idle 扱いにしない = 材料に残す。
+    if log.speaker_id.as_deref() != Some(agent_id) {
         return false;
     }
     let text = log.content.trim();
@@ -100,14 +110,14 @@ fn is_idle_heartbeat_speech(log: &opencrab_db::queries::SessionLogRow) -> bool {
 ///    残ってしまい「実質ログが残らない」バッチが存在しなくなる。
 /// 2. idle（静観）の speech 行（[`is_idle_heartbeat_speech`]）。
 ///
-/// 逆に `tool_call` / `tool_result` / `inner_voice` / 実のある speech（SPEAK/LEARN）は
-/// 実際の活動なので材料に残す。これらが 1 件も残らないバッチだけを「純idle」として
-/// topic 化しない（#374）。
-fn is_heartbeat_noise(log: &opencrab_db::queries::SessionLogRow) -> bool {
+/// 逆に `tool_call` / `tool_result` / `inner_voice` / 実のある speech（SPEAK/LEARN）/
+/// 他者の発言は実際の活動・実質なので材料に残す。これらが 1 件も残らないバッチだけを
+/// 「純idle」として topic 化しない（#374）。
+fn is_heartbeat_noise(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
     if log.log_type == "system" && log.speaker_id.as_deref() == Some("heartbeat") {
         return true;
     }
-    is_idle_heartbeat_speech(log)
+    is_idle_heartbeat_speech(log, agent_id)
 }
 
 pub struct IndexBuilder;
@@ -224,7 +234,7 @@ impl IndexBuilder {
                 if session_id.starts_with("heartbeat-") {
                     session_logs
                         .iter()
-                        .filter(|l| !is_heartbeat_noise(l))
+                        .filter(|l| !is_heartbeat_noise(l, agent_id))
                         .collect()
                 } else {
                     session_logs.iter().collect()
@@ -1818,6 +1828,7 @@ mod tests {
     /// idle 判定が main.rs の HeartbeatDecision 分類と同基準であることを直接確認する。
     #[test]
     fn test_is_idle_heartbeat_speech_classification() {
+        // speaker はデフォルトで自分（"a"）。
         let mk = |content: &str, log_type: &str| opencrab_db::queries::SessionLogRow {
             id: None,
             agent_id: "a".to_string(),
@@ -1830,25 +1841,33 @@ mod tests {
             created_at: None,
         };
         // SPEAK: も LEARN も無い → idle
-        assert!(is_idle_heartbeat_speech(&mk("IDLE", "speech")));
-        assert!(is_idle_heartbeat_speech(&mk("  IDLE  ", "speech")));
+        assert!(is_idle_heartbeat_speech(&mk("IDLE", "speech"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("  IDLE  ", "speech"), "a"));
         // SPEAK: の後に非空 → 実あり
-        assert!(!is_idle_heartbeat_speech(&mk("SPEAK: hello", "speech")));
-        assert!(!is_idle_heartbeat_speech(&mk(
-            "考えた結果\nSPEAK: みんなおはよう",
-            "speech"
-        )));
+        assert!(!is_idle_heartbeat_speech(
+            &mk("SPEAK: hello", "speech"),
+            "a"
+        ));
+        assert!(!is_idle_heartbeat_speech(
+            &mk("考えた結果\nSPEAK: みんなおはよう", "speech"),
+            "a"
+        ));
         // SPEAK: が空 → idle（main.rs と同基準）
-        assert!(is_idle_heartbeat_speech(&mk("SPEAK:", "speech")));
-        assert!(is_idle_heartbeat_speech(&mk("SPEAK:   ", "speech")));
+        assert!(is_idle_heartbeat_speech(&mk("SPEAK:", "speech"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("SPEAK:   ", "speech"), "a"));
         // LEARN を含む → 実あり
-        assert!(!is_idle_heartbeat_speech(&mk("LEARN", "speech")));
-        assert!(!is_idle_heartbeat_speech(&mk(
-            "learn something new",
-            "speech"
-        )));
+        assert!(!is_idle_heartbeat_speech(&mk("LEARN", "speech"), "a"));
+        assert!(!is_idle_heartbeat_speech(
+            &mk("learn something new", "speech"),
+            "a"
+        ));
         // speech 以外の log_type は常に実あり扱い（heartbeat の応答は speech のみ）
-        assert!(!is_idle_heartbeat_speech(&mk("IDLE", "system")));
+        assert!(!is_idle_heartbeat_speech(&mk("IDLE", "system"), "a"));
+        // 話者ガード: 他者の発言は本文が idle 風でも idle 扱いにしない（材料に残す）
+        assert!(!is_idle_heartbeat_speech(
+            &mk("IDLE", "speech"),
+            "other-agent"
+        ));
     }
 
     /// is_heartbeat_noise: プロンプト scaffolding と idle speech を除き、
@@ -1868,22 +1887,26 @@ mod tests {
                 created_at: None,
             };
         // 毎tick のプロンプト scaffolding（system + speaker=heartbeat）→ ノイズ
-        assert!(is_heartbeat_noise(&mk(
-            "[ハートビート] ...",
-            "system",
-            "heartbeat"
-        )));
-        // idle speech → ノイズ
-        assert!(is_heartbeat_noise(&mk("IDLE", "speech", "a")));
+        assert!(is_heartbeat_noise(
+            &mk("[ハートビート] ...", "system", "heartbeat"),
+            "a"
+        ));
+        // idle speech（自分）→ ノイズ
+        assert!(is_heartbeat_noise(&mk("IDLE", "speech", "a"), "a"));
         // 実のある speech → 残す
-        assert!(!is_heartbeat_noise(&mk("SPEAK: hi", "speech", "a")));
-        assert!(!is_heartbeat_noise(&mk("LEARN x", "speech", "a")));
+        assert!(!is_heartbeat_noise(&mk("SPEAK: hi", "speech", "a"), "a"));
+        assert!(!is_heartbeat_noise(&mk("LEARN x", "speech", "a"), "a"));
         // tool / inner_voice は実活動 → 残す
-        assert!(!is_heartbeat_noise(&mk("call foo", "tool_call", "a")));
-        assert!(!is_heartbeat_noise(&mk("result", "tool_result", "a")));
-        assert!(!is_heartbeat_noise(&mk("考えている", "inner_voice", "a")));
+        assert!(!is_heartbeat_noise(&mk("call foo", "tool_call", "a"), "a"));
+        assert!(!is_heartbeat_noise(&mk("result", "tool_result", "a"), "a"));
+        assert!(!is_heartbeat_noise(
+            &mk("考えている", "inner_voice", "a"),
+            "a"
+        ));
         // system でも speaker が heartbeat 以外なら残す
-        assert!(!is_heartbeat_noise(&mk("なにか", "system", "a")));
+        assert!(!is_heartbeat_noise(&mk("なにか", "system", "a"), "a"));
+        // 他者の発言は本文が idle 風でも残す（相手の言葉を落とさない）
+        assert!(!is_heartbeat_noise(&mk("IDLE", "speech", "other"), "a"));
     }
 
     /// 純idle だけの heartbeat グループ（毎tick のプロンプト + idle speech のみ）
@@ -1976,6 +1999,50 @@ mod tests {
         assert!(
             tree.iter().any(|n| n.node_type == "topic"),
             "tool/inner_voice の実活動があれば topic は作られる"
+        );
+    }
+
+    /// 話者ガード: heartbeat セッションに他者の発言が混ざっていたら、自分は idle でも
+    /// topic を作り、他者の言葉を要約材料に残す（相手の言葉を落とさない）。
+    #[tokio::test]
+    async fn test_heartbeat_others_speech_is_kept() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "heartbeat-agent-1-chan-1";
+        // 自分は静観、しかし相手が話しかけてきた（本文は SPEAK:/LEARN を含まない実質発言）
+        insert_heartbeat_prompt(&db_conn, "agent-1", sid);
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "speech",
+            "someone-else",
+            "ねえ、これどう思う？相手からの実質発言marker",
+        );
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            assert!(
+                tree.iter().any(|n| n.node_type == "topic"),
+                "他者の発言があれば topic は作られる"
+            );
+        }
+        // 他者の発言は要約材料に含まれ、自分の idle 行は除かれる
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = request.messages[1].text_content().unwrap_or("").to_string();
+        assert!(
+            prompt.contains("相手からの実質発言marker"),
+            "他者の発言は材料に残る"
         );
     }
 
