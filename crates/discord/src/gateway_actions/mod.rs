@@ -743,6 +743,21 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "{n} は core inline アクションで Discord gateway には無いはず"
                 );
+            } else if *n == "survey_my_history"
+                || *n == "read_my_history"
+                || *n == "record_memory_unit"
+                || *n == "retract_memory_unit"
+            {
+                // #379: 記憶の単位（宣言）道具 4 個は core inline アクション
+                // （`CORE_INLINE_ACTIONS` / `crates/actions/src/memory_units.rs`）で Discord
+                // gateway には無い。caller=Agent 遮断は bridge の `TRUSTED_ONLY_ACTIONS` が
+                // 効かせる。実在性の検証は `crates/actions/src/subtask.rs` の
+                // `core_actions_are_classified_for_dispatch`（CORE_INLINE_ACTIONS が
+                // ActionDispatcher に実在することを確認）が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は core inline アクションで Discord gateway には無いはず"
+                );
             } else if n.starts_with("nostr_") {
                 // nostr_switch_identity / nostr_list_keys は Nostr ゲートウェイ側の
                 // アクション（この Discord gateway の definitions には出ない）。

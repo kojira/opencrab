@@ -896,6 +896,109 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 30,
+        description: "memory index: node_type に 'unit' を追加（記憶の単位・宣言ノード用 / issue #379 #376）",
+        // **CHECK 制約の拡張（許可値を 1 つ増やす）のみ。既存の行・列は 1 行も失わない。**
+        //
+        // 背景（#376 段階1）: エージェントが自分の生ログの範囲 `[from_id, to_id]` を「1 つの
+        // 記憶」として宣言する道具（`record_memory_unit`）を足す。宣言ノードは既存の time-series
+        // topic（`node_type='topic'`, `source_type='session_log'`）と**構造的に混ざらない**よう、
+        // 別 `node_type='unit'` として載せる（`source_type='declared'` も併記して表示で区別する）。
+        //
+        // なぜ `node_type='unit'`（`source_type='declared'` 案ではなく）: 監査（#379）で、
+        // time-series・タグ整理の worklist 系クエリは `source_type='session_log'` を pin して
+        // いるが、rollup の EXISTS 副問い合わせ / `get_topic_nodes_for_session` 等は「親チェイン /
+        // `source_session_id`」で topic を絞る**裸の `node_type='topic'`** だと判明した。宣言を
+        // 別 `node_type` にすれば、これら全ての `node_type='topic'` 述語から**自動で外れる**
+        // （不変条件に依存しない構造的分離）。将来 誰かが裸の topic クエリを足しても混ざらない。
+        //
+        // `insert_index_node` は `INSERT OR IGNORE` なので、CHECK 違反はエラーにならず黙って
+        // 無視される（＝宣言ノードを作ったつもりで消える）。SQLite は CHECK を `ALTER` で
+        // 広げられないため、**v5 / v21 / v23 と同じテーブル再構築**で許可値を 1 つ足す。全行を
+        // 無条件コピーするので time-series ツリー（period/session/topic/daily）も category/meta も
+        // 無傷。孤児 parent_id は NULL に落とす（v23 の流儀）。
+        //
+        // FTS 整合: `memory_index_fts` は `node_id`（TEXT 列）で手動同期する独立 FTS5 で、
+        // `content=`（external-content by rowid）ではない。再構築は `INSERT ... SELECT` で全 `id`
+        // を保存するので FTS 行は全て有効なまま＝**FTS 孤児は起きない**（v23 も FTS を触って
+        // いない）。
+        //
+        // 冪等性（肯定形。v23 と同じ流儀）: 現行スキーマの `node_type` CHECK に `'unit'` が
+        // 既に現れるときだけ再構築を skip する（`sqlite_master.sql` の文字列判定）。狭い CHECK の
+        // テーブル SQL に `'unit'` の文字列が現れる余地は無い（列名・既定値・他の CHECK の
+        // どれにも含まれない）ので「まだ狭いのに広いと誤判定して skip」は起こり得ない。逆に
+        // 「広いのに狭いと誤判定して再構築」へ外れても再構築は冪等なので無害。新規 DB は
+        // SCHEMA_SQL 側で既に 'unit' を持つので再構築されない。
+        //
+        // 切り戻し（宣言ノードは本人が作る派生データ。削除すれば原状復帰。古いバイナリへ
+        // 戻すときは版番号も戻すこと）:
+        //   BEGIN;
+        //   DELETE FROM memory_index_fts WHERE node_id IN
+        //       (SELECT id FROM memory_index_nodes WHERE node_type='unit');
+        //   DELETE FROM memory_index_nodes WHERE node_type IN ('unit','root') AND source_type='declared';
+        //   -- （厳密に旧 CHECK へ戻すなら v23 と同型の再構築で狭める）
+        //   PRAGMA user_version = 29;
+        //   COMMIT;
+        up: |conn| {
+            let widened: bool = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_index_nodes'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(|sql| sql.contains("'unit'"))
+                .unwrap_or(false);
+            if !widened {
+                conn.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+                conn.execute_batch(
+                    "CREATE TABLE memory_index_nodes_new (
+                        id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL,
+                        parent_id TEXT REFERENCES memory_index_nodes_new(id) ON DELETE CASCADE,
+                        node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly','category','meta','unit')),
+                        source_type TEXT NOT NULL DEFAULT 'session_log',
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        start_log_id INTEGER,
+                        end_log_id INTEGER,
+                        source_session_id TEXT,
+                        date_from TEXT,
+                        date_to TEXT,
+                        depth INTEGER NOT NULL DEFAULT 0,
+                        child_count INTEGER NOT NULL DEFAULT 0,
+                        token_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        short_id TEXT,
+                        keywords_json TEXT NOT NULL DEFAULT '[]',
+                        summary_refreshed_at TEXT
+                    );
+                    INSERT INTO memory_index_nodes_new
+                        (id, agent_id, parent_id, node_type, source_type, title, summary,
+                         start_log_id, end_log_id, source_session_id, date_from, date_to,
+                         depth, child_count, token_count, created_at, updated_at, short_id,
+                         keywords_json, summary_refreshed_at)
+                        SELECT id, agent_id, parent_id, node_type, source_type, title, summary,
+                               start_log_id, end_log_id, source_session_id, date_from, date_to,
+                               depth, child_count, token_count, created_at, updated_at, short_id,
+                               keywords_json, summary_refreshed_at
+                        FROM memory_index_nodes;
+                    UPDATE memory_index_nodes_new SET parent_id = NULL
+                        WHERE parent_id IS NOT NULL
+                          AND parent_id NOT IN (SELECT id FROM memory_index_nodes_new);
+                    DROP TABLE memory_index_nodes;
+                    ALTER TABLE memory_index_nodes_new RENAME TO memory_index_nodes;
+                    CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
+                    CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
+                    CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_memory_index_nodes_source_type ON memory_index_nodes(agent_id, source_type);",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2079,7 +2182,7 @@ CREATE TABLE IF NOT EXISTS memory_index_nodes (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
     parent_id TEXT REFERENCES memory_index_nodes(id) ON DELETE CASCADE,
-    node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly','category','meta')),
+    node_type TEXT NOT NULL CHECK (node_type IN ('root','period','session','topic','daily','hourly','weekly','monthly','yearly','category','meta','unit')),
     source_type TEXT NOT NULL DEFAULT 'session_log',
     title TEXT NOT NULL,
     summary TEXT NOT NULL,

@@ -464,6 +464,10 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     "search_memory_index",
     "retrieve_memory_nodes",
     "search_my_history",
+    // 記憶の単位（宣言）の読み取り 2 つ（#379）。地図/範囲読みは即答すべき純読み取りで、
+    // 結果を見て次の範囲や宣言を同ターンで決める。dispatch すると 2 ターンに割れるだけ。
+    "survey_my_history",
+    "read_my_history",
     "get_task",
     "analyze_llm_usage",
     "recall_model_experiences",
@@ -480,6 +484,11 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     "tag_topic",
     "untag_topic",
     "merge_tags",
+    // (6) 記憶の単位（宣言）の記録 2 つ（#379）。宣言/取り消しは短時間の書き込みで、
+    //     結果（宣言できたか / 取り消せたか）を同ターンで見て次の操作を決める。呼び出し元は
+    //     `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）から触らせない。
+    "record_memory_unit",
+    "retract_memory_unit",
 ];
 
 /// core アクションのうち、**意図的に dispatch を許す**もの。
@@ -636,6 +645,19 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "tag_topic",
     "untag_topic",
     "merge_tags",
+    // 記憶の単位（宣言）道具 4 つ（#379 #376 段階1）。タグ道具（上）と同じ論拠で
+    // **trusted_only**: Nostr（caller=Agent）は誰でも話しかけられるので、会話の流れで
+    // 生ログを俯瞰させ・宣言させ続けると、記憶レイヤをスパムで汚染できる。宣言ラン
+    // （段階2）は caller=Owner で走る（heartbeat と同じ前例）ので支障は無い。owner /
+    // co_agent / trusted_user が自分の意思で触るターン（heartbeat tick / ダッシュボード /
+    // オーナー会話 / 信頼済みユーザー会話）は全て caller!=Agent なので従来どおり通る。
+    // いずれも core dispatcher のアクション（`crates/actions/src/memory_units.rs`）で、
+    // 既存の caller ゲートへの追加のみ＝新しい概念・列・設定は足していない。読み取り 2 つ
+    // （survey / read）は整理ラン用の `ORGANIZE_ALLOWED_TOOLS` にも入る（記録 2 つは段階2）。
+    "survey_my_history",
+    "read_my_history",
+    "record_memory_unit",
+    "retract_memory_unit",
 ];
 
 // `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。
@@ -2548,6 +2570,88 @@ mod tests {
                 assert!(
                     listed.iter().any(|n| n == name),
                     "caller={caller:?} の list_tools に {name} が出ない（#359）"
+                );
+            }
+        }
+    }
+
+    /// #379: 記憶の単位（宣言）道具 4 個は trusted_only（owner_only ではない）。
+    const MEMORY_UNIT_ACTIONS_TRUSTED_ONLY: &[&str] = &[
+        "survey_my_history",
+        "read_my_history",
+        "record_memory_unit",
+        "retract_memory_unit",
+    ];
+
+    #[test]
+    fn memory_unit_actions_are_trusted_only_in_policy_table() {
+        for name in MEMORY_UNIT_ACTIONS_TRUSTED_ONLY {
+            let p = tool_policy(name);
+            assert!(p.trusted_only, "{name} must be trusted_only (#379)");
+            assert!(
+                !p.owner_only,
+                "{name} は trusted_only であるべき（owner_only にすると CoAgent / \
+                 TrustedUser も塞がれる / #379）"
+            );
+        }
+    }
+
+    /// #379: caller=Agent からは記憶の単位道具 4 個が **3 経路すべて**（`policy_allows` /
+    /// `list_tools` / `dispatch_inner`）で落ちる。対照で Owner / CoAgent / TrustedUser は通る。
+    /// タグ道具の `tag_actions_gated_from_agent_caller`（#359）と同型。
+    #[tokio::test]
+    async fn memory_unit_actions_gated_from_agent_caller() {
+        let (_d, agent_ctx) = test_context_with_caller(CallerIdentity::Agent);
+        let agent_exec = BridgedExecutor::new(ActionDispatcher::new(), agent_ctx);
+        let agent_listed: Vec<String> = agent_exec
+            .list_tools()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+
+        for name in MEMORY_UNIT_ACTIONS_TRUSTED_ONLY {
+            // 1. ポリシー述語（list_tools と dispatch_inner が共有）。
+            assert!(
+                !agent_exec.policy_allows(name),
+                "caller=Agent が {name} を policy_allows で通してしまう（#379）"
+            );
+            // 2. 可視性: モデルに見えていない。
+            assert!(
+                !agent_listed.iter().any(|n| n == name),
+                "caller=Agent の list_tools に {name} が出てしまう（#379）"
+            );
+            // 3. 実行時強制: 名前指定の実行が policy 拒否になる（実在アクションなので
+            //    「引数不足」ではなく policy 拒否であることまで見る）。
+            let r = agent_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.success,
+                "caller=Agent の {name} 実行が拒否されない（#379）"
+            );
+            assert!(
+                is_rejection(r.error.as_deref()),
+                "caller=Agent の {name} 実行が policy 拒否になっていない（error={:?} / #379）",
+                r.error
+            );
+        }
+
+        for caller in [
+            CallerIdentity::Owner,
+            CallerIdentity::CoAgent {
+                agent_id: "peer".to_string(),
+            },
+            CallerIdentity::TrustedUser,
+        ] {
+            let (_d, ctx) = test_context_with_caller(caller.clone());
+            let exec = BridgedExecutor::new(ActionDispatcher::new(), ctx);
+            let listed: Vec<String> = exec.list_tools().into_iter().map(|t| t.name).collect();
+            for name in MEMORY_UNIT_ACTIONS_TRUSTED_ONLY {
+                assert!(
+                    exec.policy_allows(name),
+                    "caller={caller:?} で {name} が policy_allows を通らない（#379）"
+                );
+                assert!(
+                    listed.iter().any(|n| n == name),
+                    "caller={caller:?} の list_tools に {name} が出ない（#379）"
                 );
             }
         }
