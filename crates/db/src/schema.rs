@@ -1098,6 +1098,16 @@ const MIGRATIONS: &[Migration] = &[
         // 一時表 `_v32_inbound_remap` に「(rowid, 新 agent_id)」を一度だけ確定させ、本体と FTS の
         // 双方へ適用することで両者の集合を一致させる。
         //
+        // ## v32 が回復する範囲（重要・ここで閉じるのは半分だけ）
+        // **v32 が回復するのは FTS 記憶検索（`search_my_history`）のみ。索引ビルドへの取り込みは
+        // 別課題として #380 に残る。** `search_session_logs` は `WHERE fts.agent_id = ?` だけで
+        // 絞るので付け替えれば即引ける。一方、索引ビルドは watermark（`memory_index_watermark`
+        // の `last_indexed_log_id`）を `after_id` に渡して `id > after_id` の行だけを拾う
+        // （`crates/core/src/memory_index/index_builder.rs` → `get_unindexed_session_logs`）。
+        // 付け替え対象は過去行なので **watermark より下**にあり（本番コピー実測: 対象 4,657 行は
+        // 全て受信側の watermark 以下）、`agent_id` を直しても索引ビルドは 1 行も拾わない。
+        // 索引へ実際に載せるには watermark を巻き戻す等の再索引の仕掛けが要る（#380 の項目 2・3）。
+        //
         // ## 冪等性
         // 番号付き MIGRATIONS は `user_version` で 1 回しか走らない（#349 の凍結 `migrate()` は
         // 既存 DB に届かないのでここへ置く）。加えて SQL 自体も自然冪等: 付け替え後は
@@ -1114,8 +1124,20 @@ const MIGRATIONS: &[Migration] = &[
         up: |conn| {
             // 受信側が一意に定まる旧形の受信行だけを (rowid, 新 agent_id) へ確定させる。
             // agents との JOIN で該当なし（＝復元不能）や自己宛（付け替え不要）は除く。
+            //
+            // `IF NOT EXISTS` は**付けない**。`CREATE TABLE ... AS SELECT` に付けると同名の
+            // TEMP 表が既にある場合に SELECT が実行されず、**古い中身がそのまま適用される**
+            // （冪等のつもりが逆に働き、黙って別の集合を書き換える）。先頭に
+            // `DROP TABLE IF EXISTS` を置く手もあるが、それも残骸を黙って捨てるだけで
+            // 「なぜ残っていたか」を隠す。ここは残骸があれば即エラーで落ちる形にして、
+            // 異常に気づけるようにする（正常系は末尾の `DROP` で必ず消える。途中失敗時も
+            // temp DB は同一トランザクションに参加するので巻き戻る）。
+            //
+            // 相関サブクエリの `LIMIT 1` は ORDER BY 無しだが曖昧にならない。ある agent_id が
+            // 別の agent_id の接頭辞になって初めて 2 件 match し得るところ、`agents.agent_id`
+            // は同じ長さの UUID なので接頭辞関係が成立しない（本番実測でも複数 match は 0 行）。
             conn.execute_batch(
-                "CREATE TEMP TABLE IF NOT EXISTS _v32_inbound_remap AS
+                "CREATE TEMP TABLE _v32_inbound_remap AS
                  SELECT ms.id AS row_id,
                         (SELECT a.agent_id FROM agents a
                           WHERE ms.session_id = 'nostr-' || a.agent_id
@@ -3778,7 +3800,9 @@ mod migration_tests {
     /// v32: 既存の受信行（送信者名義）を受信側エージェント名義へ付け替え、索引/FTS に
     /// 載せる（#380）。session_id に埋まった agent_id で受信側を復元できる行だけを対象にし、
     /// 復元できない行・新形・旧々形・応答は 1 行も触らないこと、FTS も同時に直ること、
-    /// 索引/検索へ受信側名義で載ること、冪等であることを固定する。
+    /// FTS 検索へ受信側名義で載ること、冪等であることを固定する。索引ビルドについては
+    /// 「watermark を巻き戻せば載る形」かつ「watermark 先行下では載らない」の両側を固定する
+    /// （v32 が回復するのは FTS 検索のみで、索引への取り込みは #380 に残る）。
     #[test]
     fn v32_remaps_inbound_agent_id_to_recipient_and_indexes() {
         use crate::queries::{
@@ -3946,6 +3970,13 @@ mod migration_tests {
         assert_eq!(agent_of(id_reply), recipient, "応答行は不変");
 
         // 索引ビルド入力に受信側名義で載る（送信者名義では載らない）。
+        //
+        // ここは `after_id = 0`（＝索引 watermark を巻き戻した状態）での確認であって、
+        // 「watermark を巻き戻せば受信側名義で載る形になっている」ことだけを固定している。
+        // 実際の索引ビルドは watermark（`last_indexed_log_id`）を `after_id` へ渡す
+        // （`crates/core/src/memory_index/index_builder.rs`）ため、**本番のように watermark が
+        // 対象行より先行している状況では、v32 だけでは索引へ入らない**（直下でその側も固定する）。
+        // 索引ビルドへの実取り込みには別途 #380 の対応が要る。
         let indexed = get_unindexed_session_logs(&conn, recipient, 0, 100).unwrap();
         assert!(indexed.iter().any(|r| r.content == "discord inbound apple"));
         assert!(indexed.iter().any(|r| r.content == "nostr inbound banana"));
@@ -3954,6 +3985,18 @@ mod migration_tests {
                 .unwrap()
                 .is_empty(),
             "受信行が送信者名義で索引入力に残っている"
+        );
+
+        // watermark が対象行より先行している状態（本番がこれ）では、付け替えても索引ビルド
+        // 入力には 1 行も載らない。v32 の効き目が FTS 検索に限られることを明示的に固定する。
+        let watermark: i64 = conn
+            .query_row("SELECT MAX(id) FROM memory_sessions", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            get_unindexed_session_logs(&conn, recipient, watermark, 100)
+                .unwrap()
+                .is_empty(),
+            "watermark 先行下では付け替え行は索引ビルド入力に載らない（#380 の残課題）"
         );
 
         // FTS 記憶検索で受信側が相手の発言を引ける。送信者名義では引けない。
