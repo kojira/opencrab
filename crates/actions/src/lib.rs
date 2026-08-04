@@ -9,6 +9,7 @@ pub mod llm_analysis;
 pub mod llm_evaluation;
 pub mod llm_selection;
 pub mod memory_access;
+pub mod memory_units;
 pub mod search;
 pub mod session_runtime;
 pub mod skill_management;

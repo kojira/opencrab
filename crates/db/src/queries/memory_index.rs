@@ -1796,3 +1796,157 @@ pub fn merge_tags(
         })
     })
 }
+
+// ============================================
+// 記憶の単位（宣言ノード / issue #379 #376 段階1）
+// ============================================
+//
+// エージェントが自分の生ログの範囲 `[from_id, to_id]` を「1 つの記憶」として宣言する。
+// 宣言は time-series ツリー（root→period→session→topic, `source_type='session_log'`）や
+// カテゴリ層（`source_type='category'`）とは**別 `node_type='unit'`** として載せる
+// （`source_type='declared'` も併記）。`node_type='unit'` は既存の全 `node_type='topic'`
+// 述語（rollup / タグ整理 worklist / `get_topic_nodes_for_session` / `merge_topics` 等）から
+// 構造的に外れるので、二重要約・二重タグ付けは起きない（#379 監査で確定 / v30 で CHECK 拡張）。
+//
+// 親は専用ルート `declroot-<agent_id>`（`node_type='root'`, `source_type='declared'`,
+// parent_id=NULL）。short_id は `u` 系列。**生ログ（memory_sessions）は消さない・変えない**
+// ので、宣言は何度でも取り消して付け直せる（`retract_memory_unit`）。
+
+/// 宣言ツリーの根（`node_type='root'`, `source_type='declared'`）を確保して id を返す。
+///
+/// id はエージェント決定的（`declroot-<agent_id>`）なので「先に get → 無ければ insert」で
+/// 冪等（`ensure_category_root` と同型）。session_log ツリーの根（`root-<agent_id>`）とも
+/// カテゴリ根（`catroot-<agent_id>`）とも id・source_type が別なので混ざらない。
+pub fn ensure_declared_root(conn: &Connection, agent_id: &str, now: &str) -> Result<String> {
+    let id = format!("declroot-{agent_id}");
+    if get_index_node(conn, &id)?.is_some() {
+        return Ok(id);
+    }
+    let short_id = next_short_id(conn, agent_id, "r")?;
+    let root = IndexNodeRow {
+        id: id.clone(),
+        agent_id: agent_id.to_string(),
+        parent_id: None,
+        node_type: "root".to_string(),
+        source_type: "declared".to_string(),
+        title: "宣言した記憶".to_string(),
+        summary: String::new(),
+        start_log_id: None,
+        end_log_id: None,
+        source_session_id: None,
+        date_from: None,
+        date_to: None,
+        depth: 0,
+        child_count: 0,
+        token_count: 0,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+        short_id: Some(short_id),
+        keywords_json: "[]".to_string(),
+        summary_refreshed_at: None,
+    };
+    insert_index_node(conn, &root)?;
+    // read-back: OR IGNORE / CHECK 違反で黙って握り潰されていないか確認（#344）。
+    if get_index_node(conn, &id)?.is_none() {
+        anyhow::bail!("宣言ルートの作成に失敗しました（ノードが作成されませんでした）");
+    }
+    Ok(id)
+}
+
+/// 生ログの範囲 `[from_id, to_id]` を 1 つの記憶として宣言する（`node_type='unit'`）。
+///
+/// `title` 必須・`summary` 任意。`source_session_id` は必ず NULL（宣言はセッションに
+/// 紐付けない — `get_topic_nodes_for_session` 等の `source_session_id` 絞りから外れる）。
+/// **重なりは禁止しない**（1 つの範囲が複数ユニットに属してよい / 既存ユニットとの
+/// start/end 重複はチェックしない）。作成後に **id で read-back** して実在を確認する
+/// （`INSERT OR IGNORE` がノードを黙って握り潰していないか / #344）。生ログには触らない。
+#[allow(clippy::too_many_arguments)]
+pub fn record_memory_unit(
+    conn: &Connection,
+    agent_id: &str,
+    title: &str,
+    summary: &str,
+    from_id: i64,
+    to_id: i64,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+    now: &str,
+) -> Result<IndexNodeRow> {
+    let title = title.trim();
+    if title.is_empty() {
+        anyhow::bail!("title が空です");
+    }
+    let root_id = ensure_declared_root(conn, agent_id, now)?;
+    let short_id = next_short_id(conn, agent_id, "u")?;
+    let node = IndexNodeRow {
+        id: format!("unit-{}", uuid_like(agent_id, title, now)),
+        agent_id: agent_id.to_string(),
+        parent_id: Some(root_id),
+        node_type: "unit".to_string(),
+        source_type: "declared".to_string(),
+        title: title.to_string(),
+        summary: summary.to_string(),
+        start_log_id: Some(from_id),
+        end_log_id: Some(to_id),
+        source_session_id: None,
+        date_from: date_from.map(str::to_string),
+        date_to: date_to.map(str::to_string),
+        depth: 1,
+        child_count: 0,
+        token_count: 0,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+        short_id: Some(short_id),
+        keywords_json: "[]".to_string(),
+        summary_refreshed_at: None,
+    };
+    insert_index_node(conn, &node)?;
+    // read-back: 実在しなければ宣言は失敗している（#344: 黙って握り潰さない）。
+    if get_index_node(conn, &node.id)?.is_none() {
+        anyhow::bail!("記憶の宣言に失敗しました（ノードが作成されませんでした）");
+    }
+    Ok(node)
+}
+
+/// 宣言ユニットを取り消す（**宣言ノード + FTS 行 + member 行だけ**を消す。生ログは不変）。
+///
+/// `unit_ref` は short_id またはフル id。**`node_type='unit'` のノードだけ**を対象にする
+/// （session_log topic やカテゴリノードを誤って消さないための安全ガード）。ユニットに
+/// 付いたタグの member 行（`memory_category_members.topic_id = unit.id`）も消す＝原状復帰。
+/// FTS は `delete_index_node`（subtree CTE で FTS も消す）に委ねて孤児を残さない（v26 の罠）。
+///
+/// 戻り値: 取り消したユニットのフル id。見つからない / ユニットでない場合は `Err`。
+pub fn retract_memory_unit(conn: &Connection, agent_id: &str, unit_ref: &str) -> Result<String> {
+    let node = match get_index_node_by_short_or_id(conn, agent_id, unit_ref)? {
+        Some(n) => n,
+        None => anyhow::bail!("宣言ユニット「{unit_ref}」が見つかりません"),
+    };
+    if node.node_type != "unit" {
+        anyhow::bail!(
+            "「{unit_ref}」は宣言ユニット（node_type='unit'）ではありません（node_type='{}'）。retract は宣言ユニットのみ取り消せます",
+            node.node_type
+        );
+    }
+    with_index_savepoint(conn, |tx| {
+        // (1) ユニットに付いたタグの member 行を消す（孤児を残さない / 原状復帰）。
+        tx.execute(
+            "DELETE FROM memory_category_members WHERE agent_id = ?1 AND topic_id = ?2",
+            params![agent_id, node.id],
+        )?;
+        // (2) 宣言ノード本体を FTS ごと削除（unit は葉なので subtree は自分だけ）。
+        delete_index_node(tx, &node.id)?;
+        Ok(())
+    })?;
+    Ok(node.id)
+}
+
+/// エージェントの宣言ユニット一覧（新しい順）。survey / テスト・監査で使う。
+pub fn list_memory_units(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
+         WHERE agent_id = ?1 AND node_type = 'unit'
+         ORDER BY start_log_id DESC, created_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![agent_id], index_node_from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}

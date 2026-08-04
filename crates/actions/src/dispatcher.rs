@@ -7,6 +7,7 @@ use crate::llm_analysis::*;
 use crate::llm_evaluation::*;
 use crate::llm_selection::*;
 use crate::memory_access::*;
+use crate::memory_units::*;
 use crate::search::*;
 use crate::skill_management::*;
 use crate::soul::*;
@@ -58,6 +59,11 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(TagTopicAction));
         dispatcher.register(Arc::new(UntagTopicAction));
         dispatcher.register(Arc::new(MergeTagsAction));
+        // 記憶の単位（宣言）道具 4 つ（#379 #376 段階1）。TRUSTED_ONLY で Nostr から触らせない。
+        dispatcher.register(Arc::new(SurveyMyHistoryAction));
+        dispatcher.register(Arc::new(ReadMyHistoryAction));
+        dispatcher.register(Arc::new(RecordMemoryUnitAction));
+        dispatcher.register(Arc::new(RetractMemoryUnitAction));
 
         // LLM関連アクション登録
         dispatcher.register(Arc::new(SelectLlmAction));

@@ -98,6 +98,10 @@ pub const ORGANIZE_ALLOWED_TOOLS: &[&str] = &[
     "search_memory_index",
     "retrieve_memory_nodes",
     "search_my_history",
+    // 記憶の単位（宣言）の読み取り 2 つ（#379 #376 段階1）。整理ランが生ログを俯瞰・範囲読み
+    // できるようにする。記録 2 つ（record / retract）は宣言ラン（段階2）で別途載せる。
+    "survey_my_history",
+    "read_my_history",
     // タグ操作
     "tag_topic",
     "untag_topic",
