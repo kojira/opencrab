@@ -264,6 +264,26 @@ impl Action for SurveyMyHistoryAction {
     }
 }
 
+/// 引数 `key` が「意味のある文字列」か（空文字・空白のみ・非文字列は「指定なし」）。
+///
+/// モデルは使わないキーも `""` で埋めてくるので、`is_some` では「指定あり」と
+/// 誤判定してしまう（#388）。トリムして中身があるものだけを指定ありとみなす。
+fn meaningful_str(args: &serde_json::Value, key: &str) -> bool {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+/// 引数 `key` が「意味のある整数」か（`0`・非整数は「指定なし」）。
+///
+/// モデルは使わない id 系キーも `0` で埋めてくる（#388）。id は 1 始まりなので
+/// `0` は範囲としての意味を持たない。0 は「指定なし」として扱う。
+fn meaningful_int(args: &serde_json::Value, key: &str) -> bool {
+    args.get(key)
+        .and_then(|v| v.as_i64())
+        .is_some_and(|n| n != 0)
+}
+
 /// 生ログを範囲指定で読む（有界: 行数 + 文字数キャップ + カーソル）。
 pub struct ReadMyHistoryAction;
 
@@ -298,10 +318,16 @@ impl Action for ReadMyHistoryAction {
         use opencrab_db::queries::HistoryFilter;
 
         // 排他的にどの範囲指定が来ているかを判定する。
-        let has_session = args.get("session_id").and_then(|v| v.as_str()).is_some();
-        let has_id_range = args.get("from_id").is_some() || args.get("to_id").is_some();
-        let has_around = args.get("around_id").is_some();
-        let has_time = args.get("from_time").is_some() || args.get("to_time").is_some();
+        //
+        // 判定は「キーの有無」ではなく「値が意味を持つか」で行う（#388）。
+        // gpt-5.6-sol 等のモデルはスキーマの全プロパティを毎回 `""` / `0` で埋めてくる。
+        // presence（`is_some`）で数えると全モードが立ち、必ず「範囲は 1 つだけ」で
+        // 拒否されて生ログを 1 行も読めなくなる（実験で 29 回連続拒否・成果ゼロ）。
+        // 空文字列・0・null は「指定なし」として扱い、実際に意味を持つ値だけをモードとして数える。
+        let has_session = meaningful_str(args, "session_id");
+        let has_id_range = meaningful_int(args, "from_id") || meaningful_int(args, "to_id");
+        let has_around = meaningful_int(args, "around_id");
+        let has_time = meaningful_str(args, "from_time") || meaningful_str(args, "to_time");
 
         let mode_count = [has_session, has_id_range, has_around, has_time]
             .iter()
@@ -314,29 +340,29 @@ impl Action for ReadMyHistoryAction {
         }
         if mode_count > 1 {
             return ActionResult::error(
-                "範囲指定は 1 つだけにしてください（session_id / id 範囲 / around / 時刻範囲）",
+                "範囲指定は 1 つだけにしてください（session_id / id 範囲 / around / 時刻範囲）。\
+                 使わない範囲は 0 か空文字にしてください",
             );
         }
 
         let filter = if has_session {
             HistoryFilter::Session(args["session_id"].as_str().unwrap().to_string())
         } else if has_id_range {
-            let from_id = match args["from_id"].as_i64() {
-                Some(v) => v,
-                None => {
-                    return ActionResult::error(
-                        "from_id と to_id を両方 integer で指定してください",
-                    )
-                }
-            };
-            let to_id = match args["to_id"].as_i64() {
-                Some(v) => v,
-                None => {
-                    return ActionResult::error(
-                        "from_id と to_id を両方 integer で指定してください",
-                    )
-                }
-            };
+            // 片側だけ意味を持つ id 範囲も素直に解釈する（#388 追補）。
+            // from_id だけ → そこから先を、to_id だけ → そこまでを読む。指定の無い側
+            // （`0`・空・非整数）は開いた端（`i64::MIN` / `i64::MAX`）にする。0 を境界として
+            // 使うと `from_id:5, to_id:0` が [0,5] に正規化されて逆向きに読まれ、黙って
+            // 空や見当違いが返り、エージェントが理由の分からないまま彷徨う（今日の失敗の形）。
+            // 有界化は既存の行数・文字数・トークンのキャップが担う。範囲が本当に空でも
+            // `range_total=0` が返るので「なぜ空か」は伝わる。
+            let from_id = args["from_id"]
+                .as_i64()
+                .filter(|&v| v != 0)
+                .unwrap_or(i64::MIN);
+            let to_id = args["to_id"]
+                .as_i64()
+                .filter(|&v| v != 0)
+                .unwrap_or(i64::MAX);
             HistoryFilter::IdRange { from_id, to_id }
         } else if has_around {
             let center_id = match args["around_id"].as_i64() {
@@ -957,5 +983,210 @@ mod tests {
         assert!(data["returned"].as_u64().unwrap() < 60);
         assert!(data["estimated_tokens"].as_i64().unwrap() > 0);
         assert_eq!(data["inline_limit_tokens"], json!(INLINE_LIMIT_TOKENS));
+    }
+
+    // ---- #388: モデルは全プロパティを埋める。値ベース判定で正しいモードに解決する ----
+    //
+    // 既存の単体テストは引数を「そのモードのキーだけ」明示的に組むので、この失敗を
+    // 再現しない（だから実験 2 回まで見つからなかった）。ここでは gpt-5.6-sol の実際の
+    // 癖——スキーマの全プロパティを毎回 `""` / `0` で埋める——を模したうえで、意味の
+    // ある値を 1 つだけ足し、各モードが正しく解決することを確認する。
+
+    /// モデルが毎回埋めてくる「全プロパティが空値」の引数（read_my_history のスキーマ全て）。
+    fn all_props_filled() -> serde_json::Value {
+        json!({
+            "session_id": "",
+            "from_id": 0,
+            "to_id": 0,
+            "around_id": 0,
+            "from_time": "",
+            "to_time": "",
+            "estimate_only": false,
+            "cursor_from_id": 0
+        })
+    }
+
+    /// `base` に `over` のキーを上書きした引数を作る。
+    fn with_override(mut base: serde_json::Value, over: serde_json::Value) -> serde_json::Value {
+        let obj = base.as_object_mut().unwrap();
+        for (k, v) in over.as_object().unwrap() {
+            obj.insert(k.clone(), v.clone());
+        }
+        base
+    }
+
+    /// 全プロパティが空値で埋まった状態＋意味のある `around_id` だけ → around モードで動く。
+    /// これが #388 で 29 回連続拒否された、実際の呼び出しの形。
+    #[tokio::test]
+    async fn read_all_props_filled_plus_around_works() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20); // id 1..20
+
+        let args = with_override(all_props_filled(), json!({"around_id": 10}));
+        let r = ReadMyHistoryAction.execute(&args, &ctx).await;
+        assert!(
+            r.success,
+            "全プロパティ埋め＋around が『範囲は1つだけ』で拒否された: {:?}",
+            r.error
+        );
+        assert!(r.data.unwrap()["returned"].as_u64().unwrap() > 0);
+    }
+
+    /// 各モードについて、他のキーが全部空値で埋まっていても正しく解決すること。
+    #[tokio::test]
+    async fn read_each_mode_resolves_when_others_are_empty_valued() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20); // id 1..20 / session-1
+
+        // session モード。
+        let r = ReadMyHistoryAction
+            .execute(
+                &with_override(all_props_filled(), json!({"session_id": "session-1"})),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "session モードが拒否された: {:?}", r.error);
+        assert!(r.data.unwrap()["returned"].as_u64().unwrap() > 0);
+
+        // id 範囲モード。
+        let r = ReadMyHistoryAction
+            .execute(
+                &with_override(all_props_filled(), json!({"from_id": 5, "to_id": 15})),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "id 範囲モードが拒否された: {:?}", r.error);
+        assert_eq!(r.data.unwrap()["returned"], 11);
+
+        // around モード。
+        let r = ReadMyHistoryAction
+            .execute(
+                &with_override(all_props_filled(), json!({"around_id": 10})),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "around モードが拒否された: {:?}", r.error);
+        assert!(r.data.unwrap()["returned"].as_u64().unwrap() > 0);
+
+        // 時刻範囲モード（seed の created_at は「今」なので広い範囲で確実に捕まえる）。
+        let r = ReadMyHistoryAction
+            .execute(
+                &with_override(
+                    all_props_filled(),
+                    json!({
+                        "from_time": "2000-01-01T00:00:00Z",
+                        "to_time": "2100-01-01T00:00:00Z"
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "時刻範囲モードが拒否された: {:?}", r.error);
+        assert!(r.data.unwrap()["returned"].as_u64().unwrap() > 0);
+    }
+
+    /// 全プロパティ埋め＋意味のある値ゼロ → 「範囲が必要」で拒否される（誤って通さない）。
+    #[tokio::test]
+    async fn read_all_props_filled_but_no_meaningful_value_is_rejected() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 4);
+        let r = ReadMyHistoryAction.execute(&all_props_filled(), &ctx).await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("範囲指定が必要"));
+    }
+
+    /// 意味のある値が 2 つあれば従来どおり排他で拒否する（排他は維持する / #388）。
+    #[tokio::test]
+    async fn read_two_meaningful_ranges_still_rejected() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20);
+        let r = ReadMyHistoryAction
+            .execute(
+                &with_override(
+                    all_props_filled(),
+                    json!({"session_id": "session-1", "around_id": 10}),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        let err = r.error.unwrap();
+        assert!(err.contains("1 つだけ"));
+        // 全プロパティを埋めるモデルが 1 回で復帰できるよう「他をどう消すか」を示す。
+        assert!(
+            err.contains("0 か空文字"),
+            "拒否メッセージに復帰方法が無い: {err}"
+        );
+    }
+
+    /// 全プロパティ埋め＋around＋estimate_only=true → 範囲判定を抜けて estimate が返る。
+    /// 実験では estimate_only を 5 回渡したが、range 判定が先に落ちて一度も発火しなかった。
+    #[tokio::test]
+    async fn read_all_props_filled_estimate_only_now_reaches_estimate() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20);
+        let args = with_override(
+            all_props_filled(),
+            json!({"around_id": 10, "estimate_only": true}),
+        );
+        let r = ReadMyHistoryAction.execute(&args, &ctx).await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(data["estimate_only"], true);
+        assert!(data.get("rows").is_none());
+    }
+
+    // ---- #388 追補: 片側だけの id 範囲を空結果にせず素直に読む ----
+
+    /// `from_id` だけ意味あり（`to_id` は空値）→ そこから先を読む。全プロパティ埋めでも動く。
+    #[tokio::test]
+    async fn read_id_range_from_only_reads_onward() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20); // id 1..20
+
+        let args = with_override(all_props_filled(), json!({"from_id": 15}));
+        let r = ReadMyHistoryAction.execute(&args, &ctx).await;
+        assert!(
+            r.success,
+            "from_id 片側指定が拒否/空になった: {:?}",
+            r.error
+        );
+        let data = r.data.unwrap();
+        // id 15..20 の 6 件。0 を境界に使うと逆向き（1..15）になり返り値が変わる。
+        assert_eq!(data["range_total"], 6, "from 15 以降を読むべき");
+        assert_eq!(data["returned"], 6);
+    }
+
+    /// `to_id` だけ意味あり（`from_id` は空値）→ そこまでを読む。全プロパティ埋めでも動く。
+    #[tokio::test]
+    async fn read_id_range_to_only_reads_up_to() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20); // id 1..20
+
+        let args = with_override(all_props_filled(), json!({"to_id": 5}));
+        let r = ReadMyHistoryAction.execute(&args, &ctx).await;
+        assert!(r.success, "to_id 片側指定が拒否/空になった: {:?}", r.error);
+        let data = r.data.unwrap();
+        // id 1..5 の 5 件。
+        assert_eq!(data["range_total"], 5, "5 まで読むべき");
+        assert_eq!(data["returned"], 5);
+    }
+
+    /// 範囲が本当に該当なしなら、空であること（range_total=0）が返る（「なぜ空か」を伝える）。
+    #[tokio::test]
+    async fn read_id_range_genuinely_empty_reports_zero_total() {
+        let (_d, ctx) = test_context();
+        seed_logs(&ctx, 20); // id 1..20
+
+        // 100..200 には生ログが無い（両側とも意味を持つが該当なし）。
+        let args = with_override(all_props_filled(), json!({"from_id": 100, "to_id": 200}));
+        let r = ReadMyHistoryAction.execute(&args, &ctx).await;
+        assert!(r.success, "{:?}", r.error);
+        let data = r.data.unwrap();
+        assert_eq!(
+            data["range_total"], 0,
+            "該当なしは range_total=0 で明示する"
+        );
+        assert_eq!(data["returned"], 0);
     }
 }
