@@ -710,15 +710,16 @@ const OMITTED_MARKER: &str = "[... older messages omitted due to context length 
 /// エージェント自身ではない話者の発言か（= ユーザー／他エージェントの生発言）。
 ///
 /// **判定は行の `agent_id` 列ではなく、`agent_id` 引数（＝ 応答するエージェント）と
-/// 比べること**（#286）。ゲートウェイ受信の行は `agent_id` 列にも**送信者 ID** が入る
-/// （`transcript::record_inbound_message` の注意書き）ため、行内の 2 列を突き合わせる
-/// と Discord / Nostr の受信行は常に `agent_id == speaker_id` になり、この述語が
-/// 恒偽になる。実際それで #284 の保証が本番経路では丸ごと no-op だった
-/// （本番 DB の該当 4,490 件すべてが `==`）。
+/// `speaker_id` を比べること**（#286）。DB 側の `list_recent_user_speech_logs` も
+/// 最初から `speaker_id != <agent_id 引数>` で比較しており、2 つの述語は必ず一致させる
+/// こと（片方だけ変えると、混ぜ戻した行がここで捨てられて元の症状に戻る）。
 ///
-/// DB 側の `list_recent_user_speech_logs` は最初から `speaker_id != <agent_id 引数>`
-/// で比較しており、こちらを合わせる形になる（2 つの述語は必ず一致させること。
-/// 片方だけ直すと、混ぜ戻した行がここで捨てられて元の症状に戻る）。
+/// なぜ行の `agent_id` 列を見ないか（#286 の経緯）: 当時ゲートウェイ受信の行は
+/// `agent_id` 列にも**送信者 ID** が入り（`agent_id == speaker_id`）、行内 2 列の
+/// 突き合わせでは Discord / Nostr の受信行でこの述語が恒偽になった。実際それで #284 の
+/// 保証が本番経路で丸ごと no-op だった（当時の該当 4,490 件すべてが `==`）。#377 で
+/// 受信行は `agent_id`＝受信側 / `speaker_id`＝送信者 に直ったので列は縮退しなくなったが、
+/// **述語は引き続き `speaker_id` と `agent_id` 引数で比べる**（行の `agent_id` 列は無関係）。
 fn is_user_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
     log.log_type == "speech" && log.speaker_id.as_deref().is_some_and(|s| s != agent_id)
 }
@@ -2571,13 +2572,15 @@ mod redact_secret_fields_tests {
 /// 一度も見ないまま応答していた。ここで固定するのは「ログ種別に関係なく、直近の
 /// ユーザー発言 N 件が優先で残る」こと。
 ///
-/// **行の形は本番と同じでなければならない**（#286）。ゲートウェイ受信の行は
-/// `agent_id` 列にも**送信者 ID** が入る（`transcript::record_inbound_message` の
-/// 注意書き。`agent_id == speaker_id`）。以前のテストは `agent_id = "a1"` /
-/// `speaker_id = "kojira"` という REST/web 経路だけの形で書かれていたため、
-/// 「`speaker_id != log.agent_id`」という誤った述語が Discord / Nostr では常に
-/// false になるバグをすり抜けた（本番 DB では該当 4,490 件すべてが `==`）。
-/// ユーザー発言は**必ず `record_inbound_message` 経由で**入れること。
+/// **行の形は本番と同じでなければならない**（#286）。ユーザー発言は**必ず
+/// `record_inbound_message` 経由で**入れること（`agent_id`＝受信側 / `speaker_id`＝送信者、
+/// #377）。手書きの行だと本番と形がずれ、述語のバグを見逃す。
+///
+/// 経緯: 以前ゲートウェイ受信は `agent_id` 列にも送信者 ID を入れており
+/// （`agent_id == speaker_id`）、「`speaker_id != log.agent_id`」という列比較の述語が
+/// Discord / Nostr では常に false になった（当時の該当 4,490 件すべてが `==`）。#377 で
+/// 受信行が `agent_id`＝受信側 に直り列は縮退しなくなったが、正しい述語は今も
+/// `speaker_id != <agent_id 引数>`（[`super::is_user_speech`] 参照）。
 #[cfg(test)]
 mod recent_user_speech_guarantee_tests {
     use super::{build_conversation_string, RECENT_MIN_USER_SPEECHES};
@@ -2588,7 +2591,8 @@ mod recent_user_speech_guarantee_tests {
     const SESSION: &str = "s1";
 
     /// ユーザー発言を**本番と同じ書き手**（`record_inbound_message`）で入れる。
-    /// 行の形（`agent_id` 列 = 送信者 ID）を再現するのがこのテストの肝。
+    /// 行の形（`agent_id` 列＝受信側エージェント / `speaker_id` 列＝送信者、#377）を
+    /// 再現するのがこのテストの肝。
     fn insert_user_speech(conn: &rusqlite::Connection, text: &str) {
         assert!(
             crate::transcript::record_inbound_message(
@@ -2739,11 +2743,20 @@ mod recent_user_speech_guarantee_tests {
         assert!(!out.contains("omitted"));
     }
 
-    /// #286 の回帰そのもの: **Discord/Nostr の行の形**（`agent_id == speaker_id`）でも
-    /// 直近ユーザー発言が優先枠に入ること。
+    /// **Discord/Nostr の行の形**（`record_inbound_message` 経由）でも直近ユーザー発言が
+    /// 優先枠に入ること。fixture は本番と同じ書き手を使い、受信行が `agent_id`＝受信側 /
+    /// `speaker_id`＝送信者（#377）で入ることも下で固定する。
     ///
-    /// 旧述語（`speaker_id != log.agent_id`）ではこの形が常に「エージェント自身の発言」
-    /// と判定され、必須枠が空になっていた（＝ 本番では保証が丸ごと no-op）。
+    /// **このテストはもう #286 を pin していない**（識別力が下がった点は正直に書く）:
+    /// #286 は「受信行が `agent_id == speaker_id` になり、列比較の述語
+    /// `speaker_id != log.agent_id` が恒偽になる」バグだった。#377 で受信行が
+    /// `agent_id != speaker_id`（受信側≠送信者）に直ったため、仮に述語を旧・列比較へ
+    /// 戻しても "kojira" != "a1" で真になり、**このテストは落ちない**。
+    ///
+    /// それでも無防備になった性質は無い: 行の形が直ったので列比較でも正しい答えになる
+    /// （＝ #286 のバグ自体が成立しなくなった）。述語が引数比較であるべきことは
+    /// [`super::is_user_speech`] の doc とその近傍テストが担い、ここは「ゲートウェイ形状の
+    /// 発言が必須枠に載る」という結果だけを固定する。
     #[test]
     fn gateway_shaped_rows_are_recognized_as_user_speech() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -2791,8 +2804,8 @@ mod live_inbound_source_tests {
     const SESSION: &str = "s1";
 
     /// ユーザー発言を本番と同じ書き手（`record_inbound_message`）で入れる。
-    /// この経路の行は `agent_id` 列にも**送信者 ID** が入るため、述語を
-    /// `speaker_id != <agent_id 引数>` に合わせてあることの検査でもある（#286）。
+    /// この経路の行は `agent_id` 列＝受信側エージェント / `speaker_id` 列＝送信者（#377）。
+    /// 述語を `speaker_id != <agent_id 引数>` に合わせてあること（#286）の検査でもある。
     fn insert_user_speech(db: &opencrab_db::Db, text: &str) {
         let conn = db.lock().unwrap();
         assert!(
