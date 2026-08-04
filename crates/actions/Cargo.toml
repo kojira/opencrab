@@ -23,7 +23,7 @@ indexmap = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 opencrab-llm-types = { workspace = true }
 
 [lints]
