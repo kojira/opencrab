@@ -20,7 +20,9 @@
 //!   `[Memory Index]` の注入経路（`build_agent_context`）は通らない。
 //! - **1 エージェント内しか見ない**（他エージェントの記憶を混ぜない）。全クエリが `agent_id` 固定。
 //! - **生ログを消さない・変更しない**（読むだけ / 宣言は派生ノードで `retract` 可逆）。
-//! - **前進のみ**（partial ではマーカーを進めない）。clean 完了時だけ提示した窓の末尾へ進める。
+//! - **位置は前進のみ**（partial では位置を進めない）。clean 完了時だけ提示窓の末尾へ進める。
+//!   ただし **throttle（日次ゲート用の壁時計）は clean/partial に関わらず毎回 `now` へ進める**
+//!   （partial で据え置くと同じ窓のまま tick 毎に再発火して LLM を呼び続けるため / #366 と同型）。
 //! - **既定オフ**。`enabled=false` なら RunRequest すら組まずゼロコールで即 return。
 
 use chrono::{DateTime, Duration, Utc};
@@ -173,15 +175,30 @@ async fn run_declare(
     };
 
     // --- 前進（前進のみ / 位置 + throttle を 1 列に刻む）---
-    // clean 完了時のみ、マーカーを「提示した窓の末尾（`to_id`）」へ進め、throttle 用の壁時計を
-    // `now` に更新する（複合カーソル `"{now}|{to_id}"`）。**提示したら進める**ので、本人が意図的に
-    // 宣言しなかった範囲を毎回拾い直さない（一期一会 / タグ整理ランと同じ流儀）。partial では
-    // 何も書かない（同じ窓を次回に再挑戦。record は範囲不変なので重複宣言してもユニットが増える
-    // だけで壊れず、本人が retract できる）。
-    // **マーカーを進めないと無限ループ**（#374）— clean で必ず `to_id`（> 現カーソル）へ前進する。
-    if clean {
+    // **throttle（壁時計）は clean/partial に関わらず毎回 `now` へ進める。位置は clean のときだけ
+    // 提示窓の末尾（`to_id`）へ進める（partial では据え置き）。** 複合カーソル 1 列の位置部と
+    // throttle 部を別々に扱う。
+    //
+    // なぜ partial でも throttle を進めるか（#366 と同じ理由でタグ整理ランが位置と throttle を
+    // 分離したのと同型）: 日次ゲートは throttle 部で判定する。partial（timeout / ターン上限 /
+    // エラー）で throttle を据え置くと、位置も進まないため**次の maintenance tick（既定 600 秒）で
+    // 同じ窓のまま再発火**し、clean が 1 回通るまで 10 分おきに LLM を呼び続ける（無人・夜間の
+    // 暴走）。throttle を `now` へ進めれば、次 tick は日次ゲートで弾かれ、翌日に同じ窓を再挑戦する。
+    //
+    // 位置を進めるのは clean のときだけ（**提示したら進める**＝本人が意図的に宣言しなかった範囲を
+    // 毎回拾い直さない / 一期一会）。**位置を進めないと無限ループ**（#374）だが、それは clean 側で
+    // 必ず `to_id`（> 現カーソル）へ前進することで塞ぐ。partial で位置据え置きでも throttle が翌日
+    // まで再発火を止めるので暴走しない。record は範囲不変なので、翌日 clean で重複宣言してもユニットが
+    // 増えるだけで壊れず、本人が retract できる。
+    let position = if clean {
+        plan.window.to_id.unwrap_or(plan.cursor_id)
+    } else {
+        plan.cursor_id
+    };
+    let marker_after = format_marker(&now.to_rfc3339(), position);
+    {
         let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-        opencrab_db::queries::set_memory_declare_cursor(&conn, agent_id, &plan.marker_advance_to)?;
+        opencrab_db::queries::set_memory_declare_cursor(&conn, agent_id, &marker_after)?;
     }
 
     // --- 監査（層1: agent_logs / context="sleep"）---
@@ -197,8 +214,10 @@ async fn run_declare(
             "window_session_count": plan.window.session_count,
             "total_remaining": plan.window.total_remaining,
             "session_id": session_id,
-            "marker_advanced": clean,
-            "marker_advanced_to": if clean { Some(plan.marker_advance_to.clone()) } else { None },
+            // 位置は clean のときだけ前進。throttle は毎回 now（partial の再発火を止める）。
+            "position_advanced": clean,
+            "throttle_advanced": true,
+            "marker_after": marker_after,
             "cost": { "latency_ms": latency_ms },
         });
         let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
@@ -237,10 +256,9 @@ struct DeclarePlan {
     survey: HistorySurvey,
     /// すでに宣言した記憶（新しい順 / 最大 [`RECENT_UNITS_SHOWN`] 件）。本人の直近の手癖を示す。
     recent_units: Vec<IndexNodeRow>,
-    /// 現在のマーカー位置（生ログ id）。プロンプトの「ここまで宣言済み」の表示に使う。
+    /// 現在のマーカー位置（生ログ id）。プロンプトの「ここまで宣言済み」の表示・partial 時に
+    /// 位置を据え置く値として使う（clean は `window.to_id` へ進む）。
     cursor_id: i64,
-    /// clean 完了時にマーカーへ刻む複合カーソル `"{now}|{window.to_id}"`。
-    marker_advance_to: String,
 }
 
 /// ゲート判定の結果。
@@ -288,10 +306,10 @@ fn decide_declare(
         return Ok(DeclareDecision::Skip("below_floor"));
     }
     // total_remaining >= 下限 >= 1 なのでマーカーより新しいログが必ず存在し、窓は非空
-    // （from_id / to_id は Some）。防御的に None なら発火しない。
-    let Some(to_id) = window.to_id else {
+    // （from_id / to_id は Some）。防御的に None なら発火しない（clean 前進先が無いため）。
+    if window.to_id.is_none() {
         return Ok(DeclareDecision::Skip("below_floor"));
-    };
+    }
 
     // 地図（生ログ全体の分布 / day 粒度）。集計のみ＝本文は渡さない。
     let survey = opencrab_db::queries::survey_my_history(&conn, agent_id, "day", SURVEY_BUCKETS)?;
@@ -308,7 +326,6 @@ fn decide_declare(
             .map(|a| (a.persona_name, a.personality, a.instructions))
             .unwrap_or_else(|| (agent_id.to_string(), None, String::new()));
 
-    let marker_advance_to = format_marker(&now.to_rfc3339(), to_id);
     Ok(DeclareDecision::Run(Box::new(DeclarePlan {
         persona_name,
         personality,
@@ -317,7 +334,6 @@ fn decide_declare(
         survey,
         recent_units,
         cursor_id,
-        marker_advance_to,
     })))
 }
 
@@ -577,9 +593,8 @@ mod tests {
                 assert_eq!(plan.window.from_id, Some(ids[0]), "窓は最古から");
                 assert_eq!(plan.window.to_id, Some(ids[2]));
                 assert_eq!(plan.window.total_remaining, 5, "未宣言の総数は 5");
-                // clean 前進先は "{now}|{to_id}"。
-                let (_, adv) = parse_marker(Some(&plan.marker_advance_to));
-                assert_eq!(adv, ids[2]);
+                // clean 前進先は窓末尾（to_id）。
+                assert_eq!(plan.window.to_id, Some(ids[2]));
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -796,20 +811,24 @@ mod tests {
         .unwrap();
         assert!(ran);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "ターンは 1 回");
-        // clean → マーカーが提示窓の末尾（3 件目）へ進む。max_logs=3 なので to は ids[2]。
+        // clean → 位置が提示窓の末尾（3 件目）へ進む。max_logs=3 なので to は ids[2]。
         let marker = get_marker(&state, "a1").expect("マーカーが立つ");
         let (_, cursor) = parse_marker(Some(&marker));
         assert_eq!(cursor, to_id - 2, "窓末尾（3 件目）へ前進");
         let audit = latest_sleep_audit(&state).expect("監査ログ");
         assert_eq!(audit["outcome"], "completed");
-        assert_eq!(audit["marker_advanced"], true);
+        assert_eq!(audit["position_advanced"], true);
+        assert_eq!(audit["throttle_advanced"], true);
     }
 
+    /// partial（ターン上限）: **位置は据え置き・throttle は now へ前進**。その結果、次 tick は
+    /// 日次ゲートで弾かれ、同じ窓で再発火しない（#366 と同型の暴走防止 / 無人の連続失敗を止める）。
     #[tokio::test]
-    async fn partial_run_holds_marker() {
+    async fn partial_holds_position_but_advances_throttle() {
         let state = crate::test_app_state();
-        seed_passing_gate(&state);
-        let before = get_marker(&state, "a1");
+        seed_passing_gate(&state); // marker = "{48h前}|0"
+        let (before_run, before_pos) = parse_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(before_pos, 0);
         let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
         let ran = run_declare(
             &state.db,
@@ -821,21 +840,30 @@ mod tests {
         .await
         .unwrap();
         assert!(ran, "起動はした（partial でも true）");
-        assert_eq!(
-            get_marker(&state, "a1"),
-            before,
-            "partial ではマーカーを進めない"
-        );
+        let (after_run, after_pos) = parse_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(after_pos, 0, "partial では位置を進めない（据え置き）");
+        // throttle は now へ進んだ（48h 前より新しい）。
+        let before_dt = before_run.unwrap().parse::<DateTime<Utc>>().unwrap();
+        let after_dt = after_run.unwrap().parse::<DateTime<Utc>>().unwrap();
+        assert!(after_dt > before_dt, "partial でも throttle は now へ進む");
         let audit = latest_sleep_audit(&state).expect("監査ログ");
         assert_eq!(audit["outcome"], "stopped_by_limit");
-        assert_eq!(audit["marker_advanced"], false);
+        assert_eq!(audit["position_advanced"], false);
+        assert_eq!(audit["throttle_advanced"], true);
+        // 次 tick は日次ゲートで弾かれる（10 分後の再発火を止める）。
+        let d = decide_declare(&state.db, &cfg(true, 3, 2), "a1").unwrap();
+        assert!(
+            matches!(d, DeclareDecision::Skip("interval_not_elapsed")),
+            "partial 直後は throttle で弾かれ再発火しない"
+        );
     }
 
+    /// error（run 自体の失敗）も partial と同じ: 位置据え置き・throttle 前進・次 tick はゲート。
     #[tokio::test]
-    async fn errored_run_holds_marker() {
+    async fn error_holds_position_but_advances_throttle() {
         let state = crate::test_app_state();
         seed_passing_gate(&state);
-        let before = get_marker(&state, "a1");
+        let (before_run, _) = parse_marker(get_marker(&state, "a1").as_deref());
         let fake = FakeRunner::new(FakeOutcome::Error);
         run_declare(
             &state.db,
@@ -846,9 +874,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(get_marker(&state, "a1"), before, "error では進めない");
+        let (after_run, after_pos) = parse_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(after_pos, 0, "error では位置を進めない");
+        let before_dt = before_run.unwrap().parse::<DateTime<Utc>>().unwrap();
+        let after_dt = after_run.unwrap().parse::<DateTime<Utc>>().unwrap();
+        assert!(after_dt > before_dt, "error でも throttle は now へ進む");
         let audit = latest_sleep_audit(&state).expect("監査ログ");
         assert_eq!(audit["outcome"], "error");
+        assert_eq!(audit["position_advanced"], false);
+        // 次 tick はゲートで弾かれる。
+        let d = decide_declare(&state.db, &cfg(true, 3, 2), "a1").unwrap();
+        assert!(matches!(d, DeclareDecision::Skip("interval_not_elapsed")));
     }
 
     /// マーカーが前進し、次回は次の窓を提示する（提示済みを二度出さない = 無限ループしない）。
