@@ -1133,9 +1133,13 @@ const MIGRATIONS: &[Migration] = &[
             // 異常に気づけるようにする（正常系は末尾の `DROP` で必ず消える。途中失敗時も
             // temp DB は同一トランザクションに参加するので巻き戻る）。
             //
-            // 相関サブクエリの `LIMIT 1` は ORDER BY 無しだが曖昧にならない。ある agent_id が
-            // 別の agent_id の接頭辞になって初めて 2 件 match し得るところ、`agents.agent_id`
-            // は同じ長さの UUID なので接頭辞関係が成立しない（本番実測でも複数 match は 0 行）。
+            // 相関サブクエリの `LIMIT 1` は ORDER BY 無しなので、2 件以上 match すると黙って
+            // 片方を選ぶ。2 件 match し得るのは、ある agent_id が別の agent_id の接頭辞に
+            // なっている場合だけ。**これを構造的に排除する仕組みは無い**（`agents.agent_id` は
+            // UUID 形とは限らず、本番にも UUID 形でないものが実在する）。担保は構造ではなく
+            // **実測**である: 本番実測で、接頭辞関係にある agent_id の組は 0 組、述語に掛かる
+            // 行のうち 2 件以上の agent に match する行は 0 行、非 UUID 形の agent_id を含む
+            // session_id の行も 0 行だった。**agent_id の形が今後増える場合はここを再確認する。**
             conn.execute_batch(
                 "CREATE TEMP TABLE _v32_inbound_remap AS
                  SELECT ms.id AS row_id,
@@ -3988,14 +3992,25 @@ mod migration_tests {
         );
 
         // watermark が対象行より先行している状態（本番がこれ）では、付け替えても索引ビルド
-        // 入力には 1 行も載らない。v32 の効き目が FTS 検索に限られることを明示的に固定する。
-        let watermark: i64 = conn
-            .query_row("SELECT MAX(id) FROM memory_sessions", [], |r| r.get(0))
-            .unwrap();
+        // 入力には載らない。v32 の効き目が FTS 検索に限られることを明示的に固定する。
+        //
+        // watermark は**付け替え対象の最大 id**（=(3)）にする。全体の MAX(id) にすると結果が
+        // 必ず空になり、付け替えが 1 行も起きていなくても通る空回りのテストになる。(3) を境に
+        // すれば recipient 名義の (5)(6)(7) は結果に残るので、「クエリが何も返していないだけ」
+        // ではなく「付け替え行**だけ**が watermark に切られている」ことを固定できる。
+        let above_watermark = get_unindexed_session_logs(&conn, recipient, id_nostr2, 100).unwrap();
         assert!(
-            get_unindexed_session_logs(&conn, recipient, watermark, 100)
-                .unwrap()
-                .is_empty(),
+            above_watermark
+                .iter()
+                .any(|r| r.content == "newform inbound elder"),
+            "watermark より上の受信側名義行は載る（フィルタが空を返しているだけではない証拠）"
+        );
+        assert!(
+            !above_watermark
+                .iter()
+                .any(|r| r.content == "discord inbound apple"
+                    || r.content == "nostr inbound banana"
+                    || r.content == "nostr inbound cherry"),
             "watermark 先行下では付け替え行は索引ビルド入力に載らない（#380 の残課題）"
         );
 
