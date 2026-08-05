@@ -20,9 +20,14 @@
 //!   `[Memory Index]` の注入経路（`build_agent_context`）は通らない。
 //! - **1 エージェント内しか見ない**（他エージェントの記憶を混ぜない）。全クエリが `agent_id` 固定。
 //! - **生ログを消さない・変更しない**（読むだけ / 宣言は派生ノードで `retract` 可逆）。
-//! - **位置は前進のみ**（partial では位置を進めない）。clean 完了時だけ提示窓の末尾へ進める。
+//! - **位置は前進のみ**（partial では位置を進めない）。clean 完了時だけ前へ進める。
 //!   ただし **throttle（日次ゲート用の壁時計）は clean/partial に関わらず毎回 `now` へ進める**
 //!   （partial で据え置くと同じ窓のまま tick 毎に再発火して LLM を呼び続けるため / #366 と同型）。
+//! - **窓の境界と広さも本人が決める**（#394）。「どこからどこまでが一つの記憶か」を本人が決める
+//!   設計なのに、窓だけは機械が固定で切っていた。`plan_next_memory_window` で次回の開始位置
+//!   （＝オーバーラップ）と窓の広さを表明でき、ランの側はそれを**前進の下限
+//!   （[`MIN_ADVANCE_DIVISOR`]）と上限（[`MAX_ADVANCE_WINDOWS`]）へ丸めてから**使う。
+//!   丸めがあるので、宣言ゼロ・指定なし・現在位置以下の指定でも**必ず前進する**。
 //! - **既定オフ**。`enabled=false` なら RunRequest すら組まずゼロコールで即 return。
 
 use chrono::{DateTime, Duration, Utc};
@@ -68,9 +73,29 @@ pub const DECLARE_ALLOWED_TOOLS: &[&str] = &[
     // 記憶の単位の記録 / 取り消し（段階2 で初めて渡す）
     "record_memory_unit",
     "retract_memory_unit",
+    // 次回の窓（境界と広さ）を本人が決める（#394）
+    "plan_next_memory_window",
     // ラン制御（ターンを終える宣言のみ）
     "declare_done",
 ];
+
+/// 本人が窓の位置を指定しても、clean 完了時には**最低でも提示窓の何分の 1 かは必ず前へ進む**
+/// ——その分母（#394）。
+///
+/// カーソルを完全に本人任せにすると、宣言ゼロ・同じ位置の指定・現在位置以下の指定で**同じ窓を
+/// 永久に再取得するループ**に入る（#374 で実際に踏んだ罠）。かといって「1 件でも進めば良い」に
+/// すると、窓 300 に対して 1 件ずつしか進まないラン（＝実質ループ）を止められない。提示した窓の
+/// 1/3 を下限にすると、**どんな指定でも 1 つの窓は最悪 3 ラン（日次なら 3 日）で必ず抜ける**一方、
+/// 「続いている出来事の末尾を次回へ回す」用途には窓の 2/3 まで使える。
+const MIN_ADVANCE_DIVISOR: i64 = 3;
+
+/// 本人が指定できるカーソルの**上限**を、提示窓の何倍の件数までにするか（#394）。
+///
+/// `record_memory_unit` は窓に縛られないので、本人は窓の終端を越えた範囲を宣言できる。その分を
+/// 次の窓から外すには終端より先を指せる必要がある。一方で桁違いの値（総ログ数を越える id 等）を
+/// そのまま呑むと、**読んでいない生ログを丸ごと飛ばして二度と窓に入らない**。窓 1 つぶんの
+/// 越境（＝合計 2 窓ぶん）まで許せば「越えて宣言した続きから」は成立し、それ以上の飛ばしは起きない。
+const MAX_ADVANCE_WINDOWS: i64 = 2;
 
 /// このエージェントの宣言ランを（ゲートを満たせば）実行する。**本番エントリ**。
 ///
@@ -194,8 +219,26 @@ async fn run_declare(
     // 必ず `to_id`（> 現カーソル）へ前進することで塞ぐ。partial で位置据え置きでも throttle が翌日
     // まで再発火を止めるので暴走しない。record は範囲不変なので、翌日 clean で重複宣言してもユニットが
     // 増えるだけで壊れず、本人が retract できる。
+    //
+    // **窓の終端は既定であって決定ではない**（#394）。本人がターン中に
+    // `plan_next_memory_window(next_from_id=...)` で「次はここから」を表明していれば、その
+    // 手前（`next_from_id - 1`）を位置にする。ただし必ず `[min_position, max_position]` へ
+    // 丸める（下限＝提示窓の 1/3 は必ず進む・上限＝2 窓ぶんより先へは飛ばない）。指定が無い・
+    // 宣言ゼロ・現在位置以下の指定は、いずれもこの丸めで下限以上へ引き上げられる＝**必ず前進**。
+    let requested = {
+        let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        opencrab_db::queries::get_memory_declare_window(&conn, agent_id)?
+    };
+    let requested_next_from_id = requested.as_ref().and_then(|p| p.next_from_id);
+    let requested_note = requested.as_ref().and_then(|p| p.note.clone());
     let position = if clean {
-        plan.window.to_id.unwrap_or(plan.cursor_id)
+        match requested_next_from_id {
+            // 次の窓が `next_from_id` から始まる ⇔ カーソル（提示し終えた末尾）はその 1 つ手前。
+            Some(next_from) => {
+                (next_from.saturating_sub(1)).clamp(plan.min_position, plan.max_position)
+            }
+            None => plan.window.to_id.unwrap_or(plan.cursor_id),
+        }
     } else {
         plan.cursor_id
     };
@@ -203,6 +246,16 @@ async fn run_declare(
     {
         let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         opencrab_db::queries::set_memory_declare_cursor(&conn, agent_id, &marker_after)?;
+
+        // 位置の希望は**このランで使い切る**（clean / partial を問わず消す）。残すと、次の窓を
+        // 見てもいない過去の指定が後のランのカーソルを引き戻し続ける。広さ（`window_size`）は
+        // 本人の設定なので消さない（sticky / 本人が上書きするまで効く）。
+        if let Some(mut p) = requested {
+            if p.next_from_id.is_some() {
+                p.next_from_id = None;
+                opencrab_db::queries::set_memory_declare_window(&conn, agent_id, Some(&p))?;
+            }
+        }
     }
 
     // --- 監査（層1: agent_logs / context="sleep"）---
@@ -218,6 +271,14 @@ async fn run_declare(
             "window_session_count": plan.window.session_count,
             "total_remaining": plan.window.total_remaining,
             "session_id": session_id,
+            // 窓の広さ（本人の希望か config 既定か）と、位置の希望・丸めの範囲（#394）。
+            "window_size": plan.window_size,
+            "window_size_preferred": plan.preferred_window_size,
+            "requested_next_from_id": requested_next_from_id,
+            "position": position,
+            "position_min": plan.min_position,
+            "position_max": plan.max_position,
+            "window_note": requested_note,
             // 位置は clean のときだけ前進。throttle は毎回 now（partial の再発火を止める）。
             "position_advanced": clean,
             "throttle_advanced": true,
@@ -261,8 +322,19 @@ struct DeclarePlan {
     /// すでに宣言した記憶（新しい順 / 最大 [`RECENT_UNITS_SHOWN`] 件）。本人の直近の手癖を示す。
     recent_units: Vec<IndexNodeRow>,
     /// 現在のマーカー位置（生ログ id）。プロンプトの「ここまで宣言済み」の表示・partial 時に
-    /// 位置を据え置く値として使う（clean は `window.to_id` へ進む）。
+    /// 位置を据え置く値として使う（clean は既定で `window.to_id` へ進む）。
     cursor_id: i64,
+    /// 今回の窓の広さ（生ログ件数）。本人の希望（sticky）があればそれ、無ければ config の
+    /// `max_logs`。プロンプトにも出して、本人が「広い/狭い」を判断できるようにする（#394）。
+    window_size: i64,
+    /// 本人が既に表明している窓の広さ（sticky）。未表明なら `None`（＝ config の既定で走っている）。
+    preferred_window_size: Option<i64>,
+    /// clean 完了時にカーソルを置ける**下限**（＝ここまでは必ず前進する / #394）。
+    /// 提示窓の `1/MIN_ADVANCE_DIVISOR` 件目の生ログ id。窓が小さければ窓の終端。
+    min_position: i64,
+    /// clean 完了時にカーソルを置ける**上限**（#394）。提示窓の `MAX_ADVANCE_WINDOWS` 倍の
+    /// 件数ぶん先の生ログ id。それより先に生ログが無ければ最後の id。
+    max_position: i64,
 }
 
 /// ゲート判定の結果。
@@ -300,9 +372,22 @@ fn decide_declare(
         }
     }
 
-    // 未宣言の窓（マーカーより新しい生ログを id 昇順で最大 max_logs 件）。
-    let window =
-        opencrab_db::queries::declare_window(&conn, agent_id, cursor_id, cfg.max_logs.max(1))?;
+    // 窓の広さ: 本人が `plan_next_memory_window` で表明していればそれ、無ければ config の既定
+    // （#394）。**config の既定は変えない**——本人が表明したときだけ、その値を上下限へ丸めて
+    // 使う（未表明のエージェントは従来どおり `max_logs` そのままで走る）。上限は運用の設定より
+    // 狭くならないよう `max` を取る（`max_logs` を 600 超に設定した運用を勝手に絞らない）。
+    let pref = opencrab_db::queries::get_memory_declare_window(&conn, agent_id)?;
+    let preferred_window_size = pref.as_ref().and_then(|p| p.window_size);
+    let window_size = match preferred_window_size {
+        Some(v) => v.clamp(
+            opencrab_actions::memory_units::DECLARE_WINDOW_MIN,
+            opencrab_actions::memory_units::DECLARE_WINDOW_MAX.max(cfg.max_logs),
+        ),
+        None => cfg.max_logs.max(1),
+    };
+
+    // 未宣言の窓（マーカーより新しい生ログを id 昇順で最大 window_size 件）。
+    let window = opencrab_db::queries::declare_window(&conn, agent_id, cursor_id, window_size)?;
 
     // ゲート2: 発火の下限。マーカーより新しい未宣言ログが下限に達しないと発火しない
     // （薄い材料で走らせない / #313 の実測: 20 件では抽象タグしか出なかった）。0 件もここで弾く。
@@ -314,6 +399,26 @@ fn decide_declare(
     if window.to_id.is_none() {
         return Ok(DeclareDecision::Skip("below_floor"));
     }
+
+    // カーソルを置ける下限・上限（#394）。**窓と同じ時点で決める**（ターン中に増えた生ログに
+    // 影響されないため）。id の差ではなく**生ログの件数**で測る（id は全エージェント共通の採番
+    // なので、1 エージェントぶんの間隔は疎ら）。
+    //
+    // 窓が非空（`to_id` が Some）なのは上のゲートで確定しているので、両方とも必ず Some になる。
+    // 防御的に None のときは窓の終端（＝従来の挙動）へ倒す。
+    let window_end = window.to_id.unwrap_or(cursor_id);
+    // 切り上げ除算（`i64::div_ceil` は unstable なので手で書く。log_count >= 0）。
+    let min_advance = ((window.log_count + MIN_ADVANCE_DIVISOR - 1) / MIN_ADVANCE_DIVISOR).max(1);
+    let min_position =
+        opencrab_db::queries::nth_log_id_after(&conn, agent_id, cursor_id, min_advance)?
+            .unwrap_or(window_end);
+    let max_position = opencrab_db::queries::nth_log_id_after(
+        &conn,
+        agent_id,
+        cursor_id,
+        window.log_count.saturating_mul(MAX_ADVANCE_WINDOWS).max(1),
+    )?
+    .unwrap_or(window_end);
 
     // 地図（生ログ全体の分布 / day 粒度）。集計のみ＝本文は渡さない。
     let survey = opencrab_db::queries::survey_my_history(&conn, agent_id, "day", SURVEY_BUCKETS)?;
@@ -338,6 +443,10 @@ fn decide_declare(
         survey,
         recent_units,
         cursor_id,
+        window_size,
+        preferred_window_size,
+        min_position,
+        max_position,
     })))
 }
 
@@ -398,6 +507,7 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
          - `search_my_history`: 生ログを全文検索する（関連する場面を探す）\n\
          - `record_memory_unit(from_id, to_id, title, summary?, tags?)`: 範囲を一つの記憶として宣言する\n\
          - `retract_memory_unit(unit_id)`: 宣言を取り消す\n\
+         - `plan_next_memory_window(next_from_id?, window_size?, note?)`: 次回の範囲の始まりと広さを決める\n\
          メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶を宣言する時間です。\
          生ログは読むだけで、消えも変わりもしません。宣言は何度でもやり直せます。\n\
          【サイズの約束】1 回のツール結果が inline_limit_tokens（約 2,500 トークン）を超えると本文は捨てられます。\
@@ -407,9 +517,31 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
          この範囲の生ログには、まだあなたの記憶の単位が宣言されていません。ここを読んで、あなたに\
          とっての「一つの記憶」を宣言してください。セッションの切れ目・話題の切れ目・気持ちの切れ目、\
          どれを単位にするかはあなた次第です。（この範囲のセッション数の目安: {sessions}）\n\n\
+         # 範囲の切り方もあなたが決められます\n\
+         この「今回の範囲」は初期値にすぎません。`plan_next_memory_window` で次回に持ち越せます。\n\
+         - **まだ続いている出来事**が範囲の途中から始まっているなら、そこで宣言せず\
+         `plan_next_memory_window(next_from_id=その先頭の id)` を呼んでください。そこから先は\
+         次回もう一度この範囲に現れます（呼ばなければ、宣言しなかった末尾は二度と現れません）。\n\
+         - 範囲の**終わりを越えて**宣言したときも、`next_from_id` を宣言の続きの id にすれば、\
+         次回が宣言済みと重なりません。\n\
+         - 位置の指定は必ず前へ進むよう丸められます（今回は id {min_pos} 〜 {max_pos} の範囲に収まります）。\n\
+         - **範囲の広さ自体**も変えられます。今回は {size} 件です{size_src}。材料が薄くて\
+         出来事が拾いきれないと感じたら `window_size` を大きく、濃すぎて丁寧に見られないと\
+         感じたら小さくしてください（{size_min}〜{size_max} 件）。一度決めると変えるまで効き続けます。\n\
+         どちらも義務ではありません。今のままで良ければ呼ばなくて構いません。\n\n\
          # すでに宣言した記憶（最近のもの）\n{units_txt}",
         count = w.log_count,
         sessions = w.session_count,
+        min_pos = plan.min_position.saturating_add(1),
+        max_pos = plan.max_position.saturating_add(1),
+        size = plan.window_size,
+        size_src = if plan.preferred_window_size.is_some() {
+            "（あなたが決めた広さ）"
+        } else {
+            "（既定の広さ）"
+        },
+        size_min = opencrab_actions::memory_units::DECLARE_WINDOW_MIN,
+        size_max = opencrab_actions::memory_units::DECLARE_WINDOW_MAX,
     ) + &instructions_section
 }
 
@@ -506,6 +638,7 @@ fn parse_marker(marker: Option<&str>) -> (Option<String>, i64) {
 mod tests {
     use super::*;
     use opencrab_core::EngineResult;
+    use opencrab_db::queries::DeclareWindowPref;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // --- セットアップ ---
@@ -766,6 +899,9 @@ mod tests {
         outcome: FakeOutcome,
         calls: AtomicUsize,
         captured: std::sync::Mutex<Option<CapturedReq>>,
+        /// ターン中に本人が `plan_next_memory_window` を呼んだ状況を模す（#394）。
+        /// 道具は DB へ書くだけなので、ここで同じ列へ書けば本番と同じ経路を通る。
+        writes_pref: Option<(opencrab_db::Db, DeclareWindowPref)>,
     }
 
     struct CapturedReq {
@@ -782,7 +918,14 @@ mod tests {
                 outcome,
                 calls: AtomicUsize::new(0),
                 captured: std::sync::Mutex::new(None),
+                writes_pref: None,
             }
+        }
+
+        /// ターン中に本人が窓の希望を表明する版（#394）。
+        fn with_pref(mut self, state: &AppState, pref: DeclareWindowPref) -> Self {
+            self.writes_pref = Some((state.db.clone(), pref));
+            self
         }
     }
 
@@ -797,6 +940,10 @@ mod tests {
                 has_gateway_actions: req.gateway_actions.is_some(),
                 persist_turn_logs: req.persist_turn_logs,
             });
+            if let Some((db, pref)) = &self.writes_pref {
+                let conn = db.lock().unwrap();
+                opencrab_db::queries::set_memory_declare_window(&conn, "a1", Some(pref)).unwrap();
+            }
             match self.outcome {
                 FakeOutcome::Completed => Ok(engine_result(false)),
                 FakeOutcome::StoppedByLimit => Ok(engine_result(true)),
@@ -1133,5 +1280,406 @@ mod tests {
         let units = opencrab_db::queries::list_memory_units(&conn, "a1").unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].node_type, "unit");
+    }
+
+    // ---- #394: 窓の境界と広さを本人が決める（前進の保証つき）----
+
+    fn cursor_of(state: &AppState) -> i64 {
+        parse_marker(get_marker(state, "a1").as_deref()).1
+    }
+
+    fn get_pref(state: &AppState) -> Option<DeclareWindowPref> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_memory_declare_window(&conn, "a1").unwrap()
+    }
+
+    /// 位置の希望だけを持つ `DeclareWindowPref`。
+    fn want_next_from(id: i64) -> DeclareWindowPref {
+        DeclareWindowPref {
+            next_from_id: Some(id),
+            ..Default::default()
+        }
+    }
+
+    /// ゲートが通る状態に `n` 件の生ログを積む（cursor=0 / 間隔 OK）。id を返す。
+    fn seed_window(state: &AppState, n: usize) -> Vec<i64> {
+        let ids = seed_logs(state, "a1", "s1", n);
+        set_marker(state, "a1", &format_marker(&hours_ago(48), 0));
+        ids
+    }
+
+    /// **前進の保証(1)**: 何も表明しない（宣言ゼロ相当）ラン。従来どおり窓の終端へ進む。
+    #[tokio::test]
+    async fn no_request_advances_to_window_end() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 9);
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), ids[8], "希望が無ければ窓の終端へ");
+    }
+
+    /// **前進の保証(2)**: 本人が現在位置以下（＝巻き戻し）を指定しても、必ず前へ進む。
+    /// これを落とすと同じ窓を永久に再取得するループに入る（#374）。
+    #[tokio::test]
+    async fn request_at_or_below_cursor_still_advances() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 9);
+        // cursor は 0。「次は id 1 から」＝ 1 件も進めない要求。
+        let fake =
+            FakeRunner::new(FakeOutcome::Completed).with_pref(&state, want_next_from(ids[0]));
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        // 下限（提示窓 9 件の 1/3 = 3 件目）まで引き上げられる。
+        assert_eq!(cursor_of(&state), ids[2], "下限まで必ず前進する");
+        assert!(cursor_of(&state) > 0, "前進していない（無限ループの入口）");
+
+        // 次のランは進んだ先から始まる（同じ窓を再取得しない）。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        match decide_declare(&state.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.window.from_id, Some(ids[3])),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// **前進の保証(3)**: 0 や負の指定（モデルが空値で埋めた形）でも下限まで進む。
+    #[tokio::test]
+    async fn nonsense_request_still_advances() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 9);
+        let fake = FakeRunner::new(FakeOutcome::Completed).with_pref(
+            &state,
+            DeclareWindowPref {
+                next_from_id: Some(-42),
+                ..Default::default()
+            },
+        );
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), ids[2], "壊れた指定でも下限まで前進する");
+    }
+
+    /// 本来の用途: **続いている出来事の末尾を次回へ回す**。窓の途中を指せばそこから次回に現れる。
+    #[tokio::test]
+    async fn request_inside_window_rolls_the_tail_over() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 9);
+        // 「id ids[5] から先はまだ続いているので次回に回したい」
+        let fake =
+            FakeRunner::new(FakeOutcome::Completed).with_pref(&state, want_next_from(ids[5]));
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), ids[4], "指した id の 1 つ手前で止まる");
+
+        // 翌日: 回した末尾（ids[5..]）がちゃんともう一度現れる（従来は二度と現れなかった）。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        match decide_declare(&state.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => {
+                assert_eq!(plan.window.from_id, Some(ids[5]), "末尾が次の窓に戻る");
+                assert_eq!(plan.window.to_id, Some(ids[8]));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+        let audit = latest_sleep_audit(&state).expect("監査ログ");
+        assert_eq!(audit["requested_next_from_id"], json!(ids[5]));
+        assert_eq!(audit["position"], json!(ids[4]));
+    }
+
+    /// **上限**: 窓の終端を大きく越える指定でも、2 窓ぶんより先へは飛ばない（未読を丸ごと
+    /// 飛ばして二度と窓に入らないのを防ぐ）。
+    #[tokio::test]
+    async fn request_far_beyond_window_is_capped() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 40);
+        let fake =
+            FakeRunner::new(FakeOutcome::Completed).with_pref(&state, want_next_from(999_999));
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        // 窓は 9 件。上限は 2 窓ぶん = 18 件目。
+        assert_eq!(cursor_of(&state), ids[17], "上限（2 窓ぶん）で止まる");
+        // 残りは失われていない。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        match decide_declare(&state.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.window.total_remaining, 22),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 窓の終端を**少しだけ**越えた指定（越境して宣言した続きから）はそのまま通る。
+    #[tokio::test]
+    async fn request_just_past_window_end_is_honored() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 20);
+        // 窓は 9 件（ids[0..9]）。本人は ids[10] まで宣言したので「次は ids[11] から」。
+        let fake =
+            FakeRunner::new(FakeOutcome::Completed).with_pref(&state, want_next_from(ids[11]));
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), ids[10], "越境した宣言のぶんは重複しない");
+    }
+
+    /// **partial では据え置き**（既存の挙動を壊さない）。位置の希望はランで使い切って消える。
+    #[tokio::test]
+    async fn partial_holds_position_even_with_request_and_consumes_it() {
+        let state = crate::test_app_state();
+        seed_window(&state, 9);
+        let fake = FakeRunner::new(FakeOutcome::StoppedByLimit).with_pref(
+            &state,
+            DeclareWindowPref {
+                next_from_id: Some(5),
+                window_size: Some(120),
+                ..Default::default()
+            },
+        );
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), 0, "partial では位置を進めない");
+        let pref = get_pref(&state).expect("希望の行は残る");
+        assert_eq!(pref.next_from_id, None, "位置の希望はランで使い切る");
+        assert_eq!(pref.window_size, Some(120), "広さは残る（sticky）");
+    }
+
+    /// 位置の希望は clean でも使い切る（過去の指定が後のランを引き戻し続けない）。
+    #[tokio::test]
+    async fn position_request_is_consumed_after_clean_run() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 9);
+        let fake =
+            FakeRunner::new(FakeOutcome::Completed).with_pref(&state, want_next_from(ids[5]));
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(get_pref(&state).unwrap().next_from_id, None);
+
+        // 2 回目（希望なし）は窓の終端まで進む＝古い指定が生き残っていない。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        let fake2 = FakeRunner::new(FakeOutcome::Completed);
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), ids[8]);
+    }
+
+    /// **窓の広さ**: 本人の表明が次の窓に効き、上下限へ丸められる。表明が無ければ config の既定
+    /// のまま（既定値は変えない）。
+    #[test]
+    fn preferred_window_size_resizes_next_window_within_bounds() {
+        let state = crate::test_app_state();
+        seed_window(&state, 200);
+        let c = cfg(true, 100, 1);
+
+        // 表明なし: config の既定（100）。既定が下限 50 を下回る設定でも丸めない。
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => {
+                assert_eq!(plan.window_size, 100);
+                assert_eq!(plan.window.log_count, 100);
+                assert_eq!(plan.preferred_window_size, None);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+        match decide_declare(&state.db, &cfg(true, 20, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(
+                plan.window_size, 20,
+                "表明が無ければ config の既定をそのまま使う（既定値を変えない）"
+            ),
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        // 広げる（薄かったので次はもっと広く）。
+        let set = |size: i64| {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_memory_declare_window(
+                &conn,
+                "a1",
+                Some(&DeclareWindowPref {
+                    window_size: Some(size),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        };
+        set(150);
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => {
+                assert_eq!(plan.window_size, 150);
+                assert_eq!(plan.window.log_count, 150, "実際の窓が広がる");
+                assert_eq!(plan.preferred_window_size, Some(150));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        // 狭める。
+        set(60);
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.window.log_count, 60),
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        // 上限・下限で丸める（プロンプトが肥大しない / 前進が止まらない）。
+        set(100_000);
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(
+                plan.window_size,
+                opencrab_actions::memory_units::DECLARE_WINDOW_MAX
+            ),
+            other => panic!("expected Run, got {other:?}"),
+        }
+        set(1);
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(
+                plan.window_size,
+                opencrab_actions::memory_units::DECLARE_WINDOW_MIN
+            ),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 運用が `max_logs` を上限より大きく設定している場合、本人の表明でそれより狭められることは
+    /// あっても、上限のせいで運用の設定より狭くなることは無い。
+    #[test]
+    fn preferred_window_size_ceiling_never_undercuts_config() {
+        let state = crate::test_app_state();
+        seed_window(&state, 60);
+        let big = opencrab_actions::memory_units::DECLARE_WINDOW_MAX + 400;
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_memory_declare_window(
+                &conn,
+                "a1",
+                Some(&DeclareWindowPref {
+                    window_size: Some(big),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+        match decide_declare(&state.db, &cfg(true, big, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.window_size, big),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 丸めの下限・上限は**窓と同じ時点**で決まり、生ログの件数で測られる。
+    #[test]
+    fn position_bounds_are_measured_in_rows() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 40);
+        match decide_declare(&state.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => {
+                assert_eq!(plan.min_position, ids[2], "窓 9 件の 1/3 = 3 件目");
+                assert_eq!(plan.max_position, ids[17], "窓 9 件の 2 倍 = 18 件目");
+                assert!(plan.min_position <= plan.window.to_id.unwrap());
+                assert!(plan.max_position >= plan.window.to_id.unwrap());
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+        // 生ログが 2 窓ぶんに満たないときは、上限は「あるだけ」（最後の id）。
+        let state2 = crate::test_app_state();
+        let ids2 = seed_window(&state2, 12);
+        match decide_declare(&state2.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.max_position, ids2[11]),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// プロンプトに「窓は自分で調整できる」ことが**書いてある**（道具を足しても説明が無ければ
+    /// 使われない）。今回の広さと、丸めの範囲も示す。
+    #[test]
+    fn system_prompt_explains_window_control() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 9);
+        let plan = match decide_declare(&state.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        let sp = build_system_prompt(&plan);
+        assert!(sp.contains("plan_next_memory_window"), "道具名が無い");
+        assert!(
+            sp.contains("範囲の切り方もあなたが決められます"),
+            "説明が無い"
+        );
+        assert!(sp.contains("next_from_id"), "持ち越しの指定方法が無い");
+        assert!(sp.contains("window_size"), "広さの変え方が無い");
+        // 今回の広さ（9 件）と既定/本人の別。
+        assert!(sp.contains("今回は 9 件です（既定の広さ）"));
+        // 丸めの範囲は next_from_id として指せる値（＝位置 + 1）で示す。
+        assert!(sp.contains(&format!("id {} 〜 {}", ids[2] + 1, ids[8] + 1)));
     }
 }

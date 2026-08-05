@@ -384,6 +384,10 @@ fn default_mo_timeout_secs() -> u64 {
 /// `max_logs`（1 回で提示する未宣言ログの枠）・`min_new_logs`（発火下限）・`min_interval_minutes`
 /// （日次ゲート）は**実測してから既定を確定する**ため config 可変にする。既定は #313 の実測に
 /// 倣う: 20 件では材料が薄く抽象タグしか出ず、100 件で情緒の軸が出た → 枠 100・下限 100。
+///
+/// `max_logs` は**枠の既定**であって固定値ではない（#394）。エージェント本人が
+/// `plan_next_memory_window` で広さを表明していれば、そちらが（上下限へ丸めた上で）優先される。
+/// 未表明のエージェントはここの値でそのまま走る。
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryDeclareConfig {
     /// 宣言ラン全体の on/off。既定 false。

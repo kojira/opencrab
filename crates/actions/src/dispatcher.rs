@@ -64,6 +64,8 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(ReadMyHistoryAction));
         dispatcher.register(Arc::new(RecordMemoryUnitAction));
         dispatcher.register(Arc::new(RetractMemoryUnitAction));
+        // 宣言ランの窓（境界と広さ）を本人が決める（#394）。同じく TRUSTED_ONLY。
+        dispatcher.register(Arc::new(PlanNextMemoryWindowAction));
 
         // LLM関連アクション登録
         dispatcher.register(Arc::new(SelectLlmAction));

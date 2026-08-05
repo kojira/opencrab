@@ -6,9 +6,12 @@
 //! （`node_type='topic'`）とは別 `node_type` なので、索引ビルド・タグ整理・月次ロールアップの
 //! worklist へ**構造的に混ざらない**（#379 監査で確定）。
 //!
-//! 4 つとも **TRUSTED_ONLY**（`bridge::TRUSTED_ONLY_ACTIONS`）で Nostr（caller=Agent）からは
+//! 全て **TRUSTED_ONLY**（`bridge::TRUSTED_ONLY_ACTIONS`）で Nostr（caller=Agent）からは
 //! list_tools に出ず dispatch でも拒否される。読み取り 2 つ（survey / read）は整理ラン用の
 //! `ORGANIZE_ALLOWED_TOOLS` にも入る。記録 2 つ（record / retract）は段階2 まで入れない。
+//!
+//! #394 で 5 つ目 `plan_next_memory_window` を足した。宣言ランが 1 回に提示する窓（範囲の
+//! 始まりと広さ）を**本人が決める**ための道具で、宣言ランからのみ使う。
 //!
 //! 有界化（687 発話の塊を一度に吐かせない）: `read_my_history` は行数 + 総文字数の
 //! ハードキャップ + カーソル。`survey_my_history` はバケット数に上限。**生ログは読むだけ**。
@@ -637,6 +640,128 @@ impl Action for RetractMemoryUnitAction {
     }
 }
 
+/// 宣言ランの窓の広さ（生ログ件数）として本人が指定できる**下限**（#394）。
+///
+/// これより狭くすると材料が薄すぎて宣言が抽象論に落ちる（#313 の実測: 20 件では固有名詞の
+/// 無い抽象タグしか出なかった）。加えて 1 ラン当たりの前進量が小さくなりすぎ、日次ゲートの
+/// もとで生ログの流入に追いつかなくなる。
+pub const DECLARE_WINDOW_MIN: i64 = 50;
+
+/// 宣言ランの窓の広さ（生ログ件数）として本人が指定できる**上限**（#394）。
+///
+/// 上限の理由は 1 コールのプロンプト肥大。本番実測で**窓 300 のとき最終コールが 73k
+/// トークン**だった（窓の中身は本人が `read_my_history` で読み進めるので、コンテキストは
+/// 窓の広さに概ね比例する）。倍の 600 でおよそ 150k 級となり、200k コンテキストの内側に
+/// 収まる最後のあたりになる。ここを超えると窓を広げた結果としてターンが途中で潰れ、
+/// partial（位置据え置き）になって前へ進まない。
+///
+/// 運用側が `memory_declare.max_logs` にこれより大きい値を設定している場合は、そちらが
+/// 上限になる（本人の指定が運用の既定より狭められることは無い / 呼び出し側で `max` を取る）。
+pub const DECLARE_WINDOW_MAX: i64 = 600;
+
+/// 次回の宣言ランの窓（開始位置と広さ）を本人が決める。
+///
+/// #394: 宣言ランは「どこからどこまでが 1 つの記憶かは本人が決める」設計なのに、**窓の
+/// 境界と広さだけは機械が固定で決めていた**（カーソルは宣言内容と無関係に窓の終端へ進む）。
+/// この道具は本人の希望を DB（`agent_memory_index_config.memory_declare_window`）へ書く。
+/// **希望であって決定ではない**: ランの側が前進の下限・上限へ丸めてから使う（本人任せに
+/// すると宣言ゼロ・同じ位置の指定で同じ窓を永久に再取得するループに入る / #374）。
+pub struct PlanNextMemoryWindowAction;
+
+#[async_trait]
+impl Action for PlanNextMemoryWindowAction {
+    fn name(&self) -> &str {
+        "plan_next_memory_window"
+    }
+
+    fn description(&self) -> &str {
+        "次に自分へ提示される「今回の範囲」（窓）の始まりと広さを自分で決める。まだ続いている\
+         出来事の末尾を次回へ回したいときは next_from_id にその先頭の生ログ id を渡す（そこから\
+         先は次の窓にもう一度現れる）。窓の終端を越えて宣言したときも next_from_id を宣言の\
+         次の id にすれば、次の窓が宣言済みと重ならない。材料が薄い/濃いと感じたら window_size で\
+         次回以降の窓の広さ（生ログ件数）を変えられる（この設定は変えるまで残る）。どちらも希望\
+         として記録され、必ず前へ進むように丸められる。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "next_from_id": {
+                    "type": "integer",
+                    "description": "次回の窓をこの生ログ id から始める（この id 以降は次回へ回す）。今回の範囲の中を指せば末尾を持ち越し、範囲の外（先）を指せば宣言済みの続きから始まる。指定しない（0）なら今回の範囲の終わりまで進む。"
+                },
+                "window_size": {
+                    "type": "integer",
+                    "description": format!("次回以降の窓に入れる生ログ件数（{DECLARE_WINDOW_MIN}〜{DECLARE_WINDOW_MAX} に丸められる）。一度決めると変えるまで効き続ける。")
+                },
+                "note": {
+                    "type": "string",
+                    "description": "そう決めた理由（任意）。記録に残るだけで、機械は解釈しない。"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        // `0` / 空文字は「指定なし」として扱う（モデルは使わないキーも埋めてくる / #388）。
+        let next_from_id = args["next_from_id"].as_i64().filter(|&v| v > 0);
+        let requested_size = args["window_size"].as_i64().filter(|&v| v > 0);
+        let note = args["note"]
+            .as_str()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        if next_from_id.is_none() && requested_size.is_none() && note.is_none() {
+            return ActionResult::error(
+                "next_from_id / window_size / note のいずれかを指定してください",
+            );
+        }
+
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+
+        // 既存の希望に**上書き**する（指定しなかった項目は残す）。window_size だけ変えたい
+        // ときに、前に書いた next_from_id が消えないように。
+        let mut pref = match opencrab_db::queries::get_memory_declare_window(&conn, &ctx.agent_id) {
+            Ok(p) => p.unwrap_or_default(),
+            Err(e) => return ActionResult::error(&format!("窓の希望の読み取りに失敗: {e}")),
+        };
+        if let Some(v) = next_from_id {
+            pref.next_from_id = Some(v);
+        }
+        // 広さはここでも上下限に丸めて**丸めた値を返す**（本人が実際の設定を確認できる）。
+        // ランの側でも config を見て丸め直す（そちらが最終権限）。
+        let clamped_size = requested_size.map(|v| v.clamp(DECLARE_WINDOW_MIN, DECLARE_WINDOW_MAX));
+        if let Some(v) = clamped_size {
+            pref.window_size = Some(v);
+        }
+        if note.is_some() {
+            pref.note = note;
+        }
+        pref.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+        if let Err(e) =
+            opencrab_db::queries::set_memory_declare_window(&conn, &ctx.agent_id, Some(&pref))
+        {
+            return ActionResult::error(&format!("窓の希望の保存に失敗: {e}"));
+        }
+
+        ActionResult::success(json!({
+            "next_from_id": pref.next_from_id,
+            "window_size": pref.window_size,
+            "window_size_clamped": requested_size.is_some() && requested_size != clamped_size,
+            "window_size_range": [DECLARE_WINDOW_MIN, DECLARE_WINDOW_MAX],
+            "note": pref.note,
+            "applies_to": "next_run",
+            "hint": "next_from_id はこのランの終わりに一度だけ使われます（必ず前へ進むよう丸められます）。window_size は変えるまで効き続けます。",
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1295,86 @@ mod tests {
         // id 1..5 の 5 件。
         assert_eq!(data["range_total"], 5, "5 まで読むべき");
         assert_eq!(data["returned"], 5);
+    }
+
+    // ---- #394: 次回の窓（境界と広さ）を本人が決める ----
+
+    fn pref(ctx: &ActionContext) -> Option<opencrab_db::queries::DeclareWindowPref> {
+        let conn = ctx.db.lock().unwrap();
+        opencrab_db::queries::get_memory_declare_window(&conn, &ctx.agent_id).unwrap()
+    }
+
+    /// 位置と広さを書ける。指定しなかった項目は**前の指定を消さない**（部分更新）。
+    #[tokio::test]
+    async fn plan_window_records_and_merges_fields() {
+        let (_d, ctx) = test_context();
+
+        // 位置だけ表明する。
+        let r = PlanNextMemoryWindowAction
+            .execute(
+                &json!({"next_from_id": 23_600, "note": "この出来事はまだ続いている"}),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let p = pref(&ctx).expect("希望が保存される");
+        assert_eq!(p.next_from_id, Some(23_600));
+        assert_eq!(p.window_size, None);
+        assert_eq!(p.note.as_deref(), Some("この出来事はまだ続いている"));
+        assert!(p.updated_at.is_some());
+
+        // 広さだけ表明しても、位置は消えない（部分更新）。
+        let r = PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 450}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let p = pref(&ctx).unwrap();
+        assert_eq!(p.next_from_id, Some(23_600), "位置が消えてはいけない");
+        assert_eq!(p.window_size, Some(450));
+    }
+
+    /// 広さは上下限へ丸め、**丸めたことを返り値で伝える**（本人が実際の設定を確認できる）。
+    #[tokio::test]
+    async fn plan_window_clamps_size_and_reports_it() {
+        let (_d, ctx) = test_context();
+
+        let r = PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 100_000}), &ctx)
+            .await;
+        assert!(r.success);
+        let data = r.data.unwrap();
+        assert_eq!(data["window_size"], json!(DECLARE_WINDOW_MAX));
+        assert_eq!(data["window_size_clamped"], json!(true));
+        assert_eq!(pref(&ctx).unwrap().window_size, Some(DECLARE_WINDOW_MAX));
+
+        let r = PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 1}), &ctx)
+            .await;
+        assert!(r.success);
+        assert_eq!(r.data.unwrap()["window_size"], json!(DECLARE_WINDOW_MIN));
+
+        // 範囲内はそのまま（丸めていないことも伝える）。
+        let r = PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 200}), &ctx)
+            .await;
+        let data = r.data.unwrap();
+        assert_eq!(data["window_size"], json!(200));
+        assert_eq!(data["window_size_clamped"], json!(false));
+    }
+
+    /// 全プロパティを空値で埋めてくるモデル（#388 の癖）は「指定なし」として拒否する。
+    /// `0` を位置として呑むと、本人が意図しない巻き戻しの希望が立ってしまう。
+    #[tokio::test]
+    async fn plan_window_rejects_all_empty_values() {
+        let (_d, ctx) = test_context();
+        let r = PlanNextMemoryWindowAction
+            .execute(
+                &json!({"next_from_id": 0, "window_size": 0, "note": "  "}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+        assert_eq!(pref(&ctx), None, "何も書かれてはいけない");
     }
 
     /// 範囲が本当に該当なしなら、空であること（range_total=0）が返る（「なぜ空か」を伝える）。

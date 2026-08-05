@@ -489,6 +489,9 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     //     `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）から触らせない。
     "record_memory_unit",
     "retract_memory_unit",
+    // (6) 宣言ランの窓の希望（#394）。1 行を UPSERT するだけの短時間の書き込みで、
+    //     返り値（丸めた後の実際の設定）を同ターンで見て決め直す。dispatch する意味が無い。
+    "plan_next_memory_window",
 ];
 
 /// core アクションのうち、**意図的に dispatch を許す**もの。
@@ -658,6 +661,10 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     "read_my_history",
     "record_memory_unit",
     "retract_memory_unit",
+    // 宣言ランの窓の希望（#394）。同じ論拠で trusted_only: caller=Agent（Nostr の受信ターン）
+    // から触れると、話しかけるだけで他人の宣言ランの窓を動かせてしまう。宣言ラン本体は
+    // caller=Owner で走るので支障は無い。
+    "plan_next_memory_window",
 ];
 
 // `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。
@@ -2575,12 +2582,14 @@ mod tests {
         }
     }
 
-    /// #379: 記憶の単位（宣言）道具 4 個は trusted_only（owner_only ではない）。
+    /// #379: 記憶の単位（宣言）道具は trusted_only（owner_only ではない）。
+    /// #394 で窓を決める `plan_next_memory_window` を同じ扱いで足した。
     const MEMORY_UNIT_ACTIONS_TRUSTED_ONLY: &[&str] = &[
         "survey_my_history",
         "read_my_history",
         "record_memory_unit",
         "retract_memory_unit",
+        "plan_next_memory_window",
     ];
 
     #[test]

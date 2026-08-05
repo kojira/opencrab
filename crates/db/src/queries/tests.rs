@@ -4581,3 +4581,110 @@ fn survey_my_history_aggregates_and_caps_buckets() {
     assert!(capped.truncated);
     assert_eq!(capped.total_buckets, 2, "全体の総バケット数は落とさず返す");
 }
+
+// ---- 宣言ランの窓を本人が決める（#394）----
+
+/// `nth_log_id_after` は **id の差ではなく生ログの件数**で数える（id は全エージェント共通の
+/// 採番なので、1 エージェントぶんの id は疎らに飛ぶ）。件数が足りなければ最後の id へ丸める。
+#[test]
+fn nth_log_id_after_counts_rows_not_id_gaps() {
+    let conn = setup();
+    // a1 と a2 を交互に入れ、a1 の id を飛び飛びにする。
+    for i in 0..10 {
+        for agent in ["a1", "a2"] {
+            conn.execute(
+                "INSERT INTO memory_sessions (agent_id, session_id, log_type, content, created_at)
+                 VALUES (?1, 's1', 'message', ?2, '2026-08-01T00:00:00Z')",
+                params![agent, format!("{agent}-{i}")],
+            )
+            .unwrap();
+        }
+    }
+    let a1_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM memory_sessions WHERE agent_id='a1' ORDER BY id ASC")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(a1_ids.len(), 10);
+    assert!(a1_ids[1] - a1_ids[0] > 1, "id が飛んでいる前提が崩れている");
+
+    // cursor=0 から 1 件目 / 3 件目 / 10 件目。
+    assert_eq!(
+        nth_log_id_after(&conn, "a1", 0, 1).unwrap(),
+        Some(a1_ids[0])
+    );
+    assert_eq!(
+        nth_log_id_after(&conn, "a1", 0, 3).unwrap(),
+        Some(a1_ids[2])
+    );
+    assert_eq!(
+        nth_log_id_after(&conn, "a1", 0, 10).unwrap(),
+        Some(a1_ids[9])
+    );
+    // 足りなければ最後（あるだけ進める）。
+    assert_eq!(
+        nth_log_id_after(&conn, "a1", 0, 999).unwrap(),
+        Some(a1_ids[9])
+    );
+    // cursor より後ろだけを数える。
+    assert_eq!(
+        nth_log_id_after(&conn, "a1", a1_ids[4], 2).unwrap(),
+        Some(a1_ids[6])
+    );
+    // 1 件も無ければ None（＝進める先が無い）。
+    assert_eq!(nth_log_id_after(&conn, "a1", a1_ids[9], 1).unwrap(), None);
+    // 0 / 負の n は 1 件目に丸める（呼び出し側の 0 除算・逆走を防ぐ）。
+    assert_eq!(
+        nth_log_id_after(&conn, "a1", 0, 0).unwrap(),
+        Some(a1_ids[0])
+    );
+}
+
+/// 窓の希望（#394）は JSON で 1 列に往復し、壊れた JSON は「希望なし」に倒れる。
+#[test]
+fn declare_window_pref_roundtrips_and_tolerates_garbage() {
+    let conn = setup();
+    assert_eq!(get_memory_declare_window(&conn, "a1").unwrap(), None);
+
+    let pref = DeclareWindowPref {
+        next_from_id: Some(23_600),
+        window_size: Some(450),
+        note: Some("材料が薄かったので広げる".to_string()),
+        updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+    };
+    set_memory_declare_window(&conn, "a1", Some(&pref)).unwrap();
+    assert_eq!(get_memory_declare_window(&conn, "a1").unwrap(), Some(pref));
+
+    // 位置だけ消して広さは残す（ランが位置を使い切ったときの形）。
+    let sticky = DeclareWindowPref {
+        next_from_id: None,
+        window_size: Some(450),
+        ..Default::default()
+    };
+    set_memory_declare_window(&conn, "a1", Some(&sticky)).unwrap();
+    let got = get_memory_declare_window(&conn, "a1").unwrap().unwrap();
+    assert_eq!(got.next_from_id, None);
+    assert_eq!(got.window_size, Some(450));
+
+    // 隣の列（宣言ランのマーカー）は触らない。
+    set_memory_declare_cursor(&conn, "a1", "2026-08-05T00:00:00Z|23594").unwrap();
+    set_memory_declare_window(&conn, "a1", Some(&sticky)).unwrap();
+    assert_eq!(
+        get_memory_declare_cursor(&conn, "a1").unwrap().as_deref(),
+        Some("2026-08-05T00:00:00Z|23594")
+    );
+
+    // NULL へ戻せる。
+    set_memory_declare_window(&conn, "a1", None).unwrap();
+    assert_eq!(get_memory_declare_window(&conn, "a1").unwrap(), None);
+
+    // 壊れた JSON はエラーにせず「希望なし」（＝従来どおりの窓）に倒れる。
+    conn.execute(
+        "UPDATE agent_memory_index_config SET memory_declare_window = 'not json' WHERE agent_id='a1'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(get_memory_declare_window(&conn, "a1").unwrap(), None);
+}
