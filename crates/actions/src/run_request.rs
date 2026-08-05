@@ -100,8 +100,11 @@ pub struct RunRequest {
     /// **整備作業**であり、記録すると次の宣言ランがそれを材料にして「記憶を整理した」という
     /// 記憶を作り始める（#375 でアイドルのハートビートが topic を量産したのと同じ構造）。
     ///
-    /// 監査は落ちない: 生プロンプト/生応答は `run_agent_response` が `llm_logs` へ、構造化監査は
-    /// 各ランが `agent_logs`（context="sleep"）へ残す。ここで落とすのは会話の生ログだけ。
+    /// **落とすのは「記憶の材料としての扱い」だけで、何を行ったかの運用記録は残す**（#393）:
+    /// - `llm_logs`: `run_agent_response` が LLM コールごとに ChatRequest 全体（累積した
+    ///   messages ＝ ツール結果込み）・応答・`tool_calls`・トークン数・レイテンシを記録する。
+    ///   `session_id` でランを特定できる。**このフラグは `llm_logs` の配線に一切触らない。**
+    /// - `agent_logs`: 各ランが 1 ラン 1 行の構造化監査（context="sleep"）を自分で書く。
     ///
     /// 対話ターン・heartbeat・subtask は `true` のままで一切変わらない。
     pub persist_turn_logs: bool,

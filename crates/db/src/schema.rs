@@ -1208,11 +1208,19 @@ const MIGRATIONS: &[Migration] = &[
         //   **整備作業そのものを記憶にしてしまったユニット**の扱いは別（機械判定できないので
         //   このマイグレーションでは触らない / #393 のコメント参照）。
         //
+        // ## 運用記録（`llm_logs` / `agent_logs`）は消さない
+        // 消すのは `memory_sessions` と `memory_sessions_fts` の 2 表だけ。**何を行ったかの
+        // 記録は別途必要**（#393 の追加受け入れ条件）なので、`llm_logs`（`session_id` で
+        // ランを特定でき、LLM コールごとの生プロンプト = 累積 messages・応答・`tool_calls`・
+        // トークン数を持つ）と `agent_logs`（context="sleep" の 1 ラン 1 行の要約）は残す。
+        // 生ログから外すのは「記憶の材料としての扱い」だけ。
+        //
         // ## 本番コピーでの実測
-        // 適用前 user_version=32 / `memory_sessions` 49,129 行 / `memory_sessions_fts` 49,337 行 /
-        // FTS 孤児 208 行。対象は `sleep-declare-%` のみで 1,572 行（`sleep-organize-%` は 0 行）。
-        // 適用後は本体 47,557 行・FTS 47,765 行（ともに -1,572）、孤児 208 行のまま増減なし、
-        // 他の session_id 接頭辞の行数は 1 行も変化なし。
+        // 適用前 user_version=32 / `memory_sessions` 49,203 行 / `memory_sessions_fts` 49,411 行 /
+        // FTS 孤児 208 行。対象は `sleep-declare-%` のみで 1,646 行（`sleep-organize-%` は 0 行）。
+        // 適用後は本体 47,557 行・FTS 47,765 行（ともに -1,646）、孤児 208 行のまま増減なし、
+        // 他の session_id 接頭辞の行数は 1 行も変化なし。`llm_logs` 8,082 行・`agent_logs` 44 行は
+        // 前後とも同数（全 39 テーブルの行数 diff で変化したのは本体と FTS のシャドウ表のみ）。
         //
         // ## 冪等性
         // 番号付き MIGRATIONS は `user_version` で 1 回しか走らないが、SQL 自体も自然冪等
@@ -4183,6 +4191,49 @@ mod migration_tests {
         )
         .expect("orphan");
 
+        // 運用記録（#393 の追加受け入れ条件）。同じメンテナンスランの `llm_logs`
+        // （session_id で引ける生プロンプト/生応答/tool_calls）と `agent_logs`
+        // （context="sleep" の 1 ラン 1 行の要約）を仕込み、**v33 がこれらを消さない**ことを
+        // 固定する。生ログから外すのは「記憶の材料としての扱い」だけで、何を行ったかの
+        // 運用記録は残す。
+        crate::queries::insert_llm_log(
+            &conn,
+            &crate::queries::LlmLogRow {
+                id: "llm-1".to_string(),
+                agent_id: agent.to_string(),
+                session_id: Some("sleep-declare-a1-1700000000".to_string()),
+                model: Some("m".to_string()),
+                prompt: "p".to_string(),
+                response: "r".to_string(),
+                tool_calls: Some("[]".to_string()),
+                latency_ms: Some(1),
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                error_code: None,
+                error_body: None,
+                requested_at: None,
+                trigger_message_id: None,
+                is_bot_iteration: false,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                created_at: "2026-08-05T00:00:00+00:00".to_string(),
+            },
+        )
+        .expect("llm_log");
+        crate::queries::insert_agent_log(
+            &conn,
+            &crate::queries::AgentLogRow {
+                id: "audit-1".to_string(),
+                agent_id: Some(agent.to_string()),
+                level: "info".to_string(),
+                context: "sleep".to_string(),
+                message: r#"{"kind":"memory_declare"}"#.to_string(),
+                created_at: None,
+            },
+        )
+        .expect("agent_log");
+
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         let orphans = |c: &Connection| -> i64 {
             c.query_row(
@@ -4246,6 +4297,19 @@ mod migration_tests {
         );
         assert_eq!(orphans(&conn), orphans_before, "孤児は増えも減りもしない");
 
+        // 運用記録は 1 行も消えていない。session_id が対象と同じ `sleep-declare-%` でも
+        // `llm_logs` は対象外（消すのは memory_sessions と memory_sessions_fts だけ）。
+        assert_eq!(
+            count("SELECT COUNT(*) FROM llm_logs WHERE session_id LIKE 'sleep-declare-%'"),
+            1,
+            "llm_logs は消さない（何を行ったかの記録は残す）"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM agent_logs WHERE context = 'sleep'"),
+            1,
+            "agent_logs（sleep 監査）は消さない"
+        );
+
         // 冪等: 版を 32 へ戻して再実行しても何も変わらない（対象 0 行）。
         let body_after = count("SELECT COUNT(*) FROM memory_sessions");
         let fts_after = count("SELECT COUNT(*) FROM memory_sessions_fts");
@@ -4254,6 +4318,8 @@ mod migration_tests {
         assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), body_after);
         assert_eq!(count("SELECT COUNT(*) FROM memory_sessions_fts"), fts_after);
         assert_eq!(orphans(&conn), orphans_before);
+        assert_eq!(count("SELECT COUNT(*) FROM llm_logs"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM agent_logs"), 1);
     }
 
     /// v20 起点の一気通貫（v20→v21→v22→v23）。稼働中の本番 DB は v22 なので実運用の

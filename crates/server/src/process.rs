@@ -1766,9 +1766,18 @@ pub async fn run_agent_response(
 
     // sleep のメンテナンスラン（#393）はここを配線しない = 生ログ（`memory_sessions`）に
     // 1 行も書かない。整備作業のターンは本人の体験ではなく、記録すると次の宣言ランが
-    // 「記憶を整理した」という記憶を作り始める。監査（llm_logs / agent_logs）は別経路なので
-    // 落ちない。LLM が見る文脈も変わらない（巨大結果の退避は上の
-    // `set_tool_result_offload` が担当していて、この callback は永続化専用）。
+    // 「記憶を整理した」という記憶を作り始める。
+    //
+    // **落ちるのは `memory_sessions` への書き込みだけ。何を行ったかの運用記録は残る**（#393）:
+    // - `llm_logs`: 上の `set_llm_log_callback` は**この分岐の外**で無条件に配線され、engine の
+    //   別フック（`set_log_callback`）に載る。LLM コールごとに ChatRequest 全体（＝累積した
+    //   messages。ツール結果も含む）と応答・`tool_calls`・トークン数・レイテンシを記録する。
+    //   engine 側は `messages.push(...)` を on_tool_call / on_tool_result より**先**に行うので、
+    //   ここを配線しなくても累積内容は 1 バイトも変わらない。
+    // - `agent_logs`: 各ランが自分で `insert_agent_log`（context="sleep"）する。この関数を通らない。
+    //
+    // LLM が見る文脈も変わらない（巨大結果の退避は上の `set_tool_result_offload` が担当していて、
+    // この callback は永続化専用）。
     if req.persist_turn_logs {
         set_turn_log_callbacks(
             &mut engine,
