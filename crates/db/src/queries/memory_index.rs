@@ -1068,6 +1068,93 @@ pub fn set_memory_declare_cursor(conn: &Connection, agent_id: &str, cursor: &str
     Ok(())
 }
 
+/// 宣言ラン（#394）の**窓の希望**。本人が `plan_next_memory_window` で表明した内容。
+///
+/// 窓の境界と広さを機械が固定で決めていた（カーソルは宣言内容と無関係に窓の終端へ進む）のを、
+/// 「どこからどこまでが 1 つの記憶かは本人が決める」という宣言ランの設計に揃えるための箱。
+/// **希望であって決定ではない**: ランの側が前進の下限・上限へ丸めてから使う（本人任せにすると
+/// 同じ窓を永久に再取得するループに入る / #374）。
+///
+/// フィールドは**寿命が違う**:
+/// - `next_from_id` と `note` はそのランの終わりに消費されて消える（持ち越さない）。過去の
+///   指定が後のランのカーソルを勝手に引き戻さないため。`note` は「その位置をそう決めた理由」
+///   なので寿命は位置と同じ（残すと以後すべてのランの監査に同じ文字列が出続け、そのランで
+///   書かれたものと誤読される）。
+/// - `window_size` は sticky（本人が上書きするまで効き続ける）。「今回は薄かったので次から
+///   もっと広く」という調整は、1 回きりではなく本人の設定として残るのが自然だから。
+/// - `partial_streak` だけは**機械が持つ状態**（本人は書かない）。広さを sticky にした結果、
+///   広げすぎてターンが毎回潰れる状態から自力で戻れなくなるのを防ぐためのカウンタ。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeclareWindowPref {
+    /// 次回の窓をこの生ログ id から始めたい（＝この id 以降は未処理として次回へ回す）。
+    /// ランが消費したら `None` に戻る。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_from_id: Option<i64>,
+    /// 次回以降の窓に入れたい生ログ件数（sticky）。`None` なら config の既定を使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_size: Option<i64>,
+    /// 本人が書いた理由。監査ログに載せるだけで、機械は解釈しない。位置と一緒に消費される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// 最後に書いた時刻（RFC3339）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    /// `window_size` を表明した状態で partial が**連続**した回数（機械が刻む / 本人は書かない）。
+    /// clean が 1 回通れば `None` に戻る。既定値へ戻したときも `None` に戻る。丸めの規則と
+    /// 上限は `crates/server/src/memory_declare.rs` にある。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_streak: Option<i64>,
+}
+
+/// 宣言ランの窓の希望（#394）を取得する。行が無い / NULL / 壊れた JSON なら `None`。
+///
+/// 壊れた JSON でエラーにしないのは、この列が**任意の希望**でしかないため。読めなければ
+/// 「希望なし」として従来どおり（窓の終端まで前進 / config の広さ）に倒れるのが安全側。
+pub fn get_memory_declare_window(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<Option<DeclareWindowPref>> {
+    let raw = conn.query_row(
+        "SELECT memory_declare_window FROM agent_memory_index_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    let raw = match raw {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(raw.and_then(|s| serde_json::from_str::<DeclareWindowPref>(&s).ok()))
+}
+
+/// 宣言ランの窓の希望を UPSERT で永続化する（行が無ければ作る）。
+/// `None` を渡すと列を NULL に戻す（希望なし）。隣の列（マーカー等）は触らない。
+pub fn set_memory_declare_window(
+    conn: &Connection,
+    agent_id: &str,
+    pref: Option<&DeclareWindowPref>,
+) -> Result<()> {
+    let raw = match pref {
+        Some(p) => Some(serde_json::to_string(p)?),
+        None => None,
+    };
+    conn.execute(
+        "INSERT INTO agent_memory_index_config
+             (agent_id, batch_size, threshold, updated_at, memory_declare_window)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             memory_declare_window = excluded.memory_declare_window",
+        params![
+            agent_id,
+            BATCH_SIZE_DEFAULT,
+            THRESHOLD_DEFAULT,
+            chrono::Utc::now().to_rfc3339(),
+            raw,
+        ],
+    )?;
+    Ok(())
+}
+
 /// スリープ整理ラン（#313 段階3）の worklist 対象 topic 数を数える（発火の下限ゲート用）。
 ///
 /// 対象 = `node_type='topic'` かつ `source_type='session_log'` で、

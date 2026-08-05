@@ -747,8 +747,9 @@ mod tests {
                 || *n == "read_my_history"
                 || *n == "record_memory_unit"
                 || *n == "retract_memory_unit"
+                || *n == "plan_next_memory_window"
             {
-                // #379: 記憶の単位（宣言）道具 4 個は core inline アクション
+                // #379 / #394: 記憶の単位（宣言）道具は core inline アクション
                 // （`CORE_INLINE_ACTIONS` / `crates/actions/src/memory_units.rs`）で Discord
                 // gateway には無い。caller=Agent 遮断は bridge の `TRUSTED_ONLY_ACTIONS` が
                 // 効かせる。実在性の検証は `crates/actions/src/subtask.rs` の

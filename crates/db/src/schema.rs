@@ -1378,6 +1378,65 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 34,
+        description:
+            "agent_memory_index_config.memory_declare_window: 宣言ランの窓の希望（本人が決める境界と広さ）(issue #394)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #394: 宣言ランは「どこからどこまでが 1 つの記憶かは本人が決める」設計なのに、
+        // **窓の境界と広さだけは機械が固定で決めていた**（カーソルは宣言内容と無関係に窓の
+        // 終端へ進む / `memory_declare.rs`）。この列は、本人が道具
+        // （`plan_next_memory_window`）で表明した**次回の窓の希望**を持つ。
+        //
+        // 中身は JSON（[`crate::queries::DeclareWindowPref`]）:
+        //  - `next_from_id`: 次回の窓をここから始めたい（＝この id 以降は次回へ回す）。
+        //    **そのランの終わりに消費して消える**（持ち越さない）。
+        //  - `window_size`: 次回以降の窓に入れる生ログ件数。**sticky**（本人が上書きするまで
+        //    効き続ける）。
+        //  - `note`: 理由（監査に残すだけ / 機械は解釈しない）。
+        //
+        // どちらも**希望**であり、ランの側が前進の下限・上限へ丸めてから使う（本人任せにすると
+        // 同じ窓を永久に再取得するループへ入る / #374 で実際に踏んだ罠）。丸めの規則は
+        // `crates/server/src/memory_declare.rs` にある。
+        //
+        // **NULL 既定 = 希望なし**（従来どおり窓の終端まで進み、広さは config の `max_logs`）。
+        // 既存 DB は列が NULL のまま増えるだけで、宣言ランの挙動は本人が道具を使うまで変わらない。
+        //
+        // 版番号が 33 でなく **34** なのは、33 を #393（宣言/整理ランのターンログを
+        // `memory_sessions` に残さない）が使うため。
+        //
+        // ## 番号を飛ばして採るときの前提（**適用順の保証が要る**）
+        // `run_migrations` は `m.version > user_version` でしか判定せず、適用のたびに
+        // `user_version` を**その番号で**刻む。「番号 N は未適用」という台帳はどこにも無い。
+        // したがって **番号の大きいマイグレーションを先に適用して再起動すると、番号の小さい
+        // 未適用のマイグレーションは永久に skip される**（エラーも警告も出ない）。ここで 34 を
+        // 先に刻んだ DB は `33 > 34` が偽になり、v33 が一度も走らないまま「適用済み」に見える。
+        //
+        // つまり番号を飛ばすときは、**飛ばされた番号の側（ここでは v33 / #393）が先に適用される
+        // ことを運用で保証する**必要がある。この PR（#394）は #393 をマージ・再起動したあとに
+        // 入れる前提で 34 を採っている。番号を飛ばして採る後続も、同じ保証を持てるときだけに
+        // すること（持てないなら、後からマージする側が次の空き番号を取る）。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE agent_memory_index_config` 側で
+        // 列を持つので `column_exists` でガードする（v24 / v25 / v27〜v29 / v31 の前例）。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）。戻す先は **33**（#393 の v33 が適用済みの
+        // 状態）。32 まで戻すと次回起動で v33 が再走する（対象 0 行なので無害だが不正確）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 33;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_memory_index_config", "memory_declare_window")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN memory_declare_window TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2663,7 +2722,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     last_organize_at TEXT,
     organize_backlog_cursor TEXT,
     organize_last_run_at TEXT,
-    memory_declare_cursor TEXT
+    memory_declare_cursor TEXT,
+    memory_declare_window TEXT
 );
 
 -- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
@@ -3678,6 +3738,69 @@ mod migration_tests {
             Some("2026-08-06T00:00:00Z|4242"),
             "再実行でマーカーが消えてはならない"
         );
+    }
+
+    /// v34（#394）: `agent_memory_index_config.memory_declare_window`（本人が決める窓の希望）が
+    /// **既存 DB に届く**こと、既定 NULL であること、隣の列（宣言ランのマーカー・タグ整理ランの
+    /// 3 列）が壊れないこと、再実行で値が消えないこと。
+    #[test]
+    fn agent_memory_index_config_declare_window_migration_v34_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(
+            column_exists(&conn, "agent_memory_index_config", "memory_declare_window").unwrap()
+        );
+
+        // 列を落とし、宣言ランのマーカーに値を入れた状態で版を戻す（既存 DB を模す）。
+        conn.execute_batch(
+            "ALTER TABLE agent_memory_index_config DROP COLUMN memory_declare_window;
+             INSERT INTO agent_memory_index_config
+               (agent_id, batch_size, threshold, updated_at, memory_declare_cursor,
+                organize_last_run_at)
+               VALUES ('a1', 50, 20, '2026-01-01', '2026-08-05T00:00:00Z|23594',
+                       '2026-08-05T00:00:00Z');
+             PRAGMA user_version = 32",
+        )
+        .unwrap();
+        assert!(
+            !column_exists(&conn, "agent_memory_index_config", "memory_declare_window").unwrap()
+        );
+
+        initialize(&conn).expect("upgrade v32 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(
+            column_exists(&conn, "agent_memory_index_config", "memory_declare_window").unwrap()
+        );
+
+        let (window, cursor, organize): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT memory_declare_window, memory_declare_cursor, organize_last_run_at
+                 FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("memory_declare_window を含む SELECT が通らない");
+        assert_eq!(
+            window, None,
+            "新列は既定 NULL（希望なし）でなければならない"
+        );
+        assert_eq!(cursor.as_deref(), Some("2026-08-05T00:00:00Z|23594"));
+        assert_eq!(organize.as_deref(), Some("2026-08-05T00:00:00Z"));
+
+        // 冪等性: 値を書いた後に再実行しても落ちず、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_memory_index_config SET memory_declare_window = '{\"window_size\":450}' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT memory_declare_window FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("{\"window_size\":450}"));
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を

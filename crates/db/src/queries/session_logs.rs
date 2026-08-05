@@ -832,3 +832,37 @@ pub fn declare_window(
         date_to,
     })
 }
+
+/// `cursor_id` より新しい生ログを id 昇順に並べたときの **`n` 番目（1 始まり）の id**。
+/// `n` 件も無ければ**最後（最大 id）**を、1 件も無ければ `None` を返す。
+///
+/// 宣言ラン（#394）が、本人の指定したカーソル位置を丸める**下限・上限**を作るために使う。
+/// 「id を N 足す」ではなく「**生ログを N 件ぶん進める**」でなければ意味が無い（id は全
+/// エージェント共通の採番で、1 エージェントぶんの間隔は疎らだから）。生ログは読むだけ。
+pub fn nth_log_id_after(
+    conn: &Connection,
+    agent_id: &str,
+    cursor_id: i64,
+    n: i64,
+) -> Result<Option<i64>> {
+    let offset = n.max(1) - 1;
+    let nth = conn.query_row(
+        "SELECT id FROM memory_sessions
+             WHERE agent_id = ?1 AND id > ?2
+             ORDER BY id ASC LIMIT 1 OFFSET ?3",
+        params![agent_id, cursor_id, offset],
+        |r| r.get::<_, i64>(0),
+    );
+    match nth {
+        Ok(id) => return Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(e) => return Err(e.into()),
+    }
+    // n 件に満たない: あるだけ進める（＝最後の id）。1 件も無ければ None。
+    let last: Option<i64> = conn.query_row(
+        "SELECT MAX(id) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        params![agent_id, cursor_id],
+        |r| r.get(0),
+    )?;
+    Ok(last)
+}
