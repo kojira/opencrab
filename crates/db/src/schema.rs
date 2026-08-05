@@ -1170,7 +1170,8 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 33,
-        description: "sleep のメンテナンスラン（宣言/整理）が生んだ生ログを削除する (issue #393)",
+        description:
+            "sleep のメンテナンスラン（宣言/整理）が生んだ生ログと索引ノードを削除する (issue #393)",
         // **削除のみ。スキーマは変えない。**
         //
         // 背景（#393）: sleep のメンテナンスラン（記憶の宣言 `memory_declare` / タグ整理
@@ -1201,12 +1202,50 @@ const MIGRATIONS: &[Migration] = &[
         // 実体の無い行が出る。一時表 `_v33_maintenance_rows` に rowid を一度確定させ、本体と
         // FTS の**同一集合**へ適用する。既存の孤児には触れない（増やしも減らしもしない）。
         //
-        // ## 索引・宣言済みユニットへの影響
-        // - 索引 watermark（`memory_index_watermark.last_indexed_log_id`）は id の値なので、
-        //   行が消えても位置はずれない。宣言カーソル（`memory_declare_cursor` の位置部）も同じ。
-        // - 既に宣言されたユニットは id 範囲を持つ。範囲内の行が減るだけで範囲自体は壊れない。
-        //   **整備作業そのものを記憶にしてしまったユニット**の扱いは別（機械判定できないので
-        //   このマイグレーションでは触らない / #393 のコメント参照）。
+        // ## 索引ノードも一緒に消す（生ログだけ消すと「中身が引けない記憶」が残る）
+        // **索引ビルドは削除対象の id 帯を既に通過済み**である（本番実測: 稼働中 3 体とも
+        // `memory_index_watermark.last_indexed_log_id` が、その体の `sleep-declare-%` 行の
+        // MAX(id) と一致）。つまりメンテナンスランのログから作られた索引ノードが既に存在する。
+        // 生ログだけ消すと、`retrieve_memory_nodes`（`crates/actions/src/memory_access.rs`）が
+        // `start_log_id..end_log_id` で本文を引いたとき `messages: []` を返す一方、
+        // `search_memory_index` には `memory_index_fts` 経由でヒットし続ける
+        // = **タイトルと要約はあるが中身が空の記憶**が残る。#393 の目的（整備作業を記憶にしない）が
+        // 索引層で未達になるので、索引側も同時に消す。
+        //
+        // 対象は 2 種類:
+        //   1. `source_session_id` がメンテナンスランのセッションを指すノード。索引ビルダは
+        //      session / topic ノードに必ず `source_session_id: Some(session_id)` を入れる
+        //      （`crates/core/src/memory_index/index_builder.rs`）ので**機械的に判定できる**。
+        //   2. 本人が宣言したユニット（`node_type='unit'`）のうち、**範囲内の生ログが 1 件以上
+        //      あり、その全てがメンテナンスラン由来**のもの。ユニットは `source_session_id` を
+        //      持たない（`record_memory_unit` は id 範囲だけを刻む）ので範囲の中身で判定する。
+        //      「整備作業そのものを記憶にしてしまったユニット」がこれに当たる（本番実測 1 件:
+        //      「生ログを初めて俯瞰し、E2E 試験期間を記憶として束ねた内省」）。判定は生ログを
+        //      消す**前**に行う必要があるため、削除順は「索引 → 生ログ」にしてある。
+        //      範囲に通常のログが 1 件でも混じるユニットは対象外（本人の記憶を巻き添えにしない）。
+        //
+        // 子孫も含めて消す（再帰 CTE）。本番実測では対象ノードの子は全て対象に含まれており
+        // （topic の親は必ず対象 session）、対象外のノードが巻き添えになる関係は 0 件だった。
+        // 再帰にしてあるのは将来 CASCADE で黙って消える子の FTS 行が残らないようにするため。
+        //
+        // ## 索引まわりで**触らない**もの
+        // - 空になる親（`period` ノード）は残す。`period-{agent_id}-{YYYY-MM}` は索引ビルダが
+        //   同じ id で再利用するキーで、消しても次のビルドで作り直される。本番では 2 件が
+        //   子 0 になるが、後続のセッションがそこへ吊り下がるだけで害が無い。
+        // - `memory_index_watermark.last_indexed_log_id` は id の**値比較**にしか使われない
+        //   （`get_unindexed_session_logs` / `get_unindexed_log_count` の `id > ?`）ので、
+        //   その id の行が消えても索引ビルドの入力は 1 行も変わらない。
+        // - `memory_index_watermark.total_nodes` は「累計で何ノード作ったか」の積み上げ値
+        //   （`index_builder` が `existing + nodes_created` で書くだけ）で、実カウントとは
+        //   元から一致していない（本番実測 3,033 vs 実カウント 3,210 等）。API が返すのは
+        //   `tree.len()`（`crates/server/src/api/agents.rs`）なので、ここは触らない。
+        // - 宣言カーソル（`agent_memory_index_config.memory_declare_cursor` の位置部）も値比較のみ。
+        //
+        // ## 索引ノードを指す他テーブル
+        // ノード id を値で持つ列はスキーマ全走査で `memory_index_nodes.parent_id`（自己参照）、
+        // `memory_index_fts.node_id`、`memory_category_members.topic_id` / `.category_id` の 4 つ。
+        // `memory_category_members` も同じ集合で削除する（宙に浮く参照を残さない）。**`topic_id`
+        // という列名だが topic ノードとは限らず、削除対象のユニットを指す行が本番に 3 件あった。**
         //
         // ## 運用記録（`llm_logs` / `agent_logs`）は消さない
         // 消すのは `memory_sessions` と `memory_sessions_fts` の 2 表だけ。**何を行ったかの
@@ -1215,36 +1254,90 @@ const MIGRATIONS: &[Migration] = &[
         // トークン数を持つ）と `agent_logs`（context="sleep" の 1 ラン 1 行の要約）は残す。
         // 生ログから外すのは「記憶の材料としての扱い」だけ。
         //
-        // ## 本番コピーでの実測
-        // 適用前 user_version=32 / `memory_sessions` 49,203 行 / `memory_sessions_fts` 49,411 行 /
-        // FTS 孤児 208 行。対象は `sleep-declare-%` のみで 1,646 行（`sleep-organize-%` は 0 行）。
-        // 適用後は本体 47,557 行・FTS 47,765 行（ともに -1,646）、孤児 208 行のまま増減なし、
-        // 他の session_id 接頭辞の行数は 1 行も変化なし。`llm_logs` 8,082 行・`agent_logs` 44 行は
-        // 前後とも同数（全 39 テーブルの行数 diff で変化したのは本体と FTS のシャドウ表のみ）。
+        // ## 本番コピーでの実測（適用前 user_version=32）
+        // 生ログ: `memory_sessions` 49,231 → 47,585 / `memory_sessions_fts` 49,439 → 47,793
+        // （ともに -1,646。対象は `sleep-declare-%` のみで `sleep-organize-%` は 0 行）。
+        // FTS 孤児 208 行は前後で不変、本体だけで FTS が無い行は 0 のまま。
+        //
+        // 索引: `memory_index_nodes` 6,997 → 6,896 / `memory_index_fts` 6,997 → 6,896
+        // （ともに -101 = session 36 + topic 64 + unit 1）。`memory_index_fts` の孤児 0、
+        // 本体だけのノード 0、親が存在しないノード 0（いずれも前後で 0）。
+        // `memory_category_members` 392 → 389（-3。全て削除したユニットを `topic_id` に持つ行で、
+        // **ユニットにもカテゴリが付く**ため `source_session_id` 由来のノードだけを見ると 0 に見える）。
+        //
+        // **適用後、id 範囲を持つノードで範囲が空になるものは 0 件**（session 275/275・
+        // topic 5,990/5,990・unit 71/71 が全て 1 件以上の生ログを引ける）。両 FTS の
+        // `integrity-check` も通過。
+        //
+        // `llm_logs` 8,093 行・`agent_logs` 44 行は前後とも同数。全 39 テーブルの行数 diff で
+        // 変化したのは上記 3 表と 2 つの FTS のシャドウ表だけ。
         //
         // ## 冪等性
-        // 番号付き MIGRATIONS は `user_version` で 1 回しか走らないが、SQL 自体も自然冪等
-        // （2 回目は対象 0 行）。
+        // 番号付き MIGRATIONS は `user_version` で 1 回しか走らないが、SQL 自体も自然冪等。
+        // 2 回目は (1) が 0 行（既に消えている）、(2) も 0 行になる: 生ログを消した後は
+        // `_v33_maintenance_rows` が空なので「範囲内の全行がメンテナンスラン由来」は
+        // 「範囲内に行が 1 件も無い」と同値になり、直前の「1 件以上ある」条件と両立しない。
+        // 本番コピーで版を 32 へ戻して再実行し、全テーブル行数の差分がゼロであることを確認した。
         //
         // ## 切り戻し
-        // 削除した生ログは復元できない。原状復帰が要るなら v33 前のバックアップから戻す。
-        // バイナリだけ戻す場合は版番号を戻せばよい:
+        // 削除した生ログと索引ノードは復元できない。原状復帰が要るなら v33 前のバックアップから
+        // 戻す。バイナリだけ戻す場合は版番号を戻せばよい:
         //   BEGIN; PRAGMA user_version = 32; COMMIT;
         up: |conn| {
             // `IF NOT EXISTS` は付けない（v32 と同じ理由: 残骸があれば黙って古い集合を
             // 適用するより、即エラーで落ちて気づけるようにする）。正常系は末尾の `DROP` で
             // 必ず消え、途中失敗時も temp DB は同一トランザクションに参加して巻き戻る。
+            //
+            // **順序が意味を持つ**: ユニットの判定（範囲内の生ログが全てメンテナンスラン由来か）は
+            // 生ログが残っているうちにしかできない。索引側を先に確定・削除してから生ログを消す。
             conn.execute_batch(
                 "CREATE TEMP TABLE _v33_maintenance_rows AS
                  SELECT id AS row_id FROM memory_sessions
                  WHERE session_id LIKE 'sleep-declare-%'
                     OR session_id LIKE 'sleep-organize-%';
 
+                 -- 削除する索引ノード（種を確定 → 子孫へ再帰的に広げる）。
+                 CREATE TEMP TABLE _v33_index_nodes AS
+                 WITH RECURSIVE seed(id) AS (
+                     -- (1) メンテナンスランのセッションから作られた session / topic ノード
+                     SELECT id FROM memory_index_nodes
+                     WHERE source_session_id LIKE 'sleep-declare-%'
+                        OR source_session_id LIKE 'sleep-organize-%'
+                     UNION
+                     -- (2) 範囲が「メンテナンスランのログだけ」で構成される宣言ユニット
+                     SELECT n.id FROM memory_index_nodes n
+                     WHERE n.node_type = 'unit'
+                       AND n.start_log_id IS NOT NULL AND n.end_log_id IS NOT NULL
+                       AND EXISTS (SELECT 1 FROM memory_sessions m
+                                    WHERE m.agent_id = n.agent_id
+                                      AND m.id BETWEEN n.start_log_id AND n.end_log_id)
+                       AND NOT EXISTS (SELECT 1 FROM memory_sessions m
+                                        WHERE m.agent_id = n.agent_id
+                                          AND m.id BETWEEN n.start_log_id AND n.end_log_id
+                                          AND m.id NOT IN (SELECT row_id FROM _v33_maintenance_rows))
+                 ), subtree(id) AS (
+                     SELECT id FROM seed
+                     UNION
+                     SELECT n.id FROM memory_index_nodes n JOIN subtree s ON n.parent_id = s.id
+                 )
+                 SELECT id AS node_id FROM subtree;
+
+                 -- 索引: FTS → カテゴリ所属 → 本体の順に、同一 node_id 集合で消す。
+                 DELETE FROM memory_index_fts
+                     WHERE node_id IN (SELECT node_id FROM _v33_index_nodes);
+                 DELETE FROM memory_category_members
+                     WHERE topic_id IN (SELECT node_id FROM _v33_index_nodes)
+                        OR category_id IN (SELECT node_id FROM _v33_index_nodes);
+                 DELETE FROM memory_index_nodes
+                     WHERE id IN (SELECT node_id FROM _v33_index_nodes);
+
+                 -- 生ログ: 本体と FTS を同一 rowid 集合で消す。
                  DELETE FROM memory_sessions_fts
                      WHERE rowid IN (SELECT row_id FROM _v33_maintenance_rows);
                  DELETE FROM memory_sessions
                      WHERE id IN (SELECT row_id FROM _v33_maintenance_rows);
 
+                 DROP TABLE _v33_index_nodes;
                  DROP TABLE _v33_maintenance_rows;",
             )?;
             Ok(())
@@ -4141,7 +4234,7 @@ mod migration_tests {
     /// v33: sleep のメンテナンスラン（宣言 `sleep-declare-*` / 整理 `sleep-organize-*`）が
     /// 生んだ生ログを消す（#393）。本体と FTS を**同一 rowid 集合**で消すこと（＝孤児を
     /// 増やさない）、他の接頭辞のログを 1 行も巻き込まないこと、既存の孤児に触らないこと、
-    /// 冪等であることを固定する。
+    /// 運用記録（`llm_logs` / `agent_logs`）を消さないこと、冪等であることを固定する。
     #[test]
     fn v33_deletes_maintenance_run_logs_from_both_tables() {
         use crate::queries::{insert_session_log, SessionLogRow};
@@ -4320,6 +4413,248 @@ mod migration_tests {
         assert_eq!(orphans(&conn), orphans_before);
         assert_eq!(count("SELECT COUNT(*) FROM llm_logs"), 1);
         assert_eq!(count("SELECT COUNT(*) FROM agent_logs"), 1);
+    }
+
+    /// v33（索引側 / #393 の 2 巡目レビュー指摘）: メンテナンスランのログから作られた
+    /// 索引ノードも消す。生ログだけ消すと「タイトルと要約はあるが中身を引くと空が返る記憶」が
+    /// 残るため（索引ビルドは本番で対象 id 帯を通過済み）。
+    ///
+    /// 固定するもの:
+    /// - `source_session_id` がメンテナンスランを指す session / topic ノードが本体と
+    ///   `memory_index_fts` の**同一 node_id 集合**で消えること
+    /// - 対象ノードの子孫も消えること（FTS 孤児を残さない）
+    /// - 空になる親（period）は**残す**こと
+    /// - 通常の会話由来のノードを 1 件も巻き込まないこと
+    /// - 宣言ユニットは「範囲が丸ごとメンテナンスラン由来」のものだけ消し、通常ログが
+    ///   混じるユニット・範囲が空のユニットは残すこと
+    /// - `memory_category_members` の宙に浮く参照が消えること（残るノードの行は残ること）
+    /// - 冪等であること
+    #[test]
+    fn v33_deletes_maintenance_run_index_nodes_and_only_pure_maintenance_units() {
+        use crate::queries::{insert_index_node, insert_session_log, IndexNodeRow, SessionLogRow};
+        let conn = crate::init_memory().expect("init");
+        let agent = "a1";
+
+        let log = |session: &str, content: &str| SessionLogRow {
+            id: None,
+            agent_id: agent.to_string(),
+            session_id: session.to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some(agent.to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        // 生ログ: メンテナンスラン 2 行 → 通常 1 行 → メンテナンスラン 1 行 の順に入れて、
+        // ユニットの範囲が「丸ごと」か「混在」かを id 範囲で作り分けられるようにする。
+        let m1 = insert_session_log(&conn, &log("sleep-declare-a1-1", "m1")).unwrap();
+        let m2 = insert_session_log(&conn, &log("sleep-declare-a1-1", "m2")).unwrap();
+        let normal = insert_session_log(&conn, &log("discord-a1-1-2", "normal")).unwrap();
+        let m3 = insert_session_log(&conn, &log("sleep-organize-a1-1", "m3")).unwrap();
+
+        let node = |id: &str,
+                    parent: Option<&str>,
+                    node_type: &str,
+                    src_session: Option<&str>,
+                    range: Option<(i64, i64)>| IndexNodeRow {
+            id: id.to_string(),
+            agent_id: agent.to_string(),
+            parent_id: parent.map(|s| s.to_string()),
+            node_type: node_type.to_string(),
+            source_type: if node_type == "unit" {
+                "declared".to_string()
+            } else {
+                "session_log".to_string()
+            },
+            title: format!("title-{id}"),
+            summary: format!("summary-{id}"),
+            start_log_id: range.map(|r| r.0),
+            end_log_id: range.map(|r| r.1),
+            source_session_id: src_session.map(|s| s.to_string()),
+            date_from: None,
+            date_to: None,
+            depth: 2,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-08-05T00:00:00+00:00".to_string(),
+            updated_at: "2026-08-05T00:00:00+00:00".to_string(),
+            short_id: None,
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        };
+
+        // 親（period）と、その下のメンテナンス由来 session + その topic 子。
+        insert_index_node(&conn, &node("period-1", None, "period", None, None)).unwrap();
+        insert_index_node(
+            &conn,
+            &node(
+                "sess-m",
+                Some("period-1"),
+                "session",
+                Some("sleep-declare-a1-1"),
+                Some((m1, m2)),
+            ),
+        )
+        .unwrap();
+        insert_index_node(
+            &conn,
+            &node(
+                "topic-m",
+                Some("sess-m"),
+                "topic",
+                Some("sleep-declare-a1-1"),
+                Some((m1, m2)),
+            ),
+        )
+        .unwrap();
+        // 対象 session の子だが `source_session_id` が無い（再帰で一緒に消える = FTS 孤児を残さない）。
+        insert_index_node(
+            &conn,
+            &node(
+                "topic-m-nosrc",
+                Some("sess-m"),
+                "topic",
+                None,
+                Some((m1, m2)),
+            ),
+        )
+        .unwrap();
+        // 通常の会話由来（残る）。period-1 の子でもあるので、親が空にならない側も確かめられる。
+        insert_index_node(
+            &conn,
+            &node(
+                "sess-ok",
+                Some("period-1"),
+                "session",
+                Some("discord-a1-1-2"),
+                Some((normal, normal)),
+            ),
+        )
+        .unwrap();
+        insert_index_node(
+            &conn,
+            &node(
+                "topic-ok",
+                Some("sess-ok"),
+                "topic",
+                Some("discord-a1-1-2"),
+                Some((normal, normal)),
+            ),
+        )
+        .unwrap();
+        // ユニット 3 種。範囲が丸ごとメンテナンス由来 / 通常ログ混在 / 範囲が空。
+        insert_index_node(
+            &conn,
+            &node("unit-pure", None, "unit", None, Some((m1, m2))),
+        )
+        .unwrap();
+        insert_index_node(
+            &conn,
+            &node("unit-mixed", None, "unit", None, Some((m1, m3))),
+        )
+        .unwrap();
+        insert_index_node(
+            &conn,
+            &node("unit-empty", None, "unit", None, Some((900_000, 900_001))),
+        )
+        .unwrap();
+
+        // カテゴリ所属: 消える topic と残る topic の両方に付ける。
+        conn.execute_batch(
+            "INSERT INTO memory_category_members (agent_id, topic_id, category_id, created_at)
+                 VALUES ('a1','topic-m','cat-1','2026-08-05T00:00:00+00:00'),
+                        ('a1','topic-ok','cat-1','2026-08-05T00:00:00+00:00');",
+        )
+        .unwrap();
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let exists = |id: &str| -> i64 {
+            count(&format!(
+                "SELECT COUNT(*) FROM memory_index_nodes WHERE id = '{id}'"
+            ))
+        };
+        let in_fts = |id: &str| -> i64 {
+            count(&format!(
+                "SELECT COUNT(*) FROM memory_index_fts WHERE node_id = '{id}'"
+            ))
+        };
+        let fts_orphans = || -> i64 {
+            count(
+                "SELECT COUNT(*) FROM memory_index_fts f
+                 LEFT JOIN memory_index_nodes n ON n.id = f.node_id WHERE n.id IS NULL",
+            )
+        };
+        let nodes_without_fts = || -> i64 {
+            count(
+                "SELECT COUNT(*) FROM memory_index_nodes n
+                 LEFT JOIN memory_index_fts f ON f.node_id = n.id WHERE f.node_id IS NULL",
+            )
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 9);
+        assert_eq!(fts_orphans(), 0);
+        assert_eq!(nodes_without_fts(), 0);
+
+        conn.execute_batch("PRAGMA user_version = 32").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v33");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 消えたもの（本体と FTS の両方から）。
+        for id in ["sess-m", "topic-m", "topic-m-nosrc", "unit-pure"] {
+            assert_eq!(exists(id), 0, "{id} は消える");
+            assert_eq!(in_fts(id), 0, "{id} は FTS からも同じ集合で消える");
+        }
+        // 残るもの。空になった period も残す（索引ビルダが同じ id で再利用するキー）。
+        for id in [
+            "period-1",
+            "sess-ok",
+            "topic-ok",
+            "unit-mixed",
+            "unit-empty",
+        ] {
+            assert_eq!(exists(id), 1, "{id} は残る");
+            assert_eq!(in_fts(id), 1, "{id} の FTS も残る");
+        }
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 5);
+        assert_eq!(fts_orphans(), 0, "FTS 孤児を作らない");
+        assert_eq!(nodes_without_fts(), 0, "本体だけのノードも作らない");
+
+        // カテゴリ所属: 消えた topic への参照だけが消え、残る topic の行は残る。
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_category_members WHERE topic_id = 'topic-m'"),
+            0,
+            "宙に浮く参照を残さない"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_category_members WHERE topic_id = 'topic-ok'"),
+            1,
+            "残るノードの所属は残す"
+        );
+
+        // 生ログ側: メンテナンス 3 行が消え、通常 1 行は残る。
+        assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), 1);
+        assert_eq!(
+            count(&format!(
+                "SELECT COUNT(*) FROM memory_sessions WHERE id = {normal}"
+            )),
+            1
+        );
+
+        // FTS integrity-check（削除で索引が壊れていないこと）。
+        conn.execute_batch(
+            "INSERT INTO memory_index_fts(memory_index_fts) VALUES('integrity-check');",
+        )
+        .expect("memory_index_fts integrity");
+
+        // 冪等: 版を 32 へ戻して再実行しても何も変わらない。生ログが消えた後は
+        // 「範囲に 1 件以上ある」が成り立たないので、unit-mixed / unit-empty も対象外のまま。
+        conn.execute_batch("PRAGMA user_version = 32").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v33 再実行");
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 5);
+        assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), 1);
+        assert_eq!(exists("unit-mixed"), 1, "再実行で本人の記憶を巻き込まない");
+        assert_eq!(exists("unit-empty"), 1);
+        assert_eq!(fts_orphans(), 0);
     }
 
     /// v20 起点の一気通貫（v20→v21→v22→v23）。稼働中の本番 DB は v22 なので実運用の
