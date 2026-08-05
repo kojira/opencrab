@@ -524,10 +524,14 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
          次回もう一度この範囲に現れます（呼ばなければ、宣言しなかった末尾は二度と現れません）。\n\
          - 範囲の**終わりを越えて**宣言したときも、`next_from_id` を宣言の続きの id にすれば、\
          次回が宣言済みと重なりません。\n\
-         - 位置の指定は必ず前へ進むよう丸められます（今回は id {min_pos} 〜 {max_pos} の範囲に収まります）。\n\
-         - **範囲の広さ自体**も変えられます。今回は {size} 件です{size_src}。材料が薄くて\
-         出来事が拾いきれないと感じたら `window_size` を大きく、濃すぎて丁寧に見られないと\
-         感じたら小さくしてください（{size_min}〜{size_max} 件）。一度決めると変えるまで効き続けます。\n\
+         - 位置の指定は必ず前へ進むよう丸められます（今回は id {min_pos} 〜 {max_pos} の範囲に\
+         収まります）。この「必ず進む」量は範囲の広さに比例するので、広くするほど、次回に回さず\
+         その場で通り過ぎる件数も増えます。\n\
+         - **範囲の広さ自体**も変えられます。いまの設定は {size} 件です{size_src}（未宣言の\
+         生ログがそれより少ないときは、上の「今回の範囲」の件数はこれより少なくなります）。\
+         材料が薄くて出来事が拾いきれないと感じたら `window_size` を大きく、濃すぎて丁寧に\
+         見られないと感じたら小さくしてください（下限 {size_min} 件 / 上限は既定 {size_max} 件）。\
+         一度決めると変えるまで効き続けます。\n\
          どちらも義務ではありません。今のままで良ければ呼ばなくて構いません。\n\n\
          # すでに宣言した記憶（最近のもの）\n{units_txt}",
         count = w.log_count,
@@ -637,6 +641,7 @@ fn parse_marker(marker: Option<&str>) -> (Option<String>, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opencrab_actions::Action;
     use opencrab_core::EngineResult;
     use opencrab_db::queries::DeclareWindowPref;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1301,6 +1306,33 @@ mod tests {
         }
     }
 
+    /// 宣言ランの中で道具を呼ぶときと同じ `ActionContext`（caller=Owner / gateway="sleep" /
+    /// 同じ DB）。窓の道具は DB しか触らないので、これで本番と同じ経路を通せる。
+    fn declare_tool_ctx(state: &AppState) -> (tempfile::TempDir, opencrab_actions::ActionContext) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = opencrab_actions::ActionContext {
+            caller: CallerIdentity::Owner,
+            agent_id: "a1".to_string(),
+            agent_name: "a1".to_string(),
+            session_id: Some("sleep-declare-a1-1".to_string()),
+            db: state.db.clone(),
+            workspace: std::sync::Arc::new(workspace),
+            last_metrics_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            current_purpose: std::sync::Arc::new(std::sync::Mutex::new("conversation".to_string())),
+            runtime_info: std::sync::Arc::new(std::sync::Mutex::new(
+                opencrab_actions::RuntimeInfo {
+                    default_model: "mock:test".to_string(),
+                    active_model: None,
+                    available_providers: vec!["mock".to_string()],
+                    gateway: "sleep".to_string(),
+                },
+            )),
+        };
+        (dir, ctx)
+    }
+
     /// ゲートが通る状態に `n` 件の生ログを積む（cursor=0 / 間隔 OK）。id を返す。
     fn seed_window(state: &AppState, n: usize) -> Vec<i64> {
         let ids = seed_logs(state, "a1", "s1", n);
@@ -1613,25 +1645,81 @@ mod tests {
 
     /// 運用が `max_logs` を上限より大きく設定している場合、本人の表明でそれより狭められることは
     /// あっても、上限のせいで運用の設定より狭くなることは無い。
-    #[test]
-    fn preferred_window_size_ceiling_never_undercuts_config() {
+    ///
+    /// **道具（`plan_next_memory_window`）経由で**表明する——本人が実際に通る経路。DB を直接
+    /// 叩くと、道具が上限で丸めてしまう実装でもこのテストは通ってしまい、doc の約束
+    /// （`DECLARE_WINDOW_MAX` の doc）との食い違いを検出できない。
+    #[tokio::test]
+    async fn preferred_window_size_ceiling_never_undercuts_config_via_tool() {
         let state = crate::test_app_state();
         seed_window(&state, 60);
         let big = opencrab_actions::memory_units::DECLARE_WINDOW_MAX + 400;
-        {
-            let conn = state.db.lock().unwrap();
-            opencrab_db::queries::set_memory_declare_window(
-                &conn,
-                "a1",
-                Some(&DeclareWindowPref {
-                    window_size: Some(big),
-                    ..Default::default()
-                }),
-            )
-            .unwrap();
-        }
+
+        let (_dir, ctx) = declare_tool_ctx(&state);
+        let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": big}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        // 運用が上限より広い枠を既定にしている: 本人が同じ値を表明しても窓は狭まらない。
         match decide_declare(&state.db, &cfg(true, big, 1), "a1").unwrap() {
-            DeclareDecision::Run(plan) => assert_eq!(plan.window_size, big),
+            DeclareDecision::Run(plan) => assert_eq!(
+                plan.window_size, big,
+                "本人が表明した瞬間に窓が運用の既定より狭まってはいけない"
+            ),
+            other => panic!("expected Run, got {other:?}"),
+        }
+        // 運用が既定（上限より狭い）なら、同じ表明が上限で丸められる。
+        match decide_declare(&state.db, &cfg(true, 100, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(
+                plan.window_size,
+                opencrab_actions::memory_units::DECLARE_WINDOW_MAX
+            ),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// 道具経由で位置と広さを表明し、**ラン → 次の窓**まで通す（本人が実際に通る経路の一気通貫）。
+    #[tokio::test]
+    async fn tool_expressed_window_flows_through_a_real_run() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 200);
+        let (_dir, ctx) = declare_tool_ctx(&state);
+        let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
+            .execute(
+                &json!({"next_from_id": ids[40], "window_size": 80, "note": "まだ続いている"}),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        // 窓 60 のランが clean で終わると、カーソルは道具で指した 1 つ手前へ。
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+        run_declare(
+            &state.db,
+            &cfg(true, 60, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cursor_of(&state), ids[39]);
+        let audit = latest_sleep_audit(&state).expect("監査ログ");
+        assert_eq!(audit["window_note"], json!("まだ続いている"));
+
+        // 次のランの窓は、道具で表明した広さ 80（config の 60 ではない）で組まれる。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        match decide_declare(&state.db, &cfg(true, 60, 1), "a1").unwrap() {
+            DeclareDecision::Run(plan) => {
+                assert_eq!(plan.window.from_id, Some(ids[40]), "指した id から再開する");
+                assert_eq!(plan.window_size, 80);
+                assert_eq!(plan.window.log_count, 80);
+            }
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -1678,8 +1766,34 @@ mod tests {
         assert!(sp.contains("next_from_id"), "持ち越しの指定方法が無い");
         assert!(sp.contains("window_size"), "広さの変え方が無い");
         // 今回の広さ（9 件）と既定/本人の別。
-        assert!(sp.contains("今回は 9 件です（既定の広さ）"));
+        assert!(sp.contains("いまの設定は 9 件です（既定の広さ）"));
         // 丸めの範囲は next_from_id として指せる値（＝位置 + 1）で示す。
         assert!(sp.contains(&format!("id {} 〜 {}", ids[2] + 1, ids[8] + 1)));
+    }
+
+    /// 残ログが窓より少ないとき、プロンプトの 2 つの件数（提示した実数と設定値）が
+    /// **矛盾して読めない**こと。設定 100 / 残り 9 件で「9 件」と「100 件」が並ぶ形。
+    #[test]
+    fn system_prompt_distinguishes_actual_range_from_configured_size() {
+        let state = crate::test_app_state();
+        seed_window(&state, 9);
+        let plan = match decide_declare(&state.db, &cfg(true, 100, 1), "a1").unwrap() {
+            DeclareDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert_eq!(plan.window.log_count, 9, "実際に提示できるのは 9 件");
+        assert_eq!(plan.window_size, 100, "設定は 100 件");
+        let sp = build_system_prompt(&plan);
+        // 提示した範囲は実数で書く。
+        assert!(sp.contains("今回の範囲（未宣言"));
+        assert!(sp.contains("/ 9 件 /"));
+        // 広さは「設定」として書き分け、実数がこれより少なくなり得ることを添える。
+        assert!(sp.contains("いまの設定は 100 件です"));
+        assert!(
+            sp.contains("これより少なくなります"),
+            "設定値と実数がずれ得ることの説明が無い"
+        );
+        // 「今回は 100 件」という、提示した実数と読める書き方をしていない。
+        assert!(!sp.contains("今回は 100 件"));
     }
 }

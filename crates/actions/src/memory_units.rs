@@ -656,7 +656,11 @@ pub const DECLARE_WINDOW_MIN: i64 = 50;
 /// partial（位置据え置き）になって前へ進まない。
 ///
 /// 運用側が `memory_declare.max_logs` にこれより大きい値を設定している場合は、そちらが
-/// 上限になる（本人の指定が運用の既定より狭められることは無い / 呼び出し側で `max` を取る）。
+/// 上限になる（本人の指定が運用の既定より狭められることは無い）。**その `max` を取れるのは
+/// config を持つラン側（`memory_declare::decide_declare`）だけ**なので、この道具は上限で
+/// 丸めず**希望をそのまま記録する**。ここで 600 に丸めてしまうと、`max_logs = 1000` の運用で
+/// 本人が 1000 と表明した瞬間に窓が 1000 → 600 へ**狭まる**（黙っていれば 1000 のままだった）。
+/// 下限（[`DECLARE_WINDOW_MIN`]）は config に依らないので、こちらは道具の側でも丸めてよい。
 pub const DECLARE_WINDOW_MAX: i64 = 600;
 
 /// 次回の宣言ランの窓（開始位置と広さ）を本人が決める。
@@ -693,7 +697,7 @@ impl Action for PlanNextMemoryWindowAction {
                 },
                 "window_size": {
                     "type": "integer",
-                    "description": format!("次回以降の窓に入れる生ログ件数（{DECLARE_WINDOW_MIN}〜{DECLARE_WINDOW_MAX} に丸められる）。一度決めると変えるまで効き続ける。")
+                    "description": format!("次回以降の窓に入れる生ログ件数（下限 {DECLARE_WINDOW_MIN} / 上限は既定 {DECLARE_WINDOW_MAX}。運用の設定がそれより広ければその値）。一度決めると変えるまで効き続ける。")
                 },
                 "note": {
                     "type": "string",
@@ -733,10 +737,13 @@ impl Action for PlanNextMemoryWindowAction {
         if let Some(v) = next_from_id {
             pref.next_from_id = Some(v);
         }
-        // 広さはここでも上下限に丸めて**丸めた値を返す**（本人が実際の設定を確認できる）。
-        // ランの側でも config を見て丸め直す（そちらが最終権限）。
-        let clamped_size = requested_size.map(|v| v.clamp(DECLARE_WINDOW_MIN, DECLARE_WINDOW_MAX));
-        if let Some(v) = clamped_size {
+        // 広さの**下限だけ**ここで丸める。下限は config に依らないので、丸めた値をその場で
+        // 返せば本人が実際の設定を確認できる。**上限は丸めない**——上限は運用の `max_logs` と
+        // の `max` で決まり（[`DECLARE_WINDOW_MAX`] の doc）、config を持つのはラン側だけ
+        // だから。ここで 600 に丸めると `max_logs = 1000` の運用で本人が 1000 と表明した
+        // 瞬間に窓が 1000 → 600 へ狭まる（黙っていれば 1000 のままだった）。
+        let recorded_size = requested_size.map(|v| v.max(DECLARE_WINDOW_MIN));
+        if let Some(v) = recorded_size {
             pref.window_size = Some(v);
         }
         if note.is_some() {
@@ -753,11 +760,17 @@ impl Action for PlanNextMemoryWindowAction {
         ActionResult::success(json!({
             "next_from_id": pref.next_from_id,
             "window_size": pref.window_size,
-            "window_size_clamped": requested_size.is_some() && requested_size != clamped_size,
-            "window_size_range": [DECLARE_WINDOW_MIN, DECLARE_WINDOW_MAX],
+            "window_size_raised_to_min": requested_size.is_some() && requested_size != recorded_size,
+            "window_size_min": DECLARE_WINDOW_MIN,
+            "window_size_max_default": DECLARE_WINDOW_MAX,
             "note": pref.note,
             "applies_to": "next_run",
-            "hint": "next_from_id はこのランの終わりに一度だけ使われます（必ず前へ進むよう丸められます）。window_size は変えるまで効き続けます。",
+            "hint": format!(
+                "next_from_id はこのランの終わりに一度だけ使われます（必ず前へ進むよう丸められます）。\
+                 window_size は変えるまで効き続けます。広さの上限は既定 {DECLARE_WINDOW_MAX} 件\
+                 （運用の設定がそれより広ければその値）で、実際に使われた広さは次回の\
+                 「今回の範囲」に出ます。"
+            ),
         }))
     }
 }
@@ -1333,33 +1346,46 @@ mod tests {
         assert_eq!(p.window_size, Some(450));
     }
 
-    /// 広さは上下限へ丸め、**丸めたことを返り値で伝える**（本人が実際の設定を確認できる）。
+    /// 広さの**下限だけ**道具が丸め、**上限は丸めない**（上限は運用の `max_logs` との `max` で
+    /// 決まり、config を持つのはラン側だけ）。ここで 600 に丸めると、`max_logs` を 600 超に
+    /// している運用で本人が表明した瞬間に窓が**狭まる**（黙っていれば広いままだった）。
     #[tokio::test]
-    async fn plan_window_clamps_size_and_reports_it() {
+    async fn plan_window_raises_to_min_but_does_not_cap_at_max() {
         let (_d, ctx) = test_context();
 
+        // 上限より大きい希望は**そのまま記録する**（ラン側が config を見て丸める）。
         let r = PlanNextMemoryWindowAction
-            .execute(&json!({"window_size": 100_000}), &ctx)
+            .execute(&json!({"window_size": DECLARE_WINDOW_MAX + 400}), &ctx)
             .await;
         assert!(r.success);
         let data = r.data.unwrap();
-        assert_eq!(data["window_size"], json!(DECLARE_WINDOW_MAX));
-        assert_eq!(data["window_size_clamped"], json!(true));
-        assert_eq!(pref(&ctx).unwrap().window_size, Some(DECLARE_WINDOW_MAX));
+        assert_eq!(data["window_size"], json!(DECLARE_WINDOW_MAX + 400));
+        assert_eq!(data["window_size_raised_to_min"], json!(false));
+        assert_eq!(
+            pref(&ctx).unwrap().window_size,
+            Some(DECLARE_WINDOW_MAX + 400),
+            "道具が上限で丸めると、広い max_logs の運用で窓がむしろ狭まる"
+        );
+        // 上限の既定は伝える（本人が「そのまま通る」と誤解しないように）。
+        assert_eq!(data["window_size_max_default"], json!(DECLARE_WINDOW_MAX));
 
+        // 下限は config に依らないので道具が丸め、丸めたことを伝える。
         let r = PlanNextMemoryWindowAction
             .execute(&json!({"window_size": 1}), &ctx)
             .await;
         assert!(r.success);
-        assert_eq!(r.data.unwrap()["window_size"], json!(DECLARE_WINDOW_MIN));
+        let data = r.data.unwrap();
+        assert_eq!(data["window_size"], json!(DECLARE_WINDOW_MIN));
+        assert_eq!(data["window_size_raised_to_min"], json!(true));
+        assert_eq!(pref(&ctx).unwrap().window_size, Some(DECLARE_WINDOW_MIN));
 
-        // 範囲内はそのまま（丸めていないことも伝える）。
+        // 範囲内はそのまま。
         let r = PlanNextMemoryWindowAction
             .execute(&json!({"window_size": 200}), &ctx)
             .await;
         let data = r.data.unwrap();
         assert_eq!(data["window_size"], json!(200));
-        assert_eq!(data["window_size_clamped"], json!(false));
+        assert_eq!(data["window_size_raised_to_min"], json!(false));
     }
 
     /// 全プロパティを空値で埋めてくるモデル（#388 の癖）は「指定なし」として拒否する。
