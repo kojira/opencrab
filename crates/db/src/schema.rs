@@ -1228,10 +1228,26 @@ const MIGRATIONS: &[Migration] = &[
         // （topic の親は必ず対象 session）、対象外のノードが巻き添えになる関係は 0 件だった。
         // 再帰にしてあるのは将来 CASCADE で黙って消える子の FTS 行が残らないようにするため。
         //
+        // ## 親の集計列（`child_count`）は直す
+        // `memory_index_nodes.child_count` は「直下の子の数」で、**本番では全 6,997 ノードが
+        // 実カウントと一致している**（`index_stats` の `child_count_mismatch` はこれを見る /
+        // `crates/core/src/memory_index/graph_query.rs`）。子を消すとここがずれるので、
+        // 削除**前**に「生き残る親」を控えておき、削除後に実カウントで書き直す。
+        //
+        // **索引ビルダの再計算には任せられない。** 再計算（`index_builder.rs`）は現存する子から
+        // `HashMap<parent_id, count>` を組んで**そのキーだけ**を UPDATE するので、子が 0 になった
+        // 親は 1 度も書かれず古い値が残り続ける。本番では 5 つの親がずれ、うち 2 つ
+        // （`period-…-2026-08` 2 件）は子 0 になる = 永久に直らない側に当たる。
+        //
+        // `updated_at` は触らない。ここでの書き換えは「子が消えた」ことの反映で、ノード自身の
+        // 内容は変わっていない（`updated_at` が child_count 更新で汚れる件は `IndexNodeRow` の
+        // doc にあるとおり。マイグレーションで全ノードの時刻を動かす方が読み手を混乱させる）。
+        //
         // ## 索引まわりで**触らない**もの
-        // - 空になる親（`period` ノード）は残す。`period-{agent_id}-{YYYY-MM}` は索引ビルダが
+        // - 空になる親（`period` ノード）自体は残す。`period-{agent_id}-{YYYY-MM}` は索引ビルダが
         //   同じ id で再利用するキーで、消しても次のビルドで作り直される。本番では 2 件が
-        //   子 0 になるが、後続のセッションがそこへ吊り下がるだけで害が無い。
+        //   子 0 になるが、後続のセッションがそこへ吊り下がるだけで害が無い（`child_count` は
+        //   上記のとおり 0 へ直す）。
         // - `memory_index_watermark.last_indexed_log_id` は id の**値比較**にしか使われない
         //   （`get_unindexed_session_logs` / `get_unindexed_log_count` の `id > ?`）ので、
         //   その id の行が消えても索引ビルドの入力は 1 行も変わらない。
@@ -1255,7 +1271,7 @@ const MIGRATIONS: &[Migration] = &[
         // 生ログから外すのは「記憶の材料としての扱い」だけ。
         //
         // ## 本番コピーでの実測（適用前 user_version=32）
-        // 生ログ: `memory_sessions` 49,231 → 47,585 / `memory_sessions_fts` 49,439 → 47,793
+        // 生ログ: `memory_sessions` 49,233 → 47,587 / `memory_sessions_fts` 49,441 → 47,795
         // （ともに -1,646。対象は `sleep-declare-%` のみで `sleep-organize-%` は 0 行）。
         // FTS 孤児 208 行は前後で不変、本体だけで FTS が無い行は 0 のまま。
         //
@@ -1265,11 +1281,15 @@ const MIGRATIONS: &[Migration] = &[
         // `memory_category_members` 392 → 389（-3。全て削除したユニットを `topic_id` に持つ行で、
         // **ユニットにもカテゴリが付く**ため `source_session_id` 由来のノードだけを見ると 0 に見える）。
         //
+        // `child_count` は前後とも実カウントと**全ノードで一致**（mismatch 0 → 0）。子を失った
+        // 5 つの親は 3→2（`declroot-…`）/ 12→0 / 14→3 / 68→57 / 2→0（`period-…-2026-08`）へ
+        // 正しく減った。**0 になる 2 件が索引ビルダでは直らない側**（再計算は子を持つ親しか書かない）。
+        //
         // **適用後、id 範囲を持つノードで範囲が空になるものは 0 件**（session 275/275・
         // topic 5,990/5,990・unit 71/71 が全て 1 件以上の生ログを引ける）。両 FTS の
         // `integrity-check` も通過。
         //
-        // `llm_logs` 8,093 行・`agent_logs` 44 行は前後とも同数。全 39 テーブルの行数 diff で
+        // `llm_logs` 8,094 行・`agent_logs` 44 行は前後とも同数。全 39 テーブルの行数 diff で
         // 変化したのは上記 3 表と 2 つの FTS のシャドウ表だけ。
         //
         // ## 冪等性
@@ -1322,6 +1342,14 @@ const MIGRATIONS: &[Migration] = &[
                  )
                  SELECT id AS node_id FROM subtree;
 
+                 -- 子を失う「生き残る親」を削除**前**に控える（削除後は parent_id を辿れない）。
+                 CREATE TEMP TABLE _v33_affected_parents AS
+                 SELECT DISTINCT n.parent_id AS node_id
+                 FROM memory_index_nodes n
+                 WHERE n.id IN (SELECT node_id FROM _v33_index_nodes)
+                   AND n.parent_id IS NOT NULL
+                   AND n.parent_id NOT IN (SELECT node_id FROM _v33_index_nodes);
+
                  -- 索引: FTS → カテゴリ所属 → 本体の順に、同一 node_id 集合で消す。
                  DELETE FROM memory_index_fts
                      WHERE node_id IN (SELECT node_id FROM _v33_index_nodes);
@@ -1331,12 +1359,19 @@ const MIGRATIONS: &[Migration] = &[
                  DELETE FROM memory_index_nodes
                      WHERE id IN (SELECT node_id FROM _v33_index_nodes);
 
+                 -- 生き残る親の child_count を実カウントへ直す。
+                 UPDATE memory_index_nodes
+                     SET child_count = (SELECT COUNT(*) FROM memory_index_nodes c
+                                         WHERE c.parent_id = memory_index_nodes.id)
+                     WHERE id IN (SELECT node_id FROM _v33_affected_parents);
+
                  -- 生ログ: 本体と FTS を同一 rowid 集合で消す。
                  DELETE FROM memory_sessions_fts
                      WHERE rowid IN (SELECT row_id FROM _v33_maintenance_rows);
                  DELETE FROM memory_sessions
                      WHERE id IN (SELECT row_id FROM _v33_maintenance_rows);
 
+                 DROP TABLE _v33_affected_parents;
                  DROP TABLE _v33_index_nodes;
                  DROP TABLE _v33_maintenance_rows;",
             )?;
@@ -4543,20 +4578,62 @@ mod migration_tests {
             ),
         )
         .unwrap();
+        // 子が全て消えて空になる period（本番に 2 件あるケース）。索引ビルダの child_count
+        // 再計算は「子を持つ親」しか書かないので、ここが 0 へ直らないと永久にずれたままになる。
+        insert_index_node(&conn, &node("period-2", None, "period", None, None)).unwrap();
+        insert_index_node(
+            &conn,
+            &node(
+                "sess-m2",
+                Some("period-2"),
+                "session",
+                Some("sleep-organize-a1-1"),
+                Some((m3, m3)),
+            ),
+        )
+        .unwrap();
         // ユニット 3 種。範囲が丸ごとメンテナンス由来 / 通常ログ混在 / 範囲が空。
+        // 宣言ユニットの根（本番の `declroot-{agent_id}`）も置き、子を 1 つ失う側を作る。
+        insert_index_node(&conn, &node("declroot-1", None, "root", None, None)).unwrap();
         insert_index_node(
             &conn,
-            &node("unit-pure", None, "unit", None, Some((m1, m2))),
+            &node(
+                "unit-pure",
+                Some("declroot-1"),
+                "unit",
+                None,
+                Some((m1, m2)),
+            ),
         )
         .unwrap();
         insert_index_node(
             &conn,
-            &node("unit-mixed", None, "unit", None, Some((m1, m3))),
+            &node(
+                "unit-mixed",
+                Some("declroot-1"),
+                "unit",
+                None,
+                Some((m1, m3)),
+            ),
         )
         .unwrap();
         insert_index_node(
             &conn,
-            &node("unit-empty", None, "unit", None, Some((900_000, 900_001))),
+            &node(
+                "unit-empty",
+                Some("declroot-1"),
+                "unit",
+                None,
+                Some((900_000, 900_001)),
+            ),
+        )
+        .unwrap();
+
+        // 健全な索引の状態を作る: child_count を実カウントに揃える（本番も全ノードで一致している）。
+        conn.execute_batch(
+            "UPDATE memory_index_nodes
+                 SET child_count = (SELECT COUNT(*) FROM memory_index_nodes c
+                                     WHERE c.parent_id = memory_index_nodes.id);",
         )
         .unwrap();
 
@@ -4591,22 +4668,40 @@ mod migration_tests {
                  LEFT JOIN memory_index_fts f ON f.node_id = n.id WHERE f.node_id IS NULL",
             )
         };
-        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 9);
+        let child_count_of = |id: &str| -> i64 {
+            count(&format!(
+                "SELECT child_count FROM memory_index_nodes WHERE id = '{id}'"
+            ))
+        };
+        let child_count_mismatch = || -> i64 {
+            count(
+                "SELECT COUNT(*) FROM memory_index_nodes n
+                 WHERE n.child_count <> (SELECT COUNT(*) FROM memory_index_nodes c
+                                          WHERE c.parent_id = n.id)",
+            )
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 12);
         assert_eq!(fts_orphans(), 0);
         assert_eq!(nodes_without_fts(), 0);
+        assert_eq!(child_count_mismatch(), 0, "仕込み時点では全ノード一致");
+        assert_eq!(child_count_of("period-1"), 2);
+        assert_eq!(child_count_of("period-2"), 1);
+        assert_eq!(child_count_of("declroot-1"), 3);
 
         conn.execute_batch("PRAGMA user_version = 32").unwrap();
         run_migrations(&conn, MIGRATIONS).expect("v33");
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
 
         // 消えたもの（本体と FTS の両方から）。
-        for id in ["sess-m", "topic-m", "topic-m-nosrc", "unit-pure"] {
+        for id in ["sess-m", "sess-m2", "topic-m", "topic-m-nosrc", "unit-pure"] {
             assert_eq!(exists(id), 0, "{id} は消える");
             assert_eq!(in_fts(id), 0, "{id} は FTS からも同じ集合で消える");
         }
         // 残るもの。空になった period も残す（索引ビルダが同じ id で再利用するキー）。
         for id in [
             "period-1",
+            "period-2",
+            "declroot-1",
             "sess-ok",
             "topic-ok",
             "unit-mixed",
@@ -4615,9 +4710,17 @@ mod migration_tests {
             assert_eq!(exists(id), 1, "{id} は残る");
             assert_eq!(in_fts(id), 1, "{id} の FTS も残る");
         }
-        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 5);
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 7);
         assert_eq!(fts_orphans(), 0, "FTS 孤児を作らない");
         assert_eq!(nodes_without_fts(), 0, "本体だけのノードも作らない");
+
+        // 生き残る親の child_count が実カウントへ直っている。**子が 0 になった period-2 まで
+        // 直ること**が肝（索引ビルダの再計算は子を持つ親しか書かないので、ここで直さないと
+        // 永久にずれたまま残る）。
+        assert_eq!(child_count_mismatch(), 0, "削除後も全ノードで一致");
+        assert_eq!(child_count_of("period-1"), 1, "sess-m を失って 2→1");
+        assert_eq!(child_count_of("period-2"), 0, "子が全て消えて 1→0");
+        assert_eq!(child_count_of("declroot-1"), 2, "unit-pure を失って 3→2");
 
         // カテゴリ所属: 消えた topic への参照だけが消え、残る topic の行は残る。
         assert_eq!(
@@ -4650,11 +4753,16 @@ mod migration_tests {
         // 「範囲に 1 件以上ある」が成り立たないので、unit-mixed / unit-empty も対象外のまま。
         conn.execute_batch("PRAGMA user_version = 32").unwrap();
         run_migrations(&conn, MIGRATIONS).expect("v33 再実行");
-        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 5);
+        assert_eq!(count("SELECT COUNT(*) FROM memory_index_nodes"), 7);
         assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), 1);
         assert_eq!(exists("unit-mixed"), 1, "再実行で本人の記憶を巻き込まない");
         assert_eq!(exists("unit-empty"), 1);
         assert_eq!(fts_orphans(), 0);
+        assert_eq!(
+            child_count_mismatch(),
+            0,
+            "再実行でも child_count は一致のまま"
+        );
     }
 
     /// v20 起点の一気通貫（v20→v21→v22→v23）。稼働中の本番 DB は v22 なので実運用の
