@@ -1075,11 +1075,15 @@ pub fn set_memory_declare_cursor(conn: &Connection, agent_id: &str, cursor: &str
 /// **希望であって決定ではない**: ランの側が前進の下限・上限へ丸めてから使う（本人任せにすると
 /// 同じ窓を永久に再取得するループに入る / #374）。
 ///
-/// 2 つのフィールドは**寿命が違う**:
-/// - `next_from_id` はそのランの終わりに消費されて消える（持ち越さない）。過去の指定が
-///   後のランのカーソルを勝手に引き戻さないため。
+/// フィールドは**寿命が違う**:
+/// - `next_from_id` と `note` はそのランの終わりに消費されて消える（持ち越さない）。過去の
+///   指定が後のランのカーソルを勝手に引き戻さないため。`note` は「その位置をそう決めた理由」
+///   なので寿命は位置と同じ（残すと以後すべてのランの監査に同じ文字列が出続け、そのランで
+///   書かれたものと誤読される）。
 /// - `window_size` は sticky（本人が上書きするまで効き続ける）。「今回は薄かったので次から
 ///   もっと広く」という調整は、1 回きりではなく本人の設定として残るのが自然だから。
+/// - `partial_streak` だけは**機械が持つ状態**（本人は書かない）。広さを sticky にした結果、
+///   広げすぎてターンが毎回潰れる状態から自力で戻れなくなるのを防ぐためのカウンタ。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeclareWindowPref {
     /// 次回の窓をこの生ログ id から始めたい（＝この id 以降は未処理として次回へ回す）。
@@ -1089,12 +1093,17 @@ pub struct DeclareWindowPref {
     /// 次回以降の窓に入れたい生ログ件数（sticky）。`None` なら config の既定を使う。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<i64>,
-    /// 本人が書いた理由。監査ログに載せるだけで、機械は解釈しない。
+    /// 本人が書いた理由。監査ログに載せるだけで、機械は解釈しない。位置と一緒に消費される。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// 最後に書いた時刻（RFC3339）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// `window_size` を表明した状態で partial が**連続**した回数（機械が刻む / 本人は書かない）。
+    /// clean が 1 回通れば `None` に戻る。既定値へ戻したときも `None` に戻る。丸めの規則と
+    /// 上限は `crates/server/src/memory_declare.rs` にある。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_streak: Option<i64>,
 }
 
 /// 宣言ランの窓の希望（#394）を取得する。行が無い / NULL / 壊れた JSON なら `None`。

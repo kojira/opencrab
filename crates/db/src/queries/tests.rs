@@ -4653,11 +4653,12 @@ fn declare_window_pref_roundtrips_and_tolerates_garbage() {
         window_size: Some(450),
         note: Some("材料が薄かったので広げる".to_string()),
         updated_at: Some("2026-08-05T00:00:00Z".to_string()),
+        partial_streak: Some(2),
     };
     set_memory_declare_window(&conn, "a1", Some(&pref)).unwrap();
     assert_eq!(get_memory_declare_window(&conn, "a1").unwrap(), Some(pref));
 
-    // 位置だけ消して広さは残す（ランが位置を使い切ったときの形）。
+    // 位置と理由を消して広さは残す（ランが位置を使い切ったときの形）。
     let sticky = DeclareWindowPref {
         next_from_id: None,
         window_size: Some(450),
@@ -4666,7 +4667,19 @@ fn declare_window_pref_roundtrips_and_tolerates_garbage() {
     set_memory_declare_window(&conn, "a1", Some(&sticky)).unwrap();
     let got = get_memory_declare_window(&conn, "a1").unwrap().unwrap();
     assert_eq!(got.next_from_id, None);
+    assert_eq!(got.note, None);
+    assert_eq!(got.partial_streak, None);
     assert_eq!(got.window_size, Some(450));
+
+    // 旧い形（`partial_streak` が無い JSON）も読める（列は後から足したフィールド）。
+    conn.execute(
+        "UPDATE agent_memory_index_config SET memory_declare_window = '{\"window_size\":450}' WHERE agent_id='a1'",
+        [],
+    )
+    .unwrap();
+    let old = get_memory_declare_window(&conn, "a1").unwrap().unwrap();
+    assert_eq!(old.window_size, Some(450));
+    assert_eq!(old.partial_streak, None);
 
     // 隣の列（宣言ランのマーカー）は触らない。
     set_memory_declare_cursor(&conn, "a1", "2026-08-05T00:00:00Z|23594").unwrap();

@@ -97,6 +97,19 @@ const MIN_ADVANCE_DIVISOR: i64 = 3;
 /// 越境（＝合計 2 窓ぶん）まで許せば「越えて宣言した続きから」は成立し、それ以上の飛ばしは起きない。
 const MAX_ADVANCE_WINDOWS: i64 = 2;
 
+/// partial（timeout / ターン上限 / エラー）がこの回数**連続**したら、本人が表明した窓の広さを
+/// 破棄して config の既定へ戻す（#394）。
+///
+/// 広さは sticky なので、本人が広げすぎてターンが毎回潰れると**位置が 1 件も進まないまま
+/// 発火し続ける**。ターンが潰れる状況では `plan_next_memory_window` を呼ぶ余地も無いので、
+/// 放っておくと本人が自分で狭めるまで抜けられない（自力での回復が保証されない）。
+///
+/// 3 にする理由: 1 回の partial は珍しくない（LLM の一時的な遅延・失敗でも起きる）ので、
+/// 1 や 2 で戻すと本人の設定が些細な揺らぎで消える。一方、日次（既定 1440 分）なら 3 日、
+/// バックログ消化（`min_interval_minutes = 1` / maintenance tick 既定 600 秒）でも 30 分ほどで
+/// 回復するので、空回りが数時間に伸びることは無い。**clean が 1 回通れば連続は切れる**。
+const MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET: i64 = 3;
+
 /// このエージェントの宣言ランを（ゲートを満たせば）実行する。**本番エントリ**。
 ///
 /// 本番のラン構築（`run_agent_response`）を [`AppStateTurnRunner`] に閉じ込め、宣言ランの
@@ -243,18 +256,56 @@ async fn run_declare(
         plan.cursor_id
     };
     let marker_after = format_marker(&now.to_rfc3339(), position);
+
+    // 窓の希望の後始末（#394）。
+    //
+    // - **位置（`next_from_id`）と理由（`note`）はこのランで使い切る**（clean / partial を
+    //   問わず消す）。位置を残すと、次の窓を見てもいない過去の指定が後のランのカーソルを
+    //   引き戻し続ける。`note` は「その位置をそう決めた理由」なので寿命は位置と同じ——残すと
+    //   以後すべてのランの監査 `window_note` に同じ文字列が出続け、「このランで本人がこう
+    //   書いた」と誤読される。
+    // - **広さ（`window_size`）は sticky**（本人が上書きするまで効く）。ただし partial が
+    //   続いたら自動で手放す（下記）。
+    let mut after = requested.clone().unwrap_or_default();
+    after.next_from_id = None;
+    after.note = None;
+
+    // **partial が続いたら本人の広さを既定へ戻す**（自力で回復できない状態を作らない）。
+    //
+    // 広さは sticky なので、本人が広げすぎてターンが毎回潰れると、位置が 1 件も進まないまま
+    // 発火し続ける。しかもターンが潰れる状況では `plan_next_memory_window` を呼ぶ余地も
+    // 無いので、**本人が自分で狭めるまで抜けられない**。日次（既定 1440 分）なら軽微だが、
+    // バックログ消化では `min_interval_minutes = 1` で回すため maintenance tick ごと
+    // （既定 600 秒）に発火し、数時間ぶん空回りする。
+    //
+    // 数える対象は「本人が広さを表明しているとき」だけ（表明が無ければ戻す先が無い）。
+    // clean が 1 回通れば連続は切れる。戻すのは希望の破棄だけで、次に本人が
+    // `plan_next_memory_window` を呼べばまた広げられる（恒久的に禁止しない）。
+    let mut window_size_auto_reset = false;
+    if after.window_size.is_some() {
+        if clean {
+            after.partial_streak = None;
+        } else {
+            let streak = after.partial_streak.unwrap_or(0) + 1;
+            if streak >= MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET {
+                after.window_size = None;
+                after.partial_streak = None;
+                window_size_auto_reset = true;
+            } else {
+                after.partial_streak = Some(streak);
+            }
+        }
+    }
+    let partial_streak_after = after.partial_streak.unwrap_or(0);
+
     {
         let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         opencrab_db::queries::set_memory_declare_cursor(&conn, agent_id, &marker_after)?;
 
-        // 位置の希望は**このランで使い切る**（clean / partial を問わず消す）。残すと、次の窓を
-        // 見てもいない過去の指定が後のランのカーソルを引き戻し続ける。広さ（`window_size`）は
-        // 本人の設定なので消さない（sticky / 本人が上書きするまで効く）。
-        if let Some(mut p) = requested {
-            if p.next_from_id.is_some() {
-                p.next_from_id = None;
-                opencrab_db::queries::set_memory_declare_window(&conn, agent_id, Some(&p))?;
-            }
+        // 中身が空になったら列ごと NULL へ戻す（「希望なし」と同じ状態にする）。
+        let after_opt = (after != Default::default()).then_some(&after);
+        if after_opt != requested.as_ref() {
+            opencrab_db::queries::set_memory_declare_window(&conn, agent_id, after_opt)?;
         }
     }
 
@@ -279,6 +330,10 @@ async fn run_declare(
             "position_min": plan.min_position,
             "position_max": plan.max_position,
             "window_note": requested_note,
+            // partial の連続と、それによる広さの自動リセット（#394）。`true` なら次のランは
+            // config の既定の広さで走る（本人が再び表明すればまた広がる）。
+            "partial_streak": partial_streak_after,
+            "window_size_auto_reset": window_size_auto_reset,
             // 位置は clean のときだけ前進。throttle は毎回 now（partial の再発火を止める）。
             "position_advanced": clean,
             "throttle_advanced": true,
@@ -1333,6 +1388,18 @@ mod tests {
         (dir, ctx)
     }
 
+    /// throttle だけ開けて（位置はそのまま）もう 1 ラン回す。翌日 / 次の tick を模す。
+    async fn run_again(state: &AppState, c: &MemoryDeclareConfig, fake: &FakeRunner) {
+        set_marker(
+            state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(state)),
+        );
+        run_declare(&state.db, c, &state.index_build_inflight, "a1", fake)
+            .await
+            .unwrap();
+    }
+
     /// ゲートが通る状態に `n` 件の生ログを積む（cursor=0 / 間隔 OK）。id を返す。
     fn seed_window(state: &AppState, n: usize) -> Vec<i64> {
         let ids = seed_logs(state, "a1", "s1", n);
@@ -1548,7 +1615,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(get_pref(&state).unwrap().next_from_id, None);
+        // 位置しか書かれていなかったので、使い切ると希望そのものが空になる（列は NULL へ戻る）。
+        assert_eq!(get_pref(&state).and_then(|p| p.next_from_id), None);
+        assert_eq!(get_pref(&state), None, "空になった希望は NULL へ戻す");
 
         // 2 回目（希望なし）は窓の終端まで進む＝古い指定が生き残っていない。
         set_marker(
@@ -1567,6 +1636,185 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cursor_of(&state), ids[8]);
+    }
+
+    /// `note` は位置と**同じ寿命**で消費される。残すと、以後すべてのランの監査 `window_note` に
+    /// 同じ文字列が出続け、「このランで本人がこう書いた」と誤読される。
+    #[tokio::test]
+    async fn note_is_consumed_together_with_the_position() {
+        let state = crate::test_app_state();
+        let ids = seed_window(&state, 20);
+        let fake = FakeRunner::new(FakeOutcome::Completed).with_pref(
+            &state,
+            DeclareWindowPref {
+                next_from_id: Some(ids[5]),
+                note: Some("この出来事はまだ続いている".to_string()),
+                ..Default::default()
+            },
+        );
+        run_declare(
+            &state.db,
+            &cfg(true, 9, 1),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        // 書かれたランの監査には出る。
+        assert_eq!(
+            latest_sleep_audit(&state).unwrap()["window_note"],
+            json!("この出来事はまだ続いている")
+        );
+        assert_eq!(
+            get_pref(&state).and_then(|p| p.note),
+            None,
+            "note は残らない"
+        );
+
+        // 次のラン（本人は何も書いていない）の監査には出ない。
+        let fake2 = FakeRunner::new(FakeOutcome::Completed);
+        run_again(&state, &cfg(true, 9, 1), &fake2).await;
+        assert_eq!(
+            latest_sleep_audit(&state).unwrap()["window_note"],
+            json!(null),
+            "過去のランの note が後のランの監査に出続けている"
+        );
+    }
+
+    /// **自力での回復**: 本人が広げた結果ターンが毎回潰れると、位置が 1 件も進まないまま発火し
+    /// 続ける（ターンが潰れる状況では本人が道具を呼ぶ余地も無い）。partial が
+    /// [`MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET`] 回連続したら、広さの希望を捨てて config の
+    /// 既定へ戻す。**N-1 回では戻らない**（一時的な遅延・失敗で本人の設定を消さない）。
+    #[tokio::test]
+    async fn consecutive_partials_reset_preferred_window_size() {
+        assert_eq!(MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET, 3, "以下は N=3 前提");
+        let state = crate::test_app_state();
+        seed_window(&state, 200);
+        let c = cfg(true, 100, 1);
+
+        // 本人が道具で広さを表明する（実際に通る経路）。
+        let (_dir, ctx) = declare_tool_ctx(&state);
+        let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 60}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        // 1 回目・2 回目の partial では戻さない（連続を数えるだけ）。
+        for expected_streak in 1..MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET {
+            let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
+            run_again(&state, &c, &fake).await;
+            let pref = get_pref(&state).expect("希望は残る");
+            assert_eq!(
+                pref.window_size,
+                Some(60),
+                "{expected_streak} 回目の partial で本人の設定が消えた"
+            );
+            assert_eq!(pref.partial_streak, Some(expected_streak));
+            let audit = latest_sleep_audit(&state).unwrap();
+            assert_eq!(audit["partial_streak"], json!(expected_streak));
+            assert_eq!(audit["window_size_auto_reset"], json!(false));
+        }
+
+        // N 回目で既定へ戻す。
+        let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
+        run_again(&state, &c, &fake).await;
+        assert_eq!(
+            get_pref(&state).and_then(|p| p.window_size),
+            None,
+            "N 回連続の partial でも本人の広さが残っている（自力で回復できない）"
+        );
+        assert_eq!(get_pref(&state).and_then(|p| p.partial_streak), None);
+        let audit = latest_sleep_audit(&state).unwrap();
+        assert_eq!(
+            audit["window_size_auto_reset"],
+            json!(true),
+            "自動で戻したことが監査から分からない"
+        );
+
+        // 次のランは config の既定の広さで走る（throttle だけ開ける）。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => {
+                assert_eq!(plan.window_size, 100, "config の既定へ戻っていない");
+                assert_eq!(plan.preferred_window_size, None);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+
+        // 恒久的な禁止ではない: 本人が呼べばまた広げられる。
+        let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 300}), &ctx)
+            .await;
+        assert!(r.success);
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.window_size, 300),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// clean が 1 回通れば連続は切れる（間に成功が挟まれば本人の設定は消えない）。
+    #[tokio::test]
+    async fn clean_run_breaks_the_partial_streak() {
+        let state = crate::test_app_state();
+        seed_window(&state, 400);
+        let c = cfg(true, 100, 1);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_memory_declare_window(
+                &conn,
+                "a1",
+                Some(&DeclareWindowPref {
+                    window_size: Some(60),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+
+        // partial × (N-1) → clean → partial × (N-1)。どこにも N 連続は無い。
+        for outcome in [
+            FakeOutcome::StoppedByLimit,
+            FakeOutcome::Error,
+            FakeOutcome::Completed,
+            FakeOutcome::StoppedByLimit,
+            FakeOutcome::Error,
+        ] {
+            let fake = FakeRunner::new(outcome);
+            run_again(&state, &c, &fake).await;
+        }
+        assert_eq!(
+            get_pref(&state).and_then(|p| p.window_size),
+            Some(60),
+            "clean を挟んでいるのに本人の設定が消えた"
+        );
+        assert_eq!(
+            get_pref(&state).and_then(|p| p.partial_streak),
+            Some(2),
+            "clean 後の連続だけが数えられているはず"
+        );
+    }
+
+    /// 広さを表明していないエージェントでは連続を数えない（戻す先が無い＝仕事が無い）。
+    /// 希望の行を作らないので、道具を一度も使っていない DB は NULL のまま。
+    #[tokio::test]
+    async fn partials_without_a_preference_do_not_create_state() {
+        let state = crate::test_app_state();
+        seed_window(&state, 200);
+        let c = cfg(true, 100, 1);
+        for _ in 0..MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET + 1 {
+            let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
+            run_again(&state, &c, &fake).await;
+        }
+        assert_eq!(get_pref(&state), None, "希望なしの行を作ってはいけない");
+        assert_eq!(
+            latest_sleep_audit(&state).unwrap()["partial_streak"],
+            json!(0)
+        );
     }
 
     /// **窓の広さ**: 本人の表明が次の窓に効き、上下限へ丸められる。表明が無ければ config の既定
