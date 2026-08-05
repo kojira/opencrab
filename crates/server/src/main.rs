@@ -1045,6 +1045,10 @@ async fn main() -> anyhow::Result<()> {
     // 「Discord へは一切出ない構成のまま動いている」ことに気づけなかった（配送時の WARN は
     // 発火してから出るもので、起動時のハンドル未解決そのものは可視化されていなかった）。
     // ハンドルの実際の解決は配送時に行うので、ここはあくまで起動時点のスナップショット。
+    //
+    // Discord feature 無効ビルドでは per-agent も共有もハンドルが存在しようがなく、
+    // 「解決できない」WARN が毎起動エージェントの数だけ出るだけの雑音になるので診断ごと落とす。
+    #[cfg(feature = "discord")]
     {
         let resolved: Vec<String> = match state.db.lock() {
             Ok(conn) => agent_ids

@@ -58,11 +58,20 @@ pub(crate) trait PerAgentDiscordHttp: Send + Sync {
     fn http_for_agent(&self, agent_id: &str) -> Option<crate::DiscordHttp>;
 }
 
-/// 稼働中の per-agent Discord ゲートウェイからハンドルを引く（#400）。
+/// per-agent Discord ゲートウェイからハンドルを引く（#400）。
 ///
 /// 生存（`is_running`）では絞らない。`Http` は REST クライアントであり、受信ループの
-/// 生死とは独立に送信できるため（絞ると「ゲートウェイが一時的に落ちている間だけ
-/// 別のボット名で出る」というより悪い挙動になる）。
+/// 生死とは独立に送信できるため、**エントリは残っているが受信ループの handle だけ
+/// finished** のケースでは絞らない方がその体自身の名前で出せる。
+///
+/// **ゲートウェイの停止・再起動中の窓は救えない。** `get_http_for_agent` は
+/// `DiscordGatewayManager` のマップ引きに過ぎず、`stop_agent_gateway`（および
+/// `start_agent_gateway` が先頭で呼ぶそれ）はエントリごと remove するので、その間は
+/// `None` になり共有ゲートウェイのハンドルへ落ちる＝共有ボットの名前で出る。これは
+/// `is_running` で絞るかどうかと無関係に起きる。塞ぐならフォールバック条件を「いま
+/// ハンドルが引けるか」ではなく「その体が per-agent Discord 設定を持つか」に寄せる
+/// 形になるが、配送経路に新しい DB 参照を足すことになる。窓は起動/再起動時に限られ、
+/// **変更前（先頭 1 体のハンドルを全体で共有）より悪くはならない**ので本 PR では取らない。
 #[cfg(feature = "discord")]
 impl<T: opencrab_discord::AgentRunner + Send + Sync> PerAgentDiscordHttp
     for opencrab_discord::DiscordGatewayManager<T>
@@ -167,6 +176,10 @@ fn startup_http_diagnosis(source: HeartbeatHttpSource) -> (tracing::Level, &'sta
 }
 
 /// 起動時に、ハートビートを回す体ごとにハンドルの解決可否を 1 行残す（#400）。
+///
+/// Discord feature 無効ビルドでは呼び出し側（`main.rs` の起動時診断）ごと落ちる
+/// （ハンドルが存在しようがない構成で WARN を並べても雑音にしかならない）。
+#[cfg_attr(not(feature = "discord"), allow(dead_code))]
 pub(crate) fn log_startup_http_resolution(http: &HeartbeatDiscordHttp, agent_id: &str) {
     let (_, source) = http.resolve(agent_id);
     let (level, reason) = startup_http_diagnosis(source);
@@ -533,17 +546,36 @@ mod tests {
     fn fake_http(_token: &str) -> crate::DiscordHttp {}
 
     /// 体ごとのハンドルを返す偽の per-agent ゲートウェイ（ネットワークに出ない）。
+    /// **誰の id で引かれたか**を記録する（配送経路が発話者の id を渡すことの観測点）。
     struct FakePerAgentHttp {
         handles: Vec<(String, crate::DiscordHttp)>,
+        queried: Mutex<Vec<String>>,
+    }
+
+    impl FakePerAgentHttp {
+        fn queried(&self) -> Vec<String> {
+            self.queried.lock().unwrap().clone()
+        }
     }
 
     impl PerAgentDiscordHttp for FakePerAgentHttp {
         fn http_for_agent(&self, agent_id: &str) -> Option<crate::DiscordHttp> {
+            self.queried.lock().unwrap().push(agent_id.to_string());
             self.handles
                 .iter()
                 .find(|(id, _)| id == agent_id)
                 .map(|(_, http)| http.clone())
         }
+    }
+
+    fn fake_per_agent(handles: Vec<(&str, crate::DiscordHttp)>) -> Arc<FakePerAgentHttp> {
+        Arc::new(FakePerAgentHttp {
+            handles: handles
+                .into_iter()
+                .map(|(id, http)| (id.to_string(), http))
+                .collect(),
+            queried: Mutex::new(Vec::new()),
+        })
     }
 
     fn empty_http() -> HeartbeatDiscordHttp {
@@ -562,12 +594,10 @@ mod tests {
         let first = fake_http("token-first");
         let second = fake_http("token-second");
         let resolver = with_shared(fake_http("token-shared"));
-        resolver.set_per_agent_source(Arc::new(FakePerAgentHttp {
-            handles: vec![
-                ("first".to_string(), first.clone()),
-                ("second".to_string(), second.clone()),
-            ],
-        }));
+        resolver.set_per_agent_source(fake_per_agent(vec![
+            ("first", first.clone()),
+            ("second", second.clone()),
+        ]));
 
         let (http_first, source_first) = resolver.resolve("first");
         let (http_second, source_second) = resolver.resolve("second");
@@ -602,9 +632,7 @@ mod tests {
     fn falls_back_to_the_shared_gateway_handle() {
         let shared = fake_http("token-shared");
         let resolver = with_shared(shared.clone());
-        resolver.set_per_agent_source(Arc::new(FakePerAgentHttp {
-            handles: vec![("other".to_string(), fake_http("token-other"))],
-        }));
+        resolver.set_per_agent_source(fake_per_agent(vec![("other", fake_http("token-other"))]));
 
         let (http, source) = resolver.resolve("crab");
 
@@ -626,9 +654,7 @@ mod tests {
     #[test]
     fn reports_none_when_no_handle_is_available() {
         let resolver = empty_http();
-        resolver.set_per_agent_source(Arc::new(FakePerAgentHttp {
-            handles: vec![("other".to_string(), fake_http("token-other"))],
-        }));
+        resolver.set_per_agent_source(fake_per_agent(vec![("other", fake_http("token-other"))]));
 
         let (http, source) = resolver.resolve("crab");
 
@@ -662,6 +688,144 @@ mod tests {
             assert!(!startup_http_diagnosis(source).1.is_empty());
         }
     }
+
+    /// **配送経路は「発話する体の id」で解決を引く。** 解決規則を単体で確かめても、
+    /// 配送関数が誰の id を渡すかは別の性質なのでここで押さえる（`agent_id` を渡し忘れて
+    /// 固定値や先頭の体を引くようになったら落ちる）。
+    /// channel は不正値にして送信分岐へ入らせない＝実ネットワークに出ない。
+    #[tokio::test]
+    async fn delivery_resolves_the_handle_with_the_speaking_agents_id() {
+        let source = fake_per_agent(vec![
+            ("first", fake_http("token-first")),
+            ("second", fake_http("token-second")),
+        ]);
+        let resolver = empty_http();
+        resolver.set_per_agent_source(source.clone());
+
+        deliver_via_discord_shared_http(&resolver, "second", "not-a-number", "hi").await;
+
+        assert_eq!(
+            source.queried(),
+            vec!["second".to_string()],
+            "発話者（2 体目）の id で 1 回引く（先頭の体でも固定値でもない）"
+        );
+    }
+
+    /// **解決できないとき、実際に warn イベントが出て、どの体かが分かる。**
+    /// レベル判定（`startup_http_diagnosis`）だけを見ていると、出力側の分岐を反転しても
+    /// フィールドを落としても気づけない。#400 の要件は「どの体で、なぜ取れなかったかを
+    /// ログに残す」なのでここを実出力で押さえる。
+    #[test]
+    fn missing_handle_actually_emits_a_warn_naming_the_agent() {
+        let resolver = empty_http();
+        resolver.set_per_agent_source(fake_per_agent(vec![("other", fake_http("token-other"))]));
+
+        let logs = captured_logs(|| log_startup_http_resolution(&resolver, "speaker-under-test"));
+
+        assert!(logs.contains("WARN"), "warn レベルで出ること: {logs}");
+        assert!(
+            logs.contains("agent_id") && logs.contains("speaker-under-test"),
+            "どの体か分かること（agent_id フィールド付き）: {logs}"
+        );
+        assert!(
+            logs.contains("http_source") && logs.contains("none"),
+            "なぜ取れないか（解決の出所）が載ること: {logs}"
+        );
+    }
+
+    /// 逆側: 解決できたときは warn を出さない（上のテストと対で、出力側の分岐が
+    /// 反転したら両方が落ちる）。
+    #[test]
+    fn a_resolvable_handle_emits_no_warn() {
+        let resolver = with_shared(fake_http("token-shared"));
+
+        let logs = captured_logs(|| log_startup_http_resolution(&resolver, "speaker-under-test"));
+
+        assert!(
+            logs.is_empty(),
+            "解決できていれば WARN 以上は出ない（info のみ）: {logs}"
+        );
+    }
+
+    /// テスト用: `tracing` 出力を文字列として捕まえるヘルパー。
+    ///
+    /// **`crates/server/src/caller_identity.rs` の同名ヘルパーの複製**（設計と注意点は
+    /// そちらのコメントが本体）。共有できないのはターゲットが違うため:
+    /// `heartbeat_delivery` は bin（`main.rs`）側のモジュールで、lib 側の `#[cfg(test)]`
+    /// アイテムは bin のテストビルドには入らない。lib 側へ出すには本番ビルドに
+    /// テスト専用の捕捉機構を公開することになるので、複製を選ぶ。
+    mod capture {
+        use std::cell::RefCell;
+        use std::io;
+        use std::sync::{Arc, Mutex, Once};
+
+        thread_local! {
+            /// このスレッドが捕捉中なら書き込み先。捕捉していなければ `None`（捨てる）。
+            static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
+        }
+
+        #[derive(Clone, Copy, Default)]
+        struct ThreadLocalWriter;
+
+        impl io::Write for ThreadLocalWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                SINK.with(|sink| {
+                    if let Some(sink) = sink.borrow().as_ref() {
+                        sink.lock().unwrap().extend_from_slice(buf);
+                    }
+                });
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalWriter {
+            type Writer = ThreadLocalWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                *self
+            }
+        }
+
+        /// `f` の実行中に**このスレッドで**出た tracing 出力（WARN 以上）を返す。
+        /// 「警告条件を満たす」ではなく「実際に warn イベントが出る」ことを見るため。
+        ///
+        /// subscriber はプロセスで 1 個だけ張り、どのテストの出力を拾うかはスレッド
+        /// ローカルの捕捉先で切り替える（`with_default` だと callsite の `Interest` が
+        /// 「出さない」で焼き付く競合がある。詳細は caller_identity.rs のコメント）。
+        pub(super) fn captured_logs(f: impl FnOnce()) -> String {
+            static INSTALL: Once = Once::new();
+            INSTALL.call_once(|| {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(ThreadLocalWriter)
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::WARN)
+                    .finish();
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("捕捉用 subscriber を張れること（他に global default が居ない）");
+                // 張る途中の窓で焼き付いた `Interest` を計算し直す。
+                tracing::callsite::rebuild_interest_cache();
+            });
+
+            /// `f` が panic しても捕捉先を残さない。
+            struct Capturing;
+            impl Drop for Capturing {
+                fn drop(&mut self) {
+                    SINK.with(|sink| *sink.borrow_mut() = None);
+                }
+            }
+
+            let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
+            SINK.with(|sink| *sink.borrow_mut() = Some(buf.clone()));
+            let _capturing = Capturing;
+            f();
+            drop(_capturing);
+            let bytes = buf.lock().unwrap().clone();
+            String::from_utf8(bytes).unwrap()
+        }
+    }
+    use capture::captured_logs;
 
     /// (e) 長文は transport の `chunk_limit()` で分割され、複数回 `send_text` される。
     /// 各チャンクは上限以下で、連結すると元の content に戻る（無損失分割）。
