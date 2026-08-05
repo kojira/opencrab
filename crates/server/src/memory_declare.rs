@@ -98,7 +98,9 @@ const MIN_ADVANCE_DIVISOR: i64 = 3;
 const MAX_ADVANCE_WINDOWS: i64 = 2;
 
 /// partial（timeout / ターン上限 / エラー）がこの回数**連続**したら、本人が表明した窓の広さを
-/// 破棄して config の既定へ戻す（#394）。
+/// 破棄して config の既定へ戻す（#394）。**戻す対象は「既定より広い」表明だけ**——狭める方向の
+/// 表明（#394 のオーナー要件「濃い範囲では窓を縮めて丁寧に見たい」）は、partial の原因になり得
+/// ないので機械が取り上げない。
 ///
 /// 広さは sticky なので、本人が広げすぎてターンが毎回潰れると**位置が 1 件も進まないまま
 /// 発火し続ける**。ターンが潰れる状況では `plan_next_memory_window` を呼ぶ余地も無いので、
@@ -278,22 +280,34 @@ async fn run_declare(
     // バックログ消化では `min_interval_minutes = 1` で回すため maintenance tick ごと
     // （既定 600 秒）に発火し、数時間ぶん空回りする。
     //
-    // 数える対象は「本人が広さを表明しているとき」だけ（表明が無ければ戻す先が無い）。
+    // 数える対象は「**次のランで config の既定より広くなる**表明があるとき」だけ。この安全弁の
+    // 目的は「広げすぎて毎回ターンが潰れる状態からの回復」なので、既定以下の設定を機械が取り
+    // 上げる理由が無い。むしろ:
+    // - 本人は既定より**狭い**値も表明できる（#394 のオーナー要件「密に拾う個性 → 濃い範囲では
+    //   窓を縮めて丁寧に見たい」）。狭い設定を破棄すると窓は既定へ**広がる**——partial の原因
+    //   （timeout / ターン上限）は広い窓の側で起きるので、原因でないものを取り上げて悪化させる。
+    // - `clean` は `completed` だけが真で、LLM 側の一時障害（`error`）も 1 回として数える。
+    //   消化中は `min_interval_minutes = 1` なので、プロバイダが数十分不調なだけで連続が伸びる。
+    // - 本人がターン中に「広すぎたので狭くする」と自己修正した場合、`requested` はターンの
+    //   **後**に読むので、その狭い値がそのまま次の判定に入る。既定以下なので数えられず、
+    //   書いたばかりの値が巻き添えで消えることも無い。
+    //
+    // 判定に使う広さは `decide_declare` と**同じ丸め**（[`effective_window_size`]）を通す。
     // clean が 1 回通れば連続は切れる。戻すのは希望の破棄だけで、次に本人が
     // `plan_next_memory_window` を呼べばまた広げられる（恒久的に禁止しない）。
     let mut window_size_auto_reset = false;
-    if after.window_size.is_some() {
-        if clean {
+    let widened_beyond_default = after.window_size.is_some()
+        && effective_window_size(after.window_size, cfg) > cfg.max_logs.max(1);
+    if clean || !widened_beyond_default {
+        after.partial_streak = None;
+    } else {
+        let streak = after.partial_streak.unwrap_or(0).saturating_add(1);
+        if streak >= MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET {
+            after.window_size = None;
             after.partial_streak = None;
+            window_size_auto_reset = true;
         } else {
-            let streak = after.partial_streak.unwrap_or(0) + 1;
-            if streak >= MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET {
-                after.window_size = None;
-                after.partial_streak = None;
-                window_size_auto_reset = true;
-            } else {
-                after.partial_streak = Some(streak);
-            }
+            after.partial_streak = Some(streak);
         }
     }
     let partial_streak_after = after.partial_streak.unwrap_or(0);
@@ -401,6 +415,25 @@ enum DeclareDecision {
     Run(Box<DeclarePlan>),
 }
 
+/// 本人の表明（`preferred`）を、そのランで**実際に使う窓の広さ**へ丸める（#394）。
+///
+/// **config の既定は変えない**——本人が表明したときだけ、その値を上下限へ丸めて使う（未表明の
+/// エージェントは従来どおり `max_logs` そのままで走る）。上限は運用の設定より狭くならないよう
+/// `max` を取る（`max_logs` を [`opencrab_actions::memory_units::DECLARE_WINDOW_MAX`] 超に
+/// 設定した運用を勝手に絞らない / 表明した瞬間に窓が狭まるのを防ぐ）。
+///
+/// 窓を組むとき（[`decide_declare`]）と、partial の連続を数えるかどうかの判定（[`run_declare`]）
+/// の**両方**がここを通る。別々に丸めると、判定が実際の広さとずれる。
+fn effective_window_size(preferred: Option<i64>, cfg: &MemoryDeclareConfig) -> i64 {
+    match preferred {
+        Some(v) => v.clamp(
+            opencrab_actions::memory_units::DECLARE_WINDOW_MIN,
+            opencrab_actions::memory_units::DECLARE_WINDOW_MAX.max(cfg.max_logs),
+        ),
+        None => cfg.max_logs.max(1),
+    }
+}
+
 /// ゲート（日次 throttle + 下限）を判定し、通れば窓・地図・人格を積んだ計画を返す。
 ///
 /// DB 読みのみ。ロックは関数内で完結し、`run_agent_response` の await を跨いで保持しない。
@@ -427,19 +460,9 @@ fn decide_declare(
         }
     }
 
-    // 窓の広さ: 本人が `plan_next_memory_window` で表明していればそれ、無ければ config の既定
-    // （#394）。**config の既定は変えない**——本人が表明したときだけ、その値を上下限へ丸めて
-    // 使う（未表明のエージェントは従来どおり `max_logs` そのままで走る）。上限は運用の設定より
-    // 狭くならないよう `max` を取る（`max_logs` を 600 超に設定した運用を勝手に絞らない）。
     let pref = opencrab_db::queries::get_memory_declare_window(&conn, agent_id)?;
     let preferred_window_size = pref.as_ref().and_then(|p| p.window_size);
-    let window_size = match preferred_window_size {
-        Some(v) => v.clamp(
-            opencrab_actions::memory_units::DECLARE_WINDOW_MIN,
-            opencrab_actions::memory_units::DECLARE_WINDOW_MAX.max(cfg.max_logs),
-        ),
-        None => cfg.max_logs.max(1),
-    };
+    let window_size = effective_window_size(preferred_window_size, cfg);
 
     // 未宣言の窓（マーカーより新しい生ログを id 昇順で最大 window_size 件）。
     let window = opencrab_db::queries::declare_window(&conn, agent_id, cursor_id, window_size)?;
@@ -586,7 +609,9 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
          生ログがそれより少ないときは、上の「今回の範囲」の件数はこれより少なくなります）。\
          材料が薄くて出来事が拾いきれないと感じたら `window_size` を大きく、濃すぎて丁寧に\
          見られないと感じたら小さくしてください（下限 {size_min} 件 / 上限は既定 {size_max} 件）。\
-         一度決めると変えるまで効き続けます。\n\
+         一度決めると変えるまで効き続けます。ただし**既定より広げた設定のまま、ターンが途中で\
+         潰れる（時間切れ・反復上限・エラー）ことが {reset_n} 回続いたら、既定の広さへ自動で\
+         戻します**（そのときは自分で広げ直せます）。狭めた設定はそのままです。\n\
          どちらも義務ではありません。今のままで良ければ呼ばなくて構いません。\n\n\
          # すでに宣言した記憶（最近のもの）\n{units_txt}",
         count = w.log_count,
@@ -601,6 +626,8 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
         },
         size_min = opencrab_actions::memory_units::DECLARE_WINDOW_MIN,
         size_max = opencrab_actions::memory_units::DECLARE_WINDOW_MAX,
+        // 約束の文面を実装の定数から組む（片方だけ変えても食い違わない / #394）。
+        reset_n = MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET,
     ) + &instructions_section
 }
 
@@ -1690,13 +1717,14 @@ mod tests {
     async fn consecutive_partials_reset_preferred_window_size() {
         assert_eq!(MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET, 3, "以下は N=3 前提");
         let state = crate::test_app_state();
-        seed_window(&state, 200);
+        seed_window(&state, 400);
+        // config の既定は 100。本人はそれより**広い** 300 を表明する（＝安全弁の対象）。
         let c = cfg(true, 100, 1);
 
         // 本人が道具で広さを表明する（実際に通る経路）。
         let (_dir, ctx) = declare_tool_ctx(&state);
         let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
-            .execute(&json!({"window_size": 60}), &ctx)
+            .execute(&json!({"window_size": 300}), &ctx)
             .await;
         assert!(r.success, "{:?}", r.error);
 
@@ -1707,7 +1735,7 @@ mod tests {
             let pref = get_pref(&state).expect("希望は残る");
             assert_eq!(
                 pref.window_size,
-                Some(60),
+                Some(300),
                 "{expected_streak} 回目の partial で本人の設定が消えた"
             );
             assert_eq!(pref.partial_streak, Some(expected_streak));
@@ -1748,18 +1776,67 @@ mod tests {
 
         // 恒久的な禁止ではない: 本人が呼べばまた広げられる。
         let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
-            .execute(&json!({"window_size": 300}), &ctx)
+            .execute(&json!({"window_size": 250}), &ctx)
             .await;
         assert!(r.success);
         match decide_declare(&state.db, &c, "a1").unwrap() {
-            DeclareDecision::Run(plan) => assert_eq!(plan.window_size, 300),
+            DeclareDecision::Run(plan) => assert_eq!(plan.window_size, 250),
             other => panic!("expected Run, got {other:?}"),
         }
     }
 
-    /// clean が 1 回通れば連続は切れる（間に成功が挟まれば本人の設定は消えない）。
+    /// **狭める方向の表明は巻き添えにしない**（#394 のオーナー要件「密に拾う個性 → 濃い範囲では
+    /// 窓を縮めて丁寧に見たい」）。
+    ///
+    /// 既定より狭い設定は partial の原因になり得ない（timeout / ターン上限は広い窓の側で起きる）。
+    /// ここで破棄すると、窓は既定へ**広がって**状況を悪化させる方向へ動く。`clean` は
+    /// `completed` だけが真で LLM 側の一時障害も 1 回として数えるので、消化中
+    /// （`min_interval_minutes = 1`）はプロバイダの不調だけで連続が伸びる——現実に踏む。
     #[tokio::test]
-    async fn clean_run_breaks_the_partial_streak() {
+    async fn narrower_than_default_preference_is_never_auto_reset() {
+        let state = crate::test_app_state();
+        seed_window(&state, 400);
+        let c = cfg(true, 100, 1); // 既定 100 に対して本人は 60（狭める方向）
+
+        let (_dir, ctx) = declare_tool_ctx(&state);
+        let r = opencrab_actions::memory_units::PlanNextMemoryWindowAction
+            .execute(&json!({"window_size": 60}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        // N を超えて partial が続いても破棄しない。連続も数えない。
+        for _ in 0..MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET + 2 {
+            let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
+            run_again(&state, &c, &fake).await;
+            let pref = get_pref(&state).expect("希望は残る");
+            assert_eq!(
+                pref.window_size,
+                Some(60),
+                "狭める方向の設定を機械が取り上げた（窓が既定へ広がってしまう）"
+            );
+            assert_eq!(pref.partial_streak, None, "対象外なのに連続を数えている");
+            assert_eq!(
+                latest_sleep_audit(&state).unwrap()["window_size_auto_reset"],
+                json!(false)
+            );
+        }
+        // 次のランも本人の 60 のまま。
+        set_marker(
+            &state,
+            "a1",
+            &format_marker(&hours_ago(48), cursor_of(&state)),
+        );
+        match decide_declare(&state.db, &c, "a1").unwrap() {
+            DeclareDecision::Run(plan) => assert_eq!(plan.window_size, 60),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// **本人の自己修正は巻き添えにしない**。希望はターンの**後**に読むので、連続が N-1 まで
+    /// 来た状態で本人がターン中に「広すぎたので狭くする」と表明し、そのターンも partial に
+    /// 落ちても、**いま書いたばかりの狭い値ごと**破棄されてはいけない。
+    #[tokio::test]
+    async fn self_correction_during_the_turn_is_not_swept_away() {
         let state = crate::test_app_state();
         seed_window(&state, 400);
         let c = cfg(true, 100, 1);
@@ -1769,7 +1846,56 @@ mod tests {
                 &conn,
                 "a1",
                 Some(&DeclareWindowPref {
-                    window_size: Some(60),
+                    window_size: Some(300),
+                    // 既に N-1 回連続している状態から始める。
+                    partial_streak: Some(MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET - 1),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+
+        // このターンの中で本人が既定以下へ狭め、ターン自体は partial に終わる。
+        let fake = FakeRunner::new(FakeOutcome::StoppedByLimit).with_pref(
+            &state,
+            DeclareWindowPref {
+                window_size: Some(80),
+                partial_streak: Some(MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET - 1),
+                ..Default::default()
+            },
+        );
+        run_again(&state, &c, &fake).await;
+
+        let pref = get_pref(&state).expect("希望は残る");
+        assert_eq!(
+            pref.window_size,
+            Some(80),
+            "本人が書いたばかりの狭い値が N 回目として破棄された"
+        );
+        assert_eq!(
+            pref.partial_streak, None,
+            "既定以下になったので連続は切れる"
+        );
+        assert_eq!(
+            latest_sleep_audit(&state).unwrap()["window_size_auto_reset"],
+            json!(false)
+        );
+    }
+
+    /// clean が 1 回通れば連続は切れる（間に成功が挟まれば本人の設定は消えない）。
+    #[tokio::test]
+    async fn clean_run_breaks_the_partial_streak() {
+        let state = crate::test_app_state();
+        seed_window(&state, 800);
+        // 既定 100 より広い 300（＝安全弁の対象）でないと、そもそも連続を数えない。
+        let c = cfg(true, 100, 1);
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_memory_declare_window(
+                &conn,
+                "a1",
+                Some(&DeclareWindowPref {
+                    window_size: Some(300),
                     ..Default::default()
                 }),
             )
@@ -1789,7 +1915,7 @@ mod tests {
         }
         assert_eq!(
             get_pref(&state).and_then(|p| p.window_size),
-            Some(60),
+            Some(300),
             "clean を挟んでいるのに本人の設定が消えた"
         );
         assert_eq!(
@@ -2017,6 +2143,41 @@ mod tests {
         assert!(sp.contains("いまの設定は 9 件です（既定の広さ）"));
         // 丸めの範囲は next_from_id として指せる値（＝位置 + 1）で示す。
         assert!(sp.contains(&format!("id {} 〜 {}", ids[2] + 1, ids[8] + 1)));
+    }
+
+    /// **約束と実装が一致していること**: 広さは sticky だが、機械が既定へ戻すことがある。
+    /// プロンプトはその条件（既定より広い / N 回連続）まで書き、狭めた設定は戻らないと言う。
+    ///
+    /// 回数は**実装の定数から組む**ので、`MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET` を変えれば
+    /// 文面も追随する（片方だけ変わって食い違うことがない）。
+    #[test]
+    fn system_prompt_promise_matches_the_auto_reset_rule() {
+        let state = crate::test_app_state();
+        seed_window(&state, 9);
+        let plan = match decide_declare(&state.db, &cfg(true, 9, 1), "a1").unwrap() {
+            DeclareDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        let sp = build_system_prompt(&plan);
+        // sticky であることは引き続き言う。
+        assert!(sp.contains("一度決めると変えるまで効き続けます"));
+        // ただし機械が戻すことがある、という但し書きが同じ場所にある。
+        assert!(
+            sp.contains(&format!(
+                "{MAX_PARTIAL_STREAK_BEFORE_WINDOW_RESET} 回続いたら"
+            )),
+            "自動で戻す条件（回数）が実装の定数と結びついていない: {sp}"
+        );
+        assert!(
+            sp.contains("既定の広さへ自動で戻します"),
+            "自動で戻すことが書かれていない"
+        );
+        // 戻す対象は「既定より広げた設定」だけ、という条件まで書く（狭めた設定は戻らない）。
+        assert!(sp.contains("既定より広げた設定"), "対象の条件が無い");
+        assert!(
+            sp.contains("狭めた設定はそのままです"),
+            "対象外の明示が無い"
+        );
     }
 
     /// 残ログが窓より少ないとき、プロンプトの 2 つの件数（提示した実数と設定値）が
