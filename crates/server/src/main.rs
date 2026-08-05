@@ -10,10 +10,15 @@ use tokio::sync::watch;
 
 mod heartbeat_delivery;
 
+/// Discord へ 1 通送るためのハンドル。**ボットのトークンを保持するので、どのハンドルで
+/// 送るかが Discord 上の送信者名を決める**（#400 の核心）。
 #[cfg(feature = "discord")]
-type DiscordHttpArc = Arc<Mutex<Option<Arc<serenity::http::Http>>>>;
+type DiscordHttp = Arc<serenity::http::Http>;
 #[cfg(not(feature = "discord"))]
-type DiscordHttpArc = Arc<Mutex<Option<()>>>;
+type DiscordHttp = ();
+
+/// 共有（TOML）ゲートウェイのハンドル置き場。ゲートウェイ起動時に埋まる。
+type DiscordHttpArc = Arc<Mutex<Option<DiscordHttp>>>;
 
 /// ハートビート用セッションを取得または作成する。
 fn get_or_create_heartbeat_session(
@@ -203,7 +208,8 @@ fn list_whitelisted_heartbeat_channels(
 fn make_heartbeat_callback(
     db: opencrab_db::Db,
     agent_id_owned: String,
-    discord_http: DiscordHttpArc,
+    // #400: 全体で共有する 1 本のハンドルではなく、**発話する体ごとに**解決する口を持つ。
+    discord_http: Arc<heartbeat_delivery::HeartbeatDiscordHttp>,
     state: AppState,
     global_interval_secs: u64,
     // グローバル `[agent] heartbeat_enabled` の実値（ループ起動時に強制 true へ倒す前の
@@ -734,11 +740,14 @@ async fn main() -> anyhow::Result<()> {
         state.cleanup_stale_interactions();
     }
 
-    #[cfg(feature = "discord")]
-    let heartbeat_discord_http: Arc<Mutex<Option<Arc<serenity::http::Http>>>> =
-        Arc::new(Mutex::new(None));
-    #[cfg(not(feature = "discord"))]
-    let heartbeat_discord_http: Arc<Mutex<Option<()>>> = Arc::new(Mutex::new(None));
+    // 共有（TOML）ゲートウェイのハンドル。登録簿（`state.gateways`）には載らないので
+    // ここで直接持つ（理由は `heartbeat_delivery` モジュール doc）。
+    let shared_discord_http: DiscordHttpArc = Arc::new(Mutex::new(None));
+    // ハートビート発話の Discord ハンドル解決口（#400）。**発話する体ごと**に
+    // per-agent ゲートウェイ → 共有ゲートウェイの順で配送時に引く。
+    let heartbeat_discord_http = Arc::new(heartbeat_delivery::HeartbeatDiscordHttp::new(
+        shared_discord_http.clone(),
+    ));
 
     // Start Discord gateway if configured and feature is enabled.
     #[cfg(feature = "discord")]
@@ -889,7 +898,7 @@ async fn main() -> anyhow::Result<()> {
                         None => gateway_actions_base,
                     });
 
-                *heartbeat_discord_http.lock().unwrap() = Some(gateway.http().clone());
+                *shared_discord_http.lock().unwrap() = Some(gateway.http().clone());
 
                 let discord_state = state.clone();
                 let owner_discord_id = discord_cfg.owner_discord_id.clone();
@@ -927,12 +936,20 @@ async fn main() -> anyhow::Result<()> {
         // **この位置は動かせない**（走査を最後の 1 回に畳めない理由でもある）:
         // 1. 復元は共有（TOML）ゲートウェイの**起動後**。起動直後の短い窓では共有側が
         //    メッセージを処理し、専用ゲートウェイが上がり次第 per-message スキップが効く。
-        // 2. すぐ下の heartbeat 用 HTTP クライアントの取得が、この復元の**完了**に
-        //    依存する（復元が後ろへずれると per-agent ゲートウェイがまだ無く、
-        //    heartbeat の発話が共有ゲートウェイの HTTP のままになる）。
+        // 2. 下の起動時診断（どの体で Discord ハンドルが解決できるか）が、この復元の
+        //    **完了**を前提にしている。#400 以降、実際の解決は配送のたびに行うので
+        //    「復元が後ろへずれると発話が共有ゲートウェイの HTTP のまま固定される」
+        //    という取り返しのつかない依存は無くなったが、診断の意味は復元後にしかない。
         state.gateways.restore_pending().await;
 
-        // Per-agentゲートウェイのHTTPクライアントをheartbeatに設定
+        // heartbeat の Discord ハンドルを **per-agent ゲートウェイから体ごとに**引ける
+        // ようにする（#400）。
+        //
+        // 以前はここで `agent_ids.first()` の 1 体だけを解決して 1 本のハンドルを全体で
+        // 共有していた。`Http` はボットのトークンを保持する＝送信者名を決めるので、
+        // (1) Discord へ発話できるのは先頭の体だけ、(2) 先頭以外の体が Discord チャンネル
+        // へ向いていればその発話は先頭の体の名前で出る、という並び順依存になっていた。
+        // 引き口だけ渡し、**どの体のハンドルを使うかは配送時に発話者で決める**。
         //
         // **ここは登録簿の走査に畳んでいない**（#191 段階2 PR5）。必要なのは
         // `Arc<serenity::http::Http>` そのもので、heartbeat の発話経路（`SPEAK:`）が
@@ -940,19 +957,7 @@ async fn main() -> anyhow::Result<()> {
         // （`gateway_actions_for`）が返すのは `GatewayActions` であって生の HTTP
         // クライアントではなく、ここに当てると発話経路ごと書き換えになる（挙動不変で
         // なくなる）。transport 中立化は heartbeat 側の課題として残す。
-        let heartbeat_agent_id_for_http = {
-            let conn = state.db.lock().unwrap();
-            cfg.gateway
-                .discord
-                .agent_ids
-                .first()
-                .map(|id| resolve_agent_id(&conn, id))
-                .unwrap_or_default()
-        };
-        if let Some(http) = manager.get_http_for_agent(&heartbeat_agent_id_for_http) {
-            *heartbeat_discord_http.lock().unwrap() = Some(http);
-            tracing::info!(agent_id = %heartbeat_agent_id_for_http, "Set heartbeat Discord HTTP from per-agent gateway");
-        }
+        heartbeat_discord_http.set_per_agent_source(manager.clone());
 
         tracing::info!("Per-agent Discord gateway manager initialized");
     }
@@ -1034,6 +1039,29 @@ async fn main() -> anyhow::Result<()> {
             base
         }
     };
+
+    // #400: ハートビートを回す体ごとに、Discord ハンドルが解決できるかを起動時に 1 行残す。
+    // 以前は先頭 1 体の解決に失敗しても `if let Some` が外れるだけで**何も出ず**、
+    // 「Discord へは一切出ない構成のまま動いている」ことに気づけなかった（配送時の WARN は
+    // 発火してから出るもので、起動時のハンドル未解決そのものは可視化されていなかった）。
+    // ハンドルの実際の解決は配送時に行うので、ここはあくまで起動時点のスナップショット。
+    //
+    // Discord feature 無効ビルドでは per-agent も共有もハンドルが存在しようがなく、
+    // 「解決できない」WARN が毎起動エージェントの数だけ出るだけの雑音になるので診断ごと落とす。
+    #[cfg(feature = "discord")]
+    {
+        let resolved: Vec<String> = match state.db.lock() {
+            Ok(conn) => agent_ids
+                .iter()
+                .map(|id| resolve_agent_id(&conn, id))
+                .collect(),
+            // DB を引けなければ config の表記のままで診断する（診断のために起動を止めない）。
+            Err(_) => agent_ids.clone(),
+        };
+        for agent_id in &resolved {
+            heartbeat_delivery::log_startup_http_resolution(&heartbeat_discord_http, agent_id);
+        }
+    }
 
     // #238: agent_heartbeat_config に enabled 行が 1 つでもあるか。グローバル無効でも
     // opt-in 済みエージェントが居ればループ群を起動する二段ゲートの上段（下段＝個々の
