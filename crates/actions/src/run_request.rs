@@ -92,6 +92,22 @@ pub struct RunRequest {
     /// 「眠っている間に外へ手が出る」ツール（`execute_shell` / `nostr_run` / `ws_write` 等）を
     /// 落とす。
     pub tool_allowlist: Option<Vec<String>>,
+    /// このランのターン（speech / tool_call / tool_result）を生ログ（`memory_sessions`）へ
+    /// 記録するか（#393）。既定 `true` = 従来どおり全て記録する。
+    ///
+    /// `false` にするのは **sleep のメンテナンスラン**（記憶の宣言 `memory_declare` /
+    /// タグ整理 `memory_organize`）だけ。あれらは本人が生きた体験をしたターンではなく
+    /// **整備作業**であり、記録すると次の宣言ランがそれを材料にして「記憶を整理した」という
+    /// 記憶を作り始める（#375 でアイドルのハートビートが topic を量産したのと同じ構造）。
+    ///
+    /// **落とすのは「記憶の材料としての扱い」だけで、何を行ったかの運用記録は残す**（#393）:
+    /// - `llm_logs`: `run_agent_response` が LLM コールごとに ChatRequest 全体（累積した
+    ///   messages ＝ ツール結果込み）・応答・`tool_calls`・トークン数・レイテンシを記録する。
+    ///   `session_id` でランを特定できる。**このフラグは `llm_logs` の配線に一切触らない。**
+    /// - `agent_logs`: 各ランが 1 ラン 1 行の構造化監査（context="sleep"）を自分で書く。
+    ///
+    /// 対話ターン・heartbeat・subtask は `true` のままで一切変わらない。
+    pub persist_turn_logs: bool,
 }
 
 impl RunRequest {
@@ -124,6 +140,7 @@ impl RunRequest {
             run_notifier: None,
             live_inbound_scope: LiveInboundScope::AllOthers,
             tool_allowlist: None,
+            persist_turn_logs: true,
         }
     }
 
@@ -201,5 +218,44 @@ impl RunRequest {
     pub fn with_tool_allowlist(mut self, tools: Vec<String>) -> Self {
         self.tool_allowlist = Some(tools);
         self
+    }
+
+    /// このランのターンを生ログ（`memory_sessions`）へ**記録しない**（#393）。
+    ///
+    /// sleep のメンテナンスラン（`memory_declare` / `memory_organize`）専用。詳細と理由は
+    /// [`RunRequest::persist_turn_logs`] を参照。
+    pub fn without_turn_logs(mut self) -> Self {
+        self.persist_turn_logs = false;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req() -> RunRequest {
+        RunRequest::new(
+            "a1",
+            "persona",
+            "s1",
+            "sys",
+            "conv",
+            "discord",
+            CallerIdentity::Owner,
+        )
+    }
+
+    /// 既定は「記録する」。対話ターン・heartbeat・subtask は `new` のままなので、
+    /// #393 の追加でそれらの生ログが落ちないことをここで固定する。
+    #[test]
+    fn turn_logs_are_persisted_by_default() {
+        assert!(req().persist_turn_logs);
+    }
+
+    /// opt-out はメンテナンスラン用の明示的な 1 手だけ（#393）。
+    #[test]
+    fn without_turn_logs_opts_out() {
+        assert!(!req().without_turn_logs().persist_turn_logs);
     }
 }

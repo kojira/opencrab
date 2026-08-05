@@ -148,7 +148,11 @@ async fn run_declare(
             .iter()
             .map(|s| s.to_string())
             .collect(),
-    );
+    )
+    // このランのターンは生ログ（`memory_sessions`）に**書かない**（#393）。書くと 1 ラン
+    // 35〜65 行を生産し、それが次の宣言ランの窓に入って「記憶を整理した」という記憶を
+    // 作り始める（実際に本番で起きた）。整備作業は本人の生きた体験ではない。
+    .without_turn_logs();
 
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(
@@ -769,6 +773,7 @@ mod tests {
         caller_is_owner: bool,
         tool_allowlist: Option<Vec<String>>,
         has_gateway_actions: bool,
+        persist_turn_logs: bool,
     }
 
     impl FakeRunner {
@@ -790,6 +795,7 @@ mod tests {
                 caller_is_owner: matches!(req.caller, CallerIdentity::Owner),
                 tool_allowlist: req.tool_allowlist.clone(),
                 has_gateway_actions: req.gateway_actions.is_some(),
+                persist_turn_logs: req.persist_turn_logs,
             });
             match self.outcome {
                 FakeOutcome::Completed => Ok(engine_result(false)),
@@ -1011,6 +1017,11 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(req.tool_allowlist.as_ref(), Some(&expected));
+        // #393: 整備作業のターンは生ログに残さない（残すと次の宣言ランの材料になる）。
+        assert!(
+            !req.persist_turn_logs,
+            "宣言ランのターンは memory_sessions に記録しない"
+        );
     }
 
     /// 許可リストの内容（経路1）: 宣言に要る道具は入り、外向き・タグ整理の道具は入らない。
