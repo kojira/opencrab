@@ -1168,6 +1168,80 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 33,
+        description: "sleep のメンテナンスラン（宣言/整理）が生んだ生ログを削除する (issue #393)",
+        // **削除のみ。スキーマは変えない。**
+        //
+        // 背景（#393）: sleep のメンテナンスラン（記憶の宣言 `memory_declare` / タグ整理
+        // `memory_organize`）は `run_agent_response` を通るため、そのターン（speech /
+        // tool_call / tool_result）が生ログ `memory_sessions` に記録されていた。生ログは
+        // 次の宣言ランの材料そのものなので、**整備作業のログが「記憶」の材料になる**。実際に
+        // 本番で「生ログを初めて俯瞰し、E2E 試験期間を記憶として束ねた内省」というユニットが
+        // 宣言された。#375 でアイドルのハートビートが topic を量産したのと同じ構造。
+        //
+        // **これから書く分**は `RunRequest::persist_turn_logs = false`（#393）で止まる
+        // （`crates/actions/src/run_request.rs` / `crates/server/src/process.rs`）。この
+        // マイグレーションは**既に書かれてしまった分**を消す。
+        //
+        // ## 対象の特定
+        // `session_id` の接頭辞で引く。メンテナンスランの session_id を組み立てるのは
+        // **2 箇所だけ**で、`RunRequest::new` の全呼び出し元を走査して確認した:
+        //   - `crates/server/src/memory_declare.rs` … `sleep-declare-{agent_id}-{unix_ts}`
+        //   - `crates/server/src/memory_organize.rs` … `sleep-organize-{agent_id}-{unix_ts}`
+        // sleep のもう 1 つのラン（`skill_consolidation`）は素の LLM 1 コールで session を
+        // 持たない（`llm_logs.session_id` は `None`）ため生ログを書かず、対象外。
+        // 対話・heartbeat・subtask・nostr・web・REST の session_id はいずれも別の接頭辞
+        // （`discord-` / `heartbeat-` / `subtask-` / `nostr-` / `web-` / `agent-msg-`）で、
+        // `sleep-` で始まるものは無い。
+        //
+        // ## FTS も同じ rowid 集合で消す
+        // `memory_sessions_fts` は本体と手動同期する通常の fts5（外部コンテンツではない）。
+        // 片方だけ消すと孤児（本体に対応行が無い FTS 行）が増え、`search_my_history` に
+        // 実体の無い行が出る。一時表 `_v33_maintenance_rows` に rowid を一度確定させ、本体と
+        // FTS の**同一集合**へ適用する。既存の孤児には触れない（増やしも減らしもしない）。
+        //
+        // ## 索引・宣言済みユニットへの影響
+        // - 索引 watermark（`memory_index_watermark.last_indexed_log_id`）は id の値なので、
+        //   行が消えても位置はずれない。宣言カーソル（`memory_declare_cursor` の位置部）も同じ。
+        // - 既に宣言されたユニットは id 範囲を持つ。範囲内の行が減るだけで範囲自体は壊れない。
+        //   **整備作業そのものを記憶にしてしまったユニット**の扱いは別（機械判定できないので
+        //   このマイグレーションでは触らない / #393 のコメント参照）。
+        //
+        // ## 本番コピーでの実測
+        // 適用前 user_version=32 / `memory_sessions` 49,129 行 / `memory_sessions_fts` 49,337 行 /
+        // FTS 孤児 208 行。対象は `sleep-declare-%` のみで 1,572 行（`sleep-organize-%` は 0 行）。
+        // 適用後は本体 47,557 行・FTS 47,765 行（ともに -1,572）、孤児 208 行のまま増減なし、
+        // 他の session_id 接頭辞の行数は 1 行も変化なし。
+        //
+        // ## 冪等性
+        // 番号付き MIGRATIONS は `user_version` で 1 回しか走らないが、SQL 自体も自然冪等
+        // （2 回目は対象 0 行）。
+        //
+        // ## 切り戻し
+        // 削除した生ログは復元できない。原状復帰が要るなら v33 前のバックアップから戻す。
+        // バイナリだけ戻す場合は版番号を戻せばよい:
+        //   BEGIN; PRAGMA user_version = 32; COMMIT;
+        up: |conn| {
+            // `IF NOT EXISTS` は付けない（v32 と同じ理由: 残骸があれば黙って古い集合を
+            // 適用するより、即エラーで落ちて気づけるようにする）。正常系は末尾の `DROP` で
+            // 必ず消え、途中失敗時も temp DB は同一トランザクションに参加して巻き戻る。
+            conn.execute_batch(
+                "CREATE TEMP TABLE _v33_maintenance_rows AS
+                 SELECT id AS row_id FROM memory_sessions
+                 WHERE session_id LIKE 'sleep-declare-%'
+                    OR session_id LIKE 'sleep-organize-%';
+
+                 DELETE FROM memory_sessions_fts
+                     WHERE rowid IN (SELECT row_id FROM _v33_maintenance_rows);
+                 DELETE FROM memory_sessions
+                     WHERE id IN (SELECT row_id FROM _v33_maintenance_rows);
+
+                 DROP TABLE _v33_maintenance_rows;",
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -4054,6 +4128,132 @@ mod migration_tests {
             "sender-u",
             "再実行後も復元不能行は不変"
         );
+    }
+
+    /// v33: sleep のメンテナンスラン（宣言 `sleep-declare-*` / 整理 `sleep-organize-*`）が
+    /// 生んだ生ログを消す（#393）。本体と FTS を**同一 rowid 集合**で消すこと（＝孤児を
+    /// 増やさない）、他の接頭辞のログを 1 行も巻き込まないこと、既存の孤児に触らないこと、
+    /// 冪等であることを固定する。
+    #[test]
+    fn v33_deletes_maintenance_run_logs_from_both_tables() {
+        use crate::queries::{insert_session_log, SessionLogRow};
+        let conn = crate::init_memory().expect("init");
+        let agent = "a1";
+
+        let mk = |session: &str, content: &str| SessionLogRow {
+            id: None,
+            agent_id: agent.to_string(),
+            session_id: session.to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some(agent.to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        // メンテナンスランの生ログ（消える）。
+        let id_declare = insert_session_log(&conn, &mk("sleep-declare-a1-1700000000", "declare"))
+            .expect("declare");
+        let id_organize =
+            insert_session_log(&conn, &mk("sleep-organize-a1-1700000001", "organize"))
+                .expect("organize");
+        // 通常の会話・ハートビート等（残る）。`sleep` を含むが接頭辞ではない session_id や、
+        // 接頭辞に見えて別物の `sleep-` も混ぜて、LIKE が広く効きすぎないことを確かめる。
+        let keep = [
+            ("discord-a1-100-200", "discord"),
+            ("heartbeat-a1-100", "heartbeat"),
+            ("subtask-42", "subtask"),
+            ("nostr-a1", "nostr"),
+            ("web-a1-conv", "web"),
+            ("agent-msg-a1-u1", "rest"),
+            ("discord-a1-sleep-declare-x", "not a maintenance run"),
+        ];
+        let keep_ids: Vec<i64> = keep
+            .iter()
+            .map(|(s, c)| insert_session_log(&conn, &mk(s, c)).expect("keep"))
+            .collect();
+
+        // 既存の孤児（本体に対応行が無い FTS 行）を 1 件仕込む。本番にも 208 行あり、
+        // v33 がそれを増やしも減らしもしないことを固定する。
+        conn.execute(
+            "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
+             VALUES (999999, 'orphan', ?1, 'discord-a1-orphan', 'speech')",
+            [agent],
+        )
+        .expect("orphan");
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let orphans = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM memory_sessions_fts f
+                 LEFT JOIN memory_sessions m ON m.id = f.rowid WHERE m.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let body_before = count("SELECT COUNT(*) FROM memory_sessions");
+        let fts_before = count("SELECT COUNT(*) FROM memory_sessions_fts");
+        let orphans_before = orphans(&conn);
+        assert_eq!(orphans_before, 1, "孤児の仕込みが効いている");
+
+        conn.execute_batch("PRAGMA user_version = 32").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v33");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+        // 対象 2 行が本体からも FTS からも消えている。
+        for id in [id_declare, id_organize] {
+            assert_eq!(
+                count(&format!(
+                    "SELECT COUNT(*) FROM memory_sessions WHERE id = {id}"
+                )),
+                0,
+                "本体から消える"
+            );
+            assert_eq!(
+                count(&format!(
+                    "SELECT COUNT(*) FROM memory_sessions_fts WHERE rowid = {id}"
+                )),
+                0,
+                "FTS からも同じ rowid で消える"
+            );
+        }
+        // 他は 1 行も巻き込んでいない（本体・FTS とも）。
+        for id in &keep_ids {
+            assert_eq!(
+                count(&format!(
+                    "SELECT COUNT(*) FROM memory_sessions WHERE id = {id}"
+                )),
+                1,
+                "メンテナンスラン以外は残る"
+            );
+            assert_eq!(
+                count(&format!(
+                    "SELECT COUNT(*) FROM memory_sessions_fts WHERE rowid = {id}"
+                )),
+                1,
+                "FTS 側も残る"
+            );
+        }
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_sessions"),
+            body_before - 2
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM memory_sessions_fts"),
+            fts_before - 2
+        );
+        assert_eq!(orphans(&conn), orphans_before, "孤児は増えも減りもしない");
+
+        // 冪等: 版を 32 へ戻して再実行しても何も変わらない（対象 0 行）。
+        let body_after = count("SELECT COUNT(*) FROM memory_sessions");
+        let fts_after = count("SELECT COUNT(*) FROM memory_sessions_fts");
+        conn.execute_batch("PRAGMA user_version = 32").unwrap();
+        run_migrations(&conn, MIGRATIONS).expect("v33 再実行");
+        assert_eq!(count("SELECT COUNT(*) FROM memory_sessions"), body_after);
+        assert_eq!(count("SELECT COUNT(*) FROM memory_sessions_fts"), fts_after);
+        assert_eq!(orphans(&conn), orphans_before);
     }
 
     /// v20 起点の一気通貫（v20→v21→v22→v23）。稼働中の本番 DB は v22 なので実運用の

@@ -1764,13 +1764,20 @@ pub async fn run_agent_response(
         engine.set_on_response_text(move |text: String| cb(text));
     }
 
-    set_turn_log_callbacks(
-        &mut engine,
-        state.db.clone(),
-        agent_id.to_string(),
-        session_id.to_string(),
-        tool_result_workspace,
-    );
+    // sleep のメンテナンスラン（#393）はここを配線しない = 生ログ（`memory_sessions`）に
+    // 1 行も書かない。整備作業のターンは本人の体験ではなく、記録すると次の宣言ランが
+    // 「記憶を整理した」という記憶を作り始める。監査（llm_logs / agent_logs）は別経路なので
+    // 落ちない。LLM が見る文脈も変わらない（巨大結果の退避は上の
+    // `set_tool_result_offload` が担当していて、この callback は永続化専用）。
+    if req.persist_turn_logs {
+        set_turn_log_callbacks(
+            &mut engine,
+            state.db.clone(),
+            agent_id.to_string(),
+            session_id.to_string(),
+            tool_result_workspace,
+        );
+    }
 
     let merged_image_urls = merge_image_urls(state, session_id, agent_id, &req.image_urls);
 
