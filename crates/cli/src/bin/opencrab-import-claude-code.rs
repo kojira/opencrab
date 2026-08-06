@@ -123,6 +123,7 @@ fn default_workspace_root(db_path: &str, agent_id: &str) -> Result<PathBuf> {
 
 /// 既存行から重複防止の鍵と thinking 連番のカーソルを復元し、
 /// **他所が入れた行がこのエージェントに既にあるか**も同時に見る。
+#[derive(Debug)]
 struct Existing {
     keys: HashSet<(String, String, usize)>,
     next_thinking_index: usize,
@@ -174,6 +175,73 @@ fn load_existing(conn: &Connection, agent_id: &str) -> Result<Existing> {
         next_thinking_index,
         foreign_rows,
     })
+}
+
+/// テーブルが存在するか。`sqlite_master` を照会するだけで **DB を書き換えない**。
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// 取り込み先が共有 DB でないことを確かめ、既存の取り込み状態を返す。**照会のみで
+/// DB を書き換えない**。
+///
+/// - 他エージェントの行があれば中止（1 DB = 1 エージェント）。
+/// - 同じ `agent_id` に別経路が入れた行があれば中止（id の打ち間違え）。
+fn guard_not_shared_database(conn: &Connection, agent_id: &str, db_path: &str) -> Result<Existing> {
+    // 稼働中のインスタンスの DB を渡していないか。他のエージェントの記憶がある DB は
+    // 取り込み先にしない（デバッグ・再起動と干渉し、記憶の分離が DB レベルで崩れる）。
+    let others = other_agent_rows(conn, agent_id)?;
+    if others > 0 {
+        bail!(
+            "{db_path} already holds {others} session log rows for other agents; \
+             refusing to import into a shared database. Claude Code material belongs in a \
+             separate instance (its own db / port / gateways off / heartbeat off) so that \
+             debugging and restarts do not touch these memories. Point --db at a new file."
+        );
+    }
+
+    let existing = load_existing(conn, agent_id)?;
+
+    // 同じ agent_id に別経路が入れた行がある場合も止める（id の打ち間違え）。
+    if existing.foreign_rows > 0 {
+        bail!(
+            "agent {agent_id} already has {} session log rows from other sources; \
+             refusing to mix Claude Code material into an existing agent's memory \
+             (use a fresh agent id — 1 project = 1 agent)",
+            existing.foreign_rows
+        );
+    }
+
+    Ok(existing)
+}
+
+/// 取り込み前の安全確認とスキーマ準備。**中止する場合は DB を一切書き換えない**
+/// （`user_version` も行も不変）。main から切り出してテスト可能にしてある。
+///
+/// 中止ガードは**スキーマのマイグレーションより前**に評価する。`--db` を稼働中の
+/// 本番へ打ち間違えたとき、このコマンドがサーバより新しいスキーマ版だと、中止する前に
+/// `schema::initialize` が `user_version` やテーブルを本番へ書いてしまうため。
+///
+/// - `memory_sessions` が既にある DB … initialize より先にガードを通し、通過したときだけ
+///   initialize する（隔離 DB のスキーマ更新は正当なので塞がない）。
+/// - `memory_sessions` が無い新規/空の DB … ガードの照会対象そのものが無いので、従来どおり
+///   initialize でスキーマを作ってから評価する（新規なので必ず 0 件）。
+fn prepare_database(conn: &Connection, agent_id: &str, db_path: &str) -> Result<Existing> {
+    if table_exists(conn, "memory_sessions")? {
+        let existing = guard_not_shared_database(conn, agent_id, db_path)?;
+        opencrab_db::schema::initialize(conn).with_context(|| format!("init schema: {db_path}"))?;
+        Ok(existing)
+    } else {
+        // 空の新規ファイルでもそのまま動くようにスキーマを作る。段階2 の別インスタンスへ
+        // そのまま渡せる形にする。
+        opencrab_db::schema::initialize(conn).with_context(|| format!("init schema: {db_path}"))?;
+        guard_not_shared_database(conn, agent_id, db_path)
+    }
 }
 
 /// thinking の全文をワークスペースへ退避する。生ログの印が指す先。
@@ -268,34 +336,9 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let conn = Connection::open(&db_path).with_context(|| format!("open DB: {db_path}"))?;
-    // 空の新規ファイルでもそのまま動くようにスキーマを作る（既存 DB では no-op か
-    // 未適用マイグレーションの適用）。段階2 の別インスタンスへそのまま渡せる形にする。
-    opencrab_db::schema::initialize(&conn).with_context(|| format!("init schema: {db_path}"))?;
-
-    // 稼働中のインスタンスの DB を渡していないか。他のエージェントの記憶がある DB は
-    // 取り込み先にしない（デバッグ・再起動と干渉し、記憶の分離が DB レベルで崩れる）。
-    let others = other_agent_rows(&conn, &args.agent_id)?;
-    if others > 0 {
-        bail!(
-            "{db_path} already holds {others} session log rows for other agents; \
-             refusing to import into a shared database. Claude Code material belongs in a \
-             separate instance (its own db / port / gateways off / heartbeat off) so that \
-             debugging and restarts do not touch these memories. Point --db at a new file."
-        );
-    }
-
-    let existing = load_existing(&conn, &args.agent_id)?;
-
-    // 同じ agent_id に別経路が入れた行がある場合も止める（id の打ち間違え）。
-    if existing.foreign_rows > 0 {
-        bail!(
-            "agent {} already has {} session log rows from other sources; \
-             refusing to mix Claude Code material into an existing agent's memory \
-             (use a fresh agent id — 1 project = 1 agent)",
-            args.agent_id,
-            existing.foreign_rows
-        );
-    }
+    // 安全ガードを通してからスキーマを準備する。中止する経路では DB を 1 バイトも
+    // 書き換えない（[`prepare_database`] の不変条件）。
+    let existing = prepare_database(&conn, &args.agent_id, &db_path)?;
 
     let scan = claude_code::scan_project_dir(&args.project_dir, existing.next_thinking_index)?;
     print_stats(&scan.stats);
@@ -386,6 +429,76 @@ mod tests {
 
         insert_row(&conn, "already-running-agent");
         assert_eq!(other_agent_rows(&conn, "cc-agent").unwrap(), 1);
+    }
+
+    /// 全テーブルの行数スナップショット（中止経路で 1 行も動いていないことの照合用）。
+    fn table_row_counts(conn: &Connection) -> std::collections::BTreeMap<String, i64> {
+        let names: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master \
+                     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            rows
+        };
+        names
+            .into_iter()
+            .map(|n| {
+                let c: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM \"{n}\""), [], |r| r.get(0))
+                    .unwrap();
+                (n, c)
+            })
+            .collect()
+    }
+
+    /// 中止する経路では DB を **1 バイトも書き換えない**（マイグレーションも走らせない）。
+    /// bin がサーバより新しいスキーマ版でも、`--db` の打ち間違え（他エージェントの行がある
+    /// 共有 DB）では `user_version` も全テーブルの行数も動かない、という不変条件の回帰。
+    #[test]
+    fn aborting_on_a_shared_database_writes_nothing() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 他エージェントの行がある＝共有 DB（稼働中インスタンス）を模す。
+        insert_row(&conn, "already-running-agent");
+
+        // サーバが 1 つ古いスキーマ版であることを模す（bin の方が新しく、initialize が
+        // マイグレーションを書き得る状況）。人為的に user_version を 1 つ下げる。
+        let current: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let lowered = current - 1;
+        conn.execute_batch(&format!("PRAGMA user_version = {lowered}"))
+            .unwrap();
+
+        let before = table_row_counts(&conn);
+
+        // 取り込み準備は中止する（memory_sessions が既にあるので initialize より前に
+        // ガードが走る）。
+        let err = prepare_database(&conn, "cc-agent", "/tmp/does-not-matter.db").unwrap_err();
+        assert!(
+            err.to_string().contains("shared database"),
+            "想定した中止理由でない: {err}"
+        );
+
+        // 中止したので initialize は走っていない: user_version も全テーブル行数も不変。
+        let after_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after_version, lowered,
+            "中止したのに user_version が動いた（マイグレーションが本番へ書かれた）"
+        );
+        assert_eq!(
+            table_row_counts(&conn),
+            before,
+            "中止したのにテーブルの行数が変わった"
+        );
     }
 
     /// 退避先は `--db` の隣。別インスタンスの既定レイアウト
