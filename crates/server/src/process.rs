@@ -744,31 +744,22 @@ fn build_conversation_inner(
         ));
     }
 
-    // [Past context summary] セクション構築
-    // node_id を併記してエージェントが retrieve_memory_nodes で全文検索できるようにする
-    let summary_section: String = topics
-        .iter()
-        .map(|t| {
-            let key = t.short_id.as_deref().unwrap_or(&t.id);
-            let date_hint = match (t.date_from.as_deref(), t.date_to.as_deref()) {
-                (Some(from), Some(to)) if from == to => format!(" ({})", &from[5..]),
-                (Some(from), Some(to)) => format!(" ({}~{})", &from[5..], &to[5..]),
-                (Some(from), None) => format!(" ({})", &from[5..]),
-                _ => String::new(),
-            };
-            format!("- [{}]{} {}: {}", key, date_hint, t.title, t.summary)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // [Past context summary] セクション構築（予算の 30% 以内 / 新しい方を残す。#406）
+    let summary_section = build_past_context_summary_section(
+        &topics,
+        context_budget_tokens / PAST_SUMMARY_BUDGET_DEN * PAST_SUMMARY_BUDGET_NUM,
+    );
 
-    let summary_header =
-        "[Past context summary (use retrieve_memory_nodes with short_id to recall details)]\n";
-    let recent_header = "\n\n[Recent conversation]\n";
-    let overhead_tokens = estimate_tokens(summary_header)
-        + estimate_tokens(&summary_section)
-        + estimate_tokens(recent_header);
+    // 要約が落ちた（予算が極小）ときは先頭の空行を作らない。
+    let recent_header = if summary_section.is_empty() {
+        "[Recent conversation]\n"
+    } else {
+        "\n\n[Recent conversation]\n"
+    };
+    let overhead_tokens = estimate_tokens(&summary_section) + estimate_tokens(recent_header);
 
-    // 残りの予算を最近のログに割り当て
+    // 残りの予算を最近のログに割り当て。要約は 30% で頭打ちなので、直近会話には
+    // 常に 50% 以上（ヘッダぶんを除いて ~70%）が残る（#406）。
     let remaining_budget = context_budget_tokens.saturating_sub(overhead_tokens);
 
     // indexed_boundary: topic でカバーされている最後の log_id
@@ -814,9 +805,116 @@ fn build_conversation_inner(
     // 予算内に収まるようにログを後ろから詰める
     let recent_text = fit_logs_to_budget(&recent_logs, agent_id, remaining_budget);
 
-    Ok(format!(
-        "{summary_header}{summary_section}{recent_header}{recent_text}"
-    ))
+    Ok(format!("{summary_section}{recent_header}{recent_text}"))
+}
+
+/// `[Past context summary]` に割く文脈予算の割合（分子／分母 = 30%）。
+///
+/// **オーナー指定の配分（#406）**: 長期 20%（`[Memory Index]`。既存の 1/4 ガードが
+/// 掛かっており段階 1 では触らない）／短期 30%（このセクション）／直近 50%
+/// （`[Channel conversation]` + `[Recent conversation]`）。
+///
+/// なぜ上限が要るか（実測。次に読む人が測り直さずに済むように残す）: このセクションは
+/// **そのセッションの topic 要約の全件連結**で、長寿命セッションほど無限に伸びる。
+/// 本番のハートビート専用セッションでは topic 2,446 件・要約の総文字数 248,340 に達し、
+/// 上限が無いため `remaining_budget` が 0 に張り付き、**会話本文は `RECENT_MIN_LOGS`
+/// 件しか残らなかった**。1 ハートビートあたりの入力が 284,486 トークン（キャッシュ読 0 /
+/// 35 秒）で、同条件の別エージェント（38,078 トークン）の 7.5 倍。載っていたのは
+/// ほぼ自分の過去出力の要約で、当該エージェントは 2 ヶ月ほぼ同一の発話を繰り返していた。
+///
+/// **割合の基準は「このセクションを組む関数に渡された予算」**であって全体予算ではない。
+/// ハートビート経路では `[Channel conversation]` が先に `inner_budget × 3/4` を取り、
+/// 残りが [`build_conversation_inner`] へ渡る（[`build_heartbeat_conversation_string`]）。
+/// ここで全体予算の 30% を基準にすると、渡された予算を要約が丸ごと食い潰して
+/// **上の症状がそのまま再現する**。渡された予算に対する割合にすることで、
+/// 「実会話を優先し、ハートビート履歴は下限だけ」というオーナー決定とも向きが揃う。
+const PAST_SUMMARY_BUDGET_NUM: usize = 3;
+const PAST_SUMMARY_BUDGET_DEN: usize = 10;
+
+/// `[Past context summary]` のヘッダ。**予算判定にはこのヘッダぶんも含める**
+/// （セクション全体で 30% に収める）。
+const PAST_SUMMARY_HEADER: &str =
+    "[Past context summary (use retrieve_memory_nodes with short_id to recall details)]\n";
+
+/// 予算に入らず落とした topic 要約があることを本人へ伝える 1 行（#406）。
+///
+/// **落としたことを黙らない。** ヘッダが既に `use retrieve_memory_nodes with short_id`
+/// と言っているので、その延長で「何件落ちたか」「どう引き出すか」を書く。short_id は
+/// 落ちた行と一緒に消えているため、ここでは検索（キーワード／日付）で引く旨を書く。
+fn past_summary_omitted_notice(dropped: usize) -> String {
+    format!(
+        "- [... {dropped} older topic summaries were omitted to fit the context budget. \
+         They are not lost: call retrieve_memory_nodes with a keyword or a date range to recall them ...]"
+    )
+}
+
+/// `[Past context summary]` セクションを予算内で組む（#406）。
+///
+/// **切り詰めの向き: 新しい方を残し、古い方から落とす。** 供給元の
+/// `get_topic_nodes_for_session` は `ORDER BY start_log_id ASC`（＝**古い順**）なので、
+/// 素直に前から詰めると古い方だけが残る。ここでは**末尾（新しい方）から**予算いっぱいまで
+/// 詰め、最後に表示順を時系列（古い→新しい）へ戻す。
+///
+/// 予算にセクション全体（ヘッダ + 省略の告知 + 残した行）が入らなければ空文字を返す
+/// （＝セクションごと出さない）。`[Memory Index]` の 1/4 ガードと同じ扱いで、
+/// 予算が極小のときに「告知だけで予算を使い切る」ことを避ける。
+fn build_past_context_summary_section(
+    topics: &[opencrab_db::queries::IndexNodeRow],
+    budget_tokens: usize,
+) -> String {
+    // node_id を併記してエージェントが retrieve_memory_nodes で全文検索できるようにする
+    let lines: Vec<String> = topics
+        .iter()
+        .map(|t| {
+            let key = t.short_id.as_deref().unwrap_or(&t.id);
+            let date_hint = match (t.date_from.as_deref(), t.date_to.as_deref()) {
+                (Some(from), Some(to)) if from == to => format!(" ({})", &from[5..]),
+                (Some(from), Some(to)) => format!(" ({}~{})", &from[5..], &to[5..]),
+                (Some(from), None) => format!(" ({})", &from[5..]),
+                _ => String::new(),
+            };
+            format!("- [{}]{} {}: {}", key, date_hint, t.title, t.summary)
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let header_tokens = estimate_tokens(PAST_SUMMARY_HEADER);
+    let line_tokens: Vec<usize> = lines
+        .iter()
+        .map(|l| estimate_tokens(l) + 1) // +1 for newline
+        .collect();
+    let total_tokens: usize = line_tokens.iter().sum();
+    if header_tokens + total_tokens <= budget_tokens {
+        return format!("{PAST_SUMMARY_HEADER}{}", lines.join("\n"));
+    }
+
+    // 全件は入らない → 告知ぶんを先に確保してから新しい方（末尾）を詰める。
+    // 告知の文字数は件数の桁でしか変わらないので、最大件数で 1 度だけ測って上界とする
+    // （実際の件数はこれ以下 = 見積りが不足することはない）。
+    let notice_tokens = estimate_tokens(&past_summary_omitted_notice(lines.len())) + 1;
+    let body_budget = budget_tokens.saturating_sub(header_tokens + notice_tokens);
+    let mut kept_from = lines.len();
+    let mut used = 0usize;
+    while kept_from > 0 {
+        let next = kept_from - 1;
+        if used + line_tokens[next] > body_budget {
+            break;
+        }
+        used += line_tokens[next];
+        kept_from = next;
+    }
+    // 全件が入るなら上の早期 return で返っているので、必ず 1 件以上落ちている。
+    let notice = past_summary_omitted_notice(kept_from);
+    if header_tokens + estimate_tokens(&notice) + 1 + used > budget_tokens {
+        // 告知すら入らない極小予算。セクションごと出さない。
+        return String::new();
+    }
+
+    let mut body = vec![notice];
+    body.extend(lines[kept_from..].iter().cloned());
+    format!("{PAST_SUMMARY_HEADER}{}", body.join("\n"))
 }
 
 /// context_budget_tokens を呼び出し元で計算するヘルパー。
@@ -3238,6 +3336,269 @@ mod heartbeat_conversation_tests {
         .unwrap();
         assert!(!hb.contains("[Channel conversation]"));
         assert_eq!(plain, hb);
+    }
+}
+
+/// `[Past context summary]` の予算上限（#406）。
+///
+/// 事故当時、このセクションには上限が無く、topic 2,446 件・要約 248,340 文字が全件
+/// 連結され、1 ハートビートの入力が 284,486 トークンになっていた。ここで固定するのは
+/// **上限が効くこと**と**切り詰めの向き（新しい方が残る）**の 2 点。
+#[cfg(test)]
+mod past_summary_budget_tests {
+    use super::{
+        build_conversation_string, build_heartbeat_conversation_string, estimate_tokens,
+        PAST_SUMMARY_BUDGET_DEN, PAST_SUMMARY_BUDGET_NUM,
+    };
+
+    const AGENT: &str = "a1";
+    const SESSION: &str = "s1";
+    const CH_SESSION: &str = "discord-a1-111-222";
+
+    fn insert_log(conn: &rusqlite::Connection, session_id: &str, speaker: &str, content: String) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: session_id.to_string(),
+                log_type: "speech".to_string(),
+                content,
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 現セッションの topic を `n` 件置く。`start_log_id` は昇順（＝供給元の
+    /// `ORDER BY start_log_id ASC` で **TOPIC-000 が最古**になる）。
+    fn seed_topics(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            opencrab_db::queries::insert_index_node(
+                conn,
+                &opencrab_db::queries::IndexNodeRow {
+                    id: format!("t{i:03}"),
+                    agent_id: AGENT.to_string(),
+                    parent_id: None,
+                    node_type: "topic".to_string(),
+                    source_type: "session_log".to_string(),
+                    title: format!("TOPIC-{i:03}"),
+                    summary: format!(
+                        "summary body for topic {i:03} {}",
+                        "padding words to make the line非自明な長さ ".repeat(3)
+                    ),
+                    start_log_id: Some(i as i64 + 1),
+                    end_log_id: None,
+                    source_session_id: Some(SESSION.to_string()),
+                    date_from: None,
+                    date_to: None,
+                    depth: 0,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-07-01T00:00:00Z".to_string(),
+                    updated_at: "2026-07-01T00:00:00Z".to_string(),
+                    short_id: Some(format!("t{i:03}")),
+                    keywords_json: "[]".to_string(),
+                    summary_refreshed_at: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// 会話本文だけで予算を超えるだけのログを積む（＝コンパクション経路へ入れる）。
+    fn seed_logs(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            insert_log(
+                conn,
+                SESSION,
+                AGENT,
+                format!("log line {i} about the release plan and the follow-up work"),
+            );
+        }
+    }
+
+    /// 出力から `[Past context summary]` セクション（ヘッダ込み）だけを切り出す。
+    fn summary_section(out: &str) -> &str {
+        let start = out
+            .find("[Past context summary")
+            .unwrap_or_else(|| panic!("コンパクション経路に入っていない: {out}"));
+        let rest = &out[start..];
+        match rest.find("[Recent conversation]") {
+            Some(end) => &rest[..end],
+            None => rest,
+        }
+    }
+
+    /// topic が数千件あっても、セクションは予算の 30% を超えない。
+    #[test]
+    fn past_summary_stays_within_thirty_percent_of_the_budget() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_logs(&conn, 400);
+        seed_topics(&conn, 2_000);
+
+        const BUDGET: usize = 4_000;
+        let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
+        let cap = BUDGET / PAST_SUMMARY_BUDGET_DEN * PAST_SUMMARY_BUDGET_NUM;
+        let used = estimate_tokens(summary_section(out.as_str()));
+        assert!(
+            used <= cap,
+            "[Past context summary] が予算の 30% ({cap}) を超えた: {used} トークン"
+        );
+        // 上限が無かった頃はここが数万トークンだった。空回りしていないこと（＝実際に
+        // 切り詰めが起きて、全件連結にはなっていないこと）も同時に見る。
+        assert!(
+            !out.contains("TOPIC-000"),
+            "2,000 件が全件載っている（切り詰めが起きていない）"
+        );
+    }
+
+    /// **切り詰めの向き**: 新しい topic が残り、古い topic から落ちる。
+    ///
+    /// 供給元のクエリは古い順なので、素直に前から詰めると逆になる。詰める向きを
+    /// 反転させたらこのテストが落ちること。表示順が時系列（古い→新しい）へ戻って
+    /// いることも同時に見る。
+    #[test]
+    fn past_summary_keeps_the_newest_topics_and_drops_the_oldest() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_logs(&conn, 400);
+        seed_topics(&conn, 100);
+
+        let out = build_conversation_string(&conn, SESSION, AGENT, 4_000).unwrap();
+        let section = summary_section(out.as_str());
+        assert!(
+            section.contains("TOPIC-099"),
+            "最新の topic が落ちている: {section}"
+        );
+        assert!(
+            !section.contains("TOPIC-000"),
+            "最古の topic が残っている（切り詰めの向きが逆）: {section}"
+        );
+        let newest = section.find("TOPIC-099").unwrap();
+        let one_before = section
+            .find("TOPIC-098")
+            .expect("直前の topic まで落ちている（残す件数が想定より少ない）");
+        assert!(
+            one_before < newest,
+            "表示順が時系列に戻っていない（新しい方が先に出ている）: {section}"
+        );
+    }
+
+    /// 落としたら黙らない: 件数と引き出し方を本人へ伝える。
+    #[test]
+    fn past_summary_reports_how_many_were_omitted() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_logs(&conn, 400);
+        seed_topics(&conn, 100);
+
+        let out = build_conversation_string(&conn, SESSION, AGENT, 4_000).unwrap();
+        let section = summary_section(out.as_str());
+        assert!(
+            section.contains("older topic summaries were omitted"),
+            "落としたことが伝わっていない: {section}"
+        );
+        assert!(
+            section.contains("retrieve_memory_nodes"),
+            "引き出し方が書かれていない: {section}"
+        );
+        // 残った件数と落とした件数の合計は 100。告知の件数が実態と食い違わないこと。
+        let kept = (0..100)
+            .filter(|i| section.contains(&format!("TOPIC-{i:03}")))
+            .count();
+        assert!(
+            section.contains(&format!("{} older topic summaries", 100 - kept)),
+            "告知の件数が残存件数と合っていない（残 {kept} 件）: {section}"
+        );
+    }
+
+    /// 要約が予算を食い潰さないので、直近会話の枠が残る（事故当時はここが 0 だった）。
+    #[test]
+    fn recent_conversation_keeps_its_share_when_topics_are_huge() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_logs(&conn, 400);
+        seed_topics(&conn, 2_000);
+
+        const BUDGET: usize = 4_000;
+        let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
+        let recent = &out[out
+            .find("[Recent conversation]")
+            .unwrap_or_else(|| panic!("直近会話セクションが無い: {out}"))..];
+        let used = estimate_tokens(recent);
+        assert!(
+            used * 2 >= BUDGET,
+            "直近会話が予算の 50% ({}) に届いていない: {used} トークン",
+            BUDGET / 2
+        );
+        // 合計が予算を超えないこと（本 issue の本体）。
+        assert!(
+            estimate_tokens(&out) <= BUDGET,
+            "プロンプト全体が予算 {BUDGET} を超えた: {} トークン",
+            estimate_tokens(&out)
+        );
+    }
+
+    /// ハートビート経路でも合計が予算を超えず、実会話と末尾の出力形式指示が残る。
+    #[test]
+    fn heartbeat_total_stays_within_budget_and_keeps_channel_and_format_instruction() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_topics(&conn, 2_000);
+        for i in 0..40 {
+            insert_log(
+                &conn,
+                CH_SESSION,
+                "human-1",
+                format!("CHANNELMSG-{i} 人がチャンネルで実際に話したこと"),
+            );
+        }
+        seed_logs(&conn, 400);
+        // 専用セッションの最後のログ = 今回のハートビートプロンプト（出力形式の規約）。
+        insert_log(
+            &conn,
+            SESSION,
+            "heartbeat",
+            "[ハートビート] 出力形式: SPEAK/LEARN/IDLE のいずれか。".to_string(),
+        );
+
+        const BUDGET: usize = 4_000;
+        let out =
+            build_heartbeat_conversation_string(&conn, SESSION, Some(CH_SESSION), AGENT, BUDGET)
+                .unwrap();
+        assert!(
+            estimate_tokens(&out) <= BUDGET,
+            "ハートビート文脈が予算 {BUDGET} を超えた: {} トークン",
+            estimate_tokens(&out)
+        );
+        assert!(
+            out.contains("[Channel conversation]") && out.contains("CHANNELMSG-39"),
+            "実会話が要約に押し出されている: {out}"
+        );
+        assert!(
+            out.trim_end()
+                .ends_with("出力形式: SPEAK/LEARN/IDLE のいずれか。"),
+            "末尾の出力形式指示が落ちている（SPEAK: のパースが壊れる）: {out}"
+        );
+    }
+
+    /// 予算が極小でも panic しない（0 除算・スライス外・オーバーフロー）。
+    #[test]
+    fn tiny_budget_does_not_panic() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_logs(&conn, 20);
+        seed_topics(&conn, 50);
+
+        for budget in 0..=3 {
+            let out = build_conversation_string(&conn, SESSION, AGENT, budget).unwrap();
+            assert!(!out.is_empty(), "budget={budget} で空文字になった");
+            // 予算に告知すら入らないのでセクションごと落ちる。直近ログの下限
+            // （RECENT_MIN_LOGS）は引き続き効く。
+            assert!(
+                out.contains("log line 19"),
+                "budget={budget} で直近ログの下限が効いていない: {out}"
+            );
+        }
     }
 }
 
