@@ -20,6 +20,7 @@
 //!         user:text             → speech（発話者＝相手）
 //! 印だけ  assistant:thinking    → inner_voice（本文は退避、生ログには印だけ）
 //! 捨てる  assistant:tool_use / user:tool_result / user:image
+//!         `promptSource: "system"` の user 行（task-notification / 他セッション連絡）
 //!         非対話の type すべて（file-history-snapshot / queue-operation / pr-link /
 //!         last-prompt / mode / permission-mode / ai-title / bridge-session / attachment /
 //!         system / custom-title / file-history-delta / frame-link …）
@@ -29,6 +30,12 @@
 //! （`tool_use` + `tool_result`）が本文（`text`）の 4.4 倍あり、落とすだけで容量の 39% が
 //! 消えて材料の密度が上がる。非対話の type は**運用のメタ情報**であって体験ではなく、
 //! 取り込むと #393 で消した「整備作業が記憶になる」のと同じ状態になる。
+//!
+//! `user` 行のうち `promptSource: "system"`（機械が差し込んだ行）も同じ理由で落とす。
+//! 実体は task-notification（バックグラウンドタスクの完了通知＝サブタスクの成果ダンプ）が
+//! 大半で、残りが他セッションからの連絡。どちらも本人の体験ではなく道具が返した作業結果で、
+//! #393 と同じ形（オーナー判断 2026-08-07 / #413）。`type: "system"` の非対話行とは別物で、
+//! こちらは `type: "user"` だが送信者が機械の行を指す。
 //!
 //! 捨てる側を**列挙しない**のが要点。`assistant:text` / `user:text` / `assistant:thinking`
 //! 以外はすべて落ちるので、Claude Code 側に新しい `type` が増えても勝手に混ざらない。
@@ -105,9 +112,10 @@ pub const USER_SPEAKER_ID: &str = "claude-code-user";
 /// 機械が差し込んだ `user` 行（`promptSource: "system"`）の `speaker_id`。
 ///
 /// 実データの内訳は task-notification（バックグラウンドタスクの完了通知）と
-/// 他セッションからのエージェント間メッセージで、**人間の発言ではない**。#382 の
-/// 規約が `speaker_id` = 送信者である以上、人間と同じ名義にすると「誰が言ったか」が
-/// 壊れる。opencrab 側で既に使われている `"system"` に揃える。
+/// 他セッションからのエージェント間メッセージで、**人間の発言ではない**。現在これらの
+/// 行は [`plan_record`] で取り込みごと落とす（#413 / オーナー判断 2026-08-07）ので、
+/// この名義が実際に `memory_sessions` へ書かれることは無い。[`Speaker::System`] を
+/// 「落とす対象」を見分ける分類として残しているため、その名義もここで定義しておく。
 pub const SYSTEM_SPEAKER_ID: &str = "system";
 
 /// 取り込んだ 1 行が誰の発言かの区別。`speaker_id` 列へ落ちる。
@@ -117,7 +125,9 @@ pub enum Speaker {
     Agent,
     /// 相手＝人間のオーナー（`user`）。
     User,
-    /// 機械が差し込んだ `user` 行（task-notification 等）。
+    /// 機械が差し込んだ `user` 行（task-notification 等）。この分類の行は
+    /// [`plan_record`] で取り込まず落とす（#413）。行を生ログへ書くためではなく、
+    /// 落とす対象を見分けるための分類。
     System,
 }
 
@@ -308,6 +318,16 @@ fn plan_record(
             _ => Speaker::User,
         },
     };
+
+    // 機械が差し込んだ `user` 行（`promptSource: "system"`）は取り込まない。実体は
+    // task-notification（バックグラウンドタスクの完了通知＝サブタスクの成果ダンプ）と
+    // 他セッションからの連絡で、**本人の体験ではなく道具が返した作業結果**。#393 で
+    // declare_window から外した「整備作業が記憶になる」のと同じ形なので、そもそも生ログに
+    // 書かない（オーナー判断 2026-08-07 / #413）。落とした量は集計に残す。
+    if speaker == Speaker::System {
+        ScanStats::add(&mut stats.dropped, "user:system-injected", raw_len);
+        return;
+    }
 
     let source_uuid = record
         .get("uuid")
@@ -633,29 +653,35 @@ mod tests {
         assert_eq!(rows[0].speaker, Speaker::User);
     }
 
-    /// #382 の規約: `speaker_id` は送信者。機械が差し込んだ `user` 行は人間名義にしない。
+    /// 機械が差し込んだ `user` 行（`promptSource: "system"`＝task-notification 等）は
+    /// 取り込まない（#393 と同じ「道具が返した作業結果が記憶になる」形。オーナー判断 #413）。
+    /// `system` 以外の promptSource（`queued` 等）は従来どおり相手＝人間の発言として残る。
     #[test]
-    fn machine_injected_user_rows_are_not_attributed_to_the_human() {
-        let mut human = record(
+    fn machine_injected_system_rows_are_dropped() {
+        let mut queued = record(
             "user",
             "u1",
             "2026-01-01T00:00:00.000Z",
             serde_json::json!("やあ"),
         );
-        human["promptSource"] = serde_json::json!("queued");
-        let mut machine = record(
+        queued["promptSource"] = serde_json::json!("queued");
+        let mut system = record(
             "user",
             "u2",
             "2026-01-01T00:00:01.000Z",
             serde_json::json!("<task-notification>done</task-notification>"),
         );
-        machine["promptSource"] = serde_json::json!("system");
+        system["promptSource"] = serde_json::json!("system");
 
-        let (rows, _) = plan(&[human, machine]);
+        let (rows, stats) = plan(&[queued, system]);
+
+        // 入力 2 行のうち system 行だけが落ち、queued（人間）行だけが残る。
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "やあ");
+        assert_eq!(rows[0].speaker, Speaker::User);
         assert_eq!(rows[0].speaker.speaker_id("agent-x"), USER_SPEAKER_ID);
-        assert_eq!(rows[1].speaker.speaker_id("agent-x"), SYSTEM_SPEAKER_ID);
-        // 本人の発言だけが agent_id 名義。
-        assert_ne!(rows[0].speaker.speaker_id("agent-x"), "agent-x");
+        // 落としたことは集計に出る（何を捨てたかの実測が報告に要る）。
+        assert_eq!(stats.dropped["user:system-injected"].count, 1);
     }
 
     /// thinking は**本文を 1 文字も生ログへ出さず**、印と退避先だけを残す。
