@@ -7,14 +7,29 @@ use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 /// 再読み込みした設定を適用してよいか検証する（#412）。
 ///
 /// `[llm] default_provider` / `default_model` は `agents.model` が空のエージェント
-/// 全員が使う実効モデル。`model_pricing` に `context_window` が無いモデルへ差し替えると
+/// 全員が使う実効モデル。`model_pricing` に `context_window` が無いモデルへ**差し替えると**
 /// 文脈予算が黙って既定値へ落ちる。**落ちた設定は適用しない**: ここで Err を返した
 /// リロードは丸ごと捨て、プロセスは旧設定のまま走り続ける。
+///
+/// **検証するのは spec が実際に変わったときだけ。** 方針は「設定する時に弾く」であって、
+/// 変えていないものを理由に弾くのはそれより広い。ホットリロードは `default_model` を
+/// 適用しない（`state.default_model` は起動時に一度組み立てられるきり）ので、無条件に
+/// 検証すると**リロードが適用しない値を根拠に、モデルと無関係な tools の編集まで
+/// 巻き添えで捨てる**ことになる。
+///
+/// `running_default_model` は稼働中の実効 spec（`AppState.default_model`）。
+/// 組み立て方は `main.rs` 側と**同じ `format!("{provider}:{model}")`** で、片方だけ
+/// 分離した形になっていると永久に不一致になる。ホットリロードでは更新されない値
+/// なので、比較対象は常に「いまプロセスが実際に使っているモデル」になる。
 fn validate_reloaded_config(
     db: &opencrab_db::Db,
+    running_default_model: &str,
     cfg: &crate::config::AppConfig,
 ) -> Result<(), String> {
     let spec = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
+    if spec == running_default_model {
+        return Ok(());
+    }
     let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
     crate::process::ensure_model_context_window_registered(&conn, &spec)
 }
@@ -23,9 +38,13 @@ fn validate_reloaded_config(
 ///
 /// When any file in the directory changes, the watcher re-parses the config
 /// and live-updates the shared `ToolsConfig`.
+///
+/// `running_default_model` は起動時に決まった実効モデル spec。ここで差し替えたい
+/// わけではなく、**「変わったか」の基準**としてだけ使う（[`validate_reloaded_config`]）。
 pub fn start_config_watcher(
     config_dir: impl AsRef<Path>,
     db: opencrab_db::Db,
+    running_default_model: String,
     tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     heartbeat_config_tx: tokio::sync::watch::Sender<opencrab_core::heartbeat::HeartbeatConfig>,
 ) -> JoinHandle<()> {
@@ -98,7 +117,7 @@ pub fn start_config_watcher(
 
                 // #412: 検証に落ちた設定は**一切適用しない**。tools も heartbeat も
                 // 触らずに次のイベントを待つ（旧設定のまま動き続ける）。
-                if let Err(e) = validate_reloaded_config(&db, &cfg) {
+                if let Err(e) = validate_reloaded_config(&db, &running_default_model, &cfg) {
                     tracing::error!(
                         "Config reload rejected for {:?}; keeping the previous config: {e}",
                         path
@@ -127,25 +146,35 @@ pub fn start_config_watcher(
     })
 }
 
-/// 落ちた設定を適用しないこと（#412）。
+/// 落ちた設定を適用しないこと、そして**変えていないものは理由にしないこと**（#412）。
 #[cfg(test)]
 mod reload_validation_tests {
     use super::validate_reloaded_config;
 
+    /// 稼働中の実効 spec。`main.rs` と同じ組み立て方（`provider:model`）。
+    const RUNNING: &str = "p1:m1";
+
+    fn empty_db() -> opencrab_db::Db {
+        opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap())
+    }
+
     fn db_with(provider: &str, model: &str, window: Option<i32>) -> opencrab_db::Db {
-        let conn = opencrab_db::init_memory().unwrap();
-        opencrab_db::queries::upsert_model_pricing(
-            &conn,
-            &opencrab_db::queries::ModelPricingRow {
-                provider: provider.to_string(),
-                model: model.to_string(),
-                input_price_per_1m: 0.0,
-                output_price_per_1m: 0.0,
-                context_window: window,
-            },
-        )
-        .unwrap();
-        opencrab_db::Db::from_connection(conn)
+        let db = empty_db();
+        {
+            let conn = db.lock().unwrap();
+            opencrab_db::queries::upsert_model_pricing(
+                &conn,
+                &opencrab_db::queries::ModelPricingRow {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    input_price_per_1m: 0.0,
+                    output_price_per_1m: 0.0,
+                    context_window: window,
+                },
+            )
+            .unwrap();
+        }
+        db
     }
 
     fn cfg(provider: &str, model: &str) -> crate::config::AppConfig {
@@ -155,26 +184,132 @@ mod reload_validation_tests {
         .unwrap()
     }
 
+    /// **本題**: default_model を変えていないリロードは、そのモデルが未登録でも通る。
+    ///
+    /// ホットリロードは `default_model` を適用しない。適用しない値を根拠に、
+    /// モデルと無関係な tools の編集まで捨てるのは「設定する時に弾く」より広い。
     #[test]
-    fn registered_default_model_is_accepted() {
-        let db = db_with("p1", "m1", Some(200_000));
-        assert!(validate_reloaded_config(&db, &cfg("p1", "m1")).is_ok());
+    fn unchanged_default_model_passes_even_when_unregistered() {
+        let db = empty_db();
+        assert!(validate_reloaded_config(&db, RUNNING, &cfg("p1", "m1")).is_ok());
     }
 
-    /// 未登録のモデルへ差し替える設定は拒否される。呼び出し側はこの Err で
-    /// `continue` するので、tools も heartbeat も更新されない（旧設定が残る）。
+    /// 変えたなら検証する。未登録への差し替えは拒否。
     #[test]
-    fn unregistered_default_model_is_rejected() {
+    fn changed_default_model_must_be_registered() {
         let db = db_with("p1", "m1", Some(200_000));
-        let err = validate_reloaded_config(&db, &cfg("p1", "m2")).unwrap_err();
+        let err = validate_reloaded_config(&db, RUNNING, &cfg("p1", "m2")).unwrap_err();
         assert!(err.contains("/api/llm/model-pricing"), "{err}");
     }
 
-    /// 空の DB（= 本番の初期状態）では、登録前のリロードは通らない。
+    /// 変えた先が登録済みなら通る。
     #[test]
-    fn empty_model_pricing_rejects_every_reload() {
-        let conn = opencrab_db::init_memory().unwrap();
-        let db = opencrab_db::Db::from_connection(conn);
-        assert!(validate_reloaded_config(&db, &cfg("p1", "m1")).is_err());
+    fn changed_default_model_passes_when_registered() {
+        let db = db_with("p1", "m2", Some(200_000));
+        assert!(validate_reloaded_config(&db, RUNNING, &cfg("p1", "m2")).is_ok());
+    }
+
+    /// provider だけ変えても「変わった」扱い（比較は spec 全体）。
+    #[test]
+    fn changed_provider_alone_is_also_validated() {
+        let db = empty_db();
+        assert!(validate_reloaded_config(&db, RUNNING, &cfg("p2", "m1")).is_err());
+    }
+
+    /// `model_pricing` が空でも、**差し替えないリロードは止まらない**。
+    /// 登録前に config を触れなくなるのは方針より広い制約なので、そこは通す。
+    #[test]
+    fn empty_model_pricing_only_blocks_actual_changes() {
+        let db = empty_db();
+        assert!(validate_reloaded_config(&db, RUNNING, &cfg("p1", "m1")).is_ok());
+        assert!(validate_reloaded_config(&db, RUNNING, &cfg("p1", "m2")).is_err());
+    }
+}
+
+/// watcher 本体の振る舞い（#412）: 拒否したリロードが `tools_config` にも
+/// heartbeat 通知にも**到達しない**こと。
+///
+/// 検証の単体テストだけでは「Err を返す」までしか押さえられず、呼び出し側が
+/// その Err を無視していても気づけない。ここはファイルを実際に書いて watcher を
+/// 通す。**先に正常な変更が適用されることを確認**してから異常系を見る（陽性対照が
+/// 無いと、単にイベントが届いていないだけで「適用されなかった」と誤判定する）。
+#[cfg(test)]
+mod watcher_rejection_tests {
+    use super::start_config_watcher;
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    /// 稼働中の実効 spec。これと同じなら「変えていない」。
+    const RUNNING: &str = "p1:m1";
+    /// 正常な変更が反映されるまでの待ち上限。遅いマシンでも落ちないよう長めに取る。
+    const APPLY_WAIT: Duration = Duration::from_secs(10);
+    /// 拒否されたはずの変更が現れないことを見る観測窓。デバウンスは 300ms で、
+    /// 陽性対照が直前にこの経路の実レイテンシを示しているので 3 秒あれば足りる。
+    const REJECT_WINDOW: Duration = Duration::from_secs(3);
+
+    fn config_text(provider: &str, model: &str, tools_enabled: bool, hb_secs: u64) -> String {
+        format!(
+            "[llm]\ndefault_provider = \"{provider}\"\ndefault_model = \"{model}\"\n\
+             [tools]\nenabled = {tools_enabled}\n\
+             [agent]\nheartbeat_interval_secs = {hb_secs}\n"
+        )
+    }
+
+    /// `cond` が true になるまで最大 `limit` 待つ。戻り値は成立したか。
+    fn wait_until(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if cond() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn rejected_reload_touches_neither_tools_nor_heartbeat() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(&path, config_text("p1", "m1", false, 60)).unwrap();
+
+        // `model_pricing` は空。よって「変えたら拒否 / 変えなければ通る」の両方が出る。
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        let tools_config = Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
+        let (hb_tx, hb_rx) =
+            tokio::sync::watch::channel(opencrab_core::heartbeat::HeartbeatConfig {
+                interval_secs: 60,
+                enabled: false,
+            });
+
+        let _handle = start_config_watcher(
+            dir.path(),
+            db,
+            RUNNING.to_string(),
+            tools_config.clone(),
+            hb_tx,
+        );
+
+        // 陽性対照: default_model を変えない編集は適用される（watcher が生きている証拠）。
+        std::fs::write(&path, config_text("p1", "m1", true, 90)).unwrap();
+        assert!(
+            wait_until(APPLY_WAIT, || tools_config.read().unwrap().enabled),
+            "default_model を変えない編集は適用されるはず（watcher が動いていない）"
+        );
+        assert!(
+            wait_until(APPLY_WAIT, || hb_rx.borrow().interval_secs == 90),
+            "heartbeat 設定も適用されるはず"
+        );
+
+        // 本題: 未登録モデルへ差し替える編集は、tools も heartbeat も動かさない。
+        std::fs::write(&path, config_text("p1", "m2", false, 120)).unwrap();
+        assert!(
+            !wait_until(REJECT_WINDOW, || {
+                !tools_config.read().unwrap().enabled || hb_rx.borrow().interval_secs == 120
+            }),
+            "拒否したリロードが tools_config / heartbeat のどちらかへ到達した"
+        );
     }
 }
