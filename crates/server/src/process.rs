@@ -525,7 +525,17 @@ fn build_context_prefix_sections(
 /// このセクションは実会話（人の発言）なので、素で入れると「直近の発言に返事をする」
 /// 形へ引っ張られ、`SPEAK:` / `IDLE` の出力形式を落としうる。形式指示はハートビート
 /// 専用セッション側の末尾に残る（[`build_heartbeat_conversation_string`] の並び順）。
-const CHANNEL_CONVERSATION_HEADER: &str = "[Channel conversation] (what people actually said in this channel. You are not necessarily being addressed here; follow the response-format instruction at the end of this prompt.)\n";
+///
+/// 「発言だけを載せる」ことも明示する（[`is_channel_conversation_speech`]）。名乗りと
+/// 中身が食い違うと、モデルは見えていない往復を見たものとして扱いうる。
+const CHANNEL_CONVERSATION_HEADER: &str = "[Channel conversation] (the most recent things people actually said in this channel. Tool calls, tool results, system events and older messages are not shown here. You are not necessarily being addressed here; follow the response-format instruction at the end of this prompt.)\n";
+
+/// 実会話セクションで読む直近ログの窓（件数）。**speech 以外を落とす前**の生の件数。
+///
+/// `build_truncated_conversation` の窓と同値。全件読み（`list_session_logs_by_session`）
+/// を避けるためのもので、本番の実会話セッションは最大 5,383 行 / 851KB あり、毎 tick
+/// これを `db.lock()` を握ったまま tiktoken に通すのは高い。
+const CHANNEL_CONVERSATION_LOG_WINDOW: usize = 500;
 
 /// ハートビート文脈で実会話へ割く予算の割合（分子／分母）。
 ///
@@ -555,7 +565,9 @@ const HEARTBEAT_CHANNEL_BUDGET_DEN: usize = 4;
 /// 既に担っており、`[Past context summary]` を 2 つ出すと short_id 集合が素という
 /// 既存の不変条件が壊れるため。
 ///
-/// `channel_session_id` が None（エージェント単位 tick 等）またはログ皆無なら、
+/// 実会話セクションに載せるのは**発言だけ**（[`is_channel_conversation_speech`]）。
+///
+/// `channel_session_id` が None（エージェント単位 tick 等）または発言が 1 件も無ければ、
 /// 出力は [`build_conversation_string`] と同一になる。
 pub fn build_heartbeat_conversation_string(
     conn: &rusqlite::Connection,
@@ -599,26 +611,67 @@ pub fn build_heartbeat_conversation_string(
     Ok(parts.join("\n\n"))
 }
 
+/// 実会話セクションに載せるログか（#404）。
+///
+/// **`speech` だけを載せる。** #404 が直したいのは「エージェントが自分の過去の発話しか
+/// 手本を持てず、2 ヶ月ほぼ同一の発話を繰り返していた」ことなので、要るのは**人が何を
+/// 話したか**であって自分のツール往復ではない。本番のツール往復が多いチャンネルでは
+/// 直近 500 行の内訳が tool_result 162 行 / 104KB・system 55 行 / 50KB・speech 184 行 /
+/// 49KB・tool_call 95 行 / 13KB で、**speech はバイトで 2 割強**しかない。素通しだと
+/// 実会話へ割いた枠の大半をツール結果が食い、目的が達成されない。
+///
+/// 落とすものの内訳:
+/// - `tool_call` / `tool_result` / `tool_cancelled`: 自分の作業機構であって発言ではない。
+/// - `system`: Discord セッションでは subtask の生成・完了・タイムアウト・進捗報告の
+///   JSON（本番実測）。これも自分の機構で、1 行あたりが最も重い。
+/// - `inner_voice`: `generate_inner_voice` が書く**自分の内心**。自己参照を増やす方向に
+///   働くので、この目的では最も入れたくない。
+/// - `evaluation`: 元から会話に載せない（#291）。
+/// - `interaction_response`: UI 操作の応答であって発言ではない。
+///
+/// **この絞り込みは実会話セクションだけに掛ける。**ハートビート専用セッション側は
+/// 従来どおり全種別を載せる — subtask の完了本文が次 tick で文脈へ載ることに
+/// `heartbeat_run_request` の `NoopCompletionSink` が依存している。
+fn is_channel_conversation_speech(log: &opencrab_db::queries::SessionLogRow) -> bool {
+    log.log_type == "speech"
+}
+
 /// 実会話セッションを `[Channel conversation]` セクションへ整形する（#404）。
 ///
-/// ログが無ければ `None`（セクションごと出さない）。予算超過時は topic 要約ではなく
-/// 直近窓で切る（理由は [`build_heartbeat_conversation_string`] の doc）。
+/// 直近 [`CHANNEL_CONVERSATION_LOG_WINDOW`] 件の窓から発言だけを残し、予算内へ詰める。
+/// 発言が 1 件も無ければ `None`（セクションごと出さない）。topic 要約は使わない
+/// （理由は [`build_heartbeat_conversation_string`] の doc）。
 fn build_channel_conversation_section(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,
     budget_tokens: usize,
 ) -> Option<String> {
-    let full = build_full_conversation(conn, session_id);
-    if full == "No messages yet." {
+    let mut logs = match opencrab_db::queries::list_recent_session_logs(
+        conn,
+        session_id,
+        CHANNEL_CONVERSATION_LOG_WINDOW,
+    ) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, "failed to list channel conversation logs: {e}");
+            return None;
+        }
+    };
+    logs.reverse();
+    logs.retain(is_channel_conversation_speech);
+    // #284 と同じ保証を実会話セクションでも効かせる。ツール往復が 500 件を超えて続くと
+    // 窓から人の発言が 1 件も残らないことがあるため、セッション全体から直近の
+    // ユーザー発言を混ぜ戻す（取得は id 順にマージされる）。
+    let logs = merge_recent_user_speeches(conn, session_id, agent_id, logs);
+    if logs.is_empty() {
         return None;
     }
     let body_budget = budget_tokens.saturating_sub(estimate_tokens(CHANNEL_CONVERSATION_HEADER));
-    let body = if estimate_tokens(&full) <= body_budget {
-        full
-    } else {
-        build_truncated_conversation(conn, session_id, agent_id, body_budget)
-    };
+    let body = fit_logs_to_budget(&logs, agent_id, body_budget);
+    if body.is_empty() {
+        return None;
+    }
     Some(format!("{CHANNEL_CONVERSATION_HEADER}{body}"))
 }
 
@@ -2742,8 +2795,8 @@ mod heartbeat_conversation_tests {
             insert(
                 conn,
                 CH_SESSION,
-                AGENT,
                 "speech",
+                AGENT,
                 format!("channel reply {i} from the agent about the release plan"),
             );
         }
@@ -2763,8 +2816,8 @@ mod heartbeat_conversation_tests {
             insert(
                 conn,
                 HB_SESSION,
-                AGENT,
                 "speech",
+                AGENT,
                 format!("heartbeat note {i}: 静けさは続いてる。IDLE"),
             );
         }
@@ -2775,6 +2828,115 @@ mod heartbeat_conversation_tests {
             "heartbeat",
             format!("[ハートビート] 現在の会話「開発」。静けさが続くなら黙っていてよい。\n{FORMAT_INSTRUCTION}"),
         );
+    }
+
+    /// ツール往復・system イベント・内心。**実会話セクションには出さない側**。
+    /// 本番のツール往復が多いチャンネルの内訳（直近 500 行で tool_result 104KB /
+    /// system 50KB に対し speech 49KB）を縮めて再現する。
+    fn seed_channel_tool_traffic(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            insert(
+                conn,
+                CH_SESSION,
+                "tool_call",
+                AGENT,
+                format!("TOOLCALL-{i} execute_shell"),
+            );
+            insert(
+                conn,
+                CH_SESSION,
+                "tool_result",
+                AGENT,
+                format!("TOOLPAYLOAD-{i} {}", "x".repeat(300)),
+            );
+            insert(
+                conn,
+                CH_SESSION,
+                "system",
+                AGENT,
+                format!(
+                    r#"{{"exit_reason":"completed","result":"SUBTASKEVENT-{i}","session_id":"subtask-x"}}"#
+                ),
+            );
+            insert(
+                conn,
+                CH_SESSION,
+                "inner_voice",
+                AGENT,
+                format!("INNERVOICE-{i} 自分の内心をここに書いている"),
+            );
+        }
+    }
+
+    /// 両セッションに現在月の topic を 1 件ずつ置く（`[Memory Index]` と
+    /// `[Past context summary]` の担当分けを見るため）。
+    fn seed_topics_for_both_sessions(conn: &rusqlite::Connection) {
+        use opencrab_db::queries::*;
+        let mk = |id: &str,
+                  node_type: &str,
+                  parent: Option<&str>,
+                  title: &str,
+                  source_session_id: Option<&str>,
+                  date_from: Option<&str>| IndexNodeRow {
+            id: id.to_string(),
+            agent_id: AGENT.to_string(),
+            parent_id: parent.map(String::from),
+            node_type: node_type.to_string(),
+            source_type: "session_log".to_string(),
+            title: title.to_string(),
+            summary: format!("{title} の要約"),
+            start_log_id: None,
+            end_log_id: None,
+            source_session_id: source_session_id.map(String::from),
+            date_from: date_from.map(String::from),
+            date_to: None,
+            depth: 0,
+            child_count: 0,
+            token_count: 0,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            short_id: Some(id.to_string()),
+            keywords_json: "[]".to_string(),
+            summary_refreshed_at: None,
+        };
+        insert_index_node(conn, &mk("r1", "root", None, "root", None, None)).unwrap();
+        insert_index_node(
+            conn,
+            &mk("pjun", "period", Some("r1"), "2026-06", None, None),
+        )
+        .unwrap();
+        insert_index_node(conn, &mk("s1", "session", Some("pjun"), "S", None, None)).unwrap();
+        insert_index_node(
+            conn,
+            &mk(
+                "t-ch",
+                "topic",
+                Some("s1"),
+                "実会話の話題",
+                Some(CH_SESSION),
+                Some("2026-06-10"),
+            ),
+        )
+        .unwrap();
+        insert_index_node(
+            conn,
+            &mk(
+                "t-hb",
+                "topic",
+                Some("s1"),
+                "ハートビートの話題",
+                Some(HB_SESSION),
+                Some("2026-06-11"),
+            ),
+        )
+        .unwrap();
+        // ハートビート側の topic に古いログ範囲を持たせ、コンパクション時の
+        // [Past context summary] に載るようにする。
+        conn.execute(
+            "UPDATE memory_index_nodes SET start_log_id = 1, end_log_id = 20 WHERE id = 't-hb'",
+            [],
+        )
+        .unwrap();
     }
 
     /// 中心要件: 同じチャンネルの実会話がハートビート文脈へ入り、専用セッションの
@@ -2843,9 +3005,44 @@ mod heartbeat_conversation_tests {
             out.trim_end().ends_with(FORMAT_INSTRUCTION),
             "コンパクション後も形式指示は末尾に残る: {out}"
         );
-        // セッションを跨いだ要約はしない: [Past context summary] は専用セッション側の
-        // 1 つだけ（実会話側は直近窓で切る）。
-        assert!(out.matches("[Past context summary").count() <= 1, "{out}");
+    }
+
+    /// セッションを跨いだ要約はしない: **両方のセッションに topic がある**状態でも
+    /// `[Past context summary]` は専用セッション側の 1 つだけ。実会話側の topic は
+    /// `[Memory Index]`（現セッション以外の topic を載せる）にだけ出る = short_id
+    /// 集合が素、という既存の不変条件がハートビート経路でも保たれる。
+    #[test]
+    fn cross_session_summaries_do_not_double_up() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 3);
+        seed_heartbeat(&conn, 40);
+        seed_topics_for_both_sessions(&conn);
+
+        let out =
+            build_heartbeat_conversation_string(&conn, HB_SESSION, Some(CH_SESSION), AGENT, 1_500)
+                .unwrap();
+
+        assert_eq!(out.matches("[Memory Index]").count(), 1, "{out}");
+        assert_eq!(
+            out.matches("[Past context summary").count(),
+            1,
+            "要約セクションはハートビート側の 1 つだけ: {out}"
+        );
+        // short_id は片方にしか出ない。
+        assert_eq!(out.matches("[t-hb]").count(), 1, "{out}");
+        assert_eq!(out.matches("[t-ch]").count(), 1, "{out}");
+        let mi_pos = out.find("[Memory Index]").unwrap();
+        let pcs_pos = out.find("[Past context summary").unwrap();
+        let t_ch_pos = out.find("[t-ch]").unwrap();
+        let t_hb_pos = out.find("[t-hb]").unwrap();
+        assert!(
+            t_ch_pos > mi_pos && t_ch_pos < pcs_pos,
+            "実会話の topic は Memory Index 側にだけ出る: {out}"
+        );
+        assert!(
+            t_hb_pos > pcs_pos,
+            "ハートビートの topic は Past context summary 側にだけ出る: {out}"
+        );
     }
 
     /// 予算配分: 実会話を優先する（専用セッションの履歴は反復が多く情報密度が低い）。
@@ -2881,6 +3078,108 @@ mod heartbeat_conversation_tests {
         let hb =
             build_heartbeat_conversation_string(&conn, HB_SESSION, None, AGENT, 100_000).unwrap();
         assert_eq!(plain, hb);
+    }
+
+    /// 実会話セクションは**人が何を話したか**で埋める。ツール往復・system イベント・
+    /// 内心が枠を食わない（#404 の目的は自己参照のループを破ること）。
+    #[test]
+    fn channel_section_carries_speech_not_tool_traffic() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 発言が先・ツール往復が後（＝ツール往復の方が新しい）。素通しだと直近から
+        // 詰める `fit_logs_to_budget` が枠をツール結果で埋め、古い側の発言が落ちる。
+        seed_channel(&conn, 8);
+        seed_channel_tool_traffic(&conn, 40);
+        seed_heartbeat(&conn, 5);
+
+        let out =
+            build_heartbeat_conversation_string(&conn, HB_SESSION, Some(CH_SESSION), AGENT, 1_600)
+                .unwrap();
+
+        assert_eq!(out.matches("[Channel conversation]").count(), 1, "{out}");
+        for i in 0..8 {
+            assert!(
+                out.contains(&format!("channel message {i} from a person")),
+                "人の発言 {i} が枠から落ちている: {out}"
+            );
+            // #284 の保証が拾うのは人の発言だけ。エージェント側の発言まで残ることが
+            // 「ツール往復を落として枠が空いた」ことの証拠になる。
+            assert!(
+                out.contains(&format!("channel reply {i} from the agent")),
+                "エージェント側の発言 {i} が枠から落ちている: {out}"
+            );
+        }
+        assert!(
+            !out.contains("TOOLPAYLOAD-"),
+            "tool_result が載っている: {out}"
+        );
+        assert!(!out.contains("TOOLCALL-"), "tool_call が載っている: {out}");
+        assert!(
+            !out.contains("SUBTASKEVENT-"),
+            "system イベントが載っている: {out}"
+        );
+        assert!(
+            !out.contains("INNERVOICE-"),
+            "自分の内心が載っている（自己参照を増やす）: {out}"
+        );
+    }
+
+    /// 発言が 1 件も無く、ツール往復だけのチャンネルではセクションごと出さない。
+    #[test]
+    fn channel_session_with_only_tool_traffic_adds_no_section() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel_tool_traffic(&conn, 5);
+        seed_heartbeat(&conn, 5);
+
+        let plain = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+        let hb = build_heartbeat_conversation_string(
+            &conn,
+            HB_SESSION,
+            Some(CH_SESSION),
+            AGENT,
+            100_000,
+        )
+        .unwrap();
+        assert!(!hb.contains("[Channel conversation]"), "{hb}");
+        assert_eq!(plain, hb);
+    }
+
+    /// 絞り込みは**実会話セクションだけ**。ハートビート専用セッション側は従来どおり
+    /// 全種別を載せる — subtask の完了本文が次 tick で文脈へ載ることに
+    /// `heartbeat_run_request` の `NoopCompletionSink` が依存している。
+    #[test]
+    fn heartbeat_session_still_carries_non_speech_logs() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 3);
+        seed_heartbeat(&conn, 3);
+        insert(
+            &conn,
+            HB_SESSION,
+            "system",
+            "system",
+            r#"{"exit_reason":"completed","result":"SUBTASKBODY-1 調査の結論はこう"}"#.to_string(),
+        );
+        insert(
+            &conn,
+            HB_SESSION,
+            "tool_result",
+            AGENT,
+            "HBTOOLRESULT-1 検索結果".to_string(),
+        );
+
+        let out = build_heartbeat_conversation_string(
+            &conn,
+            HB_SESSION,
+            Some(CH_SESSION),
+            AGENT,
+            100_000,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("SUBTASKBODY-1"),
+            "subtask 完了本文がハートビート文脈から消えた: {out}"
+        );
+        assert!(out.contains("HBTOOLRESULT-1"), "{out}");
     }
 
     /// 実会話が 1 行も無いチャンネルでは、セクションごと出さない（空見出しを足さない）。

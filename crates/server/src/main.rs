@@ -61,8 +61,10 @@ fn get_or_create_heartbeat_session(
 ///   では常に not found）。
 /// - sink: `NoopCompletionSink` = **即時 resume はしない**。完了本文は
 ///   `settle_completed` が親セッションログへ永続化し、heartbeat は毎 tick 同じ
-///   session_id で `build_conversation_string` により会話を再構築するため、次 tick で
-///   自然に文脈へ載る。sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
+///   session_id で `build_heartbeat_conversation_string` により会話を再構築するため、
+///   次 tick で自然に文脈へ載る。**この依存があるので、ハートビート専用セッション側の
+///   ログは種別で絞らない**（実会話セクションだけが `speech` に絞られる / #404）。
+///   sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
 ///   sink 側へ複製する必要があり、かつ session ロックが無いため次 tick と競合して
 ///   二重応答の不変条件（RFC §6）を壊す。
 fn heartbeat_run_request(
