@@ -966,6 +966,27 @@ fn model_pricing_key(provider: &str, model: &str) -> (String, String) {
     (provider.trim().to_string(), model.trim().to_string())
 }
 
+/// `provider:model` 形式の spec を比較用に正規化する（#412）。
+///
+/// `model_pricing` を引くキーと同じ正規化を通すので、**両端の空白が付いた / 外れた
+/// だけの spec は「同じ」**と判定される。生文字列で比べると、実際には同じモデルを
+/// 指しているのに「変わった」ことになる。
+pub fn normalize_model_spec(spec: &str) -> String {
+    let (provider, model) = split_llm_model_spec(spec);
+    let (provider, model) = model_pricing_key(provider, model);
+    format!("{provider}:{model}")
+}
+
+/// 文脈予算に使える `context_window` か（#412）。
+///
+/// `None` はもちろん、**0 以下も未登録扱い**にする。0 では予算が消え、負では
+/// `as usize` で桁違いの値へ巻き上がって上限が事実上無くなる。投入 API は `<= 0` を
+/// 弾くので通常は作れないが、読み出し側でも倒しておく。この PR の主題は
+/// 「`model_pricing` に変な行を作らせない」であって、変な行を信じることではない。
+fn usable_context_window(row: &opencrab_db::queries::ModelPricingRow) -> Option<i32> {
+    row.context_window.filter(|w| *w > 0)
+}
+
 /// `provider:model` 形式の spec が `model_pricing` に `context_window` を持つ行を
 /// 持つか検証する（#412）。
 ///
@@ -982,7 +1003,9 @@ pub fn ensure_model_context_window_registered(
     let (provider, model) = split_llm_model_spec(spec);
     let (provider, model) = model_pricing_key(provider, model);
     match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
-        Ok(Some(p)) if p.context_window.is_some() => Ok(()),
+        // 使えない `context_window`（NULL / 0 以下）は行があっても未登録扱い。
+        // gate と実行時で判定が食い違うと「設定は通ったのに予算だけ既定へ落ちる」。
+        Ok(Some(p)) if usable_context_window(&p).is_some() => Ok(()),
         Ok(_) => Err(model_context_window_missing_message(spec)),
         Err(e) => Err(format!(
             "failed to look up model_pricing for \"{spec}\": {e}"
@@ -1051,7 +1074,7 @@ pub fn compute_context_budget(
 ) -> usize {
     let (provider, model) = model_pricing_key(provider, model);
     let registered = match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
-        Ok(row) => row.and_then(|p| p.context_window),
+        Ok(row) => row.as_ref().and_then(usable_context_window),
         Err(e) => {
             if warn_once_for_model("lookup_failed", &provider, &model) {
                 tracing::warn!(
@@ -1071,7 +1094,8 @@ pub fn compute_context_budget(
                 tracing::warn!(
                     provider = %provider,
                     model = %model,
-                    "no context_window in model_pricing; falling back to default \
+                    "no usable context_window in model_pricing (missing row, NULL, or \
+                     non-positive); falling back to default \
                      ({DEFAULT_CONTEXT_BUDGET_TOKENS}). Register it with \
                      PUT /api/llm/model-pricing so the budget matches the real model."
                 );
@@ -4656,6 +4680,40 @@ mod model_context_window_gate_tests {
         register(&conn, "", "m1", Some(123));
         assert!(ensure_model_context_window_registered(&conn, "m1").is_ok());
         assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_err());
+    }
+
+    /// `context_window` が 0 以下の行は**未登録扱い**。
+    ///
+    /// 0 なら予算が消え、負なら `as usize` で桁違いの値へ巻き上がって上限が事実上
+    /// 無くなる（文脈予算の上限そのものが無意味になる）。投入 API は `<= 0` を弾くが、
+    /// 読み出し側でも倒す。gate と実行時で判定が食い違わないよう**両方**で同じ扱い。
+    #[test]
+    fn non_positive_context_window_is_treated_as_unregistered() {
+        for bad in [0, -1, -200_000] {
+            let conn = opencrab_db::init_memory().unwrap();
+            register(&conn, "p1", "m1", Some(bad));
+            assert!(
+                ensure_model_context_window_registered(&conn, "p1:m1").is_err(),
+                "context_window={bad} は未登録扱いのはず"
+            );
+            assert_eq!(
+                compute_context_budget(&conn, "p1", "m1", 0.5),
+                super::DEFAULT_CONTEXT_BUDGET_TOKENS / 2,
+                "context_window={bad} で既定へ落ちるはず"
+            );
+        }
+    }
+
+    /// spec の比較用正規化は、参照キーと同じ trim を通す。
+    /// 空白が付いた / 外れただけの spec は「同じ」。
+    #[test]
+    fn spec_normalization_ignores_surrounding_whitespace() {
+        use super::normalize_model_spec as norm;
+        assert_eq!(norm(" p1 : m1 "), norm("p1:m1"));
+        assert_eq!(norm("p1:m1\n"), norm("p1:m1"));
+        assert_ne!(norm("p1:m1"), norm("p1:m2"));
+        // model 側の `:` は分割しない（最初の `:` だけが区切り）。
+        assert_eq!(norm(" p1 : a/b:c "), "p1:a/b:c");
     }
 
     /// 投入側（`PUT /api/llm/model-pricing`）は trim して保存する。参照側だけ生のまま

@@ -21,13 +21,19 @@ use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 /// 組み立て方は `main.rs` 側と**同じ `format!("{provider}:{model}")`** で、片方だけ
 /// 分離した形になっていると永久に不一致になる。ホットリロードでは更新されない値
 /// なので、比較対象は常に「いまプロセスが実際に使っているモデル」になる。
+///
+/// 「変わったか」の比較は `model_pricing` を引くキーと**同じ正規化**を通す
+/// （[`crate::process::normalize_model_spec`]）。両端の空白が付いた / 外れただけで
+/// 「変わった」と判定すると、同じモデルを指しているのに検証が走る。
 fn validate_reloaded_config(
     db: &opencrab_db::Db,
     running_default_model: &str,
     cfg: &crate::config::AppConfig,
 ) -> Result<(), String> {
     let spec = format!("{}:{}", cfg.llm.default_provider, cfg.llm.default_model);
-    if spec == running_default_model {
+    if crate::process::normalize_model_spec(&spec)
+        == crate::process::normalize_model_spec(running_default_model)
+    {
         return Ok(());
     }
     let conn = db.lock().map_err(|e| format!("db lock failed: {e}"))?;
@@ -194,6 +200,15 @@ mod reload_validation_tests {
         assert!(validate_reloaded_config(&db, RUNNING, &cfg("p1", "m1")).is_ok());
     }
 
+    /// 空白が付いた / 外れただけの config は「変わっていない」。
+    /// 比較を生文字列でやると、同じモデルを指しているのに検証が走る。
+    #[test]
+    fn whitespace_only_difference_is_not_a_change() {
+        let db = empty_db();
+        assert!(validate_reloaded_config(&db, RUNNING, &cfg(" p1 ", " m1 ")).is_ok());
+        assert!(validate_reloaded_config(&db, " p1 : m1 ", &cfg("p1", "m1")).is_ok());
+    }
+
     /// 変えたなら検証する。未登録への差し替えは拒否。
     #[test]
     fn changed_default_model_must_be_registered() {
@@ -310,7 +325,7 @@ mod watcher_rejection_tests {
             hb_tx,
         );
 
-        // 陽性対照: default_model を変えない編集は適用される（watcher が生きている証拠）。
+        // 陽性対照（前）: default_model を変えない編集は適用される（watcher が生きている証拠）。
         assert!(
             poll_with_rewrites(
                 &path,
@@ -330,6 +345,19 @@ mod watcher_rejection_tests {
                 || { !tools_config.read().unwrap().enabled || hb_rx.borrow().interval_secs == 120 }
             ),
             "拒否したリロードが tools_config / heartbeat のどちらかへ到達した"
+        );
+
+        // 陽性対照（後）: 窓の**あと**にも適用が通ること。前の対照だけだと、窓の途中で
+        // watcher が死んでいても「届かなかった」を「拒否された」と読んでしまう。
+        // ここが通れば、窓のあいだ watcher は生きていたことになる。
+        assert!(
+            poll_with_rewrites(
+                &path,
+                &config_text("p1", "m1", true, 150),
+                APPLY_WAIT,
+                || { tools_config.read().unwrap().enabled && hb_rx.borrow().interval_secs == 150 }
+            ),
+            "陰性の窓のあとも watcher は生きているはず（窓の間に止まっていた）"
         );
     }
 }
