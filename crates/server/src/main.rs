@@ -61,8 +61,10 @@ fn get_or_create_heartbeat_session(
 ///   では常に not found）。
 /// - sink: `NoopCompletionSink` = **即時 resume はしない**。完了本文は
 ///   `settle_completed` が親セッションログへ永続化し、heartbeat は毎 tick 同じ
-///   session_id で `build_conversation_string` により会話を再構築するため、次 tick で
-///   自然に文脈へ載る。sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
+///   session_id で `build_heartbeat_conversation_string` により会話を再構築するため、
+///   次 tick で自然に文脈へ載る。**この依存があるので、ハートビート専用セッション側の
+///   ログは種別で絞らない**（実会話セクションだけが `speech` に絞られる / #404）。
+///   sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
 ///   sink 側へ複製する必要があり、かつ session ロックが無いため次 tick と競合して
 ///   二重応答の不変条件（RFC §6）を壊す。
 fn heartbeat_run_request(
@@ -86,6 +88,34 @@ fn heartbeat_run_request(
         Some(registries.registry_for(agent_id)),
         Arc::new(opencrab_actions::NoopCompletionSink),
     )
+}
+
+/// ハートビート応答テキストから決定（SPEAK / LEARN / IDLE）を解く。
+///
+/// **入力は応答テキストだけ**で、プロンプトに何を積んだかには依存しない（#404 で
+/// ハートビート文脈へ実会話を入れたが、この関数のシグネチャがその独立性を担保する）。
+/// 判定は既存挙動のまま: `SPEAK:` を含む最初の行の右側を取り、空なら Idle。
+/// `SPEAK:` が無く LEARN（大小無視）を含めば Learn、それ以外は Idle。
+fn parse_heartbeat_decision(response: &str) -> HeartbeatDecision {
+    let response_text = response.trim();
+    if response_text.contains("SPEAK:") {
+        let content = response_text
+            .lines()
+            .find(|l| l.contains("SPEAK:"))
+            .and_then(|l| l.splitn(2, "SPEAK:").nth(1))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !content.is_empty() {
+            HeartbeatDecision::Speak(content)
+        } else {
+            HeartbeatDecision::Idle
+        }
+    } else if response_text.to_uppercase().contains("LEARN") {
+        HeartbeatDecision::Learn
+    } else {
+        HeartbeatDecision::Idle
+    }
 }
 
 /// エージェント単位 tick（channel を持たない発話）のプロンプト内呼称。
@@ -150,7 +180,7 @@ fn heartbeat_interval_elapsed(
 }
 
 /// heartbeat_enabled = true のチャンネルを、当該エージェント向けに解決して返す
-/// （channel_id, channel_name, interval_secs）。グローバル設定（agent_id="")と
+/// （channel_id, channel_name, guild_id, interval_secs）。グローバル設定（agent_id="")と
 /// エージェント固有設定の両方が同一 channel_id に存在しうるため、(1) 当該エージェント
 /// に無関係な行を除外し、(2) 同一 channel_id ではエージェント固有行をグローバル行より
 /// 優先して重複処理を防ぐ。
@@ -167,7 +197,7 @@ fn heartbeat_interval_elapsed(
 fn list_whitelisted_heartbeat_channels(
     db: &opencrab_db::Db,
     agent_id: &str,
-) -> Vec<(String, String, Option<u64>)> {
+) -> Vec<(String, String, String, Option<u64>)> {
     let conn = db.lock().unwrap();
     match opencrab_db::queries::list_heartbeat_channels(&conn) {
         Ok(channels) => {
@@ -193,7 +223,16 @@ fn list_whitelisted_heartbeat_channels(
             }
             selected
                 .into_values()
-                .map(|c| (c.channel_id, c.channel_name, c.heartbeat_interval_secs))
+                .map(|c| {
+                    (
+                        c.channel_id,
+                        c.channel_name,
+                        // #404: 実会話セッション ID（discord-{agent}-{guild}-{channel}）の
+                        // 解決に使う。dedup 後の行から取るので、interval と同じ precedence。
+                        c.guild_id,
+                        c.heartbeat_interval_secs,
+                    )
+                })
                 .collect()
         }
         Err(e) => {
@@ -244,9 +283,10 @@ fn make_heartbeat_callback(
                 )
             };
 
-            // 発火対象（channel_id, channel_name, interval_secs）。channel_id が空文字なら
-            // 「エージェント単位 tick」（channel を持たない発話）を表す。
-            let targets: Vec<(String, String, Option<u64>)> = match heartbeat_firing_plan(
+            // 発火対象（channel_id, channel_name, guild_id, interval_secs）。channel_id が
+            // 空文字なら「エージェント単位 tick」（channel を持たない発話）を表す。
+            // guild_id は実会話セッションの解決（#404）にのみ使う。
+            let targets: Vec<(String, String, String, Option<u64>)> = match heartbeat_firing_plan(
                 resolved.enabled,
                 resolved.interval_secs,
                 global_enabled,
@@ -261,6 +301,8 @@ fn make_heartbeat_callback(
                     vec![(
                         String::new(),
                         HEARTBEAT_AGENT_SCOPED_LABEL.to_string(),
+                        // channel を持たないので実会話セッションも解決しない（#404）。
+                        String::new(),
                         Some(interval_secs),
                     )]
                 }
@@ -275,7 +317,7 @@ fn make_heartbeat_callback(
                     let conn = db.lock().unwrap();
                     channels
                         .into_iter()
-                        .map(|(cid, name, ch_interval)| {
+                        .map(|(cid, name, guild_id, ch_interval)| {
                             let resolved = opencrab_db::queries::resolve_channel_heartbeat_interval(
                                 &conn,
                                 &agent_id_owned,
@@ -297,7 +339,7 @@ fn make_heartbeat_callback(
                                     "channel heartbeat 間隔を下限へ引き上げた (source=clamped)"
                                 );
                             }
-                            (cid, name, Some(resolved.interval_secs))
+                            (cid, name, guild_id, Some(resolved.interval_secs))
                         })
                         .collect()
                 }
@@ -316,7 +358,7 @@ fn make_heartbeat_callback(
             // 最後の決定を返す（全ターゲットを処理した後）
             let mut last_decision = HeartbeatDecision::Idle;
 
-            for (channel_id_str, channel_name, channel_interval_secs) in &targets {
+            for (channel_id_str, channel_name, guild_id, channel_interval_secs) in &targets {
                 // per-target interval チェック。エージェント単位 tick（空 channel_id）は
                 // last_channel_ticks を channel_id と衝突しない合成キーで引く。
                 let tick_key = if channel_id_str.is_empty() {
@@ -416,15 +458,26 @@ fn make_heartbeat_callback(
                         agent_model.split(':').nth(1).unwrap_or(""),
                         state.compaction_ratio,
                     );
-                    let conv = match opencrab_server::process::build_conversation_string(
+                    // #404: ハートビート専用セッションの履歴だけでは、**同じチャンネルで
+                    // 実際に交わされた会話が 1 行も見えない**（見えるのは自分の過去の
+                    // ハートビートだけ）。実会話セッションを解決して文脈へ入れる。
+                    // 専用セッションへの分離自体（`SPEAK:` パースとハートビートログを
+                    // 実会話と混ぜない）は維持し、実会話は**読むだけ**。
+                    let channel_session_id = opencrab_server::process::heartbeat_channel_session_id(
+                        &agent_id_owned,
+                        guild_id,
+                        channel_id_str,
+                    );
+                    let conv = match opencrab_server::process::build_heartbeat_conversation_string(
                         &conn,
                         &session_id,
+                        channel_session_id.as_deref(),
                         &agent_id_owned,
                         budget,
                     ) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::error!(agent_id = %agent_id_owned, session_id = %session_id, "build_conversation_string failed: {e}");
+                            tracing::error!(agent_id = %agent_id_owned, session_id = %session_id, "build_heartbeat_conversation_string failed: {e}");
                             continue;
                         }
                     };
@@ -471,25 +524,7 @@ fn make_heartbeat_callback(
                         }
 
                         // 7. 応答からSPEAK/LEARN/IDLEを解析
-                        let response_text = result.response.trim().to_string();
-                        if response_text.contains("SPEAK:") {
-                            let content = response_text
-                                .lines()
-                                .find(|l| l.contains("SPEAK:"))
-                                .and_then(|l| l.splitn(2, "SPEAK:").nth(1))
-                                .unwrap_or("")
-                                .trim()
-                                .to_string();
-                            if !content.is_empty() {
-                                HeartbeatDecision::Speak(content)
-                            } else {
-                                HeartbeatDecision::Idle
-                            }
-                        } else if response_text.to_uppercase().contains("LEARN") {
-                            HeartbeatDecision::Learn
-                        } else {
-                            HeartbeatDecision::Idle
-                        }
+                        parse_heartbeat_decision(&result.response)
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1411,5 +1446,61 @@ mod tests {
         // 間隔を縮めれば（resolve の値が効く）同じ経過でも発火する。
         let last = now - Duration::from_secs(100);
         assert!(heartbeat_interval_elapsed(Some(last), now, 60));
+    }
+
+    /// #404: 文脈に実会話を入れても `SPEAK:` / `LEARN` / `IDLE` の解釈は変わらない。
+    /// パースの入力は応答テキストだけ（プロンプトに何を積んだかに依存しない）。
+    #[test]
+    fn heartbeat_decision_parse_depends_only_on_response_text() {
+        assert!(matches!(
+            parse_heartbeat_decision("SPEAK: おはよう"),
+            HeartbeatDecision::Speak(c) if c == "おはよう"
+        ));
+        // 前置きの行があっても SPEAK: を含む行から取る。
+        assert!(matches!(
+            parse_heartbeat_decision("考えた結果\nSPEAK: 今日は静かだ\n"),
+            HeartbeatDecision::Speak(c) if c == "今日は静かだ"
+        ));
+        // 中身が空なら発話しない。
+        assert!(matches!(
+            parse_heartbeat_decision("SPEAK:   "),
+            HeartbeatDecision::Idle
+        ));
+        assert!(matches!(
+            parse_heartbeat_decision("learn"),
+            HeartbeatDecision::Learn
+        ));
+        assert!(matches!(
+            parse_heartbeat_decision("IDLE"),
+            HeartbeatDecision::Idle
+        ));
+        // 実会話が文脈に入っても、応答が SPEAK: を含まなければ発話にはならない
+        // （実会話側の引用が誤って発話へ昇格しないこと）。
+        assert!(matches!(
+            parse_heartbeat_decision("チャンネルでは雑談が続いている。今は黙っておく。"),
+            HeartbeatDecision::Idle
+        ));
+    }
+
+    /// #404: 実会話セッション ID は `discord-{agent}-{guild}-{channel}`。
+    /// エージェント単位 tick（channel_id / guild_id が空）では解決しない。
+    #[test]
+    fn heartbeat_channel_session_id_resolves_only_for_channel_ticks() {
+        assert_eq!(
+            opencrab_server::process::heartbeat_channel_session_id("agent-a", "111", "222"),
+            Some("discord-agent-a-111-222".to_string())
+        );
+        assert_eq!(
+            opencrab_server::process::heartbeat_channel_session_id("agent-a", "", ""),
+            None
+        );
+        assert_eq!(
+            opencrab_server::process::heartbeat_channel_session_id("agent-a", "111", ""),
+            None
+        );
+        assert_eq!(
+            opencrab_server::process::heartbeat_channel_session_id("agent-a", "", "222"),
+            None
+        );
     }
 }
