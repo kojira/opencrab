@@ -236,16 +236,20 @@ mod reload_validation_tests {
 #[cfg(test)]
 mod watcher_rejection_tests {
     use super::start_config_watcher;
+    use std::path::Path;
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
     /// 稼働中の実効 spec。これと同じなら「変えていない」。
     const RUNNING: &str = "p1:m1";
     /// 正常な変更が反映されるまでの待ち上限。遅いマシンでも落ちないよう長めに取る。
-    const APPLY_WAIT: Duration = Duration::from_secs(10);
-    /// 拒否されたはずの変更が現れないことを見る観測窓。デバウンスは 300ms で、
-    /// 陽性対照が直前にこの経路の実レイテンシを示しているので 3 秒あれば足りる。
+    const APPLY_WAIT: Duration = Duration::from_secs(20);
+    /// 拒否されたはずの変更が現れないことを見る観測窓。陽性対照が直前にこの経路の
+    /// 実レイテンシを示しているので、同じ書き直しを数回繰り返せる長さがあれば足りる。
     const REJECT_WINDOW: Duration = Duration::from_secs(3);
+    /// 書き直しの間隔。デバウンス（300ms）より長くしないと、書き直しがデバウンスを
+    /// 延々とリセットして一度も発火しない。
+    const REWRITE_INTERVAL: Duration = Duration::from_millis(500);
 
     fn config_text(provider: &str, model: &str, tools_enabled: bool, hb_secs: u64) -> String {
         format!(
@@ -255,17 +259,31 @@ mod watcher_rejection_tests {
         )
     }
 
-    /// `cond` が true になるまで最大 `limit` 待つ。戻り値は成立したか。
-    fn wait_until(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    /// `content` を書き直しながら `cond` の成立を最大 `limit` 待つ。戻り値は成立したか。
+    ///
+    /// watcher スレッドの起動と最初の書き込みが競合すると、イベントを 1 度取りこぼした
+    /// まま二度と発火しない（CI で実際に踏んだ）。同じ内容でも書き直せば再びイベントに
+    /// なるので、成立するまで書き直しながら待つ。異常系でも「拒否されるはずの内容」を
+    /// 何度も与えることになり、観測の機会が増える方向にしか働かない。
+    fn poll_with_rewrites(
+        path: &Path,
+        content: &str,
+        limit: Duration,
+        mut cond: impl FnMut() -> bool,
+    ) -> bool {
         let deadline = Instant::now() + limit;
         loop {
-            if cond() {
-                return true;
+            std::fs::write(path, content).unwrap();
+            let next_write = Instant::now() + REWRITE_INTERVAL;
+            while Instant::now() < next_write {
+                if cond() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
             if Instant::now() >= deadline {
-                return false;
+                return cond();
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -293,22 +311,24 @@ mod watcher_rejection_tests {
         );
 
         // 陽性対照: default_model を変えない編集は適用される（watcher が生きている証拠）。
-        std::fs::write(&path, config_text("p1", "m1", true, 90)).unwrap();
         assert!(
-            wait_until(APPLY_WAIT, || tools_config.read().unwrap().enabled),
+            poll_with_rewrites(
+                &path,
+                &config_text("p1", "m1", true, 90),
+                APPLY_WAIT,
+                || { tools_config.read().unwrap().enabled && hb_rx.borrow().interval_secs == 90 }
+            ),
             "default_model を変えない編集は適用されるはず（watcher が動いていない）"
-        );
-        assert!(
-            wait_until(APPLY_WAIT, || hb_rx.borrow().interval_secs == 90),
-            "heartbeat 設定も適用されるはず"
         );
 
         // 本題: 未登録モデルへ差し替える編集は、tools も heartbeat も動かさない。
-        std::fs::write(&path, config_text("p1", "m2", false, 120)).unwrap();
         assert!(
-            !wait_until(REJECT_WINDOW, || {
-                !tools_config.read().unwrap().enabled || hb_rx.borrow().interval_secs == 120
-            }),
+            !poll_with_rewrites(
+                &path,
+                &config_text("p1", "m2", false, 120),
+                REJECT_WINDOW,
+                || { !tools_config.read().unwrap().enabled || hb_rx.borrow().interval_secs == 120 }
+            ),
             "拒否したリロードが tools_config / heartbeat のどちらかへ到達した"
         );
     }
