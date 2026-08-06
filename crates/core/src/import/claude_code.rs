@@ -22,6 +22,7 @@
 //! 印だけ  assistant:thinking    → inner_voice（本文は退避、生ログには印だけ）
 //! 捨てる  assistant:tool_use / user:tool_result / user:image
 //!         `promptSource: "system"` かつ本文が task-notification の user 行
+//!         `isSidechain: true`（サブエージェント＝道具の動き）の行すべて
 //!         非対話の type すべて（file-history-snapshot / queue-operation / pr-link /
 //!         last-prompt / mode / permission-mode / ai-title / bridge-session / attachment /
 //!         system / custom-title / file-history-delta / frame-link …）
@@ -38,6 +39,14 @@
 //! `promptSource: "system"` でも他セッションからの連絡（agent-message 等）は「他者から連絡を
 //! 受け判断を迫られた」対人的体験なので取り込み、`speaker_id` = `system` にする（オーナーの
 //! UX 判断 2026-08-07）。`type: "system"` の非対話行とは別物で、こちらは `type: "user"`。
+//!
+//! `isSidechain: true` のレコード（サブエージェント）も **type を問わず落とす**。これは本人が
+//! 呼んだ道具の内部の動きであって本人の体験ではなく、task-notification と同じ「道具の動きは
+//! 記憶に入れない」判断軸（#413）。実データではサブエージェントのログは
+//! `<project>/<uuid>/subagents/` 配下の別ファイルにあり [`scan_project_dir`] の非再帰
+//! `read_dir` でも読まれないが、そこに依存せず**フラグを明示的に見て落とす**（偶然の
+//! 非取り込みに頼ると、inline `isSidechain: true` が top-level ファイルに現れたとき無ガードで
+//! 混ざる）。
 //!
 //! 捨てる側を**列挙しない**のが要点。`assistant:text` / `user:text` / `assistant:thinking`
 //! 以外はすべて落ちるので、Claude Code 側に新しい `type` が増えても勝手に混ざらない。
@@ -304,6 +313,21 @@ fn plan_record(
     next_thinking_index: &mut usize,
 ) {
     let rec_type = record.get("type").and_then(Value::as_str).unwrap_or("?");
+
+    // サイドチェーン（サブエージェント）は道具の動きであって本人の体験ではないので、
+    // type を問わず行ごと落とす（task-notification と同じ「道具の動きは記憶に入れない」
+    // 判断軸）。実データではサブエージェントのログは `<project>/<uuid>/subagents/` 配下の
+    // 別ファイルにあり、scan の非再帰 read_dir でも読まれない。が、inline で
+    // `isSidechain: true` が top-level のファイルに現れても混ざらないよう、**フラグを
+    // 明示的に見て落とす**（偶然の非取り込みに頼らない）。
+    if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        ScanStats::add(
+            &mut stats.dropped,
+            &format!("{rec_type}:sidechain"),
+            raw_len,
+        );
+        return;
+    }
 
     // 非対話の type は行ごと落とす（列挙せず、対話 2 種以外を全部落とす）。
     if rec_type != "assistant" && rec_type != "user" {
@@ -1011,14 +1035,60 @@ mod tests {
         assert_eq!(scan.stats.unparsable_lines, 1);
     }
 
-    /// `.jsonl` 以外（セッションごとのサブディレクトリ等）は走査しない。
+    /// `.jsonl` 以外や、サブディレクトリ配下のファイルは走査しない。実レイアウトでは
+    /// `<project>/<uuid>/subagents/agent-*.jsonl` にサブエージェント（サイドチェーン）の
+    /// セッションログが入るが、[`scan_project_dir`] は非再帰なので読まれない。サイドチェーンは
+    /// さらに [`plan_record`] で `isSidechain` を見て**明示的にも**落とす（この非再帰の
+    /// 偶然に頼らない）。
     #[test]
     fn only_jsonl_files_are_scanned() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("some-session-dir")).unwrap();
+        // サブエージェントのログは `<uuid>/subagents/` 配下（サブディレクトリ）に置かれる。
+        let subagents = dir
+            .path()
+            .join("11111111-2222-3333-4444-555555555555")
+            .join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let sidechain_log = serde_json::to_string(&record(
+            "assistant",
+            "sa1",
+            "2026-01-01T00:00:00.000Z",
+            serde_json::json!([{"type": "text", "text": "サブエージェントの本文"}]),
+        ))
+        .unwrap();
+        std::fs::write(subagents.join("agent-abc.jsonl"), sidechain_log).unwrap();
         std::fs::write(dir.path().join("notes.md"), "not a session").unwrap();
+
         let scan = scan_project_dir(dir.path(), 1).unwrap();
+        // サブディレクトリ配下の `.jsonl` も `.md` も読まない。
         assert_eq!(scan.stats.files, 0);
         assert!(scan.rows.is_empty());
+    }
+
+    /// `isSidechain: true`（サブエージェント＝道具の動き）のレコードは type を問わず落ち、
+    /// dropped に載る。既存の取り込み対象（本人の発話）は従来どおり残る。
+    #[test]
+    fn sidechain_records_are_dropped() {
+        let normal = record(
+            "assistant",
+            "u1",
+            "2026-01-01T00:00:00.000Z",
+            serde_json::json!([{"type": "text", "text": "本人の発話"}]),
+        );
+        let mut side = record(
+            "assistant",
+            "u2",
+            "2026-01-01T00:00:01.000Z",
+            serde_json::json!([{"type": "text", "text": "サブエージェントの発話"}]),
+        );
+        side["isSidechain"] = serde_json::json!(true);
+
+        let (rows, stats) = plan(&[normal, side]);
+
+        // 入力 2 行のうちサイドチェーンだけが落ち、本人の行だけが残る。
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, "本人の発話");
+        // 落としたことは集計に出る（type 別のキーで載る）。
+        assert_eq!(stats.dropped["assistant:sidechain"].count, 1);
     }
 }
