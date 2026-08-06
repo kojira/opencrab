@@ -458,12 +458,15 @@ fn build_context_prefix_sections(
             }
         };
 
-    // [Memory Index]: 長期記憶のコンパクトな目次を常時前置する（月次要約 + 現在月
-    // topic、short_id 付き）。台帳と同じく「動的状態は会話側」（system は 1h
-    // キャッシュ）。best-effort — 失敗しても返信は殺さない。
+    // [Memory Index]: 長期記憶のコンパクトな目次を常時前置する（月次要約 + 本人が
+    // 宣言した記憶の単位 + 未宣言の現在月 topic、short_id 付き）。台帳と同じく
+    // 「動的状態は会話側」（system は 1h キャッシュ）。best-effort — 失敗しても
+    // 返信は殺さない。
     // コンパクション時の [Past context summary]（build_conversation_inner 内、
     // 現セッションの topic のみ）とは役割が異なり、こちらは現セッション由来の
     // topic を除外するため short_id が両方に出ることはない（invariant）。
+    // 宣言ユニットはエージェント単位（生涯スコープ）でこちらにだけ出る
+    // （get_topic_nodes_for_session は node_type='topic' しか拾わない / #403）。
     let memory_index_section =
         match opencrab_core::memory_index::build_memory_index_section(conn, agent_id, session_id) {
             Ok(section) => section,

@@ -743,11 +743,25 @@ pub fn list_period_nodes(conn: &Connection, agent_id: &str) -> Result<Vec<IndexN
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-/// 指定月（date_from が `YYYY-MM` 始まり）の topic を新しい順に返す。
-/// `exclude_session_id` のセッション由来 topic は除外（現セッションの topic は
-/// コンパクション時の [Past context summary] が担当 — short_id の重複を避ける）。
-/// source_session_id が NULL の topic（merge_topics 産）は含める。
-pub fn list_topic_nodes_for_month(
+/// 指定月（date_from が `YYYY-MM` 始まり）の topic のうち、**宣言ユニットが覆って
+/// いないもの**を新しい順に返す（#403）。
+///
+/// 除外は 2 段:
+/// - `exclude_session_id` のセッション由来 topic（現セッションの topic は
+///   コンパクション時の [Past context summary] が担当 — short_id の重複を避ける）。
+///   source_session_id が NULL の topic（merge_topics 産）は含める。
+/// - 生ログ id 範囲が宣言ユニット（`node_type='unit'`）と重なる topic。topic は
+///   機械の切り方、unit は本人の切り方なので、同じ期間を二重に見せない
+///   （[Memory Index] は覆われている範囲を unit 行で見せる）。重なり判定は
+///   `u.start_log_id <= t.end_log_id AND u.end_log_id >= t.start_log_id`。
+///   **id 範囲を持たない（NULL の）topic は落とさない** — 判定できないものを消すと
+///   材料が失われる側に倒れるため、比較が NULL になるケースは残す。宣言ユニットが
+///   0 件のエージェントでは NOT EXISTS が常に真になり、結果は従来と同一。
+///
+/// 宣言に飛びがあっても（読んだが宣言しなかった範囲）その範囲の topic は覆われて
+/// いないので残る。「宣言カーソルより古いものは一律隠す」ではないのは、飛びの
+/// ぶんの記憶を消さないため。
+pub fn list_undeclared_topic_nodes_for_month(
     conn: &Connection,
     agent_id: &str,
     month_prefix: &str,
@@ -755,11 +769,16 @@ pub fn list_topic_nodes_for_month(
     limit: usize,
 ) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
-         WHERE agent_id = ?1 AND node_type = 'topic' AND source_type = 'session_log'
-           AND date_from LIKE ?2 || '%'
-           AND (source_session_id IS NULL OR source_session_id != ?3)
-         ORDER BY created_at DESC LIMIT ?4"
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes t
+         WHERE t.agent_id = ?1 AND t.node_type = 'topic' AND t.source_type = 'session_log'
+           AND t.date_from LIKE ?2 || '%'
+           AND (t.source_session_id IS NULL OR t.source_session_id != ?3)
+           AND NOT EXISTS (
+             SELECT 1 FROM memory_index_nodes u
+             WHERE u.agent_id = t.agent_id AND u.node_type = 'unit'
+               AND u.start_log_id <= t.end_log_id AND u.end_log_id >= t.start_log_id
+           )
+         ORDER BY t.created_at DESC LIMIT ?4"
     ))?;
     let rows = stmt.query_map(
         params![agent_id, month_prefix, exclude_session_id, limit as i64],
@@ -2078,4 +2097,31 @@ pub fn list_memory_units(conn: &Connection, agent_id: &str) -> Result<Vec<IndexN
     ))?;
     let rows = stmt.query_map(params![agent_id], index_node_from_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 宣言ユニットの新しい方から `limit` 件（#403 の [Memory Index] 注入用）。
+/// 並びは [`list_memory_units`] と同じ（生ログ位置の新しい順）。全件版と分けるのは、
+/// 会話のたびに走る注入で 200 件超の summary まで読み込まないため。
+pub fn list_recent_memory_units(
+    conn: &Connection,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
+         WHERE agent_id = ?1 AND node_type = 'unit'
+         ORDER BY start_log_id DESC, created_at DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![agent_id, limit as i64], index_node_from_row)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 宣言ユニットの総数（[Memory Index] の「…and N older」畳み行用）。
+pub fn count_memory_units(conn: &Connection, agent_id: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_index_nodes WHERE agent_id = ?1 AND node_type = 'unit'",
+        params![agent_id],
+        |row| row.get(0),
+    )?;
+    Ok(n as usize)
 }
