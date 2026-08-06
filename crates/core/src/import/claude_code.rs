@@ -18,9 +18,10 @@
 //! ```text
 //! 残す    assistant:text        → speech（発話者＝本人）
 //!         user:text             → speech（発話者＝相手）
+//!         `promptSource: "system"` の user 行のうち他セッションからの連絡 → speech（発話者＝system）
 //! 印だけ  assistant:thinking    → inner_voice（本文は退避、生ログには印だけ）
 //! 捨てる  assistant:tool_use / user:tool_result / user:image
-//!         `promptSource: "system"` の user 行（task-notification / 他セッション連絡）
+//!         `promptSource: "system"` かつ本文が task-notification の user 行
 //!         非対話の type すべて（file-history-snapshot / queue-operation / pr-link /
 //!         last-prompt / mode / permission-mode / ai-title / bridge-session / attachment /
 //!         system / custom-title / file-history-delta / frame-link …）
@@ -31,11 +32,12 @@
 //! 消えて材料の密度が上がる。非対話の type は**運用のメタ情報**であって体験ではなく、
 //! 取り込むと #393 で消した「整備作業が記憶になる」のと同じ状態になる。
 //!
-//! `user` 行のうち `promptSource: "system"`（機械が差し込んだ行）も同じ理由で落とす。
-//! 実体は task-notification（バックグラウンドタスクの完了通知＝サブタスクの成果ダンプ）が
-//! 大半で、残りが他セッションからの連絡。どちらも本人の体験ではなく道具が返した作業結果で、
-//! #393 と同じ形（オーナー判断 2026-08-07 / #413）。`type: "system"` の非対話行とは別物で、
-//! こちらは `type: "user"` だが送信者が機械の行を指す。
+//! `user` 行のうち `promptSource: "system"` で**本文が task-notification の行だけ**落とす。
+//! task-notification はバックグラウンドタスクの完了通知＝サブタスクの成果物ダンプで、本人の
+//! 体験ではなく道具が返した作業結果。#393 と同じ形なので落とす（#413）。同じ
+//! `promptSource: "system"` でも他セッションからの連絡（agent-message 等）は「他者から連絡を
+//! 受け判断を迫られた」対人的体験なので取り込み、`speaker_id` = `system` にする（オーナーの
+//! UX 判断 2026-08-07）。`type: "system"` の非対話行とは別物で、こちらは `type: "user"`。
 //!
 //! 捨てる側を**列挙しない**のが要点。`assistant:text` / `user:text` / `assistant:thinking`
 //! 以外はすべて落ちるので、Claude Code 側に新しい `type` が増えても勝手に混ざらない。
@@ -112,10 +114,10 @@ pub const USER_SPEAKER_ID: &str = "claude-code-user";
 /// 機械が差し込んだ `user` 行（`promptSource: "system"`）の `speaker_id`。
 ///
 /// 実データの内訳は task-notification（バックグラウンドタスクの完了通知）と
-/// 他セッションからのエージェント間メッセージで、**人間の発言ではない**。現在これらの
-/// 行は [`plan_record`] で取り込みごと落とす（#413 / オーナー判断 2026-08-07）ので、
-/// この名義が実際に `memory_sessions` へ書かれることは無い。[`Speaker::System`] を
-/// 「落とす対象」を見分ける分類として残しているため、その名義もここで定義しておく。
+/// 他セッションからのエージェント間メッセージで、**人間の発言ではない**。#382 の規約が
+/// `speaker_id` = 送信者である以上、人間と同じ名義にすると「誰が言ったか」が壊れる。
+/// opencrab 側で既に使われている `"system"` に揃える。なお task-notification は
+/// [`plan_record`] で落とす（#413）ので、この名義が実際に付くのは他セッションからの連絡。
 pub const SYSTEM_SPEAKER_ID: &str = "system";
 
 /// 取り込んだ 1 行が誰の発言かの区別。`speaker_id` 列へ落ちる。
@@ -125,9 +127,9 @@ pub enum Speaker {
     Agent,
     /// 相手＝人間のオーナー（`user`）。
     User,
-    /// 機械が差し込んだ `user` 行（task-notification 等）。この分類の行は
-    /// [`plan_record`] で取り込まず落とす（#413）。行を生ログへ書くためではなく、
-    /// 落とす対象を見分けるための分類。
+    /// 機械が差し込んだ `user` 行（他セッションからの連絡など）。`speaker_id` = `system`。
+    /// ただし本文が task-notification（道具の成果物ダンプ）の行は [`plan_record`] で
+    /// 落とす（#413）。取り込むのは他セッションからの連絡のような対人的体験だけ。
     System,
 }
 
@@ -278,6 +280,19 @@ fn block_bytes(block: &Value) -> usize {
     serde_json::to_string(block).map(|s| s.len()).unwrap_or(0)
 }
 
+/// `promptSource: "system"` の行が task-notification（バックグラウンドタスクの完了通知）か。
+///
+/// 実データでは system 名義の行は本文が文字列 1 つで、task-notification は必ず
+/// `<task-notification>` タグで始まる（他セッションからの連絡は
+/// `Another Claude session sent a message:` で始まる）。先頭ブロックの本文の先頭で見分ける。
+fn is_task_notification(blocks: &[Value]) -> bool {
+    blocks
+        .first()
+        .and_then(|b| b.get("text").and_then(Value::as_str))
+        .map(|t| t.trim_start().starts_with("<task-notification>"))
+        .unwrap_or(false)
+}
+
 /// 1 行（1 レコード）を見て、取り込む行を組み立てつつ集計する。
 ///
 /// `next_thinking_index` は thinking に振る連番のカーソル（呼び出し側が進める）。
@@ -319,13 +334,15 @@ fn plan_record(
         },
     };
 
-    // 機械が差し込んだ `user` 行（`promptSource: "system"`）は取り込まない。実体は
-    // task-notification（バックグラウンドタスクの完了通知＝サブタスクの成果ダンプ）と
-    // 他セッションからの連絡で、**本人の体験ではなく道具が返した作業結果**。#393 で
-    // declare_window から外した「整備作業が記憶になる」のと同じ形なので、そもそも生ログに
-    // 書かない（オーナー判断 2026-08-07 / #413）。落とした量は集計に残す。
-    if speaker == Speaker::System {
-        ScanStats::add(&mut stats.dropped, "user:system-injected", raw_len);
+    // 機械が差し込んだ `user` 行（`promptSource: "system"`）のうち、**本文が
+    // task-notification の行だけ**取り込まない。task-notification はバックグラウンド
+    // タスクの完了通知＝サブタスクの成果物ダンプで、本人の体験ではなく道具が返した
+    // 作業結果。#393 で declare_window から外した「整備作業が記憶になる」のと同じ形。
+    // 同じ `promptSource: "system"` でも他セッションからの連絡（agent-message 等）は
+    // 「他者から連絡を受け判断を迫られた」対人的体験なので取り込む（オーナーの UX 判断
+    // 2026-08-07 / #413）。落とした量は集計に残す。
+    if speaker == Speaker::System && is_task_notification(&blocks) {
+        ScanStats::add(&mut stats.dropped, "user:task-notification", raw_len);
         return;
     }
 
@@ -653,35 +670,53 @@ mod tests {
         assert_eq!(rows[0].speaker, Speaker::User);
     }
 
-    /// 機械が差し込んだ `user` 行（`promptSource: "system"`＝task-notification 等）は
-    /// 取り込まない（#393 と同じ「道具が返した作業結果が記憶になる」形。オーナー判断 #413）。
-    /// `system` 以外の promptSource（`queued` 等）は従来どおり相手＝人間の発言として残る。
+    /// `promptSource: "system"` の行のうち **task-notification だけ落とす**（道具が返した
+    /// 成果物ダンプ＝#393 と同型のノイズ）。他セッションからの連絡（agent-message 等）は
+    /// 「他者から連絡を受け判断を迫られた」対人的体験なので取り込み、`speaker_id` は
+    /// `system` のままにする。人間の発言は従来どおり残す（オーナーの UX 判断 #413）。
     #[test]
-    fn machine_injected_system_rows_are_dropped() {
-        let mut queued = record(
+    fn task_notifications_are_dropped_but_other_system_rows_are_kept() {
+        let human = record(
             "user",
             "u1",
             "2026-01-01T00:00:00.000Z",
             serde_json::json!("やあ"),
         );
-        queued["promptSource"] = serde_json::json!("queued");
-        let mut system = record(
+        let mut task_note = record(
             "user",
             "u2",
             "2026-01-01T00:00:01.000Z",
-            serde_json::json!("<task-notification>done</task-notification>"),
+            serde_json::json!(
+                "<task-notification>\n<status>completed</status>\n</task-notification>"
+            ),
         );
-        system["promptSource"] = serde_json::json!("system");
+        task_note["promptSource"] = serde_json::json!("system");
+        let mut cross_session = record(
+            "user",
+            "u3",
+            "2026-01-01T00:00:02.000Z",
+            serde_json::json!(
+                "Another Claude session sent a message:\n\
+                 <agent-message from=\"general-purpose\">確認したい点があります</agent-message>"
+            ),
+        );
+        cross_session["promptSource"] = serde_json::json!("system");
 
-        let (rows, stats) = plan(&[queued, system]);
+        let (rows, stats) = plan(&[human, task_note, cross_session]);
 
-        // 入力 2 行のうち system 行だけが落ち、queued（人間）行だけが残る。
-        assert_eq!(rows.len(), 1);
+        // 入力 3 行のうち task-notification だけが落ち、2 行残る。
+        assert_eq!(rows.len(), 2);
+        // (c) 人間の発言は従来どおり。
         assert_eq!(rows[0].content, "やあ");
         assert_eq!(rows[0].speaker, Speaker::User);
-        assert_eq!(rows[0].speaker.speaker_id("agent-x"), USER_SPEAKER_ID);
-        // 落としたことは集計に出る（何を捨てたかの実測が報告に要る）。
-        assert_eq!(stats.dropped["user:system-injected"].count, 1);
+        // (b) 他セッションからの連絡は取り込む。送信者は system 名義。
+        assert!(rows[1].content.contains("<agent-message"));
+        assert_eq!(rows[1].speaker, Speaker::System);
+        assert_eq!(rows[1].speaker.speaker_id("agent-x"), SYSTEM_SPEAKER_ID);
+        // (a) task-notification は落ちたことが集計に出る。
+        assert_eq!(stats.dropped["user:task-notification"].count, 1);
+        // 落ちたのは task-notification の 1 行だけ（system 名義の連絡は落ちていない）。
+        assert_eq!(stats.dropped.values().map(|s| s.count).sum::<usize>(), 1);
     }
 
     /// thinking は**本文を 1 文字も生ログへ出さず**、印と退避先だけを残す。
