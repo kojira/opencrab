@@ -5,8 +5,25 @@
 //! 存在しなかった**。入れる手段が無いので誰も入れず、空でも既定値で黙って動くので
 //! 誰も困らない ——「気づけない壊れ方」がここで固定されていた。
 //!
-//! ここが投入経路。モデルを設定する側（`PUT`/`PATCH /api/agents/{id}` と config の
-//! `[llm] default_model`）は、この API で登録済みのモデルしか受け付けない。
+//! ここが投入経路。モデルを設定する側（`PUT`/`PATCH /api/agents/{id}`、
+//! `configure_self` ツール、config の `[llm] default_model`）は、この API で登録済みの
+//! モデルしか受け付けない。
+//!
+//! # 登録が必要な spec
+//!
+//! 「エージェントが使っているモデル」だけでは足りない。**登録すべきは次の和集合**:
+//!
+//! - `agents.model` に入っている distinct な spec すべて
+//! - config の `[llm] default_provider` と `default_model` を `provider:model` の形に
+//!   繋いだ spec（`agents.model` が空のエージェントの実効モデルであり、ホットリロードの
+//!   検証対象でもある）
+//!
+//! 後者が前者に含まれるとは限らない。**落とすと `config/*.toml` を触った瞬間の
+//! リロードが毎回丸ごと拒否される**（tools だけの変更であっても）。登録後は
+//! `GET /api/llm/model-pricing` で件数を確認すること。
+//!
+//! provider / model は両端の空白を落として保存する。参照側（`process::model_pricing_key`）
+//! も同じ正規化を掛けるので、「登録したのに未登録と言われる」は起きない。
 
 use axum::extract::State;
 use axum::http::StatusCode;

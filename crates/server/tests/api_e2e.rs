@@ -3461,3 +3461,42 @@ async fn test_put_agent_rejects_switching_to_another_unregistered_model() {
     assert_eq!(resp["updated"], false);
     assert_eq!(agent_model(app, &agent_id).await, "testprov:legacy");
 }
+
+/// 投入 API は provider/model を trim して保存し、gate も同じ正規化で引く。
+/// 揃っていないと「登録したのに未登録と言われる」になる。
+#[tokio::test]
+async fn test_model_pricing_trim_is_consistent_between_put_and_gate() {
+    let app = create_test_app();
+    let (agent_id, app) = create_test_agent(app).await;
+
+    let (status, _) = send_request(
+        app.clone(),
+        "PUT",
+        "/api/llm/model-pricing",
+        Some(serde_json::json!({
+            "provider": "  testprov  ", "model": "  testmodel  ", "context_window": 200000
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 空白なしの spec で通る（保存側が trim されている）。
+    let (_, resp) = send_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
+        Some(serde_json::json!({"model": "testprov:testmodel"})),
+    )
+    .await;
+    assert_eq!(resp["updated"], true, "{resp}");
+
+    // 空白入りの spec でも通る（参照側も trim されている）。
+    let (_, resp) = send_request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/agents/{agent_id}"),
+        Some(serde_json::json!({"model": " testprov : testmodel "})),
+    )
+    .await;
+    assert_eq!(resp["updated"], true, "{resp}");
+}
