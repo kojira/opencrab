@@ -19,23 +19,39 @@ use rusqlite::Connection;
 
 use crate::llm_text::truncate_chars;
 
-/// セクション全体の文字数上限。ブロック別予算の合計（2750 + 1500 + 600 = 4850）+
-/// ヘッダ・畳み行の最大 308 chars を上回る値。
+/// セクション全体の文字数上限を**記述した**定数。ブロック別予算の合計
+/// （2750 + 1500 + 600 = 4850）+ ヘッダ・畳み行の最大 308 chars を上回る値。
+///
+/// **この定数はランタイムでは読まれない**（切り詰めに使っていない）。実際に長さを
+/// 決めているのはブロック別予算（[`UNIT_BLOCK_MAX_CHARS`] 等）で、この値は
+/// 「その合計がここを超えない」ことをテストで確認するための上限表明。ブロック別
+/// 予算を増やすときは、この値も併せて更新する（テストが検知する）。
+///
 /// 注意: 日本語はおよそ 0.7 tokens/char なので、フルサイズで **最大 ~3.6k tokens**
 /// になる（英語なら ~1.3k）。小さいコンテキスト予算での圧迫は注入側
 /// （build_conversation_string）が予算比ガードで防ぐ — ガードはセクションが
-/// 予算の 1/4 を超えると**セクションごと落とす**ので、この値を上げるときは
-/// 「フルサイズ × 4 < 想定予算」を必ず確認する（既定予算 50k tokens に対し
-/// 3.6k × 4 = 14.4k で通る）。
+/// 予算の 1/4 を超えると**セクションごと落とす**ので、ブロック別予算を増やすときは
+/// 「フルサイズ × 4 < 想定予算」を確認する（既定予算 50k tokens に対し
+/// 3.6k × 4 = 14.4k で通る。`context_window` が ~29k 未満のモデルを
+/// `model_pricing` に入れた構成では、フルサイズ時にセクションごと落ちる）。
 pub const MEMORY_INDEX_MAX_CHARS: usize = 5200;
 /// 月行ブロックの文字数予算。月次要約がこのセクションの中心なので大半を割く。
 /// 超過時は古い月から落とし、`…and N older months` の 1 行に畳む。
 const MONTH_BLOCK_MAX_CHARS: usize = 2750;
 /// 宣言ユニット行ブロックの文字数予算（古いユニットから落とす）。
-/// タイトル長は本番実測で p50=32 / p90=42 chars、行頭 `- [uNN] MM-DD ` が 15 chars
-/// なので p50 行 ≒ 47 chars。[`MEMORY_INDEX_MAX_UNITS`] = 30 行 × 47 ≒ 1410 で、
-/// 通常は**件数上限が先に効く**。この予算は異常に長いタイトルが続いたときの帽子。
+/// タイトル長は本番実測で p50=32 / p90=42 / max=63 chars、行頭 `- [uNN] MM-DD ` が
+/// 15 chars なので p50 行 ≒ 47 chars。[`MEMORY_INDEX_MAX_UNITS`] = 30 行で 1400〜1600
+/// になり、**件数上限と文字予算のどちらが先に効くかはエージェントによる**
+/// （本番 3 体の実測で 1390 / 1294 / 1598 chars = 1 体はこの予算が先に効く）。
 const UNIT_BLOCK_MAX_CHARS: usize = 1500;
+/// unit 行に描画するタイトルの上限（超過分は `…` で切る）。
+/// `record_memory_unit` も宣言アクションも title の長さを制限しないので、上限は
+/// **描画側でしか保証できない**。これにより unit 行 1 本は
+/// `"- [" + short_id(≤29: `unit-`+16hex+8hex) + "] " + "MM-DD " + title(≤121)` =
+/// **最大 161 chars** に収まり、[`UNIT_BLOCK_MAX_CHARS`] = 1500 を 1 行で使い切る
+/// ことがない（= ユニットがあるのに unit ブロックが畳み行ごと消える、が起きない）。
+/// 本番実測の max は 63 chars なので、実データが切られることは当面ない。
+const UNIT_TITLE_MAX_CHARS: usize = 120;
 /// 現在月 topic ブロックの文字数予算（古い topic から落とす）。
 const TOPIC_BLOCK_MAX_CHARS: usize = 600;
 /// 表示する月数の上限（それより古い月は件数のみ表示）。
@@ -170,7 +186,10 @@ pub fn build_memory_index_section(
             .as_deref()
             .and_then(|d| d.get(5..10))
             .unwrap_or("");
-        unit_lines.push(format!("- [{sid}] {date} {}", u.title));
+        // タイトルは宣言側で長さ制限が無いので描画側で切る（1 行が予算を
+        // 使い切ると unit ブロックが畳み行ごと消えてしまう）。
+        let title = truncate_chars(&u.title, UNIT_TITLE_MAX_CHARS);
+        unit_lines.push(format!("- [{sid}] {date} {title}"));
     }
     let mut unit_lines = take_within_budget(unit_lines, UNIT_BLOCK_MAX_CHARS);
     let hidden_units = unit_total.saturating_sub(unit_lines.len());
@@ -212,6 +231,9 @@ pub fn build_memory_index_section(
     if !unit_lines.is_empty() {
         out.push_str("Declared memories (your own cuts):\n");
         // 畳んだユニットは最も古い側 = 先頭に置く（月行と同じ並べ方）。
+        // （unit 行 1 本は最大 161 chars < 予算 1500 なので、units が非空なら
+        // unit_lines も必ず非空 — 「畳み行だけ」も「ブロックごと消える」も起きない。
+        // 上限は UNIT_TITLE_MAX_CHARS が担保する）
         if hidden_units > 0 {
             out.push_str(&format!(
                 "  …and {hidden_units} older declared memories (browse_memory_index)\n"
@@ -594,8 +616,10 @@ mod tests {
             section.contains(&format!("宣言{n}")),
             "newest unit must survive: {section}"
         );
+        // 最古 = short_id u1。`[u10]` 等は `]` のおかげで前方一致しない
+        // （タイトル `宣言1` での照合は行末が改行なので恒真になる）。
         assert!(
-            !section.contains("宣言1 "),
+            !section.contains("[u1]"),
             "oldest unit must be dropped: {section}"
         );
         let rendered = section.lines().filter(|l| l.starts_with("- [u")).count();
@@ -645,6 +669,50 @@ mod tests {
         // 落ちるのは古い側
         assert!(section.contains(&format!("宣言{MEMORY_INDEX_MAX_UNITS}-")));
         assert!(!section.contains("宣言1-"));
+    }
+
+    /// 宣言側に title の長さ制限が無いので、1 行が文字予算を使い切って
+    /// **unit ブロックが畳み行ごと消える**縁がある。描画側の切り詰めで塞ぐ。
+    #[test]
+    fn absurdly_long_title_is_truncated_and_block_survives() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed(&conn);
+        // 溢れさせるだけの件数 + 最新の 1 件が予算 1500 を単独で超える長さ
+        for i in 1..=MEMORY_INDEX_MAX_UNITS {
+            declare(
+                &conn,
+                &format!("宣言{i}"),
+                i as i64 * 10,
+                i as i64 * 10 + 5,
+                "13",
+            );
+        }
+        let huge = format!("巨大{}", "長".repeat(5000));
+        declare(&conn, &huge, 100_000, 100_001, "14");
+
+        let section = build_memory_index_section(&conn, "a1", "current-session")
+            .unwrap()
+            .unwrap();
+        // ブロックも畳み行も消えない
+        assert!(
+            section.contains("Declared memories (your own cuts):"),
+            "unit block must not vanish: {section}"
+        );
+        assert!(
+            section.contains("older declared memories (browse_memory_index)"),
+            "fold line must survive: {section}"
+        );
+        // 長いタイトルは切られて出る（丸ごと落ちるのでも原文のままでもない）
+        assert!(section.contains("巨大長"), "{section}");
+        assert!(!section.contains(&huge), "title must be truncated");
+        let longest = section
+            .lines()
+            .filter(|l| l.starts_with("- [u"))
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap();
+        assert!(longest <= 161, "unit line must stay bounded: {longest}");
+        assert!(section.chars().count() <= MEMORY_INDEX_MAX_CHARS);
     }
 
     /// period が 1 つも無くてもユニットだけで記憶を見せる。
