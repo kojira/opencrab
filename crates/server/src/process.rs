@@ -942,19 +942,167 @@ fn build_past_context_summary_section(
     format!("{PAST_SUMMARY_HEADER}{}", body.join("\n"))
 }
 
+/// 未登録モデルを設定しようとしたときのエラーメッセージ（#412）。
+///
+/// **登録方法まで書く。** 拒否だけして先へ進む手段を示さないと、「設定できないが
+/// どうすれば設定できるかも分からない」で止まる。
+pub fn model_context_window_missing_message(spec: &str) -> String {
+    format!(
+        "model \"{spec}\" has no context_window registered in model_pricing. \
+         Register it first: PUT /api/llm/model-pricing with body \
+         {{\"provider\": \"...\", \"model\": \"...\", \"input_price_per_1m\": 0.0, \
+         \"output_price_per_1m\": 0.0, \"context_window\": <max tokens>}}. \
+         Current registrations: GET /api/llm/model-pricing."
+    )
+}
+
+/// `model_pricing` を引くときのキー。**投入 API の保存キーと同じ正規化**（両端の
+/// 空白を落とす）を掛ける。
+///
+/// 揃えないと「登録したのに未登録と言われる」が起きる。投入側（`PUT
+/// /api/llm/model-pricing`）は trim して保存するので、参照側だけ生のまま引くと、
+/// 両端に空白のある spec が gate も実行時の予算計算も外す。
+fn model_pricing_key(provider: &str, model: &str) -> (String, String) {
+    (provider.trim().to_string(), model.trim().to_string())
+}
+
+/// `provider:model` 形式の spec を比較用に正規化する（#412）。
+///
+/// `model_pricing` を引くキーと同じ正規化を通すので、**両端の空白が付いた / 外れた
+/// だけの spec は「同じ」**と判定される。生文字列で比べると、実際には同じモデルを
+/// 指しているのに「変わった」ことになる。
+pub fn normalize_model_spec(spec: &str) -> String {
+    let (provider, model) = split_llm_model_spec(spec);
+    let (provider, model) = model_pricing_key(provider, model);
+    format!("{provider}:{model}")
+}
+
+/// 文脈予算に使える `context_window` か（#412）。
+///
+/// `None` はもちろん、**0 以下も未登録扱い**にする。0 では予算が消え、負では
+/// `as usize` で桁違いの値へ巻き上がって上限が事実上無くなる。投入 API は `<= 0` を
+/// 弾くので通常は作れないが、読み出し側でも倒しておく。この PR の主題は
+/// 「`model_pricing` に変な行を作らせない」であって、変な行を信じることではない。
+fn usable_context_window(row: &opencrab_db::queries::ModelPricingRow) -> Option<i32> {
+    row.context_window.filter(|w| *w > 0)
+}
+
+/// `provider:model` 形式の spec が `model_pricing` に `context_window` を持つ行を
+/// 持つか検証する（#412）。
+///
+/// 文脈予算は `context_window × compaction_ratio` で決まる。行が無いと
+/// [`compute_context_budget`] が既定値へ落ち、「データが無い」と「その値だと決めた」
+/// が区別できなくなる。**壊れた状態を作れなくする**ため、モデルを設定する瞬間に弾く。
+///
+/// DB 参照に失敗した場合も Err にする（fail-closed）。登録されていることを確認
+/// できていない以上、通してはいけない。
+pub fn ensure_model_context_window_registered(
+    conn: &rusqlite::Connection,
+    spec: &str,
+) -> Result<(), String> {
+    let (provider, model) = split_llm_model_spec(spec);
+    let (provider, model) = model_pricing_key(provider, model);
+    match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
+        // 使えない `context_window`（NULL / 0 以下）は行があっても未登録扱い。
+        // gate と実行時で判定が食い違うと「設定は通ったのに予算だけ既定へ落ちる」。
+        Ok(Some(p)) if usable_context_window(&p).is_some() => Ok(()),
+        Ok(_) => Err(model_context_window_missing_message(spec)),
+        Err(e) => Err(format!(
+            "failed to look up model_pricing for \"{spec}\": {e}"
+        )),
+    }
+}
+
+/// エージェントのモデルを**新しく設定するとき**だけ、`model_pricing` の登録を
+/// 要求する（#412）。
+///
+/// 既に入っている値をそのまま送り直す更新（識別情報だけを編集する PUT など）は
+/// 素通しする。ここで既存値まで弾くと、登録前から動いているエージェントが
+/// 名前ひとつ変えられなくなる。
+///
+/// 空文字 / 未指定は「グローバル既定に従う」であってモデルの指定ではないので、
+/// これも対象外（既定側は config のホットリロードで検証する）。
+/// `effective_model_for_agent` が空を弾いて `default_model` へ落とすため、
+/// 空文字がそのまま実効モデルになることはない。
+///
+/// `agents.model` を書き換える経路（`PUT`/`PATCH /api/agents/{id}` と
+/// `configure_self` ツール）はすべてここを通す。
+pub fn check_agent_model_change(
+    conn: &rusqlite::Connection,
+    existing: Option<&opencrab_db::queries::AgentRow>,
+    new_model: Option<&str>,
+) -> Result<(), String> {
+    let Some(new_model) = new_model.filter(|m| !m.is_empty()) else {
+        return Ok(());
+    };
+    if existing.and_then(|a| a.model.as_deref()) == Some(new_model) {
+        return Ok(());
+    }
+    ensure_model_context_window_registered(conn, new_model)
+}
+
+/// 同じ (provider, model) の WARN を 1 度だけに絞る（#412）。
+///
+/// [`compute_context_budget`] は全ターンで通るため、そのまま出すと登録が済むまで
+/// 同じ 1 行がログを埋める。登録されれば分岐自体に来なくなるので、解除は要らない。
+/// キーは実際に使われた spec の数だけで、増え続けることはない。
+fn warn_once_for_model(kind: &'static str, provider: &str, model: &str) -> bool {
+    use std::sync::{LazyLock, Mutex};
+    /// 既に WARN を出した (種別, provider, model)。
+    type WarnedModels = std::collections::HashSet<(&'static str, String, String)>;
+    static WARNED: LazyLock<Mutex<WarnedModels>> =
+        LazyLock::new(|| Mutex::new(WarnedModels::new()));
+    match WARNED.lock() {
+        Ok(mut seen) => seen.insert((kind, provider.to_string(), model.to_string())),
+        // 抑止のための状態が壊れたなら、黙らせるより出す方を選ぶ。
+        Err(_) => true,
+    }
+}
+
 /// context_budget_tokens を呼び出し元で計算するヘルパー。
 /// model_pricing の context_window と compaction_ratio から予算を算出する。
+///
+/// 行が引けないときは既定値へ落とすが、**黙って落とさない**（#412）。設定時に
+/// [`ensure_model_context_window_registered`] で弾くので通常は到達しないが、弾く前に
+/// 入った既存データが残りうる。実行中のエージェントを止めないため WARN に留め、
+/// 毎ターン同じ行が出ないよう (provider, model) ごとに 1 度だけ出す。
 pub fn compute_context_budget(
     conn: &rusqlite::Connection,
     provider: &str,
     model: &str,
     compaction_ratio: f64,
 ) -> usize {
-    let context_window = opencrab_db::queries::get_model_pricing(conn, provider, model)
-        .ok()
-        .flatten()
-        .and_then(|p| p.context_window)
-        .unwrap_or(DEFAULT_CONTEXT_BUDGET_TOKENS as i32) as usize;
+    let (provider, model) = model_pricing_key(provider, model);
+    let registered = match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
+        Ok(row) => row.as_ref().and_then(usable_context_window),
+        Err(e) => {
+            if warn_once_for_model("lookup_failed", &provider, &model) {
+                tracing::warn!(
+                    provider = %provider,
+                    model = %model,
+                    "model_pricing lookup failed; falling back to default context window \
+                     ({DEFAULT_CONTEXT_BUDGET_TOKENS}): {e}"
+                );
+            }
+            return ((DEFAULT_CONTEXT_BUDGET_TOKENS as f64) * compaction_ratio) as usize;
+        }
+    };
+    let context_window = match registered {
+        Some(w) => w as usize,
+        None => {
+            if warn_once_for_model("unregistered", &provider, &model) {
+                tracing::warn!(
+                    provider = %provider,
+                    model = %model,
+                    "no usable context_window in model_pricing (missing row, NULL, or \
+                     non-positive); falling back to default \
+                     ({DEFAULT_CONTEXT_BUDGET_TOKENS}). Register it with \
+                     PUT /api/llm/model-pricing so the budget matches the real model."
+                );
+            }
+            DEFAULT_CONTEXT_BUDGET_TOKENS
+        }
+    };
     ((context_window as f64) * compaction_ratio) as usize
 }
 
@@ -4478,5 +4626,144 @@ mod impression_section_injection_tests {
         let out = build_conversation_string(&conn, "s1", AGENT, 100_000).unwrap();
         assert!(!out.contains("[Impressions]"), "{out}");
         assert!(out.contains("こんにちは"), "{out}");
+    }
+}
+
+/// 未登録モデルを設定時に弾き、実行時は既定へ落ちても止めない（#412）。
+#[cfg(test)]
+mod model_context_window_gate_tests {
+    use super::{compute_context_budget, ensure_model_context_window_registered};
+
+    fn register(conn: &rusqlite::Connection, provider: &str, model: &str, window: Option<i32>) {
+        opencrab_db::queries::upsert_model_pricing(
+            conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: window,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn registered_model_passes() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", Some(200_000));
+        assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_ok());
+    }
+
+    #[test]
+    fn unregistered_model_is_rejected_with_how_to_register() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let err = ensure_model_context_window_registered(&conn, "p1:m1").unwrap_err();
+        // 拒否するだけでなく、登録先を必ず示す。
+        assert!(err.contains("model_pricing"), "{err}");
+        assert!(err.contains("/api/llm/model-pricing"), "{err}");
+    }
+
+    /// 行はあるが `context_window` が NULL の場合も未登録扱い。
+    /// 予算を決められない以上、単価だけ入っていても通してはいけない。
+    #[test]
+    fn row_without_context_window_is_rejected() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", None);
+        assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_err());
+    }
+
+    /// provider を持たない spec は provider="" として引く（`split_llm_model_spec` の規約）。
+    #[test]
+    fn bare_model_spec_uses_empty_provider() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "", "m1", Some(123));
+        assert!(ensure_model_context_window_registered(&conn, "m1").is_ok());
+        assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_err());
+    }
+
+    /// `context_window` が 0 以下の行は**未登録扱い**。
+    ///
+    /// 0 なら予算が消え、負なら `as usize` で桁違いの値へ巻き上がって上限が事実上
+    /// 無くなる（文脈予算の上限そのものが無意味になる）。投入 API は `<= 0` を弾くが、
+    /// 読み出し側でも倒す。gate と実行時で判定が食い違わないよう**両方**で同じ扱い。
+    #[test]
+    fn non_positive_context_window_is_treated_as_unregistered() {
+        for bad in [0, -1, -200_000] {
+            let conn = opencrab_db::init_memory().unwrap();
+            register(&conn, "p1", "m1", Some(bad));
+            assert!(
+                ensure_model_context_window_registered(&conn, "p1:m1").is_err(),
+                "context_window={bad} は未登録扱いのはず"
+            );
+            assert_eq!(
+                compute_context_budget(&conn, "p1", "m1", 0.5),
+                super::DEFAULT_CONTEXT_BUDGET_TOKENS / 2,
+                "context_window={bad} で既定へ落ちるはず"
+            );
+        }
+    }
+
+    /// spec の比較用正規化は、参照キーと同じ trim を通す。
+    /// 空白が付いた / 外れただけの spec は「同じ」。
+    #[test]
+    fn spec_normalization_ignores_surrounding_whitespace() {
+        use super::normalize_model_spec as norm;
+        assert_eq!(norm(" p1 : m1 "), norm("p1:m1"));
+        assert_eq!(norm("p1:m1\n"), norm("p1:m1"));
+        assert_ne!(norm("p1:m1"), norm("p1:m2"));
+        // model 側の `:` は分割しない（最初の `:` だけが区切り）。
+        assert_eq!(norm(" p1 : a/b:c "), "p1:a/b:c");
+    }
+
+    /// 投入側（`PUT /api/llm/model-pricing`）は trim して保存する。参照側だけ生のまま
+    /// 引くと「登録したのに未登録と言われる」になるので、両端の空白は落として揃える。
+    #[test]
+    fn lookup_ignores_surrounding_whitespace() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", Some(200_000));
+        assert!(ensure_model_context_window_registered(&conn, " p1 : m1 ").is_ok());
+        // 実行時の予算計算も同じ正規化で引く（gate は通ったのに予算だけ既定へ落ちない）。
+        assert_eq!(compute_context_budget(&conn, " p1 ", " m1 ", 0.5), 100_000);
+    }
+
+    /// 同じ (provider, model) の WARN は 1 度だけ。毎ターン通る経路なので、
+    /// 抑止が効かないと登録が済むまでログが同じ 1 行で埋まる。
+    #[test]
+    fn warn_is_emitted_once_per_model() {
+        assert!(super::warn_once_for_model(
+            "k",
+            "warn-test-p",
+            "warn-test-m"
+        ));
+        assert!(!super::warn_once_for_model(
+            "k",
+            "warn-test-p",
+            "warn-test-m"
+        ));
+        // 別のモデルは別枠（1 つ出したら以後全部黙る、ではない）。
+        assert!(super::warn_once_for_model(
+            "k",
+            "warn-test-p",
+            "warn-test-m2"
+        ));
+    }
+
+    #[test]
+    fn budget_uses_registered_context_window() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", Some(200_000));
+        assert_eq!(compute_context_budget(&conn, "p1", "m1", 0.5), 100_000);
+    }
+
+    /// 未登録でも**実行は止めない**。既定値の compaction_ratio 倍で走り続ける
+    /// （WARN は出るが、稼働中のエージェントを落とすのは方針ではない）。
+    #[test]
+    fn budget_falls_back_to_default_when_unregistered() {
+        let conn = opencrab_db::init_memory().unwrap();
+        assert_eq!(
+            compute_context_budget(&conn, "p1", "m1", 0.5),
+            super::DEFAULT_CONTEXT_BUDGET_TOKENS / 2
+        );
     }
 }

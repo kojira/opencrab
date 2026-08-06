@@ -248,6 +248,12 @@ pub fn create_router(state: AppState) -> Router {
             post(api::setup::seed_standard_skills),
         )
         .route("/api/llm/model-choices", get(api::llm::model_choices))
+        // モデル単価 / コンテキスト長の登録（#412）。文脈予算の出所であり、
+        // モデルを設定する側はここに登録済みのモデルしか受け付けない。
+        .route(
+            "/api/llm/model-pricing",
+            get(api::model_pricing::list_model_pricing).put(api::model_pricing::put_model_pricing),
+        )
         // プロバイダー設定（ダッシュボード編集 + ホットリロード）
         .route("/api/llm/providers", get(api::providers::list_providers))
         .route(

@@ -1719,6 +1719,22 @@ impl SystemGatewayActions {
                 Ok(c) => c,
                 Err(_) => return err("db lock failed".to_string()),
             };
+            // #412: オーナーが会話で「モデルを変えて」と言う経路がここ。ダッシュボードの
+            // 口だけ塞いでも、こちらから未登録モデルを入れれば「黙って既定値」が再発する。
+            // `PUT`/`PATCH /api/agents/{id}` と同じ gate を通す（owner 限定の扱いは
+            // 上の fail-closed チェックのままで変えない）。
+            if let Some(Some(new_model)) = patch.model.as_ref() {
+                let existing = opencrab_db::queries::get_agent(&conn, &agent_id)
+                    .ok()
+                    .flatten();
+                if let Err(e) = crate::process::check_agent_model_change(
+                    &conn,
+                    existing.as_ref(),
+                    Some(new_model),
+                ) {
+                    return err(e);
+                }
+            }
             opencrab_db::queries::apply_agent_patch(&conn, &agent_id, &patch)
         };
         match result {
@@ -7011,5 +7027,139 @@ mod tests {
         let msg = r.error.unwrap();
         assert!(msg.contains("nostr_run 失敗"), "got: {msg}");
         assert!(msg.contains("passthrough boom"), "got: {msg}");
+    }
+}
+
+/// #412: `configure_self` から未登録モデルを設定できないこと。
+///
+/// オーナーが会話で「モデルを変えて」と言う経路がここ。ダッシュボードの口
+/// （`PUT`/`PATCH /api/agents/{id}`）だけ塞いでも、こちらが素通りなら
+/// 「黙って既定値」状態は同じように再発する。
+#[cfg(test)]
+mod configure_self_model_gate_tests {
+    use super::*;
+
+    const AGENT: &str = "agent-x";
+
+    fn state_with_agent(model: Option<&str>) -> AppState {
+        let state = crate::test_app_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent(
+                &conn,
+                &opencrab_db::queries::AgentRow {
+                    agent_id: AGENT.to_string(),
+                    name: "Agent X".to_string(),
+                    job_title: None,
+                    organization: None,
+                    image_url: None,
+                    persona_name: "X".to_string(),
+                    personality: None,
+                    instructions: String::new(),
+                    heartbeat_instructions: String::new(),
+                    model: model.map(|s| s.to_string()),
+                    reasoning_effort: None,
+                    web_search: None,
+                    metadata_json: None,
+                },
+            )
+            .unwrap();
+        }
+        state
+    }
+
+    fn register(state: &AppState, provider: &str, model: &str, window: i32) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(window),
+            },
+        )
+        .unwrap();
+    }
+
+    fn stored_model(state: &AppState) -> Option<String> {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent(&conn, AGENT)
+            .unwrap()
+            .unwrap()
+            .model
+    }
+
+    async fn configure(
+        state: &AppState,
+        caller: GatewayCaller,
+        args: serde_json::Value,
+    ) -> GatewayActionResult {
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        actions
+            .execute(
+                "configure_self",
+                &args,
+                &GatewayCallContext::new(caller, AGENT),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn rejects_unregistered_model() {
+        let state = state_with_agent(None);
+        let r = configure(
+            &state,
+            GatewayCaller::Owner,
+            json!({"model": "testprov:unregistered"}),
+        )
+        .await;
+        assert!(!r.success);
+        let e = r.error.unwrap();
+        assert!(e.contains("model_pricing"), "{e}");
+        assert!(e.contains("/api/llm/model-pricing"), "{e}");
+        // 拒否した以上、保存もされない。
+        assert_eq!(stored_model(&state), None);
+    }
+
+    #[tokio::test]
+    async fn accepts_registered_model() {
+        let state = state_with_agent(None);
+        register(&state, "testprov", "testmodel", 200_000);
+        let r = configure(
+            &state,
+            GatewayCaller::Owner,
+            json!({"model": "testprov:testmodel"}),
+        )
+        .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(stored_model(&state), Some("testprov:testmodel".to_string()));
+    }
+
+    /// 既存の未登録モデルを載せたまま**別のフィールドだけ**変える操作は通る
+    /// （gate が「新しく設定するとき」にだけ効いていること）。
+    #[tokio::test]
+    async fn other_fields_change_while_unregistered_model_stays() {
+        let state = state_with_agent(Some("testprov:legacy"));
+        let r = configure(&state, GatewayCaller::Owner, json!({"job_title": "研究員"})).await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(stored_model(&state), Some("testprov:legacy".to_string()));
+    }
+
+    /// owner 限定の扱いは変えていない。gate の追加で権限判定が緩んでいないこと。
+    #[tokio::test]
+    async fn non_owner_is_still_rejected() {
+        let state = state_with_agent(None);
+        register(&state, "testprov", "testmodel", 200_000);
+        let r = configure(
+            &state,
+            GatewayCaller::Agent,
+            json!({"model": "testprov:testmodel"}),
+        )
+        .await;
+        assert!(!r.success);
+        assert!(r.error.unwrap().contains("owner"));
+        assert_eq!(stored_model(&state), None);
     }
 }

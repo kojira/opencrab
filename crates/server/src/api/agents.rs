@@ -128,6 +128,12 @@ pub async fn put_agent(
     let existing = opencrab_db::queries::get_agent(&conn, &id).ok().flatten();
     let existing_effort = existing.as_ref().and_then(|a| a.reasoning_effort.clone());
     let existing_web_search = existing.as_ref().and_then(|a| a.web_search);
+    // #412: model を新しい値へ変えるときだけ登録を要求する（既存値の送り直しは素通し）。
+    if let Err(e) =
+        crate::process::check_agent_model_change(&conn, existing.as_ref(), body.model.as_deref())
+    {
+        return Json(serde_json::json!({"updated": false, "error": e}));
+    }
     let row = opencrab_db::queries::AgentRow {
         agent_id: id,
         name: body.name,
@@ -153,6 +159,18 @@ pub async fn patch_agent(
     Json(patch): Json<opencrab_db::queries::AgentPatch>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
+    // #412: model を実際に差し替える PATCH だけ登録を要求する。
+    // クリア（既定へ戻す）は空文字で表現される（serde の `Option<Option<_>>` は
+    // JSON null を「変更なし」に潰すため。`apply_agent_patch` の同趣旨のコメント参照）。
+    // 空文字は `check_agent_model_change` 側で対象外になる。
+    if let Some(Some(new_model)) = patch.model.as_ref() {
+        let existing = opencrab_db::queries::get_agent(&conn, &id).ok().flatten();
+        if let Err(e) =
+            crate::process::check_agent_model_change(&conn, existing.as_ref(), Some(new_model))
+        {
+            return Json(serde_json::json!({"updated": false, "error": e}));
+        }
+    }
     match opencrab_db::queries::apply_agent_patch(&conn, &id, &patch) {
         Ok(true) => Json(serde_json::json!({"updated": true})),
         Ok(false) => Json(serde_json::json!({"updated": false, "error": "Agent not found"})),

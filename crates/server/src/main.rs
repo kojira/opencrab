@@ -1241,6 +1241,10 @@ async fn main() -> anyhow::Result<()> {
 
     let _watcher_handle = opencrab_server::hot_reload::start_config_watcher(
         "config",
+        state.db.clone(),
+        // #412: 「default_model が変わったか」の基準。稼働中の実効 spec そのものを渡す
+        // （上の `format!("{provider}:{model}")` と同じ形でないと永久に不一致になる）。
+        state.default_model.clone(),
         state.tools_config.clone(),
         heartbeat_config_tx,
     );
