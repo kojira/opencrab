@@ -526,15 +526,18 @@ fn build_context_prefix_sections(
 /// 形へ引っ張られ、`SPEAK:` / `IDLE` の出力形式を落としうる。形式指示はハートビート
 /// 専用セッション側の末尾に残る（[`build_heartbeat_conversation_string`] の並び順）。
 ///
-/// 「発言だけを載せる」ことも明示する（[`is_channel_conversation_speech`]）。名乗りと
-/// 中身が食い違うと、モデルは見えていない往復を見たものとして扱いうる。
-const CHANNEL_CONVERSATION_HEADER: &str = "[Channel conversation] (the most recent things people actually said in this channel. Tool calls, tool results, system events and older messages are not shown here. You are not necessarily being addressed here; follow the response-format instruction at the end of this prompt.)\n";
+/// 「発言だけを載せる」ことも明示する（[`CHANNEL_CONVERSATION_LOG_TYPE`]）。名乗りと
+/// 中身が食い違うと、モデルは見えていない往復を見たものとして扱いうる。**自分の発言も
+/// 入る**ことを書くのも同じ理由: 本番のツール往復が多いチャンネルではこのセクションの
+/// 9 割（文字）が自分の発話で、`people said` とだけ名乗るのは実態と食い違う。
+const CHANNEL_CONVERSATION_HEADER: &str = "[Channel conversation] (the most recent messages actually exchanged in this channel, including your own. Tool calls, tool results, system events and older messages are not shown here. You are not necessarily being addressed here; follow the response-format instruction at the end of this prompt.)\n";
 
-/// 実会話セクションで読む直近ログの窓（件数）。**speech 以外を落とす前**の生の件数。
+/// 実会話セクションで読む直近ログの窓（件数）。**[`CHANNEL_CONVERSATION_LOG_TYPE`] で
+/// 絞ったあと**の件数（絞り込みは SQL 側で掛ける）。
 ///
-/// `build_truncated_conversation` の窓と同値。全件読み（`list_session_logs_by_session`）
-/// を避けるためのもので、本番の実会話セッションは最大 5,383 行 / 851KB あり、毎 tick
-/// これを `db.lock()` を握ったまま tiktoken に通すのは高い。
+/// 全件読み（`list_session_logs_by_session`）を避けるためのもので、本番の実会話
+/// セッションは最大 5,383 行 / 851KB あり、毎 tick これを `db.lock()` を握ったまま
+/// tiktoken に通すのは高い。
 const CHANNEL_CONVERSATION_LOG_WINDOW: usize = 500;
 
 /// ハートビート文脈で実会話へ割く予算の割合（分子／分母）。
@@ -565,7 +568,7 @@ const HEARTBEAT_CHANNEL_BUDGET_DEN: usize = 4;
 /// 既に担っており、`[Past context summary]` を 2 つ出すと short_id 集合が素という
 /// 既存の不変条件が壊れるため。
 ///
-/// 実会話セクションに載せるのは**発言だけ**（[`is_channel_conversation_speech`]）。
+/// 実会話セクションに載せるのは**発言だけ**（[`CHANNEL_CONVERSATION_LOG_TYPE`]）。
 ///
 /// `channel_session_id` が None（エージェント単位 tick 等）または発言が 1 件も無ければ、
 /// 出力は [`build_conversation_string`] と同一になる。
@@ -611,34 +614,42 @@ pub fn build_heartbeat_conversation_string(
     Ok(parts.join("\n\n"))
 }
 
-/// 実会話セクションに載せるログか（#404）。
+/// 実会話セクションに載せる log_type（#404）。**これが唯一の判定元**で、
+/// [`build_channel_conversation_section`] は SQL の `WHERE log_type = ?` にそのまま渡す。
+/// Rust 側に同じ述語を二重に置かない（ずれると「絞ったつもりで漏れる／落としすぎる」）。
 ///
 /// **`speech` だけを載せる。** #404 が直したいのは「エージェントが自分の過去の発話しか
-/// 手本を持てず、2 ヶ月ほぼ同一の発話を繰り返していた」ことなので、要るのは**人が何を
-/// 話したか**であって自分のツール往復ではない。本番のツール往復が多いチャンネルでは
+/// 手本を持てず、2 ヶ月ほぼ同一の発話を繰り返していた」ことなので、要るのは**何が話され
+/// たか**であって自分のツール往復ではない。本番のツール往復が多いチャンネルでは
 /// 直近 500 行の内訳が tool_result 162 行 / 104KB・system 55 行 / 50KB・speech 184 行 /
 /// 49KB・tool_call 95 行 / 13KB で、**speech はバイトで 2 割強**しかない。素通しだと
 /// 実会話へ割いた枠の大半をツール結果が食い、目的が達成されない。
 ///
 /// 落とすものの内訳:
 /// - `tool_call` / `tool_result` / `tool_cancelled`: 自分の作業機構であって発言ではない。
+///   結果そのものは飛ぶが、それを人へ説明した直後の自分の `speech` は残る。
 /// - `system`: Discord セッションでは subtask の生成・完了・タイムアウト・進捗報告の
-///   JSON（本番実測）。これも自分の機構で、1 行あたりが最も重い。
+///   JSON（本番の全 724 行がこれ）。これも自分の機構で、1 行あたりが最も重い
+///   （ハートビート対象チャンネルの最大は 1 行 134,863 文字 = それだけで予算超過）。
 /// - `inner_voice`: `generate_inner_voice` が書く**自分の内心**。自己参照を増やす方向に
 ///   働くので、この目的では最も入れたくない。
 /// - `evaluation`: 元から会話に載せない（#291）。
-/// - `interaction_response`: UI 操作の応答であって発言ではない。
+/// - `interaction_response`: 人が UI を操作したことの記録（本番全 DB で 16 行、
+///   ハートビート対象チャンネルには 0 行）。**発言ではない**ので落とすが、これは人の
+///   行動の記録であって上の「自分の機構」とは性質が違う。人の**発言**を落とす根拠には
+///   しないこと。
 ///
 /// **この絞り込みは実会話セクションだけに掛ける。**ハートビート専用セッション側は
 /// 従来どおり全種別を載せる — subtask の完了本文が次 tick で文脈へ載ることに
 /// `heartbeat_run_request` の `NoopCompletionSink` が依存している。
-fn is_channel_conversation_speech(log: &opencrab_db::queries::SessionLogRow) -> bool {
-    log.log_type == "speech"
-}
+const CHANNEL_CONVERSATION_LOG_TYPE: &str = "speech";
 
 /// 実会話セッションを `[Channel conversation]` セクションへ整形する（#404）。
 ///
-/// 直近 [`CHANNEL_CONVERSATION_LOG_WINDOW`] 件の窓から発言だけを残し、予算内へ詰める。
+/// [`CHANNEL_CONVERSATION_LOG_TYPE`] の直近 [`CHANNEL_CONVERSATION_LOG_WINDOW`] 件を
+/// 取り、予算内へ詰める。**絞り込みは SQL 側**で、窓 N 件は絞ったあとの件数になる
+/// （生の N 件から捨てると、ツール往復の多いチャンネルで窓の一部しか発言が残らず、
+/// 余った予算がハートビート履歴側へ戻ってしまう — #405 レビュー 2 巡目）。
 /// 発言が 1 件も無ければ `None`（セクションごと出さない）。topic 要約は使わない
 /// （理由は [`build_heartbeat_conversation_string`] の doc）。
 fn build_channel_conversation_section(
@@ -647,9 +658,10 @@ fn build_channel_conversation_section(
     agent_id: &str,
     budget_tokens: usize,
 ) -> Option<String> {
-    let mut logs = match opencrab_db::queries::list_recent_session_logs(
+    let mut logs = match opencrab_db::queries::list_recent_session_logs_of_type(
         conn,
         session_id,
+        CHANNEL_CONVERSATION_LOG_TYPE,
         CHANNEL_CONVERSATION_LOG_WINDOW,
     ) {
         Ok(l) => l,
@@ -659,10 +671,8 @@ fn build_channel_conversation_section(
         }
     };
     logs.reverse();
-    logs.retain(is_channel_conversation_speech);
-    // #284 と同じ保証を実会話セクションでも効かせる。ツール往復が 500 件を超えて続くと
-    // 窓から人の発言が 1 件も残らないことがあるため、セッション全体から直近の
-    // ユーザー発言を混ぜ戻す（取得は id 順にマージされる）。
+    // #284 と同じ保証を実会話セクションでも効かせる。人の発言が窓（直近 500 発言）から
+    // 溢れていても直近の分は混ぜ戻す（取得は id 順にマージされる）。
     let logs = merge_recent_user_speeches(conn, session_id, agent_id, logs);
     if logs.is_empty() {
         return None;
@@ -3121,6 +3131,35 @@ mod heartbeat_conversation_tests {
             !out.contains("INNERVOICE-"),
             "自分の内心が載っている（自己参照を増やす）: {out}"
         );
+    }
+
+    /// 窓は**発言で数える**。ツール往復に押し出されて発言が窓から落ちない
+    /// （＝生の直近 N 件を取ってから絞るのではなく、SQL 側で絞る / #405 レビュー 2 巡目）。
+    ///
+    /// 生ログ 600 行のうち古い側 200 行が発言、新しい側 400 行がツール往復。
+    /// 「生の直近 500 行を取ってから絞る」形だと、最も古い 100 行の発言が窓の外に落ちる。
+    #[test]
+    fn channel_window_counts_speech_not_raw_logs() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 100); // speech 200 行（id 1..200）
+        seed_channel_tool_traffic(&conn, 100); // 非 speech 400 行（id 201..600）
+        seed_heartbeat(&conn, 5);
+
+        // 予算は発言 200 行が収まる大きさにして、窓だけが効くようにする。
+        let out =
+            build_heartbeat_conversation_string(&conn, HB_SESSION, Some(CH_SESSION), AGENT, 40_000)
+                .unwrap();
+
+        assert!(
+            out.contains("channel message 0 from a person"),
+            "生の窓（500 行）の外にある最古の発言が落ちている: {out}"
+        );
+        assert!(
+            out.contains("channel reply 0 from the agent"),
+            "生の窓の外にあるエージェントの発言が落ちている: {out}"
+        );
+        assert!(out.contains("channel message 99 from a person"), "{out}");
+        assert!(!out.contains("TOOLPAYLOAD-"), "{out}");
     }
 
     /// 発言が 1 件も無く、ツール往復だけのチャンネルではセクションごと出さない。

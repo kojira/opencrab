@@ -4701,3 +4701,63 @@ fn declare_window_pref_roundtrips_and_tolerates_garbage() {
     .unwrap();
     assert_eq!(get_memory_declare_window(&conn, "a1").unwrap(), None);
 }
+
+/// `list_recent_session_logs_of_type`: **SQL 側**で log_type を絞る（#404 / #405）。
+///
+/// 呼び出し側で絞ると「生の直近 N 件を取ってから捨てる」ことになり、ツール往復の多い
+/// セッションでは目的の種別が N の一部しか残らない。ここで固定するのは
+/// 「limit は絞ったあとの件数」「他種別が混ざらない」「id DESC で返る」。
+#[test]
+fn list_recent_session_logs_of_type_filters_in_sql() {
+    let conn = setup();
+    let mk = |log_type: &str, content: &str| SessionLogRow {
+        id: None,
+        agent_id: "a1".to_string(),
+        session_id: "s1".to_string(),
+        log_type: log_type.to_string(),
+        content: content.to_string(),
+        speaker_id: Some("a1".to_string()),
+        turn_number: None,
+        metadata_json: None,
+        created_at: None,
+    };
+    // 発言 1 件のあとにツール往復 20 件、さらに発言 3 件。
+    insert_session_log(&conn, &mk("speech", "oldest speech")).unwrap();
+    for i in 0..20 {
+        insert_session_log(&conn, &mk("tool_result", &format!("tool {i}"))).unwrap();
+    }
+    for i in 0..3 {
+        insert_session_log(&conn, &mk("speech", &format!("speech {i}"))).unwrap();
+    }
+    // 別セッションは混ざらない。
+    let mut other = mk("speech", "other session");
+    other.session_id = "s2".to_string();
+    insert_session_log(&conn, &other).unwrap();
+
+    // 生の直近 10 件を取ってから絞ると、ツール往復に押し出されて古い発言が落ちる。
+    let raw = list_recent_session_logs(&conn, "s1", 10).unwrap();
+    assert!(
+        !raw.iter().any(|l| l.content == "oldest speech"),
+        "前提: 生の窓では古い発言が窓の外にある"
+    );
+
+    let speech = list_recent_session_logs_of_type(&conn, "s1", "speech", 10).unwrap();
+    assert_eq!(speech.len(), 4, "limit は絞ったあとの件数");
+    assert!(speech.iter().all(|l| l.log_type == "speech"));
+    assert!(speech.iter().all(|l| l.session_id == "s1"));
+    // id DESC（呼び出し側が reverse する前提）。
+    assert_eq!(speech[0].content, "speech 2");
+    assert_eq!(speech[3].content, "oldest speech");
+
+    // limit は効く。
+    let limited = list_recent_session_logs_of_type(&conn, "s1", "speech", 2).unwrap();
+    assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].content, "speech 2");
+
+    // 該当が無ければ空。
+    assert!(
+        list_recent_session_logs_of_type(&conn, "s1", "inner_voice", 10)
+            .unwrap()
+            .is_empty()
+    );
+}
