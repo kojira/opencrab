@@ -422,6 +422,30 @@ pub fn build_conversation_string(
     agent_id: &str,
     context_budget_tokens: usize,
 ) -> Result<String, anyhow::Error> {
+    let prefix_sections =
+        build_context_prefix_sections(conn, session_id, agent_id, context_budget_tokens);
+
+    let mut inner_budget = context_budget_tokens;
+    for section in &prefix_sections {
+        inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
+    }
+    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
+
+    let mut parts = prefix_sections;
+    parts.push(inner);
+    Ok(parts.join("\n\n"))
+}
+
+/// 会話本文の前に置く固定セクション（台帳 / [Memory Index] / [Impressions]）を組む。
+///
+/// すべて `session_id` を「いま走っているセッション」として解決する。best-effort で、
+/// どれが欠けても会話構築は続行する。
+fn build_context_prefix_sections(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    context_budget_tokens: usize,
+) -> Vec<String> {
     // タスク台帳（前向きワーキング状態）を会話の先頭に前置する。
     // system prompt 側は 1h キャッシュされるため、毎ターン変わる台帳状態はここに置く。
     // 台帳の読み出し失敗で返信自体を殺さない（warn して台帳なしで続行）。
@@ -482,15 +506,6 @@ pub fn build_conversation_string(
         }
     };
 
-    let mut inner_budget = context_budget_tokens;
-    for section in [&ledger_section, &memory_index_section, &impression_section]
-        .into_iter()
-        .flatten()
-    {
-        inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
-    }
-    let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
-
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = ledger_section {
         parts.push(s);
@@ -501,8 +516,129 @@ pub fn build_conversation_string(
     if let Some(s) = impression_section {
         parts.push(s);
     }
+    parts
+}
+
+/// ハートビート文脈に載せる実会話セクションのヘッダ（#404）。
+///
+/// **「あなた宛とは限らない」「出力形式は末尾の指示に従う」を明示する**のが要点。
+/// このセクションは実会話（人の発言）なので、素で入れると「直近の発言に返事をする」
+/// 形へ引っ張られ、`SPEAK:` / `IDLE` の出力形式を落としうる。形式指示はハートビート
+/// 専用セッション側の末尾に残る（[`build_heartbeat_conversation_string`] の並び順）。
+const CHANNEL_CONVERSATION_HEADER: &str = "[Channel conversation] (what people actually said in this channel. You are not necessarily being addressed here; follow the response-format instruction at the end of this prompt.)\n";
+
+/// ハートビート文脈で実会話へ割く予算の割合（分子／分母）。
+///
+/// 残りがハートビート専用セッションの履歴に回る。実会話を厚くするのは #404 の実測に
+/// よる: 同一チャンネルでハートビート専用セッション 15,246 行に対し実会話 11,396 行が
+/// あり、前者は「静けさは続いてる」等の自分の警戒心の反復で情報密度が低い。
+/// 専用セッション側は「直前に何を喋ったか（同じことを繰り返さない）」と末尾の出力形式
+/// 指示さえ残れば足り、これらは `fit_logs_to_budget` の直近下限（`RECENT_MIN_LOGS`）で
+/// 予算 0 でも保たれる。
+const HEARTBEAT_CHANNEL_BUDGET_NUM: usize = 3;
+const HEARTBEAT_CHANNEL_BUDGET_DEN: usize = 4;
+
+/// ハートビート用の会話文字列を組む（#404）。
+///
+/// ハートビートは `heartbeat-{agent_id}-{channel_id}` という専用セッションで走るため、
+/// 素の [`build_conversation_string`] では**同じチャンネルの実会話が 1 行も見えない**。
+/// ここでは専用セッションの履歴に加えて、`channel_session_id`（実会話）を
+/// `[Channel conversation]` として差し込む。
+///
+/// 並び順は `前置セクション → 実会話 → ハートビート専用セッション` で固定する。
+/// 専用セッションの**最後のログが今回のハートビートプロンプト（出力形式の規約を含む）**
+/// なので、これを末尾に置くことで `SPEAK:` / `IDLE` のパース前提が変わらない。
+///
+/// コンパクションはセッションを跨がない: 専用セッション側は従来どおり自分の topic 要約
+/// （`[Past context summary]`）でコンパクションし、実会話側は topic 要約を使わず直近窓
+/// で切る。実会話の長期の要約は `[Memory Index]`（別セッション由来の topic を載せる）が
+/// 既に担っており、`[Past context summary]` を 2 つ出すと short_id 集合が素という
+/// 既存の不変条件が壊れるため。
+///
+/// `channel_session_id` が None（エージェント単位 tick 等）またはログ皆無なら、
+/// 出力は [`build_conversation_string`] と同一になる。
+pub fn build_heartbeat_conversation_string(
+    conn: &rusqlite::Connection,
+    heartbeat_session_id: &str,
+    channel_session_id: Option<&str>,
+    agent_id: &str,
+    context_budget_tokens: usize,
+) -> Result<String, anyhow::Error> {
+    let prefix_sections =
+        build_context_prefix_sections(conn, heartbeat_session_id, agent_id, context_budget_tokens);
+
+    let mut inner_budget = context_budget_tokens;
+    for section in &prefix_sections {
+        inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
+    }
+
+    let channel_section = channel_session_id
+        .filter(|id| !id.is_empty() && *id != heartbeat_session_id)
+        .and_then(|id| {
+            build_channel_conversation_section(
+                conn,
+                id,
+                agent_id,
+                inner_budget / HEARTBEAT_CHANNEL_BUDGET_DEN * HEARTBEAT_CHANNEL_BUDGET_NUM,
+            )
+        });
+
+    // 実会話が実際に使った分だけ引く（予算内に収まったチャンネルは残りを専用セッション
+    // へ返す）。直近下限で割当を超えることもあるため saturating。
+    let heartbeat_budget = match &channel_section {
+        Some(s) => inner_budget.saturating_sub(estimate_tokens(s)),
+        None => inner_budget,
+    };
+    let inner = build_conversation_inner(conn, heartbeat_session_id, agent_id, heartbeat_budget)?;
+
+    let mut parts = prefix_sections;
+    if let Some(s) = channel_section {
+        parts.push(s);
+    }
     parts.push(inner);
     Ok(parts.join("\n\n"))
+}
+
+/// 実会話セッションを `[Channel conversation]` セクションへ整形する（#404）。
+///
+/// ログが無ければ `None`（セクションごと出さない）。予算超過時は topic 要約ではなく
+/// 直近窓で切る（理由は [`build_heartbeat_conversation_string`] の doc）。
+fn build_channel_conversation_section(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+    budget_tokens: usize,
+) -> Option<String> {
+    let full = build_full_conversation(conn, session_id);
+    if full == "No messages yet." {
+        return None;
+    }
+    let body_budget = budget_tokens.saturating_sub(estimate_tokens(CHANNEL_CONVERSATION_HEADER));
+    let body = if estimate_tokens(&full) <= body_budget {
+        full
+    } else {
+        build_truncated_conversation(conn, session_id, agent_id, body_budget)
+    };
+    Some(format!("{CHANNEL_CONVERSATION_HEADER}{body}"))
+}
+
+/// ハートビート対象チャンネルの「実会話」セッション ID（#404）。
+///
+/// Discord の会話セッションは `discord-{agent_id}-{guild_id}-{channel_id}`
+/// （`crates/discord/src/message_loop.rs`）。どちらかの ID が空（エージェント単位 tick、
+/// guild 未設定のチャンネル設定）なら解決しない。
+///
+/// 実在確認はしない — ログが無いセッション ID を渡しても
+/// [`build_heartbeat_conversation_string`] 側でセクションごと落ちる。
+pub fn heartbeat_channel_session_id(
+    agent_id: &str,
+    guild_id: &str,
+    channel_id: &str,
+) -> Option<String> {
+    if agent_id.is_empty() || guild_id.is_empty() || channel_id.is_empty() {
+        return None;
+    }
+    Some(format!("discord-{agent_id}-{guild_id}-{channel_id}"))
 }
 
 /// 会話文字列本体の構築（タスク台帳の前置は `build_conversation_string` 側で行う）。
@@ -2551,6 +2687,219 @@ mod memory_index_section_injection_tests {
         assert!(mi_pos < pcs_pos);
         assert!(tother_pos > mi_pos && tother_pos < pcs_pos);
         assert!(tcur_pos > pcs_pos);
+    }
+}
+
+/// #404: ハートビート文脈に同じチャンネルの実会話が入ることを固定する。
+///
+/// 症状は「ハートビートが自分の過去のハートビートしか見えない」。実会話が入ること、
+/// 専用セッションの履歴と共存すること、予算逼迫時も実会話が優先されること、そして
+/// **出力形式の指示が末尾に残る**（`SPEAK:` パースの前提が変わらない）ことを見る。
+#[cfg(test)]
+mod heartbeat_conversation_tests {
+    use super::{build_conversation_string, build_heartbeat_conversation_string};
+
+    const AGENT: &str = "a1";
+    const HB_SESSION: &str = "heartbeat-a1-222";
+    const CH_SESSION: &str = "discord-a1-111-222";
+    /// main.rs がハートビートプロンプト末尾に付ける規約（ランタイム固定部分）。
+    const FORMAT_INSTRUCTION: &str = "出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。";
+
+    fn insert(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+        log_type: &str,
+        speaker: &str,
+        content: String,
+    ) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: session_id.to_string(),
+                log_type: log_type.to_string(),
+                content,
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 実会話: 人の発言（speaker != agent）とエージェントの返信が並ぶ。
+    fn seed_channel(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            insert(
+                conn,
+                CH_SESSION,
+                "speech",
+                "human-1",
+                format!("channel message {i} from a person talking about the release plan"),
+            );
+            insert(
+                conn,
+                CH_SESSION,
+                AGENT,
+                "speech",
+                format!("channel reply {i} from the agent about the release plan"),
+            );
+        }
+    }
+
+    /// ハートビート専用セッション: プロンプト（system）と自分の判断（speech）の反復。
+    /// 最後は**今回のプロンプト**（main.rs は会話を組む前に必ず 1 件挿入する）。
+    fn seed_heartbeat(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            insert(
+                conn,
+                HB_SESSION,
+                "system",
+                "heartbeat",
+                format!("[ハートビート] 現在の会話「開発」。静けさが続くなら黙っていてよい。\n{FORMAT_INSTRUCTION}"),
+            );
+            insert(
+                conn,
+                HB_SESSION,
+                AGENT,
+                "speech",
+                format!("heartbeat note {i}: 静けさは続いてる。IDLE"),
+            );
+        }
+        insert(
+            conn,
+            HB_SESSION,
+            "system",
+            "heartbeat",
+            format!("[ハートビート] 現在の会話「開発」。静けさが続くなら黙っていてよい。\n{FORMAT_INSTRUCTION}"),
+        );
+    }
+
+    /// 中心要件: 同じチャンネルの実会話がハートビート文脈へ入り、専用セッションの
+    /// 履歴と共存する。並び順は 実会話 → 専用セッション（出力形式指示が末尾）。
+    #[test]
+    fn channel_conversation_enters_heartbeat_context() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 3);
+        seed_heartbeat(&conn, 3);
+
+        let out = build_heartbeat_conversation_string(
+            &conn,
+            HB_SESSION,
+            Some(CH_SESSION),
+            AGENT,
+            100_000,
+        )
+        .unwrap();
+
+        assert_eq!(out.matches("[Channel conversation]").count(), 1);
+        assert!(
+            out.contains("channel message 2 from a person"),
+            "実会話の直近の発言が文脈に入っていない: {out}"
+        );
+        assert!(
+            out.contains("channel message 0 from a person"),
+            "予算内なら実会話は全文載る: {out}"
+        );
+        // 専用セッションの履歴も残る（片方に置き換わらない）。
+        assert!(out.contains("heartbeat note 2"), "{out}");
+
+        let ch_pos = out.find("[Channel conversation]").unwrap();
+        let hb_pos = out.find("heartbeat note 0").unwrap();
+        assert!(
+            ch_pos < hb_pos,
+            "実会話は専用セッションより前に置く（形式指示を末尾に残すため）: {out}"
+        );
+        assert!(
+            out.trim_end().ends_with(FORMAT_INSTRUCTION),
+            "出力形式の指示が末尾に残っていない（SPEAK: パースの前提が崩れる): {out}"
+        );
+
+        // 対比: 従来の呼び出しでは実会話は 1 行も見えない（#404 の症状）。
+        let plain = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+        assert!(!plain.contains("channel message"), "{plain}");
+    }
+
+    /// 予算が足りない場合でも実会話は落ちず、形式指示も末尾に残る。
+    #[test]
+    fn compaction_keeps_channel_conversation_and_format_instruction() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 60);
+        seed_heartbeat(&conn, 60);
+
+        let out =
+            build_heartbeat_conversation_string(&conn, HB_SESSION, Some(CH_SESSION), AGENT, 1_200)
+                .unwrap();
+
+        assert_eq!(out.matches("[Channel conversation]").count(), 1);
+        assert!(
+            out.contains("channel message 59 from a person"),
+            "直近の実会話が落ちている: {out}"
+        );
+        assert!(out.contains("heartbeat note 59"), "{out}");
+        assert!(
+            out.trim_end().ends_with(FORMAT_INSTRUCTION),
+            "コンパクション後も形式指示は末尾に残る: {out}"
+        );
+        // セッションを跨いだ要約はしない: [Past context summary] は専用セッション側の
+        // 1 つだけ（実会話側は直近窓で切る）。
+        assert!(out.matches("[Past context summary").count() <= 1, "{out}");
+    }
+
+    /// 予算配分: 実会話を優先する（専用セッションの履歴は反復が多く情報密度が低い）。
+    #[test]
+    fn channel_conversation_gets_the_larger_share_of_the_budget() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 60);
+        seed_heartbeat(&conn, 60);
+
+        let out =
+            build_heartbeat_conversation_string(&conn, HB_SESSION, Some(CH_SESSION), AGENT, 1_200)
+                .unwrap();
+
+        let channel_lines = out.matches("channel message ").count();
+        let heartbeat_lines = out.matches("heartbeat note ").count();
+        assert!(
+            channel_lines > heartbeat_lines,
+            "実会話より自分のハートビート履歴が多く載っている (channel={channel_lines}, heartbeat={heartbeat_lines})"
+        );
+        assert!(
+            channel_lines >= 10,
+            "実会話がほとんど載っていない (channel={channel_lines})"
+        );
+    }
+
+    /// channel セッションを渡さない（エージェント単位 tick）なら従来と完全同一。
+    #[test]
+    fn without_channel_session_output_is_unchanged() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_heartbeat(&conn, 5);
+
+        let plain = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+        let hb =
+            build_heartbeat_conversation_string(&conn, HB_SESSION, None, AGENT, 100_000).unwrap();
+        assert_eq!(plain, hb);
+    }
+
+    /// 実会話が 1 行も無いチャンネルでは、セクションごと出さない（空見出しを足さない）。
+    #[test]
+    fn channel_session_without_logs_adds_no_section() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_heartbeat(&conn, 5);
+
+        let plain = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+        let hb = build_heartbeat_conversation_string(
+            &conn,
+            HB_SESSION,
+            Some("discord-a1-111-999"),
+            AGENT,
+            100_000,
+        )
+        .unwrap();
+        assert!(!hb.contains("[Channel conversation]"));
+        assert_eq!(plain, hb);
     }
 }
 
