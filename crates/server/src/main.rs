@@ -1241,6 +1241,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _watcher_handle = opencrab_server::hot_reload::start_config_watcher(
         "config",
+        state.db.clone(),
         state.tools_config.clone(),
         heartbeat_config_tx,
     );

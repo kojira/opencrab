@@ -40,6 +40,25 @@ pub fn upsert_model_pricing(conn: &Connection, pricing: &ModelPricingRow) -> Res
     Ok(())
 }
 
+pub fn list_model_pricing(conn: &Connection) -> Result<Vec<ModelPricingRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT provider, model, input_price_per_1m, output_price_per_1m, context_window
+         FROM model_pricing ORDER BY provider, model",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ModelPricingRow {
+                provider: row.get(0)?,
+                model: row.get(1)?,
+                input_price_per_1m: row.get(2)?,
+                output_price_per_1m: row.get(3)?,
+                context_window: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn get_model_pricing(
     conn: &Connection,
     provider: &str,

@@ -11,6 +11,7 @@ pub mod llm;
 pub mod llm_logs;
 pub mod mcp;
 pub mod memory;
+pub mod model_pricing;
 pub mod nostr;
 pub mod nostr_relay;
 pub mod providers;

@@ -942,19 +942,80 @@ fn build_past_context_summary_section(
     format!("{PAST_SUMMARY_HEADER}{}", body.join("\n"))
 }
 
+/// 未登録モデルを設定しようとしたときのエラーメッセージ（#412）。
+///
+/// **登録方法まで書く。** 拒否だけして先へ進む手段を示さないと、「設定できないが
+/// どうすれば設定できるかも分からない」で止まる。
+pub fn model_context_window_missing_message(spec: &str) -> String {
+    format!(
+        "model \"{spec}\" has no context_window registered in model_pricing. \
+         Register it first: PUT /api/llm/model-pricing with body \
+         {{\"provider\": \"...\", \"model\": \"...\", \"input_price_per_1m\": 0.0, \
+         \"output_price_per_1m\": 0.0, \"context_window\": <max tokens>}}. \
+         Current registrations: GET /api/llm/model-pricing."
+    )
+}
+
+/// `provider:model` 形式の spec が `model_pricing` に `context_window` を持つ行を
+/// 持つか検証する（#412）。
+///
+/// 文脈予算は `context_window × compaction_ratio` で決まる。行が無いと
+/// [`compute_context_budget`] が既定値へ落ち、「データが無い」と「その値だと決めた」
+/// が区別できなくなる。**壊れた状態を作れなくする**ため、モデルを設定する瞬間に弾く。
+///
+/// DB 参照に失敗した場合も Err にする（fail-closed）。登録されていることを確認
+/// できていない以上、通してはいけない。
+pub fn ensure_model_context_window_registered(
+    conn: &rusqlite::Connection,
+    spec: &str,
+) -> Result<(), String> {
+    let (provider, model) = split_llm_model_spec(spec);
+    match opencrab_db::queries::get_model_pricing(conn, provider, model) {
+        Ok(Some(p)) if p.context_window.is_some() => Ok(()),
+        Ok(_) => Err(model_context_window_missing_message(spec)),
+        Err(e) => Err(format!(
+            "failed to look up model_pricing for \"{spec}\": {e}"
+        )),
+    }
+}
+
 /// context_budget_tokens を呼び出し元で計算するヘルパー。
 /// model_pricing の context_window と compaction_ratio から予算を算出する。
+///
+/// 行が引けないときは既定値へ落とすが、**黙って落とさない**（#412）。設定時に
+/// [`ensure_model_context_window_registered`] で弾くので通常は到達しないが、弾く前に
+/// 入った既存データが残りうる。実行中のエージェントを止めないため WARN に留める。
 pub fn compute_context_budget(
     conn: &rusqlite::Connection,
     provider: &str,
     model: &str,
     compaction_ratio: f64,
 ) -> usize {
-    let context_window = opencrab_db::queries::get_model_pricing(conn, provider, model)
-        .ok()
-        .flatten()
-        .and_then(|p| p.context_window)
-        .unwrap_or(DEFAULT_CONTEXT_BUDGET_TOKENS as i32) as usize;
+    let registered = match opencrab_db::queries::get_model_pricing(conn, provider, model) {
+        Ok(row) => row.and_then(|p| p.context_window),
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider,
+                model = %model,
+                "model_pricing lookup failed; falling back to default context window \
+                 ({DEFAULT_CONTEXT_BUDGET_TOKENS}): {e}"
+            );
+            return ((DEFAULT_CONTEXT_BUDGET_TOKENS as f64) * compaction_ratio) as usize;
+        }
+    };
+    let context_window = match registered {
+        Some(w) => w as usize,
+        None => {
+            tracing::warn!(
+                provider = %provider,
+                model = %model,
+                "no context_window in model_pricing; falling back to default \
+                 ({DEFAULT_CONTEXT_BUDGET_TOKENS}). Register it with \
+                 PUT /api/llm/model-pricing so the budget matches the real model."
+            );
+            DEFAULT_CONTEXT_BUDGET_TOKENS
+        }
+    };
     ((context_window as f64) * compaction_ratio) as usize
 }
 
@@ -4478,5 +4539,77 @@ mod impression_section_injection_tests {
         let out = build_conversation_string(&conn, "s1", AGENT, 100_000).unwrap();
         assert!(!out.contains("[Impressions]"), "{out}");
         assert!(out.contains("こんにちは"), "{out}");
+    }
+}
+
+/// 未登録モデルを設定時に弾き、実行時は既定へ落ちても止めない（#412）。
+#[cfg(test)]
+mod model_context_window_gate_tests {
+    use super::{compute_context_budget, ensure_model_context_window_registered};
+
+    fn register(conn: &rusqlite::Connection, provider: &str, model: &str, window: Option<i32>) {
+        opencrab_db::queries::upsert_model_pricing(
+            conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: window,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn registered_model_passes() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", Some(200_000));
+        assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_ok());
+    }
+
+    #[test]
+    fn unregistered_model_is_rejected_with_how_to_register() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let err = ensure_model_context_window_registered(&conn, "p1:m1").unwrap_err();
+        // 拒否するだけでなく、登録先を必ず示す。
+        assert!(err.contains("model_pricing"), "{err}");
+        assert!(err.contains("/api/llm/model-pricing"), "{err}");
+    }
+
+    /// 行はあるが `context_window` が NULL の場合も未登録扱い。
+    /// 予算を決められない以上、単価だけ入っていても通してはいけない。
+    #[test]
+    fn row_without_context_window_is_rejected() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", None);
+        assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_err());
+    }
+
+    /// provider を持たない spec は provider="" として引く（`split_llm_model_spec` の規約）。
+    #[test]
+    fn bare_model_spec_uses_empty_provider() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "", "m1", Some(123));
+        assert!(ensure_model_context_window_registered(&conn, "m1").is_ok());
+        assert!(ensure_model_context_window_registered(&conn, "p1:m1").is_err());
+    }
+
+    #[test]
+    fn budget_uses_registered_context_window() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", Some(200_000));
+        assert_eq!(compute_context_budget(&conn, "p1", "m1", 0.5), 100_000);
+    }
+
+    /// 未登録でも**実行は止めない**。既定値の compaction_ratio 倍で走り続ける
+    /// （WARN は出るが、稼働中のエージェントを落とすのは方針ではない）。
+    #[test]
+    fn budget_falls_back_to_default_when_unregistered() {
+        let conn = opencrab_db::init_memory().unwrap();
+        assert_eq!(
+            compute_context_budget(&conn, "p1", "m1", 0.5),
+            super::DEFAULT_CONTEXT_BUDGET_TOKENS / 2
+        );
     }
 }

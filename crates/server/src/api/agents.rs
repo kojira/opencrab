@@ -117,6 +117,30 @@ pub struct PutAgentBody {
     pub metadata_json: Option<String>,
 }
 
+/// モデルを**新しく設定するとき**だけ、`model_pricing` の登録を要求する（#412）。
+///
+/// 既に入っている値をそのまま送り直す更新（識別情報だけを編集する PUT など）は
+/// 素通しする。ここで既存値まで弾くと、登録前から動いているエージェントが
+/// 名前ひとつ変えられなくなる。
+///
+/// 空文字 / 未指定は「グローバル既定に従う」であってモデルの指定ではないので、
+/// これも対象外（既定側は config のホットリロードで検証する）。
+/// `effective_model_for_agent` が空を弾いて `default_model` へ落とすため、
+/// 空文字がそのまま実効モデルになることはない。
+fn check_model_change(
+    conn: &rusqlite::Connection,
+    existing: Option<&opencrab_db::queries::AgentRow>,
+    new_model: Option<&str>,
+) -> Result<(), String> {
+    let Some(new_model) = new_model.filter(|m| !m.is_empty()) else {
+        return Ok(());
+    };
+    if existing.and_then(|a| a.model.as_deref()) == Some(new_model) {
+        return Ok(());
+    }
+    crate::process::ensure_model_context_window_registered(conn, new_model)
+}
+
 pub async fn put_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -128,6 +152,9 @@ pub async fn put_agent(
     let existing = opencrab_db::queries::get_agent(&conn, &id).ok().flatten();
     let existing_effort = existing.as_ref().and_then(|a| a.reasoning_effort.clone());
     let existing_web_search = existing.as_ref().and_then(|a| a.web_search);
+    if let Err(e) = check_model_change(&conn, existing.as_ref(), body.model.as_deref()) {
+        return Json(serde_json::json!({"updated": false, "error": e}));
+    }
     let row = opencrab_db::queries::AgentRow {
         agent_id: id,
         name: body.name,
@@ -153,6 +180,16 @@ pub async fn patch_agent(
     Json(patch): Json<opencrab_db::queries::AgentPatch>,
 ) -> Json<serde_json::Value> {
     let conn = state.db.lock().unwrap();
+    // #412: model を実際に差し替える PATCH だけ登録を要求する。
+    // クリア（既定へ戻す）は空文字で表現される（serde の `Option<Option<_>>` は
+    // JSON null を「変更なし」に潰すため。`apply_agent_patch` の同趣旨のコメント参照）。
+    // 空文字は `check_model_change` 側で対象外になる。
+    if let Some(Some(new_model)) = patch.model.as_ref() {
+        let existing = opencrab_db::queries::get_agent(&conn, &id).ok().flatten();
+        if let Err(e) = check_model_change(&conn, existing.as_ref(), Some(new_model)) {
+            return Json(serde_json::json!({"updated": false, "error": e}));
+        }
+    }
     match opencrab_db::queries::apply_agent_patch(&conn, &id, &patch) {
         Ok(true) => Json(serde_json::json!({"updated": true})),
         Ok(false) => Json(serde_json::json!({"updated": false, "error": "Agent not found"})),
