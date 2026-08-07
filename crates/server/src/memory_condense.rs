@@ -19,15 +19,20 @@
 //! - **本人の自己申告に頼らない**。入力は生ログ由来の宣言物（ユニット）であって会話での自称ではない。
 //! - **既定オフ**。`enabled=false` なら RunRequest すら組まずゼロコールで即 return。
 //!
-//! ゲートは 2 段（[`decide_condense`]）:
-//! - **ユニット増加の下限**: 前回凝縮した時点のユニット総数から `min_new_units` 以上増えていない
-//!   と発火しない（増えていなければ空振りの LLM コールを作らない / #411 原則2 の「何も出さない」を
-//!   材料が無いときにも守る）。
-//! - **日次以上の throttle**: 前回実行から `min_interval_minutes` 以上経っていないと発火しない。
+//! **逐次凝縮**（オーナー指摘 2026-08-08「いきなりまとまった期間を与えると平均に寄る」）: 全ユニットを
+//! 一括で渡さず、カーソルより新しいユニットを**時系列順に `min_new_units` 件ずつの窓**で読む。毎回
+//! 「既存 core 全件＋今回の窓」を渡し、更新優先で core を育てる。新規エージェントが 1 回で見る量と、
+//! 既存エージェントの積み残し消化の 1 窓が同じ幅になる（＝新規と同じ形で消化する）。
 //!
-//! マーカーは複合カーソル `"{last_run_at}|{unit_count}"`（宣言ランと同型）。位置部は「前回凝縮
-//! した時点のユニット総数」。clean 完了時だけ現在のユニット総数へ進める（partial では据え置き、
-//! ただし throttle は毎回 `now` へ進めて再発火を止める / #366 と同型）。
+//! ゲート（[`decide_condense`]）:
+//! - 残ユニット（カーソルより新しい未凝縮）が窓幅以上 → **積み残し消化**として throttle を待たず
+//!   1 tick 1 窓で発火。0 < 残 < 窓幅 → 末尾の端数で、`min_interval_minutes` を待って流す（増加待ちは
+//!   ここだけ）。残 0 → ゼロコールで return。
+//!
+//! マーカーは複合カーソル `"{last_run_at}|{position_start_log_id}"`（宣言ランと同型）。位置部は
+//! 「最後に凝縮した窓の末尾ユニットの start_log_id」で、次の窓はこれより新しいユニットから始まる。
+//! clean 完了時だけ窓の末尾へ進める（partial では据え置き＝次 tick で同じ窓を読む。ただし throttle
+//! は毎回 `now` へ進めて端数待ちの起点をリセット / #366 と同型）。
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
@@ -42,11 +47,6 @@ use opencrab_db::queries::IndexNodeRow;
 /// プロンプトに載せる既存の凝縮（core）の最大件数。更新優先（#411 原則4）のために「今ある核」を
 /// 思い出させる手がかり。core は数が少ない設計（人格の核）なので通常は全件がこの内側に収まる。
 const CORES_SHOWN: usize = 40;
-
-/// プロンプトに載せる自分のユニットの最大件数。実測で最大のエージェントでも 216 件・約 5.4 万字で
-/// 1 コンテキストに収まるが、将来ユニットが際限なく増えても system プロンプトが破綻しないよう
-/// 上限を置く（新しい方から。溢れた古い分は「他に N 件」の 1 行に畳む）。初回実験の実測で見直す。
-const UNITS_SHOWN: usize = 400;
 
 /// sleep 凝縮ランに渡すツール許可リスト（#411）。
 ///
@@ -174,17 +174,17 @@ async fn run_condense(
         Err(_) => ("timeout", false),
     };
 
-    // --- マーカー前進 ---
-    // throttle（壁時計）は clean/partial に関わらず毎回 `now` へ進める（partial の再発火を止める）。
-    // 位置部（前回凝縮時点のユニット総数）は clean のときだけ現在の総数へ進める（partial では
-    // 据え置き = 次回も同じ増分を材料として見られる）。凝縮ランはユニットを作らない（allowlist に
-    // record_memory_unit が無い）ので、`plan.unit_count` はランの前後で不変。
-    let baseline_after = if clean {
-        plan.unit_count
+    // --- マーカー前進（逐次窓）---
+    // throttle（壁時計）は clean/partial に関わらず毎回 `now` へ進める（partial の再発火を止める /
+    // 端数待ちの起点をリセット）。位置部（start_log_id）は clean のときだけ今回の窓の末尾
+    // （`position_after`）へ進める。partial では据え置き = 次 tick で同じ窓をもう一度読む（宣言ラン
+    // と同じ「位置は前進のみ・partial 据え置き」）。
+    let position_after = if clean {
+        plan.position_after
     } else {
-        plan.baseline_unit_count
+        plan.position_before
     };
-    let marker_after = format_condense_marker(&now.to_rfc3339(), baseline_after);
+    let marker_after = format_condense_marker(&now.to_rfc3339(), position_after);
     {
         let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         opencrab_db::queries::set_memory_condense_cursor(&conn, agent_id, &marker_after)?;
@@ -195,13 +195,14 @@ async fn run_condense(
         let audit = json!({
             "kind": "memory_condense",
             "outcome": outcome,
-            "unit_count": plan.unit_count,
-            "baseline_before": plan.baseline_unit_count,
-            "units_grown_by": plan.unit_count - plan.baseline_unit_count,
+            "window_units": plan.window_units.len(),
+            "remaining_before": plan.remaining_before,
+            "remaining_after": (plan.remaining_before - plan.window_units.len() as i64).max(0),
             "existing_cores": plan.existing_cores.len(),
             "session_id": session_id,
-            "baseline_after": baseline_after,
-            // 位置（ユニット総数）は clean のときだけ前進。throttle は毎回 now。
+            "position_before": plan.position_before,
+            "position_after": position_after,
+            // 位置（start_log_id）は clean のときだけ前進。throttle は毎回 now。
             "position_advanced": clean,
             "throttle_advanced": true,
             "marker_after": marker_after,
@@ -224,9 +225,10 @@ async fn run_condense(
     tracing::info!(
         agent_id,
         outcome,
-        units = plan.unit_count,
+        window_units = plan.window_units.len(),
+        remaining_before = plan.remaining_before,
         cores = plan.existing_cores.len(),
-        marker_advanced = clean,
+        position_advanced = clean,
         "memory condense ran"
     );
     Ok(true)
@@ -238,14 +240,16 @@ struct CondensePlan {
     persona_name: String,
     personality: Option<String>,
     instructions: String,
-    /// 自分のユニット（新しい順 / 最大 [`UNITS_SHOWN`] 件）。凝縮の材料。
-    units: Vec<IndexNodeRow>,
-    /// ユニットの総数（切り詰め前）。マーカーの位置部・プロンプトの畳み行に使う。
-    unit_count: i64,
+    /// 今回の窓のユニット（時系列＝古い→新しい順 / 最大 `window_size` 件）。逐次凝縮の材料。
+    window_units: Vec<IndexNodeRow>,
+    /// カーソル位置（この start_log_id より新しいユニットが未凝縮）。partial 据え置きの値。
+    position_before: i64,
+    /// clean 完了時にカーソルを進める先（今回の窓のユニットの最大 start_log_id）。
+    position_after: i64,
+    /// カーソルより新しい未凝縮ユニットの総残数（窓に載る前）。プロンプトの「残り N 件」表示・監査用。
+    remaining_before: i64,
     /// 既存の凝縮（更新優先の手がかり / 最大 [`CORES_SHOWN`] 件）。
     existing_cores: Vec<IndexNodeRow>,
-    /// 前回凝縮した時点のユニット総数（マーカーの位置部）。partial 据え置きの値。
-    baseline_unit_count: i64,
 }
 
 /// ゲート判定の結果。
@@ -257,8 +261,16 @@ enum CondenseDecision {
     Run(Box<CondensePlan>),
 }
 
-/// ゲート（日次 throttle + ユニット増加の下限）を判定し、通れば材料を積んだ計画を返す。
+/// ゲートを判定し、通れば今回の窓（時系列 N 件）と既存 core を積んだ計画を返す。
 /// DB 読みのみ。ロックは関数内で完結し、`run_turn` の await を跨いで保持しない。
+///
+/// **逐次凝縮の発火（オーナー指摘: 一括で与えない）**:
+/// - カーソル位置 `position`（start_log_id）より新しい未凝縮ユニットの残数 `remaining` を数える。
+/// - `remaining == 0` → `Skip("no_new_units")`（ゼロコール）。
+/// - `remaining >= N`（窓幅）→ **積み残し消化**として throttle を待たず発火（1 tick 1 窓）。
+/// - `0 < remaining < N`（末尾の端数）→ **min_interval を待って**発火（新しいユニットの増加待ちは
+///   ここだけ。まだ経っていなければ `Skip("tail_waiting")`）。初回（last_run_at 無し）は待たない。
+/// いずれも窓は「position より新しいユニットを時系列順に最大 N 件」。
 fn decide_condense(
     db: &opencrab_db::Db,
     cfg: &MemoryCondenseConfig,
@@ -267,33 +279,41 @@ fn decide_condense(
     let now = Utc::now();
     let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
 
-    // マーカー = 複合カーソル `"{last_run_at}|{unit_count}"`。未実行（None）は (throttle 無し, 0)。
+    // マーカー = 複合カーソル `"{last_run_at}|{position_start_log_id}"`。未実行（None）は
+    // (throttle 無し, position 0)。position 0 は「最古のユニットから」を意味する。
     let marker = opencrab_db::queries::get_memory_condense_cursor(&conn, agent_id)?;
-    let (last_run_at, baseline_unit_count) = parse_condense_marker(marker.as_deref());
+    let (last_run_at, position) = parse_condense_marker(marker.as_deref());
 
-    // ゲート1: 日次 throttle。last_run_at が無ければ（初回）throttle は掛からない。
-    if let Some(lr) = &last_run_at {
-        let elapsed = lr
-            .parse::<DateTime<Utc>>()
-            .map(|dt| now.signed_duration_since(dt))
-            .unwrap_or_else(|_| Duration::zero());
-        if elapsed < Duration::minutes(cfg.min_interval_minutes.max(1)) {
-            return Ok(CondenseDecision::Skip("interval_not_elapsed"));
+    let window_size = cfg.min_new_units.max(1) as usize;
+    let remaining =
+        opencrab_db::queries::count_memory_units_after(&conn, agent_id, position)? as i64;
+
+    // 発火判定（逐次窓）。
+    if remaining == 0 {
+        return Ok(CondenseDecision::Skip("no_new_units"));
+    }
+    if remaining < window_size as i64 {
+        // 末尾の端数。min_interval を待ってから流す（新しいユニットの増加待ち）。
+        // 積み残し消化中（remaining >= 窓幅）はこの throttle を通らない = 待たず淡々と進む。
+        if let Some(lr) = &last_run_at {
+            let elapsed = lr
+                .parse::<DateTime<Utc>>()
+                .map(|dt| now.signed_duration_since(dt))
+                .unwrap_or_else(|_| Duration::zero());
+            if elapsed < Duration::minutes(cfg.min_interval_minutes.max(1)) {
+                return Ok(CondenseDecision::Skip("tail_waiting"));
+            }
         }
     }
 
-    // ゲート2: ユニット増加の下限。前回凝縮時点の総数から下限以上増えていないと発火しない
-    // （薄い材料で走らせない / 空振りの LLM コールを作らない）。初回は baseline=0 なので
-    // 「今あるユニットが下限以上」で発火する。
-    let unit_count = opencrab_db::queries::count_memory_units(&conn, agent_id)? as i64;
-    let grown = unit_count - baseline_unit_count;
-    if grown < cfg.min_new_units.max(1) {
-        return Ok(CondenseDecision::Skip("below_floor"));
-    }
+    // 今回の窓: position より新しいユニットを時系列（古い→新しい）順に最大 N 件。
+    let window_units =
+        opencrab_db::queries::list_memory_units_after(&conn, agent_id, position, window_size)?;
+    // 窓が空なら発火しない（remaining>0 なら非空だが防御的に）。
+    let Some(position_after) = window_units.iter().filter_map(|u| u.start_log_id).max() else {
+        return Ok(CondenseDecision::Skip("no_new_units"));
+    };
 
-    // 材料: 自分のユニット（新しい順）と既存の core。
-    let mut units = opencrab_db::queries::list_memory_units(&conn, agent_id)?;
-    units.truncate(UNITS_SHOWN);
     let mut existing_cores = opencrab_db::queries::list_memory_cores(&conn, agent_id)?;
     existing_cores.truncate(CORES_SHOWN);
 
@@ -309,10 +329,11 @@ fn decide_condense(
         persona_name,
         personality,
         instructions,
-        units,
-        unit_count,
+        window_units,
+        position_before: position,
+        position_after,
+        remaining_before: remaining,
         existing_cores,
-        baseline_unit_count,
     })))
 }
 
@@ -338,20 +359,22 @@ fn build_system_prompt(plan: &CondensePlan) -> String {
         format!("\n\n## Instructions\n{}", plan.instructions)
     };
 
-    let units_txt = if plan.units.is_empty() {
-        "(まだ宣言したユニットがありません)".to_string()
+    // 今回の窓（時系列＝古い→新しい順）。逐次凝縮なので、全ユニットではなくこの窓だけを渡す。
+    let units_txt = if plan.window_units.is_empty() {
+        "(今回の窓にユニットがありません)".to_string()
     } else {
         let mut s = plan
-            .units
+            .window_units
             .iter()
             .map(format_unit_line)
             .collect::<Vec<_>>()
             .join("\n");
-        let shown = plan.units.len() as i64;
-        if plan.unit_count > shown {
+        let shown = plan.window_units.len() as i64;
+        let tail = plan.remaining_before - shown;
+        if tail > 0 {
             s.push_str(&format!(
-                "\n… ほかに古いユニットが {} 件（search_memory_index / retrieve_memory_nodes で辿れます）",
-                plan.unit_count - shown
+                "\n（この先にまだ凝縮していないユニットが {tail} 件あります。今回はこの窓の範囲だけを見て、\
+                 次回以降の窓で続きを見ます。焦って先の分まで束ねないでください。）"
             ));
         }
         s
@@ -369,23 +392,36 @@ fn build_system_prompt(plan: &CondensePlan) -> String {
 
     format!(
         "{personality_section}\
-         これはあなたのスリープ（内省）の時間です。あなたがこれまでに宣言してきた記憶の\
-         ユニット（一つ一つの出来事）を並べて見渡し、「その出来事たちが何を意味するか」を\
-         あなた自身の言葉で抽出します。一つのユニットからは出てこない——いくつかを並べて\
-         初めて見える『大事なこと』を、人格の核として刻みます。正解も平均もありません。\
-         一期一会でよく、**全部を凝縮する必要も、無理に何か出す必要もありません**。今回\
-         見えるものが無ければ、何も刻まずに終えて構いません。\n\n\
+         これはあなたのスリープ（内省）の時間です。あなたが宣言してきた記憶のユニット\
+         （一つ一つの出来事）を、時系列の一区切りずつ振り返り、「その出来事たちが何を意味するか」\
+         をあなた自身の言葉で抽出して、人格の核として刻みます。**今回見るのは下の「今回の窓」\
+         （時系列で古い順の一区切り）だけ**です。人生をまとめて回顧するのではなく、この区切りで\
+         見えたことを、これまでに刻んだ核に足し込んでいきます。正解も平均もありません。一期一会で\
+         よく、**この窓で無理に何か出す必要はありません**。見えるものが無ければ何も刻まずに\
+         終えて構いません。\n\n\
          # やること\n\
-         下の「あなたのユニット」を俯瞰し、繰り返し現れる形・変化・選択・関係など、\
-         あなたにとって大事だと思うことを `record_memory_core` で刻んでください。どんな\
-         視点で束ねるか・いくつ刻むか・そもそも刻むかは、あなたが決めます。\n\n\
-         # 視点の例（これに縛られません）\n\
-         出発点として、こういう視点があります。**あなた自身の軸を足して構いません**——\
-         一度きりに見える視点でも、あなたが大事に思うならそれを尊重してください:\n\
-         - 楽しかったこと / つらかったこと / 改善すべきこと\n\
-         - 人との関係 / 自分で決めたこと / できるようになったこと\n\
-         - 繰り返していること（自分では一番見えにくい。同じ判断や言葉を何度も繰り返して\
-         いないか、ユニットを並べて確かめてください）\n\n\
+         下の「今回の窓」のユニットを俯瞰し、繰り返し現れる形・変化・選択・関係など、あなたに\
+         とって大事だと思うことを見つけてください。**まず「すでに刻んだ凝縮」を見て、今回の窓が\
+         その核を深める/裏づける/更新するなら `update_memory_core` で育ててください**（新しく\
+         足すのは、既存のどれとも違う軸が見えたときだけ）。どんな視点で束ねるか・いくつ刻むか・\
+         そもそも刻むかは、あなたが決めます。\n\n\
+         # 基本の軸（それぞれ一度は目を通してください）\n\
+         基本の軸が 7 つあります。**それぞれについて一度は自分のユニットを見て**、その軸で\
+         凝縮できるものがあれば `record_memory_core` で刻んでください:\n\
+         1. 楽しかったこと\n\
+         2. つらかったこと\n\
+         3. 改善すべきこと\n\
+         4. 人との関係\n\
+         5. 自分で決めたこと\n\
+         6. できるようになったこと\n\
+         7. 繰り返していること（自分では一番見えにくい。同じ判断や言葉を何度も繰り返して\
+         いないか、ユニットを並べて確かめてください）\n\
+         **今回はその軸で凝縮するものが無いと判断した軸は、最後の完了メッセージに\
+         「〈軸名〉: 今回は無い」と一言だけ書いてください**（`record_memory_core` には記録しません\
+         ——core は実のある凝縮だけです）。「無い」と書くのは失敗ではありません。むしろ、無い軸を\
+         無理に薄い凝縮ででっち上げる方が最悪です——見つからなければ正直に「無い」と書いてください。\n\
+         **あなた自身の軸を足すのも従来どおり自由です**——この 7 つに縛られず、一度きりに見える\
+         視点でも、あなたが大事に思うなら尊重してください。\n\n\
          # 大事な約束\n\
          - **根拠のユニットに必ずリンクさせてください。** `record_memory_core` の sources に、\
          その原則の根拠になったユニットの short_id（例 u42）を挙げます。根拠の無い凝縮は\
@@ -403,19 +439,20 @@ fn build_system_prompt(plan: &CondensePlan) -> String {
          - `record_memory_core(axis, body, sources)`: 原則を 1 件刻む（sources は根拠ユニットの short_id、最低 1 つ）\n\
          - `update_memory_core(core_id, axis, body, sources?)`: 既存の凝縮を書き直す（sources 省略で根拠維持）\n\
          - `retract_memory_core(core_id)`: 凝縮を取り消す\n\n\
-         # あなたのユニット（宣言した記憶 / 新しい順・全 {total} 件中）\n{units_txt}\n\n\
-         # すでに刻んだ凝縮（更新の候補）\n{cores_txt}",
-        total = plan.unit_count,
+         # 今回の窓（宣言した記憶 / 時系列・古い→新しい順 / {shown} 件）\n{units_txt}\n\n\
+         # すでに刻んだ凝縮（まずここを見て、育てられるものは更新する）\n{cores_txt}",
+        shown = plan.window_units.len(),
     ) + &instructions_section
 }
 
 /// エンジンに渡す「ユーザーターン」。system 側に材料を明示済みなので、ここは着手の合図のみ。
 fn build_task_message() -> String {
-    "スリープの時間です。上の「あなたのユニット」を並べて見渡し、いくつかを束ねて初めて見える\
-     『大事なこと』を、あなたの言葉で凝縮してください。どんな視点で束ねるか・いくつ刻むか・\
-     そもそも刻むか（何も無ければ刻まなくてよい）はあなたが決めます。根拠のユニットには必ず\
-     リンクさせ、既にある凝縮は更新を優先してください。終わったら、どういう視点で見たかを\
-     一言だけ残してください。"
+    "スリープの時間です。上の「今回の窓」（時系列の一区切り）を見渡し、いくつかを束ねて見える\
+     『大事なこと』を、あなたの言葉で凝縮してください。まず「すでに刻んだ凝縮」を見て、今回の窓が\
+     その核を育てるなら update_memory_core で更新し、既存のどれとも違う軸だけ新しく刻みます。\
+     窓の先の分まで焦って束ねないでください。根拠のユニットには必ずリンクさせてください。基本の\
+     軸 7 つはそれぞれ一度は目を通し、凝縮したものは刻み、今回は無い軸は最後に「〈軸名〉: 今回は\
+     無い」と一言ずつ書いてください（無いと書くのは失敗ではありません。でっち上げないこと）。"
         .to_string()
 }
 
@@ -441,10 +478,10 @@ fn format_core_line(c: &IndexNodeRow) -> String {
     format!("- [{id}] {axis}: {body}", axis = c.title.trim())
 }
 
-/// マーカー `"{last_run_at}|{unit_count}"` を組む。宣言ランと同じ形式（`|` は rfc3339 にも
-/// 十進の件数にも現れない）。
-fn format_condense_marker(last_run_at: &str, unit_count: i64) -> String {
-    format!("{last_run_at}|{unit_count}")
+/// マーカー `"{last_run_at}|{position_start_log_id}"` を組む。宣言ランと同じ形式（`|` は rfc3339
+/// にも十進の id にも現れない）。
+fn format_condense_marker(last_run_at: &str, position: i64) -> String {
+    format!("{last_run_at}|{position}")
 }
 
 /// マーカーを `(last_run_at, unit_count)` へ分解する。`None`（未実行）→ `(None, 0)`。
@@ -658,10 +695,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn below_unit_growth_floor_is_zero_call() {
+    async fn no_new_units_after_cursor_is_zero_call() {
         let state = crate::test_app_state();
-        seed_units(&state, "a1", 2);
-        // 下限 3 に対しユニットは 2（初回 baseline=0）→ 発火しない。
+        seed_units(&state, "a1", 5); // start_log_id 1..5
+                                     // カーソルを末尾（5）に置く = 全部凝縮済み。残 0 → 発火しない。
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 5));
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -672,16 +710,16 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!ran, "増加がゲート下限に届かなければ起動しない");
+        assert!(!ran, "カーソルより新しいユニットが無ければ起動しない");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn no_growth_since_last_condense_is_zero_call() {
+    async fn full_window_fires_even_when_throttled() {
         let state = crate::test_app_state();
-        seed_units(&state, "a1", 10);
-        // 前回凝縮時点でユニット 10 だった（baseline=10）とマーク。以後増えていない。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 10));
+        seed_units(&state, "a1", 10); // 残 10 >= 窓幅 3
+                                      // 直前（1 分前）に走ったばかりでも、積み残し（残 >= 窓幅）は throttle を待たず消化する。
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(0), 0));
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -692,19 +730,39 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            !ran,
-            "前回から増えていなければ（throttle は明けていても）起動しない"
-        );
+        assert!(ran, "積み残しは throttle を待たず 1 窓消化する");
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
+        assert_eq!(audit["window_units"], 3, "1 回で窓幅ぶんだけ消化");
+        assert_eq!(audit["remaining_before"], 10);
+        assert_eq!(audit["remaining_after"], 7);
+    }
+
+    #[tokio::test]
+    async fn tail_below_window_waits_for_interval() {
+        let state = crate::test_app_state();
+        seed_units(&state, "a1", 2); // 残 2 < 窓幅 3 = 末尾の端数
+                                     // 端数は min_interval を待つ。1 分前に走ったばかり（1440 分未達）→ 待つ。
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(0), 0));
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+        let ran = run_condense(
+            &state.db,
+            &cfg(true, 3, 1440),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(!ran, "端数は min_interval 未達なら待つ");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn interval_gate_blocks_when_recent() {
+    async fn tail_flushes_after_interval_or_on_first_run() {
+        // 初回（マーカー無し）は throttle を待たず端数を流す。
         let state = crate::test_app_state();
-        seed_units(&state, "a1", 10);
-        // 増加は十分（baseline=0 → 10）だが、1h 前に走った（24h 未満）→ throttle。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(1), 0));
+        seed_units(&state, "a1", 2); // 残 2 < 窓幅 3
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -715,16 +773,60 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!ran, "throttle 未達では起動しない");
-        assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+        assert!(ran, "初回は端数でも流す");
+        let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
+        assert_eq!(audit["window_units"], 2, "端数 2 件を消化");
+        let (_, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos, 2, "位置は端数の末尾 start_log_id へ");
+    }
+
+    // --- 窓の切り出し（decide_condense）---
+
+    #[test]
+    fn window_slices_oldest_first_and_next_window_continues() {
+        let state = crate::test_app_state();
+        let ids = seed_units(&state, "a1", 5); // u1..u5, start_log_id 1..5
+                                               // 位置 0（初回）: 最古 3 件が窓。
+        match decide_condense(&state.db, &cfg(true, 3, 1440), "a1").unwrap() {
+            CondenseDecision::Run(p) => {
+                let w: Vec<&str> = p
+                    .window_units
+                    .iter()
+                    .map(|u| u.short_id.as_deref().unwrap())
+                    .collect();
+                assert_eq!(
+                    w,
+                    vec![ids[0].as_str(), ids[1].as_str(), ids[2].as_str()],
+                    "古い順の最初の 3 件"
+                );
+                assert_eq!(p.position_before, 0);
+                assert_eq!(p.position_after, 3, "窓末尾 start_log_id");
+                assert_eq!(p.remaining_before, 5);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+        // 位置 3（1 窓消化済み・初回でない）: 残 2 件が窓（端数だが throttle 明け）。
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 3));
+        match decide_condense(&state.db, &cfg(true, 3, 1440), "a1").unwrap() {
+            CondenseDecision::Run(p) => {
+                let w: Vec<&str> = p
+                    .window_units
+                    .iter()
+                    .map(|u| u.short_id.as_deref().unwrap())
+                    .collect();
+                assert_eq!(w, vec![ids[3].as_str(), ids[4].as_str()], "続きの 2 件");
+                assert_eq!(p.position_after, 5);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
     }
 
     // --- clean / partial のマーカー ---
 
     #[tokio::test]
-    async fn clean_run_advances_baseline_to_current_unit_count() {
+    async fn clean_run_advances_position_to_window_tail() {
         let state = crate::test_app_state();
-        seed_units(&state, "a1", 5);
+        seed_units(&state, "a1", 5); // start_log_id 1..5, 窓幅 3
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -737,20 +839,21 @@ mod tests {
         .unwrap();
         assert!(ran);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-        let (_, baseline) = parse_condense_marker(get_marker(&state, "a1").as_deref());
-        assert_eq!(baseline, 5, "clean は位置を現在のユニット総数へ進める");
+        let (_, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos, 3, "clean は位置を今回の窓の末尾 start_log_id へ進める");
         let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
         assert_eq!(audit["outcome"], "completed");
         assert_eq!(audit["position_advanced"], true);
-        assert_eq!(audit["units_grown_by"], 5);
+        assert_eq!(audit["position_after"], 3);
+        assert_eq!(audit["window_units"], 3);
     }
 
     #[tokio::test]
-    async fn partial_holds_baseline_but_advances_throttle() {
+    async fn partial_holds_position_but_advances_throttle() {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 5);
-        // 過去に一度走って baseline=1 だったとする（240h 前で throttle は明けている）。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 1));
+        // 位置 2 まで消化済み・240h 前（throttle 明け）。残 3 >= 窓幅で発火。
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 2));
         let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
         let ran = run_condense(
             &state.db,
@@ -762,16 +865,15 @@ mod tests {
         .await
         .unwrap();
         assert!(ran, "起動はした（partial）");
-        let (ts, baseline) = parse_condense_marker(get_marker(&state, "a1").as_deref());
-        assert_eq!(baseline, 1, "partial は位置（baseline）を据え置く");
-        // throttle は now へ進んでいる（240h 前ではない）。
+        let (ts, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos, 2, "partial は位置を据え置く（次 tick で同じ窓を読む）");
         let advanced = ts
             .and_then(|s| s.parse::<DateTime<Utc>>().ok())
             .map(|dt| Utc::now().signed_duration_since(dt) < Duration::hours(1))
             .unwrap_or(false);
         assert!(
             advanced,
-            "partial でも throttle は now へ進む（再発火を止める）"
+            "partial でも throttle は now へ進む（端数待ちの起点をリセット）"
         );
         let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
         assert_eq!(audit["outcome"], "stopped_by_limit");
@@ -780,7 +882,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_outcome_holds_baseline() {
+    async fn error_outcome_holds_position() {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 5);
         let fake = FakeRunner::new(FakeOutcome::Error);
@@ -794,10 +896,10 @@ mod tests {
         .await
         .unwrap();
         assert!(ran);
-        let (_, baseline) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        let (_, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
         assert_eq!(
-            baseline, 0,
-            "error（partial）は baseline を据え置く（初回 baseline=0）"
+            pos, 0,
+            "error（partial）は位置を据え置く（初回 position=0）"
         );
         let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
         assert_eq!(audit["outcome"], "error");
@@ -892,16 +994,26 @@ mod tests {
             other => panic!("expected Run, got {other:?}"),
         };
         let sp = build_system_prompt(&plan);
-        // ユニットが並ぶ。
-        assert!(sp.contains(&unit_ids[0]), "ユニットの short_id が出る");
-        // 軸は開いて見せる。
-        assert!(sp.contains("あなた自身の軸を足して"), "軸は開いた提示");
-        assert!(sp.contains("繰り返していること"), "例の視点が出る");
-        // 「何も出さない」を選べる。
-        assert!(sp.contains("無理に何か出す必要もありません"));
-        // 根拠リンクと更新優先。
-        assert!(sp.contains("根拠のユニット"));
+        // 今回の窓のユニットが並ぶ（逐次凝縮）。
+        assert!(sp.contains("今回の窓"), "窓ベースの提示");
+        assert!(sp.contains(&unit_ids[0]), "窓のユニットの short_id が出る");
+        // 軸は開いて見せる（自分の軸を足せる）。
+        assert!(sp.contains("あなた自身の軸を足す"), "軸は開いた提示");
+        assert!(sp.contains("繰り返していること"), "基本の軸が出る");
+        // 基本の 7 軸それぞれに目を通し、無い軸は「今回は無い」と明示させる。
+        assert!(sp.contains("基本の軸"), "基本の軸セクションがある");
+        assert!(sp.contains("今回は無い"), "無い軸を明示する指示がある");
+        assert!(
+            sp.contains("でっち上げる"),
+            "無い軸を薄い凝縮ででっち上げないよう戒めている"
+        );
+        // 「無理に出さない」を選べる（この窓で）。
+        assert!(sp.contains("無理に何か出す必要はありません"));
+        // 更新優先で core を育てる（逐次凝縮の要）。
+        assert!(sp.contains("育てて"), "既存 core を update で育てる指示");
         assert!(sp.contains("更新を優先"));
+        // 根拠リンク。
+        assert!(sp.contains("根拠のユニット"));
         // 既存 core が更新候補として出る。
         assert!(sp.contains("同じ判断を何度も繰り返している"));
         assert!(sp.contains("record_memory_core"));

@@ -2138,6 +2138,44 @@ pub fn count_memory_units(conn: &Connection, agent_id: &str) -> Result<usize> {
     Ok(n as usize)
 }
 
+/// 凝縮の**逐次窓**（#411 / オーナー指摘: 蓄積分を一括で与えない）。カーソル位置
+/// `after_start_log_id` より新しいユニットを**時系列（古い→新しい）順に最大 `limit` 件**返す。
+/// 凝縮ランは毎回この窓（＋既存 core 全件）だけを見て、更新優先で core を育てる。一括で全
+/// ユニットを渡すと平均化に寄るため、新規エージェントが少しずつ積むのと同じ窓幅で消化する。
+pub fn list_memory_units_after(
+    conn: &Connection,
+    agent_id: &str,
+    after_start_log_id: i64,
+    limit: usize,
+) -> Result<Vec<IndexNodeRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
+         WHERE agent_id = ?1 AND node_type = 'unit' AND start_log_id > ?2
+         ORDER BY start_log_id ASC, created_at ASC LIMIT ?3"
+    ))?;
+    let rows = stmt.query_map(
+        params![agent_id, after_start_log_id, limit as i64],
+        index_node_from_row,
+    )?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// カーソル位置 `after_start_log_id` より新しい（＝まだ凝縮していない）ユニットの残数。
+/// 発火判定（残 >= 窓幅なら積み残し消化、0 < 残 < 窓幅なら min_interval を待って末尾を流す）に使う。
+pub fn count_memory_units_after(
+    conn: &Connection,
+    agent_id: &str,
+    after_start_log_id: i64,
+) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_index_nodes
+         WHERE agent_id = ?1 AND node_type = 'unit' AND start_log_id > ?2",
+        params![agent_id, after_start_log_id],
+        |row| row.get(0),
+    )?;
+    Ok(n as usize)
+}
+
 // ============================================
 // MEMORY: 凝縮（記憶の 3 段目 / issue #411）
 // ============================================
