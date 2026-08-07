@@ -8,9 +8,14 @@ SERVER_PID_FILE="$SCRIPT_DIR/.server.pid"
 WEB_PID_FILE="$SCRIPT_DIR/.web.pid"
 FEATURES="discord"
 
-# #417: 実サーバプロセスを PID ファイルに頼らず探すためのパターン。
-# start_server は ./target/debug/opencrab-server を起動するので、その実行ファイルパスで照合する。
-SERVER_PROC_PATTERN="target/debug/opencrab-server"
+# #417: サーバ実行ファイルの絶対パス。start_server の argv と stop_stray_servers の
+# pgrep 照合の両方でこれを使う。
+#
+# 相対部分文字列（"target/debug/opencrab-server"）だと checkout を区別できず、別 worktree の
+# 隔離テスト用サーバや、そのパスを引数に持つ無関係プロセスまで巻き込んで kill してしまう。
+# このチェックアウト配下の絶対パスで一致させ、「この checkout のサーバだけ」に絞る。
+SERVER_BIN="$SCRIPT_DIR/target/debug/opencrab-server"
+SERVER_PROC_PATTERN="$SERVER_BIN"
 
 usage() {
     cat <<EOF
@@ -36,7 +41,9 @@ start_server() {
     stop_server 2>/dev/null || true
     build_server
     echo "==> Starting server..."
-    ./target/debug/opencrab-server > "$SCRIPT_DIR/.server.log" 2>&1 &
+    # 絶対パスで起動する。argv が SERVER_PROC_PATTERN と一致し、stop_stray_servers が
+    # この checkout のサーバだけを検出できる（#417）。
+    "$SERVER_BIN" > "$SCRIPT_DIR/.server.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$SERVER_PID_FILE"
     echo "    Server started (PID: $pid)"
