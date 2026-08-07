@@ -169,14 +169,31 @@ pub(crate) fn update_heartbeat_instructions(
                     c.heartbeat_instructions = instructions.clone();
                     c
                 }
+                // whitelisted / readable / writable は**焼き込まず実効値を継承**する（#418）。
+                // set_channel_scope と同型: これらは (channel_id, agent_id) 固有行がグローバル行を
+                // 上書きする precedence を持つため、ハートビート指示の設定という副作用で固定値の
+                // 新規行を作ると実効ゲートを黙って変えてしまう。existing=None のブランチなので、各
+                // helper はグローバル行の値（無ければ既定）＝現在の実効値を返す。
                 None => opencrab_db::queries::ChannelConfigRow {
                     channel_id: channel_id.to_string(),
                     agent_id: ctx.agent_id.clone(),
                     guild_id,
                     channel_name: String::new(),
-                    readable: true,
-                    writable: true,
-                    whitelisted: false,
+                    readable: opencrab_db::queries::is_channel_readable_for_agent(
+                        &conn,
+                        channel_id,
+                        &ctx.agent_id,
+                    ),
+                    writable: opencrab_db::queries::is_channel_writable_for_agent(
+                        &conn,
+                        channel_id,
+                        &ctx.agent_id,
+                    ),
+                    whitelisted: opencrab_db::queries::is_channel_whitelisted_for_agent(
+                        &conn,
+                        channel_id,
+                        &ctx.agent_id,
+                    ),
                     heartbeat_enabled: true,
                     heartbeat_interval_secs: None,
                     heartbeat_instructions: instructions.clone(),

@@ -407,14 +407,32 @@ fn set_channel_scope(
                 Some(g) if !g.is_empty() => g,
                 _ => return err("新規チャンネル設定の作成にはguild_idが必要です"),
             };
+            // whitelisted / readable / writable は**焼き込まず実効値を継承**する（#418）。
+            // これらは (channel_id, agent_id) 固有行がグローバル行を上書きする precedence
+            // （`is_channel_*_for_agent`）を持つため、固定値で新規行を作るとハートビート設定の
+            // 副作用でチャンネルの実効ゲートが変わってしまう。ここは existing=None のブランチな
+            // ので、各 helper はグローバル行の値（無ければ既定）＝現在の実効値を返す。これを
+            // そのまま焼くことで「ハートビート設定操作は whitelist 等の実効値を変えない」を守る。
             opencrab_db::queries::ChannelConfigRow {
                 channel_id: channel_id.to_string(),
                 agent_id: ctx.agent_id.clone(),
                 guild_id,
                 channel_name: String::new(),
-                readable: true,
-                writable: true,
-                whitelisted: false,
+                readable: opencrab_db::queries::is_channel_readable_for_agent(
+                    &conn,
+                    channel_id,
+                    &ctx.agent_id,
+                ),
+                writable: opencrab_db::queries::is_channel_writable_for_agent(
+                    &conn,
+                    channel_id,
+                    &ctx.agent_id,
+                ),
+                whitelisted: opencrab_db::queries::is_channel_whitelisted_for_agent(
+                    &conn,
+                    channel_id,
+                    &ctx.agent_id,
+                ),
                 // 新規行の既定は有効（discord_channel_config の既定・指示文 scope=channel と
                 // 同じ）。enabled 明示があればそれを尊重する。
                 heartbeat_enabled: enabled_arg.unwrap_or(true),

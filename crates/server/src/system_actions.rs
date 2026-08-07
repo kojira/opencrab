@@ -5950,6 +5950,281 @@ mod tests {
         assert!(row.heartbeat_enabled, "新規行の既定は有効");
     }
 
+    /// #418 バグ再現ケース: グローバル行で whitelisted=1 のチャンネルに固有行が無いとき、
+    /// scope=channel の設定で新規固有行を作っても、そのエージェントの**実効 whitelist は
+    /// true のまま**でなければならない。固定値 `whitelisted: false` を焼くと固有行が
+    /// グローバルを precedence で上書きし、実効値が黙って false に落ちる（修正前はここで落ちた）。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_inherits_whitelist_from_global_row() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            // グローバル行（agent_id=""）だけを許可で仕込む。固有行は無い。
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: String::new(),
+                    guild_id: "g1".to_string(),
+                    channel_name: "雑談".to_string(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: true,
+                    heartbeat_enabled: false,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+            // 前提: このエージェントの固有行はまだ無く、実効 whitelist はグローバル由来で true。
+            assert!(
+                opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(opencrab_db::queries::is_channel_whitelisted_for_agent(
+                &conn, "ch1", "agent-x"
+            ));
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "guild_id": "g1", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let conn = state.db.lock().unwrap();
+        // 新規固有行ができるが、whitelisted はグローバルの実効値（true）を継承する。
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .expect("固有行が作られる");
+        assert!(
+            row.whitelisted,
+            "ハートビート設定でグローバルの許可(true)を黙って落としてはならない"
+        );
+        // 実効 whitelist も true のまま（固有行がグローバルを上書きして false に落ちない）。
+        assert!(
+            opencrab_db::queries::is_channel_whitelisted_for_agent(&conn, "ch1", "agent-x"),
+            "実効 whitelist が true→false に落ちてはならない（#418）"
+        );
+    }
+
+    /// #418 過剰修正（一律 true）防止ケース: グローバル行で whitelisted=0（＝意図して不許可）の
+    /// チャンネルに固有行が無いとき、scope=channel の設定で新規行を作っても実効 whitelist は
+    /// **false のまま**でなければならない。「継承」は実効値のコピーであって一律 true 化ではない。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_does_not_open_a_closed_channel() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: String::new(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: false,
+                    heartbeat_enabled: false,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+            assert!(!opencrab_db::queries::is_channel_whitelisted_for_agent(
+                &conn, "ch1", "agent-x"
+            ));
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "guild_id": "g1", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .expect("固有行が作られる");
+        assert!(
+            !row.whitelisted,
+            "不許可(false)のチャンネルをハートビート設定で勝手に開けてはならない"
+        );
+        assert!(
+            !opencrab_db::queries::is_channel_whitelisted_for_agent(&conn, "ch1", "agent-x"),
+            "実効 whitelist が false→true に上がってはならない（一律 true は誤り）"
+        );
+    }
+
+    /// #418: 既存の固有行が whitelisted=0（意図して切ってある）とき、scope=channel の
+    /// ハートビート設定は whitelisted を**一切触らない**（heartbeat 系カラムだけ更新）。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_preserves_existing_disabled_whitelist() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: "agent-x".to_string(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: false,
+                    heartbeat_enabled: true,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "interval_secs": 900}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.heartbeat_interval_secs, Some(900), "間隔だけ更新される");
+        assert!(
+            !row.whitelisted,
+            "意図して切った whitelisted=0 をハートビート設定で touch してはならない"
+        );
+    }
+
+    /// #418 姉妹経路: `update_heartbeat_instructions(scope="channel")` も新規行作成で
+    /// whitelist の実効値を継承しなければならない（`set_channel_scope` と同型の焼き込みが
+    /// あった）。グローバル `whitelisted=1`・固有行なし → 指示文設定後も実効 whitelist は true。
+    #[tokio::test]
+    async fn update_heartbeat_instructions_channel_scope_inherits_whitelist_from_global_row() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: String::new(),
+                    guild_id: "g1".to_string(),
+                    channel_name: "雑談".to_string(),
+                    readable: true,
+                    writable: true,
+                    whitelisted: true,
+                    heartbeat_enabled: false,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+            assert!(
+                opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(opencrab_db::queries::is_channel_whitelisted_for_agent(
+                &conn, "ch1", "agent-x"
+            ));
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        // update_heartbeat_instructions はオーナー限定。
+        let r = actions
+            .execute(
+                "update_heartbeat_instructions",
+                &json!({"scope": "channel", "channel_id": "ch1", "guild_id": "g1", "instructions": "業務連絡のみ"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .expect("固有行が作られる");
+        assert_eq!(
+            row.heartbeat_instructions, "業務連絡のみ",
+            "指示文は設定される"
+        );
+        assert!(
+            row.whitelisted,
+            "指示文設定でグローバルの許可(true)を黙って落としてはならない"
+        );
+        assert!(
+            opencrab_db::queries::is_channel_whitelisted_for_agent(&conn, "ch1", "agent-x"),
+            "実効 whitelist が true→false に落ちてはならない（#418 姉妹経路）"
+        );
+    }
+
+    /// #418: whitelist と同型で readable/writable も実効値を継承する（over-grant しない方向）。
+    /// グローバル readable=0/writable=0・固有行なし → scope=channel の新規行はその false を継承し、
+    /// 固定 true で勝手に読み書きを開放しない。
+    #[tokio::test]
+    async fn set_my_heartbeat_channel_scope_inherits_readable_writable_from_global_row() {
+        let state = heartbeat_state();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_channel_config(
+                &conn,
+                &opencrab_db::queries::ChannelConfigRow {
+                    channel_id: "ch1".to_string(),
+                    agent_id: String::new(),
+                    guild_id: "g1".to_string(),
+                    channel_name: String::new(),
+                    readable: false,
+                    writable: false,
+                    whitelisted: true,
+                    heartbeat_enabled: false,
+                    heartbeat_interval_secs: None,
+                    heartbeat_instructions: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+
+        let r = actions
+            .execute(
+                "set_my_heartbeat",
+                &json!({"scope": "channel", "channel_id": "ch1", "guild_id": "g1", "interval_secs": 600}),
+                &trusted_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+
+        let conn = state.db.lock().unwrap();
+        let row = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch1", "agent-x")
+            .unwrap()
+            .expect("固有行が作られる");
+        assert!(
+            !row.readable,
+            "readable=0 をハートビート設定で勝手に true に開放してはならない"
+        );
+        assert!(
+            !row.writable,
+            "writable=0 をハートビート設定で勝手に true に開放してはならない"
+        );
+    }
+
     /// enabled=false のチャンネルは heartbeat_enabled=0 になる（発火対象から外れる）。
     #[tokio::test]
     async fn set_my_heartbeat_channel_scope_can_disable_channel() {
