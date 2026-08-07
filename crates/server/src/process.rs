@@ -647,6 +647,22 @@ pub fn build_heartbeat_conversation_string(
 /// `heartbeat_run_request` の `NoopCompletionSink` が依存している。
 const CHANNEL_CONVERSATION_LOG_TYPE: &str = "speech";
 
+/// ハートビート発話を実会話（`discord-…`）セッションへ二重記録するとき、その `speech`
+/// 行の `metadata_json` に付ける印（#425）。
+///
+/// `deliver_heartbeat_speech` が Discord へ配信できたターンだけ、本人の発話を
+/// この印を付けて実会話セッションへも書く（配信の書き込み側は `main.rs`）。狙いは
+/// **通常の Discord 返信ターンが読む [`build_conversation_string`] に本人の HB 投稿を
+/// 載せる**こと — そちらは `metadata_json` を見ずに素通しするので印は影響しない。
+///
+/// 一方 HB 経路の [`build_heartbeat_conversation_string`] は heartbeat 専用セッション
+/// （同じ発話が `SPEAK: …` の形で載る）と実会話セッションの**両方**を読む。実会話
+/// セクションでこの印の付いた自己エコーまで出すと、同じ発話が 2 回並ぶ。そこで
+/// [`build_channel_conversation_section`] はこの印の付いた行だけを落とす（下記）。
+/// 印の無い本人の非 HB 発話・他者発話はそのまま残るので、#404 の「自分の発言も含める」
+/// 意図は保たれる。
+pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channel_echo"}"#;
+
 /// 実会話セッションを `[Channel conversation]` セクションへ整形する（#404）。
 ///
 /// [`CHANNEL_CONVERSATION_LOG_TYPE`] の直近 [`CHANNEL_CONVERSATION_LOG_WINDOW`] 件を
@@ -673,6 +689,13 @@ fn build_channel_conversation_section(
             return None;
         }
     };
+    // #425: HB 由来の自己エコー（[`HEARTBEAT_CHANNEL_ECHO_METADATA`] 印）は、同じ発話が
+    // heartbeat 専用セッション側にも `SPEAK: …` として載っており、この関数を呼ぶ
+    // [`build_heartbeat_conversation_string`] は両方を読む。実会話セクションでそのまま
+    // 出すと二重表示になるので、印の付いた行だけを落とす。印の無い本人の非 HB 発話・
+    // 他者発話は残す（#404 の「自分の発言も含める」意図を壊さない）。ここでの絞り込みは
+    // 通常の Discord 返信が読む [`build_conversation_string`] には掛からない（別関数）。
+    logs.retain(|l| l.metadata_json.as_deref() != Some(HEARTBEAT_CHANNEL_ECHO_METADATA));
     logs.reverse();
     // #284 と同じ保証を実会話セクションでも効かせる。人の発言が窓（直近 500 発言）から
     // 溢れていても直近の分は混ぜ戻す（取得は id 順にマージされる）。
@@ -3263,6 +3286,101 @@ mod heartbeat_conversation_tests {
         // 対比: 従来の呼び出しでは実会話は 1 行も見えない（#404 の症状）。
         let plain = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
         assert!(!plain.contains("channel message"), "{plain}");
+    }
+
+    /// #425: HB 発話は heartbeat 専用セッション（`SPEAK: …`）と実会話セッション（案 A の
+    /// 二重記録）の両方に載る。HB 文脈組み立ては両方を読むので、実会話セクションでは
+    /// [`HEARTBEAT_CHANNEL_ECHO_METADATA`] 印の付いた自己エコーを落として二重表示を防ぐ。
+    /// 印の無い本人の通常返信・他者発言は残す（#404 の意図）。
+    #[test]
+    fn heartbeat_channel_echo_is_deduplicated_in_heartbeat_context() {
+        let conn = opencrab_db::init_memory().unwrap();
+
+        // 実会話セッション: 他者発言 + 本人の通常返信（印なし）。
+        insert(
+            &conn,
+            CH_SESSION,
+            "speech",
+            "human-1",
+            "リリース計画どうする？".to_string(),
+        );
+        insert(
+            &conn,
+            CH_SESSION,
+            "speech",
+            AGENT,
+            "通常返信 明日まとめます".to_string(),
+        );
+        // 本人の HB 発話を案 A で会話セッションへ二重記録（印つき）。
+        opencrab_db::queries::insert_session_log(
+            &conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: CH_SESSION.to_string(),
+                log_type: "speech".to_string(),
+                content: "ECHOUTTERANCE リリースの件、進めます".to_string(),
+                speaker_id: Some(AGENT.to_string()),
+                turn_number: None,
+                metadata_json: Some(super::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+                created_at: None,
+            },
+        )
+        .unwrap();
+
+        // heartbeat 専用セッション: 同じ発話が SPEAK: 形式で載る + 末尾は今回のプロンプト。
+        insert(
+            &conn,
+            HB_SESSION,
+            "speech",
+            AGENT,
+            "SPEAK: ECHOUTTERANCE リリースの件、進めます".to_string(),
+        );
+        insert(
+            &conn,
+            HB_SESSION,
+            "system",
+            "heartbeat",
+            format!("[ハートビート] 現在の会話「開発」。\n{FORMAT_INSTRUCTION}"),
+        );
+
+        let out = build_heartbeat_conversation_string(
+            &conn,
+            HB_SESSION,
+            Some(CH_SESSION),
+            AGENT,
+            100_000,
+        )
+        .unwrap();
+
+        // 実会話セクションには他者発言と本人の通常返信が残る。
+        assert!(
+            out.contains("リリース計画どうする？"),
+            "他者発言は実会話セクションに残る: {out}"
+        );
+        assert!(
+            out.contains("通常返信 明日まとめます"),
+            "本人の非 HB 発話は残る（#404 の「自分の発言も含める」意図）: {out}"
+        );
+        // HB 由来の自己エコーは実会話セクションから落ち、heartbeat 専用セッション側
+        // （SPEAK: 形式）にのみ現れる ＝ 会話文字列中に 1 回だけ。
+        assert_eq!(
+            out.matches("ECHOUTTERANCE").count(),
+            1,
+            "HB 発話が二重表示されていない（実会話セクションからは印で除外）: {out}"
+        );
+        assert!(
+            out.contains("SPEAK: ECHOUTTERANCE"),
+            "残る 1 回は heartbeat 専用セッション側（SPEAK: 形式）: {out}"
+        );
+
+        // 対比: 通常返信ターンが読む build_conversation_string（実会話セッション）は印を
+        // 無視して素通しするので、本人の HB 投稿がそのまま会話文脈に現れる（#425 の修正点）。
+        let plain = build_conversation_string(&conn, CH_SESSION, AGENT, 100_000).unwrap();
+        assert!(
+            plain.contains("ECHOUTTERANCE"),
+            "通常返信ターンでは本人の HB 投稿が会話文脈に現れる（#425 の直したい経路）: {plain}"
+        );
     }
 
     /// 予算が足りない場合でも実会話は落ちず、形式指示も末尾に残る。
