@@ -701,10 +701,26 @@ async fn process_incoming_message<T: AgentRunner>(
             reaction_added = true;
         }
 
-        // タイピングインジケーター送信（ホワイトリスト通過後のみ）
-        if let Err(e) = gateway.start_typing(channel_id).await {
-            warn!("Failed to start typing indicator: {e}");
-        }
+        // タイピングインジケーター（ホワイトリスト通過後のみ）。
+        // #429: 1 回だけ打つと Discord の失効（約 10 秒）で応答前に消えるため、ターンが
+        // 生きている間は打ち直し続ける keepalive を起こす。ガード `typing_keepalive` は
+        // 下の spawn_serialized 内へ move し、ターン終了（成功・空・NO_REPLY・エラー）で
+        // drop されて確実に停止する。keepalive は別タスクなのでイベントループもターン本体も
+        // ブロックしない。発火条件は従来どおり（ここに来た＝応答する体だけ）。
+        let typing_keepalive = {
+            let gw = gateway.clone();
+            crate::typing_keepalive::spawn_typing_keepalive(
+                crate::typing_keepalive::TYPING_REFRESH_INTERVAL,
+                move || {
+                    let gw = gw.clone();
+                    async move {
+                        if let Err(e) = gw.start_typing(channel_id).await {
+                            warn!("Failed to refresh typing indicator: {e}");
+                        }
+                    }
+                },
+            )
+        };
 
         // NOTE: 会話履歴の構築は、推論本体とともにセッション単位ロックの内側（spawn 内）で
         // 行う。これにより、割り込みメッセージが直前の推論完了前に走って履歴が不整合に
@@ -787,8 +803,14 @@ async fn process_incoming_message<T: AgentRunner>(
         let text_spawn = text.clone();
         let event_tx_spawn = event_tx.clone();
         let registry_spawn = subtask_registry.clone();
+        // #429: typing keepalive をターン本体へ move する。この future がどの経路で
+        // 終わっても（下の早期パスを含む）ここで束ねたガードが drop され、keepalive は停止する。
+        let typing_keepalive_spawn = typing_keepalive;
 
         session_locks.spawn_serialized(session_id.clone(), async move {
+            // ターンの寿命に typing keepalive を束ねる（#429）。名前付きで保持し、
+            // ブロック終端まで生かす。drop = keepalive 停止。
+            let _typing_keepalive = typing_keepalive_spawn;
             let inbound = opencrab_actions::InboundMessageRecord {
                 session_id: &session_id_spawn,
                 recipient_agent_id: &agent_id_spawn,
