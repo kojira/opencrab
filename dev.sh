@@ -8,6 +8,10 @@ SERVER_PID_FILE="$SCRIPT_DIR/.server.pid"
 WEB_PID_FILE="$SCRIPT_DIR/.web.pid"
 FEATURES="discord"
 
+# #417: 実サーバプロセスを PID ファイルに頼らず探すためのパターン。
+# start_server は ./target/debug/opencrab-server を起動するので、その実行ファイルパスで照合する。
+SERVER_PROC_PATTERN="target/debug/opencrab-server"
+
 usage() {
     cat <<EOF
 Usage: ./dev.sh <command>
@@ -38,6 +42,34 @@ start_server() {
     echo "    Server started (PID: $pid)"
 }
 
+# #417: PID ファイルに載っていない実サーバプロセスを止める。
+#
+# PID ファイルが stale（別 run の古い PID／OS が別プロセスへ再利用）だと、stop_server は
+# 実サーバを止められないまま start_server が新サーバを上げ、二重起動になる（同一 SQLite への
+# 二重ライタ・Discord の二重処理）。PID ファイルとは別に実プロセスを pgrep で探し、生きて
+# いれば止めて単一インスタンスを保証する。
+stop_stray_servers() {
+    local pids
+    pids=$(pgrep -f "$SERVER_PROC_PATTERN" 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+    echo "==> PID ファイル外で稼働中の opencrab-server を検出 (PID: $(echo "$pids" | tr '\n' ' '))"
+    echo "    二重起動を避けるため停止します..."
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    # Wait up to 5s for graceful shutdown
+    for _ in $(seq 1 50); do
+        pgrep -f "$SERVER_PROC_PATTERN" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    # Force kill if still running
+    if pgrep -f "$SERVER_PROC_PATTERN" >/dev/null 2>&1; then
+        pkill -9 -f "$SERVER_PROC_PATTERN" 2>/dev/null || true
+    fi
+    echo "    停止しました"
+}
+
 stop_server() {
     if [ -f "$SERVER_PID_FILE" ]; then
         local pid
@@ -62,6 +94,10 @@ stop_server() {
     else
         echo "    No server PID file found"
     fi
+
+    # #417: PID ファイル経由の停止だけでは、stale/欠落時に実プロセスが残る。
+    # 起動前に必ず実プロセスを掃除して二重起動を防ぐ（残っていなければ no-op）。
+    stop_stray_servers
 }
 
 start_web() {
