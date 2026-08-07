@@ -198,19 +198,26 @@ pub(crate) fn log_startup_http_resolution(http: &HeartbeatDiscordHttp, agent_id:
 ///
 /// 第 1 引数は `&AppState` ではなく `&AgentGatewayRegistry` を直接受ける（本関数が使うのは
 /// `state.gateways` だけ。AppState 構築を避けて結線を単体テスト可能にするため / PR-C）。
+///
+/// **戻り値: Discord へ実際に配信できたか（#425）。** `true` のときだけ呼び出し側が、その
+/// 発話を本人の `discord-…` 会話セッションへ二重記録する（本人が後続の通常返信ターンで
+/// 自分の HB 投稿を思い出せるようにする）。手順1 の非 Discord transport が担当した場合は
+/// `discord-…` セッションが対象外なので `false`、Discord 配信に失敗／配信先が無い場合も
+/// `false`（言っていないことを記憶に残さない）。
 pub(crate) async fn deliver_heartbeat_speech(
     gateways: &AgentGatewayRegistry,
     discord_http: &HeartbeatDiscordHttp,
     agent_id: &str,
     channel_target: &str,
     content: &str,
-) {
+) -> bool {
     // 手順1: 非 Discord の登録 transport を registry 経由で試す。
     if deliver_via_non_discord_registry(gateways, agent_id, channel_target, content).await {
-        return;
+        // 非 Discord へ配れた。`discord-…` 会話セッションは記録先ではないので false。
+        return false;
     }
     // 手順2: 既存の Discord 共有 http 経路（現行 main.rs の直叩きと同一）。
-    deliver_via_discord_shared_http(discord_http, agent_id, channel_target, content).await;
+    deliver_via_discord_shared_http(discord_http, agent_id, channel_target, content).await
 }
 
 /// 稼働中の**非 Discord** transport へ登録簿経由で 1 通配る。配れたら（＝ある transport が
@@ -288,12 +295,16 @@ async fn deliver_via_non_discord_registry(
 ///
 /// **どのハンドルで送るかだけが #400 で変わった**: 全体で共有する 1 本ではなく、
 /// [`HeartbeatDiscordHttp::resolve`] が `agent_id` ごとに（per-agent → 共有の順で）引く。
+///
+/// **戻り値: Discord へ 1 通送れたか（#425）。** 送信 `Ok` のときだけ `true`。送信失敗・
+/// 配信先が無い（ハンドル未解決 / channel_target が無効）・Discord feature 無効ビルドは
+/// いずれも `false`（実際には Discord へ出ていないので、二重記録の対象にしない）。
 async fn deliver_via_discord_shared_http(
     discord_http: &HeartbeatDiscordHttp,
     agent_id: &str,
     channel_target: &str,
     content: &str,
-) {
+) -> bool {
     let channel_id_u64: Option<u64> = channel_target.parse().ok();
     let (http_opt, http_source) = discord_http.resolve(agent_id);
     if let (Some(_http), Some(_ch_id)) = (http_opt.clone(), channel_id_u64) {
@@ -307,13 +318,16 @@ async fn deliver_via_discord_shared_http(
                 .await
             {
                 tracing::error!(agent_id = %agent_id, channel_id = %channel_target, http_source = http_source.as_str(), "Heartbeat send_speech failed: {e}");
+                false
             } else {
                 tracing::info!(agent_id = %agent_id, channel_id = %channel_target, http_source = http_source.as_str(), "Heartbeat spoke: {}", content);
+                true
             }
         }
         #[cfg(not(feature = "discord"))]
         {
             tracing::info!(agent_id = %agent_id, channel_id = %channel_target, http_source = http_source.as_str(), "Heartbeat Speak (discord disabled): {}", content);
+            false
         }
     } else {
         // 手順1（非 Discord registry）も手順2（Discord 共有 http）も配れなかった＝
@@ -333,6 +347,7 @@ async fn deliver_via_discord_shared_http(
             channel_valid = channel_id_u64.is_some(),
             "Heartbeat: 発火したが発話先が無い（transport 未稼働 / channel 未設定・空/無効）。発話を取りこぼした"
         );
+        false
     }
 }
 
@@ -874,12 +889,20 @@ mod tests {
         // 引き受けるので Discord には一切触れない。
         let none_http = empty_http();
 
-        deliver_heartbeat_speech(&registry, &none_http, "crab", "note-target", "自律発話").await;
+        let delivered =
+            deliver_heartbeat_speech(&registry, &none_http, "crab", "note-target", "自律発話")
+                .await;
 
         assert_eq!(
             *calls.lock().unwrap(),
             vec![("note-target".to_string(), "自律発話".to_string())],
             "手順1 が content を配送し、手順2 へは進まない"
+        );
+        // #425: 非 Discord へ配れたターンは Discord 会話セッションへの二重記録対象では
+        // ないので false（記録先の `discord-…` セッションが無い）。
+        assert!(
+            !delivered,
+            "非 Discord transport が担当したターンは false（discord 会話セッションへ記録しない）"
         );
     }
 
@@ -892,11 +915,18 @@ mod tests {
         let registry = AgentGatewayRegistry::new();
         let none_http = empty_http();
 
-        deliver_heartbeat_speech(&registry, &none_http, "crab", "123456789", "hi").await;
+        let delivered =
+            deliver_heartbeat_speech(&registry, &none_http, "crab", "123456789", "hi").await;
 
         assert!(
             calls.lock().unwrap().is_empty(),
             "手順1 が居なければ registry spy には渡らない（手順2 の Discord 経路へ）"
+        );
+        // #425: 手順2 も http 未解決で配れなかった（送信していない）。方向ケース: 配信に
+        // 失敗したターンは false ＝ 呼び出し側は記録しない（言っていないことを残さない）。
+        assert!(
+            !delivered,
+            "Discord ハンドルが無く配れなかったターンは false（記録しない）"
         );
     }
 }

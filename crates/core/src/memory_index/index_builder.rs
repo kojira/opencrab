@@ -230,15 +230,20 @@ impl IndexBuilder {
             // 有無で判定する。
             // watermark（max_log_id）は上で前進済みなので、topic を作らなくても毎 tick
             // 同じログを取り直す無限ループにはならない。
-            let material_logs: Vec<&opencrab_db::queries::SessionLogRow> =
-                if session_id.starts_with("heartbeat-") {
-                    session_logs
-                        .iter()
-                        .filter(|l| !is_heartbeat_noise(l, agent_id))
-                        .collect()
-                } else {
-                    session_logs.iter().collect()
-                };
+            // #425: エコー行（HB 発話の表示専用の二重記録）は topic 要約の材料に入れない。
+            // 記憶材料としての HB 発話は heartbeat セッション側が担うため、索引・宣言材料は
+            // この PR の前後で不変。watermark（max_log_id）は上でフィルタ前の session_logs から
+            // 算出済みなので、材料が空でも前進する（エコーだけのバッチが「永遠に未索引」で
+            // バッチを詰まらせない — #416 と同族の「無言で進まない」を作らない）。
+            let material_logs: Vec<&opencrab_db::queries::SessionLogRow> = session_logs
+                .iter()
+                .filter(|l| {
+                    !opencrab_db::queries::is_heartbeat_channel_echo(l.metadata_json.as_deref())
+                })
+                .filter(|l| {
+                    !(session_id.starts_with("heartbeat-") && is_heartbeat_noise(l, agent_id))
+                })
+                .collect();
             if material_logs.is_empty() {
                 continue;
             }
@@ -2258,6 +2263,124 @@ mod tests {
         assert!(
             tree.iter().any(|n| n.node_type == "topic"),
             "通常セッションは idle フィルタの対象外"
+        );
+    }
+
+    /// #425 表示専用エコー行を投入するヘルパー。実会話（discord）セッションに、
+    /// 印つき speech として入れる。
+    fn insert_echo(conn: &rusqlite::Connection, agent_id: &str, session_id: &str, content: &str) {
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some(agent_id.to_string()),
+            turn_number: None,
+            metadata_json: Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+            created_at: None,
+        };
+        opencrab_db::queries::insert_session_log(conn, &log).unwrap();
+    }
+
+    /// #425: エコー行だけのバッチ（実会話セッションに印つき行しか無い）→ topic を作らず、
+    /// watermark は前進する。エコー行が「永遠に未索引」で残ってバッチを詰まらせない
+    /// （#416 と同族の「無言で進まない」を作らない）。再ビルドで同じ行を取り直さない。
+    #[tokio::test]
+    async fn test_heartbeat_echo_only_no_topic_but_watermark_advances() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "discord-agent-1-111-222";
+        insert_echo(&db_conn, "agent-1", sid, "エコー発話1");
+        insert_echo(&db_conn, "agent-1", sid, "エコー発話2");
+        insert_echo(&db_conn, "agent-1", sid, "エコー発話3");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let result = IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+        // 3 行は取得（消費）される。
+        assert_eq!(result.logs_indexed, 3);
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            assert!(
+                tree.iter().all(|n| n.node_type != "topic"),
+                "エコーだけなら topic は作られない（記憶材料に入れない）"
+            );
+            assert!(
+                tree.iter().all(|n| n.node_type != "session"),
+                "エコーだけなら session ノードも作られない"
+            );
+            let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                wm.last_indexed_log_id, 3,
+                "topic を作らなくても watermark は前進する（バッチが詰まらない）"
+            );
+        }
+
+        // 再ビルドで同じログを取り直さない（無限ループにならない）。
+        let r2 = IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+        assert_eq!(r2.logs_indexed, 0, "watermark 前進により再取得しない");
+    }
+
+    /// #425: 実会話セッションに実発言とエコーが混在 → topic は作られるが、要約材料には
+    /// エコー行が入らない（記憶索引・宣言材料はこの PR の前後で不変）。被覆範囲は
+    /// エコーを含む全ログを跨ぐ（watermark 維持）。
+    #[tokio::test]
+    async fn test_heartbeat_echo_excluded_from_index_material() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        let sid = "discord-agent-1-111-222";
+        // 他者の実発言（材料に残る）→ 本人の HB エコー（材料から除く）。
+        insert_hb_row(
+            &db_conn,
+            "agent-1",
+            sid,
+            "speech",
+            "someone-else",
+            "他者の実発言substantivemarker",
+        );
+        insert_echo(&db_conn, "agent-1", sid, "本人のHBエコーechomarker");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        let last_request = Arc::new(Mutex::new(None));
+        let llm = RecordingMockLlm {
+            last_request: last_request.clone(),
+        };
+        IndexBuilder::build_incremental(&conn, "agent-1", &llm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        {
+            let db = conn.lock().unwrap();
+            let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+            let topic = tree
+                .iter()
+                .find(|n| n.node_type == "topic")
+                .expect("他者の実発言があれば topic は作られる");
+            // 被覆範囲はエコーを含む全ログを跨ぐ（カバレッジ・watermark 維持）。
+            assert_eq!(topic.start_log_id, Some(1));
+            assert_eq!(topic.end_log_id, Some(2));
+            let wm = opencrab_db::queries::get_index_watermark(&db, "agent-1")
+                .unwrap()
+                .unwrap();
+            assert_eq!(wm.last_indexed_log_id, 2);
+        }
+
+        // LLM に渡した要約材料からエコー行が除かれ、他者の実発言だけが含まれる。
+        let request = last_request.lock().unwrap().clone().unwrap();
+        let prompt = request.messages[1].text_content().unwrap_or("").to_string();
+        assert!(
+            prompt.contains("substantivemarker"),
+            "他者の実発言は材料に残る"
+        );
+        assert!(
+            !prompt.contains("echomarker"),
+            "エコー行は要約材料から除かれる（記憶索引に入れない）"
         );
     }
 }

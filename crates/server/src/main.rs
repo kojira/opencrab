@@ -50,6 +50,62 @@ fn get_or_create_heartbeat_session(
     session_id
 }
 
+/// ハートビート発話を、本人の実会話（`discord-…`）セッションへ `speech` として二重記録する
+/// （#425 案 A）。
+///
+/// 背景: HB 発話は heartbeat 専用セッションにしか記録されず、自分の投稿が Discord から
+/// `message` として戻ってきても `is_own_message` で捨てられるため、本人の会話セッションには
+/// 1 行も残らない。結果、後続の通常返信ターン（`discord-…` セッションだけを読む）で本人だけ
+/// 自分の HB 投稿を思い出せない。ここで配信成功時に会話セッションへも書くことでその欠落を塞ぐ。
+///
+/// - `delivered=false`（非 Discord transport が担当・配信失敗・配信先無し）のターンは記録
+///   しない。**言っていないことを記憶に残さない**方向を守る。
+/// - guild を解決できないエージェント単位 tick（`channel_id`/`guild_id` が空）は記録先の
+///   会話セッションが無いので何もしない（[`heartbeat_channel_session_id`] が `None`）。
+/// - `opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA` を印として付ける。この印の
+///   付いた行は**表示専用**で、記憶系（FTS 検索・記憶索引・宣言材料）には一切載らない
+///   （`is_heartbeat_channel_echo` で db/core が除外）。記憶材料は heartbeat 専用セッション
+///   側が担っており、この PR の前後で記憶系の挙動は不変。HB 経路の文脈組み立ては専用
+///   セッションと会話セッションの両方を読むため、この印で実会話セクション側の二重表示も
+///   除外する（読み取り側は `process::build_channel_conversation_section`）。通常返信が
+///   読む `process::build_conversation_string` は印を見ずに素通しするので、狙いの経路には
+///   そのまま載る。
+fn record_heartbeat_channel_echo(
+    db: &opencrab_db::Db,
+    delivered: bool,
+    agent_id: &str,
+    guild_id: &str,
+    channel_id: &str,
+    content: &str,
+) {
+    if !delivered {
+        return;
+    }
+    let Some(session_id) =
+        opencrab_server::process::heartbeat_channel_session_id(agent_id, guild_id, channel_id)
+    else {
+        return;
+    };
+    let Ok(conn) = db.lock() else {
+        tracing::error!(agent_id = %agent_id, channel_id = %channel_id, "#425: db lock 取得に失敗し、HB 発話を会話セッションへ記録できなかった");
+        return;
+    };
+    let log = opencrab_db::queries::SessionLogRow {
+        id: None,
+        agent_id: agent_id.to_string(),
+        session_id,
+        log_type: "speech".to_string(),
+        content: content.to_string(),
+        speaker_id: Some(agent_id.to_string()),
+        turn_number: None,
+        metadata_json: Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+        created_at: None,
+    };
+    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+        tracing::error!(agent_id = %agent_id, channel_id = %channel_id, "#425: HB 発話を会話セッションへ記録できなかった: {e}");
+    }
+}
+
 /// heartbeat 経路の `RunRequest` を組む（#169）。
 ///
 /// 非ブロック dispatch（RFC #152 S3a）を有効化する。これにより heartbeat の tick は
@@ -573,8 +629,12 @@ fn make_heartbeat_callback(
                         let state = state.clone();
                         let agent_id_log = agent_id_owned.clone();
                         let ch_id_str = channel_id_str.clone();
+                        // #425: 配信できたら本人の discord 会話セッションへも二重記録する
+                        // ため、guild と db を持ち込む。
+                        let guild_id_log = guild_id.clone();
+                        let db = db.clone();
                         tokio::spawn(async move {
-                            heartbeat_delivery::deliver_heartbeat_speech(
+                            let delivered = heartbeat_delivery::deliver_heartbeat_speech(
                                 &state.gateways,
                                 &discord_http,
                                 &agent_id_log,
@@ -582,6 +642,16 @@ fn make_heartbeat_callback(
                                 &content,
                             )
                             .await;
+                            // #425: Discord へ配信できたターンだけ、本人の会話セッションへ
+                            // 発話を記録する（配信失敗ターンは記録しない）。
+                            record_heartbeat_channel_echo(
+                                &db,
+                                delivered,
+                                &agent_id_log,
+                                &guild_id_log,
+                                &ch_id_str,
+                                &content,
+                            );
                         });
                     }
                     HeartbeatDecision::Learn => {
@@ -1505,6 +1575,48 @@ mod tests {
         assert_eq!(
             opencrab_server::process::heartbeat_channel_session_id("agent-a", "", "222"),
             None
+        );
+    }
+
+    /// #425: HB 発話の会話セッションへの二重記録は **Discord へ配信できたターンだけ**行う。
+    /// (a) 配信成功 → 本人の `discord-…` 会話セッションへ `speech` が印つきで載る（修正前は
+    /// 1 行も無く、本人が自分の投稿を思い出せない再現ケース）。(b) 配信失敗 → 載せない
+    /// （言っていないことを記憶に残さない）。guild 無しのエージェント単位 tick → 記録先が
+    /// 無いので何もしない。
+    #[test]
+    fn heartbeat_channel_echo_recorded_only_on_delivery() {
+        let db = opencrab_db::Db::memory().unwrap();
+
+        // (a) 配信成功
+        record_heartbeat_channel_echo(&db, true, "agent-a", "111", "222", "自律発話A");
+        // (b) 配信失敗 → 記録しない
+        record_heartbeat_channel_echo(&db, false, "agent-a", "111", "222", "配信失敗の発話");
+        // guild 無し（エージェント単位 tick）→ 記録先が無いので何もしない
+        record_heartbeat_channel_echo(&db, true, "agent-a", "", "", "guild無しの発話");
+
+        let conn = db.lock().unwrap();
+        let logs =
+            opencrab_db::queries::list_session_logs_by_session(&conn, "discord-agent-a-111-222")
+                .unwrap();
+
+        assert_eq!(
+            logs.len(),
+            1,
+            "配信成功ターンだけが会話セッションへ載る（失敗・guild無しは載らない）: {logs:?}"
+        );
+        let row = &logs[0];
+        assert_eq!(row.log_type, "speech");
+        assert_eq!(row.content, "自律発話A");
+        assert_eq!(row.speaker_id.as_deref(), Some("agent-a"));
+        assert_eq!(
+            row.metadata_json.as_deref(),
+            Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA),
+            "HB 二重記録の印が付く（HB 経路の実会話セクションで二重表示を除外するため）"
+        );
+        // 印は is_heartbeat_channel_echo で表示専用（FTS・索引・宣言材料から除外）と判定される。
+        assert!(
+            opencrab_db::queries::is_heartbeat_channel_echo(row.metadata_json.as_deref()),
+            "記録した印は is_heartbeat_channel_echo で表示専用と判定される"
         );
     }
 }

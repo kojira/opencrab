@@ -445,10 +445,12 @@ pub fn get_session_logs_by_id_range(
     from_id: i64,
     to_id: i64,
 ) -> Result<Vec<SessionLogRow>> {
-    let mut stmt = conn.prepare(
+    // #425: 記憶ノードの生ログ全文取得でもエコー行（表示専用）は返さない（記憶系で不可視）。
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
-         FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3 ORDER BY id ASC",
-    )?;
+         FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3
+           AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL} ORDER BY id ASC"
+    ))?;
     let rows = stmt.query_map(params![agent_id, from_id, to_id], |row| {
         Ok(SessionLogRow {
             id: row.get(0)?,
@@ -503,8 +505,14 @@ pub fn get_unindexed_log_count(conn: &Connection, agent_id: &str) -> Result<i64>
     let last_id = get_index_watermark(conn, agent_id)?
         .map(|wm| wm.last_indexed_log_id)
         .unwrap_or(0);
+    // #425: 未索引件数の見積りからエコー行を除外（記憶材料でないので数に入れない）。
+    // 索引ビルダ本体の取得（get_unindexed_session_logs）は**除外しない**——エコー行を跨いで
+    // watermark を前進させる必要があるため（エコーだけのバッチが永遠に未索引で詰まらない）。
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        &format!(
+            "SELECT COUNT(*) FROM memory_sessions
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        ),
         params![agent_id, last_id],
         |row| row.get(0),
     )?;
@@ -793,8 +801,12 @@ pub fn get_unindexed_stats(conn: &Connection, agent_id: &str) -> Result<(i64, Op
     let last_id = get_index_watermark(conn, agent_id)?
         .map(|wm| wm.last_indexed_log_id)
         .unwrap_or(0);
+    // #425: 未索引統計からエコー行を除外（get_unindexed_log_count と同じ理由）。
     Ok(conn.query_row(
-        "SELECT COUNT(*), MAX(created_at) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        &format!(
+            "SELECT COUNT(*), MAX(created_at) FROM memory_sessions
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        ),
         params![agent_id, last_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
