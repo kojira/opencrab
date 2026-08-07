@@ -647,22 +647,6 @@ pub fn build_heartbeat_conversation_string(
 /// `heartbeat_run_request` の `NoopCompletionSink` が依存している。
 const CHANNEL_CONVERSATION_LOG_TYPE: &str = "speech";
 
-/// ハートビート発話を実会話（`discord-…`）セッションへ二重記録するとき、その `speech`
-/// 行の `metadata_json` に付ける印（#425）。
-///
-/// `deliver_heartbeat_speech` が Discord へ配信できたターンだけ、本人の発話を
-/// この印を付けて実会話セッションへも書く（配信の書き込み側は `main.rs`）。狙いは
-/// **通常の Discord 返信ターンが読む [`build_conversation_string`] に本人の HB 投稿を
-/// 載せる**こと — そちらは `metadata_json` を見ずに素通しするので印は影響しない。
-///
-/// 一方 HB 経路の [`build_heartbeat_conversation_string`] は heartbeat 専用セッション
-/// （同じ発話が `SPEAK: …` の形で載る）と実会話セッションの**両方**を読む。実会話
-/// セクションでこの印の付いた自己エコーまで出すと、同じ発話が 2 回並ぶ。そこで
-/// [`build_channel_conversation_section`] はこの印の付いた行だけを落とす（下記）。
-/// 印の無い本人の非 HB 発話・他者発話はそのまま残るので、#404 の「自分の発言も含める」
-/// 意図は保たれる。
-pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channel_echo"}"#;
-
 /// 実会話セッションを `[Channel conversation]` セクションへ整形する（#404）。
 ///
 /// [`CHANNEL_CONVERSATION_LOG_TYPE`] の直近 [`CHANNEL_CONVERSATION_LOG_WINDOW`] 件を
@@ -689,13 +673,13 @@ fn build_channel_conversation_section(
             return None;
         }
     };
-    // #425: HB 由来の自己エコー（[`HEARTBEAT_CHANNEL_ECHO_METADATA`] 印）は、同じ発話が
-    // heartbeat 専用セッション側にも `SPEAK: …` として載っており、この関数を呼ぶ
+    // #425: HB 由来の自己エコー（表示専用の二重記録）は、同じ発話が heartbeat 専用
+    // セッション側にも `SPEAK: …` として載っており、この関数を呼ぶ
     // [`build_heartbeat_conversation_string`] は両方を読む。実会話セクションでそのまま
     // 出すと二重表示になるので、印の付いた行だけを落とす。印の無い本人の非 HB 発話・
     // 他者発話は残す（#404 の「自分の発言も含める」意図を壊さない）。ここでの絞り込みは
     // 通常の Discord 返信が読む [`build_conversation_string`] には掛からない（別関数）。
-    logs.retain(|l| l.metadata_json.as_deref() != Some(HEARTBEAT_CHANNEL_ECHO_METADATA));
+    logs.retain(|l| !opencrab_db::queries::is_heartbeat_channel_echo(l.metadata_json.as_deref()));
     logs.reverse();
     // #284 と同じ保証を実会話セクションでも効かせる。人の発言が窓（直近 500 発言）から
     // 溢れていても直近の分は混ぜ戻す（取得は id 順にマージされる）。
@@ -3322,7 +3306,9 @@ mod heartbeat_conversation_tests {
                 content: "ECHOUTTERANCE リリースの件、進めます".to_string(),
                 speaker_id: Some(AGENT.to_string()),
                 turn_number: None,
-                metadata_json: Some(super::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+                metadata_json: Some(
+                    opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string(),
+                ),
                 created_at: None,
             },
         )

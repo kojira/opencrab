@@ -62,10 +62,13 @@ fn get_or_create_heartbeat_session(
 ///   しない。**言っていないことを記憶に残さない**方向を守る。
 /// - guild を解決できないエージェント単位 tick（`channel_id`/`guild_id` が空）は記録先の
 ///   会話セッションが無いので何もしない（[`heartbeat_channel_session_id`] が `None`）。
-/// - [`HEARTBEAT_CHANNEL_ECHO_METADATA`] を印として付ける。HB 経路の文脈組み立ては専用
-///   セッションと会話セッションの両方を読むため、この印で実会話セクション側の二重表示を
-///   除外する（読み取り側は [`process::build_channel_conversation_section`]）。通常返信が
-///   読む [`process::build_conversation_string`] は印を見ずに素通しするので、狙いの経路には
+/// - `opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA` を印として付ける。この印の
+///   付いた行は**表示専用**で、記憶系（FTS 検索・記憶索引・宣言材料）には一切載らない
+///   （`is_heartbeat_channel_echo` で db/core が除外）。記憶材料は heartbeat 専用セッション
+///   側が担っており、この PR の前後で記憶系の挙動は不変。HB 経路の文脈組み立ては専用
+///   セッションと会話セッションの両方を読むため、この印で実会話セクション側の二重表示も
+///   除外する（読み取り側は `process::build_channel_conversation_section`）。通常返信が
+///   読む `process::build_conversation_string` は印を見ずに素通しするので、狙いの経路には
 ///   そのまま載る。
 fn record_heartbeat_channel_echo(
     db: &opencrab_db::Db,
@@ -95,7 +98,7 @@ fn record_heartbeat_channel_echo(
         content: content.to_string(),
         speaker_id: Some(agent_id.to_string()),
         turn_number: None,
-        metadata_json: Some(opencrab_server::process::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+        metadata_json: Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
         created_at: None,
     };
     if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
@@ -1607,8 +1610,13 @@ mod tests {
         assert_eq!(row.speaker_id.as_deref(), Some("agent-a"));
         assert_eq!(
             row.metadata_json.as_deref(),
-            Some(opencrab_server::process::HEARTBEAT_CHANNEL_ECHO_METADATA),
+            Some(opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA),
             "HB 二重記録の印が付く（HB 経路の実会話セクションで二重表示を除外するため）"
+        );
+        // 印は is_heartbeat_channel_echo で表示専用（FTS・索引・宣言材料から除外）と判定される。
+        assert!(
+            opencrab_db::queries::is_heartbeat_channel_echo(row.metadata_json.as_deref()),
+            "記録した印は is_heartbeat_channel_echo で表示専用と判定される"
         );
     }
 }

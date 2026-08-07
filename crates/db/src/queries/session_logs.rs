@@ -23,6 +23,44 @@ pub struct SessionLogRow {
     pub created_at: Option<String>,
 }
 
+/// ハートビート発話を本人の実会話（`discord-…`）セッションへ二重記録した行の
+/// `metadata_json` に入る `source` 値（#425）。
+pub const HEARTBEAT_CHANNEL_ECHO_SOURCE: &str = "heartbeat_channel_echo";
+
+/// 上記エコー行の `metadata_json` そのもの。書き手（`main.rs`）はこれを `speech` 行の
+/// `metadata_json` に入れる。読み手は [`is_heartbeat_channel_echo`] で判定すること
+/// （キー順・空白の違いに依存しないため）。
+pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channel_echo"}"#;
+
+/// 行が HB 発話のエコー（**表示専用の二重記録**）かどうか（#425）。
+///
+/// エコー行は「生きた会話文脈を本人に見せる」ためだけの二重記録で、**記憶系
+/// （FTS 検索・記憶索引・宣言材料）には一切載せない**。記憶材料としての HB 発話は
+/// 従来どおり heartbeat 専用セッション側が担っており、症状修正のついでに記憶の挙動を
+/// 変えないため（この PR の前後で記憶系は不変）。判定は次の 3 箇所で使う:
+/// - [`insert_session_log_at`]: FTS 影テーブルへの投入をスキップ（検索に出さない）。
+/// - `index_builder`: topic 要約の材料から除外（索引・宣言材料に入れない）。
+/// - `process::build_channel_conversation_section`: HB 文脈の実会話セクションで、
+///   専用セッション側と二重に出るのを防ぐ。
+///
+/// `source` フィールドの**値**で判定するのでキー順・空白の違いに強い。値が現れない
+/// 大きな `metadata_json`（`tool_call` 等）は substring で早期に弾き、無駄な JSON parse を
+/// 避ける（`insert_session_log_at` は全 insert のホットパス）。
+pub fn is_heartbeat_channel_echo(metadata_json: Option<&str>) -> bool {
+    let Some(m) = metadata_json else {
+        return false;
+    };
+    if !m.contains(HEARTBEAT_CHANNEL_ECHO_SOURCE) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(m)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("source"))
+        .and_then(|s| s.as_str())
+        == Some(HEARTBEAT_CHANNEL_ECHO_SOURCE)
+}
+
 /// `insert_session_log` の best-effort 版: 失敗を握り潰さず warn を残す（#47）。
 ///
 /// 会話履歴のクリティカル経路では挿入失敗が「無言の履歴欠落」になる。伝播すると
@@ -87,18 +125,24 @@ pub fn insert_session_log_at(
 
     let row_id = conn.last_insert_rowid();
 
-    // FTSにも追加
-    conn.execute(
-        "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            row_id,
-            log.content,
-            log.agent_id,
-            log.session_id,
-            log.log_type
-        ],
-    )?;
+    // FTSにも追加。ただし #425 のエコー行（表示専用の二重記録）は FTS に載せない
+    // （記憶検索に二重ヒット・過大計上を出さない。記憶材料は heartbeat セッション側が担う）。
+    // 本体テーブルには入れる（会話文脈の表示に使う）ので、ここで memory_sessions と
+    // memory_sessions_fts が意図的に 1 行ずれる。手動同期の fts5 なので他経路が勝手に
+    // 埋め戻すことはない（唯一の投入口はこの関数）。
+    if !is_heartbeat_channel_echo(log.metadata_json.as_deref()) {
+        conn.execute(
+            "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                row_id,
+                log.content,
+                log.agent_id,
+                log.session_id,
+                log.log_type
+            ],
+        )?;
+    }
 
     if let Some(tx) = tx {
         tx.commit()?;
