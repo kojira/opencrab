@@ -1239,6 +1239,93 @@ mod tests {
         assert!(!rt.success, "ユニットを core として取り消せてはいけない");
     }
 
+    /// 段階2 でタグ整理側が作りうる `node_type='meta'` / `source_type='category'` の行は、
+    /// 凝縮の 3 経路（list / update / retract）から**見えない・触れない**。source_type ガードを
+    /// 外すと落ちる（変異検出）。
+    #[tokio::test]
+    async fn core_tools_ignore_category_meta_rows() {
+        let (_d, ctx) = test_context();
+        let (u1, _u2) = seed_two_units(&ctx).await;
+
+        // 本物の凝縮（source_type='condensed'）を 1 件作る。
+        let r = RecordMemoryCoreAction
+            .execute(
+                &json!({"axis": "軸", "body": "本文", "sources": [u1]}),
+                &ctx,
+            )
+            .await;
+        assert!(r.success);
+        let condensed_short = r.data.unwrap()["short_id"].as_str().unwrap().to_string();
+
+        // タグ整理側が作る想定の category-meta 行を直接差し込む（node_type='meta' だが condensed でない）。
+        {
+            let conn = ctx.db.lock().unwrap();
+            opencrab_db::queries::insert_index_node(
+                &conn,
+                &opencrab_db::queries::IndexNodeRow {
+                    id: "meta-category-x".to_string(),
+                    agent_id: "agent-1".to_string(),
+                    parent_id: None,
+                    node_type: "meta".to_string(),
+                    source_type: "category".to_string(),
+                    title: "カテゴリ meta".to_string(),
+                    summary: "タグ整理側の meta".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 1,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some("cat1".to_string()),
+                    keywords_json: "[]".to_string(),
+                    summary_refreshed_at: None,
+                },
+            )
+            .unwrap();
+        }
+
+        // (1) list からは category-meta が見えない（condensed の 1 件だけ）。
+        {
+            let conn = ctx.db.lock().unwrap();
+            let cores = opencrab_db::queries::list_memory_cores(&conn, "agent-1").unwrap();
+            assert_eq!(cores.len(), 1, "list は condensed だけを返す");
+            assert_eq!(cores[0].short_id.as_deref(), Some(condensed_short.as_str()));
+        }
+
+        // (2) update は category-meta を書き換えられない。
+        let up = UpdateMemoryCoreAction
+            .execute(&json!({"core_id": "cat1", "axis": "x", "body": "y"}), &ctx)
+            .await;
+        assert!(
+            !up.success,
+            "category-meta を凝縮として更新できてはいけない"
+        );
+
+        // (3) retract は category-meta を消せない。
+        let rt = RetractMemoryCoreAction
+            .execute(&json!({"core_id": "cat1"}), &ctx)
+            .await;
+        assert!(
+            !rt.success,
+            "category-meta を凝縮として取り消せてはいけない"
+        );
+
+        // category-meta は無傷で残っている。
+        {
+            let conn = ctx.db.lock().unwrap();
+            assert!(
+                opencrab_db::queries::get_index_node(&conn, "meta-category-x")
+                    .unwrap()
+                    .is_some(),
+                "category-meta 行は凝縮道具に触られず残る"
+            );
+        }
+    }
+
     // ---- survey の返り値を上限内に収める（#386）----
 
     use opencrab_db::queries::{HistoryBucket, HistorySurvey};

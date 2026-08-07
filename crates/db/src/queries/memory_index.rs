@@ -2335,10 +2335,14 @@ pub fn update_memory_core(
         Some(n) => n,
         None => anyhow::bail!("凝縮「{core_ref}」が見つかりません"),
     };
-    if node.node_type != "meta" {
+    // 凝縮ノードだけを対象にする。node_type='meta' は段階2 でタグ整理側が
+    // source_type='category' の meta を作りうる（#313）ので、**source_type='condensed' も要求**する
+    // （カテゴリ側の meta を凝縮道具で誤って書き換えない構造ガード。3 経路で対称に効かせる）。
+    if node.node_type != "meta" || node.source_type != "condensed" {
         anyhow::bail!(
-            "「{core_ref}」は凝縮（node_type='meta'）ではありません（node_type='{}'）。update_memory_core は凝縮のみ更新できます",
-            node.node_type
+            "「{core_ref}」は凝縮（node_type='meta' / source_type='condensed'）ではありません（node_type='{}' / source_type='{}'）。update_memory_core は凝縮のみ更新できます",
+            node.node_type,
+            node.source_type
         );
     }
 
@@ -2418,17 +2422,19 @@ pub fn update_memory_core(
 
 /// 凝縮を取り消す（**凝縮ノード + FTS 行だけ**を消す。生ログにも元ユニットにも触らない）。
 ///
-/// `core_ref` は short_id またはフル id。**`node_type='meta'` のノードだけ**を対象にする。
+/// `core_ref` は short_id またはフル id。**凝縮ノード（node_type='meta' / source_type='condensed'）
+/// だけ**を対象にする（カテゴリ側の meta を誤って消さない構造ガード）。
 /// 戻り値: 取り消した凝縮のフル id。
 pub fn retract_memory_core(conn: &Connection, agent_id: &str, core_ref: &str) -> Result<String> {
     let node = match get_index_node_by_short_or_id(conn, agent_id, core_ref)? {
         Some(n) => n,
         None => anyhow::bail!("凝縮「{core_ref}」が見つかりません"),
     };
-    if node.node_type != "meta" {
+    if node.node_type != "meta" || node.source_type != "condensed" {
         anyhow::bail!(
-            "「{core_ref}」は凝縮（node_type='meta'）ではありません（node_type='{}'）。retract_memory_core は凝縮のみ取り消せます",
-            node.node_type
+            "「{core_ref}」は凝縮（node_type='meta' / source_type='condensed'）ではありません（node_type='{}' / source_type='{}'）。retract_memory_core は凝縮のみ取り消せます",
+            node.node_type,
+            node.source_type
         );
     }
     with_index_savepoint(conn, |tx| {
@@ -2439,10 +2445,13 @@ pub fn retract_memory_core(conn: &Connection, agent_id: &str, core_ref: &str) ->
 }
 
 /// エージェントの凝縮一覧（新しい順）。凝縮ランのプロンプト同梱・監査・テストで使う。
+///
+/// **`source_type='condensed'` で絞る**（node_type='meta' だけだと、段階2 でタグ整理側が作る
+/// source_type='category' の meta 行を凝縮として拾ってしまう / #313 と対称）。
 pub fn list_memory_cores(conn: &Connection, agent_id: &str) -> Result<Vec<IndexNodeRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {INDEX_NODE_COLUMNS} FROM memory_index_nodes
-         WHERE agent_id = ?1 AND node_type = 'meta'
+         WHERE agent_id = ?1 AND node_type = 'meta' AND source_type = 'condensed'
          ORDER BY updated_at DESC, created_at DESC"
     ))?;
     let rows = stmt.query_map(params![agent_id], index_node_from_row)?;
