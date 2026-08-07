@@ -67,6 +67,38 @@ fn recv_retry_backoff(consecutive_failures: u32) -> Duration {
         .min(RECV_RETRY_MAX)
 }
 
+/// whitelist / DM trust による受信破棄を INFO で残すときの間引き窓（#419）。
+///
+/// 破棄自体は正しい動作だが、busy な非 whitelist チャンネルで破棄が連発すると
+/// 同じ 1 行で `.server.log` が埋まる。同一宛先・同一理由の破棄は最大この間隔に
+/// 1 行へ抑え、「このエージェントは今この宛先を設定で無視している」ことが grep で
+/// 分かる可視性は保ちつつ洪水を防ぐ。
+const DROP_LOG_THROTTLE: Duration = Duration::from_secs(300);
+
+/// (理由:宛先) ごとに最後に破棄 INFO を出した時刻。プロセス内のログ間引き専用。
+static DROP_LOG_LAST: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Instant>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// `key`（理由と宛先の組）の破棄を今 INFO で出してよいかを返す。
+///
+/// 初回、または前回出力から `window` 以上経過していれば true を返し、最終出力時刻を
+/// `now` に更新する。窓の内側での連続破棄では false を返してログを間引く。
+fn should_emit_drop_log(
+    last_by_key: &std::sync::Mutex<HashMap<String, Instant>>,
+    key: &str,
+    now: Instant,
+    window: Duration,
+) -> bool {
+    let mut map = last_by_key.lock().unwrap();
+    match map.get(key) {
+        Some(&last) if now.duration_since(last) < window => false,
+        _ => {
+            map.insert(key.to_string(), now);
+            true
+        }
+    }
+}
+
 /// メッセージループへの内部イベント。
 pub enum LoopEvent {
     /// Discordからの新規メッセージ。
@@ -544,10 +576,16 @@ async fn process_incoming_message<T: AgentRunner>(
 
     // DM whitelist check（いずれかのエージェントが信頼していれば通す事前ゲート）
     if is_dm && !state.dm_allowed_any(&incoming.sender.id, &agent_ids, &owner_discord_id) {
-        debug!(
-            sender = %incoming.sender.id,
-            "Ignoring DM from non-whitelisted user"
-        );
+        // #419: 破棄は正しい動作だが debug だと運用ログ（INFO）に出ず「無言・エラー
+        // なし」の切り分けが難しい。設定による破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+        let key = format!("dm_gate:{}", incoming.sender.id);
+        if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+            info!(
+                sender = %incoming.sender.id,
+                reason = "dm_sender_not_trusted",
+                "受信DMを破棄: 設定によりどのエージェントも送信者を信頼していない"
+            );
+        }
         return;
     }
 
@@ -584,11 +622,18 @@ async fn process_incoming_message<T: AgentRunner>(
         // Per-agent channel whitelist check
         if !is_dm {
             if !state.is_channel_whitelisted_for_agent(&channel_id_str, agent_id) {
-                debug!(
-                    channel = %channel_id_str,
-                    agent = %agent_id,
-                    "Ignoring message from non-whitelisted channel for agent"
-                );
+                // #419: 設定によるチャンネル破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+                // 全エージェントが非 whitelist ならメッセージは無言のまま処理されないので、
+                // 運用ログでゲート破棄だと即断できるようにする。
+                let key = format!("chan_wl:{agent_id}:{channel_id_str}");
+                if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+                    info!(
+                        channel = %channel_id_str,
+                        agent = %agent_id,
+                        reason = "channel_not_whitelisted",
+                        "受信メッセージを破棄: 設定によりこのエージェントの非whitelistチャンネル"
+                    );
+                }
                 continue; // skip this agent, not return
             }
         } else {
@@ -597,11 +642,16 @@ async fn process_incoming_message<T: AgentRunner>(
             // ここで各エージェント個別に信頼を確認しないと、あるエージェントにしか信頼
             // 登録していないユーザーのDMに全エージェントが応答してしまう。
             if !state.dm_allowed(&incoming.sender.id, agent_id, &owner_discord_id) {
-                debug!(
-                    sender = %incoming.sender.id,
-                    agent = %agent_id,
-                    "Ignoring DM: sender not trusted for this agent"
-                );
+                // #419: 設定による DM 破棄を 1 行 INFO で残す（宛先ごとに間引き）。
+                let key = format!("dm_trust:{}:{}", agent_id, incoming.sender.id);
+                if should_emit_drop_log(&DROP_LOG_LAST, &key, Instant::now(), DROP_LOG_THROTTLE) {
+                    info!(
+                        sender = %incoming.sender.id,
+                        agent = %agent_id,
+                        reason = "dm_sender_not_trusted_for_agent",
+                        "受信DMを破棄: 設定によりこのエージェントは送信者を信頼していない"
+                    );
+                }
                 continue; // skip this agent, not return
             }
         }
@@ -1655,8 +1705,40 @@ mod wiring_tests;
 mod tests {
     use super::{
         discord_context_line, parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
-        should_alert_inbound_stalled, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX,
+        should_alert_inbound_stalled, should_emit_drop_log, RECV_FAILURES_BEFORE_ALERT,
+        RECV_RETRY_BASE, RECV_RETRY_MAX,
     };
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tokio::time::{Duration, Instant};
+
+    /// #419: フィルタ破棄 INFO は宛先ごとに間引く。初回は出し、窓の内側では抑制し、
+    /// 窓を越えたら再び出す。異なる宛先どうしは互いに間引かない。
+    #[test]
+    fn drop_log_throttle_emits_first_suppresses_within_window_reemits_after() {
+        let map: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+
+        // 初回は必ず出す。
+        assert!(should_emit_drop_log(&map, "chan_wl:a1:c1", t0, window));
+        // 窓の内側（同一宛先）は抑制する。ここが常に true だと洪水対策が壊れる。
+        assert!(!should_emit_drop_log(
+            &map,
+            "chan_wl:a1:c1",
+            t0 + window - Duration::from_millis(1),
+            window
+        ));
+        // 別宛先は独立に出す（他宛先の破棄で自分が間引かれない）。
+        assert!(should_emit_drop_log(&map, "chan_wl:a1:c2", t0, window));
+        // 窓を越えたら同一宛先でも再び出す（沈黙し続けないため）。
+        assert!(should_emit_drop_log(
+            &map,
+            "chan_wl:a1:c1",
+            t0 + window,
+            window
+        ));
+    }
 
     /// #286: エスカレーションは 1 度きりで終わらない。
     ///
