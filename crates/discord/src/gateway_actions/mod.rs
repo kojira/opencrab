@@ -1087,6 +1087,111 @@ mod tests {
         assert!(!cfg.writable);
     }
 
+    /// #421: whitelisted / heartbeat_enabled を省略した更新は既存値を保持する（patch 意味論）。
+    /// full-replace のまま既定値へ落とすと、読み書きだけ変える操作で既存の whitelist が
+    /// 黙って消え、そのエージェントがそのチャンネルで無言破棄されるようになる。
+    #[tokio::test]
+    async fn test_channel_config_omitted_fields_preserve_existing() {
+        let (actions, db) = make_test_actions();
+
+        // whitelisted=true, heartbeat 無効 で初期化。
+        let r1 = actions
+            .execute(
+                "discord_channel_config",
+                &json!({
+                    "channel_id": "ch-1",
+                    "guild_id": "guild-1",
+                    "channel_name": "general",
+                    "readable": true,
+                    "writable": true,
+                    "whitelisted": true,
+                    "heartbeat_enabled": false,
+                }),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(r1.success);
+
+        // 読み書きだけ変える意図で whitelisted / heartbeat_enabled を省略して更新。
+        let r2 = actions
+            .execute(
+                "discord_channel_config",
+                &json!({
+                    "channel_id": "ch-1",
+                    "guild_id": "guild-1",
+                    "channel_name": "general",
+                    "readable": false,
+                    "writable": false,
+                }),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(r2.success);
+
+        let conn = db.lock().unwrap();
+        let cfg = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch-1", "test-agent")
+            .unwrap()
+            .unwrap();
+        // 明示した値は反映される。
+        assert!(!cfg.readable);
+        assert!(!cfg.writable);
+        // 省略した値は既存を保持する（ここが壊れると #421 の無言 whitelist 消滅が再発）。
+        assert!(
+            cfg.whitelisted,
+            "omitted whitelisted must preserve existing 1"
+        );
+        assert!(
+            !cfg.heartbeat_enabled,
+            "omitted heartbeat_enabled must preserve existing false"
+        );
+    }
+
+    /// #421: 明示指定した値は従来どおりそのまま書く（省略時保持で常に据え置きにはしない）。
+    #[tokio::test]
+    async fn test_channel_config_explicit_whitelisted_false_overrides_existing() {
+        let (actions, db) = make_test_actions();
+
+        // 既存 whitelisted=true。
+        actions
+            .execute(
+                "discord_channel_config",
+                &json!({
+                    "channel_id": "ch-1",
+                    "guild_id": "guild-1",
+                    "readable": true,
+                    "writable": true,
+                    "whitelisted": true,
+                }),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+
+        // 明示的に false へ。
+        let r = actions
+            .execute(
+                "discord_channel_config",
+                &json!({
+                    "channel_id": "ch-1",
+                    "guild_id": "guild-1",
+                    "readable": true,
+                    "writable": true,
+                    "whitelisted": false,
+                }),
+                &tctx(GatewayCaller::Agent),
+            )
+            .await;
+        assert!(r.success);
+
+        let conn = db.lock().unwrap();
+        let cfg = opencrab_db::queries::get_channel_config_for_agent(&conn, "ch-1", "test-agent")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !cfg.whitelisted,
+            "explicit whitelisted=false must be written"
+        );
+    }
+
     #[tokio::test]
     async fn test_channel_config_missing_params() {
         let (actions, _db) = make_test_actions();
