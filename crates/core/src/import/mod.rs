@@ -1,6 +1,12 @@
+pub mod claude_code;
 pub mod import_service;
 pub mod openclaw_parser;
 pub mod sync_service;
+
+pub use claude_code::{
+    filter_already_imported, imported_keys_from_metadata, next_thinking_index, scan_project_dir,
+    PlannedRow, ProjectScan, ScanStats, Speaker,
+};
 
 pub use import_service::{execute_import, ImportCounts, ImportOptions, ImportResult};
 pub use openclaw_parser::{

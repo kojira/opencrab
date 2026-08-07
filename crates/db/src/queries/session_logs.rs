@@ -39,11 +39,38 @@ pub fn insert_session_log_best_effort(conn: &Connection, log: &SessionLogRow) {
 }
 
 pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64> {
+    insert_session_log_at(conn, log, &Utc::now().to_rfc3339())
+}
+
+/// `created_at` を**呼び出し側が決める** [`insert_session_log`]（#413）。
+///
+/// 通常の記録経路は「いま起きたこと」を書くので `Utc::now()` で正しいが、過去ログの
+/// **取り込み**では元の発生時刻でなければ意味が無い（宣言ランの窓も記憶索引の期間も
+/// `created_at` で切る）。`SessionLogRow::created_at` を黙って使う形にしなかったのは、
+/// 既存の全呼び出しが `None` を渡しており、意味を後付けで変えると「渡し忘れたら現在時刻」
+/// という静かな分岐が生まれるため。時刻を持ち込む経路だけがこちらを名指しで呼ぶ。
+///
+/// `created_at` は**他の行と同じ表記**（`DateTime::to_rfc3339()`）で渡すこと。比較も
+/// バケットも文字列で走るので、表記が混ざると順序が壊れる。
+pub fn insert_session_log_at(
+    conn: &Connection,
+    log: &SessionLogRow,
+    created_at: &str,
+) -> Result<i64> {
     // 本体テーブルとFTS影テーブルへの2書き込みをトランザクションで原子化する。
     // 途中失敗で FTS と memory_sessions が恒久的に不整合になるのを防ぐ。
-    let tx = conn.unchecked_transaction()?;
+    //
+    // **既に外側のトランザクション中なら、そちらの原子性に乗る**（#413）。SQLite は
+    // `BEGIN` の入れ子を許さないので、まとめて入れたい呼び出し側（取り込みは全行を
+    // 1 トランザクションにする — 途中で落ちた半端な範囲を残すと宣言ランのカーソルが
+    // その途中を跨ぐ）から呼ぶと、ここで無条件に `BEGIN` すると失敗する。
+    let tx = if conn.is_autocommit() {
+        Some(conn.unchecked_transaction()?)
+    } else {
+        None
+    };
 
-    tx.execute(
+    conn.execute(
         "INSERT INTO memory_sessions (agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
@@ -54,14 +81,14 @@ pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64>
             log.speaker_id,
             log.turn_number,
             log.metadata_json,
-            Utc::now().to_rfc3339(),
+            created_at,
         ],
     )?;
 
-    let row_id = tx.last_insert_rowid();
+    let row_id = conn.last_insert_rowid();
 
     // FTSにも追加
-    tx.execute(
+    conn.execute(
         "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
@@ -73,7 +100,9 @@ pub fn insert_session_log(conn: &Connection, log: &SessionLogRow) -> Result<i64>
         ],
     )?;
 
-    tx.commit()?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
 
     Ok(row_id)
 }
