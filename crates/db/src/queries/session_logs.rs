@@ -61,6 +61,22 @@ pub fn is_heartbeat_channel_echo(metadata_json: Option<&str>) -> bool {
         == Some(HEARTBEAT_CHANNEL_ECHO_SOURCE)
 }
 
+/// エコー行（表示専用）を記憶系クエリから除外する SQL 述語（#425）。**評価が真の行を保持**
+/// する（＝ WHERE へ `AND {…}` の形でそのまま連結する）。
+///
+/// `metadata_json` の `source` フィールドで判定し、Rust の [`is_heartbeat_channel_echo`] と
+/// **同じ行**を除外する（規則「エコーは生きた会話表示にだけ見え、記憶系のあらゆる経路から
+/// 不可視」を SQL 経路でも一貫させる）。
+/// - `metadata_json IS NULL`（大多数の行）は保持。
+/// - malformed JSON は `NOT json_valid(...)` で保持する（`json_extract` がエラーにならない）。
+/// - `source` を持たない/別値の JSON は null 安全 `IS NOT` で保持。
+/// - source が [`HEARTBEAT_CHANNEL_ECHO_SOURCE`] の行だけを落とす。
+///
+/// バインドパラメータを持たず source リテラルは固定（ユーザ入力を含まない）なので、
+/// 各クエリの WHERE 文字列へそのまま連結してよい。リテラルが上記 source 定数と一致することは
+/// 単体テストで固定する（drift ガード）。
+pub const EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL: &str = "(metadata_json IS NULL OR NOT json_valid(metadata_json) OR json_extract(metadata_json, '$.source') IS NOT 'heartbeat_channel_echo')";
+
 /// `insert_session_log` の best-effort 版: 失敗を握り潰さず warn を残す（#47）。
 ///
 /// 会話履歴のクリティカル経路では挿入失敗が「無言の履歴欠落」になる。伝播すると
@@ -130,6 +146,10 @@ pub fn insert_session_log_at(
     // 本体テーブルには入れる（会話文脈の表示に使う）ので、ここで memory_sessions と
     // memory_sessions_fts が意図的に 1 行ずれる。手動同期の fts5 なので他経路が勝手に
     // 埋め戻すことはない（唯一の投入口はこの関数）。
+    //
+    // ⚠️ 将来 `memory_sessions_fts` を本体から全行再構築するマイグレーションを書く場合も、
+    // ここと同じフィルタ（`is_heartbeat_channel_echo` / `EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL`）を
+    // 必ず掛けること。掛け忘れるとエコー行が FTS に埋め戻り、記憶検索の二重ヒットが復活する。
     if !is_heartbeat_channel_echo(log.metadata_json.as_deref()) {
         conn.execute(
             "INSERT INTO memory_sessions_fts (rowid, content, agent_id, session_id, log_type)
@@ -558,16 +578,19 @@ pub fn survey_my_history(
         Option<i64>,
         i64,
     ) = conn.query_row(
-        "SELECT COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
-                COALESCE(SUM(LENGTH(content)), 0)
-             FROM memory_sessions WHERE agent_id = ?1",
+        // #425: エコー行（表示専用）は地図・件数・est_tokens から除外（記憶系で不可視）。
+        &format!(
+            "SELECT COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
+                    COALESCE(SUM(LENGTH(content)), 0)
+                 FROM memory_sessions WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        ),
         params![agent_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let total_buckets: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM (SELECT {bucket_expr} AS bkt FROM memory_sessions
-             WHERE agent_id = ?1 GROUP BY bkt)"
+             WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL} GROUP BY bkt)"
         ),
         params![agent_id],
         |r| r.get(0),
@@ -576,7 +599,7 @@ pub fn survey_my_history(
         let sql = format!(
             "SELECT {bucket_expr} AS bkt, COUNT(*), COUNT(DISTINCT session_id), MIN(id), MAX(id),
                     COALESCE(SUM(LENGTH(content)), 0)
-             FROM memory_sessions WHERE agent_id = ?1
+             FROM memory_sessions WHERE agent_id = ?1 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
              GROUP BY bkt ORDER BY bkt DESC LIMIT ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -606,6 +629,7 @@ pub fn survey_my_history(
         let sql = format!(
             "SELECT {bucket_expr} AS bkt, log_type, COUNT(*)
              FROM memory_sessions WHERE agent_id = ?1 AND {bucket_expr} >= ?2
+               AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
              GROUP BY bkt, log_type"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -671,15 +695,22 @@ fn resolve_around_window(
     center_id: i64,
     radius: i64,
 ) -> Result<(i64, i64)> {
+    // #425: around 窓の前後 radius 件からもエコー行を除外（記憶系で不可視・窓境界を一貫）。
     let lo: Option<i64> = conn.query_row(
-        "SELECT MIN(id) FROM (SELECT id FROM memory_sessions
-         WHERE agent_id = ?1 AND id <= ?2 ORDER BY id DESC LIMIT ?3)",
+        &format!(
+            "SELECT MIN(id) FROM (SELECT id FROM memory_sessions
+         WHERE agent_id = ?1 AND id <= ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+         ORDER BY id DESC LIMIT ?3)"
+        ),
         params![agent_id, center_id, radius + 1],
         |r| r.get(0),
     )?;
     let hi: Option<i64> = conn.query_row(
-        "SELECT MAX(id) FROM (SELECT id FROM memory_sessions
-         WHERE agent_id = ?1 AND id >= ?2 ORDER BY id ASC LIMIT ?3)",
+        &format!(
+            "SELECT MAX(id) FROM (SELECT id FROM memory_sessions
+         WHERE agent_id = ?1 AND id >= ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+         ORDER BY id ASC LIMIT ?3)"
+        ),
         params![agent_id, center_id, radius + 1],
         |r| r.get(0),
     )?;
@@ -738,6 +769,9 @@ pub fn read_my_history(
             where_parts.push(format!("id >= ?{a} AND id <= ?{b}"));
         }
     }
+    // #425: エコー行（表示専用）は read_my_history の内容・range_total から除外する
+    // （記憶系のあらゆる経路で不可視。パラメータを持たない述語なので where へ連結する）。
+    where_parts.push(EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL.to_string());
     let base_where = where_parts.join(" AND ");
 
     let range_total: i64 = {
@@ -838,8 +872,12 @@ pub fn log_range_meta(
         Option<String>,
         Option<String>,
     ) = conn.query_row(
-        "SELECT COUNT(*), MIN(id), MAX(id), MIN(created_at), MAX(created_at)
-         FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3",
+        // #425: 宣言範囲メタからエコー行を除外（宣言材料・件数を記憶系で不可視に一貫）。
+        &format!(
+            "SELECT COUNT(*), MIN(id), MAX(id), MIN(created_at), MAX(created_at)
+         FROM memory_sessions WHERE agent_id = ?1 AND id >= ?2 AND id <= ?3
+           AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        ),
         params![agent_id, lo, hi],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
@@ -891,17 +929,21 @@ pub fn declare_window(
     cursor_id: i64,
     limit: i64,
 ) -> Result<DeclareWindow> {
+    // #425: 宣言窓の total_remaining・窓の中身からエコー行を除外（宣言経路で不可視に一貫）。
     let total_remaining: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        &format!(
+            "SELECT COUNT(*) FROM memory_sessions
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        ),
         params![agent_id, cursor_id],
         |r| r.get(0),
     )?;
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, session_id, created_at FROM memory_sessions
-         WHERE agent_id = ?1 AND id > ?2
-         ORDER BY id ASC LIMIT ?3",
-    )?;
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+         ORDER BY id ASC LIMIT ?3"
+    ))?;
     let rows: Vec<(i64, String, String)> = stmt
         .query_map(params![agent_id, cursor_id, limit.max(1)], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -951,11 +993,15 @@ pub fn nth_log_id_after(
     cursor_id: i64,
     n: i64,
 ) -> Result<Option<i64>> {
+    // #425: 「生ログを N 件ぶん進める」窓境界の算出でもエコー行を数えない（宣言経路で
+    // 不可視に一貫。エコーを 1 件に数えると窓境界が本来より手前へずれる）。
     let offset = n.max(1) - 1;
     let nth = conn.query_row(
-        "SELECT id FROM memory_sessions
-             WHERE agent_id = ?1 AND id > ?2
-             ORDER BY id ASC LIMIT 1 OFFSET ?3",
+        &format!(
+            "SELECT id FROM memory_sessions
+             WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}
+             ORDER BY id ASC LIMIT 1 OFFSET ?3"
+        ),
         params![agent_id, cursor_id, offset],
         |r| r.get::<_, i64>(0),
     );
@@ -966,7 +1012,10 @@ pub fn nth_log_id_after(
     }
     // n 件に満たない: あるだけ進める（＝最後の id）。1 件も無ければ None。
     let last: Option<i64> = conn.query_row(
-        "SELECT MAX(id) FROM memory_sessions WHERE agent_id = ?1 AND id > ?2",
+        &format!(
+            "SELECT MAX(id) FROM memory_sessions
+         WHERE agent_id = ?1 AND id > ?2 AND {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+        ),
         params![agent_id, cursor_id],
         |r| r.get(0),
     )?;

@@ -643,6 +643,131 @@ fn is_heartbeat_channel_echo_matches_on_source_field() {
     assert!(!is_heartbeat_channel_echo(Some("not json")));
 }
 
+/// #425 drift ガード: SQL 除外述語のリテラルが Rust 判定の source 定数と一致する。
+/// 片方だけ値を変えると SQL と Rust が別の行を除外してしまう（規則が破れる）。
+#[test]
+fn exclude_echo_sql_matches_source_constant() {
+    assert!(
+        EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL.contains(HEARTBEAT_CHANNEL_ECHO_SOURCE),
+        "SQL 述語のリテラルが source 定数と食い違っている: {EXCLUDE_HEARTBEAT_CHANNEL_ECHO_SQL}"
+    );
+}
+
+/// #425 不変テスト: エコー行（表示専用）は記憶系のどの経路（survey の地図/件数、
+/// declare_window の total_remaining/窓境界、read_my_history の内容/range_total、
+/// log_range_meta の件数、未索引件数、`nth_log_id_after` の窓境界）にも現れない。
+///
+/// 通常ログとエコーを**交互**に入れ、エコーが本来より手前に混ざる配置にする（末尾に足す
+/// だけだと境界系が動かず恒真になる）。数えると変わる値を**絶対値**で固定するので、除外を
+/// 外すと落ちる。
+#[test]
+fn heartbeat_channel_echo_invisible_to_all_memory_paths() {
+    let conn = setup();
+    let agent = "agent-1";
+    let ins = |session: &str, speaker: &str, content: &str, echo: bool| {
+        insert_session_log(
+            &conn,
+            &SessionLogRow {
+                id: None,
+                agent_id: agent.to_string(),
+                session_id: session.to_string(),
+                log_type: "speech".to_string(),
+                content: content.to_string(),
+                speaker_id: Some(speaker.to_string()),
+                turn_number: None,
+                metadata_json: echo.then(|| HEARTBEAT_CHANNEL_ECHO_METADATA.to_string()),
+                created_at: None,
+            },
+        )
+        .unwrap();
+    };
+    // id1..id5 を交互に。id3 だけがエコー（本来の並びの中間に混ざる）。
+    ins("discord-agent-1-111-a", "human", "normal 1", false); // id1
+    ins("discord-agent-1-111-a", agent, "normal 2", false); // id2
+    ins("discord-agent-1-111-a", agent, "ECHO utterance", true); // id3 (echo)
+    ins("discord-agent-1-111-b", "human", "normal 4", false); // id4
+    ins("discord-agent-1-111-b", agent, "normal 5", false); // id5
+
+    // survey: 地図・件数・est_tokens にエコーは入らない（非エコー 4 件）。
+    let survey = survey_my_history(&conn, agent, "day", 50).unwrap();
+    assert_eq!(survey.total_logs, 4, "survey 総件数はエコーを数えない");
+    let bucket_sum: i64 = survey.buckets.iter().map(|b| b.log_count).sum();
+    assert_eq!(bucket_sum, 4, "バケット log_count 合計もエコーを数えない");
+
+    // declare_window: total_remaining / log_count / 窓境界にエコーは入らない。
+    let dw = declare_window(&conn, agent, 0, 100).unwrap();
+    assert_eq!(
+        dw.total_remaining, 4,
+        "declare total_remaining はエコーを数えない"
+    );
+    assert_eq!(dw.log_count, 4, "declare 窓の log_count はエコーを数えない");
+    assert_eq!(dw.from_id, Some(1));
+    assert_eq!(dw.to_id, Some(5), "窓上端は最後の非エコー id");
+
+    // nth_log_id_after: 「3 件目」はエコー(id3)を飛ばして id4（外すと id3 になる）。
+    assert_eq!(
+        nth_log_id_after(&conn, agent, 0, 3).unwrap(),
+        Some(4),
+        "窓境界（N 件目）はエコーを数えない"
+    );
+
+    // read_my_history: 内容にエコーは出ず、range_total も非エコー件数。
+    let page = read_my_history(
+        &conn,
+        agent,
+        &HistoryFilter::IdRange {
+            from_id: 1,
+            to_id: 1000,
+        },
+        None,
+        100,
+        100_000,
+    )
+    .unwrap();
+    assert_eq!(page.range_total, 4, "read range_total はエコーを数えない");
+    assert!(
+        !page.rows.iter().any(|r| r.content.contains("ECHO")),
+        "read の内容にエコーは現れない: {:?}",
+        page.rows.iter().map(|r| &r.content).collect::<Vec<_>>()
+    );
+
+    // around 窓（resolve_around_window）でもエコーは内容に出ない。
+    let around = read_my_history(
+        &conn,
+        agent,
+        &HistoryFilter::Around {
+            center_id: 4,
+            radius: 5,
+        },
+        None,
+        100,
+        100_000,
+    )
+    .unwrap();
+    assert!(
+        !around.rows.iter().any(|r| r.content.contains("ECHO")),
+        "around 読みでもエコーは現れない"
+    );
+
+    // log_range_meta: 宣言範囲の件数はエコーを数えない。
+    let meta = log_range_meta(&conn, agent, 1, 1000).unwrap().unwrap();
+    assert_eq!(meta.count, 4, "宣言範囲メタ件数はエコーを数えない");
+
+    // 未索引件数: エコーは記憶材料でないので数に入らない。
+    assert_eq!(
+        get_unindexed_log_count(&conn, agent).unwrap(),
+        4,
+        "未索引件数はエコーを数えない"
+    );
+
+    // ただし本体テーブルには 5 行すべて残る（会話文脈の表示に使う）。
+    let all = list_session_logs_by_session(&conn, "discord-agent-1-111-a").unwrap();
+    assert!(
+        all.iter().any(|r| r.content.contains("ECHO")),
+        "本体テーブルにはエコー行が残る（表示専用）"
+    );
+}
+
 // 7. test_fts_multi_word_search
 #[test]
 fn test_fts_multi_word_search() {
