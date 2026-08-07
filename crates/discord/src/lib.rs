@@ -9,6 +9,7 @@ pub mod manager;
 pub mod message_loop;
 pub mod owner_warning;
 pub mod renderer;
+mod typing_keepalive;
 pub mod voice_session;
 
 pub use gateway_actions::DiscordGatewayActions;
