@@ -93,6 +93,10 @@ fn should_emit_drop_log(
     match map.get(key) {
         Some(&last) if now.duration_since(last) < window => false,
         _ => {
+            // #423: 出力のたびに窓を超えた古いエントリを掃除し、マップの無制限な成長を防ぐ。
+            // 掃除後に現在のキーを入れる（now は窓内なので残る）。これで保持数は「直近 window
+            // 以内に破棄が起きた宛先数」で有界になる。
+            map.retain(|_, &mut last| now.duration_since(last) < window);
             map.insert(key.to_string(), now);
             true
         }
@@ -1738,6 +1742,28 @@ mod tests {
             t0 + window,
             window
         ));
+    }
+
+    /// #423: 出力のたびに窓を超えた古いエントリを掃除し、マップが無制限に育たない。
+    /// retain を外すとここで len が増え続けて落ちる。
+    #[test]
+    fn drop_log_throttle_prunes_stale_entries_on_emit() {
+        let map: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
+        let window = Duration::from_secs(300);
+        let t0 = Instant::now();
+
+        // 3 宛先を t0 で記録。
+        assert!(should_emit_drop_log(&map, "a", t0, window));
+        assert!(should_emit_drop_log(&map, "b", t0, window));
+        assert!(should_emit_drop_log(&map, "c", t0, window));
+        assert_eq!(map.lock().unwrap().len(), 3);
+
+        // 窓を越えた時刻で新しい宛先 d を記録 → 出力時に窓超えの a/b/c が掃除され d だけ残る。
+        let later = t0 + window + Duration::from_secs(1);
+        assert!(should_emit_drop_log(&map, "d", later, window));
+        let m = map.lock().unwrap();
+        assert_eq!(m.len(), 1, "窓超えの古いエントリは掃除される");
+        assert!(m.contains_key("d"));
     }
 
     /// #286: エスカレーションは 1 度きりで終わらない。
