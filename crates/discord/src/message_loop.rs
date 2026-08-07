@@ -734,6 +734,17 @@ async fn process_incoming_message<T: AgentRunner>(
             discord_context_line(&guild_id, &channel_id_str)
         );
 
+        // #431: 「発言終わり」リアクション用に、このターンで自分が最後に投稿した
+        // メッセージ id を追跡する。on_response_text は反復ごとに発火しうるため、
+        // 送信は detach spawn（P1 非ブロック）のままにしつつ、**発火順（seq）が最大**の
+        // 送信を「最後の投稿」として採る（完了順は前後しうるので発火順で選ぶ）。
+        // ターン終了時に送信完了を待ってからリアクションを打つため、ハンドルも集める。
+        let last_self_post: std::sync::Arc<std::sync::Mutex<(u64, Option<u64>)>> =
+            std::sync::Arc::new(std::sync::Mutex::new((0, None)));
+        let reply_send_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let reply_send_tasks: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
         let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
             let state_for_cb = state.clone();
             let gateway_for_cb = gateway.clone();
@@ -741,6 +752,9 @@ async fn process_incoming_message<T: AgentRunner>(
             let is_dm_for_cb = is_dm;
             let voice_for_cb = voice.clone();
             let agent_id_for_cb = agent_id.clone();
+            let last_self_post_cb = last_self_post.clone();
+            let reply_send_seq_cb = reply_send_seq.clone();
+            let reply_send_tasks_cb = reply_send_tasks.clone();
             Some(std::sync::Arc::new(move |text: String| {
                 tracing::warn!(
                     channel_id = channel_id,
@@ -761,25 +775,39 @@ async fn process_incoming_message<T: AgentRunner>(
                 let voice_cb = voice_for_cb.clone();
                 let channel_id_str_cb = channel_id_str_for_cb.clone();
                 let agent_id_cb = agent_id_for_cb.clone();
-                tokio::spawn(async move {
+                let last_self_post_task = last_self_post_cb.clone();
+                // 発火順の連番。後段で最大 seq の送信＝最後の投稿を採る。
+                let seq = reply_send_seq_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let handle = tokio::spawn(async move {
                     tracing::warn!(
                         channel_id = channel_id,
                         text_len = text.len(),
                         "on_response_text: sending to Discord channel"
                     );
-                    if let Err(e) = gateway_cb.send_to_channel(channel_id, &text).await {
-                        tracing::error!("on_response_text Discord send failed: {e}");
-                    } else {
-                        tracing::warn!(
-                            channel_id = channel_id,
-                            "on_response_text: Discord send succeeded"
-                        );
-                        // VC セッションがこのチャンネルに紐づいていれば読み上げる
-                        if let Some(v) = &voice_cb {
-                            v.maybe_speak(&channel_id_str_cb, &agent_id_cb, &text);
+                    match gateway_cb.send_to_channel(channel_id, &text).await {
+                        Ok(msg_id) => {
+                            tracing::warn!(
+                                channel_id = channel_id,
+                                "on_response_text: Discord send succeeded"
+                            );
+                            // #431: 発火順が最大の送信だけを「最後の投稿」として記録する。
+                            if let Some(id) = msg_id {
+                                let mut g = last_self_post_task.lock().unwrap();
+                                if seq >= g.0 {
+                                    *g = (seq, Some(id));
+                                }
+                            }
+                            // VC セッションがこのチャンネルに紐づいていれば読み上げる
+                            if let Some(v) = &voice_cb {
+                                v.maybe_speak(&channel_id_str_cb, &agent_id_cb, &text);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("on_response_text Discord send failed: {e}");
                         }
                     }
                 });
+                reply_send_tasks_cb.lock().unwrap().push(handle);
             }))
         };
 
@@ -806,6 +834,9 @@ async fn process_incoming_message<T: AgentRunner>(
         // #429: typing keepalive をターン本体へ move する。この future がどの経路で
         // 終わっても（下の早期パスを含む）ここで束ねたガードが drop され、keepalive は停止する。
         let typing_keepalive_spawn = typing_keepalive;
+        // #431: 「発言終わり」リアクションの判定に使う（最後の自分の投稿 id / 送信ハンドル）。
+        let last_self_post_spawn = last_self_post.clone();
+        let reply_send_tasks_spawn = reply_send_tasks.clone();
 
         session_locks.spawn_serialized(session_id.clone(), async move {
             // ターンの寿命に typing keepalive を束ねる（#429）。名前付きで保持し、
@@ -907,6 +938,9 @@ async fn process_incoming_message<T: AgentRunner>(
                     })
                     .await;
 
+                // #431: 「発言終わり」リアクションの可否を result を move する前に確定する。
+                let eos_qualifies = end_of_speech_qualifies(&result);
+
                 handle_agent_response(
                     result,
                     &agent_id_spawn,
@@ -918,6 +952,34 @@ async fn process_incoming_message<T: AgentRunner>(
                     &discord_message_id_spawn,
                 )
                 .await;
+
+                // #431: 自然終了かつ発話ありなら、そのターンで自分が最後に投稿した
+                // メッセージに SPOKE_EMOJI を付ける。ストリーミング送信（detach spawn）が
+                // 全て完了してから最後の投稿 id を読むが、その待機はセッションロックを
+                // 塞がないよう別 detach タスクで行う（応答経路もブロックしない・non-fatal）。
+                if eos_qualifies {
+                    let handles: Vec<tokio::task::JoinHandle<()>> =
+                        std::mem::take(&mut *reply_send_tasks_spawn.lock().unwrap());
+                    let last_self_post_react = last_self_post_spawn.clone();
+                    let gateway_react = gateway_spawn.clone();
+                    let channel_id_str_react = channel_id_str_spawn.clone();
+                    tokio::spawn(async move {
+                        for h in handles {
+                            let _ = h.await;
+                        }
+                        let last_id = last_self_post_react.lock().unwrap().1;
+                        if let Some(id) = last_id {
+                            add_reaction_non_fatal(
+                                gateway_react.as_ref(),
+                                channel_id,
+                                &channel_id_str_react,
+                                &id.to_string(),
+                                SPOKE_EMOJI,
+                            )
+                            .await;
+                        }
+                    });
+                }
             }
         });
     }
@@ -1077,14 +1139,21 @@ async fn process_subtask_completed<T: AgentRunner>(
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
-            if let Err(e) = gateway
+            let sent_id = match gateway
                 .send_to_channel(channel_id, &engine_result.response)
                 .await
             {
-                error!("Subtask completion Discord send failed: {e}");
-            } else if let Some(v) = &voice {
-                v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
-            }
+                Ok(id) => {
+                    if let Some(v) = &voice {
+                        v.maybe_speak(&channel_id_str, &agent_id, &engine_result.response);
+                    }
+                    id
+                }
+                Err(e) => {
+                    error!("Subtask completion Discord send failed: {e}");
+                    None
+                }
+            };
             state.record_outbound_reply(
                 opencrab_actions::TranscriptSource::Discord,
                 &opencrab_actions::OutboundReplyRecord {
@@ -1095,6 +1164,20 @@ async fn process_subtask_completed<T: AgentRunner>(
                     context: Some(opencrab_actions::AgentReplyContext::SubtaskCompleted),
                 },
             );
+            // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
+            // 投稿できたなら「発言終わり」を付ける。付与失敗は non-fatal。
+            if !engine_result.stopped_by_limit {
+                if let Some(id) = sent_id {
+                    add_reaction_non_fatal(
+                        gateway.as_ref(),
+                        channel_id,
+                        &channel_id_str,
+                        &id.to_string(),
+                        SPOKE_EMOJI,
+                    )
+                    .await;
+                }
+            }
         }
         _ => {}
     }
@@ -1437,12 +1520,16 @@ async fn process_interaction_response<T: AgentRunner>(
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
                 return;
             }
-            if let Err(e) = gateway
+            let sent_id = match gateway
                 .send_to_channel(channel_id, &engine_result.response)
                 .await
             {
-                error!("Interaction response Discord send failed: {e}");
-            }
+                Ok(id) => id,
+                Err(e) => {
+                    error!("Interaction response Discord send failed: {e}");
+                    None
+                }
+            };
             state.record_outbound_reply(
                 opencrab_actions::TranscriptSource::Discord,
                 &opencrab_actions::OutboundReplyRecord {
@@ -1455,6 +1542,20 @@ async fn process_interaction_response<T: AgentRunner>(
                     }),
                 },
             );
+            // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
+            // 投稿できたなら「発言終わり」を付ける。付与失敗は non-fatal。
+            if !engine_result.stopped_by_limit {
+                if let Some(id) = sent_id {
+                    add_reaction_non_fatal(
+                        gateway.as_ref(),
+                        channel_id,
+                        &channel_id_str,
+                        &id.to_string(),
+                        SPOKE_EMOJI,
+                    )
+                    .await;
+                }
+            }
         }
         _ => {}
     }
@@ -1634,6 +1735,34 @@ const SEEN_EMOJI: &str = "👀";
 /// 👀 と同じ絵文字にすると 2 つの状態が区別できなくなる。
 const NO_REPLY_EMOJI: &str = "🤐";
 
+/// ターンが自然終了したとき、自分が最後に投稿したメッセージに付ける「発言終わり」の印（#431）。
+///
+/// 目的: 見ている人間が「まだ続きを書いているのか、言い終わったのか」を判別できる。
+/// 👀（受信）/🤐（黙ると決めた）と意味が衝突しない絵文字にする。付与対象も違い、
+/// これは**自分の投稿**に付く（👀/🤐 は受信したユーザー投稿に付く）。
+/// 既存の 2 種と同様ハードコード（設定項目は増やさない / #431 の判断）。
+const SPOKE_EMOJI: &str = "🏁";
+
+/// ターンが「発言終わり」リアクションの対象になるか（#431）。
+///
+/// `true` を返すのは、ターンが**自然に**（次の行動を選ばず）終わり、かつ発話として
+/// 成立したときだけ。以下は `false`:
+/// - エラー / タイムアウト（`Err`）… 「言い終わった」ではなく落ちた
+/// - 反復上限での打ち切り（`stopped_by_limit`）… 途中で切られた
+/// - `NO_REPLY` / 空応答 … そもそも発話していない
+///
+/// 実際に付けるかは、これに加えて「そのターンで自分が実際に投稿した message_id が
+/// あるか」で決まる（発話ゼロ＝投稿 id 無しなら付けない）。
+fn end_of_speech_qualifies(result: &anyhow::Result<opencrab_core::EngineResult>) -> bool {
+    match result.as_ref() {
+        Ok(r) => {
+            let text = r.response.trim();
+            !text.is_empty() && text != "NO_REPLY" && !r.stopped_by_limit
+        }
+        Err(_) => false,
+    }
+}
+
 /// リアクションを付ける対象の message_id を解析する。
 ///
 /// 空文字（message_idがメタデータに無い）や数値でない場合は `None` を返し、
@@ -1730,13 +1859,63 @@ mod wiring_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_context_line, parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
-        should_alert_inbound_stalled, should_emit_drop_log, RECV_FAILURES_BEFORE_ALERT,
-        RECV_RETRY_BASE, RECV_RETRY_MAX,
+        discord_context_line, end_of_speech_qualifies, parse_discord_session,
+        parse_reaction_message_id, recv_retry_backoff, should_alert_inbound_stalled,
+        should_emit_drop_log, NO_REPLY_EMOJI, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE,
+        RECV_RETRY_MAX, SEEN_EMOJI, SPOKE_EMOJI,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use tokio::time::{Duration, Instant};
+
+    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `response` と
+    /// `stopped_by_limit` の 2 つだけなので、他は既定的な値で埋める。
+    fn mk_result(response: &str, stopped_by_limit: bool) -> opencrab_core::EngineResult {
+        opencrab_core::EngineResult {
+            response: response.to_string(),
+            iterations: 1,
+            tool_calls_made: 0,
+            stopped_by_limit,
+            xml_fallback_parses: 0,
+        }
+    }
+
+    /// #431: 「発言終わり」の絵文字は既存の 2 種と衝突しない（区別できないと意味がない）。
+    #[test]
+    fn spoke_emoji_is_distinct_from_existing_reactions() {
+        assert_ne!(SPOKE_EMOJI, SEEN_EMOJI);
+        assert_ne!(SPOKE_EMOJI, NO_REPLY_EMOJI);
+        assert!(!SPOKE_EMOJI.is_empty());
+    }
+
+    /// #431: 自然終了かつ発話成立のターンだけが対象。
+    #[test]
+    fn end_of_speech_marks_only_natural_completed_replies() {
+        // 発話して自然終了 → 対象
+        assert!(end_of_speech_qualifies(&Ok(mk_result(
+            "言い終わったよ",
+            false
+        ))));
+    }
+
+    /// #431: 付けない経路を網羅する（恒真回避 — 各除外条件を個別に踏む）。
+    #[test]
+    fn end_of_speech_excludes_non_speech_and_cutoff() {
+        // NO_REPLY（読んで黙ると決めた）→ 付けない
+        assert!(!end_of_speech_qualifies(&Ok(mk_result("NO_REPLY", false))));
+        // 前後空白付き NO_REPLY も trim して同じ扱い
+        assert!(!end_of_speech_qualifies(&Ok(mk_result(
+            "  NO_REPLY \n",
+            false
+        ))));
+        // 空応答 → 付けない
+        assert!(!end_of_speech_qualifies(&Ok(mk_result("", false))));
+        assert!(!end_of_speech_qualifies(&Ok(mk_result("   ", false))));
+        // 反復上限で打ち切り（自然終了でない）→ 付けない
+        assert!(!end_of_speech_qualifies(&Ok(mk_result("途中まで", true))));
+        // エラー / タイムアウト終了 → 付けない
+        assert!(!end_of_speech_qualifies(&Err(anyhow::anyhow!("boom"))));
+    }
 
     /// #419: フィルタ破棄 INFO は宛先ごとに間引く。初回は出し、窓の内側では抑制し、
     /// 窓を越えたら再び出す。異なる宛先どうしは互いに間引かない。
