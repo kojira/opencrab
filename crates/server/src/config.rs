@@ -37,6 +37,9 @@ pub struct AppConfig {
     /// スリープ宣言ラン（#384 / #376 段階2）。既定オフ（opt-in / #346）。
     #[serde(default)]
     pub memory_declare: MemoryDeclareConfig,
+    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定オフ（opt-in）。
+    #[serde(default)]
+    pub memory_condense: MemoryCondenseConfig,
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
@@ -433,6 +436,59 @@ fn default_md_min_interval_minutes() -> i64 {
     1440
 }
 fn default_md_timeout_secs() -> u64 {
+    600
+}
+
+/// スリープ凝縮ラン（#411 / 記憶の 3 段目）の設定。
+///
+/// 凝縮ランは、本人が別セッションの新規 context で**自分のユニット（宣言した記憶）を俯瞰**し、
+/// 「その出来事たちが何を意味するか」という原則を `node_type='meta'` として刻む。宣言ランの
+/// 双子で、入力が生ログではなくユニットである点だけが本質的に違う。
+///
+/// **既定オフ**。ゲートは「ユニットが前回凝縮時より [`min_new_units`] 以上増えたか」＋
+/// 「前回から [`min_interval_minutes`] 以上経ったか」の 2 段。増えていなければ空振りの LLM
+/// コールを作らずゼロコールで return する。値は初回実験の実測で確定するため config 可変にする。
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryCondenseConfig {
+    /// 凝縮ラン全体の on/off。既定 false。
+    #[serde(default = "default_mc_enabled")]
+    pub enabled: bool,
+    /// 発火の下限。前回凝縮した時点のユニット総数から、これ以上増えていないと発火しない。
+    /// 初期 20（仮）。ユニット粒度が実測で概ね 3 日 = 1 ユニットなので 20 は概ね 2 か月ぶん。
+    /// **PR-3 で初回実験の実測後に確定する。**
+    #[serde(default = "default_mc_min_new_units")]
+    pub min_new_units: i64,
+    /// 日次以上の throttle。前回実行からこの**分数**以上経っていないと発火しない。
+    /// 凝縮は毎日出すものではない（頻繁だと凝縮自体が差分でなくなる / #411 原則2）ので、宣言ラン
+    /// （1440 分）より疎い初期値 10080（= 7 日）にする。**PR-3 で確定する（仮）。**
+    #[serde(default = "default_mc_min_interval_minutes")]
+    pub min_interval_minutes: i64,
+    /// 凝縮ラン 1 回のタイムアウト（秒）。超えたら partial 扱いで位置マーカーを進めない。
+    #[serde(default = "default_mc_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MemoryCondenseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_mc_enabled(),
+            min_new_units: default_mc_min_new_units(),
+            min_interval_minutes: default_mc_min_interval_minutes(),
+            timeout_secs: default_mc_timeout_secs(),
+        }
+    }
+}
+
+fn default_mc_enabled() -> bool {
+    false
+}
+fn default_mc_min_new_units() -> i64 {
+    20
+}
+fn default_mc_min_interval_minutes() -> i64 {
+    10080
+}
+fn default_mc_timeout_secs() -> u64 {
     600
 }
 

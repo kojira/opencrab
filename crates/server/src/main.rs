@@ -798,6 +798,7 @@ async fn main() -> anyhow::Result<()> {
         category_maintenance: cfg.category_maintenance.clone(),
         memory_organize: cfg.memory_organize.clone(),
         memory_declare: cfg.memory_declare.clone(),
+        memory_condense: cfg.memory_condense.clone(),
         loop_restart_enabled: cfg.agent.loop_restart_enabled,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
         mcp_manager: None,

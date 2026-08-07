@@ -1437,6 +1437,40 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 35,
+        description:
+            "agent_memory_index_config.memory_condense_cursor: 凝縮ラン（記憶の 3 段目）の進捗マーカー列 (issue #411)",
+        // **列追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #411: ユニット（記憶の 2 段目 / エピソード）を俯瞰して「大事なこと」を抽出し、
+        // `node_type='meta'` として人格の核に刻む凝縮ランを足す。この列はその進捗マーカーで、
+        // 形式は複合カーソル `"{last_run_at}|{unit_count}"`（宣言ランの `memory_declare_cursor`
+        // と同型）。位置部は「前回凝縮した時点のユニット総数」で、発火ゲート（ユニットが下限以上
+        // 増えたか）と日次 throttle をこの 1 列で判定する。
+        //
+        // **NULL 既定 = 未実行**（初回は throttle が掛からず、ユニットが下限以上あれば発火する）。
+        // 既存 DB は列が NULL のまま増えるだけで、凝縮ランは既定オフ（config）なので挙動は
+        // 変わらない。
+        //
+        // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE agent_memory_index_config` 側で
+        // 列を持つので `column_exists` でガードする（v24〜v29 / v31 / v34 の前例）。
+        //
+        // 切り戻し: 列は読まれなくなるだけで既存の行は壊れない。古いバイナリへ戻すときは
+        // 版番号を戻すこと（列はそのままで良い）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 34;
+        //   COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "agent_memory_index_config", "memory_condense_cursor")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_memory_index_config ADD COLUMN memory_condense_cursor TEXT",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2723,7 +2757,8 @@ CREATE TABLE IF NOT EXISTS agent_memory_index_config (
     organize_backlog_cursor TEXT,
     organize_last_run_at TEXT,
     memory_declare_cursor TEXT,
-    memory_declare_window TEXT
+    memory_declare_window TEXT,
+    memory_condense_cursor TEXT
 );
 
 -- スキル利用のセッション単位記録（スリープ棚卸しの弱い利用ヒント用）
@@ -3801,6 +3836,69 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(kept.as_deref(), Some("{\"window_size\":450}"));
+    }
+
+    /// v35（#411）: `agent_memory_index_config.memory_condense_cursor`（凝縮ランのマーカー）が
+    /// **既存 DB に届く**こと、既定 NULL であること、隣の列（宣言ランのマーカー/窓・タグ整理ランの
+    /// マーカー）が壊れないこと、再実行で値が消えないこと。
+    #[test]
+    fn agent_memory_index_config_condense_cursor_migration_v35_reaches_existing_db() {
+        let conn = crate::init_memory().expect("init");
+        // 新規 DB には既に列がある（SCHEMA_SQL 由来）。
+        assert!(
+            column_exists(&conn, "agent_memory_index_config", "memory_condense_cursor").unwrap()
+        );
+
+        // 列を落とし、隣の列に値を入れた状態で版を戻す（既存 DB を模す）。
+        conn.execute_batch(
+            "ALTER TABLE agent_memory_index_config DROP COLUMN memory_condense_cursor;
+             INSERT INTO agent_memory_index_config
+               (agent_id, batch_size, threshold, updated_at, memory_declare_cursor,
+                memory_declare_window)
+               VALUES ('a1', 50, 20, '2026-01-01', '2026-08-07T00:00:00Z|60000',
+                       '{\"window_size\":300}');
+             PRAGMA user_version = 34",
+        )
+        .unwrap();
+        assert!(
+            !column_exists(&conn, "agent_memory_index_config", "memory_condense_cursor").unwrap()
+        );
+
+        initialize(&conn).expect("upgrade v34 -> latest");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert!(
+            column_exists(&conn, "agent_memory_index_config", "memory_condense_cursor").unwrap()
+        );
+
+        let (condense, declare, window): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT memory_condense_cursor, memory_declare_cursor, memory_declare_window
+                 FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("memory_condense_cursor を含む SELECT が通らない");
+        assert_eq!(
+            condense, None,
+            "新列は既定 NULL（未実行）でなければならない"
+        );
+        assert_eq!(declare.as_deref(), Some("2026-08-07T00:00:00Z|60000"));
+        assert_eq!(window.as_deref(), Some("{\"window_size\":300}"));
+
+        // 冪等性: 値を書いた後に再実行しても落ちず、値も消えない。
+        conn.execute_batch(
+            "UPDATE agent_memory_index_config SET memory_condense_cursor = '2026-08-08T00:00:00Z|346' WHERE agent_id = 'a1'",
+        )
+        .unwrap();
+        initialize(&conn).expect("idempotent");
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT memory_condense_cursor FROM agent_memory_index_config WHERE agent_id = 'a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("2026-08-08T00:00:00Z|346"));
     }
 
     /// v20 の DB が **v21（impressions の再構築）→ v22（owner_pubkey の追加）** を
