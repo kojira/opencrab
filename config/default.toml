@@ -267,6 +267,28 @@ enabled = true
 threshold = 0.7
 # model = "openrouter:openai/gpt-4o"  # 省略時はエージェントの実効モデル
 
+# スリープ凝縮ラン（#411 / 記憶の 3 段目）。本人が別セッションの新規 context で自分のユニット
+# （宣言した記憶）を時系列で少しずつ俯瞰し、「その出来事たちが何を意味するか」という原則を
+# node_type='meta' / source_type='condensed' として人格の核に刻む。
+#
+# **既定 ON（#457）**。ON にすると何が起きるか（LLM ランがいつ・どれだけ焼かれるか）:
+#   - 有効化ゲートは enabled 一点。メンテループ（memory_maintenance_interval_secs、既定 600 秒）が
+#     毎 tick 全エージェントを列挙する。エージェント単位の allowlist / opt-in は無い。
+#   - 進捗マーカー未作成のエージェントは最古のユニットから消化を始める。
+#   - 残ユニットが窓幅（min_new_units=20）以上の積み残しは throttle（min_interval_minutes=7 日）を
+#     待たず、メンテ tick ごとに 1 窓（20 件）ずつ 1 LLM ラン（timeout_secs=600 上限）で消化する。
+#     残 < 20 の端数だけ 7 日を待つ（初回は待たない）。partial が続いたときのみ指数バックオフ。
+#   - つまり蓄積ユニットの多いエージェントは ON 直後から連続で凝縮ランが走る（消化しきれば
+#     恒常運用は 7 日ごとの端数消化に落ち着く）。コストを止めたい場合は enabled = false にする。
+#
+# enabled 以外（min_new_units / min_interval_minutes / timeout_secs）は #411 PR-3 で実測確定する
+# 仮値。ここで上書きせず Rust 側の既定に委ねる（下は既定を明示しているだけ・変更不要）。
+[memory_condense]
+enabled = true
+# min_new_units = 20          # 窓幅かつ積み残し発火の下限（PR-3 で確定）
+# min_interval_minutes = 10080  # 端数待ち / partial バックオフ上限（= 7 日・PR-3 で確定）
+# timeout_secs = 600          # 1 ラン上限
+
 # ─ プロバイダー設定はダッシュボード（システム設定ページ）からも編集できます。
 #   ダッシュボードでの変更は DB に保存され、この TOML より優先されます。
 #   LLM プロバイダーの変更は再起動なしで反映されます。
