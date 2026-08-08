@@ -61,6 +61,12 @@ pub struct SystemGatewayActions {
     /// transport の有無で消えないようにするのが #157 の目的で、無いときは実行だけが
     /// 明示エラーになる。
     text_delivery: Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>>,
+    /// 親ターンが「この run は subtask を起こしたか」を数えるカウンタ（#431）。
+    ///
+    /// 明示 `spawn_subtask` が**登録簿への登録まで到達した**（＝ `success`）ときだけ
+    /// 加算する。auto-dispatch 側（`SubtaskToolDispatcher`）と同一の Arc を共有し、
+    /// 親ターンは 1 つの数で両経路を見る。`None`（既定）なら数えない。
+    subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 /// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
@@ -106,7 +112,22 @@ impl SystemGatewayActions {
             completion_sink,
             a2ui,
             text_delivery,
+            subtask_starts: None,
         }
+    }
+
+    /// 親ターンの subtask 起動カウンタを設定する（#431）。
+    ///
+    /// `SubtaskToolDispatcher::with_subtask_starts` と**同じ Arc** を渡すこと。
+    /// 位置引数ではなく builder にしているのは、この配線を必要とするのが
+    /// `run_agent_response` の 1 箇所だけで、他の生成箇所（テスト・単発呼び出し）を
+    /// `None` で埋めさせないため。
+    pub fn with_subtask_starts(
+        mut self,
+        counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> Self {
+        self.subtask_starts = counter;
+        self
     }
 
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
@@ -2068,7 +2089,7 @@ impl GatewayActions for SystemGatewayActions {
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
-                crate::subtask_spawn::spawn_subtask(
+                let res = crate::subtask_spawn::spawn_subtask(
                     &self.state,
                     self.subtask_registry.as_ref(),
                     self.completion_sink.clone(),
@@ -2079,7 +2100,19 @@ impl GatewayActions for SystemGatewayActions {
                     args,
                     ctx,
                 )
-                .await
+                .await;
+                // #431: 起動が成立したときだけ「このターンは次の行動を選んだ」と数える。
+                // `spawn_subtask` は登録簿へ insert し終えてから `success: true` を返し、
+                // 手前の失敗（task 引数なし / session 不明 / 登録簿未配線）は全て
+                // `success: false` なので、success ⟺ 登録済み ⟺ 完了で resume が来る。
+                // 起動に失敗したターンは resume が来ない＝そのターンが最後の発話なので、
+                // ここで数えないのが正しい（🏁 は付く）。
+                if res.success {
+                    if let Some(c) = &self.subtask_starts {
+                        c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                res
             }
             // A2UI 送信（#156 S3）。Discord 側の実装は撤去済みなので inner へは委譲しない
             // （委譲パターンにすると二重定義を招く）。描画面が無い transport では

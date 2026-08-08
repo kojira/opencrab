@@ -108,6 +108,23 @@ pub struct RunRequest {
     ///
     /// 対話ターン・heartbeat・subtask は `true` のままで一切変わらない。
     pub persist_turn_logs: bool,
+    /// **この run が起こした subtask の本数**を数えるターンローカルなカウンタ（#431）。
+    ///
+    /// 呼び出し側（gateway）が run ごとに新しい `AtomicUsize` を作って渡し、run が
+    /// 返った後に読む。`0` より大きければ「このターンは次の行動を選んで終わった」＝
+    /// 完了時に親セッションが resume され、続きの発話がそこで起きる。
+    ///
+    /// **両方の起動経路を 1 つの数で見る**のが要点:
+    /// - 自動 dispatch（`SubtaskToolDispatcher`）
+    /// - 明示 `spawn_subtask` ツール
+    ///
+    /// どちらも登録簿（`SubtaskRegistry`）への登録が成立した時点でだけ加算する。
+    /// 登録簿を後から覗く形にしないのは、run が返る前に決着した subtask が既に
+    /// 除去されていて取りこぼす（＝まさに resume が来るケースを見落とす）ため。
+    ///
+    /// `None`（既定）なら数えない。使うのは Discord の「発言終わり」判定だけで、
+    /// 他のゲートウェイは渡さない。
+    pub subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl RunRequest {
@@ -141,6 +158,7 @@ impl RunRequest {
             live_inbound_scope: LiveInboundScope::AllOthers,
             tool_allowlist: None,
             persist_turn_logs: true,
+            subtask_starts: None,
         }
     }
 
@@ -183,6 +201,16 @@ impl RunRequest {
     ) -> Self {
         self.completion_sink = Some(sink);
         self.subtask_registry = registry;
+        self
+    }
+
+    /// この run が起こした subtask の本数を数えるカウンタを渡す（#431）。
+    ///
+    /// 自動 dispatch と明示 `spawn_subtask` の**両経路**が、登録簿への登録が成立した
+    /// ところで加算する。呼び出し側は run が返った後に読み、`0` なら「次の行動を選ばず
+    /// 終わったターン」と判定できる。詳細は [`RunRequest::subtask_starts`]。
+    pub fn with_subtask_starts(mut self, counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.subtask_starts = Some(counter);
         self
     }
 
