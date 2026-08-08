@@ -1604,7 +1604,6 @@ mod tests {
             tool_calls_made: 0,
             stopped_by_limit,
             xml_fallback_parses: 0,
-            dispatched_subtasks: 0,
         }
     }
 

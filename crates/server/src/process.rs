@@ -2054,15 +2054,20 @@ pub async fn run_agent_response(
         // 使う registry と同一 Arc を渡すことで、auto-dispatch された subtask を
         // cancel_subtask で停止できる（Discord では gateway_actions の registry とも同一）。
         let system_actions: std::sync::Arc<dyn opencrab_gateway::GatewayActions> =
-            std::sync::Arc::new(crate::system_actions::SystemGatewayActions::new(
-                state.clone(),
-                req.gateway_actions,
-                Some(subtask_registry.clone()),
-                // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
-                // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
-                // 変わらず、REST だけがセッション状態の整合を取る。
-                req.completion_sink.clone(),
-            ));
+            std::sync::Arc::new(
+                crate::system_actions::SystemGatewayActions::new(
+                    state.clone(),
+                    req.gateway_actions,
+                    Some(subtask_registry.clone()),
+                    // 停止も 1 箇所（neutral な cancel_subtask）から sink へ通知する。停止は
+                    // `on_subtask_cancelled`（既定 no-op）なので resume する sink の挙動は
+                    // 変わらず、REST だけがセッション状態の整合を取る。
+                    req.completion_sink.clone(),
+                )
+                // #431: 明示 `spawn_subtask` の起動を親ターンのカウンタへ載せる。
+                // 下の `SubtaskToolDispatcher` へ渡すのと同一 Arc（両経路を 1 つの数で見る）。
+                .with_subtask_starts(req.subtask_starts.clone()),
+            );
         // depth >= 1（sub-engine）は許可リストで最外周を絞る（#63 / RFC #152 S2）。
         // **合成後**（server ツール + transport の union）に被せるのが要点で、これが
         // 無いと再入実行がそのまま設定ツールや `spawn_subtask` へ到達し、サブタスクの
@@ -2196,7 +2201,10 @@ pub async fn run_agent_response(
             .with_caller(run_caller.clone())
             // 大きい tool_result は inline 経路と同様にワークスペースへ退避する
             // （DB へ無制限に入れると resume 時の会話再構築が context 予算を溢れる）。
-            .with_workspace_root(Some(tool_result_workspace.clone()));
+            .with_workspace_root(Some(tool_result_workspace.clone()))
+            // #431: auto-dispatch の起動を親ターンのカウンタへ載せる。上の
+            // `SystemGatewayActions`（明示 spawn_subtask）へ渡すのと同一 Arc。
+            .with_subtask_starts(req.subtask_starts.clone());
             engine.set_tool_dispatcher(std::sync::Arc::new(dispatcher));
         }
     }

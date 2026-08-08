@@ -40,6 +40,9 @@ struct RunObservation {
     has_completion_sink: bool,
     /// この run の呼び出し元（#298）。resume が元の権限を落としていないことの検査に使う。
     caller: CallerIdentity,
+    /// 「発言終わり」🏁 判定用の subtask 起動カウンタ（#431）。**`Option` のまま**
+    /// 保持する（bool に潰すと未配線を検出できるだけで、実体の共有は見られない）。
+    subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 /// 受信フック（`AgentRuntime::on_inbound_message`）の観測 1 件。
@@ -113,6 +116,15 @@ impl FakeRunner {
         )
     }
 
+    /// 観測した run の subtask 起動カウンタ（#431）。
+    fn observed_subtask_starts(&self, index: usize) -> Option<Arc<std::sync::atomic::AtomicUsize>> {
+        let runs = self.runs.lock().unwrap();
+        runs.get(index)
+            .expect("run が観測されていない")
+            .subtask_starts
+            .clone()
+    }
+
     /// 観測した run の呼び出し元（#298）。
     fn observed_caller(&self, index: usize) -> CallerIdentity {
         let runs = self.runs.lock().unwrap();
@@ -131,6 +143,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
             subtask_registry: req.subtask_registry.clone(),
             has_completion_sink: req.completion_sink.is_some(),
             caller: req.caller.clone(),
+            subtask_starts: req.subtask_starts.clone(),
         });
         self.run_observed.notify_one();
         // 空応答: 転記も Discord 送信も走らない（この fake はネットワークへ出ない）。
@@ -140,7 +153,6 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
             tool_calls_made: 0,
             stopped_by_limit: false,
             xml_fallback_parses: 0,
-            dispatched_subtasks: 0,
         })
     }
 
@@ -411,6 +423,94 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         has_sink,
         "inbound の run に完了 sink が無い（掘削の完了が再注入されない）"
     );
+}
+
+/// **inbound の run は「発言終わり」🏁 判定用の subtask 起動カウンタを載せる**（#431）。
+///
+/// このカウンタが未配線（`None`）だと、run 側（auto-dispatch / 明示 `spawn_subtask`）が
+/// 加算する先を失い、ゲートは常に「subtask を起こしていない」と見る。結果、掘削を
+/// 投げたターンに 🏁 が付いて『調べますね🏁』の数分後に続きが届く逆情報に戻る。
+/// **配線を落としても他のテストは落ちない**（ゲートの単体テストはカウンタの値を
+/// 直接与えるため）ので、ここで配線そのものを固定する。
+#[tokio::test]
+async fn inbound_run_carries_the_end_of_speech_subtask_counter() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    let session_locks = Arc::new(SessionLocks::new());
+
+    let incoming = IncomingMessage::new(
+        MessageSource::Discord {
+            guild_id: "111".to_string(),
+            channel_id: "222".to_string(),
+        },
+        MessageContent::Text("掘削して".to_string()),
+        Sender::new("user-1", "だれか"),
+    );
+
+    process_incoming_message(
+        incoming,
+        gateway,
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        session_locks,
+        false,
+        None,
+        event_tx,
+        registry,
+    )
+    .await;
+
+    state.wait_for_run().await;
+
+    let counter = state
+        .observed_subtask_starts(0)
+        .expect("inbound の run に subtask 起動カウンタが載っていない（🏁 の判定が効かない）");
+    // ターンごとに新しいカウンタで、run に入る時点では 0（前のターンの掘削を
+    // 引きずらない）。
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "ターン開始時のカウンタは 0 でなければならない"
+    );
+}
+
+/// **subtask 完了 resume の run にもカウンタが載る**（#431）。
+///
+/// resume ターンが**さらに**掘削を投げたときに、その resume へ 🏁 を付けず次の resume
+/// へ委ねるための配線。ここが落ちると鎖の途中に印が付く。
+#[tokio::test]
+async fn resume_run_carries_the_end_of_speech_subtask_counter() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+
+    process_subtask_completed(
+        "discord-crab-111-222".to_string(),
+        "crab".to_string(),
+        "st-1".to_string(),
+        "結果".to_string(),
+        "completed".to_string(),
+        222,
+        "222".to_string(),
+        "111".to_string(),
+        false,
+        gateway,
+        state.clone(),
+        gateway_actions,
+        None,
+        event_tx,
+        registry,
+        CallerIdentity::Owner,
+    )
+    .await;
+
+    let counter = state
+        .observed_subtask_starts(0)
+        .expect("resume の run に subtask 起動カウンタが載っていない");
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 /// **Discord の受信は共通の受信フックを必ず通る**（#156 S4）。
@@ -776,7 +876,6 @@ fn engine_result(response: &str) -> EngineResult {
         tool_calls_made: 0,
         stopped_by_limit: false,
         xml_fallback_parses: 0,
-        dispatched_subtasks: 0,
     }
 }
 

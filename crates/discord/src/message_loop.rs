@@ -744,6 +744,10 @@ async fn process_incoming_message<T: AgentRunner>(
         let reply_send_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let reply_send_tasks: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // #431: このターンが background subtask を起こしたか。`reply_send_seq` と同じ
+        // ターン寿命で、run が返った後に読む。自動 dispatch と明示 `spawn_subtask` の
+        // 両経路が、登録簿への登録が成立したところで加算する（`RunRequest::subtask_starts`）。
+        let subtask_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let on_response_text: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>> = {
             let state_for_cb = state.clone();
@@ -839,6 +843,7 @@ async fn process_incoming_message<T: AgentRunner>(
         let last_self_post_spawn = last_self_post.clone();
         let reply_send_tasks_spawn = reply_send_tasks.clone();
         let reply_send_seq_spawn = reply_send_seq.clone();
+        let subtask_starts_spawn = subtask_starts.clone();
 
         session_locks.spawn_serialized(session_id.clone(), async move {
             // ターンの寿命に typing keepalive を束ねる（#429）。名前付きで保持し、
@@ -936,6 +941,8 @@ async fn process_incoming_message<T: AgentRunner>(
                         // 共有 registry（DiscordGatewayActions と同一）に載せて、
                         // auto-dispatch した subtask を cancel_subtask で停止可能にする（P0）。
                         run_req = run_req.with_dispatch(Some(registry_spawn.clone()), sink);
+                        // #431: このターンが subtask を起こしたら数える（両経路）。
+                        run_req = run_req.with_subtask_starts(subtask_starts_spawn.clone());
                         run_req
                     })
                     .await;
@@ -945,11 +952,12 @@ async fn process_incoming_message<T: AgentRunner>(
                 // 送信タスクを起こした回数で見る（run_agent_response は既に完了しているので
                 // 発火は出揃っている。送信タスク自体の完了待ちは下の detach 側で行う）。
                 // 反復途中で喋って最終応答が NO_REPLY のターンを取りこぼさないため。
-                // 「自然終了か」（打ち切り / background subtask を投げていないか）は
-                // EngineResult 側が持つ（`end_of_speech_qualifies` 参照）。
                 let posted =
                     reply_send_seq_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
-                let eos_qualifies = end_of_speech_qualifies(&result, posted);
+                // このターンが「次の行動」を起こしたか（自動 dispatch / 明示 spawn_subtask）。
+                let started_subtask =
+                    subtask_starts_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                let eos_qualifies = end_of_speech_qualifies(&result, posted, started_subtask);
 
                 handle_agent_response(
                     result,
@@ -1112,6 +1120,10 @@ async fn process_subtask_completed<T: AgentRunner>(
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
+    // #431: resume ターンが**さらに** subtask を投げたら、そこにも「発言終わり」は
+    // 付けず次の resume へ委ねる。通常経路と同じカウンタの張り方。
+    let subtask_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
     match state
         .run_agent_response(
             opencrab_actions::RunRequest::new(
@@ -1126,6 +1138,7 @@ async fn process_subtask_completed<T: AgentRunner>(
                 // 降格していた。
                 caller,
             )
+            .with_subtask_starts(subtask_starts.clone())
             .with_gateway_actions(gateway_actions)
             // 返信先（gateway 不透明 token / #158 S1）= resume 対象チャンネルの数値文字列。
             .with_reply_target(channel_id_str.clone())
@@ -1177,7 +1190,11 @@ async fn process_subtask_completed<T: AgentRunner>(
             // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
             // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
             // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
-            if end_of_speech_qualifies_ok(&engine_result, sent_id.is_some()) {
+            if end_of_speech_qualifies_ok(
+                &engine_result,
+                sent_id.is_some(),
+                subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            ) {
                 if let Some(id) = sent_id {
                     add_reaction_non_fatal(
                         gateway.as_ref(),
@@ -1506,6 +1523,9 @@ async fn process_interaction_response<T: AgentRunner>(
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
+    // #431: この経路も規則を揃える（subtask を起こしたターンには付けない）。
+    let subtask_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
     match state
         .run_agent_response(
             opencrab_actions::RunRequest::new(
@@ -1518,6 +1538,7 @@ async fn process_interaction_response<T: AgentRunner>(
                 caller,
             )
             .with_gateway_actions(gateway_actions)
+            .with_subtask_starts(subtask_starts.clone())
             // 返信先（gateway 不透明 token / #158 S1）= UI 応答が来たチャンネルの数値文字列。
             .with_reply_target(channel_id_str.clone()),
         )
@@ -1556,7 +1577,11 @@ async fn process_interaction_response<T: AgentRunner>(
             // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
             // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
             // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
-            if end_of_speech_qualifies_ok(&engine_result, sent_id.is_some()) {
+            if end_of_speech_qualifies_ok(
+                &engine_result,
+                sent_id.is_some(),
+                subtask_starts.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            ) {
                 if let Some(id) = sent_id {
                     add_reaction_non_fatal(
                         gateway.as_ref(),
@@ -1763,11 +1788,17 @@ const SPOKE_EMOJI: &str = "🏁";
 /// - 反復上限での打ち切り（`stopped_by_limit`）… 途中で切られた
 /// - `posted == false` … このターンで実投稿していない（全反復 NO_REPLY/空、または
 ///   非 writable で送信に至らなかった）＝そもそも発話していない
-/// - background subtask を dispatch した（`dispatched_subtasks > 0`）… 掘削を投げた
-///   ターンは「次の行動を選んで」終わっている。ここで付けると『調べますね🏁』の数分後に
-///   続きが届く**逆の情報**になる。印は subtask 完了で resume したターンが自然終了
-///   したときにそちらへ付く（`process_subtask_completed`）。resume ターンがさらに
-///   subtask を投げた場合も同じ条件で弾かれ、次の resume へ委ねられる。
+/// - `started_subtask == true` … このターンが background subtask を起こした。掘削を
+///   投げたターンは「次の行動を選んで」終わっている。ここで付けると『調べますね🏁』の
+///   数分後に続きが届く**逆の情報**になる。印は subtask 完了で resume したターンが
+///   自然終了したときにそちらへ付く（`process_subtask_completed`）。resume ターンが
+///   さらに subtask を投げた場合も同じ条件で弾かれ、次の resume へ委ねられる。
+///
+///   `started_subtask` の実体は `RunRequest::subtask_starts` に渡したターンローカルな
+///   カウンタで、**自動 dispatch と明示 `spawn_subtask` の両方**が登録簿への登録が
+///   成立したところで加算する。登録簿を後から覗く形にしないのは、run が返る前に決着
+///   した subtask が既に除去されていて取りこぼす（＝まさに resume が来るケースを
+///   見落とす）ため。
 ///
 /// **最終応答テキストの中身（NO_REPLY/空）では判定しない。** 反復途中で発話し最終応答が
 /// `NO_REPLY` で自然終了するターン（例: 反復1で発話 → 最終 NO_REPLY）を取りこぼすため。
@@ -1778,15 +1809,20 @@ const SPOKE_EMOJI: &str = "🏁";
 fn end_of_speech_qualifies(
     result: &anyhow::Result<opencrab_core::EngineResult>,
     posted: bool,
+    started_subtask: bool,
 ) -> bool {
-    matches!(result.as_ref(), Ok(r) if end_of_speech_qualifies_ok(r, posted))
+    matches!(result.as_ref(), Ok(r) if end_of_speech_qualifies_ok(r, posted, started_subtask))
 }
 
 /// [`end_of_speech_qualifies`] の `Ok` 側だけを取り出したもの。subtask 完了 /
 /// interaction 応答の経路は `EngineResult` を先に取り出しているため、判定を
 /// 共有するにはこの形が要る（`Err` は match の別腕で落ちている）。
-fn end_of_speech_qualifies_ok(result: &opencrab_core::EngineResult, posted: bool) -> bool {
-    !result.stopped_by_limit && posted && result.dispatched_subtasks == 0
+fn end_of_speech_qualifies_ok(
+    result: &opencrab_core::EngineResult,
+    posted: bool,
+    started_subtask: bool,
+) -> bool {
+    !result.stopped_by_limit && posted && !started_subtask
 }
 
 /// リアクションを付ける対象の message_id を解析する。
@@ -1894,9 +1930,8 @@ mod tests {
     use std::sync::Mutex;
     use tokio::time::{Duration, Instant};
 
-    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `stopped_by_limit` と
-    /// `dispatched_subtasks` だけで、`response` は「最終応答テキストでは判定しない」
-    /// ことを示すために置いている。
+    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `stopped_by_limit` だけで、
+    /// `response` は「最終応答テキストでは判定しない」ことを示すために置いている。
     fn mk_result(response: &str, stopped_by_limit: bool) -> opencrab_core::EngineResult {
         opencrab_core::EngineResult {
             response: response.to_string(),
@@ -1904,15 +1939,6 @@ mod tests {
             tool_calls_made: 0,
             stopped_by_limit,
             xml_fallback_parses: 0,
-            dispatched_subtasks: 0,
-        }
-    }
-
-    /// #431: background subtask を `n` 本 dispatch して自然終了したターンの結果。
-    fn mk_result_dispatched(response: &str, n: usize) -> opencrab_core::EngineResult {
-        opencrab_core::EngineResult {
-            dispatched_subtasks: n,
-            ..mk_result(response, false)
         }
     }
 
@@ -1927,10 +1953,11 @@ mod tests {
     /// #431: 自然終了かつ発話成立のターンだけが対象。
     #[test]
     fn end_of_speech_marks_only_natural_completed_replies() {
-        // 発話して自然終了 → 対象
+        // 発話して自然終了・subtask を起こしていない → 対象
         assert!(end_of_speech_qualifies(
             &Ok(mk_result("言い終わったよ", false)),
-            true
+            true,
+            false
         ));
     }
 
@@ -1941,10 +1968,15 @@ mod tests {
     fn end_of_speech_marks_turn_that_spoke_then_ended_with_no_reply() {
         assert!(end_of_speech_qualifies(
             &Ok(mk_result("NO_REPLY", false)),
-            true
+            true,
+            false
         ));
         // 最終応答が空で終わるターン（ツール実行だけして締める）も同じ。
-        assert!(end_of_speech_qualifies(&Ok(mk_result("", false)), true));
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("", false)),
+            true,
+            false
+        ));
     }
 
     /// #431: 付けない経路を網羅する（恒真回避 — 各除外条件を個別に踏む）。
@@ -1954,56 +1986,67 @@ mod tests {
         // 逆流防止: 実投稿が無いターンには最終応答が何であれ付かない。
         assert!(!end_of_speech_qualifies(
             &Ok(mk_result("NO_REPLY", false)),
+            false,
             false
         ));
-        assert!(!end_of_speech_qualifies(&Ok(mk_result("", false)), false));
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("", false)),
+            false,
+            false
+        ));
         assert!(!end_of_speech_qualifies(
             &Ok(mk_result("送れなかった本文", false)),
+            false,
             false
         ));
         // 反復上限で打ち切り（自然終了でない）→ 発話していても付けない
         assert!(!end_of_speech_qualifies(
             &Ok(mk_result("途中まで", true)),
-            true
+            true,
+            false
         ));
         // エラー / タイムアウト終了 → 付けない
         assert!(!end_of_speech_qualifies(
             &Err(anyhow::anyhow!("boom")),
-            true
+            true,
+            false
         ));
     }
 
-    /// #431: **background subtask を投げて終わったターンには付けない。**
+    /// #431: **subtask を起こして終わったターンには付けない。**
     ///
-    /// 掘削を dispatch したターンは「次の行動を選んで」終わっており、数分後に完了
-    /// resume の続きが届く。ここで付けると『調べますね🏁』という逆の情報になる。
-    /// 発話していても（`posted == true`）付けないのが要点。
+    /// 掘削を投げたターンは「次の行動を選んで」終わっており、数分後に完了 resume の
+    /// 続きが届く。ここで付けると『調べますね🏁』という逆の情報になる。発話していても
+    /// （`posted == true`）付けないのが要点。
+    ///
+    /// 起動経路（自動 dispatch / 明示 `spawn_subtask`）はこのゲートからは見えない。
+    /// 両方が同じカウンタへ載ることは呼び出し側の配線テストが押さえる
+    /// （`message_loop_wiring_tests.rs`）。
     #[test]
-    fn end_of_speech_excludes_turn_that_dispatched_background_subtask() {
+    fn end_of_speech_excludes_turn_that_started_a_subtask() {
         // 「調べますね」と喋ってから掘削を投げたターン。
         assert!(!end_of_speech_qualifies(
-            &Ok(mk_result_dispatched("調べますね", 1)),
-            true
-        ));
-        // 複数バッチを投げたターンも同じ。
-        assert!(!end_of_speech_qualifies(
-            &Ok(mk_result_dispatched("いくつか見てくる", 3)),
+            &Ok(mk_result("調べますね", false)),
+            true,
             true
         ));
         // subtask 完了 resume / interaction 経路の `Ok` 側ゲートも同じ規則に従う。
         // resume ターンがさらに subtask を投げたら、その resume にも付けず次へ委ねる。
         assert!(!end_of_speech_qualifies_ok(
-            &mk_result_dispatched("もう少し掘る", 1),
+            &mk_result("もう少し掘る", false),
+            true,
             true
         ));
-        // 回帰: dispatch していない自然終了は従来どおり対象。
+        // 回帰: subtask を起こしていない自然終了は従来どおり対象。
         assert!(end_of_speech_qualifies(
-            &Ok(mk_result_dispatched("言い終わったよ", 0)),
-            true
+            &Ok(mk_result("言い終わったよ", false)),
+            true,
+            false
         ));
         assert!(end_of_speech_qualifies_ok(
-            &mk_result_dispatched("言い終わったよ", 0),
-            true
+            &mk_result("言い終わったよ", false),
+            true,
+            false
         ));
     }
 
