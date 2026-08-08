@@ -84,27 +84,82 @@ impl TurnOrigin {
     /// 載せない**: 完了本文は `settle_completed` が親セッションログへ永続化済みで、会話文字列の
     /// 再構築で自然に載る（RFC §1.3）。出力形式の規約を書き添えるのは、tick が session_logs へ
     /// 入れる規約行が文脈予算から落ちても継続ターンの応答形式が崩れないようにするため。
+    ///
+    /// 冒頭 1 文は `exit_reason` で分岐する（#443）。継続ターンを起こす
+    /// `SettleKind::Completed` は completed / stopped_by_limit / error / timeout の
+    /// **どれでも**発火するので、一律「完了しました」と告げると 30 分でタイムアウトした
+    /// subtask にも「完了」と伝わり、同じ prompt 内のマーカー（`exit_reason=timeout`）と
+    /// 食い違う。
     fn prompt_suffix(&self) -> Option<String> {
         match self {
             Self::Tick { .. } => None,
             Self::SubtaskResume {
                 subtask_id,
                 exit_reason,
-            } => Some(format!(
-                "[ハートビート] 依頼していたバックグラウンド処理が完了しました。結果は直前の会話ログの subtask_completed に入っています。\n\
-                 結果を見て、いま発話するかどうかは自分で決めてください。\n\
+            } => {
+                let outcome = settle_outcome(exit_reason).sentence;
+                Some(format!(
+                "[ハートビート] 依頼していたバックグラウンド処理が{outcome}。詳細は直前の会話ログの subtask_completed に入っています。\n\
+                 状況を見て、いま発話するかどうかは自分で決めてください。\n\
                  出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。\n\
                  [subtask_completed: subtask_id={subtask_id}, exit_reason={exit_reason}]"
-            )),
+            ))
+            }
         }
     }
 
     /// 内省メモに載る発火元ラベル。tick は移設前の文言と同一（`tick {n}`）。
+    ///
+    /// 継続ターンのラベルも `exit_reason` で分岐する。内省メモは curated_memory へ残って
+    /// 後のターンが読むため、prompt と同じ理由で「完了」を断言できない（#443）。
+    /// `completed` のときの文言は移設前と同一（`subtask {id} 完了`）。
     fn label(&self) -> String {
         match self {
             Self::Tick { tick } => format!("tick {tick}"),
-            Self::SubtaskResume { subtask_id, .. } => format!("subtask {subtask_id} 完了"),
+            Self::SubtaskResume {
+                subtask_id,
+                exit_reason,
+            } => format!("subtask {subtask_id} {}", settle_outcome(exit_reason).label),
         }
+    }
+}
+
+/// `exit_reason` を人へ見せる言い回しへ写す（#443）。
+struct SettleOutcome {
+    /// system prompt の 1 文目に入る述部（「…バックグラウンド処理が{sentence}。」）。
+    sentence: &'static str,
+    /// 内省メモ・ログのラベルへ入る短い語。
+    label: &'static str,
+}
+
+/// 決着理由 → 言い回し。値の出所は `subtask_spawn.rs` の 1 箇所
+/// （`stopped_by_limit` / `completed` / `error` / `timeout`）。
+///
+/// 未知の値は**断定しない**（「終了しました」）。正確な値は同じ prompt 内の
+/// `[subtask_completed: … exit_reason=…]` マーカーがそのまま持つので、ここで推測を足す
+/// 必要がない。
+fn settle_outcome(exit_reason: &str) -> SettleOutcome {
+    match exit_reason {
+        "completed" => SettleOutcome {
+            sentence: "完了しました",
+            label: "完了",
+        },
+        "stopped_by_limit" => SettleOutcome {
+            sentence: "反復上限に達して途中で打ち切られました",
+            label: "途中打ち切り",
+        },
+        "error" => SettleOutcome {
+            sentence: "エラーで失敗しました",
+            label: "失敗",
+        },
+        "timeout" => SettleOutcome {
+            sentence: "時間切れで打ち切られました",
+            label: "タイムアウト",
+        },
+        _ => SettleOutcome {
+            sentence: "終了しました",
+            label: "決着",
+        },
     }
 }
 
@@ -867,6 +922,65 @@ mod tests {
             suffix.contains("SPEAK: <メッセージ>"),
             "継続ターンにも出力形式の規約を渡す（tick の規約行が文脈から落ちても崩れない）"
         );
+    }
+
+    /// 決着理由ごとの継続ターン（`prompt_suffix` / `label` の分岐に使う）。
+    fn resume(exit_reason: &str) -> TurnOrigin {
+        TurnOrigin::SubtaskResume {
+            subtask_id: "st-1".to_string(),
+            exit_reason: exit_reason.to_string(),
+        }
+    }
+
+    /// **#443**: 完了以外の決着で「完了しました」と断言しない。
+    ///
+    /// `SettleKind::Completed` は timeout / error / stopped_by_limit でも発火するので、
+    /// 一律「完了」と告げると同じ prompt のマーカー（`exit_reason=timeout`）と矛盾する。
+    #[test]
+    fn prompt_suffix_never_claims_completion_for_unfinished_subtasks() {
+        for (exit_reason, expected) in [
+            ("timeout", "時間切れで打ち切られました"),
+            ("error", "エラーで失敗しました"),
+            ("stopped_by_limit", "反復上限に達して途中で打ち切られました"),
+            // 未知の値は断定しない（`subtask_spawn.rs` が語彙を増やしても誤情報にならない）。
+            ("weird_new_reason", "終了しました"),
+        ] {
+            let suffix = resume(exit_reason).prompt_suffix().unwrap();
+            assert!(
+                !suffix.contains("完了しました"),
+                "exit_reason={exit_reason} で完了を断言している: {suffix}"
+            );
+            assert!(
+                suffix.contains(expected),
+                "exit_reason={exit_reason} の決着が伝わらない: {suffix}"
+            );
+            assert!(
+                suffix.contains(&format!("exit_reason={exit_reason}]")),
+                "マーカーは生の exit_reason をそのまま持つ: {suffix}"
+            );
+        }
+    }
+
+    /// 完了した subtask だけが「完了しました」を受け取る（従来の文言）。
+    #[test]
+    fn prompt_suffix_states_completion_only_when_completed() {
+        let suffix = resume("completed").prompt_suffix().unwrap();
+        assert!(
+            suffix.contains("バックグラウンド処理が完了しました"),
+            "完了は完了と伝える: {suffix}"
+        );
+    }
+
+    /// 内省メモのラベルも決着理由で分かれる（curated_memory へ残り後のターンが読む）。
+    #[test]
+    fn origin_label_reflects_exit_reason() {
+        assert_eq!(resume("timeout").label(), "subtask st-1 タイムアウト");
+        assert_eq!(resume("error").label(), "subtask st-1 失敗");
+        assert_eq!(
+            resume("stopped_by_limit").label(),
+            "subtask st-1 途中打ち切り"
+        );
+        assert_eq!(resume("weird_new_reason").label(), "subtask st-1 決着");
     }
 
     /// 内省メモの発火元ラベル。tick は移設前と同じ文言。
