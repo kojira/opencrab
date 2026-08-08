@@ -1664,6 +1664,7 @@ fn set_llm_log_callback(
 fn set_run_notifier_callbacks(
     engine: &mut opencrab_core::SkillEngine,
     notifier: &std::sync::Arc<dyn opencrab_actions::SubtaskRunNotifier>,
+    session_id: String,
 ) {
     if !notifier.wants_progress() {
         return;
@@ -1673,18 +1674,48 @@ fn set_run_notifier_callbacks(
         on_call.on_progress(&summarize_tool_calls(&assistant_content, &tool_calls_json));
     });
     let on_result = notifier.clone();
-    engine.add_on_tool_result(move |_tool_call_id, tool_name, result_json, is_error| {
-        let status = if is_error { "failed" } else { "completed" };
-        let preview: String = result_json.chars().take(500).collect();
-        on_result.on_progress(&format!("tool `{tool_name}` {status}\n{preview}"));
+    engine.add_on_tool_result(move |tool_call_id, tool_name, result_json, is_error| {
+        on_result.on_progress(&tool_result_progress_line(
+            &tool_name,
+            &result_json,
+            is_error,
+            &session_id,
+            &tool_call_id,
+        ));
     });
+}
+
+/// 実況として通知口へ流す 1 行を組む（ツール名・成否・結果のプレビュー）。
+///
+/// **無害化してからプレビューを切る**。実況は webhook で系の外へ出る経路なので、
+/// 永続化側（[`set_turn_log_callbacks`]）と同じ `sanitize_tool_result_for_log` を通し、
+/// nsec が生のまま 500 文字に混ざらないようにする。秘密が結果のどこに現れるかは
+/// ツール次第で、先頭 500 文字を見て安全と判断はできないため、**切る前に**通す。
+///
+/// `workspace_root` は `None` を渡す。engine は callback より手前で `cap_tool_result` を
+/// かけており、ここへ来る本文は上限内なので退避は起きない。仮に起きても実況が
+/// ワークスペースへ書く必要はない（永続化側と二重に書くことになる）。
+fn tool_result_progress_line(
+    tool_name: &str,
+    result_json: &str,
+    is_error: bool,
+    session_id: &str,
+    tool_call_id: &str,
+) -> String {
+    let status = if is_error { "failed" } else { "completed" };
+    let safe = opencrab_actions::sanitize_tool_result_for_log(
+        tool_name,
+        result_json,
+        session_id,
+        tool_call_id,
+        None,
+    );
+    let preview: String = safe.chars().take(500).collect();
+    format!("tool `{tool_name}` {status}\n{preview}")
 }
 
 /// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
 /// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
-///
-/// #397: `add_on_tool_*` で**足す**。代入にすると、先に配線された
-/// [`set_run_notifier_callbacks`] の実況が消える。
 fn set_turn_log_callbacks(
     engine: &mut opencrab_core::SkillEngine,
     db: opencrab_db::Db,
@@ -2240,11 +2271,8 @@ pub async fn run_agent_response(
         }
     }
 
-    // サブタスク走行の実況（#175 S4）。ツール呼び出しと結果を進捗として通知口へ流す。
-    // 購読していない（`wants_progress()` が false）ならフック自体を挿さず、要約の計算も
-    // 省く（旧 `execute_spawn_subtask` と同じ判定）。
     if let Some(notifier) = run_notifier {
-        set_run_notifier_callbacks(&mut engine, &notifier);
+        set_run_notifier_callbacks(&mut engine, &notifier, session_id.to_string());
     }
 
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
@@ -4040,6 +4068,7 @@ mod past_summary_budget_tests {
 #[cfg(test)]
 mod redact_secret_fields_tests {
     // redaction 本体は inline / dispatch 両経路で共有するため actions 側にある。
+    use super::tool_result_progress_line;
     use opencrab_actions::redact_secret_fields_json;
 
     #[test]
@@ -4061,6 +4090,32 @@ mod redact_secret_fields_tests {
         let out = redact_secret_fields_json(bad);
         assert!(!out.contains("nsec1raw"));
         assert!(out.contains("redacted"));
+    }
+
+    /// #397: subtask の実況は webhook で系の外へ出る。永続化側と同じ無害化を
+    /// **プレビューを切る前に**通し、nsec の生値が通知口へ流れないようにする。
+    ///
+    /// プレビューは先頭 500 文字なので、無害化を外すと nsec がそのまま含まれて落ちる。
+    #[test]
+    fn test_tool_result_progress_line_masks_nsec() {
+        let wrapper =
+            r#"{"success":true,"data":{"nsec":"nsec1supersecret","npub":"npub1abc"},"error":null}"#;
+        let line = tool_result_progress_line(
+            "nostr_generate_key",
+            wrapper,
+            false,
+            "session-1",
+            "tool-call-1",
+        );
+        assert!(!line.contains("nsec1supersecret"), "nsec leaked: {line}");
+        assert!(line.contains("[redacted]"), "マスク痕が残ること: {line}");
+        // 実況として要る情報（ツール名・成否・秘密でない中身）は落とさない。
+        assert!(line.contains("nostr_generate_key"));
+        assert!(line.contains("completed"));
+        assert!(line.contains("npub1abc"));
+
+        let failed = tool_result_progress_line("read_file", r#"{"error":"nope"}"#, true, "s", "t");
+        assert!(failed.contains("failed"), "失敗は failed と出る: {failed}");
     }
 }
 
