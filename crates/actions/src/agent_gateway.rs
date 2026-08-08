@@ -218,13 +218,18 @@ pub trait GatewayIdentityProvisioning: Send + Sync {
 ///
 /// opencrab が Nostr で担保するのは「鍵のエージェント間混同防止」と「nsec 隠蔽」の 2 点
 /// だけで、Nostr 操作そのもの（投稿・kind:0 プロフィール・チャンネル・取得 等）は nostaro
-/// にそのまま委ねる（再実装しない＝非劣化）。config は常に `agent_id` のもの、`init`/`watch`
-/// は拒否、エラー/出力は nsec マスクを通す——という安全ガードは**実装側**（`NostaroCli`）に
-/// 閉じる。呼び出し側（server-own の `nostr_run`）は subcommand と args を渡すだけ。
+/// にそのまま委ねる（再実装しない＝非劣化）。config は常に `agent_id` のもの、
+/// `init`/`watch`/`relay` は拒否、エラー/出力は nsec マスクを通す——という安全ガードは
+/// **実装側**（`NostaroCli`）に閉じる。呼び出し側（server-own の `nostr_run`）は
+/// subcommand と args を渡すだけ。
+///
+/// `relay` だけ毛色が違うので補足すると、これは危険だからではなく、リレー設定を
+/// opencrab 側（DB）で管理しているため。nostaro から直接いじると config.toml だけが
+/// 変わって DB と desync し、次の gateway start / switch_identity で揮発する。
 #[async_trait]
 pub trait GatewayNostrPassthrough: Send + Sync {
     /// `nostaro --config <agent の config> <subcommand> [args]` を構造化引数で実行し
-    /// stdout を返す。config は常に `agent_id` のもの。`init`/`watch` は拒否。config 未
+    /// stdout を返す。config は常に `agent_id` のもの。`init`/`watch`/`relay` は拒否。config 未
     /// materialize（鍵未採用）は明示エラー。**秘密値（nsec）は出力に出さない**。
     async fn run(&self, agent_id: &str, subcommand: &str, args: &[String]) -> Result<String>;
 }

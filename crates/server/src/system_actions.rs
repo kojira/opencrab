@@ -417,7 +417,7 @@ impl SystemGatewayActions {
                     "properties": {
                         "subcommand": {
                             "type": "string",
-                            "description": "nostaro のサブコマンド（init/watch は不可）。"
+                            "description": "nostaro のサブコマンド（init/watch/relay は不可）。"
                         },
                         "args": {
                             "type": "array",
@@ -1088,7 +1088,7 @@ impl SystemGatewayActions {
     ///
     /// 稼働中（登録済み）の Nostr transport の passthrough capability
     /// （[`opencrab_actions::GatewayNostrPassthrough`]）へ委譲する。config は常に
-    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch` の拒否・`--config` 上書きの封じ・
+    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch`/`relay` の拒否・`--config` 上書きの封じ・
     /// 未 materialize（鍵未採用）の明示エラー・nsec マスクは capability の内側
     /// （`NostaroCli::run_passthrough`）で行う。呼び出し側はここで subcommand と args を
     /// 取り出して渡すだけ。
@@ -7316,7 +7316,7 @@ mod tests {
         assert!(rec.calls.lock().unwrap().is_empty());
     }
 
-    /// capability のエラー（未 materialize / init/watch 拒否 / nostaro 失敗）はそのまま
+    /// capability のエラー（未 materialize / init/watch/relay 拒否 / nostaro 失敗）はそのまま
     /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
     #[tokio::test]
     async fn nostr_run_propagates_capability_error() {
