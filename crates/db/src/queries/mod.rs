@@ -5,6 +5,7 @@
 //! 分割前と変わらない。新しいドメインを足すときは新しいサブモジュールに。
 
 mod agent_discord_config;
+mod agent_inbox;
 mod agent_logs;
 mod agent_mcp_config;
 mod agent_nostr_config;
@@ -30,6 +31,7 @@ mod trusted_users;
 mod webhook_config;
 
 pub use agent_discord_config::*;
+pub use agent_inbox::*;
 pub use agent_logs::*;
 pub use agent_mcp_config::*;
 pub use agent_nostr_config::*;

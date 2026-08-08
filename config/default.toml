@@ -293,3 +293,44 @@ threshold = 0.7
 # [voice.tts.agent_voices]
 # # crab = "3"
 # # rabomi = "1"
+
+# ─ 外部イベント受信（webhook intake / issue #454）─────────────────────────
+# 外部システム（第一号: ナレッジベース omoikane）の出来事を webhook で受け取り、
+# エージェントの受信箱（agent_inbox）に積んで、専用の消化ループが自律的に処理する。
+#
+#   受信: POST /api/hooks/{source}
+#     - source ごとの共有 secret で HMAC-SHA256 を検証（ヘッダ
+#       X-{Source}-Signature: sha256=<hex>、汎用 X-Hook-Signature も可）
+#     - secret 未設定の source は 404 / 署名不正は 401 / 受理は 202（積むだけ）
+#   消化: process_interval_secs ごとに未処理を確認。**空なら LLM を呼ばない**。
+#   catch-up: webhook は at-most-once。停止中に落ちたイベントは source 側の一覧 API を
+#             真実として catch_up_interval_secs ごとに補充する（重複は dedup で弾く）。
+#
+# セクションを書かなければ実質無効（テーブルは空・LLM は呼ばれない）。塞がずに事実だけ書く。
+# [intake]
+# process_interval_secs = 60      # 受信箱消化の間隔（秒）。最低 10 秒に丸める。
+# catch_up_interval_secs = 600    # catch-up ポーリングの間隔（秒）。最低 60 秒に丸める。
+#
+# # source ごとの共有 secret（HMAC 検証用）。値は ${ENV} で注入する（この公開リポジトリに
+# # 実値を書かない）。ここに無い / 空の source への POST は 404。
+# [intake.secrets]
+# omoikane = "${HOOK_SECRET_OMOIKANE}"
+#
+# # source × event_type → 配送先 agent_id（完全一致）。該当が無いイベントは受理（202）は
+# # するが積まれない。agent_id は config 名（例 "crab"）でも UUID でもよい。
+# [[intake.routes]]
+# source = "omoikane"
+# event_type = "comment.created"
+# agent_id = "scout"
+# [[intake.routes]]
+# source = "omoikane"
+# event_type = "chat.message"
+# agent_id = "sebastian"
+#
+# # omoikane source アダプタ（catch-up 一覧 API）。webhook 受信だけなら不要。
+# [intake.omoikane]
+# enabled = true
+# base_url = "https://omoikane.example"      # 末尾スラッシュは有無どちらでも可
+# bearer_token = "${OMOIKANE_API_TOKEN}"     # 秘密。${ENV} で注入する
+# entry_created_by = "<uid>"                 # 対象エージェントの uid フィルタ
+# poll_limit = 50

@@ -74,6 +74,13 @@ pub(crate) enum TurnOrigin {
         subtask_id: String,
         exit_reason: String,
     },
+    /// 外部イベント受信箱（webhook intake / #454）の消化ターン。
+    ///
+    /// `intake_process` ループが、未処理イベントを agent-scoped HB セッションへ system ログ
+    /// として差し込んだ**後**に起こす。差し込んだイベント本文は会話文字列の再構築で載るので、
+    /// ここでは件数と出力形式の規約だけを添える（tick が session_logs に入れる規約行が
+    /// 文脈予算から落ちても応答形式が崩れないように / SubtaskResume と同じ理由）。
+    InboxDelivery { count: usize },
 }
 
 impl TurnOrigin {
@@ -93,6 +100,11 @@ impl TurnOrigin {
     fn prompt_suffix(&self) -> Option<String> {
         match self {
             Self::Tick { .. } => None,
+            Self::InboxDelivery { count } => Some(format!(
+                "[受信箱] 外部から届いた未処理イベントが {count} 件、直前の会話ログに入っています。\n\
+                 内容を確認し、いま対応するか・発話するかは自分で決めてください。\n\
+                 出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。"
+            )),
             Self::SubtaskResume {
                 subtask_id,
                 exit_reason,
@@ -116,6 +128,7 @@ impl TurnOrigin {
     fn label(&self) -> String {
         match self {
             Self::Tick { tick } => format!("tick {tick}"),
+            Self::InboxDelivery { count } => format!("inbox {count}"),
             Self::SubtaskResume {
                 subtask_id,
                 exit_reason,

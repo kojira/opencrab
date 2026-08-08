@@ -11,6 +11,7 @@ use tokio::sync::watch;
 
 mod heartbeat_delivery;
 mod heartbeat_turn;
+mod intake_process;
 
 /// Discord へ 1 通送るためのハンドル。**ボットのトークンを保持するので、どのハンドルで
 /// 送るかが Discord 上の送信者名を決める**（#400 の核心）。
@@ -701,6 +702,7 @@ async fn main() -> anyhow::Result<()> {
         memory_condense: cfg.memory_condense.clone(),
         loop_restart_enabled: cfg.agent.loop_restart_enabled,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
+        intake: Arc::new(cfg.intake.clone()),
         mcp_manager: None,
         // 受信を持つ transport の登録簿（#191 段階2 PR2）。空で作り、各マネージャの
         // 生成箇所から後で `register` する（内部可変なので生成順を変えずに済む）。
@@ -997,6 +999,22 @@ async fn main() -> anyhow::Result<()> {
             cfg.llm_log_archive.interval_secs,
         );
     }
+
+    // 外部イベント受信（webhook intake / #454）。
+    //
+    // 消化ループは heartbeat の起動条件（グローバル有効 or opt-in）に**依存させない**。
+    // heartbeat ループは有効なエージェントが居ないと張られず、そこに inbox 消化を相乗り
+    // させると webhook 対象エージェントの heartbeat が無効なとき黙って消化されない
+    // （silent no-op）。専用ループにして常時起動し、未処理が空なら LLM を呼ばない
+    // （per-agent の非空ゲート / 受け入れ基準）。turn は既存の HeartbeatTurnRunner を
+    // 再利用する（直列化・dispatch・配送・SPEAK 解釈を流用）。
+    {
+        let intake_runner =
+            heartbeat_turn::HeartbeatTurnRunner::from_state(&state, heartbeat_discord_http.clone());
+        intake_process::spawn_intake_process_loop(state.clone(), intake_runner);
+    }
+    // catch-up ポーリング（起動時 + 定期）。source アダプタ未設定なら中で即 return する。
+    opencrab_server::intake::spawn_intake_catchup_loop(state.clone());
 
     // ハートビートの初期設定
     let initial_hb_config = HeartbeatConfig {

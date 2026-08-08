@@ -1471,6 +1471,49 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 36,
+        description: "agent_inbox: 外部イベント受信箱（webhook intake, issue #454）",
+        // **新規テーブルの追加のみ。既存の表・行の内容には一切触れない。**
+        //
+        // #454: 外部 source（第一号 omoikane）の webhook / catch-up ポーリングで受け取った
+        // 出来事を積む受信箱。専用ループ（`intake_process`）が未処理行を消化して
+        // `processed_at` を刻む。
+        //
+        // 冪等性: `CREATE TABLE IF NOT EXISTS` / `CREATE ... INDEX IF NOT EXISTS` は
+        // 自然冪等（v18/v19 の前例）。新規 DB は `SCHEMA_SQL` 側で同じ DDL を持つ。
+        //
+        // ゲートの向き: このマイグレーションは**テーブルを作るだけ**で、受信・消化を有効化
+        // しない。webhook 受信は `[intake.secrets]` に secret を設定した source だけ通り
+        // （未設定は 404）、消化ループは常時起動だが未処理行が無ければ LLM を呼ばない。
+        // つまり空のテーブルを足しても既存挙動は 1 バイトも変わらない（積むものが無い）。
+        //
+        // 切り戻し: 古いバイナリへ戻すときは版番号を戻すこと（テーブルはそのままで良い。
+        // 読み手が居なくなるだけで既存データは壊れない）:
+        //
+        //   BEGIN;
+        //   PRAGMA user_version = 35;
+        //   COMMIT;
+        up: |conn| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS agent_inbox (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    dedup_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_inbox_dedup
+                    ON agent_inbox(source, dedup_key);
+                CREATE INDEX IF NOT EXISTS idx_agent_inbox_unprocessed
+                    ON agent_inbox(agent_id, processed_at);",
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -2871,6 +2914,30 @@ CREATE INDEX IF NOT EXISTS idx_pending_interactions_session
     ON pending_interactions(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_pending_interactions_surface
     ON pending_interactions(surface_id);
+
+-- ============================================
+-- AGENT INBOX: 外部イベント受信箱（webhook intake / issue #454）
+-- ============================================
+-- 外部 source（第一号: omoikane）の出来事を受け取り、heartbeat 外の専用ループが
+-- 消化するまで積んでおく。処理は `processed_at` を刻んで記録する（NULL = 未処理）。
+-- webhook は at-most-once なので、停止中に落ちたイベントは catch-up ポーリングが
+-- 補充する。同じ出来事が webhook と catch-up の両方から来ても二重に積まないよう、
+-- source アダプタが払い出す `dedup_key`（source 内で一意。例: コメント id）に UNIQUE を
+-- 張り、投入は `INSERT OR IGNORE` で行う。
+CREATE TABLE IF NOT EXISTS agent_inbox (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    dedup_key TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_inbox_dedup
+    ON agent_inbox(source, dedup_key);
+CREATE INDEX IF NOT EXISTS idx_agent_inbox_unprocessed
+    ON agent_inbox(agent_id, processed_at);
 
 -- ============================================
 -- TASK LEDGER: 前向きワーキング状態（goal/契約/進捗/決定）

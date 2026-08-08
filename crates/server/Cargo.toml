@@ -46,6 +46,10 @@ reqwest = { workspace = true }
 # 追加バックエンドは持ち込まない（展開は既に依存ツリーにある flate2 を使う）。追加される
 # のは zip とその deflate 圧縮に使う pure-Rust の zopfli 系のみ（C ツールチェーン不要）。
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# webhook intake（#454）の HMAC-SHA256 署名検証。`Hmac::verify_slice` が定数時間比較を
+# 提供するので、署名照合は自前のバイト比較を書かずこれに委ねる（タイミング攻撃対策）。
+hmac = "0.12"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
