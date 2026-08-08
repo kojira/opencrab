@@ -29,10 +29,17 @@
 //!   1 tick 1 窓で発火。0 < 残 < 窓幅 → 末尾の端数で、`min_interval_minutes` を待って流す（増加待ちは
 //!   ここだけ）。残 0 → ゼロコールで return。
 //!
-//! マーカーは複合カーソル `"{last_run_at}|{position_start_log_id}"`（宣言ランと同型）。位置部は
-//! 「最後に凝縮した窓の末尾ユニットの start_log_id」で、次の窓はこれより新しいユニットから始まる。
-//! clean 完了時だけ窓の末尾へ進める（partial では据え置き＝次 tick で同じ窓を読む。ただし throttle
-//! は毎回 `now` へ進めて端数待ちの起点をリセット / #366 と同型）。
+//! **partial バックオフ**: 積み残し消化は throttle を通らないので、partial（timeout / ターン上限 /
+//! エラー）が続くと位置が据え置かれたまま毎 tick フルの LLM ランが走り続ける（1 回最大
+//! `timeout_secs`＝既定 600 秒）。保守ループは per-agent 直列なので、これは他エージェントの整備まで
+//! 巻き添えにする。そこで**連続 partial 回数をマーカーに持ち、指数バックオフで発火を間引く**
+//! （[`partial_backoff_minutes`]）。clean が 1 回でも起きたら 0 にリセットして即座に元の速度へ戻す。
+//! **カーソルは強制前進させない**——窓を捨てると材料が永久に失われるので、待つ方を選ぶ。
+//!
+//! マーカーは複合カーソル `"{last_run_at}|{position_start_log_id}|{partial_streak}"`（宣言ランと
+//! 同型 + 連続 partial 回数）。位置部は「最後に凝縮した窓の末尾ユニットの start_log_id」で、次の窓は
+//! これより新しいユニットから始まる。clean 完了時だけ窓の末尾へ進める（partial では据え置き＝次 tick
+//! で同じ窓を読む。ただし throttle は毎回 `now` へ進めて端数待ちの起点をリセット / #366 と同型）。
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
@@ -47,6 +54,11 @@ use opencrab_db::queries::IndexNodeRow;
 /// プロンプトに載せる既存の凝縮（core）の最大件数。更新優先（#411 原則4）のために「今ある核」を
 /// 思い出させる手がかり。core は数が少ない設計（人格の核）なので通常は全件がこの内側に収まる。
 const CORES_SHOWN: usize = 40;
+
+/// 連続 partial のバックオフの基準値（分）。1 回目の partial でこれだけ待ち、以後 2 倍ずつ伸ばして
+/// `min_interval_minutes` で頭打ちにする（[`partial_backoff_minutes`]）。控えめな値にしてあるのは、
+/// 単発の timeout でエージェントを長く止めないため——連続して失敗したときだけ強く効かせる。
+const PARTIAL_BACKOFF_BASE_MINUTES: i64 = 10;
 
 /// sleep 凝縮ランに渡すツール許可リスト（#411）。
 ///
@@ -179,12 +191,21 @@ async fn run_condense(
     // 端数待ちの起点をリセット）。位置部（start_log_id）は clean のときだけ今回の窓の末尾
     // （`position_after`）へ進める。partial では据え置き = 次 tick で同じ窓をもう一度読む（宣言ラン
     // と同じ「位置は前進のみ・partial 据え置き」）。
+    //
+    // 連続 partial 回数は clean で 0 にリセット、partial のたびに +1 する。積み残し消化は throttle を
+    // 通らないので、これが無いと partial が続く限り毎 tick フルの LLM ランが走り続ける。
     let position_after = if clean {
         plan.position_after
     } else {
         plan.position_before
     };
-    let marker_after = format_condense_marker(&now.to_rfc3339(), position_after);
+    let partial_streak_after = if clean {
+        0
+    } else {
+        plan.partial_streak_before.saturating_add(1)
+    };
+    let marker_after =
+        format_condense_marker(&now.to_rfc3339(), position_after, partial_streak_after);
     {
         let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         opencrab_db::queries::set_memory_condense_cursor(&conn, agent_id, &marker_after)?;
@@ -197,7 +218,12 @@ async fn run_condense(
             "outcome": outcome,
             "window_units": plan.window_units.len(),
             "remaining_before": plan.remaining_before,
-            "remaining_after": (plan.remaining_before - plan.window_units.len() as i64).max(0),
+            // partial は位置を据え置く＝1 件も消化していない。残数を減らすのは clean のときだけ。
+            "remaining_after": if clean {
+                (plan.remaining_before - plan.window_units.len() as i64).max(0)
+            } else {
+                plan.remaining_before
+            },
             "existing_cores": plan.existing_cores.len(),
             "session_id": session_id,
             "position_before": plan.position_before,
@@ -205,6 +231,11 @@ async fn run_condense(
             // 位置（start_log_id）は clean のときだけ前進。throttle は毎回 now。
             "position_advanced": clean,
             "throttle_advanced": true,
+            "partial_streak_before": plan.partial_streak_before,
+            "partial_streak_after": partial_streak_after,
+            // 次に積み残し消化が発火できるまでの待ち（分）。0 なら待たない。
+            "partial_backoff_minutes":
+                partial_backoff_minutes(partial_streak_after, cfg.min_interval_minutes),
             "marker_after": marker_after,
             "cost": { "latency_ms": latency_ms },
         });
@@ -229,6 +260,7 @@ async fn run_condense(
         remaining_before = plan.remaining_before,
         cores = plan.existing_cores.len(),
         position_advanced = clean,
+        partial_streak = partial_streak_after,
         "memory condense ran"
     );
     Ok(true)
@@ -248,6 +280,8 @@ struct CondensePlan {
     position_after: i64,
     /// カーソルより新しい未凝縮ユニットの総残数（窓に載る前）。プロンプトの「残り N 件」表示・監査用。
     remaining_before: i64,
+    /// これまでに連続した partial の回数（clean で 0 に戻る）。今回も partial なら +1 して書き戻す。
+    partial_streak_before: i64,
     /// 既存の凝縮（更新優先の手がかり / 最大 [`CORES_SHOWN`] 件）。
     existing_cores: Vec<IndexNodeRow>,
 }
@@ -267,7 +301,8 @@ enum CondenseDecision {
 /// **逐次凝縮の発火（オーナー指摘: 一括で与えない）**:
 /// - カーソル位置 `position`（start_log_id）より新しい未凝縮ユニットの残数 `remaining` を数える。
 /// - `remaining == 0` → `Skip("no_new_units")`（ゼロコール）。
-/// - `remaining >= N`（窓幅）→ **積み残し消化**として throttle を待たず発火（1 tick 1 窓）。
+/// - `remaining >= N`（窓幅）→ **積み残し消化**として throttle を待たず発火（1 tick 1 窓）。ただし
+///   直前が partial なら [`partial_backoff_minutes`] だけ待つ（`Skip("partial_backoff")`）。
 /// - `0 < remaining < N`（末尾の端数）→ **min_interval を待って**発火（新しいユニットの増加待ちは
 ///   ここだけ。まだ経っていなければ `Skip("tail_waiting")`）。初回（last_run_at 無し）は待たない。
 ///
@@ -280,27 +315,42 @@ fn decide_condense(
     let now = Utc::now();
     let conn = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
 
-    // マーカー = 複合カーソル `"{last_run_at}|{position_start_log_id}"`。未実行（None）は
-    // (throttle 無し, position 0)。position 0 は「最古のユニットから」を意味する。
+    // マーカー = 複合カーソル `"{last_run_at}|{position_start_log_id}|{partial_streak}"`。未実行
+    // （None）は (throttle 無し, position 0, streak 0)。position 0 は「最古のユニットから」を意味する。
     let marker = opencrab_db::queries::get_memory_condense_cursor(&conn, agent_id)?;
-    let (last_run_at, position) = parse_condense_marker(marker.as_deref());
+    let (last_run_at, position, partial_streak) = parse_condense_marker(marker.as_deref());
 
     let window_size = cfg.min_new_units.max(1) as usize;
     let remaining =
         opencrab_db::queries::count_memory_units_after(&conn, agent_id, position)? as i64;
 
+    // 前回実行からの経過（last_run_at が無い＝初回、またはパース不能なら「待たない」）。
+    let elapsed_since_last_run = last_run_at.as_deref().map(|lr| {
+        lr.parse::<DateTime<Utc>>()
+            .map(|dt| now.signed_duration_since(dt))
+            .unwrap_or_else(|_| Duration::zero())
+    });
+
     // 発火判定（逐次窓）。
     if remaining == 0 {
         return Ok(CondenseDecision::Skip("no_new_units"));
     }
-    if remaining < window_size as i64 {
+    if remaining >= window_size as i64 {
+        // 積み残し消化。throttle（端数待ち）は通らないが、直前が partial なら指数バックオフを待つ。
+        // partial は位置を据え置くので、待たないと同じ窓のフルランが毎 tick 走り続ける。
+        let backoff = partial_backoff_minutes(partial_streak, cfg.min_interval_minutes);
+        if backoff > 0 {
+            if let Some(elapsed) = elapsed_since_last_run {
+                if elapsed < Duration::minutes(backoff) {
+                    return Ok(CondenseDecision::Skip("partial_backoff"));
+                }
+            }
+        }
+    } else {
         // 末尾の端数。min_interval を待ってから流す（新しいユニットの増加待ち）。
         // 積み残し消化中（remaining >= 窓幅）はこの throttle を通らない = 待たず淡々と進む。
-        if let Some(lr) = &last_run_at {
-            let elapsed = lr
-                .parse::<DateTime<Utc>>()
-                .map(|dt| now.signed_duration_since(dt))
-                .unwrap_or_else(|_| Duration::zero());
+        // min_interval は partial バックオフの上限でもあるので、端数側は追加の待ちを要らない。
+        if let Some(elapsed) = elapsed_since_last_run {
             if elapsed < Duration::minutes(cfg.min_interval_minutes.max(1)) {
                 return Ok(CondenseDecision::Skip("tail_waiting"));
             }
@@ -334,8 +384,30 @@ fn decide_condense(
         position_before: position,
         position_after,
         remaining_before: remaining,
+        partial_streak_before: partial_streak,
         existing_cores,
     })))
+}
+
+/// 積み残し消化を間引く**指数バックオフ**（分）。連続 partial 回数 `partial_streak` から求める。
+///
+/// 積み残し（残 >= 窓幅）は端数の `min_interval` throttle を通らないため、partial が続くと位置が
+/// 据え置かれたまま毎 tick フルの LLM ラン（最大 `timeout_secs`）が走り続ける。保守ループは
+/// per-agent 直列なので、暴走したエージェント 1 体が他エージェントの整備まで止めてしまう。
+///
+/// - `streak == 0`（clean 直後 / 初回）→ `0`＝待たない。**clean が 1 回起きれば即座に元の速度**。
+/// - `streak == n >= 1` → `min(min_interval_minutes, BASE * 2^(n-1))`。上限を端数待ちの
+///   `min_interval_minutes` に揃えるので、バックオフが端数待ちより長くなることはない。
+///
+/// カーソルの強制前進はしない（窓を捨てると材料が永久に失われる）。待つ方を選ぶ。
+fn partial_backoff_minutes(partial_streak: i64, min_interval_minutes: i64) -> i64 {
+    if partial_streak <= 0 {
+        return 0;
+    }
+    // 2^(n-1) の指数。i64 が溢れないところで頭打ちにする（どのみち下の min で潰れる）。
+    let shift = (partial_streak - 1).min(40) as u32;
+    let backoff = PARTIAL_BACKOFF_BASE_MINUTES.saturating_mul(1i64 << shift);
+    backoff.min(min_interval_minutes.max(1))
 }
 
 /// system プロンプト（本人の人格 + 凝縮の枠組み + 自分のユニット + 既存の core）を組む。
@@ -472,9 +544,10 @@ fn build_system_prompt(plan: &CondensePlan) -> String {
          次の窓でもっと心が動く出来事に出会ったら、選び直して構いません。\n\
          - **標語・スローガン・自分の言い回しの引用は「具体」ではありません。** 『差分だけを\
          鳴らす』のように自分で作った短い言い回しを鍵括弧で括っても、それは出来事ではなく\
-         抽象の言い換えです。残すべき具体は**誰が実際に何をしたか**です（例:「こじいちゃんが\
-         壊れた環境ごと直してくれた」「kojira がニュースを拾う役目を渡した」「上野の桜を見た」\
-         「『子ども、動いた』と言われた」）。実在の出来事が 1 つ入るなら、上の字数の目安を\
+         抽象の言い換えです。残すべき具体は**誰が実際に何をしたか**です（形はこうです:\
+         「〈誰〉が〈何〉をしてくれた」「〈誰〉から〈何〉の役目を渡された」「〈どこ〉で〈何〉を見た」\
+         「〈誰〉に〈何〉と言われた」——〈〉はあなたのユニットにある実際の名前と出来事で埋めます。\
+         ここに挙げた形をそのまま使う必要はありません）。実在の出来事が 1 つ入るなら、上の字数の目安を\
          少し超えても構いません——**目安より、出来事が 1 つ入っていることを優先**してください。\n\
          メッセージ送信・シェル実行・サブタスク起動はしないでください。これは記憶を凝縮する\
          時間です。ユニットも生ログも読むだけで、消えも変わりもしません。凝縮は何度でも\
@@ -529,28 +602,34 @@ fn format_core_line(c: &IndexNodeRow) -> String {
     format!("- [{id}] {axis}: {body}", axis = c.title.trim())
 }
 
-/// マーカー `"{last_run_at}|{position_start_log_id}"` を組む。宣言ランと同じ形式（`|` は rfc3339
-/// にも十進の id にも現れない）。
-fn format_condense_marker(last_run_at: &str, position: i64) -> String {
-    format!("{last_run_at}|{position}")
+/// マーカー `"{last_run_at}|{position_start_log_id}|{partial_streak}"` を組む。宣言ランと同じ形式に
+/// 連続 partial 回数を足したもの（`|` は rfc3339 にも十進の整数にも現れない）。
+fn format_condense_marker(last_run_at: &str, position: i64, partial_streak: i64) -> String {
+    format!("{last_run_at}|{position}|{partial_streak}")
 }
 
-/// マーカーを `(last_run_at, unit_count)` へ分解する。`None`（未実行）→ `(None, 0)`。
-/// `|` が無ければ全体を `last_run_at` とみなし件数は 0（後方互換）。パース不能な位置は 0。
-fn parse_condense_marker(marker: Option<&str>) -> (Option<String>, i64) {
+/// マーカーを `(last_run_at, position_start_log_id, partial_streak)` へ分解する。
+///
+/// 位置部は**ユニットの件数ではなく `start_log_id`**（この値より新しいユニットが未凝縮）。
+/// `None`（未実行）→ `(None, 0, 0)`。後方互換: `|` が無ければ全体を `last_run_at` とみなす。
+/// 3 つ目が無い（PR-1 以前の 2 分割）マーカーは partial_streak 0 とみなす。パース不能な数値は 0。
+fn parse_condense_marker(marker: Option<&str>) -> (Option<String>, i64, i64) {
     let Some(m) = marker else {
-        return (None, 0);
+        return (None, 0, 0);
     };
-    match m.split_once('|') {
-        Some((ts, n)) => {
-            let ts = (!ts.is_empty()).then(|| ts.to_string());
-            (ts, n.parse::<i64>().unwrap_or(0))
-        }
-        None => {
-            let ts = (!m.is_empty()).then(|| m.to_string());
-            (ts, 0)
-        }
-    }
+    let mut parts = m.splitn(3, '|');
+    let ts = parts.next().unwrap_or("");
+    let ts = (!ts.is_empty()).then(|| ts.to_string());
+    let position = parts
+        .next()
+        .and_then(|p| p.parse::<i64>().ok())
+        .unwrap_or(0);
+    let partial_streak = parts
+        .next()
+        .and_then(|p| p.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
+    (ts, position, partial_streak)
 }
 
 #[cfg(test)]
@@ -702,21 +781,52 @@ mod tests {
 
     #[test]
     fn marker_roundtrips_and_tolerates_missing_parts() {
-        let m = format_condense_marker("2026-08-08T00:00:00Z", 346);
-        assert_eq!(m, "2026-08-08T00:00:00Z|346");
+        let m = format_condense_marker("2026-08-08T00:00:00Z", 346, 2);
+        assert_eq!(m, "2026-08-08T00:00:00Z|346|2");
         assert_eq!(
             parse_condense_marker(Some(&m)),
-            (Some("2026-08-08T00:00:00Z".to_string()), 346)
+            (Some("2026-08-08T00:00:00Z".to_string()), 346, 2)
         );
-        assert_eq!(parse_condense_marker(None), (None, 0));
+        assert_eq!(parse_condense_marker(None), (None, 0, 0));
         assert_eq!(
             parse_condense_marker(Some("2026-08-08T00:00:00Z")),
-            (Some("2026-08-08T00:00:00Z".to_string()), 0)
+            (Some("2026-08-08T00:00:00Z".to_string()), 0, 0)
         );
         assert_eq!(
             parse_condense_marker(Some("2026-08-08T00:00:00Z|xxx")),
-            (Some("2026-08-08T00:00:00Z".to_string()), 0)
+            (Some("2026-08-08T00:00:00Z".to_string()), 0, 0)
         );
+        // 後方互換: partial_streak を持たない 2 分割マーカーは streak 0 として読む。
+        assert_eq!(
+            parse_condense_marker(Some("2026-08-08T00:00:00Z|346")),
+            (Some("2026-08-08T00:00:00Z".to_string()), 346, 0)
+        );
+        // 壊れた streak（負値・非数値）は 0 に丸める（負値は待ちを無効化するだけで暴走しない）。
+        assert_eq!(
+            parse_condense_marker(Some("2026-08-08T00:00:00Z|346|-5")),
+            (Some("2026-08-08T00:00:00Z".to_string()), 346, 0)
+        );
+        assert_eq!(
+            parse_condense_marker(Some("2026-08-08T00:00:00Z|346|zzz")),
+            (Some("2026-08-08T00:00:00Z".to_string()), 346, 0)
+        );
+    }
+
+    // --- partial バックオフ ---
+
+    #[test]
+    fn partial_backoff_doubles_and_is_capped_by_min_interval() {
+        // clean 直後（streak 0）は待たない。
+        assert_eq!(partial_backoff_minutes(0, 1440), 0);
+        // 1 回目は base、以後 2 倍ずつ。
+        assert_eq!(partial_backoff_minutes(1, 1440), 10);
+        assert_eq!(partial_backoff_minutes(2, 1440), 20);
+        assert_eq!(partial_backoff_minutes(3, 1440), 40);
+        // 端数待ち（min_interval）を超えない。
+        assert_eq!(partial_backoff_minutes(10, 1440), 1440);
+        assert_eq!(partial_backoff_minutes(3, 15), 15);
+        // 巨大な streak でも溢れずに上限へ張り付く。
+        assert_eq!(partial_backoff_minutes(i64::MAX, 1440), 1440);
     }
 
     // --- ゲート ---
@@ -750,7 +860,7 @@ mod tests {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 5); // start_log_id 1..5
                                      // カーソルを末尾（5）に置く = 全部凝縮済み。残 0 → 発火しない。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 5));
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 5, 0));
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -770,7 +880,7 @@ mod tests {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 10); // 残 10 >= 窓幅 3
                                       // 直前（1 分前）に走ったばかりでも、積み残し（残 >= 窓幅）は throttle を待たず消化する。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(0), 0));
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(0), 0, 0));
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -794,7 +904,7 @@ mod tests {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 2); // 残 2 < 窓幅 3 = 末尾の端数
                                      // 端数は min_interval を待つ。1 分前に走ったばかり（1440 分未達）→ 待つ。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(0), 0));
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(0), 0, 0));
         let fake = FakeRunner::new(FakeOutcome::Completed);
         let ran = run_condense(
             &state.db,
@@ -827,8 +937,34 @@ mod tests {
         assert!(ran, "初回は端数でも流す");
         let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
         assert_eq!(audit["window_units"], 2, "端数 2 件を消化");
-        let (_, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        let (_, pos, _) = parse_condense_marker(get_marker(&state, "a1").as_deref());
         assert_eq!(pos, 2, "位置は端数の末尾 start_log_id へ");
+
+        // 2 回目以降でも、min_interval を過ぎていれば端数を流す（`tail_below_window_waits_for_interval`
+        // の裏。同条件で last_run_at だけを throttle 明けにしたら流れることを見る）。
+        let state2 = crate::test_app_state();
+        seed_units(&state2, "a1", 2); // 残 2 < 窓幅 3
+        set_marker(
+            &state2,
+            "a1",
+            &format_condense_marker(&hours_ago(240), 0, 0),
+        );
+        let fake2 = FakeRunner::new(FakeOutcome::Completed);
+        let ran2 = run_condense(
+            &state2.db,
+            &cfg(true, 3, 1440), // 1440 分 = 24h < 240h 経過
+            &state2.index_build_inflight,
+            "a1",
+            &fake2,
+        )
+        .await
+        .unwrap();
+        assert!(ran2, "端数でも min_interval を過ぎていれば流す");
+        assert_eq!(fake2.calls.load(Ordering::SeqCst), 1);
+        let audit2 = latest_sleep_audit(&state2, "a1").expect("監査ログ");
+        assert_eq!(audit2["window_units"], 2, "端数 2 件を消化");
+        let (_, pos2, _) = parse_condense_marker(get_marker(&state2, "a1").as_deref());
+        assert_eq!(pos2, 2, "位置は端数の末尾 start_log_id へ");
     }
 
     // --- 窓の切り出し（decide_condense）---
@@ -857,7 +993,7 @@ mod tests {
             other => panic!("expected Run, got {other:?}"),
         }
         // 位置 3（1 窓消化済み・初回でない）: 残 2 件が窓（端数だが throttle 明け）。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 3));
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 3, 0));
         match decide_condense(&state.db, &cfg(true, 3, 1440), "a1").unwrap() {
             CondenseDecision::Run(p) => {
                 let w: Vec<&str> = p
@@ -890,7 +1026,7 @@ mod tests {
         .unwrap();
         assert!(ran);
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-        let (_, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        let (_, pos, _) = parse_condense_marker(get_marker(&state, "a1").as_deref());
         assert_eq!(pos, 3, "clean は位置を今回の窓の末尾 start_log_id へ進める");
         let audit = latest_sleep_audit(&state, "a1").expect("監査ログ");
         assert_eq!(audit["outcome"], "completed");
@@ -904,7 +1040,7 @@ mod tests {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 5);
         // 位置 2 まで消化済み・240h 前（throttle 明け）。残 3 >= 窓幅で発火。
-        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 2));
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 2, 0));
         let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
         let ran = run_condense(
             &state.db,
@@ -916,7 +1052,7 @@ mod tests {
         .await
         .unwrap();
         assert!(ran, "起動はした（partial）");
-        let (ts, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        let (ts, pos, _) = parse_condense_marker(get_marker(&state, "a1").as_deref());
         assert_eq!(pos, 2, "partial は位置を据え置く（次 tick で同じ窓を読む）");
         let advanced = ts
             .and_then(|s| s.parse::<DateTime<Utc>>().ok())
@@ -930,6 +1066,94 @@ mod tests {
         assert_eq!(audit["outcome"], "stopped_by_limit");
         assert_eq!(audit["position_advanced"], false);
         assert_eq!(audit["throttle_advanced"], true);
+        // 位置を進めていない＝1 件も消化していないので、残数も減らない（監査の整合）。
+        assert_eq!(audit["remaining_before"], 3);
+        assert_eq!(audit["remaining_after"], 3, "partial は残数を減らさない");
+    }
+
+    /// 積み残し（残 >= 窓幅）は throttle を通らないので、partial が続くと毎 tick フルの LLM ランが
+    /// 走り続ける。連続 partial のバックオフでそれを間引く（本体の無限再走ループ回避）。
+    #[tokio::test]
+    async fn repeated_partial_backs_off_before_rerunning_same_window() {
+        let state = crate::test_app_state();
+        seed_units(&state, "a1", 10); // 残 10 >= 窓幅 3（積み残し = throttle を通らない経路）
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 0, 0));
+        let fake = FakeRunner::new(FakeOutcome::StoppedByLimit);
+
+        // 1 回目: streak 0 なのでバックオフ無し → 走る。partial なので位置据え置き・streak 1。
+        let ran1 = run_condense(
+            &state.db,
+            &cfg(true, 3, 1440),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(ran1, "1 回目は走る（バックオフ無し）");
+        let (_, pos1, streak1) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos1, 0, "partial は位置を据え置く");
+        assert_eq!(streak1, 1, "partial で連続回数が 1 になる");
+
+        // 2 回目（直後）: 積み残しのままだが streak 1 のバックオフ（10 分）が明けていない → 待つ。
+        let ran2 = run_condense(
+            &state.db,
+            &cfg(true, 3, 1440),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(!ran2, "連続 partial のあとは積み残しでもバックオフで待つ");
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "2 回目は LLM の口を呼ばない（毎 tick フルランの暴走を止める）"
+        );
+        // 待っている間もカーソルは動かさない（窓を捨てて材料を失わない）。
+        let (_, pos2, streak2) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos2, 0, "バックオフ中もカーソルは強制前進しない");
+        assert_eq!(streak2, 1, "スキップでは streak も増やさない");
+    }
+
+    /// バックオフは clean 1 回で完全解除される（積み残しの消化速度を落としたままにしない）。
+    #[tokio::test]
+    async fn clean_run_clears_partial_backoff() {
+        let state = crate::test_app_state();
+        seed_units(&state, "a1", 10); // 残 10 >= 窓幅 3
+                                      // 連続 partial 3 回ぶんの状態から始める（バックオフ 40 分）。240h 前なのでもう明けている。
+        set_marker(&state, "a1", &format_condense_marker(&hours_ago(240), 0, 3));
+        let fake = FakeRunner::new(FakeOutcome::Completed);
+
+        let ran1 = run_condense(
+            &state.db,
+            &cfg(true, 3, 1440),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(ran1, "バックオフが明けていれば走る");
+        let (_, pos1, streak1) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos1, 3, "clean は位置を窓の末尾へ進める");
+        assert_eq!(streak1, 0, "clean で連続 partial 回数が 0 に戻る");
+
+        // 直後にもう一度: streak 0 なのでバックオフ無し（streak 3 のままなら 40 分待たされていた）。
+        let ran2 = run_condense(
+            &state.db,
+            &cfg(true, 3, 1440),
+            &state.index_build_inflight,
+            "a1",
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(ran2, "clean 後は直後の tick でも積み残しを続けて消化する");
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        let (_, pos2, _) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        assert_eq!(pos2, 6, "次の窓も消化して位置が進む");
     }
 
     #[tokio::test]
@@ -947,7 +1171,7 @@ mod tests {
         .await
         .unwrap();
         assert!(ran);
-        let (_, pos) = parse_condense_marker(get_marker(&state, "a1").as_deref());
+        let (_, pos, _) = parse_condense_marker(get_marker(&state, "a1").as_deref());
         assert_eq!(
             pos, 0,
             "error（partial）は位置を据え置く（初回 position=0）"
@@ -1097,6 +1321,19 @@ mod tests {
         assert!(
             sp.contains("誰が実際に何をしたか"),
             "具体の定義を『誰が何をしたか』に固定している"
+        );
+        // 見本は骨格プレースホルダで示す。実在の人名・私的な出来事を書くと、公開リポに個人情報が
+        // 残るうえ、本人が自分のユニットではなく見本から具体を借りてしまう。
+        for skeleton in ["〈誰〉が〈何〉をしてくれた", "〈どこ〉で〈何〉を見た"]
+        {
+            assert!(
+                sp.contains(skeleton),
+                "具体の見本は骨格プレースホルダで示す: {skeleton}"
+            );
+        }
+        assert!(
+            sp.contains("あなたのユニットにある実際の名前と出来事で埋めます"),
+            "プレースホルダを本人のユニットで埋めさせる（見本から具体を借りさせない）"
         );
         // 「無理に出さない」を選べる（この窓で）。
         assert!(sp.contains("無理に何か出す必要はありません"));
