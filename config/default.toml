@@ -132,6 +132,10 @@ default_model = "gpt-5.5"
 reasoning_effort = "low"
 include_reasoning_encrypted_content = false
 max_output_tokens = 25000
+# チャット補完の read timeout（秒）。reasoning_effort の高い体は 1 ターンの生成が
+# 長くなり、短すぎると timeout → router のリトライを繰り返して 1 ターンが error に
+# 落ちる（#433）。省略時も 300（ProviderConfig の既定）。
+timeout_secs = 300
 
 # Bonsai 8B (1-bit LLM, PrismML)
 [llm.providers.bonsai]

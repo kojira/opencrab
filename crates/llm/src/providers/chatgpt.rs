@@ -20,6 +20,12 @@ const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// access_token の失効をこの秒数だけ前倒しで判定する（リクエスト飛行中の失効を防ぐ）。
 const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+/// チャット補完リクエスト全体（＝生成の読み切り）の timeout 既定値（秒）。
+/// `reasoning_effort` を上げると 1 ターンの生成がこれを超えることがあるので、
+/// config の `timeout_secs` で伸ばせる（#433）。
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// 接続確立の timeout（秒）。生成の長さとは無関係なので config では変えない。
+const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 /// リフレッシュの直列化（同時多発の 401 で refresh_token を並行消費しない）。
 /// OpenAI はリフレッシュでトークンをローテーションするため、並行リフレッシュは
@@ -213,6 +219,15 @@ fn token_expired(token: &str) -> bool {
     exp - TOKEN_EXPIRY_MARGIN_SECS <= now
 }
 
+/// チャット補完用の HTTP クライアントを組む。read timeout だけが可変。
+fn build_client(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatGptProvider {
     client: Client,
@@ -224,6 +239,8 @@ pub struct ChatGptProvider {
     default_model: String,
     reasoning_effort: Option<String>,
     include_encrypted_content: bool,
+    /// `client` に設定済みの read timeout（秒）。`Client` からは読み出せないので保持する。
+    timeout_secs: u64,
 }
 
 impl Default for ChatGptProvider {
@@ -236,18 +253,26 @@ impl ChatGptProvider {
     pub fn new() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(60))
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            client: build_client(DEFAULT_TIMEOUT_SECS),
             auth_file: format!("{}/.codex/auth.json", home),
             base_url: CHATGPT_BASE_URL.to_string(),
             oauth_token_url: OAUTH_TOKEN_URL.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
             reasoning_effort: Some("low".to_string()),
             include_encrypted_content: false,
+            timeout_secs: DEFAULT_TIMEOUT_SECS,
         }
+    }
+
+    /// チャット補完リクエストの read timeout を秒で上書きする（#433）。
+    ///
+    /// 既定は 60 秒。`reasoning_effort` の高い体は 1 ターンの生成がこれを超えることが
+    /// あり、超えると `failed to read response body: operation timed out` になって
+    /// router がリトライする。config の `[providers.chatgpt] timeout_secs` から渡す。
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.client = build_client(secs);
+        self.timeout_secs = secs;
+        self
     }
 
     /// テスト用: OAuth トークンエンドポイントを差し替える。
@@ -2096,6 +2121,53 @@ mod tests {
         assert!(!token_expired(&fake_jwt(3600)));
         // exp が読めないトークンは false（401 リトライ側に任せる）
         assert!(!token_expired("not-a-jwt"));
+    }
+
+    /// リクエストを受けてから `delay` 待って 200 を返すモック（read timeout 検証用）。
+    async fn spawn_slow_mock(delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let resp =
+                        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}/slow")
+    }
+
+    /// #433: read timeout は 60 秒ハードコードではなく、`with_timeout_secs` で伸ばせる。
+    /// 保持している値だけでなく、**実際に client へ効いている**ことまで見る。
+    #[tokio::test]
+    async fn test_timeout_secs_is_applied_to_the_http_client() {
+        assert_eq!(
+            ChatGptProvider::new().timeout_secs,
+            DEFAULT_TIMEOUT_SECS,
+            "未設定の既定は 60 秒のまま"
+        );
+
+        let url = spawn_slow_mock(Duration::from_millis(1500)).await;
+
+        let short = ChatGptProvider::new().with_timeout_secs(1);
+        let err = short.client.get(&url).send().await.unwrap_err();
+        assert!(err.is_timeout(), "1 秒なら読み切る前に timeout する: {err}");
+
+        let long = ChatGptProvider::new().with_timeout_secs(10);
+        let resp = long
+            .client
+            .get(&url)
+            .send()
+            .await
+            .expect("10 秒なら読み切れる");
+        assert!(resp.status().is_success());
     }
 
     /// 1 接続だけ受けて固定レスポンスを返す極小 HTTP モック。
