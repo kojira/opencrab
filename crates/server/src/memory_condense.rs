@@ -270,6 +270,7 @@ enum CondenseDecision {
 /// - `remaining >= N`（窓幅）→ **積み残し消化**として throttle を待たず発火（1 tick 1 窓）。
 /// - `0 < remaining < N`（末尾の端数）→ **min_interval を待って**発火（新しいユニットの増加待ちは
 ///   ここだけ。まだ経っていなければ `Skip("tail_waiting")`）。初回（last_run_at 無し）は待たない。
+///
 /// いずれも窓は「position より新しいユニットを時系列順に最大 N 件」。
 fn decide_condense(
     db: &opencrab_db::Db,
