@@ -36,7 +36,7 @@
 - **emit 箇所**: `crates/discord/src/gateway_actions/subtask_engine.rs`
   - `execute_spawn_subtask` が `from_args` で取得 → `spawn_run_worker` 起動 → `started` 送信。終端は spawn した closure 内で `exit_reason_to_status` により completed/failed/timed_out を送信。`execute_cancel_subtask` が aborted を送信。
   - `sub_session_id = "subtask-{UUID}"`。`subtask_spawned` / `subtask_completed` / `subtask_progress` を親セッションログに記録。
-  - `SkillEngine::set_on_tool_call` / `set_on_tool_result` を**粗い** `subtask_progress` 用にのみ使用（`summarize_tool_calls` でツール名の羅列、結果は 500 文字 preview）。
+  - `SkillEngine::add_on_tool_call` / `add_on_tool_result` を**粗い** `subtask_progress` 用にのみ使用（`summarize_tool_calls` でツール名の羅列、結果は 500 文字 preview）。
 
 ### 1.2 ツール呼び出しのディスパッチ・実行箇所
 

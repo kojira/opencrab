@@ -1652,8 +1652,39 @@ fn set_llm_log_callback(
     });
 }
 
+/// サブタスク走行の実況（#175 S4）の配線。ツール呼び出しと結果を進捗として通知口へ流す。
+///
+/// 購読していない（`wants_progress()` が false）ならフック自体を挿さず、要約の計算も
+/// 省く（旧 `execute_spawn_subtask` と同じ判定）。
+///
+/// #397: ここと [`set_turn_log_callbacks`] は**同じ engine の同じフック**に載る。engine
+/// 側が代入だった頃は、後から呼ばれる `set_turn_log_callbacks`（`persist_turn_logs` が
+/// true のとき）がこの実況を丸ごと上書きして消していた。今は `add_on_tool_*` で足すので
+/// 両方生き、配線の順序にも依存しない。
+fn set_run_notifier_callbacks(
+    engine: &mut opencrab_core::SkillEngine,
+    notifier: &std::sync::Arc<dyn opencrab_actions::SubtaskRunNotifier>,
+) {
+    if !notifier.wants_progress() {
+        return;
+    }
+    let on_call = notifier.clone();
+    engine.add_on_tool_call(move |assistant_content, tool_calls_json| {
+        on_call.on_progress(&summarize_tool_calls(&assistant_content, &tool_calls_json));
+    });
+    let on_result = notifier.clone();
+    engine.add_on_tool_result(move |_tool_call_id, tool_name, result_json, is_error| {
+        let status = if is_error { "failed" } else { "completed" };
+        let preview: String = result_json.chars().take(500).collect();
+        on_result.on_progress(&format!("tool `{tool_name}` {status}\n{preview}"));
+    });
+}
+
 /// ターンの tool_call / tool_result を session_logs に記録するコールバックの配線
 /// （#33: 段の分解。tool_result はサイズ上限超過時にワークスペースへ退避）。
+///
+/// #397: `add_on_tool_*` で**足す**。代入にすると、先に配線された
+/// [`set_run_notifier_callbacks`] の実況が消える。
 fn set_turn_log_callbacks(
     engine: &mut opencrab_core::SkillEngine,
     db: opencrab_db::Db,
@@ -1665,7 +1696,7 @@ fn set_turn_log_callbacks(
         let tc_db = db.clone();
         let tc_agent = agent_id.clone();
         let tc_session = session_id.clone();
-        engine.set_on_tool_call(move |content: String, tool_calls_json: String| {
+        engine.add_on_tool_call(move |content: String, tool_calls_json: String| {
             if let Ok(conn) = tc_db.lock() {
                 // LLMがtext+tool_callsを同時に返した場合、textをspeechとして記録する
                 if !content.trim().is_empty() {
@@ -1710,7 +1741,7 @@ fn set_turn_log_callbacks(
         let tr_agent = agent_id;
         let tr_session = session_id;
         let tr_workspace = tool_result_workspace;
-        engine.set_on_tool_result(
+        engine.add_on_tool_result(
             move |tool_call_id: String, tool_name: String, result_json: String, is_error: bool| {
                 // 永続化前の無害化（秘密フィールドのマスク ＋ サイズ上限/ワークスペース
                 // 退避）は background dispatch 経路（`SubtaskToolDispatcher` →
@@ -2213,18 +2244,7 @@ pub async fn run_agent_response(
     // 購読していない（`wants_progress()` が false）ならフック自体を挿さず、要約の計算も
     // 省く（旧 `execute_spawn_subtask` と同じ判定）。
     if let Some(notifier) = run_notifier {
-        if notifier.wants_progress() {
-            let on_call = notifier.clone();
-            engine.set_on_tool_call(move |assistant_content, tool_calls_json| {
-                on_call.on_progress(&summarize_tool_calls(&assistant_content, &tool_calls_json));
-            });
-            let on_result = notifier.clone();
-            engine.set_on_tool_result(move |_tool_call_id, tool_name, result_json, is_error| {
-                let status = if is_error { "failed" } else { "completed" };
-                let preview: String = result_json.chars().take(500).collect();
-                on_result.on_progress(&format!("tool `{tool_name}` {status}\n{preview}"));
-            });
-        }
+        set_run_notifier_callbacks(&mut engine, &notifier);
     }
 
     // per-agent の thinking 強度を各 ChatRequest に付与（プロバイダーが per-request で優先）。
@@ -4024,7 +4044,7 @@ mod redact_secret_fields_tests {
 
     #[test]
     fn test_redacts_nsec_nested_in_actionresult_wrapper() {
-        // set_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
+        // add_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
         // nsec は data の中にネストする。
         let wrapper = r#"{"success":true,"data":{"nsec":"nsec1supersecret","npub":"npub1abc","pubkey":"hex","warning":"w"},"error":null}"#;
         let out = redact_secret_fields_json(wrapper);
