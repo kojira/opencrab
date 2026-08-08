@@ -942,9 +942,11 @@ async fn process_incoming_message<T: AgentRunner>(
 
                 // #431: 「発言終わり」リアクションの可否を result を move する前に確定する。
                 // 「発話したか」は最終応答テキストではなく、このターンで on_response_text が
-                // 実送信まで進んだ回数で見る（run_agent_response は既に完了しているので
-                // 発火は出揃っている）。反復途中で喋って最終応答が NO_REPLY のターンを
-                // 取りこぼさないため。
+                // 送信タスクを起こした回数で見る（run_agent_response は既に完了しているので
+                // 発火は出揃っている。送信タスク自体の完了待ちは下の detach 側で行う）。
+                // 反復途中で喋って最終応答が NO_REPLY のターンを取りこぼさないため。
+                // 「自然終了か」（打ち切り / background subtask を投げていないか）は
+                // EngineResult 側が持つ（`end_of_speech_qualifies` 参照）。
                 let posted =
                     reply_send_seq_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
                 let eos_qualifies = end_of_speech_qualifies(&result, posted);
@@ -1761,6 +1763,11 @@ const SPOKE_EMOJI: &str = "🏁";
 /// - 反復上限での打ち切り（`stopped_by_limit`）… 途中で切られた
 /// - `posted == false` … このターンで実投稿していない（全反復 NO_REPLY/空、または
 ///   非 writable で送信に至らなかった）＝そもそも発話していない
+/// - background subtask を dispatch した（`dispatched_subtasks > 0`）… 掘削を投げた
+///   ターンは「次の行動を選んで」終わっている。ここで付けると『調べますね🏁』の数分後に
+///   続きが届く**逆の情報**になる。印は subtask 完了で resume したターンが自然終了
+///   したときにそちらへ付く（`process_subtask_completed`）。resume ターンがさらに
+///   subtask を投げた場合も同じ条件で弾かれ、次の resume へ委ねられる。
 ///
 /// **最終応答テキストの中身（NO_REPLY/空）では判定しない。** 反復途中で発話し最終応答が
 /// `NO_REPLY` で自然終了するターン（例: 反復1で発話 → 最終 NO_REPLY）を取りこぼすため。
@@ -1779,7 +1786,7 @@ fn end_of_speech_qualifies(
 /// interaction 応答の経路は `EngineResult` を先に取り出しているため、判定を
 /// 共有するにはこの形が要る（`Err` は match の別腕で落ちている）。
 fn end_of_speech_qualifies_ok(result: &opencrab_core::EngineResult, posted: bool) -> bool {
-    !result.stopped_by_limit && posted
+    !result.stopped_by_limit && posted && result.dispatched_subtasks == 0
 }
 
 /// リアクションを付ける対象の message_id を解析する。
@@ -1887,8 +1894,9 @@ mod tests {
     use std::sync::Mutex;
     use tokio::time::{Duration, Instant};
 
-    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `stopped_by_limit` だけで、
-    /// `response` は「最終応答テキストでは判定しない」ことを示すために置いている。
+    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `stopped_by_limit` と
+    /// `dispatched_subtasks` だけで、`response` は「最終応答テキストでは判定しない」
+    /// ことを示すために置いている。
     fn mk_result(response: &str, stopped_by_limit: bool) -> opencrab_core::EngineResult {
         opencrab_core::EngineResult {
             response: response.to_string(),
@@ -1896,6 +1904,15 @@ mod tests {
             tool_calls_made: 0,
             stopped_by_limit,
             xml_fallback_parses: 0,
+            dispatched_subtasks: 0,
+        }
+    }
+
+    /// #431: background subtask を `n` 本 dispatch して自然終了したターンの結果。
+    fn mk_result_dispatched(response: &str, n: usize) -> opencrab_core::EngineResult {
+        opencrab_core::EngineResult {
+            dispatched_subtasks: n,
+            ..mk_result(response, false)
         }
     }
 
@@ -1956,20 +1973,38 @@ mod tests {
         ));
     }
 
-    /// #431: subtask 完了 / interaction 応答の経路が使う `Ok` 側ゲートも同じ判定に従う
-    /// （経路ごとにインライン判定を持たせない）。
+    /// #431: **background subtask を投げて終わったターンには付けない。**
+    ///
+    /// 掘削を dispatch したターンは「次の行動を選んで」終わっており、数分後に完了
+    /// resume の続きが届く。ここで付けると『調べますね🏁』という逆の情報になる。
+    /// 発話していても（`posted == true`）付けないのが要点。
     #[test]
-    fn end_of_speech_ok_gate_matches_result_gate() {
-        for (response, stopped) in [("喋った", false), ("NO_REPLY", false), ("途中まで", true)]
-        {
-            for posted in [true, false] {
-                assert_eq!(
-                    end_of_speech_qualifies_ok(&mk_result(response, stopped), posted),
-                    end_of_speech_qualifies(&Ok(mk_result(response, stopped)), posted),
-                    "response={response:?} stopped={stopped} posted={posted}"
-                );
-            }
-        }
+    fn end_of_speech_excludes_turn_that_dispatched_background_subtask() {
+        // 「調べますね」と喋ってから掘削を投げたターン。
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result_dispatched("調べますね", 1)),
+            true
+        ));
+        // 複数バッチを投げたターンも同じ。
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result_dispatched("いくつか見てくる", 3)),
+            true
+        ));
+        // subtask 完了 resume / interaction 経路の `Ok` 側ゲートも同じ規則に従う。
+        // resume ターンがさらに subtask を投げたら、その resume にも付けず次へ委ねる。
+        assert!(!end_of_speech_qualifies_ok(
+            &mk_result_dispatched("もう少し掘る", 1),
+            true
+        ));
+        // 回帰: dispatch していない自然終了は従来どおり対象。
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result_dispatched("言い終わったよ", 0)),
+            true
+        ));
+        assert!(end_of_speech_qualifies_ok(
+            &mk_result_dispatched("言い終わったよ", 0),
+            true
+        ));
     }
 
     /// #419: フィルタ破棄 INFO は宛先ごとに間引く。初回は出し、窓の内側では抑制し、

@@ -301,6 +301,8 @@ impl SkillEngine {
         let mut iterations = 0;
         let mut total_tool_calls = 0;
         let mut xml_fallback_parses = 0;
+        // #431: このターンが background subtask を起こしたか（= 次の行動を選んだか）。
+        let mut dispatched_subtasks = 0;
 
         loop {
             iterations += 1;
@@ -317,6 +319,7 @@ impl SkillEngine {
                     tool_calls_made: total_tool_calls,
                     stopped_by_limit: true,
                     xml_fallback_parses,
+                    dispatched_subtasks,
                 });
             }
 
@@ -523,6 +526,8 @@ impl SkillEngine {
                         })
                         .collect();
                     total_tool_calls += calls.len();
+                    // バッチ 1 つにつき subtask 1 本（`dispatch_batch` の契約）。
+                    dispatched_subtasks += 1;
                     let outcome = dispatcher.dispatch_batch(&calls);
                     tracing::debug!(
                         tools = calls.len(),
@@ -636,6 +641,7 @@ impl SkillEngine {
                 tool_calls_made: total_tool_calls,
                 stopped_by_limit: false,
                 xml_fallback_parses,
+                dispatched_subtasks,
             });
         }
     }
@@ -1184,6 +1190,9 @@ mod tests {
         // エージェントは自分のターンで継続して最終応答を出す。
         assert_eq!(result.response, "鍵の生成を開始しました");
         assert_eq!(result.iterations, 2);
+        // #431: 「このターンは次の行動を選んで終わった」ことが結果に載る。
+        // gateway 側の「発言終わり」判定はここだけを見る。
+        assert_eq!(result.dispatched_subtasks, 1);
     }
 
     /// #284: **巨大なツール結果を生のまま LLM へ返さない。**
@@ -1414,6 +1423,8 @@ mod tests {
             dispatcher.dispatched.lock().unwrap().as_slice(),
             &["write_file,execute_shell"]
         );
+        // #431: 複数ツールでも subtask は 1 本なので計上も 1。
+        assert_eq!(result.dispatched_subtasks, 1);
         // tool_call ごとに spawned マーカーは返る（同じ subtask_id）。
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -1465,13 +1476,15 @@ mod tests {
         let dispatcher = Arc::new(RecordingDispatcher::new(&["discord_send"]));
         engine.set_tool_dispatcher(dispatcher.clone());
 
-        engine.run("system", "go", "test-model").await.unwrap();
+        let result = engine.run("system", "go", "test-model").await.unwrap();
 
         assert_eq!(
             dispatcher.dispatched.lock().unwrap().len(),
             0,
             "混在バッチは dispatch せず inline に落とす"
         );
+        // #431: dispatcher が挿さっているだけでは計上しない（実際に投げた本数を数える）。
+        assert_eq!(result.dispatched_subtasks, 0);
         assert_eq!(
             order.lock().unwrap().as_slice(),
             &["write_file", "discord_send"],

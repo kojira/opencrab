@@ -182,4 +182,12 @@ pub struct EngineResult {
     /// harness 剪定の判断材料（native tool calling で不要になれば 0 になる）。
     #[serde(default)]
     pub xml_fallback_parses: usize,
+    /// この run で background subtask として dispatch したバッチの本数（#431）。
+    ///
+    /// バッチ 1 つ = subtask 1 本（[`ToolDispatcher::dispatch_batch`] の契約）なので、
+    /// そのまま「このターンが起こした背景処理の本数」になる。`0` より大きいターンは
+    /// **次の行動を選んで終わった**ターンであり、自然終了ではない。
+    /// 完了時に親セッションが resume され、続きの発話がそこで起きる。
+    #[serde(default)]
+    pub dispatched_subtasks: usize,
 }

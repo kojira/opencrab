@@ -140,6 +140,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
             tool_calls_made: 0,
             stopped_by_limit: false,
             xml_fallback_parses: 0,
+            dispatched_subtasks: 0,
         })
     }
 
@@ -775,6 +776,7 @@ fn engine_result(response: &str) -> EngineResult {
         tool_calls_made: 0,
         stopped_by_limit: false,
         xml_fallback_parses: 0,
+        dispatched_subtasks: 0,
     }
 }
 
