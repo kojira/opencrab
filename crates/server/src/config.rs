@@ -37,7 +37,7 @@ pub struct AppConfig {
     /// スリープ宣言ラン（#384 / #376 段階2）。既定オフ（opt-in / #346）。
     #[serde(default)]
     pub memory_declare: MemoryDeclareConfig,
-    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定オフ（opt-in）。
+    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定 ON（#457。`enabled=false` で opt-out 可）。
     #[serde(default)]
     pub memory_condense: MemoryCondenseConfig,
     /// VC 対話（STT/TTS）。既定は無効。
