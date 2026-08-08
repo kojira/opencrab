@@ -778,6 +778,220 @@ impl Action for PlanNextMemoryWindowAction {
     }
 }
 
+// ============================================
+// 記憶の凝縮（3 段目 / issue #411）
+// ============================================
+//
+// 凝縮ランが使う 3 道具。ユニット（記憶の 2 段目）を俯瞰して抽出した「原則」を
+// `node_type='meta'` として記録・更新・取消する。**根拠のユニットへ必ずリンクさせる**
+// （具体を失った凝縮は平均化 / #411 原則3）ので、record / update は sources に自分の宣言
+// ユニットの short_id を要る。全て **TRUSTED_ONLY**（宣言道具と同じ論拠: caller=Agent の
+// 会話流入で人格の核をスパムさせない）。凝縮ラン（caller=Owner）からのみ使う。
+
+/// ユニットを俯瞰して抽出した「原則」を 1 件記録する（`node_type='meta'`）。
+pub struct RecordMemoryCoreAction;
+
+#[async_trait]
+impl Action for RecordMemoryCoreAction {
+    fn name(&self) -> &str {
+        "record_memory_core"
+    }
+
+    fn description(&self) -> &str {
+        "自分のユニット（宣言した記憶）を俯瞰して見えた『大事なこと』を 1 件、人格の核として刻む。axis（どんな視点か = 軸ラベル）と body（本文）必須。sources には**その原則の根拠になった自分の宣言ユニットの short_id**（例 u42）を最低 1 つ挙げる（根拠の無い凝縮は平均化なので受け付けない）。retract_memory_core で取り消せる。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["axis", "body", "sources"],
+            "properties": {
+                "axis": { "type": "string", "description": "この原則をどんな視点で見たか（軸ラベル）。例に縛られず自分の言葉でよい" },
+                "body": { "type": "string", "description": "原則の本文（何が大事だと分かったか）" },
+                "sources": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "根拠になった自分の宣言ユニットの short_id（例 u42）。最低 1 つ。複数可"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let axis = match args["axis"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("axis is required"),
+        };
+        let body = match args["body"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("body is required"),
+        };
+        let sources = parse_source_refs(&args["sources"]);
+        if sources.is_empty() {
+            return ActionResult::error(
+                "sources に根拠となる宣言ユニットの short_id を最低 1 つ指定してください",
+            );
+        }
+
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        match opencrab_db::queries::record_memory_core(
+            &conn,
+            &ctx.agent_id,
+            &axis,
+            &body,
+            &sources,
+            &now,
+        ) {
+            Ok(r) => ActionResult::success(json!({
+                "core_id": r.node.id,
+                "short_id": r.node.short_id,
+                "axis": r.node.title,
+                "sources": r.sources,
+                "unresolved_sources": r.unresolved,
+                "start_log_id": r.node.start_log_id,
+                "end_log_id": r.node.end_log_id,
+            })),
+            Err(e) => ActionResult::error(&format!("凝縮の記録に失敗しました: {e}")),
+        }
+    }
+}
+
+/// 既存の凝縮を更新する（新規追加より更新を優先する / #411 原則4）。
+pub struct UpdateMemoryCoreAction;
+
+#[async_trait]
+impl Action for UpdateMemoryCoreAction {
+    fn name(&self) -> &str {
+        "update_memory_core"
+    }
+
+    fn description(&self) -> &str {
+        "既存の凝縮（人格の核）を書き直す。同じ趣旨のものを新しく足すより、既にあるものを更新する方を優先する。axis と body 必須。sources を渡すと根拠ユニットを差し替え、省くと既存の根拠を維持する。凝縮（node_type='meta'）以外は更新できない。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["core_id", "axis", "body"],
+            "properties": {
+                "core_id": { "type": "string", "description": "更新する凝縮の short_id（例 m3）またはフル node_id" },
+                "axis": { "type": "string", "description": "軸ラベル（視点）" },
+                "body": { "type": "string", "description": "原則の本文" },
+                "sources": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "根拠ユニットの short_id を差し替える（省くと既存の根拠を維持）。渡すなら最低 1 つ"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let core_id = match args["core_id"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("core_id is required"),
+        };
+        let axis = match args["axis"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("axis is required"),
+        };
+        let body = match args["body"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("body is required"),
+        };
+        // sources を明示的に渡したときだけ差し替える（キー未指定 = None = 根拠維持）。
+        let sources: Option<Vec<String>> = args
+            .get("sources")
+            .filter(|v| !v.is_null())
+            .map(parse_source_refs);
+
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+        match opencrab_db::queries::update_memory_core(
+            &conn,
+            &ctx.agent_id,
+            &core_id,
+            &axis,
+            &body,
+            sources.as_deref(),
+        ) {
+            Ok(r) => ActionResult::success(json!({
+                "updated": true,
+                "core_id": r.node.id,
+                "short_id": r.node.short_id,
+                "axis": r.node.title,
+                "sources": r.sources,
+                "unresolved_sources": r.unresolved,
+            })),
+            Err(e) => ActionResult::error(&format!("凝縮の更新に失敗しました: {e}")),
+        }
+    }
+}
+
+/// 凝縮を取り消す（凝縮ノード + FTS のみ削除。生ログにも元ユニットにも触らない）。
+pub struct RetractMemoryCoreAction;
+
+#[async_trait]
+impl Action for RetractMemoryCoreAction {
+    fn name(&self) -> &str {
+        "retract_memory_core"
+    }
+
+    fn description(&self) -> &str {
+        "record_memory_core で刻んだ凝縮を取り消す。凝縮ノードと FTS 行だけを消す。生ログにも元ユニットにも触らない。凝縮（node_type='meta'）以外は消せない。"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["core_id"],
+            "properties": {
+                "core_id": {
+                    "type": "string",
+                    "description": "取り消す凝縮の short_id またはフル node_id"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
+        let core_id = match args["core_id"].as_str() {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return ActionResult::error("core_id is required"),
+        };
+        let conn = match ctx.db.lock() {
+            Ok(c) => c,
+            Err(_) => return ActionResult::error("Failed to acquire DB lock"),
+        };
+        match opencrab_db::queries::retract_memory_core(&conn, &ctx.agent_id, &core_id) {
+            Ok(full_id) => ActionResult::success(json!({
+                "retracted": true,
+                "core_id": full_id,
+            })),
+            Err(e) => ActionResult::error(&format!("凝縮の取り消しに失敗しました: {e}")),
+        }
+    }
+}
+
+/// `sources` 引数（文字列配列）を short_id/id 参照の並びへ正規化する。
+fn parse_source_refs(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,6 +1121,209 @@ mod tests {
             .execute(&json!({"unit_id": "nope"}), &ctx)
             .await;
         assert!(!r.success);
+    }
+
+    // ---- 記憶の凝縮（core / #411）----
+
+    /// 2 つのユニットを宣言し、その short_id を返すヘルパ。
+    async fn seed_two_units(ctx: &ActionContext) -> (String, String) {
+        seed_logs(ctx, 4);
+        let a = RecordMemoryUnitAction
+            .execute(
+                &json!({"from_id": 1, "to_id": 2, "title": "沈黙を選んだ夜"}),
+                ctx,
+            )
+            .await;
+        let b = RecordMemoryUnitAction
+            .execute(
+                &json!({"from_id": 3, "to_id": 4, "title": "差分だけ拾うと決めた朝"}),
+                ctx,
+            )
+            .await;
+        (
+            a.data.unwrap()["short_id"].as_str().unwrap().to_string(),
+            b.data.unwrap()["short_id"].as_str().unwrap().to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn core_record_update_retract_roundtrip_and_source_links() {
+        let (_d, ctx) = test_context();
+        let (u1, u2) = seed_two_units(&ctx).await;
+
+        // record: 2 つのユニットを根拠に原則を刻む。
+        let r = RecordMemoryCoreAction
+            .execute(
+                &json!({
+                    "axis": "繰り返していること",
+                    "body": "静けさのなかで差分だけを拾おうとし続けている",
+                    "sources": [u1, u2],
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "record_memory_core failed: {:?}", r.error);
+        let data = r.data.unwrap();
+        let core_id = data["short_id"].as_str().unwrap().to_string();
+        // 根拠リンクが echo され、id 範囲が元ユニットの min/max に畳まれる。
+        assert_eq!(data["sources"].as_array().unwrap().len(), 2);
+        assert!(data["unresolved_sources"].as_array().unwrap().is_empty());
+        assert_eq!(data["start_log_id"], 1, "id 範囲の下端は元ユニットの min");
+        assert_eq!(data["end_log_id"], 4, "id 範囲の上端は元ユニットの max");
+
+        // 格納は node_type='meta'（人格の核）。
+        {
+            let conn = ctx.db.lock().unwrap();
+            let cores = opencrab_db::queries::list_memory_cores(&conn, "agent-1").unwrap();
+            assert_eq!(cores.len(), 1);
+            assert_eq!(cores[0].node_type, "meta");
+            assert_eq!(cores[0].source_type, "condensed");
+            // keywords_json に根拠 short_id の配列が入る。
+            let srcs: Vec<String> = serde_json::from_str(&cores[0].keywords_json).unwrap();
+            assert!(srcs.contains(&"u1".to_string()) || srcs.len() == 2);
+        }
+
+        // update: 本文だけ書き直す（sources 省略で根拠維持）。
+        let up = UpdateMemoryCoreAction
+            .execute(
+                &json!({"core_id": core_id, "axis": "繰り返していること", "body": "書き直した本文"}),
+                &ctx,
+            )
+            .await;
+        assert!(up.success, "update failed: {:?}", up.error);
+        assert_eq!(
+            up.data.unwrap()["sources"].as_array().unwrap().len(),
+            2,
+            "根拠は維持される"
+        );
+
+        // retract。
+        let rt = RetractMemoryCoreAction
+            .execute(&json!({"core_id": core_id}), &ctx)
+            .await;
+        assert!(rt.success, "retract failed: {:?}", rt.error);
+        {
+            let conn = ctx.db.lock().unwrap();
+            assert!(opencrab_db::queries::list_memory_cores(&conn, "agent-1")
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn core_record_rejects_when_no_source_resolves() {
+        let (_d, ctx) = test_context();
+        seed_two_units(&ctx).await;
+        // 存在しない short_id だけ → 根拠 0 件で拒否（平均化を防ぐ / #411 原則3）。
+        let r = RecordMemoryCoreAction
+            .execute(
+                &json!({"axis": "x", "body": "y", "sources": ["nope1", "nope2"]}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success);
+    }
+
+    #[tokio::test]
+    async fn core_tools_reject_non_meta_node() {
+        let (_d, ctx) = test_context();
+        let (u1, _u2) = seed_two_units(&ctx).await;
+        // ユニット（node_type='unit'）を core として更新/取消しようとしても弾かれる。
+        let up = UpdateMemoryCoreAction
+            .execute(&json!({"core_id": u1, "axis": "a", "body": "b"}), &ctx)
+            .await;
+        assert!(!up.success, "ユニットを core として更新できてはいけない");
+        let rt = RetractMemoryCoreAction
+            .execute(&json!({"core_id": u1}), &ctx)
+            .await;
+        assert!(!rt.success, "ユニットを core として取り消せてはいけない");
+    }
+
+    /// 段階2 でタグ整理側が作りうる `node_type='meta'` / `source_type='category'` の行は、
+    /// 凝縮の 3 経路（list / update / retract）から**見えない・触れない**。source_type ガードを
+    /// 外すと落ちる（変異検出）。
+    #[tokio::test]
+    async fn core_tools_ignore_category_meta_rows() {
+        let (_d, ctx) = test_context();
+        let (u1, _u2) = seed_two_units(&ctx).await;
+
+        // 本物の凝縮（source_type='condensed'）を 1 件作る。
+        let r = RecordMemoryCoreAction
+            .execute(
+                &json!({"axis": "軸", "body": "本文", "sources": [u1]}),
+                &ctx,
+            )
+            .await;
+        assert!(r.success);
+        let condensed_short = r.data.unwrap()["short_id"].as_str().unwrap().to_string();
+
+        // タグ整理側が作る想定の category-meta 行を直接差し込む（node_type='meta' だが condensed でない）。
+        {
+            let conn = ctx.db.lock().unwrap();
+            opencrab_db::queries::insert_index_node(
+                &conn,
+                &opencrab_db::queries::IndexNodeRow {
+                    id: "meta-category-x".to_string(),
+                    agent_id: "agent-1".to_string(),
+                    parent_id: None,
+                    node_type: "meta".to_string(),
+                    source_type: "category".to_string(),
+                    title: "カテゴリ meta".to_string(),
+                    summary: "タグ整理側の meta".to_string(),
+                    start_log_id: None,
+                    end_log_id: None,
+                    source_session_id: None,
+                    date_from: None,
+                    date_to: None,
+                    depth: 1,
+                    child_count: 0,
+                    token_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    short_id: Some("cat1".to_string()),
+                    keywords_json: "[]".to_string(),
+                    summary_refreshed_at: None,
+                },
+            )
+            .unwrap();
+        }
+
+        // (1) list からは category-meta が見えない（condensed の 1 件だけ）。
+        {
+            let conn = ctx.db.lock().unwrap();
+            let cores = opencrab_db::queries::list_memory_cores(&conn, "agent-1").unwrap();
+            assert_eq!(cores.len(), 1, "list は condensed だけを返す");
+            assert_eq!(cores[0].short_id.as_deref(), Some(condensed_short.as_str()));
+        }
+
+        // (2) update は category-meta を書き換えられない。
+        let up = UpdateMemoryCoreAction
+            .execute(&json!({"core_id": "cat1", "axis": "x", "body": "y"}), &ctx)
+            .await;
+        assert!(
+            !up.success,
+            "category-meta を凝縮として更新できてはいけない"
+        );
+
+        // (3) retract は category-meta を消せない。
+        let rt = RetractMemoryCoreAction
+            .execute(&json!({"core_id": "cat1"}), &ctx)
+            .await;
+        assert!(
+            !rt.success,
+            "category-meta を凝縮として取り消せてはいけない"
+        );
+
+        // category-meta は無傷で残っている。
+        {
+            let conn = ctx.db.lock().unwrap();
+            assert!(
+                opencrab_db::queries::get_index_node(&conn, "meta-category-x")
+                    .unwrap()
+                    .is_some(),
+                "category-meta 行は凝縮道具に触られず残る"
+            );
+        }
     }
 
     // ---- survey の返り値を上限内に収める（#386）----

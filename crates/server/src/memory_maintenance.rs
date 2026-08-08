@@ -69,6 +69,8 @@ pub struct MaintenanceReport {
     pub organized: bool,
     /// 宣言ラン（#384 / #376 段階2）を実際に起動したか。既定オフ・ゲート未達では false。
     pub declared: bool,
+    /// 凝縮ラン（#411 / 記憶の 3 段目）を実際に起動したか。既定オフ・ゲート未達では false。
+    pub condensed: bool,
 }
 
 impl MaintenanceReport {
@@ -81,6 +83,7 @@ impl MaintenanceReport {
             || self.topics_categorized > 0
             || self.organized
             || self.declared
+            || self.condensed
     }
 }
 
@@ -298,6 +301,18 @@ pub async fn run_maintenance_tick(
         Ok(ran) => report.organized = ran,
         Err(e) => {
             tracing::warn!(agent_id = %agent_id, error = %e, "memory organize failed");
+        }
+    }
+
+    // ⑧ 凝縮ラン（#411 / 記憶の 3 段目）。ユニット（⑥で確定した記憶の単位）を俯瞰して「大事な
+    // こと」を抽出し、node_type='meta' として人格の核に刻む。宣言（⑥）→ タグ整理（⑦）が
+    // 記憶の単位とその分類を確定させた**後**に置く（凝縮はユニットの意味を抽出する一段上）。
+    // **既定オフ**（config memory_condense.enabled）。ゲート（ユニット増加の下限 + throttle）
+    // 未達ならゼロコールで即 return。対話ターンでは走らせない（呼び出し元はこの sleep ループのみ）。
+    match crate::memory_condense::maybe_run_memory_condense(state, agent_id).await {
+        Ok(ran) => report.condensed = ran,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, error = %e, "memory condense failed");
         }
     }
 

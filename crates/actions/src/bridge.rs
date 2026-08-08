@@ -492,6 +492,13 @@ pub const CORE_INLINE_ACTIONS: &[&str] = &[
     // (6) 宣言ランの窓の希望（#394）。1 行を UPSERT するだけの短時間の書き込みで、
     //     返り値（丸めた後の実際の設定）を同ターンで見て決め直す。dispatch する意味が無い。
     "plan_next_memory_window",
+    // (6) 記憶の凝縮（#411）。ユニットを俯瞰した原則を core として刻む/更新する/取り消す短時間の
+    //     書き込み。結果（刻めたか / 根拠が解決できたか）を同ターンで見て次の原則を決めるので
+    //     background 化しない。呼び出し元は `TRUSTED_ONLY_ACTIONS` にも入れて Nostr（caller=Agent）
+    //     から触らせない（宣言道具と同じ論拠）。
+    "record_memory_core",
+    "update_memory_core",
+    "retract_memory_core",
 ];
 
 /// core アクションのうち、**意図的に dispatch を許す**もの。
@@ -665,6 +672,13 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // から触れると、話しかけるだけで他人の宣言ランの窓を動かせてしまう。宣言ラン本体は
     // caller=Owner で走るので支障は無い。
     "plan_next_memory_window",
+    // 記憶の凝縮 道具 3 つ（#411）。宣言道具と同じ論拠で trusted_only: caller=Agent（Nostr の
+    // 受信ターン）から触れると、会話の流れで人格の核（core）をスパムで汚染できる。凝縮ラン本体は
+    // caller=Owner で走る（宣言ラン・heartbeat と同じ前例）ので支障は無い。core dispatcher の
+    // アクション（`crates/actions/src/memory_units.rs`）で、既存の caller ゲートへの追加のみ。
+    "record_memory_core",
+    "update_memory_core",
+    "retract_memory_core",
 ];
 
 // `nostr_run`（薄い nostaro passthrough / #268）は**ここに入れない**（#303）。

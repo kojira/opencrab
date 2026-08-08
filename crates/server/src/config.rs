@@ -37,6 +37,9 @@ pub struct AppConfig {
     /// スリープ宣言ラン（#384 / #376 段階2）。既定オフ（opt-in / #346）。
     #[serde(default)]
     pub memory_declare: MemoryDeclareConfig,
+    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定オフ（opt-in）。
+    #[serde(default)]
+    pub memory_condense: MemoryCondenseConfig,
     /// VC 対話（STT/TTS）。既定は無効。
     #[serde(default)]
     pub voice: opencrab_voice::VoiceConfig,
@@ -433,6 +436,72 @@ fn default_md_min_interval_minutes() -> i64 {
     1440
 }
 fn default_md_timeout_secs() -> u64 {
+    600
+}
+
+/// スリープ凝縮ラン（#411 / 記憶の 3 段目）の設定。
+///
+/// 凝縮ランは、本人が別セッションの新規 context で**自分のユニット（宣言した記憶）を時系列で
+/// 少しずつ俯瞰**し、「その出来事たちが何を意味するか」という原則を `node_type='meta'` として
+/// 刻む。宣言ランの双子で、入力が生ログではなくユニットである点だけが本質的に違う。
+///
+/// **逐次凝縮**（オーナー指摘 2026-08-08「いきなりまとまった期間を与えると平均に寄る」）:
+/// 全ユニットを一括で渡さず、カーソルより新しいユニットを**時系列順に [`min_new_units`] 件ずつ**
+/// の窓で読む。毎回「既存 core 全件＋今回の窓」を渡し、更新優先で core を育てる。新規エージェントが
+/// 1 回で見る量と、既存エージェントの積み残し消化の 1 窓が同じ幅になる（＝新規と同じ形で消化する）。
+///
+/// **既定オフ**。発火の仕方（[`decide_condense`] 参照）:
+/// - 残ユニット（カーソルより新しい未凝縮）が窓幅 [`min_new_units`] 以上 → **積み残し消化**として
+///   throttle を待たず 1 tick 1 窓で発火（新規と同じく淡々と消化する / オーナー指摘の趣旨）。ただし
+///   partial が続いたときは指数バックオフで間引く（上限は [`min_interval_minutes`]）。
+/// - 0 < 残 < 窓幅 → 末尾の端数。**[`min_interval_minutes`] を待って**から流す（新しいユニットの
+///   増加を待つのはここだけ）。残 0 ならゼロコールで return。
+///
+/// [`decide_condense`]: crate::memory_condense
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryCondenseConfig {
+    /// 凝縮ラン全体の on/off。既定 false。
+    #[serde(default = "default_mc_enabled")]
+    pub enabled: bool,
+    /// **窓幅 N かつ積み残し発火の下限**（逐次凝縮）。1 回の凝縮ランが時系列順に読むユニット件数。
+    /// 残ユニットがこの件数以上あれば throttle を待たず消化し、これ未満の端数は min_interval を
+    /// 待って流す。初期 20（仮）。ユニット粒度が実測で概ね 3 日 = 1 ユニットなので約 2 か月ぶん。
+    /// **PR-3 で実験の実測後に確定する。**
+    #[serde(default = "default_mc_min_new_units")]
+    pub min_new_units: i64,
+    /// 端数（残 < 窓幅）を流すときだけ効く throttle。前回実行からこの**分数**以上経っていないと
+    /// 端数は流さない（新しいユニットの増加を待つ）。**積み残し消化中（残 >= 窓幅）はこの値を
+    /// 待たず 1 tick 1 窓で淡々と進む。** ただし partial（timeout / ターン上限 / エラー）が続いた
+    /// ときの指数バックオフの**上限**としてもこの値を使う（バックオフが端数待ちより長くならない）。
+    /// 初期 10080（= 7 日）。**PR-3 で確定する（仮）。**
+    #[serde(default = "default_mc_min_interval_minutes")]
+    pub min_interval_minutes: i64,
+    /// 凝縮ラン 1 回のタイムアウト（秒）。超えたら partial 扱いで位置マーカーを進めない。
+    #[serde(default = "default_mc_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for MemoryCondenseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_mc_enabled(),
+            min_new_units: default_mc_min_new_units(),
+            min_interval_minutes: default_mc_min_interval_minutes(),
+            timeout_secs: default_mc_timeout_secs(),
+        }
+    }
+}
+
+fn default_mc_enabled() -> bool {
+    false
+}
+fn default_mc_min_new_units() -> i64 {
+    20
+}
+fn default_mc_min_interval_minutes() -> i64 {
+    10080
+}
+fn default_mc_timeout_secs() -> u64 {
     600
 }
 

@@ -66,6 +66,10 @@ impl ActionDispatcher {
         dispatcher.register(Arc::new(RetractMemoryUnitAction));
         // 宣言ランの窓（境界と広さ）を本人が決める（#394）。同じく TRUSTED_ONLY。
         dispatcher.register(Arc::new(PlanNextMemoryWindowAction));
+        // 記憶の凝縮（3 段目 / #411）。ユニットを俯瞰した原則を core として刻む。TRUSTED_ONLY。
+        dispatcher.register(Arc::new(RecordMemoryCoreAction));
+        dispatcher.register(Arc::new(UpdateMemoryCoreAction));
+        dispatcher.register(Arc::new(RetractMemoryCoreAction));
 
         // LLM関連アクション登録
         dispatcher.register(Arc::new(SelectLlmAction));

@@ -218,6 +218,7 @@ The ActionDispatcher registers these actions, invokable by agents during convers
 | **Search & Memory** | `search_my_history`, `summarize_and_save`, `browse_memory_index`, `retrieve_memory_nodes`, `search_memory_index` | Memory search, curation, and Agentic RAG |
 | **Memory tags** | `tag_topic`, `untag_topic`, `merge_tags` | Trusted-only tagging of memory topics (many-to-many) |
 | **Memory units** | `survey_my_history`, `read_my_history`, `record_memory_unit`, `retract_memory_unit`, `plan_next_memory_window` | Trusted-only: survey/read own raw logs, declare bounded ranges as memory units, and choose where the next declare window starts and how wide it is |
+| **Memory condense** | `record_memory_core`, `update_memory_core`, `retract_memory_core` | Trusted-only: distill own memory units into personality-core principles (`node_type='meta'`) that link back to the source units |
 | **LLM** | `select_llm`, `evaluate_response`, `analyze_llm_usage`, `recall_model_experiences`, `save_model_insight` | Dynamic LLM selection, evaluation, and meta-analysis |
 | **Soul** | `update_instructions` | Owner-only agent behavioral instruction update |
 | **Task ledger** | `open_task`, `update_task_contract`, `record_task_progress`, `close_task`, `get_task` | Long-running task bookkeeping |

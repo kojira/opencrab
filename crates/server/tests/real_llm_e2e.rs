@@ -60,6 +60,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
         memory_organize: opencrab_server::config::MemoryOrganizeConfig::default(),
         memory_declare: opencrab_server::config::MemoryDeclareConfig::default(),
+        memory_condense: opencrab_server::config::MemoryCondenseConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
         mcp_manager: None,
