@@ -37,7 +37,7 @@ pub struct AppConfig {
     /// スリープ宣言ラン（#384 / #376 段階2）。既定オフ（opt-in / #346）。
     #[serde(default)]
     pub memory_declare: MemoryDeclareConfig,
-    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定オフ（opt-in）。
+    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）。既定 ON（#457。`enabled=false` で opt-out 可）。
     #[serde(default)]
     pub memory_condense: MemoryCondenseConfig,
     /// VC 対話（STT/TTS）。既定は無効。
@@ -556,7 +556,7 @@ fn default_md_timeout_secs() -> u64 {
 /// の窓で読む。毎回「既存 core 全件＋今回の窓」を渡し、更新優先で core を育てる。新規エージェントが
 /// 1 回で見る量と、既存エージェントの積み残し消化の 1 窓が同じ幅になる（＝新規と同じ形で消化する）。
 ///
-/// **既定オフ**。発火の仕方（[`decide_condense`] 参照）:
+/// **既定 ON（#457）**。発火の仕方（[`decide_condense`] 参照）:
 /// - 残ユニット（カーソルより新しい未凝縮）が窓幅 [`min_new_units`] 以上 → **積み残し消化**として
 ///   throttle を待たず 1 tick 1 窓で発火（新規と同じく淡々と消化する / オーナー指摘の趣旨）。ただし
 ///   partial が続いたときは指数バックオフで間引く（上限は [`min_interval_minutes`]）。
@@ -566,7 +566,7 @@ fn default_md_timeout_secs() -> u64 {
 /// [`decide_condense`]: crate::memory_condense
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryCondenseConfig {
-    /// 凝縮ラン全体の on/off。既定 false。
+    /// 凝縮ラン全体の on/off。**既定 true（#457: 出荷時既定を ON）**。
     #[serde(default = "default_mc_enabled")]
     pub enabled: bool,
     /// **窓幅 N かつ積み残し発火の下限**（逐次凝縮）。1 回の凝縮ランが時系列順に読むユニット件数。
@@ -599,7 +599,10 @@ impl Default for MemoryCondenseConfig {
 }
 
 fn default_mc_enabled() -> bool {
-    false
+    // #457: 出荷時既定を ON にする（オーナー判断）。#411 PR-1 は既定オフで入れたが、凝縮ランを
+    // 標準機能として全エージェントに効かせる。他パラメータ（窓幅・間隔・timeout・バックオフ base）
+    // は #411 PR-3 で実測確定する仮値なので触らない。
+    true
 }
 fn default_mc_min_new_units() -> i64 {
     20
@@ -1814,5 +1817,24 @@ default_webhook = { url = "" }
         };
         let router = build_llm_router(&config).unwrap();
         assert!(router.provider_names().contains(&"openrouter"));
+    }
+
+    /// #457: 凝縮ラン（記憶の 3 段目）の**出荷時既定は ON**。
+    ///
+    /// `[memory_condense]` を書かない設定でも `enabled` が既定 true になることを、実際の設定
+    /// ロード経路と同じ `AppConfig` の serde 既定で固定する。`default_mc_enabled()` を false に
+    /// 戻すと落ちる（恒真テストにしないため enabled を直接 assert する）。
+    /// 間隔・窓幅・timeout の仮値（#411 PR-3 の領分）も本 PR で不変であることを併せて固定する。
+    #[test]
+    fn memory_condense_ships_enabled_by_default() {
+        let cfg: AppConfig = toml::from_str("").expect("empty config must parse");
+        assert!(
+            cfg.memory_condense.enabled,
+            "[memory_condense] 省略時も enabled は出荷時既定 true であるべき（#457）"
+        );
+        // #411 PR-3 で実測確定する仮値。本 PR では変えない。
+        assert_eq!(cfg.memory_condense.min_new_units, 20);
+        assert_eq!(cfg.memory_condense.min_interval_minutes, 10080);
+        assert_eq!(cfg.memory_condense.timeout_secs, 600);
     }
 }

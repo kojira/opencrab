@@ -17,7 +17,7 @@
 //!   プロンプトへの注入は PR-2）。system プロンプトはここで自前に組む。
 //! - **1 エージェント内しか見ない**（他エージェントの記憶を混ぜない）。全クエリが agent_id 固定。
 //! - **本人の自己申告に頼らない**。入力は生ログ由来の宣言物（ユニット）であって会話での自称ではない。
-//! - **既定オフ**。`enabled=false` なら RunRequest すら組まずゼロコールで即 return。
+//! - **既定 ON（#457）**。`enabled=false` にすれば RunRequest すら組まずゼロコールで即 return（opt-out）。
 //!
 //! **逐次凝縮**（オーナー指摘 2026-08-08「いきなりまとまった期間を与えると平均に寄る」）: 全ユニットを
 //! 一括で渡さず、カーソルより新しいユニットを**時系列順に `min_new_units` 件ずつの窓**で読む。毎回
@@ -89,7 +89,7 @@ pub const CONDENSE_ALLOWED_TOOLS: &[&str] = &[
 
 /// このエージェントの凝縮ランを（ゲートを満たせば）実行する。**本番エントリ**。
 ///
-/// 戻り値: 凝縮ラン（LLM）を実際に起動したら `true`。既定オフ・ゲート未達は `false`（ゼロコール）。
+/// 戻り値: 凝縮ラン（LLM）を実際に起動したら `true`。無効化時（既定 ON・opt-out 可）やゲート未達は `false`（ゼロコール）。
 pub async fn maybe_run_memory_condense(state: &AppState, agent_id: &str) -> anyhow::Result<bool> {
     let runner = AppStateTurnRunner { state };
     run_condense(
@@ -111,7 +111,7 @@ async fn run_condense(
     agent_id: &str,
     runner: &dyn OrganizeTurnRunner,
 ) -> anyhow::Result<bool> {
-    // 既定オフ: RunRequest も DB 書き込みも一切しない（ゼロコール）。
+    // 無効化時（既定 ON・`enabled=false` で opt-out）: RunRequest も DB 書き込みも一切しない（ゼロコール）。
     if !cfg.enabled {
         return Ok(false);
     }
@@ -832,7 +832,7 @@ mod tests {
     // --- ゲート ---
 
     #[tokio::test]
-    async fn default_off_is_zero_call_and_writes_nothing() {
+    async fn disabled_is_zero_call_and_writes_nothing() {
         let state = crate::test_app_state();
         seed_units(&state, "a1", 5);
         let fake = FakeRunner::new(FakeOutcome::Completed);
@@ -846,12 +846,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!ran, "既定オフでは起動しない");
+        assert!(!ran, "無効化時（enabled=false）は起動しない");
         assert_eq!(fake.calls.load(Ordering::SeqCst), 0, "口を 1 度も呼ばない");
         assert_eq!(
             get_marker(&state, "a1"),
             before,
-            "既定オフではマーカーを書き換えない"
+            "無効化時はマーカーを書き換えない"
         );
     }
 

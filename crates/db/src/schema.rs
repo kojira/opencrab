@@ -1450,8 +1450,8 @@ const MIGRATIONS: &[Migration] = &[
         // 増えたか）と日次 throttle をこの 1 列で判定する。
         //
         // **NULL 既定 = 未実行**（初回は throttle が掛からず、ユニットが下限以上あれば発火する）。
-        // 既存 DB は列が NULL のまま増えるだけで、凝縮ランは既定オフ（config）なので挙動は
-        // 変わらない。
+        // 既存 DB は列が NULL のまま増えるだけで、このマイグレーション自体は挙動を変えない
+        // （NULL=未実行。凝縮ランの有効/無効は config の `enabled` 次第。既定 ON は #457）。
         //
         // 冪等性: 新規 DB は `SCHEMA_SQL` の `CREATE TABLE agent_memory_index_config` 側で
         // 列を持つので `column_exists` でガードする（v24〜v29 / v31 / v34 の前例）。
