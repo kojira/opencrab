@@ -1006,13 +1006,9 @@ async fn main() -> anyhow::Result<()> {
     // heartbeat ループは有効なエージェントが居ないと張られず、そこに inbox 消化を相乗り
     // させると webhook 対象エージェントの heartbeat が無効なとき黙って消化されない
     // （silent no-op）。専用ループにして常時起動し、未処理が空なら LLM を呼ばない
-    // （per-agent の非空ゲート / 受け入れ基準）。turn は既存の HeartbeatTurnRunner を
-    // 再利用する（直列化・dispatch・配送・SPEAK 解釈を流用）。
-    {
-        let intake_runner =
-            heartbeat_turn::HeartbeatTurnRunner::from_state(&state, heartbeat_discord_http.clone());
-        intake_process::spawn_intake_process_loop(state.clone(), intake_runner);
-    }
+    // （per-agent の非空ゲート / 受け入れ基準）。消化ターンは heartbeat の SPEAK 配送を
+    // 通さない（webhook 起点の外部 broadcast を避ける）— 詳細は intake_process モジュール doc。
+    intake_process::spawn_intake_process_loop(state.clone());
     // catch-up ポーリング（起動時 + 定期）。source アダプタ未設定なら中で即 return する。
     opencrab_server::intake::spawn_intake_catchup_loop(state.clone());
 

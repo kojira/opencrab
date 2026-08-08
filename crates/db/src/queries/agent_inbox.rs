@@ -37,15 +37,18 @@ pub struct InboxInsert {
 
 /// 受信箱にイベントを積む。
 ///
-/// UNIQUE(source, dedup_key) に対して `INSERT OR IGNORE` する。**同じ出来事が webhook と
-/// catch-up の両方から来ても二重に積まない**（受け入れ基準の dedup）。
+/// `ON CONFLICT(source, dedup_key) DO NOTHING` で dedup する。**同じ出来事が webhook と
+/// catch-up の両方から来ても二重に積まない**（受け入れ基準の dedup）。`INSERT OR IGNORE`
+/// ではなく衝突対象を明示するのは、**dedup 以外の制約違反（NOT NULL 等）まで握り潰さない**
+/// ため（それらはエラーとして呼び出し側へ返す）。
 ///
 /// 戻り値は「新規に積まれたか」。`true` = 新規行、`false` = 既存（dedup で弾かれた）。
 pub fn enqueue_inbox_event(conn: &Connection, ev: &InboxInsert) -> Result<bool> {
     let n = conn.execute(
-        "INSERT OR IGNORE INTO agent_inbox
+        "INSERT INTO agent_inbox
             (id, agent_id, source, event_type, dedup_key, payload_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(source, dedup_key) DO NOTHING",
         params![
             ev.id,
             ev.agent_id,

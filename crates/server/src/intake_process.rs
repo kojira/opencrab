@@ -1,35 +1,48 @@
 //! 受信箱（`agent_inbox`）の消化ループ（webhook intake / issue #454）。
 //!
-//! # なぜ heartbeat と別ループか
+//! # なぜ heartbeat と別ループ・別セッションか
 //!
 //! heartbeat のループ群は「グローバル有効 or opt-in 済みエージェントが居る」ときしか張られない
 //! （`make_heartbeat_callback` を回す `heartbeat_loop`）。inbox 消化をそこへ相乗りさせると、
 //! webhook 対象エージェントの heartbeat が無効なとき **inbox が黙って消化されない**（silent
 //! no-op）。それを避けるため常時起動の専用ループにする。
 //!
+//! さらに **heartbeat の agent-scoped ターン（`channel_id=""`）を再利用しない**。あれは SPEAK 時に
+//! `deliver_heartbeat_speech` 経由で稼働中 transport へ配送し、Nostr の text_delivery は宛先を
+//! 無視して kind:1 を broadcast する（`crates/nostr/src/text_delivery.rs`）。それを通すと
+//! **webhook 起点で外部タイムラインへ broadcast する経路**を新設してしまう（#454 の意図外・
+//! owner 決定 #456 の「agent スコープ全廃」とも逆行）。加えて heartbeat と同じセッション id を
+//! 別 runner で走らせると直列化ロックを共有せず二重発話・DB 競合が起きうる。
+//!
+//! # 何をするか
+//!
+//! 専用セッション `intake-{agent}` で [`run_agent_response`] を直接呼ぶ。未処理イベントを
+//! **会話として渡す**だけで、エージェントは自分のツール経由でのみ作用する（omoikane への返信
+//! 等）。**heartbeat の SPEAK 配送（broadcast）は通さない**。応答は監査用に intake セッションへ
+//! 記録する。
+//!
 //! # コスト制御（受け入れ基準）
 //!
-//! 「inbox 空の tick では LLM 呼び出しが発生しない」を満たすため、まず未処理行を持つ
-//! エージェントだけを [`agents_with_unprocessed_inbox`] で絞り、**未処理が 1 件も無ければ
-//! turn を起こさない**（DB クエリ 1 本で終わる）。
+//! 「inbox 空の tick では LLM 呼び出しが発生しない」を満たすため、未処理行を持つエージェント
+//! だけを [`agents_with_unprocessed_inbox`] で絞り、**未処理が 1 件も無ければ turn を起こさない**。
 //!
-//! # turn の実体
+//! # 再試行
 //!
-//! 既存の [`HeartbeatTurnRunner`] を再利用する（直列化ロック・dispatch・発話配送・SPEAK 解釈を
-//! 流用）。未処理イベントを agent-scoped の HB セッションへ system ログとして差し込んで**から**
-//! turn を起こす。差し込み時点で「配送」は完了とみなして processed を刻む（turn が失敗しても
-//! イベントは会話ログに残り、次の tick 以降の文脈に載る）。
+//! `processed_at` は **turn が Ok を返したときだけ**刻む。エラー（LLM 障害等）は未処理のまま
+//! 残し次 tick で再試行する（at-least-once。外部イベントを黙って失わない方を採る）。
 
-use std::sync::Arc;
 use std::time::Duration;
 
+use opencrab_actions::{CallerIdentity, RunRequest};
 use opencrab_db::queries::{
-    agents_with_unprocessed_inbox, insert_session_log, list_unprocessed_inbox,
-    mark_inbox_processed, AgentInboxRow, SessionLogRow,
+    agents_with_unprocessed_inbox, insert_session, insert_session_log, list_unprocessed_inbox,
+    mark_inbox_processed, AgentInboxRow, SessionLogRow, SessionRow,
 };
+use opencrab_server::process::{build_agent_context, run_agent_response};
 use opencrab_server::AppState;
 
-use crate::heartbeat_turn::{HeartbeatTarget, HeartbeatTurnRunner, TurnOrigin};
+/// intake 専用セッション id の接頭辞（heartbeat の `heartbeat-` と別空間に分ける）。
+const INTAKE_SESSION_PREFIX: &str = "intake-";
 
 /// 1 エージェントから 1 tick で消化する未処理イベントの上限（バッチ）。
 const INBOX_BATCH_LIMIT: i64 = 20;
@@ -41,20 +54,20 @@ const PAYLOAD_PREVIEW_CHARS: usize = 4000;
 const MIN_INTERVAL_SECS: u64 = 10;
 
 /// 受信箱消化ループを起動する（常時。source アダプタや heartbeat 設定に依存しない）。
-pub fn spawn_intake_process_loop(state: AppState, runner: Arc<HeartbeatTurnRunner>) {
+pub fn spawn_intake_process_loop(state: AppState) {
     let interval_secs = state.intake.process_interval_secs.max(MIN_INTERVAL_SECS);
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs);
         tracing::info!(interval_secs, "intake process loop started");
         loop {
-            process_all_inboxes(&state, &runner).await;
+            process_all_inboxes(&state).await;
             tokio::time::sleep(interval).await;
         }
     });
 }
 
 /// 未処理を持つエージェントだけを順に消化する。空なら turn を一切起こさない。
-async fn process_all_inboxes(state: &AppState, runner: &Arc<HeartbeatTurnRunner>) {
+async fn process_all_inboxes(state: &AppState) {
     let agent_ids = {
         let Ok(conn) = state.db.lock() else {
             return;
@@ -68,7 +81,7 @@ async fn process_all_inboxes(state: &AppState, runner: &Arc<HeartbeatTurnRunner>
         }
     };
     for stored_agent_id in agent_ids {
-        process_agent_inbox(state, runner, &stored_agent_id).await;
+        process_agent_inbox(state, &stored_agent_id).await;
     }
 }
 
@@ -76,11 +89,7 @@ async fn process_all_inboxes(state: &AppState, runner: &Arc<HeartbeatTurnRunner>
 ///
 /// `stored_agent_id` は受信時に保存した値（config のルート値 = 名前 or UUID）。turn は
 /// heartbeat と同じく解決した UUID で走らせる（名前→UUID は `resolve_agent_id`）。
-async fn process_agent_inbox(
-    state: &AppState,
-    runner: &Arc<HeartbeatTurnRunner>,
-    stored_agent_id: &str,
-) {
+async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
     // (a) 未処理を取得（短いロック）。
     let rows = {
         let Ok(conn) = state.db.lock() else {
@@ -98,66 +107,111 @@ async fn process_agent_inbox(
         return; // 直前に他所が処理した等。turn は起こさない。
     }
 
-    // (b) 名前→UUID 解決（短いロック / heartbeat と同じ）。
-    let resolved_agent_id = {
+    // (b) 名前→UUID 解決 + intake セッション確保 + agent 文脈の組み立て（短いロック）。
+    let prepared = {
         let Ok(conn) = state.db.lock() else {
             return;
         };
-        crate::resolve_agent_id(&conn, stored_agent_id)
+        let resolved_agent_id = crate::resolve_agent_id(&conn, stored_agent_id);
+        let session_id = format!("{INTAKE_SESSION_PREFIX}{resolved_agent_id}");
+        ensure_intake_session(&conn, &session_id, &resolved_agent_id);
+        let (system_prompt, agent_name) =
+            build_agent_context(&conn, &resolved_agent_id, &CallerIdentity::Owner);
+        (resolved_agent_id, session_id, system_prompt, agent_name)
     };
+    let (resolved_agent_id, session_id, system_prompt, agent_name) = prepared;
 
-    // (c) agent-scoped の HB セッション（channel_id=""）。内部でロックするので (a)(b) の
-    //     ロックは既に落ちている。
-    let session_id = crate::get_or_create_heartbeat_session(&state.db, &resolved_agent_id, "");
+    // (c) 未処理イベントを会話として渡す。**session 履歴からは組まない**（外部イベントを
+    //     その場で処理するだけ・継続性は各エージェントの記憶系が担う）。
+    let conversation = build_inbox_prompt(&rows);
 
-    // (d) イベントを system ログへ差し込み、processed を刻む（短いロック）。
-    //     差し込み = 配送完了とみなす。turn が失敗してもイベントは会話ログに残る。
-    {
-        let Ok(conn) = state.db.lock() else {
-            return;
-        };
-        let content = build_inbox_prompt(&rows);
+    // 監査用にイベントを intake セッションへ system ログとして残す（配送はしない）。
+    if let Ok(conn) = state.db.lock() {
         let log = SessionLogRow {
             id: None,
             agent_id: resolved_agent_id.clone(),
             session_id: session_id.clone(),
             log_type: "system".to_string(),
-            content,
+            content: conversation.clone(),
             speaker_id: Some("intake".to_string()),
             turn_number: None,
             metadata_json: None,
             created_at: None,
         };
         if let Err(e) = insert_session_log(&conn, &log) {
-            // 差し込めなければ processed を刻まない（次 tick で再試行）。
-            tracing::warn!(agent_id = %resolved_agent_id, error = %e, "intake process: セッションログ差し込み失敗");
-            return;
-        }
-        for r in &rows {
-            if let Err(e) = mark_inbox_processed(&conn, &r.id) {
-                tracing::warn!(agent_id = %resolved_agent_id, inbox_id = %r.id, error = %e, "intake process: processed マーク失敗");
-            }
+            tracing::warn!(agent_id = %resolved_agent_id, error = %e, "intake process: 監査ログ記録失敗");
         }
     }
 
-    // (e) turn（ロック無し・await）。失敗（None = 文脈組み立て失敗）はイベントを会話へ
-    //     残したまま握る。SubtaskResume と同じく直前の決定を保つ意味は無いので戻り値は捨てる。
-    let target = HeartbeatTarget {
-        agent_id: resolved_agent_id,
-        session_id,
-        channel_id: String::new(),
-        guild_id: String::new(),
-        instructions_source: "intake",
-    };
-    runner
-        .run_turn(&target, TurnOrigin::InboxDelivery { count: rows.len() })
-        .await;
+    // (d) turn（ロック無し・await）。**purpose=intake / caller=Owner / dispatch なし・配送なし**。
+    //     エージェントはツール経由でのみ作用する。SPEAK を外部へ broadcast しない。
+    let req = RunRequest::new(
+        &resolved_agent_id,
+        &agent_name,
+        &session_id,
+        &system_prompt,
+        &conversation,
+        "intake",
+        CallerIdentity::Owner,
+    );
+    match run_agent_response(state, req).await {
+        Ok(result) => {
+            // 応答を監査用に記録し、処理済みを刻む（Ok のときだけ / at-least-once）。
+            if let Ok(conn) = state.db.lock() {
+                let log = SessionLogRow {
+                    id: None,
+                    agent_id: resolved_agent_id.clone(),
+                    session_id: session_id.clone(),
+                    log_type: "speech".to_string(),
+                    content: result.response.clone(),
+                    speaker_id: Some(resolved_agent_id.clone()),
+                    turn_number: None,
+                    metadata_json: None,
+                    created_at: None,
+                };
+                let _ = insert_session_log(&conn, &log);
+                for r in &rows {
+                    if let Err(e) = mark_inbox_processed(&conn, &r.id) {
+                        tracing::warn!(agent_id = %resolved_agent_id, inbox_id = %r.id, error = %e, "intake process: processed マーク失敗");
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // 未処理のまま残す（次 tick で再試行）。外部イベントを黙って失わない。
+            tracing::warn!(agent_id = %resolved_agent_id, error = %e, "intake process: turn 失敗（未処理のまま保持し再試行）");
+        }
+    }
 }
 
-/// 未処理イベント群を 1 つの system prompt にまとめる。会話文字列の再構築で載る本文。
+/// intake 専用セッションを無ければ作る（mode="intake"）。
+fn ensure_intake_session(conn: &rusqlite::Connection, session_id: &str, agent_id: &str) {
+    if let Ok(Some(_)) = opencrab_db::queries::get_session(conn, session_id) {
+        return;
+    }
+    let session = SessionRow {
+        id: session_id.to_string(),
+        mode: "intake".to_string(),
+        theme: "外部イベント受信箱の消化".to_string(),
+        phase: "active".to_string(),
+        turn_number: 0,
+        status: "active".to_string(),
+        participant_ids_json: serde_json::json!([agent_id]).to_string(),
+        facilitator_id: None,
+        done_count: 0,
+        max_turns: None,
+        metadata_json: None,
+    };
+    if let Err(e) = insert_session(conn, &session) {
+        tracing::warn!(agent_id = %agent_id, error = %e, "intake process: セッション作成失敗");
+    }
+}
+
+/// 未処理イベント群を 1 つの会話文字列にまとめる。turn に渡す本文。
 fn build_inbox_prompt(rows: &[AgentInboxRow]) -> String {
     let mut s = format!(
-        "[受信箱] 未処理の外部イベントが {} 件届いています:\n",
+        "[受信箱] 外部から届いた未処理イベントが {} 件あります。内容を確認し、必要なら\
+         あなたのツールで対応してください（この受信箱の消化は外部への発話配信を行いません）。\n",
         rows.len()
     );
     for (i, r) in rows.iter().enumerate() {
@@ -216,6 +270,8 @@ mod tests {
         assert!(p.contains("omoikane/comment.created"));
         assert!(p.contains("omoikane/chat.message"));
         assert!(p.contains("\"text\":\"hi\""));
+        // 消化ターンは外部配信しないことを本文で明示している（broadcast 誤解の防止）。
+        assert!(p.contains("外部への発話配信を行いません"));
     }
 
     #[test]
