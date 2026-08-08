@@ -1,4 +1,5 @@
-use rusqlite::Connection;
+use chrono::Utc;
+use rusqlite::{params, Connection};
 
 /// スキーマのバージョン管理は `PRAGMA user_version` で行う。
 ///
@@ -1514,6 +1515,41 @@ const MIGRATIONS: &[Migration] = &[
             Ok(())
         },
     },
+    Migration {
+        version: 37,
+        description:
+            "session_heartbeat_config + agent_schedules（セッション一本化スキーマ + 移行 / #439 × #455 × #456）",
+        // **統合スケジューラ PR1: セッション一本化スキーマ + 移行 backfill。**
+        //
+        // 2 つの表を新設し、既存の agent/channel 二本立てハートビート設定を
+        // **セッション単位の `session_heartbeat_config` へ backfill** する。旧表
+        // （`agent_heartbeat_config` / `discord_channel_config.heartbeat_*`）は**残置**
+        // （読まない・撤去は後続 PR）。**発火経路はまだ切り替えない**（PR2）。
+        //
+        // ## 不変条件（最重要・設計 §4.2）
+        // **現状の発火挙動を 1 ビットも変えない**。opt-in 済みエージェントの Discord channel
+        // 発火は現状 precedence（AgentScoped）が能動的に抑止（沈黙）しているので、その抑止を
+        // `enabled=0` として**保存**する（無条件 enabled 化＝新規発火は禁止）。global
+        // `heartbeat_enabled`（G）は per-session の状態ではないのでデータへ焼かず、発火時の
+        // ランタイムゲートとして残す（PR2・kill-switch のライブ性を壊さない）。
+        //
+        // ## 原子性
+        // `run_migrations` の per-migration トランザクション内で走り、`up` が `Err` を返すと
+        // **アトミックにロールバック**される（版トラップは起きない）。移行行の形式検証は
+        // commit 前にこの関数内で行い、壊れた行があれば `Err`（設計 §4.2.4 の実装契約）。
+        //
+        // ## 冪等性
+        // `CREATE TABLE IF NOT EXISTS`。backfill の INSERT は `ON CONFLICT DO NOTHING`。
+        // 新規 DB は `SCHEMA_SQL` 側で両表を持ち、旧表は空なので backfill は no-op。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき・旧表は無傷なので新表 2 つの DROP と版番号のみ）
+        //   BEGIN;
+        //   DROP TABLE IF EXISTS session_heartbeat_config;
+        //   DROP TABLE IF EXISTS agent_schedules;
+        //   PRAGMA user_version = 36;
+        //   COMMIT;
+        up: migrate_v37_session_heartbeat,
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -1601,6 +1637,59 @@ CREATE TABLE IF NOT EXISTS agent_heartbeat_config (
     interval_secs INTEGER,
     updated_at TEXT NOT NULL
 );
+";
+
+/// セッション単位のハートビート設定（統合スケジューラ / #439 × #456 の PR1）。
+///
+/// agent スコープ（`agent_heartbeat_config`）と channel スコープ
+/// （`discord_channel_config.heartbeat_*`）の二本立てを **セッション単位の 1 テーブル**へ
+/// 畳んだ後継。`session_id` は `nostr-{agent}` / `discord-{agent}-{guild}-{channel}`。
+/// 発火先（Nostr broadcast / Discord channel）は `session_id` 接頭辞から導くので**列に
+/// 持たない**（Discord 前提の列を一般化テーブルへ持ち込まない）。
+///
+/// 既定は**無効**（`enabled INTEGER NOT NULL DEFAULT 0` / fail-closed・#240）。
+/// `interval_secs` は生値（`NULL` = 運用者既定）。`anchor_at`/`last_fired_at` は rfc3339 の
+/// 壁時計（永続アンカー・#439）。**この PR では発火経路はまだ切り替えない**（PR2）。
+///
+/// **`SCHEMA_SQL` 側の同名ブロックと文面を一致させること**（新規 DB は SCHEMA_SQL 経由・
+/// 既存 DB は v37 マイグレーション経由で同じ形に収束する）。
+const SESSION_HEARTBEAT_CONFIG_SQL: &str = "
+CREATE TABLE IF NOT EXISTS session_heartbeat_config (
+    agent_id      TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 0,
+    interval_secs INTEGER,
+    anchor_at     TEXT,
+    last_fired_at TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (agent_id, session_id)
+);
+";
+
+/// per-agent 定時実行（#455 の PR1 スキーマ）。cron / `@every` をセッション時刻源へ載せる。
+///
+/// 既定は**無効**（fail-closed・#240）。`session_id` は注入先の一本化されたセッション
+/// （Nostr agent は `nostr-{agent}`）。`next_run_at` は計算結果キャッシュで真実は再計算。
+/// jitter は列を作らない（設計 §9・非採用）。**発火（scheduler 配線）は PR4** で、この PR は
+/// 表の新設のみ（既存挙動は 1 バイトも変わらない＝積むものが無い）。
+///
+/// **`SCHEMA_SQL` 側の同名ブロックと文面を一致させること**。
+const AGENT_SCHEDULES_SQL: &str = "
+CREATE TABLE IF NOT EXISTS agent_schedules (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id     TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    cron_expr    TEXT NOT NULL,
+    timezone     TEXT NOT NULL DEFAULT 'Asia/Tokyo',
+    message      TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 0,
+    anchor_at    TEXT,
+    last_run_at  TEXT,
+    next_run_at  TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_agent ON agent_schedules(agent_id);
 ";
 
 /// per-agent の MCP サーバ設定。1 エージェント × 複数サーバ（主キー (agent_id, name)）。
@@ -1749,6 +1838,232 @@ fn run_migrations(conn: &Connection, migrations: &[Migration]) -> rusqlite::Resu
             tx.commit()?;
         }
     }
+    Ok(())
+}
+
+/// Discord の `guild_id` / `channel_id` を正規化する（設計 §4.2 B3）。
+///
+/// 本番データに引用符付きの値（例 `"1465697209541726362"`）が混ざるため、連結して
+/// `session_id` を作る前に `"` と空白（半角空白・タブ・改行など）を除去する。数字だけが
+/// 残る前提で、残らなければ後段の [`session_id_is_valid`] が弾く（fail-closed）。
+fn norm_discord_id(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| *c != '"' && !c.is_whitespace())
+        .collect()
+}
+
+/// backfill が作った `session_id` が発火先を導ける形式かを検証する（設計 §3.6 / §4.2 B4）。
+///
+/// `agent_id` はハイフンを含む UUID なので naive な `split('-')` はしない。保存済みの
+/// `agent_id` で接頭辞を剥がし、`nostr-{agent}` か `discord-{agent}-{digits}-{digits}` に
+/// 合致するかだけを見る（guild/channel は数字のみ）。**未知/解釈不能は false = fail-closed**。
+fn session_id_is_valid(session_id: &str, agent_id: &str) -> bool {
+    if session_id == format!("nostr-{agent_id}") {
+        return true;
+    }
+    if let Some(rest) = session_id.strip_prefix(&format!("discord-{agent_id}-")) {
+        // rest = "{guild}-{channel}"。guild/channel は数値（ハイフン無し）なので rsplit_once 安全。
+        if let Some((guild, channel)) = rest.rsplit_once('-') {
+            return !guild.is_empty()
+                && !channel.is_empty()
+                && guild.chars().all(|c| c.is_ascii_digit())
+                && channel.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
+/// v37 マイグレーション本体（セッション一本化スキーマ + backfill / #439 × #455 × #456・PR1）。
+///
+/// **現状の発火挙動を 1 ビットも変えない**のが不変条件（設計 §4.2）。`run_migrations` の
+/// per-migration トランザクション内で走り、**この関数が `Err` を返すと全体がロールバック**
+/// される。移行行の形式検証は commit 前にこの関数内で行う（別コネクション・commit 後検証は
+/// 原子性が崩れるので使わない）。
+fn migrate_v37_session_heartbeat(conn: &Connection) -> rusqlite::Result<()> {
+    // 1. 新テーブル（冪等）。新規 DB は SCHEMA_SQL 側で既に作成済みなので no-op。
+    conn.execute_batch(SESSION_HEARTBEAT_CONFIG_SQL)?;
+    conn.execute_batch(AGENT_SCHEDULES_SQL)?;
+
+    // 移行時刻（壁時計・rfc3339）。enabled 行の anchor に打ち、移行直後の一斉発火を避けて
+    // next_fire を「移行時刻 + interval（未来）」へ置く（＝密にしない・設計 §4.4 の「後ろ」）。
+    let now = Utc::now().to_rfc3339();
+
+    // opt-in 集合: agent_heartbeat_config.enabled=1 の agent。opt-in 済みは現状 Discord channel
+    // 発火が precedence（AgentScoped）で抑止（沈黙）されているので、その抑止を enabled=0 として
+    // 保存する（step2）。**向き**: enabled を 0 へ倒す＝発火を「増やさない」方向（沈黙の保存）。
+    let opted_in: std::collections::HashSet<String> = {
+        let mut stmt =
+            conn.prepare("SELECT agent_id FROM agent_heartbeat_config WHERE enabled = 1")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+
+    // ── step1: Nostr セッション ─────────────────────────────────────────────
+    // opt-in 済み かつ Nostr gateway を持つ（EXISTS agent_nostr_config）→ nostr-{agent} を
+    // enabled=1 で作る。Nostr の agent スコープ発火は global（G）に依らず発火していたので
+    // enabled=1（G ゲート対象外）。opt-in 済みだが Nostr を持たない（Discord 専用の旧 agent
+    // スコープ）は現状も出口なしで沈黙 → セッション行を作らない（#456 決定3）。interval は
+    // agent_heartbeat_config の保持値（NULL = 運用者既定。意図した値を破棄しない）。
+    {
+        let mut stmt = conn.prepare(
+            "SELECT ahc.agent_id, ahc.interval_secs
+             FROM agent_heartbeat_config ahc
+             WHERE ahc.enabled = 1
+               AND EXISTS (SELECT 1 FROM agent_nostr_config anc WHERE anc.agent_id = ahc.agent_id)",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (agent_id, interval_secs) in rows {
+            let session_id = format!("nostr-{agent_id}");
+            conn.execute(
+                "INSERT INTO session_heartbeat_config
+                    (agent_id, session_id, enabled, interval_secs, anchor_at, last_fired_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, NULL, ?4)
+                 ON CONFLICT(agent_id, session_id) DO NOTHING",
+                params![agent_id, session_id, interval_secs, now],
+            )?;
+        }
+    }
+
+    // ── step2: Discord channel セッション（explicit per-agent 行）──────────────
+    // discord_channel_config.heartbeat_enabled=1 AND agent_id!='' を移す。
+    //   enabled = opt-in 済みなら 0（抑止を保存）、未 opt-in なら 1。
+    //   ※ 未 opt-in を無条件 1 にしてよいのは、G=false 時に発火を止めるのはランタイムの G
+    //     ゲート（PR2）が担うため（enabled は「このセッションの HB 設定は on」の意味で、
+    //     実発火は `enabled AND (nostr- OR G)`）。ここで G を焼き込まない（A2）。
+    // session_id = discord-{agent}-{norm(guild)}-{norm(channel)}（B3 正規化）。
+    // anchor は enabled=1 のみ now（enabled=0 は有効化時に打つ）。
+    {
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, guild_id, channel_id, heartbeat_interval_secs
+             FROM discord_channel_config
+             WHERE heartbeat_enabled = 1 AND agent_id != ''",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (agent_id, guild_id, channel_id, interval_secs) in rows {
+            let guild = norm_discord_id(&guild_id);
+            let channel = norm_discord_id(&channel_id);
+            let session_id = format!("discord-{agent_id}-{guild}-{channel}");
+            let enabled: i64 = if opted_in.contains(&agent_id) { 0 } else { 1 };
+            let anchor: Option<&str> = if enabled == 1 {
+                Some(now.as_str())
+            } else {
+                None
+            };
+            conn.execute(
+                "INSERT INTO session_heartbeat_config
+                    (agent_id, session_id, enabled, interval_secs, anchor_at, last_fired_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)
+                 ON CONFLICT(agent_id, session_id) DO NOTHING",
+                params![agent_id, session_id, enabled, interval_secs, anchor, now],
+            )?;
+        }
+    }
+
+    // ── step3: Discord global 行（agent_id=''）の展開（enabled=0・統括裁定確定）────
+    // global 行（heartbeat_enabled=1）が現に効かせていた「その channel の既定」を、対象
+    // エージェントごとに **enabled=0** の行として記録する（発火はさせない）。
+    //
+    // **enabled=0 の理由と向き（過去に向き違いの事故があるため明記）**: この移行は「HB
+    // ループが立つエージェント集合（config の discord `agent_ids` ∪ opt-in）」を参照できない
+    // （G と同じ TOML/runtime 概念）。したがって global fallback 経由で現に発火している
+    // エージェントを enabled=1 で正しく再現できない。**発火を増やさない側（enabled=0）へ倒す。**
+    // 行自体は残すので「かつて global 既定で拾われていた」事実は #460 の議論材料として保存される。
+    //
+    // **限界（PR/設計に明記）**: global fallback 経由の発火はこの移行では保存されない。**本番では
+    // その集合が空**（その channel に明示行を持たないエージェントは HB ループに含まれない）で
+    // あることを本番コピーで実測確認済み。他環境ではこの経路の発火は沈黙側へ倒れる。
+    //
+    // 対象 = `agents` のうち、その channel に明示行を持たず（明示行持ちは step2 で移行済み）、
+    // かつ whitelisted（明示行が無いので global 行の whitelisted へ fallback）なエージェント。
+    // 名前で分岐しない（データ駆動）。interval は global 行の値を保持（enabled=0 なので発火は
+    // しないが値は残す）。step2 先行 + 明示チェック + ON CONFLICT DO NOTHING で二重の保険。
+    {
+        let globals: Vec<(String, String, Option<i64>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT guild_id, channel_id, heartbeat_interval_secs
+                 FROM discord_channel_config
+                 WHERE agent_id = '' AND heartbeat_enabled = 1",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let agents: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT agent_id FROM agents")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (guild_id, channel_id, interval_secs) in &globals {
+            let guild = norm_discord_id(guild_id);
+            let channel = norm_discord_id(channel_id);
+            for agent_id in &agents {
+                // その channel に明示行を持つエージェントは step2 で移行済み → skip。
+                let explicit: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM discord_channel_config WHERE channel_id = ?1 AND agent_id = ?2",
+                    params![channel_id, agent_id],
+                    |r| r.get(0),
+                )?;
+                if explicit > 0 {
+                    continue;
+                }
+                // whitelisted（明示行なし → global 行の whitelisted へ fallback）でなければ skip。
+                if !crate::queries::is_channel_whitelisted_for_agent(conn, channel_id, agent_id) {
+                    continue;
+                }
+                let session_id = format!("discord-{agent_id}-{guild}-{channel}");
+                conn.execute(
+                    "INSERT INTO session_heartbeat_config
+                        (agent_id, session_id, enabled, interval_secs, anchor_at, last_fired_at, updated_at)
+                     VALUES (?1, ?2, 0, ?3, NULL, NULL, ?4)
+                     ON CONFLICT(agent_id, session_id) DO NOTHING",
+                    params![agent_id, session_id, interval_secs, now],
+                )?;
+            }
+        }
+    }
+
+    // ── 検証（設計 §4.2.4・全移行行）───────────────────────────────────────────
+    // 全 session_id が nostr-{agent} / discord-{agent}-{digits}-{digits} に合致するか。
+    // 合致しない行があれば Err → per-migration tx でアトミックにロールバック（版トラップ無し）。
+    {
+        let mut stmt = conn.prepare("SELECT agent_id, session_id FROM session_heartbeat_config")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (agent_id, session_id) in rows {
+            if !session_id_is_valid(&session_id, &agent_id) {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(format!(
+                        "v37 backfill produced malformed session_id '{session_id}' (fail-closed; migration rolled back)"
+                    )),
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2938,6 +3253,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_inbox_dedup
     ON agent_inbox(source, dedup_key);
 CREATE INDEX IF NOT EXISTS idx_agent_inbox_unprocessed
     ON agent_inbox(agent_id, processed_at);
+
+-- ============================================
+-- SESSION HEARTBEAT CONFIG: セッション単位ハートビート（統合スケジューラ / #439 × #456）
+-- ============================================
+-- agent/channel 二本立てを畳んだ後継。発火先は session_id 接頭辞から導くので列に持たない。
+-- 既定は無効（fail-closed / #240）。この PR では発火経路はまだ切り替えない（PR2）。
+-- ※ SESSION_HEARTBEAT_CONFIG_SQL 定数と文面を一致させること。
+CREATE TABLE IF NOT EXISTS session_heartbeat_config (
+    agent_id      TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 0,
+    interval_secs INTEGER,
+    anchor_at     TEXT,
+    last_fired_at TEXT,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (agent_id, session_id)
+);
+
+-- ============================================
+-- AGENT SCHEDULES: per-agent 定時実行（#455）
+-- ============================================
+-- cron / @every をセッション時刻源へ載せる。既定は無効（fail-closed / #240）。
+-- 発火（scheduler 配線）は PR4。この PR は表の新設のみ。
+-- ※ AGENT_SCHEDULES_SQL 定数と文面を一致させること。
+CREATE TABLE IF NOT EXISTS agent_schedules (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id     TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    cron_expr    TEXT NOT NULL,
+    timezone     TEXT NOT NULL DEFAULT 'Asia/Tokyo',
+    message      TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 0,
+    anchor_at    TEXT,
+    last_run_at  TEXT,
+    next_run_at  TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_schedules_agent ON agent_schedules(agent_id);
 
 -- ============================================
 -- TASK LEDGER: 前向きワーキング状態（goal/契約/進捗/決定）
@@ -5440,12 +5794,14 @@ mod migration_tests {
         let conn = crate::init_memory().expect("init");
         // v19 相当の既存 DB を模す: 新表を落として version を 19 へ戻す。
         // チャンネル単位設定には行を 1 件入れておき、移行で動かないことを見る。
+        // channel_id/guild_id は数値の Discord snowflake にする（v37 の session_id 形式検証
+        // `discord-{agent}-{digits}-{digits}` を通すため。実データも常に数値）。
         conn.execute_batch(
             "DROP TABLE IF EXISTS agent_heartbeat_config;
              INSERT INTO discord_channel_config
                (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted,
                 heartbeat_enabled, heartbeat_interval_secs, updated_at)
-               VALUES ('ch-1', 'a1', 'g1', 'general', 1, 1, 1, 1, 60, '2026-01-01');
+               VALUES ('2001', 'a1', '1001', 'general', 1, 1, 1, 1, 60, '2026-01-01');
              PRAGMA user_version = 19",
         )
         .unwrap();
@@ -5467,7 +5823,7 @@ mod migration_tests {
         let (hb_enabled, hb_interval): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT heartbeat_enabled, heartbeat_interval_secs FROM discord_channel_config
-                 WHERE channel_id = 'ch-1' AND agent_id = 'a1'",
+                 WHERE channel_id = '2001' AND agent_id = 'a1'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -5738,5 +6094,404 @@ mod migration_tests {
         let result = run_migrations(&conn, fake);
         assert!(result.is_err(), "newer-than-supported DB must be rejected");
         assert!(!table_exists(&conn, "test_marker").unwrap());
+    }
+
+    // ── v37: セッション一本化スキーマ + 移行（#439 × #455 × #456・PR1）──────────
+
+    /// v37 適用前（user_version=36）の DB を模す: 新表 2 つを落として版を 36 へ戻す。
+    /// 旧表（agent_heartbeat_config / discord_channel_config / agent_nostr_config）は
+    /// baseline/番号付き migration で既に存在するので、そこへ fixture を積む。
+    fn setup_pre_v37(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS session_heartbeat_config;
+             DROP TABLE IF EXISTS agent_schedules;
+             PRAGMA user_version = 36;",
+        )
+        .unwrap();
+        assert_eq!(schema_version(conn).unwrap(), 36);
+    }
+
+    fn shc_row(
+        conn: &Connection,
+        agent_id: &str,
+        session_id: &str,
+    ) -> crate::queries::SessionHeartbeatConfigRow {
+        crate::queries::get_session_heartbeat_config(conn, agent_id, session_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected session row {agent_id} / {session_id}"))
+    }
+
+    /// v37 backfill が **現状の発火挙動を保存**することを検証する（設計 §4.2 の step1/step2/
+    /// step3・正規化）。step3 の global 展開は **enabled=0**（発火を増やさない）で作る。
+    #[test]
+    fn v37_backfill_preserves_firing_and_normalizes() {
+        let conn = crate::init_memory().expect("init");
+        setup_pre_v37(&conn);
+
+        // 旧設定の fixture。
+        //  A: opt-in 済み(enabled=1) かつ Nostr 有り  → nostr-A enabled=1、Discord 抑止(0)
+        //  B: opt-in 済み かつ Nostr 無し             → nostr 作らない（出口なし・沈黙）
+        //  C: 未 opt-in（行はあるが disabled）        → Discord enabled=1
+        //  D: agent_heartbeat_config に行なし=未 opt-in、guild/channel が引用符付き → 正規化
+        //  E: heartbeat_enabled=0 の Discord 行       → 移行しない
+        //  global('' 行, ch205, whitelisted=1)        → step3 で A〜E に enabled=0 展開
+        conn.execute_batch(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES
+                ('A','A','A'),('B','B','B'),('C','C','C'),('D','D','D'),('E','E','E');
+             INSERT INTO agent_heartbeat_config (agent_id, enabled, interval_secs, updated_at) VALUES
+                ('A', 1, 18000, '2026-01-01'),
+                ('B', 1, 1200,  '2026-01-01'),
+                ('C', 0, 10800, '2026-01-01');
+             INSERT INTO agent_nostr_config (agent_id, secret_key, relays_json, filter_json, enabled, updated_at) VALUES
+                ('A', 'nsecA', '[]', '{}', 1, '2026-01-01');
+             INSERT INTO discord_channel_config
+                (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at) VALUES
+                ('201', 'A', '100', '', 1, 1, 1, 1, NULL,  '', '2026-01-01'),
+                ('202', 'C', '100', '', 1, 1, 1, 1, 10800, '', '2026-01-01'),
+                ('\"222\"', 'D', '\"111\"', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('204', 'E', '100', '', 1, 1, 1, 0, NULL,  '', '2026-01-01'),
+                ('205', '',  '100', '', 1, 1, 1, 1, NULL,  '', '2026-01-01');",
+        )
+        .unwrap();
+
+        initialize(&conn).expect("apply v37");
+        assert_eq!(schema_version(&conn).unwrap(), latest_version());
+        assert_eq!(latest_version(), 37, "v37 が最新版であること");
+
+        // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
+        //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_heartbeat_config", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(total, 9, "backfill 行数");
+
+        // step1: Nostr セッション（G 非依存で発火していたので enabled=1・anchor 打つ）。
+        let a_nostr = shc_row(&conn, "A", "nostr-A");
+        assert!(a_nostr.enabled);
+        assert_eq!(
+            a_nostr.interval_secs,
+            Some(18000),
+            "意図した interval を保持"
+        );
+        assert!(a_nostr.anchor_at.is_some(), "enabled 行は anchor を打つ");
+        assert!(a_nostr.last_fired_at.is_none());
+
+        // step2: A の Discord 行は opt-in 抑止を enabled=0 として保存（anchor は NULL）。
+        let a_disc = shc_row(&conn, "A", "discord-A-100-201");
+        assert!(
+            !a_disc.enabled,
+            "opt-in 済みの Discord 発火は現状沈黙＝enabled=0 で保存"
+        );
+        assert!(a_disc.anchor_at.is_none(), "enabled=0 は anchor を打たない");
+
+        // step2: C（未 opt-in）は enabled=1・interval 保持・anchor 打つ。
+        let c_disc = shc_row(&conn, "C", "discord-C-100-202");
+        assert!(c_disc.enabled);
+        assert_eq!(c_disc.interval_secs, Some(10800));
+        assert!(c_disc.anchor_at.is_some());
+
+        // step2 正規化(B3): guild/channel の引用符が除去され discord-D-111-222 になる。
+        let d_disc = shc_row(&conn, "D", "discord-D-111-222");
+        assert!(d_disc.enabled);
+
+        // B: Nostr 無しの opt-in は出口なし＝セッションを作らない（#456 決定3）。
+        assert!(
+            crate::queries::get_session_heartbeat_config(&conn, "B", "nostr-B")
+                .unwrap()
+                .is_none(),
+            "Discord 専用 opt-in は Nostr セッションを作らない"
+        );
+        // E: heartbeat_enabled=0 は移行しない。
+        assert!(
+            crate::queries::get_session_heartbeat_config(&conn, "E", "discord-E-100-204")
+                .unwrap()
+                .is_none()
+        );
+        // step3: global 行(ch205)を A〜E へ **enabled=0** で展開（発火は増やさない・統括裁定）。
+        //  B は他に行が無いエージェントだが、global 既定の到達先として enabled=0 行が残る。
+        let b_205 = shc_row(&conn, "B", "discord-B-100-205");
+        assert!(!b_205.enabled, "global 展開は enabled=0（発火させない）");
+        assert!(b_205.anchor_at.is_none());
+        let a_205 = shc_row(&conn, "A", "discord-A-100-205");
+        assert!(!a_205.enabled);
+        // step3 が発火（enabled=1）を 1 件も増やさないこと。
+        let expanded_enabled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_heartbeat_config WHERE session_id LIKE '%-100-205' AND enabled = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(expanded_enabled, 0, "global 展開で発火を増やさない");
+        // agent_id='' のセッションは決して作らない（global 行そのものは session にしない）。
+        let global_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_heartbeat_config WHERE agent_id = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(global_rows, 0, "agent_id='' のセッションは作らない");
+    }
+
+    /// v37 backfill が壊れた session_id（非数値 channel）を作ったら `up()` 内検証で `Err` を
+    /// 返し、per-migration トランザクションで**アトミックにロールバック**する（設計 §4.2.4）。
+    #[test]
+    fn v37_backfill_rejects_malformed_session_id_and_rolls_back() {
+        let conn = crate::init_memory().expect("init");
+        setup_pre_v37(&conn);
+
+        // 未 opt-in agent X の Discord 行で channel_id が非数値 → discord-X-100-abc（不正形式）。
+        conn.execute_batch(
+            "INSERT INTO discord_channel_config
+                (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at) VALUES
+                ('abc', 'X', '100', '', 1, 1, 1, 1, NULL, '', '2026-01-01');",
+        )
+        .unwrap();
+
+        let result = initialize(&conn);
+        assert!(result.is_err(), "壊れた session_id は fail-closed で Err");
+        // ロールバック: 版は 36 のまま、新表も作られていない（CREATE ごと巻き戻る）。
+        assert_eq!(schema_version(&conn).unwrap(), 36, "版トラップは起きない");
+        assert!(
+            !table_exists(&conn, "session_heartbeat_config").unwrap(),
+            "Err なら CREATE TABLE ごとロールバックされる"
+        );
+    }
+
+    /// SCHEMA_SQL（新規 DB）と v37 migration（既存 DB）が **同じ形**の新表を作ることを、
+    /// sqlite_master の SQL 文字列で比較して固定する（定数と SCHEMA_SQL の drift を検出）。
+    #[test]
+    fn v37_schema_parity_fresh_vs_migrated() {
+        let dump = |conn: &Connection| -> Vec<String> {
+            conn.prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE name IN ('session_heartbeat_config', 'agent_schedules', 'idx_agent_schedules_agent')
+                   AND sql IS NOT NULL
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+
+        // 新規 DB: SCHEMA_SQL 由来。
+        let fresh = crate::init_memory().expect("fresh");
+        // 既存 DB: 新表を落として版を 36 へ戻し、v37 migration で作り直す。
+        let migrated = crate::init_memory().expect("migrated");
+        setup_pre_v37(&migrated);
+        initialize(&migrated).expect("re-migrate v37");
+
+        assert_eq!(dump(&fresh), dump(&migrated));
+        assert_eq!(dump(&fresh).len(), 3, "2 tables + 1 index");
+    }
+
+    #[test]
+    fn norm_discord_id_strips_quotes_and_whitespace() {
+        assert_eq!(
+            norm_discord_id("\"1465697209541726362\""),
+            "1465697209541726362"
+        );
+        assert_eq!(norm_discord_id("  123 456 "), "123456");
+        assert_eq!(norm_discord_id("123\t\n"), "123");
+        assert_eq!(norm_discord_id("123"), "123");
+    }
+
+    #[test]
+    fn session_id_is_valid_handles_uuid_agent_and_fail_closed() {
+        let agent = "6b79ac3a-7f17-4618-a827-5bda992a3698"; // ハイフンを含む UUID
+        assert!(session_id_is_valid(&format!("nostr-{agent}"), agent));
+        assert!(session_id_is_valid(
+            &format!("discord-{agent}-100-201"),
+            agent
+        ));
+        // 非数値 guild/channel は fail-closed。
+        assert!(!session_id_is_valid(
+            &format!("discord-{agent}-100-abc"),
+            agent
+        ));
+        assert!(!session_id_is_valid(
+            &format!("discord-{agent}-abc-201"),
+            agent
+        ));
+        // 発火経路を持たない種別・未知接頭辞は fail-closed。
+        assert!(!session_id_is_valid(&format!("web-{agent}"), agent));
+        assert!(!session_id_is_valid(&format!("heartbeat-{agent}"), agent));
+        // 別 agent の id で剥がそうとしても合致しない。
+        assert!(!session_id_is_valid(
+            &format!("nostr-{agent}"),
+            "other-agent"
+        ));
+    }
+
+    // ── 不変条件テスト（設計 §4.2 A2 / 受け入れ基準 B1）─────────────────────────
+    //
+    // 「移行が発火集合を変えない」を、**期待集合を手書きせず**に検証する。旧側は実コード
+    // 経路どおりに計算し、新側は移行後の enabled セッションから計算して**一致**を見る。
+    // `G ∈ {true, false}` でパラメタライズする（移行は G を焼き込まないので DB は 1 つで両方
+    // 計算できる）。
+    //
+    // **旧側の実発火の定義（実コードを正・統括指示で訂正済み）**: 現行の ChannelScoped 発火
+    // 経路（main.rs:494-590）は **whitelist ゲートも writable ゲートも適用しない**（発火先は
+    // `list_heartbeat_channels`＝`heartbeat_enabled=1` のみ・channel_config.rs:198）。よって
+    // 旧側実発火に `is_channel_whitelisted_for_agent` を含めてはいけない。旧発火は **HB ループ
+    // が立つエージェント**（config discord `agent_ids` ∪ opt-in）にのみ起こるため、loop 集合を
+    // 入力に取る。
+
+    const INV_DEFAULT_INTERVAL: u64 = 1800;
+    const INV_MIN_INTERVAL: u64 = 300;
+
+    fn agent_has_nostr(conn: &Connection, agent_id: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM agent_nostr_config WHERE agent_id = ?1",
+            [agent_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
+    /// ChannelScoped の発火先 channel_id 群（実コード main.rs:326-372 の dedup を再現）。
+    /// `list_heartbeat_channels`（heartbeat_enabled=1）を当該 agent 向け（agent 固有 or global）に
+    /// 絞り、同一 channel_id では agent 固有行を global 行より優先して dedup する。
+    /// **whitelist ゲートは適用しない**（実コードの ChannelScoped 経路に存在しない）。
+    fn channelscoped_targets(
+        conn: &Connection,
+        agent_id: &str,
+    ) -> std::collections::BTreeSet<String> {
+        let all = crate::queries::list_heartbeat_channels(conn).unwrap();
+        let mut selected: std::collections::HashMap<String, crate::queries::ChannelConfigRow> =
+            std::collections::HashMap::new();
+        for c in all {
+            if !c.agent_id.is_empty() && c.agent_id != agent_id {
+                continue;
+            }
+            match selected.get(&c.channel_id) {
+                Some(existing) if !existing.agent_id.is_empty() && c.agent_id.is_empty() => {
+                    continue
+                }
+                _ => {
+                    selected.insert(c.channel_id.clone(), c);
+                }
+            }
+        }
+        selected.into_keys().collect()
+    }
+
+    /// 旧システムが実際に外部へ届ける発火集合を、実コード経路どおりに計算する。
+    fn old_real_firing(
+        conn: &Connection,
+        g: bool,
+        loop_agents: &std::collections::BTreeSet<String>,
+    ) -> std::collections::BTreeSet<(String, String)> {
+        let mut out = std::collections::BTreeSet::new();
+        for agent in loop_agents {
+            let resolved = crate::queries::resolve_agent_heartbeat(
+                conn,
+                agent,
+                INV_DEFAULT_INTERVAL,
+                INV_MIN_INTERVAL,
+            );
+            // firing_plan（実 main.rs:169-183 の分岐を再現）。
+            if resolved.enabled {
+                // AgentScoped: 1 回発火。外部到達は Nostr gateway を持つときだけ
+                // （Discord 専用は空 channel → ログのみ＝外部発火ゼロ）。
+                if agent_has_nostr(conn, agent) {
+                    out.insert((agent.clone(), "nostr".to_string()));
+                }
+            } else if g {
+                // ChannelScoped: heartbeat_enabled=1 チャンネル（dedup）。whitelist ゲート無し。
+                for ch in channelscoped_targets(conn, agent) {
+                    out.insert((agent.clone(), ch));
+                }
+            }
+            // None（未 opt-in かつ G=false）: 発火なし。
+        }
+        out
+    }
+
+    /// 移行後に実際に外部へ届ける発火集合を、enabled=1 セッションから計算する。
+    /// `discord-` は G ゲート、`nostr-` は G 非依存。whitelist ゲートは現状経路に無いので掛けない。
+    fn new_real_firing(conn: &Connection, g: bool) -> std::collections::BTreeSet<(String, String)> {
+        let mut out = std::collections::BTreeSet::new();
+        for row in crate::queries::list_enabled_session_heartbeat_configs(conn).unwrap() {
+            let agent = &row.agent_id;
+            let sid = &row.session_id;
+            if *sid == format!("nostr-{agent}") {
+                out.insert((agent.clone(), "nostr".to_string()));
+            } else if let Some(rest) = sid.strip_prefix(&format!("discord-{agent}-")) {
+                if let Some((_guild, channel)) = rest.rsplit_once('-') {
+                    if g {
+                        out.insert((agent.clone(), channel.to_string()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// **不変条件**: 移行直後に発火するセッション集合＝移行前に実発火していた集合。
+    /// 旧側は実 precedence（resolve_agent_heartbeat + firing_plan + Nostr 到達 + ChannelScoped
+    /// dedup、whitelist ゲート無し + loop membership）で計算、新側は enabled セッションから計算。
+    /// `G ∈ {true, false}` の両方で一致することを見る。**期待集合は手書きしない。**
+    #[test]
+    fn v37_invariant_old_firing_equals_new_firing() {
+        let conn = crate::init_memory().expect("init");
+        setup_pre_v37(&conn);
+
+        // prod を模した fixture（channel/guild は clean numeric = 正規化と同値）。
+        //  optn : opt-in + Nostr（→ AgentScoped Nostr 発火）
+        //  optnn: opt-in・Nostr 無し（→ AgentScoped だが外部到達なし）
+        //  plain: 未 opt-in・loop に居る（→ ChannelScoped）。global ch304 にも**明示行**を持つ
+        //         （＝global fallback 経由の発火を持ち込まない＝prod と同じ状況）
+        //  noloop: 未 opt-in・loop に**居ない**（→ 発火しない。prod の e2e-test 相当）
+        conn.execute_batch(
+            "INSERT INTO agents (agent_id, name, persona_name) VALUES
+                ('optn','optn','optn'),('optnn','optnn','optnn'),('plain','plain','plain'),('noloop','noloop','noloop');
+             INSERT INTO agent_heartbeat_config (agent_id, enabled, interval_secs, updated_at) VALUES
+                ('optn', 1, 18000, '2026-01-01'),
+                ('optnn',1, 1200,  '2026-01-01');
+             INSERT INTO agent_nostr_config (agent_id, secret_key, relays_json, filter_json, enabled, updated_at) VALUES
+                ('optn', 'nsec', '[]', '{}', 1, '2026-01-01');
+             INSERT INTO discord_channel_config
+                (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at) VALUES
+                ('300', 'optn',  '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('301', 'optnn', '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('302', 'plain', '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('304', 'plain', '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('304', '',      '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01');",
+        )
+        .unwrap();
+
+        initialize(&conn).expect("apply v37");
+
+        // loop membership の模型（config discord agent_ids ∪ opt-in）。noloop は含めない。
+        let loop_agents: std::collections::BTreeSet<String> = ["optn", "optnn", "plain"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for g in [true, false] {
+            let old = old_real_firing(&conn, g, &loop_agents);
+            let new = new_real_firing(&conn, g);
+            assert_eq!(old, new, "移行が発火集合を変えた (G={g})");
+        }
+        // 非空（vacuous でない）ことを確かめる。
+        assert!(
+            !old_real_firing(&conn, true, &loop_agents).is_empty(),
+            "fixture が発火を含むこと"
+        );
+        // noloop（prod の e2e-test 相当）は新側で発火しない＝移行が発火を増やしていない。
+        let fires_noloop = new_real_firing(&conn, true)
+            .iter()
+            .any(|(a, _)| a == "noloop");
+        assert!(
+            !fires_noloop,
+            "loop に居ないエージェントを移行が発火させない"
+        );
     }
 }
