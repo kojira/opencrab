@@ -3,8 +3,7 @@ use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 use opencrab_core::heartbeat::{
-    heartbeat_loop, HeartbeatCallback, HeartbeatConfig, HeartbeatDecision,
-    HeartbeatIntervalResolver,
+    HeartbeatCallback, HeartbeatConfig, HeartbeatDecision, HeartbeatIntervalResolver,
 };
 use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
@@ -12,6 +11,7 @@ use tokio::sync::watch;
 mod heartbeat_delivery;
 mod heartbeat_turn;
 mod intake_process;
+mod scheduler;
 
 /// Discord へ 1 通送るためのハンドル。**ボットのトークンを保持するので、どのハンドルで
 /// 送るかが Discord 上の送信者名を決める**（#400 の核心）。
@@ -273,6 +273,10 @@ fn resolve_heartbeat_gate_intervals(
 ///
 /// ループ生成時に固定しないので、設定変更は**次の周期から**効く。発火するかどうかの
 /// 判定・位相は従来のゲートのまま（アンカー永続化・即時反映は #439 本体）。
+///
+/// **PR2 で中央スケジューラへ切替済み。この経路はもう呼ばれない**（残置。撤去は PR-C /
+/// 設計 §5・§12）。exact next_fire を持つ中央スケジューラでは sleep 粒度の追従が不要。
+#[allow(dead_code)]
 fn make_heartbeat_interval_resolver(
     db: opencrab_db::Db,
     agent_id: String,
@@ -373,6 +377,11 @@ fn list_whitelisted_heartbeat_channels(
 
 /// ハートビートコールバックを生成する。
 /// 初期起動とhot-reload再起動の両方で使用。
+///
+/// **PR2 で中央スケジューラ（`scheduler.rs`）へ切替済み。この経路はもう呼ばれない**
+/// （残置。撤去は PR-C / 設計 §5・§12）。発火は `session_heartbeat_config` を読む
+/// スケジューラが握り、旧 agent/channel precedence（`heartbeat_firing_plan`）は使わない。
+#[allow(dead_code)]
 fn make_heartbeat_callback(
     db: opencrab_db::Db,
     agent_id_owned: String,
@@ -719,6 +728,9 @@ async fn main() -> anyhow::Result<()> {
         // エージェントが自分で触るハートビート設定の境界（#247）。下限は運用者が
         // `[agent] heartbeat_min_interval_secs` で決める。
         heartbeat_limits: cfg.agent.heartbeat_limits(),
+        // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了・global config 変更で
+        // 鳴らして rebuild させる。set_my_heartbeat / schedule CRUD からの起床は PR3/PR4。
+        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
     };
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
@@ -1018,19 +1030,15 @@ async fn main() -> anyhow::Result<()> {
         enabled: cfg.agent.heartbeat_enabled,
     };
 
-    let (heartbeat_config_tx, mut heartbeat_config_rx) = watch::channel(initial_hb_config.clone());
+    let (heartbeat_config_tx, heartbeat_config_rx) = watch::channel(initial_hb_config.clone());
 
+    // 起動時の Discord ハンドル解決診断（下の #400 ブロック）専用のエージェント列挙。
+    // 中央スケジューラは `session_heartbeat_config` を直接読むため発火にはこの列挙を使わない。
+    // 診断は Discord feature 有効時のみ出すので、列挙も同じ cfg に閉じる（無効ビルドで未使用に
+    // ならないように）。
+    #[cfg(feature = "discord")]
     let agent_ids: Vec<String> = {
-        let base: Vec<String> = {
-            #[cfg(feature = "discord")]
-            {
-                cfg.gateway.discord.agent_ids.clone()
-            }
-            #[cfg(not(feature = "discord"))]
-            {
-                vec!["default".to_string()]
-            }
-        };
+        let base: Vec<String> = cfg.gateway.discord.agent_ids.clone();
         // #238: エージェント単位ハートビートに opt-in 済み（agent_heartbeat_config で
         // enabled）のエージェントにも発火ループを立てる。これで Discord チャンネルに
         // 紐づかない Nostr 専用エージェントにもループが立つ。config 由来の id は
@@ -1083,181 +1091,32 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // #238: agent_heartbeat_config に enabled 行が 1 つでもあるか。グローバル無効でも
-    // opt-in 済みエージェントが居ればループ群を起動する二段ゲートの上段（下段＝個々の
-    // 発火可否は callback 内 resolve_agent_heartbeat が握る）。起動時 1 回だけ判定する
-    // （動的反映はスコープ外）。
-    let heartbeat_has_optin = match state.db.lock() {
-        Ok(conn) => opencrab_db::queries::list_agents_with_heartbeat_enabled(&conn)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false),
-        Err(_) => false,
-    };
-
-    // heartbeat設定変更を監視してループを再起動するタスク
-    let heartbeat_agent_ids = agent_ids.clone();
-    let heartbeat_db = state.db.clone();
-    let heartbeat_state = state.clone();
-    tokio::spawn(async move {
-        let mut prev_config = initial_hb_config.clone();
-        let mut current_shutdown_tx: Option<watch::Sender<bool>> = None;
-        let mut _handles: Vec<tokio::task::JoinHandle<()>> = vec![];
-
-        // ハートビートループを起動するヘルパークロージャ的ブロック
-        // 初期起動。グローバル有効 OR opt-in 済みエージェントが居ればループ群を起動する。
-        if prev_config.enabled || heartbeat_has_optin {
-            tracing::info!(
-                agent_ids = ?heartbeat_agent_ids,
-                interval_secs = prev_config.interval_secs,
-                global_enabled = prev_config.enabled,
-                has_optin = heartbeat_has_optin,
-                "Starting heartbeat loops"
-            );
-            let global_enabled = prev_config.enabled;
-            let (tx, rx_tmpl) = watch::channel(false);
-            for agent_id in &heartbeat_agent_ids {
-                // core heartbeat_loop は config.enabled=false で即 return するため、起動する
-                // ループの enabled は true に倒す。個々の発火可否（グローバル無効下の未
-                // opt-in エージェントを黙らせる等）は callback 内で fail-closed に判定する。
-                // interval_secs は下限 1 秒に丸める（0 だと heartbeat_loop の sleep が 0 秒
-                // 周期のビジーループになる。運用者が 0 を書いても最低 1 秒 sleep させる）。
-                let config_clone = HeartbeatConfig {
-                    interval_secs: heartbeat_loop_interval_secs(prev_config.interval_secs),
-                    enabled: true,
-                };
-                let shutdown_rx = rx_tmpl.clone();
-                let db = heartbeat_db.clone();
-                let db_for_resolve = heartbeat_db.clone();
-                let agent_id = agent_id.clone();
-                let hb_discord_http = heartbeat_discord_http.clone();
-                let state_for_hb = heartbeat_state.clone();
-                let last_channel_ticks = Arc::new(Mutex::new(std::collections::HashMap::<
-                    String,
-                    std::time::Instant,
-                >::new()));
-                _handles.push(tokio::spawn(async move {
-                    let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
-                        resolve_agent_id(&conn, &agent_id)
-                    } else {
-                        agent_id.clone()
-                    };
-                    // #439 部分先行: 眠る長さを設定間隔へ追従させる（グローバル 1800 秒
-                    // グリッドへの丸めをやめる）。毎周期 DB から解決し直す。
-                    let limits = state_for_hb.heartbeat_limits;
-                    let interval_resolver = make_heartbeat_interval_resolver(
-                        db.clone(),
-                        resolved_agent_id.clone(),
-                        limits.default_interval_secs,
-                        limits.min_interval_secs,
-                        config_clone.interval_secs,
-                        global_enabled,
-                    );
-                    let callback = make_heartbeat_callback(
-                        db,
-                        resolved_agent_id,
-                        hb_discord_http,
-                        state_for_hb,
-                        config_clone.interval_secs,
-                        global_enabled,
-                        last_channel_ticks,
-                    );
-                    heartbeat_loop(
-                        agent_id,
-                        config_clone,
-                        callback,
-                        Some(interval_resolver),
-                        shutdown_rx,
-                    )
-                    .await;
-                }));
-            }
-            current_shutdown_tx = Some(tx);
-        } else {
-            tracing::info!("Heartbeat disabled (heartbeat_enabled = false in config)");
-        }
-
-        loop {
-            if heartbeat_config_rx.changed().await.is_err() {
-                break; // sender dropped
-            }
-            let new_config = heartbeat_config_rx.borrow().clone();
-            if new_config.enabled != prev_config.enabled
-                || new_config.interval_secs != prev_config.interval_secs
-            {
-                tracing::info!(
-                    enabled = new_config.enabled,
-                    interval_secs = new_config.interval_secs,
-                    "Heartbeat config changed, restarting loops"
-                );
-                // 既存ループを停止
-                if let Some(tx) = current_shutdown_tx.take() {
-                    let _ = tx.send(true);
-                }
-                _handles.clear();
-
-                // 新設定で起動。初期起動と同じ二段ゲート（グローバル有効 OR opt-in）。
-                if new_config.enabled || heartbeat_has_optin {
-                    let global_enabled = new_config.enabled;
-                    let (tx, rx_tmpl) = watch::channel(false);
-                    for agent_id in &heartbeat_agent_ids {
-                        // core の early-return 回避のため enabled は true に倒す（初期起動と同じ）。
-                        // interval_secs は下限 1 秒に丸める（0 でビジーループ化を防ぐ・初期起動と同じ）。
-                        let config_clone = HeartbeatConfig {
-                            interval_secs: heartbeat_loop_interval_secs(new_config.interval_secs),
-                            enabled: true,
-                        };
-                        let shutdown_rx = rx_tmpl.clone();
-                        let db = heartbeat_db.clone();
-                        let db_for_resolve = heartbeat_db.clone();
-                        let agent_id = agent_id.clone();
-                        let hb_discord_http = heartbeat_discord_http.clone();
-                        let state_for_hb = heartbeat_state.clone();
-                        let last_channel_ticks = Arc::new(Mutex::new(std::collections::HashMap::<
-                            String,
-                            std::time::Instant,
-                        >::new(
-                        )));
-                        _handles.push(tokio::spawn(async move {
-                            let resolved_agent_id = if let Ok(conn) = db_for_resolve.lock() {
-                                resolve_agent_id(&conn, &agent_id)
-                            } else {
-                                agent_id.clone()
-                            };
-                            // #439 部分先行: 初期起動と同じく設定間隔へ追従させる。
-                            let limits = state_for_hb.heartbeat_limits;
-                            let interval_resolver = make_heartbeat_interval_resolver(
-                                db.clone(),
-                                resolved_agent_id.clone(),
-                                limits.default_interval_secs,
-                                limits.min_interval_secs,
-                                config_clone.interval_secs,
-                                global_enabled,
-                            );
-                            let callback = make_heartbeat_callback(
-                                db,
-                                resolved_agent_id,
-                                hb_discord_http,
-                                state_for_hb,
-                                config_clone.interval_secs,
-                                global_enabled,
-                                last_channel_ticks,
-                            );
-                            heartbeat_loop(
-                                agent_id,
-                                config_clone,
-                                callback,
-                                Some(interval_resolver),
-                                shutdown_rx,
-                            )
-                            .await;
-                        }));
-                    }
-                    current_shutdown_tx = Some(tx);
-                }
-                prev_config = new_config;
-            }
-        }
-    });
+    // 中央ハートビートスケジューラ（#439 / #437 / #438 / 設計 §3）へ切替。
+    //
+    // 旧実装はエージェントごとに `core::heartbeat::heartbeat_loop` を立て、固定グリッド
+    // sleep + メモリ位相（`Instant`）で回していた（再起動で位相消失=#439-1・設定変更が
+    // 張り直しまで効かない=#437・sleep グリッドと設定間隔の乖離=#438）。ここでは**単一
+    // タスク**が `session_heartbeat_config` を毎ウェイクで読み直し、永続アンカーから正確な
+    // 次回発火まで眠り、`scheduler_wake` で即時反映する。
+    //
+    // **単一の HeartbeatTurnRunner を共有する**のが要点。runner は `SessionLocks` を 1 つ
+    // 持ち（`heartbeat_turn.rs` / `session_runtime.rs`）、複数作ると同一 session id でも
+    // 直列化されない。中央化で全セッションが 1 つの runner を通るので、tick と継続ターンの
+    // 二重応答防止が全域で効く。
+    //
+    // live G（global kill-switch = `cfg.agent.heartbeat_enabled`）は scheduler が
+    // **発火時に** `heartbeat_config_rx` から読む（hot-reload 追従・起動時スナップにしない。
+    // さもないと後から G=false にしても止まらない退行が出る・設計 §4.2）。config 変更・
+    // set_my_heartbeat（PR3）・schedule CRUD（PR4）・発火ターン完了は `scheduler_wake` で
+    // rebuild を促す。
+    {
+        let scheduler_runner =
+            heartbeat_turn::HeartbeatTurnRunner::from_state(&state, heartbeat_discord_http.clone());
+        let scheduler_state = state.clone();
+        tokio::spawn(async move {
+            scheduler::run_scheduler(scheduler_state, scheduler_runner, heartbeat_config_rx).await;
+        });
+    }
 
     let _watcher_handle = opencrab_server::hot_reload::start_config_watcher(
         "config",
