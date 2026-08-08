@@ -9,6 +9,7 @@ use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
 
 mod heartbeat_delivery;
+mod heartbeat_turn;
 
 /// Discord へ 1 通送るためのハンドル。**ボットのトークンを保持するので、どのハンドルで
 /// 送るかが Discord 上の送信者名を決める**（#400 の核心）。
@@ -26,7 +27,14 @@ fn get_or_create_heartbeat_session(
     agent_id: &str,
     channel_id: &str,
 ) -> String {
-    let session_id = format!("heartbeat-{}-{}", agent_id, channel_id);
+    // 接頭辞は継続ターンの受け口（`heartbeat_turn::resume_origin`）が親セッションの判定に
+    // 使う。書式が割れると「HB の決着なのに継続しない」が無言で起きるので定数を共有する。
+    let session_id = format!(
+        "{}{}-{}",
+        heartbeat_turn::HEARTBEAT_SESSION_PREFIX,
+        agent_id,
+        channel_id
+    );
     let conn = db.lock().unwrap();
     if let Ok(Some(_)) = opencrab_db::queries::get_session(&conn, &session_id) {
         return session_id;
@@ -104,46 +112,6 @@ fn record_heartbeat_channel_echo(
     if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
         tracing::error!(agent_id = %agent_id, channel_id = %channel_id, "#425: HB 発話を会話セッションへ記録できなかった: {e}");
     }
-}
-
-/// heartbeat 経路の `RunRequest` を組む（#169）。
-///
-/// 非ブロック dispatch（RFC #152 S3a）を有効化する。これにより heartbeat の tick は
-/// 長時間ツールで塞がれず、`cancel_subtask`（#161）からも停止できる。
-///
-/// - registry: **agent 単位**で `AppState` が保持しているものを共有する。tick /
-///   チャンネル / heartbeat ループ再起動（設定変更）を跨いで同一 Arc なので、前 tick で
-///   dispatch した subtask を後続 tick の `cancel_subtask` が引ける（使い捨ての DashMap
-///   では常に not found）。
-/// - sink: `NoopCompletionSink` = **即時 resume はしない**。完了本文は
-///   `settle_completed` が親セッションログへ永続化し、heartbeat は毎 tick 同じ
-///   session_id で `build_heartbeat_conversation_string` により会話を再構築するため、
-///   次 tick で自然に文脈へ載る。**この依存があるので、ハートビート専用セッション側の
-///   ログは種別で絞らない**（実会話セクションだけが `speech` に絞られる / #404）。
-///   sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
-///   sink 側へ複製する必要があり、かつ session ロックが無いため次 tick と競合して
-///   二重応答の不変条件（RFC §6）を壊す。
-fn heartbeat_run_request(
-    registries: &opencrab_server::subtask_registries::SubtaskRegistries,
-    agent_id: &str,
-    agent_name: &str,
-    session_id: &str,
-    system_prompt: &str,
-    conversation: &str,
-) -> opencrab_actions::RunRequest {
-    opencrab_actions::RunRequest::new(
-        agent_id,
-        agent_name,
-        session_id,
-        system_prompt,
-        conversation,
-        "heartbeat",
-        opencrab_actions::CallerIdentity::Owner,
-    )
-    .with_dispatch(
-        Some(registries.registry_for(agent_id)),
-        Arc::new(opencrab_actions::NoopCompletionSink),
-    )
 }
 
 /// ハートビート応答テキストから決定（SPEAK / LEARN / IDLE）を解く。
@@ -314,11 +282,15 @@ fn make_heartbeat_callback(
     global_enabled: bool,
     last_channel_ticks: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 ) -> HeartbeatCallback {
+    // ターンの実体（#440）。tick と、サブタスク決着からの継続ターンが**同じ 1 つ**を通る。
+    // 直列化ロックと dispatch registry をここで共有することが、両者が同一 HB セッションで
+    // 二重に応答しないことの担保になっている（`heartbeat_turn` モジュール doc）。
+    let runner = heartbeat_turn::HeartbeatTurnRunner::from_state(&state, discord_http);
     Box::new(move |_agent_id: &str, tick: u64| {
         let _agent_id = _agent_id.to_string();
         let db = db.clone();
         let agent_id_owned = agent_id_owned.clone();
-        let discord_http = discord_http.clone();
+        let runner = runner.clone();
         let state = state.clone();
         let global_interval_secs = global_interval_secs;
         let global_enabled = global_enabled;
@@ -491,199 +463,23 @@ fn make_heartbeat_callback(
                     }
                 }
 
-                // 3-4. エージェントコンテキストと会話文字列を構築
-                let (system_prompt, agent_name, conversation) = {
-                    let conn = db.lock().unwrap();
-                    // heartbeat は caller=Owner で走る（`heartbeat_run_request`）。index も
-                    // 同じ caller で組み立て、Owner には全 skill を見せる（#352）。
-                    let (sp, name) = opencrab_server::process::build_agent_context(
-                        &conn,
-                        &agent_id_owned,
-                        &opencrab_actions::CallerIdentity::Owner,
-                    );
-                    // Use per-agent model from DB, fallback to global default
-                    let agent_model = opencrab_db::queries::effective_model_for_agent(
-                        &conn,
-                        &agent_id_owned,
-                        &state.default_model,
-                    )
-                    .unwrap_or_else(|_| state.default_model.clone());
-                    let budget = opencrab_server::process::compute_context_budget(
-                        &conn,
-                        agent_model.split(':').next().unwrap_or(""),
-                        agent_model.split(':').nth(1).unwrap_or(""),
-                        state.compaction_ratio,
-                    );
-                    // #404: ハートビート専用セッションの履歴だけでは、**同じチャンネルで
-                    // 実際に交わされた会話が 1 行も見えない**（見えるのは自分の過去の
-                    // ハートビートだけ）。実会話セッションを解決して文脈へ入れる。
-                    // 専用セッションへの分離自体（`SPEAK:` パースとハートビートログを
-                    // 実会話と混ぜない）は維持し、実会話は**読むだけ**。
-                    let channel_session_id = opencrab_server::process::heartbeat_channel_session_id(
-                        &agent_id_owned,
-                        guild_id,
-                        channel_id_str,
-                    );
-                    let conv = match opencrab_server::process::build_heartbeat_conversation_string(
-                        &conn,
-                        &session_id,
-                        channel_session_id.as_deref(),
-                        &agent_id_owned,
-                        budget,
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!(agent_id = %agent_id_owned, session_id = %session_id, "build_heartbeat_conversation_string failed: {e}");
-                            continue;
-                        }
-                    };
-                    (sp, name, conv)
+                // 3-7. ターン本体（文脈構築 → 推論 → 応答記録 → 決定の解釈 →
+                // heartbeat_log → 発話配送）は tick と継続ターンで共有する 1 実装を通る
+                // （#440 / `heartbeat_turn`）。同一 HB セッションの直列化もその中。
+                let turn_target = heartbeat_turn::HeartbeatTarget {
+                    agent_id: agent_id_owned.clone(),
+                    session_id: session_id.clone(),
+                    channel_id: channel_id_str.clone(),
+                    guild_id: guild_id.clone(),
+                    instructions_source: hb_source,
                 };
-                let conversation = opencrab_server::process::prepend_runtime_context(
-                    &conversation,
-                    "ハートビート自律行動",
-                );
-
-                // 5. run_agent_response を呼び出す（非ブロック dispatch 有効 / #169）
-                let engine_result = opencrab_server::process::run_agent_response(
-                    &state,
-                    heartbeat_run_request(
-                        &state.subtask_registries,
-                        &agent_id_owned,
-                        &agent_name,
-                        &session_id,
-                        &system_prompt,
-                        &conversation,
-                    ),
-                )
-                .await;
-
-                let decision = match engine_result {
-                    Ok(result) => {
-                        // 6. エージェント応答をsession_logsに記録
-                        {
-                            let conn = db.lock().unwrap();
-                            let log = opencrab_db::queries::SessionLogRow {
-                                id: None,
-                                agent_id: agent_id_owned.clone(),
-                                session_id: session_id.clone(),
-                                log_type: "speech".to_string(),
-                                content: result.response.clone(),
-                                speaker_id: Some(agent_id_owned.clone()),
-                                turn_number: None,
-                                metadata_json: None,
-                                created_at: None,
-                            };
-                            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                                tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat response log: {e}");
-                            }
-                        }
-
-                        // 7. 応答からSPEAK/LEARN/IDLEを解析
-                        parse_heartbeat_decision(&result.response)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Heartbeat agent response failed for channel {}: {e}",
-                            channel_id_str
-                        );
-                        HeartbeatDecision::Idle
-                    }
+                let Some(decision) = runner
+                    .run_turn(&turn_target, heartbeat_turn::TurnOrigin::Tick { tick })
+                    .await
+                else {
+                    // 文脈を組めなかった（移設前もここは `continue` で、直前の決定を保つ）。
+                    continue;
                 };
-
-                tracing::debug!(agent_id = %_agent_id, tick, channel_id = %channel_id_str, decision = %decision, "Heartbeat tick result");
-
-                // heartbeat_logに記録
-                if let Ok(conn) = db.lock() {
-                    let decision_str = match &decision {
-                        HeartbeatDecision::Idle => "idle",
-                        HeartbeatDecision::Speak(_) => "speak",
-                        HeartbeatDecision::Learn => "learn",
-                        HeartbeatDecision::ManageSkills { .. } => "manage_skills",
-                    };
-                    let result_json = serde_json::json!({
-                        "channel_id": channel_id_str,
-                        "source": hb_source,
-                    })
-                    .to_string();
-                    if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
-                        &conn,
-                        &agent_id_owned,
-                        decision_str,
-                        Some(&result_json),
-                    ) {
-                        tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
-                    }
-                }
-
-                // Speak/Learn後続処理
-                match &decision {
-                    HeartbeatDecision::Speak(content) => {
-                        // 発話出口（段階3 PR-A / #246）。まず登録簿（`state.gateways`）の
-                        // 非 Discord transport を試し、配れなければ既存の Discord 共有 http
-                        // 経路へ落ちる。Discord の挙動はバイト単位で不変（詳細は
-                        // `heartbeat_delivery` モジュール doc）。fire-and-forget で発火 tick を
-                        // 塞がない（#178 系）。
-                        let content = content.clone();
-                        let discord_http = discord_http.clone();
-                        let state = state.clone();
-                        let agent_id_log = agent_id_owned.clone();
-                        let ch_id_str = channel_id_str.clone();
-                        // #425: 配信できたら本人の discord 会話セッションへも二重記録する
-                        // ため、guild と db を持ち込む。
-                        let guild_id_log = guild_id.clone();
-                        let db = db.clone();
-                        tokio::spawn(async move {
-                            let delivered = heartbeat_delivery::deliver_heartbeat_speech(
-                                &state.gateways,
-                                &discord_http,
-                                &agent_id_log,
-                                &ch_id_str,
-                                &content,
-                            )
-                            .await;
-                            // #425: Discord へ配信できたターンだけ、本人の会話セッションへ
-                            // 発話を記録する（配信失敗ターンは記録しない）。
-                            record_heartbeat_channel_echo(
-                                &db,
-                                delivered,
-                                &agent_id_log,
-                                &guild_id_log,
-                                &ch_id_str,
-                                &content,
-                            );
-                        });
-                    }
-                    HeartbeatDecision::Learn => {
-                        let db = db.clone();
-                        let agent_id_log = agent_id_owned.clone();
-                        let tick_val = tick;
-                        let ch_id_str = channel_id_str.clone();
-                        tokio::spawn(async move {
-                            if let Ok(conn) = db.lock() {
-                                let memory = opencrab_db::queries::CuratedMemoryRow {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    agent_id: agent_id_log.clone(),
-                                    category: "reflection".to_string(),
-                                    content: format!(
-                                        "ハートビート内省 (tick {}, channel {}): 静かに自己を振り返る。",
-                                        tick_val, ch_id_str
-                                    ),
-                                    created_at: String::new(),
-                                };
-                                if let Err(e) =
-                                    opencrab_db::queries::upsert_curated_memory(&conn, &memory)
-                                {
-                                    tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");
-                                } else {
-                                    tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat reflect_and_learn: saved at tick {}", tick_val);
-                                }
-                            }
-                        });
-                    }
-                    HeartbeatDecision::Idle => {}
-                    HeartbeatDecision::ManageSkills { .. } => {}
-                }
 
                 last_decision = decision;
             }
@@ -1379,79 +1175,10 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_server::subtask_registries::SubtaskRegistries;
 
-    /// #169: heartbeat の `RunRequest` に非ブロック dispatch が配線される
-    /// （`completion_sink` が Some のときだけ `run_agent_response` が dispatcher を注入する）。
-    #[test]
-    fn heartbeat_run_request_enables_dispatch() {
-        let registries = SubtaskRegistries::new();
-        let req = heartbeat_run_request(
-            &registries,
-            "agent-a",
-            "A",
-            "heartbeat-agent-a-123",
-            "sys",
-            "conv",
-        );
-        assert!(
-            req.completion_sink.is_some(),
-            "heartbeat は dispatch を有効化する（sink 未配線だと全ツール inline 実行）"
-        );
-        assert!(
-            req.subtask_registry.is_some(),
-            "registry を渡さないと run 内で使い捨てが作られ cancel_subtask が not found になる"
-        );
-        assert_eq!(req.gateway, "heartbeat");
-    }
-
-    /// #169: registry は **agent 単位**で共有される。tick を跨いで同一 Arc なので、
-    /// 前 tick で dispatch した subtask を後続 tick の `cancel_subtask` が引ける。
-    #[test]
-    fn heartbeat_registry_is_shared_across_ticks_per_agent() {
-        let registries = SubtaskRegistries::new();
-        // 同一エージェントの別 tick（チャンネル違いで session_id も違う）。
-        let tick1 =
-            heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-1", "", "");
-        let tick2 =
-            heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-2", "", "");
-        let r1 = tick1.subtask_registry.unwrap();
-        let r2 = tick2.subtask_registry.unwrap();
-        assert!(
-            std::sync::Arc::ptr_eq(&r1, &r2),
-            "同一エージェントの tick は同じ registry を共有する"
-        );
-
-        // 別エージェントは独立（他エージェントの subtask が混ざらない）。
-        let other =
-            heartbeat_run_request(&registries, "agent-b", "B", "heartbeat-agent-b-1", "", "");
-        assert!(!std::sync::Arc::ptr_eq(
-            &r1,
-            &other.subtask_registry.unwrap()
-        ));
-    }
-
-    /// #169: heartbeat の sink は再注入しない（`NoopCompletionSink`）。
-    /// 呼んでも resume を起こさず、完了本文は次 tick の会話再構築で拾う。
-    #[tokio::test]
-    async fn heartbeat_sink_does_not_reinject() {
-        use opencrab_actions::{SettleKind, SubtaskSettled};
-
-        let registries = SubtaskRegistries::new();
-        let req = heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-1", "", "");
-        // Noop sink は呼んでも副作用が無い（panic せず、resume も配送もしない）。
-        req.completion_sink
-            .unwrap()
-            .on_subtask_settled(SubtaskSettled {
-                session_id: "heartbeat-agent-a-1".to_string(),
-                agent_id: "agent-a".to_string(),
-                subtask_id: "st-1".to_string(),
-                exit_reason: "completed".to_string(),
-                kind: SettleKind::Completed,
-                reply_target: None,
-                caller: opencrab_actions::CallerIdentity::Agent,
-            });
-    }
+    // #169 の dispatch 配線（`RunRequest` に registry と sink が載る / registry は agent
+    // 単位で共有）と、#440 の継続ターン配線のテストは `heartbeat_turn` へ移した。
+    // `RunRequest` を組むのがそちらになったため。
 
     // ── #238 発火のエージェント単位化: precedence と間隔ゲート ──────────────
 
