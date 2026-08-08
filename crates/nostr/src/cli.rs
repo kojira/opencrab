@@ -1523,15 +1523,11 @@ mod tests {
     /// シェルは介さず `"$@"` をそのまま出すので、`;` や空白入りの値も 1 引数として現れる。
     #[cfg(unix)]
     fn fake_echo_nostaro() -> (tempfile::TempDir, NostaroCli) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-nostaro.sh");
-        std::fs::write(
-            &script,
+        let script = crate::test_support::write_fake_nostaro(
+            dir.path(),
             "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
         (dir, cli)
     }
@@ -1540,16 +1536,13 @@ mod tests {
     /// 出力先と終了コードを切り替える（stderr なら exit 1 = 失敗経路）。
     #[cfg(unix)]
     fn fake_leaky_nostaro(leak_to_stderr: bool) -> (tempfile::TempDir, NostaroCli) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-nostaro.sh");
         let body = if leak_to_stderr {
             "#!/bin/sh\nprintf 'secret_key = \"nsec1leakedsecretmaterial\"\\n' 1>&2\nexit 1\n"
         } else {
             "#!/bin/sh\nprintf 'secret_key = \"nsec1leakedsecretmaterial\"\\n'\nexit 0\n"
         };
-        std::fs::write(&script, body).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = crate::test_support::write_fake_nostaro(dir.path(), body);
         let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
         (dir, cli)
     }
@@ -1696,7 +1689,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn passthrough_runs_in_agent_workspace() {
-        use std::os::unix::fs::PermissionsExt;
         let agent = "agent-pt-cwd";
         materialize_for(agent);
         let cli_probe = NostaroCli::new();
@@ -1708,14 +1700,11 @@ mod tests {
 
         // cwd と「相対パスの中身」と「--config が読めるか」を出力する fake nostaro。
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-nostaro.sh");
-        std::fs::write(
-            &script,
+        let script = crate::test_support::write_fake_nostaro(
+            dir.path(),
             "#!/bin/sh\npwd\ncat payload.json 2>/dev/null || printf 'NO_FILE'\nprintf '\\n'\n\
              if [ -f \"$2\" ]; then printf 'CONFIG_OK\\n'; else printf 'CONFIG_MISSING\\n'; fi\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
 
         let out = cli
