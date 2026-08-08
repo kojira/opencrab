@@ -72,6 +72,8 @@ impl SourceAdapter for OmoikaneAdapter {
 
     async fn poll_recent(&self) -> Result<Vec<IntakeEvent>> {
         let url = self.recent_comments_url();
+        // reqwest のエラー Display は URL を載せる。URL のクエリに entry_created_by（uid）が
+        // 入るため、公開ログに識別子を出さないよう `without_url()` で剥がしてから文脈を付ける。
         let resp = self
             .client
             .get(&url)
@@ -79,11 +81,13 @@ impl SourceAdapter for OmoikaneAdapter {
             .header("Accept", "application/json")
             .send()
             .await
+            .map_err(|e| e.without_url())
             .context("omoikane: recent comments request failed")?;
         let status = resp.status();
         let text = resp
             .text()
             .await
+            .map_err(|e| e.without_url())
             .context("omoikane: failed to read response body")?;
         if !status.is_success() {
             // 本文にトークンは含まれない想定だが、念のため短く切って外へ出す情報を絞る。

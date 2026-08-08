@@ -50,6 +50,12 @@ const INBOX_BATCH_LIMIT: i64 = 20;
 /// 1 イベントの payload を prompt に載せるときの最大文字数（文脈予算の暴発を防ぐ）。
 const PAYLOAD_PREVIEW_CHARS: usize = 4000;
 
+/// 1 tick で会話（inbox 本文）に載せる合計文字数の上限。system prompt（ペルソナ/記憶/スキル）
+/// と合わせても小さめのモデルの文脈に収まる余裕を残す。これを超える分は**次の tick へ回す**
+/// （採用した件数だけ processed を刻み、残りは未処理のまま）。バッチ全文を無条件に載せて
+/// 文脈溢れで turn ごと失敗するのを防ぐ（レビュー指摘: per-item truncate と別に全体 budget）。
+const TOTAL_PROMPT_BUDGET_CHARS: usize = 24000;
+
 /// ループの下限間隔（秒）。設定値はそのまま保持し、ここで床を効かせる（既存ループと同流儀）。
 const MIN_INTERVAL_SECS: u64 = 10;
 
@@ -122,8 +128,10 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
     let (resolved_agent_id, session_id, system_prompt, agent_name) = prepared;
 
     // (c) 未処理イベントを会話として渡す。**session 履歴からは組まない**（外部イベントを
-    //     その場で処理するだけ・継続性は各エージェントの記憶系が担う）。
-    let conversation = build_inbox_prompt(&rows);
+    //     その場で処理するだけ・継続性は各エージェントの記憶系が担う）。合計 budget を
+    //     超える分は次 tick へ回すため、採用件数 `included` だけを今回処理する。
+    let (conversation, included) = build_inbox_prompt(&rows);
+    let included_rows = &rows[..included];
 
     // 監査用にイベントを intake セッションへ system ログとして残す（配送はしない）。
     if let Ok(conn) = state.db.lock() {
@@ -170,7 +178,8 @@ async fn process_agent_inbox(state: &AppState, stored_agent_id: &str) {
                     created_at: None,
                 };
                 let _ = insert_session_log(&conn, &log);
-                for r in &rows {
+                // 今回の会話に載せた分（budget 内）だけを処理済みにする。残りは次 tick。
+                for r in included_rows {
                     if let Err(e) = mark_inbox_processed(&conn, &r.id) {
                         tracing::warn!(agent_id = %resolved_agent_id, inbox_id = %r.id, error = %e, "intake process: processed マーク失敗");
                     }
@@ -207,25 +216,37 @@ fn ensure_intake_session(conn: &rusqlite::Connection, session_id: &str, agent_id
     }
 }
 
-/// 未処理イベント群を 1 つの会話文字列にまとめる。turn に渡す本文。
-fn build_inbox_prompt(rows: &[AgentInboxRow]) -> String {
-    let mut s = format!(
-        "[受信箱] 外部から届いた未処理イベントが {} 件あります。内容を確認し、必要なら\
-         あなたのツールで対応してください（この受信箱の消化は外部への発話配信を行いません）。\n",
-        rows.len()
-    );
+/// 未処理イベントを合計文字数の予算内で**先頭から**選び、会話文字列と採用件数を返す。
+///
+/// rows は受信順（古い順）。予算 [`TOTAL_PROMPT_BUDGET_CHARS`] を超える分は含めず、呼び出し
+/// 側は**採用した件数だけ processed を刻む**（残りは未処理のまま次 tick へ）。**最低 1 件は
+/// 必ず含める**（1 件で予算超過でも処理しないと永久に詰まるため）。
+fn build_inbox_prompt(rows: &[AgentInboxRow]) -> (String, usize) {
+    let mut body = String::new();
+    let mut included = 0usize;
     for (i, r) in rows.iter().enumerate() {
         let payload = truncate_chars(&r.payload_json, PAYLOAD_PREVIEW_CHARS);
-        s.push_str(&format!(
+        let entry = format!(
             "\n{}. [{}/{}] (received_at={})\n{}\n",
             i + 1,
             r.source,
             r.event_type,
             r.received_at,
             payload
-        ));
+        );
+        // 2 件目以降は合計予算を超えない範囲でのみ追加する（1 件目は無条件）。
+        if included > 0 && body.chars().count() + entry.chars().count() > TOTAL_PROMPT_BUDGET_CHARS
+        {
+            break;
+        }
+        body.push_str(&entry);
+        included += 1;
     }
-    s
+    let header = format!(
+        "[受信箱] 外部から届いた未処理イベントが {included} 件あります。内容を確認し、必要なら\
+         あなたのツールで対応してください（この受信箱の消化は外部への発話配信を行いません）。\n"
+    );
+    (format!("{header}{body}"), included)
 }
 
 /// 文字数（char 単位）で切り詰める。マルチバイト境界を割らない。
@@ -265,13 +286,37 @@ mod tests {
             ),
             row("2", "omoikane", "chat.message", "{\"id\":2}"),
         ];
-        let p = build_inbox_prompt(&rows);
+        let (p, included) = build_inbox_prompt(&rows);
+        assert_eq!(included, 2, "小さい 2 件は両方載る");
         assert!(p.contains("2 件"));
         assert!(p.contains("omoikane/comment.created"));
         assert!(p.contains("omoikane/chat.message"));
         assert!(p.contains("\"text\":\"hi\""));
         // 消化ターンは外部配信しないことを本文で明示している（broadcast 誤解の防止）。
         assert!(p.contains("外部への発話配信を行いません"));
+    }
+
+    #[test]
+    fn prompt_caps_total_budget_but_always_includes_one() {
+        // 各イベントが per-item 上限いっぱいの payload を持つと、合計 budget で件数が絞られる。
+        let big = "x".repeat(PAYLOAD_PREVIEW_CHARS);
+        let rows: Vec<AgentInboxRow> = (0..20)
+            .map(|i| row(&i.to_string(), "omoikane", "comment.created", &big))
+            .collect();
+        let (p, included) = build_inbox_prompt(&rows);
+        // 全 20 件は載らない（budget で切れる）が、少なくとも 1 件は載る。
+        assert!(included >= 1, "最低 1 件は必ず載せる");
+        assert!(included < rows.len(), "budget 超過分は次 tick へ回す");
+        // ヘッダの件数は実際に載せた数と一致する（残数を誤って処理済みにしない担保）。
+        assert!(p.contains(&format!("{included} 件")));
+        // 1 件だけで budget を超える極端ケースでも 1 件は返す。
+        let huge = vec![row(
+            "0",
+            "omoikane",
+            "comment.created",
+            &"y".repeat(PAYLOAD_PREVIEW_CHARS),
+        )];
+        assert_eq!(build_inbox_prompt(&huge).1, 1);
     }
 
     #[test]

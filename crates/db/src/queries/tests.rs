@@ -5052,3 +5052,36 @@ fn inbox_list_order_and_processing() {
     .unwrap();
     assert_eq!(list_unprocessed_inbox(&conn, "scout", 1).unwrap().len(), 1);
 }
+
+#[test]
+fn inbox_scan_excludes_fully_processed_agents() {
+    // 「inbox 空の tick で LLM を呼ばない」の要: 全件処理済みのエージェントは走査対象から
+    // 外れる（消化ループはこの集合しか回さないので、空なら turn の到達点が 1 本も無い）。
+    let conn = setup();
+    enqueue_inbox_event(
+        &conn,
+        &inbox_insert("a", "scout", "omoikane", "comment.created", "1"),
+    )
+    .unwrap();
+    enqueue_inbox_event(
+        &conn,
+        &inbox_insert("b", "scout", "omoikane", "comment.created", "2"),
+    )
+    .unwrap();
+    assert_eq!(
+        agents_with_unprocessed_inbox(&conn).unwrap(),
+        vec!["scout".to_string()]
+    );
+
+    // 1 件処理してもまだ残るので対象。
+    mark_inbox_processed(&conn, "a").unwrap();
+    assert_eq!(
+        agents_with_unprocessed_inbox(&conn).unwrap(),
+        vec!["scout".to_string()]
+    );
+
+    // 全件処理済みにすると走査対象から消える（＝このエージェントには turn が起きない）。
+    mark_inbox_processed(&conn, "b").unwrap();
+    assert!(agents_with_unprocessed_inbox(&conn).unwrap().is_empty());
+    assert_eq!(count_unprocessed_inbox(&conn, "scout").unwrap(), 0);
+}
