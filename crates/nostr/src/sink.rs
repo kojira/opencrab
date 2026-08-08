@@ -586,17 +586,10 @@ mod tests {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let log = dir.path().join("sent.log");
-            let script = dir.path().join("fake-nostaro.sh");
-            std::fs::write(
-                &script,
-                format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
-            )
-            .unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            let script = crate::test_support::write_fake_nostaro(
+                dir.path(),
+                &format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+            );
             Self {
                 _dir: dir,
                 script,

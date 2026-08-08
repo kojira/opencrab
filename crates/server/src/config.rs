@@ -1119,6 +1119,11 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if !pconfig.reasoning_effort.is_empty() {
                     p = p.with_reasoning_effort(&pconfig.reasoning_effort);
                 }
+                // 長考ターン（reasoning_effort の高い体）が既定 60 秒の read timeout を
+                // 超えて error → リトライを繰り返さないよう、config から伸ばせる（#433）。
+                if pconfig.timeout_secs > 0 {
+                    p = p.with_timeout_secs(pconfig.timeout_secs);
+                }
                 p = p.with_include_encrypted_content(pconfig.include_reasoning_encrypted_content);
                 Some(Arc::new(p))
             }

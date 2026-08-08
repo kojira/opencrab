@@ -38,10 +38,14 @@ pub struct SkillEngine {
     pub log_callback: Option<Box<dyn Fn(&LlmCallLog) + Send + Sync>>,
     /// Optional callback invoked with response text on every LLM reply.
     pub on_response_text: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    /// Optional callback invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
-    on_tool_call: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
-    /// Optional callback invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
-    on_tool_result: Option<Arc<dyn Fn(String, String, String, bool) + Send + Sync>>,
+    /// Callbacks invoked when the assistant produces tool calls: (assistant_content, tool_calls_json).
+    ///
+    /// **複数**持つ（#397）。購読者は独立している（subtask の進捗実況・session_logs への
+    /// 永続化）ので、後から配線した方が前を消してはならない。登録順に全部呼ぶ。
+    on_tool_call: Vec<Arc<dyn Fn(String, String) + Send + Sync>>,
+    /// Callbacks invoked when a tool result is received: (tool_call_id, tool_name, result_json, is_error).
+    /// [`Self::on_tool_call`] と同じく複数持ち、登録順に全部呼ぶ（#397）。
+    on_tool_result: Vec<Arc<dyn Fn(String, String, String, bool) + Send + Sync>>,
     /// Per-run reasoning (thinking) effort. Attached to every ChatRequest so
     /// providers can override their construction-time default per agent.
     reasoning_effort: Option<String>,
@@ -86,8 +90,8 @@ impl SkillEngine {
             allowed_actions: None,
             log_callback: None,
             on_response_text: None,
-            on_tool_call: None,
-            on_tool_result: None,
+            on_tool_call: Vec::new(),
+            on_tool_result: Vec::new(),
             reasoning_effort: None,
             web_search: false,
             tool_dispatcher: None,
@@ -191,17 +195,21 @@ impl SkillEngine {
         self.on_response_text = Some(Arc::new(cb));
     }
 
-    /// Set the on_tool_call callback, invoked when the assistant produces tool calls.
-    pub fn set_on_tool_call(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
-        self.on_tool_call = Some(Arc::new(cb));
+    /// Add an on_tool_call callback, invoked when the assistant produces tool calls.
+    ///
+    /// **足す**（置き換えない / #397）。進捗実況と session_logs 永続化のように独立した
+    /// 購読者が同じ engine に配線されるため、代入だと後勝ちで前の購読が黙って消える。
+    pub fn add_on_tool_call(&mut self, cb: impl Fn(String, String) + Send + Sync + 'static) {
+        self.on_tool_call.push(Arc::new(cb));
     }
 
-    /// Set the on_tool_result callback, invoked when a tool result is received.
-    pub fn set_on_tool_result(
+    /// Add an on_tool_result callback, invoked when a tool result is received.
+    /// [`Self::add_on_tool_call`] と同じく足す（置き換えない / #397）。
+    pub fn add_on_tool_result(
         &mut self,
         cb: impl Fn(String, String, String, bool) + Send + Sync + 'static,
     ) {
-        self.on_tool_result = Some(Arc::new(cb));
+        self.on_tool_result.push(Arc::new(cb));
     }
 
     /// Set the allowed actions from active skill declarations.
@@ -487,10 +495,13 @@ impl SkillEngine {
                     tool_call_id: None,
                 });
 
-                // Notify on_tool_call callback.
-                if let Some(ref cb) = self.on_tool_call {
+                // Notify on_tool_call callbacks.
+                if !self.on_tool_call.is_empty() {
                     let calls_json = serde_json::to_string(&tool_calls).unwrap_or_default();
-                    cb(content.clone().unwrap_or_default(), calls_json);
+                    let assistant_content = content.clone().unwrap_or_default();
+                    for cb in &self.on_tool_call {
+                        cb(assistant_content.clone(), calls_json.clone());
+                    }
                 }
 
                 // 自動 dispatch（RFC #152 S3a・非ブロック）のバッチ判定。
@@ -539,11 +550,11 @@ impl SkillEngine {
                         let result_json = serde_json::to_string(&spawned)
                             .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                        if let Some(ref cb) = self.on_tool_result {
+                        for cb in &self.on_tool_result {
                             cb(
                                 tool_call.id.clone(),
                                 tool_call.function.name.clone(),
-                                result_json,
+                                result_json.clone(),
                                 false,
                             );
                         }
@@ -568,8 +579,8 @@ impl SkillEngine {
                             .unwrap_or_else(|_| r#"{"error": "Permission denied"}"#.to_string());
                         messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
 
-                        // Notify on_tool_result callback for denied action.
-                        if let Some(ref cb) = self.on_tool_result {
+                        // Notify on_tool_result callbacks for denied action.
+                        for cb in &self.on_tool_result {
                             cb(
                                 tool_call.id.clone(),
                                 tool_name.clone(),
@@ -602,8 +613,8 @@ impl SkillEngine {
 
                     messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
 
-                    // Notify on_tool_result callback.
-                    if let Some(ref cb) = self.on_tool_result {
+                    // Notify on_tool_result callbacks.
+                    for cb in &self.on_tool_result {
                         cb(
                             tool_call.id.clone(),
                             tool_name.clone(),
@@ -1070,6 +1081,58 @@ mod tests {
         assert_eq!(result.response, "直接答えます");
     }
 
+    /// #397: ツールフックは**複数の購読者**が同じ engine に載る（subtask の進捗実況と
+    /// session_logs への永続化）。後から配線した方が前を消してはならない。
+    ///
+    /// 代入だった頃は 2 つ目の登録で 1 つ目が黙って落ち、`persist_turn_logs` が true の
+    /// ターン（＝後から永続化フックが載るターン）で進捗実況が丸ごと死んでいた。
+    #[tokio::test]
+    async fn test_tool_hooks_accumulate_instead_of_replacing() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![tc("tc-1", "test_tool", serde_json::json!({}))]),
+            text_response("done"),
+        ]);
+        let executor = MockExecutor::new().add_result(
+            "test_tool",
+            ActionResult {
+                success: true,
+                data: serde_json::json!({"result": "ok"}),
+                error: None,
+            },
+        );
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+
+        // 1 つ目 = 進捗実況相当、2 つ目 = 永続化相当。process.rs と同じ配線順。
+        let calls: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
+        let results: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(vec![]));
+
+        let c1 = calls.clone();
+        engine.add_on_tool_call(move |_content, _json| c1.lock().unwrap().push("notifier"));
+        let r1 = results.clone();
+        engine
+            .add_on_tool_result(move |_id, _name, _json, _err| r1.lock().unwrap().push("notifier"));
+        let c2 = calls.clone();
+        engine.add_on_tool_call(move |_content, _json| c2.lock().unwrap().push("turn_log"));
+        let r2 = results.clone();
+        engine
+            .add_on_tool_result(move |_id, _name, _json, _err| r2.lock().unwrap().push("turn_log"));
+
+        engine.run("system", "do it", "test-model").await.unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &["notifier", "turn_log"],
+            "on_tool_call は登録順に全部呼ばれること（後勝ちで消えない）"
+        );
+        assert_eq!(
+            results.lock().unwrap().as_slice(),
+            &["notifier", "turn_log"],
+            "on_tool_result は登録順に全部呼ばれること（後勝ちで消えない）"
+        );
+    }
+
     // ---- RFC #152 S3a: 自動 dispatch（非ブロック / 全ツール subtask 化） ----
 
     /// 記録用の最小 `ToolDispatcher`。`should_dispatch` は control 集合以外を真にし、
@@ -1157,7 +1220,7 @@ mod tests {
         // 2回目の LLM 呼び出しが見る messages を記録し、spawned マーカーの再注入を検証する。
         let seen_tool_results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_clone = seen_tool_results.clone();
-        engine.set_on_tool_result(move |_id, name, json, _err| {
+        engine.add_on_tool_result(move |_id, name, json, _err| {
             seen_clone.lock().unwrap().push(format!("{name}:{json}"));
         });
 
@@ -1245,7 +1308,7 @@ mod tests {
         // DB へ渡る本文（callback）も同じ capped 本文であること。
         let logged: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let logged_clone = logged.clone();
-        engine.set_on_tool_result(move |_id, _name, json, _err| {
+        engine.add_on_tool_result(move |_id, _name, json, _err| {
             logged_clone.lock().unwrap().push(json);
         });
 
@@ -1397,7 +1460,7 @@ mod tests {
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_clone = seen.clone();
-        engine.set_on_tool_result(move |_id, _name, json, _err| {
+        engine.add_on_tool_result(move |_id, _name, json, _err| {
             seen_clone.lock().unwrap().push(json);
         });
 

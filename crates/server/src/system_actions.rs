@@ -61,6 +61,12 @@ pub struct SystemGatewayActions {
     /// transport の有無で消えないようにするのが #157 の目的で、無いときは実行だけが
     /// 明示エラーになる。
     text_delivery: Option<Arc<dyn opencrab_core::text_delivery::TextDelivery>>,
+    /// 親ターンが「この run は subtask を起こしたか」を数えるカウンタ（#431）。
+    ///
+    /// 明示 `spawn_subtask` が**登録簿への登録まで到達した**（＝ `success`）ときだけ
+    /// 加算する。auto-dispatch 側（`SubtaskToolDispatcher`）と同一の Arc を共有し、
+    /// 親ターンは 1 つの数で両経路を見る。`None`（既定）なら数えない。
+    subtask_starts: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 /// `report_progress` が登録簿から引く、進捗通知に要る項目だけの写し。
@@ -106,7 +112,22 @@ impl SystemGatewayActions {
             completion_sink,
             a2ui,
             text_delivery,
+            subtask_starts: None,
         }
+    }
+
+    /// 親ターンの subtask 起動カウンタを設定する（#431）。
+    ///
+    /// `SubtaskToolDispatcher::with_subtask_starts` と**同じ Arc** を渡すこと。
+    /// 位置引数ではなく builder にしているのは、この配線を必要とするのが
+    /// `run_agent_response` の 1 箇所だけで、他の生成箇所（テスト・単発呼び出し）を
+    /// `None` で埋めさせないため。
+    pub fn with_subtask_starts(
+        mut self,
+        counter: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> Self {
+        self.subtask_starts = counter;
+        self
     }
 
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
@@ -396,7 +417,7 @@ impl SystemGatewayActions {
                     "properties": {
                         "subcommand": {
                             "type": "string",
-                            "description": "nostaro のサブコマンド（init/watch は不可）。"
+                            "description": "nostaro のサブコマンド（init/watch/relay は不可）。"
                         },
                         "args": {
                             "type": "array",
@@ -1067,7 +1088,7 @@ impl SystemGatewayActions {
     ///
     /// 稼働中（登録済み）の Nostr transport の passthrough capability
     /// （[`opencrab_actions::GatewayNostrPassthrough`]）へ委譲する。config は常に
-    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch` の拒否・`--config` 上書きの封じ・
+    /// `ctx.agent_id` のもの（鍵混同防止）。`init`/`watch`/`relay` の拒否・`--config` 上書きの封じ・
     /// 未 materialize（鍵未採用）の明示エラー・nsec マスクは capability の内側
     /// （`NostaroCli::run_passthrough`）で行う。呼び出し側はここで subcommand と args を
     /// 取り出して渡すだけ。
@@ -2068,7 +2089,7 @@ impl GatewayActions for SystemGatewayActions {
             // subtask 起動（#175 S4）。transport 非依存の唯一の実装（Discord 側の実装は
             // 撤去済み）。inner へは委譲しない。
             "spawn_subtask" => {
-                crate::subtask_spawn::spawn_subtask(
+                let res = crate::subtask_spawn::spawn_subtask(
                     &self.state,
                     self.subtask_registry.as_ref(),
                     self.completion_sink.clone(),
@@ -2079,7 +2100,19 @@ impl GatewayActions for SystemGatewayActions {
                     args,
                     ctx,
                 )
-                .await
+                .await;
+                // #431: 起動が成立したときだけ「このターンは次の行動を選んだ」と数える。
+                // `spawn_subtask` は登録簿へ insert し終えてから `success: true` を返し、
+                // 手前の失敗（task 引数なし / session 不明 / 登録簿未配線）は全て
+                // `success: false` なので、success ⟺ 登録済み ⟺ 完了で resume が来る。
+                // 起動に失敗したターンは resume が来ない＝そのターンが最後の発話なので、
+                // ここで数えないのが正しい（🏁 は付く）。
+                if res.success {
+                    if let Some(c) = &self.subtask_starts {
+                        c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                res
             }
             // A2UI 送信（#156 S3）。Discord 側の実装は撤去済みなので inner へは委譲しない
             // （委譲パターンにすると二重定義を招く）。描画面が無い transport では
@@ -7283,7 +7316,7 @@ mod tests {
         assert!(rec.calls.lock().unwrap().is_empty());
     }
 
-    /// capability のエラー（未 materialize / init/watch 拒否 / nostaro 失敗）はそのまま
+    /// capability のエラー（未 materialize / init/watch/relay 拒否 / nostaro 失敗）はそのまま
     /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
     #[tokio::test]
     async fn nostr_run_propagates_capability_error() {

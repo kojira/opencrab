@@ -2019,16 +2019,10 @@ mod tests {
     /// `is_running` は true を保つ）。`pubkey_out` が空なら pubkey も空を返す（起動失敗を模す）。
     fn fake_nostaro(pubkey_out: &str) -> (tempfile::TempDir, NostaroCli) {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-nostaro.sh");
         let body = format!(
             "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = pubkey ]; then\n    printf '%s' '{pubkey_out}'\n    exit 0\n  fi\ndone\nexit 0\n"
         );
-        std::fs::write(&script, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let script = crate::test_support::write_fake_nostaro(dir.path(), &body);
         let cli = NostaroCli::new().with_binary_path(script.to_string_lossy().to_string());
         (dir, cli)
     }

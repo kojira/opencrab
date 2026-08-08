@@ -2293,6 +2293,92 @@ async fn test_dispatched_subtask_carries_the_run_caller_to_settlement() {
     }
 }
 
+/// #431: `RunRequest::subtask_starts` が **両方の起動経路**から加算される。
+///
+/// Discord の「発言終わり」🏁 はこの数が `0` かどうかだけで「次の行動を選ばずに終わった
+/// ターンか」を判定する。数え漏らすと、掘削を始めたターンに 🏁 が付き『調べますね🏁』の
+/// 数分後に完了 resume の続きが届く**逆の情報**になる。
+///
+/// このテストが必要な理由: 配線点は `process.rs` の 2 箇所
+/// （`SubtaskToolDispatcher::with_subtask_starts` と
+/// `SystemGatewayActions::with_subtask_starts`）にしかなく、そこを外しても
+/// `crates/actions` / `crates/server` 側のユニットテストは**自前で dispatcher や
+/// gateway を組む**ので落ちない（配線の写しでしかない）。上の
+/// `test_dispatched_subtask_carries_the_run_caller_to_settlement` と同じ理由。
+#[tokio::test]
+async fn test_run_counts_subtask_starts_from_both_launch_paths() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 決着通知を捨てるだけの sink（ここで見たいのは起動の計上だけ）。
+    struct NoopSink;
+    impl opencrab_actions::SubtaskCompletionSink for NoopSink {
+        fn on_subtask_settled(&self, _ev: opencrab_actions::SubtaskSettled) {}
+    }
+
+    // (ツール名, 引数) — 左が auto-dispatch 経路、右が明示 spawn_subtask 経路。
+    let cases = [
+        (
+            "learn_from_experience",
+            serde_json::json!({
+                "skill_name": "background_work",
+                "description": "d",
+                "situation_pattern": "s",
+                "guidance": "g"
+            }),
+        ),
+        (
+            "spawn_subtask",
+            serde_json::json!({ "task": "ログを調べる", "label": "dig" }),
+        ),
+    ];
+
+    for (tool_name, args) in cases {
+        let (app, _db, mock, state) = create_test_app_with_state();
+        let (agent_id, _app) = create_test_agent_named(app, "StartCounter", "TestPersona").await;
+        let session_id = format!("agent-msg-{agent_id}-u431");
+
+        mock.push_tool_call_response(vec![ToolCall {
+            id: "tc-431".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: tool_name.to_string(),
+                arguments: args.to_string(),
+            },
+        }]);
+        // 親ターンの締め。明示 spawn 経路は sub-engine も同じモックから引くので多めに積む。
+        mock.push_text_response("調べますね");
+        mock.push_text_response("調べますね");
+
+        let starts = Arc::new(AtomicUsize::new(0));
+        let sink: Arc<dyn opencrab_actions::SubtaskCompletionSink> = Arc::new(NoopSink);
+        let run_req = opencrab_actions::RunRequest::new(
+            &agent_id,
+            "StartCounter",
+            &session_id,
+            "system",
+            "user: ログを調べて",
+            "rest",
+            opencrab_actions::CallerIdentity::Owner,
+        )
+        .with_dispatch(
+            Some(state.subtask_registries.registry_for(&session_id)),
+            sink,
+        )
+        .with_subtask_starts(starts.clone());
+
+        opencrab_server::process::run_agent_response(&state, run_req)
+            .await
+            .expect("subtask を起こす run が失敗した");
+
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "{tool_name} 経路で起動した subtask が親ターンのカウンタに載っていない\
+             （このターンに 🏁 が付き、数分後に続きが届く逆情報になる）"
+        );
+    }
+}
+
 /// #154 / #152: `POST /api/agents/{id}/web/send` もツールを background subtask として
 /// dispatch する（メインを塞がない）。
 ///

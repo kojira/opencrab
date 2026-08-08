@@ -185,24 +185,31 @@ impl DiscordGateway {
         rx.recv().await.context("Discord gateway channel closed")
     }
 
-    /// 指定チャンネルにテキストメッセージを送信する
-    pub async fn send_to_channel(&self, channel_id: u64, text: &str) -> Result<()> {
+    /// 指定チャンネルにテキストメッセージを送信する。
+    ///
+    /// 送信した Discord メッセージの id を返す（分割送信時は**最後のチャンク**の id）。
+    /// 「発言終わり」リアクション（#431）が、そのターンで自分が最後に投稿したメッセージを
+    /// 特定するのに使う。id が不要な呼び出し側は戻り値を無視してよい。
+    pub async fn send_to_channel(&self, channel_id: u64, text: &str) -> Result<Option<u64>> {
+        let mut last_id = None;
         // Discord APIの文字数制限（2000文字）
         if text.len() <= 2000 {
-            ChannelId::new(channel_id)
+            let msg = ChannelId::new(channel_id)
                 .say(&self.http, text)
                 .await
                 .context("Failed to send message to Discord channel")?;
+            last_id = Some(msg.id.get());
         } else {
             // 長いメッセージは分割送信
             for chunk in split_message(text, 2000) {
-                ChannelId::new(channel_id)
+                let msg = ChannelId::new(channel_id)
                     .say(&self.http, &chunk)
                     .await
                     .context("Failed to send message chunk to Discord channel")?;
+                last_id = Some(msg.id.get());
             }
         }
-        Ok(())
+        Ok(last_id)
     }
 
     /// 指定メッセージにUnicode絵文字のリアクションを付ける。

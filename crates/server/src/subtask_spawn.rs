@@ -641,6 +641,50 @@ mod tests {
         assert!(!state.subtask_notifiers.contains_key(&subtask_id));
     }
 
+    /// #431: **明示 `spawn_subtask` も**親ターンの subtask 起動カウンタを進める。
+    ///
+    /// auto-dispatch 経路（`SubtaskToolDispatcher`）だけを数えていると、この経路で
+    /// 掘削を始めたターンに「発言終わり」🏁 が付き、『調べますね🏁』の数分後に完了
+    /// resume の続きが届く逆情報になる。両経路が**同じカウンタ**へ載ることを固定する。
+    ///
+    /// 起動に**失敗**したターンは数えない（resume が来ない＝そのターンが最後の発話
+    /// なので 🏁 は付くのが正しい）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_subtask_counts_the_start_for_the_parent_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state = state_with_stub_llm("never", true);
+        let reg = registry();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let actions = SystemGatewayActions::new(state.clone(), None, Some(reg.clone()), None)
+            .with_subtask_starts(Some(starts.clone()));
+
+        let res = actions
+            .execute(
+                "spawn_subtask",
+                &json!({ "task": "調べ物をする", "label": "job" }),
+                &parent_ctx("web-parent-count"),
+            )
+            .await;
+        assert!(res.success, "spawn_subtask: {:?}", res.error);
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "起動が成立したら親ターンのカウンタが進む"
+        );
+
+        // 起動に失敗するターン（`task` 引数なし）は数えない。
+        let failed = actions
+            .execute("spawn_subtask", &json!({}), &parent_ctx("web-parent-count"))
+            .await;
+        assert!(!failed.success, "task 引数なしは失敗する");
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "起動に失敗したターンは数えない（resume が来ないので 🏁 は付いてよい）"
+        );
+    }
+
     /// **停止の到達性**: spawn した subtask は、同じ `SystemGatewayActions` の
     /// `cancel_subtask` が引く**同一の登録簿**に入る。別の登録簿へ入れると not found。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

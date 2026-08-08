@@ -4,11 +4,13 @@ use tracing_subscriber::EnvFilter;
 
 use opencrab_core::heartbeat::{
     heartbeat_loop, HeartbeatCallback, HeartbeatConfig, HeartbeatDecision,
+    HeartbeatIntervalResolver,
 };
 use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
 
 mod heartbeat_delivery;
+mod heartbeat_turn;
 
 /// Discord へ 1 通送るためのハンドル。**ボットのトークンを保持するので、どのハンドルで
 /// 送るかが Discord 上の送信者名を決める**（#400 の核心）。
@@ -26,7 +28,14 @@ fn get_or_create_heartbeat_session(
     agent_id: &str,
     channel_id: &str,
 ) -> String {
-    let session_id = format!("heartbeat-{}-{}", agent_id, channel_id);
+    // 接頭辞は継続ターンの受け口（`heartbeat_turn::resume_origin`）が親セッションの判定に
+    // 使う。書式が割れると「HB の決着なのに継続しない」が無言で起きるので定数を共有する。
+    let session_id = format!(
+        "{}{}-{}",
+        heartbeat_turn::HEARTBEAT_SESSION_PREFIX,
+        agent_id,
+        channel_id
+    );
     let conn = db.lock().unwrap();
     if let Ok(Some(_)) = opencrab_db::queries::get_session(&conn, &session_id) {
         return session_id;
@@ -106,46 +115,6 @@ fn record_heartbeat_channel_echo(
     }
 }
 
-/// heartbeat 経路の `RunRequest` を組む（#169）。
-///
-/// 非ブロック dispatch（RFC #152 S3a）を有効化する。これにより heartbeat の tick は
-/// 長時間ツールで塞がれず、`cancel_subtask`（#161）からも停止できる。
-///
-/// - registry: **agent 単位**で `AppState` が保持しているものを共有する。tick /
-///   チャンネル / heartbeat ループ再起動（設定変更）を跨いで同一 Arc なので、前 tick で
-///   dispatch した subtask を後続 tick の `cancel_subtask` が引ける（使い捨ての DashMap
-///   では常に not found）。
-/// - sink: `NoopCompletionSink` = **即時 resume はしない**。完了本文は
-///   `settle_completed` が親セッションログへ永続化し、heartbeat は毎 tick 同じ
-///   session_id で `build_heartbeat_conversation_string` により会話を再構築するため、
-///   次 tick で自然に文脈へ載る。**この依存があるので、ハートビート専用セッション側の
-///   ログは種別で絞らない**（実会話セクションだけが `speech` に絞られる / #404）。
-///   sink で resume させると `SPEAK:` パースと heartbeat ログ記録を
-///   sink 側へ複製する必要があり、かつ session ロックが無いため次 tick と競合して
-///   二重応答の不変条件（RFC §6）を壊す。
-fn heartbeat_run_request(
-    registries: &opencrab_server::subtask_registries::SubtaskRegistries,
-    agent_id: &str,
-    agent_name: &str,
-    session_id: &str,
-    system_prompt: &str,
-    conversation: &str,
-) -> opencrab_actions::RunRequest {
-    opencrab_actions::RunRequest::new(
-        agent_id,
-        agent_name,
-        session_id,
-        system_prompt,
-        conversation,
-        "heartbeat",
-        opencrab_actions::CallerIdentity::Owner,
-    )
-    .with_dispatch(
-        Some(registries.registry_for(agent_id)),
-        Arc::new(opencrab_actions::NoopCompletionSink),
-    )
-}
-
 /// ハートビート応答テキストから決定（SPEAK / LEARN / IDLE）を解く。
 ///
 /// **入力は応答テキストだけ**で、プロンプトに何を積んだかには依存しない（#404 で
@@ -218,6 +187,109 @@ fn heartbeat_firing_plan(
 /// 両経路で同じ丸めを使う。
 fn heartbeat_loop_interval_secs(configured: u64) -> u64 {
     configured.max(1)
+}
+
+/// 発火ループの sleep 周期を「そのエージェントの実効的な最小間隔」へ**短くする方向に
+/// だけ**追従させる（純粋関数・#439 の部分先行）。
+///
+/// 従来はグローバル `[agent] heartbeat_interval_secs`（実値 1800）で固定して眠っていた
+/// ため、ゲート（`heartbeat_interval_elapsed`）が設定間隔を見ていても評価の機会自体が
+/// 1800 秒グリッドに丸められ、1200 秒（20 分）設定が実質 30 分になっていた。設定の床は
+/// `heartbeat_min_interval_secs = 300` なので、床と評価グリッドが自己矛盾していた。
+///
+/// - `candidates`: この周期で実際にゲートされる間隔群（agent-scope なら 1 つ、
+///   channel-scope なら各チャンネルの実効間隔、発火しない周期なら空）。
+/// - グローバルより**長い**候補で周期を伸ばさない。長い設定はゲートが弾けば済むので、
+///   周期を伸ばすと発火を遅らせるだけになる。
+/// - 下限は運用者の床（`min_interval_secs`）。床未満へは短くしない。床がグローバルより
+///   長い設定でも周期をグローバルより長くはしない（従来どおりグローバル周期で回る）。
+fn heartbeat_effective_loop_interval_secs(
+    candidates: &[u64],
+    global_interval_secs: u64,
+    min_interval_secs: u64,
+) -> u64 {
+    let global = heartbeat_loop_interval_secs(global_interval_secs);
+    let floor = min_interval_secs.max(1);
+    let shortest = candidates
+        .iter()
+        .copied()
+        .filter(|v| *v > 0)
+        .min()
+        .unwrap_or(global);
+    // 短くする方向にだけ追従 → 床へ引き上げ → それでもグローバルは超えない。
+    shortest.min(global).max(floor).min(global)
+}
+
+/// この周期でゲート対象になる間隔群を DB から解決する（#439 の部分先行）。
+///
+/// 発火計画（`heartbeat_firing_plan`）と同じ経路をたどるので、発火しない周期
+/// （未 opt-in × グローバル無効）では空になり、周期はグローバルのままになる。
+/// DB を読めなければ空を返す = グローバル周期に落ちる（従来の挙動）。
+fn resolve_heartbeat_gate_intervals(
+    db: &opencrab_db::Db,
+    agent_id: &str,
+    default_interval_secs: u64,
+    min_interval_secs: u64,
+    global_enabled: bool,
+) -> Vec<u64> {
+    let resolved = {
+        let Ok(conn) = db.lock() else {
+            return vec![];
+        };
+        opencrab_db::queries::resolve_agent_heartbeat(
+            &conn,
+            agent_id,
+            default_interval_secs,
+            min_interval_secs,
+        )
+    };
+    match heartbeat_firing_plan(resolved.enabled, resolved.interval_secs, global_enabled) {
+        HeartbeatFiringPlan::AgentScoped { interval_secs } => vec![interval_secs],
+        HeartbeatFiringPlan::ChannelScoped => {
+            let channels = list_whitelisted_heartbeat_channels(db, agent_id);
+            let Ok(conn) = db.lock() else {
+                return vec![];
+            };
+            channels
+                .into_iter()
+                .map(|(_cid, _name, _guild, ch_interval)| {
+                    opencrab_db::queries::resolve_channel_heartbeat_interval(
+                        &conn,
+                        agent_id,
+                        ch_interval,
+                        default_interval_secs,
+                        min_interval_secs,
+                    )
+                    .interval_secs
+                })
+                .collect()
+        }
+        HeartbeatFiringPlan::None => vec![],
+    }
+}
+
+/// ループの sleep 周期を毎周期解決するクロージャを作る（#439 の部分先行）。
+///
+/// ループ生成時に固定しないので、設定変更は**次の周期から**効く。発火するかどうかの
+/// 判定・位相は従来のゲートのまま（アンカー永続化・即時反映は #439 本体）。
+fn make_heartbeat_interval_resolver(
+    db: opencrab_db::Db,
+    agent_id: String,
+    default_interval_secs: u64,
+    min_interval_secs: u64,
+    global_interval_secs: u64,
+    global_enabled: bool,
+) -> HeartbeatIntervalResolver {
+    Arc::new(move || {
+        let candidates = resolve_heartbeat_gate_intervals(
+            &db,
+            &agent_id,
+            default_interval_secs,
+            min_interval_secs,
+            global_enabled,
+        );
+        heartbeat_effective_loop_interval_secs(&candidates, global_interval_secs, min_interval_secs)
+    })
 }
 
 /// 前回発火からの経過が `interval_secs` 以上かを判定する（純粋関数）。
@@ -314,11 +386,15 @@ fn make_heartbeat_callback(
     global_enabled: bool,
     last_channel_ticks: Arc<Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 ) -> HeartbeatCallback {
+    // ターンの実体（#440）。tick と、サブタスク決着からの継続ターンが**同じ 1 つ**を通る。
+    // 直列化ロックと dispatch registry をここで共有することが、両者が同一 HB セッションで
+    // 二重に応答しないことの担保になっている（`heartbeat_turn` モジュール doc）。
+    let runner = heartbeat_turn::HeartbeatTurnRunner::from_state(&state, discord_http);
     Box::new(move |_agent_id: &str, tick: u64| {
         let _agent_id = _agent_id.to_string();
         let db = db.clone();
         let agent_id_owned = agent_id_owned.clone();
-        let discord_http = discord_http.clone();
+        let runner = runner.clone();
         let state = state.clone();
         let global_interval_secs = global_interval_secs;
         let global_enabled = global_enabled;
@@ -491,199 +567,23 @@ fn make_heartbeat_callback(
                     }
                 }
 
-                // 3-4. エージェントコンテキストと会話文字列を構築
-                let (system_prompt, agent_name, conversation) = {
-                    let conn = db.lock().unwrap();
-                    // heartbeat は caller=Owner で走る（`heartbeat_run_request`）。index も
-                    // 同じ caller で組み立て、Owner には全 skill を見せる（#352）。
-                    let (sp, name) = opencrab_server::process::build_agent_context(
-                        &conn,
-                        &agent_id_owned,
-                        &opencrab_actions::CallerIdentity::Owner,
-                    );
-                    // Use per-agent model from DB, fallback to global default
-                    let agent_model = opencrab_db::queries::effective_model_for_agent(
-                        &conn,
-                        &agent_id_owned,
-                        &state.default_model,
-                    )
-                    .unwrap_or_else(|_| state.default_model.clone());
-                    let budget = opencrab_server::process::compute_context_budget(
-                        &conn,
-                        agent_model.split(':').next().unwrap_or(""),
-                        agent_model.split(':').nth(1).unwrap_or(""),
-                        state.compaction_ratio,
-                    );
-                    // #404: ハートビート専用セッションの履歴だけでは、**同じチャンネルで
-                    // 実際に交わされた会話が 1 行も見えない**（見えるのは自分の過去の
-                    // ハートビートだけ）。実会話セッションを解決して文脈へ入れる。
-                    // 専用セッションへの分離自体（`SPEAK:` パースとハートビートログを
-                    // 実会話と混ぜない）は維持し、実会話は**読むだけ**。
-                    let channel_session_id = opencrab_server::process::heartbeat_channel_session_id(
-                        &agent_id_owned,
-                        guild_id,
-                        channel_id_str,
-                    );
-                    let conv = match opencrab_server::process::build_heartbeat_conversation_string(
-                        &conn,
-                        &session_id,
-                        channel_session_id.as_deref(),
-                        &agent_id_owned,
-                        budget,
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!(agent_id = %agent_id_owned, session_id = %session_id, "build_heartbeat_conversation_string failed: {e}");
-                            continue;
-                        }
-                    };
-                    (sp, name, conv)
+                // 3-7. ターン本体（文脈構築 → 推論 → 応答記録 → 決定の解釈 →
+                // heartbeat_log → 発話配送）は tick と継続ターンで共有する 1 実装を通る
+                // （#440 / `heartbeat_turn`）。同一 HB セッションの直列化もその中。
+                let turn_target = heartbeat_turn::HeartbeatTarget {
+                    agent_id: agent_id_owned.clone(),
+                    session_id: session_id.clone(),
+                    channel_id: channel_id_str.clone(),
+                    guild_id: guild_id.clone(),
+                    instructions_source: hb_source,
                 };
-                let conversation = opencrab_server::process::prepend_runtime_context(
-                    &conversation,
-                    "ハートビート自律行動",
-                );
-
-                // 5. run_agent_response を呼び出す（非ブロック dispatch 有効 / #169）
-                let engine_result = opencrab_server::process::run_agent_response(
-                    &state,
-                    heartbeat_run_request(
-                        &state.subtask_registries,
-                        &agent_id_owned,
-                        &agent_name,
-                        &session_id,
-                        &system_prompt,
-                        &conversation,
-                    ),
-                )
-                .await;
-
-                let decision = match engine_result {
-                    Ok(result) => {
-                        // 6. エージェント応答をsession_logsに記録
-                        {
-                            let conn = db.lock().unwrap();
-                            let log = opencrab_db::queries::SessionLogRow {
-                                id: None,
-                                agent_id: agent_id_owned.clone(),
-                                session_id: session_id.clone(),
-                                log_type: "speech".to_string(),
-                                content: result.response.clone(),
-                                speaker_id: Some(agent_id_owned.clone()),
-                                turn_number: None,
-                                metadata_json: None,
-                                created_at: None,
-                            };
-                            if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                                tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat response log: {e}");
-                            }
-                        }
-
-                        // 7. 応答からSPEAK/LEARN/IDLEを解析
-                        parse_heartbeat_decision(&result.response)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Heartbeat agent response failed for channel {}: {e}",
-                            channel_id_str
-                        );
-                        HeartbeatDecision::Idle
-                    }
+                let Some(decision) = runner
+                    .run_turn(&turn_target, heartbeat_turn::TurnOrigin::Tick { tick })
+                    .await
+                else {
+                    // 文脈を組めなかった（移設前もここは `continue` で、直前の決定を保つ）。
+                    continue;
                 };
-
-                tracing::debug!(agent_id = %_agent_id, tick, channel_id = %channel_id_str, decision = %decision, "Heartbeat tick result");
-
-                // heartbeat_logに記録
-                if let Ok(conn) = db.lock() {
-                    let decision_str = match &decision {
-                        HeartbeatDecision::Idle => "idle",
-                        HeartbeatDecision::Speak(_) => "speak",
-                        HeartbeatDecision::Learn => "learn",
-                        HeartbeatDecision::ManageSkills { .. } => "manage_skills",
-                    };
-                    let result_json = serde_json::json!({
-                        "channel_id": channel_id_str,
-                        "source": hb_source,
-                    })
-                    .to_string();
-                    if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
-                        &conn,
-                        &agent_id_owned,
-                        decision_str,
-                        Some(&result_json),
-                    ) {
-                        tracing::error!(agent_id = %agent_id_owned, "Failed to insert heartbeat log: {}", e);
-                    }
-                }
-
-                // Speak/Learn後続処理
-                match &decision {
-                    HeartbeatDecision::Speak(content) => {
-                        // 発話出口（段階3 PR-A / #246）。まず登録簿（`state.gateways`）の
-                        // 非 Discord transport を試し、配れなければ既存の Discord 共有 http
-                        // 経路へ落ちる。Discord の挙動はバイト単位で不変（詳細は
-                        // `heartbeat_delivery` モジュール doc）。fire-and-forget で発火 tick を
-                        // 塞がない（#178 系）。
-                        let content = content.clone();
-                        let discord_http = discord_http.clone();
-                        let state = state.clone();
-                        let agent_id_log = agent_id_owned.clone();
-                        let ch_id_str = channel_id_str.clone();
-                        // #425: 配信できたら本人の discord 会話セッションへも二重記録する
-                        // ため、guild と db を持ち込む。
-                        let guild_id_log = guild_id.clone();
-                        let db = db.clone();
-                        tokio::spawn(async move {
-                            let delivered = heartbeat_delivery::deliver_heartbeat_speech(
-                                &state.gateways,
-                                &discord_http,
-                                &agent_id_log,
-                                &ch_id_str,
-                                &content,
-                            )
-                            .await;
-                            // #425: Discord へ配信できたターンだけ、本人の会話セッションへ
-                            // 発話を記録する（配信失敗ターンは記録しない）。
-                            record_heartbeat_channel_echo(
-                                &db,
-                                delivered,
-                                &agent_id_log,
-                                &guild_id_log,
-                                &ch_id_str,
-                                &content,
-                            );
-                        });
-                    }
-                    HeartbeatDecision::Learn => {
-                        let db = db.clone();
-                        let agent_id_log = agent_id_owned.clone();
-                        let tick_val = tick;
-                        let ch_id_str = channel_id_str.clone();
-                        tokio::spawn(async move {
-                            if let Ok(conn) = db.lock() {
-                                let memory = opencrab_db::queries::CuratedMemoryRow {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    agent_id: agent_id_log.clone(),
-                                    category: "reflection".to_string(),
-                                    content: format!(
-                                        "ハートビート内省 (tick {}, channel {}): 静かに自己を振り返る。",
-                                        tick_val, ch_id_str
-                                    ),
-                                    created_at: String::new(),
-                                };
-                                if let Err(e) =
-                                    opencrab_db::queries::upsert_curated_memory(&conn, &memory)
-                                {
-                                    tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");
-                                } else {
-                                    tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat reflect_and_learn: saved at tick {}", tick_val);
-                                }
-                            }
-                        });
-                    }
-                    HeartbeatDecision::Idle => {}
-                    HeartbeatDecision::ManageSkills { .. } => {}
-                }
 
                 last_decision = decision;
             }
@@ -1227,6 +1127,17 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         agent_id.clone()
                     };
+                    // #439 部分先行: 眠る長さを設定間隔へ追従させる（グローバル 1800 秒
+                    // グリッドへの丸めをやめる）。毎周期 DB から解決し直す。
+                    let limits = state_for_hb.heartbeat_limits;
+                    let interval_resolver = make_heartbeat_interval_resolver(
+                        db.clone(),
+                        resolved_agent_id.clone(),
+                        limits.default_interval_secs,
+                        limits.min_interval_secs,
+                        config_clone.interval_secs,
+                        global_enabled,
+                    );
                     let callback = make_heartbeat_callback(
                         db,
                         resolved_agent_id,
@@ -1236,7 +1147,14 @@ async fn main() -> anyhow::Result<()> {
                         global_enabled,
                         last_channel_ticks,
                     );
-                    heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
+                    heartbeat_loop(
+                        agent_id,
+                        config_clone,
+                        callback,
+                        Some(interval_resolver),
+                        shutdown_rx,
+                    )
+                    .await;
                 }));
             }
             current_shutdown_tx = Some(tx);
@@ -1291,6 +1209,16 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 agent_id.clone()
                             };
+                            // #439 部分先行: 初期起動と同じく設定間隔へ追従させる。
+                            let limits = state_for_hb.heartbeat_limits;
+                            let interval_resolver = make_heartbeat_interval_resolver(
+                                db.clone(),
+                                resolved_agent_id.clone(),
+                                limits.default_interval_secs,
+                                limits.min_interval_secs,
+                                config_clone.interval_secs,
+                                global_enabled,
+                            );
                             let callback = make_heartbeat_callback(
                                 db,
                                 resolved_agent_id,
@@ -1300,7 +1228,14 @@ async fn main() -> anyhow::Result<()> {
                                 global_enabled,
                                 last_channel_ticks,
                             );
-                            heartbeat_loop(agent_id, config_clone, callback, shutdown_rx).await;
+                            heartbeat_loop(
+                                agent_id,
+                                config_clone,
+                                callback,
+                                Some(interval_resolver),
+                                shutdown_rx,
+                            )
+                            .await;
                         }));
                     }
                     current_shutdown_tx = Some(tx);
@@ -1380,79 +1315,10 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opencrab_server::subtask_registries::SubtaskRegistries;
 
-    /// #169: heartbeat の `RunRequest` に非ブロック dispatch が配線される
-    /// （`completion_sink` が Some のときだけ `run_agent_response` が dispatcher を注入する）。
-    #[test]
-    fn heartbeat_run_request_enables_dispatch() {
-        let registries = SubtaskRegistries::new();
-        let req = heartbeat_run_request(
-            &registries,
-            "agent-a",
-            "A",
-            "heartbeat-agent-a-123",
-            "sys",
-            "conv",
-        );
-        assert!(
-            req.completion_sink.is_some(),
-            "heartbeat は dispatch を有効化する（sink 未配線だと全ツール inline 実行）"
-        );
-        assert!(
-            req.subtask_registry.is_some(),
-            "registry を渡さないと run 内で使い捨てが作られ cancel_subtask が not found になる"
-        );
-        assert_eq!(req.gateway, "heartbeat");
-    }
-
-    /// #169: registry は **agent 単位**で共有される。tick を跨いで同一 Arc なので、
-    /// 前 tick で dispatch した subtask を後続 tick の `cancel_subtask` が引ける。
-    #[test]
-    fn heartbeat_registry_is_shared_across_ticks_per_agent() {
-        let registries = SubtaskRegistries::new();
-        // 同一エージェントの別 tick（チャンネル違いで session_id も違う）。
-        let tick1 =
-            heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-1", "", "");
-        let tick2 =
-            heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-2", "", "");
-        let r1 = tick1.subtask_registry.unwrap();
-        let r2 = tick2.subtask_registry.unwrap();
-        assert!(
-            std::sync::Arc::ptr_eq(&r1, &r2),
-            "同一エージェントの tick は同じ registry を共有する"
-        );
-
-        // 別エージェントは独立（他エージェントの subtask が混ざらない）。
-        let other =
-            heartbeat_run_request(&registries, "agent-b", "B", "heartbeat-agent-b-1", "", "");
-        assert!(!std::sync::Arc::ptr_eq(
-            &r1,
-            &other.subtask_registry.unwrap()
-        ));
-    }
-
-    /// #169: heartbeat の sink は再注入しない（`NoopCompletionSink`）。
-    /// 呼んでも resume を起こさず、完了本文は次 tick の会話再構築で拾う。
-    #[tokio::test]
-    async fn heartbeat_sink_does_not_reinject() {
-        use opencrab_actions::{SettleKind, SubtaskSettled};
-
-        let registries = SubtaskRegistries::new();
-        let req = heartbeat_run_request(&registries, "agent-a", "A", "heartbeat-agent-a-1", "", "");
-        // Noop sink は呼んでも副作用が無い（panic せず、resume も配送もしない）。
-        req.completion_sink
-            .unwrap()
-            .on_subtask_settled(SubtaskSettled {
-                session_id: "heartbeat-agent-a-1".to_string(),
-                agent_id: "agent-a".to_string(),
-                subtask_id: "st-1".to_string(),
-                exit_reason: "completed".to_string(),
-                kind: SettleKind::Completed,
-                reply_target: None,
-                caller: opencrab_actions::CallerIdentity::Agent,
-            });
-    }
+    // #169 の dispatch 配線（`RunRequest` に registry と sink が載る / registry は agent
+    // 単位で共有）と、#440 の継続ターン配線のテストは `heartbeat_turn` へ移した。
+    // `RunRequest` を組むのがそちらになったため。
 
     // ── #238 発火のエージェント単位化: precedence と間隔ゲート ──────────────
 
@@ -1619,5 +1485,207 @@ mod tests {
             opencrab_db::queries::is_heartbeat_channel_echo(row.metadata_json.as_deref()),
             "記録した印は is_heartbeat_channel_echo で表示専用と判定される"
         );
+    }
+
+    // ── #439 部分先行: 評価グリッドを設定間隔へ追従させる ────────────────────
+
+    /// 運用実値に合わせた境界値（グローバル 1800 秒 / 床 300 秒）。
+    const TEST_GLOBAL_INTERVAL: u64 = 1800;
+    const TEST_MIN_INTERVAL: u64 = 300;
+
+    /// テスト用に「本番と同じ経路」の resolver を作る。ループ起動時に 1 回だけ作られる
+    /// ものと同じで、以降は毎回 DB を読み直す。
+    fn test_interval_resolver(
+        db: &opencrab_db::Db,
+        agent_id: &str,
+        global_enabled: bool,
+    ) -> HeartbeatIntervalResolver {
+        make_heartbeat_interval_resolver(
+            db.clone(),
+            agent_id.to_string(),
+            TEST_GLOBAL_INTERVAL,
+            TEST_MIN_INTERVAL,
+            TEST_GLOBAL_INTERVAL,
+            global_enabled,
+        )
+    }
+
+    fn set_agent_heartbeat(db: &opencrab_db::Db, agent_id: &str, interval_secs: Option<i64>) {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::upsert_agent_heartbeat_config(
+            &conn,
+            &opencrab_db::queries::AgentHeartbeatConfigRow {
+                agent_id: agent_id.to_string(),
+                enabled: true,
+                interval_secs,
+            },
+        )
+        .unwrap();
+    }
+
+    fn set_heartbeat_channel(
+        db: &opencrab_db::Db,
+        channel_id: &str,
+        agent_id: &str,
+        interval_secs: Option<u64>,
+    ) {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::upsert_channel_config(
+            &conn,
+            &opencrab_db::queries::ChannelConfigRow {
+                channel_id: channel_id.to_string(),
+                agent_id: agent_id.to_string(),
+                guild_id: "111".to_string(),
+                channel_name: "ch".to_string(),
+                readable: true,
+                writable: true,
+                whitelisted: true,
+                heartbeat_enabled: true,
+                heartbeat_interval_secs: interval_secs,
+                heartbeat_instructions: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// (a) agent-scope 1200 秒（20 分）の設定があれば、ループの次回 sleep は 1200 になる。
+    /// 修正前はグローバル 1800 で固定されていたので、この assert は 1800 で落ちる
+    /// （＝ 20 分設定が実質 30 分に丸められていた再現ケース）。
+    #[test]
+    fn loop_interval_follows_agent_scope_setting() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_agent_heartbeat(&db, "agent-a", Some(1200));
+
+        let resolve = test_interval_resolver(&db, "agent-a", true);
+        assert_eq!(
+            resolve(),
+            1200,
+            "20 分設定なら 20 分ごとに評価する（1800 グリッドへ丸めない）"
+        );
+    }
+
+    /// (b) 床（300 秒）未満の設定は床へクランプする。240 秒設定でも 240 秒ごとには
+    /// 回さない。
+    #[test]
+    fn loop_interval_clamps_to_floor() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_agent_heartbeat(&db, "agent-a", Some(240));
+
+        let resolve = test_interval_resolver(&db, "agent-a", true);
+        assert_eq!(resolve(), TEST_MIN_INTERVAL, "床未満へは短くしない");
+    }
+
+    /// (c) 設定が無ければグローバル 1800 のまま（挙動不変）。グローバル有効・無効の
+    /// どちらでも変わらない。
+    #[test]
+    fn loop_interval_stays_global_without_settings() {
+        let db = opencrab_db::Db::memory().unwrap();
+        for global_enabled in [true, false] {
+            let resolve = test_interval_resolver(&db, "agent-a", global_enabled);
+            assert_eq!(
+                resolve(),
+                TEST_GLOBAL_INTERVAL,
+                "設定が無ければ従来どおりグローバル周期（global_enabled={global_enabled}）"
+            );
+        }
+    }
+
+    /// (d) 同じ resolver（ループ生成時に 1 回だけ作られるもの）が、周期中の設定変更を
+    /// 次の周期の sleep に反映する。ループ生成時に間隔を固定しないことの担保。
+    #[test]
+    fn loop_interval_reresolves_each_cycle() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_agent_heartbeat(&db, "agent-a", Some(1200));
+
+        let resolve = test_interval_resolver(&db, "agent-a", true);
+        assert_eq!(resolve(), 1200);
+
+        // 周期の途中で設定を変える。
+        set_agent_heartbeat(&db, "agent-a", Some(600));
+        assert_eq!(resolve(), 600, "次周期の sleep に反映される");
+
+        // 伸ばす方向の変更も、グローバルを超えない範囲では反映される。
+        set_agent_heartbeat(&db, "agent-a", Some(900));
+        assert_eq!(resolve(), 900);
+    }
+
+    /// 未 opt-in（channel-scope 発火）でも、チャンネルの設定間隔に追従する。
+    /// 複数チャンネルなら最短に合わせる（どのチャンネルの発火も遅らせないため）。
+    #[test]
+    fn loop_interval_follows_shortest_channel_scope_setting() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_heartbeat_channel(&db, "222", "agent-a", Some(1200));
+        set_heartbeat_channel(&db, "333", "agent-a", Some(600));
+
+        let resolve = test_interval_resolver(&db, "agent-a", true);
+        assert_eq!(resolve(), 600, "最短のチャンネル設定に合わせる");
+    }
+
+    /// opt-in 済みなら channel 発火はしない（`heartbeat_firing_plan` の precedence）ので、
+    /// 周期も agent-scope の値だけで決まる。より短い channel 設定に引きずられない。
+    #[test]
+    fn loop_interval_ignores_channels_when_agent_scoped() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_agent_heartbeat(&db, "agent-a", Some(1200));
+        set_heartbeat_channel(&db, "222", "agent-a", Some(300));
+
+        let resolve = test_interval_resolver(&db, "agent-a", true);
+        assert_eq!(
+            resolve(),
+            1200,
+            "opt-in 済みは agent-scope 発火のみ。発火しない channel 設定で周期を縮めない"
+        );
+    }
+
+    /// グローバル無効 × 未 opt-in は発火しない周期なので、周期はグローバルのまま。
+    /// 他エージェントの opt-in のために立っているループを、無関係な channel 設定で
+    /// 細かく回さない。
+    #[test]
+    fn loop_interval_stays_global_when_nothing_fires() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_heartbeat_channel(&db, "222", "agent-a", Some(600));
+
+        let resolve = test_interval_resolver(&db, "agent-a", false);
+        assert_eq!(resolve(), TEST_GLOBAL_INTERVAL);
+    }
+
+    /// 方向: **短くする方向にだけ**追従する。グローバルより長い設定でループを伸ばすと
+    /// 発火が遅れるだけなので、周期はグローバルのまま（長い設定はゲートが弾く）。
+    #[test]
+    fn loop_interval_never_stretches_beyond_global() {
+        let db = opencrab_db::Db::memory().unwrap();
+        set_agent_heartbeat(&db, "agent-a", Some(3600));
+
+        let resolve = test_interval_resolver(&db, "agent-a", true);
+        assert_eq!(
+            resolve(),
+            TEST_GLOBAL_INTERVAL,
+            "1 時間設定でもループはグローバル周期で回る（発火はゲートが 1 時間で弾く）"
+        );
+    }
+
+    /// 純粋関数の境界: 候補なし・0 混入・床がグローバルより長い設定でも破綻しない。
+    #[test]
+    fn effective_loop_interval_edges() {
+        // 候補なし → グローバル。
+        assert_eq!(heartbeat_effective_loop_interval_secs(&[], 1800, 300), 1800);
+        // 0 は候補として無視する（ビジーループにしない）。
+        assert_eq!(
+            heartbeat_effective_loop_interval_secs(&[0, 900], 1800, 300),
+            900
+        );
+        assert_eq!(
+            heartbeat_effective_loop_interval_secs(&[0], 1800, 300),
+            1800,
+            "0 しか無ければ候補なしと同じ"
+        );
+        // 床 > グローバル でも周期をグローバルより長くしない（clamp の順序で破綻しない）。
+        assert_eq!(
+            heartbeat_effective_loop_interval_secs(&[100], 60, 300),
+            60,
+            "床がグローバルより長くても、周期はグローバルを超えない"
+        );
+        // グローバル 0 は 1 秒へ丸める（既存の heartbeat_loop_interval_secs と同じ）。
+        assert_eq!(heartbeat_effective_loop_interval_secs(&[], 0, 300), 1);
     }
 }

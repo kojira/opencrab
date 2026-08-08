@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn redacts_nsec_nested_in_data() {
-        // set_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
+        // add_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
         // nsec は data の中に入る（トップレベル走査だけでは漏れる）。
         let wrapper =
             r#"{"success":true,"data":{"npub":"npub1ok","nsec":"nsec1xxx"},"error":null}"#;
