@@ -8,6 +8,8 @@ Base URL: `http://localhost:3000`
 |--------|----------|---------|
 | GET | `/health` | Health check → `"ok"` (plain text) |
 | GET | `/api/health` | Health check → `{"status":"ok"}` (JSON) |
+| **External Intake** | | |
+| POST | `/api/hooks/{source}` | Receive external event (HMAC-verified) → 202 |
 | **Agents** | | |
 | POST | `/api/agents` | Create agent |
 | GET | `/api/agents` | List agents |
@@ -113,6 +115,46 @@ Base URL: `http://localhost:3000`
 ```json
 {"status": "ok"}
 ```
+
+---
+
+## External Event Intake
+
+外部システム（第一号: ナレッジベース omoikane）の出来事を受け取り、エージェントの受信箱
+（`agent_inbox`）に積む webhook（issue #454）。受理したイベントは **処理せず積むだけ**で、
+専用の消化ループが heartbeat とは独立に処理する。設定は `config/default.toml` の `[intake]`。
+
+### POST /api/hooks/{source}
+
+**目的**: 外部イベントを受信して受信箱へ積む（例: `/api/hooks/omoikane`）。
+
+**認証**: source ごとの共有 secret による HMAC-SHA256（**定数時間**照合）。
+
+- 署名ヘッダ: `X-{Source}-Signature: sha256=<hex(hmac-sha256(secret, raw_body))>`
+  （汎用 `X-Hook-Signature` も受理）。
+- secret は `[intake.secrets]`（`${ENV}` で注入）から解決。未設定 / 空の source は **404**。
+
+**Body**: `{"type": "<event type>", "data": {...}, "delivered_at": "..."}`
+
+**ルーティング**: `[[intake.routes]]` の `(source, event_type) → agent_id`（完全一致）。該当が
+無いイベントは受理（202）はするが受信箱に積まれない。
+
+**dedup**: `data.id` から `"{event_type}:{id}"` を作り、`UNIQUE(source, dedup_key)` +
+`INSERT OR IGNORE` で二重投入を防ぐ（webhook 再送 / catch-up との相互重複を弾く）。
+
+**Status**
+
+| Status | 条件 |
+|--------|------|
+| 202 Accepted | 署名 OK。積んだ / dedup で既存 / ルート無し（いずれも受理） |
+| 400 Bad Request | body が JSON でない / `type` が空 |
+| 401 Unauthorized | 署名ヘッダ欠落 or 不正（受信箱は汚染しない） |
+| 404 Not Found | secret 未設定の source |
+
+**信頼性（catch-up）**: webhook は at-most-once。停止中に落ちたイベントは source 側の一覧 API
+を真実として起動時 + 定期（`catch_up_interval_secs`）にポーリングし、未処理分を補充する。
+
+**消化**: `process_interval_secs` ごとに未処理を確認。**未処理が空なら LLM を呼ばない**。
 
 ---
 

@@ -49,6 +49,9 @@ pub struct AppConfig {
     /// 古い LLM ログの zip アーカイブ（#337）。
     #[serde(default)]
     pub llm_log_archive: LlmLogArchiveConfig,
+    /// 外部イベント受信（webhook intake / issue #454）。既定は実質無効。
+    #[serde(default)]
+    pub intake: IntakeConfig,
 }
 
 /// 古い `llm_logs` を zip へ書き出して DB から外す設定（#337）。
@@ -97,6 +100,109 @@ fn default_archive_retention_days() -> i64 {
 }
 fn default_archive_interval_secs() -> u64 {
     86400
+}
+
+/// 外部イベント受信（webhook intake / issue #454）の設定。
+///
+/// `POST /api/hooks/{source}` で受け取った出来事を `agent_inbox` に積み、専用の消化ループ
+/// （`intake_process`）が heartbeat とは独立に処理する。真実は source 側の一覧 API とし、
+/// webhook で落ちた分は catch-up ポーリングが補充する。
+///
+/// **未設定（`[intake]` セクションが無い / secret 未設定 / route 無し）なら実質無効。**
+/// テーブルは空のまま、消化ループは未処理 0 件で LLM を呼ばない。塞がず、事実を書いて選ばせる。
+#[derive(Debug, Deserialize, Clone)]
+pub struct IntakeConfig {
+    /// source ごとの共有 secret（HMAC-SHA256 検証用）。key = source 名 / value = secret。
+    /// `${ENV}` 展開済み。**このマップに無い（または空文字の）source への POST は 404**。
+    /// secret はログ・エラーメッセージに出さない。
+    #[serde(default)]
+    pub secrets: HashMap<String, String>,
+    /// source×event_type → agent_id のルーティング（完全一致）。該当が無いイベントは
+    /// 受理（202）はするが受信箱に積まない（配送先が無いため）。
+    #[serde(default)]
+    pub routes: Vec<IntakeRoute>,
+    /// 受信箱消化ループの間隔（秒）。既定 60。ループ側で最低 10 秒に丸める。
+    /// **未処理が空の tick は LLM を呼ばない**（DB 1 クエリのみ / コスト制御・受け入れ基準）。
+    #[serde(default = "default_intake_process_interval_secs")]
+    pub process_interval_secs: u64,
+    /// catch-up ポーリングの間隔（秒）。既定 600（10分）。ループ側で最低 60 秒に丸める。
+    #[serde(default = "default_intake_catch_up_interval_secs")]
+    pub catch_up_interval_secs: u64,
+    /// omoikane source アダプタ（第一号）。未設定なら omoikane の catch-up はしない
+    /// （webhook 受信は secret さえ設定すれば動く）。
+    #[serde(default)]
+    pub omoikane: Option<OmoikaneConfig>,
+}
+
+impl Default for IntakeConfig {
+    fn default() -> Self {
+        Self {
+            secrets: HashMap::new(),
+            routes: Vec::new(),
+            process_interval_secs: default_intake_process_interval_secs(),
+            catch_up_interval_secs: default_intake_catch_up_interval_secs(),
+            omoikane: None,
+        }
+    }
+}
+
+impl IntakeConfig {
+    /// source の共有 secret を返す。未設定 / 空文字は `None`（＝webhook は 404）。
+    pub fn secret_for(&self, source: &str) -> Option<&str> {
+        self.secrets
+            .get(source)
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// (source, event_type) の配送先 agent_id を返す（完全一致・先勝ち）。
+    pub fn route_agent(&self, source: &str, event_type: &str) -> Option<&str> {
+        self.routes
+            .iter()
+            .find(|r| r.source == source && r.event_type == event_type)
+            .map(|r| r.agent_id.as_str())
+    }
+}
+
+/// source×event_type → agent_id の 1 ルート。
+#[derive(Debug, Deserialize, Clone)]
+pub struct IntakeRoute {
+    pub source: String,
+    pub event_type: String,
+    pub agent_id: String,
+}
+
+/// omoikane（ナレッジベース）source アダプタの設定。catch-up 一覧 API の接続先。
+#[derive(Debug, Deserialize, Clone)]
+pub struct OmoikaneConfig {
+    /// catch-up ポーリングの有効/無効。既定 true（セクションを書いた時点で使う想定）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 一覧 API のベース URL（例: `https://omoikane.example/`）。空なら catch-up しない。
+    #[serde(default)]
+    pub base_url: String,
+    /// Bearer トークン（`${ENV}` 展開済み）。秘密。ログに出さない。
+    #[serde(default)]
+    pub bearer_token: String,
+    /// `entry_created_by` フィルタ（対象エージェントの uid）。
+    #[serde(default)]
+    pub entry_created_by: String,
+    /// 1 回のポーリングで取得する上限件数。既定 50。
+    #[serde(default = "default_omoikane_poll_limit")]
+    pub poll_limit: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_intake_process_interval_secs() -> u64 {
+    60
+}
+fn default_intake_catch_up_interval_secs() -> u64 {
+    600
+}
+fn default_omoikane_poll_limit() -> u32 {
+    50
 }
 
 /// 非ブロックツール実行（dispatch）の設定（RFC #152 S3a）。

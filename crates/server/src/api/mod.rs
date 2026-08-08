@@ -5,6 +5,7 @@ pub mod analytics;
 pub mod channel_configs;
 pub mod co_agents;
 pub mod daily_log_index;
+pub mod hooks;
 pub mod import;
 pub mod import_sync;
 pub mod llm;

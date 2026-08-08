@@ -17,6 +17,7 @@ pub mod caller_identity;
 pub mod config;
 pub mod heartbeat_instructions;
 pub mod hot_reload;
+pub mod intake;
 pub mod llm_adapter;
 pub mod llm_log_archive;
 pub mod memory_condense;
@@ -172,6 +173,12 @@ pub struct AppState {
     /// 参照する。下限は設定ファイル（`[agent] heartbeat_min_interval_secs`）由来で、
     /// 運用者が費用と負荷の許容範囲を決める。
     pub heartbeat_limits: config::HeartbeatLimits,
+    /// 外部イベント受信（webhook intake / issue #454）の設定。
+    ///
+    /// webhook ハンドラ（source→secret の解決 / ルーティング）と、受信箱の消化・catch-up
+    /// ループが参照する。秘密（source secret / Bearer）を含むため、ログや API 応答へ
+    /// そのまま出さないこと。
+    pub intake: Arc<config::IntakeConfig>,
 }
 
 impl AppState {
@@ -213,6 +220,7 @@ pub(crate) fn test_app_state() -> AppState {
         memory_condense: config::MemoryCondenseConfig::default(),
         loop_restart_enabled: false,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
+        intake: Arc::new(config::IntakeConfig::default()),
         mcp_manager: None,
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
@@ -229,6 +237,9 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/api/health", get(api_health_check))
+        // 外部イベント受信 webhook（#454）。source ごとの共有 secret で HMAC 検証し、
+        // 受理したイベントを agent_inbox へ積む（処理は intake_process ループ）。
+        .route("/api/hooks/{source}", post(api::hooks::receive_hook))
         // エージェント管理
         .route(
             "/api/agents",
