@@ -974,23 +974,64 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
 
 /// Replace `${VAR_NAME}` patterns with corresponding environment variable values.
 /// Unknown variables are replaced with empty strings.
+///
+/// **単一パス走査**（#171）: 入力を左から右へ一度だけ走り、置換した値は**再走査しない**。
+/// 旧実装は毎回先頭から `find` し直して展開結果も再解釈していたため、以下の実測済み
+/// 失敗モードがあった。単一パスにすることで、上限や反復回数の管理なしに全て解消する。
+///
+/// - **起動ハング**: 値が自分自身を参照する形（値に `${SAME_VAR}` を含む）だと置換が
+///   収束せず無限ループになっていた。再走査しないので、置換値に `${...}` が現れても
+///   もう展開されず、必ず有限で終わる。
+/// - **設定行の無言消失**: `}` を全体から探すため、`${` に対応する `}` が同じ行に無いと
+///   ずっと後方の `}`（別の設定行）まで飲み込み、間の行が丸ごと消えていた。ここでは
+///   `}` の探索を**同じ行の中（次の `\n` まで）**に限定し、閉じが無ければ `${` を
+///   リテラルとして残すので、後続行は保存される。
+/// - **原因の追えないパースエラー**: 値に `"` / 改行 / `${` が含まれると TOML を壊すが、
+///   どの変数が原因か分からなかった。そうした値を検出したら**変数名を添えて `warn!`** する
+///   （ロガーは `load_config` 呼び出し前に初期化済み。`hot_reload` 経路でも初期化済み）。
+///
+/// この関数は「向き」を狭める方向にのみ働く（再帰展開という以前は暗黙にできていた挙動を
+/// 止める）。設定値に環境変数参照をネストさせる運用は無い（値は token / ID 等）。
 pub(crate) fn expand_env_vars(input: &str) -> String {
-    let mut result = input.to_string();
-    // Find all ${...} patterns and replace them
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
     loop {
-        let start = match result.find("${") {
+        let start = match rest.find("${") {
             Some(pos) => pos,
-            None => break,
+            None => {
+                out.push_str(rest);
+                break;
+            }
         };
-        let end = match result[start..].find('}') {
-            Some(pos) => start + pos,
-            None => break,
-        };
-        let var_name = &result[start + 2..end];
-        let value = std::env::var(var_name).unwrap_or_default();
-        result = format!("{}{}{}", &result[..start], value, &result[end + 1..]);
+        out.push_str(&rest[..start]);
+        // `${` の直後から。`}` は**同じ行の中だけ**で探す（別行を飲み込まない = 行消失防止）。
+        let after = &rest[start + 2..];
+        let line_end = after.find('\n').unwrap_or(after.len());
+        match after[..line_end].find('}') {
+            None => {
+                // 同じ行に閉じ `}` が無い → 展開せず `${` をリテラルとして残し、続きを走査する。
+                warn!(
+                    "config: `${{` に同じ行で対応する `}}` が無いためリテラルとして残します（設定の記法ミスの可能性）"
+                );
+                out.push_str("${");
+                rest = after;
+            }
+            Some(close) => {
+                let var_name = &after[..close];
+                let value = std::env::var(var_name).unwrap_or_default();
+                if value.contains('"') || value.contains('\n') || value.contains("${") {
+                    warn!(
+                        var = %var_name,
+                        "config: 環境変数の値に TOML を壊す/再展開を誘発しうる文字（\" ・改行・${{）が含まれます。リテラルとして（再展開せず）差し込みます"
+                    );
+                }
+                out.push_str(&value);
+                // 置換値は out へ入れたきり再走査しない（単一パス）。`}` の次から続ける。
+                rest = &after[close + 1..];
+            }
+        }
     }
-    result
+    out
 }
 
 // ---------- Provider overrides (dashboard-managed) ----------
@@ -1364,6 +1405,64 @@ mod tests {
         assert_eq!(result, "aaa and bbb");
     }
 
+    /// #171 失敗モード1（起動ハング）: 値が自分自身を参照しても収束し、必ず有限で終わる。
+    /// 単一パス走査は置換値を再走査しないので、値中の `${SELF...}` は展開されず残る。
+    /// 旧実装（毎回先頭から再走査）ではここが無限ループになっていた。
+    #[test]
+    fn test_expand_env_vars_self_reference_does_not_loop() {
+        let _lock = env_lock();
+        let _g = EnvVarGuard::set("TEST_SELF_REF_171", "x${TEST_SELF_REF_171}y");
+        let result = expand_env_vars("${TEST_SELF_REF_171}");
+        // 一度だけ置換され、値中の参照はリテラルのまま（再展開しない）。
+        assert_eq!(result, "x${TEST_SELF_REF_171}y");
+    }
+
+    /// #171: 置換した値は再走査しない（単一パス）。旧実装は展開結果を再解釈したため、
+    /// 値に別の参照が含まれると連鎖展開していた。この差分がそのまま変異検知になる
+    /// （旧挙動なら "final"、単一パスなら "${TEST_NEST_INNER_171}"）。
+    #[test]
+    fn test_expand_env_vars_no_nested_reexpansion() {
+        let _lock = env_lock();
+        let _outer = EnvVarGuard::set("TEST_NEST_OUTER_171", "${TEST_NEST_INNER_171}");
+        let _inner = EnvVarGuard::set("TEST_NEST_INNER_171", "final");
+        let result = expand_env_vars("${TEST_NEST_OUTER_171}");
+        assert_eq!(result, "${TEST_NEST_INNER_171}");
+    }
+
+    /// #171 失敗モード2（設定行の無言消失）: `${` に同じ行で対応する `}` が無い場合、
+    /// 別の行の `}` まで飲み込んで間の行を消してはならない。閉じが無ければ `${` を
+    /// リテラルとして残し、後続行は保存する。旧実装は b / c 行を丸ごと失っていた。
+    #[test]
+    fn test_expand_env_vars_unterminated_does_not_eat_following_lines() {
+        let _lock = env_lock();
+        let input = "a = \"${TEST_UNTERMINATED_171\"\nb = \"keep\"\nc = \"}\"\n";
+        let result = expand_env_vars(input);
+        assert!(
+            result.contains("b = \"keep\""),
+            "後続行が消えてはならない: {result:?}"
+        );
+        assert!(
+            result.contains("c = \"}\""),
+            "後続行が消えてはならない: {result:?}"
+        );
+        // 未終端の `${` はリテラルとして残る（展開しようとして周囲を壊さない）。
+        assert!(
+            result.contains("${TEST_UNTERMINATED_171"),
+            "未終端の `${{` はリテラルで残る: {result:?}"
+        );
+    }
+
+    /// #171 失敗モード3（原因の追えない値）: 値に `"` が含まれても、周囲を壊さず
+    /// リテラルとして差し込む（TOML パースは下流で落ちるが、そのときは変数名付きの
+    /// 警告が出ている）。ここでは差し込み自体が素直に行われることを固定する。
+    #[test]
+    fn test_expand_env_vars_value_with_quote_is_inserted_verbatim() {
+        let _lock = env_lock();
+        let _g = EnvVarGuard::set("TEST_QUOTE_VALUE_171", "a\"b");
+        let result = expand_env_vars("k = \"${TEST_QUOTE_VALUE_171}\"");
+        assert_eq!(result, "k = \"a\"b\"");
+    }
+
     /// `owner_discord_id` は環境変数参照で与える（ローカル固有値を `.env` に寄せる）。
     #[test]
     fn owner_discord_id_expands_from_env() {
@@ -1427,7 +1526,8 @@ mod tests {
     #[test]
     fn shipped_configs_take_owner_discord_id_from_env() {
         let _lock = env_lock();
-        // `${}` を含まない値にする（expand_env_vars は展開結果も再走査するため）。
+        // 値はプレーンなリテラル（`${}` を含まない）にしておく。単一パス展開なので
+        // 仮に含んでも再展開はされないが、期待値を曖昧にしないため素の文字列を使う。
         const SENTINEL: &str = "sentinel-owner-000";
         let _guard = EnvVarGuard::set("OWNER_DISCORD_ID", SENTINEL);
 
