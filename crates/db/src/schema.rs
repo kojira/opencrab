@@ -1888,28 +1888,44 @@ fn migrate_v37_session_heartbeat(conn: &Connection) -> rusqlite::Result<()> {
     // next_fire を「移行時刻 + interval（未来）」へ置く（＝密にしない・設計 §4.4 の「後ろ」）。
     let now = Utc::now().to_rfc3339();
 
-    // opt-in 集合: agent_heartbeat_config.enabled=1 の agent。opt-in 済みは現状 Discord channel
-    // 発火が precedence（AgentScoped）で抑止（沈黙）されているので、その抑止を enabled=0 として
-    // 保存する（step2）。**向き**: enabled を 0 へ倒す＝発火を「増やさない」方向（沈黙の保存）。
+    // opt-in 集合。opt-in 済みは現状 Discord channel 発火が precedence（AgentScoped）で抑止
+    // （沈黙）されているので、その抑止を enabled=0 として保存する（step2）。**向き**: enabled を
+    // 0 へ倒す＝発火を「増やさない」方向（沈黙の保存）。
+    //
+    // **判定は `resolve_agent_heartbeat`（heartbeat.rs:193）の意味論に一致させる（F2 修正）**:
+    // raw `enabled=1` ではなく、`interval_secs <= 0`（壊れた値）は resolve が `enabled:false` へ
+    // 倒すため opt-in から除外する。除外すると当該 agent は AgentScoped に入らず、未 opt-in として
+    // ChannelScoped（G 有効時）で Discord 発火する現状に一致する。**この不一致を捕まえるため、
+    // 不変条件テストの旧側は raw ではなく resolve_agent_heartbeat を使う**（テストが移行と同じ
+    // 近似を共有しないようにする）。
     let opted_in: std::collections::HashSet<String> = {
-        let mut stmt =
-            conn.prepare("SELECT agent_id FROM agent_heartbeat_config WHERE enabled = 1")?;
+        let mut stmt = conn.prepare(
+            "SELECT agent_id FROM agent_heartbeat_config
+             WHERE enabled = 1 AND (interval_secs IS NULL OR interval_secs > 0)",
+        )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
 
     // ── step1: Nostr セッション ─────────────────────────────────────────────
-    // opt-in 済み かつ Nostr gateway を持つ（EXISTS agent_nostr_config）→ nostr-{agent} を
-    // enabled=1 で作る。Nostr の agent スコープ発火は global（G）に依らず発火していたので
-    // enabled=1（G ゲート対象外）。opt-in 済みだが Nostr を持たない（Discord 専用の旧 agent
-    // スコープ）は現状も出口なしで沈黙 → セッション行を作らない（#456 決定3）。interval は
-    // agent_heartbeat_config の保持値（NULL = 運用者既定。意図した値を破棄しない）。
+    // opt-in 済み（resolve 意味論・上記）かつ **Nostr gateway が実際に稼働する条件を満たす**
+    // → nostr-{agent} を enabled=1 で作る。Nostr の agent スコープ発火は global（G）に依らず
+    // 発火していたので enabled=1（G ゲート対象外）。
+    //
+    // **Nostr 判定は runtime の実発火条件に一致させる（F1 修正）**: 単なる EXISTS ではなく
+    // **`agent_nostr_config.enabled = 1`** を要求する。runtime は enabled=1 の gateway だけを
+    // 起動し（nostr_runner_impl.rs:94）、発火は `is_running` ゲート（heartbeat_delivery.rs:225）→
+    // text_delivery（nostr/actions.rs:352）を通る。EXISTS だけだと **nostr disabled のエージェント
+    // を enabled=1 の nostr セッションにして PR2 で新規発火させてしまう**（runtime では鳴らない）。
+    // opt-in だが Nostr 稼働条件を満たさない（Discord 専用の旧 agent スコープ）は現状も出口なしで
+    // 沈黙 → セッション行を作らない（#456 決定3）。interval は agent_heartbeat_config の保持値。
     {
         let mut stmt = conn.prepare(
             "SELECT ahc.agent_id, ahc.interval_secs
              FROM agent_heartbeat_config ahc
-             WHERE ahc.enabled = 1
-               AND EXISTS (SELECT 1 FROM agent_nostr_config anc WHERE anc.agent_id = ahc.agent_id)",
+             WHERE ahc.enabled = 1 AND (ahc.interval_secs IS NULL OR ahc.interval_secs > 0)
+               AND EXISTS (SELECT 1 FROM agent_nostr_config anc
+                           WHERE anc.agent_id = ahc.agent_id AND anc.enabled = 1)",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -6345,9 +6361,12 @@ mod migration_tests {
     const INV_DEFAULT_INTERVAL: u64 = 1800;
     const INV_MIN_INTERVAL: u64 = 300;
 
-    fn agent_has_nostr(conn: &Connection, agent_id: &str) -> bool {
+    /// runtime で Nostr が実際に鳴る条件を判定する。**`enabled = 1` を要求する**（存在だけの
+    /// COUNT にしない・F1）。runtime は enabled=1 の gateway だけ起動する（nostr_runner_impl.rs:94）
+    /// ため、移行の EXISTS 近似と**同じ判定式をテストが共有しない**ようにここで実効条件を使う。
+    fn agent_nostr_fires(conn: &Connection, agent_id: &str) -> bool {
         conn.query_row(
-            "SELECT COUNT(*) FROM agent_nostr_config WHERE agent_id = ?1",
+            "SELECT COUNT(*) FROM agent_nostr_config WHERE agent_id = ?1 AND enabled = 1",
             [agent_id],
             |r| r.get::<_, i64>(0),
         )
@@ -6398,9 +6417,9 @@ mod migration_tests {
             );
             // firing_plan（実 main.rs:169-183 の分岐を再現）。
             if resolved.enabled {
-                // AgentScoped: 1 回発火。外部到達は Nostr gateway を持つときだけ
-                // （Discord 専用は空 channel → ログのみ＝外部発火ゼロ）。
-                if agent_has_nostr(conn, agent) {
+                // AgentScoped: 1 回発火。外部到達は Nostr gateway が**実際に鳴る**ときだけ
+                // （Discord 専用・Nostr disabled は空 channel or 未起動 → 外部発火ゼロ）。
+                if agent_nostr_fires(conn, agent) {
                     out.insert((agent.clone(), "nostr".to_string()));
                 }
             } else if g {
@@ -6444,25 +6463,41 @@ mod migration_tests {
         setup_pre_v37(&conn);
 
         // prod を模した fixture（channel/guild は clean numeric = 正規化と同値）。
-        //  optn : opt-in + Nostr（→ AgentScoped Nostr 発火）
+        //  optn : opt-in + Nostr enabled=1（→ AgentScoped Nostr 発火）
         //  optnn: opt-in・Nostr 無し（→ AgentScoped だが外部到達なし）
         //  plain: 未 opt-in・loop に居る（→ ChannelScoped）。global ch304 にも**明示行**を持つ
         //         （＝global fallback 経由の発火を持ち込まない＝prod と同じ状況）
         //  noloop: 未 opt-in・loop に**居ない**（→ 発火しない。prod の e2e-test 相当）
+        //  optn0: opt-in・Nostr 行はあるが **enabled=0**（→ runtime で鳴らない・F1 の probe）。
+        //         移行が EXISTS 近似だと nostr セッションを enabled=1 で作り新側だけ発火＝不一致。
+        //  optbad: hb enabled=1 だが **interval_secs=0**（resolve が enabled:false へ倒す・F2 の
+        //         probe）。resolve 意味論では未 opt-in なので ChannelScoped で Discord 発火する。
+        //         移行が raw enabled=1 だと opt-in 扱いして Discord を抑止・nostr を作り不一致。
+        //         ※ optbad は global ch304 にも**明示行**を持たせる（plain と同様）。持たせないと
+        //         loop エージェントが global fallback 経由で ch304 に発火する状況になり、それは
+        //         移行が保存できない既知の限界（enabled=0 展開）＝設計どおりの不一致になるため。
+        //         prod では loop エージェントは global fallback に依存していないので、それを模す。
         conn.execute_batch(
             "INSERT INTO agents (agent_id, name, persona_name) VALUES
-                ('optn','optn','optn'),('optnn','optnn','optnn'),('plain','plain','plain'),('noloop','noloop','noloop');
+                ('optn','optn','optn'),('optnn','optnn','optnn'),('plain','plain','plain'),
+                ('noloop','noloop','noloop'),('optn0','optn0','optn0'),('optbad','optbad','optbad');
              INSERT INTO agent_heartbeat_config (agent_id, enabled, interval_secs, updated_at) VALUES
                 ('optn', 1, 18000, '2026-01-01'),
-                ('optnn',1, 1200,  '2026-01-01');
+                ('optnn',1, 1200,  '2026-01-01'),
+                ('optn0',1, 5000,  '2026-01-01'),
+                ('optbad',1, 0,    '2026-01-01');
              INSERT INTO agent_nostr_config (agent_id, secret_key, relays_json, filter_json, enabled, updated_at) VALUES
-                ('optn', 'nsec', '[]', '{}', 1, '2026-01-01');
+                ('optn',  'nsec', '[]', '{}', 1, '2026-01-01'),
+                ('optn0', 'nsec', '[]', '{}', 0, '2026-01-01'),
+                ('optbad','nsec', '[]', '{}', 1, '2026-01-01');
              INSERT INTO discord_channel_config
                 (channel_id, agent_id, guild_id, channel_name, readable, writable, whitelisted, heartbeat_enabled, heartbeat_interval_secs, heartbeat_instructions, updated_at) VALUES
                 ('300', 'optn',  '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
                 ('301', 'optnn', '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
                 ('302', 'plain', '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
                 ('304', 'plain', '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('305', 'optbad','900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
+                ('304', 'optbad','900', '', 1, 1, 1, 1, NULL, '', '2026-01-01'),
                 ('304', '',      '900', '', 1, 1, 1, 1, NULL, '', '2026-01-01');",
         )
         .unwrap();
@@ -6470,10 +6505,11 @@ mod migration_tests {
         initialize(&conn).expect("apply v37");
 
         // loop membership の模型（config discord agent_ids ∪ opt-in）。noloop は含めない。
-        let loop_agents: std::collections::BTreeSet<String> = ["optn", "optnn", "plain"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let loop_agents: std::collections::BTreeSet<String> =
+            ["optn", "optnn", "plain", "optn0", "optbad"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
 
         for g in [true, false] {
             let old = old_real_firing(&conn, g, &loop_agents);
