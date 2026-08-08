@@ -3861,6 +3861,46 @@ mod past_summary_budget_tests {
         );
     }
 
+    /// #408: 全 topic が予算内に収まる（早期 return）経路を固定する。既存テストは
+    /// いずれも切り詰めが起きる seed（topic 100 件 / 予算 4,000 など）なので、
+    /// `build_past_context_summary_section` の `if dropped == 0` を潰す変異（→ `if false`）
+    /// を入れても素通りしていた。
+    ///
+    /// コンパクション（＝ `[Past context summary]` の構築）は**全文が予算を超えたときだけ**
+    /// 走る（`build_conversation_inner` の全文フィット早期 return）。そこで**ログは大量**に
+    /// 置いて予算超過でコンパクションを起こしつつ、**topic は少数**（3 件）に絞って 30% 枠
+    /// （4,000 × 3/10 = 1,200 トークン）に全件が収まる状況を作る。ここで
+    /// (1) 切り詰めの告知が出ない (2) 全 topic が出力に含まれる ことを固定する。
+    ///
+    /// 変異を入れると `dropped == 0` のまま告知構築へ落ち、`past_summary_omitted_notice(0)`
+    /// （"0 older topic summaries were omitted ..."）が混入してここで落ちる。
+    /// `topics.is_empty()` の fallback 経路（`build_truncated_conversation`）とは別物で、
+    /// こちらは「topic はあるが全部入る」ケース。
+    #[test]
+    fn past_summary_emits_no_notice_when_all_topics_fit() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 全文が 4,000 を超えるだけのログを置く（＝コンパクションを起こす）。
+        seed_logs(&conn, 400);
+        // topic は 3 件だけ。30% 枠（1,200 トークン）に余裕で全件収まる。
+        seed_topics(&conn, 3);
+
+        let out = build_conversation_string(&conn, SESSION, AGENT, 4_000).unwrap();
+        let section = summary_section(out.as_str());
+
+        // 全 topic が [Past context summary] に出る。
+        for i in 0..3 {
+            assert!(
+                section.contains(&format!("TOPIC-{i:03}")),
+                "全 topic が出力に含まれるべき (TOPIC-{i:03}): {section}"
+            );
+        }
+        // 全件が収まるので切り詰めの告知は一切出ない（早期 return 経路）。
+        assert!(
+            !section.contains("were omitted"),
+            "全件が収まるのに切り詰めの告知が出ている（早期 return が壊れている）: {section}"
+        );
+    }
+
     /// 要約が予算を食い潰さないので、直近会話の枠が残る（事故当時はここが 0 だった）。
     #[test]
     fn recent_conversation_keeps_its_share_when_topics_are_huge() {
