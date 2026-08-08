@@ -834,9 +834,11 @@ async fn process_incoming_message<T: AgentRunner>(
         // #429: typing keepalive をターン本体へ move する。この future がどの経路で
         // 終わっても（下の早期パスを含む）ここで束ねたガードが drop され、keepalive は停止する。
         let typing_keepalive_spawn = typing_keepalive;
-        // #431: 「発言終わり」リアクションの判定に使う（最後の自分の投稿 id / 送信ハンドル）。
+        // #431: 「発言終わり」リアクションの判定に使う（最後の自分の投稿 id / 送信ハンドル /
+        // 実送信を試みた回数＝このターンで発話したか）。
         let last_self_post_spawn = last_self_post.clone();
         let reply_send_tasks_spawn = reply_send_tasks.clone();
+        let reply_send_seq_spawn = reply_send_seq.clone();
 
         session_locks.spawn_serialized(session_id.clone(), async move {
             // ターンの寿命に typing keepalive を束ねる（#429）。名前付きで保持し、
@@ -939,7 +941,13 @@ async fn process_incoming_message<T: AgentRunner>(
                     .await;
 
                 // #431: 「発言終わり」リアクションの可否を result を move する前に確定する。
-                let eos_qualifies = end_of_speech_qualifies(&result);
+                // 「発話したか」は最終応答テキストではなく、このターンで on_response_text が
+                // 実送信まで進んだ回数で見る（run_agent_response は既に完了しているので
+                // 発火は出揃っている）。反復途中で喋って最終応答が NO_REPLY のターンを
+                // 取りこぼさないため。
+                let posted =
+                    reply_send_seq_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                let eos_qualifies = end_of_speech_qualifies(&result, posted);
 
                 handle_agent_response(
                     result,
@@ -1165,8 +1173,9 @@ async fn process_subtask_completed<T: AgentRunner>(
                 },
             );
             // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
-            // 投稿できたなら「発言終わり」を付ける。付与失敗は non-fatal。
-            if !engine_result.stopped_by_limit {
+            // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
+            // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
+            if end_of_speech_qualifies_ok(&engine_result, sent_id.is_some()) {
                 if let Some(id) = sent_id {
                     add_reaction_non_fatal(
                         gateway.as_ref(),
@@ -1543,8 +1552,9 @@ async fn process_interaction_response<T: AgentRunner>(
                 },
             );
             // #431: 自然終了（NO_REPLY/空は上で return 済み）かつ打ち切りでなく、実際に
-            // 投稿できたなら「発言終わり」を付ける。付与失敗は non-fatal。
-            if !engine_result.stopped_by_limit {
+            // 投稿できたなら「発言終わり」を付ける。判定は通常経路と同じゲートへ寄せる。
+            // この経路は 1 応答 1 送信なので `posted` = 送信 id の有無。付与失敗は non-fatal。
+            if end_of_speech_qualifies_ok(&engine_result, sent_id.is_some()) {
                 if let Some(id) = sent_id {
                     add_reaction_non_fatal(
                         gateway.as_ref(),
@@ -1745,22 +1755,31 @@ const SPOKE_EMOJI: &str = "🏁";
 
 /// ターンが「発言終わり」リアクションの対象になるか（#431）。
 ///
-/// `true` を返すのは、ターンが**自然に**（次の行動を選ばず）終わり、かつ発話として
-/// 成立したときだけ。以下は `false`:
+/// `true` を返すのは、ターンが**自然に**（次の行動を選ばず）終わり、かつそのターンで
+/// 自分が**実際に投稿できた**（`posted`）ときだけ。以下は `false`:
 /// - エラー / タイムアウト（`Err`）… 「言い終わった」ではなく落ちた
 /// - 反復上限での打ち切り（`stopped_by_limit`）… 途中で切られた
-/// - `NO_REPLY` / 空応答 … そもそも発話していない
+/// - `posted == false` … このターンで実投稿していない（全反復 NO_REPLY/空、または
+///   非 writable で送信に至らなかった）＝そもそも発話していない
 ///
-/// 実際に付けるかは、これに加えて「そのターンで自分が実際に投稿した message_id が
-/// あるか」で決まる（発話ゼロ＝投稿 id 無しなら付けない）。
-fn end_of_speech_qualifies(result: &anyhow::Result<opencrab_core::EngineResult>) -> bool {
-    match result.as_ref() {
-        Ok(r) => {
-            let text = r.response.trim();
-            !text.is_empty() && text != "NO_REPLY" && !r.stopped_by_limit
-        }
-        Err(_) => false,
-    }
+/// **最終応答テキストの中身（NO_REPLY/空）では判定しない。** 反復途中で発話し最終応答が
+/// `NO_REPLY` で自然終了するターン（例: 反復1で発話 → 最終 NO_REPLY）を取りこぼすため。
+/// 「発話したか」は実投稿の有無（`posted`）で見る。`posted` の実体は、通常経路では
+/// 実送信を試みた回数（`reply_send_seq > 0`）、subtask/interaction 経路では送信 id
+/// （`sent_id.is_some()`）。実送信を試みたが失敗して id が採れなかった場合は、この関数は
+/// `true` を返すが、実際の付与は呼び出し側の「最後の投稿 id が Some か」で最終的に弾かれる。
+fn end_of_speech_qualifies(
+    result: &anyhow::Result<opencrab_core::EngineResult>,
+    posted: bool,
+) -> bool {
+    matches!(result.as_ref(), Ok(r) if end_of_speech_qualifies_ok(r, posted))
+}
+
+/// [`end_of_speech_qualifies`] の `Ok` 側だけを取り出したもの。subtask 完了 /
+/// interaction 応答の経路は `EngineResult` を先に取り出しているため、判定を
+/// 共有するにはこの形が要る（`Err` は match の別腕で落ちている）。
+fn end_of_speech_qualifies_ok(result: &opencrab_core::EngineResult, posted: bool) -> bool {
+    !result.stopped_by_limit && posted
 }
 
 /// リアクションを付ける対象の message_id を解析する。
@@ -1859,17 +1878,17 @@ mod wiring_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_context_line, end_of_speech_qualifies, parse_discord_session,
-        parse_reaction_message_id, recv_retry_backoff, should_alert_inbound_stalled,
-        should_emit_drop_log, NO_REPLY_EMOJI, RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE,
-        RECV_RETRY_MAX, SEEN_EMOJI, SPOKE_EMOJI,
+        discord_context_line, end_of_speech_qualifies, end_of_speech_qualifies_ok,
+        parse_discord_session, parse_reaction_message_id, recv_retry_backoff,
+        should_alert_inbound_stalled, should_emit_drop_log, NO_REPLY_EMOJI,
+        RECV_FAILURES_BEFORE_ALERT, RECV_RETRY_BASE, RECV_RETRY_MAX, SEEN_EMOJI, SPOKE_EMOJI,
     };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use tokio::time::{Duration, Instant};
 
-    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `response` と
-    /// `stopped_by_limit` の 2 つだけなので、他は既定的な値で埋める。
+    /// #431 テスト用に `EngineResult` を組む。判定に効くのは `stopped_by_limit` だけで、
+    /// `response` は「最終応答テキストでは判定しない」ことを示すために置いている。
     fn mk_result(response: &str, stopped_by_limit: bool) -> opencrab_core::EngineResult {
         opencrab_core::EngineResult {
             response: response.to_string(),
@@ -1892,29 +1911,65 @@ mod tests {
     #[test]
     fn end_of_speech_marks_only_natural_completed_replies() {
         // 発話して自然終了 → 対象
-        assert!(end_of_speech_qualifies(&Ok(mk_result(
-            "言い終わったよ",
-            false
-        ))));
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("言い終わったよ", false)),
+            true
+        ));
+    }
+
+    /// #431: **反復途中で喋り、最終応答が `NO_REPLY` で自然終了した**ターンも対象。
+    /// これが取りこぼされると「調べます」と言ったきり沈黙する——🏁 が解決すべき当の
+    /// 状況——に印が付かない。判定は最終応答テキストではなく実投稿の有無で見る。
+    #[test]
+    fn end_of_speech_marks_turn_that_spoke_then_ended_with_no_reply() {
+        assert!(end_of_speech_qualifies(
+            &Ok(mk_result("NO_REPLY", false)),
+            true
+        ));
+        // 最終応答が空で終わるターン（ツール実行だけして締める）も同じ。
+        assert!(end_of_speech_qualifies(&Ok(mk_result("", false)), true));
     }
 
     /// #431: 付けない経路を網羅する（恒真回避 — 各除外条件を個別に踏む）。
     #[test]
     fn end_of_speech_excludes_non_speech_and_cutoff() {
-        // NO_REPLY（読んで黙ると決めた）→ 付けない
-        assert!(!end_of_speech_qualifies(&Ok(mk_result("NO_REPLY", false))));
-        // 前後空白付き NO_REPLY も trim して同じ扱い
-        assert!(!end_of_speech_qualifies(&Ok(mk_result(
-            "  NO_REPLY \n",
+        // 発話ゼロ（全反復 NO_REPLY / 非 writable で送信に至らず）→ 付けない。
+        // 逆流防止: 実投稿が無いターンには最終応答が何であれ付かない。
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("NO_REPLY", false)),
             false
-        ))));
-        // 空応答 → 付けない
-        assert!(!end_of_speech_qualifies(&Ok(mk_result("", false))));
-        assert!(!end_of_speech_qualifies(&Ok(mk_result("   ", false))));
-        // 反復上限で打ち切り（自然終了でない）→ 付けない
-        assert!(!end_of_speech_qualifies(&Ok(mk_result("途中まで", true))));
+        ));
+        assert!(!end_of_speech_qualifies(&Ok(mk_result("", false)), false));
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("送れなかった本文", false)),
+            false
+        ));
+        // 反復上限で打ち切り（自然終了でない）→ 発話していても付けない
+        assert!(!end_of_speech_qualifies(
+            &Ok(mk_result("途中まで", true)),
+            true
+        ));
         // エラー / タイムアウト終了 → 付けない
-        assert!(!end_of_speech_qualifies(&Err(anyhow::anyhow!("boom"))));
+        assert!(!end_of_speech_qualifies(
+            &Err(anyhow::anyhow!("boom")),
+            true
+        ));
+    }
+
+    /// #431: subtask 完了 / interaction 応答の経路が使う `Ok` 側ゲートも同じ判定に従う
+    /// （経路ごとにインライン判定を持たせない）。
+    #[test]
+    fn end_of_speech_ok_gate_matches_result_gate() {
+        for (response, stopped) in [("喋った", false), ("NO_REPLY", false), ("途中まで", true)]
+        {
+            for posted in [true, false] {
+                assert_eq!(
+                    end_of_speech_qualifies_ok(&mk_result(response, stopped), posted),
+                    end_of_speech_qualifies(&Ok(mk_result(response, stopped)), posted),
+                    "response={response:?} stopped={stopped} posted={posted}"
+                );
+            }
+        }
     }
 
     /// #419: フィルタ破棄 INFO は宛先ごとに間引く。初回は出し、窓の内側では抑制し、
