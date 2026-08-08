@@ -605,8 +605,15 @@ impl NostaroCli {
     /// （パストラバーサル/インジェクション防止）。返り値は保存パス。
     pub fn save_generated_key(agent_id: &str, key: &GeneratedKey) -> Result<PathBuf> {
         let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create key dir: {}", dir.display()))?;
+        // 失敗経路でも鍵の**所在（保存先パス）をエラーに載せない**（#241）。成功経路は
+        // 返り値の PathBuf をツール層（`nostr_generate_key`）が捨てて npub だけ返す＝所在を
+        // LLM に渡さない。だが失敗経路の `with_context` がパスを載せると、その保護が失敗時
+        // だけ破れ、エラーがツール結果としてそのままエージェントへ渡る。所在は**サーバログ
+        // にだけ**残し、返すエラーは「失敗した」事実のみにする（運用者はログで所在を追える）。
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(dir = %dir.display(), error = %format!("{e}"), "generated key: 保存先ディレクトリの作成に失敗");
+            anyhow::bail!("鍵の保存先ディレクトリの作成に失敗しました");
+        }
         // ファイル名は英数字のみ（bech32/hex は満たす）。空や異物は fallback。
         let stem = sanitize_key_stem(&key.npub);
         let stem = if stem.is_empty() {
@@ -620,7 +627,12 @@ impl NostaroCli {
             stem
         };
         let path = dir.join(format!("{stem}.nsec"));
-        write_secret_file(&path, &key.nsec)?;
+        // `write_secret_file` のエラーには path が Context として載るため、ここで握り、
+        // 所在はログにだけ残して、返すエラーからは落とす（上と同じ理由 = #241）。
+        if let Err(e) = write_secret_file(&path, &key.nsec) {
+            tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "generated key: 鍵ファイルの保存に失敗");
+            anyhow::bail!("生成した鍵の保存に失敗しました");
+        }
         Ok(path)
     }
 
@@ -1118,6 +1130,44 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// #241: 保存に失敗しても、返るエラーに**鍵の所在（保存先パス）を載せない**。
+    /// 成功経路は所在を捨てて npub だけ返すのに、失敗経路の `with_context` がパスを
+    /// 載せると保護が失敗時だけ破れ、エラーが `nostr_generate_key` の結果として
+    /// そのままエージェントへ渡ってしまう。所在はサーバログにだけ残す。
+    #[test]
+    fn test_save_generated_key_failure_does_not_leak_path() {
+        let agent = "agent-241-save-fail";
+        let base = NostaroCli::agent_nostr_dir(agent).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // `generated-keys` の位置に**ファイル**を置く → create_dir_all がそこで失敗する。
+        let blocker = base.join("generated-keys");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        let key = GeneratedKey {
+            nsec: "nsec1secret".to_string(),
+            npub: "npub1abc".to_string(),
+            pubkey: "deadbeef".to_string(),
+        };
+        let err = NostaroCli::save_generated_key(agent, &key).unwrap_err();
+        let msg = format!("{err:#}");
+
+        // 所在（保存先ディレクトリ / agent id / `generated-keys` / データパス）が一切載らない。
+        assert!(!msg.contains("generated-keys"), "保存先が漏れている: {msg}");
+        assert!(
+            !msg.contains(agent),
+            "agent id 経由で所在が漏れている: {msg}"
+        );
+        assert!(
+            !msg.contains(base.to_string_lossy().as_ref()),
+            "保存先パスが漏れている: {msg}"
+        );
+        // 失敗した事実は返す（エージェントは「保存に失敗した」ことは知ってよい）。
+        assert!(msg.contains("失敗"), "失敗である旨は返すべき: {msg}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
