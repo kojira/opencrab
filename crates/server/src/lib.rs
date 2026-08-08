@@ -98,7 +98,7 @@ pub struct AppState {
     pub memory_organize: config::MemoryOrganizeConfig,
     /// スリープ宣言ラン（#384 / #376 段階2）の設定。既定オフ（opt-in / #346）。
     pub memory_declare: config::MemoryDeclareConfig,
-    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）の設定。既定オフ（opt-in）。
+    /// スリープ凝縮ラン（#411 / 記憶の 3 段目）の設定。既定 ON（#457。`enabled=false` で opt-out 可）。
     pub memory_condense: config::MemoryCondenseConfig,
     /// ループ再起動 v1（#52）: 反復上限停止 + active タスク残存時の1回自動再実行。
     pub loop_restart_enabled: bool,
