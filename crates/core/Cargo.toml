@@ -24,7 +24,8 @@ opencrab-llm-types = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true }
+# test-util: ハートビートループの周期を仮想時間で検証する（`#[tokio::test(start_paused)]`）。
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
