@@ -30,6 +30,8 @@ pub mod pubkey;
 pub mod runner;
 pub mod session;
 pub mod sink;
+#[cfg(test)]
+mod test_support;
 pub mod text_delivery;
 
 pub use actions::NostrGatewayActions;
