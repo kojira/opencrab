@@ -356,6 +356,10 @@ enabled = true
 # # ——コードは触らない。REST の一覧 API（配列を返す GET）なら kind = "rest_list" で足りる。
 # # 一時停止したいときは enabled = false（設定は残せる）。特殊な認証や非 REST（ページング等）が
 # # 要るときだけ新しい kind を実装する（設定を「何でも書ける言語」にはしない）。
+# #
+# # 重要: source の name は上の [[intake.routes]] の source と一致させること。一致しないと
+# # catch-up は取得できても配送先（route）が無くイベントが捨てられる（起動時に warn は出るが
+# # 処理はされない）。name のタイポがいちばん起きやすい・気づきにくい壊れ方。
 # [[intake.sources]]
 # name = "omoikane"                          # [intake.secrets] / [[intake.routes]] の source と同じキー
 # kind = "rest_list"                         # 一覧 API を叩く汎用型
