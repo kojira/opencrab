@@ -5828,10 +5828,15 @@ mod tests {
     }
 
     /// 発火経路の無いセッション（session_id なし / web-）は fail-closed（設計 §13.1）。
-    /// 「設定できたのに永遠に発火しない行」を作らせない。
+    /// 「設定できたのに永遠に発火しない行」を作らせない。**エラーには理由だけでなく remedy
+    /// （どこで実行すればよいか）を書く**（#456 の発端は混乱・M-b）。詰まらせて終わらない。
     #[tokio::test]
     async fn heartbeat_tools_fail_closed_without_fireable_session() {
         let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+        // remedy 相当の文言（次に何をすればよいかが 1 読で分かる）が含まれること。
+        let has_remedy = |msg: &str| {
+            msg.contains("Discord") && msg.contains("Nostr") && msg.contains("実行してください")
+        };
         // (a) セッション文脈なし。
         let mut none_ctx = GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x");
         none_ctx.session_id = None;
@@ -5839,7 +5844,9 @@ mod tests {
             .execute("set_my_heartbeat", &json!({"enabled": true}), &none_ctx)
             .await;
         assert!(!r.success);
-        assert!(r.error.unwrap().contains("セッション文脈"));
+        let e = r.error.unwrap();
+        assert!(e.contains("セッション文脈"), "理由: {e}");
+        assert!(has_remedy(&e), "remedy が無い（詰まらせる）: {e}");
         // (b) 発火経路の無い種別（web-）。
         let mut web = GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x");
         web.session_id = Some("web-agent-x".to_string());
@@ -5847,11 +5854,15 @@ mod tests {
             .execute("set_my_heartbeat", &json!({"enabled": true}), &web)
             .await;
         assert!(!r.success);
-        assert!(r.error.unwrap().contains("発火経路"));
-        // get も fail-closed。
+        let e = r.error.unwrap();
+        assert!(e.contains("発火経路"), "理由: {e}");
+        assert!(has_remedy(&e), "remedy が無い（詰まらせる）: {e}");
+        // get も fail-closed かつ remedy 付き。
         let r = actions.execute("get_my_heartbeat", &json!({}), &web).await;
         assert!(!r.success);
-        assert!(r.error.unwrap().contains("発火経路"));
+        let e = r.error.unwrap();
+        assert!(e.contains("発火経路"), "理由: {e}");
+        assert!(has_remedy(&e), "remedy が無い（詰まらせる）: {e}");
     }
 
     /// `discord-` セッションは G=false のとき「enabled なのに発火しない」理由を本人へ見せる

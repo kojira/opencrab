@@ -324,9 +324,6 @@ fn heartbeat_interval_elapsed(
 /// 採用されて発火が続く**。つまり「このチャンネルだけ自律を止める」は agent 固有行の
 /// 無効化だけでは達成できない（global 行も無効化するか、global 行が無い前提が要る）。
 /// 塞ぐと global 行で運用しているチャンネルの挙動が変わるため、本 PR では塞がない。
-/// なお `channel_state_payload`（get_my_heartbeat scope=channel）は (channel_id, agent_id)
-/// 固有行のみを読むので、global 行しか無いチャンネルでは get が `enabled=false` を返しても
-/// 実発火は global 行で起こりうる（get の表示と実発火が乖離する edge）。
 fn list_whitelisted_heartbeat_channels(
     db: &opencrab_db::Db,
     agent_id: &str,

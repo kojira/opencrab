@@ -157,15 +157,18 @@ fn current_session_target(
     let session_id = match ctx.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
+            // 理由だけでなく **remedy（次に何をすればよいか）** を書く（#456 の発端は「混乱」
+            // なので、拒否で詰まらせると混乱を別の形にすり替えるだけになる・M-b）。
             return Err(err(
-                "セッション文脈がありません。ハートビートは会話中のセッション（Nostr / Discord チャンネル）から設定・照会してください。",
+                "このセッションからはハートビートを設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
             ));
         }
     };
     match opencrab_db::queries::resolve_session_fire_target(session_id, &ctx.agent_id) {
         Some(target) => Ok((session_id.to_string(), target)),
+        // 理由（発火経路が無い種別）＋ remedy（どこで実行すればよいか）を 1 読で示す（M-b）。
         None => Err(err(
-            "ハートビートは Nostr の自発投稿か Discord チャンネルのセッションでのみ設定・照会できます（現在のセッションには発火経路がありません）。",
+            "このセッションからはハートビートを設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
         )),
     }
 }
