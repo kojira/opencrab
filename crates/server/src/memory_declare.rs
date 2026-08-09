@@ -398,6 +398,11 @@ struct DeclarePlan {
     window_size: i64,
     /// 本人が既に表明している窓の広さ（sticky）。未表明なら `None`（＝ config の既定で走っている）。
     preferred_window_size: Option<i64>,
+    /// 既定の窓の広さ（＝ `cfg.max_logs.max(1)`。表明が無いときに使う値）。自動リセットの
+    /// 判定 `effective > cfg.max_logs.max(1)`（#394 の `widened_beyond_default`）が比べる
+    /// のとまさに同じ値。本人が表明済みだと size は自分の値しか出ないので、既定を併記して
+    /// 「自分の設定が既定より広いか＝自動リセットが自分に掛かるか」を本人が判定できるようにする（#399）。
+    default_window_size: i64,
     /// clean 完了時にカーソルを置ける**下限**（＝ここまでは必ず前進する / #394）。
     /// 提示窓の `1/MIN_ADVANCE_DIVISOR` 件目の生ログ id。窓が小さければ窓の終端。
     min_position: i64,
@@ -523,6 +528,8 @@ fn decide_declare(
         cursor_id,
         window_size,
         preferred_window_size,
+        // 既定 = 未表明時に使う値。effective_window_size の None 枝と同式（#399）。
+        default_window_size: cfg.max_logs.max(1),
         min_position,
         max_position,
     })))
@@ -619,10 +626,13 @@ fn build_system_prompt(plan: &DeclarePlan) -> String {
         min_pos = plan.min_position.saturating_add(1),
         max_pos = plan.max_position.saturating_add(1),
         size = plan.window_size,
+        // 表明済みだと size は自分の値しか出ないので、既定を併記して「自分の設定が既定より
+        // 広いか＝上の自動リセットが自分に掛かるか」を本人が判定できるようにする（#399）。
+        // 未表明のときは size がそのまま既定なので併記しない（足す情報は最小に留める）。
         size_src = if plan.preferred_window_size.is_some() {
-            "（あなたが決めた広さ）"
+            format!("（あなたが決めた広さ／既定は {} 件）", plan.default_window_size)
         } else {
-            "（既定の広さ）"
+            "（既定の広さ）".to_string()
         },
         size_min = opencrab_actions::memory_units::DECLARE_WINDOW_MIN,
         size_max = opencrab_actions::memory_units::DECLARE_WINDOW_MAX,
@@ -972,6 +982,58 @@ mod tests {
         // 生ログ本文（"発話 N"）は**渡さない**（要約を渡すと読まない / #313）。
         assert!(!sp.contains("発話 0"), "生ログ本文がプロンプトに漏れている");
         assert!(!sp.contains("発話 4"), "生ログ本文がプロンプトに漏れている");
+    }
+
+    /// #399: 本人が広さを表明済みだと「いまの設定」は自分の値しか出ない。既定を併記して
+    /// 「自分の設定が既定より広いか＝自動リセットが自分に掛かるか」を本人が判定できること。
+    #[test]
+    fn prompt_shows_default_window_alongside_preferred() {
+        let state = crate::test_app_state();
+        seed_logs(&state, "a1", "s1", 5);
+        // 本人が既定（= max_logs = 3）より広い 100 件を表明済み。
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_memory_declare_window(
+                &conn,
+                "a1",
+                Some(&DeclareWindowPref {
+                    window_size: Some(100),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+        let plan = match decide_declare(&state.db, &cfg(true, 3, 2), "a1").unwrap() {
+            DeclareDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        // 既定 = cfg.max_logs.max(1) = 3。自動リセットの `widened_beyond_default` が比べるのと同値。
+        assert_eq!(plan.default_window_size, 3);
+        // 表明した広さ（clamp 後 = 100）が「いまの設定」。
+        assert_eq!(plan.window_size, 100);
+        let sp = build_system_prompt(&plan);
+        assert!(
+            sp.contains("いまの設定は 100 件です（あなたが決めた広さ／既定は 3 件）"),
+            "既定の併記が出ていない: {sp}"
+        );
+    }
+
+    /// #399: 未表明のときは「いまの設定」がそのまま既定なので、併記は足さない（情報は最小）。
+    #[test]
+    fn prompt_omits_default_when_no_preference() {
+        let state = crate::test_app_state();
+        seed_logs(&state, "a1", "s1", 5);
+        let plan = match decide_declare(&state.db, &cfg(true, 3, 2), "a1").unwrap() {
+            DeclareDecision::Run(p) => p,
+            other => panic!("expected Run, got {other:?}"),
+        };
+        assert_eq!(plan.preferred_window_size, None);
+        let sp = build_system_prompt(&plan);
+        assert!(sp.contains("（既定の広さ）"), "既定表示が無い: {sp}");
+        assert!(
+            !sp.contains("あなたが決めた広さ"),
+            "未表明なのに表明済みの文言が出ている: {sp}"
+        );
     }
 
     // --- 本番のラン構築を通さない全経路テスト（#370 の構造を共有）---
@@ -1642,9 +1704,21 @@ mod tests {
         )
         .await
         .unwrap();
-        // 位置しか書かれていなかったので、使い切ると希望そのものが空になる（列は NULL へ戻る）。
+        // want_next_from は updated_at を書かないので、位置を使い切ると `after` は
+        // `Default::default()` と一致し、列ごと NULL へ戻る（run_declare の
+        // `after != Default::default()` 判定）。
+        //
+        // 注意（#399）: 全 NULL に戻るのは「位置だけ・updated_at 無し」のこの経路だけ。
+        // 道具（`plan_next_memory_window` / memory_units.rs）は必ず `updated_at = Some(now)`
+        // を書くため、同じく位置を使い切っても列には `{"updated_at":…}` が残り、get_pref は
+        // `Some` を返す。ただし `window_size` が `None` なら既定の広さで走る点は等価で実害は
+        // 無い。この assert が固定しているのは「位置の希望はランで使い切る」ことだけ。
         assert_eq!(get_pref(&state).and_then(|p| p.next_from_id), None);
-        assert_eq!(get_pref(&state), None, "空になった希望は NULL へ戻す");
+        assert_eq!(
+            get_pref(&state),
+            None,
+            "位置だけの希望（updated_at 無し）は使い切ると列ごと NULL へ戻る"
+        );
 
         // 2 回目（希望なし）は窓の終端まで進む＝古い指定が生き残っていない。
         set_marker(
