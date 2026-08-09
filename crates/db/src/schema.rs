@@ -2311,32 +2311,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         )",
     )?;
 
-    // 旧 soul テーブル向けマイグレーション（新規DBでは soul 不存在のためスキップ）
-    if table_exists(conn, "soul")? {
-        // soul.social_style_json カラムDROP（dead code削除）
-        let has_social_style: bool = conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='social_style_json'",
-            )?
-            .query_row([], |row| row.get::<_, i64>(0))
-            .map(|c| c > 0)
-            .unwrap_or(false);
-        if has_social_style {
-            conn.execute_batch("ALTER TABLE soul DROP COLUMN social_style_json")?;
-        }
-
-        // soul.thinking_style_json カラムDROP（dead code削除）
-        let has_thinking_style: bool = conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='thinking_style_json'",
-            )?
-            .query_row([], |row| row.get::<_, i64>(0))
-            .map(|c| c > 0)
-            .unwrap_or(false);
-        if has_thinking_style {
-            conn.execute_batch("ALTER TABLE soul DROP COLUMN thinking_style_json")?;
-        }
-    }
+    // 旧 soul の JSON 列（social_style_json / thinking_style_json）は、以前ここで
+    // 「dead code 削除」として DROP していた。だが soul は後段の
+    // `migrate_soul_identity_to_agents` で**テーブルごと** DROP されるため、この個別 DROP は
+    // 常にその直後の全体 DROP に呑まれる冗長操作でしかない。しかも thinking_style_json は
+    // 自由記述 `description` を含み、ここで先に落とすと集約時の退避（#480）が拾えなくなる。
+    // よって個別 DROP は撤去し、全 JSON 列の退避は集約側に一本化する（列は soul ごと消える）。
 
     // llm_logs テーブル作成（既存DBへの対応）
     conn.execute_batch(
@@ -2591,6 +2571,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 "ALTER TABLE soul ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
             )?;
         }
+
+        // soul.personality カラム追加（#480）。soul が `personality_json` しか持たない最初期
+        // （2026-02・b6a145e）世代の DB は `personality` 列を持たず、後段の
+        // `migrate_soul_identity_to_agents` が `SELECT ... s.personality ... FROM soul` で
+        // `no such column: s.personality` を投げて起動不能になる。集約前に列を用意して塞ぐ。
+        // 旧 `personality_json`（構造化 JSON）は agents.personality（自由記述 TEXT・NULL 可）に
+        // 意味的対応が無いため移送せず NULL のままにする（起動の担保が目的・#478 と同じ発想）。
+        let has_personality: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='personality'")?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_personality {
+            conn.execute_batch("ALTER TABLE soul ADD COLUMN personality TEXT")?;
+        }
     }
 
     // import_sync_state テーブル作成
@@ -2733,6 +2728,78 @@ fn migrate_soul_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
           AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = i.agent_id);
         "#,
     )?;
+
+    // #480: 上の集約は soul から persona_name / personality / instructions しか agents に
+    // 写さない。残る JSON 列（social_style_json / personality_json=Big Five /
+    // thinking_style_json / custom_traits_json）は直後の DROP TABLE soul で失われる。
+    // thinking_style_json は自由記述 `description` を、custom_traits_json は利用者任意の JSON を
+    // 含み得るため、「意図して設定した値を勝手に破棄しない」原則（#456）に反する。
+    // → DROP 前に、存在する JSON 列を **agents.metadata_json.legacy_soul** へ入れ子で退避する。
+    //
+    // 頑健性: 世代により存在する列が違う（8b2b2b8 以降の soul は JSON 列を一切持たない）ため
+    // 実在する列だけを動的に組み立てる。列値が不正 JSON / NULL でも起動を止めないよう
+    // `json_valid` で分岐し（不正 JSON はエラーになる `json()` を避けて生文字列で保持）、
+    // 既存の metadata_json（identity 由来）が入っている経路も壊さない（valid ならそこへ挿す・
+    // 不正でも `_original_metadata` に退避してから legacy_soul を足す）。
+    let legacy_cols = [
+        "social_style_json",
+        "personality_json",
+        "thinking_style_json",
+        "custom_traits_json",
+    ];
+    let present: Vec<&str> = legacy_cols
+        .into_iter()
+        .filter(|c| column_exists(conn, "soul", c).unwrap_or(false))
+        .collect();
+    if !present.is_empty() {
+        let obj_fields = present
+            .iter()
+            .map(|c| format!("'{c}', CASE WHEN json_valid(s.{c}) THEN json(s.{c}) ELSE s.{c} END"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // 不正 JSON を含む行数を先に数える（起動は止めず、warn で可視化するため）。
+        // 「壊れていた」= 実在列のいずれかが非 NULL かつ `json_valid` でない行。
+        let broken_pred = present
+            .iter()
+            .map(|c| format!("(s.{c} IS NOT NULL AND NOT json_valid(s.{c}))"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let broken_json_rows: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM soul s WHERE {broken_pred}"),
+            [],
+            |r| r.get(0),
+        )?;
+
+        let sql = format!(
+            "UPDATE agents
+             SET metadata_json = json_set(
+                 CASE
+                     WHEN metadata_json IS NULL THEN '{{}}'
+                     WHEN json_valid(metadata_json) THEN metadata_json
+                     ELSE json_object('_original_metadata', metadata_json)
+                 END,
+                 '$.legacy_soul',
+                 json((SELECT json_object({obj_fields}) FROM soul s WHERE s.agent_id = agents.agent_id))
+             )
+             WHERE agent_id IN (SELECT agent_id FROM soul)"
+        );
+        let salvaged_rows = conn.execute(&sql, [])?;
+
+        // 移行の可視化（#480）: この世代の DB は今まで起動できず、利用者は何が起きるか分からない。
+        // 黙って通すと「何か消えたかも」と疑うことすらできないため、退避したことと件数を残す。
+        if salvaged_rows > 0 {
+            tracing::info!(
+                salvaged_rows,
+                "旧 soul の付随データ（JSON 列）を agents.metadata_json の legacy_soul へ退避した"
+            );
+        }
+        if broken_json_rows > 0 {
+            tracing::warn!(
+                broken_json_rows,
+                "旧 soul の付随データに不正 JSON が含まれ、構造化せず生文字列として退避した（起動は継続）"
+            );
+        }
+    }
 
     conn.execute_batch("DROP TABLE IF EXISTS soul; DROP TABLE IF EXISTS identity;")?;
     Ok(())
@@ -3484,6 +3551,125 @@ mod migration_tests {
                         )
                         .unwrap();
                     assert!(sid.is_some(), "既存行が backfill されていること");
+                },
+            },
+            // 2026-02 (b6a145e) 初期世代: `soul` が `personality_json`（JSON）を持ち
+            // `personality` / `instructions` 列を持たない。現行 `migrate_soul_identity_to_agents`
+            // は `SELECT ... s.personality ... FROM soul` で集約するため、修正前は
+            // `no such column: s.personality` を投げて起動不能だった（#480）。修正後は
+            // migrate() が集約前に `personality` 列を用意して塞ぐ。
+            OldDbGeneration {
+                name: "pre_personality_2026_02",
+                // b6a145e の soul / identity をそのまま（soul は personality を欠く）。
+                schema: "
+                    CREATE TABLE IF NOT EXISTS soul (
+                        agent_id TEXT PRIMARY KEY,
+                        persona_name TEXT NOT NULL,
+                        social_style_json TEXT NOT NULL DEFAULT '{}',
+                        personality_json TEXT NOT NULL DEFAULT '{}',
+                        thinking_style_json TEXT NOT NULL DEFAULT '{}',
+                        custom_traits_json TEXT,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS identity (
+                        agent_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'discussant',
+                        job_title TEXT,
+                        organization TEXT,
+                        image_url TEXT,
+                        metadata_json TEXT,
+                        updated_at TEXT NOT NULL
+                    );
+                    -- a1: soul + identity（集約 INSERT1 経路）。identity は既存 metadata を持つ。
+                    -- soul の JSON 列（Big Five / 自由記述 description / 任意 custom_traits）を全て埋める。
+                    INSERT INTO soul (agent_id, persona_name, social_style_json, personality_json, thinking_style_json, custom_traits_json, updated_at)
+                    VALUES ('a1', 'Shelly',
+                            '{\"formal\":0.7}',
+                            '{\"openness\":0.5}',
+                            '{\"description\":\"deep and careful\"}',
+                            '{\"favorite_color\":\"teal\"}',
+                            '2026-02-20');
+                    INSERT INTO identity (agent_id, name, job_title, metadata_json, updated_at)
+                    VALUES ('a1', 'Shelly', 'engineer', '{\"kept\":\"yes\"}', '2026-02-20');
+                    -- a2: soul のみ（identity 無し = 集約 INSERT2 経路）。metadata は NULL から退避される。
+                    INSERT INTO soul (agent_id, persona_name, custom_traits_json, updated_at)
+                    VALUES ('a2', 'Solo', '{\"note\":\"user wrote this\"}', '2026-02-20');
+                    -- a3: custom_traits_json が不正 JSON。起動を止めず生文字列で退避する（warn 経路）。
+                    INSERT INTO soul (agent_id, persona_name, custom_traits_json, updated_at)
+                    VALUES ('a3', 'Broken', 'not-json{oops', '2026-02-20');
+                ",
+                verify: |conn| {
+                    // soul / identity は集約後に DROP される。
+                    assert!(
+                        !table_exists(conn, "soul").unwrap(),
+                        "soul は集約後に DROP されていること"
+                    );
+                    assert!(
+                        !table_exists(conn, "identity").unwrap(),
+                        "identity は集約後に DROP されていること"
+                    );
+                    // agents に統合され、name は identity 由来・personality は列欠落のため NULL。
+                    let (name, job, personality): (String, Option<String>, Option<String>) = conn
+                        .query_row(
+                            "SELECT name, job_title, personality FROM agents WHERE agent_id = 'a1'",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .expect("agents に a1 が集約されていること");
+                    assert_eq!(name, "Shelly");
+                    assert_eq!(job.as_deref(), Some("engineer"));
+                    assert!(
+                        personality.is_none(),
+                        "personality 列欠落世代は NULL で集約されること（personality_json は移送しない）"
+                    );
+
+                    // #480 退避: soul の JSON 列は agents.metadata_json.legacy_soul へ保全される。
+                    // a1（INSERT1 経路）: identity 既存 metadata（kept）を壊さず legacy_soul を足す。
+                    let extract = |agent: &str, path: &str| -> Option<String> {
+                        conn.query_row(
+                            "SELECT json_extract(metadata_json, ?2) FROM agents WHERE agent_id = ?1",
+                            rusqlite::params![agent, path],
+                            |r| r.get::<_, Option<String>>(0),
+                        )
+                        .unwrap()
+                    };
+                    assert_eq!(
+                        extract("a1", "$.kept").as_deref(),
+                        Some("yes"),
+                        "identity 由来の既存 metadata は退避で壊れないこと"
+                    );
+                    assert_eq!(
+                        extract("a1", "$.legacy_soul.thinking_style_json.description")
+                            .as_deref(),
+                        Some("deep and careful"),
+                        "thinking_style_json の自由記述 description が退避されること"
+                    );
+                    assert_eq!(
+                        extract("a1", "$.legacy_soul.custom_traits_json.favorite_color")
+                            .as_deref(),
+                        Some("teal"),
+                        "custom_traits_json（任意 JSON）が退避されること"
+                    );
+                    // 数値は json_extract が REAL を返すため、オブジェクトごと TEXT で取り出して検証。
+                    assert_eq!(
+                        extract("a1", "$.legacy_soul.personality_json").as_deref(),
+                        Some("{\"openness\":0.5}"),
+                        "personality_json（Big Five）も退避されること"
+                    );
+                    // a2（INSERT2 経路）: metadata が NULL からでも legacy_soul を退避できること。
+                    assert_eq!(
+                        extract("a2", "$.legacy_soul.custom_traits_json.note")
+                            .as_deref(),
+                        Some("user wrote this"),
+                        "identity 無し経路（metadata=NULL）でも退避されること"
+                    );
+                    // a3: 不正 JSON でも起動を止めず、生文字列として退避されること（warn 経路）。
+                    assert_eq!(
+                        extract("a3", "$.legacy_soul.custom_traits_json").as_deref(),
+                        Some("not-json{oops"),
+                        "不正 JSON は生文字列で退避されること"
+                    );
                 },
             },
         ]
