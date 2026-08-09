@@ -350,6 +350,12 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     dispatchable）と分類が割れるのはこのため — あちらは長文の保存で、
     //     値域の押し戻しを同ターンで受ける必要が無い。
     "set_my_heartbeat",
+    // 定時実行（#455）。ハートビートと同じ理由で inline:
+    // (5) 純粋な読み取り: `get_my_schedules`。
+    // (3) 同ターン結果依存: `set_my_schedule` は cron 式の不正を**同ターンで拒否**し、
+    //     直して呼び直せる必要がある（実行時に黙って発火しないのが最悪）。
+    "get_my_schedules",
+    "set_my_schedule",
     // 通知先（webhook）の管理（#157 S5 で Discord から移設）。**移設前の分類を維持する**:
     // 6 個とも `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
     //
@@ -601,6 +607,12 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // （費用と挙動に効く / #240 の「意図せず自律実行が始まる」の再来）。
     "get_my_heartbeat",
     "set_my_heartbeat",
+    // 定時実行（#455）。`set_my_heartbeat` と同じ理由: **owner 限定にはしない**（自分の
+    // 定時実行を自分で決めるのが目的で、本人が触るターン〔heartbeat tick / ダッシュボード /
+    // オーナー会話〕は caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話ターン）へ
+    // 開けると、会話で「毎朝○時に外部出力する」を仕込ませられる（#240 の再来）ので塞ぐ。
+    "get_my_schedules",
+    "set_my_schedule",
     // VC 参加/退出。可視性 == 強制の対称化（#45）: 非 trusted の Agent には
     // 一覧にも出さない。ハンドラ側はさらに厳しく owner/trusted_user のみ許可
     // （co_agent は一覧に見えても実行は拒否される）。

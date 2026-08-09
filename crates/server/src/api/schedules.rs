@@ -2,8 +2,10 @@
 //!
 //! `GET/POST /api/agents/{id}/schedules`, `PATCH/DELETE /api/schedules/{sid}`。
 //! **既存のダッシュボード系エージェント設定 API（`channel_configs` 等）と同じ認証層の内側**
-//! に置く（新しい認可ゲートは足さない・設計 §10.2）。**新しい自己設定ツールは追加しない**
-//! （自律作用面を広げない・§7.4）——schedule はオーナーがダッシュボードから登録する。
+//! に置く（新しい認可ゲートは足さない・設計 §10.2）。この CRUD（owner/dashboard 用）と、
+//! **エージェント自身が触るツール**（`crate::agent_schedule` の `set_my_schedule` /
+//! `get_my_schedules`・オーナー裁定 2026-08-09 で §7.4 の「ツールを追加しない」を撤回）は
+//! **検証・登録ロジックを共有する**（[`create_schedule_core`] / [`list_session_schedules_core`]）。
 //!
 //! # 語彙・持ち方（統括裁定・v38）
 //! 応答の**次回発火は `next_fire_at`**（heartbeat と同名）で、**列に持たず照会時に算出**する
@@ -49,6 +51,19 @@ pub struct ScheduleDto {
     pub last_fired_at: Option<String>,
     /// 次回発火時刻（rfc3339 UTC）。cron/`@every` から算出。解釈不能なら `null`。
     pub next_fire_at: Option<String>,
+    /// enabled なのに発火しない状態か（heartbeat の `gated` と同じ扱い）。
+    pub gated: bool,
+    /// `gated=true` のときの理由。**schedule は G ゲートの対象外**なので理由は「式を解釈
+    /// できない」等に限られる（G による沈黙は起きない）。
+    pub gated_reason: Option<String>,
+}
+
+/// CRUD ハンドラとエージェント向けツールが**共有する**操作エラー（ロジックを二重化しない）。
+pub(crate) enum ScheduleOpError {
+    /// 入力不正（cron/tz/session/message）。ハンドラは 400、ツールは remedy 付きエラーへ写す。
+    BadRequest(String),
+    /// サーバ内部エラー（DB 等）。
+    Internal(String),
 }
 
 fn parse_wall_clock(s: &Option<String>) -> Option<DateTime<Utc>> {
@@ -59,7 +74,7 @@ fn parse_wall_clock(s: &Option<String>) -> Option<DateTime<Utc>> {
 }
 
 impl ScheduleDto {
-    fn from_row(row: AgentScheduleRow) -> Self {
+    pub(crate) fn from_row(row: AgentScheduleRow) -> Self {
         // 照会時算出（真実は再計算・キャッシュしない）。
         let next_fire_at = schedule_next_fire_at(
             &row.cron_expr,
@@ -70,6 +85,16 @@ impl ScheduleDto {
         .ok()
         .flatten()
         .map(|t| t.to_rfc3339());
+        // enabled なのに next を算出できない = 発火しない（式が解釈不能など）。schedule は G ゲート
+        // 対象外なので、gated の理由はこれに限られる（heartbeat の G 沈黙は起きない）。
+        let gated_reason = if row.enabled && next_fire_at.is_none() {
+            Some(format!(
+                "スケジュール式（{}）を解釈できないため発火しません。cron 5 フィールド（例: 0 7 * * *）か @every 形式（例: @every 3h）で指定し直してください。",
+                row.cron_expr
+            ))
+        } else {
+            None
+        };
         ScheduleDto {
             id: row.id.unwrap_or_default(),
             agent_id: row.agent_id,
@@ -81,8 +106,89 @@ impl ScheduleDto {
             anchor_at: row.anchor_at,
             last_fired_at: row.last_fired_at,
             next_fire_at,
+            gated: gated_reason.is_some(),
+            gated_reason,
         }
     }
+}
+
+/// 新規スケジュールを検証・登録して DTO を返す共有コア（CRUD ハンドラ / ツールが共用）。
+///
+/// cron/`@every`/timezone を検証し、`session_id` がそのエージェントの発火経路を持つことを確認し、
+/// enabled なら `anchor_at=now`（設計 §4.4）で挿入する。成功後に `scheduler_wake` を鳴らす（#437）。
+pub(crate) fn create_schedule_core(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    cron_expr: &str,
+    timezone: &str,
+    message: &str,
+    enabled: bool,
+) -> Result<ScheduleDto, ScheduleOpError> {
+    validate_schedule(cron_expr, timezone).map_err(|e| {
+        ScheduleOpError::BadRequest(format!(
+            "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
+        ))
+    })?;
+    if resolve_session_fire_target(session_id, agent_id).is_none() {
+        return Err(ScheduleOpError::BadRequest(
+            "このセッションには発火経路がありません（Nostr の自発投稿、または Discord チャンネルのセッションでのみ登録できます）。".to_string(),
+        ));
+    }
+    if message.trim().is_empty() {
+        return Err(ScheduleOpError::BadRequest(
+            "message は空にできません（発火時にエージェントへ渡す指示文を書いてください）。"
+                .to_string(),
+        ));
+    }
+
+    // enabled で作るなら anchor=now（初回発火を「now 以降の最初のスロット / now+周期」へ）。
+    let anchor_at = if enabled {
+        Some(Utc::now().to_rfc3339())
+    } else {
+        None
+    };
+    let row = AgentScheduleRow {
+        id: None,
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        cron_expr: cron_expr.to_string(),
+        timezone: timezone.to_string(),
+        message: message.to_string(),
+        enabled,
+        anchor_at,
+        last_fired_at: None,
+    };
+    let id = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::insert_agent_schedule(&conn, &row)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+    };
+    // 即時反映（#437）: スケジューラを起こして rebuild させる。
+    state.scheduler_wake.notify_one();
+    let saved = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_schedule(&conn, id)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+            .ok_or_else(|| ScheduleOpError::Internal("insert 後の行が見つかりません".to_string()))?
+    };
+    Ok(ScheduleDto::from_row(saved))
+}
+
+/// あるセッションに属するスケジュールを DTO で列挙する共有コア（ツール `get_my_schedules` 用）。
+pub(crate) fn list_session_schedules_core(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+) -> Result<Vec<ScheduleDto>, ScheduleOpError> {
+    let conn = state.db.lock().unwrap();
+    let rows = opencrab_db::queries::list_agent_schedules(&conn, agent_id)
+        .map_err(|e| ScheduleOpError::Internal(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.session_id == session_id)
+        .map(ScheduleDto::from_row)
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -130,48 +236,20 @@ pub async fn create_schedule(
     Path(agent_id): Path<String>,
     Json(req): Json<CreateRequest>,
 ) -> Result<Json<ScheduleDto>, StatusCode> {
-    // cron / @every / timezone の検証（不正は 400）。
-    validate_schedule(&req.cron_expr, &req.timezone).map_err(|_| StatusCode::BAD_REQUEST)?;
-    // session_id はそのエージェントの発火経路を持つセッションに限る（fail-closed）。
-    if resolve_session_fire_target(&req.session_id, &agent_id).is_none() {
-        return Err(StatusCode::BAD_REQUEST);
+    // 検証・登録・wake は共有コアへ（エージェント向けツール set_my_schedule と同一ロジック）。
+    match create_schedule_core(
+        &state,
+        &agent_id,
+        &req.session_id,
+        &req.cron_expr,
+        &req.timezone,
+        &req.message,
+        req.enabled,
+    ) {
+        Ok(dto) => Ok(Json(dto)),
+        Err(ScheduleOpError::BadRequest(_)) => Err(StatusCode::BAD_REQUEST),
+        Err(ScheduleOpError::Internal(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
-    if req.message.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // enabled で作るなら anchor=now（初回発火を「now 以降の最初のスロット / now+周期」へ）。
-    let anchor_at = if req.enabled {
-        Some(Utc::now().to_rfc3339())
-    } else {
-        None
-    };
-    let row = AgentScheduleRow {
-        id: None,
-        agent_id: agent_id.clone(),
-        session_id: req.session_id,
-        cron_expr: req.cron_expr,
-        timezone: req.timezone,
-        message: req.message,
-        enabled: req.enabled,
-        anchor_at,
-        last_fired_at: None,
-    };
-    let id = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::insert_agent_schedule(&conn, &row)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-    // 即時反映（#437）: スケジューラを起こして rebuild させる。
-    state.scheduler_wake.notify_one();
-
-    let saved = {
-        let conn = state.db.lock().unwrap();
-        opencrab_db::queries::get_agent_schedule(&conn, id)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-    };
-    Ok(Json(ScheduleDto::from_row(saved)))
 }
 
 #[derive(Debug, Deserialize)]
