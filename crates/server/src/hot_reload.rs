@@ -360,4 +360,58 @@ mod watcher_rejection_tests {
             "陰性の窓のあとも watcher は生きているはず（窓の間に止まっていた）"
         );
     }
+
+    /// `heartbeat_enabled`（live G / global kill-switch）の変更が watch へ push されることを、
+    /// 実ファイル書き換えで両方向（true→false→true）確認する。
+    ///
+    /// **これは live G の心臓**。watcher が enabled を config から読み直さず起動時の値へ固定
+    /// （＝起動時スナップショット）に退行すると、**運用者が `heartbeat_enabled = false` にしても
+    /// discord- が止まらない**。上の `rejected_reload_touches_neither_tools_nor_heartbeat` は
+    /// `interval_secs` しか見ておらず enabled の追従を担保していなかったので、ここで別途固定する。
+    fn hb_config_text(enabled: bool) -> String {
+        format!(
+            "[llm]\ndefault_provider = \"p1\"\ndefault_model = \"m1\"\n\
+             [tools]\nenabled = true\n\
+             [agent]\nheartbeat_interval_secs = 60\nheartbeat_enabled = {enabled}\n"
+        )
+    }
+
+    #[test]
+    fn heartbeat_enabled_toggle_propagates_to_watch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("hb.toml");
+        std::fs::write(&path, hb_config_text(true)).unwrap();
+
+        let db = opencrab_db::Db::from_connection(opencrab_db::init_memory().unwrap());
+        let tools_config = Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default()));
+        let (hb_tx, hb_rx) =
+            tokio::sync::watch::channel(opencrab_core::heartbeat::HeartbeatConfig {
+                interval_secs: 60,
+                enabled: true,
+            });
+
+        let _handle = start_config_watcher(
+            dir.path(),
+            db,
+            RUNNING.to_string(),
+            tools_config.clone(),
+            hb_tx,
+        );
+
+        // G=false へ落とす編集が watch へ届く（default_model は不変なので validate を通る）。
+        assert!(
+            poll_with_rewrites(&path, &hb_config_text(false), APPLY_WAIT, || {
+                !hb_rx.borrow().enabled
+            }),
+            "heartbeat_enabled=false が watch へ push されない（live G kill-switch が壊れる＝起動時スナップショットに退行）"
+        );
+
+        // 逆方向: G=true へ戻す編集も届く。
+        assert!(
+            poll_with_rewrites(&path, &hb_config_text(true), APPLY_WAIT, || {
+                hb_rx.borrow().enabled
+            }),
+            "heartbeat_enabled=true への復帰が watch へ push されない"
+        );
+    }
 }

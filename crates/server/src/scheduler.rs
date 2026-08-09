@@ -771,4 +771,75 @@ mod tests {
             "last_attempt が next_fire を interval ぶん後ろへ逃がす"
         );
     }
+
+    // ---- panic 経路の統合確認（§6 / §3.7 N-a） ----
+
+    /// 発火ターンが **panic** したとき、`InFlightGuard::drop` が in_flight を除去し・完了 wake を
+    /// 鳴らし・`last_attempt` を **残す**ことを実行で確認する。panic は spawn 内の
+    /// `run_one_fire().await` で unwind するので、後続の Some/None 分岐（`set_session_last_fired` +
+    /// `attempts.remove`）には到達しない——**attempt を消してよいのは成功 Some 分岐だけ**なので、
+    /// panic では attempt が残り、rebuild が `next_fire = attempt + interval`（未来）で backoff する。
+    /// これで panic → 即再発火のスピンを避ける（§6）。guard が attempt を触るように退行したり、
+    /// in_flight 除去をやめたりすると、このテストが落ちる（本番の live 経路を守る）。
+    #[tokio::test]
+    async fn panic_in_fire_clears_in_flight_keeps_attempt_and_wakes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let attempts: Arc<Mutex<HashMap<String, DateTime<Utc>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let sid = format!("nostr-{AGENT_UUID}");
+
+        // 本体ループが spawn 直前に打つ状態を再現する（in_flight へ insert・attempt へ last_attempt）。
+        in_flight.lock().unwrap().insert(sid.clone());
+        attempts.lock().unwrap().insert(sid.clone(), Utc::now());
+
+        // 完了 wake を観測する待ち手。
+        let woken = Arc::new(AtomicBool::new(false));
+        {
+            let w = wake.clone();
+            let woken2 = woken.clone();
+            tokio::spawn(async move {
+                w.notified().await;
+                woken2.store(true, Ordering::SeqCst);
+            });
+        }
+        tokio::task::yield_now().await;
+
+        // 発火ターンが panic する spawn（`run_one_fire` 内の panic を模す）。Some/None 分岐へ
+        // 到達しないので `set_session_last_fired` も `attempts.remove` も走らない。
+        let jh = {
+            let in_flight = in_flight.clone();
+            let wake = wake.clone();
+            let sid = sid.clone();
+            tokio::spawn(async move {
+                let _guard = InFlightGuard {
+                    session_id: sid,
+                    in_flight,
+                    wake,
+                };
+                panic!("boom: 発火ターン内 panic");
+            })
+        };
+        let res = jh.await;
+        assert!(res.is_err(), "spawn した発火ターンは panic するはず");
+
+        // (1) Drop ガードが in_flight から除去した（panic の unwind 中でも走る）。
+        assert!(
+            !in_flight.lock().unwrap().contains(&sid),
+            "panic 後も in_flight に残る（Drop ガードが効いていない＝走行中扱いで固着し二度と発火しない）"
+        );
+        // (2) last_attempt は残る（成功 Some 分岐に来ないので remove されない）→ backoff が効く。
+        assert!(
+            attempts.lock().unwrap().contains_key(&sid),
+            "panic 時に attempt が消える（backoff が効かず即再発火スピンになる）"
+        );
+        // (3) 完了 wake が届いた（Drop ガードの notify_one）。
+        tokio::task::yield_now().await;
+        assert!(
+            woken.load(Ordering::SeqCst),
+            "panic 後の完了 wake が鳴っていない（rebuild が促されない）"
+        );
+    }
 }
