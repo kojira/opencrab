@@ -21,6 +21,14 @@ fn create_test_app() -> Router {
 /// API を経由せずに行を書き込みたいテスト（入口の正規化が入る前に保存された
 /// レガシー行の再現）で使う。
 fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
+    let (state, db) = create_test_state(0.5);
+    (create_router(state), db)
+}
+
+/// 既定ヘルパと同じ `AppState` を組むが、`compaction_ratio` だけ引数で差し替える。
+/// compaction_ratio を state から読んでいる経路（例: model_pricing 一覧 API）を
+/// 恒真にならない値で検証するために使う。
+fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
     let state = AppState {
@@ -35,7 +43,7 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         tools_config: Arc::new(std::sync::RwLock::new(
             opencrab_actions::tools::ToolsConfig::default(),
         )),
-        compaction_ratio: 0.5,
+        compaction_ratio,
         evaluator: opencrab_server::config::EvaluatorConfig::default(),
         skill_consolidation: opencrab_server::config::SkillConsolidationConfig::default(),
         category_maintenance: opencrab_server::config::CategoryMaintenanceConfig::default(),
@@ -61,7 +69,7 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
     };
-    (create_router(state), db)
+    (state, db)
 }
 
 // ==================== Helper ====================
@@ -129,6 +137,37 @@ async fn test_health_check() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
+}
+
+#[tokio::test]
+async fn test_model_pricing_list_exposes_compaction_ratio() {
+    // 実効予算 = context_window × compaction_ratio をフロントが計算するには
+    // compaction_ratio が要る（#484）。ここでは **既定 0.5 を避けて** 0.375 を state に
+    // 入れ、ハンドラが state.compaction_ratio を読んでいる（定数を返していない）ことを
+    // 確かめる。行も 1 件入れて models と同居することを見る。
+    let (state, db) = create_test_state(0.375);
+    {
+        let conn = db.lock().unwrap();
+        opencrab_db::queries::upsert_model_pricing(
+            &conn,
+            &opencrab_db::queries::ModelPricingRow {
+                provider: "chatgpt".to_string(),
+                model: "gpt-5.6-luna".to_string(),
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
+                context_window: Some(400_000),
+            },
+        )
+        .unwrap();
+    }
+    let app = create_router(state);
+
+    let (status, body) = send_request(app, "GET", "/api/llm/model-pricing", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["compaction_ratio"].as_f64(), Some(0.375));
+    let models = body["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["context_window"].as_i64(), Some(400_000));
 }
 
 #[tokio::test]
