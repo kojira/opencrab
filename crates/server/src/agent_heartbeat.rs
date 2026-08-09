@@ -1,48 +1,38 @@
-//! エージェントが**自分自身の**ハートビート設定を読み書きするツール（#247 / #336）。
+//! エージェントが**自分自身の**ハートビート設定を読み書きするツール（#247 / #336 / #456）。
 //!
-//! - `get_my_heartbeat`: 現在の有効/無効と間隔、そして境界値（下限・上限・既定）を返す。
+//! - `get_my_heartbeat`: 現在の有効/無効・間隔・次回発火時刻（`next_fire_at`）、境界値
+//!   （下限・上限・既定）を返す。enabled なのに発火しない理由があればそれも返す。
 //! - `set_my_heartbeat`: 有効/無効と間隔を更新する。
 //!
-//! # スコープ（#336）
+//! # セッション単位に一本化（#456・設計 §13）
 //!
-//! 既定は `scope="agent"`（エージェント単位、`agent_heartbeat_config`）。`scope="channel"`
-//! を渡すと **そのチャンネルの** 有効/無効と間隔（`discord_channel_config` の
-//! `heartbeat_enabled` / `heartbeat_interval_secs`）を触る。指示文
-//! （`read/update_heartbeat_instructions`）の scope の扱いに揃えてある（channel scope は
-//! `discord_channel_config` を読み書きする）。チャンネル発火時の間隔は
-//! `resolve_channel_heartbeat_interval`（channel → agent → 運用者既定、下限クランプ）で
-//! 解決される。
+//! **スコープは存在しない。** かつては `scope="agent"`（`agent_heartbeat_config`）と
+//! `scope="channel"`（`discord_channel_config`）の二択があり、エージェントに設定を頼むと
+//! 「セッションスコープと agent スコープを取り違えて混乱する」のが #456 の発端だった。
+//! PR3 でスコープ引数・応答フィールド・説明文からスコープの二重性を一掃し、**常に「いま
+//! 話しているセッション」**（`ctx.session_id`）に対して設定・照会する。エージェントは
+//! `enabled` と `interval_secs` だけを指定する（選ぶべきスコープが無い）。
 //!
-//! 発火形態の関係（重要）: エージェント単位で `enabled=true` にすると発火は**エージェント
-//! 単位で 1 回**（空 `channel_id` の単一発話。Discord の代表チャンネル選択は別 PR / 現状は
-//! ログのみに縮退）になり、チャンネル単位設定は使われない（#238 の
-//! precedence）。チャンネルごとに間隔・有効を効かせたい場合はエージェント単位を
-//! `enabled` にせず、`scope="channel"` で各チャンネルを設定する。Nostr など channel の
-//! 概念が無い gateway は agent スコープのまま（channel scope は Discord 用）。
+//! 発火先（Nostr broadcast / Discord channel）は `session_id` の接頭辞から導く（設計 §3.6）。
+//! 発火経路を持つのは **`nostr-` / `discord-` セッションだけ**なので、それ以外の種別
+//! （`web-` / `heartbeat-` / `agent-msg-` 等）で呼ばれたら**明示エラーで拒否**する
+//! （fail-closed）。「enabled にできたのに永遠に発火しない行」を作らせない（発端が UX
+//! なので「設定できたのに発火しない」は解決になっていない・設計 §13.1）。
 //!
 //! # 「自分のだけ」をどう保証しているか
 //!
 //! **引数に `agent_id` が無い。** 対象は常に `ctx.agent_id`（bridge が実行境界で組む
-//! 呼び出し文脈で、ツール引数 JSON からは触れない / `GatewayCallContext` の doc）。
-//! さらに `agent_id`（および紛らわしい別名）が引数に現れたら**明示エラーで拒否**する。
-//! 無視して黙って自分の設定を書き換えると、エージェントは「他のエージェントの設定を
-//! 変えた」と思い込んだままになる。
+//! 呼び出し文脈）。さらに `agent_id`（および紛らわしい別名）や**廃止したスコープ引数**
+//! （`scope` / `channel_id` / `guild_id`）が引数に現れたら**明示エラーで拒否**する。
+//! 無視して黙って現在セッションへ書くと、エージェントは「別のチャンネル / 別スコープを
+//! 設定した」と思い込んだままになる（#456 が潰したい混乱そのもの）。
 //!
 //! # 権限
 //!
-//! **オーナー限定にしない**（自分の設定を自分で触れることがこの機能の目的）。
-//! ただし素の `Agent`（= 未信頼の外部ユーザー由来のターン）からは見えないよう
-//! `TRUSTED_ONLY_ACTIONS` に入れる。エージェントが自分の意思で触るターン
-//! （ハートビート tick / ダッシュボード / オーナーとの会話）は全て `Owner` なので
-//! 自己設定は妨げられない。逆にここを開けると、外部ユーザーが会話で
-//! 「ハートビートを最短で有効にして」と言うだけで自律実行を起動できてしまう。
-//! ハンドラ内でも同じ検査をする（多層防御 / `heartbeat_instructions` と同じ流儀）。
-//!
-//! # 指示文は触らない
-//!
-//! ハートビートの**指示文**（`update_heartbeat_instructions`）はオーナー限定のまま。
-//! 「いつ動くか」を自分で決めるのと「動いたとき何をするか」を自分で書き換えるのは
-//! 意味が違う（#247 の設計判断）。
+//! **オーナー限定にしない**（自分の設定を自分で触れることがこの機能の目的）。ただし素の
+//! `Agent`（未信頼の外部ユーザー由来ターン）からは見えないよう `TRUSTED_ONLY_ACTIONS` に
+//! 入れ、ハンドラ内でも同じ検査をする（多層防御）。指示文（`update_heartbeat_instructions`）
+//! はオーナー限定のまま（「いつ動くか」と「動いたとき何をするか」は別・#247）。
 
 use serde_json::json;
 
@@ -84,6 +74,26 @@ fn reject_foreign_target(args: &serde_json::Value) -> Option<GatewayActionResult
     None
 }
 
+/// 廃止したスコープ引数（`scope` / `channel_id` / `guild_id`）を拒否する（#456 / 設計 §13）。
+///
+/// スコープは撤廃され、対象は常に**現在のセッション**になった。旧習慣でこれらを渡されたら
+/// 黙殺せず**明示エラーで新しい振る舞いへ誘導する**（黙って現在セッションへ書くと「別
+/// チャンネルを設定した」と誤解が残る＝#456 が潰したい混乱そのもの）。
+fn reject_removed_scope_args(args: &serde_json::Value) -> Option<GatewayActionResult> {
+    for key in ["scope", "channel_id", "guild_id"] {
+        if args.get(key).is_some() {
+            return Some(GatewayActionResult {
+                success: false,
+                data: None,
+                error: Some(format!(
+                    "{key}は廃止されました。ハートビートは常に「いま話しているセッション」に対して設定・照会されます（enabled と interval_secs だけ指定してください）。"
+                )),
+            });
+        }
+    }
+    None
+}
+
 /// `error` だけを持つ失敗レスポンスを組む短縮子。
 fn err(msg: impl Into<String>) -> GatewayActionResult {
     GatewayActionResult {
@@ -91,13 +101,6 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
         data: None,
         error: Some(msg.into()),
     }
-}
-
-/// `scope` を読む（既定は `"agent"`）。
-fn scope_arg(args: &serde_json::Value) -> &str {
-    args.get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("agent")
 }
 
 /// `enabled` 引数を解釈する。`None` = 未指定 / `Some(b)` = 明示。型違いは Err。
@@ -114,8 +117,8 @@ fn parse_enabled_arg(args: &serde_json::Value) -> Result<Option<bool>, GatewayAc
 /// - `Some(None)` = 明示 null（= 運用者既定に戻す）
 /// - `Some(Some(secs))` = 明示値（下限・上限・正整数を検証済み）
 ///
-/// 下限より短い / 上限より長い / 非正整数は**拒否**する（丸めない）。agent / channel の
-/// どちらの scope でも同じ床・天井を効かせる（#336 決定3: 下限をチャンネル単位でも維持）。
+/// 下限より短い / 上限より長い / 非正整数は**拒否**する（丸めない）。丸めると、エージェントは
+/// 要求した値で動いていると思い込んだまま別の間隔で走る。
 fn parse_interval_arg(
     args: &serde_json::Value,
     min: u64,
@@ -143,82 +146,116 @@ fn parse_interval_arg(
     }
 }
 
-/// agent scope の現在の設定 + 境界値を 1 つの JSON にまとめる。読み出しも更新後も同じ形。
-fn agent_state_payload(
-    state: &AppState,
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-) -> serde_json::Value {
-    let limits = state.heartbeat_limits;
-    let resolved = opencrab_db::queries::resolve_agent_heartbeat(
-        conn,
-        agent_id,
-        limits.default_interval_secs,
-        limits.min_interval_secs,
-    );
-    let configured = opencrab_db::queries::get_agent_heartbeat_config(conn, agent_id)
-        .ok()
-        .flatten()
-        .and_then(|r| r.interval_secs);
-    json!({
-        "agent_id": agent_id,
-        "scope": "agent",
-        "enabled": resolved.enabled,
-        "interval_secs": resolved.interval_secs,
-        "configured_interval_secs": configured,
-        "source": resolved.source,
-        "min_interval_secs": limits.effective_min(),
-        "max_interval_secs": crate::config::HeartbeatLimits::MAX_INTERVAL_SECS,
-        "default_interval_secs": limits.default_interval_secs,
-    })
+/// 現在のセッションを発火先へ解決する（設計 §3.6 と**同じ種別集合**を db 層で共有）。
+///
+/// `ctx.session_id` が無い（セッション文脈なし）→ fail-closed エラー。`nostr-` / `discord-`
+/// 以外（発火経路が無い種別）→ fail-closed エラー。「設定できたのに永遠に発火しない行」を
+/// 作らせない（設計 §13.1）。
+fn current_session_target(
+    ctx: &GatewayCallContext,
+) -> Result<(String, opencrab_db::queries::SessionFireTarget), GatewayActionResult> {
+    let session_id = match ctx.session_id.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Err(err(
+                "セッション文脈がありません。ハートビートは会話中のセッション（Nostr / Discord チャンネル）から設定・照会してください。",
+            ));
+        }
+    };
+    match opencrab_db::queries::resolve_session_fire_target(session_id, &ctx.agent_id) {
+        Some(target) => Ok((session_id.to_string(), target)),
+        None => Err(err(
+            "ハートビートは Nostr の自発投稿か Discord チャンネルのセッションでのみ設定・照会できます（現在のセッションには発火経路がありません）。",
+        )),
+    }
 }
 
-/// channel scope の現在の設定 + 境界値をまとめる（#336）。`enabled` / `configured_interval_secs`
-/// は当該エージェントの `(channel_id, agent_id)` 行の値（行が無ければ enabled=false /
-/// interval=null）。`interval_secs` は `resolve_channel_heartbeat_interval`（channel → agent →
-/// 既定, 下限クランプ）の実効値。
+/// 現在セッションの設定 + 境界値 + 次回発火時刻を 1 つの JSON にまとめる。
 ///
-/// 注意（既存 precedence / #238）: ここは `(channel_id, agent_id)` 固有行だけを読む。global 行
-/// （agent_id=""）しか無いチャンネルでは `enabled=false` を返すが、実発火は
-/// `list_whitelisted_heartbeat_channels` 経由で global 行により起こりうる（get の表示と実発火が
-/// 乖離する edge）。本 PR では precedence を変えないため、この乖離は残る。
-fn channel_state_payload(
+/// 読み出しも更新後も同じ形（session_payload に一本化・旧 agent/channel の 2 系統を廃止）。
+/// `next_fire_at` は列を持たず**照会時に算出**する（設計 §4.3 の `heartbeat_next_fire_at`）。
+/// enabled なのに発火しない理由（`gated` / `gated_reason`）も併せて返す（#394 / #4）。
+fn session_payload(
     state: &AppState,
     conn: &rusqlite::Connection,
     agent_id: &str,
-    channel_id: &str,
+    session_id: &str,
+    target: &opencrab_db::queries::SessionFireTarget,
 ) -> serde_json::Value {
     let limits = state.heartbeat_limits;
-    let existing = opencrab_db::queries::get_channel_config_for_agent(conn, channel_id, agent_id)
+    let row = opencrab_db::queries::get_session_heartbeat_config(conn, agent_id, session_id)
         .ok()
         .flatten();
-    let configured = existing.as_ref().and_then(|c| c.heartbeat_interval_secs);
-    let enabled = existing
-        .as_ref()
-        .map(|c| c.heartbeat_enabled)
-        .unwrap_or(false);
-    let resolved = opencrab_db::queries::resolve_channel_heartbeat_interval(
-        conn,
-        agent_id,
+
+    let enabled = row.as_ref().map(|r| r.enabled).unwrap_or(false);
+    let configured = row.as_ref().and_then(|r| r.interval_secs);
+    // 実効間隔（fail-closed 解決）。None = 壊れた値（0 以下）で発火しない。
+    let effective = opencrab_db::queries::resolve_session_interval_secs(
         configured,
         limits.default_interval_secs,
         limits.min_interval_secs,
     );
+    let anchor_at = row.as_ref().and_then(|r| r.anchor_at.clone());
+    let last_fired_at = row.as_ref().and_then(|r| r.last_fired_at.clone());
+
+    // next_fire_at（#439-4）: 無効・発火経路なし・壊れた間隔・起点なしは null。
+    // 起点（anchor/last_fired）から算出する（列は持たない・真実は再計算・設計 §4.3）。
+    let next_fire_at = if enabled {
+        effective.and_then(|interval| {
+            let anchor = anchor_at
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc));
+            let last = last_fired_at
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc));
+            opencrab_db::queries::heartbeat_next_fire_at(anchor, last, interval)
+                .map(|t| t.to_rfc3339())
+        })
+    } else {
+        None
+    };
+
+    // enabled なのに発火しない理由（本人に見せる・#394）。**whitelist は現行 HB 発火経路に
+    // ゲートとして存在しないので理由に含めない**（含めると発火に影響しない嘘の理由になる・
+    // 設計 §5 N3 / §13.1 訂正）。実際の非発火ゲートは (a) 壊れた間隔・(b) `discord-` の live G。
+    let live_g = state.heartbeat_config_rx.borrow().enabled;
+    let gated_reason: Option<String> = if enabled {
+        if effective.is_none() {
+            Some(
+                "設定された間隔が不正（0 以下）なため発火しません。有効な間隔（秒）を指定し直してください。"
+                    .to_string(),
+            )
+        } else if target.is_discord() && !live_g {
+            Some(
+                "グローバルのハートビートが無効化（[agent] heartbeat_enabled=false）されているため、現在このセッションは発火しません（運用者設定）。"
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     json!({
-        "agent_id": agent_id,
-        "scope": "channel",
-        "channel_id": channel_id,
+        "session_id": session_id,
         "enabled": enabled,
-        "interval_secs": resolved.interval_secs,
+        "interval_secs": effective,
         "configured_interval_secs": configured,
-        "source": resolved.source,
+        "anchor_at": anchor_at,
+        "last_fired_at": last_fired_at,
+        "next_fire_at": next_fire_at,
+        "gated": gated_reason.is_some(),
+        "gated_reason": gated_reason,
         "min_interval_secs": limits.effective_min(),
         "max_interval_secs": crate::config::HeartbeatLimits::MAX_INTERVAL_SECS,
         "default_interval_secs": limits.default_interval_secs,
     })
 }
 
-/// 自分のハートビート設定を読み出す。`scope="channel"` なら当該チャンネルの設定を返す。
+/// 自分のハートビート設定を読み出す（常に現在のセッションが対象）。
 pub(crate) fn get_my_heartbeat(
     state: &AppState,
     args: &serde_json::Value,
@@ -230,39 +267,34 @@ pub(crate) fn get_my_heartbeat(
     if let Some(denied) = reject_foreign_target(args) {
         return denied;
     }
+    if let Some(denied) = reject_removed_scope_args(args) {
+        return denied;
+    }
+
+    let (session_id, target) = match current_session_target(ctx) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let conn = state.db.lock().unwrap();
-    match scope_arg(args) {
-        "agent" => GatewayActionResult {
-            success: true,
-            data: Some(agent_state_payload(state, &conn, &ctx.agent_id)),
-            error: None,
-        },
-        "channel" => {
-            let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
-                Some(id) if !id.is_empty() => id,
-                _ => return err("scope=channelのときはchannel_idが必要です"),
-            };
-            GatewayActionResult {
-                success: true,
-                data: Some(channel_state_payload(
-                    state,
-                    &conn,
-                    &ctx.agent_id,
-                    channel_id,
-                )),
-                error: None,
-            }
-        }
-        other => err(format!("不明なscope: {other}（agent または channel）")),
+    GatewayActionResult {
+        success: true,
+        data: Some(session_payload(
+            state,
+            &conn,
+            &ctx.agent_id,
+            &session_id,
+            &target,
+        )),
+        error: None,
     }
 }
 
-/// 自分のハートビート設定を更新する。`scope="channel"` なら当該チャンネルの設定を更新する。
+/// 自分のハートビート設定を更新する（常に現在のセッションが対象）。
 ///
-/// 下限より短い間隔は**拒否**する（丸めない）。丸めると、エージェントは要求した値で
-/// 動いていると思い込んだまま別の間隔で走る。エラーには下限を載せるので、同じターンで
-/// 有効な値に直して呼び直せる（このツールを inline 分類にしている理由でもある）。
+/// 下限より短い間隔は**拒否**する（丸めない）。エラーには下限を載せるので、同じターンで
+/// 有効な値に直して呼び直せる（このツールを inline 分類にしている理由でもある）。更新後は
+/// 中央スケジューラを起こして**再起動なしで即時反映**する（#437・設計 §3.5a）。
 pub(crate) fn set_my_heartbeat(
     state: &AppState,
     args: &serde_json::Value,
@@ -272,6 +304,9 @@ pub(crate) fn set_my_heartbeat(
         return denied;
     }
     if let Some(denied) = reject_foreign_target(args) {
+        return denied;
+    }
+    if let Some(denied) = reject_removed_scope_args(args) {
         return denied;
     }
 
@@ -287,177 +322,76 @@ pub(crate) fn set_my_heartbeat(
         Ok(v) => v,
         Err(e) => return e,
     };
-
     if enabled_arg.is_none() && interval_arg.is_none() {
         return err("enabled か interval_secs のどちらかが必要です");
     }
 
-    match scope_arg(args) {
-        "agent" => set_agent_scope(state, ctx, enabled_arg, interval_arg),
-        "channel" => set_channel_scope(state, args, ctx, enabled_arg, interval_arg),
-        other => err(format!("不明なscope: {other}（agent または channel）")),
-    }
-}
-
-/// agent scope の更新（`agent_heartbeat_config`）。
-fn set_agent_scope(
-    state: &AppState,
-    ctx: &GatewayCallContext,
-    enabled_arg: Option<bool>,
-    interval_arg: Option<Option<i64>>,
-) -> GatewayActionResult {
-    let conn = state.db.lock().unwrap();
-    let existing = opencrab_db::queries::get_agent_heartbeat_config(&conn, &ctx.agent_id)
-        .ok()
-        .flatten();
-    // 行が無いときの土台は**無効**（#240: 設定を作っただけで自律実行が始まらない）。
-    let row = opencrab_db::queries::AgentHeartbeatConfigRow {
-        agent_id: ctx.agent_id.clone(),
-        enabled: enabled_arg
-            .unwrap_or_else(|| existing.as_ref().map(|r| r.enabled).unwrap_or(false)),
-        interval_secs: match interval_arg {
-            Some(v) => v,
-            None => existing.as_ref().and_then(|r| r.interval_secs),
-        },
+    let (session_id, target) = match current_session_target(ctx) {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
-    if let Err(e) = opencrab_db::queries::upsert_agent_heartbeat_config(&conn, &row) {
+    let conn = state.db.lock().unwrap();
+    let existing =
+        opencrab_db::queries::get_session_heartbeat_config(&conn, &ctx.agent_id, &session_id)
+            .ok()
+            .flatten();
+
+    // 行が無いときの土台は**無効**（#240: 設定を作っただけで自律実行が始まらない）。
+    let new_enabled =
+        enabled_arg.unwrap_or_else(|| existing.as_ref().map(|r| r.enabled).unwrap_or(false));
+    let new_interval: Option<i64> = match interval_arg {
+        Some(v) => v,
+        None => existing.as_ref().and_then(|r| r.interval_secs),
+    };
+
+    // アンカーの向き（設計 §4.4）:
+    //   - **明示の有効化 / 間隔変更**（＝結果として enabled=true）→ anchor=now・last_fired=NULL。
+    //     next_fire = now+interval（位相をリセット。ユーザ起点の短縮は密になってよい・N1）。
+    //   - **無効化 / 無効のまま**（enabled=false）→ anchor/last_fired は触らない（対象外）。
+    //     再有効化まで位相を保存する。
+    // ここに来る時点で enabled_arg か interval_arg のどちらかは Some なので、new_enabled=true は
+    // 必ず「明示の有効化 or 間隔変更」に対応する（設計 §4.4 の 1 行目）。
+    let now = chrono::Utc::now().to_rfc3339();
+    let (anchor_at, last_fired_at) = if new_enabled {
+        (Some(now.clone()), None)
+    } else {
+        (
+            existing.as_ref().and_then(|r| r.anchor_at.clone()),
+            existing.as_ref().and_then(|r| r.last_fired_at.clone()),
+        )
+    };
+
+    let row = opencrab_db::queries::SessionHeartbeatConfigRow {
+        agent_id: ctx.agent_id.clone(),
+        session_id: session_id.clone(),
+        enabled: new_enabled,
+        interval_secs: new_interval,
+        anchor_at,
+        last_fired_at,
+    };
+
+    if let Err(e) = opencrab_db::queries::upsert_session_heartbeat_config(&conn, &row) {
         return err(format!("ハートビート設定の保存に失敗: {e}"));
     }
 
     tracing::info!(
         agent_id = %ctx.agent_id,
+        session_id = %session_id,
         caller = %ctx.caller.label(),
         old_enabled = existing.as_ref().map(|r| r.enabled),
         old_interval_secs = existing.as_ref().and_then(|r| r.interval_secs),
         new_enabled = row.enabled,
         new_interval_secs = row.interval_secs,
-        "エージェント単位のハートビート設定を更新した"
+        "セッション単位のハートビート設定を更新した"
     );
 
-    let mut payload = agent_state_payload(state, &conn, &ctx.agent_id);
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("success".to_string(), json!(true));
-        // #336: agent スコープの enabled は「エージェント単位発火（有効時はエージェント
-        // 単位で 1 回、空 channel_id の単一発話）」を意味する。チャンネルごとに間隔・有効を分けたいなら
-        // scope=channel を使う（agent を enabled にすると channel 設定は使われない）。
-        obj.insert(
-            "note".to_string(),
-            json!("agent スコープを enabled にするとエージェント単位で発火する（有効時は 1 回のみ、空 channel_id の単一発話）。チャンネルごとに間隔・有効を分けたい場合は scope=channel で設定する。"),
-        );
-    }
-    GatewayActionResult {
-        success: true,
-        data: Some(payload),
-        error: None,
-    }
-}
+    // #437: 中央スケジューラを起こして再起動なしで即時反映する（opt-in の反映が最大
+    // MAX_SLEEP 遅れる問題を PR3 で解消）。payload は載せない（取りこぼしても次ウェイクで
+    // 収束する自己回復・設計 §3.5）。
+    state.scheduler_wake.notify_one();
 
-/// channel scope の更新（`discord_channel_config` の `heartbeat_enabled` /
-/// `heartbeat_interval_secs`）。指示文の scope=channel と同じテーブルを触る（#336）。
-///
-/// 既存行があればその設定を尊重して該当カラムだけ上書きし、無ければ既定値で新規作成する
-/// （新規作成には `guild_id` が要る。指示文 scope=channel と同じ流儀）。
-fn set_channel_scope(
-    state: &AppState,
-    args: &serde_json::Value,
-    ctx: &GatewayCallContext,
-    enabled_arg: Option<bool>,
-    interval_arg: Option<Option<i64>>,
-) -> GatewayActionResult {
-    let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {
-        Some(id) if !id.is_empty() => id,
-        _ => return err("scope=channelのときはchannel_idが必要です"),
-    };
-
-    let conn = state.db.lock().unwrap();
-    let existing =
-        opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, &ctx.agent_id)
-            .ok()
-            .flatten();
-
-    // guild_id は下の None ブランチ（新規作成）だけが使う。既存行は自分の guild_id を
-    // そのまま保持する（Some(mut c) ブランチは guild_id を触らない）ので、ここで existing
-    // から補完する必要はない。
-    let guild_id = args
-        .get("guild_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let old_enabled = existing.as_ref().map(|c| c.heartbeat_enabled);
-    let old_interval = existing.as_ref().and_then(|c| c.heartbeat_interval_secs);
-
-    // interval_arg を channel 行の `Option<u64>` へ落とす。
-    //   Some(Some(secs)) = 明示値 / Some(None) = 既定に戻す(NULL) / None = 現在値を保つ
-    let next_interval: Option<u64> = match interval_arg {
-        Some(v) => v.map(|secs| secs as u64),
-        None => old_interval,
-    };
-
-    let cfg = match existing {
-        Some(mut c) => {
-            if let Some(e) = enabled_arg {
-                c.heartbeat_enabled = e;
-            }
-            c.heartbeat_interval_secs = next_interval;
-            c
-        }
-        None => {
-            let guild_id = match guild_id {
-                Some(g) if !g.is_empty() => g,
-                _ => return err("新規チャンネル設定の作成にはguild_idが必要です"),
-            };
-            // whitelisted / readable / writable は**焼き込まず実効値を継承**する（#418）。
-            // これらは (channel_id, agent_id) 固有行がグローバル行を上書きする precedence
-            // （`is_channel_*_for_agent`）を持つため、固定値で新規行を作るとハートビート設定の
-            // 副作用でチャンネルの実効ゲートが変わってしまう。ここは existing=None のブランチな
-            // ので、各 helper はグローバル行の値（無ければ既定）＝現在の実効値を返す。これを
-            // そのまま焼くことで「ハートビート設定操作は whitelist 等の実効値を変えない」を守る。
-            opencrab_db::queries::ChannelConfigRow {
-                channel_id: channel_id.to_string(),
-                agent_id: ctx.agent_id.clone(),
-                guild_id,
-                channel_name: String::new(),
-                readable: opencrab_db::queries::is_channel_readable_for_agent(
-                    &conn,
-                    channel_id,
-                    &ctx.agent_id,
-                ),
-                writable: opencrab_db::queries::is_channel_writable_for_agent(
-                    &conn,
-                    channel_id,
-                    &ctx.agent_id,
-                ),
-                whitelisted: opencrab_db::queries::is_channel_whitelisted_for_agent(
-                    &conn,
-                    channel_id,
-                    &ctx.agent_id,
-                ),
-                // 新規行の既定は有効（discord_channel_config の既定・指示文 scope=channel と
-                // 同じ）。enabled 明示があればそれを尊重する。
-                heartbeat_enabled: enabled_arg.unwrap_or(true),
-                heartbeat_interval_secs: next_interval,
-                heartbeat_instructions: String::new(),
-            }
-        }
-    };
-
-    if let Err(e) = opencrab_db::queries::upsert_channel_config(&conn, &cfg) {
-        return err(format!("チャンネルのハートビート設定の保存に失敗: {e}"));
-    }
-
-    tracing::info!(
-        agent_id = %ctx.agent_id,
-        channel_id = %channel_id,
-        caller = %ctx.caller.label(),
-        old_enabled = old_enabled,
-        old_interval_secs = old_interval,
-        new_enabled = cfg.heartbeat_enabled,
-        new_interval_secs = cfg.heartbeat_interval_secs,
-        "チャンネル単位のハートビート設定を更新した"
-    );
-
-    let mut payload = channel_state_payload(state, &conn, &ctx.agent_id, channel_id);
+    let mut payload = session_payload(state, &conn, &ctx.agent_id, &session_id, &target);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("success".to_string(), json!(true));
     }

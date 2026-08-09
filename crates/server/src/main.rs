@@ -687,6 +687,17 @@ async fn main() -> anyhow::Result<()> {
     // 個別コマンドは実行時に run_agent_response 内でそのエージェント分だけ適用する。
     let tools_cfg = cfg.tools.clone();
 
+    // ハートビートの初期設定と live G の watch チャネル。
+    //
+    // **AppState 構築より前に作る**のは、`get_my_heartbeat`（PR3）が `discord-` セッションの
+    // ゲート理由（G=false）を本人へ見せるために live G を `AppState::heartbeat_config_rx` から
+    // 読むため（scheduler が発火時に読むのと同一源・hot-reload 追従）。tx は config watcher へ、
+    // rx は AppState と scheduler へ配る（受信端は clone 可能）。
+    let (heartbeat_config_tx, heartbeat_config_rx) = watch::channel(HeartbeatConfig {
+        interval_secs: cfg.agent.heartbeat_interval_secs,
+        enabled: cfg.agent.heartbeat_enabled,
+    });
+
     #[allow(unused_mut)]
     let mut state = AppState {
         db,
@@ -728,9 +739,11 @@ async fn main() -> anyhow::Result<()> {
         // エージェントが自分で触るハートビート設定の境界（#247）。下限は運用者が
         // `[agent] heartbeat_min_interval_secs` で決める。
         heartbeat_limits: cfg.agent.heartbeat_limits(),
-        // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了・global config 変更で
-        // 鳴らして rebuild させる。set_my_heartbeat / schedule CRUD からの起床は PR3/PR4。
+        // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了・global config 変更に
+        // 加え、set_my_heartbeat（PR3）からも鳴らして即時反映させる。
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        // live G を読む口（#394 / 設計 §13.1）。scheduler と同一の watch 源。
+        heartbeat_config_rx: heartbeat_config_rx.clone(),
     };
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
@@ -1024,13 +1037,9 @@ async fn main() -> anyhow::Result<()> {
     // catch-up ポーリング（起動時 + 定期）。source アダプタ未設定なら中で即 return する。
     opencrab_server::intake::spawn_intake_catchup_loop(state.clone());
 
-    // ハートビートの初期設定
-    let initial_hb_config = HeartbeatConfig {
-        interval_secs: cfg.agent.heartbeat_interval_secs,
-        enabled: cfg.agent.heartbeat_enabled,
-    };
-
-    let (heartbeat_config_tx, heartbeat_config_rx) = watch::channel(initial_hb_config.clone());
+    // ハートビートの初期設定と live G の watch チャネルは AppState 構築前に作成済み
+    // （`heartbeat_config_tx` / `heartbeat_config_rx`）。tx は下の config watcher へ、
+    // rx は scheduler へ渡す（AppState には clone 済み）。
 
     // 起動時の Discord ハンドル解決診断（下の #400 ブロック）専用のエージェント列挙。
     // 中央スケジューラは `session_heartbeat_config` を直接読むため発火にはこの列挙を使わない。

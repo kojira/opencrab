@@ -45,43 +45,13 @@ const MAX_SLEEP_SECS: u64 = 300;
 
 /// セッションの発火先（`session_id` 接頭辞から導く・設計 §3.6）。
 ///
-/// 発火経路を持たないセッション種別（`web-`/`heartbeat-`/`agent-msg-` 等）や壊れた
-/// session_id は `None` = **fail-closed**（発火せず warn）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FireTarget {
-    /// `nostr-{agent}`: Nostr broadcast（G ゲート対象外）。
-    NostrBroadcast,
-    /// `discord-{agent}-{guild}-{channel}`: その channel（発火時 live G でゲート）。
-    DiscordChannel {
-        guild_id: String,
-        channel_id: String,
-    },
-}
-
-/// `session_id` を保存済み `agent_id` で剥がして発火先を導く（設計 §3.6・B4）。
-///
-/// **naive な `split('-')` は禁止**（`agent_id` は UUID でハイフンを含む）。保存済み
-/// `agent_id` で接頭辞を剥がし、残りの guild/channel が数値（ハイフン無し）であることを
-/// 確認する。合致しなければ `None`（fail-closed）。
-fn resolve_fire_target(session_id: &str, agent_id: &str) -> Option<FireTarget> {
-    if session_id == format!("nostr-{agent_id}") {
-        return Some(FireTarget::NostrBroadcast);
-    }
-    let discord_prefix = format!("discord-{agent_id}-");
-    if let Some(rest) = session_id.strip_prefix(&discord_prefix) {
-        // rest = "{guild}-{channel}"。guild/channel は数値（ハイフン無し）なので rsplit_once 安全。
-        if let Some((guild, channel)) = rest.rsplit_once('-') {
-            let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-            if numeric(guild) && numeric(channel) {
-                return Some(FireTarget::DiscordChannel {
-                    guild_id: guild.to_string(),
-                    channel_id: channel.to_string(),
-                });
-            }
-        }
-    }
-    None
-}
+/// **実体は db クレートへ移設した**（[`opencrab_db::queries::SessionFireTarget`] /
+/// [`resolve_fire_target`]）。理由: 発火（スケジューラ）と受理判定・ゲート理由表示
+/// （`set_my_heartbeat` / `get_my_heartbeat`・別クレート）が **同じ種別集合**で判定
+/// しなければ「設定できたのに永遠に発火しない行」ができる（設計 §13.1）。源を二重化
+/// しないため、両者が依存できる db 層の 1 関数に集約する。ここは別名で受けるだけ。
+use opencrab_db::queries::resolve_session_fire_target as resolve_fire_target;
+use opencrab_db::queries::SessionFireTarget as FireTarget;
 
 /// rebuild で組む 1 エントリ。
 #[derive(Debug, Clone)]
