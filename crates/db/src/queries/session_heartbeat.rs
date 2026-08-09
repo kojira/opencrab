@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -138,4 +138,98 @@ pub fn set_session_last_fired(
         params![agent_id, session_id, last_fired_at, Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+/// セッション行の `interval_secs`（生値）を発火に使う実効間隔へ解決する（純粋関数）。
+///
+/// `agent_heartbeat_config` の [`resolve_agent_heartbeat`] と**同じ fail-closed 意味論**:
+/// - `None`（未設定）→ 運用者既定（下限で床上げ）。
+/// - `Some(v)` かつ `v > 0` → `max(v, min)`（下限へ床上げ・費用が減る方向）。
+/// - `Some(v)` かつ `v <= 0`（壊れた値）→ `None` = **発火させない**（スケジューラは skip）。
+///
+/// 移行（v37）は `interval_secs <= 0` の opt-in を enabled にしないので、enabled 行の
+/// 生値は通常 `NULL` か正だが、壊れた行が混じっても発火側で fail-closed に倒すための保険。
+pub fn resolve_session_interval_secs(
+    interval_secs: Option<i64>,
+    default_interval_secs: u64,
+    min_interval_secs: u64,
+) -> Option<u64> {
+    let min = min_interval_secs.max(1);
+    let fallback = default_interval_secs.max(min);
+    match interval_secs {
+        None => Some(fallback),
+        Some(v) if v > 0 => Some((v as u64).max(min)),
+        // 0 以下は壊れた値。有効化の方向へ倒さず None（発火しない）。
+        Some(_) => None,
+    }
+}
+
+/// 次回発火時刻を算出する純粋関数（設計 §4.3・#439-4）。
+///
+/// **真実は再計算**（キャッシュ列を持たない）。`base` は `last_fired_at`（実際に発火した
+/// 時刻）を優先し、無ければ `anchor_at`（有効化・移行で打った起点）。どちらも無ければ
+/// `None` = 「起点が無い＝即発火可」。
+///
+/// **向き（設計 §4.4）**: `base + interval` は常に発火起点より後ろ。位相を前へ引かない
+/// （非明示イベントで密にしない）。呼び出し側が `last_fired`/`anchor` をどう更新するかで
+/// 向きを制御し、この関数自体は `base` を後ろへ進めるだけ。
+///
+/// 異常終了時の backoff（設計 §3.7 N-a）は、呼び出し側が `last_fired` の位置に
+/// `max(last_fired_at, last_attempt_at)` を渡すことで実現する（`last_fired_at` の
+/// truthfulness を保ちつつ再発火ループを止める）。この関数のシグネチャは変えない。
+pub fn heartbeat_next_fire_at(
+    anchor_at: Option<DateTime<Utc>>,
+    last_fired_at: Option<DateTime<Utc>>,
+    interval_secs: u64,
+) -> Option<DateTime<Utc>> {
+    let base = last_fired_at.or(anchor_at)?;
+    Some(base + Duration::seconds(interval_secs as i64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_session_interval_semantics_match_resolve_agent() {
+        // None → 既定（下限で床上げ）。
+        assert_eq!(resolve_session_interval_secs(None, 1800, 300), Some(1800));
+        // 既定が下限未満なら下限へ。
+        assert_eq!(resolve_session_interval_secs(None, 100, 300), Some(300));
+        // 正の値はそのまま（下限以上）。
+        assert_eq!(
+            resolve_session_interval_secs(Some(1200), 1800, 300),
+            Some(1200)
+        );
+        // 下限未満の正値は下限へ床上げ（拒否ではなく引き上げ）。
+        assert_eq!(
+            resolve_session_interval_secs(Some(100), 1800, 300),
+            Some(300)
+        );
+        // 0・負は壊れた値 → None（発火しない）。
+        assert_eq!(resolve_session_interval_secs(Some(0), 1800, 300), None);
+        assert_eq!(resolve_session_interval_secs(Some(-5), 1800, 300), None);
+    }
+
+    #[test]
+    fn next_fire_prefers_last_fired_then_anchor_else_none() {
+        let anchor = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let last = DateTime::parse_from_rfc3339("2026-01-01T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // last_fired 優先。
+        assert_eq!(
+            heartbeat_next_fire_at(Some(anchor), Some(last), 600),
+            Some(last + Duration::seconds(600))
+        );
+        // last_fired 無ければ anchor。
+        assert_eq!(
+            heartbeat_next_fire_at(Some(anchor), None, 600),
+            Some(anchor + Duration::seconds(600))
+        );
+        // どちらも無ければ None（即発火可）。
+        assert_eq!(heartbeat_next_fire_at(None, None, 600), None);
+    }
 }

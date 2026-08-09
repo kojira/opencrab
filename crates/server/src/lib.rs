@@ -179,6 +179,14 @@ pub struct AppState {
     /// ループが参照する。秘密（source secret / Bearer）を含むため、ログや API 応答へ
     /// そのまま出さないこと。
     pub intake: Arc<config::IntakeConfig>,
+    /// 中央ハートビートスケジューラの起床通知（#437 / #439 / 設計 §3.5）。
+    ///
+    /// スケジューラは `notified()` で起きて DB から発火予定を組み直す（rebuild）。
+    /// **payload を載せない**（取りこぼしても次ウェイクで収束する自己回復）。鳴らす源:
+    /// (a) `set_my_heartbeat`（PR3 で配線）・(b) schedule CRUD（PR4）・(c) global config
+    /// 変更・(d) **発火ターンの完了**（in-flight 除去と同じ箇所で鳴らし、走行中に眠って
+    /// いたスケジューラを即座に rebuild させる）。PR2 では (c)(d) を配線する。
+    pub scheduler_wake: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -230,6 +238,7 @@ pub(crate) fn test_app_state() -> AppState {
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
         default_subtask_webhook: None,
         heartbeat_limits: config::HeartbeatLimits::default(),
+        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
     }
 }
 
