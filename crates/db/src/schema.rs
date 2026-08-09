@@ -1550,6 +1550,39 @@ const MIGRATIONS: &[Migration] = &[
         //   COMMIT;
         up: migrate_v37_session_heartbeat,
     },
+    Migration {
+        version: 38,
+        description:
+            "agent_schedules の語彙を heartbeat に揃える（last_run_at→last_fired_at・next_run_at 撤去 / #455）",
+        // **統合スケジューラ PR4: 定時実行(#455)を配線する前の語彙・持ち方の整合。**
+        //
+        // v37 が作った `agent_schedules` は heartbeat と語彙・持ち方が割れていた:
+        //   - `next_run_at` / `last_run_at` ↔ heartbeat の `next_fire_at` / `last_fired_at`
+        //     （同じ「次に scheduler が手を出す時刻」に 2 名。#456 で潰した二重語彙の再来）
+        //   - `next_run_at` は**列に持っていた**が、heartbeat は stale を避けるため
+        //     **照会時算出**（キャッシュ列を持たない）。cron 計算は wake 時のみ・件数も僅少で
+        //     ホットパスに無く、キャッシュは stale リスク（cron 式/tz/enabled 変更時の無効化漏れ）
+        //     だけを増やす。→ **列を撤去して算出に寄せる**（heartbeat と同じ持ち方）。
+        //
+        // ## 変更（**非破壊・データ保存**）
+        //   1. `last_run_at` → `last_fired_at` に RENAME（列の値はそのまま保存される）
+        //   2. `next_run_at` を DROP（表示キャッシュに過ぎず、真実は照会時算出）
+        // **DROP TABLE ではなく ALTER**（本番 agent_schedules は 0 行だが、万一行があっても
+        // RENAME はデータを保存する側＝安全側に倒す）。**向き**: 発火挙動は 1 ビットも変えない
+        // （この表からの発火は本 PR の scheduler 配線で初めて起きる。移行時点では誰も読まない）。
+        //
+        // ## 冪等性（#349 の轍を踏まない）
+        // 新規 DB は SCHEMA_SQL 側で既に `last_fired_at` を持ち `next_run_at` を持たないので、
+        // `column_exists` でガードして各 ALTER を no-op にする。既存 v37 DB でのみ RENAME/DROP が走る。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき）
+        //   BEGIN;
+        //   ALTER TABLE agent_schedules RENAME COLUMN last_fired_at TO last_run_at;
+        //   ALTER TABLE agent_schedules ADD COLUMN next_run_at TEXT;
+        //   PRAGMA user_version = 37;
+        //   COMMIT;
+        up: migrate_v38_align_schedule_vocab,
+    },
 ];
 
 /// カテゴリ層メンバー表 — **v23 当時の形**（topic ↔ category の参照, issue #313）。
@@ -1673,7 +1706,11 @@ CREATE TABLE IF NOT EXISTS session_heartbeat_config (
 /// jitter は列を作らない（設計 §9・非採用）。**発火（scheduler 配線）は PR4** で、この PR は
 /// 表の新設のみ（既存挙動は 1 バイトも変わらない＝積むものが無い）。
 ///
-/// **`SCHEMA_SQL` 側の同名ブロックと文面を一致させること**。
+/// **⚠️ これは v37 の凍結履歴（旧列名 `last_run_at` / `next_run_at`）。書き換えない。**
+/// PR4（#455）で語彙を heartbeat に揃えたため、**最終形は v38 の
+/// [`migrate_v38_align_schedule_vocab`] が作る**（`last_fired_at`・`next_run_at` 撤去）。
+/// 新規 DB の最終形は `SCHEMA_SQL` 側（そちらは新列名）。この定数を変えると v37 の履歴が
+/// ずれる（既存 DB は v37 でこの形を経由してから v38 で収束する）。
 const AGENT_SCHEDULES_SQL: &str = "
 CREATE TABLE IF NOT EXISTS agent_schedules (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1879,6 +1916,27 @@ fn session_id_is_valid(session_id: &str, agent_id: &str) -> bool {
 /// per-migration トランザクション内で走り、**この関数が `Err` を返すと全体がロールバック**
 /// される。移行行の形式検証は commit 前にこの関数内で行う（別コネクション・commit 後検証は
 /// 原子性が崩れるので使わない）。
+/// v38: `agent_schedules` の語彙を heartbeat に揃える（#455・設計 §7）。
+///
+/// heartbeat の `last_fired_at` / 照会時算出（キャッシュ列なし）に合わせて、
+/// `last_run_at` を RENAME し `next_run_at` 列を撤去する。**非破壊**（RENAME は値を保存）。
+/// `column_exists` ガードで新規 DB（SCHEMA_SQL 側で既に最終形）では no-op（#349 の轍回避）。
+fn migrate_v38_align_schedule_vocab(conn: &Connection) -> rusqlite::Result<()> {
+    // 1. last_run_at → last_fired_at（heartbeat の語彙へ統一）。値はそのまま保存される。
+    if column_exists(conn, "agent_schedules", "last_run_at")?
+        && !column_exists(conn, "agent_schedules", "last_fired_at")?
+    {
+        conn.execute_batch(
+            "ALTER TABLE agent_schedules RENAME COLUMN last_run_at TO last_fired_at;",
+        )?;
+    }
+    // 2. next_run_at を撤去（照会時算出に寄せる＝stale フリー。列はキャッシュに過ぎない）。
+    if column_exists(conn, "agent_schedules", "next_run_at")? {
+        conn.execute_batch("ALTER TABLE agent_schedules DROP COLUMN next_run_at;")?;
+    }
+    Ok(())
+}
+
 fn migrate_v37_session_heartbeat(conn: &Connection) -> rusqlite::Result<()> {
     // 1. 新テーブル（冪等）。新規 DB は SCHEMA_SQL 側で既に作成済みなので no-op。
     conn.execute_batch(SESSION_HEARTBEAT_CONFIG_SQL)?;
@@ -3292,20 +3350,21 @@ CREATE TABLE IF NOT EXISTS session_heartbeat_config (
 -- ============================================
 -- cron / @every をセッション時刻源へ載せる。既定は無効（fail-closed / #240）。
 -- 発火（scheduler 配線）は PR4。この PR は表の新設のみ。
--- ※ AGENT_SCHEDULES_SQL 定数と文面を一致させること。
+-- ※ 語彙は heartbeat に揃える（last_fired_at・next は照会時算出でキャッシュ列なし / v38・#455）。
+--   AGENT_SCHEDULES_SQL 定数は v37 の凍結履歴（旧列名）なので、ここは定数と一致しない。
+--   既存 DB は v38 の ALTER で同じ最終形へ収束する（parity テストで固定）。
 CREATE TABLE IF NOT EXISTS agent_schedules (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id     TEXT NOT NULL,
-    session_id   TEXT NOT NULL,
-    cron_expr    TEXT NOT NULL,
-    timezone     TEXT NOT NULL DEFAULT 'Asia/Tokyo',
-    message      TEXT NOT NULL,
-    enabled      INTEGER NOT NULL DEFAULT 0,
-    anchor_at    TEXT,
-    last_run_at  TEXT,
-    next_run_at  TEXT,
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id      TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    cron_expr     TEXT NOT NULL,
+    timezone      TEXT NOT NULL DEFAULT 'Asia/Tokyo',
+    message       TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 0,
+    anchor_at     TEXT,
+    last_fired_at TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_agent_schedules_agent ON agent_schedules(agent_id);
 
@@ -6172,7 +6231,9 @@ mod migration_tests {
 
         initialize(&conn).expect("apply v37");
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
-        assert_eq!(latest_version(), 37, "v37 が最新版であること");
+        // v38（#455 の agent_schedules 語彙整合）が最新。v38 は session_heartbeat_config を
+        // 触らないので、下の v37 backfill 検証（発火集合・正規化）はそのまま成立する。
+        assert_eq!(latest_version(), 38, "v38 が最新版であること");
 
         // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
         //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
@@ -6279,12 +6340,21 @@ mod migration_tests {
 
     /// SCHEMA_SQL（新規 DB）と v37 migration（既存 DB）が **同じ形**の新表を作ることを、
     /// sqlite_master の SQL 文字列で比較して固定する（定数と SCHEMA_SQL の drift を検出）。
+    /// 新規 DB（SCHEMA_SQL 経由）と既存 DB（v37→v38 migration 経由）が **同じ最終形**の
+    /// スキーマへ収束することを固定する（定数と SCHEMA_SQL の drift を検出）。
+    ///
+    /// v38 で `agent_schedules` は v37 の CREATE を **ALTER で書き換える**ため、
+    /// `sqlite_master.sql` の生テキストは両経路で一致しない（fresh=SCHEMA_SQL の手書き、
+    /// migrated=旧定数を ALTER が書き換えたもの）。→ **agent_schedules は列構造
+    /// （pragma_table_info）で比較**する（空白非依存・ALTER 安全・構造契約そのもの）。
+    /// v38 が触らない `session_heartbeat_config` と index は従来どおり生 SQL で比較する。
     #[test]
-    fn v37_schema_parity_fresh_vs_migrated() {
-        let dump = |conn: &Connection| -> Vec<String> {
+    fn schedule_schema_parity_fresh_vs_migrated() {
+        // 生 SQL 比較対象（v38 が触らない = 両経路で CREATE テキストが同一）。
+        let raw_sql = |conn: &Connection| -> Vec<String> {
             conn.prepare(
                 "SELECT sql FROM sqlite_master
-                 WHERE name IN ('session_heartbeat_config', 'agent_schedules', 'idx_agent_schedules_agent')
+                 WHERE name IN ('session_heartbeat_config', 'idx_agent_schedules_agent')
                    AND sql IS NOT NULL
                  ORDER BY name",
             )
@@ -6294,16 +6364,102 @@ mod migration_tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
         };
+        // 列構造比較（name, type, notnull, dflt_value, pk）。ALTER 経由でも一致する契約。
+        let cols = |conn: &Connection,
+                    table: &str|
+         -> Vec<(String, String, i64, Option<String>, i64)> {
+            conn.prepare("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?1) ORDER BY cid")
+                .unwrap()
+                .query_map([table], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
 
         // 新規 DB: SCHEMA_SQL 由来。
         let fresh = crate::init_memory().expect("fresh");
-        // 既存 DB: 新表を落として版を 36 へ戻し、v37 migration で作り直す。
+        // 既存 DB: 新表を落として版を 36 へ戻し、v37→v38 migration で作り直す。
         let migrated = crate::init_memory().expect("migrated");
         setup_pre_v37(&migrated);
-        initialize(&migrated).expect("re-migrate v37");
+        initialize(&migrated).expect("re-migrate v37+v38");
 
-        assert_eq!(dump(&fresh), dump(&migrated));
-        assert_eq!(dump(&fresh).len(), 3, "2 tables + 1 index");
+        assert_eq!(raw_sql(&fresh), raw_sql(&migrated));
+        assert_eq!(raw_sql(&fresh).len(), 2, "1 table(shc) + 1 index");
+        assert_eq!(
+            cols(&fresh, "agent_schedules"),
+            cols(&migrated, "agent_schedules"),
+            "agent_schedules の列構造は新規/既存で一致（v38 収束）"
+        );
+        // 語彙が heartbeat へ揃い、キャッシュ列が消えたことを両経路で固定する。
+        let names: Vec<String> = cols(&fresh, "agent_schedules")
+            .into_iter()
+            .map(|c| c.0)
+            .collect();
+        assert!(
+            names.contains(&"last_fired_at".to_string()),
+            "last_fired_at に揃っている"
+        );
+        assert!(
+            !names.contains(&"last_run_at".to_string()),
+            "旧 last_run_at は消えている"
+        );
+        assert!(
+            !names.contains(&"next_run_at".to_string()),
+            "next_run_at キャッシュ列は撤去されている（照会時算出）"
+        );
+    }
+
+    /// v38 が **非破壊**（RENAME は行データを保存し、DROP は next_run_at だけを落とす）で
+    /// あることを、v37 の旧列に値を入れた行が v38 後も `last_fired_at` に生き残ることで固定する。
+    /// DROP TABLE 方式へ退行するとこのテストが落ちる（0 行前提でも安全側＝保存を守る）。
+    #[test]
+    fn v38_is_non_destructive_and_preserves_last_fired() {
+        let conn = crate::init_memory().expect("db");
+        // v37 の旧スキーマ（last_run_at / next_run_at）まで巻き戻す。
+        setup_pre_v37(&conn);
+        // v37 だけ適用した状態を作るため、v38 を含まない一時 MIGRATIONS で v37 まで進める。
+        let up_to_v37: Vec<Migration> = MIGRATIONS
+            .iter()
+            .filter(|m| m.version <= 37)
+            .map(|m| Migration {
+                version: m.version,
+                description: m.description,
+                up: m.up,
+            })
+            .collect();
+        run_migrations(&conn, &up_to_v37).expect("apply through v37");
+        assert!(column_exists(&conn, "agent_schedules", "last_run_at").unwrap());
+        assert!(column_exists(&conn, "agent_schedules", "next_run_at").unwrap());
+
+        // 旧列に値を持つ行を入れる（万一本番に行があっても保存されることの代理検証）。
+        conn.execute(
+            "INSERT INTO agent_schedules
+                (agent_id, session_id, cron_expr, timezone, message, enabled, anchor_at, last_run_at, next_run_at, created_at, updated_at)
+             VALUES ('a1','nostr-a1','0 7 * * *','Asia/Tokyo','morning',1,'2026-01-01T00:00:00Z','2026-08-09T07:00:00+09:00','2026-08-10T07:00:00+09:00','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // v38 を適用。
+        run_migrations(&conn, MIGRATIONS).expect("apply v38");
+
+        // RENAME で last_fired_at に値が保存され、next_run_at 列は消えている。
+        assert!(!column_exists(&conn, "agent_schedules", "last_run_at").unwrap());
+        assert!(column_exists(&conn, "agent_schedules", "last_fired_at").unwrap());
+        assert!(!column_exists(&conn, "agent_schedules", "next_run_at").unwrap());
+        let preserved: String = conn
+            .query_row(
+                "SELECT last_fired_at FROM agent_schedules WHERE agent_id='a1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved, "2026-08-09T07:00:00+09:00",
+            "RENAME は last_run_at の値を last_fired_at に保存する（非破壊）"
+        );
     }
 
     #[test]

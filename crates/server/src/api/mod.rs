@@ -16,6 +16,7 @@ pub mod model_pricing;
 pub mod nostr;
 pub mod nostr_relay;
 pub mod providers;
+pub mod schedules;
 pub mod sessions;
 pub mod setup;
 pub mod skills;

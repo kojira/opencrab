@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -27,6 +27,7 @@ pub mod memory_organize;
 pub mod nostr_runner_impl;
 pub mod peer_review;
 pub mod process;
+pub mod schedule_cron;
 pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
@@ -554,6 +555,15 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/agents/{id}/messages",
             post(api::agents_messages::send_agent_message),
+        )
+        // 定時実行スケジュール（#455）。ダッシュボード config API と同じ認証層の内側。
+        .route(
+            "/api/agents/{id}/schedules",
+            get(api::schedules::list_schedules).post(api::schedules::create_schedule),
+        )
+        .route(
+            "/api/schedules/{sid}",
+            patch(api::schedules::update_schedule).delete(api::schedules::delete_schedule),
         )
         // web gateway（#154）: ダッシュボードからの会話 + SSE 配送。
         // ルート定義とハンドラは独立クレート側にあり、ここは取り付けるだけ（#190 S4）。

@@ -4,6 +4,14 @@
 
 バージョン: v1（2026-06-02）
 
+> **更新（#439 / #456 / #455）**: ハートビートは**セッション単位**の設定
+> （`session_heartbeat_config`）へ一本化され（旧 agent/channel スコープは廃止）、発火は
+> **中央スケジューラ**が握る（永続アンカー・設定時起点・即時反映・`next_fire_at` 照会・
+> 再起動をまたぐ位相保存）。`set_my_heartbeat`/`get_my_heartbeat` は**現在のセッション**に
+> 対して設定・照会し、`scope` 引数は廃止された。**per-agent 定時実行（#455・cron/@every）は
+> 同じ中央スケジューラの時刻源に載る**（別ループを作らない）。詳細は
+> [[design-agent-schedules]] と `config-precedence.md`。
+
 関連:
 - [[design-agent-instructions]] — `agents.instructions` の設計とOwner限定の `update_instructions` アクション。本設計はこれを強く踏襲する。
 - [[design-async-instructions]] — システムプロンプトへの英語ブロック注入パターン。

@@ -50,6 +50,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # 提供するので、署名照合は自前のバイト比較を書かずこれに委ねる（タイミング攻撃対策）。
 hmac = "0.12"
 sha2 = { workspace = true }
+croner = "3.0.1"
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }

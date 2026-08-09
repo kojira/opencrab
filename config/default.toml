@@ -1,5 +1,11 @@
 [agent]
 heartbeat_interval_secs = 1800
+# ハートビートのマスタスイッチ（#439 の中央スケジューラで発火時に live 参照する）。
+# false にすると `discord-` セッションのハートビートは止まる（`nostr-` は G 非依存）。
+# **注意**: これは *ハートビート* のマスタスイッチであり、`agent_schedules` の定時実行
+# （#455・cron/@every）は**止まらない**。定時実行を止めるには各スケジュールの
+# `enabled` を false にする（`PATCH /api/schedules/{id}`）。運用者が G を切っても
+# 定時実行が動き続けるのは意図した挙動（heartbeat と schedule は別概念）。
 heartbeat_enabled = true
 # エージェントが自分で設定できるハートビート間隔の下限（秒 / #247）。
 #
