@@ -283,7 +283,7 @@ async fn run_one_fire(
         FireTarget::NostrBroadcast => (
             String::new(),
             String::new(),
-            crate::HEARTBEAT_AGENT_SCOPED_LABEL.to_string(),
+            crate::HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
         ),
         FireTarget::DiscordChannel {
             guild_id,

@@ -142,9 +142,15 @@ fn parse_heartbeat_decision(response: &str) -> HeartbeatDecision {
     }
 }
 
-/// エージェント単位 tick（channel を持たない発話）のプロンプト内呼称。
+/// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
+/// Nostr broadcast は特定チャンネルを持たないため、会話名の代わりにこのラベルを充てる
+/// （`scheduler.rs` の `run_one_fire`）。
+///
+/// **スコープではなく表示ラベル**である点に注意。旧名は「agent スコープ」の語を含んでおり、
+/// agent スコープ発火（#456 で全廃済み・現在は session 単位の `nostr-` セッションから発火）が
+/// まだ残っているかのように読み手を誤らせたため改名した（#472）。
 /// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
-const HEARTBEAT_AGENT_SCOPED_LABEL: &str = "（自律ハートビート）";
+const HEARTBEAT_NOSTR_CHANNEL_LABEL: &str = "（自律ハートビート）";
 
 /// config名またはUUIDのagent_idを、DBのUUIDに解決する。
 /// "crab"のような名前が渡された場合、find_agentsで検索してUUIDを返す。
