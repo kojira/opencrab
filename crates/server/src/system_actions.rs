@@ -726,7 +726,7 @@ impl SystemGatewayActions {
             // 実体と「自分のだけ」の保証は `crate::agent_heartbeat` の doc を参照。
             GatewayActionDef {
                 name: "get_my_heartbeat".to_string(),
-                description: "自分（呼び出し元エージェント）のハートビート設定を、いま話しているセッションについて読み出す。返り値: enabled（有効か）、interval_secs（実効間隔・秒）、next_fire_at（次にこのセッションのハートビートが発火する予定時刻。照会した時点で anchor_at と最終発火時刻から算出する値で、UTC の RFC3339 文字列。無効・発火経路なし・間隔が不正などでは null）、anchor_at / last_fired_at（起点と最終発火時刻。同じく UTC RFC3339 か null）、min/max/default_interval_secs（設定できる下限・上限・既定）。設定したことが無ければ無効。有効なのに発火しないときは gated=true と、その理由 gated_reason（例: グローバルのハートビートが無効化されている / 間隔が不正）を返すので、なぜ発火しないのかを自分で把握できる。他のエージェントの設定は読めない。".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート設定を、いま話しているセッションについて読み出す。返り値: enabled（有効か）、interval_secs（実効間隔・秒）、next_fire_at（このセッションのハートビートがゲートされていない場合に次に発火する予定時刻。照会した時点で anchor_at と最終発火時刻から算出する値で、UTC の RFC3339 文字列。無効・発火経路なし・間隔が不正などでは null。gated=true のときはこの時刻が来ても実際には発火しない）、anchor_at / last_fired_at（起点と最終発火時刻。同じく UTC RFC3339 か null）、min/max/default_interval_secs（設定できる下限・上限・既定）。設定したことが無ければ無効。有効なのに発火しないときは gated=true と、その理由 gated_reason（例: グローバルのハートビートが無効化されている / 間隔が不正）を返すので、なぜ発火しないのかを自分で把握できる。他のエージェントの設定は読めない。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {}
@@ -5664,6 +5664,12 @@ mod tests {
                 "get_my_heartbeat の説明文に '{needle}' が必要（#394）: {desc}"
             );
         }
+        // gated=true でも next_fire_at は非 null（ゲート解除後に発火する時刻）。その 1 フィールド
+        // だけ読んでも「この時刻に発火する」と誤読しないよう、意味を説明文で確定する（#394）。
+        assert!(
+            desc.contains("この時刻が来ても実際には発火しない"),
+            "gated 時の next_fire_at の意味が説明文に無い（#394）: {desc}"
+        );
         // 別名 next_run_at は作らない（二重語彙を増やさない・#456）。
         assert!(
             !desc.contains("next_run_at"),
