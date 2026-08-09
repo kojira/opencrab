@@ -686,6 +686,15 @@ mod tests {
                     !names.contains(&n.to_string()),
                     "{n} は server 側の実装だけであるべき"
                 );
+            } else if *n == "get_my_schedules" || *n == "set_my_schedule" {
+                // エージェント自身の定時実行スケジュール（#455）。server 側
+                // （`SystemGatewayActions` / `crates/server/src/agent_schedule.rs`）の own
+                // ツールで Discord には無い（heartbeat と同じ扱い）。実在性は server 側の
+                // README 完全性テスト（`server_gateway_action_table_matches_own_definitions`）が担う。
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "{n} は server 側の実装だけであるべき"
+                );
             } else if *n == "create_my_skill"
                 || *n == "learn_from_experience"
                 || *n == "learn_from_peer"

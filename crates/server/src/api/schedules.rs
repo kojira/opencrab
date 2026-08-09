@@ -59,6 +59,7 @@ pub struct ScheduleDto {
 }
 
 /// CRUD ハンドラとエージェント向けツールが**共有する**操作エラー（ロジックを二重化しない）。
+#[derive(Debug)]
 pub(crate) enum ScheduleOpError {
     /// 入力不正（cron/tz/session/message）。ハンドラは 400、ツールは remedy 付きエラーへ写す。
     BadRequest(String),
@@ -112,10 +113,17 @@ impl ScheduleDto {
     }
 }
 
-/// 新規スケジュールを検証・登録して DTO を返す共有コア（CRUD ハンドラ / ツールが共用）。
+/// スケジュールを検証・**冪等に**登録して DTO を返す共有コア（CRUD ハンドラ / ツールが共用）。
 ///
-/// cron/`@every`/timezone を検証し、`session_id` がそのエージェントの発火経路を持つことを確認し、
-/// enabled なら `anchor_at=now`（設計 §4.4）で挿入する。成功後に `scheduler_wake` を鳴らす（#437）。
+/// cron/`@every`/timezone を検証し、`session_id` がそのエージェントの発火経路を持つことを確認する。
+///
+/// **冪等性（同じことを 2 回言っても 1 回）**: `(session_id, cron_expr, message)` が**完全一致**する
+/// 既存行があれば**新規作成せず**その行を更新して**同じ id を返す**。同じ内容の再登録（omoikane が
+/// 巡回指示を再送するたびに `set_my_schedule` が呼ばれる等）でも enabled 行が増えず、同一スロットの
+/// 二重発火が起きない。**cron だけでは dedup しない**——message が違えば別スケジュール（「毎朝 7 時に
+/// まとめ」と「毎朝 7 時に巡回」は別物）。制約の追加ではなく当たり前の意味論（できることは減らない）。
+///
+/// 成功後に `scheduler_wake` を鳴らす（#437）。
 pub(crate) fn create_schedule_core(
     state: &AppState,
     agent_id: &str,
@@ -142,31 +150,65 @@ pub(crate) fn create_schedule_core(
         ));
     }
 
-    // enabled で作るなら anchor=now（初回発火を「now 以降の最初のスロット / now+周期」へ）。
-    let anchor_at = if enabled {
-        Some(Utc::now().to_rfc3339())
-    } else {
-        None
-    };
-    let row = AgentScheduleRow {
-        id: None,
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        cron_expr: cron_expr.to_string(),
-        timezone: timezone.to_string(),
-        message: message.to_string(),
-        enabled,
-        anchor_at,
-        last_fired_at: None,
-    };
-    let id = {
+    let now = Utc::now().to_rfc3339();
+
+    // 冪等: (session_id, cron_expr, message) 完全一致の既存行を探す（cron だけでは dedup しない）。
+    let existing = {
         let conn = state.db.lock().unwrap();
-        opencrab_db::queries::insert_agent_schedule(&conn, &row)
+        opencrab_db::queries::list_agent_schedules(&conn, agent_id)
             .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+            .into_iter()
+            .find(|r| {
+                r.session_id == session_id && r.cron_expr == cron_expr && r.message == message
+            })
     };
-    // 即時反映（#437）: スケジューラを起こして rebuild させる。
-    state.scheduler_wake.notify_one();
-    let saved = {
+
+    let saved = if let Some(mut row) = existing {
+        // 一致行を更新（同じ id を返す）。**位相の向き（設計 §4.4）**:
+        //   - 無効→有効化（enabling）: anchor=now・last_fired=NULL（新しく回し始める）。
+        //   - 既に有効で同じ内容の再登録: **位相を保存**（触らない）——さもないと set のたびに
+        //     next_fire が動いて「同じことを 2 回言うと変わる」ことになり冪等でなくなる。
+        //     （ただし anchor が欠けていれば打つ。）
+        let enabling = enabled && !row.enabled;
+        if enabling {
+            row.anchor_at = Some(now.clone());
+            row.last_fired_at = None;
+        } else if enabled && row.anchor_at.is_none() {
+            row.anchor_at = Some(now.clone());
+        }
+        row.enabled = enabled;
+        row.timezone = timezone.to_string();
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::update_agent_schedule(&conn, &row)
+                .map_err(|e| ScheduleOpError::Internal(e.to_string()))?;
+        }
+        state.scheduler_wake.notify_one();
+        let id = row.id.unwrap_or_default();
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_schedule(&conn, id)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+            .ok_or_else(|| ScheduleOpError::Internal("更新後の行が見つかりません".to_string()))?
+    } else {
+        // 新規: enabled で作るなら anchor=now（初回発火を「now 以降の最初のスロット / now+周期」へ）。
+        let anchor_at = if enabled { Some(now.clone()) } else { None };
+        let row = AgentScheduleRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            cron_expr: cron_expr.to_string(),
+            timezone: timezone.to_string(),
+            message: message.to_string(),
+            enabled,
+            anchor_at,
+            last_fired_at: None,
+        };
+        let id = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::insert_agent_schedule(&conn, &row)
+                .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+        };
+        state.scheduler_wake.notify_one();
         let conn = state.db.lock().unwrap();
         opencrab_db::queries::get_agent_schedule(&conn, id)
             .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
@@ -555,5 +597,63 @@ mod tests {
         )
         .await;
         assert_eq!(res.err(), Some(StatusCode::NOT_FOUND));
+    }
+
+    // ---- 冪等性（同じ内容の再登録で二重発火しない・マージ前修正） ----
+
+    #[test]
+    fn create_is_idempotent_on_same_content() {
+        let state = state_with_db();
+        let s = nostr_session();
+        let a = create_schedule_core(&state, AGENT, &s, "@every 3h", "Asia/Tokyo", "巡回", true)
+            .expect("1st ok");
+        let b = create_schedule_core(&state, AGENT, &s, "@every 3h", "Asia/Tokyo", "巡回", true)
+            .expect("2nd ok");
+        assert_eq!(a.id, b.id, "同一内容の再登録は同じ id を返す（冪等）");
+        // 行は 1 本だけ。
+        let conn = state.db.lock().unwrap();
+        let rows = opencrab_db::queries::list_agent_schedules(&conn, AGENT).unwrap();
+        assert_eq!(rows.len(), 1, "同一内容は 1 本のまま（二重発火しない）");
+    }
+
+    #[test]
+    fn same_cron_different_message_is_two_schedules() {
+        let state = state_with_db();
+        let s = nostr_session();
+        let a = create_schedule_core(&state, AGENT, &s, "0 7 * * *", "Asia/Tokyo", "まとめ", true)
+            .expect("a");
+        let b = create_schedule_core(&state, AGENT, &s, "0 7 * * *", "Asia/Tokyo", "巡回", true)
+            .expect("b");
+        assert_ne!(a.id, b.id, "同じ cron でも message が違えば別スケジュール");
+        let conn = state.db.lock().unwrap();
+        let rows = opencrab_db::queries::list_agent_schedules(&conn, AGENT).unwrap();
+        assert_eq!(rows.len(), 2, "cron だけで dedup しない");
+    }
+
+    /// 既に有効な同一内容の再登録では位相（anchor/last_fired）を保存する（冪等 = 時刻も動かさない）。
+    #[test]
+    fn idempotent_reregister_preserves_phase() {
+        let state = state_with_db();
+        let s = nostr_session();
+        let a = create_schedule_core(&state, AGENT, &s, "@every 3h", "Asia/Tokyo", "巡回", true)
+            .expect("a");
+        // last_fired を刻んでおく（発火済みを模す）。
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::set_agent_schedule_last_fired(
+                &conn,
+                a.id,
+                "2026-08-09T07:00:00Z",
+            )
+            .unwrap();
+        }
+        let b = create_schedule_core(&state, AGENT, &s, "@every 3h", "Asia/Tokyo", "巡回", true)
+            .expect("b");
+        assert_eq!(a.id, b.id);
+        assert_eq!(
+            b.last_fired_at.as_deref(),
+            Some("2026-08-09T07:00:00Z"),
+            "有効な同一内容の再登録は位相を保存する（次回発火が動かない＝冪等）"
+        );
     }
 }
