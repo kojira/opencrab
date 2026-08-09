@@ -64,10 +64,9 @@ DB から読み直し、永続アンカーから正確な次回発火時刻を�
 スケジュールの `enabled` を false にする。これは意図した挙動（heartbeat と schedule は別概念で、
 「HB を切ったら日次サマリまで黙って止まる」のは驚きの方向）。config `heartbeat_enabled` の説明にも明記。
 
-## CRUD API（`crates/server/src/api/schedules.rs`）
+## CRUD API（`crates/server/src/api/schedules.rs`・owner / dashboard 用）
 
 既存のダッシュボード系エージェント設定 API と同じ認証層の内側に置く（新しい認可ゲートは足さない）。
-**新しい自己設定ツールは追加しない**（自律作用面を広げない）——schedule はオーナーがダッシュボードから管理する。
 
 | メソッド | パス | 内容 |
 |---|---|---|
@@ -80,6 +79,24 @@ DB から読み直し、永続アンカーから正確な次回発火時刻を�
 - `session_id` は**そのエージェントの発火経路を持つセッション**（`nostr-`/`discord-`）に限る（不正 400）。
   「登録できたのに永遠に発火しない行」や他エージェントのセッションを作らせない。
 - 変更後は `scheduler_wake` を鳴らして即時反映（#437）。
+
+## エージェント向けツール（`crates/server/src/agent_schedule.rs`）
+
+**オーナー裁定（2026-08-09）で「エージェント向けツールを提供する」に確定。** 当初設計は「新しい自己設定
+ツールは追加しない」としていたが、これは issue #455 に無い制約で、**omoikane の巡回指示ループを閉じられない**
+（巡回指示が webhook で届いても本人がスケジュールを作れず、毎回オーナーが dashboard から登録することになる）。
+ハートビート（「いつ動くか」）は既に本人が `set_my_heartbeat` で設定できるので、schedule だけ人の承認を要求
+する理由が実測に無い。**増えるのは「何ができるか」ではなく「いつ動くかを自分で決められるか」だけ**（作用面は
+HB と同一）。CRUD と検証・登録ロジックを共有する（`create_schedule_core` / `list_session_schedules_core`）。
+
+- **`set_my_schedule`**: `cron_expr`(必須) / `message`(必須) / `enabled`(既定 true) / `timezone`(既定 Asia/Tokyo)。
+  対象は常に **`ctx.session_id`**（スコープ引数なし・#456）。発火経路の無いセッションは fail-closed + remedy。
+  cron 不正はその場でエラー。成功後 `scheduler_wake`。
+- **`get_my_schedules`**: `ctx.session_id` の schedule を `next_fire_at`（照会時算出）・`gated`/`gated_reason`
+  付きで列挙。
+- 分類: `SERVER_INLINE_ACTIONS`（同ターンで cron 不正を返す）+ `TRUSTED_ONLY_ACTIONS`（未信頼 Agent 会話
+  ターンから自律実行を仕込ませない）。**update/delete は今回未提供**（follow-up。`set` は新規作成・dashboard
+  CRUD に PATCH/DELETE あり）。
 
 ## jitter — 採用しない
 
