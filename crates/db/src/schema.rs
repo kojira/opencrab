@@ -2523,12 +2523,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         .unwrap_or(false);
     if !has_short_id_col {
         conn.execute_batch("ALTER TABLE memory_index_nodes ADD COLUMN short_id TEXT")?;
-        conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL",
-        )?;
         crate::queries::backfill_short_ids(conn)
             .map_err(|e| rusqlite::Error::InvalidParameterName(format!("{e}")))?;
     }
+    // short_id の partial index は SCHEMA_SQL ではなく **ここ** で張る（列確定後・#475）。
+    // fresh DB は SCHEMA_SQL 側で列を持つので上の分岐は skip されるが、この index は
+    // 新規 DB でも旧 DB でも必ず必要なので分岐の外で冪等に張る（IF NOT EXISTS）。
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL",
+    )?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS daily_log_index_watermark (
@@ -3105,7 +3108,11 @@ CREATE TABLE IF NOT EXISTS memory_index_nodes (
 CREATE INDEX IF NOT EXISTS idx_mem_idx_agent ON memory_index_nodes(agent_id);
 CREATE INDEX IF NOT EXISTS idx_mem_idx_parent ON memory_index_nodes(agent_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_mem_idx_type ON memory_index_nodes(agent_id, node_type);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_index_nodes_short_id ON memory_index_nodes(agent_id, short_id) WHERE short_id IS NOT NULL;
+-- `idx_memory_index_nodes_short_id`（short_id 列参照）は **ここに置かない**。migrate() が張る。
+-- 不変条件: SCHEMA_SQL には「migrate() が後から ALTER で足す列」を参照する index を置かないこと。
+-- 理由: baseline 経路（initialize / user_version<1）は fresh でない旧 DB にも SCHEMA_SQL を流す。
+-- `CREATE TABLE IF NOT EXISTS` は既存表を skip するので、旧 DB では列が増えないまま index が走り
+-- 「no such column」で落ちる（#475/#476）。列を保証する migrate() 側で張れば旧 DB でも安全（#475）。
 
 -- ============================================
 -- 記憶インデックス: カテゴリ層メンバー（topic ↔ category の参照, issue #313）
@@ -3420,6 +3427,102 @@ mod migration_tests {
         initialize(&conn).expect("re-initialize");
         assert!(column_exists(&conn, "skills", "archived").unwrap());
         assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    }
+
+    /// 版管理導入前（`user_version = 0`）の**旧 shape の表を実際に持つ** DB を、
+    /// 生成コードで作って現行 `initialize` に通す回帰スイート（#475 / #476）。
+    ///
+    /// test A（`baseline_reconciles_pre_versioning_db`）は最新スキーマ（= 全列あり）から
+    /// 列を1つ落とすだけなので、「SCHEMA_SQL の index が参照する列が旧表に無い」欠陥
+    /// （#475: `idx_memory_index_nodes_short_id`）を素通りしてしまう。ここでは**その世代の
+    /// 表定義そのもの**を与えて再現する。**新しい世代の地雷が出たら
+    /// [`old_db_generations`] に (名前, 旧表 DDL, 検証クロージャ) を1件足すだけで守れる。**
+    fn old_db_generations() -> Vec<OldDbGeneration> {
+        vec![
+            // 2026-04-04 (8afaabe) 以前: `memory_index_nodes` に `short_id` 列が無い。
+            // 現行 SCHEMA_SQL は `CREATE TABLE IF NOT EXISTS` でこの旧表を skip し、以前は
+            // その直後の short_id partial index で `no such column: short_id` を投げて起動不能
+            // だった（#475 / #476）。修正後は index を migrate() 側（列確定後）で張るので通る。
+            OldDbGeneration {
+                name: "pre_short_id_2026_04",
+                // 8afaabe~1 の memory_index_nodes をそのまま（short_id のみ欠く）。
+                schema: "
+                    CREATE TABLE IF NOT EXISTS memory_index_nodes (
+                        id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL,
+                        parent_id TEXT,
+                        node_type TEXT NOT NULL,
+                        source_type TEXT NOT NULL DEFAULT 'session_log',
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        start_log_id INTEGER,
+                        end_log_id INTEGER,
+                        source_session_id TEXT,
+                        date_from TEXT,
+                        date_to TEXT,
+                        depth INTEGER NOT NULL DEFAULT 0,
+                        child_count INTEGER NOT NULL DEFAULT 0,
+                        token_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO memory_index_nodes
+                        (id, agent_id, parent_id, node_type, title, summary, created_at, updated_at)
+                    VALUES ('n1', 'a1', NULL, 'root', 't', 's', '2026-03-01', '2026-03-01');
+                ",
+                verify: |conn| {
+                    // 旧 shape に short_id 列が足され、既存行が backfill される。
+                    assert!(
+                        column_exists(conn, "memory_index_nodes", "short_id").unwrap(),
+                        "short_id 列が足されていること"
+                    );
+                    let sid: Option<String> = conn
+                        .query_row(
+                            "SELECT short_id FROM memory_index_nodes WHERE id = 'n1'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert!(sid.is_some(), "既存行が backfill されていること");
+                },
+            },
+        ]
+    }
+
+    struct OldDbGeneration {
+        name: &'static str,
+        schema: &'static str,
+        verify: fn(&Connection),
+    }
+
+    #[test]
+    fn initialize_upgrades_old_pre_versioning_db_shapes() {
+        for gen in old_db_generations() {
+            let conn = Connection::open_in_memory().expect("open");
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            conn.execute_batch(gen.schema)
+                .unwrap_or_else(|e| panic!("[{}] seed old schema: {e}", gen.name));
+            // 版管理導入前の DB は user_version=0。
+            conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+
+            initialize(&conn).unwrap_or_else(|e| panic!("[{}] initialize failed: {e}", gen.name));
+
+            assert_eq!(
+                schema_version(&conn).unwrap(),
+                latest_version(),
+                "[{}] 最新版にスタンプされていること",
+                gen.name
+            );
+            let idx: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_memory_index_nodes_short_id'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(idx, 1, "[{}] short_id index が存在すること", gen.name);
+            (gen.verify)(&conn);
+        }
     }
 
     /// B. 冪等性: baseline 済みDBで initialize を再実行しても破壊的再構築は走らず、
