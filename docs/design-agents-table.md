@@ -116,6 +116,14 @@ DROP TABLE soul;
 DROP TABLE identity;
 ```
 
+> **旧世代 DB の注意（#480）**: 最初期（2026-02・b6a145e）の `soul` は `personality` ではなく
+> `personality_json`（構造化 JSON）を持ち、`personality` / `instructions` 列を欠く。この統合
+> クエリは `s.personality` を読むため、そのままだと `no such column: s.personality` で起動不能に
+> なる。実装では baseline `migrate()` が集約の直前に `soul.personality`（と `soul.instructions`）を
+> 欠落時に `ALTER TABLE ... ADD COLUMN` で用意して塞ぐ。`personality_json` は自由記述 TEXT の
+> `personality` へ意味的対応が無いため移送せず NULL のままにする（起動の担保が目的）。回帰は
+> `crates/db/src/schema.rs` の `old_db_generations()`（世代 `pre_personality_2026_02`）で固定。
+
 ## API 変更
 
 ### GET /api/agents/{id}

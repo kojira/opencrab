@@ -2591,6 +2591,21 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 "ALTER TABLE soul ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
             )?;
         }
+
+        // soul.personality カラム追加（#480）。soul が `personality_json` しか持たない最初期
+        // （2026-02・b6a145e）世代の DB は `personality` 列を持たず、後段の
+        // `migrate_soul_identity_to_agents` が `SELECT ... s.personality ... FROM soul` で
+        // `no such column: s.personality` を投げて起動不能になる。集約前に列を用意して塞ぐ。
+        // 旧 `personality_json`（構造化 JSON）は agents.personality（自由記述 TEXT・NULL 可）に
+        // 意味的対応が無いため移送せず NULL のままにする（起動の担保が目的・#478 と同じ発想）。
+        let has_personality: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('soul') WHERE name='personality'")?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_personality {
+            conn.execute_batch("ALTER TABLE soul ADD COLUMN personality TEXT")?;
+        }
     }
 
     // import_sync_state テーブル作成
@@ -3484,6 +3499,65 @@ mod migration_tests {
                         )
                         .unwrap();
                     assert!(sid.is_some(), "既存行が backfill されていること");
+                },
+            },
+            // 2026-02 (b6a145e) 初期世代: `soul` が `personality_json`（JSON）を持ち
+            // `personality` / `instructions` 列を持たない。現行 `migrate_soul_identity_to_agents`
+            // は `SELECT ... s.personality ... FROM soul` で集約するため、修正前は
+            // `no such column: s.personality` を投げて起動不能だった（#480）。修正後は
+            // migrate() が集約前に `personality` 列を用意して塞ぐ。
+            OldDbGeneration {
+                name: "pre_personality_2026_02",
+                // b6a145e の soul / identity をそのまま（soul は personality を欠く）。
+                schema: "
+                    CREATE TABLE IF NOT EXISTS soul (
+                        agent_id TEXT PRIMARY KEY,
+                        persona_name TEXT NOT NULL,
+                        social_style_json TEXT NOT NULL DEFAULT '{}',
+                        personality_json TEXT NOT NULL DEFAULT '{}',
+                        thinking_style_json TEXT NOT NULL DEFAULT '{}',
+                        custom_traits_json TEXT,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS identity (
+                        agent_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'discussant',
+                        job_title TEXT,
+                        organization TEXT,
+                        image_url TEXT,
+                        metadata_json TEXT,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO soul (agent_id, persona_name, personality_json, updated_at)
+                    VALUES ('a1', 'Shelly', '{\"trait\":\"calm\"}', '2026-02-20');
+                    INSERT INTO identity (agent_id, name, job_title, updated_at)
+                    VALUES ('a1', 'Shelly', 'engineer', '2026-02-20');
+                ",
+                verify: |conn| {
+                    // soul / identity は集約後に DROP される。
+                    assert!(
+                        !table_exists(conn, "soul").unwrap(),
+                        "soul は集約後に DROP されていること"
+                    );
+                    assert!(
+                        !table_exists(conn, "identity").unwrap(),
+                        "identity は集約後に DROP されていること"
+                    );
+                    // agents に統合され、name は identity 由来・personality は列欠落のため NULL。
+                    let (name, job, personality): (String, Option<String>, Option<String>) = conn
+                        .query_row(
+                            "SELECT name, job_title, personality FROM agents WHERE agent_id = 'a1'",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .expect("agents に a1 が集約されていること");
+                    assert_eq!(name, "Shelly");
+                    assert_eq!(job.as_deref(), Some("engineer"));
+                    assert!(
+                        personality.is_none(),
+                        "personality 列欠落世代は NULL で集約されること（personality_json は移送しない）"
+                    );
                 },
             },
         ]
