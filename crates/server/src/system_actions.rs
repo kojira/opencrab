@@ -726,7 +726,7 @@ impl SystemGatewayActions {
             // 実体と「自分のだけ」の保証は `crate::agent_heartbeat` の doc を参照。
             GatewayActionDef {
                 name: "get_my_heartbeat".to_string(),
-                description: "自分（呼び出し元エージェント）のハートビート設定を、いま話しているセッションについて読み出す。有効か・間隔（秒）・次回発火時刻（next_fire_at）・設定できる下限と上限を返す。設定したことが無ければ無効。有効なのに発火しない状態のときは理由（gated_reason）も返す。他のエージェントの設定は読めない。".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビート設定を、いま話しているセッションについて読み出す。返り値: enabled（有効か）、interval_secs（実効間隔・秒）、next_fire_at（次にこのセッションのハートビートが発火する予定時刻。照会した時点で anchor_at と最終発火時刻から算出する値で、UTC の RFC3339 文字列。無効・発火経路なし・間隔が不正などでは null）、anchor_at / last_fired_at（起点と最終発火時刻。同じく UTC RFC3339 か null）、min/max/default_interval_secs（設定できる下限・上限・既定）。設定したことが無ければ無効。有効なのに発火しないときは gated=true と、その理由 gated_reason（例: グローバルのハートビートが無効化されている / 間隔が不正）を返すので、なぜ発火しないのかを自分で把握できる。他のエージェントの設定は読めない。".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {}
@@ -5644,6 +5644,31 @@ mod tests {
         for key in ["enabled", "interval_secs"] {
             assert!(props.contains_key(key), "missing property: {key}");
         }
+    }
+
+    /// #394 の教訓（道具は説明が無いと使われない）を説明文で担保する。オーナー発端は
+    /// エージェントが「next_run_at が無い」と実在しない名前で呼んだこと。正しい名前
+    /// （`next_fire_at`）と、その意味・形式（UTC RFC3339）・null になる条件・`gated` の
+    /// 意味が説明文に書かれていることを固定する（別名は作らない＝二重語彙を増やさない）。
+    #[test]
+    fn get_my_heartbeat_description_explains_next_fire_at_and_gating() {
+        let defs = SystemGatewayActions::own_definitions();
+        let desc = &defs
+            .iter()
+            .find(|d| d.name == "get_my_heartbeat")
+            .unwrap()
+            .description;
+        for needle in ["next_fire_at", "RFC3339", "UTC", "null", "gated"] {
+            assert!(
+                desc.contains(needle),
+                "get_my_heartbeat の説明文に '{needle}' が必要（#394）: {desc}"
+            );
+        }
+        // 別名 next_run_at は作らない（二重語彙を増やさない・#456）。
+        assert!(
+            !desc.contains("next_run_at"),
+            "next_run_at 別名を説明文に持ち込まない（#456）"
+        );
     }
 
     /// **既定は無効**（#240）。設定したことが無いセッションは無効で返る。応答に廃止フィールド
