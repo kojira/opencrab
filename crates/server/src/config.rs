@@ -128,10 +128,12 @@ pub struct IntakeConfig {
     /// catch-up ポーリングの間隔（秒）。既定 600（10分）。ループ側で最低 60 秒に丸める。
     #[serde(default = "default_intake_catch_up_interval_secs")]
     pub catch_up_interval_secs: u64,
-    /// omoikane source アダプタ（第一号）。未設定なら omoikane の catch-up はしない
+    /// catch-up 対象の source アダプタ群。**source 名をキーにした汎用テーブル**。`kind` で
+    /// アダプタ種別を選ぶ。REST 一覧 API を叩くだけの source は **設定だけで足せる**
+    /// （コード変更不要 / issue #470）。未設定なら catch-up はしない
     /// （webhook 受信は secret さえ設定すれば動く）。
     #[serde(default)]
-    pub omoikane: Option<OmoikaneConfig>,
+    pub sources: Vec<IntakeSourceConfig>,
 }
 
 impl Default for IntakeConfig {
@@ -141,7 +143,7 @@ impl Default for IntakeConfig {
             routes: Vec::new(),
             process_interval_secs: default_intake_process_interval_secs(),
             catch_up_interval_secs: default_intake_catch_up_interval_secs(),
-            omoikane: None,
+            sources: Vec::new(),
         }
     }
 }
@@ -172,24 +174,74 @@ pub struct IntakeRoute {
     pub agent_id: String,
 }
 
-/// omoikane（ナレッジベース）source アダプタの設定。catch-up 一覧 API の接続先。
+/// catch-up アダプタの種別。REST 一覧 API を叩くだけの source は `rest_list` で足りる。
+/// 特殊な認証や非 REST（ページング等、設定で吸収しきれない形）が要るときだけ新しい種別を
+/// 実装する。**「何でも書ける設定言語」にしない**——吸収しきれないものは種別を分ける。
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntakeSourceKind {
+    /// 一覧 API（配列を返す GET）を叩く汎用型。
+    RestList,
+}
+
+/// catch-up の 1 source 設定。`name`/`kind` 以外のフィールドはアダプタ種別により解釈が変わる。
+/// 現状唯一の種別 `rest_list` は base_url + list_path + query を組み立てて GET する。
 #[derive(Debug, Deserialize, Clone)]
-pub struct OmoikaneConfig {
-    /// catch-up ポーリングの有効/無効。既定 true（セクションを書いた時点で使う想定）。
+pub struct IntakeSourceConfig {
+    /// source 名。`[intake.secrets]` / `[[intake.routes]]` の source と同じキー。
+    pub name: String,
+    /// アダプタ種別（`rest_list` 等）。未知の値は config パースエラー（黙って無視しない）。
+    pub kind: IntakeSourceKind,
+    /// この source の catch-up を有効にするか。既定 true（セクションを書けば有効）。
+    /// **`false` にすると設定を残したまま catch-up を一時停止できる**（webhook 受信は無影響）。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 一覧 API のベース URL（例: `https://omoikane.example/`）。空なら catch-up しない。
+    /// [rest_list] 一覧 API のベース URL（例: `https://kb.example`）。空なら catch-up しない。
+    /// 末尾スラッシュは有無どちらでも可。
     #[serde(default)]
     pub base_url: String,
-    /// Bearer トークン（`${ENV}` 展開済み）。秘密。ログに出さない。
+    /// [rest_list] 送信側認証。既定は無認証（omit）。Bearer は
+    /// `auth = { kind = "bearer", token = "${ENV}" }`。**webhook 受信の HMAC secret とは別物**。
     #[serde(default)]
-    pub bearer_token: String,
-    /// `entry_created_by` フィルタ（対象エージェントの uid）。
+    pub auth: IntakeAuth,
+    /// [rest_list] base_url に続けるパス（例: `/v1/comments/recent`）。先頭スラッシュは補う。
     #[serde(default)]
-    pub entry_created_by: String,
-    /// 1 回のポーリングで取得する上限件数。既定 50。
-    #[serde(default = "default_omoikane_poll_limit")]
-    pub poll_limit: u32,
+    pub list_path: String,
+    /// [rest_list] URL クエリ（key=value をそのまま付ける・値は文字列）。**取得件数の上限
+    /// （`limit` 等）もここに入れる**。
+    /// **注意（どちら向きに働くか）: `limit` を省くと source 側の既定で取得する＝**
+    /// **全件が返ると受信箱が膨らむ「広がる」方向。件数を絞りたいなら必ず設定しろ。**
+    #[serde(default)]
+    pub query: std::collections::BTreeMap<String, String>,
+    /// [rest_list] dedup に使う id フィールド名（既定 `"id"`）。この値が取れない要素は捨てる
+    /// （id 無しを hash に落とすと catch-up の度に別キーになり毎回積み直す。webhook↔catch-up の
+    /// 相互 dedup も壊れる）。
+    #[serde(default = "default_intake_id_field")]
+    pub id_field: String,
+    /// [rest_list] この一覧が生む event_type（例: `comment.created`）。webhook 側の `type` と
+    /// 一致させること（同じ dedup_key `{event_type}:{id}` を作る）。空なら catch-up しない。
+    #[serde(default)]
+    pub event_type: String,
+    /// [rest_list] レスポンス配列の場所（トップレベルの単一キー）。省略時は防御的に自動検出
+    /// （トップレベル配列 / `comments` / `data` / `items` / `results`）。これで吸収しきれない
+    /// 形（入れ子・ページング等）は設定を膨らませず**新しい `kind` を実装する**。
+    #[serde(default)]
+    pub array_path: Option<String>,
+}
+
+/// catch-up ポーリングの**送信側**認証（source API への Bearer 等）。webhook **受信**の HMAC
+/// secret（`[intake.secrets]`）とは別物。既定は無認証。
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IntakeAuth {
+    /// 認証ヘッダを付けない（`auth` を書かなければこれ）。
+    #[default]
+    None,
+    /// `Authorization: Bearer <token>`。token は秘密。`${ENV}` で注入しログに出さない。
+    Bearer {
+        #[serde(default)]
+        token: String,
+    },
 }
 
 fn default_true() -> bool {
@@ -201,8 +253,8 @@ fn default_intake_process_interval_secs() -> u64 {
 fn default_intake_catch_up_interval_secs() -> u64 {
     600
 }
-fn default_omoikane_poll_limit() -> u32 {
-    50
+fn default_intake_id_field() -> String {
+    "id".to_string()
 }
 
 /// 非ブロックツール実行（dispatch）の設定（RFC #152 S3a）。

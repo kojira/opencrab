@@ -15,7 +15,7 @@
 //! source secret と Bearer トークンはここと `AppState.intake` に閉じ込め、ログ・エラー・
 //! API 応答へ出さない。[`verify_signature`] は真偽だけを返す（詳細を返すと oracle になる）。
 
-pub mod omoikane;
+pub mod rest_list;
 
 use anyhow::Result;
 use hmac::{Hmac, Mac};
@@ -155,7 +155,8 @@ pub fn route_and_enqueue(
     })
 }
 
-/// source 側の一覧 API から未処理分を取り出す抽象。第一号は [`omoikane::OmoikaneAdapter`]。
+/// source 側の一覧 API から未処理分を取り出す抽象。汎用実装は [`rest_list::RestListAdapter`]
+/// （`kind = "rest_list"`）。第一号 omoikane も config の値としてこの型で構成する。
 #[async_trait::async_trait]
 pub trait SourceAdapter: Send + Sync {
     /// source 名（`/api/hooks/{source}` / config のキーと一致）。
@@ -164,15 +165,38 @@ pub trait SourceAdapter: Send + Sync {
     async fn poll_recent(&self) -> Result<Vec<IntakeEvent>>;
 }
 
-/// 設定から有効な source アダプタを組み立てる。
+/// 設定の `[[intake.sources]]` から有効な source アダプタを組み立てる。**source 名は型に
+/// 焼き付かない**——`kind` で種別を選ぶだけなので、REST 一覧の source は設定を足すだけで増える
+/// （コード変更不要 / issue #470）。無効（`enabled=false` / base_url 空等）な source は畳まれて
+/// 出てこない。
 pub fn build_adapters(cfg: &crate::config::IntakeConfig) -> Vec<Box<dyn SourceAdapter>> {
+    use crate::config::IntakeSourceKind;
     let mut adapters: Vec<Box<dyn SourceAdapter>> = Vec::new();
-    if let Some(oc) = &cfg.omoikane {
-        if let Some(a) = omoikane::OmoikaneAdapter::from_config(oc) {
-            adapters.push(Box::new(a));
+    for src in &cfg.sources {
+        match src.kind {
+            IntakeSourceKind::RestList => {
+                if let Some(a) = rest_list::RestListAdapter::from_config(src) {
+                    adapters.push(Box::new(a));
+                }
+            }
         }
     }
     adapters
+}
+
+/// catch-up する source のうち、対応する route（配送先）が config に 1 件も無いものを返す
+/// （#470-N1・起動時警告用）。これらは取得しても NoRoute で捨てられる（silent 障害の芽）。
+/// `active_sources` は実際に catch-up する（＝アダプタ化された）source 名なので、`enabled=false`
+/// で畳まれた source や無効な source は対象外（そもそもポーリングせず捨ても起きない）。
+fn sources_missing_routes<'a>(
+    routes: &[crate::config::IntakeRoute],
+    active_sources: &'a [String],
+) -> Vec<&'a str> {
+    active_sources
+        .iter()
+        .filter(|src| !routes.iter().any(|r| &r.source == *src))
+        .map(|s| s.as_str())
+        .collect()
 }
 
 /// catch-up ポーリングループを起動する（起動時 + 定期）。
@@ -189,6 +213,18 @@ pub fn spawn_intake_catchup_loop(state: AppState) {
     // 最低 60 秒に丸める（設定値はそのまま保持し、ここで床を効かせる / 既存ループと同流儀）。
     let interval_secs = state.intake.catch_up_interval_secs.max(60);
     let sources: Vec<String> = adapters.iter().map(|a| a.source().to_string()).collect();
+    // #470-N1: catch-up する source に対応する route（配送先）が 1 件も無いと、取得には成功する
+    // がイベントは NoRoute で捨てられ debug ログにしか出ない。config だけで source を足せるように
+    // した結果 `name` のタイポ（routes.source と不一致）が最も起きやすい運用ミスになり、しかも
+    // silent（外部 API を叩いて取得までは成功するので「設定したのに何も起きない」）。**起動時に
+    // 気づける手段**として warn を出す（error にしない・起動を止めない。route を後から足す運用は
+    // 正当なので、これは制約ではなく情報）。
+    for missing in sources_missing_routes(&state.intake.routes, &sources) {
+        tracing::warn!(
+            source = %missing,
+            "intake catch-up: この source に対応する [[intake.routes]] が無い。取得したイベントは配送先が無く捨てられる（routes.source を name と一致させること）"
+        );
+    }
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(interval_secs);
         tracing::info!(
@@ -297,5 +333,115 @@ mod tests {
         assert_eq!(k1, k2);
         assert_ne!(k1, k3);
         assert!(k1.starts_with("e:sha256:"));
+    }
+
+    /// #470 の受け入れ条件: **コードを触らず、設定だけで 2 つ目の source を足せる**こと。
+    /// 2 つの `[[intake.sources]]`（別サービス）を TOML から parse し、`build_adapters` が
+    /// 両方をアダプタ化することを示す。source 名は型に焼き付いていない。
+    #[test]
+    fn two_sources_configured_by_config_only() {
+        let toml = r#"
+process_interval_secs = 60
+catch_up_interval_secs = 600
+
+[[sources]]
+name = "omoikane"
+kind = "rest_list"
+base_url = "https://kb.example"
+auth = { kind = "bearer", token = "tok-1" }
+list_path = "/v1/comments/recent"
+query = { entry_created_by = "uid-1", limit = "50" }
+event_type = "comment.created"
+
+[[sources]]
+name = "acme"
+kind = "rest_list"
+base_url = "https://acme.example/api/"
+list_path = "notes"
+query = { since = "0" }
+id_field = "note_id"
+event_type = "note.created"
+array_path = "results"
+"#;
+        let cfg: crate::config::IntakeConfig =
+            toml::from_str(toml).expect("generic sources parse without code changes");
+        assert_eq!(cfg.sources.len(), 2);
+        let adapters = build_adapters(&cfg);
+        let names: Vec<&str> = adapters.iter().map(|a| a.source()).collect();
+        assert_eq!(
+            names,
+            vec!["omoikane", "acme"],
+            "2 つ目の source が設定だけでアダプタ化される（コード変更ゼロ）"
+        );
+    }
+
+    /// `enabled = false` の source は畳まれて出てこない（設定を残したまま一時停止できる）。
+    #[test]
+    fn disabled_source_is_dropped_but_others_remain() {
+        let toml = r#"
+[[sources]]
+name = "paused"
+kind = "rest_list"
+enabled = false
+base_url = "https://x.example"
+event_type = "e.created"
+
+[[sources]]
+name = "active"
+kind = "rest_list"
+base_url = "https://y.example"
+event_type = "e.created"
+"#;
+        let cfg: crate::config::IntakeConfig = toml::from_str(toml).unwrap();
+        let adapters = build_adapters(&cfg);
+        let names: Vec<&str> = adapters.iter().map(|a| a.source()).collect();
+        assert_eq!(names, vec!["active"]);
+    }
+
+    /// #470-N1: `[[intake.sources]].name` が `[[intake.routes]].source` と不一致だと、取得しても
+    /// NoRoute で捨てられる。`sources_missing_routes` がその source を検出する（起動時 warn の土台）。
+    #[test]
+    fn sources_missing_routes_flags_name_route_mismatch() {
+        let toml = r#"
+[[routes]]
+source = "omoikane"
+event_type = "comment.created"
+agent_id = "scout"
+
+# name が routes.source と不一致（タイポ相当）→ 取得しても捨てられる
+[[sources]]
+name = "omoiakne"
+kind = "rest_list"
+base_url = "https://kb.example"
+event_type = "comment.created"
+
+# name が route と一致 → 配送先あり
+[[sources]]
+name = "omoikane"
+kind = "rest_list"
+base_url = "https://kb2.example"
+event_type = "comment.created"
+"#;
+        let cfg: crate::config::IntakeConfig = toml::from_str(toml).unwrap();
+        let active: Vec<String> = build_adapters(&cfg)
+            .iter()
+            .map(|a| a.source().to_string())
+            .collect();
+        let missing = sources_missing_routes(&cfg.routes, &active);
+        // route と一致する "omoikane" は含まれず、不一致の "omoiakne" だけが検出される。
+        assert_eq!(missing, vec!["omoiakne"]);
+    }
+
+    /// route が全 source に揃っていれば空（誤検出しない）。disabled で畳まれた source も対象外。
+    #[test]
+    fn sources_missing_routes_empty_when_all_matched() {
+        let routes = vec![crate::config::IntakeRoute {
+            source: "active".into(),
+            event_type: "e.created".into(),
+            agent_id: "scout".into(),
+        }];
+        // active_sources には有効化された source のみ入る前提（build_adapters が畳む）。
+        let active = vec!["active".to_string()];
+        assert!(sources_missing_routes(&routes, &active).is_empty());
     }
 }
