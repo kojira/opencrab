@@ -4,7 +4,7 @@
 //!
 //! ハートビート（以下 HB）のターンは 2 経路から起きる。
 //!
-//! 1. **tick**: 時間で発火する従来の経路（`main.rs` の `make_heartbeat_callback`）。
+//! 1. **tick**: 時間で発火する経路（中央スケジューラ `scheduler.rs` の `run_one_fire`）。
 //! 2. **継続ターン**: そのターンが dispatch した非同期サブタスクが決着したときの再開。
 //!
 //! 両者は「文脈を組む → `run_agent_response` → 応答を記録 → `SPEAK/LEARN/IDLE` を解く →
@@ -190,11 +190,14 @@ impl HeartbeatEngine for AppStateEngine {
 /// 共有が要るのは [`SessionLocks`]（同一 HB セッションの直列化）と registry
 /// （`cancel_subtask` の到達性 / #169）で、どちらも「セッション単位の実行状態」。
 ///
-/// 生成は発火ループ 1 本につき 1 つ（`make_heartbeat_callback`）。ハートビート設定の
-/// hot-reload でループを張り直すと新しい実体になるため、張り直しの瞬間に**旧世代の継続
-/// ターンが走っていれば**新世代の tick とはロックを共有しない。設定変更時に限られる細い窓で、
-/// registry（`AppState` が持つ agent 単位の実体）は世代を跨いで同じままなので
-/// `cancel_subtask` の到達性は保たれる。
+/// 生成はプロセス起動時に 1 つだけ（`main.rs` が `from_state` で作り `run_scheduler` へ渡す /
+/// #439・#465 の中央スケジューラ）。スケジューラはこの 1 実体を clone して**全発火・全継続
+/// ターンで共有**し、hot-reload でも**張り直さない**（config 変更は scheduler の発火エントリを
+/// rebuild させるだけで、runner 実体は差し替わらない）。したがって [`SessionLocks`] はプロセス
+/// 全域で 1 つに保たれ、tick と継続ターンは常に同じロックを共有する。旧モデル（発火ループ 1 本
+/// につき runner を 1 つ生成し、hot-reload で張り直す）にあった「張り直しの瞬間に旧世代の継続
+/// ターンが新世代の tick とロックを共有しない」世代跨ぎレースは、runner が単一になった現行
+/// モデルでは発生しない。
 pub(crate) struct HeartbeatTurnRunner {
     db: opencrab_db::Db,
     engine: Arc<dyn HeartbeatEngine>,

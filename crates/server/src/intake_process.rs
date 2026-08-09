@@ -2,10 +2,12 @@
 //!
 //! # なぜ heartbeat と別ループ・別セッションか
 //!
-//! heartbeat のループ群は「グローバル有効 or opt-in 済みエージェントが居る」ときしか張られない
-//! （`make_heartbeat_callback` を回す `heartbeat_loop`）。inbox 消化をそこへ相乗りさせると、
-//! webhook 対象エージェントの heartbeat が無効なとき **inbox が黙って消化されない**（silent
-//! no-op）。それを避けるため常時起動の専用ループにする。
+//! 中央スケジューラ（#439・#465）のタスク自体は常時起動だが、heartbeat の**発火は enabled な
+//! セッションに対してだけ**行われる（`scheduler.rs` は `list_enabled_session_heartbeat_configs`
+//! で enabled 行だけを発火エントリに組み、`discord-` にはさらに live G ゲートも掛ける）。inbox
+//! 消化を heartbeat の発火へ相乗りさせると、webhook 対象エージェントの heartbeat が無効なとき
+//! **inbox が黙って消化されない**（silent no-op）。それを避けるため、heartbeat の有効・無効に
+//! 依存しない常時起動の専用ループにする（`spawn_intake_process_loop`）。
 //!
 //! さらに **heartbeat の agent-scoped ターン（`channel_id=""`）を再利用しない**。あれは SPEAK 時に
 //! `deliver_heartbeat_speech` 経由で稼働中 transport へ配送し、Nostr の text_delivery は宛先を

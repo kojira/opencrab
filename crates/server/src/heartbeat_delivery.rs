@@ -223,10 +223,15 @@ pub(crate) async fn deliver_heartbeat_speech(
 /// 稼働中の**非 Discord** transport へ登録簿経由で 1 通配る。配れたら（＝ある transport が
 /// 担当したら）`true`。
 ///
-/// **Discord 種別は意図的にスキップ**する（理由はモジュール doc）。現状 Nostr など他
-/// transport は capability（`gateway_actions_for` / `text_delivery`）未実装なので、この
-/// 走査は誰にも当たらず常に `false` を返す＝挙動は現行と不変。PR-B で Nostr が
-/// `text_delivery()` を提供すればここに乗る。
+/// **Discord 種別は意図的にスキップ**する（理由はモジュール doc）。
+///
+/// Nostr は既に `text_delivery()` を提供済み（`nostr/src/actions.rs` の
+/// `NostrGatewayActions::text_delivery` → `nostr/src/text_delivery.rs` の
+/// `NostrTextDelivery`）。そのため Nostr ゲートウェイがその体で稼働していれば、この走査は
+/// Nostr に**当たって publish する**（≠常に `false`）。ただし `NostrTextDelivery::send_text`
+/// は **`target` を無視して `post_note` する**（kind:1 broadcast＝エージェント設定のリレー
+/// 集合へ自発投稿）。したがって `channel_target` は Nostr 経路では効かず、宛先を絞る意味は
+/// 持たない。
 async fn deliver_via_non_discord_registry(
     gateways: &AgentGatewayRegistry,
     agent_id: &str,
