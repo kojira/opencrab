@@ -315,7 +315,7 @@ function DiscordBotSection({ agentId }: { agentId: string }) {
   );
 }
 
-function LlmModelSection({ agentId }: { agentId: string }) {
+export function LlmModelSection({ agentId }: { agentId: string }) {
   const { t } = useTranslation();
   const { agent } = useAgentContext();
   const [defaultModel, setDefaultModel] = useState('');
