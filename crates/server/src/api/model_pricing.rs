@@ -42,7 +42,14 @@ pub async fn list_model_pricing(
         .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let rows = opencrab_db::queries::list_model_pricing(&conn)
         .map_err(|e| bad(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "models": rows })))
+    // 文脈予算 = context_window × compaction_ratio。context_window は行ごとの生値
+    // だが compaction_ratio は server-global の単一値なので、掛け算に必要なもう片方
+    // として同じレスポンスに載せる。これが無いとフロントは実効予算を出せず、
+    // 「context_window が小さすぎる」異常に気づけない（#484）。
+    Ok(Json(json!({
+        "models": rows,
+        "compaction_ratio": state.compaction_ratio,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

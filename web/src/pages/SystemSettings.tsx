@@ -597,6 +597,9 @@ const pricingKey = (p: { provider: string; model: string }) => `${p.provider} ${
 
 export function ModelPricingSection() {
   const [rows, setRows] = useState<ModelPricing[] | null>(null);
+  // 実効予算 = context_window × compaction_ratio。ratio は server-global の単一値。
+  // 旧サーバは返さないので null になりうる（その場合は実効予算列を出さない）。
+  const [ratio, setRatio] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -605,6 +608,7 @@ export function ModelPricingSection() {
     try {
       const res = await listModelPricing();
       setRows(res.models);
+      setRatio(typeof res.compaction_ratio === 'number' ? res.compaction_ratio : null);
     } catch (e) {
       // model_pricing API が無い旧サーバでは一覧を出さない
       setRows([]);
@@ -641,7 +645,9 @@ export function ModelPricingSection() {
       </div>
       <p className="text-xs text-on-surface-variant">
         エージェントに設定するモデルは、ここに <code className="font-mono">context_window</code> を
-        登録して初めて保存できます。<strong>文脈予算 = context_window × compaction_ratio（既定 0.5）</strong>
+        登録して初めて保存できます。<strong>
+          実効予算 = context_window × compaction_ratio（{ratio != null ? `現在 ${ratio}` : '既定 0.5'}）
+        </strong>
         で決まり、小さすぎると注入が切り詰められます。値は
         <strong>モデル提供元の公式ドキュメント</strong>を参照してください（集約サイトの数字は当てになりません）。
       </p>
@@ -670,6 +676,9 @@ export function ModelPricingSection() {
                 <th className="py-2 pr-3 font-medium">provider</th>
                 <th className="py-2 pr-3 font-medium">model</th>
                 <th className="py-2 pr-3 text-right font-medium">context_window</th>
+                <th className="py-2 pr-3 text-right font-medium">
+                  実効予算{ratio != null ? ` (×${ratio})` : ''}
+                </th>
                 <th className="py-2 pr-3 text-right font-medium">入力 /1M</th>
                 <th className="py-2 pr-3 text-right font-medium">出力 /1M</th>
                 <th className="py-2 font-medium"></th>
@@ -689,6 +698,16 @@ export function ModelPricingSection() {
                           <span className="text-red-500">未登録</span>
                         ) : (
                           r.context_window.toLocaleString()
+                        )}
+                      </td>
+                      {/* 実効予算 = context_window × compaction_ratio。掛け算せず
+                          隣に並べて眺めるだけで「これだけ小さい」に気づけるのが狙い（#484）。
+                          context_window が未登録 / ratio 不明なら計算できないので '—'。 */}
+                      <td className="py-2 pr-3 text-right font-mono font-medium text-on-surface">
+                        {r.context_window == null || ratio == null ? (
+                          <span className="text-on-surface-variant">—</span>
+                        ) : (
+                          Math.round(r.context_window * ratio).toLocaleString()
                         )}
                       </td>
                       <td className="py-2 pr-3 text-right font-mono text-on-surface-variant">
@@ -711,7 +730,7 @@ export function ModelPricingSection() {
                     </tr>
                     {editing && (
                       <tr>
-                        <td colSpan={6} className="pb-3">
+                        <td colSpan={7} className="pb-3">
                           <ModelPricingForm
                             initial={r}
                             keysReadOnly

@@ -17,6 +17,12 @@ export interface ModelPricing {
 
 export interface ModelPricingListResponse {
   models: ModelPricing[];
+  /**
+   * server-global の compaction_ratio（context_window のうち会話履歴に使う割合）。
+   * 実効予算 = context_window × compaction_ratio。旧サーバはこのフィールドを
+   * 返さないため undefined になりうる（その場合 UI は実効予算を出さない）。
+   */
+  compaction_ratio?: number;
 }
 
 /** PUT ボディ。context_window は必須・正の整数（サーバ側で 0 以下は 400）。 */
