@@ -94,9 +94,20 @@ HB と同一）。CRUD と検証・登録ロジックを共有する（`create_s
   cron 不正はその場でエラー。成功後 `scheduler_wake`。
 - **`get_my_schedules`**: `ctx.session_id` の schedule を `next_fire_at`（照会時算出）・`gated`/`gated_reason`
   付きで列挙。
-- 分類: `SERVER_INLINE_ACTIONS`（同ターンで cron 不正を返す）+ `TRUSTED_ONLY_ACTIONS`（未信頼 Agent 会話
-  ターンから自律実行を仕込ませない）。**update/delete は今回未提供**（follow-up。`set` は新規作成・dashboard
-  CRUD に PATCH/DELETE あり）。
+- **`update_my_schedule`**（#477）: `id`(必須) + 変更する項目だけ（`cron_expr` / `message` / `timezone` /
+  `enabled`。省略は現状維持）。`enabled=false` で「止める」（行は残り履歴が追える）、cron/message の変更で
+  「間隔・内容を変える」。**`session_id` は変えられない**（別セッションへ付け替えさせない）。変更項目ゼロの
+  呼び出しは拒否（暗黙の no-op を作らない）。cron 不正・アンカーの向き（§4.4）は dashboard PATCH と共有。
+- **`delete_my_schedule`**（#477）: `id`(必須) で行ごと削除。「止めるだけ」は `update_my_schedule` の
+  `enabled=false`（履歴を残す）と役割を分ける。
+- **id の所属チェック（#477）**: update/delete は id を取るが、対象は **`ctx.agent_id`＋現在のセッション**の
+  両方に一致する行だけ（`load_owned_schedule`）。一致しない／存在しない id は**存在を明かさず**同じ文言で
+  拒否する（id を推測して他エージェント・他セッションの schedule を触れない）。`set` は
+  `(session, cron, message)` キーの冪等作成なので既存行の cron/message を「変える」経路が無い——update が
+  それを id 指定で埋める。
+- 分類: 4 つとも `SERVER_INLINE_ACTIONS`（同ターンで cron 不正・id 不在を返し、直して呼び直せる）+
+  `TRUSTED_ONLY_ACTIONS`（未信頼 Agent 会話ターンから自律実行を仕込ませない・止めさせない）。dashboard
+  CRUD（PATCH/DELETE・owner 認証）とは検証・アンカー・所属の各ロジックを共有する。
 
 ## jitter — 採用しない
 

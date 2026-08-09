@@ -784,6 +784,54 @@ impl SystemGatewayActions {
                     "required": ["cron_expr", "message"]
                 }),
             },
+            // 更新・削除（#477）。set_my_schedule は (session, cron, message) キーの冪等作成なので、
+            // 既存スケジュールの cron/message を「変える」経路が無い（別行になる）。id 指定の
+            // update/delete でそれを塞ぐ。id は get_my_schedules が返したもの。**他エージェント・
+            // 他セッションの id を渡しても触れない**（所属チェック）。
+            GatewayActionDef {
+                name: "update_my_schedule".to_string(),
+                description: "自分（呼び出し元エージェント）の定時実行スケジュールを、id 指定で部分更新する。id は get_my_schedules が返したもの（他のエージェントや別セッションのスケジュールは触れない）。変更したい項目だけ渡す（省略した項目は現在の値を保つ）: cron_expr（cron 式または @every 形式に変える＝間隔を変える）、message（発火時の指示文を変える）、timezone、enabled（false にすると止まるが行は残る＝履歴が追える。true で再開）。cron_expr / timezone を変えたときや無効→有効に変えたときは、次回発火が「今」を起点に取り直される。cron 式が不正ならその場でエラーが返る（直して呼び直すこと）。変更項目を 1 つも指定しない呼び出しは拒否される。完全に消したいなら delete_my_schedule を使う。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "integer",
+                            "description": "更新するスケジュールの id（get_my_schedules が返した値）。"
+                        },
+                        "cron_expr": {
+                            "type": "string",
+                            "description": "新しい cron 式（例: 0 7 * * *）または @every 形式（例: @every 6h）。省略すると現在の値を保つ。"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "発火時に自分へ渡される新しい指示文。省略すると現在の値を保つ。"
+                        },
+                        "timezone": {
+                            "type": "string",
+                            "description": "cron の評価に使うタイムゾーン（IANA 名・例 Asia/Tokyo）。省略すると現在の値を保つ。"
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "有効にするか。false で止める（行は残り履歴が追える）。true で再開。省略すると現在の値を保つ。"
+                        }
+                    },
+                    "required": ["id"]
+                }),
+            },
+            GatewayActionDef {
+                name: "delete_my_schedule".to_string(),
+                description: "自分（呼び出し元エージェント）の定時実行スケジュールを、id 指定で削除する。id は get_my_schedules が返したもの（他のエージェントや別セッションのスケジュールは削除できない）。行ごと消えるので履歴は残らない。止めるだけで履歴を残したいなら、代わりに update_my_schedule に enabled=false を渡すこと。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "integer",
+                            "description": "削除するスケジュールの id（get_my_schedules が返した値）。"
+                        }
+                    },
+                    "required": ["id"]
+                }),
+            },
             // ---- #157 S5: 通知先（webhook）の管理ツール（Discord から移設） ----
             //
             // 実装は DB と設定ファイル由来の既定値しか触らないのに Discord gateway に
@@ -2078,6 +2126,13 @@ impl GatewayActions for SystemGatewayActions {
             // エージェント自身の定時実行スケジュール（#455）。対象は常に ctx.session_id。
             "get_my_schedules" => crate::agent_schedule::get_my_schedules(&self.state, args, ctx),
             "set_my_schedule" => crate::agent_schedule::set_my_schedule(&self.state, args, ctx),
+            // 更新・削除（#477）。id 指定で、ctx.agent_id＋現在セッションの所属チェックを通った行だけ。
+            "update_my_schedule" => {
+                crate::agent_schedule::update_my_schedule(&self.state, args, ctx)
+            }
+            "delete_my_schedule" => {
+                crate::agent_schedule::delete_my_schedule(&self.state, args, ctx)
+            }
             // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
             // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
             // 由来のフォールバックは `AppState::default_subtask_webhook` から読むので、

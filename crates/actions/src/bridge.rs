@@ -354,8 +354,13 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     // (5) 純粋な読み取り: `get_my_schedules`。
     // (3) 同ターン結果依存: `set_my_schedule` は cron 式の不正を**同ターンで拒否**し、
     //     直して呼び直せる必要がある（実行時に黙って発火しないのが最悪）。
+    // (3) 同ターン結果依存: `update_my_schedule` も cron 不正・id 不在（他人/他セッション/
+    //     存在しない）を**同ターンで拒否**し直して呼び直せる必要がある。`delete_my_schedule`
+    //     も id 不在を同ターンで返す（成否をその場で確認して次へ）。set と同じく inline。
     "get_my_schedules",
     "set_my_schedule",
+    "update_my_schedule",
+    "delete_my_schedule",
     // 通知先（webhook）の管理（#157 S5 で Discord から移設）。**移設前の分類を維持する**:
     // 6 個とも `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
     //
@@ -611,8 +616,13 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
     // 定時実行を自分で決めるのが目的で、本人が触るターン〔heartbeat tick / ダッシュボード /
     // オーナー会話〕は caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話ターン）へ
     // 開けると、会話で「毎朝○時に外部出力する」を仕込ませられる（#240 の再来）ので塞ぐ。
+    // 更新・削除（#477）も同じ棚: **owner 限定にはしない**（自分の巡回をやめる/間隔を変えるのが
+    // 目的で、本人が触るターンは caller=Owner）。一方 caller=Agent（未信頼の外部ユーザー会話）
+    // からは一覧にも出さない。ハンドラ内でも所属チェック（agent_id＋session）で多層防御する。
     "get_my_schedules",
     "set_my_schedule",
+    "update_my_schedule",
+    "delete_my_schedule",
     // VC 参加/退出。可視性 == 強制の対称化（#45）: 非 trusted の Agent には
     // 一覧にも出さない。ハンドラ側はさらに厳しく owner/trusted_user のみ許可
     // （co_agent は一覧に見えても実行は拒否される）。
