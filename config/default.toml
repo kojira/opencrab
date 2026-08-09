@@ -349,10 +349,35 @@ enabled = true
 # event_type = "chat.message"
 # agent_id = "sebastian"
 #
-# # omoikane source アダプタ（catch-up 一覧 API）。webhook 受信だけなら不要。
-# [intake.omoikane]
-# enabled = true
-# base_url = "https://omoikane.example"      # 末尾スラッシュは有無どちらでも可
-# bearer_token = "${OMOIKANE_API_TOKEN}"     # 秘密。${ENV} で注入する
-# entry_created_by = "<uid>"                 # 対象エージェントの uid フィルタ
-# poll_limit = 50
+# # catch-up ポーリング対象の source（一覧 API）。**source 名をキーにした汎用テーブル**。
+# # webhook 受信だけなら不要（webhook は secret さえあれば動く）。
+# #
+# # 2 つ目・3 つ目の source を足すには、この [[intake.sources]] ブロックをもう 1 個書くだけ
+# # ——コードは触らない。REST の一覧 API（配列を返す GET）なら kind = "rest_list" で足りる。
+# # 一時停止したいときは enabled = false（設定は残せる）。特殊な認証や非 REST（ページング等）が
+# # 要るときだけ新しい kind を実装する（設定を「何でも書ける言語」にはしない）。
+# [[intake.sources]]
+# name = "omoikane"                          # [intake.secrets] / [[intake.routes]] の source と同じキー
+# kind = "rest_list"                         # 一覧 API を叩く汎用型
+# enabled = true                             # 既定 true。false で設定を残したまま catch-up を止める
+# base_url = "https://kb.example"            # 末尾スラッシュは有無どちらでも可
+# auth = { kind = "bearer", token = "${SOURCE_API_TOKEN}" }  # 省略で無認証。token は秘密（${ENV} 注入）
+# list_path = "/v1/comments/recent"          # base_url に続けるパス
+# # URL クエリ（key=value をそのまま付ける・値は文字列）。取得件数の上限（limit 等）もここに書く。
+# # 注意: limit を省くと source 側の既定で取得する＝全件だと受信箱が膨らむ「広がる」方向。必ず設定する。
+# query = { entry_created_by = "${SOURCE_UID}", limit = "50" }
+# id_field = "id"                            # dedup に使う id フィールド名（既定 "id"）。取れない要素は捨てる
+# event_type = "comment.created"             # この一覧が生む event_type。webhook 側の type と一致させる
+# # array_path = "comments"                  # 省略可。レスポンス配列の場所（トップレベル単一キー）。
+# #                                          #   省略時は自動検出（トップレベル配列 / comments / data / items / results）
+# #
+# # 2 つ目の source の例（コード変更なし・設定だけ）:
+# # [[intake.sources]]
+# # name = "acme"
+# # kind = "rest_list"
+# # base_url = "https://acme.example"
+# # auth = { kind = "bearer", token = "${ACME_API_TOKEN}" }
+# # list_path = "/api/notes"
+# # query = { limit = "50" }
+# # id_field = "note_id"
+# # event_type = "note.created"

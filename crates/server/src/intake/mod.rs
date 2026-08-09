@@ -15,7 +15,7 @@
 //! source secret と Bearer トークンはここと `AppState.intake` に閉じ込め、ログ・エラー・
 //! API 応答へ出さない。[`verify_signature`] は真偽だけを返す（詳細を返すと oracle になる）。
 
-pub mod omoikane;
+pub mod rest_list;
 
 use anyhow::Result;
 use hmac::{Hmac, Mac};
@@ -155,7 +155,8 @@ pub fn route_and_enqueue(
     })
 }
 
-/// source 側の一覧 API から未処理分を取り出す抽象。第一号は [`omoikane::OmoikaneAdapter`]。
+/// source 側の一覧 API から未処理分を取り出す抽象。汎用実装は [`rest_list::RestListAdapter`]
+/// （`kind = "rest_list"`）。第一号 omoikane も config の値としてこの型で構成する。
 #[async_trait::async_trait]
 pub trait SourceAdapter: Send + Sync {
     /// source 名（`/api/hooks/{source}` / config のキーと一致）。
@@ -164,12 +165,20 @@ pub trait SourceAdapter: Send + Sync {
     async fn poll_recent(&self) -> Result<Vec<IntakeEvent>>;
 }
 
-/// 設定から有効な source アダプタを組み立てる。
+/// 設定の `[[intake.sources]]` から有効な source アダプタを組み立てる。**source 名は型に
+/// 焼き付かない**——`kind` で種別を選ぶだけなので、REST 一覧の source は設定を足すだけで増える
+/// （コード変更不要 / issue #470）。無効（`enabled=false` / base_url 空等）な source は畳まれて
+/// 出てこない。
 pub fn build_adapters(cfg: &crate::config::IntakeConfig) -> Vec<Box<dyn SourceAdapter>> {
+    use crate::config::IntakeSourceKind;
     let mut adapters: Vec<Box<dyn SourceAdapter>> = Vec::new();
-    if let Some(oc) = &cfg.omoikane {
-        if let Some(a) = omoikane::OmoikaneAdapter::from_config(oc) {
-            adapters.push(Box::new(a));
+    for src in &cfg.sources {
+        match src.kind {
+            IntakeSourceKind::RestList => {
+                if let Some(a) = rest_list::RestListAdapter::from_config(src) {
+                    adapters.push(Box::new(a));
+                }
+            }
         }
     }
     adapters
@@ -297,5 +306,68 @@ mod tests {
         assert_eq!(k1, k2);
         assert_ne!(k1, k3);
         assert!(k1.starts_with("e:sha256:"));
+    }
+
+    /// #470 の受け入れ条件: **コードを触らず、設定だけで 2 つ目の source を足せる**こと。
+    /// 2 つの `[[intake.sources]]`（別サービス）を TOML から parse し、`build_adapters` が
+    /// 両方をアダプタ化することを示す。source 名は型に焼き付いていない。
+    #[test]
+    fn two_sources_configured_by_config_only() {
+        let toml = r#"
+process_interval_secs = 60
+catch_up_interval_secs = 600
+
+[[sources]]
+name = "omoikane"
+kind = "rest_list"
+base_url = "https://kb.example"
+auth = { kind = "bearer", token = "tok-1" }
+list_path = "/v1/comments/recent"
+query = { entry_created_by = "uid-1", limit = "50" }
+event_type = "comment.created"
+
+[[sources]]
+name = "acme"
+kind = "rest_list"
+base_url = "https://acme.example/api/"
+list_path = "notes"
+query = { since = "0" }
+id_field = "note_id"
+event_type = "note.created"
+array_path = "results"
+"#;
+        let cfg: crate::config::IntakeConfig =
+            toml::from_str(toml).expect("generic sources parse without code changes");
+        assert_eq!(cfg.sources.len(), 2);
+        let adapters = build_adapters(&cfg);
+        let names: Vec<&str> = adapters.iter().map(|a| a.source()).collect();
+        assert_eq!(
+            names,
+            vec!["omoikane", "acme"],
+            "2 つ目の source が設定だけでアダプタ化される（コード変更ゼロ）"
+        );
+    }
+
+    /// `enabled = false` の source は畳まれて出てこない（設定を残したまま一時停止できる）。
+    #[test]
+    fn disabled_source_is_dropped_but_others_remain() {
+        let toml = r#"
+[[sources]]
+name = "paused"
+kind = "rest_list"
+enabled = false
+base_url = "https://x.example"
+event_type = "e.created"
+
+[[sources]]
+name = "active"
+kind = "rest_list"
+base_url = "https://y.example"
+event_type = "e.created"
+"#;
+        let cfg: crate::config::IntakeConfig = toml::from_str(toml).unwrap();
+        let adapters = build_adapters(&cfg);
+        let names: Vec<&str> = adapters.iter().map(|a| a.source()).collect();
+        assert_eq!(names, vec!["active"]);
     }
 }
