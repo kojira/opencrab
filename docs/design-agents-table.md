@@ -120,8 +120,19 @@ DROP TABLE identity;
 > `personality_json`（構造化 JSON）を持ち、`personality` / `instructions` 列を欠く。この統合
 > クエリは `s.personality` を読むため、そのままだと `no such column: s.personality` で起動不能に
 > なる。実装では baseline `migrate()` が集約の直前に `soul.personality`（と `soul.instructions`）を
-> 欠落時に `ALTER TABLE ... ADD COLUMN` で用意して塞ぐ。`personality_json` は自由記述 TEXT の
-> `personality` へ意味的対応が無いため移送せず NULL のままにする（起動の担保が目的）。回帰は
+> 欠落時に `ALTER TABLE ... ADD COLUMN` で用意して塞ぐ。旧 `personality_json` は自由記述 TEXT の
+> `personality` へ意味的対応が無いため `agents.personality` へは移送せず NULL のままにする。
+>
+> **JSON 列のデータ退避（#480）**: 集約は soul から `persona_name` / `personality` /
+> `instructions` しか写さないため、残る JSON 列（`social_style_json` / `personality_json`=Big Five /
+> `thinking_style_json`=自由記述 `description` を含む / `custom_traits_json`=利用者任意の JSON）は
+> そのままだと `DROP TABLE soul` で消える。この修正が無いと、**「起動できない（データはディスク上に
+> 無事）」から「起動できる（データは消える）」へ退行**し、オーナー原則「意図して設定した値を勝手に
+> 破棄しない」（#456）に反する。よって DROP 前に、実在する JSON 列を
+> `agents.metadata_json` の `legacy_soul` キー配下へ入れ子で退避する（不正 JSON / NULL でも
+> `json_valid` 分岐で起動を止めない・identity 由来の既存 metadata も壊さない）。
+> 以前ここで社会性/思考スタイル JSON を「dead code 削除」として先に個別 DROP していたのは、
+> soul ごと DROP される前提の冗長操作だったため撤去した（退避を拾えるように）。回帰は
 > `crates/db/src/schema.rs` の `old_db_generations()`（世代 `pre_personality_2026_02`）で固定。
 
 ## API 変更
