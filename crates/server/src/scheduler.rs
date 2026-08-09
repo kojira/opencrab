@@ -812,4 +812,59 @@ mod tests {
             "panic 後の完了 wake が鳴っていない（rebuild が促されない）"
         );
     }
+
+    // ---- #438 回帰: 固定グリッドをやめ設定 interval どおりに発火する（PR-C / #452 撤去後の保証） ----
+
+    /// #438 回帰: 次回発火は **設定 interval どおり**（`anchor + interval`）に算出され、
+    /// グローバル評価グリッド（旧: 1800 秒）へ丸められない。旧実装は sleep がグローバル
+    /// 1800 秒グリッドに丸められ、1200 秒（20 分）設定が実質 30 分になっていた（#438）。
+    /// 中央スケジューラは `heartbeat_next_fire_at` で `base + interval` を exact に出す。
+    /// `heartbeat_next_fire_at` をグリッド丸め（例: 1800 の倍数へ切り上げ）へ退行させると、
+    /// この assert が `anchor + 1200` でなくなって落ちる。
+    ///
+    /// **#438 の再発防止**: このテストが落ちたら、**固定グリッド sleep（設定 interval を
+    /// 評価グリッドへ丸める挙動）への退行**が入っている。意図を取り違えないこと。
+    #[test]
+    fn next_fire_honors_exact_interval_without_grid_rounding() {
+        // 固定アンカー（rfc3339 往復で誤差の出ない秒精度）。
+        let anchor = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sid = format!("nostr-{AGENT_UUID}");
+        // interval = 1200（20 分）。global(1800) の倍数でも約数でもない値なので、
+        // グリッド丸めが起きれば anchor+1200 からずれる。
+        let conn = conn_with(&[row(
+            AGENT_UUID,
+            &sid,
+            true,
+            Some(1200),
+            Some(anchor.to_rfc3339()),
+            None,
+        )]);
+        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].next_fire_at,
+            Some(anchor + Duration::seconds(1200)),
+            "次回発火は anchor + 設定 interval(1200s)。1800 グリッドへ丸めない（#438）"
+        );
+    }
+
+    /// #438 回帰: sleep は次回発火までの **実残り時間** で決まり、固定グリッドへ戻らない。
+    /// `MAX_SLEEP_SECS`(300) 未満の残り時間はその値そのままで眠る（旧: グローバル 1800 秒
+    /// グリッド固定）。`next_sleep_secs` を固定周期へ退行させると、250 でなくなって落ちる。
+    ///
+    /// **#438 の再発防止**: このテストが落ちたら、**固定グリッド sleep への退行**が入って
+    /// いる（sleep を残り時間でなく固定周期で決めている）。意図を取り違えないこと。
+    #[test]
+    fn sleep_targets_exact_remaining_not_fixed_grid() {
+        let now = Utc::now();
+        // 残り 250 秒（MAX_SLEEP 未満・グリッド値でない）→ 250 ちょうど眠る。
+        let e = entry_at("nostr-x", Some(now + Duration::seconds(250)));
+        assert_eq!(
+            next_sleep_secs(&[e], &HashSet::new(), now),
+            250,
+            "残り 250 秒ちょうど眠る（固定グリッドへ戻さない・#438）"
+        );
+    }
 }
