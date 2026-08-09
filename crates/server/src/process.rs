@@ -224,6 +224,9 @@ pub fn build_agent_context(
         format!("\n\n## Instructions\n{instructions}")
     };
 
+    // Silent Reply は「相手が Bot か」でシステムが黙らせない。判断はエージェントへ委ね、
+    // 沈黙は会話内容（完結した / 新しい情報が無い）で決めさせる（#486・理念: システムは
+    // 相手が bot か判定しない）。ループ防止（元の意図）は種別ではなく内容の条件で残す。
     let prompt = format!(
         "You are {agent_name} ({persona}).\n\
          \n\
@@ -247,11 +250,11 @@ pub fn build_agent_context(
          ## Silent Reply\n\
          返答不要な場合は NO_REPLY とだけテキストで返してください（他のテキストと混在させない）:\n\
          - グループチャットで自分に関係ない会話の場合\n\
-         - 他のBotが話している場合（Bot同士のループを防ぐ）。ただし例外が2つ: \
-         (1) メッセージが {req_marker} で始まる場合はレビュアーとして応答する、\
-         (2) 自分が依頼したレビューへの {reply_marker} で始まる返信は記録・対応する。\
-         いずれも下記 Peer Review セクションに従うこと\n\
-         - 既に話が完結している場合\n\
+         - 既に話が完結している場合、または同じ話題の往復が続くだけで新しい情報を足せない場合\
+         （相手が Bot でも人でも同じ基準で判断する。Bot だからという理由では黙らない）\n\
+         ただし、{req_marker} で始まるメッセージにはレビュアーとして応答し、\
+         自分が依頼したレビューへの {reply_marker} で始まる返信は記録・対応すること\
+         （下記 Peer Review セクションに従う）。\n\
          \n\
          ## Async Behavior\n\
          \n\
@@ -4615,17 +4618,26 @@ mod no_forced_reply_tests {
         }
     }
 
-    /// Bot 同士のループ防止（Silent Reply の元の意図）は残る — 撤回の非退行検査。
+    /// ループ防止（Silent Reply の元の意図）は残るが、判断は相手の種別ではなく会話内容で
+    /// 行わせる（#486・理念: システムは相手が bot か判定しない）。
     #[test]
-    fn bot_loop_prevention_survives_the_revert() {
+    fn loop_prevention_survives_but_not_by_peer_type() {
         let conn = opencrab_db::init_memory().unwrap();
         let (prompt, _name) =
             build_agent_context(&conn, "a1", &opencrab_actions::CallerIdentity::Owner);
 
         assert!(prompt.contains("## Silent Reply"), "prompt:\n{prompt}");
+
+        // ループ防止は内容ベースで残る。
         assert!(
-            prompt.contains("他のBotが話している場合（Bot同士のループを防ぐ）"),
-            "bot loop prevention was lost:\n{prompt}"
+            prompt.contains("同じ話題の往復が続くだけで新しい情報を足せない場合"),
+            "content-based loop prevention was lost:\n{prompt}"
+        );
+
+        // 「相手が Bot だから黙る」という種別ベースの沈黙条件は消えていること。
+        assert!(
+            !prompt.contains("他のBotが話している場合"),
+            "peer-type silence condition still present:\n{prompt}"
         );
     }
 }
