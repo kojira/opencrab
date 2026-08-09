@@ -84,8 +84,20 @@ pub(crate) fn resolve_run_tools_config(
 /// 返す。**これは意図的**で、その run が実際に許可する集合と一致させるためである
 /// （一覧だけがエラーを返しても、実行側は設定ファイル分を許可したまま動く）。
 pub(crate) fn effective_allowed_commands(state: &AppState, agent_id: &str) -> Vec<String> {
-    resolve_run_tools_config(state, agent_id)
+    let tools_cfg = resolve_run_tools_config(state, agent_id);
+    // 実際の run では `register_tools_from_config`（crates/actions/src/tools/mod.rs）が
+    // `tools.enabled == false` なら **execute_shell 自体を登録しない**。ゲートを閉じた
+    // 構成で許可コマンドを並べると「実行できないコマンド」を返し、エージェントが混乱する
+    // （#311）。登録側と同じ条件でここも空へ倒す。register_tools_from_config が正で、
+    // 一覧はそれに追従する。
+    if !tools_cfg.enabled {
+        return Vec::new();
+    }
+    tools_cfg
         .shell
+        // 同様に shell 無し / `tools.shell.enabled == false` でも execute_shell は
+        // 登録されない。`filter` で両方（None と enabled=false）を空へ落とす。
+        .filter(|shell| shell.enabled)
         .map(|shell| {
             shell
                 .effective_commands()

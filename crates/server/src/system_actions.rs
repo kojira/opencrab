@@ -4211,9 +4211,14 @@ mod tests {
     }
 
     /// 一覧は**呼び出し元のエージェント**の許可コマンドだけを返す（agent_id スコープ）。
+    ///
+    /// `state_with_shell(&[])` を使うのは意図的: 生の `test_app_state()` は
+    /// `ToolsConfig::default()`（`enabled: false`）で、#311 のゲート追加後は一覧が
+    /// 空になってしまう。ここで検証したいのは agent_id スコープであってゲートではないので、
+    /// ゲートを開いた（`enabled: true` / `shell.enabled: true`）最小構成に載せ替える。
     #[tokio::test]
     async fn list_allowed_commands_is_scoped_to_the_calling_agent() {
-        let state = crate::test_app_state();
+        let state = state_with_shell(&[]);
         {
             let conn = state.db.lock().unwrap();
             opencrab_db::queries::add_agent_allowed_command(&conn, "agent-x", "curl", "owner")
@@ -4384,6 +4389,94 @@ mod tests {
             .await;
         assert!(r.success, "{:?}", r.error);
         assert_eq!(r.data.unwrap()["commands"], json!(["cargo", "ls", "mkdir"]));
+    }
+
+    // ---- #311: 一覧は execute_shell の登録ゲートに追従する ----
+    //
+    // 実際の run は `register_tools_from_config`（crates/actions/src/tools/mod.rs）で
+    // `tools.enabled` と `tools.shell.enabled` の 2 段ゲートを通り、どちらかが false なら
+    // execute_shell 自体が登録されない。ゲートを閉じた構成で一覧が「実行できない
+    // コマンド」を返すと、エージェントが「使える」と誤認する（#311）。
+    // 下の 3 本はゲートが**空を返す**こと、4 本目はゲートが開いているとき従来どおり
+    // 返ること（恒真回避の対照）を固定する。ゲートを外すと下 3 本が赤くなる。
+
+    /// `tools.enabled = false` のとき一覧は空。
+    /// ゲートが無ければ `["ls", "cat"]` が返るので、空であることがゲートの証拠。
+    #[tokio::test]
+    async fn list_is_empty_when_tools_disabled() {
+        let state = state_with_shell(&["ls", "cat"]);
+        state.tools_config.write().unwrap().enabled = false;
+        assert!(
+            listed_commands(&state).await.is_empty(),
+            "tools.enabled=false でも一覧が空になっていない（#311）"
+        );
+    }
+
+    /// `tools.shell.enabled = false` のとき一覧は空（shell 設定はあるが無効）。
+    #[tokio::test]
+    async fn list_is_empty_when_shell_disabled() {
+        let state = state_with_shell(&["ls", "cat"]);
+        state
+            .tools_config
+            .write()
+            .unwrap()
+            .shell
+            .as_mut()
+            .unwrap()
+            .enabled = false;
+        assert!(
+            listed_commands(&state).await.is_empty(),
+            "tools.shell.enabled=false でも一覧が空になっていない（#311）"
+        );
+    }
+
+    /// `shell` そのものが無い構成でも空（`tools.enabled=true` だが shell=None）。
+    #[tokio::test]
+    async fn list_is_empty_when_shell_absent() {
+        let state = state_with_shell(&["ls"]);
+        {
+            let mut cfg = state.tools_config.write().unwrap();
+            cfg.enabled = true;
+            cfg.shell = None;
+        }
+        assert!(
+            listed_commands(&state).await.is_empty(),
+            "shell 設定が無いのに一覧が空でない（#311）"
+        );
+    }
+
+    /// 両ゲートが true のときだけ従来どおり実効リストを返す（上の空テストが恒真でない対照）。
+    #[tokio::test]
+    async fn list_returns_commands_when_both_gates_enabled() {
+        // state_with_shell の既定は enabled=true / shell.enabled=true。
+        let state = state_with_shell(&["ls", "cat"]);
+        assert_eq!(
+            listed_commands(&state).await,
+            vec!["ls", "cat"],
+            "両ゲート true でも従来の実効リストが返らない（#311 のゲートが過剰）"
+        );
+    }
+
+    /// owner 向けの `manage_allowed_commands(action="list")` も同じゲートに従う。
+    /// 一覧の口が 2 つあるので、片方だけ塞いで漏れないことを確かめる（#311）。
+    #[tokio::test]
+    async fn manage_allowed_commands_list_is_empty_when_tools_disabled() {
+        let state = state_with_shell(&["ls", "cat"]);
+        state.tools_config.write().unwrap().enabled = false;
+        let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+        let r = actions
+            .execute(
+                "manage_allowed_commands",
+                &json!({"action": "list"}),
+                &owner_ctx(),
+            )
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(
+            r.data.unwrap()["commands"],
+            json!([]),
+            "manage 経路が list 経路と食い違い、ゲートを漏れている（#311）"
+        );
     }
 
     /// **レスポンス JSON が移設前と同一**（記憶インデックス設定）。
