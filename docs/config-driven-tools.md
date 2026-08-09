@@ -220,6 +220,12 @@ run_agent_response() (process.rs)
 - `tools.shell.enabled == true` なら `ShellToolAction::new(config)` を生成して `register()`
 - 将来追加するツール（`HttpToolAction` 等）も同様にここで登録
 
+> **許可コマンド一覧はこの 2 段ゲートに追従する（#311）**: `list_allowed_commands` /
+> `manage_allowed_commands(action="list")` は `process::effective_allowed_commands` を通す。
+> ここが `tools.enabled == false` または `tools.shell.enabled == false`（`shell` 無しを含む）で
+> **空を返す**のは、そのとき `register_tools_from_config` が `execute_shell` を登録せず、
+> どのコマンドも実行できないため。`register_tools_from_config` が正で、一覧はそれに合わせる。
+
 ### `ShellToolAction` の設計
 
 - 構造体: `ShellToolAction { config: ShellToolConfig }`
