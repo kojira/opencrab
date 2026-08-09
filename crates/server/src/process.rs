@@ -953,6 +953,13 @@ fn build_past_context_summary_section(
 ///
 /// **登録方法まで書く。** 拒否だけして先へ進む手段を示さないと、「設定できないが
 /// どうすれば設定できるかも分からない」で止まる。
+///
+/// **フロントの導線がこの文言に依存している（#482）。** `web/src/pages/AgentOverview.tsx`
+/// の `UNREGISTERED_MARKER`（= `"has no context_window registered in model_pricing"`）と
+/// 正規表現 `/model "([^"]+)"/` が、このメッセージから「未登録である」ことと spec を
+/// 拾って、その場に登録フォームを出す。**この文言を変えるなら AgentOverview.tsx も
+/// 直せ。** さもないと導線が黙って出なくなり、運用者は curl 直叩きに戻る。
+/// 契約は `missing_message_keeps_frontend_link_contract` テストで固定している。
 pub fn model_context_window_missing_message(spec: &str) -> String {
     format!(
         "model \"{spec}\" has no context_window registered in model_pricing. \
@@ -4889,6 +4896,22 @@ mod model_context_window_gate_tests {
         // 拒否するだけでなく、登録先を必ず示す。
         assert!(err.contains("model_pricing"), "{err}");
         assert!(err.contains("/api/llm/model-pricing"), "{err}");
+    }
+
+    /// フロントの導線（`web/src/pages/AgentOverview.tsx`）はこのメッセージ文言に
+    /// 結合している（#482）。`UNREGISTERED_MARKER` と spec 抽出の正規表現
+    /// `/model "([^"]+)"/` が拾える形を契約として固定する。ここが変わると導線が
+    /// 黙って出なくなるので、変えるならフロント側も直すこと。
+    #[test]
+    fn missing_message_keeps_frontend_link_contract() {
+        let msg = super::model_context_window_missing_message("chatgpt:gpt-5.6-terra");
+        // フロントの marker（AgentOverview.tsx の UNREGISTERED_MARKER と一致）。
+        assert!(
+            msg.contains("has no context_window registered in model_pricing"),
+            "{msg}"
+        );
+        // フロントの正規表現 `model "([^"]+)"` が spec を拾える引用形。
+        assert!(msg.contains("model \"chatgpt:gpt-5.6-terra\""), "{msg}");
     }
 
     /// 行はあるが `context_window` が NULL の場合も未登録扱い。
