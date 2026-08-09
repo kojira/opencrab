@@ -404,14 +404,18 @@ async fn run_one_schedule(
         }
     }
 
-    // 2. スケジュールの `message` を self-message として注入する（エージェントが受け取る入力）。
+    // 2. スケジュールの `message` を **speech**（speaker=`schedule`・≠ agent_id）として注入する。
+    //    `send_agent_message`（REST）と同じ形にするのが要点: `is_user_speech`（log_type=="speech"
+    //    かつ speaker!=agent_id・#284）が「エージェントが応答すべき直近のユーザー発言」として
+    //    認識し、コンテキスト切り詰め後も会話へ混ぜ戻す（`system` で注入すると truncation で
+    //    落ちて発火しても届かないことがある）。エージェントはこれを受け取って 1 ターン応答する。
     {
         let conn = db.lock().ok()?;
         let log = opencrab_db::queries::SessionLogRow {
             id: None,
             agent_id: agent_id.to_string(),
             session_id: session_id.to_string(),
-            log_type: "system".to_string(),
+            log_type: "speech".to_string(),
             content: message.to_string(),
             speaker_id: Some("schedule".to_string()),
             turn_number: None,
