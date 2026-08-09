@@ -3026,6 +3026,83 @@ fn test_delete_index_node_cascades_fts_for_subtree() {
 }
 
 #[test]
+fn test_delete_index_node_cleans_category_members() {
+    // ノード削除時に memory_category_members の該当行が topic_id / category_id の
+    // **両方向**で掃除される（宙に浮く参照を残さない）。v33 マイグレーションと同じ意味論。
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+    // topic を 2 件（t1 は削除、t2 は残す）と、topic に付けるタグ（category）ノード 2 件。
+    insert_test_topic(&conn, "a1", "t1", "t1");
+    insert_test_topic(&conn, "a1", "t2", "t2");
+    let root = ensure_category_root(&conn, "a1", now).unwrap();
+    let tag_del = insert_category_node(&conn, "a1", &root, "消すタグ", "", now).unwrap();
+    let tag_keep = insert_category_node(&conn, "a1", &root, "残すタグ", "", now).unwrap();
+
+    // (1) topic_id = 削除対象 の member: t1 に 2 タグ付与。
+    assert!(assign_topic_to_category(&conn, "a1", "t1", &tag_del.id, now).unwrap());
+    assert!(assign_topic_to_category(&conn, "a1", "t1", &tag_keep.id, now).unwrap());
+    // (2) category_id = 削除対象 の member: 別 topic t2 に「消すタグ」を付与。
+    assert!(assign_topic_to_category(&conn, "a1", "t2", &tag_del.id, now).unwrap());
+    assert_eq!(members_for(&conn, "a1", "t1"), 2);
+    assert_eq!(members_for(&conn, "a1", "t2"), 1);
+
+    // topic t1 を削除 → topic_id=t1 の member（2 行）が消える。t2 側は無関係なので残る。
+    delete_index_node(&conn, "t1").unwrap();
+    assert_eq!(members_for(&conn, "a1", "t1"), 0);
+    assert_eq!(members_for(&conn, "a1", "t2"), 1);
+
+    // タグノード tag_del を削除 → category_id=tag_del の member（t2 の 1 行）が消える。
+    delete_index_node(&conn, &tag_del.id).unwrap();
+    assert_eq!(members_for(&conn, "a1", "t2"), 0);
+    // 全 member が掃除されている（残骸ゼロ）。
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memory_category_members", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(total, 0);
+}
+
+#[test]
+fn test_delete_index_node_fixes_parent_child_count() {
+    // 子ノード削除時に親の child_count を実カウントへ直す。特に**子が 0 になる親**は
+    // 索引ビルダの再計算（現存する子を持つ親しか UPDATE しない）では永久に直らないので、
+    // ここで直る必要がある。v33 マイグレーションと同じ意味論。
+    let conn = setup();
+
+    // 親 p1: 子 1 つ（c1）。child_count はあらかじめ 1（正しい状態）にしておく。
+    let mut p1 = mk_topic_node("p1", "a1", "親（子1つ）", "s", &[]);
+    p1.node_type = "session".to_string();
+    p1.child_count = 1;
+    insert_index_node(&conn, &p1).unwrap();
+    let mut c1 = mk_topic_node("c1", "a1", "子1", "s", &[]);
+    c1.parent_id = Some("p1".to_string());
+    insert_index_node(&conn, &c1).unwrap();
+
+    // 親 p2: 子 2 つ（c2a, c2b）。child_count = 2。
+    let mut p2 = mk_topic_node("p2", "a1", "親（子2つ）", "s", &[]);
+    p2.node_type = "session".to_string();
+    p2.child_count = 2;
+    insert_index_node(&conn, &p2).unwrap();
+    let mut c2a = mk_topic_node("c2a", "a1", "子2a", "s", &[]);
+    c2a.parent_id = Some("p2".to_string());
+    insert_index_node(&conn, &c2a).unwrap();
+    let mut c2b = mk_topic_node("c2b", "a1", "子2b", "s", &[]);
+    c2b.parent_id = Some("p2".to_string());
+    insert_index_node(&conn, &c2b).unwrap();
+
+    let child_count = |id: &str| get_index_node(&conn, id).unwrap().unwrap().child_count;
+
+    // 子が 0 になるケース: p1 の最後の子 c1 を消す → p1.child_count は 1 → 0。
+    delete_index_node(&conn, "c1").unwrap();
+    assert_eq!(child_count("p1"), 0);
+
+    // 子が残るケース: p2 の子 1 つを消す → p2.child_count は 2 → 1。
+    delete_index_node(&conn, "c2a").unwrap();
+    assert_eq!(child_count("p2"), 1);
+}
+
+#[test]
 fn test_index_write_helpers_work_inside_outer_transaction() {
     // index_builder::delete_index はトランザクション内から delete_index_nodes_for_agent
     // を呼ぶ。SAVEPOINT 方式なので外側 tx があっても動くこと（BEGIN の入れ子は不可）。

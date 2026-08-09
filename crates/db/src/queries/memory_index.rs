@@ -204,16 +204,32 @@ pub fn insert_index_node(conn: &Connection, node: &IndexNodeRow) -> Result<()> {
     })
 }
 
-/// ノードを1件削除する（FTS 影テーブルも同期削除）。
+/// ノードを1件削除する（FTS 影テーブル・カテゴリ所属・親集計も同期する）。
 ///
 /// memory_index_nodes への生 SQL DELETE は FTS 孤児を残すため禁止 —
 /// 必ずこの関数（または `delete_index_nodes_for_agent`）を使うこと。
 ///
-/// parent_id の ON DELETE CASCADE で子孫ノードも一緒に消えるため、FTS 側は
-/// 削除**前に**再帰 CTE で部分木全体の id を集めて同期削除する（非 leaf に
-/// 対して呼んでも FTS 孤児を残さない）。
+/// parent_id の ON DELETE CASCADE で子孫ノードも一緒に消えるため、FTS と
+/// `memory_category_members` は削除**前に**再帰 CTE で部分木全体の id を集めて
+/// 同期削除する（非 leaf に対して呼んでも孤児参照を残さない）。
+///
+/// 後始末は v33 マイグレーション（schema.rs / issue #393）が同じ削除に対して
+/// 明示的に実装した意味論をランタイムへ写したもの:
+/// - `memory_category_members` … `topic_id` / `category_id` の**両方**でノードを
+///   指すため、部分木の id 集合に一致する行を両列で消す（`topic_id` 列名でも
+///   unit 等を指す行がありうる）。
+/// - 親の `child_count` … 子を失う親を実カウントで直す。索引ビルダの再計算
+///   （`index_builder.rs` の `HashMap<parent_id, count>`）は**現存する子を持つ親しか
+///   UPDATE しない**ため、最後の子を消すと親の `child_count` は永久にずれる。
+///   ここで直さないと自己修復しない。部分木の外にある親は削除対象 `node_id` の親
+///   だけ（子孫の親は全て部分木の中で一緒に消える）なので、その 1 件を直せば足りる。
+///
+/// 掃除・削除・集計直しは同一 savepoint 内で行い、途中失敗で中途半端な状態が
+/// 残らないようにする（`with_index_savepoint` がロールバックする）。
 pub fn delete_index_node(conn: &Connection, node_id: &str) -> Result<()> {
     with_index_savepoint(conn, |tx| {
+        // 子を失う親は削除後に parent_id を辿れないので、削除**前**に控える。
+        let parent_id = get_index_node(tx, node_id)?.and_then(|n| n.parent_id);
         tx.execute(
             "WITH RECURSIVE subtree(id) AS (
                 SELECT id FROM memory_index_nodes WHERE id = ?1
@@ -223,10 +239,32 @@ pub fn delete_index_node(conn: &Connection, node_id: &str) -> Result<()> {
              DELETE FROM memory_index_fts WHERE node_id IN (SELECT id FROM subtree)",
             params![node_id],
         )?;
+        // カテゴリ所属も同じ部分木集合で消す（宙に浮く参照を残さない / v33 と同じ）。
+        tx.execute(
+            "WITH RECURSIVE subtree(id) AS (
+                SELECT id FROM memory_index_nodes WHERE id = ?1
+                UNION ALL
+                SELECT n.id FROM memory_index_nodes n JOIN subtree s ON n.parent_id = s.id
+             )
+             DELETE FROM memory_category_members
+             WHERE topic_id IN (SELECT id FROM subtree)
+                OR category_id IN (SELECT id FROM subtree)",
+            params![node_id],
+        )?;
         tx.execute(
             "DELETE FROM memory_index_nodes WHERE id = ?1",
             params![node_id],
         )?;
+        // 生き残る親の child_count を実カウントへ直す（子が 0 になる親も含む）。
+        if let Some(parent_id) = parent_id {
+            tx.execute(
+                "UPDATE memory_index_nodes
+                 SET child_count = (SELECT COUNT(*) FROM memory_index_nodes c
+                                     WHERE c.parent_id = ?1)
+                 WHERE id = ?1",
+                params![parent_id],
+            )?;
+        }
         Ok(())
     })
 }
