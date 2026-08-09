@@ -24,7 +24,9 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
 }
 
 fn caller_allowed(caller: &GatewayCaller) -> bool {
-    matches!(caller, GatewayCaller::Owner | GatewayCaller::TrustedUser)
+    // #485: co_agent は owner 等価。owner / co_agent（= is_owner_equivalent）に加え
+    // trusted_user が VC 参加/退出できる。素の Agent のみ弾く。
+    caller.is_owner_equivalent() || matches!(caller, GatewayCaller::TrustedUser)
 }
 
 impl DiscordGatewayActions {
@@ -34,7 +36,9 @@ impl DiscordGatewayActions {
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         if !caller_allowed(&ctx.caller) {
-            return reject("join_voice_channel requires owner or trusted_user".to_string());
+            return reject(
+                "join_voice_channel requires owner, co_agent, or trusted_user".to_string(),
+            );
         }
         let Some(voice) = &self.voice else {
             return err("voice 機能が無効です（config.toml の [voice] enabled = true が必要）");
@@ -94,7 +98,9 @@ impl DiscordGatewayActions {
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         if !caller_allowed(&ctx.caller) {
-            return reject("leave_voice_channel requires owner or trusted_user".to_string());
+            return reject(
+                "leave_voice_channel requires owner, co_agent, or trusted_user".to_string(),
+            );
         }
         let Some(voice) = &self.voice else {
             return err("voice 機能が無効です");
@@ -142,31 +148,25 @@ mod tests {
         !r.success
             && r.error.as_deref().is_some_and(|e| {
                 e.starts_with(opencrab_actions::REJECTION_CODE_PREFIX)
-                    && e.contains("requires owner or trusted_user")
+                    && e.contains("requires owner")
             })
     }
 
-    /// **VC 参加/退出は owner / trusted_user 以外を弾く**（#203 の一括点検）。
+    /// **VC 参加/退出は素の Agent を弾く**（#203 の一括点検 / #485 で co_agent を許可へ）。
     ///
-    /// VC 参加はサーバの他メンバーに直接聞こえる行為なので、エージェント本体や
-    /// 別エージェント（co_agent）が勝手に入れてはならない。`caller_allowed` を
-    /// 常に真へ書き換えても落ちるテストが 1 件も無く（ツール名の存在確認しか
-    /// なかった）、この 2 本が Discord 側で唯一の実行時ゲートだった。
+    /// VC 参加はサーバの他メンバーに直接聞こえる行為なので、外部ユーザー由来の未信頼
+    /// ターン（caller=Agent）が勝手に入れてはならない。`caller_allowed` を常に真へ
+    /// 書き換えても落ちるテストが 1 件も無く（ツール名の存在確認しかなかった）、この
+    /// 2 本が Discord 側で唯一の実行時ゲートだった。
     ///
-    /// **co_agent を明示的に含める**のが要点: bridge の `caller_is_trusted`
-    /// （owner / co_agent / trusted_user）より**狭い**のがこのゲートの意図なので、
-    /// うっかり bridge 側の集合に揃えた変更を落とせる形にしてある。
+    /// #485 で co_agent は owner 等価になったので、ここでは弾かれない
+    /// （[`voice_actions_let_owner_equivalent_and_trusted_user_past_the_gate`] が確認する）。
     #[tokio::test]
     async fn voice_actions_reject_non_trusted_callers() {
         let (a, _db) = actions();
         let args = serde_json::json!({"channel_id": "333"});
 
-        for caller in [
-            GatewayCaller::Agent,
-            GatewayCaller::CoAgent {
-                agent_id: "other".to_string(),
-            },
-        ] {
+        for caller in [GatewayCaller::Agent] {
             let label = caller.label();
             let joined = a
                 .execute_join_voice_channel(&args, &ctx(caller.clone()))
@@ -189,14 +189,21 @@ mod tests {
 
     /// 上のテストが「常に弾かれるから緑」になっていないことの対照。
     ///
-    /// owner / trusted_user はゲートを**通り抜け**、その先の「voice 機能が無効」で
-    /// 止まる（= 失敗理由が権限ではない）。ゲートを閉じ切る変異を入れると落ちる。
+    /// owner / co_agent（#485 で owner 等価）/ trusted_user はゲートを**通り抜け**、その先の
+    /// 「voice 機能が無効」で止まる（= 失敗理由が権限ではない）。ゲートを閉じ切る変異を
+    /// 入れると落ちる。co_agent を含めることで #485 の owner 等価が緩んだら落ちる。
     #[tokio::test]
-    async fn voice_actions_let_owner_and_trusted_user_past_the_gate() {
+    async fn voice_actions_let_owner_equivalent_and_trusted_user_past_the_gate() {
         let (a, _db) = actions();
         let args = serde_json::json!({"channel_id": "333"});
 
-        for caller in [GatewayCaller::Owner, GatewayCaller::TrustedUser] {
+        for caller in [
+            GatewayCaller::Owner,
+            GatewayCaller::CoAgent {
+                agent_id: "other".to_string(),
+            },
+            GatewayCaller::TrustedUser,
+        ] {
             let label = caller.label();
             let joined = a
                 .execute_join_voice_channel(&args, &ctx(caller.clone()))

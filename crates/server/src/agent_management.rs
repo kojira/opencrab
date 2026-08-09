@@ -265,7 +265,7 @@ pub(crate) fn add_allowed_command(
     args: &serde_json::Value,
     ctx: &GatewayCallContext,
 ) -> GatewayActionResult {
-    if ctx.caller != GatewayCaller::Owner {
+    if !ctx.caller.is_owner_equivalent() {
         return GatewayActionResult {
             success: false,
             data: None,
@@ -380,7 +380,7 @@ pub(crate) fn remove_allowed_command(
     args: &serde_json::Value,
     ctx: &GatewayCallContext,
 ) -> GatewayActionResult {
-    if ctx.caller != GatewayCaller::Owner {
+    if !ctx.caller.is_owner_equivalent() {
         return GatewayActionResult {
             success: false,
             data: None,

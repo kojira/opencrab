@@ -107,19 +107,31 @@ impl opencrab_discord::AgentRunner for AppState {
         if crate::api::is_owner_id(owner_discord_id, sender_id) {
             return opencrab_actions::CallerIdentity::Owner;
         }
-        // DB接続取得失敗時は trust_info=None（＝最小権限の Agent 扱い）。
-        let trust_info = match self.db.lock() {
-            Ok(conn) => agent_ids.iter().find_map(|aid| {
-                // 経路は Discord 固定（#214）。互換読みは不要 — 従来の行が Discord 経路そのもの。
-                opencrab_db::queries::get_trusted_user(
-                    &conn,
-                    opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
-                    sender_id,
-                    aid,
-                )
-            }),
-            Err(_) => None,
+        // DB接続取得失敗時は最小権限（Agent）扱い。
+        let Ok(conn) = self.db.lock() else {
+            return opencrab_actions::CallerIdentity::Agent;
         };
+        // #485: co-agents API（`trusted_co_agents` 表）で owner が登録した相手を **owner 等価の
+        // co_agent** へ解決する（配線）。従来この表は権限解決に配線されておらず、登録しても
+        // 相手は `Agent` のままだった。owner 判定の次・`trusted_users` 照合より**前**に置く
+        // （co_agent は owner 等価で trusted_user より強い）。表は経路非依存なので Discord の
+        // sender_id をそのまま co_agent_id として引く。
+        if agent_ids.iter().any(|aid| {
+            opencrab_db::queries::is_trusted_co_agent(&conn, aid, sender_id).unwrap_or(false)
+        }) {
+            return opencrab_actions::CallerIdentity::CoAgent {
+                agent_id: sender_id.to_string(),
+            };
+        }
+        let trust_info = agent_ids.iter().find_map(|aid| {
+            // 経路は Discord 固定（#214）。互換読みは不要 — 従来の行が Discord 経路そのもの。
+            opencrab_db::queries::get_trusted_user(
+                &conn,
+                opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+                sender_id,
+                aid,
+            )
+        });
         // 権限は列挙型（#234）。variant を足したらここが網羅性で落ちる＝
         // 「新しい権限が黙って TrustedUser 扱いになる」が起きない。
         match trust_info.map(|u| u.permission) {

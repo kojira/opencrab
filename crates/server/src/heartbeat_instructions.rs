@@ -50,7 +50,7 @@ pub(crate) fn update_heartbeat_instructions(
     args: &serde_json::Value,
     ctx: &GatewayCallContext,
 ) -> GatewayActionResult {
-    if ctx.caller != GatewayCaller::Owner {
+    if !ctx.caller.is_owner_equivalent() {
         return GatewayActionResult {
             success: false,
             data: None,

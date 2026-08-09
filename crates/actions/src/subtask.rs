@@ -503,7 +503,10 @@ pub fn cancel_subtask(
     caller: CallerIdentity,
     caller_session_id: Option<&str>,
 ) -> CancelOutcome {
-    let is_owner = matches!(caller, CallerIdentity::Owner);
+    // #485: co_agent は owner 等価。owner（等価）はセッションをまたいで subtask を停止できる
+    // （唯一の源は is_owner_equivalent）。co_agent が owner 由来の subtask を管理できないと協働
+    // にならない。非 owner 等価（trusted_user / agent）は従来どおりセッション一致 + trust 序列。
+    let is_owner = caller.is_owner_equivalent();
     let authorized = |s: &SpawnedSubtask| -> bool {
         if is_owner {
             return true;

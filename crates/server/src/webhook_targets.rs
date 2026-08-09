@@ -289,11 +289,13 @@ fn set_default_webhook_impl(
             .to_string()
     };
 
-    // 権限: owner は全 scope を set/disable できる。Agent は自分自身の agent scope
+    // 権限: owner（等価）は全 scope を set/disable できる。Agent は自分自身の agent scope
     // （scope='agent' かつ agent_id が自分）のみ。それ以外（tool/global/他 agent）は拒否。
-    // trusted_user / co_agent は read-only（set/disable 不可）。
+    // trusted_user は read-only（set/disable 不可）。
+    // #485: co_agent は owner 等価になったので owner と同じく全 scope を set/disable できる
+    //       （唯一の源は is_owner_equivalent）。
     match &ctx.caller {
-        GatewayCaller::Owner => {}
+        c if c.is_owner_equivalent() => {}
         GatewayCaller::Agent => {
             if scope != "agent" {
                 return reject(

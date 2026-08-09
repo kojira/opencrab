@@ -18,9 +18,7 @@ use opencrab_actions::{
     cancel_subtask as neutral_cancel_subtask, CancelOutcome, SettleKind, SubtaskCompletionSink,
     SubtaskRegistry, SubtaskSettled, REJECTION_CODE_PREFIX,
 };
-use opencrab_gateway::{
-    GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
-};
+use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use opencrab_mcp::is_valid_server_name;
 use serde_json::{json, Value};
 
@@ -1466,7 +1464,7 @@ impl SystemGatewayActions {
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
-        if ctx.caller != GatewayCaller::Owner {
+        if !ctx.caller.is_owner_equivalent() {
             return err("configure_llm_provider requires owner".to_string());
         }
         let Some(provider) = args.get("provider").and_then(|v| v.as_str()) else {
@@ -1534,7 +1532,7 @@ impl SystemGatewayActions {
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
-        if ctx.caller != GatewayCaller::Owner {
+        if !ctx.caller.is_owner_equivalent() {
             return err("manage_allowed_commands requires owner".to_string());
         }
         let agent_id = ctx.agent_id.clone();
@@ -1598,7 +1596,7 @@ impl SystemGatewayActions {
 
     async fn configure_nostr(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
         // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
-        if ctx.caller != GatewayCaller::Owner {
+        if !ctx.caller.is_owner_equivalent() {
             return err("configure_nostr requires owner".to_string());
         }
         let agent_id = ctx.agent_id.clone();
@@ -1711,7 +1709,7 @@ impl SystemGatewayActions {
 
     async fn configure_self(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
         // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
-        if ctx.caller != GatewayCaller::Owner {
+        if !ctx.caller.is_owner_equivalent() {
             return err("configure_self requires owner".to_string());
         }
         let agent_id = ctx.agent_id.clone();
@@ -1789,7 +1787,7 @@ impl SystemGatewayActions {
         ctx: &GatewayCallContext,
     ) -> GatewayActionResult {
         // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
-        if ctx.caller != GatewayCaller::Owner {
+        if !ctx.caller.is_owner_equivalent() {
             return err("configure_mcp_server requires owner".to_string());
         }
         let agent_id = ctx.agent_id.clone();
@@ -2236,6 +2234,9 @@ impl GatewayActions for SystemGatewayActions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 本体は `is_owner_equivalent()` / `trust_level()` 経由でしか caller を見ないので、
+    // 列挙子そのものを組み立てるのはテストだけ。本体側の `use` に混ぜると未使用警告になる。
+    use opencrab_gateway::GatewayCaller;
 
     #[test]
     fn own_definition_shape() {
@@ -6993,6 +6994,9 @@ mod tests {
 #[cfg(test)]
 mod configure_self_model_gate_tests {
     use super::*;
+    // 本体は `is_owner_equivalent()` 経由でしか caller を見ないので、列挙子を組み立てるのは
+    // テストだけ。本体側の `use` に混ぜると未使用警告になる。
+    use opencrab_gateway::GatewayCaller;
 
     const AGENT: &str = "agent-x";
 
