@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-// `CallerIdentity` は本体では未使用だが、`mod tests` が `use super::*` 経由で使う。
-#[allow(unused_imports)]
-use crate::traits::{Action, ActionContext, ActionResult, CallerIdentity};
+use crate::traits::{Action, ActionContext, ActionResult};
 
 /// instructionsを更新するアクション（Ownerのみ実行可能）
 pub struct UpdateInstructionsAction;
@@ -78,6 +76,9 @@ impl Action for UpdateInstructionsAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 本体は `is_owner_equivalent()` 経由でしか caller を見ないので、型そのものを使うのは
+    // テストだけ。本体側の `use` に混ぜると未使用警告になるためここで引く。
+    use crate::traits::CallerIdentity;
     use opencrab_db::queries::{upsert_agent, AgentRow};
     use serde_json::json;
 

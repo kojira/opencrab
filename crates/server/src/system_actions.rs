@@ -18,11 +18,7 @@ use opencrab_actions::{
     cancel_subtask as neutral_cancel_subtask, CancelOutcome, SettleKind, SubtaskCompletionSink,
     SubtaskRegistry, SubtaskSettled, REJECTION_CODE_PREFIX,
 };
-// `GatewayCaller` は本体では未使用だが、`mod tests` が `use super::*` 経由で使う。
-#[allow(unused_imports)]
-use opencrab_gateway::{
-    GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext, GatewayCaller,
-};
+use opencrab_gateway::{GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext};
 use opencrab_mcp::is_valid_server_name;
 use serde_json::{json, Value};
 
@@ -2238,6 +2234,9 @@ impl GatewayActions for SystemGatewayActions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 本体は `is_owner_equivalent()` / `trust_level()` 経由でしか caller を見ないので、
+    // 列挙子そのものを組み立てるのはテストだけ。本体側の `use` に混ぜると未使用警告になる。
+    use opencrab_gateway::GatewayCaller;
 
     #[test]
     fn own_definition_shape() {
@@ -6995,6 +6994,9 @@ mod tests {
 #[cfg(test)]
 mod configure_self_model_gate_tests {
     use super::*;
+    // 本体は `is_owner_equivalent()` 経由でしか caller を見ないので、列挙子を組み立てるのは
+    // テストだけ。本体側の `use` に混ぜると未使用警告になる。
+    use opencrab_gateway::GatewayCaller;
 
     const AGENT: &str = "agent-x";
 
