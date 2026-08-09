@@ -228,10 +228,35 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
     }
 }
 
+/// 決着理由 → system prompt の 1 文目に入る述部（「…バックグラウンド処理が{…}。」）。
+///
+/// 継続 resume を起こす `SettleKind::Completed` は completed / stopped_by_limit /
+/// error / timeout の**どれでも**発火する（値の出所は `actions/src/subtask.rs` の
+/// `exit_reason`）。一律「完了しました」と告げると失敗・タイムアウトした subtask にも
+/// 「完了」と伝わり、同じ prompt 内のマーカー（`exit_reason=timeout`）と食い違う。
+/// #443（HB）で入れた `heartbeat_turn.rs::settle_outcome` と**同一の写像**を Nostr へ
+/// 適用する（#445）。HB のような内省メモは Nostr sink には無いので述部のみ返す。
+///
+/// 未知の値は**断定しない**（「終了しました」）。正確な値は同じ prompt 内の
+/// `[subtask_completed: … exit_reason=…]` マーカーがそのまま持つので、推測を足さない。
+fn settle_outcome_sentence(exit_reason: &str) -> &'static str {
+    match exit_reason {
+        "completed" => "完了しました",
+        "stopped_by_limit" => "反復上限に達して途中で打ち切られました",
+        "error" => "エラーで失敗しました",
+        "timeout" => "時間切れで打ち切られました",
+        _ => "終了しました",
+    }
+}
+
 /// resume 時に system prompt へ足す Nostr 固有の指示を組む。
+///
+/// 冒頭 1 文は `exit_reason` で分岐する（#443 の同型 / #445）。「結果は」→「詳細は」も
+/// 中立化した。失敗・タイムアウトでも `subtask_completed` ログには理由本文が入る。
 fn resume_prompt_suffix(reply_target: &str, subtask_id: &str, exit_reason: &str) -> String {
+    let outcome = settle_outcome_sentence(exit_reason);
     format!(
-        "[Nostr] 依頼されていたバックグラウンド処理が完了しました。結果は直前の会話ログの \
+        "[Nostr] 依頼されていたバックグラウンド処理が{outcome}。詳細は直前の会話ログの \
          subtask_completed に入っています。相手へ伝えるなら nostr_reply(target=\"{reply_target}\") \
          を使ってください（target は返信先ノート）。伝える必要がなければ NO_REPLY とだけ答えてください。\
          \n[subtask_completed: subtask_id={subtask_id}, exit_reason={exit_reason}]"
@@ -1086,5 +1111,45 @@ mod tests {
         );
         assert_eq!(outcome, opencrab_actions::CancelOutcome::Cancelled);
         assert!(!r.runtime().has_running(&sid));
+    }
+
+    /// **#445**（#443 の同型）: 完了以外の決着で「完了しました」と断言しない。
+    ///
+    /// resume を起こす `SettleKind::Completed` は timeout / error / stopped_by_limit でも
+    /// 発火するので、一律「完了」と告げると同じ prompt のマーカー（`exit_reason=timeout`）
+    /// と矛盾する。各決着の述部が入り、マーカーは生の `exit_reason` をそのまま持つことも見る。
+    #[test]
+    fn resume_suffix_never_claims_completion_for_unfinished_subtasks() {
+        for (exit_reason, expected) in [
+            ("timeout", "時間切れで打ち切られました"),
+            ("error", "エラーで失敗しました"),
+            ("stopped_by_limit", "反復上限に達して途中で打ち切られました"),
+            // 未知の値は断定しない（`subtask.rs` が語彙を増やしても誤情報にならない）。
+            ("weird_new_reason", "終了しました"),
+        ] {
+            let suffix = resume_prompt_suffix("note1target", "st-1", exit_reason);
+            assert!(
+                !suffix.contains("完了しました"),
+                "exit_reason={exit_reason} で完了を断言している: {suffix}"
+            );
+            assert!(
+                suffix.contains(expected),
+                "exit_reason={exit_reason} の決着が伝わらない: {suffix}"
+            );
+            assert!(
+                suffix.contains(&format!("exit_reason={exit_reason}]")),
+                "マーカーは生の exit_reason をそのまま持つ: {suffix}"
+            );
+        }
+    }
+
+    /// 完了した subtask だけが「完了しました」を受け取る（従来の文言）。
+    #[test]
+    fn resume_suffix_states_completion_only_when_completed() {
+        let suffix = resume_prompt_suffix("note1target", "st-1", "completed");
+        assert!(
+            suffix.contains("バックグラウンド処理が完了しました"),
+            "完了は完了と伝える: {suffix}"
+        );
     }
 }
