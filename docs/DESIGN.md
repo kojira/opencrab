@@ -428,6 +428,8 @@ RESTとDiscordは共通の処理関数（`process.rs`）を使い、入出力部
 | `model_experience_notes` | モデル体験メモ (situation, observation, recommendation) |
 | `model_pricing` | モデル価格情報 |
 | `heartbeat_log` | ハートビート記録 |
+| `session_heartbeat_config` | セッション単位ハートビート設定 (#439/#456・永続アンカー last_fired_at) |
+| `agent_schedules` | per-agent 定時実行 (#455・cron/@every・last_fired_at・next は照会時算出) |
 | `memory_index_nodes` | 記憶インデックスの階層ツリーノード (node_type, title, summary, log_id range) |
 | `memory_index_watermark` | インデックス構築の進捗管理 (last_indexed_log_id) |
 

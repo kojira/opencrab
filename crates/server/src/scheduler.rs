@@ -1,4 +1,4 @@
-//! 中央ハートビートスケジューラ（#439 / #437 / #438 / 設計 §3）。
+//! 中央スケジューラ（#439 / #437 / #438 / #455 / 設計 §3・§7）。
 //!
 //! # なぜ中央スケジューラか
 //!
@@ -8,22 +8,40 @@
 //! メモリ（`Instant`）だけで持ち、再起動で消えて（#439-1）、設定変更はループを張り直す
 //! まで効かず（#437）、sleep グリッドと設定間隔が食い違っていた（#438）。
 //!
-//! ここでは **単一のタスク**が、`session_heartbeat_config`（enabled 行）を毎ウェイクで
-//! DB から読み直し、**永続アンカー**（`anchor_at`/`last_fired_at`・壁時計）から
-//! **正確な次回発火時刻**を算出し、**最も近い次回発火まで眠る**。設定変更・発火ターン
-//! 完了・global config 変更は `scheduler_wake`（[`AppState::scheduler_wake`]）で起こして
-//! rebuild させる（即時反映・#437）。位相は DB に永続するので再起動で伸びない（#439-1）。
+//! ここでは **単一のタスク**が、`session_heartbeat_config`（enabled 行）と
+//! `agent_schedules`（enabled 行・#455）を毎ウェイクで DB から読み直し、**永続アンカー**
+//! （`anchor_at`/`last_fired_at`・壁時計）から**正確な次回発火時刻**を算出し、**最も近い
+//! 次回発火まで眠る**。設定変更・発火ターン完了・global config 変更は `scheduler_wake`
+//! （[`AppState::scheduler_wake`]）で起こして rebuild させる（即時反映・#437）。位相は DB に
+//! 永続するので再起動で伸びない（#439-1）。
+//!
+//! # 2 種のエントリ（設計 §3.1）
+//!
+//! - **Heartbeat**（session 単位・[`EntryKey::Heartbeat`]）: SPEAK/LEARN/IDLE の probe を
+//!   打ち、SPEAK なら [`crate::heartbeat_delivery`] で配送する（[`HeartbeatTurnRunner`] 経由）。
+//! - **Schedule**（#455・[`EntryKey::Schedule`]）: cron / `@every` の時刻に、登録された
+//!   `message` を対象セッションへ self-message として注入し、**通常メッセージ処理経路**
+//!   （`run_agent_response`・caller=Owner）で 1 ターン走らせる（SkillEngine が走る）。
+//!   HB の probe とは別物なので SPEAK/LEARN/IDLE 解釈はしない。
+//!
+//! **キーを enum で分ける理由**: schedule は**同一セッションに複数ぶら下がる**（同じ
+//! `nostr-{agent}` に「毎朝 7 時」と「3 時間ごと」が併存しうる）。in-flight / attempts を
+//! session_id 文字列で持つと別スケジュールを誤ブロックする。3 つ目の用途が来ても enum の
+//! 変種追加で済み、特定の用途名は型・スキーマに入らない。
 //!
 //! # 発火集合（不変条件・設計 §4.2 / §5）
 //!
-//! **実発火 = `enabled AND (session が nostr- OR live G)`**。`discord-` セッションは
+//! **HB の実発火 = `enabled AND (session が nostr- OR live G)`**。`discord-` セッションは
 //! 発火時に live G（`cfg.agent.heartbeat_enabled`・hot-reload 追従）でゲートし、`nostr-`
 //! は G 非依存。**whitelist ゲートは現行 HB 発火経路に存在しないので掛けない**（掛けると
 //! PR1 が確立した「発火集合を変えない」不変条件と食い違う。設計 §5 N3）。
+//! **schedule には G を掛けない**（統括裁定・設計 §10.1）: G は heartbeat のマスタスイッチで
+//! あって schedule のものではない。schedule は自身の `enabled`（既定 0 = fail-closed）で制御し、
+//! **運用者が G を切っても定時実行は止まらない**（config/docs/PR に明記）。
 //!
 //! # ビジーループを作らない（設計 §3.2 A1 / §6）
 //!
-//! 走行中（in-flight）セッションは (1) sleep の `min` 候補から除外し、(2) ターン完了で
+//! 走行中（in-flight）エントリは (1) sleep の `min` 候補から除外し、(2) ターン完了で
 //! wake する。よって走行中は 0 秒スピンせず、完了した瞬間に rebuild してそのターンが
 //! truthful に刻んだ `last_fired_at` から次回を計算する。`last_fired_at` は**成功発火時
 //! だけ**刻み（skip / 異常終了では刻まない・§6 N2）、異常終了は**メモリの last_attempt**
@@ -37,6 +55,7 @@ use opencrab_core::heartbeat::{HeartbeatConfig, HeartbeatDecision};
 use tokio::sync::watch;
 
 use crate::heartbeat_turn::{HeartbeatTarget, HeartbeatTurnRunner, TurnOrigin};
+use opencrab_actions::{CallerIdentity, RunRequest, SessionLocks};
 use opencrab_server::AppState;
 
 /// sleep の頭打ち（秒）。NTP ジャンプ・DST・notify 取りこぼしの安全網（設計 §3.4）。
@@ -53,16 +72,39 @@ const MAX_SLEEP_SECS: u64 = 300;
 use opencrab_db::queries::resolve_session_fire_target as resolve_fire_target;
 use opencrab_db::queries::SessionFireTarget as FireTarget;
 
+/// in-flight / attempts のキー（設計 §3.1）。**session_id ではなく enum**で分ける。
+///
+/// schedule は同一セッションに複数ぶら下がるので session_id 文字列では別スケジュールを
+/// 誤ブロックする。HB は 1 セッション 1 発火なので session_id で足りる。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum EntryKey {
+    /// heartbeat（session 単位）。
+    Heartbeat { session_id: String },
+    /// #455 の定時実行（schedule 行の id 単位）。
+    Schedule { schedule_id: i64 },
+}
+
+/// 発火時の振る舞い（設計 §3.1）。
+#[derive(Debug, Clone)]
+enum FireKind {
+    /// heartbeat probe（SPEAK/LEARN/IDLE・配送は [`HeartbeatTurnRunner`]）。
+    Heartbeat { target: FireTarget },
+    /// #455: 対象セッションへ注入して通常メッセージ処理経路で 1 ターン走らせる。
+    ScheduledMessage { message: String },
+}
+
 /// rebuild で組む 1 エントリ。
 #[derive(Debug, Clone)]
 struct Entry {
+    /// in-flight / attempts / sleep 除外のキー（設計 §3.1）。
+    key: EntryKey,
     agent_id: String,
-    /// 発火先セッション（`nostr-…` / `discord-…`）。in-flight キー・DB 更新キーに使う。
+    /// 発火先/注入先セッション（`nostr-…` / `discord-…`）。
     session_id: String,
-    target: FireTarget,
     /// `None` = 起点（anchor/last_fired）が無い＝即発火可（設計 §4.3）。
-    /// `interval_secs` は算出済みなので保持しない（次回は完了後の rebuild で再計算する）。
+    /// `interval`/`cron` は算出済みなので保持しない（次回は完了後の rebuild で再計算する）。
     next_fire_at: Option<DateTime<Utc>>,
+    kind: FireKind,
 }
 
 /// rfc3339 文字列を壁時計へ。壊れていれば `None`（起点なし扱い＝安全側では即発火だが、
@@ -84,70 +126,123 @@ fn later_of(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTi
     }
 }
 
-/// enabled セッションから発火エントリを組む（設計 §3.2 rebuild）。
+/// enabled のセッション（HB）とスケジュール（#455）から発火エントリを組む（設計 §3.2 rebuild）。
 ///
-/// - `live_g`: 発火時に読んだ live G（`discord-` のマスタゲート）。`nostr-` は非依存。
+/// - `live_g`: 発火時に読んだ live G（`discord-` HB のマスタゲート）。`nostr-` HB・schedule は非依存。
 /// - `attempts`: 異常終了の last_attempt（メモリ・§3.7 N-a）。base を後ろへ逃がして backoff。
 ///
-/// 期待集合を手書きしない（`list_enabled_session_heartbeat_configs` をそのまま解決）。
+/// 期待集合を手書きしない（`list_enabled_*` をそのまま解決）。
 fn rebuild_entries(
     conn: &rusqlite::Connection,
     live_g: bool,
     default_interval_secs: u64,
     min_interval_secs: u64,
-    attempts: &HashMap<String, DateTime<Utc>>,
+    attempts: &HashMap<EntryKey, DateTime<Utc>>,
 ) -> Vec<Entry> {
-    let rows = match opencrab_db::queries::list_enabled_session_heartbeat_configs(conn) {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!("scheduler: enabled セッションの列挙に失敗: {e}");
-            return vec![];
+    let mut entries = Vec::new();
+
+    // ── (A) heartbeat（session 単位・設計 §4.2 / §5） ─────────────────────────
+    match opencrab_db::queries::list_enabled_session_heartbeat_configs(conn) {
+        Ok(rows) => {
+            for row in rows {
+                let Some(target) = resolve_fire_target(&row.session_id, &row.agent_id) else {
+                    // 未知/解釈不能な session_id → 発火しない（壊れた行で外部へ publish しない）。
+                    tracing::warn!(
+                        agent_id = %row.agent_id,
+                        session_id = %row.session_id,
+                        "scheduler: 発火先を解決できない session_id を skip（fail-closed）"
+                    );
+                    continue;
+                };
+                // G ゲート: `discord-` は live G が false なら発火しない（§4.2 ランタイム G ゲート）。
+                // `nostr-` は G 非依存。**whitelist ゲートは掛けない**（設計 §5 N3・現行経路に無い）。
+                if matches!(target, FireTarget::DiscordChannel { .. }) && !live_g {
+                    continue;
+                }
+                // 壊れた interval（0 以下）は fail-closed で発火しない（§4.3 と同じ意味論）。
+                let Some(interval_secs) = opencrab_db::queries::resolve_session_interval_secs(
+                    row.interval_secs,
+                    default_interval_secs,
+                    min_interval_secs,
+                ) else {
+                    tracing::warn!(
+                        agent_id = %row.agent_id,
+                        session_id = %row.session_id,
+                        interval_secs = ?row.interval_secs,
+                        "scheduler: 壊れた interval_secs を skip（fail-closed）"
+                    );
+                    continue;
+                };
+                let key = EntryKey::Heartbeat {
+                    session_id: row.session_id.clone(),
+                };
+                let anchor = parse_wall_clock(&row.anchor_at);
+                let db_last = parse_wall_clock(&row.last_fired_at);
+                // base = max(last_fired_at, last_attempt_at)。truthful な last_fired は保ちつつ、
+                // 異常終了時の attempt で next_fire を interval ぶん後ろへ逃がす（§3.7 N-a）。
+                let effective_last = later_of(db_last, attempts.get(&key).copied());
+                let next_fire_at = opencrab_db::queries::heartbeat_next_fire_at(
+                    anchor,
+                    effective_last,
+                    interval_secs,
+                );
+                entries.push(Entry {
+                    key,
+                    agent_id: row.agent_id,
+                    session_id: row.session_id,
+                    next_fire_at,
+                    kind: FireKind::Heartbeat { target },
+                });
+            }
         }
-    };
-    let mut entries = Vec::with_capacity(rows.len());
-    for row in rows {
-        let Some(target) = resolve_fire_target(&row.session_id, &row.agent_id) else {
-            // 未知/解釈不能な session_id → 発火しない（壊れた行で外部へ publish しない）。
-            tracing::warn!(
-                agent_id = %row.agent_id,
-                session_id = %row.session_id,
-                "scheduler: 発火先を解決できない session_id を skip（fail-closed）"
-            );
-            continue;
-        };
-        // G ゲート: `discord-` は live G が false なら発火しない（§4.2 ランタイム G ゲート）。
-        // `nostr-` は G 非依存。**whitelist ゲートは掛けない**（設計 §5 N3・現行経路に無い）。
-        if matches!(target, FireTarget::DiscordChannel { .. }) && !live_g {
-            continue;
-        }
-        // 壊れた interval（0 以下）は fail-closed で発火しない（§4.3 と同じ意味論）。
-        let Some(interval_secs) = opencrab_db::queries::resolve_session_interval_secs(
-            row.interval_secs,
-            default_interval_secs,
-            min_interval_secs,
-        ) else {
-            tracing::warn!(
-                agent_id = %row.agent_id,
-                session_id = %row.session_id,
-                interval_secs = ?row.interval_secs,
-                "scheduler: 壊れた interval_secs を skip（fail-closed）"
-            );
-            continue;
-        };
-        let anchor = parse_wall_clock(&row.anchor_at);
-        let db_last = parse_wall_clock(&row.last_fired_at);
-        // base = max(last_fired_at, last_attempt_at)。truthful な last_fired は保ちつつ、
-        // 異常終了時の attempt で next_fire を interval ぶん後ろへ逃がす（§3.7 N-a）。
-        let effective_last = later_of(db_last, attempts.get(&row.session_id).copied());
-        let next_fire_at =
-            opencrab_db::queries::heartbeat_next_fire_at(anchor, effective_last, interval_secs);
-        entries.push(Entry {
-            agent_id: row.agent_id,
-            session_id: row.session_id,
-            target,
-            next_fire_at,
-        });
+        Err(e) => tracing::warn!("scheduler: enabled セッションの列挙に失敗: {e}"),
     }
+
+    // ── (B) schedule（#455・設計 §7） ────────────────────────────────────────
+    // **G ゲートは掛けない**（統括裁定・§10.1）。cron/`@every` の next は照会時算出
+    // （キャッシュ列なし）。解釈不能な式は fail-closed で skip（CRUD が 400 で弾くので
+    // 通常ここには来ないが、DB を手で壊しても外部へ影響しないための保険）。
+    match opencrab_db::queries::list_enabled_agent_schedules(conn) {
+        Ok(rows) => {
+            for row in rows {
+                let Some(schedule_id) = row.id else {
+                    continue; // DB 由来は必ず Some。
+                };
+                let key = EntryKey::Schedule { schedule_id };
+                let anchor = parse_wall_clock(&row.anchor_at);
+                let db_last = parse_wall_clock(&row.last_fired_at);
+                let effective_last = later_of(db_last, attempts.get(&key).copied());
+                let next_fire_at = match opencrab_server::schedule_cron::schedule_next_fire_at(
+                    &row.cron_expr,
+                    &row.timezone,
+                    anchor,
+                    effective_last,
+                ) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %row.agent_id,
+                            schedule_id,
+                            cron_expr = %row.cron_expr,
+                            "scheduler: 解釈できない schedule 式を skip（fail-closed）: {e}"
+                        );
+                        continue;
+                    }
+                };
+                entries.push(Entry {
+                    key,
+                    agent_id: row.agent_id,
+                    session_id: row.session_id,
+                    next_fire_at,
+                    kind: FireKind::ScheduledMessage {
+                        message: row.message,
+                    },
+                });
+            }
+        }
+        Err(e) => tracing::warn!("scheduler: enabled schedule の列挙に失敗: {e}"),
+    }
+
     entries
 }
 
@@ -156,36 +251,35 @@ fn rebuild_entries(
 /// 完了で in-flight を外し、同時に `scheduler_wake` を鳴らす。これで走行中に眠っていた
 /// スケジューラが即座に rebuild して、完了ターンが刻んだ `last_fired_at` から次回を計算
 /// できる（A1 のスピン回避と truthfulness の両立）。異常終了時の backoff は spawn 時に
-/// 打った `attempts[session_id]` が担う（このガードは触らない）。
+/// 打った `attempts[key]` が担う（このガードは触らない）。
 struct InFlightGuard {
-    session_id: String,
-    in_flight: Arc<Mutex<HashSet<String>>>,
+    key: EntryKey,
+    in_flight: Arc<Mutex<HashSet<EntryKey>>>,
     wake: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         if let Ok(mut set) = self.in_flight.lock() {
-            set.remove(&self.session_id);
+            set.remove(&self.key);
         }
         // 完了 wake。取りこぼしても §MAX_SLEEP で再ループするので正しさは rebuild が担保。
         self.wake.notify_one();
     }
 }
 
-/// 1 発火分の準備（HB セッション作成・指示解決・プロンプト挿入）→ ターン実行。
+/// 1 発火分（heartbeat）の準備 → ターン実行（旧 `make_heartbeat_callback` の per-target 本体）。
 ///
-/// 旧 `make_heartbeat_callback` の per-target 本体（session 作成・instructions・プロンプト
-/// 挿入・`run_turn`）と同じことを、session モデルの 1 エントリに対して行う。`None` は
-/// 「ターンを開始できなかった」（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
+/// `None` は「ターンを開始できなかった」（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
 async fn run_one_fire(
     runner: &Arc<HeartbeatTurnRunner>,
     db: &opencrab_db::Db,
-    entry: &Entry,
+    agent_id: &str,
+    target: &FireTarget,
     tick: u64,
 ) -> Option<HeartbeatDecision> {
     // 発火先セッションの種別から、HB ターンの宛先フィールドを導く。
-    let (channel_id, guild_id, channel_name) = match &entry.target {
+    let (channel_id, guild_id, channel_name) = match target {
         FireTarget::NostrBroadcast => (
             String::new(),
             String::new(),
@@ -199,39 +293,32 @@ async fn run_one_fire(
             // 発火集合には影響しない表示専用フィールド。
             let name = {
                 let conn = db.lock().ok()?;
-                opencrab_db::queries::get_channel_config_for_agent(
-                    &conn,
-                    channel_id,
-                    &entry.agent_id,
-                )
-                .ok()
-                .flatten()
-                .map(|r| r.channel_name)
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| channel_id.clone())
+                opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.channel_name)
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| channel_id.clone())
             };
             (channel_id.clone(), guild_id.clone(), name)
         }
     };
 
     // HB 専用セッション（`heartbeat-{agent}-{channel}`。nostr は channel_id 空）。
-    let hb_session_id = crate::get_or_create_heartbeat_session(db, &entry.agent_id, &channel_id);
+    let hb_session_id = crate::get_or_create_heartbeat_session(db, agent_id, &channel_id);
 
     // 指示文を解決し、HB プロンプトを HB セッションへ挿入する（run_turn が文脈へ読む）。
     let instructions_source = {
         let conn = db.lock().ok()?;
-        let resolved = opencrab_db::queries::resolve_heartbeat_instructions(
-            &conn,
-            &entry.agent_id,
-            &channel_id,
-        );
+        let resolved =
+            opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
         let prompt = format!(
             "[ハートビート] 現在の会話「{}」。{}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。",
             channel_name, resolved.text
         );
         let log = opencrab_db::queries::SessionLogRow {
             id: None,
-            agent_id: entry.agent_id.clone(),
+            agent_id: agent_id.to_string(),
             session_id: hb_session_id.clone(),
             log_type: "system".to_string(),
             content: prompt,
@@ -241,21 +328,191 @@ async fn run_one_fire(
             created_at: None,
         };
         if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            tracing::error!(agent_id = %entry.agent_id, "scheduler: HB プロンプトの挿入に失敗: {e}");
+            tracing::error!(agent_id = %agent_id, "scheduler: HB プロンプトの挿入に失敗: {e}");
             return None;
         }
         resolved.source
     };
 
-    let target = HeartbeatTarget {
-        agent_id: entry.agent_id.clone(),
+    let hb_target = HeartbeatTarget {
+        agent_id: agent_id.to_string(),
         session_id: hb_session_id,
         channel_id,
         guild_id,
         instructions_source,
     };
     // 唯一の入口。同一 HB セッションのロック下で 1 ターン走らせる（直列化）。
-    runner.run_turn(&target, TurnOrigin::Tick { tick }).await
+    runner.run_turn(&hb_target, TurnOrigin::Tick { tick }).await
+}
+
+/// 1 発火分（#455 schedule）: `message` を対象セッションへ注入し、通常メッセージ処理経路で
+/// 1 ターン走らせる（設計 §7.3・統括裁定）。**caller=Owner**（HB tick と同じ自己実行）。
+///
+/// heartbeat の probe（SPEAK/LEARN/IDLE）ではなく**通常のメッセージ**として処理するので、
+/// `run_agent_response` を直呼びする（`HeartbeatTurnRunner` は使わない）。#458（intake）と
+/// 同型: **応答は生成・記録するが自動配送はしない**——外界への出力はエージェントが自分の
+/// ツール域（HB tick と同じ）で行う（外部作用面は設計 §10.1・PR 本文に明記）。
+///
+/// 直列化は呼び出し側が [`SessionLocks::run_serialized`] で行う（同一セッションの schedule 同士を
+/// 直列化）。`None` = ターンを開始できなかった（→ 呼び出し側で backoff）。
+async fn run_one_schedule(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    message: &str,
+) -> Option<()> {
+    let db = &state.db;
+
+    // LLM が無ければ発火を諦める（backoff。set/CRUD/次ウェイクで再試行）。
+    if state.llm_router.get().provider_names().is_empty() {
+        tracing::warn!(
+            agent_id,
+            session_id,
+            "scheduler: LLM provider が無く schedule 発火を skip"
+        );
+        return None;
+    }
+
+    // 1. 注入先セッションを用意（無ければ作る。`send_agent_message` と同型）。
+    {
+        let conn = db.lock().ok()?;
+        let existing = opencrab_db::queries::get_session(&conn, session_id)
+            .ok()
+            .flatten();
+        if existing.is_none() {
+            let session = opencrab_db::queries::SessionRow {
+                id: session_id.to_string(),
+                mode: "autonomous".to_string(),
+                theme: "direct_message".to_string(),
+                phase: "divergent".to_string(),
+                turn_number: 0,
+                status: "active".to_string(),
+                participant_ids_json: serde_json::json!([agent_id]).to_string(),
+                facilitator_id: None,
+                done_count: 0,
+                max_turns: None,
+                metadata_json: None,
+            };
+            if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
+                tracing::error!(
+                    agent_id,
+                    session_id,
+                    "scheduler: schedule セッション作成に失敗: {e}"
+                );
+                return None;
+            }
+        }
+    }
+
+    // 2. スケジュールの `message` を **speech**（speaker=`schedule`・≠ agent_id）として注入する。
+    //    `send_agent_message`（REST）と同じ形にするのが要点: `is_user_speech`（log_type=="speech"
+    //    かつ speaker!=agent_id・#284）が「エージェントが応答すべき直近のユーザー発言」として
+    //    認識し、コンテキスト切り詰め後も会話へ混ぜ戻す（`system` で注入すると truncation で
+    //    落ちて発火しても届かないことがある）。エージェントはこれを受け取って 1 ターン応答する。
+    {
+        let conn = db.lock().ok()?;
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: message.to_string(),
+            speaker_id: Some("schedule".to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+            tracing::error!(
+                agent_id,
+                session_id,
+                "scheduler: schedule メッセージの注入に失敗: {e}"
+            );
+            return None;
+        }
+    }
+
+    // 3. 文脈を組む（**HB tick と同じ 8 項目**: build_agent_context〔ペルソナ/記憶/スキル注入〕
+    //    ・caller=Owner・モデル解決・コンテキスト予算）。
+    let (system_prompt, agent_name, conversation) = {
+        let conn = db.lock().ok()?;
+        let (system_prompt, agent_name) =
+            opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
+        let eff =
+            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+                .unwrap_or_else(|_| state.default_model.clone());
+        let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
+        let budget = opencrab_server::process::compute_context_budget(
+            &conn,
+            prov,
+            mdl,
+            state.compaction_ratio,
+        );
+        let raw = match opencrab_server::process::build_conversation_string(
+            &conn, session_id, agent_id, budget,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    agent_id,
+                    session_id,
+                    "scheduler: 会話文字列の組み立てに失敗: {e}"
+                );
+                return None;
+            }
+        };
+        let conversation =
+            opencrab_server::process::prepend_runtime_context(&raw, "direct_message");
+        (system_prompt, agent_name, conversation)
+    };
+
+    // 4. 通常メッセージ処理経路（run_agent_response）。gateway_actions/dispatch は付けない
+    //    ＝ **HB tick と同じツール域**（HB tick も run_request で付けない）。長時間ツールは
+    //    この spawn 済みターン内で inline 実行され、in-flight dedup が重複発火を防ぐので
+    //    スケジューラ本体は塞がらない。
+    let req = RunRequest::new(
+        agent_id,
+        &agent_name,
+        session_id,
+        &system_prompt,
+        &conversation,
+        "schedule",
+        CallerIdentity::Owner,
+    );
+    match opencrab_server::process::run_agent_response(state, req).await {
+        Ok(engine_result) => {
+            // 5. 応答をセッションへ記録する（次ターンが文脈を失わないように・監査痕跡）。
+            if let Ok(conn) = db.lock() {
+                let log = opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: agent_id.to_string(),
+                    session_id: session_id.to_string(),
+                    log_type: "speech".to_string(),
+                    content: engine_result.response.clone(),
+                    speaker_id: Some(agent_id.to_string()),
+                    turn_number: None,
+                    metadata_json: None,
+                    created_at: None,
+                };
+                if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+                    tracing::error!(
+                        agent_id,
+                        session_id,
+                        "scheduler: schedule 応答の記録に失敗: {e}"
+                    );
+                }
+            }
+            Some(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                agent_id,
+                session_id,
+                "scheduler: schedule 発火ターンが失敗: {e}"
+            );
+            None
+        }
+    }
 }
 
 /// 中央スケジューラの本体ループ。プロセス寿命で回り続ける（設計 §3.2）。
@@ -272,6 +529,9 @@ pub(crate) async fn run_scheduler(
     let db = state.db.clone();
     let default_interval_secs = state.heartbeat_limits.default_interval_secs;
     let min_interval_secs = state.heartbeat_limits.min_interval_secs;
+    // schedule ターンの per-session 直列化（同一セッションの schedule 同士が並行に会話へ
+    // 書き込むのを防ぐ）。HB は runner 内の locks で直列化される。
+    let schedule_locks = Arc::new(SessionLocks::new());
 
     // config 変更を wake へ橋渡しする（変更で rebuild → live G を読み直す・#437(c)）。
     // 別 receiver clone を消費し、本体ループは `borrow()` で live 値を読むだけにする
@@ -286,12 +546,13 @@ pub(crate) async fn run_scheduler(
         });
     }
 
-    let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let in_flight: Arc<Mutex<HashSet<EntryKey>>> = Arc::new(Mutex::new(HashSet::new()));
     // 異常終了（panic / 文脈失敗）の last_attempt（メモリ・§3.7 N-a）。成功で除去。
-    let attempts: Arc<Mutex<HashMap<String, DateTime<Utc>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let attempts: Arc<Mutex<HashMap<EntryKey, DateTime<Utc>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let mut fire_seq: u64 = 0;
 
-    tracing::info!("中央ハートビートスケジューラを開始");
+    tracing::info!("中央スケジューラを開始（heartbeat + agent_schedules）");
 
     loop {
         // live G は発火のたびに hot-reload 後の現在値を読む（起動時スナップにしない）。
@@ -325,70 +586,121 @@ pub(crate) async fn run_scheduler(
             // last_fired を進めない（§6 N2: 虚偽時刻を出さない）。
             {
                 let mut set = in_flight.lock().unwrap();
-                if set.contains(&entry.session_id) {
+                if set.contains(&entry.key) {
                     tracing::info!(
                         agent_id = %entry.agent_id,
                         session_id = %entry.session_id,
+                        key = ?entry.key,
                         "scheduler skip: 前回発火がまだ走行中"
                     );
                     continue;
                 }
-                set.insert(entry.session_id.clone());
+                set.insert(entry.key.clone());
             }
             // 異常終了の backoff 起点を spawn 時に打つ（panic で success 印が付かなくても
             // next_fire = attempt + interval になり再発火ループを止める・§3.7 N-a）。成功で除去。
-            attempts
-                .lock()
-                .unwrap()
-                .insert(entry.session_id.clone(), now);
+            attempts.lock().unwrap().insert(entry.key.clone(), now);
 
             fire_seq += 1;
             let tick = fire_seq;
             let entry = entry.clone();
             let runner = runner.clone();
+            let state = state.clone();
             let db = db.clone();
             let in_flight = in_flight.clone();
             let attempts = attempts.clone();
             let wake = wake.clone();
+            let schedule_locks = schedule_locks.clone();
             tokio::spawn(async move {
                 // 完了（成功/失敗/パニック）で in-flight 除去 + wake（Drop ガード）。
                 let _guard = InFlightGuard {
-                    session_id: entry.session_id.clone(),
+                    key: entry.key.clone(),
                     in_flight,
                     wake,
                 };
-                let outcome = run_one_fire(&runner, &db, &entry, tick).await;
-                match outcome {
-                    Some(_) => {
-                        // 正常発火: truthful に last_fired_at=now を刻み、attempt を除去する。
-                        // next_fire = last_fired + interval（後ろへ・§4.4）。missed-run は
-                        // 1 回に圧縮される（base が最新の last_fired になるため・§8）。
-                        let fired_at = Utc::now().to_rfc3339();
-                        if let Ok(conn) = db.lock() {
-                            if let Err(e) = opencrab_db::queries::set_session_last_fired(
-                                &conn,
-                                &entry.agent_id,
-                                &entry.session_id,
-                                &fired_at,
-                            ) {
-                                tracing::error!(
-                                    agent_id = %entry.agent_id,
-                                    session_id = %entry.session_id,
-                                    "scheduler: last_fired_at の更新に失敗: {e}"
-                                );
+                // 種別ごとに発火し、成功時だけ truthful に last_fired を刻む。
+                let fired: bool = match &entry.kind {
+                    FireKind::Heartbeat { target } => {
+                        let outcome =
+                            run_one_fire(&runner, &db, &entry.agent_id, target, tick).await;
+                        if outcome.is_some() {
+                            let fired_at = Utc::now().to_rfc3339();
+                            if let Ok(conn) = db.lock() {
+                                if let Err(e) = opencrab_db::queries::set_session_last_fired(
+                                    &conn,
+                                    &entry.agent_id,
+                                    &entry.session_id,
+                                    &fired_at,
+                                ) {
+                                    tracing::error!(
+                                        agent_id = %entry.agent_id,
+                                        session_id = %entry.session_id,
+                                        "scheduler: last_fired_at の更新に失敗: {e}"
+                                    );
+                                }
                             }
+                            true
+                        } else {
+                            false
                         }
-                        attempts.lock().unwrap().remove(&entry.session_id);
                     }
-                    None => {
-                        // 文脈組み立て失敗。last_fired は刻まない（発火していない）。spawn 時に
-                        // 打った attempt が残り、interval ぶん backoff して即再試行ループを避ける。
-                        tracing::debug!(
+                    FireKind::ScheduledMessage { message } => {
+                        let EntryKey::Schedule { schedule_id } = &entry.key else {
+                            // ScheduledMessage は必ず Schedule キー。
+                            return;
+                        };
+                        let schedule_id = *schedule_id;
+                        tracing::info!(
                             agent_id = %entry.agent_id,
                             session_id = %entry.session_id,
-                            "scheduler: 発火ターンを開始できず（backoff）"
+                            schedule_id,
+                            "scheduler: 定時実行を発火（#455）"
                         );
+                        // 同一セッションの schedule 同士を直列化して発火する。
+                        let outcome = schedule_locks
+                            .run_serialized(
+                                &entry.session_id,
+                                run_one_schedule(
+                                    &state,
+                                    &entry.agent_id,
+                                    &entry.session_id,
+                                    message,
+                                ),
+                            )
+                            .await;
+                        if outcome.is_some() {
+                            let fired_at = Utc::now().to_rfc3339();
+                            if let Ok(conn) = db.lock() {
+                                if let Err(e) = opencrab_db::queries::set_agent_schedule_last_fired(
+                                    &conn,
+                                    schedule_id,
+                                    &fired_at,
+                                ) {
+                                    tracing::error!(
+                                        schedule_id,
+                                        "scheduler: schedule last_fired_at の更新に失敗: {e}"
+                                    );
+                                }
+                            }
+                            true
+                        } else {
+                            false
+                        }
                     }
+                };
+
+                if fired {
+                    // 正常発火: attempt を除去（次回 base は truthful な last_fired へ戻る）。
+                    // missed-run は base が最新の last_fired になるため 1 回に圧縮される（§8）。
+                    attempts.lock().unwrap().remove(&entry.key);
+                } else {
+                    // 発火できず（文脈失敗 / ターン失敗）。last_fired は刻まない。spawn 時に打った
+                    // attempt が残り、interval ぶん backoff して即再試行ループを避ける（§3.7 N-a）。
+                    tracing::debug!(
+                        agent_id = %entry.agent_id,
+                        session_id = %entry.session_id,
+                        "scheduler: 発火ターンを開始/完了できず（backoff）"
+                    );
                 }
                 // ここで _guard が drop され、in-flight 除去 + wake。
             });
@@ -406,15 +718,15 @@ pub(crate) async fn run_scheduler(
 
 /// 次に眠る秒数を決める純粋関数（設計 §3.2 A1・ビジーループ回避の核心）。
 ///
-/// **in-flight エントリを候補から除外する**（走行中セッションの `next_fire` は `<= now` に
+/// **in-flight エントリを候補から除外する**（走行中エントリの `next_fire` は `<= now` に
 /// 貼り付くが、完了まで `last_fired` を進めない〔N2〕ので、含めると sleep(0) スピンになる）。
 /// 除外した上で「未来（`> now`）の最小 next_fire」まで眠る。候補が無ければ `MAX_SLEEP`
 /// （全て in-flight / 起点なしで due 済みの状態でも 0 秒スピンしない）。上限は `MAX_SLEEP`
 /// で頭打ち（NTP ジャンプ・DST・notify 取りこぼしの安全網。判定は再ループで `<= now` 再評価）。
-fn next_sleep_secs(entries: &[Entry], in_flight: &HashSet<String>, now: DateTime<Utc>) -> u64 {
+fn next_sleep_secs(entries: &[Entry], in_flight: &HashSet<EntryKey>, now: DateTime<Utc>) -> u64 {
     let next = entries
         .iter()
-        .filter(|e| !in_flight.contains(&e.session_id))
+        .filter(|e| !in_flight.contains(&e.key))
         .filter_map(|e| e.next_fire_at)
         .filter(|t| *t > now)
         .min();
@@ -500,10 +812,16 @@ mod tests {
     // ---- rebuild / 発火集合の不変条件（設計 §4.2 / §5・#5） ----
 
     use chrono::Duration;
-    use opencrab_db::queries::SessionHeartbeatConfigRow;
+    use opencrab_db::queries::{AgentScheduleRow, SessionHeartbeatConfigRow};
     use std::collections::HashMap;
 
     const AGENT_B: &str = "c56f19e0-1111-2222-3333-444455556666";
+
+    fn hb_key(session: &str) -> EntryKey {
+        EntryKey::Heartbeat {
+            session_id: session.to_string(),
+        }
+    }
 
     fn row(
         agent: &str,
@@ -537,8 +855,6 @@ mod tests {
 
     /// 本番の発火集合（Nostr 2 + Discord 1）を模した fixture で、**live G が
     /// `discord-` だけをゲートし `nostr-` は非依存**であることを固定する（不変条件 #5）。
-    /// enabled=0 の抑止行（opt-in の Discord）は `list_enabled` が返さないので発火集合に
-    /// 入らない。**期待集合を手書きするが、右辺は G ゲートの効果のみで左辺と差が出る**。
     #[test]
     fn firing_set_gates_discord_by_live_g_only() {
         let past = (Utc::now() - Duration::hours(12)).to_rfc3339();
@@ -592,7 +908,6 @@ mod tests {
                 .collect(),
             "G=true では nostr 2 + discord 1 が発火対象"
         );
-        // すべて anchor 12h 前・interval 最大 5h なので due（next_fire <= now）。
         assert!(with_g
             .iter()
             .all(|e| e.next_fire_at.map(|t| t <= Utc::now()).unwrap_or(true)));
@@ -613,7 +928,6 @@ mod tests {
         let good = format!("nostr-{AGENT_UUID}");
         let rows = [
             row(AGENT_UUID, &good, true, Some(600), Some(past.clone()), None),
-            // 発火経路の無い種別 → resolve_fire_target None → skip。
             row(
                 AGENT_UUID,
                 &format!("web-{AGENT_UUID}"),
@@ -622,7 +936,6 @@ mod tests {
                 Some(past.clone()),
                 None,
             ),
-            // interval <= 0（壊れた値）→ skip。
             row(
                 AGENT_B,
                 &format!("nostr-{AGENT_B}"),
@@ -641,10 +954,13 @@ mod tests {
 
     fn entry_at(session: &str, next: Option<DateTime<Utc>>) -> Entry {
         Entry {
+            key: hb_key(session),
             agent_id: AGENT_UUID.to_string(),
             session_id: session.to_string(),
-            target: FireTarget::NostrBroadcast,
             next_fire_at: next,
+            kind: FireKind::Heartbeat {
+                target: FireTarget::NostrBroadcast,
+            },
         }
     }
 
@@ -653,11 +969,8 @@ mod tests {
     fn sleep_excludes_in_flight_and_never_spins_to_zero() {
         let now = Utc::now();
         let mut in_flight = HashSet::new();
-        in_flight.insert("s-running".to_string());
+        in_flight.insert(hb_key("s-running"));
 
-        // (a) 走行中で attempt により next_fire が未来(now+10)へ押されたエントリは、完了 wake
-        //     で拾うので候補から除外する。除外しないと 10s で無駄に起きてしまう（→ 120 に
-        //     ならず 10 になる）。in-flight フィルタが load-bearing。
         let running_future = entry_at("s-running", Some(now + Duration::seconds(10)));
         let idle_future = entry_at("s-future", Some(now + Duration::seconds(120)));
         assert_eq!(
@@ -666,7 +979,6 @@ mod tests {
             "in-flight の未来エントリを除外し、非 in-flight の 120s まで眠る"
         );
 
-        // (b) 走行中で next_fire が過去(<=now)に貼り付いたエントリだけ → 0 秒スピンせず MAX_SLEEP。
         let running_stuck = entry_at("s-running", Some(now - Duration::seconds(30)));
         assert_eq!(
             next_sleep_secs(&[running_stuck], &in_flight, now),
@@ -674,7 +986,6 @@ mod tests {
             "走行中 due だけなら 0 秒スピンせず MAX_SLEEP（完了 wake で拾う）"
         );
 
-        // (c) 未来エントリが MAX を超えても MAX で頭打ち。
         let far = entry_at("s-far", Some(now + Duration::hours(2)));
         assert_eq!(
             next_sleep_secs(&[far], &HashSet::new(), now),
@@ -682,18 +993,48 @@ mod tests {
         );
     }
 
+    /// schedule のキーは同一セッションでも別スケジュールを誤ブロックしない（EntryKey enum の要点）。
+    #[test]
+    fn schedule_keys_do_not_cross_block_same_session() {
+        let now = Utc::now();
+        let session = format!("nostr-{AGENT_UUID}");
+        let mut in_flight = HashSet::new();
+        in_flight.insert(EntryKey::Schedule { schedule_id: 1 });
+
+        let running = Entry {
+            key: EntryKey::Schedule { schedule_id: 1 },
+            agent_id: AGENT_UUID.to_string(),
+            session_id: session.clone(),
+            next_fire_at: Some(now - Duration::seconds(5)),
+            kind: FireKind::ScheduledMessage {
+                message: "a".into(),
+            },
+        };
+        // 同一セッションの別スケジュール（id=2）は in_flight に居ないので sleep 候補に残る。
+        let sibling = Entry {
+            key: EntryKey::Schedule { schedule_id: 2 },
+            agent_id: AGENT_UUID.to_string(),
+            session_id: session,
+            next_fire_at: Some(now + Duration::seconds(90)),
+            kind: FireKind::ScheduledMessage {
+                message: "b".into(),
+            },
+        };
+        assert_eq!(
+            next_sleep_secs(&[running, sibling], &in_flight, now),
+            90,
+            "id=1 が走行中でも id=2（同一セッション）は別キーなので候補に残る"
+        );
+    }
+
     // ---- missed-run 圧縮 / アンカーの向き（§8 / §4.4 / §3.7 N-a） ----
 
-    /// 長時間ダウン後も、過ぎたスロットは**1 エントリ**にまとまる（多重発火しない・§8）。
-    /// 発火成功で last_fired=now を刻むと next_fire は now+interval（未来）へ後退する
-    /// （位相を前に引かない＝密にしない・§4.4）。
     #[test]
     fn missed_run_compresses_to_one_and_success_pushes_forward() {
         let long_ago = (Utc::now() - Duration::days(3)).to_rfc3339();
         let sid = format!("nostr-{AGENT_UUID}");
         let conn = conn_with(&[row(AGENT_UUID, &sid, true, Some(600), Some(long_ago), None)]);
 
-        // 3 日過ぎていても 1 エントリ・due（多重発火しない）。
         let before = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
         assert_eq!(before.len(), 1);
         assert!(before[0]
@@ -701,11 +1042,9 @@ mod tests {
             .map(|t| t <= Utc::now())
             .unwrap_or(true));
 
-        // 発火成功を模して last_fired=now を刻む。
         let now_str = Utc::now().to_rfc3339();
         opencrab_db::queries::set_session_last_fired(&conn, AGENT_UUID, &sid, &now_str).unwrap();
 
-        // next_fire = last_fired + 600 → 未来（もう due でない・向きは後ろ）。
         let after = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
         assert_eq!(after.len(), 1);
         assert!(
@@ -717,21 +1056,17 @@ mod tests {
         );
     }
 
-    /// 異常終了の last_attempt（メモリ）は next_fire を interval ぶん後ろへ逃がす
-    /// （再発火ループを止める・§3.7 N-a）。last_fired は触らない（truthfulness）。
     #[test]
     fn last_attempt_backoff_defers_next_fire_without_touching_last_fired() {
         let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
         let sid = format!("nostr-{AGENT_UUID}");
         let conn = conn_with(&[row(AGENT_UUID, &sid, true, Some(600), Some(past), None)]);
 
-        // attempt 無し → due（即発火可）。
         let due = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
         assert!(due[0].next_fire_at.map(|t| t <= Utc::now()).unwrap_or(true));
 
-        // attempt=now を打つと next_fire = now+600（未来）へ逃げる（backoff）。
         let mut attempts = HashMap::new();
-        attempts.insert(sid, Utc::now());
+        attempts.insert(hb_key(&sid), Utc::now());
         let deferred = rebuild_entries(&conn, true, 1800, 300, &attempts);
         assert!(
             deferred[0]
@@ -744,28 +1079,19 @@ mod tests {
 
     // ---- panic 経路の統合確認（§6 / §3.7 N-a） ----
 
-    /// 発火ターンが **panic** したとき、`InFlightGuard::drop` が in_flight を除去し・完了 wake を
-    /// 鳴らし・`last_attempt` を **残す**ことを実行で確認する。panic は spawn 内の
-    /// `run_one_fire().await` で unwind するので、後続の Some/None 分岐（`set_session_last_fired` +
-    /// `attempts.remove`）には到達しない——**attempt を消してよいのは成功 Some 分岐だけ**なので、
-    /// panic では attempt が残り、rebuild が `next_fire = attempt + interval`（未来）で backoff する。
-    /// これで panic → 即再発火のスピンを避ける（§6）。guard が attempt を触るように退行したり、
-    /// in_flight 除去をやめたりすると、このテストが落ちる（本番の live 経路を守る）。
     #[tokio::test]
     async fn panic_in_fire_clears_in_flight_keeps_attempt_and_wakes() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let attempts: Arc<Mutex<HashMap<String, DateTime<Utc>>>> =
+        let in_flight: Arc<Mutex<HashSet<EntryKey>>> = Arc::new(Mutex::new(HashSet::new()));
+        let attempts: Arc<Mutex<HashMap<EntryKey, DateTime<Utc>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let wake = Arc::new(tokio::sync::Notify::new());
-        let sid = format!("nostr-{AGENT_UUID}");
+        let key = hb_key(&format!("nostr-{AGENT_UUID}"));
 
-        // 本体ループが spawn 直前に打つ状態を再現する（in_flight へ insert・attempt へ last_attempt）。
-        in_flight.lock().unwrap().insert(sid.clone());
-        attempts.lock().unwrap().insert(sid.clone(), Utc::now());
+        in_flight.lock().unwrap().insert(key.clone());
+        attempts.lock().unwrap().insert(key.clone(), Utc::now());
 
-        // 完了 wake を観測する待ち手。
         let woken = Arc::new(AtomicBool::new(false));
         {
             let w = wake.clone();
@@ -777,15 +1103,13 @@ mod tests {
         }
         tokio::task::yield_now().await;
 
-        // 発火ターンが panic する spawn（`run_one_fire` 内の panic を模す）。Some/None 分岐へ
-        // 到達しないので `set_session_last_fired` も `attempts.remove` も走らない。
         let jh = {
             let in_flight = in_flight.clone();
             let wake = wake.clone();
-            let sid = sid.clone();
+            let key = key.clone();
             tokio::spawn(async move {
                 let _guard = InFlightGuard {
-                    session_id: sid,
+                    key,
                     in_flight,
                     wake,
                 };
@@ -795,17 +1119,14 @@ mod tests {
         let res = jh.await;
         assert!(res.is_err(), "spawn した発火ターンは panic するはず");
 
-        // (1) Drop ガードが in_flight から除去した（panic の unwind 中でも走る）。
         assert!(
-            !in_flight.lock().unwrap().contains(&sid),
-            "panic 後も in_flight に残る（Drop ガードが効いていない＝走行中扱いで固着し二度と発火しない）"
+            !in_flight.lock().unwrap().contains(&key),
+            "panic 後も in_flight に残る（Drop ガードが効いていない）"
         );
-        // (2) last_attempt は残る（成功 Some 分岐に来ないので remove されない）→ backoff が効く。
         assert!(
-            attempts.lock().unwrap().contains_key(&sid),
+            attempts.lock().unwrap().contains_key(&key),
             "panic 時に attempt が消える（backoff が効かず即再発火スピンになる）"
         );
-        // (3) 完了 wake が届いた（Drop ガードの notify_one）。
         tokio::task::yield_now().await;
         assert!(
             woken.load(Ordering::SeqCst),
@@ -813,26 +1134,14 @@ mod tests {
         );
     }
 
-    // ---- #438 回帰: 固定グリッドをやめ設定 interval どおりに発火する（PR-C / #452 撤去後の保証） ----
+    // ---- #438 回帰: 固定グリッドをやめ設定 interval どおりに発火する ----
 
-    /// #438 回帰: 次回発火は **設定 interval どおり**（`anchor + interval`）に算出され、
-    /// グローバル評価グリッド（旧: 1800 秒）へ丸められない。旧実装は sleep がグローバル
-    /// 1800 秒グリッドに丸められ、1200 秒（20 分）設定が実質 30 分になっていた（#438）。
-    /// 中央スケジューラは `heartbeat_next_fire_at` で `base + interval` を exact に出す。
-    /// `heartbeat_next_fire_at` をグリッド丸め（例: 1800 の倍数へ切り上げ）へ退行させると、
-    /// この assert が `anchor + 1200` でなくなって落ちる。
-    ///
-    /// **#438 の再発防止**: このテストが落ちたら、**固定グリッド sleep（設定 interval を
-    /// 評価グリッドへ丸める挙動）への退行**が入っている。意図を取り違えないこと。
     #[test]
     fn next_fire_honors_exact_interval_without_grid_rounding() {
-        // 固定アンカー（rfc3339 往復で誤差の出ない秒精度）。
         let anchor = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
         let sid = format!("nostr-{AGENT_UUID}");
-        // interval = 1200（20 分）。global(1800) の倍数でも約数でもない値なので、
-        // グリッド丸めが起きれば anchor+1200 からずれる。
         let conn = conn_with(&[row(
             AGENT_UUID,
             &sid,
@@ -850,21 +1159,190 @@ mod tests {
         );
     }
 
-    /// #438 回帰: sleep は次回発火までの **実残り時間** で決まり、固定グリッドへ戻らない。
-    /// `MAX_SLEEP_SECS`(300) 未満の残り時間はその値そのままで眠る（旧: グローバル 1800 秒
-    /// グリッド固定）。`next_sleep_secs` を固定周期へ退行させると、250 でなくなって落ちる。
-    ///
-    /// **#438 の再発防止**: このテストが落ちたら、**固定グリッド sleep への退行**が入って
-    /// いる（sleep を残り時間でなく固定周期で決めている）。意図を取り違えないこと。
     #[test]
     fn sleep_targets_exact_remaining_not_fixed_grid() {
         let now = Utc::now();
-        // 残り 250 秒（MAX_SLEEP 未満・グリッド値でない）→ 250 ちょうど眠る。
         let e = entry_at("nostr-x", Some(now + Duration::seconds(250)));
         assert_eq!(
             next_sleep_secs(&[e], &HashSet::new(), now),
             250,
             "残り 250 秒ちょうど眠る（固定グリッドへ戻さない・#438）"
+        );
+    }
+
+    // ---- #455 schedule: rebuild へ載る・G 非依存・cron/@every・missed-run・enabled ----
+
+    fn sched(
+        agent: &str,
+        session: &str,
+        cron: &str,
+        enabled: bool,
+        anchor: Option<&str>,
+        last: Option<&str>,
+    ) -> AgentScheduleRow {
+        AgentScheduleRow {
+            id: None,
+            agent_id: agent.to_string(),
+            session_id: session.to_string(),
+            cron_expr: cron.to_string(),
+            timezone: "Asia/Tokyo".to_string(),
+            message: "定時のメッセージ".to_string(),
+            enabled,
+            anchor_at: anchor.map(|s| s.to_string()),
+            last_fired_at: last.map(|s| s.to_string()),
+        }
+    }
+
+    fn schedule_keys(entries: &[Entry]) -> std::collections::BTreeSet<i64> {
+        entries
+            .iter()
+            .filter_map(|e| match e.key {
+                EntryKey::Schedule { schedule_id } => Some(schedule_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// enabled な cron / `@every` の両方が rebuild に載る。disabled は載らない（enabled=false で停止）。
+    #[test]
+    fn schedules_enabled_both_kinds_load_disabled_excluded() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let sid = format!("nostr-{AGENT_UUID}");
+        let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        // cron（enabled）。
+        let id_cron = opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "0 7 * * *", true, Some(&past), None),
+        )
+        .unwrap();
+        // @every（enabled）。
+        let id_every = opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "@every 3h", true, Some(&past), None),
+        )
+        .unwrap();
+        // disabled は列挙されない。
+        let _id_off = opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "@every 1h", false, Some(&past), None),
+        )
+        .unwrap();
+
+        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        assert_eq!(
+            schedule_keys(&entries),
+            [id_cron, id_every].into_iter().collect(),
+            "cron と @every の enabled 2 件だけが載る（disabled は停止）"
+        );
+        // 両種とも next_fire_at が算出されている（cron/@every のどちらの経路も通る）。
+        // due か未来かは現在時刻に依存するので、ここでは「算出できたこと」だけを固定する
+        // （missed-run の due は schedule_missed_run_compresses_to_one で固定）。
+        for e in entries
+            .iter()
+            .filter(|e| matches!(e.key, EntryKey::Schedule { .. }))
+        {
+            assert!(
+                e.next_fire_at.is_some(),
+                "cron/@every とも next_fire_at を算出できる"
+            );
+        }
+    }
+
+    /// schedule は live G の対象外（G=false でも発火対象に残る・統括裁定 §10.1）。
+    #[test]
+    fn schedules_are_not_gated_by_g() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // discord- セッションの schedule（HB なら G=false で消える種別）。
+        let sid = format!("discord-{AGENT_UUID}-1001-2002");
+        let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        let id = opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "@every 30m", true, Some(&past), None),
+        )
+        .unwrap();
+
+        // G=false でも schedule は残る（HB の discord- は消えるが schedule は G 非依存）。
+        let entries = rebuild_entries(&conn, false, 1800, 300, &HashMap::new());
+        assert_eq!(
+            schedule_keys(&entries),
+            [id].into_iter().collect(),
+            "G=false でも discord- 宛 schedule は発火対象（G は heartbeat のスイッチ）"
+        );
+    }
+
+    /// 長時間ダウン後の cron schedule も 1 エントリ・due（missed-run 1 回圧縮・§8）。
+    #[test]
+    fn schedule_missed_run_compresses_to_one() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let sid = format!("nostr-{AGENT_UUID}");
+        let long_ago = (Utc::now() - Duration::days(3)).to_rfc3339();
+        opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "0 7 * * *", true, Some(&long_ago), None),
+        )
+        .unwrap();
+
+        let before = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let sched_entries: Vec<_> = before
+            .iter()
+            .filter(|e| matches!(e.key, EntryKey::Schedule { .. }))
+            .collect();
+        assert_eq!(
+            sched_entries.len(),
+            1,
+            "3 日過ぎても 1 エントリ（多重発火しない）"
+        );
+        assert!(
+            sched_entries[0]
+                .next_fire_at
+                .map(|t| t <= Utc::now())
+                .unwrap_or(true),
+            "過ぎたスロットは due（1 回だけ発火）"
+        );
+    }
+
+    /// 解釈できない cron 式は fail-closed で skip（外部へ影響しない）。
+    #[test]
+    fn schedule_unparseable_expr_is_skipped() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let sid = format!("nostr-{AGENT_UUID}");
+        opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "totally not a cron", true, None, None),
+        )
+        .unwrap();
+        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        assert!(
+            schedule_keys(&entries).is_empty(),
+            "解釈不能な式は発火集合に入らない（fail-closed）"
+        );
+    }
+
+    /// 発火成功で last_fired を刻むと、次回 rebuild で cron の次スロット（未来）へ後退する
+    /// （二重実行しない・向きは後ろ・§8 / §4.4）。
+    #[test]
+    fn schedule_success_pushes_next_forward() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let sid = format!("nostr-{AGENT_UUID}");
+        let long_ago = (Utc::now() - Duration::days(3)).to_rfc3339();
+        let id = opencrab_db::queries::insert_agent_schedule(
+            &conn,
+            &sched(AGENT_UUID, &sid, "0 7 * * *", true, Some(&long_ago), None),
+        )
+        .unwrap();
+
+        // 発火成功を模して last_fired=now を刻む。
+        opencrab_db::queries::set_agent_schedule_last_fired(&conn, id, &Utc::now().to_rfc3339())
+            .unwrap();
+
+        let after = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let e = after
+            .iter()
+            .find(|e| matches!(e.key, EntryKey::Schedule { .. }))
+            .unwrap();
+        assert!(
+            e.next_fire_at.map(|t| t > Utc::now()).unwrap_or(false),
+            "発火成功後は次スロット（未来）へ後退＝直後の rebuild で再発火しない（二重実行しない）"
         );
     }
 }

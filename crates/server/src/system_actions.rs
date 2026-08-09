@@ -749,6 +749,43 @@ impl SystemGatewayActions {
                     }
                 }),
             },
+            // ---- 定時実行（#455）: ハートビート（固定短間隔の tick）とは別に、cron / @every で
+            // 「時刻・周期ベース」の自律実行を自分で登録できる。対象は常に ctx.session_id。
+            // 語彙はハートビートに揃える（next_fire_at / gated / gated_reason）。
+            GatewayActionDef {
+                name: "get_my_schedules".to_string(),
+                description: "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションについて一覧で読み出す。各要素: id、cron_expr（cron 式または @every 形式）、timezone、message（発火時に自分へ渡される指示文）、enabled、next_fire_at（次に発火する予定時刻。照会時に anchor と最終発火時刻から算出する UTC の RFC3339 文字列。無効・式が不正などでは null）、gated / gated_reason（enabled なのに発火しない状態とその理由）、anchor_at / last_fired_at。他のエージェントや別セッションのスケジュールは読めない。定時実行はハートビート（固定短間隔）とは別物で、「毎朝 7 時」「3 時間ごと」のような時刻・周期ベースの自律実行。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            GatewayActionDef {
+                name: "set_my_schedule".to_string(),
+                description: "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。ハートビート（固定短間隔の tick）とは別の、時刻・周期ベースの自律実行。対象は常にこのセッション（Nostr の自発投稿、またはこの Discord チャンネル）で、どこに登録するか選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 3h`、`@every 1h30m`、`@every 45m`）で指定する。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。運用者がハートビートを無効化していても、定時実行は止まらない（別概念）。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "cron_expr": {
+                            "type": "string",
+                            "description": "標準 5 フィールド cron（例: 0 7 * * *）または @every 形式（例: @every 3h / @every 1h30m）。"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "発火時に自分へ渡される指示文。"
+                        },
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "有効にするか。省略時 true（登録すると定期実行が始まる）。false で登録だけして止めておける。"
+                        },
+                        "timezone": {
+                            "type": "string",
+                            "description": "cron の評価に使うタイムゾーン（IANA 名・例 Asia/Tokyo）。省略時 Asia/Tokyo。@every では未使用。"
+                        }
+                    },
+                    "required": ["cron_expr", "message"]
+                }),
+            },
             // ---- #157 S5: 通知先（webhook）の管理ツール（Discord から移設） ----
             //
             // 実装は DB と設定ファイル由来の既定値しか触らないのに Discord gateway に
@@ -2040,6 +2077,9 @@ impl GatewayActions for SystemGatewayActions {
             // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
             "get_my_heartbeat" => crate::agent_heartbeat::get_my_heartbeat(&self.state, args, ctx),
             "set_my_heartbeat" => crate::agent_heartbeat::set_my_heartbeat(&self.state, args, ctx),
+            // エージェント自身の定時実行スケジュール（#455）。対象は常に ctx.session_id。
+            "get_my_schedules" => crate::agent_schedule::get_my_schedules(&self.state, args, ctx),
+            "set_my_schedule" => crate::agent_schedule::set_my_schedule(&self.state, args, ctx),
             // 通知先（webhook）の管理ツール（#157 S5）。Discord 側の実装は撤去済みなので
             // inner へは委譲しない（委譲パターンにすると二重定義を招く）。設定ファイル
             // 由来のフォールバックは `AppState::default_subtask_webhook` から読むので、

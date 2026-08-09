@@ -52,6 +52,11 @@ Base URL: `http://localhost:3000`
 | POST | `/api/sessions/{id}/mentor` | Insert mentor instruction |
 | **Agent Messages** | | |
 | POST | `/api/agents/{id}/messages` | Send direct message to agent |
+| **Agent Schedules (#455)** | | |
+| GET | `/api/agents/{id}/schedules` | List schedules (each with computed `next_fire_at`) |
+| POST | `/api/agents/{id}/schedules` | Create schedule (cron/`@every`; validates cron/tz/session; 400 on invalid) |
+| PATCH | `/api/schedules/{sid}` | Update schedule (cron/tz change or enable resets anchor; disable preserves phase) |
+| DELETE | `/api/schedules/{sid}` | Delete schedule |
 | **Web** | | |
 | POST | `/api/agents/{id}/web/send` | Send message from web dashboard (inbound) |
 | GET | `/api/agents/{id}/web/stream` | Subscribe to agent utterances (SSE) |
@@ -1273,6 +1278,69 @@ Base URL: `http://localhost:3000`
   "error": "No LLM providers available"
 }
 ```
+
+---
+
+## Agent Schedules (#455)
+
+per-agent の定時実行（cron / `@every`）。中央スケジューラ（#439）の同一時刻源に載る。
+発火時は `message` を対象セッションへ self-message として注入し、通常メッセージ処理経路
+（caller=Owner）で 1 ターン走らせる。詳細は `docs/design-agent-schedules.md`。
+
+**次回発火時刻 `next_fire_at` は列に持たず照会時に算出**（heartbeat と同じ方針・stale フリー）。
+既定は無効（`enabled=false`・fail-closed）。**`heartbeat_enabled`（G）は schedule に掛からない**
+（G を切っても定時実行は止まらない。止めるには `enabled=false`）。
+
+### GET /api/agents/{id}/schedules
+
+```json
+{
+  "agent_id": "…",
+  "schedules": [
+    {
+      "id": 1, "agent_id": "…", "session_id": "nostr-…",
+      "cron_expr": "0 7 * * *", "timezone": "Asia/Tokyo",
+      "message": "毎朝のまとめを書いてください", "enabled": true,
+      "anchor_at": "2026-08-09T00:00:00+09:00",
+      "last_fired_at": null,
+      "next_fire_at": "2026-08-09T22:00:00+00:00"
+    }
+  ],
+  "count": 1
+}
+```
+
+### POST /api/agents/{id}/schedules
+
+Request:
+
+```json
+{
+  "session_id": "nostr-…",            // そのエージェントの発火経路を持つセッションに限る
+  "cron_expr": "0 7 * * *",           // 標準 5 フィールド cron、または "@every 3h"
+  "timezone": "Asia/Tokyo",           // 省略時 Asia/Tokyo
+  "message": "毎朝のまとめを書いてください",
+  "enabled": true                      // 省略時 false（fail-closed）
+}
+```
+
+- 不正な cron/`@every`/timezone は **400**。
+- `session_id` がそのエージェントの `nostr-`/`discord-` セッションでなければ **400**。
+- `enabled=true` で作ると `anchor_at=now`（初回発火は「now 以降の最初のスロット / now+周期」）。
+- 応答は作成された行（`next_fire_at` は照会時算出）。
+
+### PATCH /api/schedules/{sid}
+
+部分更新（送ったフィールドだけ変更）。存在しない `sid` は **404**。
+
+- **cron 式 / timezone の明示変更**、または **無効→有効化**では `anchor_at=now`・`last_fired_at=NULL`
+  にリセットする（新しい式で次スロットから）。
+- **有効→無効化**では anchor/last_fired を触らない（意図した疎らさを壊さない）。
+- 変更後はスケジューラを起こして即時反映（#437・再起動不要）。
+
+### DELETE /api/schedules/{sid}
+
+削除。存在しない `sid` は **404**。
 
 ---
 
