@@ -2757,6 +2757,19 @@ fn migrate_soul_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
             .map(|c| format!("'{c}', CASE WHEN json_valid(s.{c}) THEN json(s.{c}) ELSE s.{c} END"))
             .collect::<Vec<_>>()
             .join(", ");
+        // 不正 JSON を含む行数を先に数える（起動は止めず、warn で可視化するため）。
+        // 「壊れていた」= 実在列のいずれかが非 NULL かつ `json_valid` でない行。
+        let broken_pred = present
+            .iter()
+            .map(|c| format!("(s.{c} IS NOT NULL AND NOT json_valid(s.{c}))"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let broken_json_rows: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM soul s WHERE {broken_pred}"),
+            [],
+            |r| r.get(0),
+        )?;
+
         let sql = format!(
             "UPDATE agents
              SET metadata_json = json_set(
@@ -2770,7 +2783,22 @@ fn migrate_soul_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
              )
              WHERE agent_id IN (SELECT agent_id FROM soul)"
         );
-        conn.execute_batch(&sql)?;
+        let salvaged_rows = conn.execute(&sql, [])?;
+
+        // 移行の可視化（#480）: この世代の DB は今まで起動できず、利用者は何が起きるか分からない。
+        // 黙って通すと「何か消えたかも」と疑うことすらできないため、退避したことと件数を残す。
+        if salvaged_rows > 0 {
+            tracing::info!(
+                salvaged_rows,
+                "旧 soul の付随データ（JSON 列）を agents.metadata_json の legacy_soul へ退避した"
+            );
+        }
+        if broken_json_rows > 0 {
+            tracing::warn!(
+                broken_json_rows,
+                "旧 soul の付随データに不正 JSON が含まれ、構造化せず生文字列として退避した（起動は継続）"
+            );
+        }
     }
 
     conn.execute_batch("DROP TABLE IF EXISTS soul; DROP TABLE IF EXISTS identity;")?;
@@ -3567,6 +3595,9 @@ mod migration_tests {
                     -- a2: soul のみ（identity 無し = 集約 INSERT2 経路）。metadata は NULL から退避される。
                     INSERT INTO soul (agent_id, persona_name, custom_traits_json, updated_at)
                     VALUES ('a2', 'Solo', '{\"note\":\"user wrote this\"}', '2026-02-20');
+                    -- a3: custom_traits_json が不正 JSON。起動を止めず生文字列で退避する（warn 経路）。
+                    INSERT INTO soul (agent_id, persona_name, custom_traits_json, updated_at)
+                    VALUES ('a3', 'Broken', 'not-json{oops', '2026-02-20');
                 ",
                 verify: |conn| {
                     // soul / identity は集約後に DROP される。
@@ -3632,6 +3663,12 @@ mod migration_tests {
                             .as_deref(),
                         Some("user wrote this"),
                         "identity 無し経路（metadata=NULL）でも退避されること"
+                    );
+                    // a3: 不正 JSON でも起動を止めず、生文字列として退避されること（warn 経路）。
+                    assert_eq!(
+                        extract("a3", "$.legacy_soul.custom_traits_json").as_deref(),
+                        Some("not-json{oops"),
+                        "不正 JSON は生文字列で退避されること"
                     );
                 },
             },
