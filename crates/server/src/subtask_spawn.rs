@@ -548,6 +548,56 @@ mod tests {
         }
     }
 
+    /// 完了を**テストの合図まで遅延**させる stub。`gate` が `true` を受け取るまで
+    /// `chat_completion` が返らないので、その間サブタスクは settle できず、共有登録簿に
+    /// 載ったままになる。#450: 「spawn 直後は登録簿に載っている」という assert を、子が
+    /// 即完了して registry から remove する競合から切り離すために使う。
+    ///
+    /// `sleep` で待つ形（＝競合を隠すだけで遅いマシンで再発する）ではなく、**完了の順序を
+    /// 固定する**。親が登録を確認し終えるまで子は決着できない。合図後は latch が開いた
+    /// ままになるので、`chat_completion` が複数回呼ばれてもブロックしない。
+    struct GatedStub {
+        reply: String,
+        gate: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl opencrab_llm::traits::LlmProvider for GatedStub {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_completion(
+            &self,
+            request: opencrab_llm::message::ChatRequest,
+        ) -> anyhow::Result<opencrab_llm::message::ChatResponse> {
+            // 合図（true）が来るまで返さない = サブタスクを走行中のまま保つ。送信側が
+            // drop されたら（テスト終了時など）先へ進む。
+            let mut gate = self.gate.clone();
+            loop {
+                if *gate.borrow_and_update() {
+                    break;
+                }
+                if gate.changed().await.is_err() {
+                    break;
+                }
+            }
+            Ok(opencrab_llm::message::ChatResponse {
+                id: "resp-1".to_string(),
+                model: request.model,
+                choices: vec![opencrab_llm::message::Choice {
+                    index: 0,
+                    message: opencrab_llm::message::Message::assistant(&self.reply),
+                    finish_reason: Some(opencrab_llm::message::FinishReason::Stop),
+                }],
+                usage: Default::default(),
+                created: 0,
+            })
+        }
+    }
+
     /// `mock:test` を解決できる `AppState`（Discord を一切通さない = web / REST 相当）。
     fn state_with_stub_llm(reply: &str, hang: bool) -> AppState {
         let state = crate::test_app_state();
@@ -555,6 +605,19 @@ mod tests {
         router.add_provider(Arc::new(StubProvider {
             reply: reply.to_string(),
             hang,
+        }));
+        state.llm_router.swap(router);
+        state
+    }
+
+    /// `state_with_stub_llm` の gated 版。sub-run の完了を `gate` が `true` を受け取る
+    /// まで遅延させる（#450）。
+    fn state_with_gated_llm(reply: &str, gate: tokio::sync::watch::Receiver<bool>) -> AppState {
+        let state = crate::test_app_state();
+        let mut router = opencrab_llm::router::LlmRouter::new();
+        router.add_provider(Arc::new(GatedStub {
+            reply: reply.to_string(),
+            gate,
         }));
         state.llm_router.swap(router);
         state
@@ -657,9 +720,17 @@ mod tests {
     ///
     /// 旧実装は Discord ゲートウェイにしか無く、REST は LLM クライアントとして `None` を
     /// 渡していたため「no LLM client available」で必ず失敗していた。
+    ///
+    /// #450: 「spawn 直後は登録簿に載っている」assert は、子が即完了して registry から
+    /// remove した後に親が assert する競合を塞げていなかった（`:233-` の開始ゲートは
+    /// 「親 insert より先に子が remove しない」順序しか保証しない）。ここでは
+    /// **完了を `gate` の合図まで遅延**させ、親が登録を確認し終えるまで子が決着できない
+    /// ようにして順序を固定する（`sleep` で隠さない）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_subtask_runs_and_settles_without_discord() {
-        let state = state_with_stub_llm("sub-engine done", false);
+        // 子の完了ゲート。親が登録を確認するまで `true` を送らない。
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let state = state_with_gated_llm("sub-engine done", gate_rx);
         let reg = registry();
         let sink = Arc::new(OrderCheckingSink::new(state.db.clone()));
         let actions = SystemGatewayActions::new(
@@ -679,7 +750,9 @@ mod tests {
         assert!(res.success, "spawn_subtask: {:?}", res.error);
         let subtask_id = spawned_id(&res);
 
-        // spawn は即座に返り、走行中エントリが共有登録簿に載っている。
+        // spawn は即座に返り、走行中エントリが共有登録簿に載っている。子はまだ `gate` の
+        // 合図待ちで settle できないため、この確認は競合なく成立する（#450）。ここで登録が
+        // 無ければ本物の退行（spawn したのに登録されない）＝赤になる。
         assert_eq!(res.data.as_ref().unwrap()["status"], "spawned");
         assert!(
             reg.contains_key(&subtask_id),
@@ -691,6 +764,11 @@ mod tests {
             "web-parent-1",
             "subtask_spawned"
         ));
+
+        // 登録を確認したので、子の完了を許可する。
+        gate_tx
+            .send(true)
+            .expect("gate receiver は sub-run が保持している");
 
         // 決着を待つ。
         assert!(
