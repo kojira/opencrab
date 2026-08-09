@@ -11,6 +11,7 @@ import {
   patchAgent,
 } from '../api/agents';
 import { getLlmModelChoices } from '../api/llm';
+import ModelPricingForm from '../components/ui/ModelPricingForm';
 import {
   getNostrConfig,
   updateNostrConfig,
@@ -324,6 +325,8 @@ function LlmModelSection({ agentId }: { agentId: string }) {
   const [webSearch, setWebSearch] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // 保存が「未登録モデル」エラーで弾かれたときに、その場で登録するための spec。
+  const [unregisteredSpec, setUnregisteredSpec] = useState<string | null>(null);
 
   useEffect(() => {
     getLlmModelChoices()
@@ -349,24 +352,61 @@ function LlmModelSection({ agentId }: { agentId: string }) {
     setWebSearch(agent?.web_search ?? false);
   }, [agent?.web_search]);
 
+  // サーバーが「model_pricing に context_window が無い」ときに返す文言（process.rs:958）。
+  const UNREGISTERED_MARKER = 'has no context_window registered in model_pricing';
+
+  // patchAgent を実行し、失敗ならエラー文字列を返す（成功なら null）。
+  const runPatch = async (): Promise<string | null> => {
+    const res = await patchAgent(agentId, {
+      model: selection === '' ? null : selection,
+      // 既定選択時は空文字を送る（サーバー側で NULL に正規化）。null は
+      // serde の都合で「変更なし」に潰れてクリアできないため。
+      reasoning_effort: reasoningEffort,
+      web_search: webSearch,
+    });
+    if (res.updated) return null;
+    return res.error ?? t('agentDetail.modelSaveFailed');
+  };
+
   const save = async () => {
     setSaving(true);
     setMessage(null);
+    setUnregisteredSpec(null);
     try {
-      const res = await patchAgent(agentId, {
-        model: selection === '' ? null : selection,
-        // 既定選択時は空文字を送る（サーバー側で NULL に正規化）。null は
-        // serde の都合で「変更なし」に潰れてクリアできないため。
-        reasoning_effort: reasoningEffort,
-        web_search: webSearch,
-      });
-      if (res.updated) {
+      const err = await runPatch();
+      if (!err) {
         setMessage(t('agentDetail.modelSaved'));
+      } else if (err.includes(UNREGISTERED_MARKER)) {
+        // エラー文から失敗した spec を拾う（無ければ選択中の spec）。その場に
+        // 登録フォームを出す導線。ターミナルで curl を叩く必要をなくす。
+        const m = err.match(/model "([^"]+)"/);
+        setUnregisteredSpec(m ? m[1] : selection);
+        setMessage(t('agentDetail.modelUnregisteredHint'));
       } else {
-        setMessage(res.error ?? t('agentDetail.modelSaveFailed'));
+        setMessage(err);
       }
     } catch (e) {
       setMessage(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 登録が済んだら、元々やろうとしていたモデル保存を自動で再試行する。
+  // 「登録できたのか / 保存できたのか」を分けて見せる（登録は成功したが保存が
+  // 別理由で失敗する経路があるため）。
+  const onPricingRegistered = async () => {
+    setUnregisteredSpec(null);
+    setSaving(true);
+    try {
+      const err = await runPatch();
+      if (!err) {
+        setMessage(t('agentDetail.modelRegisteredAndSaved'));
+      } else {
+        setMessage(t('agentDetail.modelRegisteredButSaveFailed', { error: err }));
+      }
+    } catch (e) {
+      setMessage(t('agentDetail.modelRegisteredButSaveFailed', { error: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -444,8 +484,29 @@ function LlmModelSection({ agentId }: { agentId: string }) {
           </span>
         </span>
       </label>
+
+      {unregisteredSpec && (
+        <div className="mt-4">
+          <p className="text-label-lg text-on-surface mb-2">
+            {t('agentDetail.registerModelTitle', { spec: unregisteredSpec })}
+          </p>
+          <ModelPricingForm
+            initial={splitModelSpec(unregisteredSpec)}
+            submitLabel={t('agentDetail.registerAndSave')}
+            onSaved={onPricingRegistered}
+            onCancel={() => setUnregisteredSpec(null)}
+          />
+        </div>
+      )}
     </div>
   );
+}
+
+// "provider:model" 形式の spec を登録フォームの初期値に分解する。
+function splitModelSpec(spec: string): { provider?: string; model?: string } {
+  const i = spec.indexOf(':');
+  if (i < 0) return { model: spec };
+  return { provider: spec.slice(0, i), model: spec.slice(i + 1) };
 }
 
 export default function AgentOverview() {
