@@ -97,14 +97,18 @@ pub fn resolve_caller_identity_with_owner(
     // co_agent は owner 等価で trusted_user より強いので、両方に該当する相手は co_agent を採る。
     //
     // **既知の制約（未解決・#489）**: ここで突合するのは経路の生の発言者識別子
-    // （Discord user_id / Nostr pubkey）だが、`trusted_co_agents.co_agent_id` に入るのは
-    // co-agents API の仕様上 **opencrab の agent UUID**。両者は別の識別子空間で、
-    // agent UUID から経路上の識別子を引く対応表も持っていない（`agent_discord_config` に
-    // bot の user_id は無く、`agent_nostr_config` は秘密鍵しか持たない）。そのため
+    // （Discord user_id / Nostr pubkey）。`add_co_agent` は `co_agent_id` を検証せず
+    // 受け取った文字列をそのまま保存するので、**経路の識別子で登録すればここで一致する**。
+    // ただし UI の運用上は **opencrab の agent UUID** を入れる作りで、本番の登録もそちら。
+    // agent UUID から経路上の識別子を引く対応表は持っていない（`agent_discord_config` に
+    // bot の user_id は無く、`agent_nostr_config` は秘密鍵しか持たない）ため、
     // **agent UUID で登録された行はここで一致しない**。fail-closed なので誤って権限が
-    // 渡ることはないが、この表経由で co_agent を効かせるには対応表の追加が要る。
-    // 現状 co_agent が実際に成立するのは下の `trusted_users(permission='co-agent')` 経路
-    // （経路の識別子で登録されるので突合できる）。
+    // 渡ることはないが、agent UUID 登録を効かせるには対応表の追加が要る。
+    // 現状 co_agent が確実に成立するのは下の `trusted_users(permission='co-agent')` 経路
+    // （経路の識別子で登録されるので必ず突合できる）。
+    //
+    // なお `trusted_co_agents.allowed_actions` は**権限判定に使っていない**（#490）。
+    // この表で解決した co_agent は列の中身によらず owner 等価になる。
     if user_ids
         .iter()
         .any(|uid| opencrab_db::queries::is_trusted_co_agent(conn, agent_id, uid).unwrap_or(false))
