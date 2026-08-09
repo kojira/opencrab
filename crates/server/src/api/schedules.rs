@@ -233,6 +233,146 @@ pub(crate) fn list_session_schedules_core(
         .collect())
 }
 
+/// 更新時のアンカーの向き（設計 §4.4）を計算する共通ロジック。
+///
+/// cron 式 / timezone の**明示変更**、または **無効→有効化**では `anchor_at=now`・
+/// `last_fired_at=NULL`（新しい式で「now 以降の最初のスロット / now+周期」から始める）。
+/// それ以外（無効化・message だけの変更・変化なし）は**位相を保存**（触らない）。
+/// dashboard の PATCH（[`update_schedule`]）とエージェント向け `update_my_schedule`
+/// （[`update_schedule_core`]）が**同じ規則**を共有する（§4.4 を二重に書かない）。
+fn next_anchor_and_last_fired(
+    existing: &AgentScheduleRow,
+    new_cron: &str,
+    new_tz: &str,
+    new_enabled: bool,
+) -> (Option<String>, Option<String>) {
+    let timing_changed = new_cron != existing.cron_expr || new_tz != existing.timezone;
+    let enabling = new_enabled && !existing.enabled;
+    if timing_changed || enabling {
+        (Some(Utc::now().to_rfc3339()), None)
+    } else {
+        (existing.anchor_at.clone(), existing.last_fired_at.clone())
+    }
+}
+
+/// **所属チェック付き**で id からスケジュール行を取り出す（エージェント向けツール専用）。
+///
+/// 行が存在し、かつ **`agent_id` と `session_id` の両方が一致**するときだけ `Ok`。一致しない
+/// （他エージェント・他セッションのもの）や、そもそも存在しない id は、**存在を明かさず**一律の
+/// `BadRequest` にする。`get_my_schedules` が返した id をそのまま渡す想定で、**id を推測して
+/// 他人・他セッションのスケジュールを覗いたり消したりできない**ことを保証する（#477 の決定事項 1）。
+fn load_owned_schedule(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    id: i64,
+) -> Result<AgentScheduleRow, ScheduleOpError> {
+    let row = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_schedule(&conn, id)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+    };
+    match row {
+        Some(r) if r.agent_id == agent_id && r.session_id == session_id => Ok(r),
+        // 存在しない／他人のもの／他セッションのもの、を区別せず同じ文言にする（存在秘匿）。
+        _ => Err(ScheduleOpError::BadRequest(
+            "指定した id のスケジュールが見つかりません（このセッションのあなたのスケジュールではありません）。get_my_schedules で id を確認してください。".to_string(),
+        )),
+    }
+}
+
+/// `update_schedule_core` への部分更新フィールド。各 `None` は「現在の値を保つ」。
+///
+/// `session_id` は**含めない**（別セッションへの付け替えを構造的に不可能にする）。
+#[derive(Debug, Default)]
+pub(crate) struct SchedulePatch<'a> {
+    pub cron_expr: Option<&'a str>,
+    pub timezone: Option<&'a str>,
+    pub message: Option<&'a str>,
+    pub enabled: Option<bool>,
+}
+
+/// 自分のスケジュールを **id 指定で**部分更新する共有コア（ツール `update_my_schedule` 用）。
+///
+/// `agent_id`＋`session_id` の所属チェック（[`load_owned_schedule`]）を通った行だけを更新する。
+/// **`session_id` は変更しない**（別セッションへ付け替えさせない）。cron/tz を検証し、アンカーの
+/// 向きは dashboard PATCH と同じ（[`next_anchor_and_last_fired`]）。成功後 `scheduler_wake`（#437）。
+pub(crate) fn update_schedule_core(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    id: i64,
+    patch: SchedulePatch<'_>,
+) -> Result<ScheduleDto, ScheduleOpError> {
+    let existing = load_owned_schedule(state, agent_id, session_id, id)?;
+
+    let new_cron = patch.cron_expr.unwrap_or(&existing.cron_expr).to_string();
+    let new_tz = patch.timezone.unwrap_or(&existing.timezone).to_string();
+    let new_message = patch.message.unwrap_or(&existing.message).to_string();
+    let new_enabled = patch.enabled.unwrap_or(existing.enabled);
+
+    validate_schedule(&new_cron, &new_tz).map_err(|e| {
+        ScheduleOpError::BadRequest(format!(
+            "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
+        ))
+    })?;
+    if new_message.trim().is_empty() {
+        return Err(ScheduleOpError::BadRequest(
+            "message は空にできません（発火時にエージェントへ渡す指示文を書いてください）。"
+                .to_string(),
+        ));
+    }
+
+    let (anchor_at, last_fired_at) =
+        next_anchor_and_last_fired(&existing, &new_cron, &new_tz, new_enabled);
+
+    let row = AgentScheduleRow {
+        id: Some(id),
+        agent_id: existing.agent_id.clone(),
+        session_id: existing.session_id.clone(),
+        cron_expr: new_cron,
+        timezone: new_tz,
+        message: new_message,
+        enabled: new_enabled,
+        anchor_at,
+        last_fired_at,
+    };
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::update_agent_schedule(&conn, &row)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?;
+    }
+    state.scheduler_wake.notify_one();
+
+    let saved = {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::get_agent_schedule(&conn, id)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?
+            .ok_or_else(|| ScheduleOpError::Internal("更新後の行が見つかりません".to_string()))?
+    };
+    Ok(ScheduleDto::from_row(saved))
+}
+
+/// 自分のスケジュールを **id 指定で**削除する共有コア（ツール `delete_my_schedule` 用）。
+///
+/// `agent_id`＋`session_id` の所属チェックを通った行だけを削除する。成功後 `scheduler_wake`（#437）。
+pub(crate) fn delete_schedule_core(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    id: i64,
+) -> Result<(), ScheduleOpError> {
+    // 所属チェック（存在しない／他人のものは同じ文言で拒否）。削除できるのは自分のこのセッションの行だけ。
+    let _ = load_owned_schedule(state, agent_id, session_id, id)?;
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::delete_agent_schedule(&conn, id)
+            .map_err(|e| ScheduleOpError::Internal(e.to_string()))?;
+    }
+    state.scheduler_wake.notify_one();
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct ListResponse {
     pub agent_id: String,
@@ -344,16 +484,9 @@ pub async fn update_schedule(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // アンカーの向き（§4.4）。
-    let timing_changed = new_cron != existing.cron_expr || new_tz != existing.timezone;
-    let enabling = new_enabled && !existing.enabled;
-    let (anchor_at, last_fired_at) = if timing_changed || enabling {
-        // 明示変更 / 有効化 → now を起点にし直す（last_fired は捨てて次スロットから）。
-        (Some(Utc::now().to_rfc3339()), None)
-    } else {
-        // それ以外（無効化・message 変更・変化なし）→ 位相を保存（触らない）。
-        (existing.anchor_at.clone(), existing.last_fired_at.clone())
-    };
+    // アンカーの向き（§4.4）。dashboard PATCH とエージェント向け update で同じ規則を共有する。
+    let (anchor_at, last_fired_at) =
+        next_anchor_and_last_fired(&existing, &new_cron, &new_tz, new_enabled);
 
     let row = AgentScheduleRow {
         id: Some(sid),
