@@ -56,6 +56,7 @@ fn create_test_app_with_db() -> (Router, opencrab_db::Db) {
         default_subtask_webhook: None,
         heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
@@ -1055,6 +1056,7 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         default_subtask_webhook: None,
         heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
@@ -1967,6 +1969,7 @@ fn state_with_consolidation(
         default_subtask_webhook: None,
         heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),

@@ -17,6 +17,59 @@ use super::*;
 // **この PR（PR1）では発火経路はまだこの表を読まない**（中央スケジューラへの切替は PR2）。
 // ここではスキーマ・移行・クエリ関数までを用意する。
 
+/// セッションの発火先（`session_id` 接頭辞から導く・設計 §3.6）。
+///
+/// 発火経路を持たないセッション種別（`web-`/`heartbeat-`/`agent-msg-` 等）や壊れた
+/// `session_id` は [`resolve_session_fire_target`] が `None` を返す = **fail-closed**。
+///
+/// **なぜ db クレートに置くか**: 中央スケジューラ（発火）と `set_my_heartbeat` /
+/// `get_my_heartbeat`（受理判定・ゲート理由表示）が **同じ種別集合**で判定しなければ
+/// 「設定できたのに永遠に発火しない行」ができる（設計 §13.1）。両者が別クレート
+/// （bin / lib）にあるため、共有できる db 層へ 1 つだけ置く（源を二重化しない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionFireTarget {
+    /// `nostr-{agent}`: Nostr broadcast（G ゲート対象外）。
+    NostrBroadcast,
+    /// `discord-{agent}-{guild}-{channel}`: その channel（発火時 live G でゲート）。
+    DiscordChannel {
+        guild_id: String,
+        channel_id: String,
+    },
+}
+
+impl SessionFireTarget {
+    /// `discord-` セッションか（発火時に live G マスタゲートの対象になる種別か・設計 §5）。
+    pub fn is_discord(&self) -> bool {
+        matches!(self, SessionFireTarget::DiscordChannel { .. })
+    }
+}
+
+/// `session_id` を保存済み `agent_id` で剥がして発火先を導く（設計 §3.6・B4）。
+///
+/// **naive な `split('-')` は禁止**（`agent_id` は UUID でハイフンを含む。例
+/// `6b79ac3a-7f17-4618-a827-5bda992a3698`）。保存済み `agent_id` で接頭辞を剥がし、残りの
+/// guild/channel が数値（ハイフン無し）であることを確認する。合致しなければ `None`
+/// （fail-closed）。発火経路を持たない種別（`web-`/`heartbeat-`/`agent-msg-` 等）も `None`。
+pub fn resolve_session_fire_target(session_id: &str, agent_id: &str) -> Option<SessionFireTarget> {
+    if session_id == format!("nostr-{agent_id}") {
+        return Some(SessionFireTarget::NostrBroadcast);
+    }
+    let discord_prefix = format!("discord-{agent_id}-");
+    if let Some(rest) = session_id.strip_prefix(&discord_prefix) {
+        // rest = "{guild}-{channel}"。guild/channel は数値（ハイフン無し）なので rsplit_once 安全。
+        if let Some((guild, channel)) = rest.rsplit_once('-') {
+            let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            if numeric(guild) && numeric(channel) {
+                return Some(SessionFireTarget::DiscordChannel {
+                    guild_id: guild.to_string(),
+                    channel_id: channel.to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// セッション単位ハートビート設定 1 行（`session_heartbeat_config`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHeartbeatConfigRow {
@@ -189,6 +242,58 @@ pub fn heartbeat_next_fire_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+
+    #[test]
+    fn resolve_session_fire_target_nostr() {
+        assert_eq!(
+            resolve_session_fire_target(&format!("nostr-{AGENT_UUID}"), AGENT_UUID),
+            Some(SessionFireTarget::NostrBroadcast)
+        );
+    }
+
+    #[test]
+    fn resolve_session_fire_target_discord_strips_uuid_prefix() {
+        // agent_id が UUID（ハイフン入り）でも保存済み agent_id で剥がすので割れない。
+        let sid = format!("discord-{AGENT_UUID}-1001-2002");
+        let target = resolve_session_fire_target(&sid, AGENT_UUID);
+        assert_eq!(
+            target,
+            Some(SessionFireTarget::DiscordChannel {
+                guild_id: "1001".to_string(),
+                channel_id: "2002".to_string(),
+            })
+        );
+        assert!(target.unwrap().is_discord());
+    }
+
+    #[test]
+    fn resolve_session_fire_target_fail_closed() {
+        // 発火経路を持たない種別 → None。
+        assert_eq!(
+            resolve_session_fire_target(&format!("web-{AGENT_UUID}"), AGENT_UUID),
+            None
+        );
+        assert_eq!(
+            resolve_session_fire_target(&format!("heartbeat-{AGENT_UUID}-2002"), AGENT_UUID),
+            None
+        );
+        assert_eq!(
+            resolve_session_fire_target(&format!("agent-msg-{AGENT_UUID}"), AGENT_UUID),
+            None
+        );
+        // 非数値 guild/channel → None（fail-closed）。
+        assert_eq!(
+            resolve_session_fire_target(&format!("discord-{AGENT_UUID}-guild-chan"), AGENT_UUID),
+            None
+        );
+        // 別 agent_id の session を渡しても剥がれない → None。
+        assert_eq!(
+            resolve_session_fire_target(&format!("discord-{AGENT_UUID}-1001-2002"), "other-agent"),
+            None
+        );
+    }
 
     #[test]
     fn resolve_session_interval_semantics_match_resolve_agent() {

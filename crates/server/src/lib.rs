@@ -187,6 +187,28 @@ pub struct AppState {
     /// 変更・(d) **発火ターンの完了**（in-flight 除去と同じ箇所で鳴らし、走行中に眠って
     /// いたスケジューラを即座に rebuild させる）。PR2 では (c)(d) を配線する。
     pub scheduler_wake: Arc<tokio::sync::Notify>,
+    /// live G（global heartbeat kill-switch = `[agent] heartbeat_enabled`）を読む口
+    /// （#394 / 設計 §13.1）。
+    ///
+    /// 中央スケジューラが発火時に読むのと**同一の watch 源**（hot-reload 追従）。
+    /// `get_my_heartbeat` が `discord-` セッションの「enabled なのに G=false でゲート中」を
+    /// 本人へ見せるために `borrow().enabled` を読む（起動時スナップにしない＝表示と実発火の
+    /// 乖離を防ぐ）。`nostr-` は G 非依存なのでゲート理由に使わない（設計 §5）。
+    pub heartbeat_config_rx:
+        tokio::sync::watch::Receiver<opencrab_core::heartbeat::HeartbeatConfig>,
+}
+
+/// live G を読む「切り離し済み」受信端を作る（送信端を即 drop する）。
+///
+/// テストや、config watcher を配線しない構成で [`AppState::heartbeat_config_rx`] を埋める
+/// ために使う。送信端を落としても `borrow()` は `initial` を返し続けるので、ゲート理由の
+/// 読み取りは動く（このフィールドの読み手は `borrow()` だけで `changed()` は使わない）。
+/// 本番は `main.rs` が hot-reload 配線済みの受信端を渡すので、これは使わない。
+pub fn disconnected_heartbeat_config_rx(
+    initial: opencrab_core::heartbeat::HeartbeatConfig,
+) -> tokio::sync::watch::Receiver<opencrab_core::heartbeat::HeartbeatConfig> {
+    let (_tx, rx) = tokio::sync::watch::channel(initial);
+    rx
 }
 
 impl AppState {
@@ -239,6 +261,9 @@ pub(crate) fn test_app_state() -> AppState {
         default_subtask_webhook: None,
         heartbeat_limits: config::HeartbeatLimits::default(),
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        heartbeat_config_rx: disconnected_heartbeat_config_rx(
+            opencrab_core::heartbeat::HeartbeatConfig::default(),
+        ),
     }
 }
 
