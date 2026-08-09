@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 
+// `CallerIdentity` は本体では未使用だが、`mod tests` が `use super::*` 経由で使う。
+#[allow(unused_imports)]
 use crate::traits::{Action, ActionContext, ActionResult, CallerIdentity};
 
 /// instructionsを更新するアクション（Ownerのみ実行可能）
@@ -34,10 +36,10 @@ impl Action for UpdateInstructionsAction {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ActionContext) -> ActionResult {
-        // Owner判定：CallerIdentity::Ownerのみ実行可能
-        if ctx.caller != CallerIdentity::Owner {
+        // owner 等価判定（#485: co_agent も owner 等価。唯一の源は is_owner_equivalent）。
+        if !ctx.caller.is_owner_equivalent() {
             return ActionResult::error(
-                "update_instructions はownerからのメッセージへの返信時のみ実行可能です",
+                "update_instructions はowner（または owner 等価の co_agent）からのメッセージへの返信時のみ実行可能です",
             );
         }
 

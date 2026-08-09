@@ -170,8 +170,8 @@ impl DiscordGatewayActions {
             };
         }
 
-        // 作成が必要 → owner 限定 + channel_id 必須。
-        if ctx.caller != GatewayCaller::Owner {
+        // 作成が必要 → owner（等価）限定 + channel_id 必須（#485: co_agent も owner 等価）。
+        if !ctx.caller.is_owner_equivalent() {
             return reject("creating a webhook is owner-only");
         }
         let channel_id = match args.get("channel_id").and_then(|v| v.as_str()) {

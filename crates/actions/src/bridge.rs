@@ -914,7 +914,10 @@ impl BridgedExecutor {
     }
 
     fn caller_is_owner(&self) -> bool {
-        matches!(self.context.caller, crate::traits::CallerIdentity::Owner)
+        // #485: co_agent は owner 等価（オーナー指示 2026-08-10。#330 を覆す）。owner 判定の
+        // 唯一の源は `CallerIdentity::is_owner_equivalent`。OWNER_ONLY_ACTIONS（execute_shell /
+        // ws_* / configure_* / (add|remove)_allowed_command 等）の可視性・実行の双方がここを通る。
+        self.context.caller.is_owner_equivalent()
     }
 
     fn caller_is_trusted(&self) -> bool {
@@ -2832,6 +2835,45 @@ mod tests {
         assert_eq!(
             r.data["reached_gateway"], true,
             "execute_shell が gateway へ到達しない（heartbeat 経路が死ぬ / #330）"
+        );
+
+        // #485: co_agent は owner 等価。owner と同じく 3 経路すべてで LOCAL_OWNER_ONLY_TOOLS を
+        // 使え、execute_shell が gateway まで到達する（オーナーの「co_agent に execute_shell /
+        // ファイル操作を開放して」を満たす）。is_owner_equivalent から CoAgent を外すと落ちる。
+        let (_d3, cctx) = test_context_with_caller(CallerIdentity::CoAgent {
+            agent_id: "peer".to_string(),
+        });
+        let co_exec = BridgedExecutor::new(ActionDispatcher::new(), cctx)
+            .with_gateway_actions(Arc::new(GwLocal));
+        let co_tools: Vec<String> = co_exec.list_tools().into_iter().map(|t| t.name).collect();
+        for name in LOCAL_OWNER_ONLY_TOOLS {
+            assert!(
+                co_exec.policy_allows(name),
+                "caller=CoAgent は {name} を使えるべき（#485: owner 等価）"
+            );
+            assert!(
+                co_tools.iter().any(|t| t == name),
+                "caller=CoAgent の list_tools に {name} が出るべき（#485）"
+            );
+            let r = co_exec.execute(name, &json!({})).await;
+            assert!(
+                !r.error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("requires owner"),
+                "caller=CoAgent の {name} が owner ゲートで拒否された: {:?}（#485）",
+                r.error
+            );
+        }
+        let r = co_exec.execute("execute_shell", &json!({})).await;
+        assert!(
+            r.success,
+            "caller=CoAgent の execute_shell 実行が拒否された: {:?}（#485）",
+            r.error
+        );
+        assert_eq!(
+            r.data["reached_gateway"], true,
+            "execute_shell が gateway へ到達しない（#485: co_agent = owner 等価）"
         );
     }
 

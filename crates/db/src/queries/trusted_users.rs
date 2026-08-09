@@ -37,6 +37,23 @@ pub fn list_trusted_co_agents(conn: &Connection, agent_id: &str) -> Result<Vec<T
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// `agent_id` にとって `co_agent_id` が信頼済み co-agent として登録されているか。
+///
+/// 呼び出し元の権限解決（[`crate::queries`] を使う `caller_identity` / Discord の
+/// `resolve_caller`）が、`trusted_users` の照合に加えてこの表も引くために使う（#485）。
+/// この表は co-agents API（`POST /api/agents/{id}/co-agents`）が書き込むが、以前は
+/// list API しか読まず**権限解決に配線されていなかった**（登録しても相手は Agent の
+/// まま = owner 等価に届かない）バグの修正。`allowed_actions` はここでは見ない
+/// （登録があれば co_agent = owner 等価。#485 は widening のみで別ゲートを足さない）。
+pub fn is_trusted_co_agent(conn: &Connection, agent_id: &str, co_agent_id: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM trusted_co_agents WHERE agent_id = ?1 AND co_agent_id = ?2",
+        params![agent_id, co_agent_id],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 pub fn insert_trusted_co_agent(conn: &Connection, row: &TrustedCoAgentRow) -> Result<()> {
     conn.execute(
         "INSERT INTO trusted_co_agents (id, agent_id, co_agent_id, allowed_actions, created_by, created_at)

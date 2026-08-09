@@ -90,6 +90,20 @@ pub fn resolve_caller_identity_with_owner(
     {
         return CallerIdentity::Owner;
     }
+    // #485: co-agents API（`POST /api/agents/{id}/co-agents` → `trusted_co_agents` 表）で
+    // owner が明示的に登録した相手を **owner 等価の co_agent** へ解決する（配線）。この表は
+    // 従来 list API しか読まず権限解決に配線されておらず、登録しても相手は `Agent` のまま
+    // owner 等価に届かなかった。owner 判定の次・`trusted_users` 照合より**前**に置く:
+    // co_agent は owner 等価で trusted_user より強いので、両方に該当する相手は co_agent を採る。
+    if user_ids
+        .iter()
+        .any(|uid| opencrab_db::queries::is_trusted_co_agent(conn, agent_id, uid).unwrap_or(false))
+    {
+        return CallerIdentity::CoAgent {
+            // どの表記で登録されていても、名乗る識別子は先頭（正規化済みの表現）で揃える。
+            agent_id: user_ids.first().copied().unwrap_or_default().to_string(),
+        };
+    }
     let permission = user_ids.iter().find_map(|uid| {
         opencrab_db::queries::get_trusted_user(conn, platform, uid, agent_id).map(|u| u.permission)
     });

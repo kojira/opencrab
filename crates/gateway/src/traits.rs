@@ -29,6 +29,16 @@ impl GatewayCaller {
             GatewayCaller::TrustedUser => "trusted_user",
         }
     }
+
+    /// **co_agent は owner 等価**（#485。オーナー指示 2026-08-10 / #330 を覆す）。
+    ///
+    /// server 側ハンドラ（configure_* / (add|remove)_allowed_command / ハートビート指示
+    /// 更新 / webhook set/disable / voice）の owner ゲートはこの述語を通す。判定本体は
+    /// [`opencrab_core::caller::CallerIdentity::is_owner_equivalent`] に委譲し、
+    /// **owner 等価の唯一の源**を core 1 箇所に保つ（gateway 側で別途 match しない）。
+    pub fn is_owner_equivalent(&self) -> bool {
+        opencrab_core::caller::CallerIdentity::from(self).is_owner_equivalent()
+    }
 }
 
 /// gateway 境界の caller から dispatcher 側の識別子へ戻す（#298）。
