@@ -710,25 +710,6 @@ fn build_channel_conversation_section(
     Some(format!("{CHANNEL_CONVERSATION_HEADER}{body}"))
 }
 
-/// ハートビート対象チャンネルの「実会話」セッション ID（#404）。
-///
-/// Discord の会話セッションは `discord-{agent_id}-{guild_id}-{channel_id}`
-/// （`crates/discord/src/message_loop.rs`）。どちらかの ID が空（エージェント単位 tick、
-/// guild 未設定のチャンネル設定）なら解決しない。
-///
-/// 実在確認はしない — ログが無いセッション ID を渡しても
-/// [`build_heartbeat_conversation_string`] 側でセクションごと落ちる。
-pub fn heartbeat_channel_session_id(
-    agent_id: &str,
-    guild_id: &str,
-    channel_id: &str,
-) -> Option<String> {
-    if agent_id.is_empty() || guild_id.is_empty() || channel_id.is_empty() {
-        return None;
-    }
-    Some(format!("discord-{agent_id}-{guild_id}-{channel_id}"))
-}
-
 /// 会話文字列本体の構築（タスク台帳の前置は `build_conversation_string` 側で行う）。
 fn build_conversation_inner(
     conn: &rusqlite::Connection,
