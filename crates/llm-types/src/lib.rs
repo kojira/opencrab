@@ -440,16 +440,6 @@ pub fn is_context_window_error(message: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
-impl LlmError {
-    /// この API エラーが context ウィンドウ超過か（#539）。message で判定する
-    /// （[`is_context_window_error`]）。status だけでは他の 400 と区別できない。
-    pub fn is_context_window_exceeded(&self) -> bool {
-        match self {
-            LlmError::Http { message, .. } => is_context_window_error(message),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,23 +489,6 @@ mod tests {
         ));
         assert!(!is_context_window_error("request timed out"));
         assert!(!is_context_window_error(""));
-    }
-
-    #[test]
-    fn llm_error_context_window_helper_uses_message() {
-        let overflow = LlmError::Http {
-            provider: "chatgpt",
-            status: 400,
-            message: "Your input exceeds the context window of this model.".to_string(),
-        };
-        assert!(overflow.is_context_window_exceeded());
-        // 同じ 400 でも別の bad request は超過ではない（status だけで決めない）。
-        let other_400 = LlmError::Http {
-            provider: "chatgpt",
-            status: 400,
-            message: "invalid_request_error: unknown parameter".to_string(),
-        };
-        assert!(!other_400.is_context_window_exceeded());
     }
 
     #[test]
