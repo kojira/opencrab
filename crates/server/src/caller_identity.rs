@@ -107,8 +107,10 @@ pub fn resolve_caller_identity_with_owner(
     // 現状 co_agent が確実に成立するのは下の `trusted_users(permission='co-agent')` 経路
     // （経路の識別子で登録されるので必ず突合できる）。
     //
-    // なお `trusted_co_agents.allowed_actions` は**権限判定に使っていない**（#490）。
-    // この表で解決した co_agent は列の中身によらず owner 等価になる。
+    // なお `trusted_co_agents.allowed_actions` は**権限判定に使っていない**。#485 の方針
+    // （co_agent は owner 等価）と絞り込みは正面から矛盾するため、co-agents API 側で非空の
+    // `allowed_actions` を受け付けないようにした（#490）。列は互換のため残すが、この表で
+    // 解決した co_agent は列の中身によらず owner 等価になる。
     if user_ids
         .iter()
         .any(|uid| opencrab_db::queries::is_trusted_co_agent(conn, agent_id, uid).unwrap_or(false))

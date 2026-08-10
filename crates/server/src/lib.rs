@@ -529,9 +529,9 @@ pub fn create_router(state: AppState) -> Router {
             get(api::co_agents::list_co_agents).post(api::co_agents::add_co_agent),
         )
         .route(
+            // PATCH は #490 で撤去（可変フィールドの allowed_actions を API から外したため）。
             "/api/agents/{id}/co-agents/{co_agent_id}",
-            axum::routing::patch(api::co_agents::update_co_agent)
-                .delete(api::co_agents::delete_co_agent),
+            axum::routing::delete(api::co_agents::delete_co_agent),
         )
         // チャンネル設定
         .route(

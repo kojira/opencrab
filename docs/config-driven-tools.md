@@ -1023,9 +1023,15 @@ CREATE TABLE trusted_co_agents (
 );
 ```
 
-`allowed_actions` の値例：
+`allowed_actions` の値例（**当初設計。#490 で撤回**）：
 - `null` → 全アクション許可（現行の `trusted_co_agents` リストと同等）
 - `["execute_shell", "ws_read"]` → 指定アクションのみ許可
+
+> **実装上の決定（#485 / #488 / #490）**: co_agent は最終的に **owner 等価**に配線された（#485 / #488）。
+> owner ができる指示は全部できてよい、という方針と「アクションを絞る」機能は正面から矛盾するため、
+> **`allowed_actions` による絞り込みは実装しない**ことにした。co-agents API は非空の `allowed_actions`
+> を受け付けず（`400`）、レスポンスからも外している（#490）。**列は外部 DB の互換のため残す**が、
+> 権限判定では一切参照しない。下記の API 設計に残る `allowed_actions` はこの当初案の名残。
 
 ### APIエンドポイント設計（概念レベル）
 
@@ -1035,7 +1041,7 @@ CREATE TABLE trusted_co_agents (
 |---------|------|------|---------|
 | `GET` | `/api/agents/{id}/co-agents` | co-agentリスト取得 | owner |
 | `POST` | `/api/agents/{id}/co-agents` | co-agent追加 | owner |
-| `PATCH` | `/api/agents/{id}/co-agents/{co_agent_id}` | 許可アクション更新 | owner |
+| ~~`PATCH`~~ | ~~`/api/agents/{id}/co-agents/{co_agent_id}`~~ | ~~許可アクション更新~~ → **#490 で撤去**（更新対象の `allowed_actions` を廃止したため） | — |
 | `DELETE` | `/api/agents/{id}/co-agents/{co_agent_id}` | co-agent削除 | owner |
 
 リクエスト/レスポンス例（`POST /api/agents/{id}/co-agents`）：

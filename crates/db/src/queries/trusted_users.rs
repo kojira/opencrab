@@ -73,18 +73,9 @@ pub fn insert_trusted_co_agent(conn: &Connection, row: &TrustedCoAgentRow) -> Re
     Ok(())
 }
 
-pub fn update_trusted_co_agent_actions(
-    conn: &Connection,
-    agent_id: &str,
-    co_agent_id: &str,
-    allowed_actions: Option<&str>,
-) -> Result<bool> {
-    let updated = conn.execute(
-        "UPDATE trusted_co_agents SET allowed_actions = ?3 WHERE agent_id = ?1 AND co_agent_id = ?2",
-        params![agent_id, co_agent_id, allowed_actions],
-    )?;
-    Ok(updated > 0)
-}
+// `update_trusted_co_agent_actions` は #490 で撤去した。唯一の呼び出し元だった
+// co-agents API の PATCH（`allowed_actions` 更新）が無くなり、この列は権限判定に
+// 使われないため書き換える経路も要らなくなった（列自体は互換のため残す）。
 
 pub fn delete_trusted_co_agent(
     conn: &Connection,
