@@ -1024,11 +1024,17 @@ async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
             // #486/#543: 再回答を抑えるガードがコード上無いため、自分の直近応答と正規化後に
             // 完全一致する応答は送らない（構造的バックストップ。相手が bot か人かは見ず、自分の
             // 過去の出力とだけ比べる。根本の再起動増幅は #543）。NO_REPLY と同じ経路へ合流。
-            if response == "NO_REPLY"
-                || state.is_duplicate_of_last_reply(agent_id, session_id, response)
-            {
-                debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
-                state.record_agent_no_reply(agent_id, session_id);
+            let is_self_dup = response != "NO_REPLY"
+                && state.is_duplicate_of_last_reply(agent_id, session_id, response);
+            if response == "NO_REPLY" || is_self_dup {
+                if is_self_dup {
+                    // #545: 本物の沈黙と区別できる印を残す（metadata reason + 落とした候補文面をログに）。
+                    debug!(agent_id = %agent_id, candidate = %response, "suppressed self-duplicate reply");
+                    state.record_agent_no_reply_suppressed(agent_id, session_id);
+                } else {
+                    debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
+                    state.record_agent_no_reply(agent_id, session_id);
+                }
                 // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
                 // ＝ NO_REPLY のまま終わるのは変わらない。
                 add_reaction_non_fatal(
@@ -1164,10 +1170,16 @@ async fn process_subtask_completed<T: AgentRunner>(
             let response = engine_result.response.trim();
             // #486/#543: 再回答を抑えるガードが無いため、自分の直近応答と正規化後に完全一致
             // する応答は送らない（構造的バックストップ。根本の再起動増幅は #543）。NO_REPLY と同経路。
-            if response == "NO_REPLY"
-                || state.is_duplicate_of_last_reply(&agent_id, &session_id, response)
-            {
-                state.record_agent_no_reply(&agent_id, &session_id);
+            let is_self_dup = response != "NO_REPLY"
+                && state.is_duplicate_of_last_reply(&agent_id, &session_id, response);
+            if response == "NO_REPLY" || is_self_dup {
+                if is_self_dup {
+                    // #545: 抑止の判別印（metadata reason + 落とした候補文面をログに）。
+                    debug!(agent_id = %agent_id, candidate = %response, "suppressed self-duplicate reply");
+                    state.record_agent_no_reply_suppressed(&agent_id, &session_id);
+                } else {
+                    state.record_agent_no_reply(&agent_id, &session_id);
+                }
                 return;
             }
             if !is_dm && !state.is_channel_writable(&channel_id_str) {
@@ -1559,10 +1571,16 @@ async fn process_interaction_response<T: AgentRunner>(
             let response = engine_result.response.trim();
             // #486/#543: 再回答を抑えるガードが無いため、自分の直近応答と正規化後に完全一致
             // する応答は送らない（構造的バックストップ。根本の再起動増幅は #543）。NO_REPLY と同経路。
-            if response == "NO_REPLY"
-                || state.is_duplicate_of_last_reply(&agent_id, &session_id, response)
-            {
-                state.record_agent_no_reply(&agent_id, &session_id);
+            let is_self_dup = response != "NO_REPLY"
+                && state.is_duplicate_of_last_reply(&agent_id, &session_id, response);
+            if response == "NO_REPLY" || is_self_dup {
+                if is_self_dup {
+                    // #545: 抑止の判別印（metadata reason + 落とした候補文面をログに）。
+                    debug!(agent_id = %agent_id, candidate = %response, "suppressed self-duplicate reply");
+                    state.record_agent_no_reply_suppressed(&agent_id, &session_id);
+                } else {
+                    state.record_agent_no_reply(&agent_id, &session_id);
+                }
                 return;
             }
             if !is_dm && !state.is_channel_writable(&channel_id_str) {

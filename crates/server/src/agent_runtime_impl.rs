@@ -61,6 +61,12 @@ impl AgentRuntime for AppState {
         }
     }
 
+    fn record_agent_no_reply_suppressed(&self, agent_id: &str, session_id: &str) {
+        if let Ok(conn) = self.db.lock() {
+            crate::transcript::record_agent_no_reply_suppressed(&conn, agent_id, session_id);
+        }
+    }
+
     fn is_duplicate_of_last_reply(
         &self,
         agent_id: &str,

@@ -101,8 +101,33 @@ pub fn record_inbound_message(
     false
 }
 
-/// NO_REPLY（沈黙の明示）。
+/// NO_REPLY（沈黙の明示）。**本物の沈黙**（モデルが黙ると決めた）。
 pub fn record_agent_no_reply(conn: &Connection, agent_id: &str, session_id: &str) {
+    record_agent_no_reply_inner(conn, agent_id, session_id, None);
+}
+
+/// 自己重複（#486）で送信を抑止したときの NO_REPLY 記録（#545）。
+///
+/// 本物の沈黙と metadata で区別できるよう `reason:"self_duplicate"` を足す。`no_reply:true`
+/// は従来どおり維持する（既存の読み手はこのキーだけを見る）。会話へレンダリングされる文面は
+/// 本物の沈黙と同じ `NO_REPLY` のまま — **モデルの見え方は変えない**（#543 の切り分けを濁さない）。
+/// これがないと「本物の沈黙」と「自己重複で落とした」が同じ印になり、デプロイ後に本 PR の
+/// 効きを測れない（#539 の「記録はあるが判別できない」の轍を踏む）。
+pub fn record_agent_no_reply_suppressed(conn: &Connection, agent_id: &str, session_id: &str) {
+    record_agent_no_reply_inner(conn, agent_id, session_id, Some("self_duplicate"));
+}
+
+fn record_agent_no_reply_inner(
+    conn: &Connection,
+    agent_id: &str,
+    session_id: &str,
+    reason: Option<&str>,
+) {
+    // 本物の沈黙（reason=None）は従来と**完全に同じ** metadata（後方互換）。
+    let metadata = match reason {
+        None => serde_json::json!({ "no_reply": true }),
+        Some(r) => serde_json::json!({ "no_reply": true, "reason": r }),
+    };
     insert_session_log_best_effort(
         conn,
         &SessionLogRow {
@@ -113,7 +138,7 @@ pub fn record_agent_no_reply(conn: &Connection, agent_id: &str, session_id: &str
             content: "NO_REPLY".to_string(),
             speaker_id: Some(agent_id.to_string()),
             turn_number: None,
-            metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
+            metadata_json: Some(metadata.to_string()),
             created_at: None,
         },
     );
@@ -647,5 +672,40 @@ mod tests {
         let conn = opencrab_db::init_memory().unwrap();
         speech(&conn, "s1", "bot-agent-x", "とすて", false);
         assert!(!is_self_duplicate(&conn, "a1", "s1", "とすて"));
+    }
+
+    /// #545: 自己重複で抑止した NO_REPLY は、本物の沈黙と **metadata で区別できる**。
+    /// 会話に見える文面はどちらも `NO_REPLY`（モデルの見え方は同じ）。
+    #[test]
+    fn suppressed_no_reply_is_distinguishable_from_genuine_silence() {
+        let conn = opencrab_db::init_memory().unwrap();
+        record_agent_no_reply(&conn, "a1", "s-genuine"); // 本物の沈黙
+        record_agent_no_reply_suppressed(&conn, "a1", "s-dup"); // 自己重複で抑止
+
+        let g =
+            opencrab_db::queries::list_recent_session_logs_of_type(&conn, "s-genuine", "speech", 1)
+                .unwrap();
+        let s = opencrab_db::queries::list_recent_session_logs_of_type(&conn, "s-dup", "speech", 1)
+            .unwrap();
+
+        // 文面は両方とも NO_REPLY。
+        assert_eq!(g[0].content, "NO_REPLY");
+        assert_eq!(s[0].content, "NO_REPLY");
+
+        let gm = g[0].metadata_json.as_deref().unwrap();
+        let sm = s[0].metadata_json.as_deref().unwrap();
+        // 本物の沈黙は従来どおり no_reply だけ（reason 無し）。
+        assert!(gm.contains("\"no_reply\":true"), "genuine: {gm}");
+        assert!(
+            !gm.contains("reason"),
+            "genuine must not carry a reason: {gm}"
+        );
+        // 抑止は no_reply を保ちつつ reason で判別できる。
+        assert!(sm.contains("\"no_reply\":true"), "suppressed: {sm}");
+        assert!(
+            sm.contains("\"reason\":\"self_duplicate\""),
+            "suppressed must carry the discriminator: {sm}"
+        );
+        assert_ne!(gm, sm);
     }
 }
