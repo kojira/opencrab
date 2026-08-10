@@ -73,29 +73,8 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;
 
-    /// NO_REPLY（沈黙の明示）を記録する（best-effort）。**本物の沈黙**。
+    /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
-
-    /// 自己重複（#486）で送信を抑止したときの NO_REPLY を記録する（#545）。
-    ///
-    /// 本物の沈黙（[`Self::record_agent_no_reply`]）と metadata で区別できる印
-    /// （`reason:"self_duplicate"`）を残す。既定は no-op（DB を持たない fake 実装向け）。
-    fn record_agent_no_reply_suppressed(&self, _agent_id: &str, _session_id: &str) {}
-
-    /// 送ろうとしている応答が、**自分自身の直近の応答**と正規化後に完全一致するか（#486）。
-    ///
-    /// 再回答を抑えるガードが無いために入れる機械的バックストップ（モデル従順性に依存しない）。
-    /// 判定は「自分の出力 vs 自分の過去の出力」だけで、**相手が bot か人かは見ない**。既定は
-    /// `false`（DB を持たない fake 実装向け）。実体は server 側の `transcript::is_self_duplicate`。
-    /// 根本の「再起動 × デデュープ不在」の増幅は #543 の管轄で、これ単体では直らない。
-    fn is_duplicate_of_last_reply(
-        &self,
-        _agent_id: &str,
-        _session_id: &str,
-        _candidate: &str,
-    ) -> bool {
-        false
-    }
 
     /// ゲートウェイから受信した発言をセッションログへ記録する。**記録できたら `true`**。
     ///
