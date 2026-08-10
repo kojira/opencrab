@@ -305,7 +305,8 @@ const MIGRATIONS: &[Migration] = &[
         version: 17,
         description:
             "trusted_discord_users → trusted_users / discord_user_id → user_id (Discord 命名の解消, issue #159)",
-        // **改名のみ。行の追加・削除・書き換えは一切しない。**
+        // **信頼済みユーザーの行は 1 件も失わない。** 改名で移送するのが基本で、唯一の
+        // 例外は #479 の「空の新表を DROP してから改名」だが、DROP するのは行ゼロの表だけ。
         //
         // `ALTER TABLE ... RENAME TO` と `ALTER TABLE ... RENAME COLUMN` は
         // テーブルの再構築を伴わない（SQLite が sqlite_schema の DDL 文字列を
@@ -314,10 +315,30 @@ const MIGRATIONS: &[Migration] = &[
         // agent_id)`）は再構築が要る非可逆な変更なので、ここには**混ぜない**。
         //
         // 冪等性: 新規DB は SCHEMA_SQL 側で既に新しい名前なので、どの分岐も走らない。
+        // 版付き旧DB では run_migrations が version>17 で二度と呼ばず、本番（version=38）は
+        // baseline も通らない（下記 #479 分岐が本番を触ることはない）。
         up: |conn| {
-            if table_exists(conn, "trusted_discord_users")? && !table_exists(conn, "trusted_users")?
-            {
-                conn.execute_batch("ALTER TABLE trusted_discord_users RENAME TO trusted_users")?;
+            if table_exists(conn, "trusted_discord_users")? {
+                if !table_exists(conn, "trusted_users")? {
+                    // 通常の昇格経路（版付き旧DB）: 新表がまだ無いので単純に改名する。
+                    conn.execute_batch(
+                        "ALTER TABLE trusted_discord_users RENAME TO trusted_users",
+                    )?;
+                } else if !table_has_rows(conn, "trusted_users")? {
+                    // #479: 版管理導入前（user_version<1）の旧DBは baseline 経路を通り、
+                    // 先に SCHEMA_SQL が **空の** trusted_users を作る。そのため上の
+                    // `!table_exists` ガードが false になって改名が skip され、旧表に
+                    // データが取り残されていた（クラッシュしないので気づけない）。
+                    // 空の新表を DROP してから改名でデータを移す。**空表の DROP は
+                    // 行を 1 件も消さない**ので、通常経路（新表にデータあり）は下の else で
+                    // 一切触らず保護される（設計上の安全条件）。
+                    conn.execute_batch(
+                        "DROP TABLE trusted_users;
+                         ALTER TABLE trusted_discord_users RENAME TO trusted_users",
+                    )?;
+                }
+                // else: 新表に既にデータがある = 既に正しく昇格済み。この並存は通常経路では
+                // 起きないが、起きても実データを持つ新表は壊さず、旧表にも触れない（冪等・保全優先）。
             }
             if column_exists(conn, "trusted_users", "discord_user_id")? {
                 conn.execute_batch(
@@ -2650,6 +2671,19 @@ fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// テーブルに 1 行以上あるかを判定する（#479: v17 の RENAME 分岐で使う）。
+///
+/// 呼び出し側で `table_exists` を確認済みの前提。`EXISTS` で 1 行見つかり次第打ち切るので
+/// 全件 COUNT より軽い。テーブル名は SQL に埋め込むため、呼び出し元は必ず定数を渡すこと。
+fn table_has_rows(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM \"{table}\")"),
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+}
+
 /// テーブルに指定カラムが存在するか判定する（将来の番号付きマイグレーション用ヘルパー）。
 ///
 /// version 1 baseline (`migrate`) 内の約30箇所のインライン `pragma_table_info` プローブは
@@ -3670,6 +3704,73 @@ mod migration_tests {
                         Some("not-json{oops"),
                         "不正 JSON は生文字列で退避されること"
                     );
+                },
+            },
+            // 2026-（v17・#159）改名前世代: 表は旧名 `trusted_discord_users`（列 `discord_user_id`）。
+            // 版管理導入前（user_version=0）で作られたため、initialize の baseline 経路は
+            // 先に SCHEMA_SQL を流し **空の `trusted_users` を作る**。その後 run_migrations が
+            // v17 に達しても、ガード `table_exists("trusted_discord_users") && !table_exists("trusted_users")`
+            // が「新表が既に存在する」で false になり **RENAME が skip** され、旧表に信頼済み
+            // ユーザーのデータが取り残される（クラッシュしないので気づけない・#479）。
+            // 修正後は v17 が「新表が空なら空表を DROP してから RENAME」でデータを移す。
+            OldDbGeneration {
+                name: "pre_trusted_rename_2026",
+                // v16 相当の旧 shape（display_name / platform は既に持つ）を user_version=0 で。
+                // v3 / v16 のガードはこれらの列が既にあるので no-op になり、v17 の改名だけが要点。
+                schema: "
+                    CREATE TABLE IF NOT EXISTS trusted_discord_users (
+                        id TEXT PRIMARY KEY,
+                        discord_user_id TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        permission TEXT NOT NULL DEFAULT 'user',
+                        created_by TEXT NOT NULL DEFAULT 'owner',
+                        created_at TEXT NOT NULL,
+                        display_name TEXT NOT NULL DEFAULT '',
+                        platform TEXT NOT NULL DEFAULT 'discord',
+                        UNIQUE (discord_user_id, agent_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_trusted_discord_users_agent ON trusted_discord_users(agent_id);
+                    INSERT INTO trusted_discord_users
+                        (id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform)
+                        VALUES ('old-1', '42', 'a1', 'co_agent', 'owner', '2026-01-01', 'Crab B', 'discord'),
+                               ('old-2', '43', 'a1', 'user', 'owner', '2026-01-02', '', 'discord');
+                ",
+                verify: |conn| {
+                    // 改名が成立し、旧名は消えている。
+                    assert!(
+                        table_exists(conn, "trusted_users").unwrap(),
+                        "trusted_users へ改名されていること"
+                    );
+                    assert!(
+                        !table_exists(conn, "trusted_discord_users").unwrap(),
+                        "旧 trusted_discord_users は残っていないこと（データが取り残されない）"
+                    );
+                    // #479 の本丸: 旧表のデータが新表へ移っていること（空の新表に上書きされない）。
+                    let n: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM trusted_users", [], |r| r.get(0))
+                        .unwrap();
+                    assert_eq!(n, 2, "旧表の 2 行が trusted_users に移っていること");
+                    // 列も改名され、値はそのまま。permission は後続 v18 で co_agent→co-agent に統一。
+                    let (user_id, permission, display_name, platform): (String, String, String, String) = conn
+                        .query_row(
+                            "SELECT user_id, permission, display_name, platform FROM trusted_users WHERE id = 'old-1'",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        )
+                        .unwrap();
+                    assert_eq!(user_id, "42", "discord_user_id の値が user_id に移っていること");
+                    assert_eq!(permission, "co-agent");
+                    assert_eq!(display_name, "Crab B");
+                    assert_eq!(platform, "discord");
+                    // 索引は新名で張り直され、旧名は消えている。
+                    let new_idx: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_trusted_users_agent'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(new_idx, 1, "idx_trusted_users_agent が存在すること");
                 },
             },
         ]
@@ -6059,6 +6160,82 @@ mod migration_tests {
 
         // 再実行しても冪等
         initialize(&conn).expect("idempotent");
+    }
+
+    /// v17 の #479 分岐が、**既にデータのある `trusted_users` を絶対に壊さない**こと。
+    ///
+    /// baseline 経路（user_version<1）では SCHEMA_SQL が空の `trusted_users` を先に作るため、
+    /// #479 の修正で「新表が空なら DROP して旧表を RENAME」する分岐を足した。ここで検証するのは
+    /// その分岐の安全条件: **新表にデータがある並存状態**（通常経路では起きないが冪等・保全のため
+    /// 想定する）では、新表を DROP せず・旧表にも触れないこと。v17 の `up` を直接呼んで固定する。
+    #[test]
+    fn v17_never_destroys_populated_trusted_users() {
+        let conn = Connection::open_in_memory().expect("open");
+        // 新表（最終 shape）にデータを 1 件、旧表にも別データを 1 件置いた並存状態を作る。
+        conn.execute_batch(
+            "CREATE TABLE trusted_users (
+               id TEXT PRIMARY KEY,
+               user_id TEXT NOT NULL,
+               agent_id TEXT NOT NULL,
+               permission TEXT NOT NULL DEFAULT 'user',
+               created_by TEXT NOT NULL DEFAULT 'owner',
+               created_at TEXT NOT NULL,
+               display_name TEXT NOT NULL DEFAULT '',
+               platform TEXT NOT NULL DEFAULT 'discord',
+               UNIQUE (user_id, agent_id)
+             );
+             INSERT INTO trusted_users (id, user_id, agent_id, permission, created_by, created_at, display_name, platform)
+               VALUES ('new-1', '100', 'a1', 'co-agent', 'owner', '2026-05-01', 'Keep Me', 'web');
+             CREATE TABLE trusted_discord_users (
+               id TEXT PRIMARY KEY,
+               discord_user_id TEXT NOT NULL,
+               agent_id TEXT NOT NULL,
+               permission TEXT NOT NULL DEFAULT 'user',
+               created_by TEXT NOT NULL DEFAULT 'owner',
+               created_at TEXT NOT NULL,
+               display_name TEXT NOT NULL DEFAULT '',
+               platform TEXT NOT NULL DEFAULT 'discord',
+               UNIQUE (discord_user_id, agent_id)
+             );
+             INSERT INTO trusted_discord_users (id, discord_user_id, agent_id, permission, created_by, created_at, display_name, platform)
+               VALUES ('old-1', '42', 'a1', 'user', 'owner', '2026-01-01', 'Stale', 'discord');",
+        )
+        .unwrap();
+
+        // v17 の up を直接適用（並存状態に対する分岐だけを検証する）。
+        let v17 = MIGRATIONS
+            .iter()
+            .find(|m| m.version == 17)
+            .expect("v17 migration exists");
+        (v17.up)(&conn).expect("v17 up");
+
+        // 新表のデータはそのまま（DROP されていない・置き換わっていない）。
+        let (n, display): (i64, String) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM trusted_users), \
+                        (SELECT display_name FROM trusted_users WHERE id = 'new-1')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "既存データのある trusted_users は 1 行のまま");
+        assert_eq!(
+            display, "Keep Me",
+            "既存行が旧表のデータで上書きされないこと"
+        );
+        // 旧表は触られず残る（実データを勝手に消さない）。ここでの並存は通常経路では起きないが、
+        // 起きても「新表のデータを守る」方を優先する。
+        assert!(
+            table_exists(&conn, "trusted_discord_users").unwrap(),
+            "新表にデータがある場合、旧表は破棄されない"
+        );
+
+        // 冪等: もう一度流しても新表のデータは不変。
+        (v17.up)(&conn).expect("v17 up idempotent");
+        let n2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trusted_users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 1);
     }
 
     /// v18: `trusted_users.permission` の表記統一（#234）。
