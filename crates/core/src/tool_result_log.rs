@@ -139,25 +139,6 @@ pub fn contains_secret(value: &serde_json::Value) -> bool {
     }
 }
 
-/// tool_result JSON 文字列から秘密フィールドをマスクする（**明示的なハード版**）。
-///
-/// ここに渡るのは `ActionResult` ラッパ全体の serialize
-/// （`{"success":..,"data":{..},"error":..}`）で、`nsec` は `data` の**中**にある。
-/// 再帰マスク（[`redact_secrets_in_place`]）を通す。JSON として解釈できない場合は生の
-/// 中身に秘密鍵が残りうるため、固定の placeholder に置き換える（生保存で漏らさない）。
-///
-/// 「秘密を含む前提の blob を無条件に潰す」呼び出し向け（非 JSON も握り潰す）。
-/// sanitize パイプライン内の内容ベース判定は `redact_secrets_in_result` を使う。
-pub fn redact_secret_fields_json(result_json: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(result_json) {
-        Ok(mut v) => {
-            redact_secrets_in_place(&mut v);
-            v.to_string()
-        }
-        Err(_) => "{\"note\":\"[redacted secret result]\"}".to_string(),
-    }
-}
-
 /// sanitize パイプライン用の秘密マスク（**内容ベース／ツール名に依存しない**）。
 ///
 /// 従来は `nostr_generate_key` 決め打ちだったが、秘密を返す 3 つ目の経路が「また自前で
@@ -169,8 +150,7 @@ pub fn redact_secret_fields_json(result_json: &str) -> String {
 /// ので parse を省き、借用のまま返す（大半の結果はここで素通り＝無駄な clone/再直列化を
 /// しない）。substring は一致したがキーとしては存在しない（値の中に `nsec` の語がある等）
 /// 場合も、何も潰さないなら元の文字列をそのまま返す。非 JSON はここでは触らない
-/// （オフロード案内文の再無害化などを壊さない。ハードに潰したい経路は
-/// [`redact_secret_fields_json`]）。
+/// （オフロード案内文の再無害化などを壊さない）。
 fn redact_secrets_in_result(result_json: &str) -> std::borrow::Cow<'_, str> {
     if !SECRET_KEYS.iter().any(|k| result_json.contains(k)) {
         return std::borrow::Cow::Borrowed(result_json);
@@ -374,24 +354,6 @@ pub fn sanitize_tool_result_for_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn redacts_nsec_nested_in_data() {
-        // add_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
-        // nsec は data の中に入る（トップレベル走査だけでは漏れる）。
-        let wrapper =
-            r#"{"success":true,"data":{"npub":"npub1ok","nsec":"nsec1xxx"},"error":null}"#;
-        let out = redact_secret_fields_json(wrapper);
-        assert!(!out.contains("nsec1xxx"));
-        assert!(out.contains("[redacted]"));
-        assert!(out.contains("npub1ok"));
-    }
-
-    #[test]
-    fn non_json_input_is_replaced_wholesale() {
-        let out = redact_secret_fields_json("nsec1plaintextleak");
-        assert!(!out.contains("nsec1plaintextleak"));
-    }
 
     /// #519: `data` の中へネストした `nsec` が、**ツール名に依存せず**潰れる。
     /// 従来の永続化ゲートは `nostr_generate_key` 決め打ちで、別ツールが同じ形の秘密を
