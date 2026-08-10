@@ -4208,31 +4208,10 @@ mod past_summary_budget_tests {
 }
 
 #[cfg(test)]
-mod redact_secret_fields_tests {
-    // redaction 本体は inline / dispatch 両経路で共有するため actions 側にある。
+mod tool_result_progress_line_tests {
+    // 実況（progress line）は永続化と同じ無害化（`sanitize_tool_result_for_log`）を通す。
+    // redaction 本体は inline / dispatch 両経路で共有するため actions/core 側にある。
     use super::tool_result_progress_line;
-    use opencrab_actions::redact_secret_fields_json;
-
-    #[test]
-    fn test_redacts_nsec_nested_in_actionresult_wrapper() {
-        // add_on_tool_result に渡る実際の形は ActionResult ラッパ全体で、
-        // nsec は data の中にネストする。
-        let wrapper = r#"{"success":true,"data":{"nsec":"nsec1supersecret","npub":"npub1abc","pubkey":"hex","warning":"w"},"error":null}"#;
-        let out = redact_secret_fields_json(wrapper);
-        assert!(!out.contains("supersecret"), "nsec leaked: {out}");
-        assert!(out.contains("[redacted]"));
-        // 非秘密は保持。
-        assert!(out.contains("npub1abc"));
-        assert!(out.contains("hex"));
-        // トップレベル nsec も潰す。
-        let top = r#"{"nsec":"nsec1x","npub":"npub1y"}"#;
-        assert!(!redact_secret_fields_json(top).contains("nsec1x"));
-        // JSON 不能は placeholder に。
-        let bad = "nsec1raw npub1 not-json";
-        let out = redact_secret_fields_json(bad);
-        assert!(!out.contains("nsec1raw"));
-        assert!(out.contains("redacted"));
-    }
 
     /// #397: subtask の実況は webhook で系の外へ出る。永続化側と同じ無害化を
     /// **プレビューを切る前に**通し、nsec の生値が通知口へ流れないようにする。
