@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opencrab_core::tool_result_log::{contains_secret, redact_secrets_in_place};
 use opencrab_core::{ActionExecutor, ActionResult as CoreActionResult, FunctionDefinition};
 use opencrab_gateway::GatewayActions;
 
@@ -746,20 +748,22 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
     }
 }
 
-/// tool 結果 Value から秘密鍵フィールド（`nsec`）をマスクした複製を返す。
-/// 観測系（activity webhook 等の sink）へ秘密鍵を生で流さないために使う。
-/// 呼び出し側は `nsec` を含むときだけ呼ぶ（clone コストを避けるため）。
-fn redact_secret_fields(data: &serde_json::Value) -> serde_json::Value {
-    let mut cloned = data.clone();
-    if let Some(obj) = cloned.as_object_mut() {
-        if obj.contains_key("nsec") {
-            obj.insert(
-                "nsec".to_string(),
-                serde_json::Value::String("[redacted]".to_string()),
-            );
-        }
+/// 観測系（activity webhook 等の sink＝外部）へ渡す tool 結果を秘密マスクする。
+///
+/// 検出・マスクとも core の 1 実装（[`contains_secret`] / [`redact_secrets_in_place`]）に
+/// 集約し、永続化経路（`tool_result_log`）と**同じ再帰ロジック・同じ [`SECRET_KEYS`]**を
+/// 通す。旧実装はトップレベルの `nsec` しか見ず、`data` の中や配列にネストした秘密を
+/// 素通りさせていた（#519）。
+///
+/// 秘密が無ければ clone せず借用のまま返す（大半の結果でコピーを避ける）。
+fn redact_for_sink(data: &serde_json::Value) -> Cow<'_, serde_json::Value> {
+    if contains_secret(data) {
+        let mut cloned = data.clone();
+        redact_secrets_in_place(&mut cloned);
+        Cow::Owned(cloned)
+    } else {
+        Cow::Borrowed(data)
     }
-    cloned
 }
 
 /// エラー文言から「権限拒否（実行されなかった）」を判定する。
@@ -1102,14 +1106,9 @@ impl BridgedExecutor {
             ToolEventStatus::Failed
         };
         // 秘密鍵（nsec 等）を含む結果は sink（activity webhook 等の観測系）へ生で流さない。
-        // 含む場合だけ redact したコピーを作って渡す（通常は clone を避ける）。
-        let redacted;
-        let sink_result: &serde_json::Value = if result.data.get("nsec").is_some() {
-            redacted = redact_secret_fields(&result.data);
-            &redacted
-        } else {
-            &result.data
-        };
+        // 検出・マスクは core の再帰実装に集約（ネスト・配列も潰す #519）。含む場合だけ
+        // コピーを作り、無ければ借用のまま渡す（通常は clone を避ける）。
+        let sink_result = redact_for_sink(&result.data);
         sink.on_event(&ToolEvent {
             tool_name: name,
             tool_call_id: call_id,
@@ -1120,7 +1119,7 @@ impl BridgedExecutor {
             started_at: &started_at,
             duration_ms: Some(duration_ms),
             args,
-            result: Some(sink_result),
+            result: Some(&sink_result),
             error: result.error.as_deref(),
         });
         result
@@ -1363,18 +1362,31 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_secret_fields_masks_nsec() {
-        let data = json!({"nsec": "nsec1supersecret", "npub": "npub1abc", "pubkey": "hex"});
-        let red = redact_secret_fields(&data);
-        assert_eq!(red["nsec"], "[redacted]");
+    fn redact_for_sink_masks_nested_secret() {
+        // #519: 実際の tool 結果は秘密が `data` の中へネストする。トップレベルだけ見る
+        // 旧実装はここで素通りしていた。
+        let data = json!({
+            "success": true,
+            "data": {"nsec": "nsec1supersecret", "npub": "npub1abc", "pubkey": "hex"},
+        });
+        let red = redact_for_sink(&data);
+        assert_eq!(red["data"]["nsec"], "[redacted]");
         // 非秘密フィールドは保持。
-        assert_eq!(red["npub"], "npub1abc");
-        assert_eq!(red["pubkey"], "hex");
+        assert_eq!(red["data"]["npub"], "npub1abc");
+        assert_eq!(red["data"]["pubkey"], "hex");
         // 秘密が残らない。
         assert!(!red.to_string().contains("supersecret"));
-        // nsec が無ければそのまま。
-        let plain = json!({"url": "https://x"});
-        assert_eq!(redact_secret_fields(&plain), plain);
+        // 秘密が sink へ渡る値には残らない（ネスト・配列も）。
+        let arr = json!({"data": {"keys": [{"nsec": "nsec1inarray"}]}});
+        assert!(!redact_for_sink(&arr).to_string().contains("nsec1inarray"));
+    }
+
+    #[test]
+    fn redact_for_sink_borrows_when_no_secret() {
+        // 秘密が無ければ clone しない（借用のまま）。
+        let plain = json!({"data": {"url": "https://x"}});
+        assert!(matches!(redact_for_sink(&plain), Cow::Borrowed(_)));
+        assert_eq!(*redact_for_sink(&plain), plain);
     }
 
     /// テスト用GatewayActionsモック

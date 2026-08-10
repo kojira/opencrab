@@ -60,7 +60,8 @@ pub use subtask_registries::SubtaskRegistries;
 // **同一の上限と退避**を使う必要があり、core は actions に依存できないため。
 // 既存の呼び出し元互換のためここから re-export する。
 pub use opencrab_core::tool_result_log::{
-    redact_secret_fields_json, sanitize_tool_result_for_llm, sanitize_tool_result_for_log,
+    contains_secret, redact_secret_fields_json, redact_secrets_in_place,
+    sanitize_tool_result_for_llm, sanitize_tool_result_for_log, SECRET_KEYS,
     TOOL_RESULT_TOKEN_LIMIT,
 };
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
