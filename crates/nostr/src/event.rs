@@ -30,20 +30,16 @@ pub struct NostrEvent {
     pub tags: Vec<Vec<String>>,
 }
 
+/// アンカーへ差し込む値の最大文字数。アンカーは**必ず 1 行**に収める
+/// （履歴の他の行と混ざらないため）。
+const MAX_ANCHOR_FIELD_CHARS: usize = 128;
+
 /// アンカーへ差し込む値の無害化: 制御文字（改行含む）を落とし、長すぎれば切り詰める。
-/// アンカーは**必ず 1 行**に収める（履歴の他の行と混ざらないため）。
+///
+/// #521: 防御ロジックは Discord の注記フィールドと共有する [`opencrab_core::injection`]
+/// に集約。ここは Nostr の上限 `MAX_ANCHOR_FIELD_CHARS` を渡す薄いラッパ。
 fn sanitize_anchor_field(s: &str) -> String {
-    const MAX: usize = 128;
-    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
-    if cleaned.chars().count() <= MAX {
-        cleaned
-    } else {
-        cleaned
-            .chars()
-            .take(MAX - 1)
-            .chain(std::iter::once('…'))
-            .collect()
-    }
+    opencrab_core::injection::sanitize_embedded_field(s, MAX_ANCHOR_FIELD_CHARS)
 }
 
 impl NostrEvent {

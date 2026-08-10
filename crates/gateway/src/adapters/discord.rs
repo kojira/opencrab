@@ -360,18 +360,10 @@ const MAX_NOTE_FIELD_CHARS: usize = 100;
 /// ファイル名で**偽の発話行を注入**できてしまう。他の制御文字も注記の見た目を壊す。
 /// 非画像側も同じ関数を通す（同型のリスクを従来から持っているので揃えて塞ぐ）。
 ///
-/// 正常なファイル名は一切変化しない（制御文字を含まず短いものは素通り）。
+/// #521: 防御ロジックは Nostr の受信アンカーと共有する [`opencrab_core::injection`] に集約。
+/// ここは Discord の上限 `MAX_NOTE_FIELD_CHARS` を渡す薄いラッパ。
 fn sanitize_note_field(s: &str) -> String {
-    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
-    if cleaned.chars().count() <= MAX_NOTE_FIELD_CHARS {
-        cleaned
-    } else {
-        cleaned
-            .chars()
-            .take(MAX_NOTE_FIELD_CHARS - 1)
-            .chain(std::iter::once('…'))
-            .collect()
-    }
+    opencrab_core::injection::sanitize_embedded_field(s, MAX_NOTE_FIELD_CHARS)
 }
 
 impl AttachmentInfo {
