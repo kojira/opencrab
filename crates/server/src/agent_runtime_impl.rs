@@ -61,6 +61,20 @@ impl AgentRuntime for AppState {
         }
     }
 
+    fn is_duplicate_of_last_reply(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        candidate: &str,
+    ) -> bool {
+        match self.db.lock() {
+            Ok(conn) => {
+                crate::transcript::is_self_duplicate(&conn, agent_id, session_id, candidate)
+            }
+            Err(_) => false,
+        }
+    }
+
     // ---- 転記（#42: 行の形は transcript モジュールが所有。#158 S3 で gateway 非依存に）
 
     /// #284 P0-3: ユーザー発言の記録だけは成否を返す（他の転記は best-effort のまま）。

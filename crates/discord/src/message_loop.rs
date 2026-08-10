@@ -1020,7 +1020,13 @@ async fn handle_agent_response<T: AgentRunner, G: ReactionAdder>(
 ) {
     match result {
         Ok(engine_result) if !engine_result.response.is_empty() => {
-            if engine_result.response.trim() == "NO_REPLY" {
+            let response = engine_result.response.trim();
+            // #486/#543: 再回答を抑えるガードがコード上無いため、自分の直近応答と正規化後に
+            // 完全一致する応答は送らない（構造的バックストップ。相手が bot か人かは見ず、自分の
+            // 過去の出力とだけ比べる。根本の再起動増幅は #543）。NO_REPLY と同じ経路へ合流。
+            if response == "NO_REPLY"
+                || state.is_duplicate_of_last_reply(agent_id, session_id, response)
+            {
                 debug!(agent_id = %agent_id, "Agent returned NO_REPLY");
                 state.record_agent_no_reply(agent_id, session_id);
                 // 黙ったことを投稿者に見せる（#317）。失敗しても応答処理は続けない
@@ -1155,7 +1161,12 @@ async fn process_subtask_completed<T: AgentRunner>(
         .await
     {
         Ok(engine_result) if !engine_result.response.is_empty() => {
-            if engine_result.response.trim() == "NO_REPLY" {
+            let response = engine_result.response.trim();
+            // #486/#543: 再回答を抑えるガードが無いため、自分の直近応答と正規化後に完全一致
+            // する応答は送らない（構造的バックストップ。根本の再起動増幅は #543）。NO_REPLY と同経路。
+            if response == "NO_REPLY"
+                || state.is_duplicate_of_last_reply(&agent_id, &session_id, response)
+            {
                 state.record_agent_no_reply(&agent_id, &session_id);
                 return;
             }
@@ -1545,7 +1556,12 @@ async fn process_interaction_response<T: AgentRunner>(
         .await
     {
         Ok(engine_result) if !engine_result.response.is_empty() => {
-            if engine_result.response.trim() == "NO_REPLY" {
+            let response = engine_result.response.trim();
+            // #486/#543: 再回答を抑えるガードが無いため、自分の直近応答と正規化後に完全一致
+            // する応答は送らない（構造的バックストップ。根本の再起動増幅は #543）。NO_REPLY と同経路。
+            if response == "NO_REPLY"
+                || state.is_duplicate_of_last_reply(&agent_id, &session_id, response)
+            {
                 state.record_agent_no_reply(&agent_id, &session_id);
                 return;
             }
