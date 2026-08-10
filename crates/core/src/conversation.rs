@@ -2038,6 +2038,12 @@ mod past_summary_budget_tests {
     }
 
     /// 要約が予算を食い潰さないので、直近会話の枠が残る（事故当時はここが 0 だった）。
+    ///
+    /// #500 の位置づけ: これは**コンパクションが機能していることの回復ガード**であって、
+    /// heartbeat 障害の再発防止ではない。障害時の会話は予算（525,000）に収まっていたのに、
+    /// その予算自体がバックエンドの実上限（371,678）を超えていた。**「予算 ≤ バックエンド
+    /// 実上限」の天井はまだコードに無く #535 の管轄**。この `<= BUDGET` assert が意味を持つのは
+    /// budget が正しく設定されている前提でのみ。
     #[test]
     fn recent_conversation_keeps_its_share_when_topics_are_huge() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -2064,6 +2070,10 @@ mod past_summary_budget_tests {
     }
 
     /// ハートビート経路でも合計が予算を超えず、実会話と末尾の出力形式指示が残る。
+    ///
+    /// #500 の位置づけ: **回復ガード**（コンパクションが効くこと）であって障害の再発防止では
+    /// ない。死んだのは heartbeat 経路だが、原因は budget 自体がバックエンド実上限を超えた
+    /// ことで、このテストでは捕まらない（budget が正しい前提でのみ有効。天井は #535 の管轄）。
     #[test]
     fn heartbeat_total_stays_within_budget_and_keeps_channel_and_format_instruction() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -2166,6 +2176,9 @@ mod past_summary_budget_tests {
     }
 
     /// 予算が極小でも panic しない（0 除算・スライス外・オーバーフロー）。
+    ///
+    /// **panic しないことだけを見る。** 極小予算では直近下限（`RECENT_MIN_LOGS`）が予算を
+    /// 割って出力が予算を超えうるが、それはここでは固定しない（超過そのものは #536）。
     #[test]
     fn tiny_budget_does_not_panic() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -2182,6 +2195,93 @@ mod past_summary_budget_tests {
                 "budget={budget} で直近ログの下限が効いていない: {out}"
             );
         }
+    }
+}
+
+/// #500: 組み上がった会話が予算で頭打ちになる（＝コンパクションが機能している）ことの
+/// **回復ガード**。
+///
+/// **これは heartbeat 障害の再発防止ではない。** あの日は会話が予算（525,000）に収まって
+/// いたのに、その予算自体がバックエンドの実上限（371,678）を超えていた。破れたのは
+/// 「予算 ⇔ バックエンド実上限」の間で、そこには今も天井が無く **#535 の管轄**（本番は
+/// `context_window` を手で下げているだけ）。ここが守るのは「budget が正しく設定されている
+/// 前提で、履歴がいくら伸びてもコンパクションが出力を予算付近まで頭打ちにすること」だけ。
+///
+/// topic 圧縮経路（[`past_summary_budget_tests::recent_conversation_keeps_its_share_when_topics_are_huge`]）
+/// とハートビート経路（[`past_summary_budget_tests::heartbeat_total_stays_within_budget_and_keeps_channel_and_format_instruction`]）
+/// の「出力 ≤ 予算」は #406 で既に固定済み。ここは**未カバーだった topic 無しの切り詰め
+/// フォールバック**（[`super::build_truncated_conversation`]）を埋める。
+///
+/// なお `fit_logs_to_budget` は末尾から予算いっぱいまで詰めるので出力はほぼ予算ちょうどに
+/// なり、**予算に計上されない省略マーカー / セクション区切りのぶん、通常サイズの行でも
+/// 出力は予算を数十トークンだけ超えうる**（実測で +12 程度。#536 の巨大行による超過とは
+/// 別の、境界の小さなオーバーヘッド）。回復ガードが見たいのは「履歴全体＝予算の数倍まで
+/// 膨らまない」ことなので、予算＋小さな既知の余白で判定する。
+#[cfg(test)]
+mod budget_fit_recovery_guard_tests {
+    use super::{build_conversation_string, estimate_tokens};
+
+    const AGENT: &str = "a1";
+    const SESSION: &str = "s1";
+
+    fn insert_speech(conn: &rusqlite::Connection, content: &str) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: SESSION.to_string(),
+                log_type: "speech".to_string(),
+                content: content.to_string(),
+                speaker_id: Some(AGENT.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// topic 要約が 1 件も無い（＝`build_truncated_conversation` フォールバック）状態で
+    /// 履歴が予算を大きく超えても、組み上がった会話は予算付近で頭打ちになる。
+    ///
+    /// 既存の fits テストは全て topic ありの summary 経路。topic 生成が追いつく前の
+    /// セッションや要約が引けない経路はこの切り詰めフォールバックへ落ちるため、そこも
+    /// 頭打ちになることを固定する。行は通常サイズ（下限が巨大行で予算を割る #536 とは別条件）。
+    #[test]
+    fn truncated_fallback_without_topics_stays_within_budget() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 予算を大きく超える履歴を積む（topic は入れない → 切り詰め経路）。
+        for i in 0..400 {
+            insert_speech(
+                &conn,
+                &format!("log line {i} about the release plan and the follow-up work"),
+            );
+        }
+
+        const BUDGET: usize = 4_000;
+        // 予算に計上されない省略マーカー / 区切りのぶんの既知の小さな余白。
+        const MARKER_SLACK: usize = 128;
+
+        let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
+        // 前提: topic 無しの切り詰めフォールバックに入っている。
+        assert!(
+            !out.contains("[Past context summary"),
+            "topic 要約が出ている＝切り詰め経路のテストになっていない: {out}"
+        );
+        // コンパクションが実際に起きた（＝古いメッセージが落ちた）ことの印。これが無ければ
+        // 全文がそのまま出ており、予算頭打ちを検証できていない。
+        assert!(
+            out.contains("[Note: Earlier messages were omitted"),
+            "切り詰めの注記が無い＝コンパクションが起きていない: {out}"
+        );
+        let toks = estimate_tokens(&out);
+        assert!(
+            toks <= BUDGET + MARKER_SLACK,
+            "切り詰め経路で出力が予算+余白（{}）を超えた: {toks} トークン。\
+             履歴（予算の数倍）が頭打ちにできていない可能性がある",
+            BUDGET + MARKER_SLACK
+        );
     }
 }
 
