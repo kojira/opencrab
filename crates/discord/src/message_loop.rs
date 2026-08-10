@@ -311,8 +311,12 @@ pub async fn run_discord_loop<T: AgentRunner>(
     );
 
     // イベント処理ループ（直列）: P2のDB競合を構造的に解消
-    // デバウンス: 同一(channel_id, sender_id)のメッセージを DEBOUNCE_DELAY 分まとめてから処理
-    let mut debounce_buffers: HashMap<(String, String), (Vec<IncomingMessage>, Instant)> =
+    // #543: デバウンスの単位を (channel, sender) から **(channel, caller 権限レベル)** へ。
+    // オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」を、情報を落とさない形で
+    // 実現する。同権限のメッセージだけを 1 つの窓にまとめ、**権限をまたぐ合流はしない**
+    // （owner と bot は別窓＝別 run。owner 権限の消失も bot の権限昇格も起こさない）。窓内の
+    // 全メッセージは個別に記録して送信者の帰属を保ち、run は窓につき 1 回だけ起こす。
+    let mut debounce_buffers: HashMap<(String, u8), (Vec<IncomingMessage>, Instant)> =
         HashMap::new();
 
     // セッション単位の推論直列化ランタイム（gateway 非依存層の共通実装 / #156 S2）。
@@ -337,12 +341,36 @@ pub async fn run_discord_loop<T: AgentRunner>(
             event = event_rx.recv() => {
                 match event {
                     Some(LoopEvent::IncomingMessage(msg)) => {
-                        let key = debounce_key(&msg);
-                        let entry = debounce_buffers
-                            .entry(key)
-                            .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
-                        entry.0.push(msg);
-                        entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
+                        let caller =
+                            state.resolve_caller(&msg.sender.id, &agent_ids, &owner_discord_id);
+                        if runs_solo(&caller) {
+                            // #543: オーナー本人は**常に単独 run**（合流も遅延もしない）。記録は
+                            // process_incoming_message 内で行う（record_only=false）。窓を通さない
+                            // ので他メッセージと帰属が混ざらない。
+                            process_incoming_message(
+                                msg,
+                                gateway.clone(),
+                                state.clone(),
+                                agent_ids.clone(),
+                                gateway_actions.clone(),
+                                owner_discord_id.clone(),
+                                session_locks.clone(),
+                                skip_agents_with_dedicated_gateway,
+                                voice.clone(),
+                                event_tx.clone(),
+                                subtask_registry.clone(),
+                                false,
+                            )
+                            .await;
+                        } else {
+                            let entry = debounce_buffers
+                                .entry(debounce_window_key(&msg, &caller))
+                                .or_insert_with(|| {
+                                    (Vec::new(), Instant::now() + DEBOUNCE_DELAY)
+                                });
+                            entry.0.push(msg);
+                            entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
+                        }
                     }
                     Some(LoopEvent::SubtaskCompleted {
                         session_id,
@@ -443,23 +471,25 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         for key in expired_keys {
             if let Some((messages, _)) = debounce_buffers.remove(&key) {
-                let merged = merge_incoming_messages(messages);
-                if let Some(merged) = merged {
-                    let count = merged
-                        .metadata
-                        .get("debounce_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1);
-                    if count > 1 {
-                        info!(
-                            channel = %key.0,
-                            sender = %key.1,
-                            count = count,
-                            "Debounced messages merged"
-                        );
-                    }
+                // #543: 合流窓の全メッセージを**個別に**記録する（送信者の帰属を保つ）。
+                // run（推論）は窓につき 1 回だけ、**内容のある最後のメッセージ**が起こす。run は
+                // DB から会話全体を読むので、合流分は全部・正しい帰属で文脈に入る。トリガーが
+                // 無い（全メッセージが空）なら run は起こらない（応答対象が無いだけで、記録は済む）。
+                let trigger_idx = messages.iter().rposition(incoming_has_content);
+                let count = messages.len();
+                if count > 1 {
+                    info!(
+                        channel = %key.0,
+                        privilege = key.1,
+                        count = count,
+                        "Debounced (channel+privilege): recording all, running once"
+                    );
+                }
+                for (i, msg) in messages.into_iter().enumerate() {
+                    // トリガー以外は record-only（記録と 👀 まで。run は起こさない）。
+                    let record_only = Some(i) != trigger_idx;
                     process_incoming_message(
-                        merged,
+                        msg,
                         gateway.clone(),
                         state.clone(),
                         agent_ids.clone(),
@@ -470,6 +500,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         voice.clone(),
                         event_tx.clone(),
                         subtask_registry.clone(),
+                        record_only,
                     )
                     .await;
                 }
@@ -530,6 +561,10 @@ async fn process_incoming_message<T: AgentRunner>(
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    // #543: true なら**記録（と 👀）まで**で終え、推論（run）は起こさない。デバウンス窓で
+    // 合流したメッセージのうち、run トリガーでないものに使う。各メッセージを正しい送信者で
+    // 個別に会話ログへ残しつつ、run は窓につき 1 回だけにするための分岐。
+    record_only: bool,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -699,6 +734,13 @@ async fn process_incoming_message<T: AgentRunner>(
             )
             .await;
             reaction_added = true;
+        }
+
+        // #543: record-only パス（デバウンス窓の非トリガーメッセージ）は、記録と 👀 まで。
+        // typing / 推論（run）は起こさない。合流窓のトリガー 1 通だけが run を起こし、その run が
+        // DB から会話全体（この記録も含む）を読むので、情報は落ちず文脈には正しい帰属で入る。
+        if record_only {
+            continue;
         }
 
         // タイピングインジケーター（ホワイトリスト通過後のみ）。
@@ -1836,61 +1878,49 @@ fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     message_id.parse::<u64>().ok()
 }
 
-/// デバウンスキーを生成する: (channel_id, sender_id)。
-fn debounce_key(msg: &IncomingMessage) -> (String, String) {
-    let channel_id = match &msg.source {
+/// デバウンス窓の channel 部分を取り出す（#543。権限部分は呼び出し側が caller から解決する）。
+fn debounce_channel_id(msg: &IncomingMessage) -> String {
+    match &msg.source {
         opencrab_gateway::MessageSource::Discord { channel_id, .. } => channel_id.clone(),
         _ => String::new(),
-    };
-    (channel_id, msg.sender.id.clone())
+    }
 }
 
-/// 複数のIncomingMessageを1つにマージする。
-/// テキストは改行で結合、画像URLはすべて集約、メタデータは最後のメッセージを使用。
-fn merge_incoming_messages(mut messages: Vec<IncomingMessage>) -> Option<IncomingMessage> {
-    if messages.is_empty() {
-        return None;
-    }
-    if messages.len() == 1 {
-        return Some(messages.remove(0));
-    }
+/// このメッセージを合流窓に入れず**常に単独 run**にするか（#543）。
+///
+/// **オーナー本人（種別 [`opencrab_actions::CallerIdentity::Owner`]）だけ true。** #489
+/// （識別子空間の食い違いで co_agent の判定が一度も発火していない）が直ると、co_agent は
+/// #485 で **owner 等価**になり、bot の発言とオーナーの発言が**同じ権限 rank（=2）**になる。
+/// rank が同じでも identity は別（kojira 本人と bot は別人）で、合流すると run の帰属
+/// （誰の発言への応答か）が曖昧になる。そこで **rank ではなく種別 `Owner` そのもの**で外す。
+/// これは合流するかを決めるだけで、新しい権限ゲート（禁止/許可）ではない。相手が bot かでは
+/// 判定しない（判定は `resolve_caller` の結果＝自分側の識別だけで行う）。
+fn runs_solo(caller: &opencrab_actions::CallerIdentity) -> bool {
+    matches!(caller, opencrab_actions::CallerIdentity::Owner)
+}
 
-    let count = messages.len();
-    let mut texts = Vec::new();
-    let mut images = Vec::new();
+/// デバウンス窓のキー = **(channel, caller 権限レベル)**（#543）。オーナー本人は [`runs_solo`]
+/// で先に外れるので、ここに来るのは非オーナー（agent / trusted / 将来の co_agent）だけ。
+///
+/// trusted(=1) と agent(=0)（と将来 owner 等価の co_agent=2）は別キー＝別窓＝別 run になり、
+/// **権限をまたぐ合流を構造的に禁止**する: 最後の送信者を採ると帰属が消え、最強権限を採ると
+/// bot が上位権限で走る——どちらも起こさない。run 側は各メッセージの caller を個別に解決し
+/// 直すので、ここはグルーピング用の粗い区分でよい。
+fn debounce_window_key(
+    msg: &IncomingMessage,
+    caller: &opencrab_actions::CallerIdentity,
+) -> (String, u8) {
+    (debounce_channel_id(msg), caller.trust_level())
+}
 
-    for msg in &messages {
-        let (text, img_urls) = extract_discord_content(&msg.content);
-        if !text.is_empty() {
-            texts.push(text);
-        }
-        images.extend(img_urls);
-    }
-
-    // 最後のメッセージをベースにする（最新のメタデータ・タイムスタンプ）
-    let mut merged = messages.pop().unwrap();
-
-    // コンテンツをマージ
-    let merged_text = texts.join("\n");
-    if images.is_empty() {
-        merged.content = opencrab_gateway::MessageContent::Text(merged_text);
-    } else {
-        let mut parts: Vec<opencrab_gateway::ContentPart> = Vec::new();
-        if !merged_text.is_empty() {
-            parts.push(opencrab_gateway::ContentPart::Text(merged_text));
-        }
-        for url in images {
-            parts.push(opencrab_gateway::ContentPart::Image { url, alt: None });
-        }
-        merged.content = opencrab_gateway::MessageContent::Multi(parts);
-    }
-
-    // デバウンスでまとめたことをメタデータに記録
-    merged
-        .metadata
-        .insert("debounce_count".to_string(), serde_json::json!(count));
-
-    Some(merged)
+/// メッセージが応答対象になる内容（テキストまたは画像）を持つか（#543）。
+///
+/// デバウンス窓の run トリガー選びに使う。`process_incoming_message` 冒頭の早期 return
+/// （text も image も空なら何もしない）と同じ判定にそろえ、内容の無いメッセージを
+/// トリガーに選んで run を消してしまうことを防ぐ。
+fn incoming_has_content(msg: &IncomingMessage) -> bool {
+    let (text, images) = extract_discord_content(&msg.content);
+    !text.is_empty() || !images.is_empty()
 }
 
 /// メッセージコンテンツからテキストと画像URLを抽出する。

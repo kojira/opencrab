@@ -26,8 +26,8 @@ use opencrab_core::EngineResult;
 use opencrab_gateway::{DiscordGateway, IncomingMessage, MessageContent, MessageSource, Sender};
 
 use super::{
-    create_event_channel, process_incoming_message, process_interaction_response,
-    process_subtask_completed,
+    create_event_channel, debounce_window_key, incoming_has_content, process_incoming_message,
+    process_interaction_response, process_subtask_completed, runs_solo,
 };
 
 /// `run_agent_response` の観測 1 件。
@@ -283,11 +283,17 @@ impl crate::AgentRunner for FakeRunner {
 
     fn resolve_caller(
         &self,
-        _sender_id: &str,
+        sender_id: &str,
         _agent_ids: &[String],
-        _owner_discord_id: &str,
+        owner_discord_id: &str,
     ) -> CallerIdentity {
-        CallerIdentity::TrustedUser
+        // 実装に忠実に: 送信者がオーナー本人なら Owner、それ以外は TrustedUser。
+        // #543 のデバウンス窓キー（権限レベル）が owner と非 owner を分けることの検証に使う。
+        if sender_id == owner_discord_id {
+            CallerIdentity::Owner
+        } else {
+            CallerIdentity::TrustedUser
+        }
     }
 
     fn list_enabled_discord_configs(&self) -> Vec<opencrab_db::queries::AgentDiscordConfigRow> {
@@ -406,6 +412,7 @@ async fn inbound_run_carries_the_shared_registry_so_cancel_can_reach_it() {
         None,
         event_tx,
         registry.clone(),
+        false,
     )
     .await;
 
@@ -460,6 +467,7 @@ async fn inbound_run_carries_the_end_of_speech_subtask_counter() {
         None,
         event_tx,
         registry,
+        false,
     )
     .await;
 
@@ -549,6 +557,7 @@ async fn inbound_goes_through_the_shared_inbound_hook() {
         None,
         event_tx,
         registry,
+        false,
     )
     .await;
 
@@ -620,6 +629,7 @@ async fn inbound_message_is_recorded_before_the_session_lock_is_acquired() {
         None,
         event_tx,
         registry,
+        false,
     )
     .await;
 
@@ -686,6 +696,7 @@ fn failed_inbound_record_is_detected_not_swallowed() {
                 None,
                 event_tx,
                 registry,
+                false,
             )
             .await;
 
@@ -983,6 +994,7 @@ fn every_sender_gets_the_seen_reaction_including_other_bots() {
                 None,
                 event_tx,
                 registry,
+                false,
             )
             .await;
         });
@@ -1021,4 +1033,167 @@ async fn no_reply_without_a_message_id_is_skipped_not_fatal() {
             .is_empty(),
         "数値でない message_id でリアクションを試みている"
     );
+}
+
+// ---- #543: デバウンスを (channel, sender) から (channel, 権限レベル) へ移し、run 発火直前で間引く ----
+
+fn discord_msg(channel: &str, sender: &str, text: &str) -> IncomingMessage {
+    IncomingMessage::new(
+        MessageSource::Discord {
+            guild_id: "111".to_string(),
+            channel_id: channel.to_string(),
+        },
+        MessageContent::Text(text.to_string()),
+        Sender::new(sender, sender),
+    )
+}
+
+/// #543: record-only パスは記録（と 👀）まで済ませ、推論（run）は起こさない。合流窓の
+/// 非トリガーメッセージを「捨てずに記録だけする」ための土台。
+#[tokio::test]
+async fn record_only_records_inbound_but_does_not_run() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    let session_locks = Arc::new(SessionLocks::new());
+
+    process_incoming_message(
+        discord_msg("222", "user-1", "記録だけして"),
+        gateway,
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        session_locks,
+        false,
+        None,
+        event_tx,
+        registry,
+        true, // record_only
+    )
+    .await;
+
+    assert_eq!(
+        state.inbound_records.lock().unwrap().clone(),
+        vec!["記録だけして".to_string()],
+        "record_only でも発言は記録される"
+    );
+    assert!(
+        state.runs.lock().unwrap().is_empty(),
+        "record_only なのに推論（run）が走った"
+    );
+}
+
+/// #543 本体: 合流窓が別 sender の複数メッセージを含んでも、**全メッセージが個別に記録され**、
+/// **run は 1 回だけ**起きる。run は DB から会話全体を読むので、合流分は全部・正しい帰属で
+/// 文脈に入る（＝「ユーザーの発言を捨てる」ことをしない）。
+#[tokio::test]
+async fn debounced_window_records_every_message_but_runs_once() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (event_tx, _event_rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+    let session_locks = Arc::new(SessionLocks::new());
+
+    // フラッシュの再現: 非トリガーは record-only、内容のある最後のメッセージが run トリガー。
+    process_incoming_message(
+        discord_msg("222", "kairo", "かいろの発言"),
+        gateway.clone(),
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions.clone(),
+        "owner-1".to_string(),
+        session_locks.clone(),
+        false,
+        None,
+        event_tx.clone(),
+        registry.clone(),
+        true, // 非トリガー（record-only）
+    )
+    .await;
+    process_incoming_message(
+        discord_msg("222", "nostarou", "のすたろうの発言"),
+        gateway,
+        state.clone(),
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        session_locks,
+        false,
+        None,
+        event_tx,
+        registry,
+        false, // トリガー（run を起こす）
+    )
+    .await;
+
+    state.wait_for_run().await;
+
+    let records = state.inbound_records.lock().unwrap().clone();
+    assert!(
+        records.contains(&"かいろの発言".to_string()),
+        "records={records:?}"
+    );
+    assert!(
+        records.contains(&"のすたろうの発言".to_string()),
+        "records={records:?}"
+    );
+    assert_eq!(records.len(), 2, "合流しても畳まず 2 件記録: {records:?}");
+    assert_eq!(state.runs.lock().unwrap().len(), 1, "合流窓の run は 1 回");
+}
+
+/// #543: オーナー本人（種別 Owner）だけが**単独 run**（合流対象外）。co_agent が将来
+/// owner 等価（同 rank）になっても、種別 Owner だけを外すので rank では判定しない。
+#[test]
+fn only_owner_identity_runs_solo() {
+    use opencrab_actions::CallerIdentity;
+    assert!(runs_solo(&CallerIdentity::Owner), "オーナー本人は単独 run");
+    assert!(!runs_solo(&CallerIdentity::Agent));
+    assert!(!runs_solo(&CallerIdentity::TrustedUser));
+    // co_agent は owner 等価（rank=2）だが**種別 Owner ではない**ので合流対象（単独にしない）。
+    assert!(
+        !runs_solo(&CallerIdentity::CoAgent {
+            agent_id: "kairo".to_string()
+        }),
+        "co_agent は種別 Owner ではないので単独 run にはしない（rank ではなく種別で分ける）"
+    );
+}
+
+/// #543: 合流窓のキーは (channel, 権限レベル)。権限レベルが違うメッセージは別窓＝別 run に
+/// なり、権限をまたぐ合流をしない。同権限・同チャンネルは同じ窓に入る。
+#[test]
+fn debounce_window_key_separates_by_privilege_level() {
+    use opencrab_actions::CallerIdentity;
+    let msg = discord_msg("222", "u", "hi");
+    let msg_other_channel = discord_msg("999", "u", "hi");
+
+    let trusted = debounce_window_key(&msg, &CallerIdentity::TrustedUser);
+    let agent = debounce_window_key(&msg, &CallerIdentity::Agent);
+    let agent_same = debounce_window_key(&msg, &CallerIdentity::Agent);
+    let agent_other_channel = debounce_window_key(&msg_other_channel, &CallerIdentity::Agent);
+
+    // 権限レベルが違えば別窓。
+    assert_ne!(trusted, agent, "trusted と agent が同じ窓に入っている");
+    // 同権限・同チャンネルは同じ窓。
+    assert_eq!(agent, agent_same, "同権限・同チャンネルは同じ窓のはず");
+    // チャンネルが違えば別窓。
+    assert_ne!(
+        agent, agent_other_channel,
+        "別チャンネルが同じ窓に入っている"
+    );
+}
+
+/// #543: run トリガーは「内容のある最後のメッセージ」。末尾が空でも内容のある方を選び、
+/// 全メッセージが空のときだけ run を起こさない（間引きで run を消さない・空を選ばない）。
+#[test]
+fn run_trigger_selection_uses_latest_message_with_content() {
+    let has = discord_msg("222", "u", "本文あり");
+    let empty = discord_msg("222", "u", "");
+    assert!(incoming_has_content(&has));
+    assert!(!incoming_has_content(&empty));
+
+    let window = [has, empty];
+    assert_eq!(window.iter().rposition(incoming_has_content), Some(0));
+
+    let all_empty = [discord_msg("222", "u", ""), discord_msg("222", "u", "")];
+    assert_eq!(all_empty.iter().rposition(incoming_has_content), None);
 }
