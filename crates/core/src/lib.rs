@@ -21,6 +21,7 @@ pub mod heartbeat;
 pub mod identity;
 pub mod import;
 pub mod impression_section;
+pub mod injection;
 pub mod llm_text;
 pub mod memory;
 pub mod memory_index;
