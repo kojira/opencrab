@@ -81,7 +81,6 @@ Base URL: `http://localhost:3000`
 | **Co-Agents** | | |
 | GET | `/api/agents/{id}/co-agents` | List co-agents |
 | POST | `/api/agents/{id}/co-agents` | Register co-agent |
-| PATCH | `/api/agents/{id}/co-agents/{co_agent_id}` | Update co-agent |
 | DELETE | `/api/agents/{id}/co-agents/{co_agent_id}` | Remove co-agent |
 | **Trusted Users** | | |
 | GET | `/api/agents/{id}/trusted-users` | List trusted users |
@@ -1906,9 +1905,10 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | id | UUID | レコード ID |
 | agent_id | UUID | 親エージェント ID |
 | co_agent_id | UUID | 共同エージェント ID |
-| allowed_actions | string[] \| null | 許可アクション一覧（`null` = 全許可） |
 | created_by | string | 作成者 |
 | created_at | ISO8601 | 作成日時 |
+
+> **Note (#490)**: `allowed_actions` は権限判定に使われないためレスポンスから外した。co_agent は owner 等価で、登録された相手は全アクションを実行できる。
 
 **Example Response**
 
@@ -1917,7 +1917,6 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
   "id": "e5f6a7b8-c9d0-1234-ef01-234567890123",
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
   "co_agent_id": "660f9500-f3a0-52e5-b827-557766551111",
-  "allowed_actions": ["chat", "memory_read"],
   "created_by": "admin",
   "created_at": "2026-03-20T10:00:00Z"
 }]
@@ -1934,39 +1933,22 @@ GET /api/agents/550e8400-.../channel-configs?guild_id=111222333444555666
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | co_agent_id | UUID | ✅ | 共同エージェントの ID |
-| allowed_actions | string[] | ❌ | 許可アクション一覧（省略時 = 全許可） |
+
+> **Note (#490)**: `allowed_actions` は受け付けない。非空で渡すと `400 Bad Request`（co_agent は owner 等価で権限判定に使われないため）。省略 / `null` / 空配列は許容。
 
 **Example Request**
 
 ```json
-{"co_agent_id": "660f9500-f3a0-52e5-b827-557766551111", "allowed_actions": ["chat", "memory_read"]}
+{"co_agent_id": "660f9500-f3a0-52e5-b827-557766551111"}
 ```
 
 **Response**: CoAgentRow（上記と同構造）
 
 ---
 
-### PATCH /api/agents/{id}/co-agents/{co_agent_id}
+### ~~PATCH /api/agents/{id}/co-agents/{co_agent_id}~~（#490 で撤去）
 
-**目的**: 共同エージェントの許可アクションを更新する
-
-**Request Body**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| allowed_actions | string[] | ✅ | 許可アクション一覧 |
-
-**Example Request**
-
-```json
-{"allowed_actions": ["chat", "memory_read", "memory_write"]}
-```
-
-**Response**
-
-```json
-{"updated": true}
-```
+**撤去済み**: 唯一の役割が `allowed_actions` の更新だったが、その列は権限判定に使われず API から外したため、更新できるフィールドが無くなった。何もしないエンドポイントを残すより撤去した（co_agent は owner 等価で、追加/削除は POST/DELETE で足りる）。**この経路への `PATCH` は `405 Method Not Allowed` を返す**（`DELETE` は下記のとおり有効）。
 
 ---
 

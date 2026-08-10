@@ -327,7 +327,8 @@ AppLayout（AppLayout.tsx）
 
 **レイアウト改善:**
 - テーブル形式からカードリスト形式に変更（モバイルで横スクロール発生を回避）
-- 各エントリを1行コンパクト表示（co_agent_id / allowed_actions / 追加日 / 削除ボタン）
+- 各エントリを1行コンパクト表示（co_agent_id / 追加日 / 削除ボタン）
+  - ※ `allowed_actions` は #490 で撤回（権限判定に使われないため UI・API から削除）
 
 ### 4.8 Trusted Users（`AgentTrustedUsers.tsx`）
 
