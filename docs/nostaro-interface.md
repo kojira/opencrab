@@ -80,9 +80,13 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 | `nostr_upload` | `nostaro --config <p> upload <path>` |
 
 > **#514: DM 送信は禁止**。`nostr_dm` ツールは撤去し、`nostaro dm` を叩く経路
-> （送信メソッド・`nostr_run dm` passthrough）も塞いだ。DM は暗号化されていても秘密鍵が
-> 漏れた時点で過去に遡って全部読めるため、その前提ごと無くす（オーナー決定）。private な
-> 話は Nostr でせず、Discord の DM か指定チャンネルを使う。
+> （送信メソッド・`nostr_run dm` passthrough）も塞いだ。さらに **`nostr_run event` も deny**:
+> `nostaro event` は任意 kind を publish できる（`-k 4` / `--kind=1059` / `--file` の JSON
+> `{"kind":4,…}`）ため、`dm` deny だけでは `event -k 4` で DM を迂回できる。security boundary
+> を引数解析に依存させないため `event` は丸ごと拒否する（NIP-28 の `channel` は公開
+> kind:40/41/42 で暗号化オプションも無く private 経路ではないので拒否しない）。DM は暗号化
+> されていても秘密鍵が漏れた時点で過去に遡って全部読めるため、その前提ごと無くす（オーナー
+> 決定）。private な話は Nostr でせず、Discord の DM か指定チャンネルを使う。
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 
