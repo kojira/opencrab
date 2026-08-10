@@ -41,6 +41,9 @@ pub fn build_conversation_string(
     for section in &prefix_sections {
         inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
     }
+    // #536: 最後の `parts.join("\n\n")` の区切りも出力へ含まれるので計上する。
+    // prefix N 個 + inner の N+1 パートで区切りは N 本（prefix が空なら 0 本）。
+    inner_budget = inner_budget.saturating_sub(prefix_sections.len() * estimate_tokens("\n\n"));
     let inner = build_conversation_inner(conn, session_id, agent_id, inner_budget)?;
 
     let mut parts = prefix_sections;
@@ -200,6 +203,10 @@ pub fn build_heartbeat_conversation_string(
     for section in &prefix_sections {
         inner_budget = inner_budget.saturating_sub(estimate_tokens(section));
     }
+    // #536: 最後の `parts.join("\n\n")` の区切りを計上する。prefix N 個ぶんの区切りは
+    // ここで引き、channel↔inner の区切り（channel がある場合の 1 本）は下の
+    // `heartbeat_budget` で引く。
+    inner_budget = inner_budget.saturating_sub(prefix_sections.len() * estimate_tokens("\n\n"));
 
     let channel_section = channel_session_id
         .filter(|id| !id.is_empty() && *id != heartbeat_session_id)
@@ -215,7 +222,10 @@ pub fn build_heartbeat_conversation_string(
     // 実会話が実際に使った分だけ引く（予算内に収まったチャンネルは残りを専用セッション
     // へ返す）。直近下限で割当を超えることもあるため saturating。
     let heartbeat_budget = match &channel_section {
-        Some(s) => inner_budget.saturating_sub(estimate_tokens(s)),
+        // channel がある場合は channel↔inner の区切り 1 本ぶんも引く（#536）。
+        Some(s) => inner_budget
+            .saturating_sub(estimate_tokens(s))
+            .saturating_sub(estimate_tokens("\n\n")),
         None => inner_budget,
     };
     let inner = build_conversation_inner(conn, heartbeat_session_id, agent_id, heartbeat_budget)?;
@@ -814,31 +824,49 @@ fn fit_logs_to_budget(
     //
     // `must` は直近のユーザー発言集合なので `max()` がそのまま「一番新しいユーザー発言」。
     // それが連続区間内（`>= start_idx`）なら飛び地は不要（None）。
-    let forced_orphan = must.iter().copied().max().filter(|&i| i < start_idx);
+    // #536: 省略マーカーも実際に出力へ含まれるのに予算へ計上していなかった（会計のバグ）。
+    // 連続区間（tail）は tail_budget 内に収めてあるが、前置するマーカーぶんが未計上で、
+    // 通常サイズの行でも出力が予算を数十トークン超えることがあった。組み上げた総量が予算を
+    // 超えるなら、連続区間の**最古**を 1 行ずつ落として（落ちた分はマーカーが件数として
+    // 吸収する）予算内へ収める。floor（`RECENT_MIN_LOGS`）と must は割らない —— 直近下限
+    // だけで予算を超える極小予算では従来どおり超過する（floor は #536 の対象外）。#284 の
+    // 最新ユーザー発言（飛び地）と #404 の末尾行は末尾側なので削られない。
+    let render = |start_idx: usize| -> String {
+        let forced_orphan = must.iter().copied().max().filter(|&i| i < start_idx);
+        let mut parts: Vec<String> = Vec::with_capacity(formatted.len() - start_idx + 3);
+        match forced_orphan {
+            Some(idx) => {
+                // 飛び地より前に落とした分（件数＋期間で「何かがあった」ことを残す）。
+                if idx > 0 {
+                    parts.push(format_omission_marker(&logs[..idx]));
+                }
+                // 一番新しいユーザー発言（飛び地でも必ず載せる）。
+                parts.push(formatted[idx].clone());
+                // 飛び地と連続区間のあいだに落とした分（古い飛び地の連投を含む）。
+                // #536 のトリムで連続区間が飛び地のすぐ後ろまで縮むと空区間になりうるので、
+                // 非空のときだけ出す（空マーカー "0 older messages" を作らない）。
+                if idx + 1 < start_idx {
+                    parts.push(format_omission_marker(&logs[idx + 1..start_idx]));
+                }
+            }
+            None => {
+                // 一番新しいユーザー発言は連続区間に入っている（または must が空）。
+                // 連続区間より前に落とした分だけを 1 つのマーカーに集約する。
+                if start_idx > 0 {
+                    parts.push(format_omission_marker(&logs[..start_idx]));
+                }
+            }
+        }
+        parts.extend(formatted[start_idx..].iter().cloned());
+        parts.join("\n")
+    };
 
-    let mut parts: Vec<String> = Vec::with_capacity(formatted.len() - start_idx + 3);
-    match forced_orphan {
-        Some(idx) => {
-            // 飛び地より前に落とした分（件数＋期間で「何かがあった」ことを残す）。
-            if idx > 0 {
-                parts.push(format_omission_marker(&logs[..idx]));
-            }
-            // 一番新しいユーザー発言（飛び地でも必ず載せる）。
-            parts.push(formatted[idx].clone());
-            // 飛び地と連続区間のあいだに落とした分（古い飛び地の連投を含む。
-            // ループは非 must 行で break するため `idx + 1 < start_idx` が保証され非空）。
-            parts.push(format_omission_marker(&logs[idx + 1..start_idx]));
-        }
-        None => {
-            // 一番新しいユーザー発言は連続区間に入っている（または must が空）。
-            // 連続区間より前に落とした分だけを 1 つのマーカーに集約する。
-            if start_idx > 0 {
-                parts.push(format_omission_marker(&logs[..start_idx]));
-            }
-        }
+    let mut out = render(start_idx);
+    while estimate_tokens(&out) > budget_tokens && formatted.len() - start_idx > RECENT_MIN_LOGS {
+        start_idx += 1;
+        out = render(start_idx);
     }
-    parts.extend(formatted[start_idx..].iter().cloned());
-    parts.join("\n")
+    out
 }
 
 fn format_logs(logs: &[opencrab_db::queries::SessionLogRow]) -> String {
@@ -2243,11 +2271,15 @@ mod budget_fit_recovery_guard_tests {
     }
 
     /// topic 要約が 1 件も無い（＝`build_truncated_conversation` フォールバック）状態で
-    /// 履歴が予算を大きく超えても、組み上がった会話は予算付近で頭打ちになる。
+    /// 履歴が予算を大きく超えても、組み上がった会話は予算内に収まる。
     ///
     /// 既存の fits テストは全て topic ありの summary 経路。topic 生成が追いつく前の
     /// セッションや要約が引けない経路はこの切り詰めフォールバックへ落ちるため、そこも
-    /// 頭打ちになることを固定する。行は通常サイズ（下限が巨大行で予算を割る #536 とは別条件）。
+    /// 頭打ちになることを固定する。行は通常サイズ（下限が巨大行で予算を割る #536 の
+    /// floor 経路とは別条件）。
+    ///
+    /// #536: 省略マーカーを予算へ計上したので、以前は必要だった余白（`MARKER_SLACK`）を
+    /// 外し、**厳密に `<= BUDGET`** で固定する。
     #[test]
     fn truncated_fallback_without_topics_stays_within_budget() {
         let conn = opencrab_db::init_memory().unwrap();
@@ -2260,8 +2292,6 @@ mod budget_fit_recovery_guard_tests {
         }
 
         const BUDGET: usize = 4_000;
-        // 予算に計上されない省略マーカー / 区切りのぶんの既知の小さな余白。
-        const MARKER_SLACK: usize = 128;
 
         let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
         // 前提: topic 無しの切り詰めフォールバックに入っている。
@@ -2277,11 +2307,43 @@ mod budget_fit_recovery_guard_tests {
         );
         let toks = estimate_tokens(&out);
         assert!(
-            toks <= BUDGET + MARKER_SLACK,
-            "切り詰め経路で出力が予算+余白（{}）を超えた: {toks} トークン。\
-             履歴（予算の数倍）が頭打ちにできていない可能性がある",
-            BUDGET + MARKER_SLACK
+            toks <= BUDGET,
+            "切り詰め経路で出力が予算 {BUDGET} を超えた: {toks} トークン。\
+             省略マーカーの計上（#536）が効いていない可能性がある"
         );
+    }
+
+    /// #536 の回帰ガード: 省略マーカーを予算へ計上する前は、通常サイズの行でも複数の
+    /// 予算値で出力が予算を数十トークン超えていた（実測 budget=6,000 で +12、10,000 で
+    /// +11）。マーカー計上後は**どの予算でも厳密に `<= budget`**。マーカーが実際に出る
+    /// （コンパクションが起きる）予算帯を複数点で固定する。
+    #[test]
+    fn omission_markers_are_counted_so_output_never_exceeds_budget() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 全文が下の最大予算（20,000）も超えるだけの通常サイズ行を積む（topic 無し →
+        // 切り詰め経路）。どの予算でもコンパクション（＝マーカー）が起きるようにする。
+        for i in 0..2_000 {
+            insert_speech(
+                &conn,
+                &format!("log line {i} about the release plan and the follow-up work"),
+            );
+        }
+        // マーカーが出る（＝コンパクションが起きる）予算帯を複数点で。#536 前は
+        // 6,000 / 10,000 で超過していた。
+        for budget in [2_000usize, 4_000, 6_000, 8_000, 10_000, 20_000] {
+            let out = build_conversation_string(&conn, SESSION, AGENT, budget).unwrap();
+            assert!(
+                out.contains("[Note: Earlier messages were omitted"),
+                "budget={budget} でコンパクションが起きていない（マーカー計上を検証できない）: {out}"
+            );
+            let toks = estimate_tokens(&out);
+            assert!(
+                toks <= budget,
+                "budget={budget} で出力が予算を超えた: {toks} トークン（+{}）。\
+                 マーカー計上（#536）の回帰",
+                toks - budget
+            );
+        }
     }
 }
 
