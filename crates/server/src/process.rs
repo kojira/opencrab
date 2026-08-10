@@ -162,20 +162,33 @@ pub fn build_agent_context(
     if matches!(caller, opencrab_actions::CallerIdentity::Agent) {
         skills.retain(|s| s.agent_visible);
     }
+    // curated 記憶は取り込みが **1 見出し 1 行**（`long_term/<見出し>`）で入れるため、
+    // 完全一致で引くと `long_term/*` が 1 件も載らなかった（#428）。前方一致で素の
+    // `long_term` と `long_term/<見出し>` の両方を拾い、見出しごとに束ねて注入する。
+    // user_profile は単一の完全一致 1 行だけなので出力は従来どおり（見出しは付かない）。
     let curated_categories = ["long_term", "user_profile", "agent_rules"];
     let curated_sections: Vec<String> = curated_categories
         .iter()
         .filter_map(|cat| {
             let memories =
-                opencrab_db::queries::get_curated_memories(conn, agent_id, cat).unwrap_or_default();
+                opencrab_db::queries::get_curated_memories_by_prefix(conn, agent_id, cat)
+                    .unwrap_or_default();
             if memories.is_empty() {
                 return None;
             }
+            // `<cat>/<見出し>` は `### <見出し>` を前置して 1 塊にする。素の `<cat>`
+            // （接尾辞なし）は本文だけ。見出しが空の行は本文だけに倒す。
+            let prefix = format!("{cat}/");
             let content = memories
                 .iter()
-                .map(|m| m.content.as_str())
+                .map(|m| match m.category.strip_prefix(&prefix).map(str::trim) {
+                    Some(heading) if !heading.is_empty() => {
+                        format!("### {heading}\n{}", m.content)
+                    }
+                    _ => m.content.clone(),
+                })
                 .collect::<Vec<_>>()
-                .join("\n");
+                .join("\n\n");
             let header = match *cat {
                 "long_term" => "## Long-term Memory",
                 "user_profile" => "## User Profile",
@@ -1807,6 +1820,85 @@ mod agent_visible_skill_index_tests {
         let (owner_prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Owner);
         assert!(owner_prompt.contains("Your skills (index only"));
         assert!(owner_prompt.contains("HiddenOnly"));
+    }
+}
+
+/// #428: system プロンプトへの curated 記憶注入が `long_term/<見出し>`（取り込みの実形式）を
+/// 拾うことを固定する。従来は完全一致で引いていたため本番の `long_term/*` が 1 件も載らず、
+/// 手書き reference facts が全エージェントで死んでいた。
+#[cfg(test)]
+mod curated_long_term_injection_tests {
+    use super::build_agent_context;
+    use opencrab_actions::CallerIdentity;
+    use opencrab_db::queries::CuratedMemoryRow;
+
+    fn curate(conn: &rusqlite::Connection, category: &str, content: &str) {
+        opencrab_db::queries::upsert_curated_memory(
+            conn,
+            &CuratedMemoryRow {
+                id: uuid::Uuid::new_v4().to_string(),
+                agent_id: "a1".to_string(),
+                category: category.to_string(),
+                content: content.to_string(),
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn long_term_suffixed_headings_are_injected_and_bundled_by_heading() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 本番と同じ形: long_term は接尾辞付きだけ（素の `long_term` 行は無い）。
+        curate(&conn, "long_term/A100サーバー", "- GPU は 8 枚");
+        curate(&conn, "long_term/Nostr", "- リレーは wss://…");
+        // user_profile は単一の完全一致（従来から生きている経路）。
+        curate(&conn, "user_profile", "kojira さんは…");
+        // daily_log/* は注入対象外。前方一致が別 prefix を巻き込まないことの確認。
+        curate(&conn, "daily_log/2026-08-11", "きょうの日記の本文");
+
+        let (prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Owner);
+
+        // long_term セクションが出て、見出しごとに束ねられ、本文も載る。
+        assert!(
+            prompt.contains("## Long-term Memory"),
+            "Long-term Memory セクションが出ていない:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("### A100サーバー")
+                && prompt.contains("- GPU は 8 枚")
+                && prompt.contains("### Nostr")
+                && prompt.contains("- リレーは wss://…"),
+            "long_term/<見出し> が見出し付きで注入されていない:\n{prompt}"
+        );
+        // user_profile は従来どおり見出し無しで注入（回帰していない）。
+        assert!(
+            prompt.contains("## User Profile") && prompt.contains("kojira さんは…"),
+            "user_profile の注入が壊れている:\n{prompt}"
+        );
+        // daily_log は注入されない（前方一致が別カテゴリを巻き込まない）。
+        assert!(
+            !prompt.contains("きょうの日記の本文"),
+            "daily_log が誤って注入されている:\n{prompt}"
+        );
+    }
+
+    #[test]
+    fn no_long_term_data_means_no_section() {
+        let conn = opencrab_db::init_memory().unwrap();
+        curate(&conn, "user_profile", "profile only");
+
+        let (prompt, _) = build_agent_context(&conn, "a1", &CallerIdentity::Owner);
+        // データが無ければ空の見出しは出さない（agent_rules も同様に本番は 0 行）。
+        assert!(
+            !prompt.contains("## Long-term Memory"),
+            "空の long_term 見出しが出ている:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("## Agent Rules"),
+            "空の agent_rules 見出しが出ている:\n{prompt}"
+        );
+        assert!(prompt.contains("## User Profile"));
     }
 }
 

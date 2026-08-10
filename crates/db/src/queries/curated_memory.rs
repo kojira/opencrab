@@ -76,6 +76,40 @@ pub fn get_curated_memories(
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// `category` が `prefix` 完全一致、または `prefix/<見出し>` 形式の curated 記憶を全て返す。
+///
+/// 取り込み（`opencrab_core::import::openclaw_parser`）は long_term を **1 見出し 1 行**
+/// （`long_term/<見出し>`）で入れるのに、system プロンプト注入は完全一致で引いていたため
+/// `long_term/*` が 1 件も載っていなかった（#428）。両形式を拾ってまとめて注入できるようにする。
+///
+/// `prefix/_%`（`_` で最低 1 文字）なので、見出しが空の `prefix/` は拾わない
+/// （[`list_long_term_category_seeds`](super::list_long_term_category_seeds) と同じ述語）。
+/// 並びは `category` 昇順で決定的（完全一致の素の `prefix` は `prefix/…` より前に来る）。
+pub fn get_curated_memories_by_prefix(
+    conn: &Connection,
+    agent_id: &str,
+    prefix: &str,
+) -> Result<Vec<CuratedMemoryRow>> {
+    let like = format!("{prefix}/_%");
+    let mut stmt = conn.prepare(
+        "SELECT id, agent_id, category, content, created_at FROM memory_curated
+         WHERE agent_id = ?1 AND (category = ?2 OR category LIKE ?3)
+         ORDER BY category ASC",
+    )?;
+
+    let rows = stmt.query_map(params![agent_id, prefix, like], |row| {
+        Ok(CuratedMemoryRow {
+            id: row.get(0)?,
+            agent_id: row.get(1)?,
+            category: row.get(2)?,
+            content: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    })?;
+
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn list_curated_memories(
     conn: &Connection,
     agent_id: &str,
