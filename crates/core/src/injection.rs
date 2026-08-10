@@ -7,8 +7,13 @@
 //! この防御は Discord（注記フィールド）と Nostr（受信アンカー）の**両経路が共有する**。
 //! 以前は各 crate に同一実装がコピーされ、片方だけ更新される危険があった（#521）。
 //! 新しい経路（3 つ目の gateway 等）も**必ず [`sanitize_embedded_field`] を通す**こと。
-//! 自前で `filter(|c| !c.is_control())` を書き直すと drift ガードテスト
-//! `sanitizer_is_the_single_source` が検出して落とす。
+//!
+//! `sanitizer_is_the_single_source` テストはこの単一化を**部分的に**守る:
+//! 制御文字除去メソッド `is_control` が `injection.rs`（と既知の別目的サイト）以外に
+//! 現れたら落とす、**同じ綴りのコピペを検知するトリップワイヤ**。意味的な単一化の
+//! 保証ではない —— `replace(...)` / `is_ascii_control` など**別の書き方で同じことを
+//! すればテストは沈黙して通る**。新しいサニタイザが増えたときの本当の関門は**レビュー**
+//! であり、このテストはコピペの取りこぼしを機械的に拾う補助にすぎない。
 
 /// 会話履歴・アンカーへ埋め込む前に外部由来フィールドを無害化する（**注入防御**）。
 ///
@@ -83,12 +88,23 @@ mod tests {
         assert_eq!(sanitize_embedded_field(&s, 128).chars().count(), 128);
     }
 
-    /// drift ガード: 制御文字除去サニタイザは**この 1 実装だけ**であることを機械強制する。
+    /// drift ガード（**コピペ検知のトリップワイヤ**。単一化の保証ではない）。
     ///
     /// `heartbeat_channel_echo` の共有定数 + drift ガードと同じ発想（#521 の構造の問い C）。
-    /// 3 つ目の経路が `filter(|c| !c.is_control())` を自前で書いたら、ここが検出して落ちる。
-    /// 唯一許すのはこの `injection.rs`。
-    /// （`db/queries/heartbeat.rs` は `\n`/`\t` を残す別目的で、この部分文字列を含まない。）
+    /// 制御文字除去メソッド `is_control` が、許可サイト以外の `.rs` に現れたら落とす。
+    /// 3 つ目の経路が既存イディオムをコピペすれば（`|c| !c.is_control()` / `|&c| ...` /
+    /// UFCS `char::is_control` / rustfmt が改行で割った形など、綴りに `is_control` を
+    /// 含む変種）ここで拾える。
+    ///
+    /// **限界（意図的に doc 化）**: 捕まえるのは `is_control` という綴りの一致だけ。
+    /// `replace([...], "")` や `is_ascii_control` など**別の書き方で同じ無害化をすると
+    /// 沈黙して通る**。よってこれは万能ガードではなく、コピペの取りこぼしを拾う補助。
+    /// 新しいサニタイザの本当の関門はレビュー。
+    ///
+    /// 許可サイト:
+    /// - `core/src/injection.rs`（この単一実装。doc/テストにも綴りが出る）
+    /// - `db/queries/heartbeat.rs`（`\n`/`\t` を残す別目的の `is_control`。誤検出を避け
+    ///   るため明示的に allowlist する）
     #[test]
     fn sanitizer_is_the_single_source() {
         use std::path::Path;
@@ -104,8 +120,16 @@ mod tests {
             crates_dir.display()
         );
 
-        let needle = "|c| !c.is_control()";
-        let allowed = crates_dir.join("core").join("src").join("injection.rs");
+        // メソッド名まで広げて綴り変種を拾う（限界は上記 doc 参照）。
+        let needle = "is_control";
+        let allowed: [std::path::PathBuf; 2] = [
+            crates_dir.join("core").join("src").join("injection.rs"),
+            crates_dir
+                .join("db")
+                .join("src")
+                .join("queries")
+                .join("heartbeat.rs"),
+        ];
 
         let mut offenders = Vec::new();
         let mut stack = vec![crates_dir.clone()];
@@ -120,8 +144,10 @@ mod tests {
                     }
                     stack.push(path);
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                    let body = std::fs::read_to_string(&path).unwrap_or_default();
-                    if body.contains(needle) && path != allowed {
+                    // 読めない .rs は黙って飛ばさず落とす（検査のすり抜けを防ぐ）。
+                    let body = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("読めない .rs: {} ({e})", path.display()));
+                    if body.contains(needle) && !allowed.contains(&path) {
                         offenders.push(path);
                     }
                 }
@@ -129,7 +155,8 @@ mod tests {
         }
         assert!(
             offenders.is_empty(),
-            "制御文字除去サニタイザの自前実装を検出。injection::sanitize_embedded_field を使うこと: {offenders:?}"
+            "制御文字除去サニタイザ（`is_control`）の自前実装を検出。\
+             injection::sanitize_embedded_field を使うか、別目的なら allowlist に追加: {offenders:?}"
         );
     }
 }
