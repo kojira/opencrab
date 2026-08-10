@@ -320,6 +320,12 @@ async fn run_one_fire(
     // HB 専用セッション（`heartbeat-{agent}-{channel}`。nostr は channel_id 空）。
     let hb_session_id = crate::get_or_create_heartbeat_session(db, agent_id, &channel_id);
 
+    // #508: 実会話（`[Channel conversation]`）セッションを発火先種別から解決する。
+    // Nostr は `nostr-{agent}`、Discord は `discord-{agent}-{guild}-{channel}`。書式の源は
+    // db 層の `resolve_session_fire_target` と対の 1 箇所（種別を持つここで解いて target へ
+    // 載せ、`heartbeat_turn::build_context` は解決済み ID を読むだけにする）。
+    let channel_session_id = target.channel_session_id(agent_id);
+
     // 指示文を解決し、整形した HB プロンプトを **その tick の system プロンプトへ載せるため**
     // target に持たせる（#501）。以前はこれを HB セッションログ（`system` /
     // `speaker_id='heartbeat'`）へ挿入していたが、毎 tick 同一文面が履歴へ積まれて会話へ
@@ -340,6 +346,7 @@ async fn run_one_fire(
         session_id: hb_session_id,
         channel_id,
         guild_id,
+        channel_session_id,
         instructions_prompt,
         instructions_source,
     };

@@ -42,6 +42,27 @@ impl SessionFireTarget {
     pub fn is_discord(&self) -> bool {
         matches!(self, SessionFireTarget::DiscordChannel { .. })
     }
+
+    /// 発火先の「実会話」セッション ID（ハートビートが `[Channel conversation]` として
+    /// 読む、外で実際に交わされている会話の在処 / #404 / #508）。
+    ///
+    /// [`resolve_session_fire_target`] の逆写像。session_id → 発火先を解く parse と対で、
+    /// 発火先 → session_id を組む。`nostr-{agent}` / `discord-{agent}-{guild}-{channel}` の
+    /// 書式の源をここ 1 箇所へ集約する（§3.6 の「源を二重化しない」）。
+    ///
+    /// **3 つ目の gateway を足したらこの `match` が未対応で割れる** — 発火先を増やしたら
+    /// 実会話の在処も必ず決めさせる（型で強制する。以前の
+    /// `heartbeat_channel_session_id` は Discord 書式を文字列から組み直す関数で、Nostr
+    /// （guild/channel が空）では必ず `None` になり実会話が 1 行も入らなかった / #508）。
+    pub fn channel_session_id(&self, agent_id: &str) -> String {
+        match self {
+            SessionFireTarget::NostrBroadcast => format!("nostr-{agent_id}"),
+            SessionFireTarget::DiscordChannel {
+                guild_id,
+                channel_id,
+            } => format!("discord-{agent_id}-{guild_id}-{channel_id}"),
+        }
+    }
 }
 
 /// `session_id` を保存済み `agent_id` で剥がして発火先を導く（設計 §3.6・B4）。
@@ -266,6 +287,34 @@ mod tests {
             })
         );
         assert!(target.unwrap().is_discord());
+    }
+
+    /// #508: `channel_session_id` は `resolve_session_fire_target` の逆写像。両方向を
+    /// 突き合わせて、発火先 → session_id → 発火先 が round-trip すること（parse と build が
+    /// 独立実装なので恒真にならない）。Nostr が空でなく `nostr-{agent}` を返すのが要点
+    /// （旧 `heartbeat_channel_session_id` は Nostr で必ず `None` を返していた）。
+    #[test]
+    fn channel_session_id_is_inverse_of_resolve() {
+        let nostr = SessionFireTarget::NostrBroadcast.channel_session_id(AGENT_UUID);
+        assert_eq!(nostr, format!("nostr-{AGENT_UUID}"));
+        assert_eq!(
+            resolve_session_fire_target(&nostr, AGENT_UUID),
+            Some(SessionFireTarget::NostrBroadcast)
+        );
+
+        let discord = SessionFireTarget::DiscordChannel {
+            guild_id: "1001".to_string(),
+            channel_id: "2002".to_string(),
+        }
+        .channel_session_id(AGENT_UUID);
+        assert_eq!(discord, format!("discord-{AGENT_UUID}-1001-2002"));
+        assert_eq!(
+            resolve_session_fire_target(&discord, AGENT_UUID),
+            Some(SessionFireTarget::DiscordChannel {
+                guild_id: "1001".to_string(),
+                channel_id: "2002".to_string(),
+            })
+        );
     }
 
     #[test]

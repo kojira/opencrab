@@ -68,8 +68,8 @@ fn get_or_create_heartbeat_session(
 ///
 /// - `delivered=false`（非 Discord transport が担当・配信失敗・配信先無し）のターンは記録
 ///   しない。**言っていないことを記憶に残さない**方向を守る。
-/// - guild を解決できないエージェント単位 tick（`channel_id`/`guild_id` が空）は記録先の
-///   会話セッションが無いので何もしない（[`heartbeat_channel_session_id`] が `None`）。
+/// - guild を解決できないエージェント単位 tick（`channel_id`/`guild_id` が空）や Nostr は、
+///   記録先の Discord 会話セッションが無いので何もしない（Nostr の二重記録は #515 で別途）。
 /// - `opencrab_db::queries::HEARTBEAT_CHANNEL_ECHO_METADATA` を印として付ける。この印の
 ///   付いた行は**表示専用**で、記憶系（FTS 検索・記憶索引・宣言材料）には一切載らない
 ///   （`is_heartbeat_channel_echo` で db/core が除外）。記憶材料は heartbeat 専用セッション
@@ -89,11 +89,17 @@ fn record_heartbeat_channel_echo(
     if !delivered {
         return;
     }
-    let Some(session_id) =
-        opencrab_server::process::heartbeat_channel_session_id(agent_id, guild_id, channel_id)
-    else {
+    // Discord 会話セッション（`discord-{agent}-{guild}-{channel}`）へだけ二重記録する。
+    // guild/channel が空（エージェント単位 tick）や Nostr（両 ID 空）は記録先が無いので
+    // 何もしない（#508 で実会話の解決を発火先種別へ寄せた後の Discord 専用の書き込み経路）。
+    if guild_id.is_empty() || channel_id.is_empty() {
         return;
-    };
+    }
+    let session_id = opencrab_db::queries::SessionFireTarget::DiscordChannel {
+        guild_id: guild_id.to_string(),
+        channel_id: channel_id.to_string(),
+    }
+    .channel_session_id(agent_id);
     let Ok(conn) = db.lock() else {
         tracing::error!(agent_id = %agent_id, channel_id = %channel_id, "#425: db lock 取得に失敗し、HB 発話を会話セッションへ記録できなかった");
         return;
@@ -786,28 +792,6 @@ mod tests {
             parse_heartbeat_decision("チャンネルでは雑談が続いている。今は黙っておく。"),
             HeartbeatDecision::Idle
         ));
-    }
-
-    /// #404: 実会話セッション ID は `discord-{agent}-{guild}-{channel}`。
-    /// エージェント単位 tick（channel_id / guild_id が空）では解決しない。
-    #[test]
-    fn heartbeat_channel_session_id_resolves_only_for_channel_ticks() {
-        assert_eq!(
-            opencrab_server::process::heartbeat_channel_session_id("agent-a", "111", "222"),
-            Some("discord-agent-a-111-222".to_string())
-        );
-        assert_eq!(
-            opencrab_server::process::heartbeat_channel_session_id("agent-a", "", ""),
-            None
-        );
-        assert_eq!(
-            opencrab_server::process::heartbeat_channel_session_id("agent-a", "111", ""),
-            None
-        );
-        assert_eq!(
-            opencrab_server::process::heartbeat_channel_session_id("agent-a", "", "222"),
-            None
-        );
     }
 
     /// #425: HB 発話の会話セッションへの二重記録は **Discord へ配信できたターンだけ**行う。
