@@ -26,10 +26,16 @@ impl MemoryManager {
     }
 
     /// Get all curated memories, optionally filtered by category.
+    ///
+    /// カテゴリ指定時は**前方一致**（`cat` 完全一致 ＋ `cat/<見出し>`）で拾う（#544）。
+    /// 取り込みは long_term を `long_term/<見出し>` の 1 見出し 1 行で入れるので、完全一致
+    /// （旧 `get_curated_memories`）だと `long_term/*` を丸ごと取りこぼす。#428 が system
+    /// プロンプト注入経路（`server::process`）を前方一致へ直したのと**同じ食い違い**が、
+    /// この読み手（`MemoryManager::get_curated`）に残っていた。見出しの無い素の `cat` も拾う。
     pub fn get_curated(&self, category: Option<&str>) -> Result<Vec<CuratedMemory>> {
         let conn = self.conn.lock().unwrap();
         let rows = if let Some(cat) = category {
-            queries::get_curated_memories(&conn, &self.agent_id, cat)?
+            queries::get_curated_memories_by_prefix(&conn, &self.agent_id, cat)?
         } else {
             queries::list_curated_memories(&conn, &self.agent_id, 10000, 0)?.0
         };
@@ -170,6 +176,25 @@ mod tests {
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].content, "The sky is blue");
         assert_eq!(memories[0].category, "facts");
+    }
+
+    /// #544: 取り込みの `long_term/<見出し>` 形式（1 見出し 1 行）を、`get_curated` が
+    /// 前方一致で全部拾う。完全一致だった旧実装はこれらを丸ごと取りこぼしていた。
+    #[test]
+    fn get_curated_picks_up_suffixed_long_term_headings() {
+        let mm = test_mm();
+        mm.save_curated("c1", "long_term/Nostr", "nostr facts")
+            .unwrap();
+        mm.save_curated("c2", "long_term/A100", "gpu facts")
+            .unwrap();
+        // 別カテゴリは巻き込まない。
+        mm.save_curated("c3", "daily_log/2026-08-11", "diary")
+            .unwrap();
+
+        let got = mm.get_curated(Some("long_term")).unwrap();
+        let mut cats: Vec<&str> = got.iter().map(|m| m.category.as_str()).collect();
+        cats.sort_unstable();
+        assert_eq!(cats, vec!["long_term/A100", "long_term/Nostr"]);
     }
 
     #[test]
