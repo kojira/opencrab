@@ -101,33 +101,8 @@ pub fn record_inbound_message(
     false
 }
 
-/// NO_REPLY（沈黙の明示）。**本物の沈黙**（モデルが黙ると決めた）。
+/// NO_REPLY（沈黙の明示）。
 pub fn record_agent_no_reply(conn: &Connection, agent_id: &str, session_id: &str) {
-    record_agent_no_reply_inner(conn, agent_id, session_id, None);
-}
-
-/// 自己重複（#486）で送信を抑止したときの NO_REPLY 記録（#545）。
-///
-/// 本物の沈黙と metadata で区別できるよう `reason:"self_duplicate"` を足す。`no_reply:true`
-/// は従来どおり維持する（既存の読み手はこのキーだけを見る）。会話へレンダリングされる文面は
-/// 本物の沈黙と同じ `NO_REPLY` のまま — **モデルの見え方は変えない**（#543 の切り分けを濁さない）。
-/// これがないと「本物の沈黙」と「自己重複で落とした」が同じ印になり、デプロイ後に本 PR の
-/// 効きを測れない（#539 の「記録はあるが判別できない」の轍を踏む）。
-pub fn record_agent_no_reply_suppressed(conn: &Connection, agent_id: &str, session_id: &str) {
-    record_agent_no_reply_inner(conn, agent_id, session_id, Some("self_duplicate"));
-}
-
-fn record_agent_no_reply_inner(
-    conn: &Connection,
-    agent_id: &str,
-    session_id: &str,
-    reason: Option<&str>,
-) {
-    // 本物の沈黙（reason=None）は従来と**完全に同じ** metadata（後方互換）。
-    let metadata = match reason {
-        None => serde_json::json!({ "no_reply": true }),
-        Some(r) => serde_json::json!({ "no_reply": true, "reason": r }),
-    };
     insert_session_log_best_effort(
         conn,
         &SessionLogRow {
@@ -138,75 +113,10 @@ fn record_agent_no_reply_inner(
             content: "NO_REPLY".to_string(),
             speaker_id: Some(agent_id.to_string()),
             turn_number: None,
-            metadata_json: Some(metadata.to_string()),
+            metadata_json: Some(serde_json::json!({"no_reply": true}).to_string()),
             created_at: None,
         },
     );
-}
-
-/// 自己重複判定で遡る speech 行の窓。自分の直近応答は普通ごく最近なので浅くてよいが、
-/// 相手の発言や tool 由来の speech が挟まっても直近の自分の応答へ届く程度に取る。
-const SELF_DUPLICATE_LOOKBACK: usize = 50;
-
-/// 会話重複判定用の正規化: 前後空白の除去・連続空白の 1 個への畳み込み・小文字化のみ。
-/// **fuzzy にしない**（同義言い換えや部分一致は見ない。誤検知と複雑さを避ける / #486）。
-fn normalize_reply(s: &str) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-/// 送ろうとしている応答が、**自分自身の直近の応答**と正規化後に完全一致するか（#486）。
-///
-/// **再回答を抑えるガードがコード上どこにも無いために入れる機械的バックストップ。**
-/// モデルの従順性に一切依存しない — プロンプト層の自己重複ルール（案 A）は過去に無視された
-/// 実績（本番プロンプト 936 本に旧ガード文が入っていたのに bot は返し合っていた）があるので、
-/// 確実な抑止はこちら（案 B）が本命。判定材料は「自分の出力 vs 自分の過去の出力」だけで、
-/// **相手が bot か人かは一切見ない**（理念: システムは相手が bot か判定しない）。相手が
-/// 誰であれ、自分が直前に言ったのと同じ文面をもう一度送ろうとしたら真。
-///
-/// **これは退行の修正ではない**（症状は 3 月から存在し、むしろ 8 月頭の方が多かった）。
-/// **根本原因である「再起動 × デデュープ不在」の増幅は #543 の管轄**で、この関数単体では
-/// ループは無くならない（構造的バックストップにすぎない。これで直ったと見なさないこと）。
-///
-/// - 比較対象は**自分（`agent_id`）の直近の実応答 1 件**のみ。`NO_REPLY` の記録行
-///   （[`record_agent_no_reply`] が書く content=="NO_REPLY"）は飛ばす（沈黙は「直近の応答」
-///   ではない）。他者の発言は `speaker_id` で除外する。
-/// - 一致は正規化後の**完全一致のみ**（[`normalize_reply`]）。話題が変わって間に別の応答を
-///   挟めば「直近の応答」が変わるので、後のターンで同じ相槌が出ても抑止しない（過剰抑止回避）。
-/// - 空応答は対象外（呼び出し側が別途 NO_REPLY 扱いする）。
-pub fn is_self_duplicate(
-    conn: &Connection,
-    agent_id: &str,
-    session_id: &str,
-    candidate: &str,
-) -> bool {
-    let norm = normalize_reply(candidate);
-    if norm.is_empty() {
-        return false;
-    }
-    // id DESC（新しい順）で speech 行だけを引く。
-    let recent = match opencrab_db::queries::list_recent_session_logs_of_type(
-        conn,
-        session_id,
-        "speech",
-        SELF_DUPLICATE_LOOKBACK,
-    ) {
-        Ok(rows) => rows,
-        Err(_) => return false,
-    };
-    for row in recent {
-        if row.speaker_id.as_deref() != Some(agent_id) {
-            continue; // 他者の発言は見ない
-        }
-        if row.content.trim() == "NO_REPLY" {
-            continue; // 沈黙の記録は「直近の応答」ではない
-        }
-        // 最初に見つかった「自分の実応答」= 直近応答。それとだけ比べる。
-        return normalize_reply(&row.content) == norm;
-    }
-    false
 }
 
 /// エージェントがゲートウェイへ返した応答（Discord / Nostr 共通）。
@@ -593,119 +503,5 @@ mod tests {
         let sender_hits =
             opencrab_db::queries::search_session_logs(&conn, "peer-9", "pasta", 10).unwrap();
         assert!(sender_hits.is_empty());
-    }
-
-    // ---- #486: is_self_duplicate（自分の直近応答との完全一致で送信を止める）----
-
-    fn speech(conn: &Connection, session_id: &str, speaker: &str, content: &str, no_reply: bool) {
-        insert_session_log_best_effort(
-            conn,
-            &SessionLogRow {
-                id: None,
-                agent_id: "a1".to_string(),
-                session_id: session_id.to_string(),
-                log_type: "speech".to_string(),
-                content: content.to_string(),
-                speaker_id: Some(speaker.to_string()),
-                turn_number: None,
-                metadata_json: no_reply.then(|| r#"{"no_reply":true}"#.to_string()),
-                created_at: None,
-            },
-        );
-    }
-
-    /// 今回の事象の再現: 自分が既に「とすて」と言った状態で、同じ「とすて」を返そうとしたら
-    /// **送らない**（重複＝真）。別の文面なら真ではない。
-    #[test]
-    fn self_duplicate_detects_immediate_repeat() {
-        let conn = opencrab_db::init_memory().unwrap();
-        speech(&conn, "s1", "a1", "とすて", false);
-        assert!(is_self_duplicate(&conn, "a1", "s1", "とすて"));
-        assert!(!is_self_duplicate(&conn, "a1", "s1", "べつのはなし"));
-    }
-
-    /// 正規化は **trim / 連続空白の畳み込み / 大小のみ**。fuzzy にしない
-    /// （句読点や語尾が違えば別物扱い）。
-    #[test]
-    fn self_duplicate_normalization_is_trim_space_case_only() {
-        let conn = opencrab_db::init_memory().unwrap();
-        speech(&conn, "s1", "a1", "Hello  World", false); // 元は大文字＋二重空白
-        assert!(is_self_duplicate(&conn, "a1", "s1", "hello world")); // 大小＋空白畳み込み
-        assert!(is_self_duplicate(&conn, "a1", "s1", "  Hello World  ")); // trim
-        assert!(!is_self_duplicate(&conn, "a1", "s1", "Hello World!")); // 記号追加は別物
-        assert!(!is_self_duplicate(&conn, "a1", "s1", "Hello")); // 部分一致も別物
-    }
-
-    /// 自分の NO_REPLY 記録を挟んでも、その直前の実応答と比べる（沈黙は「直近の応答」ではない）。
-    #[test]
-    fn self_duplicate_skips_no_reply_marker() {
-        let conn = opencrab_db::init_memory().unwrap();
-        speech(&conn, "s1", "a1", "とすて", false);
-        speech(&conn, "s1", "a1", "NO_REPLY", true);
-        assert!(is_self_duplicate(&conn, "a1", "s1", "とすて"));
-    }
-
-    /// 過剰抑止しない: 話題が変わり、間に別の応答を挟めば直近応答が変わるので、
-    /// 昔と同じ短い相槌をもう一度返しても止めない。
-    #[test]
-    fn self_duplicate_allows_repeat_after_intervening_reply() {
-        let conn = opencrab_db::init_memory().unwrap();
-        speech(&conn, "s1", "a1", "はい", false);
-        speech(&conn, "s1", "a1", "了解しました", false); // 直近応答はこちら
-        assert!(!is_self_duplicate(&conn, "a1", "s1", "はい"));
-    }
-
-    /// 相手の種別を見ない: 判定は「自分の直近応答」だけで決まる。
-    #[test]
-    fn self_duplicate_ignores_peer_identity() {
-        // 相手が人間 sim でも bot sim でも、自分の直近応答と一致すれば同じく重複。
-        for peer in ["human-user-123", "bot-agent-x"] {
-            let conn = opencrab_db::init_memory().unwrap();
-            speech(&conn, "s1", peer, "とすて", false); // 相手の発言
-            speech(&conn, "s1", "a1", "とすて", false); // 自分の応答
-            assert!(
-                is_self_duplicate(&conn, "a1", "s1", "とすて"),
-                "peer={peer} でも自分の直近応答と一致すれば重複"
-            );
-        }
-        // 相手が同じ文面を言っただけ（自分は未発言）では重複ではない。
-        let conn = opencrab_db::init_memory().unwrap();
-        speech(&conn, "s1", "bot-agent-x", "とすて", false);
-        assert!(!is_self_duplicate(&conn, "a1", "s1", "とすて"));
-    }
-
-    /// #545: 自己重複で抑止した NO_REPLY は、本物の沈黙と **metadata で区別できる**。
-    /// 会話に見える文面はどちらも `NO_REPLY`（モデルの見え方は同じ）。
-    #[test]
-    fn suppressed_no_reply_is_distinguishable_from_genuine_silence() {
-        let conn = opencrab_db::init_memory().unwrap();
-        record_agent_no_reply(&conn, "a1", "s-genuine"); // 本物の沈黙
-        record_agent_no_reply_suppressed(&conn, "a1", "s-dup"); // 自己重複で抑止
-
-        let g =
-            opencrab_db::queries::list_recent_session_logs_of_type(&conn, "s-genuine", "speech", 1)
-                .unwrap();
-        let s = opencrab_db::queries::list_recent_session_logs_of_type(&conn, "s-dup", "speech", 1)
-            .unwrap();
-
-        // 文面は両方とも NO_REPLY。
-        assert_eq!(g[0].content, "NO_REPLY");
-        assert_eq!(s[0].content, "NO_REPLY");
-
-        let gm = g[0].metadata_json.as_deref().unwrap();
-        let sm = s[0].metadata_json.as_deref().unwrap();
-        // 本物の沈黙は従来どおり no_reply だけ（reason 無し）。
-        assert!(gm.contains("\"no_reply\":true"), "genuine: {gm}");
-        assert!(
-            !gm.contains("reason"),
-            "genuine must not carry a reason: {gm}"
-        );
-        // 抑止は no_reply を保ちつつ reason で判別できる。
-        assert!(sm.contains("\"no_reply\":true"), "suppressed: {sm}");
-        assert!(
-            sm.contains("\"reason\":\"self_duplicate\""),
-            "suppressed must carry the discriminator: {sm}"
-        );
-        assert_ne!(gm, sm);
     }
 }
