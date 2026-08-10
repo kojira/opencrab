@@ -869,6 +869,24 @@ mod tests {
         opencrab_db::queries::insert_session_log(&conn, &log).unwrap();
     }
 
+    /// HB **専用セッション**へ残ったエージェント自身の発話記録（#515）。
+    /// `speaker_id = agent_id` の `speech` 行だけを拾う（指示文は system プロンプト側なので
+    /// ここには無い / #501）。
+    fn heartbeat_speech_records(db: &opencrab_db::Db) -> Vec<String> {
+        let conn = db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM memory_sessions \
+                 WHERE session_id = ?1 AND log_type = 'speech' AND speaker_id = ?2 \
+                 ORDER BY id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([SESSION, AGENT], |r| r.get::<_, String>(0))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
     fn heartbeat_log_decisions(db: &opencrab_db::Db) -> Vec<(String, String)> {
         let conn = db.lock().unwrap();
         let mut stmt = conn
@@ -1275,6 +1293,95 @@ mod tests {
             v,
             serde_json::json!({"channel_id": "222", "source": "default"}),
             "tick 行に発火元は足さない"
+        );
+    }
+
+    /// #515: **ターン結果を記録として残す**。SPEAK / LEARN / IDLE のどれでも、エージェント
+    /// 自身の応答（＝その言葉）が HB 専用セッションへ `speech` として 1 行残る。IDLE では
+    /// 応答に含めた**短い理由**がそのまま記録に載る（「なぜ見送ったか」が後から分かる）。
+    ///
+    /// **変異確認**: この記録は `turn()` の `speech` 挿入（`result.response` を書く箇所）が担う。
+    /// その挿入を外すと記録が 0 件になり、3 ケースとも赤くなる。
+    #[tokio::test]
+    async fn every_decision_leaves_the_agents_own_words_as_a_record() {
+        // IDLE + 理由。理由が記録へそのまま残る。
+        {
+            let engine = RecordingEngine::new("IDLE: TL に新しい話題が無い");
+            let (runner, db, _calls) = runner_with(engine);
+            runner
+                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+                .await;
+            let records = heartbeat_speech_records(&db);
+            assert_eq!(records, vec!["IDLE: TL に新しい話題が無い".to_string()]);
+        }
+        // SPEAK。発話本文がそのまま記録にも残る。
+        {
+            let engine = RecordingEngine::new("SPEAK: 新着に返信した");
+            let (runner, db, _calls) = runner_with(engine);
+            runner
+                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+                .await;
+            assert_eq!(
+                heartbeat_speech_records(&db),
+                vec!["SPEAK: 新着に返信した".to_string()]
+            );
+        }
+        // LEARN。何をしたか（内省した）が記録に残る。
+        {
+            let engine = RecordingEngine::new("LEARN: 巡回の気づきをメモした");
+            let (runner, db, _calls) = runner_with(engine);
+            runner
+                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+                .await;
+            assert_eq!(
+                heartbeat_speech_records(&db),
+                vec!["LEARN: 巡回の気づきをメモした".to_string()]
+            );
+        }
+    }
+
+    /// #515: 理由が無い素の `IDLE`（LLM が規約を守らない場合）でも壊れない。決定は Idle、
+    /// 記録は空にならず「IDLE」1 語がそのまま残る（記録機構は応答をそのまま書くだけ）。
+    #[tokio::test]
+    async fn bare_idle_without_reason_still_records() {
+        let engine = RecordingEngine::new("IDLE");
+        let (runner, db, _calls) = runner_with(engine);
+        let decision = runner
+            .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+            .await;
+        assert!(matches!(decision, Some(HeartbeatDecision::Idle)));
+        assert_eq!(heartbeat_speech_records(&db), vec!["IDLE".to_string()]);
+    }
+
+    /// #515（SPEAK 側の非対称の是正）: **IDLE の理由文に `SPEAK:` が紛れても外部配送しない**。
+    ///
+    /// 決定が Idle になること（parse）だけでなく、**配送出口（spy）が 1 度も呼ばれない**ことを
+    /// ターンごと通しで見る。旧実装だと理由の右側が発話として `deliver_heartbeat_speech` に乗り、
+    /// 取り消せない外部投稿になる。`parse_heartbeat_decision` の SPEAK 除外を外すと spy に
+    /// 送信が入り、このテストが赤くなる（＝外部誤投稿の検知）。
+    #[tokio::test]
+    async fn idle_reason_mentioning_speak_is_never_delivered() {
+        let engine = RecordingEngine::new("IDLE: 今は SPEAK: するほどの話題がない");
+        let (runner, db, calls) = runner_with(engine);
+
+        let decision = runner
+            .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+            .await;
+
+        assert!(
+            matches!(decision, Some(HeartbeatDecision::Idle)),
+            "IDLE の理由に SPEAK: が入っても決定は Idle"
+        );
+        // 配送は spawn され得るので、少し待ってからでも 1 件も無いことを見る。
+        assert!(
+            !wait_until(|| !calls.lock().unwrap().is_empty()).await,
+            "IDLE の理由文が外部チャンネルへ配送された（取り消せない誤投稿）: {:?}",
+            *calls.lock().unwrap()
+        );
+        // 記録には理由がそのまま残る（記録は応答をそのまま書く）。
+        assert_eq!(
+            heartbeat_speech_records(&db),
+            vec!["IDLE: 今は SPEAK: するほどの話題がない".to_string()]
         );
     }
 
