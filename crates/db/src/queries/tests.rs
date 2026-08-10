@@ -3457,6 +3457,89 @@ fn category_and_meta_nodes_persist_through_or_ignore_insert() {
     }
 }
 
+/// #520: 3 つの専用ルート（category / declared / condensed）は `ensure_root` に集約された。
+/// 3 経路すべてで次を固定する:
+/// 正しい `node_type='root'` / `source_type` / `title` / `parent=None` / `depth=0` /
+/// `short_id` 付きのノードが作られること（呼び出し元の挙動が変わらない）;
+/// **read-back ガードが効くこと**＝返る id が必ず実在ノードを指すこと（#344 の沈黙を固定。
+/// 集約前は category 経路だけガードが欠けていた。`ensure_root` が退行して OR IGNORE で
+/// 握り潰したら `get_index_node` が None になりここが落ちる）;
+/// 冪等（二度目は同じ id・二重作成しない）;
+/// 3 種の id・short_id が互いに別で共存すること（相互に握り潰さない）。
+#[test]
+fn ensure_root_paths_persist_and_are_idempotent() {
+    // (呼ぶ関数, 期待 id, 期待 source_type, 期待 title)
+    type Case = (
+        fn(&Connection, &str, &str) -> anyhow::Result<String>,
+        &'static str,
+        &'static str,
+        &'static str,
+    );
+    let conn = setup();
+    let now = "2026-06-01T00:00:00Z";
+
+    let cases: [Case; 3] = [
+        (ensure_category_root, "catroot-a1", "category", "カテゴリ"),
+        (
+            ensure_declared_root,
+            "declroot-a1",
+            "declared",
+            "宣言した記憶",
+        ),
+        (
+            ensure_condensed_root,
+            "condroot-a1",
+            "condensed",
+            "凝縮した記憶",
+        ),
+    ];
+
+    for (ensure_fn, expected_id, source_type, title) in cases {
+        let id = ensure_fn(&conn, "a1", now).unwrap();
+        assert_eq!(id, expected_id, "決定的 id");
+
+        // read-back: 返る id は必ず実在ノードを指す（OR IGNORE で握り潰されていない / #344）。
+        let node = get_index_node(&conn, &id).unwrap().unwrap_or_else(|| {
+            panic!("{source_type} ルートが read-back で見つからない（握り潰し）")
+        });
+        assert_eq!(node.node_type, "root");
+        assert_eq!(node.source_type, source_type);
+        assert_eq!(node.title, title);
+        assert_eq!(node.parent_id, None);
+        assert_eq!(node.depth, 0);
+        assert!(node.short_id.is_some(), "short_id が採番されている");
+
+        // 冪等: 二度目は同じ id を返す。
+        assert_eq!(ensure_fn(&conn, "a1", now).unwrap(), id, "二度目も同じ id");
+    }
+
+    // 二重作成しない: root ノードはちょうど 3 つ（3 種各 1）。
+    let root_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_index_nodes WHERE agent_id = 'a1' AND node_type = 'root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(root_count, 3, "3 種のルートが各 1 つだけ（二重作成しない）");
+
+    // 3 種の short_id は互いに別（`r` 系列で相互に握り潰さず共存する）。
+    let short_ids: Vec<String> = ["catroot-a1", "declroot-a1", "condroot-a1"]
+        .iter()
+        .map(|id| {
+            get_index_node(&conn, id)
+                .unwrap()
+                .unwrap()
+                .short_id
+                .unwrap()
+        })
+        .collect();
+    let mut uniq = short_ids.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), 3, "3 種の short_id が互いに別: {short_ids:?}");
+}
+
 #[test]
 fn category_seed_and_assignment_queries_roundtrip() {
     let conn = setup();
