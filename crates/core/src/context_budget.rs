@@ -186,8 +186,27 @@ pub fn compute_context_budget(
     compaction_ratio: f64,
 ) -> usize {
     let (provider, model) = model_pricing_key(provider, model);
-    let registered = match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
-        Ok(row) => row.as_ref().and_then(usable_context_window),
+    // #541: lookup 失敗も未登録も、既定 context_window に倒して**同じ出口**（下の予算計算
+    // ＋天井）へ合流させる。以前は lookup 失敗だけ early return で `backend_budget_ceiling`
+    // を通らず、未登録経路と非対称だった（実害は無いが構造の穴）。WARN は経路ごとに別 kind
+    // で 1 回ずつ出す（`lookup_failed` / `unregistered`）。
+    let context_window = match opencrab_db::queries::get_model_pricing(conn, &provider, &model) {
+        Ok(row) => match row.as_ref().and_then(usable_context_window) {
+            Some(w) => w as usize,
+            None => {
+                if warn_once_for_model("unregistered", &provider, &model) {
+                    tracing::warn!(
+                        provider = %provider,
+                        model = %model,
+                        "no usable context_window in model_pricing (missing row, NULL, or \
+                         non-positive); falling back to default \
+                         ({DEFAULT_CONTEXT_BUDGET_TOKENS}). Register it with \
+                         PUT /api/llm/model-pricing so the budget matches the real model."
+                    );
+                }
+                DEFAULT_CONTEXT_BUDGET_TOKENS
+            }
+        },
         Err(e) => {
             if warn_once_for_model("lookup_failed", &provider, &model) {
                 tracing::warn!(
@@ -195,22 +214,6 @@ pub fn compute_context_budget(
                     model = %model,
                     "model_pricing lookup failed; falling back to default context window \
                      ({DEFAULT_CONTEXT_BUDGET_TOKENS}): {e}"
-                );
-            }
-            return ((DEFAULT_CONTEXT_BUDGET_TOKENS as f64) * compaction_ratio) as usize;
-        }
-    };
-    let context_window = match registered {
-        Some(w) => w as usize,
-        None => {
-            if warn_once_for_model("unregistered", &provider, &model) {
-                tracing::warn!(
-                    provider = %provider,
-                    model = %model,
-                    "no usable context_window in model_pricing (missing row, NULL, or \
-                     non-positive); falling back to default \
-                     ({DEFAULT_CONTEXT_BUDGET_TOKENS}). Register it with \
-                     PUT /api/llm/model-pricing so the budget matches the real model."
                 );
             }
             DEFAULT_CONTEXT_BUDGET_TOKENS
@@ -431,19 +434,38 @@ mod model_context_window_gate_tests {
     }
 
     /// 天井が噛んだときの WARN は (provider, model) ごとに 1 回だけ。毎ターン通る経路
-    /// なので、抑止が効かないとログが埋まる。`over_before_ceiling` の kind で固定する。
+    /// なので、抑止が効かないとログが埋まる。`over_backend_ceiling` の kind で固定する。
+    ///
+    /// #541: 以前は `warn_once_for_model` を直接叩くだけで（`warn_is_emitted_once_per_model`
+    /// と重複気味・通るだけ）、`compute_context_budget` の kind 文字列がドリフトしても
+    /// 気付けなかった。ここでは**天井超えの設定で `compute_context_budget` を実際に回し**、
+    /// (1) 予算が天井で頭打ちになること、(2) 実経路が `"over_backend_ceiling"` の kind で
+    /// warn_once を 1 回叩いたこと（直後の直接呼びが抑止される＝既に登録済み）を見る。
+    /// kind 文字列がずれれば下の `assert!(!…)` が true に戻って落ちる。
     #[test]
     fn ceiling_warn_is_emitted_once() {
-        // warn_once の抑止は種別＋(provider, model) 単位。ここでは天井超えの kind を直接叩く。
-        assert!(super::warn_once_for_model(
-            "over_backend_ceiling",
-            "ceiling-warn-p",
-            "ceiling-warn-m"
-        ));
+        let conn = opencrab_db::init_memory().unwrap();
+        // 天井超えの設定（1,050,000 × 0.5 = 525,000 > chatgpt 天井 350,000）。model 名は
+        // このテスト固有にして、warn_once のグローバル抑止キーが他テストと衝突しないようにする。
+        register(&conn, "chatgpt", "ceiling-warn-once-m", Some(1_050_000));
+
+        // (1) 実経路が天井で頭を抑える（＝over_backend_ceiling の分岐を通っている）。
+        assert_eq!(
+            compute_context_budget(&conn, "chatgpt", "ceiling-warn-once-m", 0.5),
+            350_000
+        );
+        // (2) 同じ (kind, provider, model) の WARN を実経路が既に 1 回出したので、直後の
+        //     直接呼びは抑止される。compute_context_budget が実際に "over_backend_ceiling"
+        //     の kind で warn_once を叩いたことの証明（kind がドリフトすればここが true）。
         assert!(!super::warn_once_for_model(
             "over_backend_ceiling",
-            "ceiling-warn-p",
-            "ceiling-warn-m"
+            "chatgpt",
+            "ceiling-warn-once-m"
         ));
+        // 2 回目の compute も同じ天井値（挙動は不変・WARN は既に抑止済み）。
+        assert_eq!(
+            compute_context_budget(&conn, "chatgpt", "ceiling-warn-once-m", 0.5),
+            350_000
+        );
     }
 }
