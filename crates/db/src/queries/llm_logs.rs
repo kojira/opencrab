@@ -123,7 +123,15 @@ pub fn llm_logs_stats(conn: &Connection, agent_id: &str, days: i64) -> Result<Ve
                COALESCE(SUM(cache_creation_tokens),0) as cache_creation_tokens
         FROM llm_logs
         WHERE agent_id = ?1
-          AND COALESCE(requested_at, created_at) >= datetime('now', ?2)
+          -- #537: 両辺を julianday() で数値化してから比較する。左辺
+          -- COALESCE(requested_at, created_at) は RFC3339（`...T...Z`）と
+          -- `datetime('now')`（`... ...` = 空白区切り。created_at の DEFAULT）が
+          -- 混在しうる（list_llm_log_months の doc 参照）。右辺 datetime('now', ?2)
+          -- は常に空白区切りなので、生文字列比較では 11 文字目で `'T'`(0x54) >
+          -- `' '`(0x20) となり、境界日の行が時刻に関係なく素通りして過剰計上される。
+          -- julianday() は T/空白どちらの形式も実時刻へ解釈するため、真の時刻境界で
+          -- 比較できる（解釈不能な値だけが NULL となり脱落するが、本番の全形式は解釈可能）。
+          AND julianday(COALESCE(requested_at, created_at)) >= julianday('now', ?2)
         GROUP BY date(COALESCE(requested_at, created_at))
         ORDER BY date ASC";
     let days_param = format!("-{} days", days);
@@ -294,5 +302,107 @@ mod archive_query_tests {
         assert_eq!(deleted, 2);
         let remaining = list_llm_log_months(&conn).unwrap();
         assert_eq!(remaining, vec![("2026-04".to_string(), 1)]);
+    }
+}
+
+#[cfg(test)]
+mod stats_query_tests {
+    use super::*;
+
+    /// `now` からの相対時刻を **RFC3339（`...T...Z`）** で作る（本番の `requested_at` と
+    /// 同じ形式）。`datetime('now', ?2)` は空白区切りなので、この T 形式の値を入れることで
+    /// #537 の「境界日が生文字列比較で素通りする」条件を再現できる。
+    fn t_offset(conn: &Connection, modifier: &str) -> String {
+        conn.query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1)",
+            params![modifier],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    }
+
+    fn insert_at(conn: &Connection, id: &str, ts: &str) {
+        let row = LlmLogRow {
+            id: id.to_string(),
+            agent_id: "a1".to_string(),
+            session_id: None,
+            model: Some("m".to_string()),
+            prompt: String::new(),
+            response: String::new(),
+            tool_calls: None,
+            latency_ms: Some(10),
+            prompt_tokens: Some(1),
+            completion_tokens: Some(1),
+            total_tokens: Some(2),
+            error_code: None,
+            error_body: None,
+            requested_at: Some(ts.to_string()),
+            trigger_message_id: None,
+            is_bot_iteration: false,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            created_at: ts.to_string(),
+        };
+        insert_llm_log(conn, &row).unwrap();
+    }
+
+    fn total_count(conn: &Connection, days: i64) -> i64 {
+        llm_logs_stats(conn, "a1", days)
+            .unwrap()
+            .iter()
+            .map(|r| r.count)
+            .sum()
+    }
+
+    /// #537 の中核: 境界日の行が**時刻**で正しく切られる。
+    ///
+    /// days=1 の境界は `datetime('now','-1 day')`（空白区切り）。左辺は T 形式なので、
+    /// 旧実装の生文字列比較では 11 文字目で `'T'` > `' '` となり、**境界の 1 秒前**の
+    /// 行（`-86401 秒`）まで素通りして過剰計上していた。julianday() 化で実時刻境界に
+    /// なり、境界より前は除外・境界以降は算入される。
+    #[test]
+    fn boundary_is_compared_by_real_time_not_lexically() {
+        let conn = crate::init_memory().unwrap();
+        // days=1 の境界 = now-86400 秒。
+        insert_at(&conn, "old", &t_offset(&conn, "-259200 seconds")); // 3 日前: 除外
+        insert_at(&conn, "just_before", &t_offset(&conn, "-86401 seconds")); // 境界の 1 秒前: 除外（旧実装のバグ行）
+        insert_at(&conn, "just_after", &t_offset(&conn, "-86399 seconds")); // 境界の 1 秒後: 算入
+        insert_at(&conn, "recent", &t_offset(&conn, "-3600 seconds")); // 1 時間前: 算入
+
+        // 修正後: 直近 1 日は just_after と recent の 2 行だけ。
+        // 旧実装なら just_before も混じって 3 行になる（この assert が回帰ガード）。
+        assert_eq!(
+            total_count(&conn, 1),
+            2,
+            "境界の 1 秒前の行が時刻を無視して算入されている（#537 の過剰計上）"
+        );
+
+        // より広い窓（30 日）では 3 日前の old も含め全 4 行が入る（期間パラメタが効く）。
+        assert_eq!(total_count(&conn, 30), 4);
+    }
+
+    /// 空白区切り（`datetime('now')` = created_at の DEFAULT 形式）の行も、T 形式の
+    /// 境界と同様に実時刻で比較される（julianday() は両形式を解釈する）。左辺の形式に
+    /// 依存しないことの回帰ガード。
+    #[test]
+    fn space_separated_timestamps_are_also_bounded_by_time() {
+        let conn = crate::init_memory().unwrap();
+        let space_before: String = conn
+            .query_row(
+                "SELECT datetime('now', ?1)", // 空白区切り
+                params!["-86401 seconds"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let space_after: String = conn
+            .query_row(
+                "SELECT datetime('now', ?1)",
+                params!["-3600 seconds"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        insert_at(&conn, "sb", &space_before); // 境界前: 除外
+        insert_at(&conn, "sa", &space_after); // 境界内: 算入
+        assert_eq!(total_count(&conn, 1), 1);
     }
 }
