@@ -397,6 +397,21 @@ pub fn settle_completed(
         }
     }
 
+    // 1b. #553: subtask セッションの死活を永続化する。決着したら sub-session の
+    //     `sessions.status` を `exit_reason`（completed / error / timeout / stopped_by_limit）
+    //     へ遷移させ、`status='active'` のままにしない。これで再起動を跨いだ起動時リコンサイル
+    //     （active=孤児）と併せ、死活が永続状態から判定できる。sink 発火より前の DB 書き込み。
+    //     sub-session 行を持たない自動 dispatch では 0 行更新で無害。
+    if !ctx.sub_session_id.is_empty() {
+        if let Ok(conn) = db.lock() {
+            let _ = opencrab_db::queries::set_session_status(
+                &conn,
+                &ctx.sub_session_id,
+                &ctx.exit_reason,
+            );
+        }
+    }
+
     // 2. registry から除去し、除去したエントリから reply_target と caller を回収する。
     //    remove 後は引けないため、remove の戻り値から読み出す（#167 / #298）。
     let removed = registry.remove(&ctx.subtask_id).map(|(_, subtask)| subtask);
@@ -601,6 +616,13 @@ pub fn cancel_subtask(
                         created_at: None,
                     };
                     opencrab_db::queries::insert_session_log_best_effort(&conn, &log);
+                    // #553: subtask セッションの死活を永続化する（cancelled）。settle_completed
+                    // の終端化と対をなす。sub-session 行が無ければ 0 行更新で無害。
+                    let _ = opencrab_db::queries::set_session_status(
+                        &conn,
+                        &subtask.session_id,
+                        "cancelled",
+                    );
                 }
             }
 
@@ -1342,6 +1364,87 @@ mod tests {
         assert_eq!(sink.logs_at_fire.load(Ordering::SeqCst), 1);
         // registry からは除去済み。
         assert!(registry.is_empty());
+    }
+
+    /// #553: settle_completed は sub-session の `sessions.status` を **exit_reason** へ
+    /// 遷移させ（'active' のままにしない）、親セッション（別モード）の status には触れない。
+    #[tokio::test]
+    async fn settle_completed_transitions_sub_session_status() {
+        let conn = opencrab_db::init_memory().unwrap();
+        let mk = |id: &str, mode: &str| opencrab_db::queries::SessionRow {
+            id: id.to_string(),
+            mode: mode.to_string(),
+            theme: "Subtask: t".to_string(),
+            phase: "active".to_string(),
+            turn_number: 0,
+            status: "active".to_string(),
+            participant_ids_json: "[]".to_string(),
+            facilitator_id: None,
+            done_count: 0,
+            max_turns: None,
+            metadata_json: None,
+        };
+        // sub-session 行（active）と親 discord セッション（active）を用意。
+        opencrab_db::queries::insert_session(&conn, &mk("subtask-sub-9", "subtask")).unwrap();
+        opencrab_db::queries::insert_session(&conn, &mk("discord-a-1-2", "discord")).unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+
+        let handle = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        registry.insert(
+            "sub-9".to_string(),
+            SpawnedSubtask {
+                abort_handle: handle,
+                session_id: "subtask-sub-9".to_string(),
+                parent_session_id: "discord-a-1-2".to_string(),
+                agent_id: "agent-a".to_string(),
+                label: "job".to_string(),
+                tool_name: "spawn_subtask".to_string(),
+                started_at: std::time::Instant::now(),
+                reply_target: None,
+                caller: CallerIdentity::Agent,
+                lifecycle: SubtaskLifecycle::new(),
+            },
+        );
+
+        struct NoopSink;
+        impl SubtaskCompletionSink for NoopSink {
+            fn on_subtask_settled(&self, _ev: SubtaskSettled) {}
+        }
+
+        settle_completed(
+            &registry,
+            &db,
+            &NoopSink,
+            SettleContext {
+                parent_session_id: "discord-a-1-2".to_string(),
+                agent_id: "agent-a".to_string(),
+                subtask_id: "sub-9".to_string(),
+                sub_session_id: "subtask-sub-9".to_string(),
+                // "completed" 固定ではなく実 exit_reason を書くことを固定する。
+                exit_reason: "timeout".to_string(),
+                lifecycle: SubtaskLifecycle::new(),
+            },
+            "body",
+        );
+
+        let conn = db.lock().unwrap();
+        // sub-session は exit_reason へ終端化されている。
+        assert_eq!(
+            opencrab_db::queries::get_session(&conn, "subtask-sub-9")
+                .unwrap()
+                .unwrap()
+                .status,
+            "timeout"
+        );
+        // 親（別モード）の status は不変。
+        assert_eq!(
+            opencrab_db::queries::get_session(&conn, "discord-a-1-2")
+                .unwrap()
+                .unwrap()
+                .status,
+            "active"
+        );
     }
 
     /// 与えた `reply_target` で fake subtask を登録し、`settle_completed` を通した
