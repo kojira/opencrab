@@ -64,6 +64,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         loop_restart_enabled: false,
         index_build_inflight: std::sync::Arc::new(dashmap::DashMap::new()),
         intake: std::sync::Arc::new(Default::default()),
+        intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),

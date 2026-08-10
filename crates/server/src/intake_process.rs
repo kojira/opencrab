@@ -62,16 +62,38 @@ const TOTAL_PROMPT_BUDGET_CHARS: usize = 24000;
 const MIN_INTERVAL_SECS: u64 = 10;
 
 /// 受信箱消化ループを起動する（常時。source アダプタや heartbeat 設定に依存しない）。
+///
+/// 各周回は `process_all_inboxes` を **inline に await して直列処理**し、その後
+/// [`wait_for_tick`] で「ポーリング間隔の満了」か「`intake_wake` の通知」のどちらか早い方まで
+/// 待つ（#499）。webhook が新規イベントを積むと [`AppState::intake_wake`] が鳴り、間隔を待たず
+/// 即消化する。ポーリングは取りこぼし・再試行の安全網として**間隔既定のまま残す**。
+///
+/// ループは単一タスクなので消化は決して並行しない。処理中に通知が複数来ても `Notify` の permit は
+/// 1 つに畳まれ、現在の処理が終わったあと 1 回だけ再消化される（多重ターンにならない・#499 注意点）。
 pub fn spawn_intake_process_loop(state: AppState) {
     let interval_secs = state.intake.process_interval_secs.max(MIN_INTERVAL_SECS);
     tokio::spawn(async move {
         let interval = Duration::from_secs(interval_secs);
+        let wake = state.intake_wake.clone();
         tracing::info!(interval_secs, "intake process loop started");
         loop {
             process_all_inboxes(&state).await;
-            tokio::time::sleep(interval).await;
+            wait_for_tick(interval, &wake).await;
         }
     });
+}
+
+/// ポーリング間隔が満了するか、`wake` が鳴るまで待つ（どちらか早い方 / #499）。
+///
+/// `wake` は webhook が新規イベントを積んだ直後に鳴る。`Notify` は待機者が居ないときの通知を
+/// permit として 1 つ記憶するので、enqueue → notify の直後にこの関数へ入っても取りこぼさず
+/// 即起きる（記憶した permit を `notified()` が消費する）。間隔満了は安全網（取りこぼし・再試行）
+/// として常に効く。scheduler の `sleep_or_wake` と同じ形。
+async fn wait_for_tick(interval: Duration, wake: &tokio::sync::Notify) {
+    tokio::select! {
+        _ = tokio::time::sleep(interval) => {}
+        _ = wake.notified() => {}
+    }
 }
 
 /// 未処理を持つエージェントだけを順に消化する。空なら turn を一切起こさない。
@@ -330,5 +352,43 @@ mod tests {
         assert!(out.contains("文字を省略"));
         // 短い入力はそのまま。
         assert_eq!(truncate_chars("short", 100), "short");
+    }
+
+    /// #499: webhook が積んだ直後に `intake_wake` が鳴っていれば、消化ループはポーリング間隔を
+    /// 待たずに即起きる。間隔を 1 時間に取り、事前に notify した状態で 1 秒以内に返れば
+    /// **wake ブランチで起きた**ことの証明になる（sleep ブランチなら 1 時間眠って timeout する）。
+    /// notify を外すと（`wait_for_tick` の wake ブランチ削除 / 呼び出し側の notify 削除）この
+    /// テストは timeout で赤くなる（変異検出）。
+    #[tokio::test]
+    async fn wait_for_tick_wakes_immediately_when_prenotified() {
+        let wake = tokio::sync::Notify::new();
+        // 待機者が居なくても permit を 1 つ記憶する（enqueue→notify→待機 の競合を再現）。
+        wake.notify_one();
+        let r = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_tick(Duration::from_secs(3600), &wake),
+        )
+        .await;
+        assert!(
+            r.is_ok(),
+            "事前 notify があれば間隔（1時間）を待たず即起きるはず（wake ブランチ）"
+        );
+    }
+
+    /// #499: 通知が無くてもポーリング間隔の満了で必ず起きる（取りこぼし・再試行の安全網が残る）。
+    /// 短い間隔で notify せず、間隔満了で返ることを確認する。`wait_for_tick` の sleep ブランチを
+    /// 削除するとこのテストは timeout で赤くなる。
+    #[tokio::test]
+    async fn wait_for_tick_falls_back_to_polling_without_notify() {
+        let wake = tokio::sync::Notify::new();
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_tick(Duration::from_millis(20), &wake),
+        )
+        .await;
+        assert!(
+            r.is_ok(),
+            "通知が無くても間隔満了（sleep ブランチ）で起きる安全網が残っているはず"
+        );
     }
 }

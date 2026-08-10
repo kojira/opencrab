@@ -242,6 +242,10 @@ pub fn spawn_intake_catchup_loop(state: AppState) {
 }
 
 /// 1 アダプタを 1 回ポーリングして受信箱へ補充する。失敗は握って次周期へ（ループを殺さない）。
+///
+/// 新規に積んだ（`enqueued>0`）ときは消化ループを即起こす（`intake_wake` / #499）。webhook 側だけ
+/// 即応で catch-up 側はポーリング待ち、という非対称を作らない。**LLM はここでは呼ばない**（積む
+/// だけ・消化は `intake_process` 側）。
 async fn run_catchup_once(state: &AppState, adapter: &dyn SourceAdapter) {
     let source = adapter.source();
     match adapter.poll_recent().await {
@@ -267,6 +271,13 @@ async fn run_catchup_once(state: &AppState, adapter: &dyn SourceAdapter) {
                 no_route,
                 "intake catch-up: ポーリング完了"
             );
+            // #499: 取りこぼしを回収した瞬間に消化ループを即起こす。webhook 側だけ即応で catch-up
+            // 側はポーリング待ち、という非対称を作らない。**新規に積んだ（enqueued>0）ときだけ**
+            // 鳴らす（全部 dedup / NoRoute なら何も積まれていないので鳴らさず空振り wake を作らない
+            // ——hook ハンドラと同じ条件）。
+            if enqueued > 0 {
+                state.intake_wake.notify_one();
+            }
         }
         Err(e) => {
             // 秘密を出さないため error の Display のみ（アダプタ側で本文/トークンは含めない）。
@@ -430,6 +441,68 @@ event_type = "comment.created"
         let missing = sources_missing_routes(&cfg.routes, &active);
         // route と一致する "omoikane" は含まれず、不一致の "omoiakne" だけが検出される。
         assert_eq!(missing, vec!["omoiakne"]);
+    }
+
+    /// `intake_wake` に permit が記憶されている（=鳴らされた）かを、消費して判定する。
+    /// permit があれば `notified()` は即完了して true。無ければ 50ms で timeout し false。
+    async fn was_notified(wake: &tokio::sync::Notify) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified())
+            .await
+            .is_ok()
+    }
+
+    /// テスト用の source アダプタ。`poll_recent` で固定のイベント列を返すだけ。
+    struct MockAdapter {
+        source: String,
+        events: Vec<IntakeEvent>,
+    }
+
+    #[async_trait::async_trait]
+    impl SourceAdapter for MockAdapter {
+        fn source(&self) -> &str {
+            &self.source
+        }
+        async fn poll_recent(&self) -> Result<Vec<IntakeEvent>> {
+            Ok(self.events.clone())
+        }
+    }
+
+    /// #499: catch-up が**新規を積んだ瞬間**に消化ループを即起こす（webhook と同じ非対称を作らない）。
+    /// 2 回目は全部 dedup で 0 件なので鳴らさない（空振り wake を作らない＝hook と同条件）。
+    /// notify を外すと (1) が timeout で赤くなる（変異検出）。
+    #[tokio::test]
+    async fn catchup_notifies_intake_wake_only_when_it_enqueues_new() {
+        let mut state = crate::test_app_state();
+        state.intake = std::sync::Arc::new(crate::config::IntakeConfig {
+            routes: vec![crate::config::IntakeRoute {
+                source: "omoikane".into(),
+                event_type: "comment.created".into(),
+                agent_id: "scout".into(),
+            }],
+            ..Default::default()
+        });
+        let adapter = MockAdapter {
+            source: "omoikane".into(),
+            events: vec![IntakeEvent {
+                event_type: "comment.created".into(),
+                dedup_key: "comment.created:1".into(),
+                payload_json: "{\"id\":1}".into(),
+            }],
+        };
+
+        // (1) 新規を積む → 即消化のため wake を鳴らす。
+        run_catchup_once(&state, &adapter).await;
+        assert!(
+            was_notified(&state.intake_wake).await,
+            "catch-up が新規を積んだら wake を鳴らす（#499）"
+        );
+
+        // (2) 同じイベントを再ポーリング → 全部 dedup（0 件）なので鳴らさない。
+        run_catchup_once(&state, &adapter).await;
+        assert!(
+            !was_notified(&state.intake_wake).await,
+            "全部 dedup（enqueued=0）なら wake を鳴らさない"
+        );
     }
 
     /// route が全 source に揃っていれば空（誤検出しない）。disabled で畳まれた source も対象外。
