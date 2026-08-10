@@ -1,6 +1,12 @@
 //! エージェントに露出する Nostr 送信ツール（`nostr_post` / `nostr_reply` /
-//! `nostr_dm` / `nostr_zap` / `nostr_upload`）。`GatewayActions` 実装なので
+//! `nostr_zap` / `nostr_upload`）。`GatewayActions` 実装なので
 //! `BridgedExecutor` がツール一覧にマージし、LLM から呼べる。
+//!
+//! #514: `nostr_dm`（DM 送信）は撤去した。DM は暗号化されていても秘密鍵が漏れた時点で
+//! 過去に遡って全部読めるため、「暗号化されているから private を書いてよい」という誤った
+//! 安心を前提ごと無くす（オーナー決定）。送信は本ツールの撤去に加え、`nostr_run dm`
+//! passthrough も塞いで二経路とも封じている（[`crate::cli::NostaroCli::PASSTHROUGH_DENIED_SUBCOMMANDS`]）。
+//! private な話は Nostr でせず、Discord の DM か指定チャンネルを使うこと。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -126,19 +132,12 @@ impl GatewayActions for NostrGatewayActions {
                     "required": ["target", "text"]
                 }),
             },
-            GatewayActionDef {
-                name: "nostr_dm".to_string(),
-                description: "Nostr DM（既定 NIP-17 暗号化）を送る。".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "recipient": {"type": "string", "description": "宛先の npub または hex pubkey。"},
-                        "text": {"type": "string", "description": "本文。"},
-                        "from": from_param(),
-                    },
-                    "required": ["recipient", "text"]
-                }),
-            },
+            // #514: `nostr_dm` はここに**定義しない**（DM 送信は禁止）。DM は暗号化
+            // されていても秘密鍵が漏れた時点で過去に遡って全部読めるため、その前提ごと
+            // 無くす（オーナー決定）。定義から外すのでモデルはこのツールを見ない。万一
+            // 名前指定で呼ばれても `execute` が fail-closed で拒否する。将来「やっぱり DM を
+            // 使いたい」なら、この定義と `execute` の分岐、`PASSTHROUGH_DENIED_SUBCOMMANDS`
+            // の `dm`、`DM_KINDS` の受信破棄を戻せばよい（3 経路とも 1 か所ずつ）。
             GatewayActionDef {
                 name: "nostr_zap".to_string(),
                 description: "Nostr で zap（Lightning 投げ銭）を送る。".to_string(),
@@ -246,24 +245,13 @@ impl GatewayActions for NostrGatewayActions {
                     Err(e) => err(format!("nostr_reply 失敗: {e}")),
                 }
             }
-            "nostr_dm" => {
-                let (Some(recipient), Some(text)) =
-                    (arg_str(args, "recipient"), arg_str(args, "text"))
-                else {
-                    return err("recipient と text パラメータが必要です");
-                };
-                match self
-                    .cli
-                    .dm(agent_id, recipient, text, arg_str(args, "from"))
-                    .await
-                {
-                    Ok(out) => {
-                        self.mark_sent();
-                        ok(json!({"result": out}))
-                    }
-                    Err(e) => err(format!("nostr_dm 失敗: {e}")),
-                }
-            }
+            // #514: DM 送信は禁止。定義から外しているのでモデルは通常ここへ来ないが、
+            // 名前指定で呼ばれても fail-closed で拒否する（黙って成功に見せない）。
+            "nostr_dm" => err(
+                "nostr_dm は廃止されました（#514）。Nostr の DM は秘密鍵が漏れると過去に遡って\
+                 全部読めるため扱いません。private な話は Discord の DM か指定チャンネルを\
+                 使ってください。",
+            ),
             "nostr_zap" => {
                 let Some(recipient) = arg_str(args, "recipient") else {
                     return err("recipient パラメータが必要です");
@@ -369,7 +357,6 @@ mod tests {
         for expected in [
             "nostr_post",
             "nostr_reply",
-            "nostr_dm",
             "nostr_zap",
             "nostr_upload",
             "nostr_generate_key",
@@ -378,6 +365,33 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+        // #514: nostr_dm は定義から外れている（DM 送信禁止）。
+        assert!(
+            !names.contains(&"nostr_dm".to_string()),
+            "nostr_dm は #514 で撤去したので定義に無いこと"
+        );
+    }
+
+    /// [#514] `nostr_dm` は定義に無く、名前指定で呼んでも fail-closed で拒否される。
+    /// 送信禁止の回帰防止（黙って成功に見せない）。
+    #[tokio::test]
+    async fn test_nostr_dm_is_removed_and_rejected() {
+        let a = NostrGatewayActions::new(NostaroCli::new());
+        let names: Vec<String> = a.definitions().into_iter().map(|d| d.name).collect();
+        assert!(!names.contains(&"nostr_dm".to_string()));
+
+        let ctx = GatewayCallContext::for_agent("agent-dm-block");
+        let r = a
+            .execute(
+                "nostr_dm",
+                &json!({"recipient": "npub1x", "text": "secret"}),
+                &ctx,
+            )
+            .await;
+        assert!(!r.success, "nostr_dm は成功してはいけない");
+        let msg = r.error.unwrap();
+        assert!(msg.contains("514"), "拒否理由に #514 を含む: {msg}");
+        assert!(msg.contains("Discord"), "代替（Discord）へ誘導する: {msg}");
     }
 
     /// `nostr_list_keys` は生成鍵の npub 一覧のみ返し、nsec を応答に出さない。
@@ -525,7 +539,8 @@ mod tests {
         }
 
         // 送信系（sent フラグを立てるもの）が漏れていないこと。
-        for name in ["nostr_post", "nostr_reply", "nostr_dm", "nostr_zap"] {
+        // #514: nostr_dm は撤去済みなのでここには含めない。
+        for name in ["nostr_post", "nostr_reply", "nostr_zap"] {
             assert!(
                 non_dispatch.contains(name),
                 "{name} は送信系なので dispatch 対象外でなければならない"

@@ -257,7 +257,8 @@ impl SystemGatewayActions {
                         },
                         "kinds": {
                             "type": "array", "items": {"type": "integer"},
-                            "description": "購読する kind 番号。"
+                            "description": "購読する kind 番号。DM の kind（4 / 1059）は指定しても\
+                            無視される（#514: DM は扱わない。private な話は Discord で）。"
                         },
                         "enabled": {
                             "type": "boolean",
@@ -385,21 +386,25 @@ impl SystemGatewayActions {
             // `nostr_post`/`reply` は Nostr 受信ターン用にそのまま残る）。opencrab が守るのは
             // 「鍵のエージェント間混同防止（config は ctx.agent_id 固定）」と「nsec 隠蔽」の
             // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
-            // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）だけ拒否する。
+            // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）に加え、#514 で
+            // `dm`（DM 送信）・`event`（任意 kind publish で DM を迂回できる）も拒否する。
             GatewayActionDef {
                 name: "nostr_run".to_string(),
                 description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
-                              nostaro のサブコマンド（例: event / post / reply / dm / zap / upload / \
+                              nostaro のサブコマンド（例: post / reply / zap / upload / \
                               react / repost / follow / unfollow / profile / channel / get / timeline / \
                               search / decode / pubkey など）を、`args` にそのサブコマンドの\
-                              フラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"event\", \
-                              args=[\"--kind\",\"0\",\"--content\",\"{...}\"] で kind:0 プロフィールを設定）。\
+                              フラグと値を**1 要素ずつ**配列で渡す（例: subcommand=\"profile\", \
+                              args=[\"--name\",\"…\",\"--about\",\"…\"] でプロフィール(kind:0)を設定）。\
                               投稿・プロフィール(kind:0)設定・チャンネル・取得など nostaro が持つ操作を\
-                              すべて使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
+                              使える。署名は**あなた自身の採用済み Nostr 鍵**で行われ、秘密鍵(nsec)は\
                               扱わない・見えない。鍵の作成/採用は nostr_generate_key / \
                               nostr_switch_identity を使うこと（init は不可）。受信の常時監視（watch）は\
                               ここからは起動できない。リレー設定は opencrab 側（configure_nostr / \
-                              ダッシュボード）で管理するため relay サブコマンドは不可。まだ鍵を採用して\
+                              ダッシュボード）で管理するため relay サブコマンドは不可。\
+                              **dm と event は不可**（#514: DM は扱わない。event は任意 kind を投げられ \
+                              DM を迂回できるため。private な話は Discord の DM か指定チャンネルで）。\
+                              まだ鍵を採用して\
                               いない場合は先に nostr_switch_identity で採用すること。\
                               `timeline` は**フォロー基準**（自分とフォロー中の相手のノートが対象で、\
                               足りない分だけリレーから補われる）。フォローしていない人のノートを\
@@ -415,7 +420,7 @@ impl SystemGatewayActions {
                     "properties": {
                         "subcommand": {
                             "type": "string",
-                            "description": "nostaro のサブコマンド（init/watch/relay は不可）。"
+                            "description": "nostaro のサブコマンド（init/watch/relay/dm/event は不可）。"
                         },
                         "args": {
                             "type": "array",
@@ -1701,7 +1706,14 @@ impl SystemGatewayActions {
             .unwrap_or_else(|| serde_json::from_str(&existing.relays_json).unwrap_or_default());
         let authors = arg_strs("authors").unwrap_or_else(|| cur_strs(&ef, "authors"));
         let keywords = arg_strs("keywords").unwrap_or_else(|| cur_strs(&ef, "keywords"));
-        let kinds = arg_or_cur_kinds();
+        // #514: DM の kind（4 / 1059）はここで落とす。保存自体は apply_nostr_settings 側でも
+        // ストリップするが、この tool の応答（下の "kinds"）が保存値と一致するよう、モデルへ
+        // 返す前にも落として「DM を購読設定できた」と誤解させない。DM は受信破棄・送信禁止・
+        // 購読除外の 3 経路で一貫して扱わない（オーナー決定）。
+        let kinds: Vec<u32> = arg_or_cur_kinds()
+            .into_iter()
+            .filter(|k| !opencrab_nostr::DM_KINDS.contains(k))
+            .collect();
         let enabled = args
             .get("enabled")
             .and_then(|v| v.as_bool())
@@ -7042,29 +7054,33 @@ mod tests {
         let actions = SystemGatewayActions::new(state, None, None, None);
         let ctx = GatewayCallContext::new(GatewayCaller::Agent, "agent-268");
 
+        // 委譲プラミングの検証（agent_id 固定・args そのまま渡る）。subcommand は実 deny を
+        // 通る読み取り系（timeline）にする — `event` は #514 で deny なので happy-path の例に
+        // 使うと「event が通る」と誤読される（実 deny は NostaroCli::run_passthrough 側で、
+        // ここは fake capability なので deny を経由しない）。
         let r = actions
             .execute(
                 "nostr_run",
                 &json!({
-                    "subcommand": "event",
-                    "args": ["--kind", "0", "hello; rm -rf /"]
+                    "subcommand": "timeline",
+                    "args": ["--limit", "5", "hello; rm -rf /"]
                 }),
                 &ctx,
             )
             .await;
         assert!(r.success, "error: {:?}", r.error);
-        assert_eq!(r.data.unwrap()["result"], "ran event");
+        assert_eq!(r.data.unwrap()["result"], "ran timeline");
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         let (agent, sub, args) = &calls[0];
         assert_eq!(agent, "agent-268", "config は常に ctx.agent_id のもの");
-        assert_eq!(sub, "event");
+        assert_eq!(sub, "timeline");
         assert_eq!(
             args,
             &vec![
-                "--kind".to_string(),
-                "0".to_string(),
+                "--limit".to_string(),
+                "5".to_string(),
                 "hello; rm -rf /".to_string()
             ],
             "args は 1 要素ずつそのまま渡る（注入されない）"
@@ -7112,7 +7128,7 @@ mod tests {
         assert!(rec.calls.lock().unwrap().is_empty());
     }
 
-    /// capability のエラー（未 materialize / init/watch/relay 拒否 / nostaro 失敗）はそのまま
+    /// capability のエラー（未 materialize / init/watch/relay/dm/event 拒否 / nostaro 失敗）はそのまま
     /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
     #[tokio::test]
     async fn nostr_run_propagates_capability_error() {

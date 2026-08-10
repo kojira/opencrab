@@ -269,7 +269,7 @@ pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
 pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
     "nostr_post",
     "nostr_reply",
-    "nostr_dm",
+    // #514: `nostr_dm` は撤去（DM 送信禁止）。定義に無いので配送系分類からも外す。
     "nostr_zap",
     "nostr_upload",
     "nostr_switch_identity",
@@ -720,14 +720,20 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
 // 「Nostr 上で自律的に活動する」という目的そのものを塞ぐ。
 // （heartbeat tick は caller=Owner なので元から塞がれていない。上の各コメントも同じ。）
 //
-// `nostr_zap` / `nostr_dm` も同じ理由で**ここに入れない**（#306）。以前は入っていたが、
+// `nostr_zap` は同じ理由で**ここに入れない**（#306）。以前は `nostr_dm` と共に入っていたが、
 // `nostr_run` を開けた時点で `nostr_run zap` / `nostr_run dm` が同じターンから通るように
-// なり（passthrough の deny は `init`/`watch`/`relay` の 3 つだけ / `crates/nostr/src/cli.rs`）、
-// inner ツール名だけを隠しても能力は塞げていなかった。一貫性は**制約を増やす方向ではなく
-// 減らす方向**で取る、というのがオーナーの決定（#306）。使うかどうかはエージェントが自分で
-// 判断する。上の nostr_switch_identity / nostr_list_keys は残る — こちらは①鍵の混同防止に
+// なり（当時の passthrough deny は `init`/`watch`/`relay` の 3 つだけ）、inner ツール名だけを
+// 隠しても能力は塞げていなかった。一貫性は**制約を増やす方向ではなく減らす方向**で取る、
+// というのがオーナーの決定（#306）。使うかどうかはエージェントが自分で判断する。
+//
+// **`nostr_dm` は #514 で別扱いになった**: DM は秘密鍵漏洩で過去に遡って全部読めるため
+// 送信禁止（オーナー決定）。定義から削除し、送信のもう一方の経路 `nostr_run dm` も
+// passthrough deny（`crates/nostr/src/cli.rs` の `PASSTHROUGH_DENIED_SUBCOMMANDS` に `dm`）で
+// 塞いだ。#306 の「減らす方向」とは逆の追加だが、#306 は「DM か zap か」の caller ゲートの
+// 話で、#514 は「DM という機能そのものを持たない」というより上位の決定なので矛盾しない。
+// 上の nostr_switch_identity / nostr_list_keys は残る — こちらは①鍵の混同防止に
 // 直接効き、`nostr_run` 側でも `init` が deny されていて迂回路が無い。
-// ゲートを外した状態は `nostr_messaging_passes_the_gate_for_agent_caller` が実測で固定する。
+// nostr_zap のゲートを外した状態は `nostr_messaging_passes_the_gate_for_agent_caller` が固定する。
 
 /// アクション名 → 権限/深度ポリシー（#45 の単一の表）。
 ///
@@ -2250,25 +2256,29 @@ mod tests {
         }
     }
 
-    /// #306: `nostr_dm` / `nostr_zap` は caller=Agent のターンで**実際にゲートを通る**。
+    /// #306: `nostr_zap` は caller=Agent のターンで**実際にゲートを通る**。
     ///
-    /// 以前は `TRUSTED_ONLY_ACTIONS` に入っていたが、`nostr_run` を開けた（#303）時点で
-    /// `nostr_run dm` / `nostr_run zap` が同じターンから通るため、inner ツール名を隠す
-    /// だけのゲートになっていた。一貫性を**制約を減らす方向**で取るというオーナーの決定
-    /// （#306）に従い外した。ここはその決定を実測で固定する。
+    /// 以前は `nostr_dm` / `nostr_zap` が `TRUSTED_ONLY_ACTIONS` に入っていたが、`nostr_run`
+    /// を開けた（#303）時点で `nostr_run dm` / `nostr_run zap` が同じターンから通るため、
+    /// inner ツール名を隠すだけのゲートになっていた。一貫性を**制約を減らす方向**で取ると
+    /// いうオーナーの決定（#306）に従い外した。ここはその決定を実測で固定する。
+    ///
+    /// **#514 で `nostr_dm` は撤去した**（DM 送信禁止・定義から削除＋`nostr_run dm` も deny）
+    /// ので、#306 の対象から外れ、ここでの検証は `nostr_zap` に絞る。DM のブロックは bridge の
+    /// caller ゲート層ではなく定義層と passthrough 層で行う（`crates/nostr`）。
     ///
     /// `nostr_run` 側（`nostr_run_passes_the_gate_for_agent_caller`）と同じく、リストに
     /// 無いことだけを見ても**別の場所に新しいゲートが足された**場合を捕まえられないので、
     /// `policy_allows` / `list_tools` / `dispatch_inner`（= `execute`）の 3 経路を通す。
     #[tokio::test]
     async fn nostr_messaging_passes_the_gate_for_agent_caller() {
-        /// `nostr_dm` / `nostr_zap` を定義するだけの fake gateway
+        /// `nostr_zap` を定義するだけの fake gateway
         /// （本体は `crates/nostr` にあり、この crate からは参照できない）。
         struct GwNostrMessaging;
         #[async_trait::async_trait]
         impl GatewayActions for GwNostrMessaging {
             fn definitions(&self) -> Vec<GatewayActionDef> {
-                ["nostr_dm", "nostr_zap"]
+                ["nostr_zap"]
                     .into_iter()
                     .map(|name| GatewayActionDef {
                         name: name.to_string(),
@@ -2300,7 +2310,7 @@ mod tests {
             .map(|t| t.name)
             .collect();
 
-        for name in ["nostr_dm", "nostr_zap"] {
+        for name in ["nostr_zap"] {
             // 1. ポリシー述語（list_tools と dispatch_inner が共有する単一の判定）。
             assert!(
                 agent_exec.policy_allows(name),
@@ -2326,7 +2336,7 @@ mod tests {
         for name in ["create_skill", "nostr_switch_identity", "nostr_list_keys"] {
             assert!(
                 !agent_exec.policy_allows(name),
-                "{name} の trusted ゲートは維持されるべき（#306 は nostr_dm/nostr_zap だけ）"
+                "{name} の trusted ゲートは維持されるべき（#306 は nostr_zap のみ・nostr_dm は #514 で撤去）"
             );
         }
     }

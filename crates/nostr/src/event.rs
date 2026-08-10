@@ -5,6 +5,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// DM とみなす kind: NIP-04（`kind:4`）と NIP-17 gift wrap（`kind:1059`）。
+///
+/// #514: opencrab は DM を**一切扱わない**（受信は破棄・送信は禁止・購読からも外す）。
+/// 暗号化 DM は「今は安全」でも秘密鍵が漏れた時点で過去に遡って全部読めるため、
+/// 「暗号化されているから private を書いてよい」という誤った安心を前提ごと無くす
+/// （オーナー決定）。「オーナー限定にする」では鍵漏洩に対して無力なので統合・破棄した。
+///
+/// 新しい DM 的な kind（NIP-17 の別ラッパ等）が現れたら**この 1 か所へ足す**だけで、
+/// 受信破棄（[`NostrEvent::is_dm`]）・購読除外（`NostrConfig::effective_kinds` /
+/// `apply_nostr_settings`）に一括で効く。
+pub const DM_KINDS: &[u32] = &[4, 1059];
+
 /// 受信した Nostr イベント（nostaro の JSON 出力1件）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NostrEvent {
@@ -48,6 +60,11 @@ impl NostrEvent {
         self.note_id.as_deref().unwrap_or(&self.id)
     }
 
+    /// この受信が DM（[`DM_KINDS`]）か。#514: DM は受信ループで破棄する。
+    pub fn is_dm(&self) -> bool {
+        DM_KINDS.contains(&self.kind)
+    }
+
     /// 受信の種別ラベル（転記の見出しに付す / issue #252）。
     ///
     /// ここに来る受信は既に「自分宛」に絞られている（`nostaro watch` 側でフィルタ済み）ので、
@@ -58,7 +75,7 @@ impl NostrEvent {
     /// - `e` タグを持つ kind 1 = 既存ノートへのリプライ
     /// - それ以外（`e` タグ無し）= メンション
     pub fn inbound_kind_label(&self) -> &'static str {
-        if self.kind == 4 || self.kind == 1059 {
+        if self.is_dm() {
             return "DM";
         }
         if self.kind == 7 {
@@ -229,6 +246,23 @@ mod tests {
         assert_eq!(ev.inbound_kind_label(), "DM");
         ev.kind = 1059;
         assert_eq!(ev.inbound_kind_label(), "DM");
+    }
+
+    /// [#514] DM 判定は NIP-04（4）/ NIP-17 gift wrap（1059）だけを真にし、
+    /// 通常の kind（1/6/7/30023）は偽（受信破棄の対象外）。
+    #[test]
+    fn test_is_dm_covers_only_dm_kinds() {
+        assert_eq!(super::DM_KINDS, &[4, 1059]);
+        for &dm in super::DM_KINDS {
+            let mut e = ev(1);
+            e.kind = dm;
+            assert!(e.is_dm(), "kind {dm} は DM のはず");
+        }
+        for non_dm in [1u32, 6, 7, 30023, 0] {
+            let mut e = ev(1);
+            e.kind = non_dm;
+            assert!(!e.is_dm(), "kind {non_dm} は DM ではない");
+        }
     }
 
     fn ev(kind: u32) -> NostrEvent {
