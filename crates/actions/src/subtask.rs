@@ -1145,6 +1145,20 @@ impl ToolDispatcher for SubtaskToolDispatcher {
                 serde_json::to_string(&arr).unwrap_or_else(|_| r#"[]"#.to_string())
             };
 
+            // #551: 個々のツール結果は上（`sanitize_tool_result_for_log`）で退避済み
+            // （≤ 上限）だが、複数ツールの**結合本文**（batch 配列）は合算で巨大になりうる
+            // （本番最大 134,863 文字。`tool_result` が退避されるのにこの完了本文だけ素通し
+            // だった非対称）。同じ退避をこの結合本文にも掛け、上限超過なら workspace へ退避
+            // して本文には notice（パス・行数・読み方）だけ残す。単一ツール／上限内は
+            // no-op なので、閾値以下の小さい完了本文の見え方は変わらない。
+            let result_text = opencrab_core::tool_result_log::sanitize_tool_result_for_log(
+                "subtask_completed",
+                &result_text,
+                &parent_session_id,
+                &subtask_id_task,
+                workspace_root.as_deref(),
+            );
+
             // 中核（gateway 非依存）: DB 永続化 → registry 除去 → sink 発火。
             // 順序契約（DB 記録 → 通知）は settle_completed が 1 箇所で保証する。
             settle_completed(
@@ -2771,6 +2785,92 @@ mod tests {
             );
             assert_eq!(arr[i]["result"]["success"], true);
         }
+    }
+
+    /// #551: 個々のツール結果は per-tool 上限内でも、複数ツールの**結合本文**が上限を
+    /// 超えると `tool_result` と同じく workspace へ退避し、DB 本文には notice（パス・行数・
+    /// 読み方）だけを残す。エージェントは notice の指すファイルから全文を読み返せる。
+    #[tokio::test]
+    async fn large_batch_result_is_offloaded_and_recoverable() {
+        // 各ツールは per-tool 上限（TOOL_RESULT_TOKEN_LIMIT）内だが、2 本の結合で超える。
+        struct BigExecutor;
+        #[async_trait::async_trait]
+        impl ActionExecutor for BigExecutor {
+            async fn execute(&self, name: &str, _args: &serde_json::Value) -> ActionResult {
+                ActionResult {
+                    success: true,
+                    // 変化のあるテキスト（連続同一文字だと tiktoken で潰れて上限に届かない）。
+                    data: serde_json::json!({ "tool": name, "blob": "a1b2c3d4 ".repeat(250) }),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                Vec::new()
+            }
+        }
+
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let registry: SubtaskRegistry = Arc::new(DashMap::new());
+        let sink = Arc::new(RecordingSink::default());
+        let parent = "web-agent-a-conv1";
+        let dir = tempfile::TempDir::new().unwrap();
+        let executor: Arc<dyn ActionExecutor> = Arc::new(BigExecutor);
+
+        let dispatcher = SubtaskToolDispatcher::new(
+            executor,
+            registry.clone(),
+            db.clone(),
+            sink.clone(),
+            "agent-a",
+            parent,
+        )
+        .with_workspace_root(Some(dir.path().to_path_buf()));
+
+        dispatcher.dispatch_batch(&[call("ws_read", "tc-a"), call("ws_read", "tc-b")]);
+        wait_until_settled(&registry).await;
+
+        let body = completed_log_body(&db, parent);
+        let log: serde_json::Value = serde_json::from_str(&body).expect("完了ログは JSON");
+        let result = log["result"].as_str().expect("result は文字列");
+
+        // 本文には生データではなく退避 notice が載る（`tool_result` と同じ書式）。
+        assert!(
+            result.contains("withheld") && result.contains("tmp/"),
+            "結合本文が退避されず生で載っている: {}",
+            &result[..result.len().min(200)]
+        );
+        // 生の巨大 blob（片方ぶんでも）が本文へ漏れていない。
+        assert!(
+            !result.contains(&"a1b2c3d4 ".repeat(250)),
+            "退避したのに生データが本文へ漏れている"
+        );
+        // speaker_id は None のまま（#501 の除外条件 system+heartbeat に掛からないこと）。
+        {
+            let conn = db.lock().unwrap();
+            let row = opencrab_db::queries::list_recent_session_logs(&conn, parent, 50)
+                .unwrap()
+                .into_iter()
+                .find(|l| l.content.contains("subtask_completed"))
+                .unwrap();
+            assert!(
+                row.speaker_id.is_none(),
+                "subtask 完了行の speaker_id は None のまま"
+            );
+        }
+        // notice が指すファイル（workspace/tmp 配下）から全文を読み返せる＝回収可能。
+        let tmp = dir.path().join("tmp");
+        let files: Vec<_> = std::fs::read_dir(&tmp)
+            .expect("tmp ディレクトリが作られる")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(files.len(), 1, "退避ファイルが 1 つ作られる");
+        let full = std::fs::read_to_string(files[0].path()).expect("退避ファイルを読み返せる");
+        assert_eq!(
+            full.matches(&"a1b2c3d4 ".repeat(250)).count(),
+            2,
+            "退避ファイルに両ツールの全結果が残っている（回収経路）"
+        );
     }
 
     /// [P2 回帰] cancel でバッチを止めたとき、**完走済み call の部分結果**が親ログに残る
