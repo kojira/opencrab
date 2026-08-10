@@ -254,6 +254,24 @@ async fn main() -> anyhow::Result<()> {
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
 
+    // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
+    // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
+    // 実行タスクが消滅済み）。「何分止まったら死」の判定を要せず 'interrupted' へ終端化する。
+    // 述語 mode='subtask' は他モードに触れない（reconcile_orphaned_subtasks を参照）。
+    match db.lock() {
+        Ok(conn) => match opencrab_db::queries::reconcile_orphaned_subtasks(&conn) {
+            Ok(n) if n > 0 => {
+                tracing::info!(
+                    reconciled = n,
+                    "startup: 孤児化した active subtask を interrupted へ終端化した（#553）"
+                )
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("startup subtask reconcile に失敗: {e}"),
+        },
+        Err(e) => tracing::warn!("startup subtask reconcile: db lock 取得に失敗: {e}"),
+    }
+
     // Build LLM router from config + DB のダッシュボード設定オーバーライド
     let llm_overrides = {
         let conn = db.lock().unwrap();

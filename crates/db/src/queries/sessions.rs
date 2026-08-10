@@ -156,6 +156,36 @@ pub fn update_session_metadata(
     Ok(())
 }
 
+/// `sessions.status` を終端値へ遷移させる（#553）。subtask の死活を永続状態から判定
+/// できるようにするため、決着経路（`settle_completed` / `cancel_subtask`）が `exit_reason`
+/// 対応の終端値（completed / error / timeout / stopped_by_limit / cancelled）を書く。
+/// 存在しない `session_id`（sub-session 行を持たない自動 dispatch など）では 0 行更新で無害。
+/// `updated_at` も併せて進める（既存 [`update_session_metadata`] と同型の 1 クエリ）。
+pub fn set_session_status(conn: &Connection, session_id: &str, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status, Utc::now().to_rfc3339(), session_id],
+    )?;
+    Ok(())
+}
+
+/// 起動時リコンサイル（#553）: 新プロセスの subtask registry（in-memory）は必ず空なので、
+/// この時点で `status='active'` の subtask セッションは**定義上すべて孤児**（前プロセスと
+/// 共に実行タスクが消滅済み）。「何分止まったら死」の判定を要せず、確定的に `'interrupted'`
+/// へ終端化する。返り値は更新件数。
+///
+/// 述語 `mode = 'subtask'` は本番実測で `id LIKE 'subtask-%'` と完全一致
+/// （active 302/302・any 302/302・不一致 0 行）を確認済み。他モード（autonomous / discord /
+/// heartbeat / nostr）には**一切触れない**。`memory_sessions`（会話ログ）にも触れない。
+pub fn reconcile_orphaned_subtasks(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE sessions SET status = 'interrupted', updated_at = ?1
+         WHERE mode = 'subtask' AND status = 'active'",
+        params![Utc::now().to_rfc3339()],
+    )?;
+    Ok(n)
+}
+
 // ============================================
 // Heartbeat Log
 // ============================================
