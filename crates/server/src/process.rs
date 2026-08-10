@@ -1203,8 +1203,50 @@ fn build_truncated_conversation(
     format!("{header}{recent_text}")
 }
 
-/// 中略した区間に差し込む印（会話が連続していないことを LLM に明示する）。
-const OMITTED_MARKER: &str = "[... older messages omitted due to context length ...]";
+/// 連続区間より前に落とした古いメッセージ群に添える印（#504）。
+///
+/// 飛び地としての生発言（文脈も応答有無も分からないユーザー発言）は載せないが、
+/// 「何かがあった」ことは伝わるべきなので、落とした件数と期間（先頭〜末尾の
+/// タイムスタンプ差）を書く。表記は従来の英語マーカーに揃える。
+fn format_omission_marker(omitted: &[opencrab_db::queries::SessionLogRow]) -> String {
+    let count = omitted.len();
+    let noun = if count == 1 { "message" } else { "messages" };
+    match omission_span_label(omitted) {
+        Some(span) => {
+            format!("[... {count} older {noun} over {span} omitted due to context length ...]")
+        }
+        None => format!("[... {count} older {noun} omitted due to context length ...]"),
+    }
+}
+
+/// 落とした区間の期間ラベル（先頭と末尾の `created_at` の差）。
+///
+/// ログは時系列順なので `first` が最古・`last` が最新。どちらかの `created_at` が
+/// 無い／パースできなければ `None`（マーカーは件数だけになる）。
+fn omission_span_label(omitted: &[opencrab_db::queries::SessionLogRow]) -> Option<String> {
+    let parse = |log: &opencrab_db::queries::SessionLogRow| {
+        log.created_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    };
+    let first = parse(omitted.first()?)?;
+    let last = parse(omitted.last()?)?;
+    let dur = last - first;
+    let unit = |n: i64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    let days = dur.num_days();
+    if days >= 1 {
+        return Some(unit(days, "day"));
+    }
+    let hours = dur.num_hours();
+    if hours >= 1 {
+        return Some(unit(hours, "hour"));
+    }
+    let minutes = dur.num_minutes();
+    if minutes >= 1 {
+        return Some(unit(minutes, "minute"));
+    }
+    None
+}
 
 /// エージェント自身ではない話者の発言か（= ユーザー／他エージェントの生発言）。
 ///
@@ -1390,9 +1432,15 @@ fn format_live_inbound(log: &opencrab_db::queries::SessionLogRow) -> String {
 ///
 /// 保証は 2 つ:
 /// - 最低 `RECENT_MIN_LOGS` 件は常に含める（従来どおり）。
-/// - 直近 `RECENT_MIN_USER_SPEECHES` 件のユーザー発言は**予算より先に枠を取り**、
-///   末尾の連続区間から外れていても必ず含める（#284）。巨大なツール結果が
-///   末尾を占めてもユーザーの指示は消えない。
+/// - 直近 `RECENT_MIN_USER_SPEECHES` 件のユーザー発言は**予算より先に枠を取る**。
+///   これにより末尾の連続区間が直近のユーザー発言まで届き、巨大なツール結果が
+///   末尾を占めてもユーザーの指示は連続区間内に載る（#284）。
+///
+/// **連続区間の外に押し出されたユーザー発言（＝飛び地）は原則載せない**（#504）。
+/// 文脈も応答有無も失われた裸の発言は「無いより悪い」ため。ただし A′ の決定で、
+/// **一番新しいユーザー発言 1 件だけは飛び地でも必ず載せる**（＝「今の指示」）。
+/// それより古い飛び地は落とし、件数と期間を書いた省略マーカーに集約する
+/// （[`format_omission_marker`]）。枠取り自体は残すので #284 の届き方は変わらない。
 fn fit_logs_to_budget(
     logs: &[opencrab_db::queries::SessionLogRow],
     agent_id: &str,
@@ -1440,19 +1488,39 @@ fn fit_logs_to_budget(
         start_idx = i;
     }
 
-    // 連続区間 + それより古い必須ユーザー発言を時系列で結合する。
-    let mut selected: Vec<usize> = must.iter().copied().filter(|&i| i < start_idx).collect();
-    selected.extend(start_idx..formatted.len());
+    // 連続区間の外にある必須ユーザー発言（＝飛び地）は、文脈も応答有無も失われた
+    // 裸の発言になり「無いより悪い」ため原則載せない（#504）。ただし A′ の決定に従い
+    // **一番新しいユーザー発言 1 件だけは飛び地でも必ず載せる** — これが「今の指示」で、
+    // #284 が本当に守りたかったもの。それより古い飛び地（連投の言い直し等）は落とす。
+    // `must` の枠取り（tail_budget から先取り）自体は残しているので、連続区間が直近の
+    // ユーザー発言まで届く #284 の効果は保たれ、届かないほど古い連投だけが飛び地になる。
+    //
+    // `must` は直近のユーザー発言集合なので `max()` がそのまま「一番新しいユーザー発言」。
+    // それが連続区間内（`>= start_idx`）なら飛び地は不要（None）。
+    let forced_orphan = must.iter().copied().max().filter(|&i| i < start_idx);
 
-    let mut parts: Vec<String> = Vec::with_capacity(selected.len());
-    let mut prev: Option<usize> = None;
-    for i in selected {
-        if prev.is_some_and(|p| i > p + 1) {
-            parts.push(OMITTED_MARKER.to_string());
+    let mut parts: Vec<String> = Vec::with_capacity(formatted.len() - start_idx + 3);
+    match forced_orphan {
+        Some(idx) => {
+            // 飛び地より前に落とした分（件数＋期間で「何かがあった」ことを残す）。
+            if idx > 0 {
+                parts.push(format_omission_marker(&logs[..idx]));
+            }
+            // 一番新しいユーザー発言（飛び地でも必ず載せる）。
+            parts.push(formatted[idx].clone());
+            // 飛び地と連続区間のあいだに落とした分（古い飛び地の連投を含む。
+            // ループは非 must 行で break するため `idx + 1 < start_idx` が保証され非空）。
+            parts.push(format_omission_marker(&logs[idx + 1..start_idx]));
         }
-        parts.push(formatted[i].clone());
-        prev = Some(i);
+        None => {
+            // 一番新しいユーザー発言は連続区間に入っている（または must が空）。
+            // 連続区間より前に落とした分だけを 1 つのマーカーに集約する。
+            if start_idx > 0 {
+                parts.push(format_omission_marker(&logs[..start_idx]));
+            }
+        }
     }
+    parts.extend(formatted[start_idx..].iter().cloned());
     parts.join("\n")
 }
 
@@ -4401,6 +4469,106 @@ mod recent_user_speech_guarantee_tests {
         assert!(
             out.contains("この発言が消えたら対話が成立しない"),
             "ゲートウェイ形状のユーザー発言が優先枠に入っていない: {out}"
+        );
+    }
+}
+
+/// #504: 文脈から切り離された「飛び地」のユーザー発言は会話へ載せない。
+///
+/// #284 は「直近ユーザー発言が 1 件も載らない」事故を、末尾の連続区間から外れた
+/// ユーザー発言を省略マーカーで挟んだ**飛び地**として個別に載せることで防いでいた。
+/// だが飛び地は文脈も応答有無も失われた裸の発言で、オーナー判断は「無いより悪い」。
+///
+/// そこで A′: **一番新しいユーザー発言 1 件だけは飛び地でも必ず載せ**（＝「今の指示」で、
+/// #284 が本当に守りたかったもの）、それより古い飛び地は落とす。落とした分は件数と
+/// 期間を書いた省略マーカーに集約する（[`super::format_omission_marker`]）。
+///
+/// ここは [`super::fit_logs_to_budget`] を直接叩き、行の index と `created_at` を固定して
+/// 判定する（DB や予算経路の間接を挟むと、どの発言が飛び地になるかが読みにくい）。
+#[cfg(test)]
+mod orphan_user_speech_tests {
+    use super::fit_logs_to_budget;
+    use opencrab_db::queries::SessionLogRow;
+
+    const AGENT: &str = "a1";
+    const USER: &str = "kojira";
+    const SESSION: &str = "s1";
+
+    fn user_speech(content: &str, created_at: &str) -> SessionLogRow {
+        SessionLogRow {
+            id: None,
+            agent_id: AGENT.to_string(), // 受信側エージェント（#377）
+            session_id: SESSION.to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some(USER.to_string()), // 送信者 ≠ AGENT → is_user_speech 真
+            turn_number: None,
+            metadata_json: None,
+            created_at: Some(created_at.to_string()),
+        }
+    }
+
+    fn tool_result(content: &str, created_at: &str) -> SessionLogRow {
+        SessionLogRow {
+            id: None,
+            agent_id: AGENT.to_string(),
+            session_id: SESSION.to_string(),
+            log_type: "tool_result".to_string(),
+            content: content.to_string(),
+            speaker_id: Some(AGENT.to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: Some(created_at.to_string()),
+        }
+    }
+
+    /// 連続区間の外にユーザー発言 3 件（8/1・8/6・8/6）を置き、末尾を巨大なツール結果で
+    /// 埋め尽くして 3 件すべてを飛び地にする。index の大きい "NEWEST" が一番新しい発言。
+    fn orphaned_speeches_then_tool_flood() -> Vec<SessionLogRow> {
+        let mut logs = vec![
+            user_speech("OLD-A-最古の飛び地", "2026-08-01T00:00:00Z"),
+            user_speech("OLD-B-古い飛び地", "2026-08-06T00:00:00Z"),
+            user_speech("NEWEST-一番新しい指示", "2026-08-06T12:00:00Z"),
+        ];
+        // 末尾の連続区間を埋め、予算を使い切らせる（＝上の 3 件を連続区間の外に押し出す）。
+        for i in 0..20 {
+            logs.push(tool_result(
+                &format!("tool output {i}: {}", "data ".repeat(200)),
+                "2026-08-06T12:00:00Z",
+            ));
+        }
+        logs
+    }
+
+    /// 一番新しいユーザー発言だけは飛び地でも残り、それより古い飛び地は消える。
+    #[test]
+    fn only_the_newest_orphan_user_speech_is_kept() {
+        let logs = orphaned_speeches_then_tool_flood();
+        let out = fit_logs_to_budget(&logs, AGENT, 300);
+        assert!(
+            out.contains("NEWEST-一番新しい指示"),
+            "一番新しいユーザー発言が飛び地でも残っていない: {out}"
+        );
+        assert!(
+            !out.contains("OLD-A-最古の飛び地"),
+            "古い飛び地が消えていない（OLD-A）: {out}"
+        );
+        assert!(
+            !out.contains("OLD-B-古い飛び地"),
+            "古い飛び地が消えていない（OLD-B）: {out}"
+        );
+    }
+
+    /// 落とした古い区間は、件数と期間を添えた省略マーカーに集約される。
+    #[test]
+    fn omission_marker_carries_count_and_period() {
+        let logs = orphaned_speeches_then_tool_flood();
+        let out = fit_logs_to_budget(&logs, AGENT, 300);
+        // 一番新しい発言(index 2)より前の飛び地 = index 0..2（OLD-A 8/1・OLD-B 8/6）。
+        // 件数 2・期間 5 日がマーカーに出る。
+        assert!(
+            out.contains("2 older messages over 5 days"),
+            "省略マーカーに件数・期間が入っていない: {out}"
         );
     }
 }
