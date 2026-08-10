@@ -48,11 +48,25 @@ impl NostrConfig {
     }
 
     /// 実効 kind（設定が空なら kind:1）。
+    ///
+    /// #514: DM の kind（[`crate::event::DM_KINDS`] = 4 / 1059）は**購読から必ず外す**。
+    /// 設定（DB 行）に混ざっていても、そもそもリレーへ DM を要求しない（「要求してから
+    /// 捨てる」より「要求しない」方が漏れ余地が無い）。DB を手編集された場合や、
+    /// `configure_nostr` / REST の書き込み側ストリップをすり抜けた場合の最終防壁でもある。
+    /// 受信ループ（`manager::handle_event`）の破棄と合わせて二重に効く。
+    /// 除外後に空になったら kind:1（テキストノート）へフォールバックする。
     pub fn effective_kinds(&self) -> Vec<u32> {
-        if self.filter.kinds.is_empty() {
+        let filtered: Vec<u32> = self
+            .filter
+            .kinds
+            .iter()
+            .copied()
+            .filter(|k| !crate::event::DM_KINDS.contains(k))
+            .collect();
+        if filtered.is_empty() {
             vec![1]
         } else {
-            self.filter.kinds.clone()
+            filtered
         }
     }
 
@@ -132,6 +146,30 @@ mod tests {
             },
         };
         assert_eq!(c2.effective_kinds(), vec![1, 30023]);
+    }
+
+    /// [#514] DM kind（4 / 1059）は購読から必ず外れる。エージェントが `configure_nostr` で
+    /// 混ぜても、DB を手編集しても、そもそもリレーへ要求しない。除外後に空なら kind:1。
+    #[test]
+    fn test_effective_kinds_strips_dm_kinds() {
+        // 通常 kind と DM が混在 → DM だけ落ちる。
+        let mixed = NostrConfig {
+            relays: vec![],
+            filter: NostrFilter {
+                kinds: vec![1, 4, 7, 1059, 30023],
+                ..Default::default()
+            },
+        };
+        assert_eq!(mixed.effective_kinds(), vec![1, 7, 30023]);
+        // DM だけ → 空になるので kind:1 へフォールバック（DM は絶対に購読しない）。
+        let only_dm = NostrConfig {
+            relays: vec![],
+            filter: NostrFilter {
+                kinds: vec![4, 1059],
+                ..Default::default()
+            },
+        };
+        assert_eq!(only_dm.effective_kinds(), vec![1]);
     }
 
     /// [#271/#278] フィルタ未指定は「自分宛のみ」＝**最も狭い**購読であって洪水ではない。

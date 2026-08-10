@@ -625,6 +625,27 @@ async fn handle_event<R: NostrAgentRunner>(
     queues: &Arc<SessionQueues>,
     event: NostrEvent,
 ) {
+    // #514: DM（kind:4 NIP-04 / kind:1059 NIP-17 gift wrap）は**一切扱わない**。
+    // 会話へ入れず・応答せず・記録もせず、公開リプライへフォールバックもしない。
+    // 暗号化 DM は「今は安全」でも秘密鍵が漏れた時点で過去に遡って全部読めるため、
+    // 「暗号化されているから private を書いてよい」という誤った安心を前提ごと無くす
+    // （オーナー決定）。この drop は購読除外（`effective_kinds` が DM を外す）が
+    // 破られても効く最終防壁で、`is_dm()` が DM の唯一の判定源（[`opencrab_nostr::DM_KINDS`]）。
+    //
+    // 公開リプライへ回さないのが要点: 以前 DM に kind:1 の公開リプライで返す事故があった
+    // （復号できておらず中身は漏れなかったが、復号が直れば DM 本文が公開タイムラインに
+    // 出ていた）。ここで return するので応答生成（＝返信 publish）自体が起きない。
+    // 黙って捨てると届いていたことすら分からないので、送信者 pubkey と kind を INFO で残す。
+    if event.is_dm() {
+        info!(
+            agent_id,
+            sender = %event.pubkey,
+            kind = event.kind,
+            "nostr: dropping DM (kind 4/1059 are not handled — receive discarded, no reply; #514)"
+        );
+        return;
+    }
+
     // agent 単位のセッション（**1 エージェント = 1 会話** / #323）。誰から来た受信も
     // ここへ落ちるので、エージェントは自分の発言も含めて 1 本の履歴として読める。
     // 誰の発言かは下の `sender_id`（= 相手の pubkey）が担う。
@@ -1836,6 +1857,58 @@ mod tests {
         );
         // 受信自体は通常どおり転記（会話履歴）される。
         assert_eq!(SlowRunner::snapshot(&h.runner.recorded).len(), 2);
+    }
+
+    /// [#514] DM（kind:4 / 1059）は会話へ入らない: 記録も応答生成も転記も起きない。
+    ///
+    /// テスト 1（会話へ入らない）＋ テスト 4 の対（通常 kind は従来どおり）。
+    /// **変異確認**: `handle_event` 冒頭の `if event.is_dm() { return; }` を外すと、
+    /// DM が record/started に現れてこのテストが赤くなる。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dm_is_dropped_before_entering_conversation() {
+        const URL: &str = "https://discord.com/api/webhooks/1/tok";
+        // 転記も有効にして「DM は転記もされない」まで見る。
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_relay_target(URL);
+        let h = Harness::with_runner("agent-dm-drop", runner, 8, 32);
+
+        for &kind in crate::event::DM_KINDS {
+            let mut ev = rich_event(kind);
+            ev.id = format!("dm{kind}");
+            h.feed_event(ev).await;
+        }
+
+        // 会話履歴に入らない（記録ゼロ）。
+        assert!(
+            SlowRunner::snapshot(&h.runner.recorded).is_empty(),
+            "DM は会話履歴へ記録されない"
+        );
+        // 転記（Discord webhook）へも回らない。
+        assert!(
+            SlowRunner::snapshot(&h.runner.relayed).is_empty(),
+            "DM は Discord へ転記されない"
+        );
+        // 応答生成が起きない＝返信 publish 経路に一切入らない（テスト 2: kind:1 の
+        // 公開リプライで返した事故の回帰）。少し待っても started は空のまま。
+        assert!(
+            !h.wait_finished(1, Duration::from_millis(200)).await,
+            "DM で応答生成が走ってはいけない"
+        );
+        assert!(
+            SlowRunner::snapshot(&h.runner.started).is_empty(),
+            "DM で run_agent_response（＝返信 publish 経路）が呼ばれない"
+        );
+
+        // 対照: 通常の kind:1 は従来どおり記録され、応答生成が走る（テスト 4）。
+        h.feed_event(rich_event(1)).await;
+        assert!(
+            h.wait_finished(1, Duration::from_secs(2)).await,
+            "通常ノートは従来どおり処理される"
+        );
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.recorded).len(),
+            1,
+            "通常ノートは 1 件記録される（DM は数に入らない）"
+        );
     }
 
     /// メタ情報の検証用イベント（npub / note_id / kind を明示的に持つ / #282）。

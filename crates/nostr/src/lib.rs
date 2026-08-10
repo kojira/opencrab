@@ -7,7 +7,8 @@
 //! - [`config::NostrConfig`]: リレー（既定 yabu.me / r.kojira.io・ダッシュボードで変更可）
 //!   と購読フィルタ（author / keyword / kind）。
 //! - [`event::NostrEvent`]: `nostaro watch --json` の1件（JSONL）。
-//! - [`actions::NostrGatewayActions`]: `nostr_post`/`reply`/`dm`/`zap`/`upload` ツール。
+//! - [`actions::NostrGatewayActions`]: `nostr_post`/`reply`/`zap`/`upload` ツール
+//!   （`dm` は #514 で撤去 — DM は受信破棄・送信禁止）。
 //! - [`key_provisioning::NostrKeyProvisioning`]: 鍵の払い出し capability（#191 段階2）。
 //! - [`session::NostrSessionRuntime`]: per-session 直列化ロック + dispatch registry。
 //! - [`sink::NostrResponder`]: 応答生成 + 返信配送の共通経路。subtask 完了 sink
@@ -37,7 +38,7 @@ pub mod text_delivery;
 pub use actions::NostrGatewayActions;
 pub use cli::{validate_vanity_prefix, GeneratedKey, NostaroCli, MAX_VANITY_PREFIX_LEN};
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
-pub use event::{parse_watch_line, NostrEvent};
+pub use event::{parse_watch_line, NostrEvent, DM_KINDS};
 pub use identity::NostrIdentityAdmin;
 pub use key_provisioning::NostrKeyProvisioning;
 pub use manager::NostrGatewayManager;

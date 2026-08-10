@@ -1844,9 +1844,9 @@ mod tests {
         assert!(!dispatcher.should_dispatch("discord_send_file"));
         assert!(!dispatcher.should_dispatch("send_ui"));
         // Nostr 配送系（#168）: background 化すると暗黙返信と二重投稿になる。
+        // （nostr_dm は #514 で撤去したのでここでは検証しない。）
         assert!(!dispatcher.should_dispatch("nostr_reply"));
         assert!(!dispatcher.should_dispatch("nostr_post"));
-        assert!(!dispatcher.should_dispatch("nostr_dm"));
 
         let outcome = dispatch_one(
             &dispatcher,

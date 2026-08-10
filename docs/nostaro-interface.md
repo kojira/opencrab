@@ -62,7 +62,7 @@ OpenCrab 側の防御: prefix は bech32 charset かつ最大 3 文字に制限�
 
 ### 引数の渡し方（OpenCrab 側の防御・nostaro は通常のパーサでよい）
 
-OpenCrab は positional を取るサブコマンド（post/reply/dm/zap/upload）で **`--`
+OpenCrab は positional を取るサブコマンド（post/reply/zap/upload）で **`--`
 （オプション終端）を挟み**、watch のフラグ値は **`--flag=value` の = 形式**で渡す。
 target/text/recipient は受信イベント/モデル由来（`-` 始まりの値がフラグに化ける
 引数インジェクションを防ぐため）。nostaro 側は `--` と `--flag=value` を通常どおり
@@ -76,9 +76,13 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 |---|---|
 | `nostr_post`   | `nostaro --config <p> post "<text>"` |
 | `nostr_reply`  | `nostaro --config <p> reply <target> "<text>"` |
-| `nostr_dm`     | `nostaro --config <p> dm send <recipient> "<text>"` |
 | `nostr_zap`    | `nostaro --config <p> zap <recipient> <amount> -m "<message>"` |
 | `nostr_upload` | `nostaro --config <p> upload <path>` |
+
+> **#514: DM 送信は禁止**。`nostr_dm` ツールは撤去し、`nostaro dm` を叩く経路
+> （送信メソッド・`nostr_run dm` passthrough）も塞いだ。DM は暗号化されていても秘密鍵が
+> 漏れた時点で過去に遡って全部読めるため、その前提ごと無くす（オーナー決定）。private な
+> 話は Nostr でせず、Discord の DM か指定チャンネルを使う。
 
 成功時 exit 0・stdout に結果（投稿なら note id / upload なら URL）を出す前提。
 
@@ -128,7 +132,9 @@ nostaro --config <p> watch --json \
   リレー側で絞れないのでローカル一致判定。
 - `--kind <n>`（複数可）: 指定 kind のみ。**未指定時の `--json` 既定は kind:1 + kind:7**
   （旧版は kind:1 のみ）。OpenCrab は `effective_kinds()` で必ず 1 つ以上の `--kind` を
-  明示するのでこの既定には依存しない。
+  明示するのでこの既定には依存しない。**#514: `effective_kinds()` は DM の kind（4 / 1059）を
+  必ず除外する**ので、DM をリレーへ要求することはない（設定・DB に混じっていても外す）。
+  書き込み側（`apply_nostr_settings`）でも保存前に落とし、受信ループでも破棄する多層防御。
 - `--relay <url>`（複数可）: **このフラグで指定したリレーのみに接続**する
   （config の `relays`/`default_relays` は使わない）。OpenCrab は許可リレーを
   明示フラグで渡すため、config 由来の別リレーに繋がせない。

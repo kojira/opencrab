@@ -401,18 +401,10 @@ impl NostaroCli {
         self.run(cmd).await
     }
 
-    /// `nostaro dm send -- <recipient> "<text>"`（既定 NIP-17）。
-    pub async fn dm(
-        &self,
-        agent_id: &str,
-        recipient: &str,
-        text: &str,
-        from: Option<&str>,
-    ) -> Result<String> {
-        let mut cmd = self.command_for(agent_id, from)?;
-        cmd.arg("dm").arg("send").arg("--").arg(recipient).arg(text);
-        self.run(cmd).await
-    }
+    // #514: DM 送信メソッド（`nostaro dm send`）は撤去した。DM は秘密鍵漏洩で過去に
+    // 遡って全部読めるため送信禁止。`nostr_dm` ツールの撤去に加え、送信の実プリミティブ
+    // 自体をここから消し、`nostr_run dm` passthrough も `PASSTHROUGH_DENIED_SUBCOMMANDS`
+    // で塞いでいる（送信の全経路を封じる）。
 
     /// `nostaro zap -m <message> -- <recipient> <amount>`。
     /// `-m` は positional の前（`--` 後に置くと value 扱いされるため）。
@@ -452,10 +444,16 @@ impl NostaroCli {
     ///   だけ書き換わって DB と desync し、次の gateway start / switch_identity で黙って揮発する。
     ///   よってリレー管理は opencrab の DB 経路（configure_nostr / ダッシュボード）に閉じる。
     ///   壊れている（揮発する）機能を塞ぐので**非劣化ではない**。
+    /// - `dm`（#514）: DM 送信は禁止。DM は暗号化されていても秘密鍵が漏れた時点で過去に
+    ///   遡って全部読めるため、その前提ごと無くす（オーナー決定）。`nostr_dm` ツールの撤去
+    ///   だけでは `nostr_run dm send` から通ってしまう（passthrough は inner ツール名を
+    ///   隠しても能力は塞げない / #306）ので、送信のもう一方の経路であるここも塞ぐ。
+    ///   `nostr_run dm ...` は拒否される。private な話は Discord の DM か指定チャンネルへ。
     ///
     /// これ以外のサブコマンドは**そのまま nostaro に委ねる**（Nostr 仕様の判断は
     /// opencrab で再実装せず nostaro に委譲する＝非劣化）。
-    pub const PASSTHROUGH_DENIED_SUBCOMMANDS: &'static [&'static str] = &["init", "watch", "relay"];
+    pub const PASSTHROUGH_DENIED_SUBCOMMANDS: &'static [&'static str] =
+        &["init", "watch", "relay", "dm"];
 
     /// nostaro サブコマンドを**薄く passthrough 実行**する（#268）。
     ///
@@ -486,7 +484,9 @@ impl NostaroCli {
             anyhow::bail!(
                 "nostr_run では '{sub}' は実行できません（init は nostr_generate_key / \
                  nostr_switch_identity に、watch はゲートウェイ管理に閉じています。リレー設定は \
-                 opencrab 側（configure_nostr / ダッシュボード）で管理してください）"
+                 opencrab 側（configure_nostr / ダッシュボード）で管理してください。dm は #514 で \
+                 禁止です — DM は秘密鍵漏洩で過去に遡って読めるため扱いません。private な話は \
+                 Discord の DM か指定チャンネルを使ってください）"
             );
         }
         // `--config` の上書きを封じる（config は常にあなた自身の鍵設定＝鍵混同防止を回避
@@ -1609,19 +1609,20 @@ mod tests {
         .unwrap();
     }
 
-    /// `init` / `watch` / `relay` は materialize の有無に関わらず**拒否**（鍵管理・受信・
-    /// リレー設定は passthrough の外）。deny チェックは config 存在チェックより手前なので
-    /// nostaro を spawn しない。`relay` は config.toml だけ書き換わって DB と desync し次の
-    /// gateway start / switch_identity で揮発するため塞ぐ（configure_nostr / ダッシュボード
-    /// の DB 経路に閉じる）。
+    /// `init` / `watch` / `relay` / `dm` は materialize の有無に関わらず**拒否**（鍵管理・
+    /// 受信・リレー設定・DM 送信は passthrough の外）。deny チェックは config 存在チェックより
+    /// 手前なので nostaro を spawn しない。`relay` は config.toml だけ書き換わって DB と desync
+    /// し次の gateway start / switch_identity で揮発するため塞ぐ（configure_nostr / ダッシュ
+    /// ボードの DB 経路に閉じる）。`dm`（#514）は `nostr_dm` ツール撤去だけでは
+    /// `nostr_run dm send` から通ってしまう送信のもう一方の経路を塞ぐ。
     #[cfg(unix)]
     #[tokio::test]
-    async fn passthrough_denies_init_and_watch() {
+    async fn passthrough_denies_init_watch_relay_and_dm() {
         let agent = "agent-pt-deny";
         materialize_for(agent);
         let (_d, cli) = fake_echo_nostaro();
 
-        for sub in ["init", "watch", "relay"] {
+        for sub in ["init", "watch", "relay", "dm"] {
             let r = cli.run_passthrough(agent, sub, &[]).await;
             assert!(r.is_err(), "{sub} は拒否されるべき");
             let msg = r.unwrap_err().to_string();
@@ -1636,6 +1637,16 @@ mod tests {
         assert!(
             msg.contains("configure_nostr") || msg.contains("ダッシュボード"),
             "relay の拒否理由に opencrab 側の管理経路を含めること: {msg}"
+        );
+        // #514: dm の拒否理由には代替（Discord）への誘導を含める。`dm send` の形でも塞ぐ。
+        let msg = cli
+            .run_passthrough(agent, "dm", &["send".to_string(), "npub1x".to_string()])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("Discord"),
+            "dm の拒否理由に代替（Discord）への誘導を含めること: {msg}"
         );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }

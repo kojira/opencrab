@@ -199,6 +199,17 @@ pub(crate) async fn apply_nostr_settings(
     // 最も狭い**（詳細は `docs/nostaro-interface.md`）。ここで弾くと「自分宛だけ受信する」
     // という一番普通の設定がダッシュボードから作れなくなる。
 
+    // #514: DM の kind（4 / 1059）は**保存前に落とす**。エージェントが `configure_nostr` で、
+    // あるいは REST/ダッシュボードで DM kind を選んでも DB に残さない（残せば次の gateway
+    // start でそのまま購読に反映され、DM を要求してしまう）。書き込み側で落とすことで、
+    // 保存済みの値がそのまま「実際に購読する kind」と一致する（get_nostr_config が DM を
+    // configured として見せない）。購読時の `effective_kinds()` と受信破棄も別途効く多層防御。
+    let kinds: Vec<u32> = kinds
+        .iter()
+        .copied()
+        .filter(|k| !opencrab_nostr::DM_KINDS.contains(k))
+        .collect();
+
     let row = AgentNostrConfigRow {
         agent_id: agent_id.to_string(),
         secret_key,
@@ -456,5 +467,64 @@ mod tests {
                 normalize_owner_pubkey_input(Some(bad)).expect_err("不正値を通した: {bad}");
             assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
         }
+    }
+
+    /// [#514] `apply_nostr_settings`（REST / configure_nostr 共通の書き込み口）は DM の
+    /// kind（4 / 1059）を**保存前に落とす**。エージェントが configure_nostr で戻そうとしても
+    /// DB に残らない（次の gateway start でも購読されない）。通常 kind は保つ。
+    #[tokio::test]
+    async fn apply_nostr_settings_strips_dm_kinds_before_persisting() {
+        let state = crate::test_app_state();
+        let agent = "agent-514-strip";
+        // 先に鍵付きの行を用意する（apply は secret_key 無しだと 400）。
+        {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::upsert_agent_nostr_config(
+                &conn,
+                &AgentNostrConfigRow {
+                    agent_id: agent.to_string(),
+                    secret_key: "nsec1dummy".to_string(),
+                    relays_json: "[]".to_string(),
+                    filter_json: "{}".to_string(),
+                    enabled: false,
+                },
+            )
+            .unwrap();
+        }
+
+        // DM kind を混ぜて書き込む（gateway 未登録なので起動はしない）。
+        apply_nostr_settings(
+            &state,
+            agent,
+            &[],
+            &[],
+            &[],
+            &[1, 4, 7, 1059],
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("apply は成功する");
+
+        // 保存された filter の kinds から DM が落ちていること。
+        let row = {
+            let conn = state.db.lock().unwrap();
+            opencrab_db::queries::get_agent_nostr_config(&conn, agent)
+                .unwrap()
+                .unwrap()
+        };
+        let parsed = config_from_row(&row);
+        assert_eq!(
+            parsed.filter.kinds,
+            vec![1, 7],
+            "DM kind（4/1059）が保存されている: {:?}",
+            parsed.filter.kinds
+        );
+        // 購読値も当然 DM を含まない。
+        assert!(!parsed
+            .effective_kinds()
+            .iter()
+            .any(|k| *k == 4 || *k == 1059));
     }
 }

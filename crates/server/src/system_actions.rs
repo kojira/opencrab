@@ -257,7 +257,8 @@ impl SystemGatewayActions {
                         },
                         "kinds": {
                             "type": "array", "items": {"type": "integer"},
-                            "description": "購読する kind 番号。"
+                            "description": "購読する kind 番号。DM の kind（4 / 1059）は指定しても\
+                            無視される（#514: DM は扱わない。private な話は Discord で）。"
                         },
                         "enabled": {
                             "type": "boolean",
@@ -1701,7 +1702,14 @@ impl SystemGatewayActions {
             .unwrap_or_else(|| serde_json::from_str(&existing.relays_json).unwrap_or_default());
         let authors = arg_strs("authors").unwrap_or_else(|| cur_strs(&ef, "authors"));
         let keywords = arg_strs("keywords").unwrap_or_else(|| cur_strs(&ef, "keywords"));
-        let kinds = arg_or_cur_kinds();
+        // #514: DM の kind（4 / 1059）はここで落とす。保存自体は apply_nostr_settings 側でも
+        // ストリップするが、この tool の応答（下の "kinds"）が保存値と一致するよう、モデルへ
+        // 返す前にも落として「DM を購読設定できた」と誤解させない。DM は受信破棄・送信禁止・
+        // 購読除外の 3 経路で一貫して扱わない（オーナー決定）。
+        let kinds: Vec<u32> = arg_or_cur_kinds()
+            .into_iter()
+            .filter(|k| !opencrab_nostr::DM_KINDS.contains(k))
+            .collect();
         let enabled = args
             .get("enabled")
             .and_then(|v| v.as_bool())
