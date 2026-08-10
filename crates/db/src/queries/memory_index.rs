@@ -1643,13 +1643,70 @@ pub fn list_topics_missing_keywords(
 // topic ↔ category の紐付けは parent 軸ではなく `memory_category_members`（参照表）で持つ
 // （topic の session 親を壊さない＝日付から辿る道を残す）。
 
-/// カテゴリツリーの根（`node_type='root'`, `source_type='category'`）を確保して id を返す。
+/// index ツリーの「エージェントに 1 つだけ」持つ専用ルート（`node_type='root'`）の種別。
 ///
-/// id はエージェント決定的（`catroot-<agent_id>`）なので `INSERT OR IGNORE` で冪等。
-/// 既存の session_log ツリーの根（`root-<agent_id>`）とは id も source_type も別なので
-/// 混ざらない。
-pub fn ensure_category_root(conn: &Connection, agent_id: &str, now: &str) -> Result<String> {
-    let id = format!("catroot-{agent_id}");
+/// カテゴリ層（#313）/ 宣言（#379 #376）/ 凝縮（#411）はそれぞれ別ルートにぶら下がる。
+/// 3 種は id 接頭辞・`source_type`・`title` だけが違い、確保ロジック（決定的 id を先に get →
+/// 無ければ insert → read-back）は同一なので [`ensure_root`] に集約する。ルート種別を足す
+/// ときはここに 1 バリアント加えるだけで、read-back ガード付きの生成経路に自動的に載る
+/// （ガードの入れ忘れが構造的に起きない / #520）。`node_type` は常に `'root'`、short_id は
+/// 常に `r` 系列なので**パラメータ化しない**（種別ごとに変わらないものは固定する）。
+#[derive(Clone, Copy)]
+enum RootKind {
+    /// カテゴリ層のルート（`source_type='category'` / #313）。
+    Category,
+    /// 宣言した記憶のルート（`source_type='declared'` / #379 #376）。
+    Declared,
+    /// 凝縮した記憶のルート（`source_type='condensed'` / #411）。
+    Condensed,
+}
+
+impl RootKind {
+    /// 決定的 id の接頭辞。id は `<prefix>-<agent_id>`。
+    fn id_prefix(self) -> &'static str {
+        match self {
+            RootKind::Category => "catroot",
+            RootKind::Declared => "declroot",
+            RootKind::Condensed => "condroot",
+        }
+    }
+
+    /// `source_type` 列の値。ルート同士を id・source_type の両方で分離する。
+    fn source_type(self) -> &'static str {
+        match self {
+            RootKind::Category => "category",
+            RootKind::Declared => "declared",
+            RootKind::Condensed => "condensed",
+        }
+    }
+
+    /// 俯瞰表示に出るルート名。
+    fn title(self) -> &'static str {
+        match self {
+            RootKind::Category => "カテゴリ",
+            RootKind::Declared => "宣言した記憶",
+            RootKind::Condensed => "凝縮した記憶",
+        }
+    }
+}
+
+/// 種別ごとの専用ルート（`node_type='root'`）を 1 つ確保して id を返す。
+///
+/// id はエージェント決定的（`<prefix>-<agent_id>`）なので「先に get → 無ければ insert」で
+/// 冪等。各ルートは id も `source_type` も別（同じ agent の session_log 根 `root-<agent_id>`
+/// とも混ざらない）。
+///
+/// insert は [`insert_index_node`] 経由＝`INSERT OR IGNORE` なので、short_id の UNIQUE 衝突や
+/// `node_type` の CHECK 違反が起きても**エラーにならず黙って握り潰される**（#344 の教訓）。
+/// そこで insert 後に id で read-back し、実在しなければ `bail` する。この 1 経路に 3 種
+/// （将来の 4 種目も）が乗るので、ガードの入れ忘れが構造的に起きない（#520）。
+///
+/// 注: 現行の実入力ではこの握り潰しは発生しない（決定的 id を先頭で get して抜けるので PK
+/// 衝突に至らず、short_id は `next_short_id` が MAX+1 を返すので UNIQUE 衝突せず、
+/// `node_type='root'` は常に CHECK を通り、接続は単一で直列化され TOCTOU も無い）。read-back は
+/// あくまで将来の退行（CHECK 縮小・short_id 採番変更など）に対する防御である。
+fn ensure_root(conn: &Connection, agent_id: &str, now: &str, kind: RootKind) -> Result<String> {
+    let id = format!("{}-{agent_id}", kind.id_prefix());
     if get_index_node(conn, &id)?.is_some() {
         return Ok(id);
     }
@@ -1659,8 +1716,8 @@ pub fn ensure_category_root(conn: &Connection, agent_id: &str, now: &str) -> Res
         agent_id: agent_id.to_string(),
         parent_id: None,
         node_type: "root".to_string(),
-        source_type: "category".to_string(),
-        title: "カテゴリ".to_string(),
+        source_type: kind.source_type().to_string(),
+        title: kind.title().to_string(),
         summary: String::new(),
         start_log_id: None,
         end_log_id: None,
@@ -1677,7 +1734,22 @@ pub fn ensure_category_root(conn: &Connection, agent_id: &str, now: &str) -> Res
         summary_refreshed_at: None,
     };
     insert_index_node(conn, &root)?;
+    // read-back: OR IGNORE / CHECK 違反で黙って握り潰されていないか確認（#344）。
+    if get_index_node(conn, &id)?.is_none() {
+        anyhow::bail!(
+            "ルート（{}）の作成に失敗しました（ノードが作成されませんでした）",
+            kind.source_type()
+        );
+    }
     Ok(id)
+}
+
+/// カテゴリツリーの根（`node_type='root'`, `source_type='category'`）を確保して id を返す。
+///
+/// id はエージェント決定的（`catroot-<agent_id>`）なので冪等。既存の session_log ツリーの根
+/// （`root-<agent_id>`）とは id も source_type も別なので混ざらない。実体は [`ensure_root`]。
+pub fn ensure_category_root(conn: &Connection, agent_id: &str, now: &str) -> Result<String> {
+    ensure_root(conn, agent_id, now, RootKind::Category)
 }
 
 /// curated 記憶の `long_term/<名前>` から `<名前>` の一覧を返す（カテゴリの種）。
@@ -2035,43 +2107,11 @@ pub fn merge_tags(
 
 /// 宣言ツリーの根（`node_type='root'`, `source_type='declared'`）を確保して id を返す。
 ///
-/// id はエージェント決定的（`declroot-<agent_id>`）なので「先に get → 無ければ insert」で
-/// 冪等（`ensure_category_root` と同型）。session_log ツリーの根（`root-<agent_id>`）とも
-/// カテゴリ根（`catroot-<agent_id>`）とも id・source_type が別なので混ざらない。
+/// id はエージェント決定的（`declroot-<agent_id>`）なので冪等。session_log ツリーの根
+/// （`root-<agent_id>`）ともカテゴリ根（`catroot-<agent_id>`）とも id・source_type が別なので
+/// 混ざらない。実体は [`ensure_root`]。
 pub fn ensure_declared_root(conn: &Connection, agent_id: &str, now: &str) -> Result<String> {
-    let id = format!("declroot-{agent_id}");
-    if get_index_node(conn, &id)?.is_some() {
-        return Ok(id);
-    }
-    let short_id = next_short_id(conn, agent_id, "r")?;
-    let root = IndexNodeRow {
-        id: id.clone(),
-        agent_id: agent_id.to_string(),
-        parent_id: None,
-        node_type: "root".to_string(),
-        source_type: "declared".to_string(),
-        title: "宣言した記憶".to_string(),
-        summary: String::new(),
-        start_log_id: None,
-        end_log_id: None,
-        source_session_id: None,
-        date_from: None,
-        date_to: None,
-        depth: 0,
-        child_count: 0,
-        token_count: 0,
-        created_at: now.to_string(),
-        updated_at: now.to_string(),
-        short_id: Some(short_id),
-        keywords_json: "[]".to_string(),
-        summary_refreshed_at: None,
-    };
-    insert_index_node(conn, &root)?;
-    // read-back: OR IGNORE / CHECK 違反で黙って握り潰されていないか確認（#344）。
-    if get_index_node(conn, &id)?.is_none() {
-        anyhow::bail!("宣言ルートの作成に失敗しました（ノードが作成されませんでした）");
-    }
-    Ok(id)
+    ensure_root(conn, agent_id, now, RootKind::Declared)
 }
 
 /// 生ログの範囲 `[from_id, to_id]` を 1 つの記憶として宣言する（`node_type='unit'`）。
@@ -2255,38 +2295,7 @@ pub fn count_memory_units_after(
 /// 宣言ルート（[`ensure_declared_root`]）とは別のルートにして、俯瞰時に索引（ユニット）と
 /// 核（凝縮）を取り違えないようにする。
 pub fn ensure_condensed_root(conn: &Connection, agent_id: &str, now: &str) -> Result<String> {
-    let id = format!("condroot-{agent_id}");
-    if get_index_node(conn, &id)?.is_some() {
-        return Ok(id);
-    }
-    let short_id = next_short_id(conn, agent_id, "r")?;
-    let root = IndexNodeRow {
-        id: id.clone(),
-        agent_id: agent_id.to_string(),
-        parent_id: None,
-        node_type: "root".to_string(),
-        source_type: "condensed".to_string(),
-        title: "凝縮した記憶".to_string(),
-        summary: String::new(),
-        start_log_id: None,
-        end_log_id: None,
-        source_session_id: None,
-        date_from: None,
-        date_to: None,
-        depth: 0,
-        child_count: 0,
-        token_count: 0,
-        created_at: now.to_string(),
-        updated_at: now.to_string(),
-        short_id: Some(short_id),
-        keywords_json: "[]".to_string(),
-        summary_refreshed_at: None,
-    };
-    insert_index_node(conn, &root)?;
-    if get_index_node(conn, &id)?.is_none() {
-        anyhow::bail!("凝縮ルートの作成に失敗しました（ノードが作成されませんでした）");
-    }
-    Ok(id)
+    ensure_root(conn, agent_id, now, RootKind::Condensed)
 }
 
 /// 元ユニット参照（short_id またはフル id）の並びを解決する。
