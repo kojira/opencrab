@@ -114,7 +114,9 @@ fn is_idle_heartbeat_speech(log: &opencrab_db::queries::SessionLogRow, agent_id:
 /// 他者の発言は実際の活動・実質なので材料に残す。これらが 1 件も残らないバッチだけを
 /// 「純idle」として topic 化しない（#374）。
 fn is_heartbeat_noise(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
-    if log.log_type == "system" && log.speaker_id.as_deref() == Some("heartbeat") {
+    if log.log_type == "system"
+        && log.speaker_id.as_deref() == Some(opencrab_db::queries::HEARTBEAT_SPEAKER_ID)
+    {
         return true;
     }
     is_idle_heartbeat_speech(log, agent_id)

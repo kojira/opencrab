@@ -1142,7 +1142,8 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 /// **落とさない**。判定は `memory_index::is_heartbeat_noise` と同じ述語で、
 /// `speaker_id='heartbeat'` を書くのは（過去も含め）`run_one_fire` だけ（grep 済み）。
 fn is_heartbeat_prompt_scaffolding(log: &opencrab_db::queries::SessionLogRow) -> bool {
-    log.log_type == "system" && log.speaker_id.as_deref() == Some("heartbeat")
+    log.log_type == "system"
+        && log.speaker_id.as_deref() == Some(opencrab_db::queries::HEARTBEAT_SPEAKER_ID)
 }
 
 /// 会話文字列に載せるログだけを残す（#291 / #501）。
@@ -5066,9 +5067,9 @@ mod heartbeat_prompt_dedup_tests {
         let kept = retain_conversation_logs(logs);
         // 指示文 scaffolding は 1 件も残らない。
         assert!(
-            !kept
-                .iter()
-                .any(|l| l.speaker_id.as_deref() == Some("heartbeat")),
+            !kept.iter().any(
+                |l| l.speaker_id.as_deref() == Some(opencrab_db::queries::HEARTBEAT_SPEAKER_ID)
+            ),
             "指示文 scaffolding が残った"
         );
         // subtask 完了本文（speaker=None）と発話は残る。

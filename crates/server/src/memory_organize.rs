@@ -26,6 +26,7 @@ use crate::config::MemoryOrganizeConfig;
 use crate::memory_maintenance::IndexBuildInflight;
 use crate::AppState;
 use opencrab_actions::{CallerIdentity, RunRequest};
+use opencrab_core::llm_text::truncate_chars;
 use opencrab_core::EngineResult;
 use opencrab_db::queries::IndexNodeRow;
 
@@ -617,16 +618,6 @@ fn parse_cursor(marker: &str) -> (String, String) {
         Some((ts, id)) => (ts.to_string(), id.to_string()),
         None => (marker.to_string(), String::new()),
     }
-}
-
-/// 文字（char）境界で安全に切り詰める。超過時は末尾に `…` を付ける。
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]
@@ -1314,16 +1305,6 @@ mod tests {
             parse_cursor("2026-08-03T00:00:00Z"),
             ("2026-08-03T00:00:00Z".to_string(), String::new())
         );
-    }
-
-    #[test]
-    fn truncate_chars_respects_char_boundary_and_ellipsis() {
-        // マルチバイトでもパニックせず、char 単位で切れる。
-        let s = "あいうえおかきくけこ"; // 10 文字
-        let out = truncate_chars(s, 4);
-        assert_eq!(out, "あいうえ…");
-        // 上限以下はそのまま（… を付けない）。
-        assert_eq!(truncate_chars("abc", 5), "abc");
     }
 
     #[test]

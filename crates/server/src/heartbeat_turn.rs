@@ -50,6 +50,14 @@ use crate::heartbeat_delivery::{self, HeartbeatDiscordHttp};
 /// HB セッション ID の接頭辞（`main.rs` の `get_or_create_heartbeat_session` と対）。
 pub(crate) const HEARTBEAT_SESSION_PREFIX: &str = "heartbeat-";
 
+/// ハートビート由来の実行を表すゲートウェイ名（`RunRequest.gateway`）兼、HB セッションの
+/// `SessionRow.mode`（#518）。`RuntimeInfo` に載り、継続ターンの受け口が「HB 由来か」を
+/// 見分ける目印になる。
+///
+/// **`speaker_id='heartbeat'`（scaffolding 行の目印）とは別概念**。あちらは
+/// `opencrab_db::queries::HEARTBEAT_SPEAKER_ID`。値が同じでも用途が違うので混同しないこと。
+pub(crate) const HEARTBEAT_GATEWAY: &str = "heartbeat";
+
 /// 1 ターンの宛先。tick と継続ターンで同じものを使う。
 ///
 /// `channel_id` が空文字ならエージェント単位 tick（channel を持たない発話 / #238）。
@@ -309,7 +317,7 @@ impl HeartbeatTurnRunner {
             &target.session_id,
             system_prompt,
             conversation,
-            "heartbeat",
+            HEARTBEAT_GATEWAY,
             CallerIdentity::Owner,
         )
         .with_dispatch(
@@ -1442,7 +1450,7 @@ mod tests {
 
         let requests = engine.requests.lock().unwrap();
         let req = requests.last().unwrap();
-        assert_eq!(req.gateway, "heartbeat");
+        assert_eq!(req.gateway, HEARTBEAT_GATEWAY);
         assert!(
             req.subtask_registry.is_some(),
             "registry を渡さないと run 内で使い捨てが作られ cancel_subtask が not found になる"
