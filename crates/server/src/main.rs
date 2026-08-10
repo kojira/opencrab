@@ -41,7 +41,7 @@ fn get_or_create_heartbeat_session(
     }
     let session = opencrab_db::queries::SessionRow {
         id: session_id.clone(),
-        mode: "heartbeat".to_string(),
+        mode: heartbeat_turn::HEARTBEAT_GATEWAY.to_string(),
         theme: "ハートビート自律行動".to_string(),
         phase: "active".to_string(),
         turn_number: 0,

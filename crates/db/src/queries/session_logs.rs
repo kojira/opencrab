@@ -23,6 +23,17 @@ pub struct SessionLogRow {
     pub created_at: Option<String>,
 }
 
+/// 毎 tick 注入されるハートビートのプロンプト scaffolding 行が `speaker_id` に持つ目印（#518）。
+///
+/// `log_type='system'` かつ `speaker_id` がこの値の行は「何もしていない tick の指示文」で、
+/// 記憶の材料（topic 要約）や会話再構成からは除外される。読み手（`index_builder` /
+/// `process` の `is_heartbeat_noise` 系述語）はこの定数で判定すること。
+///
+/// **`SessionRow.mode` / `RunRequest.gateway` の "heartbeat"（ハートビート gateway 名）とは
+/// 別概念**。あちらは `heartbeat_turn::HEARTBEAT_GATEWAY`。値がたまたま同じでも用途が違うので
+/// 混同しないこと。
+pub const HEARTBEAT_SPEAKER_ID: &str = "heartbeat";
+
 /// ハートビート発話を本人の実会話（`discord-…`）セッションへ二重記録した行の
 /// `metadata_json` に入る `source` 値（#425）。
 pub const HEARTBEAT_CHANNEL_ECHO_SOURCE: &str = "heartbeat_channel_echo";
