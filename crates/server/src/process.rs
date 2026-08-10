@@ -1146,12 +1146,38 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
     log.log_type == "evaluation"
 }
 
-/// 会話文字列に載せるログだけを残す（#291）。
+/// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
+///
+/// 以前は `scheduler.rs::run_one_fire` が発火のたびに `log_type='system'` かつ
+/// `speaker_id='heartbeat'` で同一文面の指示文（「[ハートビート] 現在の会話…出力形式:
+/// SPEAK/LEARN/IDLE」）をセッションログへ挿入していた。毎 tick 積まれて会話へ再注入され、
+/// 「同じ指示 → IDLE」の対が何十回も文脈に並んで挙動を歪めていた（本番の heartbeat
+/// セッションでは system の 192 件がこの重複）。**#501 で指示文は system プロンプトへ移し**
+/// （`heartbeat_turn::build_context`）、書き込み側（scheduler）は挿入をやめた。既存 DB に
+/// 積まれた分は DB を書き換えず、会話再構成でここが落とす。
+///
+/// subtask の完了本文（`settle_completed` が書く `system` かつ **`speaker_id=None`**,
+/// #404 / #405）とは `speaker_id` で区別する。完了本文は次 tick で読む契約があるので
+/// **落とさない**。判定は `memory_index::is_heartbeat_noise` と同じ述語で、
+/// `speaker_id='heartbeat'` を書くのは（過去も含め）`run_one_fire` だけ（grep 済み）。
+fn is_heartbeat_prompt_scaffolding(log: &opencrab_db::queries::SessionLogRow) -> bool {
+    log.log_type == "system" && log.speaker_id.as_deref() == Some("heartbeat")
+}
+
+/// 会話文字列に載せるログだけを残す（#291 / #501）。
+///
+/// `evaluation` を落とす（#291）のに加え、heartbeat 指示文 scaffolding
+/// （[`is_heartbeat_prompt_scaffolding`]）は**会話から全件落とす**（#501）。指示文はその
+/// tick の system プロンプトへ 1 度だけ入る（`heartbeat_turn::build_context`）ようになったので
+/// 会話履歴には不要。新規ターンはそもそも書かない（`scheduler.rs`）が、既存 DB に積まれた分
+/// （本番で 192 件）は DB を書き換えず読み出し側でここが落とす。subtask 完了本文
+/// （`system` かつ `speaker_id=None`, #404 / #405）は `speaker_id` で区別して残す。
 fn retain_conversation_logs(
     logs: Vec<opencrab_db::queries::SessionLogRow>,
 ) -> Vec<opencrab_db::queries::SessionLogRow> {
     logs.into_iter()
         .filter(|l| !is_excluded_from_conversation(l))
+        .filter(|l| !is_heartbeat_prompt_scaffolding(l))
         .collect()
 }
 
@@ -3236,8 +3262,9 @@ mod heartbeat_conversation_tests {
         }
     }
 
-    /// ハートビート専用セッション: プロンプト（system）と自分の判断（speech）の反復。
-    /// 最後は**今回のプロンプト**（main.rs は会話を組む前に必ず 1 件挿入する）。
+    /// ハートビート専用セッション: 過去に積まれた指示文（system/heartbeat）と自分の判断
+    /// （speech）の反復。#501 以降 scheduler は指示文をログへ書かないが、既存 DB には残るため
+    /// **会話再構成で除外されること**をこのシードで検証する（speech は残る）。
     fn seed_heartbeat(conn: &rusqlite::Connection, n: usize) {
         for i in 0..n {
             insert(
@@ -3404,13 +3431,16 @@ mod heartbeat_conversation_tests {
 
         let ch_pos = out.find("[Channel conversation]").unwrap();
         let hb_pos = out.find("heartbeat note 0").unwrap();
+        assert!(ch_pos < hb_pos, "実会話は専用セッションより前に置く: {out}");
+        // #501: 指示文（[ハートビート]…FORMAT_INSTRUCTION）は system プロンプトへ移した
+        // ので会話文字列には現れない（SPEAK: パースの前提は system プロンプト側が担保する）。
         assert!(
-            ch_pos < hb_pos,
-            "実会話は専用セッションより前に置く（形式指示を末尾に残すため）: {out}"
+            !out.contains(FORMAT_INSTRUCTION),
+            "指示文が会話に残っている（system プロンプトへ移したはず）: {out}"
         );
         assert!(
-            out.trim_end().ends_with(FORMAT_INSTRUCTION),
-            "出力形式の指示が末尾に残っていない（SPEAK: パースの前提が崩れる): {out}"
+            !out.contains("静けさが続くなら黙っていてよい"),
+            "指示本文が会話に残っている: {out}"
         );
 
         // 対比: 従来の呼び出しでは実会話は 1 行も見えない（#404 の症状）。
@@ -3515,9 +3545,10 @@ mod heartbeat_conversation_tests {
         );
     }
 
-    /// 予算が足りない場合でも実会話は落ちず、形式指示も末尾に残る。
+    /// 予算が足りない場合でも実会話は落ちない。#501: 指示文は system プロンプトへ移したので
+    /// 会話には現れない（コンパクション経路でも）。
     #[test]
-    fn compaction_keeps_channel_conversation_and_format_instruction() {
+    fn compaction_keeps_channel_conversation_and_drops_instruction() {
         let conn = opencrab_db::init_memory().unwrap();
         seed_channel(&conn, 60);
         seed_heartbeat(&conn, 60);
@@ -3533,8 +3564,8 @@ mod heartbeat_conversation_tests {
         );
         assert!(out.contains("heartbeat note 59"), "{out}");
         assert!(
-            out.trim_end().ends_with(FORMAT_INSTRUCTION),
-            "コンパクション後も形式指示は末尾に残る: {out}"
+            !out.contains(FORMAT_INSTRUCTION),
+            "コンパクション後の会話に指示文が残っている（system プロンプトへ移したはず）: {out}"
         );
     }
 
@@ -4966,6 +4997,128 @@ mod evaluation_not_in_conversation_tests {
         assert!(
             !out.contains("Address these gaps in your next turn"),
             "切り詰め経路で採点の指示文が残っている: {out}"
+        );
+    }
+}
+
+/// heartbeat 指示文は会話へ積まない（#501）。
+///
+/// 以前は `scheduler.rs::run_one_fire` が発火のたびに同一文面の指示文（`system` /
+/// `speaker_id='heartbeat'`）をセッションログへ挿入し、それが全件そのまま会話へ復元されて
+/// いた。本番の heartbeat セッションでは同一指示が 192 件並び、「同じ指示 → IDLE」の対を
+/// 何十回も見せて挙動を歪めていた。#501 で指示文は system プロンプトへ移した
+/// （`heartbeat_turn::build_context`）ので、会話再構成では指示文 scaffolding を**全件落とす**。
+/// subtask 完了本文（`system` / `speaker_id=None`, #404 / #405）は落とさない。
+#[cfg(test)]
+mod heartbeat_prompt_dedup_tests {
+    use super::{build_conversation_string, retain_conversation_logs};
+
+    const AGENT: &str = "a1";
+    const HB_SESSION: &str = "heartbeat-a1-222";
+
+    /// 毎 tick 挿入されていた指示文（本番と同形）。#501 以降は書かれないが、既存 DB には残る。
+    const HB_PROMPT: &str = "[ハートビート] 現在の会話「（自律ハートビート）」。20分ごとに巡回して新着に反応する。\n出力形式: SPEAK/LEARN/IDLE のいずれか。";
+
+    fn insert(conn: &rusqlite::Connection, log_type: &str, speaker: Option<&str>, content: &str) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: HB_SESSION.to_string(),
+                log_type: log_type.to_string(),
+                content: content.to_string(),
+                speaker_id: speaker.map(|s| s.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 既存 DB に積まれた指示文（複数件）が会話組み立ての出力に**一切現れない**こと。
+    /// 落とす filter を戻すと 3 回現れて赤くなる（恒真ではない）。
+    #[test]
+    fn heartbeat_prompts_never_appear_in_the_conversation() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 3 tick 分の（過去の）指示文と、その間の発話・subtask 完了本文を積む。
+        insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
+        insert(&conn, "speech", Some("kojira"), "新着あった？");
+        insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
+        insert(&conn, "speech", Some(AGENT), "SPEAK: ありました");
+        // subtask 完了本文（#404 / #405）: speaker_id=None なので落としてはならない。
+        insert(
+            &conn,
+            "system",
+            None,
+            r#"{"type":"subtask_completed","subtask_id":"st-1","result":"調査おわり"}"#,
+        );
+        insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
+
+        let out = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+
+        assert_eq!(
+            out.matches("20分ごとに巡回して新着に反応する").count(),
+            0,
+            "heartbeat 指示文が会話へ復元されている（system プロンプトへ移したはず）: {out}"
+        );
+        // #404 / #405: subtask 完了本文は残る。
+        assert!(
+            out.contains("調査おわり"),
+            "subtask 完了本文が落ちた: {out}"
+        );
+        // 発話は両方残る（除外が効きすぎていないこと）。
+        assert!(
+            out.contains("新着あった？") && out.contains("ありました"),
+            "発話が落ちた: {out}"
+        );
+    }
+
+    /// `retain_conversation_logs` は指示文 scaffolding を全件落とし、subtask 完了本文
+    /// （speaker=None）と発話は残す。
+    #[test]
+    fn retain_drops_all_scaffolds_keeps_completion_and_speech() {
+        let mk = |id: i64, log_type: &str, speaker: Option<&str>, content: &str| {
+            opencrab_db::queries::SessionLogRow {
+                id: Some(id),
+                agent_id: AGENT.to_string(),
+                session_id: HB_SESSION.to_string(),
+                log_type: log_type.to_string(),
+                content: content.to_string(),
+                speaker_id: speaker.map(|s| s.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            }
+        };
+        let logs = vec![
+            mk(1, "system", Some("heartbeat"), "指示v1"),
+            mk(2, "speech", Some(AGENT), "SPEAK: やあ"),
+            mk(3, "system", Some("heartbeat"), "指示v2"),
+            mk(
+                4,
+                "system",
+                None,
+                r#"{"type":"subtask_completed","result":"r"}"#,
+            ),
+        ];
+        let kept = retain_conversation_logs(logs);
+        // 指示文 scaffolding は 1 件も残らない。
+        assert!(
+            !kept
+                .iter()
+                .any(|l| l.speaker_id.as_deref() == Some("heartbeat")),
+            "指示文 scaffolding が残った"
+        );
+        // subtask 完了本文（speaker=None）と発話は残る。
+        assert!(
+            kept.iter().any(|l| l.speaker_id.is_none()),
+            "subtask 完了本文が落ちた"
+        );
+        assert!(
+            kept.iter().any(|l| l.content == "SPEAK: やあ"),
+            "発話が落ちた"
         );
     }
 }

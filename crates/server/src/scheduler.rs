@@ -268,6 +268,19 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// ハートビート指示文を system プロンプト用の 1 文へ整形する（#501）。
+///
+/// `channel_name` は発火経路で決まる（`FireTarget::NostrBroadcast` は
+/// [`crate::HEARTBEAT_NOSTR_CHANNEL_LABEL`]、`DiscordChannel` はチャンネル設定名）。
+/// `instructions_text` は `resolve_heartbeat_instructions` の合成結果。整形はここ 1 箇所で、
+/// 出力形式（SPEAK/LEARN/IDLE）の規約行もここに含める（`build_context` はこの文字列を
+/// system プロンプトへそのまま載せる）。
+fn format_heartbeat_prompt(channel_name: &str, instructions_text: &str) -> String {
+    format!(
+        "[ハートビート] 現在の会話「{channel_name}」。{instructions_text}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。"
+    )
+}
+
 /// 1 発火分（heartbeat）の準備 → ターン実行（旧 `make_heartbeat_callback` の per-target 本体）。
 ///
 /// `None` は「ターンを開始できなかった」（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
@@ -307,31 +320,19 @@ async fn run_one_fire(
     // HB 専用セッション（`heartbeat-{agent}-{channel}`。nostr は channel_id 空）。
     let hb_session_id = crate::get_or_create_heartbeat_session(db, agent_id, &channel_id);
 
-    // 指示文を解決し、HB プロンプトを HB セッションへ挿入する（run_turn が文脈へ読む）。
-    let instructions_source = {
+    // 指示文を解決し、整形した HB プロンプトを **その tick の system プロンプトへ載せるため**
+    // target に持たせる（#501）。以前はこれを HB セッションログ（`system` /
+    // `speaker_id='heartbeat'`）へ挿入していたが、毎 tick 同一文面が履歴へ積まれて会話へ
+    // 再注入され続け、「同じ指示 → IDLE」の対が何十回も文脈に並んで挙動を歪めていた。
+    // 書き込みをやめ、system プロンプトへ 1 度だけ入れる（`heartbeat_turn::build_context`）。
+    let (instructions_prompt, instructions_source) = {
         let conn = db.lock().ok()?;
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
-        let prompt = format!(
-            "[ハートビート] 現在の会話「{}」。{}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。",
-            channel_name, resolved.text
-        );
-        let log = opencrab_db::queries::SessionLogRow {
-            id: None,
-            agent_id: agent_id.to_string(),
-            session_id: hb_session_id.clone(),
-            log_type: "system".to_string(),
-            content: prompt,
-            speaker_id: Some("heartbeat".to_string()),
-            turn_number: None,
-            metadata_json: None,
-            created_at: None,
-        };
-        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            tracing::error!(agent_id = %agent_id, "scheduler: HB プロンプトの挿入に失敗: {e}");
-            return None;
-        }
-        resolved.source
+        (
+            format_heartbeat_prompt(&channel_name, &resolved.text),
+            resolved.source,
+        )
     };
 
     let hb_target = HeartbeatTarget {
@@ -339,6 +340,7 @@ async fn run_one_fire(
         session_id: hb_session_id,
         channel_id,
         guild_id,
+        instructions_prompt,
         instructions_source,
     };
     // 唯一の入口。同一 HB セッションのロック下で 1 ターン走らせる（直列化）。
@@ -749,6 +751,27 @@ mod tests {
     use super::*;
 
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+
+    /// #501: 指示文の整形は発火経路で決まる `channel_name` を差し込むだけ。Nostr（ラベル）と
+    /// Discord（チャンネル名）で正しい文面になり、出力形式の規約行が 1 本入ること。
+    #[test]
+    fn format_heartbeat_prompt_embeds_channel_name_per_fire_path() {
+        // NostrBroadcast は `run_one_fire` が HEARTBEAT_NOSTR_CHANNEL_LABEL を channel_name に使う。
+        let nostr = format_heartbeat_prompt(crate::HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね");
+        assert!(
+            nostr.contains("現在の会話「（自律ハートビート）」。巡回してね"),
+            "Nostr 経路の文面が違う: {nostr}"
+        );
+        // DiscordChannel はチャンネル設定名を channel_name に使う。
+        let discord = format_heartbeat_prompt("雑談", "静かにね");
+        assert!(
+            discord.contains("現在の会話「雑談」。静かにね"),
+            "Discord 経路の文面が違う: {discord}"
+        );
+        // 出力形式の規約行は各文面に 1 本だけ。
+        assert_eq!(nostr.matches("出力形式: SPEAK/LEARN/IDLE").count(), 1);
+        assert_eq!(discord.matches("出力形式: SPEAK/LEARN/IDLE").count(), 1);
+    }
 
     #[test]
     fn resolve_fire_target_nostr() {
