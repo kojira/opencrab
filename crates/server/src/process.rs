@@ -1146,12 +1146,41 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
     log.log_type == "evaluation"
 }
 
-/// 会話文字列に載せるログだけを残す（#291）。
+/// heartbeat セッションで毎 tick 注入される指示文（プロンプト scaffolding）か（#501）。
+///
+/// `scheduler.rs::run_one_fire` が発火のたびに `log_type='system'` かつ
+/// `speaker_id='heartbeat'` で同一文面の指示文（「[ハートビート] 現在の会話…出力形式:
+/// SPEAK/LEARN/IDLE」）を挿入する。これは記憶ではなく**毎回同じ指示**で、履歴へ積むと
+/// 以後ずっと会話へ再注入される（本番の heartbeat セッションでは system 445 件のうち
+/// 184 件がこの重複で、system の容量 307KB が履歴の 52% を占めていた）。
+///
+/// subtask の完了本文（`settle_completed` が書く `system` かつ **`speaker_id=None`**,
+/// #404 / #405）とは `speaker_id` で区別する。完了本文は次 tick で読む契約があるので
+/// ここには含めない。判定は `memory_index::is_heartbeat_noise` と同じ述語。
+fn is_heartbeat_prompt_scaffolding(log: &opencrab_db::queries::SessionLogRow) -> bool {
+    log.log_type == "system" && log.speaker_id.as_deref() == Some("heartbeat")
+}
+
+/// 会話文字列に載せるログだけを残す（#291 / #501）。
+///
+/// `evaluation` を落とす（#291）のに加え、heartbeat 指示文の重複
+/// （[`is_heartbeat_prompt_scaffolding`]）は**最新の 1 件だけ残す**（#501）。指示文は
+/// 「今回の tick で何をすべきか」を伝えるためのもので、必要なのは直近の 1 件だけ。過去
+/// tick の同一指示は畳んでも情報は失われない（指示が変わっていれば最新が反映される）。
+/// 最新判定は `id` の最大値で行い、呼び出し側のログ順序（ASC / DESC）に依存しない。
 fn retain_conversation_logs(
     logs: Vec<opencrab_db::queries::SessionLogRow>,
 ) -> Vec<opencrab_db::queries::SessionLogRow> {
+    // 残す指示文（＝最新の tick の 1 件）の id。id を持たない合成ログしか無い場合は
+    // `None` となり、その場合は畳まない（実 DB 読み出しでは必ず id が付く）。
+    let newest_scaffold_id = logs
+        .iter()
+        .filter(|l| is_heartbeat_prompt_scaffolding(l))
+        .filter_map(|l| l.id)
+        .max();
     logs.into_iter()
         .filter(|l| !is_excluded_from_conversation(l))
+        .filter(|l| !is_heartbeat_prompt_scaffolding(l) || l.id == newest_scaffold_id)
         .collect()
 }
 
@@ -4966,6 +4995,138 @@ mod evaluation_not_in_conversation_tests {
         assert!(
             !out.contains("Address these gaps in your next turn"),
             "切り詰め経路で採点の指示文が残っている: {out}"
+        );
+    }
+}
+
+/// heartbeat 指示文の重複を会話へ積まない（#501）。
+///
+/// `scheduler.rs::run_one_fire` が発火のたびに同一文面の指示文（`system` /
+/// `speaker_id='heartbeat'`）を挿入する。以前はこれが全件そのまま会話へ復元され、本番の
+/// heartbeat セッションでは system 445 件のうち 184 件が同一指示の重複で、system の容量
+/// 307KB（履歴の 52%）を食っていた。会話組み立てでは**最新の 1 件だけ**残す。subtask の
+/// 完了本文（`system` / `speaker_id=None`, #404 / #405）は畳まない。
+#[cfg(test)]
+mod heartbeat_prompt_dedup_tests {
+    use super::{build_conversation_string, retain_conversation_logs};
+
+    const AGENT: &str = "a1";
+    const HB_SESSION: &str = "heartbeat-a1-222";
+
+    /// 毎 tick 挿入される指示文（本番と同形で、全 tick 同一文面）。
+    const HB_PROMPT: &str = "[ハートビート] 現在の会話「（自律ハートビート）」。20分ごとに巡回して新着に反応する。\n出力形式: SPEAK/LEARN/IDLE のいずれか。";
+
+    fn insert(conn: &rusqlite::Connection, log_type: &str, speaker: Option<&str>, content: &str) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: HB_SESSION.to_string(),
+                log_type: log_type.to_string(),
+                content: content.to_string(),
+                speaker_id: speaker.map(|s| s.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 重複した指示文が履歴にあっても、会話組み立ての出力には 1 度しか現れないこと。
+    /// 修正を戻すと 3 回現れて赤くなる（恒真ではない）。
+    #[test]
+    fn duplicate_heartbeat_prompts_appear_once_in_the_conversation() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 3 tick 分の指示文と、その間の発話・subtask 完了本文を積む。
+        insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
+        insert(&conn, "speech", Some("kojira"), "新着あった？");
+        insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
+        insert(&conn, "speech", Some(AGENT), "SPEAK: ありました");
+        // subtask 完了本文（#404 / #405）: speaker_id=None なので畳まれてはならない。
+        insert(
+            &conn,
+            "system",
+            None,
+            r#"{"type":"subtask_completed","subtask_id":"st-1","result":"調査おわり"}"#,
+        );
+        insert(&conn, "system", Some("heartbeat"), HB_PROMPT);
+
+        let out = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+
+        assert_eq!(
+            out.matches("20分ごとに巡回して新着に反応する").count(),
+            1,
+            "重複した heartbeat 指示文が会話へ複数回復元されている: {out}"
+        );
+        // 最新の指示は残る（今回の tick で何をすべきかは失われない）。
+        assert!(
+            out.contains("SPEAK/LEARN/IDLE"),
+            "指示文が丸ごと落ちた: {out}"
+        );
+        // #404 / #405: subtask 完了本文は畳まれず残る。
+        assert!(
+            out.contains("調査おわり"),
+            "subtask 完了本文が畳まれた: {out}"
+        );
+        // 発話は両方残る（畳み込みが効きすぎていないこと）。
+        assert!(
+            out.contains("新着あった？") && out.contains("ありました"),
+            "発話が落ちた: {out}"
+        );
+    }
+
+    /// 指示が tick ごとに書き換わっても、残るのは**最新**の 1 件であること。
+    #[test]
+    fn only_the_newest_heartbeat_prompt_survives() {
+        let conn = opencrab_db::init_memory().unwrap();
+        insert(&conn, "system", Some("heartbeat"), "指示v1: 古い方針");
+        insert(&conn, "system", Some("heartbeat"), "指示v2: 中間の方針");
+        insert(&conn, "system", Some("heartbeat"), "指示v3: 最新の方針");
+
+        let out = build_conversation_string(&conn, HB_SESSION, AGENT, 100_000).unwrap();
+        assert!(
+            out.contains("指示v3: 最新の方針"),
+            "最新の指示が落ちた: {out}"
+        );
+        assert!(!out.contains("指示v1"), "古い指示が残っている: {out}");
+        assert!(!out.contains("指示v2"), "中間の指示が残っている: {out}");
+    }
+
+    /// `retain_conversation_logs` は入力順（ASC / DESC）に依らず id 最大の指示文を残す。
+    #[test]
+    fn retain_keeps_newest_scaffold_regardless_of_input_order() {
+        let mk =
+            |id: i64, speaker: Option<&str>, content: &str| opencrab_db::queries::SessionLogRow {
+                id: Some(id),
+                agent_id: AGENT.to_string(),
+                session_id: HB_SESSION.to_string(),
+                log_type: "system".to_string(),
+                content: content.to_string(),
+                speaker_id: speaker.map(|s| s.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            };
+        // DESC 順（id 3,2,1）で渡しても id=3 が残る。subtask 完了本文（speaker=None）は残す。
+        let logs = vec![
+            mk(4, None, r#"{"type":"subtask_completed","result":"r"}"#),
+            mk(3, Some("heartbeat"), "指示v3"),
+            mk(2, Some("heartbeat"), "指示v2"),
+            mk(1, Some("heartbeat"), "指示v1"),
+        ];
+        let kept = retain_conversation_logs(logs);
+        let scaffolds: Vec<&str> = kept
+            .iter()
+            .filter(|l| l.speaker_id.as_deref() == Some("heartbeat"))
+            .map(|l| l.content.as_str())
+            .collect();
+        assert_eq!(scaffolds, vec!["指示v3"], "最新以外の指示が残った");
+        // subtask 完了本文は畳まれない。
+        assert!(
+            kept.iter().any(|l| l.speaker_id.is_none()),
+            "subtask 完了本文が畳まれた"
         );
     }
 }
