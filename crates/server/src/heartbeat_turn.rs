@@ -60,6 +60,11 @@ pub(crate) struct HeartbeatTarget {
     pub session_id: String,
     pub channel_id: String,
     pub guild_id: String,
+    /// 整形済みのハートビート指示文（#501）。`build_context` がその tick の system
+    /// プロンプトへ 1 度だけ載せる。以前は HB セッションログへ挿入して会話へ載せていたが、
+    /// 毎 tick 積み上がるため system プロンプト注入へ移した（`scheduler::format_heartbeat_prompt`）。
+    /// sink が `target.clone()` を保持するので、継続ターン(#440)にも同じ指示が伝わる。
+    pub instructions_prompt: String,
     /// 指示文の由来（`heartbeat_log` の `result_json` に載る診断値）。
     pub instructions_source: &'static str,
 }
@@ -79,11 +84,12 @@ pub(crate) enum TurnOrigin {
 impl TurnOrigin {
     /// system prompt へ足す接尾。
     ///
-    /// tick は `None`（従来どおり、指示文は session_logs へ入れた `[ハートビート]` 行が担う）。
-    /// 継続ターンは Discord / Nostr と同じく `[subtask_completed: …]` マーカーを足す。**本文は
-    /// 載せない**: 完了本文は `settle_completed` が親セッションログへ永続化済みで、会話文字列の
-    /// 再構築で自然に載る（RFC §1.3）。出力形式の規約を書き添えるのは、tick が session_logs へ
-    /// 入れる規約行が文脈予算から落ちても継続ターンの応答形式が崩れないようにするため。
+    /// tick は `None`（指示文＝出力形式の規約行は `HeartbeatTarget::instructions_prompt` が
+    /// system プロンプトへ載せる / #501）。継続ターンは Discord / Nostr と同じく
+    /// `[subtask_completed: …]` マーカーを足す。**本文は載せない**: 完了本文は
+    /// `settle_completed` が親セッションログへ永続化済みで、会話文字列の再構築で自然に載る
+    /// （RFC §1.3）。出力形式の規約行はここには書かない — 指示文（`instructions_prompt`）が
+    /// system プロンプトに常在するようになり（文脈予算に左右されない）、重複するため（#501）。
     ///
     /// 冒頭 1 文は `exit_reason` で分岐する（#443）。継続ターンを起こす
     /// `SettleKind::Completed` は completed / stopped_by_limit / error / timeout の
@@ -101,7 +107,6 @@ impl TurnOrigin {
                 Some(format!(
                 "[ハートビート] 依頼していたバックグラウンド処理が{outcome}。詳細は直前の会話ログの subtask_completed に入っています。\n\
                  状況を見て、いま発話するかどうかは自分で決めてください。\n\
-                 出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。\n\
                  [subtask_completed: subtask_id={subtask_id}, exit_reason={exit_reason}]"
             ))
             }
@@ -418,10 +423,18 @@ impl HeartbeatTurnRunner {
         };
         drop(conn);
 
-        let system_prompt = match origin.prompt_suffix() {
-            Some(suffix) => format!("{base_prompt}\n\n{suffix}"),
-            None => base_prompt,
-        };
+        // #501: 指示文（standing instruction）は毎ターンの system プロンプトへ 1 度だけ入れる。
+        // 以前は HB セッションログ経由で会話へ載せていたが、毎 tick 積まれて「同じ指示 → IDLE」
+        // の対が何十回も文脈に並び挙動を歪めていた。継続ターン(#440)は加えて
+        // `[subtask_completed:…]` マーカー（`prompt_suffix`）を足す。出力形式の規約行は指示文側に
+        // 1 本だけ持たせ、suffix 側には置かない（重複回避）。
+        let mut system_prompt = base_prompt;
+        if !target.instructions_prompt.is_empty() {
+            system_prompt = format!("{system_prompt}\n\n{}", target.instructions_prompt);
+        }
+        if let Some(suffix) = origin.prompt_suffix() {
+            system_prompt = format!("{system_prompt}\n\n{suffix}");
+        }
         let conversation = opencrab_server::process::prepend_runtime_context(
             &conversation,
             "ハートビート自律行動",
@@ -616,6 +629,9 @@ mod tests {
 
     const AGENT: &str = "agent-a";
     const SESSION: &str = "heartbeat-agent-a-222";
+    /// scheduler が整形して target に載せる指示文（本番と同形）。#501 でこれが system
+    /// プロンプトへ入る。判別しやすいよう固有の文言を混ぜてある。
+    const INSTRUCTIONS: &str = "[ハートビート] 現在の会話「テスト部屋」。20分ごとに巡回してね。\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。";
 
     fn target() -> HeartbeatTarget {
         HeartbeatTarget {
@@ -623,6 +639,7 @@ mod tests {
             session_id: SESSION.to_string(),
             channel_id: "222".to_string(),
             guild_id: "111".to_string(),
+            instructions_prompt: INSTRUCTIONS.to_string(),
             instructions_source: "default",
         }
     }
@@ -910,7 +927,9 @@ mod tests {
         );
     }
 
-    /// tick は system prompt を触らない。継続ターンだけがマーカーを足す（本文は載せない）。
+    /// tick の suffix は無し。継続ターンだけがマーカーを足す（本文は載せない）。
+    /// #501: 出力形式の規約行は指示文（`instructions_prompt` → system プロンプト）が持ち、
+    /// suffix には重複して置かない。
     #[test]
     fn prompt_suffix_only_for_continuation() {
         assert_eq!(TurnOrigin::Tick { tick: 3 }.prompt_suffix(), None);
@@ -922,8 +941,8 @@ mod tests {
         .unwrap();
         assert!(suffix.contains("[subtask_completed: subtask_id=st-1, exit_reason=completed]"));
         assert!(
-            suffix.contains("SPEAK: <メッセージ>"),
-            "継続ターンにも出力形式の規約を渡す（tick の規約行が文脈から落ちても崩れない）"
+            !suffix.contains("出力形式:"),
+            "出力形式の規約行は指示文側に一本化し suffix には置かない（#501）: {suffix}"
         );
     }
 
@@ -1041,6 +1060,67 @@ mod tests {
             !prompts[0].contains("[subtask_completed: subtask_id="),
             "tick の system prompt は従来どおり（決着マーカーを足さない）: {}",
             prompts[0]
+        );
+    }
+
+    /// #501: tick の指示文は **system プロンプト**へ入り、会話文脈には積まれない。
+    #[tokio::test]
+    async fn tick_puts_instructions_in_the_system_prompt_not_the_conversation() {
+        let engine = RecordingEngine::new("IDLE");
+        let (runner, _db, _calls) = runner_with(engine.clone());
+
+        runner
+            .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+            .await;
+
+        let sys = &engine.system_prompts()[0];
+        assert!(
+            sys.contains("20分ごとに巡回してね") && sys.contains("出力形式: SPEAK/LEARN/IDLE"),
+            "tick の指示文が system プロンプトに入っていない: {sys}"
+        );
+        // 会話文脈には指示文を積まない（scheduler はセッションログへ書かない / #501）。
+        let conv = &engine.conversations()[0];
+        assert!(
+            !conv.contains("20分ごとに巡回してね"),
+            "指示文が会話文脈に現れている（system へ移したはず）: {conv}"
+        );
+    }
+
+    /// #501 + #440: 継続ターンの system プロンプトには **指示文と決着マーカーの両方**が載り、
+    /// 出力形式の規約行は 1 度だけ現れる（重複しない）。
+    #[tokio::test]
+    async fn continuation_system_prompt_has_instructions_and_marker_without_duplicate_format_line()
+    {
+        let engine = RecordingEngine::new("IDLE");
+        let (runner, db, _calls) = runner_with(engine.clone());
+        insert_subtask_completed_log(&db, "調査おわり");
+
+        runner
+            .run_turn(
+                &target(),
+                TurnOrigin::SubtaskResume {
+                    subtask_id: "st-1".to_string(),
+                    exit_reason: "completed".to_string(),
+                },
+            )
+            .await;
+
+        let sys = &engine.system_prompts()[0];
+        // 指示文（standing instruction）が載る。
+        assert!(
+            sys.contains("20分ごとに巡回してね"),
+            "指示文が載っていない: {sys}"
+        );
+        // 決着マーカーも載る。
+        assert!(
+            sys.contains("[subtask_completed: subtask_id=st-1, exit_reason=completed]"),
+            "決着マーカーが載っていない: {sys}"
+        );
+        // 出力形式の規約行は 1 度だけ（指示文側のみ。suffix には置かない）。
+        assert_eq!(
+            sys.matches("出力形式: SPEAK/LEARN/IDLE").count(),
+            1,
+            "出力形式の規約行が重複している: {sys}"
         );
     }
 
