@@ -879,11 +879,21 @@ impl ChatGptProvider {
                         }
                     }
                     let u = &parsed["response"]["usage"];
+                    // Responses API は cached 分を usage.input_tokens_details.cached_tokens
+                    // にネストして返す（codex CLI が flat な cached_input_tokens で返すのとは
+                    // 構造が違う点に注意）。フィールドが無い/ null のときは 0 に倒す。
+                    let cached = u["input_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0) as u32;
                     usage = Usage {
                         prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
                         completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
                         total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-                        cache_read_input_tokens: 0,
+                        cache_read_input_tokens: cached,
+                        // OpenAI はキャッシュ書き込みを別課金しない（cache write は
+                        // 通常の input と同じ料金）ため、Anthropic のような
+                        // cache_creation の概念が無く、Responses API も該当フィールドを
+                        // 返さない。ここが 0 なのはバグではなく仕様。
                         cache_creation_input_tokens: 0,
                     };
                 }
@@ -1665,6 +1675,59 @@ mod tests {
         assert_eq!(calls[0].id, "call_2");
         assert_eq!(calls[0].function.name, "search");
         assert_eq!(calls[0].function.arguments, r#"{"query":"opencrab"}"#);
+    }
+
+    /// #502: cached_tokens が usage.input_tokens_details.cached_tokens にあるとき
+    /// cache_read_input_tokens に反映されること。
+    #[test]
+    fn test_parse_response_reads_cached_tokens() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-c\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,",
+            "\"total_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":80}}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.usage.prompt_tokens, 100);
+        assert_eq!(resp.usage.completion_tokens, 20);
+        assert_eq!(resp.usage.cache_read_input_tokens, 80);
+        // OpenAI はキャッシュ書き込みを別課金しないため常に 0。
+        assert_eq!(resp.usage.cache_creation_input_tokens, 0);
+    }
+
+    /// #502: input_tokens_details / cached_tokens が欠落しても panic せず 0 に倒れること。
+    #[test]
+    fn test_parse_response_missing_cached_tokens_defaults_to_zero() {
+        let provider = ChatGptProvider::new();
+        // details ごと欠落。
+        let sse_missing = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-m\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"total_tokens\":11}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse_missing, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.usage.prompt_tokens, 7);
+        assert_eq!(resp.usage.cache_read_input_tokens, 0);
+
+        // cached_tokens が null のケース。
+        let sse_null = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-n\",",
+            "\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":4,\"total_tokens\":11,",
+            "\"input_tokens_details\":{\"cached_tokens\":null}}}}\n",
+            "\n",
+        );
+        let resp_null = provider
+            .parse_response(sse_null, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp_null.usage.cache_read_input_tokens, 0);
     }
 
     // ── build_request_body field validation ──────────────────────────────────
