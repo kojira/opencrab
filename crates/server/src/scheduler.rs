@@ -275,9 +275,19 @@ impl Drop for InFlightGuard {
 /// `instructions_text` は `resolve_heartbeat_instructions` の合成結果。整形はここ 1 箇所で、
 /// 出力形式（SPEAK/LEARN/IDLE）の規約行もここに含める（`build_context` はこの文字列を
 /// system プロンプトへそのまま載せる）。
+///
+/// #515: 応答そのものがハートビートの**記録**になる（`heartbeat_turn::turn` が `result.response`
+/// を `speech`/`speaker_id=agent_id` で HB セッションへ残す）。以前は `IDLE` だけを返させていた
+/// ため記録が「IDLE」の 1 語（本番実測: `speech` 平均 14 バイト）で、何をしたか・なぜ見送ったかが
+/// 一切残らなかった。そこで規約に **IDLE の短い理由**（`IDLE: <理由>`）を足し、見送りの判断も
+/// エージェント自身の言葉で残るようにする。
+///
+/// **理由は機構が生成しない**（#501 の再来防止）。定型文をこちらで注入すると同じ文面が何百件も
+/// 並んで判断を歪めるため、規約で「自分の言葉で」「定型文の繰り返しを避けて」と促すだけにし、
+/// 文面は毎ターン LLM が文脈から書く。記録は文脈依存に変わり続けるので構造的に反復しない。
 fn format_heartbeat_prompt(channel_name: &str, instructions_text: &str) -> String {
     format!(
-        "[ハートビート] 現在の会話「{channel_name}」。{instructions_text}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。"
+        "[ハートビート] 現在の会話「{channel_name}」。{instructions_text}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。見送るときは 'IDLE: <理由>' の形で、なぜ今は動かないのかを自分の言葉で一言残す（例:「TL に新しい話題が無い」「直前に同じ話題へ返答済み」）。この応答自体が「何をした/しなかったか」の記録になるので、定型文の繰り返しは避け、1〜2 行で簡潔に。"
     )
 }
 
@@ -778,6 +788,28 @@ mod tests {
         // 出力形式の規約行は各文面に 1 本だけ。
         assert_eq!(nostr.matches("出力形式: SPEAK/LEARN/IDLE").count(), 1);
         assert_eq!(discord.matches("出力形式: SPEAK/LEARN/IDLE").count(), 1);
+    }
+
+    /// #515: 規約は **IDLE の短い理由**を求める（`IDLE: <理由>`）。ただし理由の文面は機構が
+    /// 生成しない（規約で「自分の言葉で」と促すだけ）——同じ定型文が並ぶ #501 の再来を構造的に
+    /// 防ぐため。ここでは「求めている」ことと「文面を注入していない」ことの両方を担保する。
+    #[test]
+    fn format_heartbeat_prompt_requests_a_self_written_idle_reason() {
+        let p = format_heartbeat_prompt("雑談", "静かにね");
+        assert!(
+            p.contains("IDLE: <理由>"),
+            "IDLE に理由を求める規約が無い: {p}"
+        );
+        assert!(
+            p.contains("自分の言葉で"),
+            "理由を自分の言葉で書かせる指示が無い（機構生成の定型文を避ける要）: {p}"
+        );
+        // 機構は具体的な理由「文」を注入しない: 例示（`「…」`）はあくまで例で、
+        // 規約自体が特定の理由を毎回書き込むわけではない。文面の生成は LLM 側。
+        assert!(
+            p.contains("定型文の繰り返しは避け"),
+            "定型文の反復を避ける明示が無い（#501 の再来防止の要）: {p}"
+        );
     }
 
     #[test]

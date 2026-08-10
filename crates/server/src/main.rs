@@ -124,28 +124,49 @@ fn record_heartbeat_channel_echo(
 ///
 /// **入力は応答テキストだけ**で、プロンプトに何を積んだかには依存しない（#404 で
 /// ハートビート文脈へ実会話を入れたが、この関数のシグネチャがその独立性を担保する）。
-/// 判定は既存挙動のまま: `SPEAK:` を含む最初の行の右側を取り、空なら Idle。
-/// `SPEAK:` が無く LEARN（大小無視）を含めば Learn、それ以外は Idle。
+/// 判定: `SPEAK:` を含む最初の行の右側を取り、空なら Idle。`SPEAK:` が無く
+/// **先頭語が LEARN の決定行**があれば Learn、それ以外は Idle。
+///
+/// #515: IDLE に短い理由（`IDLE: <理由>`）を残させるようにしたため、LEARN 判定を
+/// 「応答全体に LEARN の語を含むか（大小無視）」から**決定行の先頭語**に絞った。以前の
+/// ゆるい判定だと、`IDLE: 直前に LEARN した` のように**理由に LEARN の語が混じるだけ**で
+/// Learn へ化け、内省メモ書き込み（`apply_decision` の Learn 分岐）が誤発火していた。理由は
+/// 自由文なので、決定語は行頭でだけ拾う。
 fn parse_heartbeat_decision(response: &str) -> HeartbeatDecision {
     let response_text = response.trim();
-    if response_text.contains("SPEAK:") {
-        let content = response_text
-            .lines()
-            .find(|l| l.contains("SPEAK:"))
-            .and_then(|l| l.splitn(2, "SPEAK:").nth(1))
+    // SPEAK: <メッセージ> — 従来どおり、SPEAK: を含む最初の行の右側を発話にする
+    //（思考行が前置されても拾える）。空なら発話しない。
+    if let Some(line) = response_text.lines().find(|l| l.contains("SPEAK:")) {
+        let content = line
+            .split_once("SPEAK:")
+            .map(|x| x.1)
             .unwrap_or("")
             .trim()
             .to_string();
-        if !content.is_empty() {
-            HeartbeatDecision::Speak(content)
-        } else {
+        return if content.is_empty() {
             HeartbeatDecision::Idle
-        }
-    } else if response_text.to_uppercase().contains("LEARN") {
-        HeartbeatDecision::Learn
-    } else {
-        HeartbeatDecision::Idle
+        } else {
+            HeartbeatDecision::Speak(content)
+        };
     }
+    // 先頭語が LEARN の決定行があるときだけ Learn。`IDLE: <理由>` は理由の有無・中身に
+    // 関わらずここには落ちず（先頭語は IDLE）、既定の Idle になる。
+    if response_text.lines().any(is_learn_decision_line) {
+        return HeartbeatDecision::Learn;
+    }
+    HeartbeatDecision::Idle
+}
+
+/// 決定行としての LEARN 判定。行の**先頭語**（`:` か空白まで）が `LEARN`（大小無視）のときだけ真。
+///
+/// `IDLE: 直前に LEARN した` のように理由へ LEARN の語が混じる行は、先頭語が `IDLE` なので
+/// 除外される（`split` は最初の区切りまでを先頭語として取る）。
+fn is_learn_decision_line(line: &str) -> bool {
+    line.trim()
+        .split(|c: char| c == ':' || c.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .eq_ignore_ascii_case("LEARN")
 }
 
 /// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
@@ -790,6 +811,41 @@ mod tests {
         // （実会話側の引用が誤って発話へ昇格しないこと）。
         assert!(matches!(
             parse_heartbeat_decision("チャンネルでは雑談が続いている。今は黙っておく。"),
+            HeartbeatDecision::Idle
+        ));
+    }
+
+    /// #515: IDLE に理由を後置しても壊れない。
+    ///
+    /// - `IDLE: <理由>` は Idle のまま（理由が消えて記録が空にならない = 記録は `speech` へ
+    ///   別途残るが、決定はあくまで Idle）。
+    /// - **理由に LEARN の語が混じっても** Learn に化けない（旧 `contains("LEARN")` の誤判定を
+    ///   直した回帰テスト。ここを緩い実装へ戻すと Learn になり赤くなる = 内省メモ誤発火の検知）。
+    /// - 規約を守らない素の理由文（キーワード無し）でも Idle に落ちて壊れない。
+    #[test]
+    fn heartbeat_idle_reason_does_not_misclassify() {
+        assert!(matches!(
+            parse_heartbeat_decision("IDLE: TL に新しい話題が無い"),
+            HeartbeatDecision::Idle
+        ));
+        // 理由に LEARN の語が入っても Idle（決定語は先頭の IDLE）。
+        assert!(matches!(
+            parse_heartbeat_decision("IDLE: 直前に LEARN した話題なので今は黙る"),
+            HeartbeatDecision::Idle
+        ));
+        // 先頭語が LEARN の決定行なら従来どおり Learn（理由付きでも）。
+        assert!(matches!(
+            parse_heartbeat_decision("LEARN: 巡回の気づきをメモした"),
+            HeartbeatDecision::Learn
+        ));
+        // 素の LEARN（理由なし）も従来どおり Learn。
+        assert!(matches!(
+            parse_heartbeat_decision("LEARN"),
+            HeartbeatDecision::Learn
+        ));
+        // 規約を無視した素の理由文（キーワード無し）は Idle に落ちる。
+        assert!(matches!(
+            parse_heartbeat_decision("今は特に動く必要が無いと判断した"),
             HeartbeatDecision::Idle
         ));
     }
