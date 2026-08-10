@@ -626,7 +626,15 @@ fn set_llm_log_callback(
             prompt_tokens,
             completion_tokens,
             total_tokens,
-            error_code: log.error_str.as_ref().map(|_| "error".to_string()),
+            // #539: context 超過を専用コードで判別可能にする（それ以外は従来どおり総称
+            // "error"）。判定はプロバイダ文言の一致を集約した唯一の口を通す。
+            error_code: log.error_str.as_ref().map(|s| {
+                if opencrab_llm_types::is_context_window_error(s) {
+                    opencrab_llm_types::CONTEXT_WINDOW_EXCEEDED_ERROR_CODE.to_string()
+                } else {
+                    "error".to_string()
+                }
+            }),
             error_body: log.error_str.clone(),
             requested_at: Some(log.requested_at.clone()),
             trigger_message_id: log_trigger_message_id.clone(),

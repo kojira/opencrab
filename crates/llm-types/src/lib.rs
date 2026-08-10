@@ -402,6 +402,54 @@ impl std::fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
+/// `llm_logs.error_code` に入れる、context ウィンドウ超過を表す専用コード（#539）。
+///
+/// 従来は全エラーが総称 `"error"` で、context 超過（本番で 07-25〜08-10 に 54 件）を
+/// ダッシュボードやアラートから判別できず、`error_body` の文字列一致に頼るしかなかった。
+/// この定数を唯一の識別子として使う（読み手はこの値で分岐してよい）。
+pub const CONTEXT_WINDOW_EXCEEDED_ERROR_CODE: &str = "context_window_exceeded";
+
+/// context ウィンドウ超過（入力がモデル/経路の上限を超えて拒否された）エラーか（#539）。
+///
+/// **プロバイダ固有の拒否文言の一致はここ 1 箇所に集約する。** 他所（error_code の付与・
+/// アラート・リトライ判定など）でこの判定を再実装しない。判定材料は provider がそのまま
+/// 返す message（router が「All providers failed … [provider] <message>」へ集約した後の
+/// 文字列でも部分一致で拾える）。HTTP 400 は他の bad request とも共有で status だけでは
+/// 特定できないため、文言一致が実用上の唯一の軸。
+///
+/// マーカーは小文字で保持し、message も小文字化して部分一致で照合する。
+/// - `"exceeds the context window"`: chatgpt（Codex OAuth 経路）。**本番 54 件で検証済み**。
+/// - 残りは各社の既知文言だが**本番データには出現しておらず未検証**。誤検出を避けるため、
+///   token/context 超過に十分固有な文言だけを保守的に並べる（超過でないものを超過と
+///   誤判定する方が害が大きい: 気付けるはずのものが別名で埋もれる）。
+///
+/// **重複メモ（#539）**: context 関連の文字列リストは現在 2 箇所ある — ここ（超過の特定）と
+/// `opencrab_core::memory::daily_log_indexer` の `NON_RETRYABLE_PATTERNS`（リトライ可否の
+/// 判定）。**読み手（目的）が別なので今は統合しない。** 2 つまでは許容、**3 つ目が現れたら
+/// 統合のサイン**。
+pub fn is_context_window_error(message: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "exceeds the context window", // chatgpt / OpenAI Responses（本番検証済み）
+        "maximum context length",     // OpenAI classic ("maximum context length is N tokens")
+        "context length exceeded",    // OpenAI 互換の一部
+        "reduce the length of the messages", // 上記 OpenAI 文言の後段
+        "prompt is too long",         // Anthropic ("prompt is too long: N tokens > M maximum")
+        "exceeds the maximum number of tokens", // Google Gemini 系
+    ];
+    let lower = message.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
+impl LlmError {
+    /// この API エラーが context ウィンドウ超過か（#539）。message で判定する
+    /// （[`is_context_window_error`]）。status だけでは他の 400 と区別できない。
+    pub fn is_context_window_exceeded(&self) -> bool {
+        match self {
+            LlmError::Http { message, .. } => is_context_window_error(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +474,48 @@ mod tests {
     fn test_text_content() {
         let msg = Message::user("hello");
         assert_eq!(msg.text_content(), Some("hello"));
+    }
+
+    #[test]
+    fn context_window_error_matches_real_chatgpt_body() {
+        // 本番 `llm_logs.error_body` の実形（router が集約した文字列）。
+        let real = "All providers failed for model 'gpt-5.6-sol' (1 tried):\n  \
+                    [chatgpt] ChatGPT API error: Your input exceeds the context window of this model.";
+        assert!(is_context_window_error(real));
+        // 大小無視。
+        assert!(is_context_window_error(
+            "PROMPT IS TOO LONG: 210000 tokens > 200000 maximum"
+        ));
+    }
+
+    #[test]
+    fn context_window_error_does_not_match_unrelated_failures() {
+        // fallback 枯渇（本番の非超過エラーの典型）を context 超過と誤判定しない。
+        assert!(!is_context_window_error(
+            "All providers failed for model 'gpt-5.5'. Tried: chatgpt + fallback chain [\"ollama\"]"
+        ));
+        assert!(!is_context_window_error(
+            "ChatGPT API error: rate limit exceeded"
+        ));
+        assert!(!is_context_window_error("request timed out"));
+        assert!(!is_context_window_error(""));
+    }
+
+    #[test]
+    fn llm_error_context_window_helper_uses_message() {
+        let overflow = LlmError::Http {
+            provider: "chatgpt",
+            status: 400,
+            message: "Your input exceeds the context window of this model.".to_string(),
+        };
+        assert!(overflow.is_context_window_exceeded());
+        // 同じ 400 でも別の bad request は超過ではない（status だけで決めない）。
+        let other_400 = LlmError::Http {
+            provider: "chatgpt",
+            status: 400,
+            message: "invalid_request_error: unknown parameter".to_string(),
+        };
+        assert!(!other_400.is_context_window_exceeded());
     }
 
     #[test]
