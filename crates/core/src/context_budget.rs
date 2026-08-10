@@ -16,6 +16,38 @@ pub fn split_llm_model_spec(full: &str) -> (&str, &str) {
 /// context_window が不明な場合のデフォルト予算（トークン数）。
 const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
 
+/// provider ごとの「会話予算の保守的な天井」（トークン数）。`None` は天井なし（#535）。
+///
+/// # なぜ天井が要るか
+/// [`compute_context_budget`] は `model_pricing.context_window × compaction_ratio` を
+/// 返すだけで、その値が**実際にバックエンドへ送れる量**を超えていないかを一切見ていなかった。
+/// 2026-08-10、`chatgpt` の `context_window` を 400,000 → 1,050,000（API カタログ値）へ
+/// 上げたところ、予算 = 1,050,000 × 0.5 = 525,000 になり、実際の履歴（約 465,000）が
+/// 予算内に収まってコンパクションが働かず、毎リクエストが Codex OAuth 経路の実上限で
+/// 拒否され、heartbeat が数時間サイレントに停止した（`llm_logs.error_body` に
+/// "Your input exceeds the context window of this model." が 07-25〜08-10 で 54 件残って
+/// いたが誰も見ていなかった）。天井が無いと `model_pricing` を触るたびに再発する。
+///
+/// # 350,000 の由来（後から検証できるように）
+/// `chatgpt` provider が叩く **Codex OAuth 経路の実測上限は 371,678 ok / 約 371,864 fail
+/// （±186）**。そこから出力予約（`max_output_tokens`）・system prompt・tool 定義ぶんを
+/// 引いた**保守値**が 350,000。**正確な上限を当てることが目的ではなく、100% 失敗する
+/// 予算を返さない天井が存在することが目的**なので、余裕を多めに取ってある。実上限が
+/// 変わったらこの数字を更新する。
+///
+/// # provider 粒度であって経路粒度ではない（将来の落とし穴・必読）
+/// 実上限は本来 `(provider, 認証経路)` の組で決まる。ここが provider 粒度で済んでいるのは、
+/// **現状 `chatgpt` provider = Codex OAuth 経路が 1:1 だから**にすぎない。将来 `chatgpt`
+/// provider から**真の API 経路（カタログ 1,050,000）**を使う口を足したら、この天井は
+/// その経路を過剰に絞る。そのときは経路を区別できる形へ持ち替えること。静的値が実測から
+/// ズレ始めたら「拒否レスポンスから学習して下げる」動的方式（#535 の次段）へ移す。
+fn backend_budget_ceiling(provider: &str) -> Option<usize> {
+    match provider {
+        "chatgpt" => Some(350_000),
+        _ => None,
+    }
+}
+
 /// 未登録モデルを設定しようとしたときのエラーメッセージ（#412）。
 ///
 /// **登録方法まで書く。** 拒否だけして先へ進む手段を示さないと、「設定できないが
@@ -184,7 +216,29 @@ pub fn compute_context_budget(
             DEFAULT_CONTEXT_BUDGET_TOKENS
         }
     };
-    ((context_window as f64) * compaction_ratio) as usize
+    let budget = ((context_window as f64) * compaction_ratio) as usize;
+    // #535: 予算が provider の実上限（保守天井）を超えていたら頭を抑える。
+    // 天井を超える予算はコンパクションが働かず、送っても 100% 拒否される。
+    // 噛んだときだけ WARN 1 回（毎ターン通る経路なので抑止する）。
+    match backend_budget_ceiling(&provider) {
+        Some(ceiling) if budget > ceiling => {
+            if warn_once_for_model("over_backend_ceiling", &provider, &model) {
+                tracing::warn!(
+                    provider = %provider,
+                    model = %model,
+                    budget,
+                    ceiling,
+                    "context budget ({budget}) exceeds the conservative backend ceiling \
+                     ({ceiling}); capping. The configured model_pricing.context_window implies \
+                     a budget larger than what the backend accepts, so requests would be \
+                     rejected. Lower model_pricing.context_window, or raise the ceiling in \
+                     backend_budget_ceiling if the real limit changed."
+                );
+            }
+            ceiling
+        }
+        _ => budget,
+    }
 }
 
 /// 未登録モデルを設定時に弾き、実行時は既定へ落ちても止めない（#412）。
@@ -339,5 +393,57 @@ mod model_context_window_gate_tests {
             compute_context_budget(&conn, "p1", "m1", 0.5),
             super::DEFAULT_CONTEXT_BUDGET_TOKENS / 2
         );
+    }
+
+    /// #535 の障害そのものの再現：`chatgpt` の `context_window` を 1,050,000（API カタログ値）
+    /// にしたとき、予算 = 1,050,000 × 0.5 = 525,000 になり、実上限（Codex OAuth 約 371,864）を
+    /// 超える。**この設定で毎リクエストが拒否され heartbeat が数時間止まった。** 天井
+    /// （350,000）で頭を抑え、100% 失敗する予算を返さないことを固定する。
+    #[test]
+    fn chatgpt_catalog_window_is_capped_to_backend_ceiling() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "chatgpt", "gpt-5.6-sol", Some(1_050_000));
+        // 素の計算なら 525,000。天井で 350,000 に丸められる。
+        assert_eq!(
+            compute_context_budget(&conn, "chatgpt", "gpt-5.6-sol", 0.5),
+            350_000
+        );
+    }
+
+    /// 天井の無い provider は従来どおり `context_window × ratio`（頭を抑えない）。
+    #[test]
+    fn provider_without_ceiling_is_unchanged() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "p1", "m1", Some(1_050_000));
+        assert_eq!(compute_context_budget(&conn, "p1", "m1", 0.5), 525_000);
+    }
+
+    /// 天井以下の予算は素通り（現状の運用値 350,000 × 0.5 = 175,000 は変わらない）。
+    /// 天井は「超えたときだけ」効く。
+    #[test]
+    fn chatgpt_budget_below_ceiling_passes_through() {
+        let conn = opencrab_db::init_memory().unwrap();
+        register(&conn, "chatgpt", "gpt-5.6-sol", Some(350_000));
+        assert_eq!(
+            compute_context_budget(&conn, "chatgpt", "gpt-5.6-sol", 0.5),
+            175_000
+        );
+    }
+
+    /// 天井が噛んだときの WARN は (provider, model) ごとに 1 回だけ。毎ターン通る経路
+    /// なので、抑止が効かないとログが埋まる。`over_before_ceiling` の kind で固定する。
+    #[test]
+    fn ceiling_warn_is_emitted_once() {
+        // warn_once の抑止は種別＋(provider, model) 単位。ここでは天井超えの kind を直接叩く。
+        assert!(super::warn_once_for_model(
+            "over_backend_ceiling",
+            "ceiling-warn-p",
+            "ceiling-warn-m"
+        ));
+        assert!(!super::warn_once_for_model(
+            "over_backend_ceiling",
+            "ceiling-warn-p",
+            "ceiling-warn-m"
+        ));
     }
 }
