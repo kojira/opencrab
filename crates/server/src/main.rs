@@ -127,16 +127,25 @@ fn record_heartbeat_channel_echo(
 /// 判定: `SPEAK:` を含む最初の行の右側を取り、空なら Idle。`SPEAK:` が無く
 /// **先頭語が LEARN の決定行**があれば Learn、それ以外は Idle。
 ///
-/// #515: IDLE に短い理由（`IDLE: <理由>`）を残させるようにしたため、LEARN 判定を
-/// 「応答全体に LEARN の語を含むか（大小無視）」から**決定行の先頭語**に絞った。以前の
-/// ゆるい判定だと、`IDLE: 直前に LEARN した` のように**理由に LEARN の語が混じるだけ**で
-/// Learn へ化け、内省メモ書き込み（`apply_decision` の Learn 分岐）が誤発火していた。理由は
-/// 自由文なので、決定語は行頭でだけ拾う。
+/// #515: IDLE に短い理由（`IDLE: <理由>`）を残させるようにしたため、決定語の判定を
+/// **決定行の先頭語**に寄せた。理由が自由文になり、決定行の中に他の決定語が現れる余地が
+/// 生まれたため:
+/// - **LEARN**: 「応答全体に LEARN の語を含むか（大小無視）」から先頭語判定へ絞った。
+///   `IDLE: 直前に LEARN した` で内省メモ書き込み（`apply_decision` の Learn 分岐）が
+///   誤発火するのを防ぐ。
+/// - **SPEAK**: `SPEAK:` を含む最初の行を拾う緩さ（**思考行を前置しても拾う**という既存の
+///   意図）は保つが、**IDLE / LEARN の決定行の内側にある `SPEAK:` は拾わない**。
+///   `IDLE: 今は SPEAK: するほどの話題がない` の右側が発話として**外部チャンネルへ配送**
+///   されるのを防ぐ（LEARN の誤発火＝内部メモより結果が重い＝取り消せない外部投稿）。
 fn parse_heartbeat_decision(response: &str) -> HeartbeatDecision {
     let response_text = response.trim();
-    // SPEAK: <メッセージ> — 従来どおり、SPEAK: を含む最初の行の右側を発話にする
-    //（思考行が前置されても拾える）。空なら発話しない。
-    if let Some(line) = response_text.lines().find(|l| l.contains("SPEAK:")) {
+    // SPEAK: <メッセージ> — SPEAK: を含む最初の行の右側を発話にする（思考行が前置されても
+    // 拾う）。ただし **IDLE / LEARN の決定行**（先頭語が IDLE/LEARN）の内側にある SPEAK: は
+    // その決定の理由の一部なので拾わない。空なら発話しない。
+    if let Some(line) = response_text
+        .lines()
+        .find(|l| l.contains("SPEAK:") && !leads_with_idle_or_learn(l))
+    {
         let content = line
             .split_once("SPEAK:")
             .map(|x| x.1)
@@ -157,16 +166,27 @@ fn parse_heartbeat_decision(response: &str) -> HeartbeatDecision {
     HeartbeatDecision::Idle
 }
 
-/// 決定行としての LEARN 判定。行の**先頭語**（`:` か空白まで）が `LEARN`（大小無視）のときだけ真。
-///
-/// `IDLE: 直前に LEARN した` のように理由へ LEARN の語が混じる行は、先頭語が `IDLE` なので
-/// 除外される（`split` は最初の区切りまでを先頭語として取る）。
-fn is_learn_decision_line(line: &str) -> bool {
+/// 行の**先頭語**（`:` か空白までの最初のトークン）。
+fn leading_keyword(line: &str) -> &str {
     line.trim()
         .split(|c: char| c == ':' || c.is_whitespace())
         .next()
         .unwrap_or("")
-        .eq_ignore_ascii_case("LEARN")
+}
+
+/// 決定行としての LEARN 判定。先頭語が `LEARN`（大小無視）のときだけ真。
+///
+/// `IDLE: 直前に LEARN した` のように理由へ LEARN の語が混じる行は、先頭語が `IDLE` なので
+/// 除外される。
+fn is_learn_decision_line(line: &str) -> bool {
+    leading_keyword(line).eq_ignore_ascii_case("LEARN")
+}
+
+/// IDLE / LEARN の決定行か（先頭語が IDLE か LEARN）。SPEAK 判定でこれらの行を除外し、
+/// 理由文に紛れた `SPEAK:` を発話へ昇格させないために使う。
+fn leads_with_idle_or_learn(line: &str) -> bool {
+    let kw = leading_keyword(line);
+    kw.eq_ignore_ascii_case("IDLE") || kw.eq_ignore_ascii_case("LEARN")
 }
 
 /// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
@@ -847,6 +867,37 @@ mod tests {
         assert!(matches!(
             parse_heartbeat_decision("今は特に動く必要が無いと判断した"),
             HeartbeatDecision::Idle
+        ));
+    }
+
+    /// #515（SPEAK 側の非対称の是正）: **IDLE の理由文に紛れた `SPEAK:` を発話へ昇格させない**。
+    ///
+    /// 理由を自由文にしたことで `IDLE: 今は SPEAK: …` のような理由が書ける余地が生まれた。旧
+    /// 実装（全行 `contains("SPEAK:")`）だと右側が `Speak(...)` になり**外部チャンネルへ配送**
+    /// される（取り消せない）。ここを緩い実装へ戻すとこのテストが赤くなる（＝外部誤投稿の検知）。
+    ///
+    /// 同時に、**思考行を前置してから `SPEAK:` を書く**既存の意図は保つ（doc 明記）。
+    #[test]
+    fn speak_inside_an_idle_reason_is_not_promoted_to_speech() {
+        // 本題: IDLE の決定行の内側の SPEAK: は発話にしない。
+        assert!(matches!(
+            parse_heartbeat_decision("IDLE: 今は SPEAK: するほどの話題がない"),
+            HeartbeatDecision::Idle
+        ));
+        // LEARN の決定行の内側の SPEAK: も同様（先頭語が LEARN なので発話にしない → Learn）。
+        assert!(matches!(
+            parse_heartbeat_decision("LEARN: SPEAK: しようか迷ったが学びに回す"),
+            HeartbeatDecision::Learn
+        ));
+        // 既存の意図は不変: 思考行を前置してから SPEAK: を書くと発話として拾う。
+        assert!(matches!(
+            parse_heartbeat_decision("少し迷った\nSPEAK: 新機能を告知した"),
+            HeartbeatDecision::Speak(c) if c == "新機能を告知した"
+        ));
+        // 先頭が SPEAK の決定行はそのまま発話（IDLE/LEARN 除外の巻き添えにしない）。
+        assert!(matches!(
+            parse_heartbeat_decision("SPEAK: おはよう"),
+            HeartbeatDecision::Speak(c) if c == "おはよう"
         ));
     }
 
