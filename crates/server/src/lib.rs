@@ -181,6 +181,15 @@ pub struct AppState {
     /// ループが参照する。秘密（source secret / Bearer）を含むため、ログや API 応答へ
     /// そのまま出さないこと。
     pub intake: Arc<config::IntakeConfig>,
+    /// 受信箱消化ループ（`intake_process`）の起床通知（#499）。
+    ///
+    /// `scheduler_wake` と同じ `Notify` パターン。webhook（`POST /api/hooks/{source}`）で
+    /// **新規イベントを積んだ直後**に鳴らし、消化ループがポーリング間隔を待たずに即処理する。
+    /// **payload を載せない**（取りこぼしてもポーリングが安全網として拾う自己回復）。消化ループは
+    /// 単一タスクで inbox を直列に処理するため、通知が処理中に複数来ても permit は 1 つに畳まれ、
+    /// 現在の処理が終わったあと 1 回だけ再消化される（多重ターンにならない）。受信箱が空なら
+    /// 消化ループ側の非空ゲートで LLM を呼ばない（空振り wake は no-op）。
+    pub intake_wake: Arc<tokio::sync::Notify>,
     /// 中央ハートビートスケジューラの起床通知（#437 / #439 / 設計 §3.5）。
     ///
     /// スケジューラは `notified()` で起きて DB から発火予定を組み直す（rebuild）。
@@ -253,6 +262,7 @@ pub(crate) fn test_app_state() -> AppState {
         loop_restart_enabled: false,
         index_build_inflight: Arc::new(dashmap::DashMap::new()),
         intake: Arc::new(config::IntakeConfig::default()),
+        intake_wake: Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),

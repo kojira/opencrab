@@ -159,7 +159,9 @@ Base URL: `http://localhost:3000`
 **信頼性（catch-up）**: webhook は at-most-once。停止中に落ちたイベントは source 側の一覧 API
 を真実として起動時 + 定期（`catch_up_interval_secs`）にポーリングし、未処理分を補充する。
 
-**消化**: `process_interval_secs` ごとに未処理を確認。**未処理が空なら LLM を呼ばない**。
+**消化**: 新規イベントを積んだ直後に消化ループを即起こし（`process_interval_secs` を待たない・
+issue #499）、`process_interval_secs` ごとのポーリングは取りこぼし・再試行の安全網として残す。
+いずれの起動でも**未処理が空なら LLM を呼ばない**。
 
 ---
 

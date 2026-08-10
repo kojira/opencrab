@@ -291,6 +291,9 @@ async fn main() -> anyhow::Result<()> {
         // 中央スケジューラの起床通知（#437 / #439）。発火ターン完了・global config 変更に
         // 加え、set_my_heartbeat（PR3）からも鳴らして即時反映させる。
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        // 受信箱消化ループの起床通知（#499）。webhook が新規イベントを積んだ直後に鳴らし、
+        // ポーリング間隔を待たずに即消化させる（ポーリングは安全網として残す）。
+        intake_wake: Arc::new(tokio::sync::Notify::new()),
         // live G を読む口（#394 / 設計 §13.1）。scheduler と同一の watch 源。
         heartbeat_config_rx: heartbeat_config_rx.clone(),
     };

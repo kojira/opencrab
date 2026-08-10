@@ -76,6 +76,11 @@ pub async fn receive_hook(
     match intake::route_and_enqueue(&state, &source, &event) {
         Ok(EnqueueOutcome::Enqueued) => {
             tracing::debug!(source, event_type = %event.event_type, "intake: 受信箱に積んだ");
+            // 新規イベントを積んだので消化ループを即起こす（#499）。ポーリング間隔ぶんの無応答を
+            // 消す。dedup（既存）・NoRoute では何も積まれていないので鳴らさない（空振り wake で
+            // 無駄な走査をしない）。`Notify` は待機者が居なくても permit を 1 つ記憶するので、
+            // enqueue → notify の直後にループが待機へ入っても取りこぼさない（scheduler と同流儀）。
+            state.intake_wake.notify_one();
             StatusCode::ACCEPTED
         }
         Ok(EnqueueOutcome::Duplicate) => {
@@ -267,6 +272,67 @@ mod tests {
         .await;
         assert_eq!(code, StatusCode::ACCEPTED);
         assert_eq!(unprocessed(&state, "scout"), 0);
+    }
+
+    /// `intake_wake` に permit が記憶されている（=鳴らされた）かを、消費して判定する。
+    /// permit があれば `notified()` は即完了して true。無ければ 50ms で timeout し false。
+    async fn was_notified(wake: &tokio::sync::Notify) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(50), wake.notified())
+            .await
+            .is_ok()
+    }
+
+    /// #499: 新規に積んだときだけ消化ループを即起こす。NoRoute・dedup（既存）では何も積まれて
+    /// いないので鳴らさない（空振り wake を作らない）。notify を消すと (2) が timeout で赤くなる。
+    #[tokio::test]
+    async fn enqueue_notifies_intake_wake_but_no_route_or_duplicate_does_not() {
+        let state = state_with_route();
+
+        // (1) route の無い event_type（NoRoute）→ 受理はするが積まないので鳴らさない。
+        let body = Bytes::from_static(b"{\"type\":\"chat.message\",\"data\":{\"id\":9}}");
+        let sig = sign(SECRET, &body);
+        let code = receive_hook(
+            State(state.clone()),
+            Path("omoikane".to_string()),
+            headers_with(Some(&sig)),
+            body,
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED);
+        assert!(
+            !was_notified(&state.intake_wake).await,
+            "NoRoute では何も積まれないので wake を鳴らさない"
+        );
+
+        // (2) 新規イベントを積む → 消化ループを即起こす（#499 の核心）。
+        let body = Bytes::from_static(b"{\"type\":\"comment.created\",\"data\":{\"id\":42}}");
+        let sig = sign(SECRET, &body);
+        let code = receive_hook(
+            State(state.clone()),
+            Path("omoikane".to_string()),
+            headers_with(Some(&sig)),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED);
+        assert!(
+            was_notified(&state.intake_wake).await,
+            "新規 enqueue でポーリングを待たず wake を鳴らす（#499）"
+        );
+
+        // (3) 同一イベントの再送（dedup）→ 積み増さないので鳴らさない。
+        let code = receive_hook(
+            State(state.clone()),
+            Path("omoikane".to_string()),
+            headers_with(Some(&sig)),
+            body,
+        )
+        .await;
+        assert_eq!(code, StatusCode::ACCEPTED);
+        assert!(
+            !was_notified(&state.intake_wake).await,
+            "dedup（既存）では積まないので wake を鳴らさない"
+        );
     }
 
     #[tokio::test]
