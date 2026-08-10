@@ -15,6 +15,8 @@
 pub mod a2ui;
 pub mod agent;
 pub mod caller;
+pub mod context_budget;
+pub mod conversation;
 pub mod engine;
 pub mod evaluator;
 pub mod heartbeat;
