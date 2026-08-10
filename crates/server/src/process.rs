@@ -251,6 +251,9 @@ pub fn build_agent_context(
     // Silent Reply は「相手が Bot か」でシステムが黙らせない。判断はエージェントへ委ね、
     // 沈黙は会話内容（完結した / 新しい情報が無い）で決めさせる（#486・理念: システムは
     // 相手が bot か判定しない）。ループ防止（元の意図）は種別ではなく内容の条件で残す。
+    // ここに自己重複の沈黙条件も足す（案 A）が、これは**補助**にすぎない。プロンプト層の
+    // ガードは過去に無視された実績（旧ガード文入りプロンプト 936 本でも bot は返し合った）が
+    // あるため、確実な抑止は機械的な案 B（`transcript::is_self_duplicate`）が本命。
     let prompt = format!(
         "You are {agent_name} ({persona}).\n\
          \n\
@@ -276,6 +279,8 @@ pub fn build_agent_context(
          - グループチャットで自分に関係ない会話の場合\n\
          - 既に話が完結している場合、または同じ話題の往復が続くだけで新しい情報を足せない場合\
          （相手が Bot でも人でも同じ基準で判断する。Bot だからという理由では黙らない）\n\
+         - 自分の直近の発言が既に同じ内容をカバーしている場合は NO_REPLY。\
+         自分が既に言ったことを繰り返さず、新しい情報がある時だけ返す\n\
          ただし、{req_marker} で始まるメッセージにはレビュアーとして応答し、\
          自分が依頼したレビューへの {reply_marker} で始まる返信は記録・対応すること\
          （下記 Peer Review セクションに従う）。\n\
@@ -2404,6 +2409,12 @@ mod no_forced_reply_tests {
         assert!(
             !prompt.contains("他のBotが話している場合"),
             "peer-type silence condition still present:\n{prompt}"
+        );
+
+        // #486 の穴埋め: 自己参照（自分が既に言ったか）の沈黙条件が通常ターンにも入っていること。
+        assert!(
+            prompt.contains("自分が既に言ったことを繰り返さず"),
+            "self-reference silence condition missing:\n{prompt}"
         );
     }
 }
