@@ -62,10 +62,19 @@ fn normalize_keywords(keywords: Vec<String>, fallback_title: &str) -> Vec<String
 /// heartbeat セッションの speech 行が「エージェント自身の idle（静観）応答」かどうかを判定する。
 ///
 /// 判定基準は発生源（`crates/server/src/main.rs` の `HeartbeatDecision` 分類）と
-/// 揃える: 応答本文に非空の `SPEAK:` があれば発話、`LEARN` を含めば学習、
-/// どちらでもなければ idle。索引側で本文リテラル `IDLE` を直接マッチさせると
-/// 生成タイトルの揺れや本文の微差で取りこぼすため、「実のある decision に
-/// 分類されないこと」をもって idle とみなす。
+/// 揃える: 応答本文に非空の `SPEAK:` があれば発話、`LEARN` を含めば学習。
+///
+/// #517: 残り（SPEAK/LEARN でない）は従来「一律 idle」としていたが、#515 で IDLE の
+/// 記録が「`IDLE: <なぜ見送ったか>`」という**本人の言葉の理由**を持つようになった
+/// （`heartbeat_turn` が SPEAK/LEARN/IDLE いずれでも応答本文を 1 行残す）。理由つきの
+/// 記録は材料として意味があるので落とさない。**中身があるか**で判定する:
+/// 先頭の全大文字マーカー（`IDLE` / `NO_REPLY` 等 = `[A-Z_]+` と続く任意の `:`）を剥いで
+/// なお非空の本文が残れば「実あり」として残し、剥いだ後が空（無内容の `IDLE` 等・
+/// pre-#515 の 2,991 件）だけを idle ノイズとして除外する。
+///
+/// この変更は**除外を狭める方向のみ**（新 idle 集合 ⊆ 旧 idle 集合）。SPEAK/LEARN の
+/// 扱いは不変。マーカー集合を列挙せず「全大文字トークン + 中身の有無」で見るので、
+/// 生成タイトルの揺れや将来のマーカー追加に強い。
 ///
 /// **話者ガード**: idle として捨ててよいのは `speaker_id == agent_id`、つまり
 /// エージェント自身の応答行に限る。本番のハートビートセッションは実測で
@@ -98,7 +107,29 @@ fn is_idle_heartbeat_speech(log: &opencrab_db::queries::SessionLogRow, agent_id:
     if text.to_uppercase().contains("LEARN") {
         return false;
     }
-    true
+    // #517: 先頭の全大文字マーカーを剥いで中身が残れば実あり（`IDLE: <理由>` を残す）。
+    // 無内容の裸マーカー（`IDLE` 等）だけが idle ノイズ。
+    idle_decision_has_no_reason(text)
+}
+
+/// 先頭の全大文字決定マーカー（`IDLE` / `NO_REPLY` 等 = `[A-Z_]+`）と続く任意の `:` を
+/// 剥いで、残りが空白のみか（＝理由本文が無い裸マーカー）を返す（#517）。
+///
+/// マーカーが無い本文（CJK 等で始まる散文）は剥がすものが無く、非空なら `false`。
+/// これにより「中身があるか」で idle を判定し、`IDLE: <理由>`・改行後に本文が続く
+/// `IDLE\n\n…`・マーカー無しの散文はすべて残し、無内容の `IDLE` / `NO_REPLY` /
+/// 空文字だけを true（＝ idle ノイズ）とする。
+fn idle_decision_has_no_reason(text: &str) -> bool {
+    let t = text.trim();
+    // 先頭の連続する [A-Z_] をマーカーとして数える（ASCII 大文字とアンダースコアのみ）。
+    let marker_len = t
+        .bytes()
+        .take_while(|b| b.is_ascii_uppercase() || *b == b'_')
+        .count();
+    // マーカーが実在するときだけ剥ぐ（無ければ本文全体をそのまま見る）。
+    let rest = &t[marker_len..];
+    let rest = rest.strip_prefix(':').unwrap_or(rest);
+    rest.trim().is_empty()
 }
 
 /// heartbeat セッションで「何もしていない tick」を構成するノイズ行かどうか。
@@ -2002,6 +2033,73 @@ mod tests {
         ));
     }
 
+    /// #517: #515 以降、IDLE の記録は「`IDLE: <なぜ見送ったか>`」と本人の言葉の理由を持つ。
+    /// 理由つきは材料として意味があるので**索引に残す**。無内容の裸マーカーだけを除外する。
+    /// サンプルは本番 DB（`?mode=ro`）の実データから採取。
+    #[test]
+    fn idle_speech_keeps_reasoned_records_517() {
+        let mk = |content: &str| opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: "a".to_string(),
+            session_id: "heartbeat-a-c".to_string(),
+            log_type: "speech".to_string(),
+            content: content.to_string(),
+            speaker_id: Some("a".to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+
+        // 無内容の裸マーカー・空文字は従来どおり idle（除外）— 回帰ガード。
+        assert!(is_idle_heartbeat_speech(&mk("IDLE"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("  IDLE  "), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("IDLE:"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("IDLE:   "), "a"));
+        assert!(
+            is_idle_heartbeat_speech(&mk("NO_REPLY"), "a"),
+            "裸の決定マーカーは除外"
+        );
+        assert!(is_idle_heartbeat_speech(&mk(""), "a"), "空文字は除外");
+
+        // #515 の理由つき IDLE（本番実サンプル）は実ありとして残す。
+        for s in [
+            "IDLE: 自分自身を直す開発ツールの再帰ネタで、TLへ自然に混ざった。",
+            "IDLE: まだ30分経っていない。静かに待つ。",
+            "IDLE: TLの新着を絞り込み中。",
+            // 改行後に本文が続く形（マーカー行の後に散文）も残す。
+            "IDLE\n\n特に話題もないしのんびりしてるよ〜☀️",
+        ] {
+            assert!(
+                !is_idle_heartbeat_speech(&mk(s), "a"),
+                "理由つき IDLE を落としている: {s}"
+            );
+        }
+
+        // マーカー無しの散文（本番実サンプル）も中身があるので残す。
+        assert!(!is_idle_heartbeat_speech(&mk("確認中だよ〜。"), "a"));
+
+        // SPEAK/LEARN の扱いは不変。
+        assert!(!is_idle_heartbeat_speech(&mk("SPEAK: おはよう"), "a"));
+        assert!(is_idle_heartbeat_speech(&mk("SPEAK:"), "a"));
+        assert!(!is_idle_heartbeat_speech(&mk("LEARN"), "a"));
+    }
+
+    /// #517: 理由判定ヘルパの単体。先頭全大文字マーカー＋任意の `:` を剥いだ残りの有無で決める。
+    #[test]
+    fn idle_decision_has_no_reason_unit_517() {
+        // 裸マーカー / 空 → 理由なし（true）。
+        assert!(idle_decision_has_no_reason("IDLE"));
+        assert!(idle_decision_has_no_reason("IDLE:"));
+        assert!(idle_decision_has_no_reason("NO_REPLY"));
+        assert!(idle_decision_has_no_reason("  IDLE  "));
+        assert!(idle_decision_has_no_reason(""));
+        // 理由つき / 散文 → 理由あり（false）。
+        assert!(!idle_decision_has_no_reason("IDLE: 理由"));
+        assert!(!idle_decision_has_no_reason("IDLE:理由"));
+        assert!(!idle_decision_has_no_reason("IDLE\n\n本文"));
+        assert!(!idle_decision_has_no_reason("確認中だよ〜。"));
+    }
+
     /// is_heartbeat_noise: プロンプト scaffolding と idle speech を除き、
     /// tool/inner_voice/実ある speech は残す。
     #[test]
@@ -2184,9 +2282,13 @@ mod tests {
     async fn test_heartbeat_mixed_creates_topic_excluding_idle_material() {
         let db_conn = opencrab_db::init_memory().unwrap();
         let sid = "heartbeat-agent-1-chan-1";
-        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE静観marker");
+        // #517: idle 行は実在形の裸マーカー（`IDLE`）を使う。以前は "IDLE静観marker" と
+        // マーカーに内容を直結した合成文字列だったが、#517 で「中身があるか」判定に変えた
+        // 結果その形は理由つき扱いで残る（意図どおり）。無内容の裸 idle が材料から除かれる
+        // ことをここで担保する（理由つき idle を残すことは unit テストが担保）。
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
         insert_heartbeat_speech(&db_conn, "agent-1", sid, "SPEAK: 実のある発言unique");
-        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE静観marker");
+        insert_heartbeat_speech(&db_conn, "agent-1", sid, "IDLE");
         let conn = opencrab_db::Db::from_connection(db_conn);
 
         let last_request = Arc::new(Mutex::new(None));
@@ -2221,8 +2323,8 @@ mod tests {
             "実のある行は材料に含まれる"
         );
         assert!(
-            !prompt.contains("静観marker"),
-            "idle 行は要約材料から除かれる"
+            !prompt.contains("IDLE"),
+            "無内容の裸 idle 行は要約材料から除かれる"
         );
     }
 
