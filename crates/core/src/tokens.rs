@@ -63,6 +63,10 @@ pub const BOUNDED_TOKENIZE_WINDOW: usize = 2 * 1024;
 /// ことはない。退避判定はこの bool しか使わず、退避されない側に載せる producer は上限に対し
 /// 余白（`RANGE_CONTENT_TOKEN_CEILING` の `-400` 等）を持つので、境界での上振れは無害。
 ///
+/// **窓サイズはトレードオフ**: 窓を小さくすると 1 回の encode は軽くなるが、跨ぐ境界の数が
+/// 増えて上振れも増える。[`BOUNDED_TOKENIZE_WINDOW`]（2 KiB）は、その上振れが producer の
+/// 余白（400〜500 トークン）に収まる範囲で選んでいる。
+///
 /// 表示用の「約 N トークン」など**数を返したい**用途には [`estimate_tokens_bounded`] を使う。
 pub fn tokens_reach_limit(s: &str, limit: usize) -> bool {
     if limit == 0 {

@@ -62,6 +62,15 @@ use std::path::Path;
 /// すると同じ値でも言語・エンコードでバイト量がぶれ、トークンで上限内に収めた本文が
 /// バイトで退避され、これら producer の保証が破れる。#576 で消したのは「判定の単位」では
 /// なく「全体を一括トークナイズすること」だけ（[`exceeds_limit`] を参照）。
+///
+/// **producer は「この上限そのもの」ではなく、余白を引いた予算に出力を収めること。**
+/// 判定（[`exceeds_limit`] → [`crate::tokens::tokens_reach_limit`]）は入力を窓分割して数える
+/// ため、窓境界で累計が数トークン**上振れ**する（最悪見積もりでも合計 100 トークン未満）。
+/// 上限ちょうどを出力 cap に採るとこの上振れが刺さって退避されうる。実際に本文を切っている
+/// のは余白付きの `HISTORY_RESULT_TOKEN_BUDGET`（-500）/ `RANGE_CONTENT_TOKEN_CEILING`（-400）
+/// で、`INLINE_LIMIT_TOKENS`（余白ゼロ＝上限そのもの）は名前に反して cap ではなく LLM への
+/// **表示値**（`fits` 判定と表示フィールドにしか使われない）。将来ここへ「上限そのもの」を
+/// cap に採る producer を足さないこと。
 pub const TOOL_RESULT_TOKEN_LIMIT: usize = 2_500;
 
 /// 退避ファイル名 1 コンポーネント（session_id / tool_call_id）の上限バイト数。
