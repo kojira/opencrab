@@ -87,7 +87,7 @@ fn compute_ws_read(
         // トークン近似（固まらないように）。
         let content = ws.read_file(path)?;
         let total_bytes = content.len();
-        let estimated_tokens = estimate_tokens_bounded(&content, total_bytes);
+        let estimated_tokens = opencrab_core::tokens::estimate_tokens_bounded(&content);
         let mut out = json!({
             "path": path,
             "content": content,
@@ -203,20 +203,6 @@ fn compute_ws_read(
         ));
     }
     Ok(out)
-}
-
-/// 巨大な全文をトークナイズで固まらせないための概算。[`RANGE_SCAN_BYTE_CAP`] 以下なら厳密、
-/// 超えるなら先頭サンプルのトークン数をバイト比で線形スケールする（範囲指定なしの全文用）。
-fn estimate_tokens_bounded(content: &str, total_bytes: usize) -> usize {
-    if total_bytes <= RANGE_SCAN_BYTE_CAP {
-        return opencrab_core::tokens::estimate_tokens(content);
-    }
-    let mut cut = RANGE_SCAN_BYTE_CAP;
-    while cut > 0 && !content.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let sample_tokens = opencrab_core::tokens::estimate_tokens(&content[..cut]);
-    ((sample_tokens as u128 * total_bytes as u128) / cut.max(1) as u128) as usize
 }
 
 /// 範囲読みで返す本文のトークン上限。結果 JSON 全体（本文＋メタ情報の封筒）が inline 上限
