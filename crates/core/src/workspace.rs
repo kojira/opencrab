@@ -156,6 +156,41 @@ impl Workspace {
         Ok(content)
     }
 
+    /// Read up to `max_len` bytes starting at byte offset `start`, **without loading the whole
+    /// file** (seek + bounded read). Returns `(bytes, total_len)` where `total_len` is the file
+    /// size in bytes (from metadata, O(1)). `start` at or past EOF yields empty bytes.
+    ///
+    /// The returned bytes may begin or end in the middle of a multi-byte UTF-8 character — the
+    /// caller is responsible for correcting to char boundaries. This lets `ws_read` page a huge
+    /// offloaded file (#564: measured 509MB) in bounded windows with O(window) IO per call, so
+    /// paging is O(n) overall rather than re-reading the whole file each page (#567).
+    pub fn read_file_range(
+        &self,
+        relative_path: &str,
+        start: u64,
+        max_len: usize,
+    ) -> Result<(Vec<u8>, u64)> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.resolve_path(relative_path)?;
+        let mut f = std::fs::File::open(&path)
+            .with_context(|| format!("Failed to open file: {}", path.display()))?;
+        let total = f
+            .metadata()
+            .with_context(|| format!("Failed to stat file: {}", path.display()))?
+            .len();
+        if start >= total {
+            return Ok((Vec::new(), total));
+        }
+        f.seek(SeekFrom::Start(start))
+            .with_context(|| format!("Failed to seek file: {}", path.display()))?;
+        let to_read = (max_len as u64).min(total - start) as usize;
+        let mut buf = vec![0u8; to_read];
+        f.read_exact(&mut buf)
+            .with_context(|| format!("Failed to read file range: {}", path.display()))?;
+        tracing::debug!(path = %path.display(), start, len = to_read, "Read workspace file range");
+        Ok((buf, total))
+    }
+
     /// Write content to a file in the workspace.
     ///
     /// Parent directories will be created automatically.
