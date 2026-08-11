@@ -311,9 +311,17 @@ pub async fn run_discord_loop<T: AgentRunner>(
     );
 
     // イベント処理ループ（直列）: P2のDB競合を構造的に解消
-    // デバウンス: 同一(channel_id, sender_id)のメッセージを DEBOUNCE_DELAY 分まとめてから処理
-    let mut debounce_buffers: HashMap<(String, String), (Vec<IncomingMessage>, Instant)> =
-        HashMap::new();
+    // #543 / #556: デバウンス**バッファ**は **channel ごとに 1 本**（タイマーも 1 本）。
+    // オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。全メッセージは
+    // 個別に記録して送信者の帰属を保つ。run は**フラッシュ時に切る「連続同権限グループ」**
+    // ごとに 1 回（下のフラッシュ箇所を参照）。
+    //
+    // **権限で並行バッファに割らない理由（#556）**: run は DB から会話全体を読むので、権限で
+    // 別バッファに割ると同じ文脈に対して 2 回 run が起き 2 回答える＝減らそうとした増幅になる。
+    // かといって channel だけで丸ごと 1 run にすると、caller が最後の送信者で決まり owner 指示が
+    // 降格しうる。両方を避けるため、バッファは 1 本にしつつ**フラッシュ時に連続同権限で
+    // グループへ切る**（グループ内は権限が揃うので caller が一意・別権限は別 run で混ざらない）。
+    let mut debounce_buffers: HashMap<String, (Vec<IncomingMessage>, Instant)> = HashMap::new();
 
     // セッション単位の推論直列化ランタイム（gateway 非依存層の共通実装 / #156 S2）。
     // 同一セッションへの推論が並行実行されると、1つ目の応答がまだDBに記録されていない
@@ -337,9 +345,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
             event = event_rx.recv() => {
                 match event {
                     Some(LoopEvent::IncomingMessage(msg)) => {
-                        let key = debounce_key(&msg);
+                        // バッファキー = channel だけ（#556）。同一 channel は権限に関わらず 1 本の
+                        // バッファに貯める。権限による run の分割は**フラッシュ時**（連続同権限
+                        // グループ）に行う。ここでは caller を解決しない（グループ分けは flush 側）。
                         let entry = debounce_buffers
-                            .entry(key)
+                            .entry(debounce_window_key(&msg))
                             .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
                         entry.0.push(msg);
                         entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
@@ -443,23 +453,58 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         for key in expired_keys {
             if let Some((messages, _)) = debounce_buffers.remove(&key) {
-                let merged = merge_incoming_messages(messages);
-                if let Some(merged) = merged {
-                    let count = merged
-                        .metadata
-                        .get("debounce_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1);
-                    if count > 1 {
-                        info!(
-                            channel = %key.0,
-                            sender = %key.1,
-                            count = count,
-                            "Debounced messages merged"
-                        );
+                // #543 / #556: 全メッセージを**個別に**記録する（送信者の帰属を保つ）。run は
+                // **到着順のまま「連続した同一 trust_level」で切ったグループ**ごとに 1 回だけ、
+                // そのグループ内の**内容のある最後のメッセージ**が起こす。run は DB から会話全体を
+                // 読むので、文脈は全員分・正しい帰属で入る。
+                //
+                // **なぜ「連続同権限グループ」か（#556）**: バッファを channel だけで 1 本にすると
+                // owner と外部ユーザーが混ざる。窓を丸ごと 1 run にすると caller が最後の送信者で
+                // 決まり owner 指示が降格しうる。権限ごとに並行バッファへ割ると同じ文脈に 2 回 run が
+                // 起きて増幅する。連続同権限だけをグループにすれば、**グループ内は権限が揃うので
+                // caller が一意**（降格しない）で、かつ**別権限は別グループ＝別 run**（混ざらない）。
+                // 例: owner→外部→co_agent は [owner][外部][co_agent] の 3 run、owner→co_agent→外部は
+                // [owner,co_agent][外部] の 2 run。
+                //
+                // **#489 未修正の今の実運用**: co_agent は resolve_caller で `Agent`(=0) に落ちるため、
+                // owner→co_agent は同権限にならず別グループになる。ここでのグループ分けは
+                // trust_level が揃った場合の挙動で、#489 が直れば owner 等価(=2)として合流する。
+                let levels: Vec<u8> = messages
+                    .iter()
+                    .map(|m| {
+                        state
+                            .resolve_caller(&m.sender.id, &agent_ids, &owner_discord_id)
+                            .trust_level()
+                    })
+                    .collect();
+                let groups = consecutive_groups(&levels);
+
+                if messages.len() > 1 {
+                    info!(
+                        channel = %key,
+                        messages = messages.len(),
+                        groups = groups.len(),
+                        "Debounced (channel): recording all, running once per consecutive-privilege group"
+                    );
+                }
+
+                // グループごとにトリガー（内容のある最後）を決め、それ以外は record-only にする。
+                // trigger の無い（全部空の）グループは run を起こさない（記録だけ済む）。
+                let mut record_only_flags = vec![true; messages.len()];
+                for &(start, len) in &groups {
+                    if let Some(rel) = messages[start..start + len]
+                        .iter()
+                        .rposition(incoming_has_content)
+                    {
+                        record_only_flags[start + rel] = false; // このメッセージがグループの run トリガー
                     }
+                }
+
+                for (i, msg) in messages.into_iter().enumerate() {
+                    // トリガー以外は record-only（記録と 👀 まで。run は起こさない）。
+                    let record_only = record_only_flags[i];
                     process_incoming_message(
-                        merged,
+                        msg,
                         gateway.clone(),
                         state.clone(),
                         agent_ids.clone(),
@@ -470,6 +515,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
                         voice.clone(),
                         event_tx.clone(),
                         subtask_registry.clone(),
+                        record_only,
                     )
                     .await;
                 }
@@ -530,6 +576,10 @@ async fn process_incoming_message<T: AgentRunner>(
     voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    // #543: true なら**記録（と 👀）まで**で終え、推論（run）は起こさない。デバウンス窓で
+    // 合流したメッセージのうち、run トリガーでないものに使う。各メッセージを正しい送信者で
+    // 個別に会話ログへ残しつつ、run は窓につき 1 回だけにするための分岐。
+    record_only: bool,
 ) {
     let (text, image_urls) = extract_discord_content(&incoming.content);
     if text.is_empty() && image_urls.is_empty() {
@@ -699,6 +749,13 @@ async fn process_incoming_message<T: AgentRunner>(
             )
             .await;
             reaction_added = true;
+        }
+
+        // #543: record-only パス（デバウンス窓の非トリガーメッセージ）は、記録と 👀 まで。
+        // typing / 推論（run）は起こさない。合流窓のトリガー 1 通だけが run を起こし、その run が
+        // DB から会話全体（この記録も含む）を読むので、情報は落ちず文脈には正しい帰属で入る。
+        if record_only {
+            continue;
         }
 
         // タイピングインジケーター（ホワイトリスト通過後のみ）。
@@ -1836,61 +1893,50 @@ fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     message_id.parse::<u64>().ok()
 }
 
-/// デバウンスキーを生成する: (channel_id, sender_id)。
-fn debounce_key(msg: &IncomingMessage) -> (String, String) {
-    let channel_id = match &msg.source {
+/// デバウンス**バッファ**のキー = **channel だけ**（#543 / #556）。
+///
+/// オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。バッファは channel
+/// ごとに 1 本（タイマーも 1 本）。権限で並行バッファに割らない: run は DB から会話全体を読む
+/// ので、権限で割ると同じ文脈に対し run が 2 回起きて増幅するだけ。
+///
+/// ただし**フラッシュ時に**、バッファ内を到着順のまま「連続した同一 trust_level」でグループへ
+/// 切り、run はグループごとに 1 回起こす（`consecutive_groups`）。これで別権限は別 run に分かれ、
+/// caller の降格（最後の送信者に引きずられる）も起きない。詳細は `run_discord_loop` のフラッシュ
+/// 箇所のコメントを参照。
+fn debounce_window_key(msg: &IncomingMessage) -> String {
+    match &msg.source {
         opencrab_gateway::MessageSource::Discord { channel_id, .. } => channel_id.clone(),
         _ => String::new(),
-    };
-    (channel_id, msg.sender.id.clone())
+    }
 }
 
-/// 複数のIncomingMessageを1つにマージする。
-/// テキストは改行で結合、画像URLはすべて集約、メタデータは最後のメッセージを使用。
-fn merge_incoming_messages(mut messages: Vec<IncomingMessage>) -> Option<IncomingMessage> {
-    if messages.is_empty() {
-        return None;
-    }
-    if messages.len() == 1 {
-        return Some(messages.remove(0));
-    }
-
-    let count = messages.len();
-    let mut texts = Vec::new();
-    let mut images = Vec::new();
-
-    for msg in &messages {
-        let (text, img_urls) = extract_discord_content(&msg.content);
-        if !text.is_empty() {
-            texts.push(text);
+/// 連続した同一要素の並びを `(開始 index, 長さ)` のグループに切る（#556）。到着順を保ち、
+/// 隣り合う要素が変わったところでグループが切れる。
+///
+/// デバウンスバッファのフラッシュで、メッセージ列を trust_level 列に写してから呼ぶ。
+/// 例: `[2,0,2]` → `[(0,1),(1,1),(2,1)]`（3 グループ）、`[2,2,0]` → `[(0,2),(2,1)]`（2 グループ）。
+fn consecutive_groups<T: PartialEq>(items: &[T]) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < items.len() {
+        let mut end = start + 1;
+        while end < items.len() && items[end] == items[start] {
+            end += 1;
         }
-        images.extend(img_urls);
+        groups.push((start, end - start));
+        start = end;
     }
+    groups
+}
 
-    // 最後のメッセージをベースにする（最新のメタデータ・タイムスタンプ）
-    let mut merged = messages.pop().unwrap();
-
-    // コンテンツをマージ
-    let merged_text = texts.join("\n");
-    if images.is_empty() {
-        merged.content = opencrab_gateway::MessageContent::Text(merged_text);
-    } else {
-        let mut parts: Vec<opencrab_gateway::ContentPart> = Vec::new();
-        if !merged_text.is_empty() {
-            parts.push(opencrab_gateway::ContentPart::Text(merged_text));
-        }
-        for url in images {
-            parts.push(opencrab_gateway::ContentPart::Image { url, alt: None });
-        }
-        merged.content = opencrab_gateway::MessageContent::Multi(parts);
-    }
-
-    // デバウンスでまとめたことをメタデータに記録
-    merged
-        .metadata
-        .insert("debounce_count".to_string(), serde_json::json!(count));
-
-    Some(merged)
+/// メッセージが応答対象になる内容（テキストまたは画像）を持つか（#543）。
+///
+/// デバウンス窓の run トリガー選びに使う。`process_incoming_message` 冒頭の早期 return
+/// （text も image も空なら何もしない）と同じ判定にそろえ、内容の無いメッセージを
+/// トリガーに選んで run を消してしまうことを防ぐ。
+fn incoming_has_content(msg: &IncomingMessage) -> bool {
+    let (text, images) = extract_discord_content(&msg.content);
+    !text.is_empty() || !images.is_empty()
 }
 
 /// メッセージコンテンツからテキストと画像URLを抽出する。
