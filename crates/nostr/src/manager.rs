@@ -2061,29 +2061,35 @@ mod tests {
         }
     }
 
-    /// [#570] 本番最大サイズの受信（6,761 字 ≒ 1,700 トークン < 2,500）は退避を
-    /// **完全に素通り**する: 会話履歴へ残る本文は生の `inbound_text` と 1 バイトも
-    /// 変わらず、ワークスペースに退避ファイルも作られない。閾値以下 no-op の回帰防止。
+    /// [#570] トークン上限未満の受信は退避を**完全に素通り**する: 会話履歴へ残る本文は
+    /// 生の `inbound_text` と 1 バイトも変わらず、ワークスペースに退避ファイルも作られない。
+    /// 閾値以下 no-op の回帰防止。
     ///
-    /// 本文は **6,761 文字**（#570 の実測最大）を再現する。実測の「≒1,700 トークン」は
-    /// 6,761 字 ÷ 1,700 ≈ 4 字/トークン、すなわち ASCII 主体の本文（URL・英数字混じり）で
-    /// あることを意味する（`o200k_base` は ASCII を ~4 字/トークンで畳む）。純粋なかな
-    /// 6,761 字は ~1 字/トークンで上限を超えるため、実測値を再現する ASCII 主体で組む。
+    /// Nostr 受信（source=nostr / log_type=speech）の実測最大は **1,959 字 / 2,179 バイト**
+    /// （288 行・2,000 字超は 0 行）。ここで使う ASCII 主体 **6,761 字**は実測最大ではなく、
+    /// **no-op の回帰用に十分大きい合成値**（`o200k_base` で約 1,700 トークン < 2,500）。
+    /// 純粋なかな 6,761 字は ~1 字/トークンで上限を超えてしまうため、「上限未満だが実測最大より
+    /// 十分大きい」を作れる ASCII 主体（~4 字/トークン）で組む。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn inbound_at_production_max_size_is_recorded_verbatim() {
-        // 本番実測の最大 speech サイズ = 6,761 文字（ASCII 主体 ≒ 1,700 トークン）。
+    async fn inbound_below_limit_is_recorded_verbatim() {
+        // no-op 回帰用の合成本文: ASCII 主体 6,761 字（≒ 1,700 トークン < 2,500）。
+        // 実測の Nostr 受信最大（1,959 字）より十分大きく、かつ上限未満に収まる。
         let content: String = "the nostaro bot posts publicly. "
             .repeat(220)
             .chars()
             .take(6_761)
             .collect();
-        assert_eq!(content.chars().count(), 6_761, "6,761 字を再現していない");
+        assert_eq!(
+            content.chars().count(),
+            6_761,
+            "合成本文の文字数がズレている"
+        );
         let ev = event("prodmax", "0011223344556677", &content);
         // 前提: この本文はトークン上限未満（退避されない領域）。
         assert!(
             opencrab_core::tokens::estimate_tokens(&ev.inbound_text())
                 < opencrab_actions::TOOL_RESULT_TOKEN_LIMIT,
-            "前提が崩れている: 6,761 字（ASCII 主体）が上限を超えた"
+            "前提が崩れている: 合成本文（ASCII 主体 6,761 字）が上限を超えた"
         );
         let expected = ev.inbound_text();
 
