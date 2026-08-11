@@ -1834,6 +1834,37 @@ mod heartbeat_conversation_tests {
         assert!(!hb.contains("[Channel conversation]"));
         assert_eq!(plain, hb);
     }
+
+    /// #573 Stage B: HB ターンの宛先を実会話セッションへ差し替えると
+    /// `heartbeat_session_id == channel_session_id` になる。このとき 212 行の等値フィルタで
+    /// `[Channel conversation]` セクションが落ち（#508 の二重注入が構造的に消える）、出力は
+    /// 実会話を直接読む `[Recent conversation]` 一本になる（`build_conversation_string` と同一）。
+    #[test]
+    fn collapses_to_recent_conversation_when_sessions_are_equal() {
+        let conn = opencrab_db::init_memory().unwrap();
+        seed_channel(&conn, 3);
+
+        // heartbeat_session_id と channel_session_id が同一（= Stage B の切替後）。
+        let hb = build_heartbeat_conversation_string(
+            &conn,
+            CH_SESSION,
+            Some(CH_SESSION),
+            AGENT,
+            100_000,
+        )
+        .unwrap();
+        let plain = build_conversation_string(&conn, CH_SESSION, AGENT, 100_000).unwrap();
+
+        assert!(
+            !hb.contains("[Channel conversation]"),
+            "session が等値なら [Channel conversation] は出ない: {hb}"
+        );
+        assert!(hb.contains("channel message 0 from a person"), "{hb}");
+        assert_eq!(
+            plain, hb,
+            "session が等値なら通常経路 build_conversation_string と同一出力になる"
+        );
+    }
 }
 
 /// `[Past context summary]` の予算上限（#406）。
