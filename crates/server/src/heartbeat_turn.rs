@@ -341,7 +341,20 @@ impl HeartbeatTurnRunner {
 
         let decision = match engine_result {
             Ok(result) => {
-                // エージェント応答を HB セッションへ記録する。
+                // #573 Stage B: 決定を先に解き、正規化した本文を実会話セッション
+                // （target.session_id は Stage B で = channel_session_id）へ第一級で 1 行記録する。
+                // - SPEAK: parse_heartbeat_decision が返すクリーン本文（マーカー・思考行前置を
+                //   除去済み）を記録する（#425 エコーが記録していた形）。生の `SPEAK:` を残すと
+                //   モデルが自分の履歴で probe 形式を見て通常返信にマーカーを漏らすリスクがある。
+                // - IDLE / LEARN: #515 の記録形（応答テキストそのまま = `IDLE: 理由` / `LEARN: …`）
+                //   を踏襲する。新しい書式は発明しない。
+                // R-simple: 配信可否に関わらず無条件で記録する（#515 の理念。配信失敗した SPEAK も
+                //   本人の言葉として残す。Nostr は delivered=false だが記録は残す）。
+                let decision = crate::parse_heartbeat_decision(&result.response);
+                let record_text: String = match &decision {
+                    HeartbeatDecision::Speak(content) => content.clone(),
+                    _ => result.response.trim().to_string(),
+                };
                 {
                     let conn = self.db.lock().unwrap();
                     let log = opencrab_db::queries::SessionLogRow {
@@ -349,7 +362,7 @@ impl HeartbeatTurnRunner {
                         agent_id: target.agent_id.clone(),
                         session_id: target.session_id.clone(),
                         log_type: "speech".to_string(),
-                        content: result.response.clone(),
+                        content: record_text,
                         speaker_id: Some(target.agent_id.clone()),
                         turn_number: None,
                         metadata_json: None,
@@ -359,7 +372,7 @@ impl HeartbeatTurnRunner {
                         tracing::error!(agent_id = %target.agent_id, "Failed to insert heartbeat response log: {e}");
                     }
                 }
-                crate::parse_heartbeat_decision(&result.response)
+                decision
             }
             Err(e) => {
                 tracing::warn!(
@@ -518,12 +531,12 @@ impl HeartbeatTurnRunner {
                 let discord_http = self.discord_http.clone();
                 let agent_id_log = target.agent_id.clone();
                 let ch_id_str = target.channel_id.clone();
-                // #425: 配信できたら本人の discord 会話セッションへも二重記録する
-                // ため、guild と db を持ち込む。
-                let guild_id_log = target.guild_id.clone();
-                let db = self.db.clone();
                 tokio::spawn(async move {
-                    let delivered = heartbeat_delivery::deliver_heartbeat_speech(
+                    // 配送のみ（fire-and-forget）。実会話セッションへの記録は #573 Stage B で
+                    // turn() の経路1（正規化記録）に一元化したため、#425 エコー
+                    // （record_heartbeat_channel_echo）の呼び出しは撤去した。delivered 戻り値は
+                    // 使わない（R-simple: 配信可否に関わらず記録済み）。
+                    heartbeat_delivery::deliver_heartbeat_speech(
                         &gateways,
                         &discord_http,
                         &agent_id_log,
@@ -531,16 +544,6 @@ impl HeartbeatTurnRunner {
                         &content,
                     )
                     .await;
-                    // #425: Discord へ配信できたターンだけ、本人の会話セッションへ
-                    // 発話を記録する（配信失敗ターンは記録しない）。
-                    crate::record_heartbeat_channel_echo(
-                        &db,
-                        delivered,
-                        &agent_id_log,
-                        &guild_id_log,
-                        &ch_id_str,
-                        &content,
-                    );
                 });
             }
             HeartbeatDecision::Learn => {
@@ -1336,11 +1339,13 @@ mod tests {
         );
     }
 
-    /// #515: **ターン結果を記録として残す**。SPEAK / LEARN / IDLE のどれでも、エージェント
-    /// 自身の応答（＝その言葉）が HB 専用セッションへ `speech` として 1 行残る。IDLE では
-    /// 応答に含めた**短い理由**がそのまま記録に載る（「なぜ見送ったか」が後から分かる）。
+    /// #515 / #573 Stage B: **ターン結果を記録として残す**。SPEAK / LEARN / IDLE のどれでも、
+    /// エージェント自身の言葉が（Stage B では実会話）セッションへ `speech` として 1 行残る。
+    /// IDLE / LEARN は #515 の形（応答テキストそのまま = `IDLE: 理由` / `LEARN: …`）。
+    /// **SPEAK だけは Stage B でマーカーを剥いだクリーン本文**を記録する（生の `SPEAK:` を
+    /// 履歴に残すと通常返信に probe マーカーが漏れるため）。
     ///
-    /// **変異確認**: この記録は `turn()` の `speech` 挿入（`result.response` を書く箇所）が担う。
+    /// **変異確認**: この記録は `turn()` の `speech` 挿入（正規化した本文を書く箇所）が担う。
     /// その挿入を外すと記録が 0 件になり、3 ケースとも赤くなる。
     #[tokio::test]
     async fn every_decision_leaves_the_agents_own_words_as_a_record() {
@@ -1354,7 +1359,7 @@ mod tests {
             let records = heartbeat_speech_records(&db);
             assert_eq!(records, vec!["IDLE: TL に新しい話題が無い".to_string()]);
         }
-        // SPEAK。発話本文がそのまま記録にも残る。
+        // SPEAK。#573 Stage B: マーカーを剥いだクリーン本文が記録に残る（`SPEAK:` は付かない）。
         {
             let engine = RecordingEngine::new("SPEAK: 新着に返信した");
             let (runner, db, _calls) = runner_with(engine);
@@ -1363,7 +1368,7 @@ mod tests {
                 .await;
             assert_eq!(
                 heartbeat_speech_records(&db),
-                vec!["SPEAK: 新着に返信した".to_string()]
+                vec!["新着に返信した".to_string()]
             );
         }
         // LEARN。何をしたか（内省した）が記録に残る。

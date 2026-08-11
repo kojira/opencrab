@@ -327,8 +327,9 @@ async fn run_one_fire(
         }
     };
 
-    // HB 専用セッション（`heartbeat-{agent}-{channel}`。nostr は channel_id 空）。
-    let hb_session_id = crate::get_or_create_heartbeat_session(db, agent_id, &channel_id);
+    // #573 Stage B / Q3: HB 専用セッションは Stage C で撤去するまで残置する。当面は空の
+    // セッションを作るだけ（記録は下で実会話セッションへ移すため、以後は空のまま。無害）。
+    let _ = crate::get_or_create_heartbeat_session(db, agent_id, &channel_id);
 
     // #508: 実会話（`[Channel conversation]`）セッションを発火先種別から解決する。
     // Nostr は `nostr-{agent}`、Discord は `discord-{agent}-{guild}-{channel}`。書式の源は
@@ -353,7 +354,11 @@ async fn run_one_fire(
 
     let hb_target = HeartbeatTarget {
         agent_id: agent_id.to_string(),
-        session_id: hb_session_id,
+        // #573 Stage B: HB ターンの宛先を実会話セッションへ差し替える（旧: HB 専用 hb_session_id）。
+        // これにより build_heartbeat_conversation_string で heartbeat_session_id == channel_session_id
+        // になり、`[Channel conversation]` の二重注入（#508）が等値フィルタで構造的に消え、
+        // `[Recent conversation]` に一本化される。
+        session_id: channel_session_id.clone(),
         channel_id,
         guild_id,
         channel_session_id,
