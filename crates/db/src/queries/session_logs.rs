@@ -38,9 +38,14 @@ pub const HEARTBEAT_SPEAKER_ID: &str = "heartbeat";
 /// `metadata_json` に入る `source` 値（#425）。
 pub const HEARTBEAT_CHANNEL_ECHO_SOURCE: &str = "heartbeat_channel_echo";
 
-/// 上記エコー行の `metadata_json` そのもの。書き手（`main.rs`）はこれを `speech` 行の
-/// `metadata_json` に入れる。読み手は [`is_heartbeat_channel_echo`] で判定すること
-/// （キー順・空白の違いに依存しないため）。
+/// 上記エコー行の `metadata_json` そのもの。読み手は [`is_heartbeat_channel_echo`] で判定
+/// すること（キー順・空白の違いに依存しないため）。
+///
+/// **#573 Stage B 以降、この印を新規に付ける書き手はいない**（HB 発話の記録を実会話
+/// セッションへ一元化し、#425 エコーを撤去した）。定数と読み手フィルタを残しているのは
+/// **Stage B 以前に書かれた既存のエコー行のためだけ**。これらの行の本文は同時に HB 専用
+/// セッション側にも第一級で残って索引され続けるので、フィルタを外すと FTS・記憶索引で
+/// 同一内容が二重計上される。**過去データ専用として保持しており、撤去しない。**
 pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channel_echo"}"#;
 
 /// 行が HB 発話のエコー（**表示専用の二重記録**）かどうか（#425）。

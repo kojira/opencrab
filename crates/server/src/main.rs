@@ -21,43 +21,6 @@ type DiscordHttp = ();
 /// 共有（TOML）ゲートウェイのハンドル置き場。ゲートウェイ起動時に埋まる。
 type DiscordHttpArc = Arc<Mutex<Option<DiscordHttp>>>;
 
-/// ハートビート用セッションを取得または作成する。
-fn get_or_create_heartbeat_session(
-    db: &opencrab_db::Db,
-    agent_id: &str,
-    channel_id: &str,
-) -> String {
-    // 接頭辞は継続ターンの受け口（`heartbeat_turn::resume_origin`）が親セッションの判定に
-    // 使う。書式が割れると「HB の決着なのに継続しない」が無言で起きるので定数を共有する。
-    let session_id = format!(
-        "{}{}-{}",
-        heartbeat_turn::HEARTBEAT_SESSION_PREFIX,
-        agent_id,
-        channel_id
-    );
-    let conn = db.lock().unwrap();
-    if let Ok(Some(_)) = opencrab_db::queries::get_session(&conn, &session_id) {
-        return session_id;
-    }
-    let session = opencrab_db::queries::SessionRow {
-        id: session_id.clone(),
-        mode: heartbeat_turn::HEARTBEAT_GATEWAY.to_string(),
-        theme: "ハートビート自律行動".to_string(),
-        phase: "active".to_string(),
-        turn_number: 0,
-        status: "active".to_string(),
-        participant_ids_json: serde_json::json!([agent_id]).to_string(),
-        facilitator_id: None,
-        done_count: 0,
-        max_turns: None,
-        metadata_json: None,
-    };
-    if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
-        tracing::warn!("Failed to create heartbeat session: {e}");
-    }
-    session_id
-}
-
 /// ハートビート応答テキストから決定（SPEAK / LEARN / IDLE）を解く。
 ///
 /// **入力は応答テキストだけ**で、プロンプトに何を積んだかには依存しない（#404 で

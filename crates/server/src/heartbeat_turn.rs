@@ -47,12 +47,11 @@ use opencrab_server::AppState;
 
 use crate::heartbeat_delivery::{self, HeartbeatDiscordHttp};
 
-/// HB セッション ID の接頭辞（`main.rs` の `get_or_create_heartbeat_session` と対）。
-pub(crate) const HEARTBEAT_SESSION_PREFIX: &str = "heartbeat-";
-
-/// ハートビート由来の実行を表すゲートウェイ名（`RunRequest.gateway`）兼、HB セッションの
-/// `SessionRow.mode`（#518）。`RuntimeInfo` に載り、継続ターンの受け口が「HB 由来か」を
-/// 見分ける目印になる。
+/// ハートビート由来の実行を表すゲートウェイ名（`RunRequest.gateway`）。`RuntimeInfo` に
+/// 載り、継続ターンの受け口が「HB 由来か」を見分ける目印になる。
+///
+/// （#573 Stage C まで HB 専用セッションの `SessionRow.mode` も兼ねていたが、専用セッション
+/// 生成を撤去したため現在は run 側のゲートウェイ名としてのみ使う。）
 ///
 /// **`speaker_id='heartbeat'`（scaffolding 行の目印）とは別概念**。あちらは
 /// `opencrab_db::queries::HEARTBEAT_SPEAKER_ID`。値が同じでも用途が違うので混同しないこと。
@@ -612,7 +611,7 @@ impl SubtaskCompletionSink for HeartbeatCompletionSink {
 ///   subtask か」の主判定は **`ev.session_id == own_session_id`** で足りる。
 ///
 /// **`heartbeat-` 接頭辞は見ない（#573 Stage A）。** 以前は
-/// `ev.session_id.starts_with(HEARTBEAT_SESSION_PREFIX)` も課していたが、これは主判定
+/// `ev.session_id.starts_with("heartbeat-")` も課していたが、これは主判定
 /// （`own_session_id` 一致）に対する冗長な番人にすぎず、統合後に HB ターンが実会話
 /// セッション（`nostr-…` / `discord-…`）で走ると接頭辞が消える。sink は HB run にしか
 /// 配線されないため、接頭辞を外しても他ゲートウェイの決着を HB として resume することは
