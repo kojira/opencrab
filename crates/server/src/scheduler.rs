@@ -327,10 +327,9 @@ async fn run_one_fire(
         }
     };
 
-    // #573 Stage B / Q3: HB 専用セッションは Stage C で撤去するまで残置する。当面は空の
-    // セッションを作るだけ（記録は下で実会話セッションへ移すため、以後は空のまま。無害）。
-    let _ = crate::get_or_create_heartbeat_session(db, agent_id, &channel_id);
-
+    // #573 Stage C: HB 専用セッション（`heartbeat-…`）の生成は撤去した。Stage B で HB
+    // ターンの宛先が実会話セッションへ移り、専用セッションは書き込みも読み出しも無い空の
+    // 受け皿になっていた（既存の専用セッション行は残るが、以後は新規に作らない）。
     // #508: 実会話（`[Channel conversation]`）セッションを発火先種別から解決する。
     // Nostr は `nostr-{agent}`、Discord は `discord-{agent}-{guild}-{channel}`。書式の源は
     // db 層の `resolve_session_fire_target` と対の 1 箇所（種別を持つここで解いて target へ
