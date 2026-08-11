@@ -20,6 +20,41 @@ fn baseline_reconciles_pre_versioning_db() {
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
 }
 
+/// #546: `idx_memory_sessions_session_type` は新規 DB（SCHEMA_SQL）にも既存 DB
+/// （migration v39）にも届くこと。SCHEMA_SQL 側だけ／migration 側だけ、の食い違い
+/// （#475 型の「既存 DB にだけ届かない」地雷）を両経路で固定する。
+#[test]
+fn session_type_index_reaches_new_and_existing_dbs() {
+    fn has_session_type_index(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+             AND name='idx_memory_sessions_session_type'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    // 新規 DB: SCHEMA_SQL 経路で index を持つ。
+    let conn = crate::init_memory().expect("init");
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    assert!(has_session_type_index(&conn), "新規 DB に index が無い");
+
+    // 既存 DB（v38・index 無し）を模す: index を落として版を 38 へ戻す。
+    conn.execute_batch("DROP INDEX idx_memory_sessions_session_type; PRAGMA user_version = 38;")
+        .unwrap();
+    assert!(!has_session_type_index(&conn));
+
+    // 再初期化で migration v39 が走り、index を復活し最新版へスタンプする。
+    initialize(&conn).expect("re-initialize");
+    assert!(
+        has_session_type_index(&conn),
+        "migration v39 が index を作っていない"
+    );
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+}
+
 /// 版管理導入前（`user_version = 0`）の**旧 shape の表を実際に持つ** DB を、
 /// 生成コードで作って現行 `initialize` に通す回帰スイート（#475 / #476）。
 ///
@@ -3156,9 +3191,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v38（#455 の agent_schedules 語彙整合）が最新。v38 は session_heartbeat_config を
-    // 触らないので、下の v37 backfill 検証（発火集合・正規化）はそのまま成立する。
-    assert_eq!(latest_version(), 38, "v38 が最新版であること");
+    // v39（#546 の memory_sessions インデックス）が最新。v38/v39 とも
+    // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
+    // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
+    // 更新し、下の期待値を見直すこと。
+    assert_eq!(latest_version(), 39, "v39 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。

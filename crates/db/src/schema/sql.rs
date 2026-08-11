@@ -287,6 +287,13 @@ CREATE TABLE IF NOT EXISTS memory_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_sessions_agent ON memory_sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_memory_sessions_session ON memory_sessions(agent_id, session_id);
+-- #546: session_id を先頭に引くクエリ用（list_recent_session_logs_of_type /
+-- list_recent_user_speech_logs / list_recent_session_logs 等）。上の
+-- idx_memory_sessions_session は (agent_id, session_id) で**先頭が agent_id** のため、
+-- 共有チャンネルセッション（session_id に agent を含まず複数 agent が同居 / #404・#508）を
+-- agent_id 無しで引くこれらは全表 SCAN だった。id を 3 列目に含め、(session_id, log_type)
+-- 検索と `ORDER BY id ... LIMIT` を 1 本で満たす。既存 DB へは migration v39 で届ける。
+CREATE INDEX IF NOT EXISTS idx_memory_sessions_session_type ON memory_sessions(session_id, log_type, id);
 
 -- ============================================
 -- MEMORY: FTS5全文検索

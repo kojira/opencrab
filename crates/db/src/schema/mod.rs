@@ -1612,6 +1612,49 @@ const MIGRATIONS: &[Migration] = &[
         //   COMMIT;
         up: migrate_v38_align_schedule_vocab,
     },
+    Migration {
+        version: 39,
+        description:
+            "memory_sessions(session_id, log_type, id) 複合インデックス（session_id 先頭クエリの全表 SCAN 解消 / #546）",
+        // **#546: session_id を先頭に引くクエリが全表 SCAN だった。**
+        //
+        // 既存の `idx_memory_sessions_session` は `(agent_id, session_id)` で**先頭が
+        // agent_id**。だが #404/#508 の共有チャンネルセッション（`discord-{guild}-{channel}`・
+        // session_id に agent を含まず複数 agent が同居）を **agent_id 無し**で引く
+        // `list_recent_session_logs_of_type`（`WHERE session_id=? AND log_type=? ORDER BY id
+        // DESC LIMIT`）等はこのインデックスを使えず、`EXPLAIN` が `SCAN memory_sessions`
+        // （本番 55,580 行）だった。ここに agent_id を足すと呼び手 1 体の行だけに絞られ、他
+        // 参加者の発言（共有チャンネル会話の大半）が消えて #404/#508 が壊れる（実測: ある
+        // 共有セッションで呼び手 153 件 / 他 7 名 308 件）。＝**クエリは変えずインデックスで解く**。
+        //
+        // ## 効き（本番コピーでの実測 EXPLAIN QUERY PLAN）
+        //   - list_recent_session_logs_of_type / list_recent_user_speech_logs（session_id +
+        //     log_type）: `SEARCH … USING INDEX (session_id=? AND log_type=?)`。
+        //   - list_recent_session_logs / list_session_logs_by_session / list_session_logs_after_id
+        //     （session_id のみ）: `SEARCH … USING COVERING INDEX (session_id=?)` + 小さな
+        //     TEMP B-TREE（全表 SCAN は解消）。**1 本で全部に効く。**
+        //
+        // ## 本番コピーでの実測（適用前 user_version=38 / memory_sessions 55,580 行 / 2.77GB）
+        //   - CREATE INDEX: 約 0.10 秒。
+        //   - DB サイズ増: +約 4.85 MB（+0.18%）。
+        //   - 冪等: 2 回目は `IF NOT EXISTS` で no-op（約 0.01 秒）。
+        //
+        // ## 冪等性
+        // 新規 DB は SCHEMA_SQL 側で同インデックスを持つ。`CREATE INDEX IF NOT EXISTS` で
+        // 2 度流しても no-op。DDL のみでデータは触らない。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき・インデックス削除と版番号のみ）
+        //   BEGIN;
+        //   DROP INDEX IF EXISTS idx_memory_sessions_session_type;
+        //   PRAGMA user_version = 38;
+        //   COMMIT;
+        up: |conn| {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_memory_sessions_session_type \
+                 ON memory_sessions(session_id, log_type, id);",
+            )
+        },
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。
