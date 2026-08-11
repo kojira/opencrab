@@ -288,7 +288,8 @@ impl crate::AgentRunner for FakeRunner {
         owner_discord_id: &str,
     ) -> CallerIdentity {
         // 実装に忠実に: 送信者がオーナー本人なら Owner、それ以外は TrustedUser。
-        // #543 のデバウンス窓キー（権限レベル）が owner と非 owner を分けることの検証に使う。
+        // #556 で「権限レベルが違っても同じ channel 窓に合流する」ことの検証に使う
+        // （owner=rank2 と非owner=rank1 を混在させて run が 1 回になることを確認する）。
         if sender_id == owner_discord_id {
             CallerIdentity::Owner
         } else {
@@ -1141,47 +1142,86 @@ async fn debounced_window_records_every_message_but_runs_once() {
     assert_eq!(state.runs.lock().unwrap().len(), 1, "合流窓の run は 1 回");
 }
 
-/// #543 / #556: オーナー本人は特別扱いしない。owner と co_agent は同じ権限レベル（#485 で
-/// owner 等価 = 2）なので**同じ窓に入る**（オーナー判断「一緒にまとめて問題ない」）。
+/// #556: 窓キーは **channel だけ**。権限レベルでは割らない（キーは caller を見ない）。
+/// 同一 channel は送信者・権限が何であれ同じ窓、別 channel は別窓。
 #[test]
-fn owner_and_co_agent_share_a_window_when_privilege_matches() {
-    use opencrab_actions::CallerIdentity;
-    let msg = discord_msg("222", "u", "hi");
-    let owner = debounce_window_key(&msg, &CallerIdentity::Owner);
-    let co_agent = debounce_window_key(
-        &msg,
-        &CallerIdentity::CoAgent {
-            agent_id: "kairo".to_string(),
-        },
-    );
+fn debounce_window_key_is_channel_only() {
+    let a = discord_msg("222", "owner-1", "hi");
+    let b = discord_msg("222", "gaikoku", "yo");
+    let other_channel = discord_msg("999", "owner-1", "hi");
+
     assert_eq!(
-        owner, co_agent,
-        "owner と co_agent は owner 等価（同権限）なので同じ窓に入るべき"
+        debounce_window_key(&a),
+        debounce_window_key(&b),
+        "同一 channel は送信者（権限）が違っても同じ窓に入るべき"
+    );
+    assert_ne!(
+        debounce_window_key(&a),
+        debounce_window_key(&other_channel),
+        "別 channel は別窓のはず"
     );
 }
 
-/// #543: 合流窓のキーは (channel, 権限レベル)。権限レベルが違うメッセージは別窓＝別 run に
-/// なり、権限をまたぐ合流をしない。同権限・同チャンネルは同じ窓に入る。
-#[test]
-fn debounce_window_key_separates_by_privilege_level() {
-    use opencrab_actions::CallerIdentity;
-    let msg = discord_msg("222", "u", "hi");
-    let msg_other_channel = discord_msg("999", "u", "hi");
+/// #556 統合: **権限レベルが違うメッセージが同一 channel の窓で 1 run に合流する**通しテスト。
+///
+/// harness の `resolve_caller` は owner-1 を `Owner`(rank 2)・それ以外を `TrustedUser`(rank 1)
+/// に解決する。旧実装（窓キー = (channel, 権限レベル)）ならこの 2 通は別窓＝2 run だったので、
+/// 権限をキーに戻すとこのテストが run 2 回で落ちる（回帰ガード）。記録は 1 通も畳まず個別に残す。
+#[tokio::test]
+async fn mixed_privilege_messages_in_one_channel_window_run_once() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (tx, rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
 
-    let trusted = debounce_window_key(&msg, &CallerIdentity::TrustedUser);
-    let agent = debounce_window_key(&msg, &CallerIdentity::Agent);
-    let agent_same = debounce_window_key(&msg, &CallerIdentity::Agent);
-    let agent_other_channel = debounce_window_key(&msg_other_channel, &CallerIdentity::Agent);
+    let loop_state = state.clone();
+    let handle = tokio::spawn(super::run_discord_loop(
+        gateway,
+        loop_state,
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        None,
+        Some((tx.clone(), rx)),
+        false,
+        None,
+        registry,
+    ));
 
-    // 権限レベルが違えば別窓。
-    assert_ne!(trusted, agent, "trusted と agent が同じ窓に入っている");
-    // 同権限・同チャンネルは同じ窓。
-    assert_eq!(agent, agent_same, "同権限・同チャンネルは同じ窓のはず");
-    // チャンネルが違えば別窓。
-    assert_ne!(
-        agent, agent_other_channel,
-        "別チャンネルが同じ窓に入っている"
+    // 同一 channel・2 秒窓に Owner（sender=owner-1, rank 2）と 非 Owner（sender=gaikoku,
+    // rank 1=TrustedUser）。権限レベルは違うが、窓キーは channel だけなので同じ窓に入る。
+    for (sender, text) in [
+        ("owner-1", "オーナーの発言"),
+        ("gaikoku", "外部ユーザーの発言"),
+    ] {
+        tx.send(super::LoopEvent::IncomingMessage(discord_msg(
+            "222", sender, text,
+        )))
+        .expect("event loop receiver closed");
+    }
+
+    state.wait_for_run().await;
+
+    let records = state.inbound_records.lock().unwrap().clone();
+    assert_eq!(
+        records.len(),
+        2,
+        "権限が違っても全メッセージ個別に記録される（畳まない・落とさない）: {records:?}"
     );
+    assert!(
+        records.contains(&"オーナーの発言".to_string()),
+        "{records:?}"
+    );
+    assert!(
+        records.contains(&"外部ユーザーの発言".to_string()),
+        "{records:?}"
+    );
+    assert_eq!(
+        state.runs.lock().unwrap().len(),
+        1,
+        "権限レベルが違うメッセージが混在しても run は 1 回（channel だけで窓を作る）"
+    );
+
+    handle.abort();
 }
 
 /// #543: run トリガーは「内容のある最後のメッセージ」。末尾が空でも内容のある方を選び、

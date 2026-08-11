@@ -311,13 +311,18 @@ pub async fn run_discord_loop<T: AgentRunner>(
     );
 
     // イベント処理ループ（直列）: P2のDB競合を構造的に解消
-    // #543: デバウンスの単位を (channel, sender) から **(channel, caller 権限レベル)** へ。
-    // オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」を、情報を落とさない形で
-    // 実現する。同権限のメッセージだけを 1 つの窓にまとめ、**権限をまたぐ合流はしない**
-    // （owner と bot は別窓＝別 run。owner 権限の消失も bot の権限昇格も起こさない）。窓内の
-    // 全メッセージは個別に記録して送信者の帰属を保ち、run は窓につき 1 回だけ起こす。
-    let mut debounce_buffers: HashMap<(String, u8), (Vec<IncomingMessage>, Instant)> =
-        HashMap::new();
+    // #543 / #556: デバウンスの単位は **channel だけ**。オーナー指示「デバウンスは
+    // チャンネルごと。人で分けたらだめ」そのまま。窓内の全メッセージは個別に記録して
+    // 送信者の帰属を保ち、run は窓につき 1 回だけ起こす。
+    //
+    // **権限レベルで窓を割らない理由（#556）**: run は DB から会話全体を読むので、どの
+    // 窓で発火しても文脈は同じ。権限で割っても分離されるのは run だけで、同じ文脈に対して
+    // 2 回 run が起き 2 回答える（2 回目は 1 回目の返答も文脈に含む）＝減らそうとした増幅
+    // そのものになる。権限昇格の心配も窓分割では守れていなかった: 会話には元々全員の発言が
+    // 入り、caller は**トリガー（内容のある最後のメッセージ）1 件**から決まる。外部発言が
+    // 文脈にありオーナー発言でトリガーされれば owner 権限で走るのは、窓を割っても割らなくても
+    // 同じ（この PR より前からそう）。窓を割らないことで新たに開く穴はない。
+    let mut debounce_buffers: HashMap<String, (Vec<IncomingMessage>, Instant)> = HashMap::new();
 
     // セッション単位の推論直列化ランタイム（gateway 非依存層の共通実装 / #156 S2）。
     // 同一セッションへの推論が並行実行されると、1つ目の応答がまだDBに記録されていない
@@ -341,14 +346,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
             event = event_rx.recv() => {
                 match event {
                     Some(LoopEvent::IncomingMessage(msg)) => {
-                        // 窓キー = (channel, caller 権限レベル)。オーナー本人を特別扱いしない
-                        // （co_agent は #485 で owner 等価とオーナーが決めた方針なので、owner と
-                        // co_agent が同権限で合流しても問題ない）。**権限レベルが違うものは合流
-                        // しない**（権限昇格を防ぐため。強い方を採ると bot が上位権限で走る）。
-                        let caller =
-                            state.resolve_caller(&msg.sender.id, &agent_ids, &owner_discord_id);
+                        // 窓キー = channel だけ（#556）。権限レベルでは割らない。同一 channel の
+                        // 2 秒窓に owner / co_agent / trusted / 外部ユーザーが混在しても 1 つの窓に
+                        // 入り、run は 1 回。caller はフラッシュ時にトリガー 1 件から解決される。
                         let entry = debounce_buffers
-                            .entry(debounce_window_key(&msg, &caller))
+                            .entry(debounce_window_key(&msg))
                             .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
                         entry.0.push(msg);
                         entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
@@ -460,10 +462,9 @@ pub async fn run_discord_loop<T: AgentRunner>(
                 let count = messages.len();
                 if count > 1 {
                     info!(
-                        channel = %key.0,
-                        privilege = key.1,
+                        channel = %key,
                         count = count,
-                        "Debounced (channel+privilege): recording all, running once"
+                        "Debounced (channel): recording all, running once"
                     );
                 }
                 for (i, msg) in messages.into_iter().enumerate() {
@@ -1859,31 +1860,21 @@ fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     message_id.parse::<u64>().ok()
 }
 
-/// デバウンス窓の channel 部分を取り出す（#543。権限部分は呼び出し側が caller から解決する）。
-fn debounce_channel_id(msg: &IncomingMessage) -> String {
+/// デバウンス窓のキー = **channel だけ**（#543 / #556）。
+///
+/// オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。権限レベルでは
+/// 割らない: run は DB から会話全体を読むので、どの窓で発火しても文脈は同じ。権限で割ると
+/// 同じ文脈に対し run が 2 回起きて 2 回答える（増幅）だけで、権限昇格も窓分割では守れない
+/// （caller はトリガー 1 件から決まり、会話には元々全員の発言が入る）。詳細は `run_discord_loop`
+/// の `debounce_buffers` 生成箇所のコメントを参照。
+///
+/// 同一 channel の 2 秒窓に owner / co_agent / trusted / 外部ユーザーが混在しても 1 つの窓に
+/// 入り、run は 1 回。トリガー（内容のある最後のメッセージ）の送信者から caller が解決される。
+fn debounce_window_key(msg: &IncomingMessage) -> String {
     match &msg.source {
         opencrab_gateway::MessageSource::Discord { channel_id, .. } => channel_id.clone(),
         _ => String::new(),
     }
-}
-
-/// デバウンス窓のキー = **(channel, caller 権限レベル)**（#543）。
-///
-/// **権限レベルだけで分ける。オーナー本人も特別扱いしない**（co_agent は #485 でオーナーが
-/// owner 等価と決めた方針なので、owner と co_agent が同権限で合流しても問題ない、というオー
-/// ナー判断）。owner/co_agent(=2) と trusted(=1) と agent(=0) は別キー＝別窓＝別 run になり、
-/// **権限をまたぐ合流を構造的に禁止**する: これは権限昇格の防止（強い方を採ると bot が上位
-/// 権限で走る）に必要で、オーナー承認とは別に残す。run 側は各メッセージの caller を個別に
-/// 解決し直すので、ここはグルーピング用の粗い区分でよい。
-///
-/// **今日は挙動が変わらない**: #489 の識別子不一致で co_agent の判定が発火せず、bot は素の
-/// `Agent`(=0)・オーナーは `Owner`(=2) と権限レベルが違うため合流しない。#489 を直して
-/// co_agent が owner 等価(=2)になって初めて、owner と co_agent が同窓で合流し得る。
-fn debounce_window_key(
-    msg: &IncomingMessage,
-    caller: &opencrab_actions::CallerIdentity,
-) -> (String, u8) {
-    (debounce_channel_id(msg), caller.trust_level())
 }
 
 /// メッセージが応答対象になる内容（テキストまたは画像）を持つか（#543）。
