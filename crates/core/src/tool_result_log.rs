@@ -166,13 +166,48 @@ fn redact_secrets_in_result(result_json: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(result_json)
 }
 
-/// 上限超過分をワークスペースへ退避する。成功したらワークスペース相対パスを返す。
+/// 退避ファイル 1 件の最大バイト数（#568）。
+///
+/// # なぜ要るか
+/// [`TOOL_RESULT_TOKEN_LIMIT`] は「inline に載せる量」を縛るだけで、「ディスクへ落とす量」は
+/// 無制限だった。本番で `execute_shell` の再帰 grep が過去の退避ファイル（`tmp/` 配下）を
+/// 巻き込んで読み、その結果がさらに退避される自己増幅で、単一 509,447,453 バイト（約 486MB）の
+/// ファイルまで育っていた（1,598 ファイル計 ~1GB、上位 2 件で 69%）。退避先はバックアップも
+/// 重くし、読み返そうとすると再び退避されて増える。
+///
+/// # 10MB の由来
+/// 本番の退避ファイル実測で 10MB を超えるのは 1,598 件中 **7 件のみ**。正当な結果（curl の
+/// HTML・検索一覧など）はほぼ 1MB 未満で、10MB は「病的に膨らんだ尾」だけを頭打ちにして正当な
+/// 小物を 1 件も削らない値。inline 上限（2,500 トークン ≒ 数 KB）より桁で大きいので、「全文は
+/// ファイルで読む」用途は保たれる。
+///
+/// # 何が失われるか
+/// 上限超過時は**先頭 [`OFFLOAD_FILE_BYTE_LIMIT`] バイト（文字境界で丸め）だけ保存**し、末尾は
+/// 捨てる。再帰 grep なら後半のヒットが消える。ただし inline には元から全文を出しておらず
+/// （#294）、notice に元サイズと「切り詰めた」ことを明記し、全文が要るなら引数を絞って再実行
+/// する導線も残すので前進はできる。**上限以下は全文保存で従来と 1 バイトも変わらない。**
+const OFFLOAD_FILE_BYTE_LIMIT: usize = 10 * 1024 * 1024;
+
+/// 退避の結果（#568）。保存できたときの相対パスと、切り詰めたかどうか。
+struct OffloadResult {
+    /// ワークスペース相対の保存先パス。
+    rel_path: String,
+    /// [`OFFLOAD_FILE_BYTE_LIMIT`] 超過で**先頭だけ**保存したときの、保存したバイト数。
+    /// 全文を保存したなら `None`（このとき notice は従来と同一）。
+    saved_prefix_bytes: Option<usize>,
+}
+
+/// 上限超過分をワークスペースへ退避する。成功したら保存先（切り詰め有無つき）を返す。
+///
+/// [`OFFLOAD_FILE_BYTE_LIMIT`] を超える結果は**先頭バイト（文字境界で丸め）だけ**保存し、
+/// `saved_prefix_bytes` にその長さを載せる（#568）。上限以下は全文保存で従来と 1 バイトも
+/// 変わらない（`saved_prefix_bytes = None`）。
 fn offload_to_workspace(
     result_json: &str,
     session_id: &str,
     tool_call_id: &str,
     workspace_root: Option<&Path>,
-) -> Option<String> {
+) -> Option<OffloadResult> {
     let root = workspace_root?;
     let tmp_dir = root.join("tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -190,8 +225,22 @@ fn offload_to_workspace(
         sanitize_component(session_id),
         sanitize_component(tool_call_id)
     );
-    if std::fs::write(tmp_dir.join(&filename), result_json).is_ok() {
-        Some(format!("tmp/{filename}"))
+    // #568: ディスクへ落とす量にも上限を設ける。超過時は**文字境界で**先頭だけ残す
+    // （バイト境界で切ると壊れた UTF-8 になる）。上限以下は全文をそのまま書く（no-op）。
+    let (to_write, saved_prefix_bytes) = if result_json.len() > OFFLOAD_FILE_BYTE_LIMIT {
+        let mut end = OFFLOAD_FILE_BYTE_LIMIT;
+        while end > 0 && !result_json.is_char_boundary(end) {
+            end -= 1;
+        }
+        (&result_json[..end], Some(end))
+    } else {
+        (result_json, None)
+    };
+    if std::fs::write(tmp_dir.join(&filename), to_write).is_ok() {
+        Some(OffloadResult {
+            rel_path: format!("tmp/{filename}"),
+            saved_prefix_bytes,
+        })
     } else {
         None
     }
@@ -230,7 +279,7 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// 誘発する。選択肢だけ示して判断は LLM に委ねる。
 ///
 /// 「同じツールを再実行するな」は残す（#284 のループ防止に効いている）。
-fn oversized_notice(result_json: &str, saved_to: Option<&str>) -> String {
+fn oversized_notice(result_json: &str, saved: Option<&OffloadResult>) -> String {
     let bytes = result_json.len();
     let lines = count_lines(result_json);
     // ここへ来る時点で `exceeds_limit` が encode 済み。ツール結果 1 件あたり
@@ -240,8 +289,12 @@ fn oversized_notice(result_json: &str, saved_to: Option<&str>) -> String {
         Some(h) => format!(", {h}"),
         None => String::new(),
     };
-    match saved_to {
-        Some(rel) => format!(
+    match saved {
+        // 全文を保存できた（[`OFFLOAD_FILE_BYTE_LIMIT`] 以下）。従来と同一文面（no-op）。
+        Some(OffloadResult {
+            rel_path: rel,
+            saved_prefix_bytes: None,
+        }) => format!(
             "[Tool result withheld: {bytes} bytes, {lines} lines, ~{tokens} tokens{hint}. \
              It exceeded the {TOOL_RESULT_TOKEN_LIMIT}-token inline limit, so none of its \
              content is included here. The full output was saved to `{rel}` (path relative to \
@@ -251,6 +304,22 @@ fn oversized_notice(result_json: &str, saved_to: Option<&str>) -> String {
              re-run with a narrower request (smaller id/time window, fewer rows, or estimate \
              the size first) so the result fits under the limit. Do NOT re-run the same tool \
              with the same arguments just to see the output again.]"
+        ),
+        // #568: 上限超過で**先頭だけ**保存した。元サイズと保存量を明記し、「不完全」であること・
+        // 全文が要るなら引数を絞って再実行する導線を残す（discarded とは別の状態）。
+        Some(OffloadResult {
+            rel_path: rel,
+            saved_prefix_bytes: Some(saved_bytes),
+        }) => format!(
+            "[Tool result withheld: {bytes} bytes, {lines} lines, ~{tokens} tokens{hint}. \
+             It exceeded the {TOOL_RESULT_TOKEN_LIMIT}-token inline limit, so none of its \
+             content is included here. The full result was {bytes} bytes; only the first \
+             {saved_bytes} bytes were saved to `{rel}` (path relative to your workspace root) \
+             to cap the offload file size - the rest was discarded, so the saved file is \
+             incomplete (truncated). You can read, search, or transform that prefix, but it is \
+             not the whole output. If you need the full result, re-run with a narrower request \
+             (smaller id/time window, fewer rows, or estimate the size first) so it fits. Do \
+             NOT re-run the same tool with the same arguments just to see the output again.]"
         ),
         None => format!(
             "[Tool result withheld: {bytes} bytes, {lines} lines, ~{tokens} tokens{hint}. \
@@ -283,8 +352,8 @@ fn sanitize_tool_result(
         return result_json.into_owned();
     }
 
-    let saved_to = offload_to_workspace(&result_json, session_id, tool_call_id, workspace_root);
-    oversized_notice(&result_json, saved_to.as_deref())
+    let saved = offload_to_workspace(&result_json, session_id, tool_call_id, workspace_root);
+    oversized_notice(&result_json, saved.as_ref())
 }
 
 /// tool_result を永続化用の本文へ変換する（redaction → トークン上限/退避）。
@@ -474,6 +543,94 @@ mod tests {
         );
         let saved = std::fs::read_to_string(dir.path().join("tmp/sess1_tc9.json")).unwrap();
         assert_eq!(saved.len(), big.len());
+    }
+
+    /// #568: 退避ファイルが [`OFFLOAD_FILE_BYTE_LIMIT`] を超えたら**先頭だけ**保存し、
+    /// 切り詰めは**文字境界**で行う（バイト境界で切ると壊れた UTF-8 になる）。
+    #[test]
+    fn offload_truncates_over_limit_at_char_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // 上限の 1 バイト手前に 3 バイト文字 'あ' を跨がせる。バイト境界で切ると
+        // 'あ' の途中で割れて壊れた UTF-8 になるが、文字境界で切れば 'あ' の手前で止まる。
+        let big = format!(
+            "{}あ{}",
+            "a".repeat(OFFLOAD_FILE_BYTE_LIMIT - 1),
+            "b".repeat(200)
+        );
+        assert!(big.len() > OFFLOAD_FILE_BYTE_LIMIT);
+
+        let saved = offload_to_workspace(&big, "sessT", "tcT", Some(dir.path())).unwrap();
+        assert_eq!(saved.rel_path, "tmp/sessT_tcT.json");
+        // 'あ' の手前（文字境界）＝ LIMIT-1 バイトで丸められる。
+        assert_eq!(saved.saved_prefix_bytes, Some(OFFLOAD_FILE_BYTE_LIMIT - 1));
+
+        let on_disk = std::fs::read(dir.path().join("tmp/sessT_tcT.json")).unwrap();
+        assert_eq!(on_disk.len(), OFFLOAD_FILE_BYTE_LIMIT - 1);
+        assert!(on_disk.len() < big.len(), "切り詰められていない");
+        // 壊れた UTF-8 になっていない（境界で切った）＝末尾の 'あ'/'b' は残らない。
+        let as_str = std::str::from_utf8(&on_disk).expect("切り詰め後も妥当な UTF-8");
+        assert!(
+            !as_str.contains('あ') && !as_str.contains('b'),
+            "上限超過分（末尾）が残っている"
+        );
+    }
+
+    /// #568: 上限以下は全文保存で**1 バイトも変わらない**（no-op）。
+    #[test]
+    fn offload_under_limit_saves_full_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = "hello ".repeat(1000); // ~6KB、上限以下
+        let saved = offload_to_workspace(&content, "sessU", "tcU", Some(dir.path())).unwrap();
+        assert_eq!(
+            saved.saved_prefix_bytes, None,
+            "上限以下は切り詰めない（None）"
+        );
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sessU_tcU.json")).unwrap();
+        assert_eq!(on_disk, content, "上限以下は 1 バイトも変わらない");
+    }
+
+    /// #568: notice は「全文保存」と「切り詰め保存」を区別し、切り詰め時は元サイズ・保存量・
+    /// truncated を明記する。「保存できなかった（discarded）」とは別の状態。
+    #[test]
+    fn oversized_notice_marks_truncation_vs_full() {
+        // 全文保存（saved_prefix_bytes = None）: 従来文面。切り詰め表現は出ない。
+        let full = OffloadResult {
+            rel_path: "tmp/a.json".to_string(),
+            saved_prefix_bytes: None,
+        };
+        let n_full = oversized_notice("original content", Some(&full));
+        assert!(
+            n_full.contains("The full output was saved to `tmp/a.json`"),
+            "{n_full}"
+        );
+        assert!(
+            !n_full.contains("only the first"),
+            "全文保存で切り詰め表現が出ている: {n_full}"
+        );
+
+        // 切り詰め保存（saved_prefix_bytes = Some）: 元サイズ・保存量・truncated を明記。
+        let trunc = OffloadResult {
+            rel_path: "tmp/b.json".to_string(),
+            saved_prefix_bytes: Some(123),
+        };
+        let original = "x".repeat(9999);
+        let n_trunc = oversized_notice(&original, Some(&trunc));
+        assert!(
+            n_trunc.contains("only the first 123 bytes"),
+            "保存量が無い: {n_trunc}"
+        );
+        assert!(
+            n_trunc.contains(&format!("{} bytes", original.len())),
+            "元サイズが無い: {n_trunc}"
+        );
+        assert!(
+            n_trunc.contains("truncated"),
+            "切り詰めの明記が無い: {n_trunc}"
+        );
+        assert!(
+            n_trunc.contains("Do NOT re-run the same tool"),
+            "ループ防止が無い: {n_trunc}"
+        );
     }
 
     /// 退避先が無くても生データは残さない（#294）。切り詰めた本文も session_logs へ
