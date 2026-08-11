@@ -28,12 +28,34 @@ const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
 /// "Your input exceeds the context window of this model." が 07-25〜08-10 で 54 件残って
 /// いたが誰も見ていなかった）。天井が無いと `model_pricing` を触るたびに再発する。
 ///
-/// # 350,000 の由来（後から検証できるように）
+/// # 305,000 の由来（後から検証できるように / #561・#562）
 /// `chatgpt` provider が叩く **Codex OAuth 経路の実測上限は 371,678 ok / 約 371,864 fail
-/// （±186）**。そこから出力予約（`max_output_tokens`）・system prompt・tool 定義ぶんを
-/// 引いた**保守値**が 350,000。**正確な上限を当てることが目的ではなく、100% 失敗する
-/// 予算を返さない天井が存在することが目的**なので、余裕を多めに取ってある。実上限が
-/// 変わったらこの数字を更新する。
+/// （±186）**。天井はこの実上限を「**最悪ケースの実トークン換算でも**」超えない値にする。
+/// 導出:
+/// ```text
+/// ceiling ≤ 実上限 371,678 / 実トークン比 1.12 − 予算外オーバーヘッド 22,344 ≒ 309,511
+///        → 余裕を見て 305,000（余裕 5,053 tok）
+/// ```
+/// 各項の根拠（#562 で実測、9 サンプル）:
+/// - **`o200k_base`（`crate::tokens::estimate_tokens`）は正確**。バックエンド実 `prompt_tokens`
+///   ÷ o200k = 中央値 1.06・**最大 1.12**。この差は**トークナイザ違いではなく、chatgpt が使う
+///   Responses API のメッセージ／ツール構造オーバーヘッド**（`providers/chatgpt.rs`。メッセージ数が
+///   多いほど比率が上がる）。予算計算は o200k で測るので、実バックエンドはこの比だけ多くなる。
+/// - **予算外オーバーヘッド（system prompt ＋ tool 定義）＝ 18,327（73 ツール）〜22,344（85 ツール）**
+///   の o200k トークン。会話予算（`compaction_ratio` の対象）に**含まれない**ぶんで、天井とは別に
+///   毎リクエスト積まれる。**最悪ケースとして 22,344 を採る**。
+/// - **1.12 は cjk 58% で観測した最悪比**。純日本語（cjk ≈ 100%）は未測定で、さらに上の可能性が
+///   ある。305,000 の余裕 5,053 tok はこの未測定ぶんと下の「ツール増加」への備え。
+///
+/// **正確な上限を当てることが目的ではなく、最悪ケースでも 100% 失敗する予算を返さない天井が
+/// 存在することが目的**。上の不変条件は `chatgpt_ceiling_stays_within_backend_limit_worst_case`
+/// テストが定数から検算しており、天井を変えると自動で再検証される。
+///
+/// # ツールが増えたら天井を下げる（必読）
+/// 予算外オーバーヘッドはツール数に比例して増える（85 ツールで 22,344）。**ツールを足して
+/// オーバーヘッドが 22,344 を超えたら、天井もそのぶん下げる**（さもないと最悪ケースで実上限を
+/// 超える）。テストの `NON_BUDGET_OVERHEAD_MAX` を実測値へ更新し、天井を導出し直すこと。実上限が
+/// 変わったときも同様に更新する。
 ///
 /// # provider 粒度であって経路粒度ではない（将来の落とし穴・必読）
 /// 実上限は本来 `(provider, 認証経路)` の組で決まる。ここが provider 粒度で済んでいるのは、
@@ -43,7 +65,7 @@ const DEFAULT_CONTEXT_BUDGET_TOKENS: usize = 100_000;
 /// ズレ始めたら「拒否レスポンスから学習して下げる」動的方式（#535 の次段）へ移す。
 fn backend_budget_ceiling(provider: &str) -> Option<usize> {
     match provider {
-        "chatgpt" => Some(350_000),
+        "chatgpt" => Some(305_000),
         _ => None,
     }
 }
@@ -401,15 +423,15 @@ mod model_context_window_gate_tests {
     /// #535 の障害そのものの再現：`chatgpt` の `context_window` を 1,050,000（API カタログ値）
     /// にしたとき、予算 = 1,050,000 × 0.5 = 525,000 になり、実上限（Codex OAuth 約 371,864）を
     /// 超える。**この設定で毎リクエストが拒否され heartbeat が数時間止まった。** 天井
-    /// （350,000）で頭を抑え、100% 失敗する予算を返さないことを固定する。
+    /// （305,000 / #561）で頭を抑え、100% 失敗する予算を返さないことを固定する。
     #[test]
     fn chatgpt_catalog_window_is_capped_to_backend_ceiling() {
         let conn = opencrab_db::init_memory().unwrap();
         register(&conn, "chatgpt", "gpt-5.6-sol", Some(1_050_000));
-        // 素の計算なら 525,000。天井で 350,000 に丸められる。
+        // 素の計算なら 525,000。天井で 305,000 に丸められる。
         assert_eq!(
             compute_context_budget(&conn, "chatgpt", "gpt-5.6-sol", 0.5),
-            350_000
+            305_000
         );
     }
 
@@ -445,14 +467,14 @@ mod model_context_window_gate_tests {
     #[test]
     fn ceiling_warn_is_emitted_once() {
         let conn = opencrab_db::init_memory().unwrap();
-        // 天井超えの設定（1,050,000 × 0.5 = 525,000 > chatgpt 天井 350,000）。model 名は
+        // 天井超えの設定（1,050,000 × 0.5 = 525,000 > chatgpt 天井 305,000）。model 名は
         // このテスト固有にして、warn_once のグローバル抑止キーが他テストと衝突しないようにする。
         register(&conn, "chatgpt", "ceiling-warn-once-m", Some(1_050_000));
 
         // (1) 実経路が天井で頭を抑える（＝over_backend_ceiling の分岐を通っている）。
         assert_eq!(
             compute_context_budget(&conn, "chatgpt", "ceiling-warn-once-m", 0.5),
-            350_000
+            305_000
         );
         // (2) 同じ (kind, provider, model) の WARN を実経路が既に 1 回出したので、直後の
         //     直接呼びは抑止される。compute_context_budget が実際に "over_backend_ceiling"
@@ -465,7 +487,36 @@ mod model_context_window_gate_tests {
         // 2 回目の compute も同じ天井値（挙動は不変・WARN は既に抑止済み）。
         assert_eq!(
             compute_context_budget(&conn, "chatgpt", "ceiling-warn-once-m", 0.5),
-            350_000
+            305_000
+        );
+    }
+
+    /// #561 の不変条件を定数から検算して固定する。
+    ///
+    /// **静的天井の目的は「最悪ケースの実トークン換算でも Codex OAuth の実上限を超えない」こと。**
+    /// 天井の値を変えたら、この不変条件が自動で再検証される（数値の直書きをしない）。破れたら
+    /// 天井を下げるか、オーバーヘッド／比の実測値を更新すること（`backend_budget_ceiling` の doc）。
+    ///
+    /// 由来（#562 実測、9 サンプル）:
+    /// - `BACKEND_INPUT_LIMIT` = 371,678: Codex OAuth 経路の実測入力上限（ok 側）。
+    /// - `NON_BUDGET_OVERHEAD_MAX` = 22,344: 会話予算外の system＋tool 定義（85 ツール）の
+    ///   o200k トークン。ツールが増えたら実測して更新する。
+    /// - `REAL_TOKEN_RATIO_MAX` = 1.12: backend `prompt_tokens` ÷ o200k の観測最大（cjk 58%）。
+    ///   純日本語は未測定でこれより上の可能性があるため、天井には別途余裕を持たせてある。
+    #[test]
+    fn chatgpt_ceiling_stays_within_backend_limit_worst_case() {
+        const BACKEND_INPUT_LIMIT: f64 = 371_678.0;
+        const NON_BUDGET_OVERHEAD_MAX: f64 = 22_344.0;
+        const REAL_TOKEN_RATIO_MAX: f64 = 1.12;
+
+        let ceiling =
+            super::backend_budget_ceiling("chatgpt").expect("chatgpt には天井があるはず") as f64;
+        // 天井いっぱいの会話予算＋予算外オーバーヘッドを、最悪の実トークン比で換算した値。
+        let worst_case_real_tokens = (ceiling + NON_BUDGET_OVERHEAD_MAX) * REAL_TOKEN_RATIO_MAX;
+        assert!(
+            worst_case_real_tokens <= BACKEND_INPUT_LIMIT,
+            "天井 {ceiling} は最悪ケースの実トークン {worst_case_real_tokens:.0} が実上限 \
+             {BACKEND_INPUT_LIMIT} を超える（天井を下げるか実測値を更新すること）"
         );
     }
 }
