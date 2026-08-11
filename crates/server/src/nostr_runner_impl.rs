@@ -165,6 +165,15 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         );
         spawn_relay_post(target.url.clone(), message);
     }
+
+    /// #570: 受信本文の退避先＝このエージェントのワークスペース。`ws_read` と同じ
+    /// resolver（[`opencrab_core::workspace::resolve_agent_workspace`]）で `{agent_id}` を
+    /// 展開した実パスを返すので、退避ファイルは `ws_read` でそのまま読み返せる
+    /// （#571 の「テンプレート未展開」を避ける）。不正な agent_id は `None`（退避せず
+    /// 案内だけ残す fail-safe）。
+    fn agent_workspace_root(&self, agent_id: &str) -> Option<std::path::PathBuf> {
+        opencrab_core::workspace::resolve_agent_workspace(&self.workspace_base, agent_id).ok()
+    }
 }
 
 /// 転記 1 通を **1 回** POST する（fire-and-forget）。

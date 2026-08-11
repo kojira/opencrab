@@ -93,4 +93,18 @@ pub trait NostrAgentRunner: AgentRuntime {
         target: &opencrab_actions::webhook_target::WebhookConfig,
         text: String,
     );
+
+    /// このエージェントのワークスペースのルート（#570: 超大受信本文の退避先）。
+    ///
+    /// 大きい Nostr 受信本文を、tool_result と同じ仕組み
+    /// （[`opencrab_actions::sanitize_tool_result_for_log`]）で退避する。退避ファイルは
+    /// `<root>/tmp/` に置かれ、エージェントは `ws_read` で読み返せる。したがって
+    /// **`ws_read` と同じ resolver でルートを解決すること**（`{agent_id}` を展開した
+    /// 実パスを返す。テンプレートのまま返すと #571 の「`{agent_id}` 未展開」になり
+    /// 読み返せない）。解決できない agent_id は `None`（退避せず案内だけ残す fail-safe
+    /// で、閾値以下の受信は `None` でも従来どおり素通り）。
+    ///
+    /// 受信ループから同期で呼ぶ（DB も I/O も伴わない純粋なパス解決）。#551 と同じく
+    /// 「`workspace_root` を持たない受信側ではなく runner に解決させる」判断に従う。
+    fn agent_workspace_root(&self, agent_id: &str) -> Option<std::path::PathBuf>;
 }

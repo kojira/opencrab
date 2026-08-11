@@ -588,6 +588,10 @@ mod tests {
             _text: String,
         ) {
         }
+
+        fn agent_workspace_root(&self, _agent_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
     }
 
     struct NoopAdmin;

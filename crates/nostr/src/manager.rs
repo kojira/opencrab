@@ -659,6 +659,30 @@ async fn handle_event<R: NostrAgentRunner>(
     let inbound_text = event.inbound_text();
 
     runner.ensure_session(&session_id, &[agent_id.to_string()], "Nostr", "{}", "nostr");
+
+    // #570: 会話履歴へ残す本文だけ、tool_result と同じ退避
+    // （[`opencrab_actions::sanitize_tool_result_for_log`]）に乗せる。Nostr の受信本文は
+    // relay が受け付けたサイズがそのまま入り、コード上の上限が無かった。超大受信が
+    // 「直近ユーザー発言」枠で退避も予算も素通りし、単独で context 予算を食い潰す経路を塞ぐ。
+    //
+    // - 閾値・保存先・案内書式は tool_result と**同一**（新しい流儀を足さない）。退避先は
+    //   エージェントのワークスペース `<root>/tmp/`（`ws_read` で読み返せる）。ファイル名の
+    //   一意キーには tool_call_id の代わりに Nostr の event.id を使う。
+    // - **閾値以下は完全な no-op**（本文を 1 バイトも変えない）: 本番最大の受信
+    //   （6,761 字 ≒ 1,700 トークン < 2,500）はここを素通りする。
+    // - 秘密（nsec）混入時のマスクも同じ経路で掛かる（防御的多層）。
+    //
+    // 転記（`relay_inbound_notification`）は**人間向けの生本文**のまま送る（下でそのまま
+    // `inbound_text` を使う）。転記先はプラットフォーム側でサイズ頭打ちになり、退避案内を
+    // 人が読むチャンネルへ流すのは不適切なため、退避は会話履歴の側だけに掛ける。
+    let recorded_text = opencrab_actions::sanitize_tool_result_for_log(
+        "nostr_inbound",
+        &inbound_text,
+        &session_id,
+        &event.id,
+        runner.agent_workspace_root(agent_id).as_deref(),
+    );
+
     // #284 P0-3: 受信発言の記録失敗は握り潰さない。落ちた発言は会話履歴に現れず、
     // エージェントはその投稿を見ないまま応答することになる。
     let recorded = runner.record_inbound_message(
@@ -671,7 +695,7 @@ async fn handle_event<R: NostrAgentRunner>(
             avatar_url: None,
             channel_id: None,
             pubkey: Some(&event.pubkey),
-            text: &inbound_text,
+            text: &recorded_text,
             image_urls: &[],
         },
     );
@@ -1126,6 +1150,8 @@ mod tests {
         caller_queries: Arc<Mutex<Vec<String>>>,
         /// 応答生成へ渡った呼び出し元（#319）。
         callers: Arc<Mutex<Vec<CallerIdentity>>>,
+        /// `agent_workspace_root` が返す退避先（#570）。`None`＝退避先なし。
+        workspace_root: Option<std::path::PathBuf>,
     }
 
     impl SlowRunner {
@@ -1151,7 +1177,14 @@ mod tests {
                 owner_pubkey: None,
                 caller_queries: Arc::new(Mutex::new(Vec::new())),
                 callers: Arc::new(Mutex::new(Vec::new())),
+                workspace_root: None,
             }
+        }
+
+        /// 受信本文の退避先を仕込む（#570 の退避経路の検証用）。
+        fn with_workspace_root(mut self, root: std::path::PathBuf) -> Self {
+            self.workspace_root = Some(root);
+            self
         }
 
         /// 「この pubkey がオーナー」という解決結果を仕込む（#319）。
@@ -1355,6 +1388,10 @@ mod tests {
         fn relay_inbound_notification(&self, _target: &WebhookConfig, text: String) {
             // 配送口のスパイ: 実際に転記へ回った本文を記録する（HTTP は出さない）。
             self.relayed.lock().unwrap().push(text);
+        }
+
+        fn agent_workspace_root(&self, _agent_id: &str) -> Option<std::path::PathBuf> {
+            self.workspace_root.clone()
         }
     }
 
@@ -2068,6 +2105,135 @@ mod tests {
                 "{needle} が両方に載る"
             );
         }
+    }
+
+    /// [#570] トークン上限未満の受信は退避を**完全に素通り**する: 会話履歴へ残る本文は
+    /// 生の `inbound_text` と 1 バイトも変わらず、ワークスペースに退避ファイルも作られない。
+    /// 閾値以下 no-op の回帰防止。
+    ///
+    /// Nostr 受信（source=nostr / log_type=speech）の実測最大は **1,959 字 / 2,179 バイト**
+    /// （288 行・2,000 字超は 0 行）。ここで使う ASCII 主体 **6,761 字**は実測最大ではなく、
+    /// **no-op の回帰用に十分大きい合成値**（`o200k_base` で約 1,700 トークン < 2,500）。
+    /// 純粋なかな 6,761 字は ~1 字/トークンで上限を超えてしまうため、「上限未満だが実測最大より
+    /// 十分大きい」を作れる ASCII 主体（~4 字/トークン）で組む。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_below_limit_is_recorded_verbatim() {
+        // no-op 回帰用の合成本文: ASCII 主体 6,761 字（≒ 1,700 トークン < 2,500）。
+        // 実測の Nostr 受信最大（1,959 字）より十分大きく、かつ上限未満に収まる。
+        let content: String = "the nostaro bot posts publicly. "
+            .repeat(220)
+            .chars()
+            .take(6_761)
+            .collect();
+        assert_eq!(
+            content.chars().count(),
+            6_761,
+            "合成本文の文字数がズレている"
+        );
+        let ev = event("prodmax", "0011223344556677", &content);
+        // 前提: この本文はトークン上限未満（退避されない領域）。
+        assert!(
+            opencrab_core::tokens::estimate_tokens(&ev.inbound_text())
+                < opencrab_actions::TOOL_RESULT_TOKEN_LIMIT,
+            "前提が崩れている: 合成本文（ASCII 主体 6,761 字）が上限を超えた"
+        );
+        let expected = ev.inbound_text();
+
+        // 退避先（ワークスペース）を与えても、閾値以下なら 1 件も書かれない。
+        let dir = tempfile::tempdir().unwrap();
+        let runner =
+            SlowRunner::new(Duration::from_millis(1)).with_workspace_root(dir.path().into());
+        let h = Harness::with_runner("agent-570-noop", runner, 8, 32);
+        h.feed_event(ev).await;
+
+        let recorded = SlowRunner::snapshot(&h.runner.recorded);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(
+            recorded[0], expected,
+            "閾値以下の受信は生本文のまま記録される（no-op）"
+        );
+        // 発言者識別子（sender_id）は退避と無関係に不変（#501 の除外条件に巻き込まれない）。
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.recorded_speakers),
+            vec!["0011223344556677".to_string()],
+            "speaker_id は退避経路で変わらない"
+        );
+        // 退避ファイルは作られない。
+        let tmp = dir.path().join("tmp");
+        let offloaded = tmp.exists()
+            && tmp
+                .read_dir()
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+        assert!(!offloaded, "閾値以下なのに退避ファイルが作られた");
+    }
+
+    /// [#570] 閾値を超える受信は、tool_result と同じ仕組みでワークスペースへ退避され、
+    /// 会話履歴には生データを 1 バイトも含まないメタ案内だけが残る。退避ファイルは
+    /// `<workspace>/tmp/` にあり（`ws_read` で読み返せる）、全文が入っている。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_over_limit_is_offloaded_to_workspace() {
+        // 上限（2,500 トークン）を確実に超える本文。
+        let content = "needle-token ".repeat(6_000);
+        let ev = event("bigid", "aabbccddeeff0011", &content);
+        let full = ev.inbound_text();
+        assert!(
+            opencrab_core::tokens::estimate_tokens(&full)
+                >= opencrab_actions::TOOL_RESULT_TOKEN_LIMIT,
+            "前提が崩れている: 上限を超えていない"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let runner =
+            SlowRunner::new(Duration::from_millis(1)).with_workspace_root(dir.path().into());
+        let h = Harness::with_runner("agent-570-big", runner, 8, 32);
+        h.feed_event(ev).await;
+
+        let recorded = SlowRunner::snapshot(&h.runner.recorded);
+        assert_eq!(recorded.len(), 1);
+        let text = &recorded[0];
+        // 生データは 1 バイトも会話履歴へ入らない。
+        assert!(
+            !text.contains("needle-token"),
+            "生データが会話履歴に混ざった: {text}"
+        );
+        // tool_result と同じ案内書式（退避先パス入り）。
+        assert!(text.contains("withheld"), "案内書式が既存と違う: {text}");
+        assert!(text.contains("tmp/"), "退避先パスが案内に無い: {text}");
+        // speaker_id は不変。
+        assert_eq!(
+            SlowRunner::snapshot(&h.runner.recorded_speakers),
+            vec!["aabbccddeeff0011".to_string()],
+        );
+        // 退避ファイルが 1 つでき、全文（生の inbound_text）が入っている。
+        let tmp = dir.path().join("tmp");
+        let files: Vec<_> = tmp.read_dir().unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(files.len(), 1, "退避ファイルが 1 件だけできる");
+        let saved = std::fs::read_to_string(&files[0]).unwrap();
+        assert_eq!(
+            saved, full,
+            "退避ファイルに全文が入る（ws_read で読み返せる）"
+        );
+    }
+
+    /// [#570] 退避先（workspace_root）が無い／解決できない場合でも、閾値超の生データを
+    /// 会話履歴へ丸ごと入れない。「保存できず捨てた」と分かる案内だけを残す（fail-safe）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_over_limit_without_workspace_is_not_dumped_raw() {
+        let content = "secret-body ".repeat(6_000);
+        let ev = event("nows", "0011223344556677", &content);
+        // workspace_root を仕込まない（= agent_workspace_root は None）。
+        let h = Harness::new("agent-570-nows", Duration::from_millis(1), 8, 32);
+        h.feed_event(ev).await;
+
+        let recorded = SlowRunner::snapshot(&h.runner.recorded);
+        assert_eq!(recorded.len(), 1);
+        let text = &recorded[0];
+        assert!(
+            !text.contains("secret-body"),
+            "退避先が無いのに生データが会話履歴へ流れた: {text}"
+        );
+        assert!(text.contains("could not be saved"), "{text}");
     }
 
     #[test]
