@@ -600,12 +600,21 @@ impl SubtaskCompletionSink for HeartbeatCompletionSink {
 
 /// 決着イベントから継続ターンの発火元を決める（純粋関数）。
 ///
-/// `None` を返す（＝継続しない）のは 3 つ:
+/// `None` を返す（＝継続しない）のは 2 つ:
 /// - 決着以外（進捗通知）。走行中の run の途中で二重に応答してしまう（Nostr / web と同じ判断。
 ///   Discord だけが `Progress` も通すのは「進捗実況」機能があるため）。
-/// - 親セッションが HB セッションでない。sink は HB の run にしか配線しないので通常は起きないが、
-///   配線が広がったときに他ゲートウェイのセッションを HB として resume しないための番人。
-/// - 親セッションがこの sink を配線したターンのものでない（同上）。
+/// - 親セッションがこの sink を配線したターンのものでない。sink は
+///   [`RunRequest::with_dispatch`] で**その run が dispatch した subtask にのみ**配線され、
+///   決着は所有 sink の `on_subtask_settled` に届く（`subtask.rs`）。よって「この HB run の
+///   subtask か」の主判定は **`ev.session_id == own_session_id`** で足りる。
+///
+/// **`heartbeat-` 接頭辞は見ない（#573 Stage A）。** 以前は
+/// `ev.session_id.starts_with(HEARTBEAT_SESSION_PREFIX)` も課していたが、これは主判定
+/// （`own_session_id` 一致）に対する冗長な番人にすぎず、統合後に HB ターンが実会話
+/// セッション（`nostr-…` / `discord-…`）で走ると接頭辞が消える。sink は HB run にしか
+/// 配線されないため、接頭辞を外しても他ゲートウェイの決着を HB として resume することは
+/// ない（同一セッションで走る Discord ターンの subtask は `DiscordCompletionSink` が所有し、
+/// この sink には届かない）。
 fn resume_origin(own_session_id: &str, ev: &SubtaskSettled) -> Option<TurnOrigin> {
     if ev.kind != SettleKind::Completed {
         tracing::debug!(
@@ -615,11 +624,11 @@ fn resume_origin(own_session_id: &str, ev: &SubtaskSettled) -> Option<TurnOrigin
         );
         return None;
     }
-    if !ev.session_id.starts_with(HEARTBEAT_SESSION_PREFIX) || ev.session_id != own_session_id {
+    if ev.session_id != own_session_id {
         tracing::debug!(
             session_id = %ev.session_id,
             own_session_id = %own_session_id,
-            "heartbeat sink: parent session is not this heartbeat session, skipping continuation turn"
+            "heartbeat sink: parent session is not this sink's own session, skipping continuation turn"
         );
         return None;
     }
@@ -958,6 +967,29 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// #573 Stage A: 判定は `own_session_id` 一致のみで、`heartbeat-` 接頭辞に依存しない。
+    /// 統合後（Stage B）に HB ターンが実会話セッション（`nostr-…` / `discord-…`）で走っても、
+    /// 自分のセッションの完了 subtask なら継続ターンが起きる。
+    #[test]
+    fn resume_origin_is_prefix_independent_for_own_session() {
+        for own in ["nostr-agent-a", "discord-agent-a-111-222"] {
+            assert_eq!(
+                resume_origin(own, &settled(own, SettleKind::Completed)),
+                Some(TurnOrigin::SubtaskResume {
+                    subtask_id: "st-1".to_string(),
+                    exit_reason: "completed".to_string(),
+                }),
+                "own_session_id={own} の自分の完了 subtask は接頭辞に関わらず継続する"
+            );
+            // 接頭辞非依存でも「別セッションの決着は拾わない」は保たれる（横取り防止）。
+            assert_eq!(
+                resume_origin(own, &settled("discord-other-9-9", SettleKind::Completed)),
+                None,
+                "own_session_id={own} でも別セッションの決着は継続しない"
+            );
+        }
     }
 
     /// tick の suffix は無し。継続ターンだけがマーカーを足す（本文は載せない）。

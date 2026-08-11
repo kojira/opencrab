@@ -132,7 +132,12 @@ fn idle_decision_has_no_reason(text: &str) -> bool {
     rest.trim().is_empty()
 }
 
-/// heartbeat セッションで「何もしていない tick」を構成するノイズ行かどうか。
+/// 「何もしていない tick」を構成するノイズ行かどうか（HB 由来ノイズの判定）。
+///
+/// #573 Stage A で呼び出し側の `heartbeat-` 接頭辞ゲートを外し、全セッションへ無条件適用
+/// するようになった。述語は元から接頭辞非依存で、下記 2 種は HB 経路しか生まない目印
+/// （`speaker_id='heartbeat'`）と中身の有無で判定するため、実会話セッションの中身のある
+/// 行を落とすことはない（[`is_idle_heartbeat_speech`] 参照）。
 ///
 /// 除外対象は 2 種類:
 /// 1. 毎 tick 注入されるハートビートのプロンプト scaffolding
@@ -254,15 +259,24 @@ impl IndexBuilder {
                 max_log_id = last_log_id;
             }
 
-            // heartbeat セッションは「何もしなかった tick」のノイズ行（毎tickのプロンプト
-            // scaffolding と idle の speech 行）を要約材料から除く。実質行が残らないグループは
-            // topic を作らずスキップする（何もしなかったハートビートを索引しない — #374）。
-            // 発生源（main.rs）は静観履歴を自己文脈に使う設計のため手を入れず、索引側だけで
-            // 落とす。バッチ結合で idle と実のある tick が同居するため「グループ丸ごとスキップ」
-            // ではなく、ノイズ行を除いた実質（SPEAK/LEARN の speech・tool・inner_voice 等）の
-            // 有無で判定する。
+            // 「何もしなかった tick」のノイズ行（毎tickのプロンプト scaffolding と idle の
+            // speech 行）を要約材料から除く。実質行が残らないグループは topic を作らずスキップ
+            // する（何もしなかったハートビートを索引しない — #374）。発生源（main.rs）は静観
+            // 履歴を自己文脈に使う設計のため手を入れず、索引側だけで落とす。バッチ結合で idle と
+            // 実のある tick が同居するため「グループ丸ごとスキップ」ではなく、ノイズ行を除いた
+            // 実質（SPEAK/LEARN の speech・tool・inner_voice 等）の有無で判定する。
             // watermark（max_log_id）は上で前進済みなので、topic を作らなくても毎 tick
             // 同じログを取り直す無限ループにはならない。
+            //
+            // #573 Stage A: `session_id.starts_with("heartbeat-")` のゲートを外し、
+            // [`is_heartbeat_noise`] を**全セッションに無条件適用**する。統合後（Stage B）は
+            // HB tick が実会話セッションに直接記録されるため、接頭辞でノイズを絞れなくなる。
+            // 述語自体は既に接頭辞非依存で安全: (1) scaffolding は `speaker_id='heartbeat'`
+            // （HB 経路しか書かない）で判定、(2) idle は #517 以降「中身の無い裸マーカー
+            // （`IDLE` / `NO_REPLY` 等）だけ」を落とし、`IDLE: <理由>` や散文・他者発言・
+            // 実のある発話は残す。実会話セッションに既にある裸 `NO_REPLY`（`record_agent_no_reply`
+            // が記録）が材料から落ちるだけで、中身のある行は落ちない（＝索引材料は縮まない方向に
+            // のみ変わる）。
             // #425: エコー行（HB 発話の表示専用の二重記録）は topic 要約の材料に入れない。
             // 記憶材料としての HB 発話は heartbeat セッション側が担うため、索引・宣言材料は
             // この PR の前後で不変。watermark（max_log_id）は上でフィルタ前の session_logs から
@@ -273,9 +287,7 @@ impl IndexBuilder {
                 .filter(|l| {
                     !opencrab_db::queries::is_heartbeat_channel_echo(l.metadata_json.as_deref())
                 })
-                .filter(|l| {
-                    !(session_id.starts_with("heartbeat-") && is_heartbeat_noise(l, agent_id))
-                })
+                .filter(|l| !is_heartbeat_noise(l, agent_id))
                 .collect();
             if material_logs.is_empty() {
                 continue;
@@ -2352,10 +2364,37 @@ mod tests {
     /// 通常（非 heartbeat）セッションは idle フィルタの対象外。本文が "IDLE" でも
     /// 従来どおり topic が作られる。
     #[tokio::test]
-    async fn test_non_heartbeat_session_not_filtered() {
+    async fn test_non_heartbeat_session_bare_idle_marker_is_filtered_573() {
+        // #573 Stage A: idle ノイズ除外は接頭辞ゲートを外し全セッションへ適用する。
+        // 通常セッション（`heartbeat-` で始まらない）でも、中身の無い裸マーカーだけの
+        // バッチは topic を作らない（実会話セッションの裸 `NO_REPLY` が材料を汚さない）。
         let db_conn = opencrab_db::init_memory().unwrap();
-        // session_id が heartbeat- で始まらない = 通常セッション
-        insert_heartbeat_speech(&db_conn, "agent-1", "session-normal", "IDLE");
+        insert_heartbeat_speech(&db_conn, "agent-1", "discord-agent-1-g-c", "NO_REPLY");
+        let conn = opencrab_db::Db::from_connection(db_conn);
+
+        IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
+            .await
+            .unwrap();
+
+        let db = conn.lock().unwrap();
+        let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
+        assert!(
+            !tree.iter().any(|n| n.node_type == "topic"),
+            "通常セッションでも裸マーカーのみのバッチは topic を作らない"
+        );
+    }
+
+    /// #573 Stage A: 接頭辞ゲートを外しても**中身のある発話は落とさない**（過剰フィルタ
+    /// でないことの包含確認）。通常セッションに実のある speech があれば topic が作られる。
+    #[tokio::test]
+    async fn test_non_heartbeat_session_substantive_speech_still_indexed_573() {
+        let db_conn = opencrab_db::init_memory().unwrap();
+        insert_heartbeat_speech(
+            &db_conn,
+            "agent-1",
+            "discord-agent-1-g-c",
+            "IDLE: 相手が寝る前の挨拶をしていたので静かに見送った。",
+        );
         let conn = opencrab_db::Db::from_connection(db_conn);
 
         IndexBuilder::build_incremental(&conn, "agent-1", &MockLlm, "m", 50, "", None)
@@ -2366,7 +2405,7 @@ mod tests {
         let tree = opencrab_db::queries::get_index_tree(&db, "agent-1").unwrap();
         assert!(
             tree.iter().any(|n| n.node_type == "topic"),
-            "通常セッションは idle フィルタの対象外"
+            "中身のある IDLE 理由（#517）は通常セッションでも材料に残り topic 化する"
         );
     }
 
