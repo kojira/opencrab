@@ -368,10 +368,14 @@ mod tests {
         let data = result.data.unwrap();
         assert!(data["reflected"].as_bool().unwrap());
 
-        // Verify curated memory was saved
+        // Verify curated memory was saved. 本番の読み手（#428 / #544）と同じ前方一致で引く
+        // （"reflection" に派生見出し `reflection/<…>` は無いので完全一致と同結果）。完全一致
+        // `get_curated_memories` は #[cfg(test)] で db クレート内テスト専用になったため、他
+        // クレートのこのテストからは参照できない。
         let conn = ctx.db.lock().unwrap();
         let memories =
-            opencrab_db::queries::get_curated_memories(&conn, "agent-1", "reflection").unwrap();
+            opencrab_db::queries::get_curated_memories_by_prefix(&conn, "agent-1", "reflection")
+                .unwrap();
         assert_eq!(memories.len(), 1);
         assert!(memories[0].content.contains("overly long responses"));
     }
