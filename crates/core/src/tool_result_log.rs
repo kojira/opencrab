@@ -53,6 +53,15 @@ use std::path::Path;
 /// - LLM 経路と DB 経路で**同じ値**を使う。ここがズレると「同ターンで見えた本文」と
 ///   「次ターンに会話へ再注入される本文」が食い違い、エージェントが前ターンの内容を
 ///   見失う（#272 と同種の破綻）。
+///
+/// **これは複数 crate の共有契約（#576）。** ツール結果を作る側は「この上限**トークン**内なら
+/// 退避されない」ことを頼りに自分の出力をトークンで頭打ちにしている:
+/// `ws_read`（`RANGE_CONTENT_TOKEN_CEILING = ここ - 400`）、`memory_units`
+/// （`HISTORY_RESULT_TOKEN_BUDGET = ここ * 8/10` / `INLINE_LIMIT_TOKENS = ここ`）、
+/// `search`、Nostr 受信退避など。**だから単位はトークンから動かせない**。判定をバイトに
+/// すると同じ値でも言語・エンコードでバイト量がぶれ、トークンで上限内に収めた本文が
+/// バイトで退避され、これら producer の保証が破れる。#576 で消したのは「判定の単位」では
+/// なく「全体を一括トークナイズすること」だけ（[`exceeds_limit`] を参照）。
 pub const TOOL_RESULT_TOKEN_LIMIT: usize = 2_500;
 
 /// 退避ファイル名 1 コンポーネント（session_id / tool_call_id）の上限バイト数。
@@ -65,17 +74,24 @@ pub const TOOL_RESULT_TOKEN_LIMIT: usize = 2_500;
 ///   LLM と DB の本文が食い違う（#286）。
 const OFFLOAD_COMPONENT_LIMIT: usize = 64;
 
-/// 本文が上限を超えているか。**tokenizer を呼ぶ前にバイト数で足切りする**（#294）。
+/// 本文が上限を超えているか。**単位はトークンのまま**（[`TOOL_RESULT_TOKEN_LIMIT`] は
+/// producer 側の契約と共有しているため／このモジュール冒頭の理由を参照）。ただし
+/// **全体をトークナイズしない**（#576）。
 ///
-/// `o200k_base` の 1 トークンは必ず 1 バイト以上なので `tokens <= bytes`。
-/// つまりバイト数が上限未満なら、トークン数を数えるまでもなく上限未満。ツール結果は
-/// 大半が数百バイトなので、この早期 return で BPE encode（数十 KB で ~数百 µs）は
-/// ほぼ走らない。上界の性質は `tokens::tests::tokens_never_exceed_bytes` で固定。
+/// 2 段構え:
+/// 1. `o200k_base` の 1 トークンは必ず 1 バイト以上なので `tokens <= bytes`。バイト数が
+///    上限未満なら、数えるまでもなく上限未満（大半のツール結果は数百バイトでここで返る）。
+///    上界の性質は `tokens::tests::tokens_never_exceed_bytes` で固定。
+/// 2. 超えていそうなものだけ [`crate::tokens::tokens_reach_limit`] で判定する。これは先頭から
+///    窓ぶんずつ encode し、累計が上限に達した時点で打ち切る。コストは「上限トークンぶんの
+///    入力」で頭打ちになり、巨大入力（486MB）や長い単一文字ランを一括トークナイズする
+///    O(n²) の入口を塞ぐ（#576）。判定はトークン基準のまま＝ producer の「上限内なら
+///    退避されない」保証は変わらない。
 fn exceeds_limit(s: &str) -> bool {
     if s.len() < TOOL_RESULT_TOKEN_LIMIT {
         return false;
     }
-    crate::tokens::estimate_tokens(s) >= TOOL_RESULT_TOKEN_LIMIT
+    crate::tokens::tokens_reach_limit(s, TOOL_RESULT_TOKEN_LIMIT)
 }
 
 /// 秘密として扱う JSON フィールド名の集合（**唯一の定義**）。
@@ -282,9 +298,10 @@ fn format_hint(s: &str) -> Option<&'static str> {
 fn oversized_notice(result_json: &str, saved: Option<&OffloadResult>) -> String {
     let bytes = result_json.len();
     let lines = count_lines(result_json);
-    // ここへ来る時点で `exceeds_limit` が encode 済み。ツール結果 1 件あたり
-    // 2 回目の encode になるが、上限超過は稀（大半は早期 return する）。
-    let tokens = crate::tokens::estimate_tokens(result_json);
+    // 「約 N トークン」は LLM が「全部読んだら予算をどれだけ食うか」を見積もるための**目安**。
+    // 全体をトークナイズすると巨大退避（486MB 実績）で同期 CPU を食う（#576）ので、先頭窓の
+    // 密度から概算する（`~` 付きで目安と分かる文言）。判定と違い数を返すのでこちらを使う。
+    let tokens = crate::tokens::estimate_tokens_bounded(result_json);
     let hint = match format_hint(result_json) {
         Some(h) => format!(", {h}"),
         None => String::new(),
@@ -718,8 +735,12 @@ mod tests {
             "バイトサイズが無い: {out}"
         );
         assert!(out.contains("3 lines"), "行数が無い: {out}");
+        // 案内のトークン数は概算（`~` 付きの目安）。判定と同じ有界推定を使う（#576）。
         assert!(
-            out.contains(&format!("~{} tokens", crate::tokens::estimate_tokens(&big))),
+            out.contains(&format!(
+                "~{} tokens",
+                crate::tokens::estimate_tokens_bounded(&big)
+            )),
             "推定トークン数が無い: {out}"
         );
         // 参照方法は選択肢として示すだけで強制しない。
@@ -757,18 +778,68 @@ mod tests {
         assert_eq!(out, json);
     }
 
-    /// バイト数では上限を超えるが**トークン数では超えない**本文は素通りする（#294）。
+    /// 判定は**トークン基準**なので、日本語が「バイト量が多い」だけで不当に早く退避される
+    /// ことはない（#294 の趣旨。#576 で全体トークナイズはやめたが単位はトークンのまま）。
     ///
-    /// 旧実装（10,000 バイト上限）ならここで切られていた。日本語 1 文字 3 バイトの
-    /// 本文は、バイトで測ると実効トークン量よりずっと大きく見える。
+    /// 日本語 1 文字 3 バイトの本文は、バイトで測ると実効トークン量よりずっと大きく見える。
+    /// トークン数が上限未満なら、バイト数が上限相当を超えていても素通りする。
     #[test]
     fn japanese_text_is_measured_in_tokens_not_bytes() {
-        // 4,500 バイト超（旧バイト上限の半分弱）だが 2,500 トークン未満。
+        // トークン上限に迫る量の日本語（バイトでは上限バイト換算 ~10KB を意識した長さ）だが、
+        // トークン数では上限未満。ここで退避されないことを担保する。
         let json = format!(r#"{{"data":"{}"}}"#, "こんにちは世界".repeat(220));
-        assert!(json.len() > 4_500, "前提が崩れている: {}", json.len());
+        // バイトでは「上限トークン数」という数値（2,500）をゆうに超える一方…
+        assert!(
+            json.len() > TOOL_RESULT_TOKEN_LIMIT,
+            "前提: バイトは 2,500 超"
+        );
+        // …トークンでは上限未満。だから退避されない。
         assert!(crate::tokens::estimate_tokens(&json) < TOOL_RESULT_TOKEN_LIMIT);
         let out = sanitize_tool_result_for_llm("read_file", &json, "sess", "tc-1", None);
         assert_eq!(out, json);
+    }
+
+    /// 退避判定は上限（2,500 トークン）の直下・直上・マルチバイト境界で、**正確な**
+    /// トークン数と同じ側に落ちる（#576 の有界判定が境界をズラさない）。これらの本文は複数窓を
+    /// 跨ぐが、CJK・空白区切りのトークンは窓境界（[`crate::tokens::BOUNDED_TOKENIZE_WINDOW`]）を
+    /// 跨がないのでチャンク境界の上振れは出ない（上振れは base64/単一文字の長大ランのみ）。
+    #[test]
+    fn exceeds_limit_agrees_with_exact_token_count_across_boundary() {
+        let samples: Vec<String> = vec![
+            "あ".repeat(2_400),
+            "あ".repeat(2_450),
+            "あ".repeat(2_550),
+            "あ".repeat(2_600),
+            "word ".repeat(1_800),
+            "word ".repeat(2_600),
+            // マルチバイト＋ASCII 混在。複数窓を跨ぐが CJK/空白でトークンは境界を跨がない。
+            format!("{}{}", "あ".repeat(1_250), "word ".repeat(1_250)),
+        ];
+        for s in &samples {
+            let exact = crate::tokens::estimate_tokens(s);
+            assert_eq!(
+                exceeds_limit(s),
+                exact >= TOOL_RESULT_TOKEN_LIMIT,
+                "len={}, exact={exact}",
+                s.len(),
+            );
+        }
+    }
+
+    /// 長い単一文字ラン（区切りの無い 1 pre-token）でも判定は返り、退避される。
+    /// 全体を一括トークナイズしていたら 486MB 級で固まる経路を、有界判定が塞ぐ（#576）。
+    /// 時間アサートは不安定なので、ここでは**判定が返って退避されること**だけを見る。
+    #[test]
+    fn huge_single_run_is_offloaded_without_hanging() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let big = "あ".repeat(100_000); // 300KB・単一 pre-token・確実に上限超
+        let out =
+            sanitize_tool_result_for_llm("execute_shell", &big, "sessR", "tcR", Some(dir.path()));
+        assert!(out.contains("withheld"), "退避されていない: {out}");
+        assert!(!out.contains("ああああ"), "生データが流れている");
+        // 退避ファイルに全文が入っている。
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sessR_tcR.json")).unwrap();
+        assert_eq!(saved.len(), big.len());
     }
 
     /// 退避できないときも生データを流さず、消えたことを LLM に伝える。
