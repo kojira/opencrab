@@ -26,8 +26,8 @@ use opencrab_core::EngineResult;
 use opencrab_gateway::{DiscordGateway, IncomingMessage, MessageContent, MessageSource, Sender};
 
 use super::{
-    create_event_channel, debounce_window_key, incoming_has_content, process_incoming_message,
-    process_interaction_response, process_subtask_completed,
+    consecutive_groups, create_event_channel, debounce_window_key, incoming_has_content,
+    process_incoming_message, process_interaction_response, process_subtask_completed,
 };
 
 /// `run_agent_response` の観測 1 件。
@@ -103,6 +103,29 @@ impl FakeRunner {
         )
         .await
         .expect("応答生成が走らなかった（run が 1 件も観測されていない）");
+    }
+
+    /// run が `n` 件観測されるまで待つ。複数グループ（連続同権限グループ化 #556）で run が
+    /// 複数起きるケースの検証に使う。`notify_one` の permit は 1 つしか溜まらないため、
+    /// 取りこぼしても 100ms ごとにポーリングして件数で確認する（上限は無限吊り防止の保険）。
+    async fn wait_for_runs(&self, n: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if self.runs.lock().unwrap().len() >= n {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "run が {n} 件に達しなかった（観測 {} 件）",
+                    self.runs.lock().unwrap().len()
+                );
+            }
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                self.run_observed.notified(),
+            )
+            .await;
+        }
     }
 
     /// 観測した run の登録簿 + sink 有無を取り出す。
@@ -1142,8 +1165,9 @@ async fn debounced_window_records_every_message_but_runs_once() {
     assert_eq!(state.runs.lock().unwrap().len(), 1, "合流窓の run は 1 回");
 }
 
-/// #556: 窓キーは **channel だけ**。権限レベルでは割らない（キーは caller を見ない）。
-/// 同一 channel は送信者・権限が何であれ同じ窓、別 channel は別窓。
+/// #556: デバウンス**バッファ**のキーは **channel だけ**（権限では割らない）。同一 channel は
+/// 送信者・権限が何であれ同じバッファ、別 channel は別バッファ。権限による run 分割は
+/// フラッシュ時のグループ化（`consecutive_groups`）で行うので、キー自体は caller を見ない。
 #[test]
 fn debounce_window_key_is_channel_only() {
     let a = discord_msg("222", "owner-1", "hi");
@@ -1153,22 +1177,69 @@ fn debounce_window_key_is_channel_only() {
     assert_eq!(
         debounce_window_key(&a),
         debounce_window_key(&b),
-        "同一 channel は送信者（権限）が違っても同じ窓に入るべき"
+        "同一 channel は送信者（権限）が違っても同じバッファに入るべき"
     );
     assert_ne!(
         debounce_window_key(&a),
         debounce_window_key(&other_channel),
-        "別 channel は別窓のはず"
+        "別 channel は別バッファのはず"
     );
 }
 
-/// #556 統合: **権限レベルが違うメッセージが同一 channel の窓で 1 run に合流する**通しテスト。
+/// #556: フラッシュ時のグループ化 = 到着順のまま「連続した同一 trust_level」で切る。
+/// オーナー指示の 4 ケースを固定する（**権限が揃った場合**の挙動。#489 未修正の実運用では
+/// co_agent が `Agent`(=0) に落ちるので owner→co_agent は同権限にならない点に注意）。
+///
+/// run の回数 = 「内容のあるメッセージを含むグループ」の数。4 ケースは全員が内容ありなので
+/// run 回数 = グループ数。
+#[test]
+fn flush_groups_consecutive_same_privilege() {
+    use opencrab_actions::CallerIdentity;
+    let owner = CallerIdentity::Owner;
+    let co_agent = CallerIdentity::CoAgent {
+        agent_id: "kairo".to_string(),
+    };
+    let external = CallerIdentity::Agent;
+
+    // trust_level: Owner=2, CoAgent=2(owner 等価), Agent=0。
+    let levels =
+        |cs: &[&CallerIdentity]| -> Vec<u8> { cs.iter().map(|c| c.trust_level()).collect() };
+
+    // A(owner) → D(外部) → B(co_agent) = [2,0,2] → [A][D][B] = 3 グループ（run 3 回）。
+    assert_eq!(
+        consecutive_groups(&levels(&[&owner, &external, &co_agent])),
+        vec![(0, 1), (1, 1), (2, 1)],
+        "owner→外部→co_agent は権限が 2,0,2 と交互なので 3 グループ"
+    );
+    // A(owner) → B(co_agent) → D(外部) = [2,2,0] → [A,B][D] = 2 グループ（run 2 回）。
+    assert_eq!(
+        consecutive_groups(&levels(&[&owner, &co_agent, &external])),
+        vec![(0, 2), (2, 1)],
+        "owner→co_agent は同権限(2)で合流、外部(0)は別グループ"
+    );
+    // A(owner) → A(owner) = [2,2] → [A,A] = 1 グループ（run 1 回）。
+    assert_eq!(
+        consecutive_groups(&levels(&[&owner, &owner])),
+        vec![(0, 2)],
+        "同一 owner 連続は 1 グループ"
+    );
+    // D(外部) → D(外部) → A(owner) = [0,0,2] → [D,D][A] = 2 グループ（run 2 回）。
+    assert_eq!(
+        consecutive_groups(&levels(&[&external, &external, &owner])),
+        vec![(0, 2), (2, 1)],
+        "外部連続は 1 グループ、owner は別グループ"
+    );
+}
+
+/// #556 統合: **権限レベルが違うメッセージは同一 channel でも別グループ＝別 run**に分かれる
+/// 通しテスト（`run_discord_loop` の flush を一巡）。ここが降格を防ぐ核心: owner の run は
+/// caller=Owner のまま走り、外部発言に引きずられない。
 ///
 /// harness の `resolve_caller` は owner-1 を `Owner`(rank 2)・それ以外を `TrustedUser`(rank 1)
-/// に解決する。旧実装（窓キー = (channel, 権限レベル)）ならこの 2 通は別窓＝2 run だったので、
-/// 権限をキーに戻すとこのテストが run 2 回で落ちる（回帰ガード）。記録は 1 通も畳まず個別に残す。
+/// に解決する。owner→外部は [owner][外部] の 2 グループなので run は 2 回。窓を丸ごと 1 run に
+/// する（グループ化を外す）とこのテストが run 1 回で落ちる（回帰ガード）。記録は個別に 2 件。
 #[tokio::test]
-async fn mixed_privilege_messages_in_one_channel_window_run_once() {
+async fn different_privilege_messages_split_into_separate_runs_through_the_loop() {
     let (state, gateway, gateway_actions) = make_deps();
     let (tx, rx) = create_event_channel();
     let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
@@ -1187,8 +1258,8 @@ async fn mixed_privilege_messages_in_one_channel_window_run_once() {
         registry,
     ));
 
-    // 同一 channel・2 秒窓に Owner（sender=owner-1, rank 2）と 非 Owner（sender=gaikoku,
-    // rank 1=TrustedUser）。権限レベルは違うが、窓キーは channel だけなので同じ窓に入る。
+    // 同一 channel・2 秒窓に Owner（sender=owner-1, rank 2）→ 非 Owner（sender=gaikoku,
+    // rank 1=TrustedUser）。連続同権限グループ化なので [owner][外部] の 2 グループ＝2 run。
     for (sender, text) in [
         ("owner-1", "オーナーの発言"),
         ("gaikoku", "外部ユーザーの発言"),
@@ -1199,13 +1270,13 @@ async fn mixed_privilege_messages_in_one_channel_window_run_once() {
         .expect("event loop receiver closed");
     }
 
-    state.wait_for_run().await;
+    state.wait_for_runs(2).await;
 
     let records = state.inbound_records.lock().unwrap().clone();
     assert_eq!(
         records.len(),
         2,
-        "権限が違っても全メッセージ個別に記録される（畳まない・落とさない）: {records:?}"
+        "全メッセージ個別に記録される（畳まない・落とさない）: {records:?}"
     );
     assert!(
         records.contains(&"オーナーの発言".to_string()),
@@ -1217,8 +1288,20 @@ async fn mixed_privilege_messages_in_one_channel_window_run_once() {
     );
     assert_eq!(
         state.runs.lock().unwrap().len(),
-        1,
-        "権限レベルが違うメッセージが混在しても run は 1 回（channel だけで窓を作る）"
+        2,
+        "権限が違うメッセージは別グループ＝別 run（owner と外部で 2 回）"
+    );
+
+    // 降格しない: owner の run は caller=Owner、外部の run は caller=TrustedUser。
+    // どちらの run にどちらの caller が載るかは順序に依存しうるので集合で確認する。
+    let callers = vec![state.observed_caller(0), state.observed_caller(1)];
+    assert!(
+        callers.contains(&CallerIdentity::Owner),
+        "owner の指示は owner 権限の run で走るべき（降格しない）: {callers:?}"
+    );
+    assert!(
+        callers.contains(&CallerIdentity::TrustedUser),
+        "外部発言は非 owner 権限の run で走るべき: {callers:?}"
     );
 
     handle.abort();
@@ -1242,10 +1325,12 @@ fn run_trigger_selection_uses_latest_message_with_content() {
 
 /// #543/#556 統合: **実イベントループ（`run_discord_loop`）の flush を一巡させる**通しテスト。
 ///
-/// 個別ユニット（trigger 選定 / `record_only = Some(i) != trigger_idx`）だけでなく、
-/// バッファ蓄積 → デバウンス期限 → フラッシュ → 全メッセージ記録 → run 1 回、という配線
-/// そのものを固定する。**末尾に空メッセージ**を混ぜて「トリガー＝内容のある**最後**」
-/// （単なる最後ではない）も守る: 空をトリガーに選ぶと run が消え、本テストが落ちる。
+/// 個別ユニットだけでなく、バッファ蓄積 → デバウンス期限 → フラッシュ → 全メッセージ記録 →
+/// run 1 回、という配線そのものを固定する。ここは**全員が同権限（非オーナー = TrustedUser）
+/// なので連続同権限グループは 1 つ**＝ run 1 回になる（権限が混ざる場合の分割は
+/// `different_privilege_messages_split_into_separate_runs_through_the_loop` が固定する）。
+/// **末尾に空メッセージ**を混ぜて「トリガー＝グループ内の内容のある**最後**」（単なる最後では
+/// ない）も守る: 空をトリガーに選ぶと run が消え、本テストが落ちる。
 #[tokio::test]
 async fn debounce_flush_records_all_messages_and_runs_once_through_the_loop() {
     let (state, gateway, gateway_actions) = make_deps();
@@ -1267,7 +1352,7 @@ async fn debounce_flush_records_all_messages_and_runs_once_through_the_loop() {
     ));
 
     // 同一チャンネル・同権限（非オーナー = TrustedUser）の内容あり 2 通 ＋ 末尾に空 1 通。
-    // 別 sender でも同じ窓（channel, 権限レベル）に入り、1 回のフラッシュで処理される。
+    // 別 sender でも同権限なので 1 グループにまとまり、1 回のフラッシュで 1 run。
     for (sender, text) in [
         ("kairo", "かいろの発言"),
         ("nostarou", "のすたろうの発言"),

@@ -311,17 +311,16 @@ pub async fn run_discord_loop<T: AgentRunner>(
     );
 
     // イベント処理ループ（直列）: P2のDB競合を構造的に解消
-    // #543 / #556: デバウンスの単位は **channel だけ**。オーナー指示「デバウンスは
-    // チャンネルごと。人で分けたらだめ」そのまま。窓内の全メッセージは個別に記録して
-    // 送信者の帰属を保ち、run は窓につき 1 回だけ起こす。
+    // #543 / #556: デバウンス**バッファ**は **channel ごとに 1 本**（タイマーも 1 本）。
+    // オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。全メッセージは
+    // 個別に記録して送信者の帰属を保つ。run は**フラッシュ時に切る「連続同権限グループ」**
+    // ごとに 1 回（下のフラッシュ箇所を参照）。
     //
-    // **権限レベルで窓を割らない理由（#556）**: run は DB から会話全体を読むので、どの
-    // 窓で発火しても文脈は同じ。権限で割っても分離されるのは run だけで、同じ文脈に対して
-    // 2 回 run が起き 2 回答える（2 回目は 1 回目の返答も文脈に含む）＝減らそうとした増幅
-    // そのものになる。権限昇格の心配も窓分割では守れていなかった: 会話には元々全員の発言が
-    // 入り、caller は**トリガー（内容のある最後のメッセージ）1 件**から決まる。外部発言が
-    // 文脈にありオーナー発言でトリガーされれば owner 権限で走るのは、窓を割っても割らなくても
-    // 同じ（この PR より前からそう）。窓を割らないことで新たに開く穴はない。
+    // **権限で並行バッファに割らない理由（#556）**: run は DB から会話全体を読むので、権限で
+    // 別バッファに割ると同じ文脈に対して 2 回 run が起き 2 回答える＝減らそうとした増幅になる。
+    // かといって channel だけで丸ごと 1 run にすると、caller が最後の送信者で決まり owner 指示が
+    // 降格しうる。両方を避けるため、バッファは 1 本にしつつ**フラッシュ時に連続同権限で
+    // グループへ切る**（グループ内は権限が揃うので caller が一意・別権限は別 run で混ざらない）。
     let mut debounce_buffers: HashMap<String, (Vec<IncomingMessage>, Instant)> = HashMap::new();
 
     // セッション単位の推論直列化ランタイム（gateway 非依存層の共通実装 / #156 S2）。
@@ -346,9 +345,9 @@ pub async fn run_discord_loop<T: AgentRunner>(
             event = event_rx.recv() => {
                 match event {
                     Some(LoopEvent::IncomingMessage(msg)) => {
-                        // 窓キー = channel だけ（#556）。権限レベルでは割らない。同一 channel の
-                        // 2 秒窓に owner / co_agent / trusted / 外部ユーザーが混在しても 1 つの窓に
-                        // 入り、run は 1 回。caller はフラッシュ時にトリガー 1 件から解決される。
+                        // バッファキー = channel だけ（#556）。同一 channel は権限に関わらず 1 本の
+                        // バッファに貯める。権限による run の分割は**フラッシュ時**（連続同権限
+                        // グループ）に行う。ここでは caller を解決しない（グループ分けは flush 側）。
                         let entry = debounce_buffers
                             .entry(debounce_window_key(&msg))
                             .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
@@ -454,22 +453,56 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         for key in expired_keys {
             if let Some((messages, _)) = debounce_buffers.remove(&key) {
-                // #543: 合流窓の全メッセージを**個別に**記録する（送信者の帰属を保つ）。
-                // run（推論）は窓につき 1 回だけ、**内容のある最後のメッセージ**が起こす。run は
-                // DB から会話全体を読むので、合流分は全部・正しい帰属で文脈に入る。トリガーが
-                // 無い（全メッセージが空）なら run は起こらない（応答対象が無いだけで、記録は済む）。
-                let trigger_idx = messages.iter().rposition(incoming_has_content);
-                let count = messages.len();
-                if count > 1 {
+                // #543 / #556: 全メッセージを**個別に**記録する（送信者の帰属を保つ）。run は
+                // **到着順のまま「連続した同一 trust_level」で切ったグループ**ごとに 1 回だけ、
+                // そのグループ内の**内容のある最後のメッセージ**が起こす。run は DB から会話全体を
+                // 読むので、文脈は全員分・正しい帰属で入る。
+                //
+                // **なぜ「連続同権限グループ」か（#556）**: バッファを channel だけで 1 本にすると
+                // owner と外部ユーザーが混ざる。窓を丸ごと 1 run にすると caller が最後の送信者で
+                // 決まり owner 指示が降格しうる。権限ごとに並行バッファへ割ると同じ文脈に 2 回 run が
+                // 起きて増幅する。連続同権限だけをグループにすれば、**グループ内は権限が揃うので
+                // caller が一意**（降格しない）で、かつ**別権限は別グループ＝別 run**（混ざらない）。
+                // 例: owner→外部→co_agent は [owner][外部][co_agent] の 3 run、owner→co_agent→外部は
+                // [owner,co_agent][外部] の 2 run。
+                //
+                // **#489 未修正の今の実運用**: co_agent は resolve_caller で `Agent`(=0) に落ちるため、
+                // owner→co_agent は同権限にならず別グループになる。ここでのグループ分けは
+                // trust_level が揃った場合の挙動で、#489 が直れば owner 等価(=2)として合流する。
+                let levels: Vec<u8> = messages
+                    .iter()
+                    .map(|m| {
+                        state
+                            .resolve_caller(&m.sender.id, &agent_ids, &owner_discord_id)
+                            .trust_level()
+                    })
+                    .collect();
+                let groups = consecutive_groups(&levels);
+
+                if messages.len() > 1 {
                     info!(
                         channel = %key,
-                        count = count,
-                        "Debounced (channel): recording all, running once"
+                        messages = messages.len(),
+                        groups = groups.len(),
+                        "Debounced (channel): recording all, running once per consecutive-privilege group"
                     );
                 }
+
+                // グループごとにトリガー（内容のある最後）を決め、それ以外は record-only にする。
+                // trigger の無い（全部空の）グループは run を起こさない（記録だけ済む）。
+                let mut record_only_flags = vec![true; messages.len()];
+                for &(start, len) in &groups {
+                    if let Some(rel) = messages[start..start + len]
+                        .iter()
+                        .rposition(incoming_has_content)
+                    {
+                        record_only_flags[start + rel] = false; // このメッセージがグループの run トリガー
+                    }
+                }
+
                 for (i, msg) in messages.into_iter().enumerate() {
                     // トリガー以外は record-only（記録と 👀 まで。run は起こさない）。
-                    let record_only = Some(i) != trigger_idx;
+                    let record_only = record_only_flags[i];
                     process_incoming_message(
                         msg,
                         gateway.clone(),
@@ -1860,21 +1893,40 @@ fn parse_reaction_message_id(message_id: &str) -> Option<u64> {
     message_id.parse::<u64>().ok()
 }
 
-/// デバウンス窓のキー = **channel だけ**（#543 / #556）。
+/// デバウンス**バッファ**のキー = **channel だけ**（#543 / #556）。
 ///
-/// オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。権限レベルでは
-/// 割らない: run は DB から会話全体を読むので、どの窓で発火しても文脈は同じ。権限で割ると
-/// 同じ文脈に対し run が 2 回起きて 2 回答える（増幅）だけで、権限昇格も窓分割では守れない
-/// （caller はトリガー 1 件から決まり、会話には元々全員の発言が入る）。詳細は `run_discord_loop`
-/// の `debounce_buffers` 生成箇所のコメントを参照。
+/// オーナー指示「デバウンスはチャンネルごと。人で分けたらだめ」そのまま。バッファは channel
+/// ごとに 1 本（タイマーも 1 本）。権限で並行バッファに割らない: run は DB から会話全体を読む
+/// ので、権限で割ると同じ文脈に対し run が 2 回起きて増幅するだけ。
 ///
-/// 同一 channel の 2 秒窓に owner / co_agent / trusted / 外部ユーザーが混在しても 1 つの窓に
-/// 入り、run は 1 回。トリガー（内容のある最後のメッセージ）の送信者から caller が解決される。
+/// ただし**フラッシュ時に**、バッファ内を到着順のまま「連続した同一 trust_level」でグループへ
+/// 切り、run はグループごとに 1 回起こす（`consecutive_groups`）。これで別権限は別 run に分かれ、
+/// caller の降格（最後の送信者に引きずられる）も起きない。詳細は `run_discord_loop` のフラッシュ
+/// 箇所のコメントを参照。
 fn debounce_window_key(msg: &IncomingMessage) -> String {
     match &msg.source {
         opencrab_gateway::MessageSource::Discord { channel_id, .. } => channel_id.clone(),
         _ => String::new(),
     }
+}
+
+/// 連続した同一要素の並びを `(開始 index, 長さ)` のグループに切る（#556）。到着順を保ち、
+/// 隣り合う要素が変わったところでグループが切れる。
+///
+/// デバウンスバッファのフラッシュで、メッセージ列を trust_level 列に写してから呼ぶ。
+/// 例: `[2,0,2]` → `[(0,1),(1,1),(2,1)]`（3 グループ）、`[2,2,0]` → `[(0,2),(2,1)]`（2 グループ）。
+fn consecutive_groups<T: PartialEq>(items: &[T]) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < items.len() {
+        let mut end = start + 1;
+        while end < items.len() && items[end] == items[start] {
+            end += 1;
+        }
+        groups.push((start, end - start));
+        start = end;
+    }
+    groups
 }
 
 /// メッセージが応答対象になる内容（テキストまたは画像）を持つか（#543）。
