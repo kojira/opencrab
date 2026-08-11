@@ -562,6 +562,10 @@ mod tests {
             Ok(())
         }
 
+        fn set_nostr_self_pubkey(&self, _agent_id: &str, _self_pubkey: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn upsert_nostr_config(&self, _cfg: &AgentNostrConfigRow) -> anyhow::Result<()> {
             Ok(())
         }

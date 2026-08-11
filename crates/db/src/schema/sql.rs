@@ -531,6 +531,11 @@ CREATE TABLE IF NOT EXISTS agent_discord_config (
     bot_token TEXT NOT NULL,
     owner_discord_id TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
+    -- この bot 自身の Discord user id（#489）。**発言者識別子 → agent UUID の逆引き**に使う
+    -- （co_agent 判定）。書くのは gateway 起動時の**自分自身の認証済み接続**（`get_current_user`）
+    -- だけで、config 構造体・upsert・REST 設定 API のどれからも書けない（外部が仕込めない）。
+    -- 既定の空文字は「未接続 = 逆引き不可 = fail-closed」を意味する。
+    bot_user_id TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 
@@ -547,6 +552,11 @@ CREATE TABLE IF NOT EXISTS agent_nostr_config (
     -- Nostr 版。**64 桁小文字 hex に正規化して保存**し、既定の空文字は「オーナー未設定
     -- ＝誰もオーナーにならない」を意味する（fail-closed）。
     owner_pubkey TEXT NOT NULL DEFAULT '',
+    -- この agent 自身の Nostr pubkey（#489。64 桁小文字 hex）。**発言者 pubkey → agent UUID の
+    -- 逆引き**に使う（co_agent 判定）。書くのは gateway 起動時に自分の secret_key から導出した
+    -- pubkey（`nostaro pubkey`）と identity 切替時の新 pubkey **だけ**で、config 構造体・upsert・
+    -- REST 設定 API のどれからも書けない。既定の空文字は「未接続 = 逆引き不可 = fail-closed」。
+    self_pubkey TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
 );
 

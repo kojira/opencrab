@@ -108,6 +108,12 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         Ok(())
     }
 
+    fn set_nostr_self_pubkey(&self, agent_id: &str, self_pubkey: &str) -> anyhow::Result<()> {
+        let conn = self.db.lock().unwrap();
+        opencrab_db::queries::set_agent_nostr_self_pubkey(&conn, agent_id, self_pubkey)?;
+        Ok(())
+    }
+
     fn upsert_nostr_config(
         &self,
         cfg: &opencrab_db::queries::AgentNostrConfigRow,
@@ -468,6 +474,96 @@ mod caller_tests {
             resolve_nostr_caller_identity(&conn, "agent-2", OWNER_HEX),
             CallerIdentity::Agent,
             "別エージェントのオーナー設定が波及した"
+        );
+    }
+
+    // ---- #489: co_agent の識別子逆引き ----
+
+    const FRIEND_AGENT_UUID: &str = "friend-agent-uuid";
+
+    /// 送信側 agent（`agent_id`）が `self_pubkey` を接続で書いた状態にする。
+    fn set_self_pubkey(conn: &Connection, agent_id: &str, pubkey: &str) {
+        opencrab_db::queries::upsert_agent_nostr_config(
+            conn,
+            &AgentNostrConfigRow {
+                agent_id: agent_id.to_string(),
+                secret_key: "nsec1sender".to_string(),
+                relays_json: "[]".to_string(),
+                filter_json: "{}".to_string(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            opencrab_db::queries::set_agent_nostr_self_pubkey(conn, agent_id, pubkey).unwrap(),
+            "self_pubkey の保存に失敗（設定行が無い）"
+        );
+    }
+
+    /// AGENT が co_agent として FRIEND_AGENT_UUID を信頼登録する（owner 登録の模擬）。
+    fn trust_co_agent(conn: &Connection, agent_id: &str, co_agent_uuid: &str) {
+        opencrab_db::queries::insert_trusted_co_agent(
+            conn,
+            &opencrab_db::queries::TrustedCoAgentRow {
+                id: format!("row-{agent_id}-{co_agent_uuid}"),
+                agent_id: agent_id.to_string(),
+                co_agent_id: co_agent_uuid.to_string(),
+                allowed_actions: None,
+                created_by: "owner".to_string(),
+                created_at: "2026-01-01".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// **本丸（#489）**: UUID 対で登録した co_agent が、発言者 pubkey → UUID の逆引きで発火する。
+    #[test]
+    fn co_agent_resolves_via_reverse_lookup() {
+        let conn = db_with_nostr_row();
+        // 送信側 agent が自 pubkey（FRIEND_HEX）を接続で登録済み。
+        set_self_pubkey(&conn, FRIEND_AGENT_UUID, FRIEND_HEX);
+        // AGENT は FRIEND_AGENT_UUID を co_agent（owner 等価）として登録。
+        trust_co_agent(&conn, AGENT, FRIEND_AGENT_UUID);
+        // FRIEND_HEX から届いたターンは、逆引きで FRIEND_AGENT_UUID に解決され CoAgent。
+        assert_eq!(
+            resolve_nostr_caller_identity(&conn, AGENT, FRIEND_HEX),
+            CallerIdentity::CoAgent {
+                agent_id: FRIEND_AGENT_UUID.to_string()
+            },
+            "UUID 登録の co_agent が逆引きで発火しない（#489 の本体）"
+        );
+        // npub 表記で来ても同じ（正規化して逆引き）。
+        assert_eq!(
+            resolve_nostr_caller_identity(&conn, AGENT, &npub_of(FRIEND_HEX)),
+            CallerIdentity::CoAgent {
+                agent_id: FRIEND_AGENT_UUID.to_string()
+            }
+        );
+    }
+
+    /// **fail-closed（#489）**: 送信側が未接続で self_pubkey が空なら、co_agent にならない。
+    #[test]
+    fn co_agent_fail_closed_when_self_pubkey_absent() {
+        let conn = db_with_nostr_row();
+        // 登録はあるが、送信側 agent の self_pubkey は未設定（未接続 = 逆引き不可）。
+        trust_co_agent(&conn, AGENT, FRIEND_AGENT_UUID);
+        assert_eq!(
+            resolve_nostr_caller_identity(&conn, AGENT, FRIEND_HEX),
+            CallerIdentity::Agent,
+            "self_pubkey 空でも co_agent に化けた（fail-closed 違反）"
+        );
+    }
+
+    /// **fail-closed（#489）**: 逆引きは成立するが、その UUID を co_agent 登録していなければ Agent。
+    #[test]
+    fn co_agent_fail_closed_when_reverse_maps_to_untrusted_uuid() {
+        let conn = db_with_nostr_row();
+        // 送信側は自 pubkey を登録済み（逆引きは成立）だが、AGENT は誰も co_agent 登録していない。
+        set_self_pubkey(&conn, FRIEND_AGENT_UUID, FRIEND_HEX);
+        assert_eq!(
+            resolve_nostr_caller_identity(&conn, AGENT, FRIEND_HEX),
+            CallerIdentity::Agent,
+            "未登録の UUID が co_agent になった（誤許可）"
         );
     }
 }

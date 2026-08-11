@@ -42,6 +42,15 @@ pub trait NostrAgentRunner: AgentRuntime {
     /// 本鍵（secret_key）だけを差し替える（identity 切替。relays/filter/enabled は保持）。
     fn set_nostr_secret_key(&self, agent_id: &str, secret_key: &str) -> Result<()>;
 
+    /// この agent 自身の Nostr pubkey（64 桁小文字 hex）を co_agent 逆引き表へ保存する（#489）。
+    ///
+    /// **呼んでよいのは自己 pubkey を自 secret_key から導出した文脈だけ**（gateway 起動時 /
+    /// identity 切替の新 pubkey）。受信イベントの著者 pubkey からは決して呼ばない
+    /// （外部が「pubkey ↔ agent UUID」を仕込めると任意ユーザーが co_agent に化ける）。
+    /// 書けなくても致命ではない（逆引き不可 → co_agent は fail-closed）ので、呼び出し側は
+    /// best-effort で扱ってよい。
+    fn set_nostr_self_pubkey(&self, agent_id: &str, self_pubkey: &str) -> Result<()>;
+
     /// `agent_nostr_config` 行を丸ごと書き込む（自己ブートストラップの採用時 / #264）。
     ///
     /// 未設定エージェントが自力で鍵を採用するとき、secret_key＋relays＋フィルタ（既存が無ければ

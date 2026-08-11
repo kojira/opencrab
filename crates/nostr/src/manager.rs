@@ -807,7 +807,7 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
         };
 
         // 3) 自己スキップ用セルを更新（以後の自己スキップが新 identity 追従）。
-        *self.self_pubkey.write().unwrap() = new_pubkey;
+        *self.self_pubkey.write().unwrap() = new_pubkey.clone();
 
         // 4) DB を最後に更新。失敗したら config/セルを旧状態へ巻き戻す（DB=旧 / config=新
         //    の不整合＝再起動で勝手に切替完了する事故を防ぐ）。
@@ -817,6 +817,25 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
             }
             *self.self_pubkey.write().unwrap() = old_pubkey;
             return Err(e).context("DB の本鍵更新に失敗（設定を元に戻しました）");
+        }
+
+        // 5) #489: co_agent 逆引き表（`agent_nostr_config.self_pubkey`）も新鍵の pubkey へ
+        //    揃える。**DB の secret_key を更新し切った後だけ**書く（secret_key が旧鍵へ
+        //    ロールバックした経路ではここへ来ないので、逆引き表が新鍵を指して secret_key と
+        //    食い違うことはない）。保存前に正規化する（起動時と同じ扱い。突合相手の author も
+        //    正規化 hex）。書き込みに失敗しても切替自体は成立済み（config/DB の secret_key は
+        //    新鍵）なので致命ではない: 逆引きが旧鍵のまま stale になるだけで fail-closed
+        //    （誤許可はしない）。次回起動の `spawn_agent_gateway` が自 pubkey を再導出して直すので、
+        //    ここは best-effort（ログのみ）。
+        match crate::normalize_pubkey(&new_pubkey) {
+            Some(hex) => {
+                if let Err(e) = self.runner.set_nostr_self_pubkey(agent_id, &hex) {
+                    warn!(agent_id, error = %e, "#489: identity 切替後の self_pubkey 書き戻しに失敗（co_agent 逆引きは次回起動まで stale・fail-closed）");
+                }
+            }
+            None => {
+                warn!(agent_id, "#489: identity 切替後の自 pubkey を正規化できず逆引き表を更新しなかった（co_agent は次回起動まで stale・fail-closed）");
+            }
         }
         Ok(npub.to_string())
     }
@@ -892,6 +911,25 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
                  自己返信ループ防止のため起動を中止します"
             )
         })?;
+
+    // #489: 自 pubkey を co_agent 逆引き表（`agent_nostr_config.self_pubkey`）へ書き戻す。
+    // 出所は自 secret_key から導出した自分の pubkey（受信著者ではない）＝信頼できる出所。
+    // 起動/restore の度に走るので既存 agent もここで backfill される。
+    //
+    // **正規化してから保存する**（突合相手の author も `normalize_pubkey` で 64 桁小文字 hex に
+    // 揃えて引くため）。`nostaro pubkey` は小文字 hex を返す前提だが、万一 npub / 大文字を
+    // 返しても「黙って壊れた値」を保存しない（正規化不能なら保存を見送って警告）。書けなくても
+    // 致命ではない（逆引き不可 → co_agent は fail-closed）ので best-effort（ログのみ）。
+    match crate::normalize_pubkey(&self_pubkey) {
+        Some(hex) => {
+            if let Err(e) = runner.set_nostr_self_pubkey(agent_id, &hex) {
+                warn!(agent_id, error = %e, "#489: self_pubkey の書き戻しに失敗（co_agent 逆引きは fail-closed のまま）");
+            }
+        }
+        None => {
+            warn!(agent_id, "#489: 自 pubkey を正規化できず逆引き表を更新しなかった（co_agent は fail-closed のまま）");
+        }
+    }
 
     let runner_c = runner.clone();
     let cli_c = cli.clone();
@@ -1078,6 +1116,8 @@ mod tests {
         enabled_calls: Arc<Mutex<Vec<bool>>>,
         /// set_nostr_secret_key に渡った nsec（ホットスワップ経路の検証 / #264）。
         secret_sets: Arc<Mutex<Vec<String>>>,
+        /// set_nostr_self_pubkey に渡った pubkey（co_agent 逆引き表の書き戻し検証 / #489）。
+        self_pubkey_sets: Arc<Mutex<Vec<String>>>,
         /// get_nostr_config が返す既存行（`None`=未設定 / #264）。
         preset_config: Option<AgentNostrConfigRow>,
         /// `resolve_nostr_caller` が Owner と答える相手の pubkey（#319）。
@@ -1106,6 +1146,7 @@ mod tests {
                 upserted: Arc::new(Mutex::new(Vec::new())),
                 enabled_calls: Arc::new(Mutex::new(Vec::new())),
                 secret_sets: Arc::new(Mutex::new(Vec::new())),
+                self_pubkey_sets: Arc::new(Mutex::new(Vec::new())),
                 preset_config: None,
                 owner_pubkey: None,
                 caller_queries: Arc::new(Mutex::new(Vec::new())),
@@ -1289,6 +1330,11 @@ mod tests {
 
         fn set_nostr_secret_key(&self, _a: &str, s: &str) -> anyhow::Result<()> {
             self.secret_sets.lock().unwrap().push(s.to_string());
+            Ok(())
+        }
+
+        fn set_nostr_self_pubkey(&self, _a: &str, pk: &str) -> anyhow::Result<()> {
+            self.self_pubkey_sets.lock().unwrap().push(pk.to_string());
             Ok(())
         }
 
@@ -2311,7 +2357,12 @@ mod tests {
             enabled: true,
         };
         let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
-        let (_fake, cli) = fake_nostaro("newpubkeyhex");
+        // #489: fake nostaro は自 pubkey を **大文字 hex** で返す。逆引き表へは保存前に
+        // `normalize_pubkey` を通した **小文字 hex** が入る（突合相手の author も正規化 hex）
+        // ことを、起動時・identity 切替の両経路で固定する。
+        let pubkey_upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        let pubkey_lower = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let (_fake, cli) = fake_nostaro(pubkey_upper);
         let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
 
         // 稼働させる（admin が admins 登録簿へ入る）。
@@ -2361,9 +2412,63 @@ mod tests {
             vec!["nsec1newhot".to_string()],
             "ホットスワップは本鍵だけ差し替える"
         );
+        // #489: 自 pubkey は co_agent 逆引き表へ書き戻される（起動時 + identity 切替時の 2 回）。
+        // どちらも fake nostaro の pubkey 出力（大文字 hex）を正規化した **小文字 hex**。
+        // 切替でも stale にならない。
+        assert_eq!(
+            *runner.self_pubkey_sets.lock().unwrap(),
+            vec![pubkey_lower.to_string(), pubkey_lower.to_string()],
+            "起動時と identity 切替時に self_pubkey を正規化して書き戻す（#489）"
+        );
         assert!(
             mgr.is_running(agent),
             "ホットスワップは再接続しない（稼働継続）"
+        );
+
+        mgr.stop_agent_gateway(agent).await;
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+    }
+
+    /// [#489] 自 pubkey が **正規化できない値**（npub でも 64 桁 hex でもない）なら、逆引き表へ
+    /// **保存しない**（黙って壊れた値を入れない）。突合相手の author は `normalize_pubkey` 済みの
+    /// 小文字 hex なので、生値を入れると必ず食い違って co_agent が静かに fail-closed で死ぬ
+    /// ＝ #489 と同じ症状になる。それを防ぐ None 経路の回帰。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_pubkey_not_saved_when_unnormalizable() {
+        let agent = "agent-badpub-489";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+
+        let existing = AgentNostrConfigRow {
+            agent_id: agent.to_string(),
+            secret_key: "nsec1old".to_string(),
+            relays_json: r#"["wss://yabu.me"]"#.to_string(),
+            filter_json: r#"{"keywords":["opencrab"]}"#.to_string(),
+            enabled: true,
+        };
+        let runner = SlowRunner::new(Duration::from_millis(1)).with_preset_config(existing);
+        // 64 桁 hex でも npub でもない非空出力 → pubkey 取得ガードは通るが normalize_pubkey は None。
+        let (_fake, cli) = fake_nostaro("not-a-valid-pubkey");
+        let mgr = NostrGatewayManager::new(runner.clone()).with_cli(cli);
+
+        let configured = crate::config::NostrConfig {
+            relays: vec!["wss://yabu.me".to_string()],
+            filter: crate::config::NostrFilter {
+                authors: vec![],
+                keywords: vec!["opencrab".to_string()],
+                kinds: vec![],
+            },
+        };
+        mgr.start_agent_gateway(agent, "nsec1old", configured)
+            .await
+            .unwrap();
+
+        assert!(
+            mgr.is_running(agent),
+            "自 pubkey が正規化不能でも gateway 自体は起動する（自己スキップは生値で機能する）"
+        );
+        assert!(
+            runner.self_pubkey_sets.lock().unwrap().is_empty(),
+            "#489: 正規化できない自 pubkey は逆引き表へ保存しない（黙って壊れた値を入れない）"
         );
 
         mgr.stop_agent_gateway(agent).await;

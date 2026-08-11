@@ -111,17 +111,25 @@ impl opencrab_discord::AgentRunner for AppState {
         let Ok(conn) = self.db.lock() else {
             return opencrab_actions::CallerIdentity::Agent;
         };
-        // #485: co-agents API（`trusted_co_agents` 表）で owner が登録した相手を **owner 等価の
-        // co_agent** へ解決する（配線）。従来この表は権限解決に配線されておらず、登録しても
-        // 相手は `Agent` のままだった。owner 判定の次・`trusted_users` 照合より**前**に置く
-        // （co_agent は owner 等価で trusted_user より強い）。表は経路非依存なので Discord の
-        // sender_id をそのまま co_agent_id として引く。
-        if agent_ids.iter().any(|aid| {
-            opencrab_db::queries::is_trusted_co_agent(&conn, aid, sender_id).unwrap_or(false)
-        }) {
-            return opencrab_actions::CallerIdentity::CoAgent {
-                agent_id: sender_id.to_string(),
-            };
+        // #485/#489: co-agents API（`trusted_co_agents` 表・agent UUID 対）で owner が登録した
+        // 相手を **owner 等価の co_agent** へ解決する。owner 判定の次・`trusted_users` 照合より
+        // **前**に置く（co_agent は owner 等価で trusted_user より強い）。
+        //
+        // **#489**: `sender_id` は Discord user_id なので、UUID 登録の行には直接一致しない。
+        // まず `bot_user_id`（各 bot 自身の `get_current_user` 接続からしか書かれない）で
+        // **Discord user_id → agent UUID** を逆引きし、その UUID で `is_trusted_co_agent` を引く。
+        // 逆引き表は接続で本人性が担保されるので、外部ユーザーが co_agent へ化ける経路は無い。
+        // 逆引きできない（未接続で bot_user_id が空）ときは co_agent にしない（fail-closed）。
+        if let Some(co_uuid) = crate::caller_identity::resolve_co_agent_uuid(
+            &conn,
+            opencrab_db::queries::TRUSTED_PLATFORM_DISCORD,
+            sender_id,
+        ) {
+            if agent_ids.iter().any(|aid| {
+                opencrab_db::queries::is_trusted_co_agent(&conn, aid, &co_uuid).unwrap_or(false)
+            }) {
+                return opencrab_actions::CallerIdentity::CoAgent { agent_id: co_uuid };
+            }
         }
         let trust_info = agent_ids.iter().find_map(|aid| {
             // 経路は Discord 固定（#214）。互換読みは不要 — 従来の行が Discord 経路そのもの。
@@ -407,6 +415,88 @@ mod tests {
         assert_eq!(
             state.resolve_caller("dash-user", &["agent-1".to_string()], "owner-id"),
             CallerIdentity::Agent
+        );
+    }
+
+    // ---- #489: Discord の co_agent 識別子逆引き ----
+
+    /// 送信側 agent が自分の bot_user_id を接続で書いた状態にする（`get_current_user` 相当）。
+    fn set_bot_user_id(state: &AppState, agent_id: &str, bot_user_id: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent_discord_config(
+            &conn,
+            &opencrab_db::queries::AgentDiscordConfigRow {
+                agent_id: agent_id.to_string(),
+                bot_token: "tok".to_string(),
+                owner_discord_id: String::new(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            opencrab_db::queries::set_agent_discord_bot_user_id(&conn, agent_id, bot_user_id)
+                .unwrap()
+        );
+    }
+
+    /// recipient が co_agent として co_agent_uuid を信頼登録する（owner 登録の模擬）。
+    fn trust_co_agent(state: &AppState, recipient: &str, co_agent_uuid: &str) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::insert_trusted_co_agent(
+            &conn,
+            &opencrab_db::queries::TrustedCoAgentRow {
+                id: format!("row-{recipient}-{co_agent_uuid}"),
+                agent_id: recipient.to_string(),
+                co_agent_id: co_agent_uuid.to_string(),
+                allowed_actions: None,
+                created_by: "owner".to_string(),
+                created_at: "2026-01-01".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// **本丸（#489）**: UUID 対で登録した co_agent が、Discord user_id → UUID の逆引きで発火する。
+    #[test]
+    fn resolve_caller_resolves_co_agent_via_reverse_lookup() {
+        let state = test_state();
+        // 送信側 agent（UUID "sender-uuid"）が自分の bot user id（"555"）を接続で登録済み。
+        set_bot_user_id(&state, "sender-uuid", "555");
+        // recipient（agent-1）は "sender-uuid" を co_agent（owner 等価）として登録。
+        trust_co_agent(&state, "agent-1", "sender-uuid");
+        // Discord user id "555" から届いた発言は、逆引きで "sender-uuid" に解決され CoAgent。
+        assert_eq!(
+            state.resolve_caller("555", &["agent-1".to_string()], "owner-id"),
+            CallerIdentity::CoAgent {
+                agent_id: "sender-uuid".to_string()
+            },
+            "UUID 登録の co_agent が逆引きで発火しない（#489 の本体）"
+        );
+    }
+
+    /// **fail-closed（#489）**: 送信側が未接続で bot_user_id が空なら、co_agent にならない。
+    #[test]
+    fn resolve_caller_co_agent_fail_closed_when_bot_user_id_absent() {
+        let state = test_state();
+        // 登録はあるが、送信側 agent の bot_user_id は未設定（未接続 = 逆引き不可）。
+        trust_co_agent(&state, "agent-1", "sender-uuid");
+        assert_eq!(
+            state.resolve_caller("555", &["agent-1".to_string()], "owner-id"),
+            CallerIdentity::Agent,
+            "bot_user_id 空でも co_agent に化けた（fail-closed 違反）"
+        );
+    }
+
+    /// **fail-closed（#489）**: 逆引きは成立するが、その UUID を co_agent 登録していなければ Agent。
+    #[test]
+    fn resolve_caller_co_agent_fail_closed_when_reverse_maps_to_untrusted_uuid() {
+        let state = test_state();
+        // 送信側は bot_user_id を登録済み（逆引きは成立）だが、recipient は誰も co_agent 登録なし。
+        set_bot_user_id(&state, "sender-uuid", "555");
+        assert_eq!(
+            state.resolve_caller("555", &["agent-1".to_string()], "owner-id"),
+            CallerIdentity::Agent,
+            "未登録の UUID が co_agent になった（誤許可）"
         );
     }
 }

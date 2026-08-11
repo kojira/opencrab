@@ -147,6 +147,63 @@ pub fn set_agent_nostr_owner_pubkey(
     Ok(updated > 0)
 }
 
+// ---- 逆引き用の自己識別子（#489） ----
+//
+// `self_pubkey` は [`AgentNostrConfigRow`] に**載せない**（`owner_pubkey` と同じ理由）。
+// 読み書きするのは下の 3 関数だけで、[`upsert_agent_nostr_config`] は列名を挙げないので
+// 既存値を素通しする。**この列は各 agent 自身の secret_key から導出した pubkey（gateway 起動時）
+// と identity 切替時の新 pubkey からしか書かない**のが不変条件で、config 構造体に載せると
+// REST の設定保存経由で外部が「pubkey ↔ agent UUID」を仕込めてしまう（#489 の汚染防止）。
+
+/// この agent 自身の Nostr pubkey（64 桁小文字 hex）を保存する（#489）。行が無ければ `false`
+/// （**行は作らない** — 鍵の無い設定行を副作用で生やさない）。
+///
+/// **呼び出してよいのは gateway 起動時の自己 pubkey 導出と identity 切替だけ**（受信イベントの
+/// 著者 pubkey からは呼ばない）。
+pub fn set_agent_nostr_self_pubkey(
+    conn: &Connection,
+    agent_id: &str,
+    self_pubkey: &str,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE agent_nostr_config SET self_pubkey = ?1, updated_at = ?2 WHERE agent_id = ?3",
+        params![self_pubkey, Utc::now().to_rfc3339(), agent_id],
+    )?;
+    Ok(updated > 0)
+}
+
+/// この agent の self_pubkey を読む。行が無ければ空文字（＝未接続 / 逆引き不可）。
+pub fn get_agent_nostr_self_pubkey(conn: &Connection, agent_id: &str) -> Result<String> {
+    let result = conn.query_row(
+        "SELECT self_pubkey FROM agent_nostr_config WHERE agent_id = ?1",
+        params![agent_id],
+        |row| row.get::<_, String>(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Nostr pubkey（64 桁小文字 hex）から、その鍵を**自分のもの**として接続した agent の UUID を
+/// 逆引きする（#489）。
+///
+/// `self_pubkey` は各 agent の自 secret_key からしか導出・保存されないので、この対応は
+/// **鍵の所有で本人性が担保されている**。空 / 空列は一致させない（fail-closed）。見つからなければ
+/// `None`。突き合わせは hex 表現同士で行う前提（呼び出し側が正規化する）。
+pub fn resolve_agent_by_nostr_self_pubkey(conn: &Connection, self_pubkey: &str) -> Option<String> {
+    if self_pubkey.trim().is_empty() {
+        return None;
+    }
+    conn.query_row(
+        "SELECT agent_id FROM agent_nostr_config WHERE self_pubkey = ?1 AND self_pubkey <> ''",
+        params![self_pubkey],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
 pub fn list_enabled_agent_nostr_configs(conn: &Connection) -> Result<Vec<AgentNostrConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, secret_key, relays_json, filter_json, enabled
@@ -273,6 +330,86 @@ mod tests {
         // 空文字でクリア＝未設定へ戻せる。
         assert!(set_agent_nostr_owner_pubkey(&conn, "a1", "").unwrap());
         assert_eq!(get_agent_nostr_owner_pubkey(&conn, "a1").unwrap(), "");
+    }
+
+    /// #489: 自己 pubkey（逆引き用）は既定で未設定（空）。設定 → 読み出し → 逆引きが往復する。
+    #[test]
+    fn test_self_pubkey_roundtrip_and_reverse_lookup() {
+        let conn = mem();
+        let pk = "a".repeat(64);
+        // 行が無ければ空（＝未接続 / 逆引き不可 / fail-closed）。
+        assert_eq!(get_agent_nostr_self_pubkey(&conn, "a1").unwrap(), "");
+        assert!(!set_agent_nostr_self_pubkey(&conn, "a1", &pk).unwrap());
+        assert!(resolve_agent_by_nostr_self_pubkey(&conn, &pk).is_none());
+
+        upsert_agent_nostr_config(
+            &conn,
+            &AgentNostrConfigRow {
+                agent_id: "a1".to_string(),
+                secret_key: "nsec1dummy".to_string(),
+                relays_json: "[]".to_string(),
+                filter_json: "{}".to_string(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        // 行を作っただけでは自己 pubkey は空（逆引き不可）。
+        assert_eq!(get_agent_nostr_self_pubkey(&conn, "a1").unwrap(), "");
+        assert!(resolve_agent_by_nostr_self_pubkey(&conn, &pk).is_none());
+
+        assert!(set_agent_nostr_self_pubkey(&conn, "a1", &pk).unwrap());
+        assert_eq!(get_agent_nostr_self_pubkey(&conn, "a1").unwrap(), pk);
+        // 逆引きで agent へ戻る。
+        assert_eq!(
+            resolve_agent_by_nostr_self_pubkey(&conn, &pk).as_deref(),
+            Some("a1")
+        );
+        // 空 pubkey では逆引きしない（空列と偶然一致させない / fail-closed）。
+        assert!(resolve_agent_by_nostr_self_pubkey(&conn, "").is_none());
+        assert!(resolve_agent_by_nostr_self_pubkey(&conn, "   ").is_none());
+        // 登録と違う pubkey は None。
+        assert!(resolve_agent_by_nostr_self_pubkey(&conn, &"b".repeat(64)).is_none());
+    }
+
+    /// #489: **汚染防止**。self_pubkey は upsert / secret_key 差し替えのどちらでも
+    /// 書き換わらない（構造体・upsert 経路から書けないので外部が仕込めない）。
+    #[test]
+    fn test_upsert_and_secret_key_change_do_not_touch_self_pubkey() {
+        let conn = mem();
+        upsert_agent_nostr_config(
+            &conn,
+            &AgentNostrConfigRow {
+                agent_id: "a1".to_string(),
+                secret_key: "nsec1old".to_string(),
+                relays_json: "[]".to_string(),
+                filter_json: "{}".to_string(),
+                enabled: false,
+            },
+        )
+        .unwrap();
+        let pk = "c".repeat(64);
+        assert!(set_agent_nostr_self_pubkey(&conn, "a1", &pk).unwrap());
+
+        // 行を丸ごと書き直す upsert（鍵差し替え + relays 変更 + 有効化）でも自己 pubkey は不変。
+        upsert_agent_nostr_config(
+            &conn,
+            &AgentNostrConfigRow {
+                agent_id: "a1".to_string(),
+                secret_key: "nsec1new".to_string(),
+                relays_json: r#"["wss://relay.example"]"#.to_string(),
+                filter_json: r#"{"keywords":["x"]}"#.to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_agent_nostr_self_pubkey(&conn, "a1").unwrap(),
+            pk,
+            "upsert が self_pubkey を書き換えた（外部から仕込める穴）"
+        );
+        // secret_key だけの差し替えでも不変（書き戻しは identity 切替の専用経路が別途行う）。
+        set_agent_nostr_config_secret_key(&conn, "a1", "nsec1third").unwrap();
+        assert_eq!(get_agent_nostr_self_pubkey(&conn, "a1").unwrap(), pk);
     }
 
     /// #319: 行を丸ごと書き直す upsert（REST 保存 / 鍵採用 / 鍵生成）で
