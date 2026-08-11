@@ -27,7 +27,7 @@ use opencrab_gateway::{DiscordGateway, IncomingMessage, MessageContent, MessageS
 
 use super::{
     create_event_channel, debounce_window_key, incoming_has_content, process_incoming_message,
-    process_interaction_response, process_subtask_completed, runs_solo,
+    process_interaction_response, process_subtask_completed,
 };
 
 /// `run_agent_response` の観測 1 件。
@@ -1141,20 +1141,22 @@ async fn debounced_window_records_every_message_but_runs_once() {
     assert_eq!(state.runs.lock().unwrap().len(), 1, "合流窓の run は 1 回");
 }
 
-/// #543: オーナー本人（種別 Owner）だけが**単独 run**（合流対象外）。co_agent が将来
-/// owner 等価（同 rank）になっても、種別 Owner だけを外すので rank では判定しない。
+/// #543 / #556: オーナー本人は特別扱いしない。owner と co_agent は同じ権限レベル（#485 で
+/// owner 等価 = 2）なので**同じ窓に入る**（オーナー判断「一緒にまとめて問題ない」）。
 #[test]
-fn only_owner_identity_runs_solo() {
+fn owner_and_co_agent_share_a_window_when_privilege_matches() {
     use opencrab_actions::CallerIdentity;
-    assert!(runs_solo(&CallerIdentity::Owner), "オーナー本人は単独 run");
-    assert!(!runs_solo(&CallerIdentity::Agent));
-    assert!(!runs_solo(&CallerIdentity::TrustedUser));
-    // co_agent は owner 等価（rank=2）だが**種別 Owner ではない**ので合流対象（単独にしない）。
-    assert!(
-        !runs_solo(&CallerIdentity::CoAgent {
-            agent_id: "kairo".to_string()
-        }),
-        "co_agent は種別 Owner ではないので単独 run にはしない（rank ではなく種別で分ける）"
+    let msg = discord_msg("222", "u", "hi");
+    let owner = debounce_window_key(&msg, &CallerIdentity::Owner);
+    let co_agent = debounce_window_key(
+        &msg,
+        &CallerIdentity::CoAgent {
+            agent_id: "kairo".to_string(),
+        },
+    );
+    assert_eq!(
+        owner, co_agent,
+        "owner と co_agent は owner 等価（同権限）なので同じ窓に入るべき"
     );
 }
 
@@ -1196,4 +1198,66 @@ fn run_trigger_selection_uses_latest_message_with_content() {
 
     let all_empty = [discord_msg("222", "u", ""), discord_msg("222", "u", "")];
     assert_eq!(all_empty.iter().rposition(incoming_has_content), None);
+}
+
+/// #543/#556 統合: **実イベントループ（`run_discord_loop`）の flush を一巡させる**通しテスト。
+///
+/// 個別ユニット（trigger 選定 / `record_only = Some(i) != trigger_idx`）だけでなく、
+/// バッファ蓄積 → デバウンス期限 → フラッシュ → 全メッセージ記録 → run 1 回、という配線
+/// そのものを固定する。**末尾に空メッセージ**を混ぜて「トリガー＝内容のある**最後**」
+/// （単なる最後ではない）も守る: 空をトリガーに選ぶと run が消え、本テストが落ちる。
+#[tokio::test]
+async fn debounce_flush_records_all_messages_and_runs_once_through_the_loop() {
+    let (state, gateway, gateway_actions) = make_deps();
+    let (tx, rx) = create_event_channel();
+    let registry: SubtaskRegistry = Arc::new(dashmap::DashMap::new());
+
+    let loop_state = state.clone();
+    let handle = tokio::spawn(super::run_discord_loop(
+        gateway,
+        loop_state,
+        vec!["crab".to_string()],
+        gateway_actions,
+        "owner-1".to_string(),
+        None,
+        Some((tx.clone(), rx)),
+        false,
+        None,
+        registry,
+    ));
+
+    // 同一チャンネル・同権限（非オーナー = TrustedUser）の内容あり 2 通 ＋ 末尾に空 1 通。
+    // 別 sender でも同じ窓（channel, 権限レベル）に入り、1 回のフラッシュで処理される。
+    for (sender, text) in [
+        ("kairo", "かいろの発言"),
+        ("nostarou", "のすたろうの発言"),
+        ("nostarou", ""),
+    ] {
+        tx.send(super::LoopEvent::IncomingMessage(discord_msg(
+            "222", sender, text,
+        )))
+        .expect("event loop receiver closed");
+    }
+
+    // 2 秒窓のフラッシュ → トリガー（内容のある最後 = のすたろう）が run を起こすのを待つ。
+    state.wait_for_run().await;
+
+    let records = state.inbound_records.lock().unwrap().clone();
+    assert_eq!(
+        records.len(),
+        2,
+        "窓の内容ありメッセージは全部個別に記録される（畳まない・落とさない）: {records:?}"
+    );
+    assert!(records.contains(&"かいろの発言".to_string()), "{records:?}");
+    assert!(
+        records.contains(&"のすたろうの発言".to_string()),
+        "{records:?}"
+    );
+    assert_eq!(
+        state.runs.lock().unwrap().len(),
+        1,
+        "窓の run は 1 回（末尾の空メッセージでトリガーを落とさない）"
+    );
+
+    handle.abort();
 }

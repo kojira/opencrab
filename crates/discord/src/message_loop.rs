@@ -341,36 +341,17 @@ pub async fn run_discord_loop<T: AgentRunner>(
             event = event_rx.recv() => {
                 match event {
                     Some(LoopEvent::IncomingMessage(msg)) => {
+                        // 窓キー = (channel, caller 権限レベル)。オーナー本人を特別扱いしない
+                        // （co_agent は #485 で owner 等価とオーナーが決めた方針なので、owner と
+                        // co_agent が同権限で合流しても問題ない）。**権限レベルが違うものは合流
+                        // しない**（権限昇格を防ぐため。強い方を採ると bot が上位権限で走る）。
                         let caller =
                             state.resolve_caller(&msg.sender.id, &agent_ids, &owner_discord_id);
-                        if runs_solo(&caller) {
-                            // #543: オーナー本人は**常に単独 run**（合流も遅延もしない）。記録は
-                            // process_incoming_message 内で行う（record_only=false）。窓を通さない
-                            // ので他メッセージと帰属が混ざらない。
-                            process_incoming_message(
-                                msg,
-                                gateway.clone(),
-                                state.clone(),
-                                agent_ids.clone(),
-                                gateway_actions.clone(),
-                                owner_discord_id.clone(),
-                                session_locks.clone(),
-                                skip_agents_with_dedicated_gateway,
-                                voice.clone(),
-                                event_tx.clone(),
-                                subtask_registry.clone(),
-                                false,
-                            )
-                            .await;
-                        } else {
-                            let entry = debounce_buffers
-                                .entry(debounce_window_key(&msg, &caller))
-                                .or_insert_with(|| {
-                                    (Vec::new(), Instant::now() + DEBOUNCE_DELAY)
-                                });
-                            entry.0.push(msg);
-                            entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
-                        }
+                        let entry = debounce_buffers
+                            .entry(debounce_window_key(&msg, &caller))
+                            .or_insert_with(|| (Vec::new(), Instant::now() + DEBOUNCE_DELAY));
+                        entry.0.push(msg);
+                        entry.1 = Instant::now() + DEBOUNCE_DELAY; // タイマーリセット
                     }
                     Some(LoopEvent::SubtaskCompleted {
                         session_id,
@@ -1886,26 +1867,18 @@ fn debounce_channel_id(msg: &IncomingMessage) -> String {
     }
 }
 
-/// このメッセージを合流窓に入れず**常に単独 run**にするか（#543）。
+/// デバウンス窓のキー = **(channel, caller 権限レベル)**（#543）。
 ///
-/// **オーナー本人（種別 [`opencrab_actions::CallerIdentity::Owner`]）だけ true。** #489
-/// （識別子空間の食い違いで co_agent の判定が一度も発火していない）が直ると、co_agent は
-/// #485 で **owner 等価**になり、bot の発言とオーナーの発言が**同じ権限 rank（=2）**になる。
-/// rank が同じでも identity は別（kojira 本人と bot は別人）で、合流すると run の帰属
-/// （誰の発言への応答か）が曖昧になる。そこで **rank ではなく種別 `Owner` そのもの**で外す。
-/// これは合流するかを決めるだけで、新しい権限ゲート（禁止/許可）ではない。相手が bot かでは
-/// 判定しない（判定は `resolve_caller` の結果＝自分側の識別だけで行う）。
-fn runs_solo(caller: &opencrab_actions::CallerIdentity) -> bool {
-    matches!(caller, opencrab_actions::CallerIdentity::Owner)
-}
-
-/// デバウンス窓のキー = **(channel, caller 権限レベル)**（#543）。オーナー本人は [`runs_solo`]
-/// で先に外れるので、ここに来るのは非オーナー（agent / trusted / 将来の co_agent）だけ。
+/// **権限レベルだけで分ける。オーナー本人も特別扱いしない**（co_agent は #485 でオーナーが
+/// owner 等価と決めた方針なので、owner と co_agent が同権限で合流しても問題ない、というオー
+/// ナー判断）。owner/co_agent(=2) と trusted(=1) と agent(=0) は別キー＝別窓＝別 run になり、
+/// **権限をまたぐ合流を構造的に禁止**する: これは権限昇格の防止（強い方を採ると bot が上位
+/// 権限で走る）に必要で、オーナー承認とは別に残す。run 側は各メッセージの caller を個別に
+/// 解決し直すので、ここはグルーピング用の粗い区分でよい。
 ///
-/// trusted(=1) と agent(=0)（と将来 owner 等価の co_agent=2）は別キー＝別窓＝別 run になり、
-/// **権限をまたぐ合流を構造的に禁止**する: 最後の送信者を採ると帰属が消え、最強権限を採ると
-/// bot が上位権限で走る——どちらも起こさない。run 側は各メッセージの caller を個別に解決し
-/// 直すので、ここはグルーピング用の粗い区分でよい。
+/// **今日は挙動が変わらない**: #489 の識別子不一致で co_agent の判定が発火せず、bot は素の
+/// `Agent`(=0)・オーナーは `Owner`(=2) と権限レベルが違うため合流しない。#489 を直して
+/// co_agent が owner 等価(=2)になって初めて、owner と co_agent が同窓で合流し得る。
 fn debounce_window_key(
     msg: &IncomingMessage,
     caller: &opencrab_actions::CallerIdentity,
