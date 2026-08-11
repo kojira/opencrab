@@ -86,6 +86,39 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         ));
         gateway.start().await?;
 
+        // #489: この bot 自身の Discord user id を co_agent 逆引き表へ書き戻す。
+        //
+        // 出所は **bot_token で認証した自分自身**（`get_current_user` = `GET /users/@me`）。
+        // 受信メッセージの author からは決して書かない（外部が「user_id ↔ agent UUID」を
+        // 仕込めると任意ユーザーが co_agent に化ける）。best-effort: 取得や書き込みに失敗しても
+        // 起動は続ける。書けなければ `bot_user_id` は空のままで、co_agent 判定は fail-closed
+        // （逆引き不可 → Agent 権限）に倒れるだけで安全側。
+        //
+        // ※ `DbGuard` は `!Send` なので、ネットワーク待ち（await）は先に済ませ、DB ロックは
+        //    await を挟まない同期ブロックに閉じる。
+        match gateway.http().get_current_user().await {
+            Ok(user) => {
+                let bot_user_id = user.id.get().to_string();
+                match self.state.db().lock() {
+                    Ok(conn) => {
+                        if let Err(e) = opencrab_db::queries::set_agent_discord_bot_user_id(
+                            &conn,
+                            agent_id,
+                            &bot_user_id,
+                        ) {
+                            error!(agent_id = %agent_id, error = %e, "#489: bot_user_id の書き戻しに失敗（co_agent 逆引きは fail-closed のまま）");
+                        }
+                    }
+                    Err(e) => {
+                        error!(agent_id = %agent_id, error = %e, "#489: DB ロック取得に失敗し bot_user_id を書き戻せず（co_agent 逆引きは fail-closed のまま）");
+                    }
+                }
+            }
+            Err(e) => {
+                error!(agent_id = %agent_id, error = %e, "#489: 自分の Discord user id を取得できず co_agent 逆引き表を更新できなかった（co_agent は fail-closed のまま）");
+            }
+        }
+
         // auto-dispatch の登録簿。停止（`cancel_subtask`）は gateway 非依存層の実装が
         // 同じ Arc を run 経由（`RunRequest::with_dispatch`）で受け取るため、この
         // registry はループへ渡すだけでよい（#157 S2 で gateway_actions からは外した）。

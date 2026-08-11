@@ -807,7 +807,7 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
         };
 
         // 3) 自己スキップ用セルを更新（以後の自己スキップが新 identity 追従）。
-        *self.self_pubkey.write().unwrap() = new_pubkey;
+        *self.self_pubkey.write().unwrap() = new_pubkey.clone();
 
         // 4) DB を最後に更新。失敗したら config/セルを旧状態へ巻き戻す（DB=旧 / config=新
         //    の不整合＝再起動で勝手に切替完了する事故を防ぐ）。
@@ -817,6 +817,17 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
             }
             *self.self_pubkey.write().unwrap() = old_pubkey;
             return Err(e).context("DB の本鍵更新に失敗（設定を元に戻しました）");
+        }
+
+        // 5) #489: co_agent 逆引き表（`agent_nostr_config.self_pubkey`）も新鍵の pubkey へ
+        //    揃える。**DB の secret_key を更新し切った後だけ**書く（secret_key が旧鍵へ
+        //    ロールバックした経路ではここへ来ないので、逆引き表が新鍵を指して secret_key と
+        //    食い違うことはない）。書き込みに失敗しても切替自体は成立済み（config/DB の
+        //    secret_key は新鍵）なので致命ではない: 逆引きが旧鍵のまま stale になるだけで
+        //    fail-closed（誤許可はしない）。次回起動の `spawn_agent_gateway` が自 pubkey を
+        //    再導出して直すので、ここは best-effort（ログのみ）。
+        if let Err(e) = self.runner.set_nostr_self_pubkey(agent_id, &new_pubkey) {
+            warn!(agent_id, error = %e, "#489: identity 切替後の self_pubkey 書き戻しに失敗（co_agent 逆引きは次回起動まで stale・fail-closed）");
         }
         Ok(npub.to_string())
     }
@@ -892,6 +903,14 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
                  自己返信ループ防止のため起動を中止します"
             )
         })?;
+
+    // #489: 自 pubkey を co_agent 逆引き表（`agent_nostr_config.self_pubkey`）へ書き戻す。
+    // 出所は自 secret_key から導出した自分の pubkey（受信著者ではない）＝信頼できる出所。
+    // 起動/restore の度に走るので既存 agent もここで backfill される。書けなくても致命では
+    // ない（逆引き不可 → co_agent は fail-closed）ので best-effort（ログのみ）。
+    if let Err(e) = runner.set_nostr_self_pubkey(agent_id, &self_pubkey) {
+        warn!(agent_id, error = %e, "#489: self_pubkey の書き戻しに失敗（co_agent 逆引きは fail-closed のまま）");
+    }
 
     let runner_c = runner.clone();
     let cli_c = cli.clone();
@@ -1078,6 +1097,8 @@ mod tests {
         enabled_calls: Arc<Mutex<Vec<bool>>>,
         /// set_nostr_secret_key に渡った nsec（ホットスワップ経路の検証 / #264）。
         secret_sets: Arc<Mutex<Vec<String>>>,
+        /// set_nostr_self_pubkey に渡った pubkey（co_agent 逆引き表の書き戻し検証 / #489）。
+        self_pubkey_sets: Arc<Mutex<Vec<String>>>,
         /// get_nostr_config が返す既存行（`None`=未設定 / #264）。
         preset_config: Option<AgentNostrConfigRow>,
         /// `resolve_nostr_caller` が Owner と答える相手の pubkey（#319）。
@@ -1106,6 +1127,7 @@ mod tests {
                 upserted: Arc::new(Mutex::new(Vec::new())),
                 enabled_calls: Arc::new(Mutex::new(Vec::new())),
                 secret_sets: Arc::new(Mutex::new(Vec::new())),
+                self_pubkey_sets: Arc::new(Mutex::new(Vec::new())),
                 preset_config: None,
                 owner_pubkey: None,
                 caller_queries: Arc::new(Mutex::new(Vec::new())),
@@ -1289,6 +1311,11 @@ mod tests {
 
         fn set_nostr_secret_key(&self, _a: &str, s: &str) -> anyhow::Result<()> {
             self.secret_sets.lock().unwrap().push(s.to_string());
+            Ok(())
+        }
+
+        fn set_nostr_self_pubkey(&self, _a: &str, pk: &str) -> anyhow::Result<()> {
+            self.self_pubkey_sets.lock().unwrap().push(pk.to_string());
             Ok(())
         }
 
@@ -2360,6 +2387,13 @@ mod tests {
             *runner.secret_sets.lock().unwrap(),
             vec!["nsec1newhot".to_string()],
             "ホットスワップは本鍵だけ差し替える"
+        );
+        // #489: 自 pubkey は co_agent 逆引き表へ書き戻される（起動時 + identity 切替時の 2 回）。
+        // どちらも fake nostaro の pubkey 出力（"newpubkeyhex"）。切替でも stale にならない。
+        assert_eq!(
+            *runner.self_pubkey_sets.lock().unwrap(),
+            vec!["newpubkeyhex".to_string(), "newpubkeyhex".to_string()],
+            "起動時と identity 切替時に self_pubkey を書き戻す（#489）"
         );
         assert!(
             mgr.is_running(agent),

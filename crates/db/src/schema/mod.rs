@@ -1655,6 +1655,50 @@ const MIGRATIONS: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 40,
+        description:
+            "co_agent 逆引き表: agent_discord_config.bot_user_id + agent_nostr_config.self_pubkey（発言者識別子→agent UUID / #489）",
+        // **#489: co_agent が識別子空間の食い違いで発火しない問題の逆引き表。**
+        //
+        // `trusted_co_agents` は agent UUID 対（agent_id ↔ co_agent_id）で登録されるのに、
+        // caller 解決は経路の生の発言者識別子（Discord user_id / Nostr pubkey）を突き合わせて
+        // いたため、UUID 登録の行が一度も一致しなかった。**発言者識別子 → agent UUID の逆引き**を
+        // 各設定表に持たせて解消する（案B）。
+        //   - `agent_discord_config.bot_user_id`: この bot 自身の Discord user id。
+        //   - `agent_nostr_config.self_pubkey`: この agent 自身の Nostr pubkey（64 桁小文字 hex）。
+        //
+        // ## 汚染防止（最重要）
+        // どちらの列も**書くのは各 agent 自身の接続だけ**（Discord: `get_current_user` /
+        // Nostr: 自 secret_key 由来 pubkey・identity 切替の新 pubkey）。config 構造体・upsert・
+        // REST 設定 API のどれにも載せないので、外部が「識別子 ↔ UUID」を仕込む経路が無い。
+        // 既定は空文字で「未接続 = 逆引き不可 = fail-closed」。
+        //
+        // ## 冪等性（#349/#475 の轍を踏まない）
+        // 新規 DB は SCHEMA_SQL 側で両列を持つので、`column_exists` でガードして各 ALTER を
+        // no-op にする。既存 DB（v39）でのみ 2 本の ADD COLUMN が走る。DDL のみ・データは触らない
+        // （既存 4 行の `trusted_co_agents` も書き換えない）。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき）
+        // 列を消す必要は無い（古いバイナリは両列を読まない）。版番号だけ戻せばよい:
+        //   BEGIN; PRAGMA user_version = 39; COMMIT;
+        // 列も落としたい場合は SQLite の DROP COLUMN（3.35+）で:
+        //   ALTER TABLE agent_discord_config DROP COLUMN bot_user_id;
+        //   ALTER TABLE agent_nostr_config DROP COLUMN self_pubkey;
+        up: |conn| {
+            if !column_exists(conn, "agent_discord_config", "bot_user_id")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_discord_config ADD COLUMN bot_user_id TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            if !column_exists(conn, "agent_nostr_config", "self_pubkey")? {
+                conn.execute_batch(
+                    "ALTER TABLE agent_nostr_config ADD COLUMN self_pubkey TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
+            Ok(())
+        },
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。

@@ -55,6 +55,53 @@ fn session_type_index_reaches_new_and_existing_dbs() {
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
 }
 
+/// #489: co_agent 逆引き列（`agent_discord_config.bot_user_id` /
+/// `agent_nostr_config.self_pubkey`）が新規 DB（SCHEMA_SQL）にも既存 DB（migration v40）にも
+/// 届くこと。SCHEMA_SQL 側だけ／migration 側だけ、の食い違い（#475 型の「既存 DB にだけ
+/// 届かない」地雷）を両経路で固定する。#546 と同型。
+#[test]
+fn co_agent_reverse_lookup_columns_reach_new_and_existing_dbs() {
+    // 新規 DB: SCHEMA_SQL 経路で両列を持つ。
+    let conn = crate::init_memory().expect("init");
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+    assert!(
+        column_exists(&conn, "agent_discord_config", "bot_user_id").unwrap(),
+        "新規 DB に bot_user_id が無い"
+    );
+    assert!(
+        column_exists(&conn, "agent_nostr_config", "self_pubkey").unwrap(),
+        "新規 DB に self_pubkey が無い"
+    );
+
+    // 既存 DB（v39・両列無し）を模す: 列を落として版を 39 へ戻す（SQLite 3.35+ の DROP COLUMN）。
+    conn.execute_batch(
+        "ALTER TABLE agent_discord_config DROP COLUMN bot_user_id; \
+         ALTER TABLE agent_nostr_config DROP COLUMN self_pubkey; \
+         PRAGMA user_version = 39;",
+    )
+    .unwrap();
+    assert!(!column_exists(&conn, "agent_discord_config", "bot_user_id").unwrap());
+    assert!(!column_exists(&conn, "agent_nostr_config", "self_pubkey").unwrap());
+
+    // 再初期化で migration v40 が走り、両列を復活し最新版へスタンプする。
+    initialize(&conn).expect("re-initialize");
+    assert!(
+        column_exists(&conn, "agent_discord_config", "bot_user_id").unwrap(),
+        "migration v40 が bot_user_id を足していない"
+    );
+    assert!(
+        column_exists(&conn, "agent_nostr_config", "self_pubkey").unwrap(),
+        "migration v40 が self_pubkey を足していない"
+    );
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+
+    // 冪等: もう一度 initialize しても列は 1 本のまま（既に v40 済みなので no-op）。
+    initialize(&conn).expect("re-initialize idempotent");
+    assert!(column_exists(&conn, "agent_discord_config", "bot_user_id").unwrap());
+    assert!(column_exists(&conn, "agent_nostr_config", "self_pubkey").unwrap());
+    assert_eq!(schema_version(&conn).unwrap(), latest_version());
+}
+
 /// 版管理導入前（`user_version = 0`）の**旧 shape の表を実際に持つ** DB を、
 /// 生成コードで作って現行 `initialize` に通す回帰スイート（#475 / #476）。
 ///
@@ -3191,11 +3238,11 @@ fn v37_backfill_preserves_firing_and_normalizes() {
 
     initialize(&conn).expect("apply v37");
     assert_eq!(schema_version(&conn).unwrap(), latest_version());
-    // v39（#546 の memory_sessions インデックス）が最新。v38/v39 とも
+    // v40（#489 の co_agent 逆引き列）が最新。v38/v39/v40 とも
     // session_heartbeat_config を触らないので、下の v37 backfill 検証（発火集合・正規化）は
     // そのまま成立する。新しい migration が session_heartbeat_config を触ったらこの guard を
     // 更新し、下の期待値を見直すこと。
-    assert_eq!(latest_version(), 39, "v39 が最新版であること");
+    assert_eq!(latest_version(), 40, "v40 が最新版であること");
 
     // 期待: 9 行 = step1(nostr-A) 1 + step2(A/201=0, C/202=1, D/222=1) 3 +
     //             step3(A,B,C,D,E の ch205 展開・全 enabled=0) 5。
