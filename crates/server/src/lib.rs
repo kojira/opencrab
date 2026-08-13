@@ -670,7 +670,10 @@ mod gateway_registry_tests {
         let clone = state.clone();
         assert!(Arc::ptr_eq(&state.gateways, &clone.gateways));
 
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
         assert_eq!(clone.gateways.kinds(), vec![gateway_kinds::NOSTR]);
     }
@@ -680,8 +683,14 @@ mod gateway_registry_tests {
     #[test]
     fn real_managers_register_in_startup_order() {
         let state = test_app_state();
-        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(discord);
         state.gateways.register(nostr);
 
@@ -707,7 +716,10 @@ mod gateway_registry_tests {
         let state = test_app_state();
 
         // 位置 1: Discord だけが登録済み。
-        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(discord);
         assert_eq!(
             state.gateways.restore_pending().await,
@@ -715,7 +727,10 @@ mod gateway_registry_tests {
         );
 
         // 位置 2: Nostr を登録してから走査。Discord は**もう拾わない**。
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
         assert_eq!(
             state.gateways.restore_pending().await,
@@ -732,7 +747,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn startup_sweep_restores_nostr_without_discord() {
         let state = test_app_state();
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
 
         assert_eq!(
@@ -749,7 +767,10 @@ mod gateway_registry_tests {
     #[test]
     fn is_running_falls_back_to_false() {
         let state = test_app_state();
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
 
         assert!(
@@ -770,7 +791,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn start_through_trait_errors_without_db_config() {
         let state = test_app_state();
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
 
         let gw = state.gateways.get(gateway_kinds::NOSTR).unwrap();
@@ -790,7 +814,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn discord_start_through_trait_errors_without_db_config() {
         let state = test_app_state();
-        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(discord);
 
         let gw = state.gateways.get(gateway_kinds::DISCORD).unwrap();
@@ -841,7 +868,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn discord_start_declines_when_config_is_disabled() {
         let state = test_app_state();
-        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(discord);
         // トークンはあるが enabled=0（「停止したはず」の設定）。
         put_discord_config(&state, "crab", "bot-token-looks-real", false);
@@ -863,7 +893,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn discord_start_declines_on_blank_token() {
         let state = test_app_state();
-        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        let discord = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(discord);
         put_discord_config(&state, "crab", " \t\n", true);
 
@@ -885,7 +918,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn nostr_start_declines_without_secret_key() {
         let state = test_app_state();
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
         {
             let conn = state.db.lock().unwrap();
@@ -934,7 +970,10 @@ mod gateway_registry_tests {
     #[tokio::test]
     async fn nostr_start_does_not_look_at_the_enabled_flag() {
         let state = test_app_state();
-        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()));
+        let nostr = Arc::new(opencrab_nostr::NostrGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         state.gateways.register(nostr);
         {
             let conn = state.db.lock().unwrap();

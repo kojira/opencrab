@@ -223,14 +223,12 @@ async fn main() -> anyhow::Result<()> {
         // 稼働中か」を参照できるよう、共有ゲートウェイへ渡す AppState clone より
         // **前に**生成して配線する。実際の復元は共有ゲートウェイ起動後に行う）。
         //
-        // #601 hotfix: **時刻発火の受け口レジストリを必ず配線する**。これを忘れると per-agent
-        // Discord ゲートウェイのループが自分の受け口を登録できず、共有（TOML）ゲートウェイを
-        // 持たない構成では scheduler の resolve が None になり Discord の時刻発火が毎回 skip される
-        // （Nostr 側は配線済みで動いていた）。
-        let manager = Arc::new(
-            opencrab_discord::DiscordGatewayManager::new(state.clone())
-                .with_timed_fire_router(state.timed_fire_router.clone()),
-        );
+        // #603: 時刻発火の受け口レジストリは `new` の**必須引数**。忘れるとコンパイルエラーに
+        // なる（#602 は Option + builder の呼び忘れで Discord の発火が全 skip し本番が止まった）。
+        let manager = Arc::new(opencrab_discord::DiscordGatewayManager::new(
+            state.clone(),
+            state.timed_fire_router.clone(),
+        ));
         // 上位から見える唯一の入口はこの登録簿（#191 段階2 PR3・PR4）。共通操作
         // （起動 / 停止 / 生存確認）も transport 固有の操作（ツール実行の実体 =
         // `gateway_actions_for`）もここから引く。`AppState` の名指しフィールドは無い。
@@ -509,6 +507,64 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // #603: 時刻発火の受け口の**起動時セルフチェック**。型で配線は強制した（マネージャは router
+    // 無しでは構築できない）が、ゲートウェイのループが実際に起動して受け口を登録するのは非同期
+    // （特に Nostr は spawn 後）。「有効な受信ゲートウェイ（per-agent の DB 設定・TOML 双方）が
+    // あるのに、受け口が 1 つも登録されていない」＝時刻発火がどこにも届かない状態を、猶予を置いて
+    // から ERROR で知らせる（#602 の黙った全 skip を、コンパイルに加えて運用でも二重に検知する）。
+    {
+        let check_state = state.clone();
+        // その transport に発火対象がいるはず、を有効設定（DB + TOML）から判定する。per-agent
+        // （DB）だけの体も拾う: #602 の本番対象はまさに TOML に無い per-agent だった。
+        #[cfg(feature = "discord")]
+        let discord_expected = {
+            let db_has = check_state
+                .db
+                .lock()
+                .ok()
+                .map(|conn| {
+                    !opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
+                        .unwrap_or_default()
+                        .is_empty()
+                })
+                .unwrap_or(false);
+            !cfg.gateway.discord.agent_ids.is_empty() || db_has
+        };
+        #[cfg(not(feature = "discord"))]
+        let discord_expected = false;
+        let nostr_expected = check_state
+            .db
+            .lock()
+            .ok()
+            .map(|conn| {
+                !opencrab_db::queries::list_enabled_agent_nostr_configs(&conn)
+                    .unwrap_or_default()
+                    .is_empty()
+            })
+            .unwrap_or(false);
+        tokio::spawn(async move {
+            // ループの起動→受け口登録は非同期なので猶予を置く（Discord は同期登録だが Nostr は
+            // spawn 後に登録するため）。
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            for (kind, expected) in [
+                (opencrab_actions::gateway_kinds::DISCORD, discord_expected),
+                (opencrab_actions::gateway_kinds::NOSTR, nostr_expected),
+            ] {
+                if !expected {
+                    continue;
+                }
+                if check_state.timed_fire_router.has_sink_for_kind(kind) {
+                    tracing::info!(kind, "timed-fire: 起動時セルフチェック OK（受け口あり）");
+                } else {
+                    tracing::error!(
+                        kind,
+                        "timed-fire: 有効な受信ゲートウェイがあるのに受け口が 0（時刻発火が届かない）。配線/起動を確認"
+                    );
+                }
+            }
+        });
+    }
+
     let _watcher_handle = opencrab_server::hot_reload::start_config_watcher(
         "config",
         state.db.clone(),
@@ -527,12 +583,14 @@ async fn main() -> anyhow::Result<()> {
         // （`nostr_run event --file <相対>` / `--out <相対>` がそれらと噛み合う）。
         let cli =
             opencrab_nostr::NostaroCli::new().with_workspace_base(state.workspace_base.clone());
-        // #588 TimedFire: Nostr ゲートウェイのループが自分の受け口を `timed_fire_router` へ登録できる
-        // よう、共有ルータの Arc を渡す（Discord と同型・per-agent→共有の解決はルータが行う）。
+        // #588 TimedFire / #603: 時刻発火の受け口レジストリは `new` の必須引数（Discord と同型・
+        // per-agent→共有の解決はルータが行う）。忘れるとコンパイルエラーになる。
         let manager: opencrab_server::SharedNostrManager = Arc::new(
-            opencrab_nostr::NostrGatewayManager::new(state.clone())
-                .with_cli(cli)
-                .with_timed_fire_router(state.timed_fire_router.clone()),
+            opencrab_nostr::NostrGatewayManager::new(
+                state.clone(),
+                state.timed_fire_router.clone(),
+            )
+            .with_cli(cli),
         );
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も
         // この登録簿から引く（#191 段階2 PR3・PR4）。名指しフィールドは無い。
