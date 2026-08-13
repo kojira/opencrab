@@ -3834,7 +3834,7 @@ async fn get_my_heartbeat_gates_on_broken_interval() {
     assert!(d["gated_reason"].as_str().unwrap().contains("間隔"));
 }
 
-/// 明示の無効化は anchor/last_fired を触らない（位相保存・§4.4）。next_fire_at は null。
+/// 明示の無効化は anchor/last_fired を触らない（位相保存・再有効化まで保つ）。next_fire_at は null。
 #[tokio::test]
 async fn set_my_heartbeat_disable_keeps_phase() {
     let state = heartbeat_state();
@@ -3860,9 +3860,10 @@ async fn set_my_heartbeat_disable_keeps_phase() {
     assert_eq!(data["next_fire_at"], serde_json::Value::Null);
 }
 
-/// 明示の間隔変更は位相を now へリセットする（ユーザ起点の短縮は密になってよい・§4.4 N1）。
+/// #605: 間隔変更は anchor を now へ張り直さない（起点を据え置く）。以前は毎回 now へ
+/// リセットしていたため、調整のたびに次回発火が先送りされて発火しなかった。
 #[tokio::test]
-async fn set_my_heartbeat_interval_change_resets_phase() {
+async fn set_my_heartbeat_interval_change_preserves_anchor() {
     let state = heartbeat_state();
     let actions = SystemGatewayActions::new(state.clone(), None, None, None);
     let e = actions
@@ -3884,10 +3885,133 @@ async fn set_my_heartbeat_interval_change_resets_phase() {
     let data = d.data.unwrap();
     assert_eq!(data["enabled"], true, "enabled は保持");
     assert_eq!(data["interval_secs"], 600);
-    assert_ne!(
+    assert_eq!(
         data["anchor_at"].as_str().unwrap(),
         anchor1,
-        "間隔変更で anchor をリセット（§4.4 N1）"
+        "間隔変更で anchor を据え置く（#605: now へ張り直さない）"
+    );
+}
+
+/// #605 の本丸: 設定変更で `last_fired_at`（発火した事実）を消さない。消すと next_fire が
+/// anchor 基準へ戻り、調整のたびに位相が先送りされて発火しなくなる。
+#[tokio::test]
+async fn set_my_heartbeat_preserves_last_fired_across_config_change() {
+    let state = heartbeat_state();
+    let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+    let _ = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"enabled": true, "interval_secs": 3600}),
+            &nostr_ctx(),
+        )
+        .await;
+    // 「実際に発火した」事実を刻む（発火経路だけが行う操作を模す）。
+    let fired_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_session_last_fired(&conn, "agent-x", "nostr-agent-x", &fired_at)
+            .unwrap();
+    }
+    // enabled は変えず interval だけ 600 へ。
+    let d = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"interval_secs": 600}),
+            &nostr_ctx(),
+        )
+        .await;
+    let data = d.data.unwrap();
+    assert_eq!(data["interval_secs"], 600);
+    assert_eq!(
+        data["last_fired_at"].as_str().unwrap(),
+        fired_at,
+        "設定変更で last_fired が消えた（#605 の退行）"
+    );
+    // next_fire = last_fired + interval（now 基準へ張り直さない）。
+    let got = chrono::DateTime::parse_from_rfc3339(data["next_fire_at"].as_str().unwrap()).unwrap();
+    let exp =
+        chrono::DateTime::parse_from_rfc3339(&fired_at).unwrap() + chrono::Duration::seconds(600);
+    assert_eq!(
+        got, exp,
+        "next_fire は last_fired+interval であるべき（now 基準ではない）"
+    );
+}
+
+/// #605: 発火済みセッションの**再有効化**でも last_fired を保つ（→ next_fire = last_fired+interval。
+/// 過ぎていれば即発火する）。以前は再有効化で last_fired=NULL・anchor=now になり先送りされた。
+#[tokio::test]
+async fn set_my_heartbeat_reenable_after_fire_preserves_last_fired() {
+    let state = heartbeat_state();
+    let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+    let _ = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"enabled": true, "interval_secs": 600}),
+            &nostr_ctx(),
+        )
+        .await;
+    let fired_at = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_session_last_fired(&conn, "agent-x", "nostr-agent-x", &fired_at)
+            .unwrap();
+    }
+    let _ = actions
+        .execute("set_my_heartbeat", &json!({"enabled": false}), &nostr_ctx())
+        .await;
+    let d = actions
+        .execute("set_my_heartbeat", &json!({"enabled": true}), &nostr_ctx())
+        .await;
+    let data = d.data.unwrap();
+    assert_eq!(data["enabled"], true);
+    assert_eq!(
+        data["last_fired_at"].as_str().unwrap(),
+        fired_at,
+        "再有効化で last_fired を消さない（#605）"
+    );
+    let got = chrono::DateTime::parse_from_rfc3339(data["next_fire_at"].as_str().unwrap()).unwrap();
+    let exp =
+        chrono::DateTime::parse_from_rfc3339(&fired_at).unwrap() + chrono::Duration::seconds(600);
+    assert_eq!(
+        got, exp,
+        "next_fire = last_fired+interval（now+interval へ逃がさない）"
+    );
+}
+
+/// #605: 初回有効化は従来どおり anchor=now を打ち、next_fire = now+interval（enable 直後の
+/// 即発火は避ける）。last_fired はまだ無い。
+#[tokio::test]
+async fn set_my_heartbeat_first_enable_sets_anchor_to_now() {
+    let state = heartbeat_state();
+    let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+    let before = chrono::Utc::now();
+    let d = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"enabled": true, "interval_secs": 600}),
+            &nostr_ctx(),
+        )
+        .await;
+    let data = d.data.unwrap();
+    assert_eq!(
+        data["last_fired_at"],
+        serde_json::Value::Null,
+        "初回は未発火"
+    );
+    let anchor = chrono::DateTime::parse_from_rfc3339(data["anchor_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(
+        anchor >= before - chrono::Duration::seconds(5)
+            && anchor <= chrono::Utc::now() + chrono::Duration::seconds(5),
+        "初回有効化は anchor を now 付近に打つ: {anchor}"
+    );
+    let next = chrono::DateTime::parse_from_rfc3339(data["next_fire_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(
+        next > chrono::Utc::now(),
+        "初回有効化の next_fire は未来（now+interval・即発火しない）: {next}"
     );
 }
 
