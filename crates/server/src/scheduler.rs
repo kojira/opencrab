@@ -446,6 +446,16 @@ async fn run_one_heartbeat(state: &AppState, agent_id: &str, target: &FireTarget
         tracing::warn!(agent_id, kind, session_id = %session_id, "scheduler: TimedFire の受け口が無い（ゲートウェイ未稼働）。発火を skip");
         return None;
     };
+    // 時刻発火の送信ログ（#588）。受信側（各ループ）の「ターン開始」ログと突き合わせれば、
+    // scheduler→ループ間で落ちたかが分かる。heartbeat 専用の文言にしない（アラーム・定時実行も
+    // 同じイベントに乗る）。プロンプトは長いので先頭プレビューだけ。
+    tracing::info!(
+        agent_id,
+        session_id = %session_id,
+        transport = kind,
+        prompt_preview = %opencrab_actions::prompt_preview(&prompt),
+        "timed-fire: 発火（scheduler → gateway loop）"
+    );
     // 時刻発火のイベントを 1 本流すだけ（fire-and-forget。ロック・配送・記録・継続はループが回す）。
     sink.fire_timed_turn(opencrab_actions::TimedFireRequest {
         session_id,
