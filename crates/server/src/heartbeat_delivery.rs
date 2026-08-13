@@ -74,8 +74,10 @@
 //!
 //! ## ブロードキャスト（Nostr）は現在ハートビートから配送されない（#588 Stage 3・オーナー判断）
 //!
-//! [`DeliveryRoute::DiscordChannel`] の発火だけがハートビートターン（`heartbeat_turn::turn`）から
-//! この配送を呼ぶ。**ブロードキャスト（[`DeliveryRoute::Broadcast`］）発火は応答本文を自動配送
+//! [`DeliveryRoute::DiscordChannel`] の発火だけがこの配送を呼ぶ。呼び出し口はハートビートターンの
+//! **`on_response_text`（反復ごと）**（`heartbeat_turn` の `discord_on_response_text`）で、通常の
+//! Discord メッセージループと同じく反復ごとに応答テキストを送る（「宣言 → 作業 → 結果」が順に出る）。
+//! **ブロードキャスト（[`DeliveryRoute::Broadcast`］）発火は応答本文を自動配送
 //! しない**——Nostr は既にツール投稿（`nostr_post` 等）が通常運用で、エージェント指示文が
 //! 「ツールで送信した後は同じ本文を返さない」という二重投稿回避の取り決めを持つため、本文まで
 //! 自動配送すると二重投稿の道が開く。したがって Nostr の発話はエージェント自身のツールに委ねる。

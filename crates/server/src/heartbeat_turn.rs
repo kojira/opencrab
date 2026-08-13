@@ -319,9 +319,12 @@ impl HeartbeatTurnRunner {
     /// - gateway_actions / reply_target（#588 Stage 3）: **通常ターンと同じツール環境**を渡す。
     ///   発火元 transport の `GatewayActions`（稼働していれば）と、Discord ではチャンネル ID を
     ///   ツールの既定宛先として載せる。これで HB ターンでも通常ターンと同じく gateway ツールが
-    ///   使える。応答本文そのものの配送は run 内では起きず（`on_response_text` を渡さない）、
-    ///   ターン後に発火元種別で `deliver_heartbeat_speech` が担う（`turn`）。`spawn_subtask` は
-    ///   `SystemGatewayActions` 経由で depth0 全ランに常在するため、この配線に依らず使える。
+    ///   使える。`spawn_subtask` は `SystemGatewayActions` 経由で depth0 全ランに常在するため、
+    ///   この配線に依らず使える。
+    /// - on_response_text（#588 Stage 3 followup）: **Discord 発火のとき**、通常ループと同じく
+    ///   反復ごとの応答テキストをチャンネルへ配送する（[`Self::discord_on_response_text`]）。以前は
+    ///   最終応答だけを配送していたため、「宣言 → `spawn_subtask` → 最終 `NO_REPLY`」の形だと宣言が
+    ///   チャンネルに出なかった。ブロードキャスト（Nostr）は自動配送しないので渡さない。
     fn run_request(
         self: &Arc<Self>,
         target: &HeartbeatTarget,
@@ -351,7 +354,56 @@ impl HeartbeatTurnRunner {
         if let SessionFireTarget::DiscordChannel { .. } = &target.fire_target {
             req = req.with_reply_target(target.channel_id.clone());
         }
+        // Discord 発火は反復ごとに応答テキストを配送する（通常ループと同じ / followup）。
+        if let Some(cb) = self.discord_on_response_text(target) {
+            req = req.with_on_response_text(cb);
+        }
         req
+    }
+
+    /// Discord 発火のとき、通常ループと同じく**反復ごと**に応答テキストを配送する
+    /// `on_response_text` コールバックを作る（#588 Stage 3 followup）。
+    ///
+    /// 通常の Discord メッセージループ（`message_loop.rs` の `on_response_text`）は
+    /// **反復ごと**に応答テキストを `send_to_channel` する（「調べるね」→ ツール実行 → 結果、と
+    /// 順に出るのはこのため）。ハートビートは最終応答だけを配送していたため、「宣言 →
+    /// `spawn_subtask` で作業 → 最終 `NO_REPLY`」という理想の形だと**宣言がチャンネルに出なかった**。
+    /// ここで反復ごとの配送を通常ループと同じ形にする。**送信の実体は [`heartbeat_delivery`] を
+    /// 再利用**する（新しい仕組みを作らない）。`NO_REPLY`・空はスキップ（通常ループと同じ判定）。
+    /// ブロードキャスト（Nostr）は自動配送しないので `None`（先の決定どおり・ツール投稿に委ねる）。
+    fn discord_on_response_text(
+        &self,
+        target: &HeartbeatTarget,
+    ) -> Option<Arc<dyn Fn(String) + Send + Sync>> {
+        if !matches!(target.fire_target, SessionFireTarget::DiscordChannel { .. }) {
+            return None;
+        }
+        let gateways = self.gateways.clone();
+        let discord_http = self.discord_http.clone();
+        let agent_id = target.agent_id.clone();
+        let channel_id = target.channel_id.clone();
+        Some(Arc::new(move |text: String| {
+            // 通常ループと同じ判定: 空 / NO_REPLY は送らない。
+            if text.is_empty() || text.trim() == "NO_REPLY" {
+                return;
+            }
+            let gateways = gateways.clone();
+            let discord_http = discord_http.clone();
+            let agent_id = agent_id.clone();
+            let channel_id = channel_id.clone();
+            // 発火 tick / 反復を塞がないよう spawn（通常ループの on_response_text と同じく非ブロック）。
+            tokio::spawn(async move {
+                heartbeat_delivery::deliver_heartbeat_speech(
+                    &gateways,
+                    &discord_http,
+                    heartbeat_delivery::DeliveryRoute::DiscordChannel,
+                    &agent_id,
+                    &channel_id,
+                    &text,
+                )
+                .await;
+            });
+        }))
     }
 
     /// 発火元 transport の `GatewayActions` を登録簿から引く（#588 Stage 3）。
@@ -373,9 +425,12 @@ impl HeartbeatTurnRunner {
     ///
     /// #588 Stage 3: **通常のターンとして走る。** 応答本文の自動配送は**発火元の種別で変わる**:
     ///
-    /// - **Discord チャンネルの発火**: 応答本文（`NO_REPLY`・空 以外）をそのままチャンネルへ
-    ///   自動配送し（[`Self::deliver_speech`]）、投稿した回だけ通常の配送記録を残す
-    ///   （[`Self::record_posted_reply`]）。沈黙（`NO_REPLY`）は無配送・無記録。
+    /// - **Discord チャンネルの発火**: 応答テキストは**反復ごと**に配送する（通常ループと同じ・
+    ///   [`Self::discord_on_response_text`] を `run_request` で `on_response_text` に載せる）。
+    ///   これにより「宣言 → `spawn_subtask` → 最終 `NO_REPLY`」でも宣言がチャンネルに出る。
+    ///   記録は通常ループと同型: 中間の宣言はエンジンの turn ログ（`on_tool_call`）が `speech` で
+    ///   残し、**最終応答が `NO_REPLY` 以外なら** [`Self::record_posted_reply`]（`record_outbound_reply`）
+    ///   で残す。最終応答が `NO_REPLY` なら最終応答は無配送・無記録（沈黙）。
     /// - **ブロードキャスト（Nostr）の発火**: 応答本文を**自動配送しない**（オーナー判断）。
     ///   エージェントが `nostr_post` 等のツールで自分から投稿する（通常の Nostr の動き。ツールは
     ///   `with_gateway_actions` で渡している）。本文は投稿されないので配送記録も残さない
@@ -399,24 +454,29 @@ impl HeartbeatTurnRunner {
                 let text = result.response.trim();
                 let is_silent = text.is_empty() || text == "NO_REPLY";
                 match heartbeat_delivery::DeliveryRoute::from_fire_target(&target.fire_target) {
-                    // Discord: 応答本文をそのままチャンネルへ自動配送し、投稿した回だけ記録する。
+                    // Discord: 応答テキストの配送は反復ごとの `on_response_text`（run_request）が
+                    // 担う。ここでは最終応答の記録だけを通常ループと同型に残す。中間の宣言は
+                    // エンジンの turn ログ（on_tool_call）が既に `speech` で記録している。
                     heartbeat_delivery::DeliveryRoute::DiscordChannel => {
                         if is_silent {
+                            // 最終応答が NO_REPLY: 最終応答は無配送・無記録（沈黙）。ただし中間で
+                            // 宣言していれば、それは on_response_text が配送済み・turn ログが記録済み。
                             tracing::debug!(
                                 agent_id = %target.agent_id,
                                 session_id = %target.session_id,
                                 origin = %origin.label(),
-                                "Heartbeat turn: NO_REPLY（沈黙・無配送・無記録）"
+                                "Heartbeat turn: 最終応答は NO_REPLY（最終応答は無配送・無記録）"
                             );
                         } else {
+                            // 最終応答は on_response_text が配送済み。ここでは通常ループと同じ
+                            // record_outbound_reply の記録だけ残す（二重送信しない）。
                             self.record_posted_reply(target, origin, &result, text);
-                            self.deliver_speech(target, text);
                             tracing::debug!(
                                 agent_id = %target.agent_id,
                                 session_id = %target.session_id,
                                 channel_id = %target.channel_id,
                                 origin = %origin.label(),
-                                "Heartbeat turn: 応答本文を Discord チャンネルへ配送"
+                                "Heartbeat turn: 最終応答を通常記録（配送は反復ごとの on_response_text）"
                             );
                         }
                     }
@@ -605,33 +665,6 @@ impl HeartbeatTurnRunner {
                 context,
             },
         );
-    }
-
-    /// 応答本文を Discord チャンネルへ配送する（fire-and-forget・#588 Stage 3 / #591）。
-    ///
-    /// **現状は Discord 発火からのみ呼ばれる**（`turn`。ブロードキャスト発火は応答本文を自動配送
-    /// しない）。配送先は発火元の種別で決める（`DeliveryRoute`）。発火 tick を塞がないよう spawn
-    /// する（#178 系）。送信の実体は [`heartbeat_delivery`]（#400 のハンドル解決・分割送信）を
-    /// **再利用**する——これはハートビート専用ではなく「メッセージループの外からチャンネルへ
-    /// 投稿する」ための送信。
-    fn deliver_speech(&self, target: &HeartbeatTarget, text: &str) {
-        let content = text.to_string();
-        let gateways = self.gateways.clone();
-        let discord_http = self.discord_http.clone();
-        let agent_id = target.agent_id.clone();
-        let channel_target = target.channel_id.clone();
-        let route = heartbeat_delivery::DeliveryRoute::from_fire_target(&target.fire_target);
-        tokio::spawn(async move {
-            heartbeat_delivery::deliver_heartbeat_speech(
-                &gateways,
-                &discord_http,
-                route,
-                &agent_id,
-                &channel_target,
-                &content,
-            )
-            .await;
-        });
     }
 }
 
@@ -1546,13 +1579,17 @@ mod tests {
         );
     }
 
-    /// #588 Stage 3: 通常ターンと同じツール環境（gateway_actions / reply_target）を配線する。
+    /// #588 Stage 3(+followup): 通常ターンと同じツール環境（gateway_actions / reply_target）と、
+    /// **Discord では反復ごと配送の `on_response_text`** を配線する。
     ///
     /// - broadcast 発火（Nostr）: `runner_with` が Nostr の `FakeGateway` を登録しているので
-    ///   `gateway_actions` が載る。返信先ノートが無いので `reply_target` は付けない。
-    /// - Discord 発火: チャンネル ID を `reply_target` に載せる（ツールの既定宛先）。
+    ///   `gateway_actions` が載る。返信先ノートが無いので `reply_target` は付けない。**応答本文は
+    ///   自動配送しない**ので `on_response_text` も付けない。
+    /// - Discord 発火: チャンネル ID を `reply_target` に載せ、**`on_response_text` を配線する**
+    ///   （反復ごとに応答テキストを配送＝「宣言」がチャンネルに出る要）。
     ///   （テストの登録簿には Discord ゲートウェイが無いので `gateway_actions` は None になるが、
-    ///   本番では per-agent Discord ゲートウェイが載る。ここでは reply_target の配線を担保する。）
+    ///   本番では per-agent Discord ゲートウェイが載る。ここでは reply_target と on_response_text の
+    ///   配線を担保する。）
     #[tokio::test]
     async fn run_request_wires_gateway_actions_and_reply_target() {
         // broadcast 発火。
@@ -1577,6 +1614,10 @@ mod tests {
                 req.reply_target.is_none(),
                 "broadcast は返信先ノートを持たないので reply_target を付けない"
             );
+            assert!(
+                req.on_response_text.is_none(),
+                "broadcast は応答本文を自動配送しないので on_response_text を付けない"
+            );
         }
         // Discord 発火。
         {
@@ -1591,6 +1632,10 @@ mod tests {
                 req.reply_target.as_deref(),
                 Some("222"),
                 "Discord 発火はチャンネル ID を reply_target に載せる"
+            );
+            assert!(
+                req.on_response_text.is_some(),
+                "Discord 発火は反復ごとに応答テキストを配送する on_response_text を配線する（宣言が出る要）"
             );
         }
     }
