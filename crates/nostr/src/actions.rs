@@ -513,7 +513,7 @@ mod tests {
             );
             assert!(
                 non_dispatch.contains(*name),
-                "{name} は配送系なので dispatch 対象外でなければならない（二重投稿防止）"
+                "{name} は配送系なので dispatch 対象外でなければならない（戻り値を同ターンで使う）"
             );
         }
 
