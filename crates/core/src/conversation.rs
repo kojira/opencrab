@@ -168,27 +168,30 @@ const CHANNEL_CONVERSATION_LOG_WINDOW: usize = 500;
 const HEARTBEAT_CHANNEL_BUDGET_NUM: usize = 3;
 const HEARTBEAT_CHANNEL_BUDGET_DEN: usize = 4;
 
-/// ハートビート用の会話文字列を組む（#404）。
+/// ハートビート用の会話文字列を組む（#404）。**⚠ #588 Stage 3 現在デッドコード（live の
+/// 呼び出し元ゼロ）。撤去は #588 Stage 4 予定。**
 ///
-/// ハートビートは `heartbeat-{agent_id}-{channel_id}` という専用セッションで走るため、
-/// 素の [`build_conversation_string`] では**同じチャンネルの実会話が 1 行も見えない**。
-/// ここでは専用セッションの履歴に加えて、`channel_session_id`（実会話）を
-/// `[Channel conversation]` として差し込む。
+/// **この関数は live のどこからも呼ばれていない。** #588 Stage 1 でハートビートターンの会話
+/// 組み立ては通常の [`build_conversation_string`] へ一本化され（`heartbeat_turn::build_context`）、
+/// 唯一の本番呼び出し元が消えた。そして**専用セッション（旧 `heartbeat-{agent}-{channel}`）は
+/// もう作られていない**——#573 Stage B/C でハートビートターンの宛先が実会話セッション
+/// （`nostr-…` / `discord-…`）へ統合され、専用セッションの生成が撤去された。したがって
+/// 「専用セッションで走る」という前提はもう成り立たない。**残っているのはこの関数の本体と
+/// テストだけで、#588 Stage 4 で撤去予定**（本コミットでは腐った doc の訂正のみ・本体は残す）。
 ///
-/// 並び順は `前置セクション → 実会話 → ハートビート専用セッション` で固定する。
-/// 専用セッションの**最後のログが今回のハートビートプロンプト（出力形式の規約を含む）**
-/// なので、これを末尾に置くことで `SPEAK:` / `IDLE` のパース前提が変わらない。
+/// 以下は**専用セッションが存在した当時の挙動の記録**であり、現行の実態ではない:
 ///
-/// コンパクションはセッションを跨がない: 専用セッション側は従来どおり自分の topic 要約
-/// （`[Past context summary]`）でコンパクションし、実会話側は topic 要約を使わず直近窓
-/// で切る。実会話の長期の要約は `[Memory Index]`（別セッション由来の topic を載せる）が
-/// 既に担っており、`[Past context summary]` を 2 つ出すと short_id 集合が素という
-/// 既存の不変条件が壊れるため。
+/// - 当時ハートビートは専用セッションで走ったため、素の [`build_conversation_string`] では
+///   同じチャンネルの実会話が 1 行も見えず、`channel_session_id`（実会話）を
+///   `[Channel conversation]` として差し込んでいた。
+/// - 並び順は `前置セクション → 実会話 → 専用セッション` で固定。専用セッションの最後のログが
+///   その回のハートビートプロンプト（旧 `SPEAK:` / `IDLE` の出力規約を含む）で、末尾に置くことで
+///   パース前提を保っていた（規約自体は #588 Stage 3 で撤去済み）。
+/// - コンパクションはセッションを跨がず、実会話側は topic 要約を使わず直近窓で切っていた。
+/// - 実会話セクションに載せるのは**発言だけ**（[`CHANNEL_CONVERSATION_LOG_TYPE`]）。
 ///
-/// 実会話セクションに載せるのは**発言だけ**（[`CHANNEL_CONVERSATION_LOG_TYPE`]）。
-///
-/// `channel_session_id` が None（エージェント単位 tick 等）または発言が 1 件も無ければ、
-/// 出力は [`build_conversation_string`] と同一になる。
+/// `channel_session_id` が None、または `heartbeat_session_id` と等値なら、出力は
+/// [`build_conversation_string`] と同一になる（統合後は常に等値なのでこの分岐が恒真）。
 pub fn build_heartbeat_conversation_string(
     conn: &rusqlite::Connection,
     heartbeat_session_id: &str,

@@ -45,7 +45,7 @@ pub use engine::{
     EngineResult, FunctionDefinition, LiveInboundSource, LlmCallLog, LlmClient, SkillEngine,
     ToolCall, ToolDispatcher,
 };
-pub use heartbeat::{HeartbeatConfig, HeartbeatDecision};
+pub use heartbeat::HeartbeatConfig;
 pub use identity::Identity;
 pub use memory::MemoryManager;
 pub use owner::{is_owner_id, owner_is_unset};
