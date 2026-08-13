@@ -247,10 +247,16 @@ fn settle_outcome_sentence(exit_reason: &str) -> &'static str {
 /// 中立化した。失敗・タイムアウトでも `subtask_completed` ログには理由本文が入る。
 fn resume_prompt_suffix(reply_target: &str, subtask_id: &str, exit_reason: &str) -> String {
     let outcome = settle_outcome_sentence(exit_reason);
+    // 配送はエージェントがツールで行う（機構は送らない・#588）。返信先ノートがあれば返信、無ければ
+    // （時刻発火のブロードキャスト等）新規投稿へ誘導する。伝える必要がなければ黙ってよい。
+    let deliver = if reply_target.trim().is_empty() {
+        "伝えるなら nostr_post で投稿してください（今回は返信先ノートがありません）".to_string()
+    } else {
+        format!("相手へ伝えるなら nostr_reply(target=\"{reply_target}\") を使ってください（target は返信先ノート）")
+    };
     format!(
         "[Nostr] 依頼されていたバックグラウンド処理が{outcome}。詳細は直前の会話ログの \
-         subtask_completed に入っています。相手へ伝えるなら nostr_reply(target=\"{reply_target}\") \
-         を使ってください（target は返信先ノート）。伝える必要がなければ NO_REPLY とだけ答えてください。\
+         subtask_completed に入っています。{deliver}。伝える必要がなければ NO_REPLY とだけ答えてください。\
          \n[subtask_completed: subtask_id={subtask_id}, exit_reason={exit_reason}]"
     )
 }
@@ -276,25 +282,23 @@ impl<R: NostrAgentRunner> SubtaskCompletionSink for NostrResponder<R> {
             );
             return;
         }
-        // 返信先が無ければ **resume しない**（方針 / #168）。
+        // 継続は **session_id の一致だけ**で起こす（#588 / #440）。返信先の有無で決めない。
         //
-        // Nostr は「返信して初めて相手に届く」gateway で、session_id からは返信先ノート
-        // を復元できない（#323 以降は agent_id しか入っていない。それ以前も相手 pubkey
-        // までで、ノート id は入っていなかった）。宛先不明のまま resume すると
-        // (1) 届かない応答を生成して LLM 費用を払い、(2) その本文を会話ログに転記して
-        // しまう（送っていないのに送ったことになり、以後の文脈が実際の Nostr 上のやり取り
-        // と食い違う）。完了本文は `settle_completed` が既に DB へ永続化しているので、
-        // 次の inbound で `build_conversation_string` が自然に拾う（heartbeat の
-        // 「次 tick 拾い」と同じ扱い）。取りこぼしではなく遅延配送になる。
-        let reply_target = ev.reply_target.clone().unwrap_or_default();
-        if reply_target.trim().is_empty() {
-            debug!(
-                session_id = %ev.session_id,
-                subtask_id = %ev.subtask_id,
-                "nostr sink: no reply_target; skipping resume (完了本文は DB 済み。次の inbound で文脈に載る)"
-            );
-            return;
-        }
+        // 継続は「自分が投げた subtask の結果を受けて続きを話す」ことなので、セッションが一致すれば
+        // 十分（撤去した `HeartbeatContinuationSink` も session_id だけで判定していた）。以前は
+        // 「返信先ノートが無ければ resume しない」としていたが、その根拠（届かない応答を作って
+        // 転記してしまう）は #588 で消えた: 配送はエージェントがツールで行い（機構は送らない）、
+        // 転記は返信先の有無に関わらず常に行う（セッションに残す）。返信先が無いブロードキャスト
+        // （時刻発火）でも subtask の成果を受けて続きを話せる（#440 が塞いだ穴を開け直さない）。
+        //
+        // 返信先は正規化する（前後空白を落とし、空白のみは「返信先なし」＝ブロードキャスト扱い）。
+        // これで転記のアンカー要否（`respond`）と誘導文（`resume_prompt_suffix`）の判定が揃う。
+        let reply_target = ev
+            .reply_target
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
 
         let responder = self.clone();
         let sid = ev.session_id.clone();
@@ -857,27 +861,35 @@ mod tests {
         );
     }
 
-    /// `reply_target` が None のときは graceful にスキップ（resume も送信もしない）。
+    /// #588 / #440: `reply_target` が無くても（ブロードキャストの時刻発火など）継続は起こる
+    /// （判定は session_id の一致だけ）。応答はセッションへアンカー無しで転記され、publish はしない
+    /// （配送はエージェントのツール）。以前は「返信先が無ければ resume しない」だったが、その根拠
+    /// （届かない応答を転記してしまう）は暗黙返信の撤去で消えた。
     #[tokio::test]
-    async fn sink_without_reply_target_is_graceful() {
+    async fn resume_without_reply_target_records_but_does_not_publish() {
         let fake = FakeNostaro::new();
-        let runner = FakeRunner::new("届かない応答");
+        let runner = FakeRunner::new("ブロードキャストの続き");
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test");
 
         r.on_subtask_settled(settled(&sid, None));
-        // 空文字も「指定なし」扱い。
+        // 空白のみも「返信先なし」扱い（正規化される）。
         r.on_subtask_settled(settled(&sid, Some("   ")));
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(
-            fake.sent().is_empty(),
-            "宛先不明なら送信しない: {}",
-            fake.sent()
+            runner.wait_for_reply("ブロードキャストの続き").await,
+            "返信先が無くても継続ターンが走ってセッションへ転記される: replies={:?}",
+            runner.replies.lock().unwrap()
         );
+        // 機構は publish しない（配送はエージェントのツール）。
+        assert!(fake.sent().is_empty(), "機構は送信しない: {}", fake.sent());
+        // 転記は本文のみ（返信先が無いのでアンカーは付かない）。
+        let replies = runner.replies.lock().unwrap();
         assert!(
-            runner.runs.lock().unwrap().is_empty(),
-            "宛先不明なら LLM も回さない（費用と未配送転記の防止）"
+            replies
+                .iter()
+                .all(|r| !r.2.contains("[Nostr reply target=")),
+            "返信先なしの転記にアンカーは付かない: {replies:?}"
         );
     }
 
@@ -1183,6 +1195,21 @@ mod tests {
         assert!(
             suffix.contains("バックグラウンド処理が完了しました"),
             "完了は完了と伝える: {suffix}"
+        );
+    }
+
+    /// #588: 返信先ノートが無い（ブロードキャストの時刻発火）resume は、`nostr_reply` の空 target
+    /// ではなく `nostr_post` の新規投稿へ誘導する。
+    #[test]
+    fn resume_suffix_guides_to_post_when_no_reply_target() {
+        let suffix = resume_prompt_suffix("", "st-1", "completed");
+        assert!(
+            suffix.contains("nostr_post で投稿"),
+            "返信先が無ければ新規投稿へ誘導: {suffix}"
+        );
+        assert!(
+            !suffix.contains("nostr_reply(target=\"\")"),
+            "空の返信先へ返信させない: {suffix}"
         );
     }
 }

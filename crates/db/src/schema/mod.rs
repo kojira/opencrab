@@ -1861,8 +1861,9 @@ fn migrate_v37_session_heartbeat(conn: &Connection) -> rusqlite::Result<()> {
     //
     // **Nostr 判定は runtime の実発火条件に一致させる（F1 修正）**: 単なる EXISTS ではなく
     // **`agent_nostr_config.enabled = 1`** を要求する。runtime は enabled=1 の gateway だけを
-    // 起動し（nostr_runner_impl.rs:94）、発火は `is_running` ゲート（heartbeat_delivery.rs:225）→
-    // text_delivery（nostr/actions.rs:352）を通る。EXISTS だけだと **nostr disabled のエージェント
+    // 起動し（nostr_runner_impl.rs:94）、時刻発火は**稼働中の gateway だけが受け口を登録する**
+    // `TimedFireRouter`（#588・nostr/manager.rs の `run_nostr_loop` で register）経由で届く。
+    // EXISTS だけだと **nostr disabled のエージェント
     // を enabled=1 の nostr セッションにして PR2 で新規発火させてしまう**（runtime では鳴らない）。
     // opt-in だが Nostr 稼働条件を満たさない（Discord 専用の旧 agent スコープ）は現状も出口なしで
     // 沈黙 → セッション行を作らない（#456 決定3）。interval は agent_heartbeat_config の保持値。
