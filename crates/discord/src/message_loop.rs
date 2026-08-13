@@ -143,6 +143,23 @@ pub enum LoopEvent {
         /// オーナーが押した瞬間にそのセッションが `Owner` で resume する（昇格経路）。
         caller: opencrab_actions::CallerIdentity,
     },
+    /// 時刻起因の発火（#588 TimedFire）。scheduler が「時刻が来たら、このセッションで・この
+    /// プロンプトで 1 ターン回して」と送る。メッセージ以外の理由でターンを回す点は
+    /// `SubtaskCompleted` と同じで、受けたら**いつもの turn**（配送・ロック・記録・継続ターンは
+    /// ループ既存の実装）を回すだけ。`prompt` は system プロンプトへ足す（会話ログに「発言」として
+    /// 残さない）。イベントは**種別を知らない**（ハートビート/アラーム/定時実行いずれも同じ口）。
+    TimedFire {
+        session_id: String,
+        agent_id: String,
+        channel_id: u64,
+        channel_id_str: String,
+        guild_id: String,
+        is_dm: bool,
+        /// system プロンプトへ足す入力。#584 指示解決の結果などを scheduler が渡す。
+        prompt: String,
+        /// 実行権限（時刻発火は本人の自己実行なので `Owner`）。
+        caller: opencrab_actions::CallerIdentity,
+    },
 }
 
 /// Discordのsystem promptに埋め込むcontext行を生成する。
@@ -193,6 +210,34 @@ pub fn create_event_channel() -> (
     mpsc::UnboundedReceiver<LoopEvent>,
 ) {
     mpsc::unbounded_channel()
+}
+
+/// scheduler の時刻発火（#588 TimedFire）を Discord ループへ流すための受け口。
+///
+/// [`opencrab_actions::TimedFireRouter`] に登録され、`fire_timed_turn` で
+/// [`LoopEvent::TimedFire`] を 1 本 send するだけ（受け口は薄く保つ）。以降のターンは
+/// ループ既存の実装（配送・ロック・記録・継続）が回す。Discord の宛先（channel_id u64 / is_dm）は
+/// transport 中立な要求（`channel_id` 文字列 / `guild_id`）から復元する。
+pub struct DiscordTimedFireSink {
+    pub event_tx: mpsc::UnboundedSender<LoopEvent>,
+}
+
+impl opencrab_actions::TimedFireSink for DiscordTimedFireSink {
+    fn fire_timed_turn(&self, req: opencrab_actions::TimedFireRequest) {
+        let channel_id: u64 = req.channel_id.parse().unwrap_or(0);
+        let is_dm = req.guild_id.is_empty();
+        // send 失敗（ループ終了）は握りつぶす: 次 tick で再送される。
+        let _ = self.event_tx.send(LoopEvent::TimedFire {
+            session_id: req.session_id,
+            agent_id: req.agent_id,
+            channel_id,
+            channel_id_str: req.channel_id,
+            guild_id: req.guild_id,
+            is_dm,
+            prompt: req.prompt,
+            caller: req.caller,
+        });
+    }
 }
 
 pub async fn run_discord_loop<T: AgentRunner>(
@@ -434,6 +479,45 @@ pub async fn run_discord_loop<T: AgentRunner>(
                                 gateway_c,
                                 state_c,
                                 ga_c,
+                                caller,
+                            )
+                            .await;
+                        });
+                    }
+                    Some(LoopEvent::TimedFire {
+                        session_id,
+                        agent_id,
+                        channel_id,
+                        channel_id_str,
+                        guild_id,
+                        is_dm,
+                        prompt,
+                        caller,
+                    }) => {
+                        // SubtaskCompleted と同じ理由でループ内では await しない。同一セッションの
+                        // 直列化はセッションロックが担保する（通常メッセージ・継続ターンと同じロック）。
+                        let gateway_c = gateway.clone();
+                        let state_c = state.clone();
+                        let ga_c = gateway_actions.clone();
+                        let voice_c = voice.clone();
+                        let event_tx_c = event_tx.clone();
+                        let registry_c = subtask_registry.clone();
+                        let sess = session_id.clone();
+                        session_locks.spawn_serialized(sess, async move {
+                            process_timed_fire(
+                                session_id,
+                                agent_id,
+                                channel_id,
+                                channel_id_str,
+                                guild_id,
+                                is_dm,
+                                prompt,
+                                gateway_c,
+                                state_c,
+                                ga_c,
+                                voice_c,
+                                event_tx_c,
+                                registry_c,
                                 caller,
                             )
                             .await;
@@ -1269,6 +1353,141 @@ async fn process_subtask_completed<T: AgentRunner>(
             }
         }
         _ => {}
+    }
+}
+
+/// 時刻起因の発火（#588 TimedFire）を**いつもの Discord ターン**として処理する。
+///
+/// `SubtaskCompleted` の resume と同型（受信を記録せず system プロンプトへマーカー/プロンプトを足して
+/// ターンを回す）だが、初回発火は「宣言 → `spawn_subtask` → 最終 `NO_REPLY`」の形になるので、通常の
+/// 受信ターンと同じく **`on_response_text` で反復ごとに配送**する（そうしないと最終が `NO_REPLY` のとき
+/// 宣言がチャンネルに出ない）。継続ターンは `with_dispatch`（`DiscordCompletionSink` → `SubtaskCompleted`）
+/// でループ既存の resume 経路に載る（ハートビート専用の継続機構は不要）。
+///
+/// **受け口は薄い**: 送信・ロック・記録・継続はすべてループ既存の実装。ここが担うのは
+/// 「渡された prompt を system プロンプトへ足して回す」だけ。プロンプトは会話ログに「発言」として
+/// 残さない（#501）。時刻発火の沈黙（`NO_REPLY`）は無記録（ハートビートの決定を踏襲。通常の受信ターンは
+/// NO_REPLY マーカーを残すが、ここは発火元メッセージが無いのでマーカー行を積み上げない）。
+#[allow(clippy::too_many_arguments)]
+async fn process_timed_fire<T: AgentRunner>(
+    session_id: String,
+    agent_id: String,
+    channel_id: u64,
+    channel_id_str: String,
+    guild_id: String,
+    is_dm: bool,
+    prompt: String,
+    gateway: Arc<DiscordGateway>,
+    state: T,
+    gateway_actions: Arc<dyn opencrab_gateway::GatewayActions>,
+    voice: Option<std::sync::Arc<crate::voice_session::VoiceSessionManager>>,
+    event_tx: mpsc::UnboundedSender<LoopEvent>,
+    subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
+    caller: opencrab_actions::CallerIdentity,
+) {
+    let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
+    // 渡された prompt（#584 指示解決の結果など）は system プロンプトへ足す（通常ターンの
+    // discord_context_line も付ける）。会話ログには「発言」として残さない（#501）。
+    let system_prompt = format!(
+        "{}\n\n{}\n\n{}",
+        base_prompt,
+        discord_context_line(&guild_id, &channel_id_str),
+        prompt
+    );
+    let conversation_raw = match state.build_conversation_string(
+        &session_id,
+        &agent_id,
+        state.context_budget_tokens(&agent_id),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(session_id = %session_id, agent_id = %agent_id, "build_conversation_string failed: {e}");
+            return;
+        }
+    };
+    let conversation =
+        prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
+
+    // 反復ごとに応答テキストを配送する（通常の受信ターンと同じ on_response_text）。宣言が出る要。
+    // NO_REPLY・空はスキップ。書き込み不可チャンネルもスキップ。発火を塞がないよう spawn。
+    let on_response_text: Arc<dyn Fn(String) + Send + Sync> = {
+        let gateway = gateway.clone();
+        let state = state.clone();
+        let voice = voice.clone();
+        let channel_id_str = channel_id_str.clone();
+        let agent_id = agent_id.clone();
+        Arc::new(move |text: String| {
+            if text.is_empty() || text.trim() == "NO_REPLY" {
+                return;
+            }
+            if !is_dm && !state.is_channel_writable(&channel_id_str) {
+                return;
+            }
+            let gateway = gateway.clone();
+            let voice = voice.clone();
+            let channel_id_str = channel_id_str.clone();
+            let agent_id = agent_id.clone();
+            tokio::spawn(async move {
+                match gateway.send_to_channel(channel_id, &text).await {
+                    Ok(_) => {
+                        if let Some(v) = &voice {
+                            v.maybe_speak(&channel_id_str, &agent_id, &text);
+                        }
+                    }
+                    Err(e) => tracing::error!("TimedFire Discord send failed: {e}"),
+                }
+            });
+        })
+    };
+
+    let result = state
+        .run_agent_response(
+            opencrab_actions::RunRequest::new(
+                &agent_id,
+                &agent_name,
+                &session_id,
+                &system_prompt,
+                &conversation,
+                "discord",
+                caller,
+            )
+            .with_gateway_actions(gateway_actions)
+            .with_reply_target(channel_id_str.clone())
+            .with_on_response_text(on_response_text)
+            .with_dispatch(Some(subtask_registry.clone()), {
+                // 継続ターンはループ既存の resume（SubtaskCompleted）へ載せる。
+                let sink: std::sync::Arc<dyn opencrab_actions::SubtaskCompletionSink> =
+                    std::sync::Arc::new(crate::gateway_actions::DiscordCompletionSink {
+                        event_tx: Some(event_tx.clone()),
+                    });
+                sink
+            }),
+        )
+        .await;
+
+    // 記録（配送は on_response_text が済ませているので送信はしない）。最終応答が NO_REPLY 以外なら
+    // 通常ターンと同じ record_outbound_reply。沈黙は無記録（上記 doc）。
+    match result {
+        Ok(engine_result) => {
+            let text = engine_result.response.trim();
+            if !text.is_empty() && text != "NO_REPLY" {
+                state.record_outbound_reply(
+                    opencrab_actions::TranscriptSource::Discord,
+                    &opencrab_actions::OutboundReplyRecord {
+                        agent_id: &agent_id,
+                        session_id: &session_id,
+                        channel_id: Some(&channel_id_str),
+                        text: &engine_result.response,
+                        context: Some(opencrab_actions::AgentReplyContext::Direct {
+                            tool_calls_made: engine_result.tool_calls_made,
+                        }),
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            error!(agent_id = %agent_id, error = format!("{e:#}"), "TimedFire turn failed");
+        }
     }
 }
 

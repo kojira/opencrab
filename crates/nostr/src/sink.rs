@@ -184,6 +184,15 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                     debug!(agent_id, session_id, "nostr: agent chose silence");
                     return None;
                 }
+                // #588: **返信先ノートが無いターンでは、暗黙返信も本文記録もしない。**
+                // 返信先が無いのに返信しようとするのは誰が呼んでも誤り（呼び出し元の種別には依存しない
+                // 性質）。時刻発火のブロードキャスト（返信先ノートを持たない）がこれに当たり、外界への
+                // 出力はエージェントが `nostr_post` 等のツールで明示的に行う（各ツールが自分で記録する）。
+                // 受信ターンは reply_target が必ず非空なので、この分岐は既存挙動を変えない。
+                if reply_target.is_empty() {
+                    debug!(agent_id, session_id, "nostr: no reply target; leaving delivery to tools");
+                    return None;
+                }
                 // 最終応答テキストを転記（会話履歴の継続性）。
                 //
                 // #323 / B1: 返信先アンカーを焼く。1 セッションに複数の相手が同居する

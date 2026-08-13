@@ -103,6 +103,8 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
     /// watch ループと完了 sink が同じ Arc を共有することが、二重投稿の防止
     /// （直列化）と `cancel_subtask` 到達性（同一 registry）の条件。
     runtime: Arc<NostrSessionRuntime>,
+    /// #588 TimedFire: 時刻発火の受け口を登録する登録簿（`main.rs` が注入・未設定なら登録しない）。
+    timed_fire_router: Option<Arc<opencrab_actions::TimedFireRouter>>,
 }
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
@@ -118,11 +120,21 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             runner,
             cli: NostaroCli::new(),
             runtime,
+            timed_fire_router: None,
         }
     }
 
     pub fn with_cli(mut self, cli: NostaroCli) -> Self {
         self.cli = cli;
+        self
+    }
+
+    /// #588 TimedFire: 時刻発火の受け口を登録する登録簿を注入する（`main.rs` が起動時に呼ぶ）。
+    pub fn with_timed_fire_router(
+        mut self,
+        router: Arc<opencrab_actions::TimedFireRouter>,
+    ) -> Self {
+        self.timed_fire_router = Some(router);
         self
     }
 
@@ -151,6 +163,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             agent_id,
             secret_key,
             config,
+            self.timed_fire_router.clone(),
         )
         .await
     }
@@ -179,6 +192,7 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
             runner: self.runner.clone(),
             cli: self.cli.clone(),
             runtime: self.runtime.clone(),
+            timed_fire_router: self.timed_fire_router.clone(),
         })
     }
 
@@ -514,7 +528,54 @@ impl SessionQueues {
 /// watch ループ本体。watch が落ちてもバックオフして再購読する（abort されるまで）。
 /// dedup セットはループ寿命で保持する（再購読時の replay を跨いで効かせる）。
 #[allow(clippy::too_many_arguments)]
-async fn run_nostr_loop<R: NostrAgentRunner>(
+/// scheduler の時刻発火（#588 TimedFire）を Nostr のセッションキューへ流す受け口。
+///
+/// [`opencrab_actions::TimedFireRouter`] に登録され、`fire_timed_turn` で「その回のプロンプトで
+/// 1 ターン回す」ジョブを per-agent キューへ enqueue するだけ（受け口は薄く保つ）。以降は Nostr の
+/// 既存経路（[`NostrResponder`]・直列化・継続ターンの SubtaskCompletionSink）が回す。
+///
+/// **ブロードキャストなので reply_target は空**＝[`NostrResponder::respond`] のガード（#588）により
+/// 暗黙返信も本文記録もしない。発話はエージェントが `nostr_post` 等のツールで自分から行う。
+struct NostrTimedFireSink<R: NostrAgentRunner> {
+    runner: R,
+    cli: NostaroCli,
+    runtime: Arc<NostrSessionRuntime>,
+    admin: Arc<dyn NostrIdentityAdmin>,
+    queues: Arc<SessionQueues>,
+    permits: Arc<Semaphore>,
+}
+
+impl<R: NostrAgentRunner + Clone> opencrab_actions::TimedFireSink for NostrTimedFireSink<R> {
+    fn fire_timed_turn(&self, req: opencrab_actions::TimedFireRequest) {
+        let responder = NostrResponder::new(
+            self.runner.clone(),
+            self.cli.clone(),
+            self.runtime.clone(),
+            self.admin.clone(),
+            req.agent_id.clone(),
+        );
+        let session_id = req.session_id.clone();
+        let prompt = req.prompt;
+        let caller = req.caller;
+        let job: ResponseJob = Box::pin(async move {
+            // reply_target は空（ブロードキャスト）。暗黙返信・本文記録はガードで抑止される（#588）。
+            responder
+                .respond_serialized(
+                    &session_id,
+                    "",
+                    &prompt,
+                    None,
+                    caller,
+                    opencrab_actions::LiveInboundScope::AllOthers,
+                )
+                .await;
+        });
+        self.queues
+            .enqueue(&req.agent_id, &req.session_id, &self.permits, job);
+    }
+}
+
+async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     runner: R,
     cli: NostaroCli,
     agent_id: String,
@@ -522,6 +583,8 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
     self_pubkey: SelfPubkey,
     admin: Arc<dyn NostrIdentityAdmin>,
     runtime: Arc<NostrSessionRuntime>,
+    // #588 TimedFire: 時刻発火の受け口を登録する登録簿（無ければ登録しない）。
+    timed_fire_router: Option<Arc<opencrab_actions::TimedFireRouter>>,
 ) {
     let mut seen = SeenEvents::new(512);
     // 応答生成の流量制限。watch 再購読を跨いで同じ permit プールを使う。
@@ -529,6 +592,21 @@ async fn run_nostr_loop<R: NostrAgentRunner>(
     // per-session の FIFO キュー。再購読を跨いで同じものを使う（購読が張り直されても
     // 処理待ちの順序と consumer を落とさない）。
     let queues = Arc::new(SessionQueues::new(SESSION_QUEUE_CAPACITY));
+    // #588 TimedFire: scheduler の時刻発火をこのループのキューへ流す受け口を登録する。
+    if let Some(router) = &timed_fire_router {
+        router.register_per_agent(
+            opencrab_actions::gateway_kinds::NOSTR,
+            &agent_id,
+            Arc::new(NostrTimedFireSink {
+                runner: runner.clone(),
+                cli: cli.clone(),
+                runtime: runtime.clone(),
+                admin: admin.clone(),
+                queues: queues.clone(),
+                permits: permits.clone(),
+            }),
+        );
+    }
     loop {
         match run_watch_once(
             &runner,
@@ -889,6 +967,7 @@ fn stop_gateway(gateways: &GatewayMap, admins: &AdminMap, agent_id: &str) {
 /// （空 nsec 拒否）・自己 pubkey 取得の fail-closed が呼び出し口によらず必ず効く
 /// （PUT enabled=false→/start バイパス封じと同じ設計）。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn spawn_agent_gateway<R: NostrAgentRunner>(
     gateways: &GatewayMap,
     admins: &AdminMap,
@@ -898,6 +977,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     agent_id: &str,
     secret_key: &str,
     config: NostrConfig,
+    timed_fire_router: Option<Arc<opencrab_actions::TimedFireRouter>>,
 ) -> anyhow::Result<()> {
     // 資格情報のガード（#191 段階2 PR3）。空 / 空白だけの nsec では nostaro が動かないので、
     // materialize（0600 のファイル書き出し）や `pubkey` 取得より **手前**で拒否する。
@@ -987,6 +1067,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
             self_pubkey_cell,
             admin,
             runtime_c,
+            timed_fire_router,
         )
         .await;
     });
@@ -1015,6 +1096,8 @@ pub struct NostrIdentityProvisioner<R: NostrAgentRunner> {
     runner: R,
     cli: NostaroCli,
     runtime: Arc<NostrSessionRuntime>,
+    /// #588 TimedFire: 採用時 bootstrap 起動でも時刻発火の受け口を登録する（本体と同じ登録簿）。
+    timed_fire_router: Option<Arc<opencrab_actions::TimedFireRouter>>,
 }
 
 impl<R: NostrAgentRunner> NostrIdentityProvisioner<R> {
@@ -1095,6 +1178,7 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
             agent_id,
             &nsec,
             config,
+            self.timed_fire_router.clone(),
         )
         .await?;
 

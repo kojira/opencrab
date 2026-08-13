@@ -18,6 +18,7 @@ pub mod subtask;
 pub mod subtask_notify;
 pub mod subtask_registries;
 pub mod task_ledger;
+pub mod timed_fire;
 pub mod tools;
 pub mod traits;
 pub mod transcript;
@@ -55,6 +56,7 @@ pub use subtask_notify::{
     SubtaskRunNotifier,
 };
 pub use subtask_registries::SubtaskRegistries;
+pub use timed_fire::{TimedFireRequest, TimedFireRouter, TimedFireSink};
 // tool_result の無害化は core 側（`opencrab_core::tool_result_log`）に一本化した
 // （#284）。LLM へ返す経路（`SkillEngine`）と DB 永続化経路（server / dispatch）で
 // **同一の上限と退避**を使う必要があり、core は actions に依存できないため。
