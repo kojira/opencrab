@@ -363,6 +363,8 @@ async fn run_one_fire(
         channel_session_id,
         instructions_prompt,
         instructions_source,
+        // #591: SPEAK の配送先はこの発火元の種別から直接決める（試す順番ではなく）。
+        fire_target: target.clone(),
     };
     // 唯一の入口。同一 HB セッションのロック下で 1 ターン走らせる（直列化）。
     runner.run_turn(&hb_target, TurnOrigin::Tick { tick }).await
