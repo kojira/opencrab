@@ -1630,7 +1630,7 @@ const MIGRATIONS: &[Migration] = &[
         // ## 効き（本番コピーでの実測 EXPLAIN QUERY PLAN）
         //   - list_recent_session_logs_of_type / list_recent_user_speech_logs（session_id +
         //     log_type）: `SEARCH … USING INDEX (session_id=? AND log_type=?)`。
-        //   - list_recent_session_logs / list_session_logs_by_session / list_session_logs_after_id
+        //   - list_recent_session_logs / list_session_logs_by_session
         //     （session_id のみ）: `SEARCH … USING COVERING INDEX (session_id=?)` + 小さな
         //     TEMP B-TREE（全表 SCAN は解消）。**1 本で全部に効く。**
         //

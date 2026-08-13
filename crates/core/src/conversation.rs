@@ -167,13 +167,16 @@ fn build_conversation_inner(
     };
 
     if topics.is_empty() {
-        // フォールバック: 要約がない場合は最新ログを予算内で切り詰め
-        return Ok(build_truncated_conversation(
+        // フォールバック: 要約がない → ヘッダ 1 行 + 予算駆動の直近ウィンドウ（#609 / #610）。
+        // 圧縮パスと同じ `build_recent_window` を使う（全ログを `fit_logs_to_budget` へ渡す）。
+        let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
+        let recent_text = build_recent_window(
             conn,
             session_id,
             agent_id,
-            context_budget_tokens,
-        ));
+            context_budget_tokens.saturating_sub(estimate_tokens(header)),
+        );
+        return Ok(format!("{header}{recent_text}"));
     }
 
     // [Past context summary] セクション構築（予算の 30% 以内 / 新しい方を残す。#406）
@@ -190,52 +193,17 @@ fn build_conversation_inner(
     };
     let overhead_tokens = estimate_tokens(&summary_section) + estimate_tokens(recent_header);
 
-    // 残りの予算を最近のログに割り当て。要約は 30% で頭打ちなので、直近会話には
-    // 常に 50% 以上（ヘッダぶんを除いて ~70%）が残る（#406）。
-    let remaining_budget = context_budget_tokens.saturating_sub(overhead_tokens);
-
-    // indexed_boundary: topic でカバーされている最後の log_id
-    let indexed_boundary = topics
-        .iter()
-        .filter_map(|t| t.end_log_id)
-        .max()
-        .unwrap_or(0);
-
-    // indexed_boundary 以降のログを取得
-    let mut recent_logs = match opencrab_db::queries::list_session_logs_after_id(
+    // 直近ウィンドウは**予算だけ**で組む（#609 / #610 レビュー①②）。要約は 30% で頭打ちなので、
+    // 直近会話には常に 50% 以上（ヘッダぶんを除いて ~70%）が残る（#406）。セッションの全ログを
+    // `build_recent_window` へ渡し、`fit_logs_to_budget` が末尾から予算いっぱいまで詰める。
+    // 落ちた分は `fit_logs_to_budget` の省略マーカーが告知する（`fit` に全件が渡るので、渡る前に
+    // 対象外になって黙って消える行が存在しない）。索引済み領域と内容が重複してもよい。
+    let recent_text = build_recent_window(
         conn,
         session_id,
-        indexed_boundary,
-    ) {
-        Ok(logs) => retain_conversation_logs(logs),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Failed to list session logs after id for session {session_id}: {e}"
-            ));
-        }
-    };
-
-    // ログが少なければ追加取得（最低 RECENT_MIN_LOGS 件は確保）
-    if recent_logs.len() < RECENT_MIN_LOGS {
-        let mut logs =
-            match opencrab_db::queries::list_recent_session_logs(conn, session_id, RECENT_MIN_LOGS)
-            {
-                Ok(l) => l,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Failed to list recent session logs for session {session_id}: {e}"
-                    ));
-                }
-            };
-        logs.reverse();
-        recent_logs = retain_conversation_logs(logs);
-    }
-
-    // #284: 直近のユーザー発言が要約境界より前に落ちていても必ず混ぜ戻す。
-    let recent_logs = merge_recent_user_speeches(conn, session_id, agent_id, recent_logs);
-
-    // 予算内に収まるようにログを後ろから詰める
-    let recent_text = fit_logs_to_budget(&recent_logs, agent_id, remaining_budget);
+        agent_id,
+        context_budget_tokens.saturating_sub(overhead_tokens),
+    );
 
     Ok(format!("{summary_section}{recent_header}{recent_text}"))
 }
@@ -439,29 +407,33 @@ fn build_full_conversation(conn: &rusqlite::Connection, session_id: &str) -> Str
     format_logs(&logs)
 }
 
-fn build_truncated_conversation(
+/// 直近会話ウィンドウを**予算だけ**で組む（#609 / #610 レビュー①②）。
+///
+/// セッションの全ログを取得し、`fit_logs_to_budget` が末尾から `budget_tokens`
+/// いっぱいまで詰める。窓の大きさは予算のみが決め、取得件数の固定上限は無い。
+/// 落ちた分はすべて `fit_logs_to_budget` の省略マーカーが告知する ——
+/// `fit` に全件が渡るので「渡る前に対象外になって黙って消える」行が存在しない。
+///
+/// 索引の進み具合（旧 `indexed_boundary`）にも取得上限（旧 `RECENT_LOG_FETCH_LIMIT=500`）にも
+/// 依存しない。全ログを渡すので #284 の「直近ユーザー発言の混ぜ戻し」（旧
+/// `merge_recent_user_speeches`）も不要になった——直近ユーザー発言は必ず入力に含まれ、
+/// `fit_logs_to_budget` の必須枠（`RECENT_MIN_USER_SPEECHES`）が拾う。
+///
+/// 圧縮パス（topic 要約あり）と topic 無しフォールバックの両方がこの 1 本を共有する。
+fn build_recent_window(
     conn: &rusqlite::Connection,
     session_id: &str,
     agent_id: &str,
     budget_tokens: usize,
 ) -> String {
-    let mut logs = match opencrab_db::queries::list_recent_session_logs(conn, session_id, 500) {
-        Ok(l) => retain_conversation_logs(l),
+    let logs = match opencrab_db::queries::list_session_logs_by_session(conn, session_id) {
+        Ok(l) => retain_conversation_logs(l), // ASC のまま。reverse 不要
         Err(e) => {
-            tracing::warn!(session_id = %session_id, "Failed to list recent session logs for truncation: {e}");
-            vec![]
+            tracing::warn!(session_id = %session_id, "failed to list session logs for recent window: {e}");
+            return String::new();
         }
     };
-    logs.reverse();
-    // #284: 500 件の窓から溢れていてもユーザー発言だけは必ず含める。
-    let logs = merge_recent_user_speeches(conn, session_id, agent_id, logs);
-
-    let header = "[Note: Earlier messages were omitted due to context length. Showing most recent messages.]\n\n";
-    let header_tokens = estimate_tokens(header);
-    let remaining = budget_tokens.saturating_sub(header_tokens);
-    let recent_text = fit_logs_to_budget(&logs, agent_id, remaining);
-
-    format!("{header}{recent_text}")
+    fit_logs_to_budget(&logs, agent_id, budget_tokens)
 }
 
 /// 連続区間より前に落とした古いメッセージ群に添える印（#504）。
@@ -524,53 +496,6 @@ fn omission_span_label(omitted: &[opencrab_db::queries::SessionLogRow]) -> Optio
 /// **述語は引き続き `speaker_id` と `agent_id` 引数で比べる**（行の `agent_id` 列は無関係）。
 fn is_user_speech(log: &opencrab_db::queries::SessionLogRow, agent_id: &str) -> bool {
     log.log_type == "speech" && log.speaker_id.as_deref().is_some_and(|s| s != agent_id)
-}
-
-/// 直近のユーザー発言をログ列へ混ぜ戻す（#284）。
-///
-/// `logs` は「要約境界より後ろ」や「直近 N 件」で切られているため、ツール往復が
-/// 長引くとユーザーの生発言が 1 件も入らないことがある。セッション全体から直近
-/// `RECENT_MIN_USER_SPEECHES` 件のユーザー発言を取り、id で重複排除して時系列へ
-/// マージする。取得に失敗しても会話構築は続行する（best-effort）。
-fn merge_recent_user_speeches(
-    conn: &rusqlite::Connection,
-    session_id: &str,
-    agent_id: &str,
-    mut logs: Vec<opencrab_db::queries::SessionLogRow>,
-) -> Vec<opencrab_db::queries::SessionLogRow> {
-    let speeches = match opencrab_db::queries::list_recent_user_speech_logs(
-        conn,
-        session_id,
-        agent_id,
-        RECENT_MIN_USER_SPEECHES,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(session_id = %session_id, "failed to load recent user speeches: {e}");
-            return logs;
-        }
-    };
-    let present: std::collections::HashSet<i64> = logs.iter().filter_map(|l| l.id).collect();
-    let mut added = 0usize;
-    for s in speeches {
-        match s.id {
-            Some(id) if !present.contains(&id) => {
-                logs.push(s);
-                added += 1;
-            }
-            _ => {}
-        }
-    }
-    if added > 0 {
-        tracing::info!(
-            session_id = %session_id,
-            added,
-            "re-injected recent user speeches that fell outside the recent-log window"
-        );
-        // id 未設定の行（テスト等）は末尾に寄せる。
-        logs.sort_by_key(|l| l.id.unwrap_or(i64::MAX));
-    }
-    logs
 }
 
 /// ログを末尾（最新）から逆順に辿り、予算内に収まる分だけ返す。
@@ -1264,7 +1189,7 @@ mod past_summary_budget_tests {
     ///
     /// 変異を入れると `dropped == 0` のまま告知構築へ落ち、`past_summary_omitted_notice(0)`
     /// （"0 older topic summaries were omitted ..."）が混入してここで落ちる。
-    /// `topics.is_empty()` の fallback 経路（`build_truncated_conversation`）とは別物で、
+    /// `topics.is_empty()` の fallback 経路（`build_recent_window`）とは別物で、
     /// こちらは「topic はあるが全部入る」ケース。
     #[test]
     fn past_summary_emits_no_notice_when_all_topics_fit() {
@@ -1346,6 +1271,299 @@ mod past_summary_budget_tests {
     }
 }
 
+/// #609: 直近ウィンドウは索引の進み具合ではなく**予算**で決まる。
+///
+/// 索引ビルダーが現ターンとほぼ同時刻まで進むと `indexed_boundary`（topic が覆う最後の
+/// log_id）がライブ末尾に張り付き、旧実装では `id > boundary` がほぼ空になって下限
+/// フォールバック（`RECENT_MIN_LOGS`）へ縮退し、予算が大量に余っているのに直近 raw が
+/// 十数件しか載らなかった。ここでは**索引が全ログを覆った（末尾に張り付いた）状態**を
+/// 作り、それでも直近ウィンドウが予算ぶんの raw を載せることを固定する。
+#[cfg(test)]
+mod budget_driven_recent_window_tests {
+    use super::{
+        build_conversation_string, build_recent_window, retain_conversation_logs, RECENT_MIN_LOGS,
+    };
+
+    const AGENT: &str = "a1";
+    const SESSION: &str = "s1";
+
+    /// 任意の log_type / speaker で 1 行積む（retain が落とす行の混入や #284 の作り込み用）。
+    fn insert_raw(
+        conn: &rusqlite::Connection,
+        log_type: &str,
+        speaker: Option<&str>,
+        content: &str,
+    ) {
+        opencrab_db::queries::insert_session_log(
+            conn,
+            &opencrab_db::queries::SessionLogRow {
+                id: None,
+                agent_id: AGENT.to_string(),
+                session_id: SESSION.to_string(),
+                log_type: log_type.to_string(),
+                content: content.to_string(),
+                speaker_id: speaker.map(|s| s.to_string()),
+                turn_number: None,
+                metadata_json: None,
+                created_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// `n` 件の（エージェント自身の）発話を積む。id は 1..=n（autoincrement）。
+    fn seed_logs(conn: &rusqlite::Connection, n: usize) {
+        for i in 0..n {
+            opencrab_db::queries::insert_session_log(
+                conn,
+                &opencrab_db::queries::SessionLogRow {
+                    id: None,
+                    agent_id: AGENT.to_string(),
+                    session_id: SESSION.to_string(),
+                    log_type: "speech".to_string(),
+                    content: format!(
+                        "recent log line {i} about the release plan and the follow-up work"
+                    ),
+                    speaker_id: Some(AGENT.to_string()),
+                    turn_number: None,
+                    metadata_json: None,
+                    created_at: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    /// 索引が全ログ（1..=end）を覆う topic を 1 件置く。`end_log_id` を最終 log_id に
+    /// することで `indexed_boundary` をライブ末尾へ張り付かせる（＝旧実装の縮退条件）。
+    fn seed_topic_covering_all(conn: &rusqlite::Connection, end_log_id: i64) {
+        opencrab_db::queries::insert_index_node(
+            conn,
+            &opencrab_db::queries::IndexNodeRow {
+                id: "t-all".to_string(),
+                agent_id: AGENT.to_string(),
+                parent_id: None,
+                node_type: "topic".to_string(),
+                source_type: "session_log".to_string(),
+                title: "作業ログ".to_string(),
+                summary: "リリース準備の一連の作業をまとめた要約。".to_string(),
+                start_log_id: Some(1),
+                end_log_id: Some(end_log_id),
+                source_session_id: Some(SESSION.to_string()),
+                date_from: None,
+                date_to: None,
+                depth: 0,
+                child_count: 0,
+                token_count: 0,
+                created_at: "2026-08-14T00:00:00Z".to_string(),
+                updated_at: "2026-08-14T00:00:00Z".to_string(),
+                short_id: Some("t-all".to_string()),
+                keywords_json: "[]".to_string(),
+                summary_refreshed_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// 索引が末尾に張り付いていても、直近ウィンドウは予算ぶんの raw を載せる。
+    ///
+    /// 旧実装なら `id > indexed_boundary` が空 → `RECENT_MIN_LOGS`(=10) 件へ縮退し、
+    /// ここが十数件で頭打ちになる。予算駆動なら残り予算いっぱいまで詰まる。
+    #[test]
+    fn recent_window_fills_budget_even_when_index_reaches_live_tail() {
+        let conn = opencrab_db::init_memory().unwrap();
+        const N: usize = 200;
+        seed_logs(&conn, N);
+        // 索引を全ログの末尾へ張り付かせる（id は 1..=N）。
+        seed_topic_covering_all(&conn, N as i64);
+
+        // 全文（~200 件）は予算を超えてコンパクションへ入るが、残り予算は十数件どころか
+        // 数十件を載せられるだけ余っている。
+        const BUDGET: usize = 2_000;
+        let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
+
+        // 前提: topic 要約ありのコンパクション経路に入っている。
+        assert!(
+            out.contains("[Past context summary"),
+            "コンパクション経路に入っていない（テストの前提が崩れている）: {out}"
+        );
+        // 直近ウィンドウが存在する。
+        let recent = &out[out
+            .find("[Recent conversation]")
+            .unwrap_or_else(|| panic!("直近会話セクションが無い: {out}"))..];
+
+        // 索引が末尾に張り付いていても、下限（10 件）へ縮退せず予算ぶんが載る。
+        let raw_count = recent.matches("recent log line").count();
+        assert!(
+            raw_count >= 40,
+            "直近 raw が予算ぶん載っていない（索引の進み具合で縮退している疑い）: \
+             {raw_count} 件 (RECENT_MIN_LOGS={RECENT_MIN_LOGS}): {recent}"
+        );
+        // 「直近 10 件」より深いログまで届いている（旧実装では末尾 10 件=190..199 しか
+        // 載らず、これは落ちる）。
+        assert!(
+            recent.contains("recent log line 160"),
+            "予算があるのに深いログまで届いていない（末尾 10 件で頭打ち）: {recent}"
+        );
+    }
+
+    /// 取得件数の固定上限が無い（#610 レビュー①）。旧 `RECENT_LOG_FETCH_LIMIT=500` の頭打ちが消えた。
+    ///
+    /// `build_recent_window` を直接叩き、500 を超える件数を積んで巨大予算を渡す。予算で 1 件も
+    /// 落ちないので、**一番古い行（末尾から N 件目）まで**出力に載る。旧実装は末尾 500 件しか
+    /// 取得しなかったので index 0（＝末尾から 700 件目）は原理的に載らなかった。
+    #[test]
+    fn recent_window_has_no_fixed_fetch_cap() {
+        let conn = opencrab_db::init_memory().unwrap();
+        const N: usize = 700; // > 旧 RECENT_LOG_FETCH_LIMIT (500)
+        seed_logs(&conn, N);
+        // 予算で 1 件も落とさない（全件が fit に載る）。
+        let out = build_recent_window(&conn, SESSION, AGENT, usize::MAX);
+        assert!(
+            out.contains("recent log line 0"),
+            "末尾 500 件より深い最古の行が載っていない（取得上限が残っている疑い）"
+        );
+        assert!(
+            out.contains(&format!("recent log line {}", N - 1)),
+            "最新行が載っていない"
+        );
+    }
+
+    /// **pre-fit 欠落ゼロ**（#610 レビュー①の核心）。`fit` に渡る入力が
+    /// `retain_conversation_logs(全件)` と一致する ——「fit に渡る前に対象外になって黙って消える行」
+    /// がゼロであること。#609 が本当に守りたいのはこれで、省略マーカーの**文言には依存しない**。
+    ///
+    /// evaluation（#291）と heartbeat scaffolding（#501）は retain が落とすが、それ以外の全ログは
+    /// fit に渡る。巨大予算で fit が 1 件も落とさない状態にし、**retain 後の全件が出力に現れ、
+    /// retain が落とす行は現れない**ことを固定する。
+    #[test]
+    fn recent_window_feeds_every_retained_log_to_fit() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 会話に載る行（speech）を積む。
+        seed_logs(&conn, 30);
+        // retain が落とす行を途中に混ぜる: evaluation（#291）と heartbeat scaffolding（#501）。
+        insert_raw(
+            &conn,
+            "evaluation",
+            Some("evaluator"),
+            "採点結果は却下マーカー",
+        );
+        insert_raw(
+            &conn,
+            "system",
+            Some(opencrab_db::queries::HEARTBEAT_SPEAKER_ID),
+            "巡回指示マーカー",
+        );
+        // 落とす行の後ろにも会話が続く形にする。
+        for i in 30..35 {
+            insert_raw(
+                &conn,
+                "speech",
+                Some(AGENT),
+                &format!("recent log line {i} tail"),
+            );
+        }
+
+        // 期待値: retain 後の全件。fit に渡る入力がこれと一致することを固定する。
+        let all = opencrab_db::queries::list_session_logs_by_session(&conn, SESSION).unwrap();
+        let retained = retain_conversation_logs(all);
+        assert_eq!(retained.len(), 35, "retain の残存件数が想定と違う");
+
+        // 巨大予算 → fit は 1 件も落とさない。
+        let out = build_recent_window(&conn, SESSION, AGENT, usize::MAX);
+
+        // retain が残す行はすべて出力に現れる（pre-fit で 1 件も落ちない）。
+        for log in &retained {
+            assert!(
+                out.contains(&log.content),
+                "retain 後の行が fit に渡っていない（pre-fit 欠落）: {}",
+                log.content
+            );
+        }
+        // retain が落とす行は現れない。
+        assert!(
+            !out.contains("採点結果は却下マーカー"),
+            "evaluation が混ざった: {out}"
+        );
+        assert!(
+            !out.contains("巡回指示マーカー"),
+            "heartbeat scaffolding が混ざった: {out}"
+        );
+    }
+
+    /// #284 の維持（`merge_recent_user_speeches` 削除後）。大量のツール往復で古いユーザー発言が
+    /// 末尾から押し出されても、**一番新しいユーザー発言**は小予算でも必ず載る。
+    ///
+    /// 全ログを fit へ渡すので、混ぜ戻し（旧 merge）が無くても直近ユーザー発言は入力に含まれ、
+    /// `fit_logs_to_budget` の必須枠（`RECENT_MIN_USER_SPEECHES` / 飛び地 A′）が拾う。
+    #[test]
+    fn newest_user_speech_survives_tool_flood_after_merge_removal() {
+        let conn = opencrab_db::init_memory().unwrap();
+        // 一番古い位置に置くユーザー発言（これが「今の指示」で、末尾からは押し出される）。
+        insert_raw(
+            &conn,
+            "speech",
+            Some("kojira"),
+            "この指示は消えてはいけない",
+        );
+        // 末尾を埋める巨大なツール往復（ユーザー発言を連続区間の外へ押し出す）。
+        for i in 0..40 {
+            insert_raw(
+                &conn,
+                "tool_result",
+                Some(AGENT),
+                &format!("結果 {i}: {}", "x".repeat(400)),
+            );
+        }
+        // topic を 1 件置いてコンパクション経路（切り詰めではない方）へ入れる。
+        seed_topic_covering_all(&conn, 100);
+
+        let out = build_conversation_string(&conn, SESSION, AGENT, 400).unwrap();
+        assert!(
+            out.contains("[Past context summary"),
+            "テストの前提: コンパクション経路に入ること: {out}"
+        );
+        assert!(
+            out.contains("この指示は消えてはいけない"),
+            "一番新しいユーザー発言が押し出された（#284 が壊れた）: {out}"
+        );
+    }
+
+    /// topic 無しフォールバックも圧縮パスと同じ `build_recent_window` を通り、予算駆動になる（#610 レビュー②）。
+    ///
+    /// topic を 1 件も置かず切り詰めフォールバックへ落とす。予算はコンパクションを起こすが、
+    /// 下限（`RECENT_MIN_LOGS`=10）ではなく予算ぶん（数十件）が載る。取得上限が無いこと自体は
+    /// 共有関数を直接叩く [`recent_window_has_no_fixed_fetch_cap`] で固定済み。
+    #[test]
+    fn topic_less_fallback_routes_through_budget_driven_window() {
+        let conn = opencrab_db::init_memory().unwrap();
+        const N: usize = 300;
+        seed_logs(&conn, N); // topic は置かない → 切り詰めフォールバック
+        const BUDGET: usize = 2_000;
+        let out = build_conversation_string(&conn, SESSION, AGENT, BUDGET).unwrap();
+        // 前提: topic 無しの切り詰めフォールバック（要約は出ない / ヘッダは出る）。
+        assert!(
+            !out.contains("[Past context summary"),
+            "切り詰め経路になっていない: {out}"
+        );
+        assert!(
+            out.contains("[Note: Earlier messages were omitted"),
+            "コンパクションが起きていない（マーカー無し）: {out}"
+        );
+        // 予算駆動: 下限 10 件ではなく予算ぶん（>=40 件）が載る。
+        let raw_count = out.matches("recent log line").count();
+        assert!(
+            raw_count >= 40,
+            "予算があるのに下限件数へ縮退している: {raw_count} 件 (RECENT_MIN_LOGS={RECENT_MIN_LOGS})"
+        );
+        // 一番新しい行は必ず載る。
+        assert!(
+            out.contains(&format!("recent log line {}", N - 1)),
+            "最新行が載っていない: {out}"
+        );
+    }
+}
+
 /// #500: 組み上がった会話が予算で頭打ちになる（＝コンパクションが機能している）ことの
 /// **回復ガード**。
 ///
@@ -1358,7 +1576,7 @@ mod past_summary_budget_tests {
 /// topic 圧縮経路（[`past_summary_budget_tests::recent_conversation_keeps_its_share_when_topics_are_huge`]）
 /// とハートビート経路（[`past_summary_budget_tests::heartbeat_total_stays_within_budget_and_keeps_channel_and_format_instruction`]）
 /// の「出力 ≤ 予算」は #406 で既に固定済み。ここは**未カバーだった topic 無しの切り詰め
-/// フォールバック**（[`super::build_truncated_conversation`]）を埋める。
+/// フォールバック**（[`super::build_recent_window`]）を埋める。
 ///
 /// なお `fit_logs_to_budget` は末尾から予算いっぱいまで詰めるので出力はほぼ予算ちょうどに
 /// なり、**予算に計上されない省略マーカー / セクション区切りのぶん、通常サイズの行でも
@@ -1390,7 +1608,7 @@ mod budget_fit_recovery_guard_tests {
         .unwrap();
     }
 
-    /// topic 要約が 1 件も無い（＝`build_truncated_conversation` フォールバック）状態で
+    /// topic 要約が 1 件も無い（＝`build_recent_window` フォールバック）状態で
     /// 履歴が予算を大きく超えても、組み上がった会話は予算内に収まる。
     ///
     /// 既存の fits テストは全て topic ありの summary 経路。topic 生成が追いつく前の
