@@ -13,6 +13,7 @@ use opencrab_gateway::DiscordGateway;
 
 use crate::AgentRunner;
 use opencrab_actions::subtask::SubtaskRegistry;
+use opencrab_actions::TimedFireRouter;
 use opencrab_core::a2ui::PendingInteractionRegistry;
 
 struct AgentGatewayEntry {
@@ -51,6 +52,10 @@ pub struct DiscordGatewayManager<T: AgentRunner> {
     // ガードを await 跨ぎで保持しないこと（各メソッドでスコープを閉じる）。
     gateways: RwLock<HashMap<String, AgentGatewayEntry>>,
     state: T,
+    // #588 TimedFire: per-agent ゲートウェイのループを、この体の Discord 受け口として
+    // `timed_fire_router` へ登録するための共有 Arc（scheduler が発火時に per-agent 優先で引く）。
+    // 未配線（None）なら登録をしないだけで、共有ゲートウェイの受け口へフォールバックする。
+    timed_fire_router: Option<Arc<TimedFireRouter>>,
 }
 
 impl<T: AgentRunner> DiscordGatewayManager<T> {
@@ -58,7 +63,14 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         Self {
             gateways: RwLock::new(HashMap::new()),
             state,
+            timed_fire_router: None,
         }
+    }
+
+    /// #588 TimedFire: 時刻発火の受け口レジストリを配線する（main.rs が `AppState` の共有 Arc を渡す）。
+    pub fn with_timed_fire_router(mut self, router: Arc<TimedFireRouter>) -> Self {
+        self.timed_fire_router = Some(router);
+        self
     }
 
     /// Start a per-agent Discord gateway with the given token.
@@ -127,6 +139,19 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         // Create event channel for A2UI and other async events
         let (event_tx, event_rx) = crate::message_loop::create_event_channel();
 
+        // #588 TimedFire: このループをこの体の per-agent Discord 受け口として登録する。
+        // scheduler は発火時に per-agent 優先で引く（#400 と同型）ので、以降この体の時刻発火は
+        // 自分のボットで出るこのループへ届く。停止時（`stop_agent_gateway`）に解除する。
+        if let Some(router) = &self.timed_fire_router {
+            router.register_per_agent(
+                opencrab_actions::gateway_kinds::DISCORD,
+                agent_id,
+                Arc::new(crate::message_loop::DiscordTimedFireSink {
+                    event_tx: event_tx.clone(),
+                }),
+            );
+        }
+
         // このゲートウェイの保留対話は上で作り直した登録簿（＝空）にしか無いので、
         // 前回稼働分の `pending` 行は再開できない。期限切れとして明示的に閉じる。
         // ただし**このエージェント分だけ**にする: per-agent ゲートウェイは実行中にも
@@ -188,6 +213,11 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         if let Some(entry) = entry {
             entry.gateway.shutdown().await;
             entry.handle.abort();
+            // #588 TimedFire: 死んだループへ発火が消えないよう受け口を解除する（以降この体の
+            // 時刻発火は共有ゲートウェイへ落ちる・#400 の動的フォールバック）。
+            if let Some(router) = &self.timed_fire_router {
+                router.unregister_per_agent(opencrab_actions::gateway_kinds::DISCORD, agent_id);
+            }
             info!(agent_id = %agent_id, "Per-agent Discord gateway stopped");
         }
     }

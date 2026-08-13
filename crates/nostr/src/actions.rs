@@ -8,7 +8,6 @@
 //! passthrough も塞いで二経路とも封じている（[`crate::cli::NostaroCli::PASSTHROUGH_DENIED_SUBCOMMANDS`]）。
 //! private な話は Nostr でせず、Discord の DM か指定チャンネルを使うこと。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -20,12 +19,11 @@ use crate::identity::NostrIdentityAdmin;
 
 /// Nostr 送信アクション群。実際の送信は nostaro CLI（per-agent 鍵）へ委譲する。
 ///
-/// `sent` は「このターンで明示的に送信（post/reply/dm/zap）した」フラグ。ループ側が
-/// これを見て暗黙返信の二重送信を防ぐ。`admin` は identity 切替（本鍵採用）の実体で、
-/// watch ループ稼働時のみ Some（owner/trusted 限定ツール `nostr_switch_identity` から使う）。
+/// 配送はすべてエージェントがこれらのツールを呼んで行う（機構は暗黙返信しない・#588）。
+/// `admin` は identity 切替（本鍵採用）の実体で、watch ループ稼働時のみ Some
+/// （owner/trusted 限定ツール `nostr_switch_identity` から使う）。
 pub struct NostrGatewayActions {
     cli: NostaroCli,
-    sent: Arc<AtomicBool>,
     admin: Option<Arc<dyn NostrIdentityAdmin>>,
     /// 素テキスト配送口（`text_delivery()`）が焼く agent_id（#246 段階3 PR-B）。
     ///
@@ -40,7 +38,6 @@ impl NostrGatewayActions {
     pub fn new(cli: NostaroCli) -> Self {
         Self {
             cli,
-            sent: Arc::new(AtomicBool::new(false)),
             admin: None,
             agent_id: None,
         }
@@ -60,15 +57,6 @@ impl NostrGatewayActions {
     pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
         self.agent_id = Some(agent_id.into());
         self
-    }
-
-    /// 「送信済み」フラグを共有取得する（ループが暗黙返信の抑制に使う）。
-    pub fn sent_flag(&self) -> Arc<AtomicBool> {
-        self.sent.clone()
-    }
-
-    fn mark_sent(&self) {
-        self.sent.store(true, Ordering::SeqCst);
     }
 }
 
@@ -221,10 +209,7 @@ impl GatewayActions for NostrGatewayActions {
                     return err("text パラメータが必要です");
                 };
                 match self.cli.post(agent_id, text, arg_str(args, "from")).await {
-                    Ok(out) => {
-                        self.mark_sent();
-                        ok(json!({"result": out}))
-                    }
+                    Ok(out) => ok(json!({"result": out})),
                     Err(e) => err(format!("nostr_post 失敗: {e}")),
                 }
             }
@@ -238,10 +223,7 @@ impl GatewayActions for NostrGatewayActions {
                     .reply(agent_id, target, text, arg_str(args, "from"))
                     .await
                 {
-                    Ok(out) => {
-                        self.mark_sent();
-                        ok(json!({"result": out}))
-                    }
+                    Ok(out) => ok(json!({"result": out})),
                     Err(e) => err(format!("nostr_reply 失敗: {e}")),
                 }
             }
@@ -265,10 +247,7 @@ impl GatewayActions for NostrGatewayActions {
                     .zap(agent_id, recipient, amount, message, arg_str(args, "from"))
                     .await
                 {
-                    Ok(out) => {
-                        self.mark_sent();
-                        ok(json!({"result": out}))
-                    }
+                    Ok(out) => ok(json!({"result": out})),
                     Err(e) => err(format!("nostr_zap 失敗: {e}")),
                 }
             }
@@ -287,7 +266,7 @@ impl GatewayActions for NostrGatewayActions {
                 match self.cli.vanity(prefix).await {
                     Ok(k) => {
                         // 秘密鍵(nsec)は**LLM に返さない**。サーバ内に 0600 で保存し、
-                        // npub/pubkey のみ返す（mark_sent は呼ばない＝送信ではない）。
+                        // npub/pubkey のみ返す（鍵生成は送信ではないので配送系ではない）。
                         match NostaroCli::save_generated_key(agent_id, &k) {
                             Ok(_) => ok(json!({
                                 "npub": k.npub,
@@ -513,11 +492,11 @@ mod tests {
 
     /// #168: Nostr 配送系は **非ブロック dispatch の対象外**（inline 実行）であること。
     ///
-    /// background 化すると、親ターンが `sent_flag` を観測する前に run が終わり、
-    /// ループの暗黙返信と後追いの明示送信で**二重投稿**になる。併せて、除外集合の名前が
-    /// 実在のアクションを指していること（ドリフト検出）と、`nostr_generate_key` が
-    /// dispatch 対象に残っていること（長時間処理の非ブロック化＝S3a の主目的、
-    /// E2E `e2e_cancel_stops_subtask` の前提）も守る。
+    /// 配送ツールは**戻り値（送信結果）を同ターンで使う**ので inline で走らせる。background 化
+    /// すると run が返る時点でまだ送信されておらず、エージェントは同ターンで送信可否を確認できない。
+    /// 併せて、除外集合の名前が実在のアクションを指していること（ドリフト検出）と、
+    /// `nostr_generate_key` が dispatch 対象に残っていること（長時間処理の非ブロック化＝S3a の
+    /// 主目的、E2E `e2e_cancel_stops_subtask` の前提）も守る。
     #[test]
     fn test_nostr_delivery_actions_are_non_dispatch() {
         let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
@@ -534,11 +513,11 @@ mod tests {
             );
             assert!(
                 non_dispatch.contains(*name),
-                "{name} は配送系なので dispatch 対象外でなければならない（二重投稿防止）"
+                "{name} は配送系なので dispatch 対象外でなければならない（戻り値を同ターンで使う）"
             );
         }
 
-        // 送信系（sent フラグを立てるもの）が漏れていないこと。
+        // 送信系（配送ツール）が漏れていないこと。
         // #514: nostr_dm は撤去済みなのでここには含めない。
         for name in ["nostr_post", "nostr_reply", "nostr_zap"] {
             assert!(
@@ -557,7 +536,7 @@ mod tests {
     ///
     /// `test_nostr_delivery_actions_are_non_dispatch` は「定数 → 実装」の片方向なので、
     /// **新しい配送系を実装したが定数へ入れ忘れた**ケースを検知できない（レビューで
-    /// `mark_sent()` を呼ぶ新アクションを足しても全テスト緑だった）。
+    /// 新しい配送ツールを足しても全テスト緑だった）。
     ///
     /// ここは実装（`definitions()`）を起点に走査し、全名が
     /// 「[`opencrab_actions::NOSTR_DELIVERY_ACTIONS`]（= 除外集合）」か
@@ -583,8 +562,8 @@ mod tests {
                 inline ^ dispatchable,
                 "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
                  新しい Nostr アクションを追加したら NOSTR_DELIVERY_ACTIONS か \
-                 NOSTR_DISPATCHABLE_ACTIONS のどちらかへ入れること（配送系＝`mark_sent()` を\
-                 呼ぶもの・戻り値を同ターンで使うもの・identity を書き換えるものは前者）"
+                 NOSTR_DISPATCHABLE_ACTIONS のどちらかへ入れること（配送系＝戻り値を同ターンで\
+                 使うもの・identity を書き換えるものは前者）"
             );
         }
 

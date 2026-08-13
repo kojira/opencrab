@@ -78,6 +78,7 @@ fn create_real_llm_app() -> (Router, opencrab_db::Db) {
         heartbeat_limits: Default::default(),
         scheduler_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         heartbeat_config_rx: opencrab_server::disconnected_heartbeat_config_rx(Default::default()),
+        timed_fire_router: std::sync::Arc::new(opencrab_actions::TimedFireRouter::new()),
         progress_debounce: std::sync::Arc::new(
             opencrab_server::subtask_registries::ProgressDebounce::new(),
         ),
