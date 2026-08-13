@@ -58,7 +58,9 @@ use tokio::sync::watch;
 
 use crate::heartbeat_delivery::HeartbeatDiscordHttp;
 use opencrab_actions::transcript::{AgentReplyContext, OutboundReplyRecord, TranscriptSource};
-use opencrab_actions::{CallerIdentity, RunRequest};
+use opencrab_actions::{
+    CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskSettled,
+};
 use opencrab_gateway::GatewayActions;
 use opencrab_server::AppState;
 
@@ -364,15 +366,127 @@ fn discord_response_text_cb(
 
 /// 発火の記録（`heartbeat_log`）。**これと「時間のトリガー＋渡すプロンプト」だけがハートビート
 /// 固有**（single-entry の裁定）。`decision` は廃止語彙のため固定値 `fired`（列定義に経緯を明記）。
-fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, channel_id: &str, source: &str) {
+fn record_heartbeat_fire(
+    db: &opencrab_db::Db,
+    agent_id: &str,
+    channel_id: &str,
+    source: &str,
+    continuation: Option<&SubtaskContinuation>,
+) {
     let Ok(conn) = db.lock() else {
         return;
     };
-    let result = serde_json::json!({ "channel_id": channel_id, "source": source }).to_string();
-    if let Err(e) =
-        opencrab_db::queries::insert_heartbeat_log(&conn, agent_id, "fired", Some(&result))
-    {
+    let mut result = serde_json::json!({ "channel_id": channel_id, "source": source });
+    // 継続ターンだけ発火元を添える（どの発火が subtask 決着由来かを後から切り分けられるように）。
+    if let (Some(c), Some(obj)) = (continuation, result.as_object_mut()) {
+        obj.insert("origin".to_string(), serde_json::json!("subtask_resume"));
+        obj.insert("subtask_id".to_string(), serde_json::json!(c.subtask_id));
+        obj.insert("exit_reason".to_string(), serde_json::json!(c.exit_reason));
+    }
+    if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
+        &conn,
+        agent_id,
+        "fired",
+        Some(&result.to_string()),
+    ) {
         tracing::error!(agent_id, "scheduler: heartbeat_log の記録に失敗: {e}");
+    }
+}
+
+/// ハートビートが dispatch したサブタスクの決着（#440）。継続ターンの前置に使う。
+#[derive(Clone, Debug)]
+struct SubtaskContinuation {
+    subtask_id: String,
+    exit_reason: String,
+}
+
+/// `exit_reason` を人へ見せる述部へ写す（#443）。`SettleKind::Completed` は completed /
+/// stopped_by_limit / error / timeout の**どれでも**発火するので、一律「完了」と言うと
+/// タイムアウトした subtask にも「完了」と伝わり同じ prompt 内のマーカーと食い違う。未知の値は
+/// 断定しない（正確な値は同 prompt の `[subtask_completed: … exit_reason=…]` が持つ）。
+fn settle_sentence(exit_reason: &str) -> &'static str {
+    match exit_reason {
+        "completed" => "完了しました",
+        "stopped_by_limit" => "反復上限に達して途中で打ち切られました",
+        "error" => "エラーで失敗しました",
+        "timeout" => "時間切れで打ち切られました",
+        _ => "終了しました",
+    }
+}
+
+/// 継続ターンの system プロンプト前置（#440/#443）。サブタスクの完了本文は `settle_completed` が
+/// 親セッションへ永続化済みで会話再構成で載るため、ここでは本文を載せずマーカーだけ足す。
+fn continuation_prompt_suffix(c: &SubtaskContinuation) -> String {
+    let outcome = settle_sentence(&c.exit_reason);
+    format!(
+        "[ハートビート] 依頼していたバックグラウンド処理が{outcome}。詳細は直前の会話ログの subtask_completed に入っています。\n\
+         状況を見て、いま発話するかどうかは自分で決めてください。\n\
+         [subtask_completed: subtask_id={}, exit_reason={}]",
+        c.subtask_id, c.exit_reason
+    )
+}
+
+/// 決着イベントから継続の有無を決める（純粋関数・旧 `resume_origin`）。
+///
+/// 継続しない（`None`）のは 2 つ: 決着以外（進捗通知は走行中の run へ二重応答してしまう）／
+/// 親セッションがこの sink を配線したターンのものでない。sink は [`RunRequest::with_dispatch`] で
+/// **その run が dispatch した subtask にのみ**配線されるので、主判定は `ev.session_id == 発火セッション`
+/// で足りる（`heartbeat-` 接頭辞には依存しない・#573 Stage A。統合後は実会話セッションで走る）。
+fn resume_continuation(own_session_id: &str, ev: &SubtaskSettled) -> Option<SubtaskContinuation> {
+    if ev.kind != SettleKind::Completed {
+        return None;
+    }
+    if ev.session_id != own_session_id {
+        return None;
+    }
+    Some(SubtaskContinuation {
+        subtask_id: ev.subtask_id.clone(),
+        exit_reason: ev.exit_reason.clone(),
+    })
+}
+
+/// ハートビートが dispatch したサブタスクの決着を受け、**継続ターン**を起動する sink（#440）。
+///
+/// `run_one_heartbeat` が `with_dispatch` で配線する。決着が来たら（自分の発火セッションの完了なら）
+/// `tokio::spawn` して、共有ロックの下で同じ発火先の継続ターンを 1 回走らせる。**spawn する**のは、
+/// この sink が `settle_completed` の途中で同期的に呼ばれるため、ここで待つとサブタスクの決着処理
+/// そのものが止まるから（Discord / Nostr / web の sink が resume を spawn するのと同じ）。ロックの
+/// 取得は spawn した中で行う（元の run のロックは dispatch が非ブロックのため既に解放されている）。
+struct HeartbeatContinuationSink {
+    state: AppState,
+    discord_http: Arc<HeartbeatDiscordHttp>,
+    agent_id: String,
+    target: FireTarget,
+    session_id: String,
+}
+
+impl SubtaskCompletionSink for HeartbeatContinuationSink {
+    fn on_subtask_settled(&self, ev: SubtaskSettled) {
+        let Some(cont) = resume_continuation(&self.session_id, &ev) else {
+            return;
+        };
+        tracing::info!(
+            agent_id = %self.agent_id,
+            session_id = %self.session_id,
+            subtask_id = %ev.subtask_id,
+            exit_reason = %ev.exit_reason,
+            "heartbeat: subtask settled; starting continuation turn"
+        );
+        let state = self.state.clone();
+        let discord_http = self.discord_http.clone();
+        let agent_id = self.agent_id.clone();
+        let target = self.target.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            // 継続ターンも通常ターン・時間発火と同じ共有ロックで直列化する（#588 Stage 2）。
+            state
+                .session_locks
+                .run_serialized(
+                    &session_id,
+                    run_one_heartbeat(&state, &discord_http, &agent_id, &target, Some(cont)),
+                )
+                .await;
+        });
     }
 }
 
@@ -447,12 +561,17 @@ fn build_scheduled_context(
 /// 組み立ては [`build_conversation_string`]、配送は Discord なら engine 標準の `on_response_text`
 /// （[`discord_response_text_cb`]）、記録は [`opencrab_server::transcript::record_outbound_reply`]、
 /// 直列化は呼び出し側が共有 [`SessionLocks`] で巻く（#588 Stage 2）。専用のターン実装・専用の配送
-/// ルーティング・専用の語彙・専用の継続ターン機構（旧 `heartbeat_turn.rs`）は撤去した。
+/// ルーティング・専用の語彙（旧 `heartbeat_turn.rs`）は撤去したが、**継続ターン（#440）は残す**。
 ///
 /// caller は **常に `Owner`**（本人が自分の意思で動くターン。`resolve_caller` には載せない）。
 /// プロンプトは **system プロンプトへ 1 度だけ**載せ、会話ログには「発言」として残さない（#501。
-/// 毎 tick 積まれると挙動を歪めるため）。継続ターンは持たない（`with_dispatch` を付けない）——
-/// 長時間作業はエージェントが `spawn_subtask` で背景化し、サブタスクは自前の通知経路で外へ出る。
+/// 毎 tick 積まれると挙動を歪めるため）。
+///
+/// **継続ターン（#440/#443）**: `with_dispatch` で非ブロック dispatch と [`HeartbeatContinuationSink`]
+/// を配線する。dispatch したサブタスクが決着すると、sink が同じ発火先で継続ターンを 1 回起動し
+/// （`continuation = Some`）、その結果（例: 見つけたニュース）をエージェントが会話へ出せる。継続で
+/// なければ `continuation = None`。継続ターンがないと、サブタスクの成果は会話ログに残るだけで
+/// チャンネルへ届かない（本番で確認・#440 の要点）。
 ///
 /// `None` = ターンを開始できなかった（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
 async fn run_one_heartbeat(
@@ -460,6 +579,7 @@ async fn run_one_heartbeat(
     discord_http: &Arc<HeartbeatDiscordHttp>,
     agent_id: &str,
     target: &FireTarget,
+    continuation: Option<SubtaskContinuation>,
 ) -> Option<()> {
     let db = &state.db;
     let is_discord = matches!(target, FireTarget::DiscordChannel { .. });
@@ -486,7 +606,7 @@ async fn run_one_heartbeat(
 
     // 前処理（ハートビート固有）: 指示解決（#584: channel → agent → default）→ 整形。応答本文を
     // 自動配送するのは Discord だけ（Nostr はツール投稿）なので、誘導も transport で変える。
-    let (system_suffix, instructions_source) = {
+    let (mut system_suffix, instructions_source) = {
         let conn = db.lock().ok()?;
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
@@ -495,6 +615,10 @@ async fn run_one_heartbeat(
             resolved.source,
         )
     };
+    // 継続ターン（#440）は指示文の後ろへ subtask 完了マーカーを足す（本文は会話再構成で載る）。
+    if let Some(c) = &continuation {
+        system_suffix = format!("{system_suffix}\n\n{}", continuation_prompt_suffix(c));
+    }
 
     // 共通文脈（LLM 確認・build_agent_context・会話組み立て）。開始できなければ発火扱いしない。
     let (system_prompt, agent_name, conversation) = build_scheduled_context(
@@ -505,8 +629,7 @@ async fn run_one_heartbeat(
         &system_suffix,
     )?;
 
-    // RunRequest（heartbeat 固有の transport 配線）。継続ターンは持たない（with_dispatch なし。
-    // spawn_subtask は SystemGatewayActions で使える）。Discord のときだけツール域＋既定宛先＋反復ごと
+    // RunRequest（heartbeat 固有の transport 配線）。Discord のときだけツール域＋既定宛先＋反復ごと
     // 配送（通常ループと同じ on_response_text）。Nostr は自動配送しない（ツール投稿）。
     let mut req = RunRequest::new(
         agent_id,
@@ -529,6 +652,17 @@ async fn run_one_heartbeat(
                 &channel_id,
             ));
     }
+    // 継続ターン（#440）: 非ブロック dispatch と継続 sink を配線する。dispatch した subtask が
+    // 決着すると sink が同じ発火先で継続ターンを 1 回起動する（registry は agent 単位で共有し、
+    // 後続 tick / 継続から cancel_subtask が引けるようにする）。
+    let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(HeartbeatContinuationSink {
+        state: state.clone(),
+        discord_http: discord_http.clone(),
+        agent_id: agent_id.to_string(),
+        target: target.clone(),
+        session_id: session_id.clone(),
+    });
+    req = req.with_dispatch(Some(state.subtask_registries.registry_for(agent_id)), sink);
     let engine_result = opencrab_server::process::run_agent_response(state, req).await;
 
     // 記録（heartbeat 固有）。Discord: 最終応答が NO_REPLY 以外なら record_outbound_reply。中間の宣言は
@@ -539,6 +673,14 @@ async fn run_one_heartbeat(
             if is_discord {
                 let text = result.response.trim();
                 if !text.is_empty() && text != "NO_REPLY" {
+                    // 通常ループと同じ `triggered_by`: 継続ターンは subtask 完了、tick は直接応答。
+                    let context = if continuation.is_some() {
+                        AgentReplyContext::SubtaskCompleted
+                    } else {
+                        AgentReplyContext::Direct {
+                            tool_calls_made: result.tool_calls_made,
+                        }
+                    };
                     if let Ok(conn) = db.lock() {
                         opencrab_server::transcript::record_outbound_reply(
                             &conn,
@@ -548,9 +690,7 @@ async fn run_one_heartbeat(
                                 session_id: &session_id,
                                 channel_id: Some(channel_id.as_str()),
                                 text,
-                                context: Some(AgentReplyContext::Direct {
-                                    tool_calls_made: result.tool_calls_made,
-                                }),
+                                context: Some(context),
                             },
                         );
                     }
@@ -563,7 +703,14 @@ async fn run_one_heartbeat(
     }
 
     // 発火の記録（ハートビート固有の 3 点目）。engine の成否によらず「発火した」ことを残す。
-    record_heartbeat_fire(db, agent_id, &channel_id, instructions_source);
+    // 継続ターンだけ発火元（subtask 決着）を添える（tick 行の形は不変）。
+    record_heartbeat_fire(
+        db,
+        agent_id,
+        &channel_id,
+        instructions_source,
+        continuation.as_ref(),
+    );
     Some(())
 }
 
@@ -825,6 +972,7 @@ pub(crate) async fn run_scheduler(
                                     &heartbeat_discord_http,
                                     &entry.agent_id,
                                     target,
+                                    None,
                                 ),
                             )
                             .await;
@@ -955,6 +1103,78 @@ mod tests {
     use super::*;
 
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
+
+    fn settled(session_id: &str, kind: SettleKind, exit_reason: &str) -> SubtaskSettled {
+        SubtaskSettled {
+            session_id: session_id.to_string(),
+            agent_id: "agent-a".to_string(),
+            subtask_id: "st-1".to_string(),
+            exit_reason: exit_reason.to_string(),
+            kind,
+            reply_target: None,
+            caller: CallerIdentity::Agent,
+        }
+    }
+
+    /// #440: 自分の発火セッションの**完了** subtask だけが継続ターンを起こす。
+    #[test]
+    fn resume_continuation_starts_only_for_own_completed_subtask() {
+        // 自分のセッションの完了 → 継続する。
+        let c = resume_continuation(
+            "nostr-agent-a",
+            &settled("nostr-agent-a", SettleKind::Completed, "completed"),
+        );
+        assert!(
+            matches!(c, Some(SubtaskContinuation { ref subtask_id, ref exit_reason }) if subtask_id == "st-1" && exit_reason == "completed")
+        );
+        // 進捗通知では継続しない（走行中の run へ二重応答しない）。
+        assert!(resume_continuation(
+            "nostr-agent-a",
+            &settled("nostr-agent-a", SettleKind::Progress, "completed")
+        )
+        .is_none());
+        // 別セッションの決着は拾わない（横取り防止）。
+        assert!(resume_continuation(
+            "nostr-agent-a",
+            &settled("discord-other-9-9", SettleKind::Completed, "completed")
+        )
+        .is_none());
+    }
+
+    /// #443: 継続の前置は subtask_completed マーカーを持ち、**未完了の決着で「完了」と断言しない**。
+    #[test]
+    fn continuation_suffix_marks_subtask_and_never_claims_false_completion() {
+        let completed = continuation_prompt_suffix(&SubtaskContinuation {
+            subtask_id: "st-1".to_string(),
+            exit_reason: "completed".to_string(),
+        });
+        assert!(completed.contains("[subtask_completed: subtask_id=st-1, exit_reason=completed]"));
+        assert!(completed.contains("完了しました"));
+        // timeout / error は「完了」と言わない（同 prompt 内のマーカーと食い違わせない）。
+        for (reason, expected) in [
+            ("timeout", "時間切れで打ち切られました"),
+            ("error", "エラーで失敗しました"),
+            ("stopped_by_limit", "反復上限に達して途中で打ち切られました"),
+            ("weird_new_reason", "終了しました"),
+        ] {
+            let s = continuation_prompt_suffix(&SubtaskContinuation {
+                subtask_id: "st-1".to_string(),
+                exit_reason: reason.to_string(),
+            });
+            assert!(
+                !s.contains("完了しました"),
+                "exit_reason={reason} で完了を断言している: {s}"
+            );
+            assert!(
+                s.contains(expected),
+                "exit_reason={reason} の決着が伝わらない: {s}"
+            );
+            assert!(
+                s.contains(&format!("exit_reason={reason}]")),
+                "生の exit_reason をマーカーへ載せる: {s}"
+            );
+        }
+    }
 
     /// #501: 指示文の整形は発火経路で決まる `channel_name` を差し込むだけ。Nostr（ラベル）と
     /// Discord（チャンネル名）で正しい文面になること。
