@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use opencrab_core::heartbeat::{HeartbeatConfig, HeartbeatDecision};
+use opencrab_core::heartbeat::HeartbeatConfig;
 use tokio::sync::watch;
 
 use crate::heartbeat_turn::{HeartbeatTarget, HeartbeatTurnRunner, TurnOrigin};
@@ -273,21 +273,36 @@ impl Drop for InFlightGuard {
 /// `channel_name` は発火経路で決まる（`FireTarget::NostrBroadcast` は
 /// [`crate::HEARTBEAT_NOSTR_CHANNEL_LABEL`]、`DiscordChannel` はチャンネル設定名）。
 /// `instructions_text` は `resolve_heartbeat_instructions` の合成結果。整形はここ 1 箇所で、
-/// 出力形式（SPEAK/LEARN/IDLE）の規約行もここに含める（`build_context` はこの文字列を
-/// system プロンプトへそのまま載せる）。
+/// `build_context` はこの文字列を system プロンプトへそのまま載せる。
 ///
-/// #515: 応答そのものがハートビートの**記録**になる（`heartbeat_turn::turn` が `result.response`
-/// を `speech`/`speaker_id=agent_id` で HB セッションへ残す）。以前は `IDLE` だけを返させていた
-/// ため記録が「IDLE」の 1 語（本番実測: `speech` 平均 14 バイト）で、何をしたか・なぜ見送ったかが
-/// 一切残らなかった。そこで規約に **IDLE の短い理由**（`IDLE: <理由>`）を足し、見送りの判断も
-/// エージェント自身の言葉で残るようにする。
+/// #588 Stage 3: **ハートビートは専用の語彙を持たず、通常のターンとして走る。** いま動く必要が
+/// 無ければ通常のターンと同じく `NO_REPLY` とだけ返す（沈黙＝無配送・無記録）。旧
+/// `SPEAK`/`LEARN`/`IDLE` の出力規約と、見送り理由を毎回記録させる規約（#515）は撤去した。
 ///
-/// **理由は機構が生成しない**（#501 の再来防止）。定型文をこちらで注入すると同じ文面が何百件も
-/// 並んで判断を歪めるため、規約で「自分の言葉で」「定型文の繰り返しを避けて」と促すだけにし、
-/// 文面は毎ターン LLM が文脈から書く。記録は文脈依存に変わり続けるので構造的に反復しない。
-fn format_heartbeat_prompt(channel_name: &str, instructions_text: &str) -> String {
+/// **誘導は発火元 transport で変わる**（`posts_response_body`）。応答本文の自動配送は Discord
+/// チャンネルの発火だけで、ブロードキャスト（Nostr）は自動配送しない（`heartbeat_turn::turn`。
+/// オーナー判断）。したがって:
+/// - **Discord（`posts_response_body = true`）**: 「この応答がそのままチャンネルへ投稿される」。
+/// - **ブロードキャスト（`false`）**: 「投稿するなら投稿ツールで自分から。応答本文は投稿されない」。
+///
+/// 「宣言 → サブタスク起動」の進め方は**プロンプトで誘導するだけ**（機構では強制しない）。
+/// **定型の宣言文は埋め込まない**（#588: 毎回同じ文字列が出ると、撤去した `IDLE:` の定型文と
+/// 同じく「エージェントの発話」ではなく「システムの通知」になり、会話ログを汚染する）。伝えるのは
+/// transport ごとの事実だけで、言い回しはエージェントが毎ターン自分の言葉で決める。
+fn format_heartbeat_prompt(
+    channel_name: &str,
+    instructions_text: &str,
+    posts_response_body: bool,
+) -> String {
+    let action = if posts_response_body {
+        // Discord: 応答本文がそのまま投稿される。
+        "取り組むことがあれば、この応答がそのままチャンネルへ投稿されるので、これから何をするかを自分の言葉で短く添えたうえで、実作業は spawn_subtask で起動してください。"
+    } else {
+        // ブロードキャスト（Nostr）: 応答本文は投稿されない。投稿はツールで行う。
+        "取り組むことがあれば、投稿は投稿ツール（nostr_post 等）で自分から行い、実作業は spawn_subtask で起動してください。この応答の本文はチャンネルへは投稿されません。"
+    };
     format!(
-        "[ハートビート] 現在の会話「{channel_name}」。{instructions_text}\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。見送るときは 'IDLE: <理由>' の形で、なぜ今は動かないのかを自分の言葉で一言残す（例:「TL に新しい話題が無い」「直前に同じ話題へ返答済み」）。この応答自体が「何をした/しなかったか」の記録になるので、定型文の繰り返しは避け、1〜2 行で簡潔に。"
+        "[ハートビート] 現在の会話「{channel_name}」。{instructions_text}\nいまはハートビートの時間です。{action}いま何もすることが無ければ、通常のターンと同じく NO_REPLY とだけ答えてください。"
     )
 }
 
@@ -300,7 +315,7 @@ async fn run_one_fire(
     agent_id: &str,
     target: &FireTarget,
     tick: u64,
-) -> Option<HeartbeatDecision> {
+) -> Option<()> {
     // 発火先セッションの種別から、HB ターンの宛先フィールドを導く。
     let (channel_id, guild_id, channel_name) = match target {
         FireTarget::NostrBroadcast => (
@@ -341,12 +356,15 @@ async fn run_one_fire(
     // `speaker_id='heartbeat'`）へ挿入していたが、毎 tick 同一文面が履歴へ積まれて会話へ
     // 再注入され続け、「同じ指示 → IDLE」の対が何十回も文脈に並んで挙動を歪めていた。
     // 書き込みをやめ、system プロンプトへ 1 度だけ入れる（`heartbeat_turn::build_context`）。
+    // 応答本文を自動配送するのは Discord チャンネルの発火だけ（ブロードキャストはツール投稿に
+    // 委ねる / `heartbeat_turn::turn`）。指示文の誘導もこれに合わせる。
+    let posts_response_body = matches!(target, FireTarget::DiscordChannel { .. });
     let (instructions_prompt, instructions_source) = {
         let conn = db.lock().ok()?;
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
         (
-            format_heartbeat_prompt(&channel_name, &resolved.text),
+            format_heartbeat_prompt(&channel_name, &resolved.text, posts_response_body),
             resolved.source,
         )
     };
@@ -780,46 +798,87 @@ mod tests {
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
 
     /// #501: 指示文の整形は発火経路で決まる `channel_name` を差し込むだけ。Nostr（ラベル）と
-    /// Discord（チャンネル名）で正しい文面になり、出力形式の規約行が 1 本入ること。
+    /// Discord（チャンネル名）で正しい文面になること。
     #[test]
     fn format_heartbeat_prompt_embeds_channel_name_per_fire_path() {
         // NostrBroadcast は `run_one_fire` が HEARTBEAT_NOSTR_CHANNEL_LABEL を channel_name に使う。
-        let nostr = format_heartbeat_prompt(crate::HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね");
+        let nostr =
+            format_heartbeat_prompt(crate::HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね", false);
         assert!(
             nostr.contains("現在の会話「（自律ハートビート）」。巡回してね"),
             "Nostr 経路の文面が違う: {nostr}"
         );
         // DiscordChannel はチャンネル設定名を channel_name に使う。
-        let discord = format_heartbeat_prompt("雑談", "静かにね");
+        let discord = format_heartbeat_prompt("雑談", "静かにね", true);
         assert!(
             discord.contains("現在の会話「雑談」。静かにね"),
             "Discord 経路の文面が違う: {discord}"
         );
-        // 出力形式の規約行は各文面に 1 本だけ。
-        assert_eq!(nostr.matches("出力形式: SPEAK/LEARN/IDLE").count(), 1);
-        assert_eq!(discord.matches("出力形式: SPEAK/LEARN/IDLE").count(), 1);
     }
 
-    /// #515: 規約は **IDLE の短い理由**を求める（`IDLE: <理由>`）。ただし理由の文面は機構が
-    /// 生成しない（規約で「自分の言葉で」と促すだけ）——同じ定型文が並ぶ #501 の再来を構造的に
-    /// 防ぐため。ここでは「求めている」ことと「文面を注入していない」ことの両方を担保する。
+    /// #588 Stage 3: 規約は**通常のターンへ寄せる**。撤去した SPEAK/LEARN/IDLE の語彙が文面に
+    /// 残っておらず、沈黙は通常ターンと同じ `NO_REPLY` で表せることを、両 transport で担保する。
     #[test]
-    fn format_heartbeat_prompt_requests_a_self_written_idle_reason() {
-        let p = format_heartbeat_prompt("雑談", "静かにね");
+    fn format_heartbeat_prompt_uses_no_reply_and_drops_speak_learn_idle() {
+        for posts_body in [true, false] {
+            let p = format_heartbeat_prompt("雑談", "静かにね", posts_body);
+            assert!(
+                p.contains("NO_REPLY"),
+                "沈黙を通常ターンと同じ NO_REPLY で表す規約が無い（posts_body={posts_body}）: {p}"
+            );
+            for retired in ["SPEAK", "LEARN", "IDLE"] {
+                assert!(
+                    !p.contains(retired),
+                    "撤去した語彙 {retired} が指示文に残っている（posts_body={posts_body}）: {p}"
+                );
+            }
+            assert!(
+                p.contains("spawn_subtask"),
+                "実作業をサブタスクで起動する誘導が無い（posts_body={posts_body}）: {p}"
+            );
+        }
+    }
+
+    /// #588 Stage 3（オーナー判断）: 誘導は発火元 transport で変わる。
+    /// - Discord: 応答本文がそのまま投稿される旨を伝える。
+    /// - ブロードキャスト（Nostr）: 応答本文は投稿されず、投稿はツールで行う旨を伝える。
+    ///
+    /// どちらも**定型の宣言文をハードコードしない**（issue に 3 回出てくる例示を埋め込まない）。
+    #[test]
+    fn format_heartbeat_prompt_guidance_varies_by_transport_without_hardcoding_a_declaration() {
+        // Discord: 応答本文が投稿される。
+        let discord = format_heartbeat_prompt("雑談", "静かにね", true);
         assert!(
-            p.contains("IDLE: <理由>"),
-            "IDLE に理由を求める規約が無い: {p}"
+            discord.contains("この応答がそのままチャンネルへ投稿される"),
+            "Discord は応答本文が投稿される旨を伝えていない: {discord}"
         );
         assert!(
-            p.contains("自分の言葉で"),
-            "理由を自分の言葉で書かせる指示が無い（機構生成の定型文を避ける要）: {p}"
+            discord.contains("自分の言葉で"),
+            "Discord は宣言をエージェント自身の言葉で書かせていない: {discord}"
         );
-        // 機構は具体的な理由「文」を注入しない: 例示（`「…」`）はあくまで例で、
-        // 規約自体が特定の理由を毎回書き込むわけではない。文面の生成は LLM 側。
+
+        // ブロードキャスト（Nostr）: 応答本文は投稿されない。投稿はツールで。
+        let broadcast = format_heartbeat_prompt("（自律ハートビート）", "巡回してね", false);
         assert!(
-            p.contains("定型文の繰り返しは避け"),
-            "定型文の反復を避ける明示が無い（#501 の再来防止の要）: {p}"
+            broadcast.contains("投稿されません"),
+            "ブロードキャストで「応答本文は投稿されない」旨が無い（二重投稿の道を塞ぐ要）: {broadcast}"
         );
+        assert!(
+            broadcast.contains("投稿ツール"),
+            "ブロードキャストで投稿はツールで行う誘導が無い: {broadcast}"
+        );
+        assert!(
+            !broadcast.contains("この応答がそのままチャンネルへ投稿される"),
+            "ブロードキャストで自動投稿を示唆している（本文は投稿されないはず）: {broadcast}"
+        );
+
+        // どちらも定型の宣言文はハードコードしない。
+        for p in [&discord, &broadcast] {
+            assert!(
+                !p.contains("作業するね"),
+                "定型の宣言文がハードコードされている（#588: 例示は実装すべき文字列ではない）: {p}"
+            );
+        }
     }
 
     #[test]

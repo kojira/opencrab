@@ -19,39 +19,9 @@ impl Default for HeartbeatConfig {
     }
 }
 
-/// The decision made during a heartbeat tick.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HeartbeatDecision {
-    /// The agent decided to say something.
-    Speak(String),
-    /// The agent decided to learn or reflect.
-    Learn,
-    /// The agent decided to do nothing.
-    Idle,
-    /// The agent decided to manage skills (cleanup duplicates, archive unused).
-    ManageSkills {
-        duplicates_found: usize,
-        archived_count: usize,
-    },
-}
-
-impl std::fmt::Display for HeartbeatDecision {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HeartbeatDecision::Speak(msg) => write!(f, "speak: {}", msg),
-            HeartbeatDecision::Learn => write!(f, "learn"),
-            HeartbeatDecision::Idle => write!(f, "idle"),
-            HeartbeatDecision::ManageSkills {
-                duplicates_found,
-                archived_count,
-            } => {
-                write!(
-                    f,
-                    "manage_skills: duplicates={}, archived={}",
-                    duplicates_found, archived_count
-                )
-            }
-        }
-    }
-}
+// 旧 `HeartbeatDecision`（`Speak` / `Learn` / `Idle` / `ManageSkills`）は #588 Stage 3 で撤去した。
+// ハートビートは専用の語彙を持たず通常のターンとして走るようになり（応答本文をそのまま扱う）、
+// この列挙型は live のロジックから完全に消えた。`Learn` が書いていた内省（reflection）は
+// `memory_maintenance` / `learning.rs` の経路が担っており、ハートビートから外しても失われない
+// （#531）。型として残すと「ハートビートは Speak/Learn/Idle を決める」という実態と食い違う宣言に
+// なるため、`core` からの公開ごと撤去した。

@@ -61,8 +61,12 @@ fn normalize_keywords(keywords: Vec<String>, fallback_title: &str) -> Vec<String
 
 /// heartbeat セッションの speech 行が「エージェント自身の idle（静観）応答」かどうかを判定する。
 ///
-/// 判定基準は発生源（`crates/server/src/main.rs` の `HeartbeatDecision` 分類）と
-/// 揃える: 応答本文に非空の `SPEAK:` があれば発話、`LEARN` を含めば学習。
+/// 判定は**過去データ**（旧 `SPEAK:` / `LEARN` / `IDLE` の語彙で残った heartbeat speech 行）を
+/// メモリ索引から除外するためのもの: 応答本文に非空の `SPEAK:` があれば発話、`LEARN` を含めば
+/// 学習として残す。**#588 Stage 3 でハートビートの専用語彙（旧 `HeartbeatDecision`）は撤去され、
+/// 新しい行はこの形式で書かれない**（通常の配送記録になる）ので、この判定は既存の履歴のための
+/// もの。マーカー集合を列挙せず「全大文字トークン + 中身の有無」で見るため、語彙撤去後の新しい
+/// 記録に対しても安全側（＝実ありとして残す）に働く。
 ///
 /// #517: 残り（SPEAK/LEARN でない）は従来「一律 idle」としていたが、#515 で IDLE の
 /// 記録が「`IDLE: <なぜ見送ったか>`」という**本人の言葉の理由**を持つようになった
@@ -2000,7 +2004,7 @@ mod tests {
         );
     }
 
-    /// idle 判定が main.rs の HeartbeatDecision 分類と同基準であることを直接確認する。
+    /// idle 判定が過去データ（旧 SPEAK/LEARN/IDLE 語彙）の分類と一致することを直接確認する。
     #[test]
     fn test_is_idle_heartbeat_speech_classification() {
         // speaker はデフォルトで自分（"a"）。

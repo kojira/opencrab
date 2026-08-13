@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-use opencrab_core::heartbeat::{HeartbeatConfig, HeartbeatDecision};
+use opencrab_core::heartbeat::HeartbeatConfig;
 use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
 
@@ -20,75 +20,6 @@ type DiscordHttp = ();
 
 /// 共有（TOML）ゲートウェイのハンドル置き場。ゲートウェイ起動時に埋まる。
 type DiscordHttpArc = Arc<Mutex<Option<DiscordHttp>>>;
-
-/// ハートビート応答テキストから決定（SPEAK / LEARN / IDLE）を解く。
-///
-/// **入力は応答テキストだけ**で、プロンプトに何を積んだかには依存しない（#404 で
-/// ハートビート文脈へ実会話を入れたが、この関数のシグネチャがその独立性を担保する）。
-/// 判定: `SPEAK:` を含む最初の行の右側を取り、空なら Idle。`SPEAK:` が無く
-/// **先頭語が LEARN の決定行**があれば Learn、それ以外は Idle。
-///
-/// #515: IDLE に短い理由（`IDLE: <理由>`）を残させるようにしたため、決定語の判定を
-/// **決定行の先頭語**に寄せた。理由が自由文になり、決定行の中に他の決定語が現れる余地が
-/// 生まれたため:
-/// - **LEARN**: 「応答全体に LEARN の語を含むか（大小無視）」から先頭語判定へ絞った。
-///   `IDLE: 直前に LEARN した` で内省メモ書き込み（`apply_decision` の Learn 分岐）が
-///   誤発火するのを防ぐ。
-/// - **SPEAK**: `SPEAK:` を含む最初の行を拾う緩さ（**思考行を前置しても拾う**という既存の
-///   意図）は保つが、**IDLE / LEARN の決定行の内側にある `SPEAK:` は拾わない**。
-///   `IDLE: 今は SPEAK: するほどの話題がない` の右側が発話として**外部チャンネルへ配送**
-///   されるのを防ぐ（LEARN の誤発火＝内部メモより結果が重い＝取り消せない外部投稿）。
-fn parse_heartbeat_decision(response: &str) -> HeartbeatDecision {
-    let response_text = response.trim();
-    // SPEAK: <メッセージ> — SPEAK: を含む最初の行の右側を発話にする（思考行が前置されても
-    // 拾う）。ただし **IDLE / LEARN の決定行**（先頭語が IDLE/LEARN）の内側にある SPEAK: は
-    // その決定の理由の一部なので拾わない。空なら発話しない。
-    if let Some(line) = response_text
-        .lines()
-        .find(|l| l.contains("SPEAK:") && !leads_with_idle_or_learn(l))
-    {
-        let content = line
-            .split_once("SPEAK:")
-            .map(|x| x.1)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        return if content.is_empty() {
-            HeartbeatDecision::Idle
-        } else {
-            HeartbeatDecision::Speak(content)
-        };
-    }
-    // 先頭語が LEARN の決定行があるときだけ Learn。`IDLE: <理由>` は理由の有無・中身に
-    // 関わらずここには落ちず（先頭語は IDLE）、既定の Idle になる。
-    if response_text.lines().any(is_learn_decision_line) {
-        return HeartbeatDecision::Learn;
-    }
-    HeartbeatDecision::Idle
-}
-
-/// 行の**先頭語**（`:` か空白までの最初のトークン）。
-fn leading_keyword(line: &str) -> &str {
-    line.trim()
-        .split(|c: char| c == ':' || c.is_whitespace())
-        .next()
-        .unwrap_or("")
-}
-
-/// 決定行としての LEARN 判定。先頭語が `LEARN`（大小無視）のときだけ真。
-///
-/// `IDLE: 直前に LEARN した` のように理由へ LEARN の語が混じる行は、先頭語が `IDLE` なので
-/// 除外される。
-fn is_learn_decision_line(line: &str) -> bool {
-    leading_keyword(line).eq_ignore_ascii_case("LEARN")
-}
-
-/// IDLE / LEARN の決定行か（先頭語が IDLE か LEARN）。SPEAK 判定でこれらの行を除外し、
-/// 理由文に紛れた `SPEAK:` を発話へ昇格させないために使う。
-fn leads_with_idle_or_learn(line: &str) -> bool {
-    let kw = leading_keyword(line);
-    kw.eq_ignore_ascii_case("IDLE") || kw.eq_ignore_ascii_case("LEARN")
-}
 
 /// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
 /// Nostr broadcast は特定チャンネルを持たないため、会話名の代わりにこのラベルを充てる
@@ -719,111 +650,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // #169 の dispatch 配線（`RunRequest` に registry と sink が載る / registry は agent
-    // 単位で共有）と、#440 の継続ターン配線のテストは `heartbeat_turn` へ移した。
-    // `RunRequest` を組むのがそちらになったため。
-
-    /// #404: 文脈に実会話を入れても `SPEAK:` / `LEARN` / `IDLE` の解釈は変わらない。
-    /// パースの入力は応答テキストだけ（プロンプトに何を積んだかに依存しない）。
-    #[test]
-    fn heartbeat_decision_parse_depends_only_on_response_text() {
-        assert!(matches!(
-            parse_heartbeat_decision("SPEAK: おはよう"),
-            HeartbeatDecision::Speak(c) if c == "おはよう"
-        ));
-        // 前置きの行があっても SPEAK: を含む行から取る。
-        assert!(matches!(
-            parse_heartbeat_decision("考えた結果\nSPEAK: 今日は静かだ\n"),
-            HeartbeatDecision::Speak(c) if c == "今日は静かだ"
-        ));
-        // 中身が空なら発話しない。
-        assert!(matches!(
-            parse_heartbeat_decision("SPEAK:   "),
-            HeartbeatDecision::Idle
-        ));
-        assert!(matches!(
-            parse_heartbeat_decision("learn"),
-            HeartbeatDecision::Learn
-        ));
-        assert!(matches!(
-            parse_heartbeat_decision("IDLE"),
-            HeartbeatDecision::Idle
-        ));
-        // 実会話が文脈に入っても、応答が SPEAK: を含まなければ発話にはならない
-        // （実会話側の引用が誤って発話へ昇格しないこと）。
-        assert!(matches!(
-            parse_heartbeat_decision("チャンネルでは雑談が続いている。今は黙っておく。"),
-            HeartbeatDecision::Idle
-        ));
-    }
-
-    /// #515: IDLE に理由を後置しても壊れない。
-    ///
-    /// - `IDLE: <理由>` は Idle のまま（理由が消えて記録が空にならない = 記録は `speech` へ
-    ///   別途残るが、決定はあくまで Idle）。
-    /// - **理由に LEARN の語が混じっても** Learn に化けない（旧 `contains("LEARN")` の誤判定を
-    ///   直した回帰テスト。ここを緩い実装へ戻すと Learn になり赤くなる = 内省メモ誤発火の検知）。
-    /// - 規約を守らない素の理由文（キーワード無し）でも Idle に落ちて壊れない。
-    #[test]
-    fn heartbeat_idle_reason_does_not_misclassify() {
-        assert!(matches!(
-            parse_heartbeat_decision("IDLE: TL に新しい話題が無い"),
-            HeartbeatDecision::Idle
-        ));
-        // 理由に LEARN の語が入っても Idle（決定語は先頭の IDLE）。
-        assert!(matches!(
-            parse_heartbeat_decision("IDLE: 直前に LEARN した話題なので今は黙る"),
-            HeartbeatDecision::Idle
-        ));
-        // 先頭語が LEARN の決定行なら従来どおり Learn（理由付きでも）。
-        assert!(matches!(
-            parse_heartbeat_decision("LEARN: 巡回の気づきをメモした"),
-            HeartbeatDecision::Learn
-        ));
-        // 素の LEARN（理由なし）も従来どおり Learn。
-        assert!(matches!(
-            parse_heartbeat_decision("LEARN"),
-            HeartbeatDecision::Learn
-        ));
-        // 規約を無視した素の理由文（キーワード無し）は Idle に落ちる。
-        assert!(matches!(
-            parse_heartbeat_decision("今は特に動く必要が無いと判断した"),
-            HeartbeatDecision::Idle
-        ));
-    }
-
-    /// #515（SPEAK 側の非対称の是正）: **IDLE の理由文に紛れた `SPEAK:` を発話へ昇格させない**。
-    ///
-    /// 理由を自由文にしたことで `IDLE: 今は SPEAK: …` のような理由が書ける余地が生まれた。旧
-    /// 実装（全行 `contains("SPEAK:")`）だと右側が `Speak(...)` になり**外部チャンネルへ配送**
-    /// される（取り消せない）。ここを緩い実装へ戻すとこのテストが赤くなる（＝外部誤投稿の検知）。
-    ///
-    /// 同時に、**思考行を前置してから `SPEAK:` を書く**既存の意図は保つ（doc 明記）。
-    #[test]
-    fn speak_inside_an_idle_reason_is_not_promoted_to_speech() {
-        // 本題: IDLE の決定行の内側の SPEAK: は発話にしない。
-        assert!(matches!(
-            parse_heartbeat_decision("IDLE: 今は SPEAK: するほどの話題がない"),
-            HeartbeatDecision::Idle
-        ));
-        // LEARN の決定行の内側の SPEAK: も同様（先頭語が LEARN なので発話にしない → Learn）。
-        assert!(matches!(
-            parse_heartbeat_decision("LEARN: SPEAK: しようか迷ったが学びに回す"),
-            HeartbeatDecision::Learn
-        ));
-        // 既存の意図は不変: 思考行を前置してから SPEAK: を書くと発話として拾う。
-        assert!(matches!(
-            parse_heartbeat_decision("少し迷った\nSPEAK: 新機能を告知した"),
-            HeartbeatDecision::Speak(c) if c == "新機能を告知した"
-        ));
-        // 先頭が SPEAK の決定行はそのまま発話（IDLE/LEARN 除外の巻き添えにしない）。
-        assert!(matches!(
-            parse_heartbeat_decision("SPEAK: おはよう"),
-            HeartbeatDecision::Speak(c) if c == "おはよう"
-        ));
-    }
-}
+// #169 の dispatch 配線（`RunRequest` に registry と sink が載る）と #440 の継続ターン配線、
+// #588 Stage 3 で通常ターンへ寄せた発火本体（配送・記録・NO_REPLY 判定）のテストは
+// `heartbeat_turn` にある。`RunRequest` を組み、応答を配送・記録するのがそちらのため、
+// main.rs には heartbeat 固有のテスト対象が残っていない。
