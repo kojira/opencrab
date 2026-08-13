@@ -150,6 +150,20 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
                     event_tx: event_tx.clone(),
                 }),
             );
+            // #601: 登録が起きたことを起動時に 1 行残す（配線忘れでこれが出ない＝時刻発火が
+            // 届かない、を運用で即検知できるように）。
+            info!(
+                agent_id = %agent_id,
+                transport = "discord",
+                "timed-fire: 受け口を登録（per-agent Discord loop）"
+            );
+        } else {
+            // router 未配線は設定バグ（main.rs で with_timed_fire_router を呼び忘れ）。黙って
+            // 時刻発火が全部 skip されるのは #601 の再発なので、WARN で必ず知らせる。
+            error!(
+                agent_id = %agent_id,
+                "timed-fire: TimedFireRouter 未配線のため per-agent Discord 受け口を登録できない（時刻発火が届かない）"
+            );
         }
 
         // このゲートウェイの保留対話は上で作り直した登録簿（＝空）にしか無いので、

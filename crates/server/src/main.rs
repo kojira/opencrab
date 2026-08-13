@@ -222,7 +222,15 @@ async fn main() -> anyhow::Result<()> {
         // Per-agent Discord gateway manager（#40: 共有ループが「専用ゲートウェイが
         // 稼働中か」を参照できるよう、共有ゲートウェイへ渡す AppState clone より
         // **前に**生成して配線する。実際の復元は共有ゲートウェイ起動後に行う）。
-        let manager = Arc::new(opencrab_discord::DiscordGatewayManager::new(state.clone()));
+        //
+        // #601 hotfix: **時刻発火の受け口レジストリを必ず配線する**。これを忘れると per-agent
+        // Discord ゲートウェイのループが自分の受け口を登録できず、共有（TOML）ゲートウェイを
+        // 持たない構成では scheduler の resolve が None になり Discord の時刻発火が毎回 skip される
+        // （Nostr 側は配線済みで動いていた）。
+        let manager = Arc::new(
+            opencrab_discord::DiscordGatewayManager::new(state.clone())
+                .with_timed_fire_router(state.timed_fire_router.clone()),
+        );
         // 上位から見える唯一の入口はこの登録簿（#191 段階2 PR3・PR4）。共通操作
         // （起動 / 停止 / 生存確認）も transport 固有の操作（ツール実行の実体 =
         // `gateway_actions_for`）もここから引く。`AppState` の名指しフィールドは無い。
@@ -310,6 +318,12 @@ async fn main() -> anyhow::Result<()> {
                     Arc::new(opencrab_discord::message_loop::DiscordTimedFireSink {
                         event_tx: event_tx.clone(),
                     }),
+                );
+                // #601: 登録が起きたことを起動時に 1 行残す（per-agent を持たない体の時刻発火は
+                // ここへ落ちる。これが出ない＝共有受け口が無い、を運用で即検知できるように）。
+                tracing::info!(
+                    transport = "discord",
+                    "timed-fire: 受け口を登録（共有 TOML Discord loop）"
                 );
                 // 設定ファイル由来の通知先フォールバック（#157 S5 で `AppState` へ
                 // 持ち上げ済み）。Discord にはもう `ensure_*` しか残っていないが、
