@@ -81,6 +81,11 @@ pub(crate) struct HeartbeatTarget {
     pub instructions_prompt: String,
     /// 指示文の由来（`heartbeat_log` の `result_json` に載る診断値）。
     pub instructions_source: &'static str,
+    /// 発火元の種別（#591）。SPEAK の配送先を「試す順番」ではなくこの種別から直接決める
+    /// （`heartbeat_delivery::DeliveryRoute::from_fire_target`）。scheduler が発火時の
+    /// `SessionFireTarget` をそのまま載せる。以前は配送が transport 横断の試す順番で決まり、
+    /// Discord チャンネルの発火が Nostr へ持って行かれていた（#591）。
+    pub fire_target: opencrab_db::queries::SessionFireTarget,
 }
 
 /// ターンの発火元。
@@ -527,6 +532,10 @@ impl HeartbeatTurnRunner {
                 let discord_http = self.discord_http.clone();
                 let agent_id_log = target.agent_id.clone();
                 let ch_id_str = target.channel_id.clone();
+                // 配送先は発火元の種別で決める（#591）。Discord チャンネルの発火は Discord へ、
+                // ブロードキャスト発火は該当 transport へ直接ディスパッチする（試す順番を撤去）。
+                let route =
+                    heartbeat_delivery::DeliveryRoute::from_fire_target(&target.fire_target);
                 tokio::spawn(async move {
                     // 配送のみ（fire-and-forget）。実会話セッションへの記録は #573 Stage B で
                     // turn() の経路1（正規化記録）に一元化したため、#425 エコー
@@ -535,6 +544,7 @@ impl HeartbeatTurnRunner {
                     heartbeat_delivery::deliver_heartbeat_speech(
                         &gateways,
                         &discord_http,
+                        route,
                         &agent_id_log,
                         &ch_id_str,
                         &content,
@@ -664,6 +674,10 @@ mod tests {
             channel_session_id: "discord-agent-a-111-222".to_string(),
             instructions_prompt: INSTRUCTIONS.to_string(),
             instructions_source: "default",
+            fire_target: opencrab_db::queries::SessionFireTarget::DiscordChannel {
+                guild_id: "111".to_string(),
+                channel_id: "222".to_string(),
+            },
         }
     }
 
@@ -1192,6 +1206,7 @@ mod tests {
             channel_session_id: session,
             instructions_prompt: INSTRUCTIONS.to_string(),
             instructions_source: "default",
+            fire_target: opencrab_db::queries::SessionFireTarget::NostrBroadcast,
         };
 
         runner
@@ -1271,15 +1286,30 @@ mod tests {
     }
 
     /// 継続ターンの `SPEAK:` は tick とまったく同じ配送に乗る。
+    ///
+    /// **#591 で発火元を broadcast（Nostr）に変えた。** `runner_with` の配送 spy（`calls`）は
+    /// Nostr transport なので、これを観測するには**発火元が broadcast**でなければならない。
+    /// 以前はここが Discord チャンネルの発火（`target()`）のまま Nostr spy へ届くのを期待して
+    /// いたが、それは「Discord 発火が Nostr へ持って行かれる」#591 の不具合そのものを期待値に
+    /// していた。配送先を発火元の種別で決めるよう直した今、Discord 発火は Discord へ行き
+    /// Nostr spy には届かない。この tick/継続で配送経路が同一という性質は発火元種別に依らない
+    /// ので、観測できる broadcast 発火で確かめる（Discord 発火の直接ディスパッチは
+    /// `heartbeat_delivery` の単体テストが押さえる）。
     #[tokio::test]
     async fn continuation_speak_goes_through_the_existing_delivery() {
         let engine = RecordingEngine::new("SPEAK: 新着に返信した");
         let (runner, db, calls) = runner_with(engine.clone());
         insert_subtask_completed_log(&db, "結果");
 
+        // broadcast 発火（channel を持たない）。session_id は読み取り経路のため SESSION のまま。
+        let broadcast_target = HeartbeatTarget {
+            channel_id: String::new(),
+            fire_target: opencrab_db::queries::SessionFireTarget::NostrBroadcast,
+            ..target()
+        };
         let decision = runner
             .run_turn(
-                &target(),
+                &broadcast_target,
                 TurnOrigin::SubtaskResume {
                     subtask_id: "st-1".to_string(),
                     exit_reason: "completed".to_string(),
@@ -1294,8 +1324,8 @@ mod tests {
         );
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![("222".to_string(), "新着に返信した".to_string())],
-            "宛先も本文も tick の発話と同じ扱い"
+            vec![(String::new(), "新着に返信した".to_string())],
+            "broadcast 発火は Nostr transport へ本文を渡す（宛先は channel を持たないので空）"
         );
         // heartbeat_log にも 1 行残り、発火元が subtask 決着だと分かる。
         let logs = heartbeat_log_decisions(&db);
