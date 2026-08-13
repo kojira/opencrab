@@ -422,9 +422,7 @@ pub use opencrab_core::context_budget::{
     check_agent_model_change, compute_context_budget, ensure_model_context_window_registered,
     model_context_window_missing_message, normalize_model_spec, split_llm_model_spec,
 };
-pub use opencrab_core::conversation::{
-    build_conversation_string, build_heartbeat_conversation_string,
-};
+pub use opencrab_core::conversation::build_conversation_string;
 // `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
 pub(crate) use opencrab_core::conversation::format_single_log;
 // 以下はテストだけが参照する（本番コードは使わない）。cfg(test) で本番ビルドの

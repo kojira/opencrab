@@ -1,119 +1,36 @@
-//! **メッセージループの外（中央スケジューラ）からチャンネルへ投稿するための送信**。発火元
-//! （fire target）の種別で配送先を直接決める（#591）。
+//! **メッセージループの外（中央スケジューラ）から Discord チャンネルへ 1 通送るための送信**
+//! （#400 / #588 single-entry）。
 //!
-//! ## これはハートビート専用ではない（#588 Stage 3）
+//! ## なぜこれだけがハートビート側に必要か
 //!
-//! 名前は `heartbeat_delivery` だが、中身は**ハートビート固有の処理ではない**。通常の Discord /
-//! Nostr ターンは各ゲートウェイのメッセージループが応答テキストを自動送信するが、ハートビートの
-//! 発火は**どのメッセージループにも属さず**中央スケジューラ（server crate）から走るため、その
-//! 送信を代わりに担う実装がここに要る。担っているのは transport 横断の送信プリミティブ——
-//! **エージェント単位のハンドル解決**（#400・下記）、Nostr broadcast、本文分割——で、これは
-//! 「メッセージループの外からチャンネルへ投稿する」一般的な必要から来ている。#588 Stage 3 で
-//! ハートビートを通常ターンへ寄せた後も、**送信するのは応答本文そのもの**（旧 `SPEAK:` の
-//! 解析結果ではない）に変わっただけで、この送信実装は再利用している。
+//! #588 single-entry でハートビートは専用のターン実装（旧 `heartbeat_turn.rs`）を撤去し、時刻が
+//! 来たら発火先セッション上で**通常ルートと同じ 1 ターン**を走らせる（`scheduler::run_one_heartbeat`）。
+//! 推論・会話組み立て・記録・直列化はすべて通常ルートのものを使う。ただ 1 点、**Discord への送信**
+//! だけは通常ルートをそのまま使えない: 通常の Discord ターンは各ゲートウェイのメッセージループが
+//! `DiscordGateway::send_to_channel` で送るが、スケジューラは**どのメッセージループにも属さず**発火
+//! するため、その `send_to_channel` を持たない。ここが「ループ外からチャンネルへ送る」唯一の口で、
+//! engine 標準の `on_response_text`（`scheduler::discord_response_text_cb`）から反復ごとに呼ばれる。
 //!
-//! 配送する本文（応答本文）の配送先は、発火したセッションの種別で決まる:
+//! Nostr（ブロードキャスト）はハートビートから自動配送しない（エージェントが `nostr_post` 等の
+//! ツールで自分で投稿する＝通常の Nostr の動き）。したがってこのモジュールは **Discord 送信だけ**を
+//! 担い、旧・transport 横断ルーティング（`DeliveryRoute` / `deliver_via_non_discord_registry`）は
+//! 撤去した。
 //!
-//! - **Discord チャンネルの発火 → Discord へ送る**（`deliver_via_discord_shared_http`。
-//!   現行 `main.rs` の直叩きと同一の整形・宛先意味論・http）。
-//! - **ブロードキャスト系（チャンネルを持たない）発火 → 稼働中の非 Discord transport へ送る**
-//!   （`deliver_via_non_discord_registry`。現状 Nostr）。
+//! ## Discord ハンドルは**発話する体ごと**に解決する（#400）
 //!
-//! ## なぜ「試す順番」をやめたか（#591）
-//!
-//! 以前はこの出口を **2 段構え**にし、「まず非 Discord の登録簿を試し、そこが処理できれば
-//! そこで確定、配れなければ Discord へ落ちる」という **transport 横断の試す順番**で配送先を
-//! 決めていた。結果、**Discord チャンネルの発火であっても、その体に Nostr 登録があれば
-//! Nostr へ持って行かれ**、Discord には 1 件も届かないのに会話ログには「投稿した」と残る、
-//! という不具合になっていた（#591）。
-//!
-//! そこで配送先は**発火元の種別だけ**で決め、横断ルーティングは行わない。発火先と配送先が
-//! 食い違う（＝送れる transport が無い）場合は、**黙って別 transport へ流し直さず** WARN で
-//! 残す（発火したのに取りこぼしたことを沈黙で見失わない）。この「発火元で直接ディスパッチ」
-//! は #588 Stage 3（ハートビートを通常ターンへ寄せる）で撤去予定だった横断ルーティングを、
-//! 実害が出ているため先行して撤去したもの。
-//!
-//! ## なぜ Discord を登録簿走査に**載せない**か（共有ゲートウェイの http を使うため）
-//!
-//! Discord チャンネルの発火は登録簿ではなく共有 http 経路（`deliver_via_discord_shared_http`）
-//! を使う。ハートビート発話の http ソースには**共有（config-based / TOML）Discord ゲートウェイ**
-//! の `Http` が含まれる（per-agent ゲートウェイがあればそちらが優先される。下の #400 の
-//! 節を参照）。ところが**共有ゲートウェイは `state.gateways`（登録簿）に
-//! 登録されていない**（登録されるのは per-agent の `DiscordGatewayManager` だけ）。
-//! したがって登録簿の `gateway_actions_for()` から辿れる Discord の `Http` は per-agent
-//! 分に限られ、共有ゲートウェイのみの構成では**発話が一切飛ばなくなる**。
-//!
-//! これは #191 段階2 PR5 が `main.rs` に残した注記（「PR4 の capability が返すのは
-//! `GatewayActions` であって生の HTTP ではなく、ここに当てると発話経路ごと書き換えに
-//! なる＝挙動不変でなくなる。transport 中立化は heartbeat 側の課題として残す」）と同じ
-//! 事実。そのため **Discord は共有 http 経路が担当**し、`deliver_via_non_discord_registry`
-//! は Discord 種別を走査からスキップする（ブロードキャスト発火で誤って per-agent Discord
-//! ゲートウェイを掴まないため）。
-//!
-//! 「Discord も登録簿へ寄せて共有 http を無くす」統一は別 issue（フォローアップ）。
-//!
-//! ## Discord 経路のハンドルは**発話する体ごと**に解決する（#400）
-//!
-//! 以前は `main.rs` が起動時に `gateway.discord.agent_ids` の**先頭 1 体**の per-agent
-//! ゲートウェイからハンドルを 1 本取り、全エージェントのハートビートでそれを共有して
-//! いた。`Http` はボットのトークンを保持するので**送信者名はハンドルが決める**。結果、
-//! (1) Discord へ発話できるのは先頭の体だけ、(2) 先頭以外の体が Discord チャンネルへ
-//! 向いていればその発話は先頭の体の名前で投稿される、という並び順依存があった。
-//!
-//! [`HeartbeatDiscordHttp`] はこれを配送時の解決に置き換える:
+//! 以前は `main.rs` が起動時に先頭 1 体の per-agent ゲートウェイからハンドルを 1 本取り、全体で共有
+//! していた。`Http` はボットのトークンを保持するので**送信者名はハンドルが決める**ため、(1) Discord
+//! へ出せるのは先頭の体だけ、(2) それ以外の体の発話も先頭の体の名前で出る、という並び順依存があった。
+//! [`HeartbeatDiscordHttp`] は配送時の解決に置き換える:
 //!
 //! 1. **発話する体自身の per-agent ゲートウェイ**のハンドル（あればこれが正しい名前）
 //! 2. 無ければ**共有（TOML）ゲートウェイ**のハンドル（従来のフォールバック）
 //!
-//! 共有ゲートウェイを 2 番目に残すのが上の制約への回答である。共有ゲートウェイは登録簿に
-//! 載らないため、ここを「per-agent が無ければ諦める」にすると共有ゲートウェイのみの構成で
-//! 発話が飛ばなくなる（＝登録簿へ寄せたのと同じ後退になる）。逆に per-agent を先に見る
-//! ことで、自分のボットを持つ体は**自分の名前で**出る。#591 で配送先の**決め方**（試す
-//! 順番 → 発火元の種別）は変えたが、この Discord ハンドル解決の順序（per-agent → 共有）と
-//! fire-and-forget は変えていない。
-//!
-//! ## ブロードキャスト（Nostr）は現在ハートビートから配送されない（#588 Stage 3・オーナー判断）
-//!
-//! [`DeliveryRoute::DiscordChannel`] の発火だけがこの配送を呼ぶ。呼び出し口はハートビートターンの
-//! **`on_response_text`（反復ごと）**（`heartbeat_turn` の `discord_on_response_text`）で、通常の
-//! Discord メッセージループと同じく反復ごとに応答テキストを送る（「宣言 → 作業 → 結果」が順に出る）。
-//! **ブロードキャスト（[`DeliveryRoute::Broadcast`］）発火は応答本文を自動配送
-//! しない**——Nostr は既にツール投稿（`nostr_post` 等）が通常運用で、エージェント指示文が
-//! 「ツールで送信した後は同じ本文を返さない」という二重投稿回避の取り決めを持つため、本文まで
-//! 自動配送すると二重投稿の道が開く。したがって Nostr の発話はエージェント自身のツールに委ねる。
-//!
-//! そのため [`deliver_via_non_discord_registry`]（および [`deliver_heartbeat_speech`] の
-//! `Broadcast` 分岐）は**現在ハートビートターンからは呼ばれない**。実装は**消していない**:
-//! 「メッセージループの外からブロードキャストへ投稿する」送信プリミティブ（transport 横断・
-//! 分割）自体は将来また必要になり得るし、消すと #400 相当の再実装になる。撤去/再配線の判断は
-//! #588 Stage 4 / #591 の申し送りで扱う。
+//! 共有ゲートウェイは `state.gateways`（登録簿）に載らない（登録されるのは per-agent の
+//! `DiscordGatewayManager` だけ）ので、ここで直接 `Http` を持つ。「per-agent が無ければ諦める」に
+//! すると共有ゲートウェイのみの構成で発話が飛ばなくなるため、共有を 2 番目のフォールバックに残す。
 
-use opencrab_actions::{chunk_text, gateway_kinds, AgentGatewayRegistry};
-use opencrab_db::queries::SessionFireTarget;
 use std::sync::{Arc, Mutex};
-
-/// ハートビート発話の配送先（発火元の種別で決まる / #591）。
-///
-/// 「試す順番」で配送先を選ばず、発火したセッションの種別からここを 1 つ決めて直接
-/// ディスパッチする（モジュール doc）。発火先種別が増えたら
-/// [`DeliveryRoute::from_fire_target`] の `match` が未対応で割れる。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeliveryRoute {
-    /// Discord チャンネルの発火 → その Discord チャンネルへ送る（`channel_target` = channel_id）。
-    DiscordChannel,
-    /// ブロードキャスト系（チャンネルを持たない）発火 → 稼働中の非 Discord transport へ。
-    Broadcast,
-}
-
-impl DeliveryRoute {
-    /// 発火元の種別から配送先を決める（#591）。
-    pub(crate) fn from_fire_target(target: &SessionFireTarget) -> Self {
-        match target {
-            SessionFireTarget::DiscordChannel { .. } => DeliveryRoute::DiscordChannel,
-            SessionFireTarget::NostrBroadcast => DeliveryRoute::Broadcast,
-        }
-    }
-}
 
 /// per-agent Discord ゲートウェイからハンドルを引く口（#400）。
 ///
@@ -257,136 +174,19 @@ pub(crate) fn log_startup_http_resolution(http: &HeartbeatDiscordHttp, agent_id:
     }
 }
 
-/// ハートビート発話を配送する（#591）。
+/// メッセージループの外（中央スケジューラ）から Discord チャンネルへ 1 通送る（#400 / #588
+/// single-entry）。
 ///
-/// **配送先は発火元の種別（`route`）で直接決める。** 以前は「まず非 Discord の登録簿を
-/// 試し、配れなければ Discord へ落ちる」という transport 横断の試す順番だったが、Discord
-/// チャンネルの発火が Nostr へ持って行かれる不具合（#591）のため撤去した（モジュール doc）。
+/// 通常の Discord ターンは各ゲートウェイのメッセージループが `DiscordGateway::send_to_channel`
+/// で送るが、ハートビートは**どのメッセージループにも属さず**発火するため、その `send_to_channel`
+/// を持たない。ここが「ループ外からチャンネルへ送る」唯一の口で、engine 標準の `on_response_text`
+/// （`scheduler::discord_response_text_cb`）から反復ごとに呼ばれる。
 ///
-/// - [`DeliveryRoute::DiscordChannel`] → Discord 共有 http 経路（現行 main.rs の直叩きと同一）。
-///   非 Discord transport が稼働していても**そちらへは流さない**。
-/// - [`DeliveryRoute::Broadcast`] → 稼働中の非 Discord transport（現状 Nostr）。配れる transport
-///   が無ければ **Discord へ流し直さず** WARN（黙って別へ送らない・受け入れ条件 C）。
-///
-/// 呼び出し側は本関数を `tokio::spawn` の中で `.await` し、発火 tick を塞がない
-/// （fire-and-forget を維持。#178 系）。第 1 引数は `&AppState` ではなく
-/// `&AgentGatewayRegistry` を直接受ける（本関数が使うのは `state.gateways` だけ。AppState
-/// 構築を避けて結線を単体テスト可能にするため / PR-C）。
-///
-/// **戻り値は無い（#573 Stage C）。** 配送は fire-and-forget（配信の成否はログで観測する）。
-pub(crate) async fn deliver_heartbeat_speech(
-    gateways: &AgentGatewayRegistry,
-    discord_http: &HeartbeatDiscordHttp,
-    route: DeliveryRoute,
-    agent_id: &str,
-    channel_target: &str,
-    content: &str,
-) {
-    match route {
-        // Discord チャンネルの発火は Discord 共有 http 経路のみ。非 Discord registry は
-        // 見ない（別 transport への横断ルーティングをやめた核心 / #591）。
-        DeliveryRoute::DiscordChannel => {
-            deliver_via_discord_shared_http(discord_http, agent_id, channel_target, content).await;
-        }
-        // ブロードキャスト発火は稼働中の非 Discord transport へ。配れなければ Discord へは
-        // 流し直さず、取りこぼしを WARN で残す（受け入れ条件 C）。
-        DeliveryRoute::Broadcast => {
-            if !deliver_via_non_discord_registry(gateways, agent_id, channel_target, content).await
-            {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    channel_target = %channel_target,
-                    "Heartbeat: ブロードキャスト発火だが配送できる非 Discord transport が無い（発話を取りこぼした。Discord へは流し直さない）"
-                );
-            }
-        }
-    }
-}
-
-/// 稼働中の**非 Discord** transport へ登録簿経由で 1 通配る。配れたら（＝ある transport が
-/// 担当したら）`true`。
-///
-/// **Discord 種別は意図的にスキップ**する（理由はモジュール doc）。
-///
-/// Nostr は既に `text_delivery()` を提供済み（`nostr/src/actions.rs` の
-/// `NostrGatewayActions::text_delivery` → `nostr/src/text_delivery.rs` の
-/// `NostrTextDelivery`）。そのため Nostr ゲートウェイがその体で稼働していれば、この走査は
-/// Nostr に**当たって publish する**（≠常に `false`）。ただし `NostrTextDelivery::send_text`
-/// は **`target` を無視して `post_note` する**（kind:1 broadcast＝エージェント設定のリレー
-/// 集合へ自発投稿）。したがって `channel_target` は Nostr 経路では効かず、宛先を絞る意味は
-/// 持たない。
-async fn deliver_via_non_discord_registry(
-    gateways: &AgentGatewayRegistry,
-    agent_id: &str,
-    target: &str,
-    content: &str,
-) -> bool {
-    for kind in gateways.kinds() {
-        // Discord は legacy 共有 http 経路（手順2）が担当する。ここで拾うと共有
-        // ゲートウェイの http に到達できず挙動が変わる（モジュール doc / #191 段階2 PR5）。
-        if kind == gateway_kinds::DISCORD {
-            continue;
-        }
-        if !gateways.is_running(kind, agent_id) {
-            continue;
-        }
-        let Some(gateway) = gateways.get(kind) else {
-            continue;
-        };
-        let Some(actions) = gateway.gateway_actions_for(agent_id) else {
-            continue;
-        };
-        let Some(delivery) = actions.text_delivery() else {
-            continue;
-        };
-        // ある transport が引き受けた時点で**それに委ねる**。送信に失敗しても他 transport
-        // や Discord へ流し直さない（別チャンネルへの二重発話を避ける）。
-        //
-        // transport の助言 `chunk_limit()` で content を分割してから 1 チャンクずつ送る。
-        // 長文の Nostr 発話がリレーの 1 イベント上限を超えて publish ごと失敗するのを防ぐ
-        // （peer_review が `build_part_messages` でやっているのと同じ発想。ただし heartbeat
-        // 発話は `part X/N` framing を付けない生分割）。1 チャンクでも失敗したらそこで打ち
-        // 切る（後続チャンクを送っても文脈が壊れるだけで、Discord へ流し直しもしない）。
-        let limit = delivery.chunk_limit();
-        let chunks = chunk_text(content, limit);
-        for (i, chunk) in chunks.iter().enumerate() {
-            match delivery.send_text(target, chunk).await {
-                Ok(()) => {
-                    tracing::info!(
-                        agent_id = %agent_id,
-                        kind,
-                        target,
-                        part = i + 1,
-                        parts = chunks.len(),
-                        "Heartbeat spoke via non-Discord transport"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        agent_id = %agent_id,
-                        kind,
-                        target,
-                        part = i + 1,
-                        parts = chunks.len(),
-                        "Heartbeat send via non-Discord transport failed: {e}"
-                    );
-                    break;
-                }
-            }
-        }
-        return true;
-    }
-    false
-}
-
-/// Discord 経路（整形・宛先意味論・fail-safe は移設時から不変）。
-///
-/// **どのハンドルで送るかだけが #400 で変わった**: 全体で共有する 1 本ではなく、
-/// [`HeartbeatDiscordHttp::resolve`] が `agent_id` ごとに（per-agent → 共有の順で）引く。
-///
-/// 配信の成否はログ（送信成功=info / 失敗=error / 発話先無し=warn）で観測する。以前は
-/// bool を返し #425 エコーの可否に使っていたが、Stage B でエコーを撤去したため戻り値は無い。
-async fn deliver_via_discord_shared_http(
+/// **どのハンドルで送るか**は [`HeartbeatDiscordHttp::resolve`] が `agent_id` ごとに
+/// （per-agent → 共有の順で）引く（#400。送信者名がその体の名前になる）。呼び出し側は
+/// `tokio::spawn` の中で `.await` し発火を塞がない（fire-and-forget）。配信の成否はログ
+/// （送信成功=info / 失敗=error / ハンドル無し=warn）で観測する。
+pub(crate) async fn deliver_via_discord_shared_http(
     discord_http: &HeartbeatDiscordHttp,
     agent_id: &str,
     channel_target: &str,
@@ -437,189 +237,7 @@ async fn deliver_via_discord_shared_http(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
-
-    use opencrab_actions::AgentGatewayLifecycle;
-    use opencrab_core::text_delivery::TextDelivery;
-    use opencrab_gateway::{
-        GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext,
-    };
-
-    /// 記録された送信（target, text）の共有ログ。
-    type CallLog = Arc<Mutex<Vec<(String, String)>>>;
-
-    /// 送信を記録するだけの配送口（ネットワークに出ない）。`chunk_limit` は注入可能。
-    struct SpyDelivery {
-        calls: CallLog,
-        chunk_limit: usize,
-    }
-
-    #[async_trait]
-    impl TextDelivery for SpyDelivery {
-        fn validate_target(&self, _target: &str) -> Result<(), String> {
-            Ok(())
-        }
-        fn mention(&self, user_id: &str) -> String {
-            format!("@{user_id}")
-        }
-        fn chunk_limit(&self) -> usize {
-            self.chunk_limit
-        }
-        async fn send_text(&self, target: &str, text: &str) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((target.to_string(), text.to_string()));
-            Ok(())
-        }
-    }
-
-    /// transport が返すツール実行の実体。`text_delivery()` だけ意味を持つ。
-    struct FakeActions {
-        delivery: Option<Arc<dyn TextDelivery>>,
-    }
-
-    #[async_trait]
-    impl GatewayActions for FakeActions {
-        fn definitions(&self) -> Vec<GatewayActionDef> {
-            vec![]
-        }
-        async fn execute(
-            &self,
-            _name: &str,
-            _args: &serde_json::Value,
-            _ctx: &GatewayCallContext,
-        ) -> GatewayActionResult {
-            GatewayActionResult {
-                success: false,
-                data: None,
-                error: Some("unused in tests".to_string()),
-            }
-        }
-        fn text_delivery(&self) -> Option<Arc<dyn TextDelivery>> {
-            self.delivery.clone()
-        }
-    }
-
-    /// ネットワークに出ない偽マネージャ。稼働 agent と配送口を注入する。
-    struct FakeGateway {
-        kind: &'static str,
-        running: Vec<String>,
-        delivery: Option<Arc<dyn TextDelivery>>,
-    }
-
-    #[async_trait]
-    impl AgentGatewayLifecycle for FakeGateway {
-        fn kind(&self) -> &'static str {
-            self.kind
-        }
-        async fn start(&self, _agent_id: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&self, _agent_id: &str) {}
-        fn is_running(&self, agent_id: &str) -> bool {
-            self.running.iter().any(|a| a == agent_id)
-        }
-        async fn restore_all(&self) {}
-        async fn shutdown_all(&self) {}
-        fn gateway_actions_for(&self, _agent_id: &str) -> Option<Arc<dyn GatewayActions>> {
-            Some(Arc::new(FakeActions {
-                delivery: self.delivery.clone(),
-            }))
-        }
-    }
-
-    fn spy() -> (CallLog, Arc<dyn TextDelivery>) {
-        spy_with_limit(2000)
-    }
-
-    fn spy_with_limit(chunk_limit: usize) -> (CallLog, Arc<dyn TextDelivery>) {
-        let calls: CallLog = Arc::new(Mutex::new(Vec::new()));
-        let delivery: Arc<dyn TextDelivery> = Arc::new(SpyDelivery {
-            calls: calls.clone(),
-            chunk_limit,
-        });
-        (calls, delivery)
-    }
-
-    /// 稼働中の非 Discord transport（配送口あり）へ、正しい target/content で 1 回配る。
-    #[tokio::test]
-    async fn delivers_to_a_running_non_discord_transport_once() {
-        let (calls, delivery) = spy();
-        let registry = AgentGatewayRegistry::new();
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["crab".to_string()],
-            delivery: Some(delivery),
-        }));
-
-        let handled =
-            deliver_via_non_discord_registry(&registry, "crab", "note-target", "こんにちは").await;
-
-        assert!(handled, "稼働中の非 Discord transport が引き受ける");
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![("note-target".to_string(), "こんにちは".to_string())],
-            "target と content がそのまま 1 回だけ渡る"
-        );
-    }
-
-    /// **Discord 種別は稼働中でも登録簿走査からスキップ**（＝手順2 の共有 http へ落ちる）。
-    /// これが「Discord をバイト不変に保つ」ための核心。
-    #[tokio::test]
-    async fn skips_discord_kind_even_when_running() {
-        let (calls, delivery) = spy();
-        let registry = AgentGatewayRegistry::new();
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::DISCORD,
-            running: vec!["crab".to_string()],
-            delivery: Some(delivery),
-        }));
-
-        let handled = deliver_via_non_discord_registry(&registry, "crab", "123456789", "hi").await;
-
-        assert!(
-            !handled,
-            "Discord は登録簿走査では拾わない（共有 http 経路が担当）"
-        );
-        assert!(
-            calls.lock().unwrap().is_empty(),
-            "Discord の配送口は登録簿経由では呼ばれない"
-        );
-    }
-
-    /// 非 Discord transport が居ない/稼働していない → 手順2 へフォールバックする（false）。
-    #[tokio::test]
-    async fn falls_through_when_no_non_discord_transport_delivers() {
-        let registry = AgentGatewayRegistry::new();
-        // 稼働していない Nostr（別 agent のみ稼働）は拾わない。
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["other".to_string()],
-            delivery: Some(spy().1),
-        }));
-
-        assert!(
-            !deliver_via_non_discord_registry(&registry, "crab", "t", "c").await,
-            "稼働していなければ手順2 へ落ちる"
-        );
-        // 空の登録簿でも安全に false。
-        let empty = AgentGatewayRegistry::new();
-        assert!(!deliver_via_non_discord_registry(&empty, "crab", "t", "c").await);
-    }
-
-    /// 稼働中でも `text_delivery()` が無い transport は拾わない（手順2 へ落ちる）。
-    #[tokio::test]
-    async fn ignores_running_transport_without_a_delivery() {
-        let registry = AgentGatewayRegistry::new();
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["crab".to_string()],
-            delivery: None,
-        }));
-        assert!(!deliver_via_non_discord_registry(&registry, "crab", "t", "c").await);
-    }
 
     /// Discord 共有 http フォールバックは http 無し/不正 channel でもログのみ・panic しない
     /// （現行 else 分岐と同じ fail-safe）。
@@ -902,23 +520,6 @@ mod tests {
             drain(&buf)
         }
 
-        /// [`captured_logs`] の async 版。`f` が返す future を `.await` する間の tracing 出力を
-        /// 拾う。`#[tokio::test]` は current-thread runtime なので await を跨いでも同じスレッド
-        /// に留まり、スレッドローカルの捕捉先がそのまま効く。
-        pub(super) async fn captured_logs_async<F, Fut>(f: F) -> String
-        where
-            F: FnOnce() -> Fut,
-            Fut: std::future::Future<Output = ()>,
-        {
-            install();
-            let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
-            SINK.with(|sink| *sink.borrow_mut() = Some(buf.clone()));
-            let _capturing = Capturing;
-            f().await;
-            drop(_capturing);
-            drain(&buf)
-        }
-
         /// 捕捉用 subscriber をプロセスに 1 個だけ張る。
         fn install() {
             static INSTALL: Once = Once::new();
@@ -948,161 +549,5 @@ mod tests {
             }
         }
     }
-    use capture::{captured_logs, captured_logs_async};
-
-    /// (e) 長文は transport の `chunk_limit()` で分割され、複数回 `send_text` される。
-    /// 各チャンクは上限以下で、連結すると元の content に戻る（無損失分割）。
-    #[tokio::test]
-    async fn long_content_is_split_by_chunk_limit_into_multiple_sends() {
-        let (calls, delivery) = spy_with_limit(5);
-        let registry = AgentGatewayRegistry::new();
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["crab".to_string()],
-            delivery: Some(delivery),
-        }));
-
-        // 13 文字（マルチバイト混在）→ 上限 5 で 3 チャンク（5 + 5 + 3）。
-        let content = "あいうえおかきくけこさしす";
-        let handled =
-            deliver_via_non_discord_registry(&registry, "crab", "note-target", content).await;
-        assert!(handled);
-
-        let sent = calls.lock().unwrap().clone();
-        assert_eq!(sent.len(), 3, "上限 5・13 文字 = 3 チャンク送信");
-        for (target, chunk) in &sent {
-            assert_eq!(target, "note-target", "全チャンク同じ宛先");
-            assert!(
-                chunk.chars().count() <= 5,
-                "各チャンクは chunk_limit 以下: {chunk:?}"
-            );
-        }
-        let joined: String = sent.iter().map(|(_, c)| c.as_str()).collect();
-        assert_eq!(joined, content, "分割は無損失（連結で元に戻る）");
-    }
-
-    // ---- #591: 配送先は発火元の種別で直接決める（試す順番の撤去） ----
-    //
-    // 旧テスト（`..._stops_after_step1_handles_it` / `..._falls_through_to_discord_when_step1_
-    // _declines`）は「非 Discord を先に試し、配れなければ Discord へ落ちる」という試す順番を
-    // 検証していた。#591 でその横断ルーティング自体を撤去したため、期待値が「発火元の種別で
-    // 決まる」へ変わる。旧テストは下の 4 本に置き換えた。
-
-    /// **#591 の核心（回帰ガード）。** Discord チャンネルの発火は、その体に**稼働中の Nostr
-    /// 登録があっても** Nostr へ持って行かれない。旧実装（試す順番）だと Nostr spy が content を
-    /// 受け取っていた＝これがまさに本番不具合。ここでは spy が空のままであることで「Discord
-    /// 経路だけを通り、Nostr へは一切流れない」ことを観測する。
-    /// http は None なので Discord 送信自体は取りこぼす（WARN）が、実ネットワークには出ない。
-    #[tokio::test]
-    async fn discord_fire_goes_to_discord_even_with_a_running_nostr() {
-        let (calls, delivery) = spy();
-        let registry = AgentGatewayRegistry::new();
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["crab".to_string()],
-            delivery: Some(delivery),
-        }));
-        let none_http = empty_http();
-
-        deliver_heartbeat_speech(
-            &registry,
-            &none_http,
-            DeliveryRoute::DiscordChannel,
-            "crab",
-            "123456789",
-            "この Discord チャンネルだけに投稿する",
-        )
-        .await;
-
-        assert!(
-            calls.lock().unwrap().is_empty(),
-            "Discord 発火は Nostr へ流れない（稼働中の Nostr 登録があっても）"
-        );
-    }
-
-    /// Nostr 登録が無いエージェントの Discord 発火も同じく Discord 経路（当然だが対で押さえる）。
-    /// 別 agent のみ稼働している Nostr は「この体には登録が無い」状況を表す。
-    #[tokio::test]
-    async fn discord_fire_without_own_nostr_goes_to_discord() {
-        let (calls, delivery) = spy();
-        let registry = AgentGatewayRegistry::new();
-        // 稼働しているのは別 agent の Nostr だけ（"crab" 自身には登録が無い）。
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["other".to_string()],
-            delivery: Some(delivery),
-        }));
-        let none_http = empty_http();
-
-        deliver_heartbeat_speech(
-            &registry,
-            &none_http,
-            DeliveryRoute::DiscordChannel,
-            "crab",
-            "123456789",
-            "hi",
-        )
-        .await;
-
-        assert!(
-            calls.lock().unwrap().is_empty(),
-            "Discord 発火は Discord 経路のみ（非 Discord registry には触れない）"
-        );
-    }
-
-    /// ブロードキャスト発火は稼働中の非 Discord transport（Nostr）へ配る（受け入れ条件 B）。
-    /// spy が content を target ごと受け取る。
-    #[tokio::test]
-    async fn broadcast_fire_delivers_to_the_nostr_transport() {
-        let (calls, delivery) = spy();
-        let registry = AgentGatewayRegistry::new();
-        registry.register(Arc::new(FakeGateway {
-            kind: gateway_kinds::NOSTR,
-            running: vec!["crab".to_string()],
-            delivery: Some(delivery),
-        }));
-        let none_http = empty_http();
-
-        deliver_heartbeat_speech(
-            &registry,
-            &none_http,
-            DeliveryRoute::Broadcast,
-            "crab",
-            "note-target",
-            "自律発話",
-        )
-        .await;
-
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![("note-target".to_string(), "自律発話".to_string())],
-            "ブロードキャスト発火は Nostr へ配る"
-        );
-    }
-
-    /// ブロードキャスト発火で配れる非 Discord transport が無いとき、**Discord へは流し直さず**
-    /// WARN を出す（受け入れ条件 C）。空 registry・http None でも panic しない。
-    #[tokio::test]
-    async fn broadcast_fire_without_a_transport_warns_and_does_not_touch_discord() {
-        let registry = AgentGatewayRegistry::new();
-        let none_http = empty_http();
-
-        let logs = captured_logs_async(|| async {
-            deliver_heartbeat_speech(
-                &registry,
-                &none_http,
-                DeliveryRoute::Broadcast,
-                "crab",
-                "note-target",
-                "hi",
-            )
-            .await;
-        })
-        .await;
-
-        assert!(
-            logs.contains("WARN") && logs.contains("取りこぼした"),
-            "配送できる transport が無ければ WARN で残す（黙って Discord へ流さない）: {logs}"
-        );
-    }
+    use capture::captured_logs;
 }

@@ -234,8 +234,8 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
 /// error / timeout の**どれでも**発火する（値の出所は `actions/src/subtask.rs` の
 /// `exit_reason`）。一律「完了しました」と告げると失敗・タイムアウトした subtask にも
 /// 「完了」と伝わり、同じ prompt 内のマーカー（`exit_reason=timeout`）と食い違う。
-/// #443（HB）で入れた `heartbeat_turn.rs::settle_outcome` と**同一の写像**を Nostr へ
-/// 適用する（#445）。HB のような内省メモは Nostr sink には無いので述部のみ返す。
+/// #443（HB）で入れた exit_reason → 言い回しの写像と**同型**を Nostr へ適用する（#445）。
+/// HB 側は #588 single-entry で継続ターン機構ごと撤去したので、この写像は現在 Nostr sink が持つ。
 ///
 /// 未知の値は**断定しない**（「終了しました」）。正確な値は同じ prompt 内の
 /// `[subtask_completed: … exit_reason=…]` マーカーがそのまま持つので、推測を足さない。

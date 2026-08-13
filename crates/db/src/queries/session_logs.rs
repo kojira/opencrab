@@ -29,9 +29,8 @@ pub struct SessionLogRow {
 /// 記憶の材料（topic 要約）や会話再構成からは除外される。読み手（`index_builder` /
 /// `process` の `is_heartbeat_noise` 系述語）はこの定数で判定すること。
 ///
-/// **`SessionRow.mode` / `RunRequest.gateway` の "heartbeat"（ハートビート gateway 名）とは
-/// 別概念**。あちらは `heartbeat_turn::HEARTBEAT_GATEWAY`。値がたまたま同じでも用途が違うので
-/// 混同しないこと。
+/// **`RunRequest.gateway` の "heartbeat"（ハートビート発火の gateway ラベル・`scheduler.rs` の
+/// `run_one_heartbeat` が渡す）とは別概念**。値がたまたま同じでも用途が違うので混同しないこと。
 pub const HEARTBEAT_SPEAKER_ID: &str = "heartbeat";
 
 /// ハートビート発話を本人の実会話（`discord-…`）セッションへ二重記録した行の
@@ -66,11 +65,12 @@ pub const HEARTBEAT_CHANNEL_ECHO_METADATA: &str = r#"{"source":"heartbeat_channe
 /// フィルタだった。**#573 Stage B 以降、新規の HB 発話は実会話セッションへ第一級で記録され、
 /// エコーは書かれない**（[`HEARTBEAT_CHANNEL_ECHO_METADATA`] 参照）。よって現在この判定が効くのは
 /// **Stage B 以前に書かれた既存のエコー行だけ**で、それらの本文と同じ発話は HB 専用セッション側
-/// にも残って索引されるため、ここで落として二重計上を防ぐ。判定は次の 3 箇所で使う:
+/// にも残って索引されるため、ここで落として二重計上を防ぐ。判定は次の 2 箇所で使う:
 /// - [`insert_session_log_at`]: FTS 影テーブルへの投入をスキップ（検索に出さない）。
 /// - `index_builder`: topic 要約の材料から除外（索引・宣言材料に入れない）。
-/// - `process::build_channel_conversation_section`: HB 文脈の実会話セクションで、
-///   専用セッション側と二重に出るのを防ぐ。
+///
+/// （#588: HB 文脈の専用会話組み立て `build_channel_conversation_section` は撤去したので、そこでの
+/// 使用は無くなった。この印は #425 のエコー行を索引・検索から落とすためだけに残る。）
 ///
 /// `source` フィールドの**値**で判定するのでキー順・空白の違いに強い。値が現れない
 /// 大きな `metadata_json`（`tool_call` 等）は substring で早期に弾き、無駄な JSON parse を
