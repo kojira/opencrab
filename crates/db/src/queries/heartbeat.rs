@@ -34,7 +34,7 @@ pub fn sanitize_heartbeat_instructions(s: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHeartbeatInstructions {
     pub text: String,
-    /// "default" | "agent" | "channel" | "agent+channel"
+    /// "default" | "agent" | "channel"
     pub source: &'static str,
 }
 
@@ -46,7 +46,11 @@ pub struct ResolvedHeartbeatInstructions {
 ///  3. `agents.heartbeat_instructions`（エージェント全体）
 ///  4. 既定文言
 ///
-/// 合成方針: エージェント指示とチャンネル上書きが両方あれば連結する（チャンネル側が後）。
+/// 合成方針: チャンネル上書き（1 か 2）があれば、それだけを使う（エージェント指示は
+/// 混ぜない）。チャンネル固有指示は「最優先」＝上書きであって、連結ではない（#583）。
+/// 以前は両方あるとき連結していたが、transport 固有の運用ルールを書いたエージェント指示と
+/// チャンネル指示が矛盾し、より断定的なエージェント指示側にエージェントが従ってチャンネル
+/// 指示が無視されていた。
 pub fn resolve_heartbeat_instructions(
     conn: &Connection,
     agent_id: &str,
@@ -93,8 +97,9 @@ pub fn resolve_heartbeat_instructions(
             source: "channel",
         },
         (true, true) => ResolvedHeartbeatInstructions {
-            text: format!("{agent_global}\n\n{channel_override}"),
-            source: "agent+channel",
+            // 両方あってもチャンネル指示で上書きする（#583）。連結しない。
+            text: channel_override,
+            source: "channel",
         },
     }
 }

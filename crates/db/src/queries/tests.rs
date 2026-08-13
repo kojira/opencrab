@@ -1955,6 +1955,7 @@ fn test_channel_heartbeat_instructions_roundtrip() {
 }
 
 /// T-2.1: priority channel(agent) > channel(global) > agent global.
+/// チャンネル指示があればエージェント指示に**上書き**する（連結しない・#583）。
 #[test]
 fn test_resolve_priority() {
     let conn = setup();
@@ -1962,15 +1963,16 @@ fn test_resolve_priority() {
     upsert_channel_config(&conn, &hb_channel("ch1", "", "GLOBAL_CH")).unwrap();
     upsert_channel_config(&conn, &hb_channel("ch1", "a1", "AGENT_CH")).unwrap();
 
-    // channel(agent) wins and is concatenated after agent global.
+    // channel(agent) wins and overrides the agent global entirely.
     let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
-    assert_eq!(r.source, "agent+channel");
-    assert_eq!(r.text, "AGENT\n\nAGENT_CH");
+    assert_eq!(r.source, "channel");
+    assert_eq!(r.text, "AGENT_CH");
 
-    // remove channel(agent) override → falls back to channel(global).
+    // remove channel(agent) override → falls back to channel(global), still overriding agent.
     delete_channel_config_for_agent(&conn, "ch1", "a1").unwrap();
     let r = resolve_heartbeat_instructions(&conn, "a1", "ch1");
-    assert_eq!(r.text, "AGENT\n\nGLOBAL_CH");
+    assert_eq!(r.source, "channel");
+    assert_eq!(r.text, "GLOBAL_CH");
 
     // remove channel(global) → agent global only.
     delete_channel_config_for_agent(&conn, "ch1", "").unwrap();
