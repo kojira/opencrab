@@ -71,6 +71,20 @@
 //! ことで、自分のボットを持つ体は**自分の名前で**出る。#591 で配送先の**決め方**（試す
 //! 順番 → 発火元の種別）は変えたが、この Discord ハンドル解決の順序（per-agent → 共有）と
 //! fire-and-forget は変えていない。
+//!
+//! ## ブロードキャスト（Nostr）は現在ハートビートから配送されない（#588 Stage 3・オーナー判断）
+//!
+//! [`DeliveryRoute::DiscordChannel`] の発火だけがハートビートターン（`heartbeat_turn::turn`）から
+//! この配送を呼ぶ。**ブロードキャスト（[`DeliveryRoute::Broadcast`］）発火は応答本文を自動配送
+//! しない**——Nostr は既にツール投稿（`nostr_post` 等）が通常運用で、エージェント指示文が
+//! 「ツールで送信した後は同じ本文を返さない」という二重投稿回避の取り決めを持つため、本文まで
+//! 自動配送すると二重投稿の道が開く。したがって Nostr の発話はエージェント自身のツールに委ねる。
+//!
+//! そのため [`deliver_via_non_discord_registry`]（および [`deliver_heartbeat_speech`] の
+//! `Broadcast` 分岐）は**現在ハートビートターンからは呼ばれない**。実装は**消していない**:
+//! 「メッセージループの外からブロードキャストへ投稿する」送信プリミティブ（transport 横断・
+//! 分割）自体は将来また必要になり得るし、消すと #400 相当の再実装になる。撤去/再配線の判断は
+//! #588 Stage 4 / #591 の申し送りで扱う。
 
 use opencrab_actions::{chunk_text, gateway_kinds, AgentGatewayRegistry};
 use opencrab_db::queries::SessionFireTarget;

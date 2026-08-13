@@ -367,10 +367,20 @@ impl HeartbeatTurnRunner {
 
     /// ターン本体。**呼び出しは [`Self::run_turn`] 経由に限る**（直列化の担保）。
     ///
-    /// #588 Stage 3: **通常のターンとして走る。** 応答本文が `NO_REPLY`（または空）でなければ、
-    /// それをそのままチャンネルへ配送し（発火元種別で決まる出口 / #591）、投稿した回だけ通常の
-    /// 配送記録を残す（[`Self::record_posted_reply`]）。沈黙（`NO_REPLY`）は無配送・無記録
-    /// （旧 `IDLE:` の毎回記録は撤去）。発火自体は `heartbeat_log` に `fired` として残す。
+    /// #588 Stage 3: **通常のターンとして走る。** 応答本文の自動配送は**発火元の種別で変わる**:
+    ///
+    /// - **Discord チャンネルの発火**: 応答本文（`NO_REPLY`・空 以外）をそのままチャンネルへ
+    ///   自動配送し（[`Self::deliver_speech`]）、投稿した回だけ通常の配送記録を残す
+    ///   （[`Self::record_posted_reply`]）。沈黙（`NO_REPLY`）は無配送・無記録。
+    /// - **ブロードキャスト（Nostr）の発火**: 応答本文を**自動配送しない**（オーナー判断）。
+    ///   エージェントが `nostr_post` 等のツールで自分から投稿する（通常の Nostr の動き。ツールは
+    ///   `with_gateway_actions` で渡している）。本文は投稿されないので配送記録も残さない
+    ///   （ツール投稿は各ツールが自分で記録する）。**理由**: Nostr は既にツール投稿が通常運用で、
+    ///   エージェント指示文が「ツールで送信した後は同じ本文を返さない」という二重投稿回避の
+    ///   取り決めを持つ。本 Stage でその逃げ道（旧 `IDLE`）を廃止したうえに本文まで自動配送すると
+    ///   二重投稿の道が開くため、ブロードキャストは自動配送しない。
+    ///
+    /// 発火自体は発火元によらず `heartbeat_log` に `fired` として残す。
     async fn turn(self: &Arc<Self>, target: &HeartbeatTarget, origin: &TurnOrigin) -> Option<()> {
         let (system_prompt, agent_name, conversation) = self.build_context(target, origin)?;
 
@@ -381,26 +391,41 @@ impl HeartbeatTurnRunner {
 
         match engine_result {
             Ok(result) => {
-                // 通常ターンと同じ NO_REPLY 判定（`message_loop.rs`）。沈黙は配送も記録もしない。
+                // 通常ターンと同じ NO_REPLY 判定（`message_loop.rs`）。
                 let text = result.response.trim();
-                if text.is_empty() || text == "NO_REPLY" {
-                    tracing::debug!(
-                        agent_id = %target.agent_id,
-                        session_id = %target.session_id,
-                        origin = %origin.label(),
-                        "Heartbeat turn: NO_REPLY（沈黙・無配送・無記録）"
-                    );
-                } else {
-                    // 投稿した回: 実会話セッションへ通常の配送記録を残し、応答本文を配送する。
-                    self.record_posted_reply(target, origin, &result, text);
-                    self.deliver_speech(target, text);
-                    tracing::debug!(
-                        agent_id = %target.agent_id,
-                        session_id = %target.session_id,
-                        channel_id = %target.channel_id,
-                        origin = %origin.label(),
-                        "Heartbeat turn: 応答本文をチャンネルへ配送"
-                    );
+                let is_silent = text.is_empty() || text == "NO_REPLY";
+                match heartbeat_delivery::DeliveryRoute::from_fire_target(&target.fire_target) {
+                    // Discord: 応答本文をそのままチャンネルへ自動配送し、投稿した回だけ記録する。
+                    heartbeat_delivery::DeliveryRoute::DiscordChannel => {
+                        if is_silent {
+                            tracing::debug!(
+                                agent_id = %target.agent_id,
+                                session_id = %target.session_id,
+                                origin = %origin.label(),
+                                "Heartbeat turn: NO_REPLY（沈黙・無配送・無記録）"
+                            );
+                        } else {
+                            self.record_posted_reply(target, origin, &result, text);
+                            self.deliver_speech(target, text);
+                            tracing::debug!(
+                                agent_id = %target.agent_id,
+                                session_id = %target.session_id,
+                                channel_id = %target.channel_id,
+                                origin = %origin.label(),
+                                "Heartbeat turn: 応答本文を Discord チャンネルへ配送"
+                            );
+                        }
+                    }
+                    // ブロードキャスト（Nostr）: 応答本文は自動配送しない（doc 参照）。配送も記録も
+                    // せず、エージェントのツール投稿に委ねる。
+                    heartbeat_delivery::DeliveryRoute::Broadcast => {
+                        tracing::debug!(
+                            agent_id = %target.agent_id,
+                            session_id = %target.session_id,
+                            origin = %origin.label(),
+                            "Heartbeat turn: ブロードキャスト発火は応答本文を自動配送しない（ツール投稿に委ねる）"
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -532,6 +557,11 @@ impl HeartbeatTurnRunner {
     /// 同じ [`opencrab_server::transcript::record_outbound_reply`] の行を実会話セッションへ残す。
     /// HB 固有の毎回記録（旧 `record_heartbeat_response`）はこれに置き換えて撤去した。沈黙の回は
     /// 呼ばれない（無記録）。
+    ///
+    /// **現状は Discord 発火からのみ呼ばれる**（`turn`）。ブロードキャスト（Nostr）発火は応答本文を
+    /// 自動配送しないため配送記録も残さない（ツール投稿は各ツールが記録する）。`NostrBroadcast` の
+    /// arm は将来ブロードキャストを記録したくなったときのために残す（`SessionFireTarget` の
+    /// 網羅性を保つ意味もある）。
     fn record_posted_reply(
         &self,
         target: &HeartbeatTarget,
@@ -573,12 +603,13 @@ impl HeartbeatTurnRunner {
         );
     }
 
-    /// 応答本文をチャンネルへ配送する（fire-and-forget・#588 Stage 3 / #591）。
+    /// 応答本文を Discord チャンネルへ配送する（fire-and-forget・#588 Stage 3 / #591）。
     ///
-    /// 配送先は発火元の種別で決める（Discord チャンネル発火は Discord へ、ブロードキャスト発火は
-    /// 該当 transport へ）。発火 tick を塞がないよう spawn する（#178 系）。送信の実体は
-    /// [`heartbeat_delivery`]（#400 のハンドル解決・分割送信）を**再利用**する——これは
-    /// ハートビート専用ではなく「メッセージループの外からチャンネルへ投稿する」ための送信。
+    /// **現状は Discord 発火からのみ呼ばれる**（`turn`。ブロードキャスト発火は応答本文を自動配送
+    /// しない）。配送先は発火元の種別で決める（`DeliveryRoute`）。発火 tick を塞がないよう spawn
+    /// する（#178 系）。送信の実体は [`heartbeat_delivery`]（#400 のハンドル解決・分割送信）を
+    /// **再利用**する——これはハートビート専用ではなく「メッセージループの外からチャンネルへ
+    /// 投稿する」ための送信。
     fn deliver_speech(&self, target: &HeartbeatTarget, text: &str) {
         let content = text.to_string();
         let gateways = self.gateways.clone();
@@ -1301,27 +1332,22 @@ mod tests {
         );
     }
 
-    /// #588 Stage 3: 継続ターンの応答本文が tick とまったく同じ配送に乗る。
+    /// #588 Stage 3: **Discord** の継続ターンも、投稿した回は tick と同じ通常の配送記録を残す
+    /// （旧 `SPEAK:` 解析は撤去。応答本文がそのまま Discord チャンネルへ配送される）。
     ///
-    /// **#591 で発火元を broadcast（Nostr）に変えた。** `runner_with` の配送 spy（`calls`）は
-    /// Nostr transport なので、これを観測するには**発火元が broadcast**でなければならない
-    /// （Discord 発火の直接ディスパッチは `heartbeat_delivery` の単体テストが押さえる）。応答本文
-    /// （`NO_REPLY` 以外）がそのまま配送される（旧 `SPEAK:` の解析は撤去した）。
+    /// Discord への実バイト送信は `heartbeat_delivery`（共有 http・#400）を再利用しており、送信の
+    /// 単体観測は同モジュールのテストが担う。ここでは「継続ターンが投稿の記録経路を通る」ことと
+    /// `heartbeat_log` の発火元を担保する。
     #[tokio::test]
-    async fn continuation_response_body_goes_through_the_existing_delivery() {
-        let engine = RecordingEngine::new("新着に返信した");
-        let (runner, db, calls) = runner_with(engine.clone());
+    async fn continuation_on_discord_records_the_posted_reply() {
+        let engine = RecordingEngine::new("調べ終わった。結果を共有する");
+        let (runner, db, _calls) = runner_with(engine.clone());
         insert_subtask_completed_log(&db, "結果");
 
-        // broadcast 発火（channel を持たない）。session_id は読み取り経路のため SESSION のまま。
-        let broadcast_target = HeartbeatTarget {
-            channel_id: String::new(),
-            fire_target: opencrab_db::queries::SessionFireTarget::NostrBroadcast,
-            ..target()
-        };
+        // Discord 発火（`target()` は DiscordChannel）。session_id は SESSION のまま。
         let started = runner
             .run_turn(
-                &broadcast_target,
+                &target(),
                 TurnOrigin::SubtaskResume {
                     subtask_id: "st-1".to_string(),
                     exit_reason: "completed".to_string(),
@@ -1330,14 +1356,10 @@ mod tests {
             .await;
 
         assert!(started.is_some(), "継続ターンが開始する");
-        assert!(
-            wait_until(|| !calls.lock().unwrap().is_empty()).await,
-            "継続ターンの応答本文が既存の配送出口（deliver_heartbeat_speech）に乗る"
-        );
         assert_eq!(
-            *calls.lock().unwrap(),
-            vec![(String::new(), "新着に返信した".to_string())],
-            "broadcast 発火は Nostr transport へ応答本文を渡す（宛先は channel を持たないので空）"
+            heartbeat_speech_records(&db),
+            vec!["調べ終わった。結果を共有する".to_string()],
+            "Discord の継続ターンは投稿した本文を通常の配送記録として残す"
         );
         // heartbeat_log にも 1 行残り（decision は固定値 fired）、発火元が subtask 決着だと分かる。
         let logs = heartbeat_log_decisions(&db);
@@ -1391,14 +1413,15 @@ mod tests {
         );
     }
 
-    /// #588 Stage 3: **沈黙（`NO_REPLY`）は無配送・無記録**（旧 IDLE の毎回記録は撤去）。
+    /// #588 Stage 3（オーナー判断）: **ブロードキャスト（Nostr）発火は応答本文を自動配送しない。**
     ///
-    /// 発火自体は `heartbeat_log` に `fired` として残るが、会話への記録も外部配送も起きない。
-    /// `turn()` の NO_REPLY 分岐を外して常に配送・記録するとこのテストが赤くなる。
+    /// 応答が `NO_REPLY` **以外**（＝本来なら発話）でも、broadcast 発火では自動配送しない
+    /// （エージェントが `nostr_post` 等で自分で投稿する）。本文は投稿されないので配送記録も残さない。
+    /// これは二重投稿の道（旧 IDLE の安全弁を廃止したうえに本文まで自動配送する）を塞ぐ核心。
+    /// `turn()` の `Broadcast` 分岐で配送・記録するよう戻すとこのテストが赤くなる。
     #[tokio::test]
-    async fn a_no_reply_turn_records_nothing_and_delivers_nothing() {
-        // 発火元を broadcast にして配送 spy（Nostr）で「1 件も配送されない」ことを観測する。
-        let engine = RecordingEngine::new("NO_REPLY");
+    async fn broadcast_fire_does_not_auto_deliver_or_record_the_body() {
+        let engine = RecordingEngine::new("新機能を告知したい");
         let (runner, db, calls) = runner_with(engine);
         let broadcast_target = HeartbeatTarget {
             channel_id: String::new(),
@@ -1408,20 +1431,40 @@ mod tests {
         let started = runner
             .run_turn(&broadcast_target, TurnOrigin::Tick { tick: 1 })
             .await;
+        assert!(started.is_some(), "ターン自体は開始・完了する");
+
+        // 外部配送は 0 件（Nostr spy に何も届かない・spawn され得るので少し待ってから見る）。
+        assert!(
+            !wait_until(|| !calls.lock().unwrap().is_empty()).await,
+            "broadcast 発火で応答本文が自動配送された（二重投稿の道が開く）: {:?}",
+            *calls.lock().unwrap()
+        );
+        // 本文は投稿されないので会話への配送記録も残さない。
+        assert!(
+            heartbeat_speech_records(&db).is_empty(),
+            "broadcast 発火で配送記録が残った（本文は投稿されないはず）"
+        );
+        // 発火ログは 1 行残る（decision=fired）。
+        let logs = heartbeat_log_decisions(&db);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0, "fired", "発火自体は fired として残る");
+    }
+
+    /// #588 Stage 3: **Discord の沈黙（`NO_REPLY`）は無配送・無記録**（旧 IDLE の毎回記録は撤去）。
+    /// 発火自体は `heartbeat_log` に `fired` として残る。
+    #[tokio::test]
+    async fn discord_no_reply_records_nothing() {
+        let engine = RecordingEngine::new("NO_REPLY");
+        let (runner, db, _calls) = runner_with(engine);
+        let started = runner
+            .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+            .await;
         assert!(started.is_some(), "沈黙でもターン自体は開始・完了する");
 
-        // 会話への記録は 0 件（沈黙の回は残さない）。
         assert!(
             heartbeat_speech_records(&db).is_empty(),
             "NO_REPLY の回に会話記録が残っている（沈黙は無記録のはず）"
         );
-        // 外部配送も 0 件（spawn され得るので少し待ってから見る）。
-        assert!(
-            !wait_until(|| !calls.lock().unwrap().is_empty()).await,
-            "NO_REPLY の回に配送された（沈黙は無配送のはず）: {:?}",
-            *calls.lock().unwrap()
-        );
-        // 発火ログは 1 行残る（decision=fired）。
         let logs = heartbeat_log_decisions(&db);
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].0, "fired", "沈黙でも発火自体は fired として残る");
