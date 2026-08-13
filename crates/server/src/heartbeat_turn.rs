@@ -7,11 +7,14 @@
 //! 1. **tick**: 時間で発火する経路（中央スケジューラ `scheduler.rs` の `run_one_fire`）。
 //! 2. **継続ターン**: そのターンが dispatch した非同期サブタスクが決着したときの再開。
 //!
-//! 両者は「文脈を組む → `run_agent_response` → 応答を記録 → `SPEAK/LEARN/IDLE` を解く →
-//! `heartbeat_log` → 発話を配送」までまったく同じことをする。以前 heartbeat が
-//! `NoopCompletionSink` で継続ターンを持たなかった理由の 1 つが「sink で resume させると
-//! `SPEAK:` パースと heartbeat ログ記録を sink 側へ複製する必要がある」だった（#440）。
-//! ここに 1 実装だけ置き、両経路がそれを通ることでその複製を構造的に無くす。
+//! 両者は「文脈を組む → `run_agent_response` → 応答を配送・記録 → `heartbeat_log`」まで
+//! まったく同じことをする。**#588 Stage 3 でハートビートは専用の語彙（旧 SPEAK/LEARN/IDLE）を
+//! 撤去し、通常のターンへ寄せた**: 応答本文（`NO_REPLY` 以外）をそのままチャンネルへ配送し、
+//! 投稿した回だけ通常の配送記録（[`opencrab_server::transcript::record_outbound_reply`]）を
+//! 残す（沈黙＝`NO_REPLY`＝無配送・無記録）。以前 heartbeat が `NoopCompletionSink` で継続
+//! ターンを持たなかった理由の 1 つが「sink で resume させると配送とログ記録を sink 側へ
+//! 複製する必要がある」だった（#440）。ここに 1 実装だけ置き、両経路がそれを通ることで
+//! その複製を構造的に無くす。
 //!
 //! # 二重応答をどう防ぐか
 //!
@@ -31,17 +34,18 @@
 //!
 //! いずれも「完了本文は運ばない（`settle_completed` が親セッションログへ永続化済み）・
 //! system prompt に `[subtask_completed: …]` を足す・会話は DB から組み直す」で共通。
-//! ここも同じ形にしてある。**ハートビート専用セッション側のログは種別で絞らない**
-//! （実会話セクションだけが `speech` に絞られる / #404）ので、`settle_completed` が書いた
-//! 完了本文は `build_heartbeat_conversation_string` がそのまま拾う。この依存は継続ターン
-//! （いま渡す）でも次 tick（拾い直す）でも同じで、#440 の前後で変わらない。
+//! ここも同じ形にしてある。HB ターンの宛先は実会話セッション（#573 Stage B で統合済み）で、
+//! `settle_completed` が書いた完了本文は通常の `build_conversation_string` がそのまま拾う。
+//! この依存は継続ターン（いま渡す）でも次 tick（拾い直す）でも同じで、#440 の前後で変わらない。
 
 use std::sync::Arc;
 
+use opencrab_actions::transcript::{AgentReplyContext, OutboundReplyRecord, TranscriptSource};
 use opencrab_actions::{
     CallerIdentity, RunRequest, SessionLocks, SettleKind, SubtaskCompletionSink, SubtaskSettled,
 };
-use opencrab_core::heartbeat::HeartbeatDecision;
+use opencrab_db::queries::SessionFireTarget;
+use opencrab_gateway::GatewayActions;
 use opencrab_server::subtask_registries::SubtaskRegistries;
 use opencrab_server::AppState;
 
@@ -262,7 +266,7 @@ impl HeartbeatTurnRunner {
         self: &Arc<Self>,
         target: &HeartbeatTarget,
         origin: TurnOrigin,
-    ) -> Option<HeartbeatDecision> {
+    ) -> Option<()> {
         let fut = self.turn(target, &origin);
         self.locks.run_serialized(&target.session_id, fut).await
     }
@@ -290,7 +294,7 @@ impl HeartbeatTurnRunner {
         })
     }
 
-    /// heartbeat 経路の `RunRequest` を組む（#169 / #440）。
+    /// heartbeat 経路の `RunRequest` を組む（#169 / #440 / #588 Stage 3）。
     ///
     /// 非ブロック dispatch（RFC #152 S3a）を有効化する。これにより heartbeat の tick は
     /// 長時間ツールで塞がれず、`cancel_subtask`（#161）からも停止できる。
@@ -308,6 +312,12 @@ impl HeartbeatTurnRunner {
     ///   不整合時の fail-closed 降格（`settle_completed` の `Agent` フォールバック）が HB
     ///   だけに効いて、tick と継続ターンで見えるツールが食い違うのを避けるため。親ターン
     ///   （tick）が `Owner` なので、引き継いでも昇格にはならない。
+    /// - gateway_actions / reply_target（#588 Stage 3）: **通常ターンと同じツール環境**を渡す。
+    ///   発火元 transport の `GatewayActions`（稼働していれば）と、Discord ではチャンネル ID を
+    ///   ツールの既定宛先として載せる。これで HB ターンでも通常ターンと同じく gateway ツールが
+    ///   使える。応答本文そのものの配送は run 内では起きず（`on_response_text` を渡さない）、
+    ///   ターン後に発火元種別で `deliver_heartbeat_speech` が担う（`turn`）。`spawn_subtask` は
+    ///   `SystemGatewayActions` 経由で depth0 全ランに常在するため、この配線に依らず使える。
     fn run_request(
         self: &Arc<Self>,
         target: &HeartbeatTarget,
@@ -315,7 +325,7 @@ impl HeartbeatTurnRunner {
         system_prompt: &str,
         conversation: &str,
     ) -> RunRequest {
-        RunRequest::new(
+        let mut req = RunRequest::new(
             &target.agent_id,
             agent_name,
             &target.session_id,
@@ -327,15 +337,41 @@ impl HeartbeatTurnRunner {
         .with_dispatch(
             Some(self.registries.registry_for(&target.agent_id)),
             self.completion_sink(target),
-        )
+        );
+        if let Some(ga) = self.resolve_gateway_actions(target) {
+            req = req.with_gateway_actions(ga);
+        }
+        // Discord はチャンネル ID をツールの既定宛先にする。Nostr broadcast は返信先ノートを
+        // 持たないので reply_target を付けない（付けても配送はしない・GatewayCallContext の
+        // 既定宛先に載るだけ）。
+        if let SessionFireTarget::DiscordChannel { .. } = &target.fire_target {
+            req = req.with_reply_target(target.channel_id.clone());
+        }
+        req
+    }
+
+    /// 発火元 transport の `GatewayActions` を登録簿から引く（#588 Stage 3）。
+    ///
+    /// 稼働していなければ `None`（Discord の共有 TOML ゲートウェイは登録簿に載らないため
+    /// per-agent 未稼働だと `None` になる。その場合でも `spawn_subtask` は
+    /// `SystemGatewayActions` 経由で使えるので発火本体は成立する）。
+    fn resolve_gateway_actions(&self, target: &HeartbeatTarget) -> Option<Arc<dyn GatewayActions>> {
+        let kind = match &target.fire_target {
+            SessionFireTarget::NostrBroadcast => opencrab_actions::gateway_kinds::NOSTR,
+            SessionFireTarget::DiscordChannel { .. } => opencrab_actions::gateway_kinds::DISCORD,
+        };
+        self.gateways
+            .get(kind)?
+            .gateway_actions_for(&target.agent_id)
     }
 
     /// ターン本体。**呼び出しは [`Self::run_turn`] 経由に限る**（直列化の担保）。
-    async fn turn(
-        self: &Arc<Self>,
-        target: &HeartbeatTarget,
-        origin: &TurnOrigin,
-    ) -> Option<HeartbeatDecision> {
+    ///
+    /// #588 Stage 3: **通常のターンとして走る。** 応答本文が `NO_REPLY`（または空）でなければ、
+    /// それをそのままチャンネルへ配送し（発火元種別で決まる出口 / #591）、投稿した回だけ通常の
+    /// 配送記録を残す（[`Self::record_posted_reply`]）。沈黙（`NO_REPLY`）は無配送・無記録
+    /// （旧 `IDLE:` の毎回記録は撤去）。発火自体は `heartbeat_log` に `fired` として残す。
+    async fn turn(self: &Arc<Self>, target: &HeartbeatTarget, origin: &TurnOrigin) -> Option<()> {
         let (system_prompt, agent_name, conversation) = self.build_context(target, origin)?;
 
         let engine_result = self
@@ -343,64 +379,40 @@ impl HeartbeatTurnRunner {
             .run(self.run_request(target, &agent_name, &system_prompt, &conversation))
             .await;
 
-        let decision = match engine_result {
+        match engine_result {
             Ok(result) => {
-                // #573 Stage B: 決定を先に解き、正規化した本文を実会話セッション
-                // （target.session_id は Stage B で = channel_session_id）へ第一級で 1 行記録する。
-                // - SPEAK: parse_heartbeat_decision が返すクリーン本文（マーカー・思考行前置を
-                //   除去済み）を記録する（#425 エコーが記録していた形）。生の `SPEAK:` を残すと
-                //   モデルが自分の履歴で probe 形式を見て通常返信にマーカーを漏らすリスクがある。
-                // - IDLE / LEARN: #515 の記録形（応答テキストそのまま = `IDLE: 理由` / `LEARN: …`）
-                //   を踏襲する。新しい書式は発明しない。
-                // R-simple: 配信可否に関わらず無条件で記録する（#515 の理念。配信失敗した SPEAK も
-                //   本人の言葉として残す。Nostr は delivered=false だが記録は残す）。
-                let decision = crate::parse_heartbeat_decision(&result.response);
-                let record_text: String = match &decision {
-                    HeartbeatDecision::Speak(content) => content.clone(),
-                    _ => result.response.trim().to_string(),
-                };
-                {
-                    let conn = self.db.lock().unwrap();
-                    let log = opencrab_db::queries::SessionLogRow {
-                        id: None,
-                        agent_id: target.agent_id.clone(),
-                        session_id: target.session_id.clone(),
-                        log_type: "speech".to_string(),
-                        content: record_text,
-                        speaker_id: Some(target.agent_id.clone()),
-                        turn_number: None,
-                        metadata_json: None,
-                        created_at: None,
-                    };
-                    if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                        tracing::error!(agent_id = %target.agent_id, "Failed to insert heartbeat response log: {e}");
-                    }
+                // 通常ターンと同じ NO_REPLY 判定（`message_loop.rs`）。沈黙は配送も記録もしない。
+                let text = result.response.trim();
+                if text.is_empty() || text == "NO_REPLY" {
+                    tracing::debug!(
+                        agent_id = %target.agent_id,
+                        session_id = %target.session_id,
+                        origin = %origin.label(),
+                        "Heartbeat turn: NO_REPLY（沈黙・無配送・無記録）"
+                    );
+                } else {
+                    // 投稿した回: 実会話セッションへ通常の配送記録を残し、応答本文を配送する。
+                    self.record_posted_reply(target, origin, &result, text);
+                    self.deliver_speech(target, text);
+                    tracing::debug!(
+                        agent_id = %target.agent_id,
+                        session_id = %target.session_id,
+                        channel_id = %target.channel_id,
+                        origin = %origin.label(),
+                        "Heartbeat turn: 応答本文をチャンネルへ配送"
+                    );
                 }
-                decision
             }
             Err(e) => {
                 tracing::warn!(
                     "Heartbeat agent response failed for channel {}: {e}",
                     target.channel_id
                 );
-                HeartbeatDecision::Idle
             }
-        };
+        }
 
-        // 移設前は tick ループ側にあった 1 行（`Heartbeat tick result`）。継続ターンも
-        // 同じ 1 行で観測できるよう、発火元をラベルで添えてここへ移した。
-        tracing::debug!(
-            agent_id = %target.agent_id,
-            session_id = %target.session_id,
-            channel_id = %target.channel_id,
-            origin = %origin.label(),
-            decision = %decision,
-            "Heartbeat turn result"
-        );
-
-        self.record_heartbeat_log(target, origin, &decision);
-        self.apply_decision(target, origin, &decision);
-        Some(decision)
+        self.record_heartbeat_log(target, origin);
+        Some(())
     }
 
     /// 文脈（system prompt / エージェント名 / 会話文字列）を組む。失敗したら `None`。
@@ -470,21 +482,21 @@ impl HeartbeatTurnRunner {
         Some((system_prompt, agent_name, conversation))
     }
 
-    /// `heartbeat_log` へ 1 行残す。tick の `result_json` は移設前と同じキー集合。
-    fn record_heartbeat_log(
-        &self,
-        target: &HeartbeatTarget,
-        origin: &TurnOrigin,
-        decision: &HeartbeatDecision,
-    ) {
+    /// `heartbeat_log` へ 1 行残す（発火ログ・#588 Stage 3）。
+    ///
+    /// **`decision` 列は廃止された語彙（旧 `SPEAK`/`LEARN`/`IDLE`）。** #588 Stage 3 で通常ターンへ
+    /// 寄せ、その tick が何を出力したかは会話ログ（投稿した回は [`Self::record_posted_reply`]・
+    /// 沈黙は無記録）が持つようになったため、この列は「もう使っていないが過去データ
+    /// （既存 13,073 行）のため残す」列になった。列が `NOT NULL` なので**マイグレーションせず**、
+    /// 新規行には**固定値 `fired`**（＝「この tick が発火した」ことだけを表す）を入れる。同じ経緯を
+    /// 列定義側（`opencrab_db` の `schema/sql.rs` の `heartbeat_log`）にも明記してある。
+    ///
+    /// `result_json` は発火の所在（`channel_id`）と指示文の由来（`source`）を残す。`source` は
+    /// #586（agent スコープ廃止）が入るまで「適用された指示が channel か agent か」の診断値として
+    /// 意味があるため落とさない。継続ターンだけ発火元（`origin`）を添える。
+    fn record_heartbeat_log(&self, target: &HeartbeatTarget, origin: &TurnOrigin) {
         let Ok(conn) = self.db.lock() else {
             return;
-        };
-        let decision_str = match decision {
-            HeartbeatDecision::Idle => "idle",
-            HeartbeatDecision::Speak(_) => "speak",
-            HeartbeatDecision::Learn => "learn",
-            HeartbeatDecision::ManageSkills { .. } => "manage_skills",
         };
         let mut result = serde_json::json!({
             "channel_id": target.channel_id,
@@ -503,84 +515,88 @@ impl HeartbeatTurnRunner {
                 obj.insert("exit_reason".to_string(), serde_json::json!(exit_reason));
             }
         }
+        // `decision` は廃止語彙の固定値（上記 doc）。
         if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
             &conn,
             &target.agent_id,
-            decision_str,
+            "fired",
             Some(&result.to_string()),
         ) {
             tracing::error!(agent_id = %target.agent_id, "Failed to insert heartbeat log: {}", e);
         }
     }
 
-    /// Speak / Learn の後続処理（配送・内省メモ）。どちらも fire-and-forget。
-    fn apply_decision(
+    /// 投稿した回の**通常の配送記録**（#588 Stage 3）。
+    ///
+    /// 発火元 transport から `source` を、`origin` から `context` を決め、通常ターンの応答と
+    /// 同じ [`opencrab_server::transcript::record_outbound_reply`] の行を実会話セッションへ残す。
+    /// HB 固有の毎回記録（旧 `record_heartbeat_response`）はこれに置き換えて撤去した。沈黙の回は
+    /// 呼ばれない（無記録）。
+    fn record_posted_reply(
         &self,
         target: &HeartbeatTarget,
         origin: &TurnOrigin,
-        decision: &HeartbeatDecision,
+        result: &opencrab_core::EngineResult,
+        text: &str,
     ) {
-        match decision {
-            HeartbeatDecision::Speak(content) => {
-                // 発話出口（段階3 PR-A / #246）。まず登録簿（`state.gateways`）の
-                // 非 Discord transport を試し、配れなければ既存の Discord 共有 http
-                // 経路へ落ちる。Discord の挙動はバイト単位で不変（詳細は
-                // `heartbeat_delivery` モジュール doc）。fire-and-forget で発火 tick を
-                // 塞がない（#178 系）。
-                let content = content.clone();
-                let gateways = self.gateways.clone();
-                let discord_http = self.discord_http.clone();
-                let agent_id_log = target.agent_id.clone();
-                let ch_id_str = target.channel_id.clone();
-                // 配送先は発火元の種別で決める（#591）。Discord チャンネルの発火は Discord へ、
-                // ブロードキャスト発火は該当 transport へ直接ディスパッチする（試す順番を撤去）。
-                let route =
-                    heartbeat_delivery::DeliveryRoute::from_fire_target(&target.fire_target);
-                tokio::spawn(async move {
-                    // 配送のみ（fire-and-forget）。実会話セッションへの記録は #573 Stage B で
-                    // turn() の経路1（正規化記録）に一元化したため、#425 エコー
-                    // （record_heartbeat_channel_echo）の呼び出しは撤去した。delivered 戻り値は
-                    // 使わない（R-simple: 配信可否に関わらず記録済み）。
-                    heartbeat_delivery::deliver_heartbeat_speech(
-                        &gateways,
-                        &discord_http,
-                        route,
-                        &agent_id_log,
-                        &ch_id_str,
-                        &content,
-                    )
-                    .await;
-                });
+        let Ok(conn) = self.db.lock() else {
+            return;
+        };
+        let (source, channel_id, context) = match &target.fire_target {
+            SessionFireTarget::DiscordChannel { .. } => {
+                // 通常ターンと同じ `triggered_by`: tick は直接応答、継続ターンは subtask 完了。
+                let ctx = match origin {
+                    TurnOrigin::SubtaskResume { .. } => AgentReplyContext::SubtaskCompleted,
+                    TurnOrigin::Tick { .. } => AgentReplyContext::Direct {
+                        tool_calls_made: result.tool_calls_made,
+                    },
+                };
+                (
+                    TranscriptSource::Discord,
+                    Some(target.channel_id.as_str()),
+                    Some(ctx),
+                )
             }
-            HeartbeatDecision::Learn => {
-                let db = self.db.clone();
-                let agent_id_log = target.agent_id.clone();
-                let ch_id_str = target.channel_id.clone();
-                let origin_label = origin.label();
-                tokio::spawn(async move {
-                    if let Ok(conn) = db.lock() {
-                        let memory = opencrab_db::queries::CuratedMemoryRow {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            agent_id: agent_id_log.clone(),
-                            category: "reflection".to_string(),
-                            content: format!(
-                                "ハートビート内省 ({}, channel {}): 静かに自己を振り返る。",
-                                origin_label, ch_id_str
-                            ),
-                            created_at: String::new(),
-                        };
-                        if let Err(e) = opencrab_db::queries::upsert_curated_memory(&conn, &memory)
-                        {
-                            tracing::error!(agent_id = %agent_id_log, "Heartbeat reflect_and_learn failed: {e}");
-                        } else {
-                            tracing::info!(agent_id = %agent_id_log, channel_id = %ch_id_str, "Heartbeat reflect_and_learn: saved at {}", origin_label);
-                        }
-                    }
-                });
-            }
-            HeartbeatDecision::Idle => {}
-            HeartbeatDecision::ManageSkills { .. } => {}
-        }
+            // Nostr は通常ターンでも `context`（triggered_by）を記録しない（`OutboundReplyRecord` doc）。
+            SessionFireTarget::NostrBroadcast => (TranscriptSource::Nostr, None, None),
+        };
+        opencrab_server::transcript::record_outbound_reply(
+            &conn,
+            source,
+            &OutboundReplyRecord {
+                agent_id: &target.agent_id,
+                session_id: &target.session_id,
+                channel_id,
+                text,
+                context,
+            },
+        );
+    }
+
+    /// 応答本文をチャンネルへ配送する（fire-and-forget・#588 Stage 3 / #591）。
+    ///
+    /// 配送先は発火元の種別で決める（Discord チャンネル発火は Discord へ、ブロードキャスト発火は
+    /// 該当 transport へ）。発火 tick を塞がないよう spawn する（#178 系）。送信の実体は
+    /// [`heartbeat_delivery`]（#400 のハンドル解決・分割送信）を**再利用**する——これは
+    /// ハートビート専用ではなく「メッセージループの外からチャンネルへ投稿する」ための送信。
+    fn deliver_speech(&self, target: &HeartbeatTarget, text: &str) {
+        let content = text.to_string();
+        let gateways = self.gateways.clone();
+        let discord_http = self.discord_http.clone();
+        let agent_id = target.agent_id.clone();
+        let channel_target = target.channel_id.clone();
+        let route = heartbeat_delivery::DeliveryRoute::from_fire_target(&target.fire_target);
+        tokio::spawn(async move {
+            heartbeat_delivery::deliver_heartbeat_speech(
+                &gateways,
+                &discord_http,
+                route,
+                &agent_id,
+                &channel_target,
+                &content,
+            )
+            .await;
+        });
     }
 }
 
@@ -661,9 +677,9 @@ mod tests {
 
     const AGENT: &str = "agent-a";
     const SESSION: &str = "heartbeat-agent-a-222";
-    /// scheduler が整形して target に載せる指示文（本番と同形）。#501 でこれが system
-    /// プロンプトへ入る。判別しやすいよう固有の文言を混ぜてある。
-    const INSTRUCTIONS: &str = "[ハートビート] 現在の会話「テスト部屋」。20分ごとに巡回してね。\n出力形式: SPEAK/LEARN/IDLE のいずれか。SPEAKの場合のみ 'SPEAK: <メッセージ>' の形式で一言。";
+    /// scheduler が整形して target に載せる指示文（本番と同形・#588 Stage 3）。#501 でこれが
+    /// system プロンプトへ入る。判別しやすいよう固有の文言（「20分ごとに巡回してね」）を混ぜてある。
+    const INSTRUCTIONS: &str = "[ハートビート] 現在の会話「テスト部屋」。20分ごとに巡回してね。\nいまはハートビートの時間です。取り組むことがあれば自分の言葉で短く添えたうえで spawn_subtask で起動し、無ければ NO_REPLY とだけ答えてください。";
 
     fn target() -> HeartbeatTarget {
         HeartbeatTarget {
@@ -1106,7 +1122,7 @@ mod tests {
     /// 発火させる。`NoopCompletionSink` に戻せば 2 ターン目が起きず、このテストが落ちる。
     #[tokio::test]
     async fn subtask_completion_starts_a_continuation_turn_with_the_result() {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, db, _calls) = runner_with(engine.clone());
 
         // 1 ターン目（tick）。ここで張られた sink が継続ターンの入口になる。
@@ -1144,7 +1160,7 @@ mod tests {
     /// #501: tick の指示文は **system プロンプト**へ入り、会話文脈には積まれない。
     #[tokio::test]
     async fn tick_puts_instructions_in_the_system_prompt_not_the_conversation() {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, _db, _calls) = runner_with(engine.clone());
 
         runner
@@ -1153,7 +1169,7 @@ mod tests {
 
         let sys = &engine.system_prompts()[0];
         assert!(
-            sys.contains("20分ごとに巡回してね") && sys.contains("出力形式: SPEAK/LEARN/IDLE"),
+            sys.contains("20分ごとに巡回してね") && sys.contains("spawn_subtask"),
             "tick の指示文が system プロンプトに入っていない: {sys}"
         );
         // 会話文脈には指示文を積まない（scheduler はセッションログへ書かない / #501）。
@@ -1190,7 +1206,7 @@ mod tests {
     /// read 経路で担保する（#508 が直した「Nostr HB に実会話が入らない」を統合後の形で維持）。
     #[tokio::test]
     async fn nostr_heartbeat_reads_channel_conversation_from_its_session() {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, db, _calls) = runner_with(engine.clone());
 
         // 本番同型: 発火セッション＝実会話セッション（nostr watch が書くリテラル）。
@@ -1224,7 +1240,7 @@ mod tests {
     /// 通常経路で読む。実会話がそのまま入ることを同じ read 経路で担保する。
     #[tokio::test]
     async fn discord_heartbeat_reads_channel_conversation_from_its_session() {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, db, _calls) = runner_with(engine.clone());
 
         insert_speech(&db, "discord-agent-a-111-222", "human-1", "会議いつ？");
@@ -1248,11 +1264,11 @@ mod tests {
     }
 
     /// #501 + #440: 継続ターンの system プロンプトには **指示文と決着マーカーの両方**が載り、
-    /// 出力形式の規約行は 1 度だけ現れる（重複しない）。
+    /// 指示文（standing instruction）は 1 度だけ現れる（suffix が重複させない）。
     #[tokio::test]
-    async fn continuation_system_prompt_has_instructions_and_marker_without_duplicate_format_line()
+    async fn continuation_system_prompt_has_instructions_and_marker_without_duplicate_instruction()
     {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, db, _calls) = runner_with(engine.clone());
         insert_subtask_completed_log(&db, "調査おわり");
 
@@ -1277,27 +1293,23 @@ mod tests {
             sys.contains("[subtask_completed: subtask_id=st-1, exit_reason=completed]"),
             "決着マーカーが載っていない: {sys}"
         );
-        // 出力形式の規約行は 1 度だけ（指示文側のみ。suffix には置かない）。
+        // 指示文の誘導（spawn_subtask 行）は 1 度だけ（指示文側のみ。suffix には置かない）。
         assert_eq!(
-            sys.matches("出力形式: SPEAK/LEARN/IDLE").count(),
+            sys.matches("spawn_subtask").count(),
             1,
-            "出力形式の規約行が重複している: {sys}"
+            "指示文の誘導が重複している（suffix が二重に載せた）: {sys}"
         );
     }
 
-    /// 継続ターンの `SPEAK:` は tick とまったく同じ配送に乗る。
+    /// #588 Stage 3: 継続ターンの応答本文が tick とまったく同じ配送に乗る。
     ///
     /// **#591 で発火元を broadcast（Nostr）に変えた。** `runner_with` の配送 spy（`calls`）は
-    /// Nostr transport なので、これを観測するには**発火元が broadcast**でなければならない。
-    /// 以前はここが Discord チャンネルの発火（`target()`）のまま Nostr spy へ届くのを期待して
-    /// いたが、それは「Discord 発火が Nostr へ持って行かれる」#591 の不具合そのものを期待値に
-    /// していた。配送先を発火元の種別で決めるよう直した今、Discord 発火は Discord へ行き
-    /// Nostr spy には届かない。この tick/継続で配送経路が同一という性質は発火元種別に依らない
-    /// ので、観測できる broadcast 発火で確かめる（Discord 発火の直接ディスパッチは
-    /// `heartbeat_delivery` の単体テストが押さえる）。
+    /// Nostr transport なので、これを観測するには**発火元が broadcast**でなければならない
+    /// （Discord 発火の直接ディスパッチは `heartbeat_delivery` の単体テストが押さえる）。応答本文
+    /// （`NO_REPLY` 以外）がそのまま配送される（旧 `SPEAK:` の解析は撤去した）。
     #[tokio::test]
-    async fn continuation_speak_goes_through_the_existing_delivery() {
-        let engine = RecordingEngine::new("SPEAK: 新着に返信した");
+    async fn continuation_response_body_goes_through_the_existing_delivery() {
+        let engine = RecordingEngine::new("新着に返信した");
         let (runner, db, calls) = runner_with(engine.clone());
         insert_subtask_completed_log(&db, "結果");
 
@@ -1307,7 +1319,7 @@ mod tests {
             fire_target: opencrab_db::queries::SessionFireTarget::NostrBroadcast,
             ..target()
         };
-        let decision = runner
+        let started = runner
             .run_turn(
                 &broadcast_target,
                 TurnOrigin::SubtaskResume {
@@ -1317,20 +1329,20 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(decision, Some(HeartbeatDecision::Speak(ref c)) if c == "新着に返信した"));
+        assert!(started.is_some(), "継続ターンが開始する");
         assert!(
             wait_until(|| !calls.lock().unwrap().is_empty()).await,
-            "継続ターンの発話が既存の配送出口（deliver_heartbeat_speech）に乗る"
+            "継続ターンの応答本文が既存の配送出口（deliver_heartbeat_speech）に乗る"
         );
         assert_eq!(
             *calls.lock().unwrap(),
             vec![(String::new(), "新着に返信した".to_string())],
-            "broadcast 発火は Nostr transport へ本文を渡す（宛先は channel を持たないので空）"
+            "broadcast 発火は Nostr transport へ応答本文を渡す（宛先は channel を持たないので空）"
         );
-        // heartbeat_log にも 1 行残り、発火元が subtask 決着だと分かる。
+        // heartbeat_log にも 1 行残り（decision は固定値 fired）、発火元が subtask 決着だと分かる。
         let logs = heartbeat_log_decisions(&db);
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].0, "speak");
+        assert_eq!(logs[0].0, "fired");
         assert!(
             logs[0].1.contains("\"origin\":\"subtask_resume\"") && logs[0].1.contains("st-1"),
             "継続ターンの heartbeat_log は発火元を残す: {}",
@@ -1338,10 +1350,11 @@ mod tests {
         );
     }
 
-    /// tick の `heartbeat_log` の形は移設前のまま（`channel_id` と `source` だけ）。
+    /// #588 Stage 3: tick の `heartbeat_log` は `decision=fired` 固定で、`result_json` は
+    /// `channel_id` と `source` だけ（tick 行に発火元は足さない）。
     #[tokio::test]
-    async fn tick_heartbeat_log_shape_is_unchanged() {
-        let engine = RecordingEngine::new("IDLE");
+    async fn tick_heartbeat_log_records_fired() {
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, db, _calls) = runner_with(engine);
         runner
             .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
@@ -1349,7 +1362,7 @@ mod tests {
 
         let logs = heartbeat_log_decisions(&db);
         assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].0, "idle");
+        assert_eq!(logs[0].0, "fired", "廃止語彙ではなく固定値 fired を入れる");
         let v: serde_json::Value = serde_json::from_str(&logs[0].1).unwrap();
         assert_eq!(
             v,
@@ -1358,95 +1371,60 @@ mod tests {
         );
     }
 
-    /// #515 / #573 Stage B: **ターン結果を記録として残す**。SPEAK / LEARN / IDLE のどれでも、
-    /// エージェント自身の言葉が（Stage B では実会話）セッションへ `speech` として 1 行残る。
-    /// IDLE / LEARN は #515 の形（応答テキストそのまま = `IDLE: 理由` / `LEARN: …`）。
-    /// **SPEAK だけは Stage B でマーカーを剥いだクリーン本文**を記録する（生の `SPEAK:` を
-    /// 履歴に残すと通常返信に probe マーカーが漏れるため）。
+    /// #588 Stage 3: **投稿した回だけ**通常の配送記録を残す。応答本文（`NO_REPLY` 以外）が
+    /// エージェント自身の言葉として実会話セッションへ `speech` で 1 行残る（旧 IDLE/LEARN の
+    /// 毎回記録は撤去し、`record_outbound_reply` の通常記録に寄せた）。
     ///
-    /// **変異確認**: この記録は `turn()` の `speech` 挿入（正規化した本文を書く箇所）が担う。
-    /// その挿入を外すと記録が 0 件になり、3 ケースとも赤くなる。
+    /// **変異確認**: この記録は `turn()` が `record_posted_reply` を呼ぶ箇所が担う。その呼び出しを
+    /// 外すと記録が 0 件になりこのテストが赤くなる。
     #[tokio::test]
-    async fn every_decision_leaves_the_agents_own_words_as_a_record() {
-        // IDLE + 理由。理由が記録へそのまま残る。
-        {
-            let engine = RecordingEngine::new("IDLE: TL に新しい話題が無い");
-            let (runner, db, _calls) = runner_with(engine);
-            runner
-                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
-                .await;
-            let records = heartbeat_speech_records(&db);
-            assert_eq!(records, vec!["IDLE: TL に新しい話題が無い".to_string()]);
-        }
-        // SPEAK。#573 Stage B: マーカーを剥いだクリーン本文が記録に残る（`SPEAK:` は付かない）。
-        {
-            let engine = RecordingEngine::new("SPEAK: 新着に返信した");
-            let (runner, db, _calls) = runner_with(engine);
-            runner
-                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
-                .await;
-            assert_eq!(
-                heartbeat_speech_records(&db),
-                vec!["新着に返信した".to_string()]
-            );
-        }
-        // LEARN。何をしたか（内省した）が記録に残る。
-        {
-            let engine = RecordingEngine::new("LEARN: 巡回の気づきをメモした");
-            let (runner, db, _calls) = runner_with(engine);
-            runner
-                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
-                .await;
-            assert_eq!(
-                heartbeat_speech_records(&db),
-                vec!["LEARN: 巡回の気づきをメモした".to_string()]
-            );
-        }
-    }
-
-    /// #515: 理由が無い素の `IDLE`（LLM が規約を守らない場合）でも壊れない。決定は Idle、
-    /// 記録は空にならず「IDLE」1 語がそのまま残る（記録機構は応答をそのまま書くだけ）。
-    #[tokio::test]
-    async fn bare_idle_without_reason_still_records() {
-        let engine = RecordingEngine::new("IDLE");
+    async fn a_posted_turn_records_the_response_body_as_an_outbound_reply() {
+        let engine = RecordingEngine::new("新機能の反応を見にいってくる");
         let (runner, db, _calls) = runner_with(engine);
-        let decision = runner
+        runner
             .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
             .await;
-        assert!(matches!(decision, Some(HeartbeatDecision::Idle)));
-        assert_eq!(heartbeat_speech_records(&db), vec!["IDLE".to_string()]);
-    }
-
-    /// #515（SPEAK 側の非対称の是正）: **IDLE の理由文に `SPEAK:` が紛れても外部配送しない**。
-    ///
-    /// 決定が Idle になること（parse）だけでなく、**配送出口（spy）が 1 度も呼ばれない**ことを
-    /// ターンごと通しで見る。旧実装だと理由の右側が発話として `deliver_heartbeat_speech` に乗り、
-    /// 取り消せない外部投稿になる。`parse_heartbeat_decision` の SPEAK 除外を外すと spy に
-    /// 送信が入り、このテストが赤くなる（＝外部誤投稿の検知）。
-    #[tokio::test]
-    async fn idle_reason_mentioning_speak_is_never_delivered() {
-        let engine = RecordingEngine::new("IDLE: 今は SPEAK: するほどの話題がない");
-        let (runner, db, calls) = runner_with(engine);
-
-        let decision = runner
-            .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
-            .await;
-
-        assert!(
-            matches!(decision, Some(HeartbeatDecision::Idle)),
-            "IDLE の理由に SPEAK: が入っても決定は Idle"
-        );
-        // 配送は spawn され得るので、少し待ってからでも 1 件も無いことを見る。
-        assert!(
-            !wait_until(|| !calls.lock().unwrap().is_empty()).await,
-            "IDLE の理由文が外部チャンネルへ配送された（取り消せない誤投稿）: {:?}",
-            *calls.lock().unwrap()
-        );
-        // 記録には理由がそのまま残る（記録は応答をそのまま書く）。
         assert_eq!(
             heartbeat_speech_records(&db),
-            vec!["IDLE: 今は SPEAK: するほどの話題がない".to_string()]
+            vec!["新機能の反応を見にいってくる".to_string()],
+            "投稿した回は応答本文が通常の配送記録として残る"
         );
+    }
+
+    /// #588 Stage 3: **沈黙（`NO_REPLY`）は無配送・無記録**（旧 IDLE の毎回記録は撤去）。
+    ///
+    /// 発火自体は `heartbeat_log` に `fired` として残るが、会話への記録も外部配送も起きない。
+    /// `turn()` の NO_REPLY 分岐を外して常に配送・記録するとこのテストが赤くなる。
+    #[tokio::test]
+    async fn a_no_reply_turn_records_nothing_and_delivers_nothing() {
+        // 発火元を broadcast にして配送 spy（Nostr）で「1 件も配送されない」ことを観測する。
+        let engine = RecordingEngine::new("NO_REPLY");
+        let (runner, db, calls) = runner_with(engine);
+        let broadcast_target = HeartbeatTarget {
+            channel_id: String::new(),
+            fire_target: opencrab_db::queries::SessionFireTarget::NostrBroadcast,
+            ..target()
+        };
+        let started = runner
+            .run_turn(&broadcast_target, TurnOrigin::Tick { tick: 1 })
+            .await;
+        assert!(started.is_some(), "沈黙でもターン自体は開始・完了する");
+
+        // 会話への記録は 0 件（沈黙の回は残さない）。
+        assert!(
+            heartbeat_speech_records(&db).is_empty(),
+            "NO_REPLY の回に会話記録が残っている（沈黙は無記録のはず）"
+        );
+        // 外部配送も 0 件（spawn され得るので少し待ってから見る）。
+        assert!(
+            !wait_until(|| !calls.lock().unwrap().is_empty()).await,
+            "NO_REPLY の回に配送された（沈黙は無配送のはず）: {:?}",
+            *calls.lock().unwrap()
+        );
+        // 発火ログは 1 行残る（decision=fired）。
+        let logs = heartbeat_log_decisions(&db);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].0, "fired", "沈黙でも発火自体は fired として残る");
     }
 
     /// 継続ターンは HB セッションの直列化ロックを通る（走行中の tick と並行しない）。
@@ -1456,7 +1434,7 @@ mod tests {
     /// このテストが落ちる（＝二重応答の不変条件が壊れたことを検知する）。
     #[tokio::test]
     async fn a_continuation_turn_waits_for_the_running_turn() {
-        let (engine, gate) = RecordingEngine::gated("IDLE");
+        let (engine, gate) = RecordingEngine::gated("NO_REPLY");
         let (runner, _db, _calls) = runner_with(engine.clone());
 
         let r1 = runner.clone();
@@ -1498,7 +1476,7 @@ mod tests {
     /// dispatch の配線（#169 の不変条件）は継続ターンでも保たれる。
     #[tokio::test]
     async fn run_request_keeps_dispatch_wiring() {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, _db, _calls) = runner_with(engine.clone());
         runner
             .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
@@ -1521,10 +1499,59 @@ mod tests {
         );
     }
 
+    /// #588 Stage 3: 通常ターンと同じツール環境（gateway_actions / reply_target）を配線する。
+    ///
+    /// - broadcast 発火（Nostr）: `runner_with` が Nostr の `FakeGateway` を登録しているので
+    ///   `gateway_actions` が載る。返信先ノートが無いので `reply_target` は付けない。
+    /// - Discord 発火: チャンネル ID を `reply_target` に載せる（ツールの既定宛先）。
+    ///   （テストの登録簿には Discord ゲートウェイが無いので `gateway_actions` は None になるが、
+    ///   本番では per-agent Discord ゲートウェイが載る。ここでは reply_target の配線を担保する。）
+    #[tokio::test]
+    async fn run_request_wires_gateway_actions_and_reply_target() {
+        // broadcast 発火。
+        {
+            let engine = RecordingEngine::new("NO_REPLY");
+            let (runner, _db, _calls) = runner_with(engine.clone());
+            let broadcast_target = HeartbeatTarget {
+                channel_id: String::new(),
+                fire_target: opencrab_db::queries::SessionFireTarget::NostrBroadcast,
+                ..target()
+            };
+            runner
+                .run_turn(&broadcast_target, TurnOrigin::Tick { tick: 1 })
+                .await;
+            let requests = engine.requests.lock().unwrap();
+            let req = requests.last().unwrap();
+            assert!(
+                req.gateway_actions.is_some(),
+                "broadcast 発火は稼働中 transport の gateway_actions を渡す"
+            );
+            assert!(
+                req.reply_target.is_none(),
+                "broadcast は返信先ノートを持たないので reply_target を付けない"
+            );
+        }
+        // Discord 発火。
+        {
+            let engine = RecordingEngine::new("NO_REPLY");
+            let (runner, _db, _calls) = runner_with(engine.clone());
+            runner
+                .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+                .await;
+            let requests = engine.requests.lock().unwrap();
+            let req = requests.last().unwrap();
+            assert_eq!(
+                req.reply_target.as_deref(),
+                Some("222"),
+                "Discord 発火はチャンネル ID を reply_target に載せる"
+            );
+        }
+    }
+
     /// registry は **agent 単位**で共有される（tick / 継続ターンを跨いで同一 Arc）。
     #[tokio::test]
     async fn registry_is_shared_across_turns_per_agent() {
-        let engine = RecordingEngine::new("IDLE");
+        let engine = RecordingEngine::new("NO_REPLY");
         let (runner, _db, _calls) = runner_with(engine.clone());
 
         runner

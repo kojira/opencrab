@@ -431,11 +431,19 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 );
 
 -- ============================================
--- ハートビートログ
+-- ハートビートログ（発火ログ）
 -- ============================================
+-- `decision` は**廃止された語彙**。#588 Stage 3 でハートビートを通常ターンへ寄せる前は、
+-- 旧 `SPEAK`/`LEARN`/`IDLE` の分類（`speak`/`learn`/`idle` 等）を入れていた。通常ターン化した
+-- 後は、その tick が何を出力したかは会話ログ（投稿した回は `session_logs` の配送記録・沈黙は
+-- 無記録）が持ち、この列は使わなくなった。ただし過去データ（既存 13,073 行の `speak`/`idle`/
+-- `learn`）のため列は残す（列が `NOT NULL` なのでマイグレーションしない）。新規行は発火した
+-- 事実だけを表す固定値 `fired` を入れる（書き込み側: server crate の `heartbeat_turn.rs` の
+-- `record_heartbeat_log`）。過去行の意味は変えない。
 CREATE TABLE IF NOT EXISTS heartbeat_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL,
+    -- 廃止語彙。新規行は固定値 `fired`（上のコメント参照）。過去データのため列を残す。
     decision TEXT NOT NULL,
     result_json TEXT,
     created_at TEXT NOT NULL
