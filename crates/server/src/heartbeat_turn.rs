@@ -425,25 +425,22 @@ impl HeartbeatTurnRunner {
             agent_model.split(':').nth(1).unwrap_or(""),
             self.compaction_ratio,
         );
-        // #404: ハートビート専用セッションの履歴だけでは、**同じチャンネルで実際に
-        // 交わされた会話が 1 行も見えない**（見えるのは自分の過去のハートビートだけ）。
-        // 実会話セッションを解決して文脈へ入れる。専用セッションへの分離自体
-        // （`SPEAK:` パースとハートビートログを実会話と混ぜない）は維持し、実会話は
-        // **読むだけ**。
-        // #508: 実会話セッションは発火先種別から解決済み（`run_one_fire` が
-        // `SessionFireTarget::channel_session_id` で解く）。以前はここで guild_id/channel_id
-        // から Discord 書式を組み直していたため、Nostr（両 ID が空）では必ず解決に失敗し外の
-        // 会話が 1 行も入らなかった。target が持つ解決済み ID をそのまま読む。
-        let conversation = match opencrab_server::process::build_heartbeat_conversation_string(
+        // #588 Stage 1: HB ターンの宛先は実会話セッション（`session_id` == `channel_session_id`・
+        // #573 Stage B で統合済み）なので、専用の `build_heartbeat_conversation_string`（実会話
+        // セッションを別引数で受け、両者が等値のとき `[Channel conversation]` 節を等値フィルタで
+        // 常に落とす上位ラッパ）を、通常の `build_conversation_string` へ寄せる。本番では
+        // `session == channel_session` のため出力はバイト単位で不変（`conversation.rs` の
+        // `collapses_to_recent_conversation_when_sessions_are_equal` が担保）。専用会話関数・定数・
+        // `HeartbeatTarget.channel_session_id` フィールドの撤去は #588 Stage 4（本段は呼び出しの差し替えのみ）。
+        let conversation = match opencrab_server::process::build_conversation_string(
             &conn,
             &target.session_id,
-            Some(target.channel_session_id.as_str()),
             &target.agent_id,
             budget,
         ) {
             Ok(s) => s,
             Err(e) => {
-                tracing::error!(agent_id = %target.agent_id, session_id = %target.session_id, "build_heartbeat_conversation_string failed: {e}");
+                tracing::error!(agent_id = %target.agent_id, session_id = %target.session_id, "build_conversation_string failed: {e}");
                 return None;
             }
         };
@@ -1173,35 +1170,26 @@ mod tests {
         .unwrap();
     }
 
-    /// #508: Nostr のハートビートに `[Channel conversation]` が入り、他者の直近発言が含まれる
-    /// こと。**発火先種別（`NostrBroadcast`）から解決した** channel session を target に載せ、
-    /// `build_context` がそれを読む経路を丸ごと踏む。
-    ///
-    /// **恒真回避**: 実会話は本番の nostr watch が書く**リテラル** `nostr-{agent}` へ seed し、
-    /// target の `channel_session_id` は解決経路（`SessionFireTarget::channel_session_id`）から
-    /// 取る。両者は解決が正しいときだけ一致する。解決を旧 Discord 専用（Nostr で空/None 相当）へ
-    /// 戻すと target が別セッションを指し、実会話が 1 行も入らず assertion が赤くなる。
+    /// #588 Stage 1: HB ターンは宛先セッションを通常の `build_conversation_string` で読む。
+    /// 本番では宛先＝実会話セッション（`session_id == channel_session_id`・#573 Stage B）なので、
+    /// Nostr HB でも他者の直近発言がそのまま会話へ入ることを、`run_turn`→`build_context` の
+    /// read 経路で担保する（#508 が直した「Nostr HB に実会話が入らない」を統合後の形で維持）。
     #[tokio::test]
-    async fn nostr_heartbeat_gets_channel_conversation_from_fire_target() {
+    async fn nostr_heartbeat_reads_channel_conversation_from_its_session() {
         let engine = RecordingEngine::new("IDLE");
         let (runner, db, _calls) = runner_with(engine.clone());
 
-        // 本番の nostr watch が書く実会話セッション（リテラル）へ他者発言を入れる。
-        insert_speech(
-            &db,
-            &format!("nostr-{AGENT}"),
-            "npub-other",
-            "外の人: 新機能どう？",
-        );
+        // 本番同型: 発火セッション＝実会話セッション（nostr watch が書くリテラル）。
+        let session =
+            opencrab_db::queries::SessionFireTarget::NostrBroadcast.channel_session_id(AGENT);
+        insert_speech(&db, &session, "npub-other", "外の人: 新機能どう？");
 
-        // 発火先種別からの解決経路（run_one_fire と同じ呼び出し）で target を組む。
         let nostr_target = HeartbeatTarget {
             agent_id: AGENT.to_string(),
-            session_id: "heartbeat-agent-a-".to_string(),
+            session_id: session.clone(),
             channel_id: String::new(),
             guild_id: String::new(),
-            channel_session_id: opencrab_db::queries::SessionFireTarget::NostrBroadcast
-                .channel_session_id(AGENT),
+            channel_session_id: session,
             instructions_prompt: INSTRUCTIONS.to_string(),
             instructions_source: "default",
         };
@@ -1212,33 +1200,35 @@ mod tests {
 
         let conv = &engine.conversations()[0];
         assert!(
-            conv.contains("[Channel conversation]"),
-            "Nostr HB に実会話セクションが入っていない（#508 の直したい欠落）: {conv}"
-        );
-        assert!(
             conv.contains("外の人: 新機能どう？"),
             "他者の直近発言が Nostr HB の会話に含まれない: {conv}"
         );
     }
 
-    /// #508: Discord の解決は不変 — `discord-{agent}-{guild}-{channel}` の実会話がそのまま入る。
-    /// Nostr 対応で Discord 経路の挙動が変わっていないことを同じ read 経路で担保する。
+    /// #588 Stage 1: Discord HB も宛先セッション（実会話 `discord-{agent}-{guild}-{channel}`）を
+    /// 通常経路で読む。実会話がそのまま入ることを同じ read 経路で担保する。
     #[tokio::test]
-    async fn discord_heartbeat_channel_conversation_unchanged() {
+    async fn discord_heartbeat_reads_channel_conversation_from_its_session() {
         let engine = RecordingEngine::new("IDLE");
         let (runner, db, _calls) = runner_with(engine.clone());
 
-        // target() は channel 222 / guild 111 → discord-agent-a-111-222。
         insert_speech(&db, "discord-agent-a-111-222", "human-1", "会議いつ？");
 
+        // 本番同型: 宛先セッション＝実会話セッション。
+        let discord_target = HeartbeatTarget {
+            session_id: "discord-agent-a-111-222".to_string(),
+            channel_session_id: "discord-agent-a-111-222".to_string(),
+            ..target()
+        };
+
         runner
-            .run_turn(&target(), TurnOrigin::Tick { tick: 1 })
+            .run_turn(&discord_target, TurnOrigin::Tick { tick: 1 })
             .await;
 
         let conv = &engine.conversations()[0];
         assert!(
-            conv.contains("[Channel conversation]") && conv.contains("会議いつ？"),
-            "Discord HB の実会話が入らない（既存経路が壊れた）: {conv}"
+            conv.contains("会議いつ？"),
+            "Discord HB の実会話が入らない（統合後の read 経路が壊れた）: {conv}"
         );
     }
 
