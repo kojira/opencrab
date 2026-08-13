@@ -84,24 +84,22 @@ impl Action for ShellToolAction {
             }
         };
 
-        // Check caller permission against command permission
-        let permitted = match &ctx.caller {
-            CallerIdentity::Owner => true, // Owner can run everything
-            CallerIdentity::Agent => {
-                // Agent can run Agent and CoAgent level commands
-                cmd_config.permission == CommandPermission::Agent
-                    || cmd_config.permission == CommandPermission::CoAgent
-            }
-            CallerIdentity::CoAgent { .. } => {
-                // CoAgent can only run CoAgent level commands
-                cmd_config.permission == CommandPermission::CoAgent
-            }
-            CallerIdentity::TrustedUser => {
-                // TrustedUser can run Agent and CoAgent level commands
-                cmd_config.permission == CommandPermission::Agent
-                    || cmd_config.permission == CommandPermission::CoAgent
-            }
+        // 宣言された permission は「実行に必要な caller クラス」を表す。誰が誰より上位かの
+        // 序列は shell.rs では判断せず、唯一の源である caller.rs の trust_level に委ねる
+        // （#485 で co_agent を owner 等価へ引き上げた序列: owner = co_agent > trusted_user
+        // > agent）。ここでは permission を対応する CallerIdentity へ写すだけで、判定は
+        // trust_level の比較 1 本（caller.rs の `can_manage_subtask_of` と同じ形）。
+        // これにより shell.rs 独自の旧序列（owner > agent > co_agent）が源と食い違って
+        // co_agent だけ agent 級を実行できない、という #608 の逆転を構造的に防ぐ。
+        let required_caller = match cmd_config.permission {
+            CommandPermission::Owner => CallerIdentity::Owner,
+            CommandPermission::Agent => CallerIdentity::Agent,
+            // agent_id は trust_level に影響しないためダミーで良い。
+            CommandPermission::CoAgent => CallerIdentity::CoAgent {
+                agent_id: String::new(),
+            },
         };
+        let permitted = ctx.caller.trust_level() >= required_caller.trust_level();
 
         if !permitted {
             return ActionResult::error(&format!(
@@ -782,8 +780,12 @@ mod tests {
         );
     }
 
+    /// #608 回帰: co_agent は owner 等価（#485）なので agent 級コマンドを実行できる。
+    /// 旧テスト `test_coagent_cannot_run_agent_command` は #485 以前の序列
+    /// （owner > agent > co_agent）を前提にしており、唯一の源（caller.rs）へ追従していない
+    /// shell.rs の手書き判定のせいで co_agent だけが取り残されていた。
     #[tokio::test]
-    async fn test_coagent_cannot_run_agent_command() {
+    async fn test_coagent_can_run_agent_command() {
         let config = ShellToolConfig {
             commands: vec![CommandConfig {
                 name: "echo".to_string(),
@@ -800,8 +802,71 @@ mod tests {
         let args = serde_json::json!({"command": "echo", "args": ["hello"]});
         let result = action.execute(&args, &ctx).await;
         assert!(
-            !result.success,
-            "CoAgent should not be able to run agent-level command"
+            result.success,
+            "CoAgent は owner 等価なので agent 級コマンドを実行できる: {:?}",
+            result.error
         );
+    }
+
+    /// #608: caller × permission の網羅マトリクス。判定は caller.rs の trust_level 序列
+    /// （owner = co_agent = 2 > trusted_user = 1 > agent = 0）に委ねており、宣言した
+    /// permission 以上の caller だけが実行できる。permission→必要 trust は Owner=2 /
+    /// Agent=0 / CoAgent=2（co_agent は owner 等価）。序列が逆転（例: 上位 caller が
+    /// 下位より実行できるコマンドが減る）したらここが落ちる。
+    #[tokio::test]
+    async fn test_permission_ladder_matrix() {
+        // 各 permission（Owner / Agent / CoAgent の順）について、その caller が実行を
+        // 許可されるべきか。
+        let cases: &[(CallerIdentity, [bool; 3])] = &[
+            (CallerIdentity::Owner, [true, true, true]),
+            (
+                CallerIdentity::CoAgent {
+                    agent_id: "helper".to_string(),
+                },
+                [true, true, true],
+            ),
+            (CallerIdentity::TrustedUser, [false, true, false]),
+            (CallerIdentity::Agent, [false, true, false]),
+        ];
+        let perms = [
+            CommandPermission::Owner,
+            CommandPermission::Agent,
+            CommandPermission::CoAgent,
+        ];
+        for (caller, expected) in cases {
+            for (i, perm) in perms.iter().enumerate() {
+                let config = ShellToolConfig {
+                    commands: vec![CommandConfig {
+                        name: "echo".to_string(),
+                        permission: perm.clone(),
+                        timeout_secs: None,
+                        description: None,
+                    }],
+                    ..ShellToolConfig::default()
+                };
+                let action = ShellToolAction::new(config);
+                let (_dir, ctx) = make_ctx(caller.clone());
+                let args = serde_json::json!({"command": "echo", "args": ["hi"]});
+                let result = action.execute(&args, &ctx).await;
+                assert_eq!(
+                    result.success, expected[i],
+                    "caller={:?} perm={:?}: expected permitted={}, got success={} (error={:?})",
+                    caller, perm, expected[i], result.success, result.error
+                );
+                if !expected[i] {
+                    assert!(
+                        result
+                            .error
+                            .as_deref()
+                            .unwrap_or("")
+                            .contains("Permission denied"),
+                        "denied case must report a permission error: caller={:?} perm={:?} error={:?}",
+                        caller,
+                        perm,
+                        result.error
+                    );
+                }
+            }
+        }
     }
 }
