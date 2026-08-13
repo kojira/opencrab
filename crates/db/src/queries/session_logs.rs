@@ -301,32 +301,6 @@ pub fn count_session_logs(conn: &Connection, session_id: &str) -> Result<i64> {
     Ok(count)
 }
 
-/// List session logs with id > after_id, ordered by id ASC.
-pub fn list_session_logs_after_id(
-    conn: &Connection,
-    session_id: &str,
-    after_id: i64,
-) -> Result<Vec<SessionLogRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, agent_id, session_id, log_type, content, speaker_id, turn_number, metadata_json, created_at
-         FROM memory_sessions WHERE session_id = ?1 AND id > ?2 ORDER BY id ASC",
-    )?;
-    let rows = stmt.query_map(params![session_id, after_id], |row| {
-        Ok(SessionLogRow {
-            id: row.get(0)?,
-            agent_id: row.get(1)?,
-            session_id: row.get(2)?,
-            log_type: row.get(3)?,
-            content: row.get(4)?,
-            speaker_id: row.get(5)?,
-            turn_number: row.get(6)?,
-            metadata_json: row.get(7)?,
-            created_at: row.get(8)?,
-        })
-    })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
 /// List the most recent N session logs (returned in id DESC order; caller should reverse).
 pub fn list_recent_session_logs(
     conn: &Connection,
