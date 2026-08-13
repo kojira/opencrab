@@ -9,12 +9,12 @@
 //! **inbox が黙って消化されない**（silent no-op）。それを避けるため、heartbeat の有効・無効に
 //! 依存しない常時起動の専用ループにする（`spawn_intake_process_loop`）。
 //!
-//! さらに **heartbeat の agent-scoped ターン（`channel_id=""`）を再利用しない**。あれは SPEAK 時に
-//! `deliver_heartbeat_speech` 経由で稼働中 transport へ配送し、Nostr の text_delivery は宛先を
-//! 無視して kind:1 を broadcast する（`crates/nostr/src/text_delivery.rs`）。それを通すと
-//! **webhook 起点で外部タイムラインへ broadcast する経路**を新設してしまう（#454 の意図外・
-//! owner 決定 #456 の「agent スコープ全廃」とも逆行）。加えて heartbeat と同じセッション id を
-//! 別 runner で走らせると直列化ロックを共有せず二重発話・DB 競合が起きうる。
+//! さらに **heartbeat の agent-scoped ターン（`channel_id=""`）を再利用しない**。当時のそれは
+//! 発話時に稼働中 transport へ配送し、Nostr の text_delivery は宛先を無視して kind:1 を broadcast
+//! する（`crates/nostr/src/text_delivery.rs`）。それを通すと **webhook 起点で外部タイムラインへ
+//! broadcast する経路**を新設してしまう（#454 の意図外・owner 決定 #456 の「agent スコープ全廃」
+//! とも逆行）。加えて heartbeat と別経路で同じセッション id を走らせると直列化ロックを共有せず
+//! 二重発話・DB 競合が起きうる。
 //!
 //! # 何をするか
 //!

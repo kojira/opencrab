@@ -172,7 +172,7 @@ const HEARTBEAT_CHANNEL_BUDGET_DEN: usize = 4;
 /// 呼び出し元ゼロ）。撤去は #588 Stage 4 予定。**
 ///
 /// **この関数は live のどこからも呼ばれていない。** #588 Stage 1 でハートビートターンの会話
-/// 組み立ては通常の [`build_conversation_string`] へ一本化され（`heartbeat_turn::build_context`）、
+/// 組み立ては通常の [`build_conversation_string`] へ一本化され（`scheduler::run_one_heartbeat`）、
 /// 唯一の本番呼び出し元が消えた。そして**専用セッション（旧 `heartbeat-{agent}-{channel}`）は
 /// もう作られていない**——#573 Stage B/C でハートビートターンの宛先が実会話セッション
 /// （`nostr-…` / `discord-…`）へ統合され、専用セッションの生成が撤去された。したがって
@@ -567,18 +567,18 @@ fn is_excluded_from_conversation(log: &opencrab_db::queries::SessionLogRow) -> b
 
 /// heartbeat セッションで過去に積まれた指示文（プロンプト scaffolding）か（#501）。
 ///
-/// 以前は `scheduler.rs::run_one_fire` が発火のたびに `log_type='system'` かつ
+/// 以前は `scheduler.rs::run_one_heartbeat` が発火のたびに `log_type='system'` かつ
 /// `speaker_id='heartbeat'` で同一文面の指示文（「[ハートビート] 現在の会話…出力形式:
 /// SPEAK/LEARN/IDLE」）をセッションログへ挿入していた。毎 tick 積まれて会話へ再注入され、
 /// 「同じ指示 → IDLE」の対が何十回も文脈に並んで挙動を歪めていた（本番の heartbeat
 /// セッションでは system の 192 件がこの重複）。**#501 で指示文は system プロンプトへ移し**
-/// （`heartbeat_turn::build_context`）、書き込み側（scheduler）は挿入をやめた。既存 DB に
+/// （`scheduler::run_one_heartbeat`）、書き込み側（scheduler）は挿入をやめた。既存 DB に
 /// 積まれた分は DB を書き換えず、会話再構成でここが落とす。
 ///
 /// subtask の完了本文（`settle_completed` が書く `system` かつ **`speaker_id=None`**,
 /// #404 / #405）とは `speaker_id` で区別する。完了本文は次 tick で読む契約があるので
 /// **落とさない**。判定は `memory_index::is_heartbeat_noise` と同じ述語で、
-/// `speaker_id='heartbeat'` を書くのは（過去も含め）`run_one_fire` だけ（grep 済み）。
+/// `speaker_id='heartbeat'` を書くのは（過去も含め）`run_one_heartbeat` だけ（grep 済み）。
 fn is_heartbeat_prompt_scaffolding(log: &opencrab_db::queries::SessionLogRow) -> bool {
     log.log_type == "system"
         && log.speaker_id.as_deref() == Some(opencrab_db::queries::HEARTBEAT_SPEAKER_ID)
@@ -588,7 +588,7 @@ fn is_heartbeat_prompt_scaffolding(log: &opencrab_db::queries::SessionLogRow) ->
 ///
 /// `evaluation` を落とす（#291）のに加え、heartbeat 指示文 scaffolding
 /// （[`is_heartbeat_prompt_scaffolding`]）は**会話から全件落とす**（#501）。指示文はその
-/// tick の system プロンプトへ 1 度だけ入る（`heartbeat_turn::build_context`）ようになったので
+/// tick の system プロンプトへ 1 度だけ入る（`scheduler::run_one_heartbeat`）ようになったので
 /// 会話履歴には不要。新規ターンはそもそも書かない（`scheduler.rs`）が、既存 DB に積まれた分
 /// （本番で 192 件）は DB を書き換えず読み出し側でここが落とす。subtask 完了本文
 /// （`system` かつ `speaker_id=None`, #404 / #405）は `speaker_id` で区別して残す。
@@ -2631,11 +2631,11 @@ mod evaluation_not_in_conversation_tests {
 
 /// heartbeat 指示文は会話へ積まない（#501）。
 ///
-/// 以前は `scheduler.rs::run_one_fire` が発火のたびに同一文面の指示文（`system` /
+/// 以前は `scheduler.rs::run_one_heartbeat` が発火のたびに同一文面の指示文（`system` /
 /// `speaker_id='heartbeat'`）をセッションログへ挿入し、それが全件そのまま会話へ復元されて
 /// いた。本番の heartbeat セッションでは同一指示が 192 件並び、「同じ指示 → IDLE」の対を
 /// 何十回も見せて挙動を歪めていた。#501 で指示文は system プロンプトへ移した
-/// （`heartbeat_turn::build_context`）ので、会話再構成では指示文 scaffolding を**全件落とす**。
+/// （`scheduler::run_one_heartbeat`）ので、会話再構成では指示文 scaffolding を**全件落とす**。
 /// subtask 完了本文（`system` / `speaker_id=None`, #404 / #405）は落とさない。
 #[cfg(test)]
 mod heartbeat_prompt_dedup_tests {

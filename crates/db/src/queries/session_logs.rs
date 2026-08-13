@@ -29,9 +29,8 @@ pub struct SessionLogRow {
 /// 記憶の材料（topic 要約）や会話再構成からは除外される。読み手（`index_builder` /
 /// `process` の `is_heartbeat_noise` 系述語）はこの定数で判定すること。
 ///
-/// **`SessionRow.mode` / `RunRequest.gateway` の "heartbeat"（ハートビート gateway 名）とは
-/// 別概念**。あちらは `heartbeat_turn::HEARTBEAT_GATEWAY`。値がたまたま同じでも用途が違うので
-/// 混同しないこと。
+/// **`RunRequest.gateway` の "heartbeat"（ハートビート発火の gateway ラベル・`scheduler.rs` の
+/// `run_one_heartbeat` が渡す）とは別概念**。値がたまたま同じでも用途が違うので混同しないこと。
 pub const HEARTBEAT_SPEAKER_ID: &str = "heartbeat";
 
 /// ハートビート発話を本人の実会話（`discord-…`）セッションへ二重記録した行の

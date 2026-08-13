@@ -7,7 +7,6 @@ use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
 
 mod heartbeat_delivery;
-mod heartbeat_turn;
 mod intake_process;
 mod scheduler;
 
@@ -23,7 +22,7 @@ type DiscordHttpArc = Arc<Mutex<Option<DiscordHttp>>>;
 
 /// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
 /// Nostr broadcast は特定チャンネルを持たないため、会話名の代わりにこのラベルを充てる
-/// （`scheduler.rs` の `run_one_fire`）。
+/// （`scheduler.rs` の `run_one_heartbeat`）。
 ///
 /// **スコープではなく表示ラベル**である点に注意。旧名は「agent スコープ」の語を含んでおり、
 /// agent スコープ発火（#456 で全廃済み・現在は session 単位の `nostr-` セッションから発火）が
@@ -560,14 +559,17 @@ async fn main() -> anyhow::Result<()> {
     // タスク**が `session_heartbeat_config` を毎ウェイクで読み直し、永続アンカーから正確な
     // 次回発火まで眠り、`scheduler_wake` で即時反映する。
     //
-    // **単一の HeartbeatTurnRunner を共有する**のが要点。中央化で全セッションが 1 つの
-    // runner を通るので、tick と継続ターンの二重応答防止が全域で効く。
+    // #588 single-entry: ハートビートは専用のターン実装（旧 `HeartbeatTurnRunner`）を持たず、
+    // 時刻が来たら発火先セッション上で**通常ルートと同じ 1 ターン**を走らせる（`run_one_heartbeat`）。
+    // 固有なのは「時間のトリガー＋渡すプロンプト」と「発火の記録」だけ。scheduler へ渡すのは
+    // メッセージループ外からの Discord 送信ハンドル（#400・`heartbeat_discord_http`）だけで、これは
+    // scheduler がどのゲートウェイのループにも属さず発火するため通常の `send_to_channel` を持てない
+    // ことへの唯一の補い。
     //
     // per-session 直列化ロック（`SessionLocks`）の唯一のインスタンスは `AppState` が
-    // 持ち（#588 Stage 2・`AppState::session_locks`）、runner・scheduler・各ゲートウェイの
-    // 受信ループ（Discord）・Nostr ランタイムはその `Arc` を clone して**同じ実体**を共有する。
-    // これで時間トリガー（tick / 継続ターン）と通常メッセージ処理のターンが、同一 session id
-    // 上で直列化される（別実体を複数作ると同じ session id でも相互排他しない）。
+    // 持ち（#588 Stage 2・`AppState::session_locks`）、scheduler・各ゲートウェイの受信ループ
+    // （Discord）・Nostr ランタイムはその `Arc` を clone して**同じ実体**を共有する。これで
+    // 時間トリガーと通常メッセージ処理のターンが同一 session id 上で直列化される。
     //
     // live G（global kill-switch = `cfg.agent.heartbeat_enabled`）は scheduler が
     // **発火時に** `heartbeat_config_rx` から読む（hot-reload 追従・起動時スナップにしない。
@@ -575,11 +577,10 @@ async fn main() -> anyhow::Result<()> {
     // set_my_heartbeat（PR3）・schedule CRUD（PR4）・発火ターン完了は `scheduler_wake` で
     // rebuild を促す。
     {
-        let scheduler_runner =
-            heartbeat_turn::HeartbeatTurnRunner::from_state(&state, heartbeat_discord_http.clone());
         let scheduler_state = state.clone();
+        let scheduler_http = heartbeat_discord_http.clone();
         tokio::spawn(async move {
-            scheduler::run_scheduler(scheduler_state, scheduler_runner, heartbeat_config_rx).await;
+            scheduler::run_scheduler(scheduler_state, scheduler_http, heartbeat_config_rx).await;
         });
     }
 
@@ -650,7 +651,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #169 の dispatch 配線（`RunRequest` に registry と sink が載る）と #440 の継続ターン配線、
-// #588 Stage 3 で通常ターンへ寄せた発火本体（配送・記録・NO_REPLY 判定）のテストは
-// `heartbeat_turn` にある。`RunRequest` を組み、応答を配送・記録するのがそちらのため、
-// main.rs には heartbeat 固有のテスト対象が残っていない。
+// #588 single-entry: ハートビートの発火本体は `scheduler::run_one_heartbeat`（時刻が来たら通常
+// ルートと同じ 1 ターンを走らせる free 関数）に集約した。専用のターン実装（旧 `heartbeat_turn.rs`）・
+// 専用の継続ターン機構（#440）は撤去したので、main.rs には heartbeat 固有のテスト対象は無い。
+// 指示文の整形テストは `scheduler` の `#[cfg(test)]`、Discord 送信ハンドル解決（#400）のテストは
+// `heartbeat_delivery` にある。

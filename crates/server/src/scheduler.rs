@@ -17,8 +17,10 @@
 //!
 //! # 2 種のエントリ（設計 §3.1）
 //!
-//! - **Heartbeat**（session 単位・[`EntryKey::Heartbeat`]）: SPEAK/LEARN/IDLE の probe を
-//!   打ち、SPEAK なら [`crate::heartbeat_delivery`] で配送する（[`HeartbeatTurnRunner`] 経由）。
+//! - **Heartbeat**（session 単位・[`EntryKey::Heartbeat`]）: 時刻が来たら発火先セッション上で
+//!   **通常ルートと同じ 1 ターン**を走らせる（[`run_one_heartbeat`]。caller=Owner・
+//!   `run_agent_response`・Discord は engine 標準の `on_response_text` で配送）。固有なのは
+//!   「時間のトリガー＋渡すプロンプト（#584 指示解決）」と「発火の記録（`heartbeat_log`）」だけ。
 //! - **Schedule**（#455・[`EntryKey::Schedule`]）: cron / `@every` の時刻に、登録された
 //!   `message` を対象セッションへ self-message として注入し、**通常メッセージ処理経路**
 //!   （`run_agent_response`・caller=Owner）で 1 ターン走らせる（SkillEngine が走る）。
@@ -54,8 +56,10 @@ use chrono::{DateTime, Utc};
 use opencrab_core::heartbeat::HeartbeatConfig;
 use tokio::sync::watch;
 
-use crate::heartbeat_turn::{HeartbeatTarget, HeartbeatTurnRunner, TurnOrigin};
+use crate::heartbeat_delivery::HeartbeatDiscordHttp;
+use opencrab_actions::transcript::{AgentReplyContext, OutboundReplyRecord, TranscriptSource};
 use opencrab_actions::{CallerIdentity, RunRequest};
+use opencrab_gateway::GatewayActions;
 use opencrab_server::AppState;
 
 /// sleep の頭打ち（秒）。NTP ジャンプ・DST・notify 取りこぼしの安全網（設計 §3.4）。
@@ -87,7 +91,7 @@ enum EntryKey {
 /// 発火時の振る舞い（設計 §3.1）。
 #[derive(Debug, Clone)]
 enum FireKind {
-    /// heartbeat probe（SPEAK/LEARN/IDLE・配送は [`HeartbeatTurnRunner`]）。
+    /// heartbeat: 発火先セッション上で通常ルートと同じ 1 ターンを走らせる（[`run_one_heartbeat`]）。
     Heartbeat { target: FireTarget },
     /// #455: 対象セッションへ注入して通常メッセージ処理経路で 1 ターン走らせる。
     ScheduledMessage { message: String },
@@ -280,7 +284,7 @@ impl Drop for InFlightGuard {
 /// `SPEAK`/`LEARN`/`IDLE` の出力規約と、見送り理由を毎回記録させる規約（#515）は撤去した。
 ///
 /// **誘導は発火元 transport で変わる**（`posts_response_body`）。応答本文の自動配送は Discord
-/// チャンネルの発火だけで、ブロードキャスト（Nostr）は自動配送しない（`heartbeat_turn::turn`。
+/// チャンネルの発火だけで、ブロードキャスト（Nostr）は自動配送しない（[`run_one_heartbeat`]。
 /// オーナー判断）。したがって:
 /// - **Discord（`posts_response_body = true`）**: 「この応答がそのままチャンネルへ投稿される」。
 /// - **ブロードキャスト（`false`）**: 「投稿するなら投稿ツールで自分から。応答本文は投稿されない」。
@@ -306,29 +310,116 @@ fn format_heartbeat_prompt(
     )
 }
 
-/// 1 発火分（heartbeat）の準備 → ターン実行（旧 `make_heartbeat_callback` の per-target 本体）。
+/// 発火元 transport の `GatewayActions` を登録簿から引く（#588 single-entry）。
 ///
-/// `None` は「ターンを開始できなかった」（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
-async fn run_one_fire(
-    runner: &Arc<HeartbeatTurnRunner>,
-    db: &opencrab_db::Db,
+/// 通常ターンと同じツール環境を渡すため。稼働していなければ `None`（それでも `spawn_subtask` は
+/// `SystemGatewayActions` 経由で使える）。Nostr なら `nostr_post` 等が載る。
+fn resolve_heartbeat_gateway_actions(
+    gateways: &opencrab_actions::AgentGatewayRegistry,
+    target: &FireTarget,
+    agent_id: &str,
+) -> Option<Arc<dyn GatewayActions>> {
+    let kind = match target {
+        FireTarget::NostrBroadcast => opencrab_actions::gateway_kinds::NOSTR,
+        FireTarget::DiscordChannel { .. } => opencrab_actions::gateway_kinds::DISCORD,
+    };
+    gateways.get(kind)?.gateway_actions_for(agent_id)
+}
+
+/// Discord 発火の `on_response_text`（通常ループと同じく反復ごとに応答テキストを配送する）。
+///
+/// **なぜ scheduler 側に配線が要るか**: 通常の Discord メッセージループは自分の
+/// `on_response_text` で反復ごとに `DiscordGateway::send_to_channel` している。scheduler は
+/// **どのゲートウェイのメッセージループにも属さず**発火するため、その `send_to_channel` を持たない。
+/// メッセージループ外からチャンネルへ送る唯一の口が [`crate::heartbeat_delivery`]（#400 の
+/// per-agent ハンドル解決）で、ここを engine 標準の `on_response_text` から呼ぶ。`NO_REPLY`・空は
+/// 送らない（通常ループと同じ判定）。
+fn discord_response_text_cb(
+    discord_http: &Arc<HeartbeatDiscordHttp>,
+    agent_id: &str,
+    channel_id: &str,
+) -> Arc<dyn Fn(String) + Send + Sync> {
+    let discord_http = discord_http.clone();
+    let agent_id = agent_id.to_string();
+    let channel_id = channel_id.to_string();
+    Arc::new(move |text: String| {
+        if text.is_empty() || text.trim() == "NO_REPLY" {
+            return;
+        }
+        let discord_http = discord_http.clone();
+        let agent_id = agent_id.clone();
+        let channel_id = channel_id.clone();
+        // 発火・反復を塞がないよう spawn（通常ループの on_response_text と同じく非ブロック）。
+        tokio::spawn(async move {
+            crate::heartbeat_delivery::deliver_via_discord_shared_http(
+                &discord_http,
+                &agent_id,
+                &channel_id,
+                &text,
+            )
+            .await;
+        });
+    })
+}
+
+/// 発火の記録（`heartbeat_log`）。**これと「時間のトリガー＋渡すプロンプト」だけがハートビート
+/// 固有**（single-entry の裁定）。`decision` は廃止語彙のため固定値 `fired`（列定義に経緯を明記）。
+fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, channel_id: &str, source: &str) {
+    let Ok(conn) = db.lock() else {
+        return;
+    };
+    let result = serde_json::json!({ "channel_id": channel_id, "source": source }).to_string();
+    if let Err(e) =
+        opencrab_db::queries::insert_heartbeat_log(&conn, agent_id, "fired", Some(&result))
+    {
+        tracing::error!(agent_id, "scheduler: heartbeat_log の記録に失敗: {e}");
+    }
+}
+
+/// 1 発火分（heartbeat）: 時刻が来たら、**通常ルートと同じ 1 ターン**を発火先セッション上で走らせる。
+///
+/// # 「トリガー＋プロンプト」だけがハートビート固有（#588 single-entry）
+///
+/// ハートビートに固有なのは (1) 時間で発火すること、(2) 渡すプロンプト（指示解決 #584 →
+/// [`format_heartbeat_prompt`]）、(3) 発火の記録（[`record_heartbeat_fire`]）の 3 点だけ。それ以外は
+/// **通常ルートのものをそのまま使う**: 推論は [`opencrab_server::process::run_agent_response`]、会話
+/// 組み立ては [`build_conversation_string`]、配送は Discord なら engine 標準の `on_response_text`
+/// （[`discord_response_text_cb`]）、記録は [`opencrab_server::transcript::record_outbound_reply`]、
+/// 直列化は呼び出し側が共有 [`SessionLocks`] で巻く（#588 Stage 2）。専用のターン実装・専用の配送
+/// ルーティング・専用の語彙・専用の継続ターン機構（旧 `heartbeat_turn.rs`）は撤去した。
+///
+/// caller は **常に `Owner`**（本人が自分の意思で動くターン。`resolve_caller` には載せない）。
+/// プロンプトは **system プロンプトへ 1 度だけ**載せ、会話ログには「発言」として残さない（#501。
+/// 毎 tick 積まれると挙動を歪めるため）。継続ターンは持たない（`with_dispatch` を付けない）——
+/// 長時間作業はエージェントが `spawn_subtask` で背景化し、サブタスクは自前の通知経路で外へ出る。
+///
+/// `None` = ターンを開始できなかった（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
+async fn run_one_heartbeat(
+    state: &AppState,
+    discord_http: &Arc<HeartbeatDiscordHttp>,
     agent_id: &str,
     target: &FireTarget,
-    tick: u64,
 ) -> Option<()> {
-    // 発火先セッションの種別から、HB ターンの宛先フィールドを導く。
-    let (channel_id, guild_id, channel_name) = match target {
+    let db = &state.db;
+
+    // LLM が無ければ発火を諦める（backoff。#455 と同じ）。
+    if state.llm_router.get().provider_names().is_empty() {
+        tracing::warn!(
+            agent_id,
+            "scheduler: LLM provider が無く heartbeat 発火を skip"
+        );
+        return None;
+    }
+
+    let is_discord = matches!(target, FireTarget::DiscordChannel { .. });
+    // 発火先セッションと、表示用の channel_id / channel_name を種別から解く（#508）。
+    let session_id = target.channel_session_id(agent_id);
+    let (channel_id, channel_name) = match target {
         FireTarget::NostrBroadcast => (
-            String::new(),
             String::new(),
             crate::HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
         ),
-        FireTarget::DiscordChannel {
-            guild_id,
-            channel_id,
-        } => {
-            // 表示名は channel 設定から引く（無ければ channel_id をそのまま使う）。
-            // 発火集合には影響しない表示専用フィールド。
+        FireTarget::DiscordChannel { channel_id, .. } => {
             let name = {
                 let conn = db.lock().ok()?;
                 opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)
@@ -338,63 +429,118 @@ async fn run_one_fire(
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| channel_id.clone())
             };
-            (channel_id.clone(), guild_id.clone(), name)
+            (channel_id.clone(), name)
         }
     };
 
-    // #573 Stage C: HB 専用セッション（`heartbeat-…`）の生成は撤去した。Stage B で HB
-    // ターンの宛先が実会話セッションへ移り、専用セッションは書き込みも読み出しも無い空の
-    // 受け皿になっていた（既存の専用セッション行は残るが、以後は新規に作らない）。
-    // #508: 実会話（`[Channel conversation]`）セッションを発火先種別から解決する。
-    // Nostr は `nostr-{agent}`、Discord は `discord-{agent}-{guild}-{channel}`。書式の源は
-    // db 層の `resolve_session_fire_target` と対の 1 箇所（種別を持つここで解いて target へ
-    // 載せ、`heartbeat_turn::build_context` は解決済み ID を読むだけにする）。
-    let channel_session_id = target.channel_session_id(agent_id);
-
-    // 指示文を解決し、整形した HB プロンプトを **その tick の system プロンプトへ載せるため**
-    // target に持たせる（#501）。以前はこれを HB セッションログ（`system` /
-    // `speaker_id='heartbeat'`）へ挿入していたが、毎 tick 同一文面が履歴へ積まれて会話へ
-    // 再注入され続け、「同じ指示 → IDLE」の対が何十回も文脈に並んで挙動を歪めていた。
-    // 書き込みをやめ、system プロンプトへ 1 度だけ入れる（`heartbeat_turn::build_context`）。
-    // 応答本文を自動配送するのは Discord チャンネルの発火だけ（ブロードキャストはツール投稿に
-    // 委ねる / `heartbeat_turn::turn`）。指示文の誘導もこれに合わせる。
-    let posts_response_body = matches!(target, FireTarget::DiscordChannel { .. });
-    let (instructions_prompt, instructions_source) = {
+    // 文脈（通常ルートと同じ）＋ ハートビートのプロンプト（指示解決 #584）を system プロンプトへ。
+    let (system_prompt, agent_name, conversation, instructions_source) = {
         let conn = db.lock().ok()?;
+        let (base_prompt, agent_name) =
+            opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
+        let eff =
+            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+                .unwrap_or_else(|_| state.default_model.clone());
+        let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
+        let budget = opencrab_server::process::compute_context_budget(
+            &conn,
+            prov,
+            mdl,
+            state.compaction_ratio,
+        );
+        let raw = match opencrab_server::process::build_conversation_string(
+            &conn,
+            &session_id,
+            agent_id,
+            budget,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(agent_id, session_id = %session_id, "scheduler: 会話文字列の組み立てに失敗: {e}");
+                return None;
+            }
+        };
+        let conversation =
+            opencrab_server::process::prepend_runtime_context(&raw, "ハートビート自律行動");
+        // 指示解決（#584: channel → agent → default）→ 整形。応答本文を自動配送するのは Discord
+        // だけ（Nostr はツール投稿）なので、誘導も transport で変える（`format_heartbeat_prompt`）。
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
-        (
-            format_heartbeat_prompt(&channel_name, &resolved.text, posts_response_body),
-            resolved.source,
-        )
+        let instructions = format_heartbeat_prompt(&channel_name, &resolved.text, is_discord);
+        let system_prompt = format!("{base_prompt}\n\n{instructions}");
+        (system_prompt, agent_name, conversation, resolved.source)
     };
 
-    let hb_target = HeartbeatTarget {
-        agent_id: agent_id.to_string(),
-        // #573 Stage B: HB ターンの宛先を実会話セッションへ差し替える（旧: HB 専用 hb_session_id）。
-        // これにより build_heartbeat_conversation_string で heartbeat_session_id == channel_session_id
-        // になり、`[Channel conversation]` の二重注入（#508）が等値フィルタで構造的に消え、
-        // `[Recent conversation]` に一本化される。
-        session_id: channel_session_id.clone(),
-        channel_id,
-        guild_id,
-        channel_session_id,
-        instructions_prompt,
-        instructions_source,
-        // #591: SPEAK の配送先はこの発火元の種別から直接決める（試す順番ではなく）。
-        fire_target: target.clone(),
-    };
-    // 唯一の入口。同一 HB セッションのロック下で 1 ターン走らせる（直列化）。
-    runner.run_turn(&hb_target, TurnOrigin::Tick { tick }).await
+    // 通常ルートと同じ run_agent_response。caller=Owner・通常ツール域（gateway_actions）を渡す。
+    // 継続ターンは持たない（with_dispatch なし。spawn_subtask は SystemGatewayActions で使える）。
+    let mut req = RunRequest::new(
+        agent_id,
+        &agent_name,
+        &session_id,
+        &system_prompt,
+        &conversation,
+        "heartbeat",
+        CallerIdentity::Owner,
+    );
+    if let Some(ga) = resolve_heartbeat_gateway_actions(&state.gateways, target, agent_id) {
+        req = req.with_gateway_actions(ga);
+    }
+    if is_discord {
+        // ツールの既定宛先＋反復ごと配送（通常ループと同じ）。Nostr は自動配送しない（ツール投稿）。
+        req = req
+            .with_reply_target(channel_id.clone())
+            .with_on_response_text(discord_response_text_cb(
+                discord_http,
+                agent_id,
+                &channel_id,
+            ));
+    }
+
+    let engine_result = opencrab_server::process::run_agent_response(state, req).await;
+
+    // 記録（通常ルートと同型）。Discord: 最終応答が NO_REPLY 以外なら record_outbound_reply。
+    // 中間の宣言は engine の turn ログ（on_tool_call）が speech で残す（通常ループと同じ）。
+    // Nostr: 自動配送しないので配送記録も残さない（ツール投稿が各自記録する）。
+    match &engine_result {
+        Ok(result) => {
+            if is_discord {
+                let text = result.response.trim();
+                if !text.is_empty() && text != "NO_REPLY" {
+                    if let Ok(conn) = db.lock() {
+                        opencrab_server::transcript::record_outbound_reply(
+                            &conn,
+                            TranscriptSource::Discord,
+                            &OutboundReplyRecord {
+                                agent_id,
+                                session_id: &session_id,
+                                channel_id: Some(channel_id.as_str()),
+                                text,
+                                context: Some(AgentReplyContext::Direct {
+                                    tool_calls_made: result.tool_calls_made,
+                                }),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(agent_id, session_id = %session_id, "scheduler: heartbeat ターンが失敗: {e}");
+        }
+    }
+
+    // 発火の記録（ハートビート固有の 3 点目）。engine の成否によらず「発火した」ことを残す。
+    record_heartbeat_fire(db, agent_id, &channel_id, instructions_source);
+    Some(())
 }
 
 /// 1 発火分（#455 schedule）: `message` を対象セッションへ注入し、通常メッセージ処理経路で
 /// 1 ターン走らせる（設計 §7.3・統括裁定）。**caller=Owner**（HB tick と同じ自己実行）。
 ///
-/// heartbeat の probe（SPEAK/LEARN/IDLE）ではなく**通常のメッセージ**として処理するので、
-/// `run_agent_response` を直呼びする（`HeartbeatTurnRunner` は使わない）。#458（intake）と
-/// 同型: **応答は生成・記録するが自動配送はしない**——外界への出力はエージェントが自分の
-/// ツール域（HB tick と同じ）で行う（外部作用面は設計 §10.1・PR 本文に明記）。
+/// [`run_one_heartbeat`] と同じく `run_agent_response` を直呼びする scheduler 発火だが、#455 は
+/// **応答を生成・記録するが自動配送はしない**——外界への出力はエージェントが自分のツール域で
+/// 行う（#458 intake と同型・外部作用面は設計 §10.1）。ハートビートが Discord へ応答テキストを
+/// 配送する（[`run_one_heartbeat`]）のと違い、schedule はチャンネルへ自動投稿しない。
 ///
 /// 直列化は呼び出し側が [`opencrab_actions::SessionLocks::run_serialized`] で行う（同一セッションの
 /// schedule 同士を直列化）。`None` = ターンを開始できなかった（→ 呼び出し側で backoff）。
@@ -565,7 +711,10 @@ async fn run_one_schedule(
 /// - `wake`: [`AppState::scheduler_wake`]。set/CRUD/global 変更/ターン完了で rebuild を促す。
 pub(crate) async fn run_scheduler(
     state: AppState,
-    runner: Arc<HeartbeatTurnRunner>,
+    // メッセージループ外からチャンネルへ送るための Discord ハンドル（#400）。ハートビートは
+    // どのゲートウェイのループにも属さず発火するため、通常の `send_to_channel` を持てない。
+    // これが「通常ルートに無いが必要」な唯一の依存（`run_one_heartbeat` の doc）。
+    heartbeat_discord_http: Arc<HeartbeatDiscordHttp>,
     config_rx: watch::Receiver<HeartbeatConfig>,
 ) {
     let wake = state.scheduler_wake.clone();
@@ -574,9 +723,9 @@ pub(crate) async fn run_scheduler(
     let min_interval_secs = state.heartbeat_limits.min_interval_secs;
     // #588 Stage 2: schedule ターン・HB tick・通常メッセージ処理ターンを同一セッション上で
     // 直列化するため、プロセス全体で 1 つの共有 `SessionLocks`（`AppState::session_locks`）を使う。
-    // 以前は schedule 専用のローカルインスタンスで、HB は runner 内の別 locks、通常ターンは
-    // 各ゲートウェイの別 locks だったため、同じ session_id でも相互排他しなかった。runner も
-    // `from_state` で同じ実体を受け取る（`heartbeat_turn::HeartbeatTurnRunner::from_state`）。
+    // 以前は schedule 専用のローカルインスタンスで、HB は別 locks、通常ターンは各ゲートウェイの
+    // 別 locks だったため、同じ session_id でも相互排他しなかった。HB tick も schedule と同じく
+    // ここで `run_serialized` に載せる（`run_one_heartbeat`）。
     let session_locks = state.session_locks.clone();
 
     // config 変更を wake へ橋渡しする（変更で rebuild → live G を読み直す・#437(c)）。
@@ -596,8 +745,6 @@ pub(crate) async fn run_scheduler(
     // 異常終了（panic / 文脈失敗）の last_attempt（メモリ・§3.7 N-a）。成功で除去。
     let attempts: Arc<Mutex<HashMap<EntryKey, DateTime<Utc>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let mut fire_seq: u64 = 0;
-
     tracing::info!("中央スケジューラを開始（heartbeat + agent_schedules）");
 
     loop {
@@ -647,10 +794,8 @@ pub(crate) async fn run_scheduler(
             // next_fire = attempt + interval になり再発火ループを止める・§3.7 N-a）。成功で除去。
             attempts.lock().unwrap().insert(entry.key.clone(), now);
 
-            fire_seq += 1;
-            let tick = fire_seq;
             let entry = entry.clone();
-            let runner = runner.clone();
+            let heartbeat_discord_http = heartbeat_discord_http.clone();
             let state = state.clone();
             let db = db.clone();
             let in_flight = in_flight.clone();
@@ -667,8 +812,19 @@ pub(crate) async fn run_scheduler(
                 // 種別ごとに発火し、成功時だけ truthful に last_fired を刻む。
                 let fired: bool = match &entry.kind {
                     FireKind::Heartbeat { target } => {
-                        let outcome =
-                            run_one_fire(&runner, &db, &entry.agent_id, target, tick).await;
+                        // 同一セッションのターン（HB tick・schedule・通常メッセージ処理）を共有
+                        // ロックで直列化して発火する（#588 Stage 2。通常ルートと同じロック）。
+                        let outcome = session_locks
+                            .run_serialized(
+                                &entry.session_id,
+                                run_one_heartbeat(
+                                    &state,
+                                    &heartbeat_discord_http,
+                                    &entry.agent_id,
+                                    target,
+                                ),
+                            )
+                            .await;
                         if outcome.is_some() {
                             let fired_at = Utc::now().to_rfc3339();
                             if let Ok(conn) = db.lock() {
@@ -801,7 +957,7 @@ mod tests {
     /// Discord（チャンネル名）で正しい文面になること。
     #[test]
     fn format_heartbeat_prompt_embeds_channel_name_per_fire_path() {
-        // NostrBroadcast は `run_one_fire` が HEARTBEAT_NOSTR_CHANNEL_LABEL を channel_name に使う。
+        // NostrBroadcast は `run_one_heartbeat` が HEARTBEAT_NOSTR_CHANNEL_LABEL を channel_name に使う。
         let nostr =
             format_heartbeat_prompt(crate::HEARTBEAT_NOSTR_CHANNEL_LABEL, "巡回してね", false);
         assert!(
