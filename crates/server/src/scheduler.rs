@@ -56,12 +56,7 @@ use chrono::{DateTime, Utc};
 use opencrab_core::heartbeat::HeartbeatConfig;
 use tokio::sync::watch;
 
-use crate::heartbeat_delivery::HeartbeatDiscordHttp;
-use opencrab_actions::transcript::{AgentReplyContext, OutboundReplyRecord, TranscriptSource};
-use opencrab_actions::{
-    CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskSettled,
-};
-use opencrab_gateway::GatewayActions;
+use opencrab_actions::{CallerIdentity, RunRequest};
 use opencrab_server::AppState;
 
 /// sleep の頭打ち（秒）。NTP ジャンプ・DST・notify 取りこぼしの安全網（設計 §3.4）。
@@ -312,77 +307,13 @@ fn format_heartbeat_prompt(
     )
 }
 
-/// 発火元 transport の `GatewayActions` を登録簿から引く（#588 single-entry）。
-///
-/// 通常ターンと同じツール環境を渡すため。稼働していなければ `None`（それでも `spawn_subtask` は
-/// `SystemGatewayActions` 経由で使える）。Nostr なら `nostr_post` 等が載る。
-fn resolve_heartbeat_gateway_actions(
-    gateways: &opencrab_actions::AgentGatewayRegistry,
-    target: &FireTarget,
-    agent_id: &str,
-) -> Option<Arc<dyn GatewayActions>> {
-    let kind = match target {
-        FireTarget::NostrBroadcast => opencrab_actions::gateway_kinds::NOSTR,
-        FireTarget::DiscordChannel { .. } => opencrab_actions::gateway_kinds::DISCORD,
-    };
-    gateways.get(kind)?.gateway_actions_for(agent_id)
-}
-
-/// Discord 発火の `on_response_text`（通常ループと同じく反復ごとに応答テキストを配送する）。
-///
-/// **なぜ scheduler 側に配線が要るか**: 通常の Discord メッセージループは自分の
-/// `on_response_text` で反復ごとに `DiscordGateway::send_to_channel` している。scheduler は
-/// **どのゲートウェイのメッセージループにも属さず**発火するため、その `send_to_channel` を持たない。
-/// メッセージループ外からチャンネルへ送る唯一の口が [`crate::heartbeat_delivery`]（#400 の
-/// per-agent ハンドル解決）で、ここを engine 標準の `on_response_text` から呼ぶ。`NO_REPLY`・空は
-/// 送らない（通常ループと同じ判定）。
-fn discord_response_text_cb(
-    discord_http: &Arc<HeartbeatDiscordHttp>,
-    agent_id: &str,
-    channel_id: &str,
-) -> Arc<dyn Fn(String) + Send + Sync> {
-    let discord_http = discord_http.clone();
-    let agent_id = agent_id.to_string();
-    let channel_id = channel_id.to_string();
-    Arc::new(move |text: String| {
-        if text.is_empty() || text.trim() == "NO_REPLY" {
-            return;
-        }
-        let discord_http = discord_http.clone();
-        let agent_id = agent_id.clone();
-        let channel_id = channel_id.clone();
-        // 発火・反復を塞がないよう spawn（通常ループの on_response_text と同じく非ブロック）。
-        tokio::spawn(async move {
-            crate::heartbeat_delivery::deliver_via_discord_shared_http(
-                &discord_http,
-                &agent_id,
-                &channel_id,
-                &text,
-            )
-            .await;
-        });
-    })
-}
-
 /// 発火の記録（`heartbeat_log`）。**これと「時間のトリガー＋渡すプロンプト」だけがハートビート
 /// 固有**（single-entry の裁定）。`decision` は廃止語彙のため固定値 `fired`（列定義に経緯を明記）。
-fn record_heartbeat_fire(
-    db: &opencrab_db::Db,
-    agent_id: &str,
-    channel_id: &str,
-    source: &str,
-    continuation: Option<&SubtaskContinuation>,
-) {
+fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, channel_id: &str, source: &str) {
     let Ok(conn) = db.lock() else {
         return;
     };
-    let mut result = serde_json::json!({ "channel_id": channel_id, "source": source });
-    // 継続ターンだけ発火元を添える（どの発火が subtask 決着由来かを後から切り分けられるように）。
-    if let (Some(c), Some(obj)) = (continuation, result.as_object_mut()) {
-        obj.insert("origin".to_string(), serde_json::json!("subtask_resume"));
-        obj.insert("subtask_id".to_string(), serde_json::json!(c.subtask_id));
-        obj.insert("exit_reason".to_string(), serde_json::json!(c.exit_reason));
-    }
+    let result = serde_json::json!({ "channel_id": channel_id, "source": source });
     if let Err(e) = opencrab_db::queries::insert_heartbeat_log(
         &conn,
         agent_id,
@@ -393,116 +324,17 @@ fn record_heartbeat_fire(
     }
 }
 
-/// ハートビートが dispatch したサブタスクの決着（#440）。継続ターンの前置に使う。
-#[derive(Clone, Debug)]
-struct SubtaskContinuation {
-    subtask_id: String,
-    exit_reason: String,
-}
-
-/// `exit_reason` を人へ見せる述部へ写す（#443）。`SettleKind::Completed` は completed /
-/// stopped_by_limit / error / timeout の**どれでも**発火するので、一律「完了」と言うと
-/// タイムアウトした subtask にも「完了」と伝わり同じ prompt 内のマーカーと食い違う。未知の値は
-/// 断定しない（正確な値は同 prompt の `[subtask_completed: … exit_reason=…]` が持つ）。
-fn settle_sentence(exit_reason: &str) -> &'static str {
-    match exit_reason {
-        "completed" => "完了しました",
-        "stopped_by_limit" => "反復上限に達して途中で打ち切られました",
-        "error" => "エラーで失敗しました",
-        "timeout" => "時間切れで打ち切られました",
-        _ => "終了しました",
-    }
-}
-
-/// 継続ターンの system プロンプト前置（#440/#443）。サブタスクの完了本文は `settle_completed` が
-/// 親セッションへ永続化済みで会話再構成で載るため、ここでは本文を載せずマーカーだけ足す。
-fn continuation_prompt_suffix(c: &SubtaskContinuation) -> String {
-    let outcome = settle_sentence(&c.exit_reason);
-    format!(
-        "[ハートビート] 依頼していたバックグラウンド処理が{outcome}。詳細は直前の会話ログの subtask_completed に入っています。\n\
-         状況を見て、いま発話するかどうかは自分で決めてください。\n\
-         [subtask_completed: subtask_id={}, exit_reason={}]",
-        c.subtask_id, c.exit_reason
-    )
-}
-
-/// 決着イベントから継続の有無を決める（純粋関数・旧 `resume_origin`）。
+/// #455 schedule 発火（[`run_one_schedule`]）の文脈組み立て。LLM 確認 → `build_agent_context`
+/// （caller=Owner）→ モデル解決 → 予算計算 → `build_conversation_string` → `prepend_runtime_context`。
+/// `system_suffix` が非空なら system プロンプトへ足す（schedule は `""`＝入力は呼び出し側が会話へ
+/// speech 注入済み・#501）。
 ///
-/// 継続しない（`None`）のは 2 つ: 決着以外（進捗通知は走行中の run へ二重応答してしまう）／
-/// 親セッションがこの sink を配線したターンのものでない。sink は [`RunRequest::with_dispatch`] で
-/// **その run が dispatch した subtask にのみ**配線されるので、主判定は `ev.session_id == 発火セッション`
-/// で足りる（`heartbeat-` 接頭辞には依存しない・#573 Stage A。統合後は実会話セッションで走る）。
-fn resume_continuation(own_session_id: &str, ev: &SubtaskSettled) -> Option<SubtaskContinuation> {
-    if ev.kind != SettleKind::Completed {
-        return None;
-    }
-    if ev.session_id != own_session_id {
-        return None;
-    }
-    Some(SubtaskContinuation {
-        subtask_id: ev.subtask_id.clone(),
-        exit_reason: ev.exit_reason.clone(),
-    })
-}
-
-/// ハートビートが dispatch したサブタスクの決着を受け、**継続ターン**を起動する sink（#440）。
-///
-/// `run_one_heartbeat` が `with_dispatch` で配線する。決着が来たら（自分の発火セッションの完了なら）
-/// `tokio::spawn` して、共有ロックの下で同じ発火先の継続ターンを 1 回走らせる。**spawn する**のは、
-/// この sink が `settle_completed` の途中で同期的に呼ばれるため、ここで待つとサブタスクの決着処理
-/// そのものが止まるから（Discord / Nostr / web の sink が resume を spawn するのと同じ）。ロックの
-/// 取得は spawn した中で行う（元の run のロックは dispatch が非ブロックのため既に解放されている）。
-struct HeartbeatContinuationSink {
-    state: AppState,
-    discord_http: Arc<HeartbeatDiscordHttp>,
-    agent_id: String,
-    target: FireTarget,
-    session_id: String,
-}
-
-impl SubtaskCompletionSink for HeartbeatContinuationSink {
-    fn on_subtask_settled(&self, ev: SubtaskSettled) {
-        let Some(cont) = resume_continuation(&self.session_id, &ev) else {
-            return;
-        };
-        tracing::info!(
-            agent_id = %self.agent_id,
-            session_id = %self.session_id,
-            subtask_id = %ev.subtask_id,
-            exit_reason = %ev.exit_reason,
-            "heartbeat: subtask settled; starting continuation turn"
-        );
-        let state = self.state.clone();
-        let discord_http = self.discord_http.clone();
-        let agent_id = self.agent_id.clone();
-        let target = self.target.clone();
-        let session_id = self.session_id.clone();
-        tokio::spawn(async move {
-            // 継続ターンも通常ターン・時間発火と同じ共有ロックで直列化する（#588 Stage 2）。
-            state
-                .session_locks
-                .run_serialized(
-                    &session_id,
-                    run_one_heartbeat(&state, &discord_http, &agent_id, &target, Some(cont)),
-                )
-                .await;
-        });
-    }
-}
-
-/// scheduler 発火の**共通文脈組み立て**。heartbeat tick（[`run_one_heartbeat`]）と #455 schedule
-/// （[`run_one_schedule`]）で**完全一致していた処理**——LLM 確認 → `build_agent_context`（caller=Owner）
-/// → モデル解決 → 予算計算 → `build_conversation_string` → `prepend_runtime_context`——を 1 箇所に
-/// 集約する（重複解消）。`system_suffix` が非空なら system プロンプトへ足す（heartbeat の指示文。
-/// schedule は `""`＝入力は呼び出し側が会話へ speech 注入済み・#501）。
+/// #588 TimedFire 以降、heartbeat はこの関数を通らない: 時刻発火はゲートウェイのループへ委譲され、
+/// 文脈組み立て・RunRequest・配送・記録は**そのループの通常ルート**が行う。scheduler 側でこの
+/// 「発火ターンを自前で回す」形が残るのは schedule（#455）だけ。
 ///
 /// 戻り値 `(system_prompt, agent_name, conversation)`。`None` = **ターンを開始できない**
 /// （LLM 無し / 会話組み立て失敗）→ 呼び出し側は発火扱いしない。
-///
-/// この関数の後は呼び出し側ごとに違うので共通化しない: RunRequest の transport 差分
-/// （heartbeat は gateway_actions / reply_target / `on_response_text` 配送、schedule は素通し）と、
-/// 記録（heartbeat は Discord 配送記録＋発火ログ、schedule は plain speech・engine 失敗時の扱いも別）。
-/// `run_agent_response` の呼び出し自体は 1 行だが、渡す req も結果処理も別物なので各所に置く。
 fn build_scheduled_context(
     state: &AppState,
     agent_id: &str,
@@ -551,46 +383,34 @@ fn build_scheduled_context(
     Some((system_prompt, agent_name, conversation))
 }
 
-/// 1 発火分（heartbeat）: 時刻が来たら、**通常ルートと同じ 1 ターン**を発火先セッション上で走らせる。
+/// 1 発火分（heartbeat・#588 TimedFire）: 時刻が来たら、発火先セッションの**ゲートウェイのループへ
+/// TimedFire イベントを 1 本流すだけ**。そのループが「いつもの turn」を回す（配送・ロック・記録・
+/// 継続ターンは全部ゲートウェイの既存実装）。scheduler に残るのは「トリガー＋渡すプロンプト
+/// （#584 指示解決）」と「発火の記録（`heartbeat_log`）」だけ。専用ターン実装・専用配送・専用継続は
+/// 撤去した。
 ///
-/// # 「トリガー＋プロンプト」だけがハートビート固有（#588 single-entry）
+/// caller は **常に `Owner`**（本人が自分の意思で動くターン）。プロンプトは受け口側で system プロンプト
+/// へ足され、会話ログには「発言」として残さない（#501）。継続ターンはループ既存の subtask 完了経路
+/// （Discord=`SubtaskCompleted` / Nostr=`NostrResponder` の `SubtaskCompletionSink`）が担う。
 ///
-/// ハートビートに固有なのは (1) 時間で発火すること、(2) 渡すプロンプト（指示解決 #584 →
-/// [`format_heartbeat_prompt`]）、(3) 発火の記録（[`record_heartbeat_fire`]）の 3 点だけ。それ以外は
-/// **通常ルートのものをそのまま使う**: 推論は [`opencrab_server::process::run_agent_response`]、会話
-/// 組み立ては [`build_conversation_string`]、配送は Discord なら engine 標準の `on_response_text`
-/// （[`discord_response_text_cb`]）、記録は [`opencrab_server::transcript::record_outbound_reply`]、
-/// 直列化は呼び出し側が共有 [`SessionLocks`] で巻く（#588 Stage 2）。専用のターン実装・専用の配送
-/// ルーティング・専用の語彙（旧 `heartbeat_turn.rs`）は撤去したが、**継続ターン（#440）は残す**。
-///
-/// caller は **常に `Owner`**（本人が自分の意思で動くターン。`resolve_caller` には載せない）。
-/// プロンプトは **system プロンプトへ 1 度だけ**載せ、会話ログには「発言」として残さない（#501。
-/// 毎 tick 積まれると挙動を歪めるため）。
-///
-/// **継続ターン（#440/#443）**: `with_dispatch` で非ブロック dispatch と [`HeartbeatContinuationSink`]
-/// を配線する。dispatch したサブタスクが決着すると、sink が同じ発火先で継続ターンを 1 回起動し
-/// （`continuation = Some`）、その結果（例: 見つけたニュース）をエージェントが会話へ出せる。継続で
-/// なければ `continuation = None`。継続ターンがないと、サブタスクの成果は会話ログに残るだけで
-/// チャンネルへ届かない（本番で確認・#440 の要点）。
-///
-/// `None` = ターンを開始できなかった（文脈組み立て失敗）で、呼び出し側は last_fired を刻まない。
-async fn run_one_heartbeat(
-    state: &AppState,
-    discord_http: &Arc<HeartbeatDiscordHttp>,
-    agent_id: &str,
-    target: &FireTarget,
-    continuation: Option<SubtaskContinuation>,
-) -> Option<()> {
+/// `None` = 送れなかった（該当ゲートウェイのループが未稼働＝受け口が登録されていない）。呼び出し側は
+/// last_fired を刻まない（次 tick で再送）。
+async fn run_one_heartbeat(state: &AppState, agent_id: &str, target: &FireTarget) -> Option<()> {
     let db = &state.db;
     let is_discord = matches!(target, FireTarget::DiscordChannel { .. });
-    // 発火先セッションと、表示用の channel_id / channel_name を種別から解く（#508）。
+    // 発火先セッションと、種別ごとの channel_id / guild_id / channel_name / 受け口の kind を解く（#508）。
     let session_id = target.channel_session_id(agent_id);
-    let (channel_id, channel_name) = match target {
+    let (kind, channel_id, guild_id, channel_name) = match target {
         FireTarget::NostrBroadcast => (
+            opencrab_actions::gateway_kinds::NOSTR,
+            String::new(),
             String::new(),
             crate::HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
         ),
-        FireTarget::DiscordChannel { channel_id, .. } => {
+        FireTarget::DiscordChannel {
+            guild_id,
+            channel_id,
+        } => {
             let name = {
                 let conn = db.lock().ok()?;
                 opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)
@@ -600,13 +420,18 @@ async fn run_one_heartbeat(
                     .filter(|n| !n.is_empty())
                     .unwrap_or_else(|| channel_id.clone())
             };
-            (channel_id.clone(), name)
+            (
+                opencrab_actions::gateway_kinds::DISCORD,
+                channel_id.clone(),
+                guild_id.clone(),
+                name,
+            )
         }
     };
 
-    // 前処理（ハートビート固有）: 指示解決（#584: channel → agent → default）→ 整形。応答本文を
-    // 自動配送するのは Discord だけ（Nostr はツール投稿）なので、誘導も transport で変える。
-    let (mut system_suffix, instructions_source) = {
+    // 渡すプロンプト（#584: channel → agent → default）→ 整形。応答本文が自動配送されるのは Discord
+    // だけ（Nostr はツール投稿）なので、誘導も transport で変える（`format_heartbeat_prompt`）。
+    let (prompt, instructions_source) = {
         let conn = db.lock().ok()?;
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
@@ -615,102 +440,24 @@ async fn run_one_heartbeat(
             resolved.source,
         )
     };
-    // 継続ターン（#440）は指示文の後ろへ subtask 完了マーカーを足す（本文は会話再構成で載る）。
-    if let Some(c) = &continuation {
-        system_suffix = format!("{system_suffix}\n\n{}", continuation_prompt_suffix(c));
-    }
 
-    // 共通文脈（LLM 確認・build_agent_context・会話組み立て）。開始できなければ発火扱いしない。
-    let (system_prompt, agent_name, conversation) = build_scheduled_context(
-        state,
-        agent_id,
-        &session_id,
-        "ハートビート自律行動",
-        &system_suffix,
-    )?;
-
-    // RunRequest（heartbeat 固有の transport 配線）。Discord のときだけツール域＋既定宛先＋反復ごと
-    // 配送（通常ループと同じ on_response_text）。Nostr は自動配送しない（ツール投稿）。
-    let mut req = RunRequest::new(
-        agent_id,
-        &agent_name,
-        &session_id,
-        &system_prompt,
-        &conversation,
-        "heartbeat",
-        CallerIdentity::Owner,
-    );
-    if let Some(ga) = resolve_heartbeat_gateway_actions(&state.gateways, target, agent_id) {
-        req = req.with_gateway_actions(ga);
-    }
-    if is_discord {
-        req = req
-            .with_reply_target(channel_id.clone())
-            .with_on_response_text(discord_response_text_cb(
-                discord_http,
-                agent_id,
-                &channel_id,
-            ));
-    }
-    // 継続ターン（#440）: 非ブロック dispatch と継続 sink を配線する。dispatch した subtask が
-    // 決着すると sink が同じ発火先で継続ターンを 1 回起動する（registry は agent 単位で共有し、
-    // 後続 tick / 継続から cancel_subtask が引けるようにする）。
-    let sink: Arc<dyn SubtaskCompletionSink> = Arc::new(HeartbeatContinuationSink {
-        state: state.clone(),
-        discord_http: discord_http.clone(),
+    // 受け口を引く（per-agent→共有・#400 と同型）。無ければ送れないので発火を諦める。
+    let Some(sink) = state.timed_fire_router.resolve(kind, agent_id) else {
+        tracing::warn!(agent_id, kind, session_id = %session_id, "scheduler: TimedFire の受け口が無い（ゲートウェイ未稼働）。発火を skip");
+        return None;
+    };
+    // 時刻発火のイベントを 1 本流すだけ（fire-and-forget。ロック・配送・記録・継続はループが回す）。
+    sink.fire_timed_turn(opencrab_actions::TimedFireRequest {
+        session_id,
         agent_id: agent_id.to_string(),
-        target: target.clone(),
-        session_id: session_id.clone(),
+        channel_id: channel_id.clone(),
+        guild_id,
+        prompt,
+        caller: CallerIdentity::Owner,
     });
-    req = req.with_dispatch(Some(state.subtask_registries.registry_for(agent_id)), sink);
-    let engine_result = opencrab_server::process::run_agent_response(state, req).await;
 
-    // 記録（heartbeat 固有）。Discord: 最終応答が NO_REPLY 以外なら record_outbound_reply。中間の宣言は
-    // engine の turn ログ（on_tool_call）が speech で残す（通常ループと同じ）。Nostr は自動配送しないので
-    // 配送記録も残さない。engine 失敗でも「発火した」ことは heartbeat_log に残す。
-    match &engine_result {
-        Ok(result) => {
-            if is_discord {
-                let text = result.response.trim();
-                if !text.is_empty() && text != "NO_REPLY" {
-                    // 通常ループと同じ `triggered_by`: 継続ターンは subtask 完了、tick は直接応答。
-                    let context = if continuation.is_some() {
-                        AgentReplyContext::SubtaskCompleted
-                    } else {
-                        AgentReplyContext::Direct {
-                            tool_calls_made: result.tool_calls_made,
-                        }
-                    };
-                    if let Ok(conn) = db.lock() {
-                        opencrab_server::transcript::record_outbound_reply(
-                            &conn,
-                            TranscriptSource::Discord,
-                            &OutboundReplyRecord {
-                                agent_id,
-                                session_id: &session_id,
-                                channel_id: Some(channel_id.as_str()),
-                                text,
-                                context: Some(context),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(agent_id, session_id = %session_id, "scheduler: heartbeat ターンが失敗: {e}");
-        }
-    }
-
-    // 発火の記録（ハートビート固有の 3 点目）。engine の成否によらず「発火した」ことを残す。
-    // 継続ターンだけ発火元（subtask 決着）を添える（tick 行の形は不変）。
-    record_heartbeat_fire(
-        db,
-        agent_id,
-        &channel_id,
-        instructions_source,
-        continuation.as_ref(),
-    );
+    // 発火の記録（ハートビート固有）。
+    record_heartbeat_fire(db, agent_id, &channel_id, instructions_source);
     Some(())
 }
 
@@ -859,14 +606,7 @@ async fn run_one_schedule(
 /// - `config_rx`: hot-reload が push する `HeartbeatConfig`。**発火時に `.borrow().enabled`
 ///   を読んで live G を得る**（起動時スナップショットにしない・§4.2 の kill-switch ライブ性）。
 /// - `wake`: [`AppState::scheduler_wake`]。set/CRUD/global 変更/ターン完了で rebuild を促す。
-pub(crate) async fn run_scheduler(
-    state: AppState,
-    // メッセージループ外からチャンネルへ送るための Discord ハンドル（#400）。ハートビートは
-    // どのゲートウェイのループにも属さず発火するため、通常の `send_to_channel` を持てない。
-    // これが「通常ルートに無いが必要」な唯一の依存（`run_one_heartbeat` の doc）。
-    heartbeat_discord_http: Arc<HeartbeatDiscordHttp>,
-    config_rx: watch::Receiver<HeartbeatConfig>,
-) {
+pub(crate) async fn run_scheduler(state: AppState, config_rx: watch::Receiver<HeartbeatConfig>) {
     let wake = state.scheduler_wake.clone();
     let db = state.db.clone();
     let default_interval_secs = state.heartbeat_limits.default_interval_secs;
@@ -945,7 +685,6 @@ pub(crate) async fn run_scheduler(
             attempts.lock().unwrap().insert(entry.key.clone(), now);
 
             let entry = entry.clone();
-            let heartbeat_discord_http = heartbeat_discord_http.clone();
             let state = state.clone();
             let db = db.clone();
             let in_flight = in_flight.clone();
@@ -962,20 +701,9 @@ pub(crate) async fn run_scheduler(
                 // 種別ごとに発火し、成功時だけ truthful に last_fired を刻む。
                 let fired: bool = match &entry.kind {
                     FireKind::Heartbeat { target } => {
-                        // 同一セッションのターン（HB tick・schedule・通常メッセージ処理）を共有
-                        // ロックで直列化して発火する（#588 Stage 2。通常ルートと同じロック）。
-                        let outcome = session_locks
-                            .run_serialized(
-                                &entry.session_id,
-                                run_one_heartbeat(
-                                    &state,
-                                    &heartbeat_discord_http,
-                                    &entry.agent_id,
-                                    target,
-                                    None,
-                                ),
-                            )
-                            .await;
+                        // #588 TimedFire: 発火先ゲートウェイのループへイベントを 1 本流すだけ
+                        // （ロック・配送・記録・継続はループが回す）。scheduler は turn を回さない。
+                        let outcome = run_one_heartbeat(&state, &entry.agent_id, target).await;
                         if outcome.is_some() {
                             let fired_at = Utc::now().to_rfc3339();
                             if let Ok(conn) = db.lock() {
@@ -1103,78 +831,6 @@ mod tests {
     use super::*;
 
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
-
-    fn settled(session_id: &str, kind: SettleKind, exit_reason: &str) -> SubtaskSettled {
-        SubtaskSettled {
-            session_id: session_id.to_string(),
-            agent_id: "agent-a".to_string(),
-            subtask_id: "st-1".to_string(),
-            exit_reason: exit_reason.to_string(),
-            kind,
-            reply_target: None,
-            caller: CallerIdentity::Agent,
-        }
-    }
-
-    /// #440: 自分の発火セッションの**完了** subtask だけが継続ターンを起こす。
-    #[test]
-    fn resume_continuation_starts_only_for_own_completed_subtask() {
-        // 自分のセッションの完了 → 継続する。
-        let c = resume_continuation(
-            "nostr-agent-a",
-            &settled("nostr-agent-a", SettleKind::Completed, "completed"),
-        );
-        assert!(
-            matches!(c, Some(SubtaskContinuation { ref subtask_id, ref exit_reason }) if subtask_id == "st-1" && exit_reason == "completed")
-        );
-        // 進捗通知では継続しない（走行中の run へ二重応答しない）。
-        assert!(resume_continuation(
-            "nostr-agent-a",
-            &settled("nostr-agent-a", SettleKind::Progress, "completed")
-        )
-        .is_none());
-        // 別セッションの決着は拾わない（横取り防止）。
-        assert!(resume_continuation(
-            "nostr-agent-a",
-            &settled("discord-other-9-9", SettleKind::Completed, "completed")
-        )
-        .is_none());
-    }
-
-    /// #443: 継続の前置は subtask_completed マーカーを持ち、**未完了の決着で「完了」と断言しない**。
-    #[test]
-    fn continuation_suffix_marks_subtask_and_never_claims_false_completion() {
-        let completed = continuation_prompt_suffix(&SubtaskContinuation {
-            subtask_id: "st-1".to_string(),
-            exit_reason: "completed".to_string(),
-        });
-        assert!(completed.contains("[subtask_completed: subtask_id=st-1, exit_reason=completed]"));
-        assert!(completed.contains("完了しました"));
-        // timeout / error は「完了」と言わない（同 prompt 内のマーカーと食い違わせない）。
-        for (reason, expected) in [
-            ("timeout", "時間切れで打ち切られました"),
-            ("error", "エラーで失敗しました"),
-            ("stopped_by_limit", "反復上限に達して途中で打ち切られました"),
-            ("weird_new_reason", "終了しました"),
-        ] {
-            let s = continuation_prompt_suffix(&SubtaskContinuation {
-                subtask_id: "st-1".to_string(),
-                exit_reason: reason.to_string(),
-            });
-            assert!(
-                !s.contains("完了しました"),
-                "exit_reason={reason} で完了を断言している: {s}"
-            );
-            assert!(
-                s.contains(expected),
-                "exit_reason={reason} の決着が伝わらない: {s}"
-            );
-            assert!(
-                s.contains(&format!("exit_reason={reason}]")),
-                "生の exit_reason をマーカーへ載せる: {s}"
-            );
-        }
-    }
 
     /// #501: 指示文の整形は発火経路で決まる `channel_name` を差し込むだけ。Nostr（ラベル）と
     /// Discord（チャンネル名）で正しい文面になること。

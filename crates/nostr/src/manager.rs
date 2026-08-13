@@ -169,7 +169,12 @@ impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     }
 
     pub async fn stop_agent_gateway(&self, agent_id: &str) {
-        stop_gateway(&self.gateways, &self.admins, agent_id);
+        stop_gateway(
+            &self.gateways,
+            &self.admins,
+            self.timed_fire_router.as_ref(),
+            agent_id,
+        );
     }
 
     pub fn is_running(&self, agent_id: &str) -> bool {
@@ -525,9 +530,6 @@ impl SessionQueues {
     }
 }
 
-/// watch ループ本体。watch が落ちてもバックオフして再購読する（abort されるまで）。
-/// dedup セットはループ寿命で保持する（再購読時の replay を跨いで効かせる）。
-#[allow(clippy::too_many_arguments)]
 /// scheduler の時刻発火（#588 TimedFire）を Nostr のセッションキューへ流す受け口。
 ///
 /// [`opencrab_actions::TimedFireRouter`] に登録され、`fire_timed_turn` で「その回のプロンプトで
@@ -575,6 +577,7 @@ impl<R: NostrAgentRunner + Clone> opencrab_actions::TimedFireSink for NostrTimed
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_nostr_loop<R: NostrAgentRunner + Clone>(
     runner: R,
     cli: NostaroCli,
@@ -949,10 +952,20 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
 }
 
 /// gateway を停止する（handle abort + 採用 admin 除去）。稼働していなければ何もしない。
-fn stop_gateway(gateways: &GatewayMap, admins: &AdminMap, agent_id: &str) {
+fn stop_gateway(
+    gateways: &GatewayMap,
+    admins: &AdminMap,
+    timed_fire_router: Option<&Arc<opencrab_actions::TimedFireRouter>>,
+    agent_id: &str,
+) {
     let handle = gateways.write().unwrap().remove(agent_id);
     // 採用 admin も一緒に外す（gateways と生死を揃える＝停止後に稼働中と誤判定させない）。
     admins.write().unwrap().remove(agent_id);
+    // #588 TimedFire: 死んだループへ発火が消えないよう受け口を解除する。Nostr は共有ゲートウェイが
+    // 無い（per-agent のみ）ので、解除しないと停止後の時刻発火が宛先なく捨てられる。
+    if let Some(router) = timed_fire_router {
+        router.unregister_per_agent(opencrab_actions::gateway_kinds::NOSTR, agent_id);
+    }
     if let Some(handle) = handle {
         // abort でループ frame を drop → 子 nostaro は kill_on_drop で kill される。
         handle.abort();
@@ -966,7 +979,6 @@ fn stop_gateway(gateways: &GatewayMap, admins: &AdminMap, agent_id: &str) {
 /// bootstrap（[`NostrIdentityProvisioner`]）が同じこの経路を通ることで、資格情報ガード
 /// （空 nsec 拒否）・自己 pubkey 取得の fail-closed が呼び出し口によらず必ず効く
 /// （PUT enabled=false→/start バイパス封じと同じ設計）。
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 async fn spawn_agent_gateway<R: NostrAgentRunner>(
     gateways: &GatewayMap,
@@ -1000,7 +1012,7 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     // 洪水を防ぐ不変条件は `NostaroCli::build_watch_command` が持つ（`--no-mention-only` を
     // 渡さない / `--match=any` を明示する）。どちらもテストで固定している。
 
-    stop_gateway(gateways, admins, agent_id);
+    stop_gateway(gateways, admins, timed_fire_router.as_ref(), agent_id);
 
     // nsec を含む config を 0600 で書き出す。
     NostaroCli::materialize_config(agent_id, secret_key, &config.effective_relays(), None)?;

@@ -6,19 +6,8 @@ use opencrab_core::heartbeat::HeartbeatConfig;
 use opencrab_server::{config, create_router, AppState};
 use tokio::sync::watch;
 
-mod heartbeat_delivery;
 mod intake_process;
 mod scheduler;
-
-/// Discord へ 1 通送るためのハンドル。**ボットのトークンを保持するので、どのハンドルで
-/// 送るかが Discord 上の送信者名を決める**（#400 の核心）。
-#[cfg(feature = "discord")]
-type DiscordHttp = Arc<serenity::http::Http>;
-#[cfg(not(feature = "discord"))]
-type DiscordHttp = ();
-
-/// 共有（TOML）ゲートウェイのハンドル置き場。ゲートウェイ起動時に埋まる。
-type DiscordHttpArc = Arc<Mutex<Option<DiscordHttp>>>;
 
 /// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
 /// Nostr broadcast は特定チャンネルを持たないため、会話名の代わりにこのラベルを充てる
@@ -195,6 +184,9 @@ async fn main() -> anyhow::Result<()> {
         intake_wake: Arc::new(tokio::sync::Notify::new()),
         // live G を読む口（#394 / 設計 §13.1）。scheduler と同一の watch 源。
         heartbeat_config_rx: heartbeat_config_rx.clone(),
+        // #588 TimedFire: 時刻発火の受け口レジストリ。各ゲートウェイのループが起動時に自分の
+        // 受け口を登録し、scheduler が発火時に per-agent→共有で引く（空で作り後から register）。
+        timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
     };
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
@@ -223,15 +215,6 @@ async fn main() -> anyhow::Result<()> {
         use opencrab_actions::AgentRuntime as _;
         state.cleanup_stale_interactions();
     }
-
-    // 共有（TOML）ゲートウェイのハンドル。登録簿（`state.gateways`）には載らないので
-    // ここで直接持つ（理由は `heartbeat_delivery` モジュール doc）。
-    let shared_discord_http: DiscordHttpArc = Arc::new(Mutex::new(None));
-    // ハートビート発話の Discord ハンドル解決口（#400）。**発話する体ごと**に
-    // per-agent ゲートウェイ → 共有ゲートウェイの順で配送時に引く。
-    let heartbeat_discord_http = Arc::new(heartbeat_delivery::HeartbeatDiscordHttp::new(
-        shared_discord_http.clone(),
-    ));
 
     // Start Discord gateway if configured and feature is enabled.
     #[cfg(feature = "discord")]
@@ -320,6 +303,14 @@ async fn main() -> anyhow::Result<()> {
                 // subtask 完了/進捗の通知はイベントループへの直接送信になった（#39）ため、
                 // gateway_actions とループで同じチャンネルを共有する必要がある。
                 let (event_tx, event_rx) = opencrab_discord::message_loop::create_event_channel();
+                // #588 TimedFire: この共有（TOML）ループを Discord の共有受け口として登録する。
+                // per-agent ゲートウェイを持たないエージェントの時刻発火はここへ落ちる（#400 と同型）。
+                state.timed_fire_router.register_shared(
+                    opencrab_actions::gateway_kinds::DISCORD,
+                    Arc::new(opencrab_discord::message_loop::DiscordTimedFireSink {
+                        event_tx: event_tx.clone(),
+                    }),
+                );
                 // 設定ファイル由来の通知先フォールバック（#157 S5 で `AppState` へ
                 // 持ち上げ済み）。Discord にはもう `ensure_*` しか残っていないが、
                 // 解決経路が全 transport で同じ値を見ることをここで担保する。
@@ -382,8 +373,6 @@ async fn main() -> anyhow::Result<()> {
                         None => gateway_actions_base,
                     });
 
-                *shared_discord_http.lock().unwrap() = Some(gateway.http().clone());
-
                 let discord_state = state.clone();
                 let owner_discord_id = discord_cfg.owner_discord_id.clone();
                 tokio::spawn(async move {
@@ -425,23 +414,6 @@ async fn main() -> anyhow::Result<()> {
         //    「復元が後ろへずれると発話が共有ゲートウェイの HTTP のまま固定される」
         //    という取り返しのつかない依存は無くなったが、診断の意味は復元後にしかない。
         state.gateways.restore_pending().await;
-
-        // heartbeat の Discord ハンドルを **per-agent ゲートウェイから体ごとに**引ける
-        // ようにする（#400）。
-        //
-        // 以前はここで `agent_ids.first()` の 1 体だけを解決して 1 本のハンドルを全体で
-        // 共有していた。`Http` はボットのトークンを保持する＝送信者名を決めるので、
-        // (1) Discord へ発話できるのは先頭の体だけ、(2) 先頭以外の体が Discord チャンネル
-        // へ向いていればその発話は先頭の体の名前で出る、という並び順依存になっていた。
-        // 引き口だけ渡し、**どの体のハンドルを使うかは配送時に発話者で決める**。
-        //
-        // **ここは登録簿の走査に畳んでいない**（#191 段階2 PR5）。必要なのは
-        // `Arc<serenity::http::Http>` そのもので、heartbeat の発話経路（`SPEAK:`）が
-        // serenity の API を直に叩く Discord 専用コードだから。PR4 の capability
-        // （`gateway_actions_for`）が返すのは `GatewayActions` であって生の HTTP
-        // クライアントではなく、ここに当てると発話経路ごと書き換えになる（挙動不変で
-        // なくなる）。transport 中立化は heartbeat 側の課題として残す。
-        heartbeat_discord_http.set_per_agent_source(manager.clone());
 
         tracing::info!("Per-agent Discord gateway manager initialized");
     }
@@ -492,65 +464,6 @@ async fn main() -> anyhow::Result<()> {
     // （`heartbeat_config_tx` / `heartbeat_config_rx`）。tx は下の config watcher へ、
     // rx は scheduler へ渡す（AppState には clone 済み）。
 
-    // 起動時の Discord ハンドル解決診断（下の #400 ブロック）専用のエージェント列挙。
-    // 中央スケジューラは `session_heartbeat_config` を直接読むため発火にはこの列挙を使わない。
-    // 診断は Discord feature 有効時のみ出すので、列挙も同じ cfg に閉じる（無効ビルドで未使用に
-    // ならないように）。
-    #[cfg(feature = "discord")]
-    let agent_ids: Vec<String> = {
-        let base: Vec<String> = cfg.gateway.discord.agent_ids.clone();
-        // #238: エージェント単位ハートビートに opt-in 済み（agent_heartbeat_config で
-        // enabled）のエージェントにも発火ループを立てる。これで Discord チャンネルに
-        // 紐づかない Nostr 専用エージェントにもループが立つ。config 由来の id は
-        // 名前かもしれないので resolve して UUID で重複除去する（同一エージェントに
-        // 二重にループを立てて二重発火させない）。DB 有効化の**動的**反映はスコープ外
-        // （起動時列挙のみ。反映は再起動時 / #251 の set_my_heartbeat 応答と整合）。
-        if let Ok(conn) = state.db.lock() {
-            let mut covered: std::collections::HashSet<String> =
-                base.iter().map(|id| resolve_agent_id(&conn, id)).collect();
-            let mut out = base;
-            match opencrab_db::queries::list_agents_with_heartbeat_enabled(&conn) {
-                Ok(enabled_ids) => {
-                    for id in enabled_ids {
-                        let resolved = resolve_agent_id(&conn, &id);
-                        if covered.insert(resolved) {
-                            out.push(id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to list heartbeat-enabled agents: {e}");
-                }
-            }
-            out
-        } else {
-            base
-        }
-    };
-
-    // #400: ハートビートを回す体ごとに、Discord ハンドルが解決できるかを起動時に 1 行残す。
-    // 以前は先頭 1 体の解決に失敗しても `if let Some` が外れるだけで**何も出ず**、
-    // 「Discord へは一切出ない構成のまま動いている」ことに気づけなかった（配送時の WARN は
-    // 発火してから出るもので、起動時のハンドル未解決そのものは可視化されていなかった）。
-    // ハンドルの実際の解決は配送時に行うので、ここはあくまで起動時点のスナップショット。
-    //
-    // Discord feature 無効ビルドでは per-agent も共有もハンドルが存在しようがなく、
-    // 「解決できない」WARN が毎起動エージェントの数だけ出るだけの雑音になるので診断ごと落とす。
-    #[cfg(feature = "discord")]
-    {
-        let resolved: Vec<String> = match state.db.lock() {
-            Ok(conn) => agent_ids
-                .iter()
-                .map(|id| resolve_agent_id(&conn, id))
-                .collect(),
-            // DB を引けなければ config の表記のままで診断する（診断のために起動を止めない）。
-            Err(_) => agent_ids.clone(),
-        };
-        for agent_id in &resolved {
-            heartbeat_delivery::log_startup_http_resolution(&heartbeat_discord_http, agent_id);
-        }
-    }
-
     // 中央ハートビートスケジューラ（#439 / #437 / #438 / 設計 §3）へ切替。
     //
     // 旧実装はエージェントごとに `core::heartbeat::heartbeat_loop` を立て、固定グリッド
@@ -559,12 +472,11 @@ async fn main() -> anyhow::Result<()> {
     // タスク**が `session_heartbeat_config` を毎ウェイクで読み直し、永続アンカーから正確な
     // 次回発火まで眠り、`scheduler_wake` で即時反映する。
     //
-    // #588 single-entry: ハートビートは専用のターン実装（旧 `HeartbeatTurnRunner`）を持たず、
-    // 時刻が来たら発火先セッション上で**通常ルートと同じ 1 ターン**を走らせる（`run_one_heartbeat`）。
-    // 固有なのは「時間のトリガー＋渡すプロンプト」と「発火の記録」だけ。scheduler へ渡すのは
-    // メッセージループ外からの Discord 送信ハンドル（#400・`heartbeat_discord_http`）だけで、これは
-    // scheduler がどのゲートウェイのループにも属さず発火するため通常の `send_to_channel` を持てない
-    // ことへの唯一の補い。
+    // #588 TimedFire: ハートビートは専用のターン実装・専用配送を持たない。時刻が来たら scheduler は
+    // 発火先ゲートウェイのループへ `TimedFire` イベントを 1 本流すだけ（`run_one_heartbeat`）で、以降の
+    // ターン（配送・ロック・記録・継続）はそのループの**通常ルート**が回す。固有なのは「時間のトリガー＋
+    // 渡すプロンプト」と「発火の記録（`heartbeat_log`）」だけ。受け口の解決は `AppState::timed_fire_router`
+    // （per-agent→共有・#400 と同型）で行うので、scheduler へ Discord 送信ハンドルを渡す必要はなくなった。
     //
     // per-session 直列化ロック（`SessionLocks`）の唯一のインスタンスは `AppState` が
     // 持ち（#588 Stage 2・`AppState::session_locks`）、scheduler・各ゲートウェイの受信ループ
@@ -578,9 +490,8 @@ async fn main() -> anyhow::Result<()> {
     // rebuild を促す。
     {
         let scheduler_state = state.clone();
-        let scheduler_http = heartbeat_discord_http.clone();
         tokio::spawn(async move {
-            scheduler::run_scheduler(scheduler_state, scheduler_http, heartbeat_config_rx).await;
+            scheduler::run_scheduler(scheduler_state, heartbeat_config_rx).await;
         });
     }
 
@@ -602,8 +513,13 @@ async fn main() -> anyhow::Result<()> {
         // （`nostr_run event --file <相対>` / `--out <相対>` がそれらと噛み合う）。
         let cli =
             opencrab_nostr::NostaroCli::new().with_workspace_base(state.workspace_base.clone());
-        let manager: opencrab_server::SharedNostrManager =
-            Arc::new(opencrab_nostr::NostrGatewayManager::new(state.clone()).with_cli(cli));
+        // #588 TimedFire: Nostr ゲートウェイのループが自分の受け口を `timed_fire_router` へ登録できる
+        // よう、共有ルータの Arc を渡す（Discord と同型・per-agent→共有の解決はルータが行う）。
+        let manager: opencrab_server::SharedNostrManager = Arc::new(
+            opencrab_nostr::NostrGatewayManager::new(state.clone())
+                .with_cli(cli)
+                .with_timed_fire_router(state.timed_fire_router.clone()),
+        );
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も
         // この登録簿から引く（#191 段階2 PR3・PR4）。名指しフィールドは無い。
         state.gateways.register(manager);
@@ -651,8 +567,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #588 single-entry: ハートビートの発火本体は `scheduler::run_one_heartbeat`（時刻が来たら通常
-// ルートと同じ 1 ターンを走らせる free 関数）に集約した。専用のターン実装（旧 `heartbeat_turn.rs`）・
-// 専用の継続ターン機構（#440）は撤去したので、main.rs には heartbeat 固有のテスト対象は無い。
-// 指示文の整形テストは `scheduler` の `#[cfg(test)]`、Discord 送信ハンドル解決（#400）のテストは
-// `heartbeat_delivery` にある。
+// #588 TimedFire: ハートビートの発火本体は `scheduler::run_one_heartbeat`（時刻が来たら発火先
+// ゲートウェイのループへ `TimedFire` を 1 本流すだけの free 関数）に集約した。専用のターン実装・専用
+// 配送（旧 `heartbeat_delivery.rs`）・scheduler 側の継続ターン機構は撤去し、以降のターンはゲートウェイ
+// 既存の通常ルート（Discord=`SubtaskCompleted` / Nostr=`NostrResponder`）が回す。指示文の整形テストは
+// `scheduler` の `#[cfg(test)]` にある。

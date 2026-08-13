@@ -44,12 +44,17 @@ pub trait TimedFireSink: Send + Sync {
 /// 無ければ共有（TOML）ゲートウェイへ落ちる。この per-agent→共有の解決は、撤去した
 /// `HeartbeatDiscordHttp`（http ハンドルの per-agent→共有）を「送り先ループの選択」へ置き換えたもの
 /// ＝送信者の同一性（#400）はループが自分の gateway で送ることで自然に保たれる。
+/// `(transport kind, agent_id)` → per-agent の受け口。
+type PerAgentSinks = Mutex<HashMap<(&'static str, String), Arc<dyn TimedFireSink>>>;
+/// transport kind → 共有（TOML）ゲートウェイの受け口。
+type SharedSinks = Mutex<HashMap<&'static str, Arc<dyn TimedFireSink>>>;
+
 #[derive(Default)]
 pub struct TimedFireRouter {
-    /// (transport kind, agent_id) → per-agent の受け口。
-    per_agent: Mutex<HashMap<(&'static str, String), Arc<dyn TimedFireSink>>>,
-    /// transport kind → 共有（TOML）ゲートウェイの受け口（per-agent が無いエージェントの落ち先）。
-    shared: Mutex<HashMap<&'static str, Arc<dyn TimedFireSink>>>,
+    /// per-agent ゲートウェイの受け口（そのボット名で出る）。
+    per_agent: PerAgentSinks,
+    /// 共有（TOML）ゲートウェイの受け口（per-agent が無いエージェントの落ち先）。
+    shared: SharedSinks,
 }
 
 impl TimedFireRouter {
@@ -58,11 +63,29 @@ impl TimedFireRouter {
     }
 
     /// per-agent ゲートウェイの受け口を登録する（そのボット名で出る）。
-    pub fn register_per_agent(&self, kind: &'static str, agent_id: &str, sink: Arc<dyn TimedFireSink>) {
+    pub fn register_per_agent(
+        &self,
+        kind: &'static str,
+        agent_id: &str,
+        sink: Arc<dyn TimedFireSink>,
+    ) {
         self.per_agent
             .lock()
             .unwrap()
             .insert((kind, agent_id.to_string()), sink);
+    }
+
+    /// per-agent ゲートウェイの受け口を解除する（そのゲートウェイの停止時）。
+    ///
+    /// 解除すると [`TimedFireRouter::resolve`] は共有（TOML）ゲートウェイの受け口へ落ちる。これで
+    /// 「専用ゲートウェイが動いている間はその体で、止まっていれば共有で」という #400 の動的
+    /// フォールバックを保つ（旧 `HeartbeatDiscordHttp` が配送時に `get_http_for_agent` の None で
+    /// 落としていたのと同じ挙動）。停止後も登録が残ると死んだループへ発火が消えるので必ず解除する。
+    pub fn unregister_per_agent(&self, kind: &'static str, agent_id: &str) {
+        self.per_agent
+            .lock()
+            .unwrap()
+            .remove(&(kind, agent_id.to_string()));
     }
 
     /// 共有（TOML）ゲートウェイの受け口を登録する（per-agent が無いエージェントの落ち先）。
@@ -110,14 +133,20 @@ mod tests {
             .resolve("discord", "crab")
             .unwrap()
             .fire_timed_turn(req("crab"));
-        assert_eq!((per.load(Ordering::SeqCst), shared.load(Ordering::SeqCst)), (1, 0));
+        assert_eq!(
+            (per.load(Ordering::SeqCst), shared.load(Ordering::SeqCst)),
+            (1, 0)
+        );
 
         // other は per-agent が無い → 共有へ落ちる。
         router
             .resolve("discord", "other")
             .unwrap()
             .fire_timed_turn(req("other"));
-        assert_eq!((per.load(Ordering::SeqCst), shared.load(Ordering::SeqCst)), (1, 1));
+        assert_eq!(
+            (per.load(Ordering::SeqCst), shared.load(Ordering::SeqCst)),
+            (1, 1)
+        );
 
         // 登録の無い transport は None（送れない）。
         assert!(router.resolve("nostr", "crab").is_none());

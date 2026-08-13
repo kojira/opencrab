@@ -190,7 +190,10 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                 // 出力はエージェントが `nostr_post` 等のツールで明示的に行う（各ツールが自分で記録する）。
                 // 受信ターンは reply_target が必ず非空なので、この分岐は既存挙動を変えない。
                 if reply_target.is_empty() {
-                    debug!(agent_id, session_id, "nostr: no reply target; leaving delivery to tools");
+                    debug!(
+                        agent_id,
+                        session_id, "nostr: no reply target; leaving delivery to tools"
+                    );
                     return None;
                 }
                 // 最終応答テキストを転記（会話履歴の継続性）。

@@ -144,6 +144,9 @@ pub struct AppState {
     /// ローカルに `SessionLocks::new()` を作るのをやめてこの 1 つを clone して共有する。
     /// `AgentRuntime::session_locks` がこれを返す（gateway 非依存層からの参照口）。
     pub session_locks: Arc<opencrab_actions::SessionLocks>,
+    /// #588 TimedFire: 時刻発火の受け口登録簿。各ゲートウェイのループが起動時に自分の受け口を
+    /// 登録し、scheduler が発火時にここを引いてイベントを 1 本流す（配送・ロック・記録はループ側）。
+    pub timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
     /// `report_progress`（#175 S1）のデバウンス世代カウンタ。
     ///
     /// `SystemGatewayActions` は run ごとに作り直されるため、そのフィールドに置くと
@@ -276,6 +279,7 @@ pub(crate) fn test_app_state() -> AppState {
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
+        timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),
