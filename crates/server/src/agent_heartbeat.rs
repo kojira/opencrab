@@ -383,9 +383,14 @@ pub(crate) fn set_my_heartbeat(
     //
     //   - **無効化 / 無効のまま**（enabled=false）→ anchor/last_fired は保存（再有効化まで位相を保つ）。
     //
-    // 結果: 発火済みセッションの**再有効化・間隔変更後の next_fire は `last_fired + interval`**。
-    // 過ぎていれば即発火する（§4.4 が本来言っていた「ユーザ起点の短縮は密になってよい」がここで
-    // 実現される。`3h→15min` に縮めたら 15 分待たされるのではなく、過ぎていれば直ちに発火する）。
+    // 結果: 既存行の**再有効化・間隔変更後の next_fire は `last_fired.or(anchor) + interval`**。
+    // これが過ぎていれば即発火する（§4.4 が本来言っていた「ユーザ起点の短縮は密になってよい」が
+    // ここで実現される。`3h→15min` に縮めたら 15 分待たされるのではなく、過ぎていれば直ちに発火）。
+    // **即発火は「発火済み」に限らない**: まだ一度も発火しておらず（last_fired=None）、`anchor` が
+    // 古いまま間隔を短縮した場合も `anchor+interval` が過ぎて即発火する（例: T0 に 3h で有効化 →
+    // 初回発火前に 15min へ短縮 → anchor+15min が過去 → 即発火）。据え置いた起点を基準に密になる、
+    // という一貫した挙動で、**初回有効化（起点を now に打つ）だけが「interval をまるごと待つ」**。
+    // 「初回は待つ / 再有効化・短縮は即発火しうる」の非対称は set_my_heartbeat のツール説明にも書く。
     let now = chrono::Utc::now().to_rfc3339();
     // last_fired_at は事実。設定変更では常に保持（新規行なら None＝未発火）。
     let last_fired_at = existing.as_ref().and_then(|r| r.last_fired_at.clone());

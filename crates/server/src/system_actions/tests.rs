@@ -4015,6 +4015,100 @@ async fn set_my_heartbeat_first_enable_sets_anchor_to_now() {
     );
 }
 
+/// #605 の目玉を直接 assert: `last_fired + interval < now` なら next_fire は**過去**（＝即発火）。
+/// 既存テストは last_fired が -30/-120 秒で next_fire が常に未来だったため、この核心を守っていなかった。
+#[tokio::test]
+async fn set_my_heartbeat_next_fire_is_in_the_past_when_overdue() {
+    let state = heartbeat_state();
+    let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+    let _ = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"enabled": true, "interval_secs": 600}),
+            &nostr_ctx(),
+        )
+        .await;
+    // 前回発火を interval より前（2000 秒前）に置く → last_fired + 600 は過去。
+    let fired_at = (chrono::Utc::now() - chrono::Duration::seconds(2000)).to_rfc3339();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_session_last_fired(&conn, "agent-x", "nostr-agent-x", &fired_at)
+            .unwrap();
+    }
+    // 設定変更（再有効化）。last_fired は保持され、next_fire は過去のまま＝即発火扱い。
+    let d = actions
+        .execute("set_my_heartbeat", &json!({"enabled": true}), &nostr_ctx())
+        .await;
+    let data = d.data.unwrap();
+    assert_eq!(data["last_fired_at"].as_str().unwrap(), fired_at);
+    let next = chrono::DateTime::parse_from_rfc3339(data["next_fire_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(
+        next < chrono::Utc::now(),
+        "next_fire は過去であるべき（即発火）: {next}"
+    );
+    let exp = (chrono::DateTime::parse_from_rfc3339(&fired_at).unwrap()
+        + chrono::Duration::seconds(600))
+    .with_timezone(&chrono::Utc);
+    assert_eq!(next, exp, "next_fire = last_fired + interval");
+}
+
+/// #605 doc の 2 ケース目: **未発火 + 古い anchor + 間隔短縮**でも next_fire は過去＝即発火。
+/// anchor を据え置く（now へ張り直さない）ので `anchor+新interval` が過ぎれば直ちに発火する。
+#[tokio::test]
+async fn set_my_heartbeat_never_fired_old_anchor_shorten_fires_immediately() {
+    let state = heartbeat_state();
+    // 未発火・古い anchor（10000 秒前）・enabled・長い間隔の行を直接用意する。
+    let old_anchor = (chrono::Utc::now() - chrono::Duration::seconds(10000)).to_rfc3339();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_session_heartbeat_config(
+            &conn,
+            &opencrab_db::queries::SessionHeartbeatConfigRow {
+                agent_id: "agent-x".into(),
+                session_id: "nostr-agent-x".into(),
+                enabled: true,
+                interval_secs: Some(3600),
+                anchor_at: Some(old_anchor.clone()),
+                last_fired_at: None,
+            },
+        )
+        .unwrap();
+    }
+    let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+    // 間隔を 600 へ短縮（enabled 引数なし）。anchor は据え置き（古いまま）。
+    let d = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"interval_secs": 600}),
+            &nostr_ctx(),
+        )
+        .await;
+    let data = d.data.unwrap();
+    assert_eq!(
+        data["last_fired_at"],
+        serde_json::Value::Null,
+        "未発火のまま"
+    );
+    assert_eq!(
+        data["anchor_at"].as_str().unwrap(),
+        old_anchor,
+        "古い anchor は据え置き（now へ張り直さない）"
+    );
+    let next = chrono::DateTime::parse_from_rfc3339(data["next_fire_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(
+        next < chrono::Utc::now(),
+        "anchor+interval が過去 → 即発火: {next}"
+    );
+    let exp = (chrono::DateTime::parse_from_rfc3339(&old_anchor).unwrap()
+        + chrono::Duration::seconds(600))
+    .with_timezone(&chrono::Utc);
+    assert_eq!(next, exp, "next_fire = anchor + interval");
+}
+
 /// #437: set 後に中央スケジューラを起こす（即時反映）。notify の permit を消費できる。
 #[tokio::test]
 async fn set_my_heartbeat_wakes_scheduler() {
