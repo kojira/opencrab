@@ -139,9 +139,19 @@ pub fn get_session_heartbeat_config(
 
 /// 設定行を作成/更新する（`updated_at` は現在時刻で更新）。
 ///
-/// **`anchor_at`/`last_fired_at` はこの upsert では触らない**（呼び出し側が明示指定した値を
-/// そのまま書く）。アンカーの向き（明示の有効化は `now`、非明示イベントは触らない）は
-/// 呼び出し側（set_my_heartbeat / スケジューラ）が設計 §4.4 に従って決める。
+/// # `last_fired_at` は UPDATE で触らない（#605）
+///
+/// `last_fired_at` は「**実際に発火した時刻**」の事実。これを進めてよいのは発火経路
+/// （[`set_session_last_fired`]・発火成功時のみ）**だけ**という設計（そちらの doc に
+/// 「実際に発火したときだけ呼ぶ・虚偽時刻を出さない」）。ところが以前はこの upsert が
+/// CONFLICT 時に `last_fired_at = excluded` で全上書きしていたため、`enabled`/`interval_secs`
+/// を変えたいだけの `set_my_heartbeat` が（`last_fired_at` を保持していないと）**設定変更の
+/// たびに発火の事実を消していた**（#605）。CONFLICT では `last_fired_at` を**更新対象から外す**
+/// ことで、設定変更が発火記録を消せない形を構造で担保する。**INSERT（新規行）では**行の値が
+/// そのまま入る（新規＝通常 `NULL`＝未発火）。
+///
+/// `anchor_at` は引き続き呼び出し側が明示指定した値を書く（起点をいつ打つ / 据え置くかは
+/// 呼び出し側の方針・#605 以降は「起点が無いときだけ now」＝ `set_my_heartbeat` の doc 参照）。
 pub fn upsert_session_heartbeat_config(
     conn: &Connection,
     cfg: &SessionHeartbeatConfigRow,
@@ -154,7 +164,6 @@ pub fn upsert_session_heartbeat_config(
             enabled = excluded.enabled,
             interval_secs = excluded.interval_secs,
             anchor_at = excluded.anchor_at,
-            last_fired_at = excluded.last_fired_at,
             updated_at = excluded.updated_at",
         params![
             cfg.agent_id,
@@ -385,5 +394,66 @@ mod tests {
         );
         // どちらも無ければ None（即発火可）。
         assert_eq!(heartbeat_next_fire_at(None, None, 600), None);
+    }
+
+    /// #605: 設定変更（CONFLICT）で `last_fired_at` を消さない。発火の事実を進めるのは
+    /// `set_session_last_fired`（発火成功時のみ）だけ。以前は upsert が全上書きしていた。
+    #[test]
+    fn upsert_preserves_last_fired_on_conflict() {
+        let conn = crate::init_memory().unwrap();
+        let base = SessionHeartbeatConfigRow {
+            agent_id: "a".into(),
+            session_id: "nostr-a".into(),
+            enabled: true,
+            interval_secs: Some(600),
+            anchor_at: Some("2026-01-01T00:00:00+00:00".into()),
+            last_fired_at: Some("2026-01-01T00:10:00+00:00".into()),
+        };
+        upsert_session_heartbeat_config(&conn, &base).unwrap();
+
+        // enabled/interval/anchor を変える upsert（呼び出し側は last_fired を保持しておらず None を渡す）。
+        let update = SessionHeartbeatConfigRow {
+            enabled: false,
+            interval_secs: Some(900),
+            anchor_at: Some("2026-02-02T00:00:00+00:00".into()),
+            last_fired_at: None, // ← 以前はこれで消えていた（#605）
+            ..base.clone()
+        };
+        upsert_session_heartbeat_config(&conn, &update).unwrap();
+
+        let got = get_session_heartbeat_config(&conn, "a", "nostr-a")
+            .unwrap()
+            .unwrap();
+        assert!(!got.enabled, "enabled は更新される");
+        assert_eq!(got.interval_secs, Some(900), "interval は更新される");
+        assert_eq!(
+            got.anchor_at.as_deref(),
+            Some("2026-02-02T00:00:00+00:00"),
+            "anchor は更新される"
+        );
+        assert_eq!(
+            got.last_fired_at.as_deref(),
+            Some("2026-01-01T00:10:00+00:00"),
+            "#605: last_fired は CONFLICT で消えない（発火経路だけが進める）"
+        );
+    }
+
+    /// 新規 INSERT では行の `last_fired_at` がそのまま入る（新規＝通常 None＝未発火）。
+    #[test]
+    fn upsert_insert_uses_row_last_fired() {
+        let conn = crate::init_memory().unwrap();
+        let row = SessionHeartbeatConfigRow {
+            agent_id: "a".into(),
+            session_id: "nostr-a".into(),
+            enabled: true,
+            interval_secs: Some(600),
+            anchor_at: Some("2026-01-01T00:00:00+00:00".into()),
+            last_fired_at: None,
+        };
+        upsert_session_heartbeat_config(&conn, &row).unwrap();
+        let got = get_session_heartbeat_config(&conn, "a", "nostr-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.last_fired_at, None, "新規行は未発火（None）");
     }
 }

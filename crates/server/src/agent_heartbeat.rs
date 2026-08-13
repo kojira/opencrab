@@ -368,21 +368,41 @@ pub(crate) fn set_my_heartbeat(
         None => existing.as_ref().and_then(|r| r.interval_secs),
     };
 
-    // アンカーの向き（設計 §4.4）:
-    //   - **明示の有効化 / 間隔変更**（＝結果として enabled=true）→ anchor=now・last_fired=NULL。
-    //     next_fire = now+interval（位相をリセット。ユーザ起点の短縮は密になってよい・N1）。
-    //   - **無効化 / 無効のまま**（enabled=false）→ anchor/last_fired は触らない（対象外）。
-    //     再有効化まで位相を保存する。
-    // ここに来る時点で enabled_arg か interval_arg のどちらかは Some なので、new_enabled=true は
-    // 必ず「明示の有効化 or 間隔変更」に対応する（設計 §4.4 の 1 行目）。
+    // アンカー / 発火記録の向き（#605 で §4.4 を実態へ修正）:
+    //
+    //   - **`last_fired_at` は設定変更で触らない**。これは「実際に発火した時刻」の事実で、
+    //     進めてよいのは発火経路（`set_session_last_fired`・発火成功時のみ）だけ。以前は
+    //     有効化のたびに `NULL` へ落としていたため、調整のたびに発火記録が消え、次回発火が
+    //     `anchor+interval` へ戻って**永久に先送り**されていた（#605）。**常に existing を保持**する
+    //     （upsert も CONFLICT では `last_fired_at` を触らないので二重に担保）。
+    //
+    //   - **`anchor_at` は起点が無いときだけ `now` を打つ**（`existing.anchor_at.or(now)`）。
+    //     起点（anchor/last_fired）が既にあれば据え置く。理由: 起点があるのに `now` へ張り直すと、
+    //     `last_fired` が効かなくなる or 位相が毎回先送りされる。起点が無い**初回有効化**でだけ
+    //     `now` を打ち、最初の発火を `now+interval` にする（enable 直後の即発火を避ける）。
+    //
+    //   - **無効化 / 無効のまま**（enabled=false）→ anchor/last_fired は保存（再有効化まで位相を保つ）。
+    //
+    // 結果: 既存行の**再有効化・間隔変更後の next_fire は `last_fired.or(anchor) + interval`**。
+    // これが過ぎていれば即発火する（§4.4 が本来言っていた「ユーザ起点の短縮は密になってよい」が
+    // ここで実現される。`3h→15min` に縮めたら 15 分待たされるのではなく、過ぎていれば直ちに発火）。
+    // **即発火は「発火済み」に限らない**: まだ一度も発火しておらず（last_fired=None）、`anchor` が
+    // 古いまま間隔を短縮した場合も `anchor+interval` が過ぎて即発火する（例: T0 に 3h で有効化 →
+    // 初回発火前に 15min へ短縮 → anchor+15min が過去 → 即発火）。据え置いた起点を基準に密になる、
+    // という一貫した挙動で、**初回有効化（起点を now に打つ）だけが「interval をまるごと待つ」**。
+    // 「初回は待つ / 再有効化・短縮は即発火しうる」の非対称は set_my_heartbeat のツール説明にも書く。
     let now = chrono::Utc::now().to_rfc3339();
-    let (anchor_at, last_fired_at) = if new_enabled {
-        (Some(now.clone()), None)
+    // last_fired_at は事実。設定変更では常に保持（新規行なら None＝未発火）。
+    let last_fired_at = existing.as_ref().and_then(|r| r.last_fired_at.clone());
+    let anchor_at = if new_enabled {
+        // 起点が無いとき（初回有効化）だけ now。既存の起点は据え置く。
+        existing
+            .as_ref()
+            .and_then(|r| r.anchor_at.clone())
+            .or_else(|| Some(now.clone()))
     } else {
-        (
-            existing.as_ref().and_then(|r| r.anchor_at.clone()),
-            existing.as_ref().and_then(|r| r.last_fired_at.clone()),
-        )
+        // 無効化 / 無効のまま: 起点を保存（再有効化まで位相を保つ）。
+        existing.as_ref().and_then(|r| r.anchor_at.clone())
     };
 
     let row = opencrab_db::queries::SessionHeartbeatConfigRow {
