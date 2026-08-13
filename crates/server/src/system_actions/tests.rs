@@ -3937,6 +3937,56 @@ async fn set_my_heartbeat_preserves_last_fired_across_config_change() {
     );
 }
 
+/// #605 対称ケース: 間隔の**延長**でも last_fired を保ち、next_fire = last_fired+（延ばした）interval。
+/// 短縮ケース（preserves_last_fired_across_config_change）と経路は同一だが、対称性のため延長方向も明示する。
+#[tokio::test]
+async fn set_my_heartbeat_preserves_last_fired_when_interval_extended() {
+    let state = heartbeat_state();
+    let actions = SystemGatewayActions::new(state.clone(), None, None, None);
+    let _ = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"enabled": true, "interval_secs": 600}),
+            &nostr_ctx(),
+        )
+        .await;
+    // 「実際に発火した」事実を刻む（発火経路だけが行う操作を模す）。
+    let fired_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::set_session_last_fired(&conn, "agent-x", "nostr-agent-x", &fired_at)
+            .unwrap();
+    }
+    // enabled は変えず interval を 600 → 7200 へ**延長**。
+    let d = actions
+        .execute(
+            "set_my_heartbeat",
+            &json!({"interval_secs": 7200}),
+            &nostr_ctx(),
+        )
+        .await;
+    let data = d.data.unwrap();
+    assert_eq!(data["interval_secs"], 7200);
+    assert_eq!(
+        data["last_fired_at"].as_str().unwrap(),
+        fired_at,
+        "間隔延長で last_fired が消えた（#605 の退行）"
+    );
+    // next_fire = last_fired + interval（延ばした 7200 を使う。now 基準へ張り直さない）。
+    let got = chrono::DateTime::parse_from_rfc3339(data["next_fire_at"].as_str().unwrap()).unwrap();
+    let exp =
+        chrono::DateTime::parse_from_rfc3339(&fired_at).unwrap() + chrono::Duration::seconds(7200);
+    assert_eq!(
+        got, exp,
+        "next_fire は last_fired+（延ばした）interval であるべき（now 基準ではない）"
+    );
+    // last_fired が -120 秒でも 7200 秒後は十分未来＝延長で発火が先送りされる。
+    assert!(
+        got > chrono::Utc::now(),
+        "延長後の next_fire は未来（+7200）であるべき: {got}"
+    );
+}
+
 /// #605: 発火済みセッションの**再有効化**でも last_fired を保つ（→ next_fire = last_fired+interval。
 /// 過ぎていれば即発火する）。以前は再有効化で last_fired=NULL・anchor=now になり先送りされた。
 #[tokio::test]
