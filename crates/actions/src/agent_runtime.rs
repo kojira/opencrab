@@ -73,6 +73,15 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;
 
+    /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
+    ///
+    /// 時間トリガー（heartbeat）のターンと通常メッセージ処理のターンを**同一セッション上で
+    /// 直列化**するため、両者が同じ `SessionLocks` インスタンスを見る必要がある。各ゲートウェイの
+    /// 受信ループ（Discord）や per-session ランタイム（Nostr の [`crate::SessionRuntime`]）は、
+    /// ローカルに `SessionLocks::new()` を作るのをやめ、ここが返す共有インスタンスを使う。
+    /// `AppState` が 1 つだけ生成して保持し、全経路がその `Arc` を clone して共有する。
+    fn session_locks(&self) -> std::sync::Arc<crate::SessionLocks>;
+
     /// NO_REPLY（沈黙の明示）を記録する（best-effort）。
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str);
 

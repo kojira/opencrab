@@ -107,12 +107,17 @@ pub struct NostrGatewayManager<R: NostrAgentRunner> {
 
 impl<R: NostrAgentRunner> NostrGatewayManager<R> {
     pub fn new(runner: R) -> Self {
+        // #588 Stage 2: watch ループ（inbound）と完了 sink（resume）が使う per-session 直列化を、
+        // heartbeat・scheduler・Discord 受信ループと**同じ** `SessionLocks` 実体へ寄せる。
+        // runner（= server の AppState）が持つ共有ロックを注入する（registry は従来どおり
+        // このランタイム固有）。runner を move する前に取り出す。
+        let runtime = Arc::new(NostrSessionRuntime::with_locks(runner.session_locks()));
         Self {
             gateways: Arc::new(RwLock::new(HashMap::new())),
             admins: Arc::new(RwLock::new(HashMap::new())),
             runner,
             cli: NostaroCli::new(),
-            runtime: Arc::new(NostrSessionRuntime::new()),
+            runtime,
         }
     }
 
@@ -1269,6 +1274,10 @@ mod tests {
 
         fn has_llm_providers(&self) -> bool {
             true
+        }
+
+        fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
+            std::sync::Arc::new(opencrab_actions::SessionLocks::new())
         }
 
         fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}

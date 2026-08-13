@@ -181,13 +181,28 @@ impl SessionLocks {
 /// 直列化だけが要る（登録簿は別経路で共有する）ゲートウェイは [`SessionLocks`] を使うこと。
 #[derive(Default)]
 pub struct SessionRuntime {
-    locks: SessionLocks,
+    /// #588 Stage 2: 共有可能な `Arc`。[`Self::new`] は自前の実体を持つ（web 用・従来どおり）が、
+    /// [`Self::with_locks`] で heartbeat / scheduler / Discord 受信ループと**同じ**実体を注入できる。
+    locks: Arc<SessionLocks>,
     registries: SubtaskRegistries,
 }
 
 impl SessionRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 共有 [`SessionLocks`]（#588 Stage 2）を注入して作る。
+    ///
+    /// 時間トリガー（heartbeat）・scheduler・Discord 受信ループと**同一セッションで直列化**したい
+    /// ゲートウェイ（Nostr）はこちらで作り、`AppState` が持つ 1 つの `Arc<SessionLocks>` を渡す。
+    /// `registries`（dispatch 登録簿）は従来どおりこのランタイム固有（`cancel_subtask` 到達性は
+    /// registry 単位の話で、ロック共有とは独立）。`new()`（自前ロック）は web が引き続き使う。
+    pub fn with_locks(locks: Arc<SessionLocks>) -> Self {
+        Self {
+            locks,
+            registries: SubtaskRegistries::new(),
+        }
     }
 
     /// セッションの dispatch registry を取得する（無ければ生成し、inbound/resume で共有）。

@@ -480,6 +480,10 @@ mod tests {
             true
         }
 
+        fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
+            std::sync::Arc::new(opencrab_actions::SessionLocks::new())
+        }
+
         fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
 
         fn record_outbound_reply(

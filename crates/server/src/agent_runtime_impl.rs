@@ -55,6 +55,11 @@ impl AgentRuntime for AppState {
         !self.llm_router.get().provider_names().is_empty()
     }
 
+    fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
+        // #588 Stage 2: プロセス全体で 1 つの共有実体を返す（clone は Arc の参照カウント増加）。
+        self.session_locks.clone()
+    }
+
     fn record_agent_no_reply(&self, agent_id: &str, session_id: &str) {
         if let Ok(conn) = self.db.lock() {
             crate::transcript::record_agent_no_reply(&conn, agent_id, session_id);

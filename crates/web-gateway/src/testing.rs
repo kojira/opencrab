@@ -224,6 +224,10 @@ impl AgentRuntime for FakeRunner {
         self.has_llm_providers
     }
 
+    fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
+        std::sync::Arc::new(opencrab_actions::SessionLocks::new())
+    }
+
     // ---- 以下は web ゲートウェイの経路が使わない（Discord/Nostr 由来の記録/掃除）。
     //      呼ばれたら配線ミスなので黙って no-op にせず落とす。
 

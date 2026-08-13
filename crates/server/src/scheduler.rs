@@ -55,7 +55,7 @@ use opencrab_core::heartbeat::{HeartbeatConfig, HeartbeatDecision};
 use tokio::sync::watch;
 
 use crate::heartbeat_turn::{HeartbeatTarget, HeartbeatTurnRunner, TurnOrigin};
-use opencrab_actions::{CallerIdentity, RunRequest, SessionLocks};
+use opencrab_actions::{CallerIdentity, RunRequest};
 use opencrab_server::AppState;
 
 /// sleep の頭打ち（秒）。NTP ジャンプ・DST・notify 取りこぼしの安全網（設計 §3.4）。
@@ -376,8 +376,8 @@ async fn run_one_fire(
 /// 同型: **応答は生成・記録するが自動配送はしない**——外界への出力はエージェントが自分の
 /// ツール域（HB tick と同じ）で行う（外部作用面は設計 §10.1・PR 本文に明記）。
 ///
-/// 直列化は呼び出し側が [`SessionLocks::run_serialized`] で行う（同一セッションの schedule 同士を
-/// 直列化）。`None` = ターンを開始できなかった（→ 呼び出し側で backoff）。
+/// 直列化は呼び出し側が [`opencrab_actions::SessionLocks::run_serialized`] で行う（同一セッションの
+/// schedule 同士を直列化）。`None` = ターンを開始できなかった（→ 呼び出し側で backoff）。
 async fn run_one_schedule(
     state: &AppState,
     agent_id: &str,
@@ -552,9 +552,12 @@ pub(crate) async fn run_scheduler(
     let db = state.db.clone();
     let default_interval_secs = state.heartbeat_limits.default_interval_secs;
     let min_interval_secs = state.heartbeat_limits.min_interval_secs;
-    // schedule ターンの per-session 直列化（同一セッションの schedule 同士が並行に会話へ
-    // 書き込むのを防ぐ）。HB は runner 内の locks で直列化される。
-    let schedule_locks = Arc::new(SessionLocks::new());
+    // #588 Stage 2: schedule ターン・HB tick・通常メッセージ処理ターンを同一セッション上で
+    // 直列化するため、プロセス全体で 1 つの共有 `SessionLocks`（`AppState::session_locks`）を使う。
+    // 以前は schedule 専用のローカルインスタンスで、HB は runner 内の別 locks、通常ターンは
+    // 各ゲートウェイの別 locks だったため、同じ session_id でも相互排他しなかった。runner も
+    // `from_state` で同じ実体を受け取る（`heartbeat_turn::HeartbeatTurnRunner::from_state`）。
+    let session_locks = state.session_locks.clone();
 
     // config 変更を wake へ橋渡しする（変更で rebuild → live G を読み直す・#437(c)）。
     // 別 receiver clone を消費し、本体ループは `borrow()` で live 値を読むだけにする
@@ -633,7 +636,7 @@ pub(crate) async fn run_scheduler(
             let in_flight = in_flight.clone();
             let attempts = attempts.clone();
             let wake = wake.clone();
-            let schedule_locks = schedule_locks.clone();
+            let session_locks = session_locks.clone();
             tokio::spawn(async move {
                 // 完了（成功/失敗/パニック）で in-flight 除去 + wake（Drop ガード）。
                 let _guard = InFlightGuard {
@@ -679,8 +682,9 @@ pub(crate) async fn run_scheduler(
                             schedule_id,
                             "scheduler: 定時実行を発火（#455）"
                         );
-                        // 同一セッションの schedule 同士を直列化して発火する。
-                        let outcome = schedule_locks
+                        // 同一セッションのターン（schedule 同士・HB tick・通常メッセージ処理）を
+                        // 共有ロックで直列化して発火する（#588 Stage 2）。
+                        let outcome = session_locks
                             .run_serialized(
                                 &entry.session_id,
                                 run_one_schedule(

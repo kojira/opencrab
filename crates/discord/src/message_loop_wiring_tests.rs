@@ -200,6 +200,10 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
         true
     }
 
+    fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
+        std::sync::Arc::new(opencrab_actions::SessionLocks::new())
+    }
+
     fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {}
 
     fn record_inbound_message(
