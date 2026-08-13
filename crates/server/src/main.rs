@@ -629,10 +629,14 @@ async fn main() -> anyhow::Result<()> {
     // タスク**が `session_heartbeat_config` を毎ウェイクで読み直し、永続アンカーから正確な
     // 次回発火まで眠り、`scheduler_wake` で即時反映する。
     //
-    // **単一の HeartbeatTurnRunner を共有する**のが要点。runner は `SessionLocks` を 1 つ
-    // 持ち（`heartbeat_turn.rs` / `session_runtime.rs`）、複数作ると同一 session id でも
-    // 直列化されない。中央化で全セッションが 1 つの runner を通るので、tick と継続ターンの
-    // 二重応答防止が全域で効く。
+    // **単一の HeartbeatTurnRunner を共有する**のが要点。中央化で全セッションが 1 つの
+    // runner を通るので、tick と継続ターンの二重応答防止が全域で効く。
+    //
+    // per-session 直列化ロック（`SessionLocks`）の唯一のインスタンスは `AppState` が
+    // 持ち（#588 Stage 2・`AppState::session_locks`）、runner・scheduler・各ゲートウェイの
+    // 受信ループ（Discord）・Nostr ランタイムはその `Arc` を clone して**同じ実体**を共有する。
+    // これで時間トリガー（tick / 継続ターン）と通常メッセージ処理のターンが、同一 session id
+    // 上で直列化される（別実体を複数作ると同じ session id でも相互排他しない）。
     //
     // live G（global kill-switch = `cfg.agent.heartbeat_enabled`）は scheduler が
     // **発火時に** `heartbeat_config_rx` から読む（hot-reload 追従・起動時スナップにしない。

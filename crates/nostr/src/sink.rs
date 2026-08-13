@@ -379,6 +379,9 @@ mod tests {
         /// Some のとき「モデルが inline で nostr_reply を呼んだ」ことを模して、
         /// 渡された gateway_actions を実際に実行する（sent フラグ経路の検証）。
         explicit_reply_target: Option<String>,
+        /// #588 Stage 2: 1 つだけ保持し `session_locks()` は毎回この clone を返す
+        /// （trait の「プロセス全体で 1 実体を共有」契約を fake でも守る）。
+        session_locks: std::sync::Arc<opencrab_actions::SessionLocks>,
     }
 
     impl FakeRunner {
@@ -391,6 +394,7 @@ mod tests {
                 inflight: Arc::new(AtomicUsize::new(0)),
                 max_inflight: Arc::new(AtomicUsize::new(0)),
                 explicit_reply_target: None,
+                session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
             }
         }
 
@@ -481,7 +485,7 @@ mod tests {
         }
 
         fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
-            std::sync::Arc::new(opencrab_actions::SessionLocks::new())
+            self.session_locks.clone()
         }
 
         fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}

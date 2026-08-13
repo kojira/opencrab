@@ -80,6 +80,9 @@ struct FakeRunner {
     /// 後から await しても取りこぼさない。
     run_observed: Arc<tokio::sync::Notify>,
     db: opencrab_db::Db,
+    /// #588 Stage 2: 1 つだけ保持し `session_locks()` は毎回この clone を返す
+    /// （trait の「プロセス全体で 1 実体を共有」契約を fake でも守る）。
+    session_locks: std::sync::Arc<opencrab_actions::SessionLocks>,
 }
 
 impl FakeRunner {
@@ -91,6 +94,7 @@ impl FakeRunner {
             inbound_record_fails: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             run_observed: Arc::new(tokio::sync::Notify::new()),
             db: opencrab_db::Db::memory().expect("in-memory DB"),
+            session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
         }
     }
 
@@ -201,7 +205,7 @@ impl opencrab_actions::AgentRuntime for FakeRunner {
     }
 
     fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
-        std::sync::Arc::new(opencrab_actions::SessionLocks::new())
+        self.session_locks.clone()
     }
 
     fn record_agent_no_reply(&self, _agent_id: &str, _session_id: &str) {}

@@ -1157,6 +1157,9 @@ mod tests {
         callers: Arc<Mutex<Vec<CallerIdentity>>>,
         /// `agent_workspace_root` が返す退避先（#570）。`None`＝退避先なし。
         workspace_root: Option<std::path::PathBuf>,
+        /// #588 Stage 2: 1 つだけ保持し `session_locks()` は毎回この clone を返す
+        /// （trait の「プロセス全体で 1 実体を共有」契約を fake でも守る）。
+        session_locks: std::sync::Arc<opencrab_actions::SessionLocks>,
     }
 
     impl SlowRunner {
@@ -1183,6 +1186,7 @@ mod tests {
                 caller_queries: Arc::new(Mutex::new(Vec::new())),
                 callers: Arc::new(Mutex::new(Vec::new())),
                 workspace_root: None,
+                session_locks: std::sync::Arc::new(opencrab_actions::SessionLocks::new()),
             }
         }
 
@@ -1277,7 +1281,7 @@ mod tests {
         }
 
         fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
-            std::sync::Arc::new(opencrab_actions::SessionLocks::new())
+            self.session_locks.clone()
         }
 
         fn ensure_session(&self, _s: &str, _a: &[String], _t: &str, _m: &str, _mode: &str) {}
