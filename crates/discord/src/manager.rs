@@ -52,25 +52,23 @@ pub struct DiscordGatewayManager<T: AgentRunner> {
     // ガードを await 跨ぎで保持しないこと（各メソッドでスコープを閉じる）。
     gateways: RwLock<HashMap<String, AgentGatewayEntry>>,
     state: T,
-    // #588 TimedFire: per-agent ゲートウェイのループを、この体の Discord 受け口として
+    // #588 TimedFire / #603: per-agent ゲートウェイのループを、この体の Discord 受け口として
     // `timed_fire_router` へ登録するための共有 Arc（scheduler が発火時に per-agent 優先で引く）。
-    // 未配線（None）なら登録をしないだけで、共有ゲートウェイの受け口へフォールバックする。
-    timed_fire_router: Option<Arc<TimedFireRouter>>,
+    // **必須**（`new` の引数）にしてあるので配線し忘れが起きえない（#602 で忘れて本番が止まった。
+    // Option + builder だと呼び忘れてもコンパイルが通ってしまう）。
+    timed_fire_router: Arc<TimedFireRouter>,
 }
 
 impl<T: AgentRunner> DiscordGatewayManager<T> {
-    pub fn new(state: T) -> Self {
+    /// `timed_fire_router` は**必須**。scheduler の時刻発火をこのマネージャの per-agent ループへ
+    /// 届けるための受け口レジストリで、渡さないと発火が届かない（#603）。型で強制することで
+    /// #602 のような「配線し忘れて黙って全 skip」を再発させない。
+    pub fn new(state: T, timed_fire_router: Arc<TimedFireRouter>) -> Self {
         Self {
             gateways: RwLock::new(HashMap::new()),
             state,
-            timed_fire_router: None,
+            timed_fire_router,
         }
-    }
-
-    /// #588 TimedFire: 時刻発火の受け口レジストリを配線する（main.rs が `AppState` の共有 Arc を渡す）。
-    pub fn with_timed_fire_router(mut self, router: Arc<TimedFireRouter>) -> Self {
-        self.timed_fire_router = Some(router);
-        self
     }
 
     /// Start a per-agent Discord gateway with the given token.
@@ -142,29 +140,21 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
         // #588 TimedFire: このループをこの体の per-agent Discord 受け口として登録する。
         // scheduler は発火時に per-agent 優先で引く（#400 と同型）ので、以降この体の時刻発火は
         // 自分のボットで出るこのループへ届く。停止時（`stop_agent_gateway`）に解除する。
-        if let Some(router) = &self.timed_fire_router {
-            router.register_per_agent(
-                opencrab_actions::gateway_kinds::DISCORD,
-                agent_id,
-                Arc::new(crate::message_loop::DiscordTimedFireSink {
-                    event_tx: event_tx.clone(),
-                }),
-            );
-            // #601: 登録が起きたことを起動時に 1 行残す（配線忘れでこれが出ない＝時刻発火が
-            // 届かない、を運用で即検知できるように）。
-            info!(
-                agent_id = %agent_id,
-                transport = "discord",
-                "timed-fire: 受け口を登録（per-agent Discord loop）"
-            );
-        } else {
-            // router 未配線は設定バグ（main.rs で with_timed_fire_router を呼び忘れ）。黙って
-            // 時刻発火が全部 skip されるのは #601 の再発なので、WARN で必ず知らせる。
-            error!(
-                agent_id = %agent_id,
-                "timed-fire: TimedFireRouter 未配線のため per-agent Discord 受け口を登録できない（時刻発火が届かない）"
-            );
-        }
+        // #603: router は必須（`new` の引数）なので「未配線で登録できない」経路は型で消えた。
+        self.timed_fire_router.register_per_agent(
+            opencrab_actions::gateway_kinds::DISCORD,
+            agent_id,
+            Arc::new(crate::message_loop::DiscordTimedFireSink {
+                event_tx: event_tx.clone(),
+            }),
+        );
+        // #601: 登録が起きたことを起動時に 1 行残す（型で強制した後も、運用で「実際に登録された」
+        // ことがログで見えるほうが良い・統括判断）。
+        info!(
+            agent_id = %agent_id,
+            transport = "discord",
+            "timed-fire: 受け口を登録（per-agent Discord loop）"
+        );
 
         // このゲートウェイの保留対話は上で作り直した登録簿（＝空）にしか無いので、
         // 前回稼働分の `pending` 行は再開できない。期限切れとして明示的に閉じる。
@@ -228,10 +218,9 @@ impl<T: AgentRunner> DiscordGatewayManager<T> {
             entry.gateway.shutdown().await;
             entry.handle.abort();
             // #588 TimedFire: 死んだループへ発火が消えないよう受け口を解除する（以降この体の
-            // 時刻発火は共有ゲートウェイへ落ちる・#400 の動的フォールバック）。
-            if let Some(router) = &self.timed_fire_router {
-                router.unregister_per_agent(opencrab_actions::gateway_kinds::DISCORD, agent_id);
-            }
+            // 時刻発火は共有ゲートウェイへ落ちる・#400 の動的フォールバック）。#603: router は必須。
+            self.timed_fire_router
+                .unregister_per_agent(opencrab_actions::gateway_kinds::DISCORD, agent_id);
             info!(agent_id = %agent_id, "Per-agent Discord gateway stopped");
         }
     }

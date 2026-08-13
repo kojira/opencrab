@@ -118,6 +118,18 @@ impl TimedFireRouter {
         }
         self.shared.lock().unwrap().get(kind).cloned()
     }
+
+    /// その kind に per-agent か共有のいずれかの受け口が**1 つでも**登録されているか
+    /// （起動時セルフチェック用・#603）。有効な受信ゲートウェイがあるのにこれが false なら、
+    /// その transport の時刻発火はどこにも届かない（配線漏れ / 起動失敗）。
+    pub fn has_sink_for_kind(&self, kind: &str) -> bool {
+        self.per_agent
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|(k, _)| *k == kind)
+            || self.shared.lock().unwrap().contains_key(kind)
+    }
 }
 
 #[cfg(test)]
@@ -181,6 +193,25 @@ mod tests {
 
         // 登録の無い transport は None（送れない）。
         assert!(router.resolve("nostr", "crab").is_none());
+    }
+
+    /// 起動時セルフチェック（#603）: per-agent でも共有でも 1 つあれば true、無ければ false。
+    #[test]
+    fn has_sink_for_kind_detects_missing_registration() {
+        let router = TimedFireRouter::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        // 何も登録していないので全 kind false（これが #602 の「受け口が 0」状態）。
+        assert!(!router.has_sink_for_kind("discord"));
+        assert!(!router.has_sink_for_kind("nostr"));
+
+        // per-agent を 1 つ登録 → その kind だけ true。
+        router.register_per_agent("nostr", "crab", Arc::new(CountingSink(counter.clone())));
+        assert!(router.has_sink_for_kind("nostr"));
+        assert!(!router.has_sink_for_kind("discord"));
+
+        // 共有だけでも true（per-agent 不在でも落ち先がある）。
+        router.register_shared("discord", Arc::new(CountingSink(counter)));
+        assert!(router.has_sink_for_kind("discord"));
     }
 
     fn req(agent: &str) -> TimedFireRequest {
