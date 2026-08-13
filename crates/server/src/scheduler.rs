@@ -376,6 +376,67 @@ fn record_heartbeat_fire(db: &opencrab_db::Db, agent_id: &str, channel_id: &str,
     }
 }
 
+/// scheduler 発火の**共通文脈組み立て**。heartbeat tick（[`run_one_heartbeat`]）と #455 schedule
+/// （[`run_one_schedule`]）で**完全一致していた処理**——LLM 確認 → `build_agent_context`（caller=Owner）
+/// → モデル解決 → 予算計算 → `build_conversation_string` → `prepend_runtime_context`——を 1 箇所に
+/// 集約する（重複解消）。`system_suffix` が非空なら system プロンプトへ足す（heartbeat の指示文。
+/// schedule は `""`＝入力は呼び出し側が会話へ speech 注入済み・#501）。
+///
+/// 戻り値 `(system_prompt, agent_name, conversation)`。`None` = **ターンを開始できない**
+/// （LLM 無し / 会話組み立て失敗）→ 呼び出し側は発火扱いしない。
+///
+/// この関数の後は呼び出し側ごとに違うので共通化しない: RunRequest の transport 差分
+/// （heartbeat は gateway_actions / reply_target / `on_response_text` 配送、schedule は素通し）と、
+/// 記録（heartbeat は Discord 配送記録＋発火ログ、schedule は plain speech・engine 失敗時の扱いも別）。
+/// `run_agent_response` の呼び出し自体は 1 行だが、渡す req も結果処理も別物なので各所に置く。
+fn build_scheduled_context(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    runtime_context: &str,
+    system_suffix: &str,
+) -> Option<(String, String, String)> {
+    // LLM が無ければ開始できない（backoff。set/CRUD/次ウェイクで再試行）。
+    if state.llm_router.get().provider_names().is_empty() {
+        tracing::warn!(
+            agent_id,
+            session_id,
+            "scheduler: LLM provider が無く発火を skip"
+        );
+        return None;
+    }
+    let conn = state.db.lock().ok()?;
+    let (base_prompt, agent_name) =
+        opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
+    let eff =
+        opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
+            .unwrap_or_else(|_| state.default_model.clone());
+    let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
+    let budget =
+        opencrab_server::process::compute_context_budget(&conn, prov, mdl, state.compaction_ratio);
+    let raw = match opencrab_server::process::build_conversation_string(
+        &conn, session_id, agent_id, budget,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                agent_id,
+                session_id,
+                "scheduler: 会話文字列の組み立てに失敗: {e}"
+            );
+            return None;
+        }
+    };
+    let conversation = opencrab_server::process::prepend_runtime_context(&raw, runtime_context);
+    // プロンプトの入れ方の差分: system プロンプトへ足す入力（空なら足さない）。
+    let system_prompt = if system_suffix.is_empty() {
+        base_prompt
+    } else {
+        format!("{base_prompt}\n\n{system_suffix}")
+    };
+    Some((system_prompt, agent_name, conversation))
+}
+
 /// 1 発火分（heartbeat）: 時刻が来たら、**通常ルートと同じ 1 ターン**を発火先セッション上で走らせる。
 ///
 /// # 「トリガー＋プロンプト」だけがハートビート固有（#588 single-entry）
@@ -401,16 +462,6 @@ async fn run_one_heartbeat(
     target: &FireTarget,
 ) -> Option<()> {
     let db = &state.db;
-
-    // LLM が無ければ発火を諦める（backoff。#455 と同じ）。
-    if state.llm_router.get().provider_names().is_empty() {
-        tracing::warn!(
-            agent_id,
-            "scheduler: LLM provider が無く heartbeat 発火を skip"
-        );
-        return None;
-    }
-
     let is_discord = matches!(target, FireTarget::DiscordChannel { .. });
     // 発火先セッションと、表示用の channel_id / channel_name を種別から解く（#508）。
     let session_id = target.channel_session_id(agent_id);
@@ -433,46 +484,30 @@ async fn run_one_heartbeat(
         }
     };
 
-    // 文脈（通常ルートと同じ）＋ ハートビートのプロンプト（指示解決 #584）を system プロンプトへ。
-    let (system_prompt, agent_name, conversation, instructions_source) = {
+    // 前処理（ハートビート固有）: 指示解決（#584: channel → agent → default）→ 整形。応答本文を
+    // 自動配送するのは Discord だけ（Nostr はツール投稿）なので、誘導も transport で変える。
+    let (system_suffix, instructions_source) = {
         let conn = db.lock().ok()?;
-        let (base_prompt, agent_name) =
-            opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
-        let budget = opencrab_server::process::compute_context_budget(
-            &conn,
-            prov,
-            mdl,
-            state.compaction_ratio,
-        );
-        let raw = match opencrab_server::process::build_conversation_string(
-            &conn,
-            &session_id,
-            agent_id,
-            budget,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(agent_id, session_id = %session_id, "scheduler: 会話文字列の組み立てに失敗: {e}");
-                return None;
-            }
-        };
-        let conversation =
-            opencrab_server::process::prepend_runtime_context(&raw, "ハートビート自律行動");
-        // 指示解決（#584: channel → agent → default）→ 整形。応答本文を自動配送するのは Discord
-        // だけ（Nostr はツール投稿）なので、誘導も transport で変える（`format_heartbeat_prompt`）。
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
-        let instructions = format_heartbeat_prompt(&channel_name, &resolved.text, is_discord);
-        let system_prompt = format!("{base_prompt}\n\n{instructions}");
-        (system_prompt, agent_name, conversation, resolved.source)
+        (
+            format_heartbeat_prompt(&channel_name, &resolved.text, is_discord),
+            resolved.source,
+        )
     };
 
-    // 通常ルートと同じ run_agent_response。caller=Owner・通常ツール域（gateway_actions）を渡す。
-    // 継続ターンは持たない（with_dispatch なし。spawn_subtask は SystemGatewayActions で使える）。
+    // 共通文脈（LLM 確認・build_agent_context・会話組み立て）。開始できなければ発火扱いしない。
+    let (system_prompt, agent_name, conversation) = build_scheduled_context(
+        state,
+        agent_id,
+        &session_id,
+        "ハートビート自律行動",
+        &system_suffix,
+    )?;
+
+    // RunRequest（heartbeat 固有の transport 配線）。継続ターンは持たない（with_dispatch なし。
+    // spawn_subtask は SystemGatewayActions で使える）。Discord のときだけツール域＋既定宛先＋反復ごと
+    // 配送（通常ループと同じ on_response_text）。Nostr は自動配送しない（ツール投稿）。
     let mut req = RunRequest::new(
         agent_id,
         &agent_name,
@@ -486,7 +521,6 @@ async fn run_one_heartbeat(
         req = req.with_gateway_actions(ga);
     }
     if is_discord {
-        // ツールの既定宛先＋反復ごと配送（通常ループと同じ）。Nostr は自動配送しない（ツール投稿）。
         req = req
             .with_reply_target(channel_id.clone())
             .with_on_response_text(discord_response_text_cb(
@@ -495,12 +529,11 @@ async fn run_one_heartbeat(
                 &channel_id,
             ));
     }
-
     let engine_result = opencrab_server::process::run_agent_response(state, req).await;
 
-    // 記録（通常ルートと同型）。Discord: 最終応答が NO_REPLY 以外なら record_outbound_reply。
-    // 中間の宣言は engine の turn ログ（on_tool_call）が speech で残す（通常ループと同じ）。
-    // Nostr: 自動配送しないので配送記録も残さない（ツール投稿が各自記録する）。
+    // 記録（heartbeat 固有）。Discord: 最終応答が NO_REPLY 以外なら record_outbound_reply。中間の宣言は
+    // engine の turn ログ（on_tool_call）が speech で残す（通常ループと同じ）。Nostr は自動配送しないので
+    // 配送記録も残さない。engine 失敗でも「発火した」ことは heartbeat_log に残す。
     match &engine_result {
         Ok(result) => {
             if is_discord {
@@ -552,7 +585,9 @@ async fn run_one_schedule(
 ) -> Option<()> {
     let db = &state.db;
 
-    // LLM が無ければ発火を諦める（backoff。set/CRUD/次ウェイクで再試行）。
+    // LLM が無ければ **speech 注入もせず**諦める（backoff）。`build_scheduled_context` も後で確認するが、
+    // 注入は文脈組み立ての前に済ませる必要があるため、LLM 無しの間 `message` が会話へ積み上がらない
+    // よう注入前にも見る（heartbeat は speech 注入をしないのでこのガードは schedule 固有）。
     if state.llm_router.get().provider_names().is_empty() {
         tracing::warn!(
             agent_id,
@@ -562,7 +597,7 @@ async fn run_one_schedule(
         return None;
     }
 
-    // 1. 注入先セッションを用意（無ければ作る。`send_agent_message` と同型）。
+    // 前処理（schedule 固有）1: 注入先セッションを用意（無ければ作る。`send_agent_message` と同型）。
     {
         let conn = db.lock().ok()?;
         let existing = opencrab_db::queries::get_session(&conn, session_id)
@@ -593,11 +628,11 @@ async fn run_one_schedule(
         }
     }
 
-    // 2. スケジュールの `message` を **speech**（speaker=`schedule`・≠ agent_id）として注入する。
-    //    `send_agent_message`（REST）と同じ形にするのが要点: `is_user_speech`（log_type=="speech"
-    //    かつ speaker!=agent_id・#284）が「エージェントが応答すべき直近のユーザー発言」として
-    //    認識し、コンテキスト切り詰め後も会話へ混ぜ戻す（`system` で注入すると truncation で
-    //    落ちて発火しても届かないことがある）。エージェントはこれを受け取って 1 ターン応答する。
+    // 前処理（schedule 固有）2: `message` を **speech**（speaker=`schedule`・≠ agent_id）として注入する。
+    // `send_agent_message`（REST）と同じ形にするのが要点: `is_user_speech`（log_type=="speech"
+    // かつ speaker!=agent_id・#284）が「エージェントが応答すべき直近のユーザー発言」として認識し、
+    // コンテキスト切り詰め後も会話へ混ぜ戻す（`system` で注入すると truncation で落ちて発火しても
+    // 届かないことがある）。ハートビートの指示文と違い毎回内容が変わるので会話へ積んでよい（#501）。
     {
         let conn = db.lock().ok()?;
         let log = opencrab_db::queries::SessionLogRow {
@@ -621,44 +656,12 @@ async fn run_one_schedule(
         }
     }
 
-    // 3. 文脈を組む（**HB tick と同じ 8 項目**: build_agent_context〔ペルソナ/記憶/スキル注入〕
-    //    ・caller=Owner・モデル解決・コンテキスト予算）。
-    let (system_prompt, agent_name, conversation) = {
-        let conn = db.lock().ok()?;
-        let (system_prompt, agent_name) =
-            opencrab_server::process::build_agent_context(&conn, agent_id, &CallerIdentity::Owner);
-        let eff =
-            opencrab_db::queries::effective_model_for_agent(&conn, agent_id, &state.default_model)
-                .unwrap_or_else(|_| state.default_model.clone());
-        let (prov, mdl) = opencrab_server::process::split_llm_model_spec(&eff);
-        let budget = opencrab_server::process::compute_context_budget(
-            &conn,
-            prov,
-            mdl,
-            state.compaction_ratio,
-        );
-        let raw = match opencrab_server::process::build_conversation_string(
-            &conn, session_id, agent_id, budget,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    agent_id,
-                    session_id,
-                    "scheduler: 会話文字列の組み立てに失敗: {e}"
-                );
-                return None;
-            }
-        };
-        let conversation =
-            opencrab_server::process::prepend_runtime_context(&raw, "direct_message");
-        (system_prompt, agent_name, conversation)
-    };
+    // 共通文脈。schedule は system プロンプトへ足さず（入力は上で会話へ speech 注入済み）。
+    let (system_prompt, agent_name, conversation) =
+        build_scheduled_context(state, agent_id, session_id, "direct_message", "")?;
 
-    // 4. 通常メッセージ処理経路（run_agent_response）。gateway_actions/dispatch は付けない
-    //    ＝ **HB tick と同じツール域**（HB tick も run_request で付けない）。長時間ツールは
-    //    この spawn 済みターン内で inline 実行され、in-flight dedup が重複発火を防ぐので
-    //    スケジューラ本体は塞がらない。
+    // RunRequest（schedule 固有）。gateway_actions / dispatch / 配送は付けない（#458 intake と同型・
+    // 自動配送しない。外界への出力はエージェントが自分のツール域で行う）。engine 失敗なら backoff。
     let req = RunRequest::new(
         agent_id,
         &agent_name,
@@ -668,40 +671,40 @@ async fn run_one_schedule(
         "schedule",
         CallerIdentity::Owner,
     );
-    match opencrab_server::process::run_agent_response(state, req).await {
-        Ok(engine_result) => {
-            // 5. 応答をセッションへ記録する（次ターンが文脈を失わないように・監査痕跡）。
-            if let Ok(conn) = db.lock() {
-                let log = opencrab_db::queries::SessionLogRow {
-                    id: None,
-                    agent_id: agent_id.to_string(),
-                    session_id: session_id.to_string(),
-                    log_type: "speech".to_string(),
-                    content: engine_result.response.clone(),
-                    speaker_id: Some(agent_id.to_string()),
-                    turn_number: None,
-                    metadata_json: None,
-                    created_at: None,
-                };
-                if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-                    tracing::error!(
-                        agent_id,
-                        session_id,
-                        "scheduler: schedule 応答の記録に失敗: {e}"
-                    );
-                }
-            }
-            Some(())
-        }
+    let engine_result = match opencrab_server::process::run_agent_response(state, req).await {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!(
                 agent_id,
                 session_id,
                 "scheduler: schedule 発火ターンが失敗: {e}"
             );
-            None
+            return None;
+        }
+    };
+
+    // 後処理（schedule 固有）: 応答をセッションへ記録する（次ターンが文脈を失わないように・監査痕跡）。
+    if let Ok(conn) = db.lock() {
+        let log = opencrab_db::queries::SessionLogRow {
+            id: None,
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            log_type: "speech".to_string(),
+            content: engine_result.response.clone(),
+            speaker_id: Some(agent_id.to_string()),
+            turn_number: None,
+            metadata_json: None,
+            created_at: None,
+        };
+        if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
+            tracing::error!(
+                agent_id,
+                session_id,
+                "scheduler: schedule 応答の記録に失敗: {e}"
+            );
         }
     }
+    Some(())
 }
 
 /// 中央スケジューラの本体ループ。プロセス寿命で回り続ける（設計 §3.2）。
