@@ -9,15 +9,9 @@ use tokio::sync::watch;
 mod intake_process;
 mod scheduler;
 
-/// Nostr 宛ハートビートターンの**表示用 channel_name**（プロンプト内の会話呼称）。
-/// Nostr broadcast は特定チャンネルを持たないため、会話名の代わりにこのラベルを充てる
-/// （`scheduler.rs` の `run_one_heartbeat`）。
-///
-/// **スコープではなく表示ラベル**である点に注意。旧名は「agent スコープ」の語を含んでおり、
-/// agent スコープ発火（#456 で全廃済み・現在は session 単位の `nostr-` セッションから発火）が
-/// まだ残っているかのように読み手を誤らせたため改名した（#472）。
-/// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
-const HEARTBEAT_NOSTR_CHANNEL_LABEL: &str = "（自律ハートビート）";
+// #599: ハートビートの発火本体（`run_one_heartbeat`）と表示ラベル
+// `HEARTBEAT_NOSTR_CHANNEL_LABEL` は lib（`opencrab_server::heartbeat_fire`）へ移した。
+// scheduler（時刻発火）と `run_my_heartbeat`（手動発火）が同じ 1 つの関数を共有するため。
 
 /// config名またはUUIDのagent_idを、DBのUUIDに解決する。
 /// "crab"のような名前が渡された場合、find_agentsで検索してUUIDを返す。
@@ -639,8 +633,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #588 TimedFire: ハートビートの発火本体は `scheduler::run_one_heartbeat`（時刻が来たら発火先
-// ゲートウェイのループへ `TimedFire` を 1 本流すだけの free 関数）に集約した。専用のターン実装・専用
-// 配送（旧 `heartbeat_delivery.rs`）・scheduler 側の継続ターン機構は撤去し、以降のターンはゲートウェイ
-// 既存の通常ルート（Discord=`SubtaskCompleted` / Nostr=`NostrResponder`）が回す。指示文の整形テストは
-// `scheduler` の `#[cfg(test)]` にある。
+// #588 TimedFire / #599: ハートビートの発火本体は `opencrab_server::heartbeat_fire::run_one_heartbeat`
+// （時刻が来たら発火先ゲートウェイのループへ `TimedFire` を 1 本流すだけの free 関数）に集約した。lib へ
+// 置いてあるので scheduler（時刻発火）と `run_my_heartbeat`（手動発火）が同じ 1 つの関数を共有する。
+// 専用のターン実装・専用配送（旧 `heartbeat_delivery.rs`）・scheduler 側の継続ターン機構は撤去し、以降の
+// ターンはゲートウェイ既存の通常ルート（Discord=`SubtaskCompleted` / Nostr=`NostrResponder`）が回す。
+// 指示文の整形テストは `heartbeat_fire` の `#[cfg(test)]` にある。

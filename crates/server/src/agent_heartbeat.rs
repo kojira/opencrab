@@ -3,6 +3,9 @@
 //! - `get_my_heartbeat`: 現在の有効/無効・間隔・次回発火時刻（`next_fire_at`）、境界値
 //!   （下限・上限・既定）を返す。enabled なのに発火しない理由があればそれも返す。
 //! - `set_my_heartbeat`: 有効/無効と間隔を更新する。
+//! - `run_my_heartbeat`（#599）: 時間を待たずに手動発火する（テスト用）。**オーナー / co_agent 限定**
+//!   （bridge の `OWNER_ONLY_ACTIONS`）。**時間発火とまったく同じ経路**
+//!   （[`crate::heartbeat_fire::run_one_heartbeat`]）を通り、`last_fired_at` は更新しない。
 //!
 //! # セッション単位に一本化（#456・設計 §13）
 //!
@@ -52,6 +55,23 @@ fn ensure_trusted(ctx: &GatewayCallContext) -> Option<GatewayActionResult> {
         success: false,
         data: None,
         error: Some("このアクションは信頼済みの呼び出し元のみ実行できます".to_string()),
+    })
+}
+
+/// 呼び出し元権限の検査（多層防御）。bridge の `OWNER_ONLY_ACTIONS` と同じ範囲
+/// （オーナー / co_agent のみ）。`run_my_heartbeat`（#599）用。**新しいゲートではなく**、
+/// bridge の owner_only ポリシーを handler 側でも同じ範囲で二重に確認するだけ。
+fn ensure_owner_or_coagent(ctx: &GatewayCallContext) -> Option<GatewayActionResult> {
+    if matches!(
+        ctx.caller,
+        GatewayCaller::Owner | GatewayCaller::CoAgent { .. }
+    ) {
+        return None;
+    }
+    Some(GatewayActionResult {
+        success: false,
+        data: None,
+        error: Some("このアクションはオーナーまたは co_agent のみ実行できます".to_string()),
     })
 }
 
@@ -402,5 +422,141 @@ pub(crate) fn set_my_heartbeat(
         success: true,
         data: Some(payload),
         error: None,
+    }
+}
+
+/// ハートビートを**時間を待たずに手動発火**する（#599・オーナー / co_agent 限定）。
+///
+/// # 時間発火とまったく同じ経路
+///
+/// scheduler の時刻発火と**同じ関数**（[`crate::heartbeat_fire::run_one_heartbeat`]）を呼ぶ。
+/// テスト用の別経路は作らない（別経路だとテストで通っても本番で挙動が割れる・#599）。発火先の
+/// 解決（session_id → `SessionFireTarget`）も設定ツールと同じ db 層の関数を使う。
+///
+/// # 対象セッション
+///
+/// 引数 `session_id` を渡せばそのセッション、省略すれば**現在のセッション**を発火する。現在
+/// セッション以外を指定できるのはオーナー / co_agent 限定だから（テスト用途）。発火経路の無い
+/// 種別（`web-` 等）は fail-closed で拒否する。
+///
+/// # `last_fired_at` は更新しない
+///
+/// 手動発火は時間発火の位相をずらさないため `last_fired_at` を刻まない（`run_one_heartbeat` は
+/// そもそも刻まない。刻むのはスケジューラの発火ループだけ）。発火の記録（`heartbeat_log`）は残す。
+///
+/// # 自己デッドロックを避ける（設計時に判明・#599）
+///
+/// このツールは呼び出しターンの中で走り、そのターンは既に現在セッションの直列化ロックを保持して
+/// いる。`TimedFire` は**イベントを送るだけ**でロックを取らないので送信自体は詰まらないが、受け取った
+/// ループは同じセッションのロックを取ろうとして待つ。したがって発火は `spawn` して**即座に「投げた」を
+/// 返し**、実際のターンは今のターンが終わってから走る（スケジューラと同じ構造）。
+pub(crate) fn run_my_heartbeat(
+    state: &AppState,
+    args: &serde_json::Value,
+    ctx: &GatewayCallContext,
+) -> GatewayActionResult {
+    // owner_only（bridge の OWNER_ONLY_ACTIONS と同ポリシー）を handler でも確認する（多層防御）。
+    if let Some(denied) = ensure_owner_or_coagent(ctx) {
+        return denied;
+    }
+    if let Some(denied) = reject_foreign_target(args) {
+        return denied;
+    }
+    if let Some(denied) = reject_removed_scope_args(args) {
+        return denied;
+    }
+
+    // 対象セッション: 明示 session_id 引数（テスト用）、無ければ現在のセッション。どちらも
+    // 発火経路の無い種別は fail-closed で拒否する（`resolve_session_fire_target` / db 層で共有）。
+    let (session_id, target) = match args.get("session_id") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+            match opencrab_db::queries::resolve_session_fire_target(s, &ctx.agent_id) {
+                Some(t) => (s.to_string(), t),
+                None => {
+                    return err(format!(
+                        "session_id「{s}」には発火経路がありません（発火できるのは discord- / nostr- セッションだけです）。"
+                    ));
+                }
+            }
+        }
+        Some(serde_json::Value::Null) | None => match current_session_target(ctx) {
+            Ok(v) => v,
+            Err(e) => return e,
+        },
+        Some(_) => return err("session_id は文字列で指定してください"),
+    };
+
+    // 受け口の有無を先に確認する（UX: ゲートウェイ未稼働なら黙って spawn せず即エラーで返す）。
+    // これは発火経路ではなく事前検証（読み取りのみ）。実際の発火は run_one_heartbeat が回す。
+    let kind = if target.is_discord() {
+        opencrab_actions::gateway_kinds::DISCORD
+    } else {
+        opencrab_actions::gateway_kinds::NOSTR
+    };
+    if !state.timed_fire_router.has_sink_for_kind(kind) {
+        return err(format!(
+            "{kind} のゲートウェイが稼働していないため発火できません（受け口が未登録）。ゲートウェイの起動を確認してください。"
+        ));
+    }
+
+    // 時間発火とまったく同じ経路を spawn で回す（呼び出しターンが現在セッションのロックを
+    // 持っているので、受信ループのターンは現在のターン終了後に走る）。ツールは即座に返す。
+    let fire_state = state.clone();
+    let fire_agent_id = ctx.agent_id.clone();
+    tokio::spawn(async move {
+        crate::heartbeat_fire::run_one_heartbeat(&fire_state, &fire_agent_id, &target).await;
+    });
+
+    tracing::info!(
+        agent_id = %ctx.agent_id,
+        session_id = %session_id,
+        caller = %ctx.caller.label(),
+        "run_my_heartbeat: 手動でハートビートを発火した（#599・last_fired_at は更新しない）"
+    );
+
+    GatewayActionResult {
+        success: true,
+        data: Some(json!({
+            "fired": true,
+            "session_id": session_id,
+            "note": "ハートビートを発火しました。実際のターンは今のターンが終わってから同じセッションで走ります（last_fired_at は更新しません）。",
+        })),
+        error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(caller: GatewayCaller) -> GatewayCallContext {
+        GatewayCallContext::new(caller, "agent-x")
+    }
+
+    /// #599: `run_my_heartbeat` の handler ゲートは owner / co_agent のみ通す（bridge の
+    /// `OWNER_ONLY_ACTIONS` と同ポリシーを多層防御で確認）。trusted user・素の Agent は弾く。
+    #[test]
+    fn run_gate_allows_only_owner_and_coagent() {
+        assert!(ensure_owner_or_coagent(&ctx(GatewayCaller::Owner)).is_none());
+        assert!(ensure_owner_or_coagent(&ctx(GatewayCaller::CoAgent {
+            agent_id: "peer".to_string()
+        }))
+        .is_none());
+        // trusted user は get/set は使えるが（`ensure_trusted`）、手動発火は owner_only。
+        assert!(ensure_owner_or_coagent(&ctx(GatewayCaller::TrustedUser)).is_some());
+        assert!(ensure_owner_or_coagent(&ctx(GatewayCaller::Agent)).is_some());
+    }
+
+    /// bridge の分類と一致すること: `run_my_heartbeat` は owner_only かつ inline。
+    #[test]
+    fn run_my_heartbeat_is_owner_only_and_inline() {
+        assert!(
+            opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"run_my_heartbeat"),
+            "owner_only ゲートに入っていない（外部ユーザーから手動発火できてしまう）"
+        );
+        assert!(
+            opencrab_actions::default_non_dispatch_tools().contains("run_my_heartbeat"),
+            "inline 分類に入っていない（発火の spawn を background 化する意味は無い）"
+        );
     }
 }

@@ -752,6 +752,21 @@ impl SystemGatewayActions {
                     }
                 }),
             },
+            // #599: 時間を待たずにハートビートを手動発火する（テスト用・オーナー / co_agent 限定）。
+            // 時間発火とまったく同じ経路を通り、last_fired_at は更新しない（時間発火の位相を保つ）。
+            GatewayActionDef {
+                name: "run_my_heartbeat".to_string(),
+                description: "自分（呼び出し元エージェント）のハートビートを、次の発火時刻を待たずに今すぐ手動で発火する。テストや動作確認に使う（時間発火とまったく同じ経路——宣言→サブタスク→継続→投稿——を通るので、待たずに一連の流れを検証できる）。対象は省略すると「いま話しているセッション」、session_id を渡せばそのセッション。発火先は Discord チャンネルまたは Nostr の自発投稿で、発火経路の無いセッション種別は拒否される。実際のターンは今のターンが終わってから走る（すぐに投げて返る）。time-fire の位相をずらさないため last_fired_at は更新しない（次回の定期発火時刻は変わらない）。オーナーまたは co_agent のみ実行できる。".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "発火する対象セッションの session_id（discord-… / nostr-…）。省略すると、いま話しているセッションを発火する。"
+                        }
+                    }
+                }),
+            },
             // ---- 定時実行（#455）: ハートビート（固定短間隔の tick）とは別に、cron / @every で
             // 「時刻・周期ベース」の自律実行を自分で登録できる。対象は常に ctx.session_id。
             // 語彙はハートビートに揃える（next_fire_at / gated / gated_reason）。
@@ -2135,6 +2150,8 @@ impl GatewayActions for SystemGatewayActions {
             // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
             "get_my_heartbeat" => crate::agent_heartbeat::get_my_heartbeat(&self.state, args, ctx),
             "set_my_heartbeat" => crate::agent_heartbeat::set_my_heartbeat(&self.state, args, ctx),
+            // #599: 時間を待たずに手動発火（オーナー / co_agent 限定・OWNER_ONLY_ACTIONS）。
+            "run_my_heartbeat" => crate::agent_heartbeat::run_my_heartbeat(&self.state, args, ctx),
             // エージェント自身の定時実行スケジュール（#455）。対象は常に ctx.session_id。
             "get_my_schedules" => crate::agent_schedule::get_my_schedules(&self.state, args, ctx),
             "set_my_schedule" => crate::agent_schedule::set_my_schedule(&self.state, args, ctx),

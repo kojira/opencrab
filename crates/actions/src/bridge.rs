@@ -358,6 +358,10 @@ pub const SERVER_INLINE_ACTIONS: &[&str] = &[
     //     dispatchable）と分類が割れるのはこのため — あちらは長文の保存で、
     //     値域の押し戻しを同ターンで受ける必要が無い。
     "set_my_heartbeat",
+    // (3) 同ターン結果依存: 手動発火（#599）。発火先の解決に失敗（発火経路の無いセッション /
+    //     ゲートウェイ未稼働）したら**同ターンで拒否**を受けて対処できる必要がある。ハンドラ自体は
+    //     発火を spawn して即返るので長時間化しない（background 化する意味も無い）。
+    "run_my_heartbeat",
     // 定時実行（#455）。ハートビートと同じ理由で inline:
     // (5) 純粋な読み取り: `get_my_schedules`。
     // (3) 同ターン結果依存: `set_my_schedule` は cron 式の不正を**同ターンで拒否**し、
@@ -582,6 +586,10 @@ pub const OWNER_ONLY_ACTIONS: &[&str] = &[
     "ws_mkdir",
     "add_allowed_command",
     "remove_allowed_command",
+    // 時間を待たずにハートビートを手動発火（#599）。テスト用だが「今すぐ自律ターンを起こす」
+    // 操作なので、オーナー / co_agent 以外（外部ユーザー由来の caller=Agent）には出さない。
+    // 発火の実行内容は時間発火と同一（別経路を作らない）。
+    "run_my_heartbeat",
 ];
 
 /// owner / co_agent / trusted_user のみ（素の Agent は不可）のアクション（#45）。
