@@ -95,6 +95,10 @@ pub struct FakeRunner {
     delay: Duration,
     inflight: Arc<AtomicUsize>,
     max_inflight: Arc<AtomicUsize>,
+    /// #588 Stage 2: 1 つだけ保持し `session_locks()` は毎回この clone を返す。
+    /// trait の契約（プロセス全体で 1 実体を共有）を fake でも守るため（呼ぶたびに
+    /// 新実体を返すと「2 回呼んで同じ instance」を期待するテストが静かに直列化を失う）。
+    session_locks: Arc<opencrab_actions::SessionLocks>,
 }
 
 impl FakeRunner {
@@ -121,6 +125,7 @@ impl FakeRunner {
             delay: Duration::ZERO,
             inflight: Arc::new(AtomicUsize::new(0)),
             max_inflight: Arc::new(AtomicUsize::new(0)),
+            session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         }
     }
 
@@ -222,6 +227,10 @@ impl AgentRuntime for FakeRunner {
 
     fn has_llm_providers(&self) -> bool {
         self.has_llm_providers
+    }
+
+    fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
+        self.session_locks.clone()
     }
 
     // ---- 以下は web ゲートウェイの経路が使わない（Discord/Nostr 由来の記録/掃除）。

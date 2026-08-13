@@ -244,6 +244,9 @@ async fn main() -> anyhow::Result<()> {
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
+        // #588 Stage 2: プロセス全体で 1 つの per-session 直列化ロック。heartbeat・scheduler・
+        // Discord 受信ループ・Nostr ランタイムが同じ実体を共有し、同一セッションのターンを直列化する。
+        session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         progress_debounce: Arc::new(opencrab_server::subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(Mutex::new(None)),
@@ -626,10 +629,14 @@ async fn main() -> anyhow::Result<()> {
     // タスク**が `session_heartbeat_config` を毎ウェイクで読み直し、永続アンカーから正確な
     // 次回発火まで眠り、`scheduler_wake` で即時反映する。
     //
-    // **単一の HeartbeatTurnRunner を共有する**のが要点。runner は `SessionLocks` を 1 つ
-    // 持ち（`heartbeat_turn.rs` / `session_runtime.rs`）、複数作ると同一 session id でも
-    // 直列化されない。中央化で全セッションが 1 つの runner を通るので、tick と継続ターンの
-    // 二重応答防止が全域で効く。
+    // **単一の HeartbeatTurnRunner を共有する**のが要点。中央化で全セッションが 1 つの
+    // runner を通るので、tick と継続ターンの二重応答防止が全域で効く。
+    //
+    // per-session 直列化ロック（`SessionLocks`）の唯一のインスタンスは `AppState` が
+    // 持ち（#588 Stage 2・`AppState::session_locks`）、runner・scheduler・各ゲートウェイの
+    // 受信ループ（Discord）・Nostr ランタイムはその `Arc` を clone して**同じ実体**を共有する。
+    // これで時間トリガー（tick / 継続ターン）と通常メッセージ処理のターンが、同一 session id
+    // 上で直列化される（別実体を複数作ると同じ session id でも相互排他しない）。
     //
     // live G（global kill-switch = `cfg.agent.heartbeat_enabled`）は scheduler が
     // **発火時に** `heartbeat_config_rx` から読む（hot-reload 追従・起動時スナップにしない。

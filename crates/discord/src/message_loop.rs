@@ -332,7 +332,11 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // `SessionLocks`（#223）。登録簿つきの `SessionRuntime` を持つと、その登録簿を
     // 「共有のもの」と誤認して dispatch 先を差し替えたときに cancel_subtask が
     // 走行中 subtask に届かなくなる。型として存在しなければその取り違えは起きない。
-    let session_locks = Arc::new(SessionLocks::new());
+    //
+    // #588 Stage 2: ローカル生成をやめ、プロセス全体で 1 つの共有 `SessionLocks`
+    // （`AppState::session_locks`）を使う。これで同一セッション（`discord-{agent}-{guild}-{channel}`）
+    // の通常メッセージ処理ターンと heartbeat の時間トリガーターンが直列化される。
+    let session_locks = state.session_locks();
 
     loop {
         // 次にフラッシュすべきバッファのデッドラインを計算

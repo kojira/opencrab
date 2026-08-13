@@ -136,6 +136,14 @@ pub struct AppState {
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
     /// dispatcher と `cancel_subtask`（#161）が同一 registry を見るようにする。
     pub subtask_registries: Arc<subtask_registries::SubtaskRegistries>,
+    /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
+    ///
+    /// 時間トリガー（heartbeat）のターンと通常メッセージ処理のターンを**同一セッション上で
+    /// 直列化**するための共有実体。各ゲートウェイの受信ループ（Discord）や per-session
+    /// ランタイム（Nostr の `SessionRuntime::with_locks`）・scheduler・heartbeat runner は、
+    /// ローカルに `SessionLocks::new()` を作るのをやめてこの 1 つを clone して共有する。
+    /// `AgentRuntime::session_locks` がこれを返す（gateway 非依存層からの参照口）。
+    pub session_locks: Arc<opencrab_actions::SessionLocks>,
     /// `report_progress`（#175 S1）のデバウンス世代カウンタ。
     ///
     /// `SystemGatewayActions` は run ごとに作り直されるため、そのフィールドに置くと
@@ -267,6 +275,7 @@ pub(crate) fn test_app_state() -> AppState {
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
+        session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),

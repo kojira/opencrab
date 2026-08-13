@@ -232,7 +232,10 @@ pub(crate) struct HeartbeatTurnRunner {
     registries: Arc<SubtaskRegistries>,
     default_model: String,
     compaction_ratio: f64,
-    locks: SessionLocks,
+    /// #588 Stage 2: プロセス全体で 1 つの共有 `SessionLocks`（`AppState::session_locks`）。
+    /// これで HB tick / 継続ターンが、同一セッションの通常メッセージ処理ターン・schedule と
+    /// 直列化される（以前は runner 固有のローカル実体で相互排他しなかった）。
+    locks: Arc<SessionLocks>,
 }
 
 impl HeartbeatTurnRunner {
@@ -250,7 +253,8 @@ impl HeartbeatTurnRunner {
             registries: state.subtask_registries.clone(),
             default_model: state.default_model.clone(),
             compaction_ratio: state.compaction_ratio,
-            locks: SessionLocks::new(),
+            // #588 Stage 2: 共有ロックを受け取り、通常ターン・schedule と同一セッションで直列化する。
+            locks: state.session_locks.clone(),
         })
     }
 
@@ -870,7 +874,7 @@ mod tests {
             registries: Arc::new(SubtaskRegistries::new()),
             default_model: "mock:test".to_string(),
             compaction_ratio: 0.5,
-            locks: SessionLocks::new(),
+            locks: Arc::new(SessionLocks::new()),
         });
         (runner, db, calls)
     }
