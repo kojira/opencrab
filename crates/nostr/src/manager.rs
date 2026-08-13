@@ -536,8 +536,9 @@ impl SessionQueues {
 /// 1 ターン回す」ジョブを per-agent キューへ enqueue するだけ（受け口は薄く保つ）。以降は Nostr の
 /// 既存経路（[`NostrResponder`]・直列化・継続ターンの SubtaskCompletionSink）が回す。
 ///
-/// **ブロードキャストなので reply_target は空**＝[`NostrResponder::respond`] のガード（#588）により
-/// 暗黙返信も本文記録もしない。発話はエージェントが `nostr_post` 等のツールで自分から行う。
+/// **ブロードキャストなので reply_target は空**。Nostr はもともと機構が publish しない（配送は
+/// エージェントが `nostr_post` 等のツールで自分から行う・#588）ので、時刻発火の特別扱いは要らない:
+/// 応答はセッションへ転記され（返信先が無いのでアンカー無し）、外界へは出ない。
 struct NostrTimedFireSink<R: NostrAgentRunner> {
     runner: R,
     cli: NostaroCli,
@@ -560,7 +561,8 @@ impl<R: NostrAgentRunner + Clone> opencrab_actions::TimedFireSink for NostrTimed
         let prompt = req.prompt;
         let caller = req.caller;
         let job: ResponseJob = Box::pin(async move {
-            // reply_target は空（ブロードキャスト）。暗黙返信・本文記録はガードで抑止される（#588）。
+            // reply_target は空（ブロードキャスト）。機構は publish しないので特別扱い不要。応答は
+            // セッションへ転記され、外界へはエージェントがツールで出す（#588）。
             responder
                 .respond_serialized(
                     &session_id,

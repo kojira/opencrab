@@ -1,12 +1,18 @@
 //! Nostr の応答生成経路と subtask 完了 sink（#168 / RFC #152 S3b-1）。
 //!
 //! Nostr は「inbound イベントへの応答」と「background subtask 完了後の resume」の
-//! 2 経路で同じことをする: 会話を DB から再構築 → `run_agent_response` → 返信。
+//! 2 経路で同じことをする: 会話を DB から再構築 → `run_agent_response` → セッションへ転記。
 //! その共通経路を [`NostrResponder`] に置き、[`SubtaskCompletionSink`] 実装も同じ型が
 //! 担う（web gateway の `WebCompletionSink` + `run_and_deliver` と同じ構造）。
 //! ただし web は応答生成と sink を別モジュールに分けており、sink から生の応答生成へ
 //! 到達できない（直列化の飛ばしがコンパイルエラーになる）。ここは同一モジュールなので
 //! その保証が無く、`respond_serialized` 経由という規律に頼っている。
+//!
+//! **配送は機構が行わない（#588）**: 応答本文の公開リレーへの送信は**エージェントが
+//! `nostr_post` / `nostr_reply` 等のツールで自分から行う**。`respond` は応答をセッションへ
+//! 転記するだけで、代わりに publish しない（Discord が機構配送、Nostr はツール配送、という
+//! transport 差はここに現れる）。これで「暗黙返信の二重投稿を防ぐ」ための `sent_flag` も
+//! 不要になった（撤去済み）。
 //!
 //! 不変条件（RFC §6）:
 //! - **二重回答しない**: `settle_completed` が「DB 永続化 → sink 発火」の順序を保証済み。
@@ -14,18 +20,11 @@
 //!   sink で運ぶ必要がない。
 //! - **per-session 直列化**: inbound と resume の応答生成をどちらも
 //!   [`NostrSessionRuntime::run_serialized`] の下で走らせる。同一セッション
-//!   （#323 以降は **エージェント単位**）に対して 2 本の応答生成が並行しないので、
-//!   二重投稿にならない。
-//! - **二重投稿しない（Nostr 固有）**: モデルが `nostr_*` で明示送信していれば
-//!   `sent_flag` が立ち、ループ側の暗黙返信を抑制する。この判定が成り立つのは
-//!   配送系ツールが **inline 実行**（`NOSTR_DELIVERY_ACTIONS` = dispatch 除外）で
-//!   あることが前提。background 化すると run 終了時にまだ送信されておらず、
-//!   暗黙返信と後追いの明示送信で二重投稿になる。
+//!   （#323 以降は **エージェント単位**）に対して 2 本の応答生成が並行しない。
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use opencrab_actions::{
     CallerIdentity, RunRequest, SettleKind, SubtaskCompletionSink, SubtaskSettled,
@@ -112,10 +111,11 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
     }
 
     /// 会話を DB から再構築 → `run_agent_response`（非ブロック dispatch 付き）→
-    /// 応答を転記し、明示送信が無ければ `reply_target` へ暗黙返信する共通経路。
+    /// 応答を生成してセッションへ転記する共通経路。**配送はしない**（エージェントが
+    /// `nostr_post` / `nostr_reply` 等のツールで自分から行う・#588）。
     ///
     /// 呼び出しは [`Self::respond_serialized`] 経由に限る（直列化の担保）。
-    /// 返り値は配送した応答本文（沈黙時は `None`）。
+    /// 返り値は生成した応答本文（沈黙 = `NO_REPLY` / 空のときは `None`）。
     async fn respond(
         &self,
         session_id: &str,
@@ -137,11 +137,11 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
             .build_conversation_string(session_id, agent_id, budget)
             .unwrap_or_default();
 
-        // 明示送信フラグ（暗黙返信の二重投稿防止）。配送系ツールは dispatch 除外
-        // （`NOSTR_DELIVERY_ACTIONS`）なので、run が返る時点で送信は済んでいる。
-        let gw = NostrGatewayActions::new(self.cli.clone()).with_admin(self.admin.clone());
-        let sent = gw.sent_flag();
-        let actions: Arc<dyn GatewayActions> = Arc::new(gw);
+        // Nostr の配送は**エージェントがツール（nostr_post / nostr_reply 等）で自分から行う**。
+        // 機構は代わりに送らない（#588・オーナー指示「エージェントの送信に任せればいい」）。ここで
+        // 作るのはそのツール群。
+        let actions: Arc<dyn GatewayActions> =
+            Arc::new(NostrGatewayActions::new(self.cli.clone()).with_admin(self.admin.clone()));
 
         // dispatch（S3a）: registry は session 単位で共有し（cancel_subtask 到達性）、
         // sink は自分自身（完了したらまた直列化下で resume する）。
@@ -184,30 +184,22 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                     debug!(agent_id, session_id, "nostr: agent chose silence");
                     return None;
                 }
-                // #588: **返信先ノートが無いターンでは、暗黙返信も本文記録もしない。**
-                // 返信先が無いのに返信しようとするのは誰が呼んでも誤り（呼び出し元の種別には依存しない
-                // 性質）。時刻発火のブロードキャスト（返信先ノートを持たない）がこれに当たり、外界への
-                // 出力はエージェントが `nostr_post` 等のツールで明示的に行う（各ツールが自分で記録する）。
-                // 受信ターンは reply_target が必ず非空なので、この分岐は既存挙動を変えない。
-                if reply_target.is_empty() {
-                    debug!(
-                        agent_id,
-                        session_id, "nostr: no reply target; leaving delivery to tools"
-                    );
-                    return None;
-                }
-                // 最終応答テキストを転記（会話履歴の継続性）。
+                // 最終応答テキストを Nostr のセッションへ**無条件で**転記する（会話履歴の継続性）。
+                // 外界への配送はエージェントがツールで行う（機構は publish しない・#588）ので、返信先の
+                // 有無にかかわらずセッションに残す（オーナー指示「返信先がなくても Nostr のセッション上に
+                // 残ればいい。ツールを使ったログが会話履歴にあれば自分で投稿したかどうかも分かる」）。
                 //
-                // #323 / B1: 返信先アンカーを焼く。1 セッションに複数の相手が同居する
-                // （#323）ため、宛先を残さないと後続ターンが「この返信が誰宛だったか」を
-                // 隣接推測でしか復元できない（暗黙返信は tool_call 行も作らず痕跡ゼロ）。
-                // アンカーは**記録専用**で、公開リレーへ送る本文（下の `cli.reply` /
-                // 明示 `nostr_reply`）には混ぜない（inbound_anchor と対称）。この記録は
-                // `sent` 判定より前なので、暗黙返信・明示送信の**両経路**でアンカーが残る。
-                let recorded = format!(
-                    "{reply}\n{anchor}",
-                    anchor = crate::event::outbound_reply_anchor(reply_target)
-                );
+                // #323 / B1: 返信先ノートがある時**だけ**宛先アンカーを焼く（記録専用・公開リレーへ送る
+                // 本文には混ぜない。1 セッションに複数の相手が同居するため「誰宛か」を残す）。返信先が
+                // 無いターン（時刻発火のブロードキャスト等）はアンカー無しでそのまま残す。
+                let recorded = if reply_target.is_empty() {
+                    reply.clone()
+                } else {
+                    format!(
+                        "{reply}\n{anchor}",
+                        anchor = crate::event::outbound_reply_anchor(reply_target)
+                    )
+                };
                 self.runner.record_outbound_reply(
                     opencrab_actions::TranscriptSource::Nostr,
                     &opencrab_actions::OutboundReplyRecord {
@@ -218,18 +210,6 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                         context: None,
                     },
                 );
-                // モデルが既に nostr_* で送信していれば暗黙返信しない（二重送信防止）。
-                if sent.load(Ordering::SeqCst) {
-                    debug!(
-                        agent_id,
-                        session_id,
-                        "nostr: explicit send already occurred; skipping implicit reply"
-                    );
-                    return Some(reply);
-                }
-                if let Err(e) = self.cli.reply(agent_id, reply_target, &reply, None).await {
-                    warn!(agent_id, error = %e, "nostr implicit reply failed");
-                }
                 Some(reply)
             }
             Err(e) => {
@@ -419,6 +399,25 @@ mod tests {
         fn with_explicit_reply(mut self, target: &str) -> Self {
             self.explicit_reply_target = Some(target.to_string());
             self
+        }
+
+        /// #588: 配送は機構が行わなくなったので、resume / inbound が「走ってセッションへ
+        /// 転記された」ことは**記録**（`replies`）で観測する（旧テストが送信ログ `fake.sent()` を
+        /// 同期点に使っていた箇所の置き換え）。転記本文のどれかが `needle` を含めば true。
+        async fn wait_for_reply(&self, needle: &str) -> bool {
+            for _ in 0..100 {
+                if self
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.2.contains(needle))
+                {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
         }
     }
 
@@ -657,17 +656,6 @@ mod tests {
         fn sent(&self) -> String {
             std::fs::read_to_string(&self.log).unwrap_or_default()
         }
-
-        /// log に `needle` が現れるまで待つ（最大 2 秒）。
-        async fn wait_for(&self, needle: &str) -> bool {
-            for _ in 0..200 {
-                if self.sent().contains(needle) {
-                    return true;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            false
-        }
     }
 
     fn responder(runner: FakeRunner, cli: NostaroCli) -> NostrResponder<FakeRunner> {
@@ -701,9 +689,11 @@ mod tests {
         settled_with_caller(session_id, reply_target, CallerIdentity::Agent)
     }
 
-    /// sink は `reply_target` 宛に返信する（session_id からは復元できない宛先）。
+    /// resume は応答を `reply_target` 宛アンカー付きでセッションへ転記する（session_id からは
+    /// 復元できない宛先を記録に残す）。#588: 配送は機構が行わない（エージェントがツールで送る）ので、
+    /// ここは**記録**を見る。
     #[tokio::test]
-    async fn sink_replies_to_reply_target() {
+    async fn sink_records_reply_with_target_anchor() {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("鍵ができました");
         let r = responder(runner.clone(), fake.cli());
@@ -712,13 +702,25 @@ mod tests {
         r.on_subtask_settled(settled(&sid, Some("note1target")));
 
         assert!(
-            fake.wait_for("note1target").await,
-            "reply_target 宛に返信されるべき: log={}",
+            runner.wait_for_reply("note1target").await,
+            "reply_target 宛アンカー付きで転記されるべき: replies={:?}",
+            runner.replies.lock().unwrap()
+        );
+        // 機構は publish しない（配送はエージェントのツール）。
+        assert!(
+            fake.sent().is_empty(),
+            "機構は暗黙返信しない: {}",
             fake.sent()
         );
-        let sent = fake.sent();
-        assert!(sent.contains("reply"), "reply サブコマンドで送る: {sent}");
-        assert!(sent.contains("鍵ができました"));
+        // 記録には本文 + 宛先アンカーが載る。
+        let replies = runner.replies.lock().unwrap();
+        assert_eq!(replies.len(), 1);
+        assert!(
+            replies[0].2.contains("鍵ができました")
+                && replies[0].2.contains("[Nostr reply target=note1target]"),
+            "記録は本文 + 宛先アンカー: {}",
+            replies[0].2
+        );
         // resume も dispatch 有効（registry + sink）で走り、reply_target を引き継ぐ。
         let runs = runner.runs.lock().unwrap();
         assert_eq!(runs.len(), 1);
@@ -729,11 +731,11 @@ mod tests {
         assert_eq!(runs[0].5, "silent", "resume の走行中注入は Silent");
     }
 
-    /// [#323 / B1] outbound の記録には返信先アンカーが載り、公開リレーへ送る本文には
-    /// 載らない（記録専用 / inbound_anchor と対称）。修正前は記録が本文のみで、暗黙
-    /// 返信経路は tool_call 行も作らないため「この返信が誰宛か」を復元できなかった。
+    /// [#323 / B1] outbound の記録には返信先アンカーが載る（記録専用 / inbound_anchor と対称）。
+    /// tool_call 行を作らない転記経路なので、これが無いと「この返信が誰宛か」を復元できない。
+    /// #588: 機構は publish しないので `fake.sent()` は空（配送はエージェントのツール）。
     #[tokio::test]
-    async fn outbound_record_carries_reply_target_anchor_not_relayed() {
+    async fn outbound_record_carries_reply_target_anchor() {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("返答本文");
         let r = responder(runner.clone(), fake.cli());
@@ -758,12 +760,11 @@ mod tests {
             "記録は本文 + 宛先アンカー: {}",
             replies[0].2
         );
-        // 公開リレーへ送る本文はアンカー抜きの本文だけ。
-        let sent = fake.sent();
-        assert!(sent.contains("返答本文"), "本文はリレーへ届く: {sent}");
+        // #588: 機構は暗黙返信しない（配送はエージェントが nostr_reply 等で行う）。
         assert!(
-            !sent.contains("[Nostr reply target="),
-            "アンカーはリレーへ送らない（記録専用）: {sent}"
+            fake.sent().is_empty(),
+            "機構は publish しない: {}",
+            fake.sent()
         );
     }
 
@@ -820,7 +821,10 @@ mod tests {
             Some("note1target"),
             CallerIdentity::Owner,
         ));
-        assert!(fake.wait_for("note1target").await, "resume が走ること");
+        assert!(
+            runner.wait_for_reply("note1target").await,
+            "resume が走ること"
+        );
 
         let runs = runner.runs.lock().unwrap();
         assert_eq!(runs.len(), 1);
@@ -844,7 +848,7 @@ mod tests {
             Some("note1target"),
             CallerIdentity::Agent,
         ));
-        assert!(fake.wait_for("note1target").await);
+        assert!(runner.wait_for_reply("note1target").await);
 
         assert_eq!(
             runner.runs.lock().unwrap()[0].4,
@@ -916,15 +920,10 @@ mod tests {
         assert!(runner.replies.lock().unwrap().is_empty());
     }
 
-    /// 二重投稿しない（#168 の核）: モデルがターン中に `nostr_reply` を明示実行したら
-    /// `sent` フラグが立ち、暗黙返信は送らない。送信は 1 回だけ。
-    ///
-    /// この不変条件は配送系ツールが **inline 実行**（dispatch 除外）であることに依存する。
-    /// background 化されると run が返る時点でフラグが立っておらず、暗黙返信＋後追いの
-    /// 明示送信で 2 通になる。除外集合の側は `test_nostr_delivery_actions_are_non_dispatch`
-    /// （`crates/nostr/src/actions.rs`）が守る。
+    /// #588: 配送はエージェントの明示送信だけ。モデルが `nostr_reply` を実行したものが届き、
+    /// 機構はそれに**加えて**送ったりしない（暗黙返信は撤去済み）。送信は 1 回だけ。
     #[tokio::test]
-    async fn explicit_send_suppresses_implicit_reply() {
+    async fn only_the_agents_explicit_send_is_delivered() {
         let fake = FakeNostaro::new();
         let runner = FakeRunner::new("本文").with_explicit_reply("note1explicit");
         let r = responder(runner.clone(), fake.cli());
@@ -942,26 +941,26 @@ mod tests {
             .await;
         assert_eq!(out.as_deref(), Some("本文"));
 
-        // 明示送信の 1 通だけ。暗黙返信（note1implicit 宛）は送らない。
+        // エージェントが送った 1 通だけ。機構は reply_target（note1implicit）へ何も送らない。
         let sent = fake.sent();
         assert!(sent.contains("note1explicit"), "明示送信が届く: {sent}");
         assert!(
             !sent.contains("note1implicit"),
-            "明示送信済みなら暗黙返信しない（二重投稿の防止）: {sent}"
+            "機構は reply_target へ暗黙返信しない: {sent}"
         );
         assert_eq!(
             sent.lines().filter(|l| l.contains("reply")).count(),
             1,
-            "送信は 1 回だけ: {sent}"
+            "送信はエージェントの 1 回だけ: {sent}"
         );
         // 応答本文の転記は行う（会話履歴の継続性）。
         let replies = runner.replies.lock().unwrap();
         assert_eq!(replies.len(), 1);
-        // #323 / B1: 明示送信経路でも記録には宛先アンカーが焼かれる（暗黙・明示の両経路
-        // で「誰宛か」を復元できる）。アンカーの target はこのターンの reply_target。
+        // #323 / B1: 記録には宛先アンカーが焼かれる（「誰宛か」を復元できる）。
+        // アンカーの target はこのターンの reply_target。
         assert!(
             replies[0].2.contains("[Nostr reply target=note1implicit]"),
-            "明示送信でも記録に宛先アンカーが載る: {}",
+            "記録に宛先アンカーが載る: {}",
             replies[0].2
         );
         // #323 / B2: respond の scope が RunRequest まで配線されている。
@@ -969,11 +968,12 @@ mod tests {
         assert_eq!(runs[0].5, "only:pk-peer", "走行中注入の対象範囲を配線する");
     }
 
-    /// 明示送信が無ければ `reply_target` 宛に暗黙返信する（従来挙動の保持）。
+    /// #588: 明示送信が無ければ**何も publish されない**が、応答はセッションへ転記される
+    /// （オーナー指示: 返信先があってもツールを呼ばなければ出ない。履歴には残る）。
     #[tokio::test]
-    async fn implicit_reply_is_sent_when_no_explicit_send() {
+    async fn no_explicit_send_records_but_does_not_publish() {
         let fake = FakeNostaro::new();
-        let runner = FakeRunner::new("暗黙で返す");
+        let runner = FakeRunner::new("ツールを呼ばない応答");
         let r = responder(runner.clone(), fake.cli());
         let sid = nostr_session_id("agent-sink-test");
 
@@ -986,21 +986,20 @@ mod tests {
             opencrab_actions::LiveInboundScope::AllOthers,
         )
         .await;
-        let sent = fake.sent();
-        assert!(sent.contains("note1implicit"), "{sent}");
-        assert!(sent.contains("暗黙で返す"), "{sent}");
-        assert_eq!(sent.lines().filter(|l| l.contains("reply")).count(), 1);
-        // #323 / B1: 暗黙返信経路でも記録に宛先アンカーが焼かれる（tool_call 行を作らない
-        // 経路なので、これが無いと痕跡ゼロ）。ただしリレーへ送る本文には混ぜない。
-        let replies = runner.replies.lock().unwrap();
+        // 機構は publish しない。
         assert!(
-            replies[0].2.contains("[Nostr reply target=note1implicit]"),
-            "暗黙返信でも記録に宛先アンカー: {}",
-            replies[0].2
+            fake.sent().is_empty(),
+            "ツール未使用なら何も出ない: {}",
+            fake.sent()
         );
+        // ただしセッションへは転記される（本文 + 宛先アンカー）。
+        let replies = runner.replies.lock().unwrap();
+        assert_eq!(replies.len(), 1);
         assert!(
-            !sent.contains("[Nostr reply target="),
-            "アンカーは公開リレーへ送らない（記録専用）: {sent}"
+            replies[0].2.contains("ツールを呼ばない応答")
+                && replies[0].2.contains("[Nostr reply target=note1implicit]"),
+            "本文 + 宛先アンカーを記録: {}",
+            replies[0].2
         );
     }
 
@@ -1030,7 +1029,10 @@ mod tests {
         r.on_subtask_settled(settled(&sid, Some("note1resume")));
 
         inbound.await.unwrap();
-        assert!(fake.wait_for("note1resume").await, "resume も配送される");
+        assert!(
+            runner.wait_for_reply("note1resume").await,
+            "resume も転記される"
+        );
         // 直列化されているので LLM 実行が重なることはない。
         assert_eq!(
             runner.max_inflight.load(AtomicOrdering::SeqCst),
@@ -1050,8 +1052,8 @@ mod tests {
         r.on_subtask_settled(settled(&nostr_session_id("agent-sink-a"), Some("note1a")));
         r.on_subtask_settled(settled(&nostr_session_id("agent-sink-b"), Some("note1b")));
 
-        assert!(fake.wait_for("note1a").await);
-        assert!(fake.wait_for("note1b").await);
+        assert!(runner.wait_for_reply("note1a").await);
+        assert!(runner.wait_for_reply("note1b").await);
         assert!(
             runner.max_inflight.load(AtomicOrdering::SeqCst) >= 2,
             "別セッションは並行して走れる"
@@ -1090,7 +1092,10 @@ mod tests {
         )
         .await;
         r.on_subtask_settled(settled(&sid, Some("note1resume")));
-        assert!(fake.wait_for("note1resume").await, "resume が走ること");
+        assert!(
+            runner.wait_for_reply("note1resume").await,
+            "resume が走ること"
+        );
 
         {
             let runs = runner.runs.lock().unwrap();
