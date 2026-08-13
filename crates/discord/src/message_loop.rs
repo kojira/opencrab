@@ -1385,6 +1385,16 @@ async fn process_timed_fire<T: AgentRunner>(
     subtask_registry: opencrab_actions::subtask::SubtaskRegistry,
     caller: opencrab_actions::CallerIdentity,
 ) {
+    // 時刻発火の受信ログ（#588）。送信側（scheduler）の「発火」ログと突き合わせれば、
+    // scheduler→この Discord ループ間で落ちたかが分かる。heartbeat 専用の文言にしない。
+    tracing::info!(
+        agent_id = %agent_id,
+        session_id = %session_id,
+        transport = "discord",
+        is_dm,
+        prompt_preview = %opencrab_actions::prompt_preview(&prompt),
+        "timed-fire: ターン開始（Discord loop 受信）"
+    );
     let (base_prompt, agent_name) = state.build_agent_context(&agent_id, &caller);
     // 渡された prompt（#584 指示解決の結果など）は system プロンプトへ足す（通常ターンの
     // discord_context_line も付ける）。会話ログには「発言」として残さない（#501）。

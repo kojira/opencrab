@@ -560,7 +560,19 @@ impl<R: NostrAgentRunner + Clone> opencrab_actions::TimedFireSink for NostrTimed
         let session_id = req.session_id.clone();
         let prompt = req.prompt;
         let caller = req.caller;
+        let agent_id_for_log = req.agent_id.clone();
+        let prompt_preview = opencrab_actions::prompt_preview(&prompt);
         let job: ResponseJob = Box::pin(async move {
+            // 時刻発火の受信ログ（#588）: この Nostr ループのキューからジョブが取り出されターンが
+            // 始まった。送信側（scheduler）の「発火」ログと突き合わせれば scheduler→ループ間で
+            // 落ちたかが分かる。heartbeat 専用の文言にしない（アラーム・定時実行も同じイベント）。
+            info!(
+                agent_id = %agent_id_for_log,
+                session_id = %session_id,
+                transport = "nostr",
+                prompt_preview = %prompt_preview,
+                "timed-fire: ターン開始（Nostr loop 受信）"
+            );
             // reply_target は空（ブロードキャスト）。機構は publish しないので特別扱い不要。応答は
             // セッションへ転記され、外界へはエージェントがツールで出す（#588）。
             responder

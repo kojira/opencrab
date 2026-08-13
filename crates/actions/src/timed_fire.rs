@@ -13,6 +13,19 @@ use crate::CallerIdentity;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// ログ用のプロンプト先頭プレビュー。全文は長いので先頭だけ・改行は空白に潰して 1 行にする
+/// （時刻発火の送信側 scheduler と受信側の各ループが**同じ形**で出し、grep で突き合わせられるように）。
+pub fn prompt_preview(prompt: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let one_line = prompt.replace(['\n', '\r'], " ");
+    let head: String = one_line.chars().take(MAX_CHARS).collect();
+    if one_line.chars().count() > MAX_CHARS {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// 時刻起因でセッションのターンを 1 回回す要求（transport 中立）。
 pub struct TimedFireRequest {
     /// 発火先＝実会話セッション（`nostr-{agent}` / `discord-{agent}-{guild}-{channel}`）。
@@ -117,6 +130,24 @@ mod tests {
         fn fire_timed_turn(&self, _req: TimedFireRequest) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// ログ用プレビュー: 短文はそのまま・改行は空白へ・80 文字超は … で切る（送受で同形）。
+    #[test]
+    fn prompt_preview_is_one_line_and_truncated() {
+        assert_eq!(prompt_preview("短いプロンプト"), "短いプロンプト");
+        // 改行/復帰は 1 行に潰す（grep で 1 行に収まる）。
+        assert_eq!(
+            prompt_preview("一行目\n二行目\r三行目"),
+            "一行目 二行目 三行目"
+        );
+        // 80 文字ちょうどは切らない、超えたら … を付ける。
+        let exactly_80 = "あ".repeat(80);
+        assert_eq!(prompt_preview(&exactly_80), exactly_80);
+        let over = "あ".repeat(81);
+        let preview = prompt_preview(&over);
+        assert!(preview.ends_with('…'), "超過は … で切る: {preview}");
+        assert_eq!(preview.chars().count(), 81, "先頭 80 文字 + …");
     }
 
     /// per-agent を優先し、無ければ共有へ落ちる（#400 の per-agent→共有と同型）。
