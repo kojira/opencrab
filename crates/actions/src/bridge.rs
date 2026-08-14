@@ -1217,6 +1217,19 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
+    /// **PR-2A 前提の検証**: 許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）と拒否リスト
+    /// （`DISCORD_ACTIONS`）は互いに素。互いに素だからこそ、両者を 1 つの 3 値
+    /// （`SubEngineAccess::{Allowed, Blocked, NotExposed}`）で無損失に統合できる。
+    #[test]
+    fn sub_engine_allow_and_deny_lists_are_disjoint() {
+        for a in SUB_ENGINE_ALLOWED_ACTIONS {
+            assert!(
+                !DISCORD_ACTIONS.contains(a),
+                "{a} が許可リストと拒否リストの両方に載っている（3 値統合の前提が崩れる）"
+            );
+        }
+    }
+
     // ---- RFC #152 S2: 合成 gateway 注入 + deny-by-default 最外周フィルタ ----
 
     /// server ツール（nostr_generate_key）と transport ツール（report_progress）と、
@@ -1231,6 +1244,11 @@ mod tests {
                 .iter()
                 .map(|n| GatewayActionDef {
                     name: n.to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: format!("{n} desc"),
                     parameters: json!({"type": "object", "properties": {}}),
                 })
@@ -1372,11 +1390,21 @@ mod tests {
             vec![
                 GatewayActionDef {
                     name: "gw_action_a".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "Gateway action A".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
                 GatewayActionDef {
                     name: "gw_action_b".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "Gateway action B".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
@@ -1419,6 +1447,11 @@ mod tests {
                 .iter()
                 .map(|name| GatewayActionDef {
                     name: name.to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: format!("server slot {name}"),
                     parameters: json!({"type": "object", "properties": {}}),
                 })
@@ -1449,11 +1482,21 @@ mod tests {
             vec![
                 GatewayActionDef {
                     name: "request_peer_review".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::Blocked,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "peer review".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
                 GatewayActionDef {
                     name: "report_progress".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::Allowed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "progress".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
@@ -1483,11 +1526,21 @@ mod tests {
             vec![
                 GatewayActionDef {
                     name: "update_heartbeat_instructions".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Dispatchable,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "update".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
                 GatewayActionDef {
                     name: "read_heartbeat_instructions".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "read".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
@@ -1593,6 +1646,11 @@ mod tests {
         fn definitions(&self) -> Vec<GatewayActionDef> {
             vec![GatewayActionDef {
                 name: "mcp__ext__send".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "external send".to_string(),
                 parameters: json!({"type": "object", "properties": {}}),
             }]
@@ -1798,16 +1856,31 @@ mod tests {
             vec![
                 GatewayActionDef {
                     name: "gw_action_a".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "Gateway action A".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
                 GatewayActionDef {
                     name: "create_skill".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Dispatchable,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "Create a skill".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
                 GatewayActionDef {
                     name: "execute_skill".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "Execute a skill".to_string(),
                     parameters: json!({"type": "object", "properties": {}}),
                 },
@@ -1994,6 +2067,11 @@ mod tests {
             fn definitions(&self) -> Vec<GatewayActionDef> {
                 vec![GatewayActionDef {
                     name: "configure_llm_provider".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "x".to_string(),
                     parameters: json!({"type": "object"}),
                 }]
@@ -2115,6 +2193,11 @@ mod tests {
             fn definitions(&self) -> Vec<GatewayActionDef> {
                 vec![GatewayActionDef {
                     name: "nostr_run".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "x".to_string(),
                     parameters: json!({"type": "object"}),
                 }]
@@ -2239,6 +2322,11 @@ mod tests {
                     .into_iter()
                     .map(|name| GatewayActionDef {
                         name: name.to_string(),
+                        class: opencrab_gateway::ToolClass {
+                            dispatch: opencrab_gateway::DispatchMode::Inline,
+                            sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                            sharing: opencrab_gateway::ToolSharing::AgentBound,
+                        },
                         description: "x".to_string(),
                         parameters: json!({"type": "object"}),
                     })
@@ -2740,6 +2828,11 @@ mod tests {
                     .iter()
                     .map(|n| GatewayActionDef {
                         name: n.to_string(),
+                        class: opencrab_gateway::ToolClass {
+                            dispatch: opencrab_gateway::DispatchMode::Inline,
+                            sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                            sharing: opencrab_gateway::ToolSharing::AgentBound,
+                        },
                         description: "x".to_string(),
                         parameters: json!({"type": "object"}),
                     })
@@ -3002,6 +3095,11 @@ mod tests {
         fn definitions(&self) -> Vec<GatewayActionDef> {
             vec![GatewayActionDef {
                 name: "ctx_probe".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "probe".to_string(),
                 parameters: json!({"type": "object", "properties": {}}),
             }]
@@ -3301,6 +3399,11 @@ mod tests {
         fn definitions(&self) -> Vec<GatewayActionDef> {
             vec![GatewayActionDef {
                 name: "rej_action".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "rej".to_string(),
                 parameters: json!({"type": "object", "properties": {}}),
             }]
@@ -3376,6 +3479,11 @@ mod tests {
         fn definitions(&self) -> Vec<GatewayActionDef> {
             vec![GatewayActionDef {
                 name: "sr_action".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "sr".to_string(),
                 parameters: json!({"type": "object", "properties": {}}),
             }]
@@ -3403,6 +3511,11 @@ mod tests {
         fn definitions(&self) -> Vec<GatewayActionDef> {
             vec![GatewayActionDef {
                 name: "perm_fail".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "pf".to_string(),
                 parameters: json!({"type": "object", "properties": {}}),
             }]

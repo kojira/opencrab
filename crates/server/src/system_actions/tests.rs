@@ -272,6 +272,58 @@ fn server_tools_are_classified_for_dispatch() {
     );
 }
 
+/// **PR-2A 等価性ガード**: `own_definitions()`（35 の own リテラル + `request_peer_review`
+/// + `send_ui`）の各ツールが名乗る分類が、現行の権威リストと一致することを機械検査する。
+///
+/// `own_definitions()` は許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）の両メンバー
+/// （`report_progress` / `nostr_generate_key`）と拒否リスト（`DISCORD_ACTIONS`）のうち
+/// server-own の 2 つ（`send_ui` / `request_peer_review`）を実際に含む。前者は集合==リストを
+/// この 1 テスト内で固定できる。discord のツール由来の Blocked は discord 側の等価性テストが
+/// 覆う。これが「PR-2A は挙動を変えていない」の証明（消費側は PR-2B まで旧リストが権威）。
+#[test]
+fn server_tool_class_matches_authoritative_lists() {
+    use opencrab_gateway::{DispatchMode, SubEngineAccess};
+    let defs = SystemGatewayActions::own_definitions();
+    assert!(!defs.is_empty());
+    let mut allowed = std::collections::BTreeSet::new();
+    for d in &defs {
+        let name = d.name.as_str();
+        assert_eq!(
+            d.class.dispatch == DispatchMode::Dispatchable,
+            opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&name),
+            "{name}: dispatch 属性が SERVER_DISPATCHABLE_ACTIONS と食い違う"
+        );
+        assert_eq!(
+            d.class.dispatch == DispatchMode::Inline,
+            opencrab_actions::SERVER_INLINE_ACTIONS.contains(&name),
+            "{name}: dispatch 属性が SERVER_INLINE_ACTIONS と食い違う"
+        );
+        assert_eq!(
+            d.class.sub_engine == SubEngineAccess::Blocked,
+            opencrab_actions::DISCORD_ACTIONS.contains(&name),
+            "{name}: sub_engine=Blocked が拒否リスト DISCORD_ACTIONS と食い違う"
+        );
+        let is_allowed = d.class.sub_engine == SubEngineAccess::Allowed;
+        assert_eq!(
+            is_allowed,
+            opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
+            "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
+        );
+        if is_allowed {
+            allowed.insert(d.name.clone());
+        }
+    }
+    // own_definitions が名乗る Allowed 集合 == 許可リスト（集合一致を 1 テスト内で固定）。
+    let expected: std::collections::BTreeSet<String> = opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(
+        allowed, expected,
+        "server own_definitions の Allowed 集合が SUB_ENGINE_ALLOWED_ACTIONS と一致しない"
+    );
+}
+
 /// [P1 回帰] 設定変更ツールは inline（同ターンで結果を返す）。長時間の鍵探索だけが
 /// background。分類定数を経由せず `default_non_dispatch_tools()` の実効値を見る。
 #[test]
@@ -333,11 +385,21 @@ fn merge_definitions_dedups_cancel_subtask_from_inner() {
             vec![
                 GatewayActionDef {
                     name: "cancel_subtask".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "discord cancel".to_string(),
                     parameters: json!({"type": "object"}),
                 },
                 GatewayActionDef {
                     name: "discord_only_tool".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "x".to_string(),
                     parameters: json!({"type": "object"}),
                 },
@@ -545,6 +607,11 @@ impl GatewayActions for RecordingInner {
             .iter()
             .map(|n| GatewayActionDef {
                 name: n.clone(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: format!("{n} (inner)"),
                 parameters: json!({"type": "object"}),
             })
@@ -4296,6 +4363,11 @@ impl GatewayActions for A2uiProvidingInner {
         // transport 側は `send_ui` を**定義しない**（移設済み）。
         vec![GatewayActionDef {
             name: "fake_transport_tool".to_string(),
+            class: opencrab_gateway::ToolClass {
+                dispatch: opencrab_gateway::DispatchMode::Inline,
+                sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                sharing: opencrab_gateway::ToolSharing::AgentBound,
+            },
             description: "x".to_string(),
             parameters: json!({"type": "object"}),
         }]
@@ -4566,12 +4638,22 @@ impl GatewayActions for DeliveryProvidingInner {
         // transport 側は `request_peer_review` を**定義しない**（移設済み）。
         let mut defs = vec![GatewayActionDef {
             name: "fake_transport_tool".to_string(),
+            class: opencrab_gateway::ToolClass {
+                dispatch: opencrab_gateway::DispatchMode::Inline,
+                sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                sharing: opencrab_gateway::ToolSharing::AgentBound,
+            },
             description: "x".to_string(),
             parameters: json!({"type": "object"}),
         }];
         if self.redefines_peer_review {
             defs.push(GatewayActionDef {
                 name: "request_peer_review".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::Blocked,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "transport の古い実装".to_string(),
                 parameters: json!({"type": "object"}),
             });

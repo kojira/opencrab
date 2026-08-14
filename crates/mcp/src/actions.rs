@@ -105,6 +105,11 @@ impl GatewayActions for McpToolProvider {
             for t in s.server.tools() {
                 defs.push(GatewayActionDef {
                     name: qualified_tool_name(server, &t.name),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: format!("[MCP:{server}] {}", t.description),
                     parameters: t.input_schema.clone(),
                 });

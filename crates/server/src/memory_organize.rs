@@ -1325,6 +1325,11 @@ mod tests {
         fn definitions(&self) -> Vec<opencrab_gateway::GatewayActionDef> {
             vec![opencrab_gateway::GatewayActionDef {
                 name: "mcp__ext__send".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "external send".to_string(),
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
             }]

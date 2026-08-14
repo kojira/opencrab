@@ -156,6 +156,7 @@ impl SystemGatewayActions {
         vec![
             GatewayActionDef {
                 name: "configure_llm_provider".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description:
                     "LLM プロバイダの設定を即時適用する（owner 限定）。DB オーバーライドに\
                 保存してルーターをホットスワップするため再起動は不要。codex/cursor は適用後に\
@@ -211,6 +212,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "manage_allowed_commands".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description:
                     "自分（このエージェント）が execute_shell で実行できる許可コマンドを\
                 管理する（owner 限定）。許可コマンドの追加はシェル実行範囲を広げるため owner のみ。"
@@ -234,6 +236,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "configure_nostr".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description:
                     "自分の Nostr 連携設定（購読リレー・フィルタ authors/keywords/kinds・\
                 有効/無効・Nostr でのオーナーの公開鍵）を変更する（owner 限定）。\
@@ -278,6 +281,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "configure_self".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description:
                     "自分（このエージェント）の人格・モデル・推論強度・web 検索などの設定を変更する\
                 （owner 限定）。model/reasoning_effort/web_search の変更は次ターン以降に反映される。\
@@ -299,6 +303,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "configure_mcp_server".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description:
                     "自分の MCP サーバ設定を管理する（owner 限定）。追加/更新・削除・有効切替が\
                 でき、変更後は接続をバックグラウンドで貼り直す。env の値は結果に出さない（キー名のみ）。\
@@ -329,6 +334,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::Allowed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
                               npub1 以降・bech32 文字のみ。長さ上限は無いが、長いほど探索に時間が \
                               かかる＝3文字程度で即時、それ以上は徐々に長くなる）を指定できる。返るのは公開情報の \
@@ -350,6 +356,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_list_keys".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分が nostr_generate_key で生成した鍵の一覧（npub のみ）を返す。\
                               nostr_switch_identity で本鍵に採用する候補を確認するのに使う。\
                               返るのは公開情報の npub だけで、**秘密鍵(nsec)は一切返らない**。"
@@ -367,6 +374,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_switch_identity".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの\
                               **本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿は\
                               その鍵で行われる。まだ Nostr に接続していなければ、この操作で自動的に\
@@ -395,6 +403,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_run".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
                               nostaro のサブコマンド（例: post / reply / zap / upload / \
                               react / repost / follow / unfollow / profile / channel / get / timeline / \
@@ -447,6 +456,7 @@ impl SystemGatewayActions {
             // `run_agent_response` を depth+1 で再入呼び出しする）。
             GatewayActionDef {
                 name: "spawn_subtask".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "バックグラウンドでサブタスクを起動します。LLMエンジンがサブエンジンとして非同期実行し、完了後にメインエンジンを自動的に再呼び出しします。複雑な長時間処理（画像生成・コード実装・調査など）に使用してください。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -485,6 +495,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "cancel_subtask".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "実行中のサブタスクをキャンセルします。キャンセルできるのは自分のセッションが親のサブタスクのみ（owner は制限なし）。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -503,6 +514,7 @@ impl SystemGatewayActions {
             // 知らなくなる（#155 の前進）。
             GatewayActionDef {
                 name: "rebuild_memory_index".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "メモリインデックスをゼロから再構築する。既存のインデックスを削除し、全ログを再インデックスする。時間がかかることがある。結果として logs_indexed（処理したログ数）と nodes_created（作成したインデックスノード数）を返す。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -517,6 +529,7 @@ impl SystemGatewayActions {
             // 省略可」と案内している契約を保つ）。
             GatewayActionDef {
                 name: "report_progress".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Allowed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "サブエンジンからメインエンジンへ進捗を報告します。depth >= 1のサブエンジンのみ使用可能。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -542,6 +555,7 @@ impl SystemGatewayActions {
             // 実体は `crate::agent_management`。
             GatewayActionDef {
                 name: "update_memory_index_config".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "メモリインデックスの設定（batch_size、threshold）を更新する。少なくとも1つのパラメータを指定する必要がある。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -560,6 +574,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "add_allowed_command".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "シェルツールの許可コマンドリストに新しいコマンドを追加する。オーナーのみ実行可能。コマンド名（例: curl, wget, git）を指定する。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -574,6 +589,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "list_allowed_commands".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "execute_shell で実行できる許可コマンドの一覧（実効リスト）を\
                 取得する。設定ファイル由来のものと自分に追加されたものを合わせて返す（#300）。"
                     .to_string(),
@@ -585,6 +601,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "remove_allowed_command".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "シェルツールの許可コマンドリストからコマンドを削除する。オーナーのみ実行可能。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -613,6 +630,7 @@ impl SystemGatewayActions {
             // 会話ログに残る呼び出しが通らなくなる。
             GatewayActionDef {
                 name: "create_skill".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "ユーザーから「〇〇するスキルを作って」と言われたとき新しいスキルを作成する。guidanceにコマンド例・使い方を書くことで、LLMがexecute_shellで動的に実行できるようになる。同名スキルが存在する場合は更新される。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -645,6 +663,7 @@ impl SystemGatewayActions {
             // なる）。詳細は `crate::heartbeat_instructions` の doc。
             GatewayActionDef {
                 name: "update_heartbeat_instructions".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "ハートビート（自律発言）時の振る舞い指示を更新する。オーナーが「これからハートビートでは○○して」と明示的に依頼した文脈でのみ呼ぶこと。出力形式（SPEAK/LEARN/IDLE）はランタイムが固定するため、ここでは頻度・トーン・話題・沈黙条件などの方針のみを書く。オーナー限定。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -676,6 +695,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "read_heartbeat_instructions".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "現在のハートビート指示を読み出す。scope=agentでエージェント全体、scope=channelでチャンネル上書きのみ、scope=effectiveで実際にtickで使われる合成結果（解決ルール適用後）を返す。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -702,6 +722,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "get_my_nostr_relay".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）の Nostr 受信 → Discord 転記の設定を読み出す。転記が有効か・転記先が設定済みか（転記先 URL は伏字で返す）を返す。他のエージェントの設定は読めない。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -711,6 +732,7 @@ impl SystemGatewayActions {
             #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "set_my_nostr_relay".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）が Nostr で受け取った自分宛の受信（メンション/リプライ/DM）を Discord へ転記する設定を更新する。対象は常に自分で、他のエージェントの設定は変えられない。enabled で転記の有効/無効を、webhook_url で転記先の Discord webhook URL を設定する。URL が Discord webhook として不正なら拒否される（丸められない）ので、拒否されたらエラーの理由を見て正しい URL で指定し直すこと。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -736,6 +758,7 @@ impl SystemGatewayActions {
             // 実体と「自分のだけ」の保証は `crate::agent_heartbeat` の doc を参照。
             GatewayActionDef {
                 name: "get_my_heartbeat".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）のハートビート設定を、いま話しているセッションについて読み出す。返り値: enabled（有効か）、interval_secs（実効間隔・秒）、next_fire_at（このセッションのハートビートがゲートされていない場合に次に発火する予定時刻。照会した時点で anchor_at と最終発火時刻から算出する値で、UTC の RFC3339 文字列。無効・発火経路なし・間隔が不正などでは null。gated=true のときはこの時刻が来ても実際には発火しない）、anchor_at / last_fired_at（起点と最終発火時刻。同じく UTC RFC3339 か null）、min/max/default_interval_secs（設定できる下限・上限・既定）。設定したことが無ければ無効。有効なのに発火しないときは gated=true と、その理由 gated_reason（例: グローバルのハートビートが無効化されている / 間隔が不正）を返すので、なぜ発火しないのかを自分で把握できる。他のエージェントの設定は読めない。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -744,6 +767,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "set_my_heartbeat".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）のハートビート（自律実行）の有効/無効と間隔を、いま話しているセッションに対して設定する。対象は常にこのセッション（Nostr の自発投稿、またはこの Discord チャンネル）で、どこに設定するか選ぶ必要はない。他のエージェントや別のチャンネルの設定は変えられない。間隔には運用者が決めた下限があり、それより短い値は拒否される（丸められない）ので、拒否されたらエラーに載っている下限以上で指定し直すこと。有効にした直後から次回発火時刻が算出され、再起動を待たず即時に反映される。発火タイミングは非対称: 一度も発火していないセッションを初めて有効化したときは間隔をまるごと待つ（今すぐは発火しない）が、既に発火したことがあるセッションの再有効化や間隔の短縮では、前回発火（や起点）＋新しい間隔が既に過ぎていれば直ちに発火する（設定変更で発火の記録は消えない）。今すぐ試したいなら run_my_heartbeat を使う。ハートビートで何をするかの指示文はこのツールでは変えられない（オーナー限定の別ツール）。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -763,6 +787,7 @@ impl SystemGatewayActions {
             // 時間発火とまったく同じ経路を通り、last_fired_at は更新しない（時間発火の位相を保つ）。
             GatewayActionDef {
                 name: "run_my_heartbeat".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）のハートビートを、次の発火時刻を待たずに今すぐ手動で発火する。テストや動作確認に使う（時間発火とまったく同じ経路——宣言→サブタスク→継続→投稿——を通るので、待たずに一連の流れを検証できる）。対象は省略すると「いま話しているセッション」、session_id を渡せばそのセッション。発火先は Discord チャンネルまたは Nostr の自発投稿で、発火経路の無いセッション種別は拒否される。実際のターンは今のターンが終わってから走る（すぐに投げて返る）。time-fire の位相をずらさないため last_fired_at は更新しない（次回の定期発火時刻は変わらない）。オーナーまたは co_agent のみ実行できる。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -779,6 +804,7 @@ impl SystemGatewayActions {
             // 語彙はハートビートに揃える（next_fire_at / gated / gated_reason）。
             GatewayActionDef {
                 name: "get_my_schedules".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションについて一覧で読み出す。各要素: id、cron_expr（cron 式または @every 形式）、timezone、message（発火時に自分へ渡される指示文）、enabled、next_fire_at（次に発火する予定時刻。照会時に anchor と最終発火時刻から算出する UTC の RFC3339 文字列。無効・式が不正などでは null）、gated / gated_reason（enabled なのに発火しない状態とその理由）、anchor_at / last_fired_at。他のエージェントや別セッションのスケジュールは読めない。定時実行はハートビート（固定短間隔）とは別物で、「毎朝 7 時」「3 時間ごと」のような時刻・周期ベースの自律実行。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -787,6 +813,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "set_my_schedule".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）の定時実行スケジュールを、いま話しているセッションに対して登録する。ハートビート（固定短間隔の tick）とは別の、時刻・周期ベースの自律実行。対象は常にこのセッション（Nostr の自発投稿、またはこの Discord チャンネル）で、どこに登録するか選ぶ必要はない。cron_expr は「標準 5 フィールド cron」（例: `0 7 * * *` = 毎朝 7 時、`0 */3 * * *` = 3 時間ごとの 0 分）か「@every 形式」（例: `@every 3h`、`@every 1h30m`、`@every 45m`）で指定する。timezone は cron の評価に使う IANA 名で、省略時は Asia/Tokyo。message は発火時に自分へ渡される指示文（例: ニュースを巡回して要約を書く）。cron 式が不正なら登録は拒否され、その場でエラーが返る（実行時に黙って発火しないことはない）ので、エラーが出たら直して呼び直すこと。enabled は省略時 true（登録するとそのまま定期実行が始まる）。登録直後から次回発火時刻が算出され、再起動を待たず即時に反映される。運用者がハートビートを無効化していても、定時実行は止まらない（別概念）。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -817,6 +844,7 @@ impl SystemGatewayActions {
             // 他セッションの id を渡しても触れない**（所属チェック）。
             GatewayActionDef {
                 name: "update_my_schedule".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）の定時実行スケジュールを、id 指定で部分更新する。id は get_my_schedules が返したもの（他のエージェントや別セッションのスケジュールは触れない）。変更したい項目だけ渡す（省略した項目は現在の値を保つ）: cron_expr（cron 式または @every 形式に変える＝間隔を変える）、message（発火時の指示文を変える）、timezone、enabled（false にすると止まるが行は残る＝履歴が追える。true で再開）。cron_expr / timezone を変えたときや無効→有効に変えたときは、次回発火が「今」を起点に取り直される。cron 式が不正ならその場でエラーが返る（直して呼び直すこと）。変更項目を 1 つも指定しない呼び出しは拒否される。完全に消したいなら delete_my_schedule を使う。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -847,6 +875,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "delete_my_schedule".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分（呼び出し元エージェント）の定時実行スケジュールを、id 指定で削除する。id は get_my_schedules が返したもの（他のエージェントや別セッションのスケジュールは削除できない）。行ごと消えるので履歴は残らない。止めるだけで履歴を残したいなら、代わりに update_my_schedule に enabled=false を渡すこと。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -871,6 +900,7 @@ impl SystemGatewayActions {
             // 新規作成するためで、ここには定義しない。
             GatewayActionDef {
                 name: "get_default_subtask_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "spawn_subtask が webhook 未指定時に実際に使うデフォルト subtask webhook を解決して返す。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -893,6 +923,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "set_default_subtask_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "scope（agent/tool/global）ごとのデフォルト subtask webhook を設定する。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner限定。応答にrawトークンは含まれない。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -941,6 +972,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "list_subtask_webhooks".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "登録されている subtask webhook 設定を一覧する。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -963,6 +995,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "get_default_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "実際に使われるデフォルト webhook を解決して返す（既定 family='activity'＝一般ツール/コマンド活動）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -986,6 +1019,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "set_default_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "scope（agent/tool/global）ごとのデフォルト webhook を設定する（既定 family='activity'）。urlを空/省略にするとそのscopeを無効化（enabled=false）する。owner は全 scope、agent は自分の agent-scope のみ設定/無効化できる。応答にrawトークンは含まれない。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -1035,6 +1069,7 @@ impl SystemGatewayActions {
             },
             GatewayActionDef {
                 name: "list_webhooks".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "登録されている webhook 設定を一覧する。`family`/`scope` で絞り込み可（省略時は全件）。トークンは秘匿され redacted_url のみ返る。owner/trusted_user/co_agent のみ。".to_string(),
                 parameters: json!({
                     "type": "object",
