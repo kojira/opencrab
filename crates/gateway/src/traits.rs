@@ -255,17 +255,28 @@ pub enum SubEngineAccess {
 
 /// ツールのハンドルが束縛される範囲。
 ///
-/// 判定基準（単一の式）:
+/// 判定基準:
 /// **`ConversationBound` = その会話に固有の一時ハンドル（特定のメッセージ ID、受信した
-/// 投稿 ID、対話中の live セッション）を必須引数に取るツール。それ以外はすべて
-/// `AgentBound`。**
+/// 投稿 ID）を必須引数に取る、または対話中の live セッションに束縛される（応答を待つ）
+/// ツール。それ以外はすべて `AgentBound`。**
+///
+/// 2 つ目の条件（live セッション束縛）は必須引数だけを見ても分からない点に注意:
+/// `send_ui` の必須引数は `channel_id`（永続）と `components` だけだが、投稿後に
+/// ユーザーの応答（クリック等）をそのやりとりの中で待つため `ConversationBound`。
+/// 必須引数だけで判断すると `send_ui` 型を `AgentBound` と誤分類する。
+///
+/// 現時点で `ConversationBound` は次の 3 つだけ:
+/// - `discord_add_reaction` — 必須引数 `message_id`（その会話のメッセージ）。
+/// - `nostr_reply` — 必須引数 `target`（受信した投稿の note id）。
+/// - `send_ui` — 対話中の live セッションに束縛される（応答を待つ）。
 ///
 /// この段階（PR-2A）ではまだ消費者が無い（挙動に影響しない）。後から共有の機構が
 /// この属性を読むので、形を今のうちに確定させる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolSharing {
-    /// 会話固有の一時ハンドルを必須引数に取る（例: リアクションの message_id、Nostr 返信の
-    /// 投稿 ID、UI 送信の対話セッション）。
+    /// 会話固有の一時ハンドルを必須引数に取る、または対話中の live セッションに束縛される
+    /// （応答を待つ）。実例: リアクションの `message_id` / Nostr 返信の投稿 id /
+    /// UI 送信（応答待ち）。
     ConversationBound,
     /// 会話に縛られず、エージェント全体で共有できる。
     AgentBound,

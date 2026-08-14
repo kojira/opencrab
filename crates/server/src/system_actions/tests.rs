@@ -282,10 +282,11 @@ fn server_tools_are_classified_for_dispatch() {
 /// 覆う。これが「PR-2A は挙動を変えていない」の証明（消費側は PR-2B まで旧リストが権威）。
 #[test]
 fn server_tool_class_matches_authoritative_lists() {
-    use opencrab_gateway::{DispatchMode, SubEngineAccess};
+    use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
     let defs = SystemGatewayActions::own_definitions();
     assert!(!defs.is_empty());
     let mut allowed = std::collections::BTreeSet::new();
+    let mut conv_bound = std::collections::BTreeSet::new();
     for d in &defs {
         let name = d.name.as_str();
         assert_eq!(
@@ -312,15 +313,37 @@ fn server_tool_class_matches_authoritative_lists() {
         if is_allowed {
             allowed.insert(d.name.clone());
         }
+        if d.class.sharing == ToolSharing::ConversationBound {
+            conv_bound.insert(d.name.clone());
+        }
     }
-    // own_definitions が名乗る Allowed 集合 == 許可リスト（集合一致を 1 テスト内で固定）。
-    let expected: std::collections::BTreeSet<String> = opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
+    // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
+    // （判定基準は `opencrab_gateway::ToolSharing` の doc）。server own の中で会話固有の
+    // live セッションに束縛されるのは応答を待つ `send_ui` のみ（必須引数だけでは判別できず
+    // doc の 2 つ目の条件で決まる）。全ゲート横断の ConversationBound は
+    // {discord_add_reaction, nostr_reply, send_ui} で、残り 2 つは discord / nostr 側が覆う。
+    // `send_ui` は feature に依らず own_definitions() が常に push する（構成非依存）。
+    let expected_conv: std::collections::BTreeSet<String> =
+        std::iter::once("send_ui".to_string()).collect();
+    assert_eq!(
+        conv_bound, expected_conv,
+        "server own の ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
+    );
+    // own_definitions が名乗る Allowed 集合 == 期待値（集合一致を 1 テスト内で固定）。
+    //
+    // 【段階1(#651) の feature 化との相互作用】`nostr_generate_key` の def は
+    // `#[cfg(feature = "nostr")]` に囲まれている（PR-1B）。一方、権威リスト
+    // `SUB_ENGINE_ALLOWED_ACTIONS`（actions crate・feature 無し）は常に両名を持つ。
+    // よって `own_definitions()` から集めた Allowed 集合は nostr 構成の有無で縮む。
+    // 期待値も **同じ feature 条件**で組んで比較する（`--no-default-features` で
+    // 落ちないように）。上の per-def 双条件（⟺）は名前ごとの照合なので構成に影響されない。
+    let mut expected: std::collections::BTreeSet<String> =
+        std::iter::once("report_progress".to_string()).collect();
+    #[cfg(feature = "nostr")]
+    expected.insert("nostr_generate_key".to_string());
     assert_eq!(
         allowed, expected,
-        "server own_definitions の Allowed 集合が SUB_ENGINE_ALLOWED_ACTIONS と一致しない"
+        "server own_definitions の Allowed 集合が期待値（feature 条件込み）と一致しない"
     );
 }
 

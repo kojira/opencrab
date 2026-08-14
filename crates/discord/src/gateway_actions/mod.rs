@@ -939,10 +939,11 @@ mod tests {
     /// テスト（リストに死名が無い / 全 def が分類済み）と合わせて集合一致を証明する。
     #[test]
     fn discord_tool_class_matches_authoritative_lists() {
-        use opencrab_gateway::{DispatchMode, SubEngineAccess};
+        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
         assert!(!defs.is_empty());
+        let mut conv_bound = std::collections::BTreeSet::new();
         for d in &defs {
             let name = d.name.as_str();
             assert_eq!(
@@ -965,7 +966,21 @@ mod tests {
                 opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
                 "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
             );
+            if d.class.sharing == ToolSharing::ConversationBound {
+                conv_bound.insert(d.name.clone());
+            }
         }
+        // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
+        // （判定基準は `opencrab_gateway::ToolSharing` の doc）。Discord ゲートで会話固有の
+        // 一時ハンドルを必須に取るのは message_id を要する `discord_add_reaction` のみ。
+        // 全ゲート横断の ConversationBound は {discord_add_reaction, nostr_reply, send_ui} で、
+        // 残り 2 つは nostr / server 側の同名テストが覆う。
+        let expected: std::collections::BTreeSet<String> =
+            std::iter::once("discord_add_reaction".to_string()).collect();
+        assert_eq!(
+            conv_bound, expected,
+            "discord ゲートの ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
+        );
     }
 
     /// 配送系・同ターン結果依存・純粋な読み取りが dispatch されていない（#152 の実害）。

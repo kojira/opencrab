@@ -365,10 +365,11 @@ mod tests {
     /// PR-2B まで旧リストが権威のまま）。
     #[test]
     fn nostr_tool_class_matches_authoritative_lists() {
-        use opencrab_gateway::{DispatchMode, SubEngineAccess};
+        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
         let a = NostrGatewayActions::new(NostaroCli::new());
         let defs = a.definitions();
         assert!(!defs.is_empty());
+        let mut conv_bound = std::collections::BTreeSet::new();
         for d in &defs {
             let name = d.name.as_str();
             assert_eq!(
@@ -391,7 +392,20 @@ mod tests {
                 opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
                 "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
             );
+            if d.class.sharing == ToolSharing::ConversationBound {
+                conv_bound.insert(d.name.clone());
+            }
         }
+        // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
+        // （判定基準は `opencrab_gateway::ToolSharing` の doc）。Nostr ゲートで会話固有の
+        // 一時ハンドルを必須に取るのは受信投稿の note id（`target`）を要する `nostr_reply` のみ。
+        // 全ゲート横断の ConversationBound は {discord_add_reaction, nostr_reply, send_ui}。
+        let expected: std::collections::BTreeSet<String> =
+            std::iter::once("nostr_reply".to_string()).collect();
+        assert_eq!(
+            conv_bound, expected,
+            "nostr ゲートの ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
+        );
     }
 
     /// [#514] `nostr_dm` は定義に無く、名前指定で呼んでも fail-closed で拒否される。
