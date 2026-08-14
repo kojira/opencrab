@@ -38,6 +38,7 @@
 //! - **per-session 直列化**: [`SessionRuntime`](opencrab_actions::SessionRuntime) の
 //!   1 本のロックで inbound / resume を直列化する。異なるセッションは並行。
 
+pub mod fire;
 pub mod gateway;
 pub mod http;
 pub mod respond;
@@ -47,6 +48,7 @@ pub mod sink;
 #[cfg(test)]
 mod testing;
 
+pub use fire::{WebFire, WebTimedFireSink, WEB_TIMED_FIRE_KIND};
 pub use gateway::{
     caller_type_label, web_session_id, WebEvent, WebGateway, WEB_SESSION_PREFIX, WEB_SESSION_THEME,
 };

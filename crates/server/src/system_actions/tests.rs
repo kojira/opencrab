@@ -4209,6 +4209,23 @@ async fn set_my_heartbeat_allows_owner() {
     assert!(r.success, "{:?}", r.error);
 }
 
+/// #627: web セッション（`web-{agent}-{conversation}`）でもハートビートを設定できる
+/// （隔離環境——Discord・Nostr 無効——でダッシュボードの会話に設定できるのが要件）。
+#[tokio::test]
+async fn set_my_heartbeat_allows_web_session() {
+    let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
+    let mut owner = GatewayCallContext::new(GatewayCaller::Owner, "agent-x");
+    owner.session_id = Some("web-agent-x-conv1".to_string());
+    let r = actions
+        .execute("set_my_heartbeat", &json!({"enabled": true}), &owner)
+        .await;
+    assert!(
+        r.success,
+        "web セッションでハートビートを設定できない: {:?}",
+        r.error
+    );
+}
+
 // ---- #156 S3: A2UI 送信（send_ui）の gateway 非依存化 ----
 
 /// A2UI 描画面を提供する inner のフェイク（Discord の代役）。

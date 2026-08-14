@@ -16,11 +16,12 @@
 //! 話しているセッション」**（`ctx.session_id`）に対して設定・照会する。エージェントは
 //! `enabled` と `interval_secs` だけを指定する（選ぶべきスコープが無い）。
 //!
-//! 発火先（Nostr broadcast / Discord channel）は `session_id` の接頭辞から導く（設計 §3.6）。
-//! 発火経路を持つのは **`nostr-` / `discord-` セッションだけ**なので、それ以外の種別
-//! （`web-` / `heartbeat-` / `agent-msg-` 等）で呼ばれたら**明示エラーで拒否**する
+//! 発火先は各 transport の `TransportFire` descriptor が `session_id` から名乗る（#628）。
+//! 発火経路を持つのは **登録済み transport のセッション（`nostr-` / `discord-` / `web-`）だけ**
+//! なので、それ以外の種別（`heartbeat-` / `agent-msg-` 等）で呼ばれたら**明示エラーで拒否**する
 //! （fail-closed）。「enabled にできたのに永遠に発火しない行」を作らせない（発端が UX
-//! なので「設定できたのに発火しない」は解決になっていない・設計 §13.1）。
+//! なので「設定できたのに発火しない」は解決になっていない・設計 §13.1）。**web も発火先**なので
+//! （#627）、隔離環境（Discord・Nostr 無効）でもダッシュボードの会話にハートビートを設定できる。
 //!
 //! # 「自分のだけ」をどう保証しているか
 //!
@@ -468,7 +469,8 @@ pub(crate) fn set_my_heartbeat(
 ///
 /// 引数 `session_id` を渡せばそのセッション、省略すれば**現在のセッション**を発火する。現在
 /// セッション以外を指定できるのはオーナー / co_agent 限定だから（テスト用途）。発火経路の無い
-/// 種別（`web-` 等）は fail-closed で拒否する。
+/// 種別（`heartbeat-` / `agent-msg-` 等・登録済み descriptor がどれも名乗らない）は fail-closed
+/// で拒否する。
 ///
 /// # `last_fired_at` は更新しない
 ///
@@ -504,8 +506,10 @@ pub(crate) fn run_my_heartbeat(
             match state.timed_fire_router.resolve_target(s, &ctx.agent_id) {
                 Some(t) => (s.to_string(), t),
                 None => {
+                    // remedy は登録済み transport から生成する（#628・web を足しても自動で載る）。
                     return err(format!(
-                        "session_id「{s}」には発火経路がありません（発火できるのは discord- / nostr- セッションだけです）。"
+                        "session_id「{s}」には発火経路がありません（発火できるのは {} のセッションです）。",
+                        state.timed_fire_router.fire_target_hint()
                     ));
                 }
             }

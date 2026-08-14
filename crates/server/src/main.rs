@@ -271,6 +271,22 @@ async fn main() -> anyhow::Result<()> {
     state
         .timed_fire_router
         .register_descriptor(std::sync::Arc::new(opencrab_nostr::NostrFire));
+    state
+        .timed_fire_router
+        .register_descriptor(std::sync::Arc::new(opencrab_web_gateway::WebFire));
+
+    // #627 / #628 段階7: web の受け口（sink）も生存非依存で登録する。web には常駐ループが無く、
+    // Discord / Nostr のように「ループ起動時に sink を登録」できないので、ここで共有受け口として
+    // 1 度だけ登録する（web は外部接続を持たず常に立ち上がる＝隔離環境でもハートビートが届く）。
+    // sink は自分で `tokio::spawn` して per-session 直列化込みの入口を回す（`WebTimedFireSink`）。
+    state.timed_fire_router.register_shared(
+        opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
+        std::sync::Arc::new(opencrab_web_gateway::WebTimedFireSink::new(state.clone())),
+    );
+    tracing::info!(
+        transport = opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
+        "timed-fire: 受け口を登録（web・生存非依存）"
+    );
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
     // 非依存層にあるため、通知先の解決（DB の webhook 設定 + TOML の既定）だけを持つ

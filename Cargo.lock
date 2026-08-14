@@ -2156,6 +2156,7 @@ dependencies = [
  "http-body-util",
  "opencrab-actions",
  "opencrab-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",

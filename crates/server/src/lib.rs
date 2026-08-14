@@ -267,6 +267,7 @@ pub(crate) fn test_app_state() -> AppState {
     #[cfg(feature = "discord")]
     timed_fire_router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
     timed_fire_router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
+    timed_fire_router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
     AppState {
         db: opencrab_db::Db::from_connection(conn),
         llm_router: SharedLlmRouter::new(LlmRouter::new()),

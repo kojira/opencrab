@@ -23,6 +23,7 @@ fn registry() -> TimedFireRouter {
     #[cfg(feature = "discord")]
     router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
     router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
+    router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
     router
 }
 

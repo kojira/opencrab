@@ -25,8 +25,9 @@
 //! # セッション単位（`set_my_heartbeat` と同じ流儀・#456）
 //!
 //! **スコープは無い。** 対象は常に `ctx.session_id`（いま話しているセッション）。発火経路を持つのは
-//! `nostr-` / `discord-` セッションだけなので、それ以外（`web-` 等）で呼ばれたら **fail-closed で
-//! 拒否し remedy（どこで実行すればよいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
+//! 登録済み transport のセッション（`nostr-` / `discord-` / `web-`・#628）だけなので、それ以外
+//! （`heartbeat-` / `agent-msg-` 等）で呼ばれたら **fail-closed で拒否し remedy（どこで実行すれば
+//! よいか）を返す**。「設定できたのに永遠に発火しない行」を作らせない。
 //!
 //! # 権限
 //!
@@ -462,19 +463,33 @@ mod tests {
         assert!(gd["schedules"][0]["next_fire_at"].is_string());
     }
 
-    /// 発火経路の無いセッション（`web-`）は fail-closed + **remedy** で拒否する。
+    /// 発火経路の無いセッション（`agent-msg-` 等・登録済み descriptor がどれも名乗らない）は
+    /// fail-closed + **remedy** で拒否する。
     #[tokio::test]
     async fn set_rejects_non_firing_session_with_remedy() {
         let state = crate::test_app_state();
         let res = set_my_schedule(
             &state,
             &json!({"cron_expr": "@every 3h", "message": "x"}),
-            &ctx("web-agent-x"),
+            &ctx("agent-msg-agent-x"),
         );
         assert!(!res.success);
         let e = res.error.unwrap();
         assert!(e.contains("発火経路"), "理由: {e}");
         assert!(e.contains("実行してください"), "remedy: {e}");
+    }
+
+    /// #627: web セッション（`web-{agent}-{conversation}`）は発火先として**受理**される
+    /// （隔離環境でもダッシュボードの会話に定時実行を設定できる）。
+    #[tokio::test]
+    async fn set_accepts_web_session() {
+        let state = crate::test_app_state();
+        let res = set_my_schedule(
+            &state,
+            &json!({"cron_expr": "@every 3h", "message": "巡回"}),
+            &ctx_for("agent-x", "web-agent-x-conv1"),
+        );
+        assert!(res.success, "web セッションが受理されない: {:?}", res.error);
     }
 
     /// cron 式が不正ならその場でエラー（remedy 付き）。
