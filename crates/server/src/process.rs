@@ -988,10 +988,36 @@ fn spawn_background_index_build(state: &AppState, agent_id: &str, effective_mode
     }
 }
 
+/// 実行対象の agent 行が `agents` に存在しないときのエラー（#632）。
+///
+/// `run_agent_response` は**サーバ側の全ターン実行が通る唯一のチョークポイント**
+/// （REST `agents_messages` / `sessions::send_message`、scheduler / intake / sleep /
+/// subtask、そして web も production では `AppState::run_agent_response` 経由でここを通る）。
+/// エージェント別テーブルには FK 制約が無く、存在しない agent_id でも per-agent 設定が
+/// 既定に落ちたまま「動いてしまう」。ここで 1 度だけ弾けば、入口ごとにチェックを
+/// 手でコピーする必要がなくなり、将来の入口も自動的に閉じる。
+///
+/// HTTP ハンドラはこのエラーを `downcast_ref` して 404 に写像する。
+#[derive(Debug, Clone)]
+pub struct AgentNotFound {
+    pub agent_id: String,
+}
+
+impl std::fmt::Display for AgentNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "agent not found: {}", self.agent_id)
+    }
+}
+
+impl std::error::Error for AgentNotFound {}
+
 /// エージェントにメッセージを処理させ、応答テキストを返す。
 ///
 /// SkillEngine + BridgedExecutor + LlmRouterAdapter のフルパイプラインを実行する。
 /// 実行要求は `RunRequest`（#33: 13位置引数の置き換え）で受ける。
+///
+/// **#632: 実行対象の agent 行が無ければ、何も実行せず [`AgentNotFound`] を返す。**
+/// これがサーバ側ターン実行の単一チョークポイントである（詳細は [`AgentNotFound`]）。
 pub async fn run_agent_response(
     state: &AppState,
     req: opencrab_actions::RunRequest,
@@ -1003,6 +1029,20 @@ pub async fn run_agent_response(
     let conversation = req.conversation.as_str();
     let gateway = req.gateway.as_str();
     let depth = req.depth;
+
+    // #632: 存在しないエージェントではターンを起こさない（サーバ側の単一チョークポイント）。
+    // 以降の workspace 作成・LLM 実行・ツール実行の手前で弾く。行が無いと per-agent 設定が
+    // 全部既定に落ちるのに動いてしまい、タイプミスに気づけない。
+    {
+        let conn = state.db.lock().unwrap();
+        if opencrab_db::queries::get_agent(&conn, agent_id)?.is_none() {
+            return Err(AgentNotFound {
+                agent_id: agent_id.to_string(),
+            }
+            .into());
+        }
+    }
+
     // Build workspace path for this agent.
     let ws_path =
         opencrab_core::workspace::resolve_agent_workspace(&state.workspace_base, agent_id)?;

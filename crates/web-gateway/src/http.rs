@@ -29,7 +29,7 @@ use futures::Stream;
 use serde::Deserialize;
 
 use crate::gateway::{caller_type_label, web_session_id};
-use crate::respond::run_and_deliver_serialized;
+use crate::respond::{run_and_deliver_serialized, WebTurnOutcome};
 use crate::runner::WebAgentRunner;
 
 /// web gateway の HTTP ルート（`POST .../web/send` と `GET .../web/stream`）。
@@ -96,17 +96,8 @@ pub async fn send_web_message<R: WebAgentRunner>(
     let user_id = normalize_user_id(req.user_id.as_deref());
     let session_id = web_session_id(&id, &req.conversation_id);
 
-    // 0. 存在しないエージェントはターンを起こさない（#632）。`agents` 行が無いと
-    //    per-agent 設定（heartbeat_instructions / model / persona 等）が全部既定に落ちるのに
-    //    「動いてしまう」ため、タイプミスに気づけない。セッションも発話も記録する前に
-    //    弾き、404 を返す（REST `POST /api/agents/{id}/messages` と同じ入口・同じ判定）。
-    if !state.agent_exists(&id) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("agent not found: {id}")})),
-        )
-            .into_response();
-    }
+    // 存在しないエージェントの弾き出し（#632）は `run_and_deliver_serialized`（web の
+    // 唯一の公開ターン入口）が担う。ここでは `AgentNotFound` を 404 に写像する（下の match）。
 
     // 1. 認可: 既存 REST（agents_messages）に倣い trusted_users から caller を導出する。
     let caller = state.resolve_caller(&id, &user_id);
@@ -138,16 +129,20 @@ pub async fn send_web_message<R: WebAgentRunner>(
     // 5. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
     //    `run_and_deliver_serialized` の内側に閉じている（呼び忘れが起こらない）。
     //    ランタイム（SSE チャンネル + ロック）は runner から引かれるため、inbound と
-    //    完了 sink が別のランタイムを掴む余地は無い。
-    let response =
-        run_and_deliver_serialized(&state, &id, &session_id, caller, None, "direct").await;
-
-    Json(serde_json::json!({
-        "session_id": session_id,
-        "caller_type": caller_type,
-        "response": response,
-    }))
-    .into_response()
+    //    完了 sink が別のランタイムを掴む余地は無い。存在確認もこの入口で 1 度だけ行われる。
+    match run_and_deliver_serialized(&state, &id, &session_id, caller, None, "direct").await {
+        WebTurnOutcome::AgentNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("agent not found: {id}")})),
+        )
+            .into_response(),
+        WebTurnOutcome::Ran(response) => Json(serde_json::json!({
+            "session_id": session_id,
+            "caller_type": caller_type,
+            "response": response,
+        }))
+        .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -412,9 +407,9 @@ mod tests {
 
     /// **存在しないエージェントはターンを起こさず 404 で弾く**（#632）。
     ///
-    /// `agents` 行が無いと per-agent 設定が全部既定に落ちるのに「動いてしまう」ため、
-    /// タイプミスに気づけない。ガードは認可判定・セッション用意・発話記録の**手前**に
-    /// あり、何も走らず・何も記録されないことを固定する（session_logs に何も書かれない）。
+    /// 存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、ハンドラは
+    /// その `AgentNotFound` を 404 に写像するだけ。**ターン（`run_agent_response`）は走らない**
+    /// ことを固定する（応答の転記も配送もされない）。
     #[tokio::test]
     async fn unknown_agent_is_rejected_with_404_without_running() {
         let runner = FakeRunner::new("走ってはいけない").without_agent();
@@ -427,19 +422,15 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
         assert_eq!(v["error"], "agent not found: ghost");
 
-        // ターンが走らない・セッションログに何も書かれない（ガードが記録の手前にある）。
+        // ターンが走らない（チョークポイントが run の手前で弾く）。
         assert!(
             runner.runs().is_empty(),
             "存在しないエージェントで実行された"
         );
+        // 応答の転記もされない。
         assert!(
-            runner.user_messages().is_empty(),
-            "存在しないエージェントでユーザ発話が記録された"
-        );
-        // 認可判定すら呼ばれない（弾くのが一番手前）。
-        assert!(
-            runner.caller_lookups().is_empty(),
-            "存在しないエージェントで認可判定が呼ばれた"
+            runner.replies().is_empty(),
+            "存在しないエージェントで応答が転記された"
         );
     }
 

@@ -9,10 +9,11 @@ use axum::{
 use serde::Deserialize;
 
 use opencrab_actions::{
-    gateway_kinds, AgentRuntime, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+    gateway_kinds, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
 };
 
 use crate::process;
+use crate::process::AgentNotFound;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -135,16 +136,9 @@ pub async fn send_agent_message(
     Path(id): Path<String>,
     Json(req): Json<SendAgentMessageRequest>,
 ) -> Response {
-    // 0. 存在しないエージェントはターンを起こさない（#632）。`agents` 行が無いと
-    //    per-agent 設定が全部既定に落ちるのに動いてしまい、タイプミスに気づけない。
-    //    セッションも発話も記録する前に弾く（web `web/send` と同じ入口・同じ判定）。
-    if !state.agent_exists(&id) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("agent not found: {id}")})),
-        )
-            .into_response();
-    }
+    // 存在しないエージェントの弾き出し（#632）は `process::run_agent_response`（サーバ側の
+    // 単一チョークポイント）が担う。ここでは run が返す `AgentNotFound` を 404 に写像する
+    // （下の match）。入口ごとにチェックをコピーしない。
 
     // 呼び出し元 ID は入口で 1 回だけ正規化し、以降すべて（認可・セッションキー・
     // speaker_id）で同じ値を使う。`is_owner_id` が trim して比較する一方でセッション
@@ -335,6 +329,14 @@ pub async fn send_agent_message(
             .into_response()
         }
         Err(e) => {
+            // #632: 存在しないエージェントはチョークポイントで弾かれる。404 に写像する。
+            if let Some(nf) = e.downcast_ref::<AgentNotFound>() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": nf.to_string()})),
+                )
+                    .into_response();
+            }
             tracing::error!(agent_id = %id, error = %e, "Agent response failed");
             // エラー時も同様: 走行中 subtask（エラー前に dispatch 済み）があれば
             // 完了扱いにしない。

@@ -1,10 +1,13 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 
 use crate::process;
+use crate::process::AgentNotFound;
 use crate::AppState;
 
 pub async fn list_session_logs(
@@ -111,7 +114,7 @@ pub async fn send_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SendMessageRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
     // 1. Log the sender's message to DB.
     let log = opencrab_db::queries::SessionLogRow {
         id: None,
@@ -129,13 +132,14 @@ pub async fn send_message(
         let conn = match state.db.lock() {
             Ok(conn) => conn,
             Err(_) => {
-                return Json(serde_json::json!({"error": "database unavailable"}));
+                return Json(serde_json::json!({"error": "database unavailable"})).into_response();
             }
         };
         match opencrab_db::queries::insert_session_log(&conn, &log) {
             Ok(id) => id,
             Err(e) => {
-                return Json(serde_json::json!({"error": format!("failed to log message: {e}")}));
+                return Json(serde_json::json!({"error": format!("failed to log message: {e}")}))
+                    .into_response();
             }
         }
     };
@@ -145,7 +149,8 @@ pub async fn send_message(
         return Json(serde_json::json!({
             "id": log_id,
             "session_id": id,
-        }));
+        }))
+        .into_response();
     }
 
     // 3. Get session and participant IDs.
@@ -153,16 +158,18 @@ pub async fn send_message(
         let conn = match state.db.lock() {
             Ok(conn) => conn,
             Err(_) => {
-                return Json(serde_json::json!({"error": "database unavailable"}));
+                return Json(serde_json::json!({"error": "database unavailable"})).into_response();
             }
         };
         match opencrab_db::queries::get_session(&conn, &id) {
             Ok(Some(session)) => session,
             Ok(None) => {
-                return Json(serde_json::json!({"error": format!("session not found: {id}")}));
+                return Json(serde_json::json!({"error": format!("session not found: {id}")}))
+                    .into_response();
             }
             Err(e) => {
-                return Json(serde_json::json!({"error": format!("failed to load session: {e}")}));
+                return Json(serde_json::json!({"error": format!("failed to load session: {e}")}))
+                    .into_response();
             }
         }
     };
@@ -170,7 +177,9 @@ pub async fn send_message(
     let participant_ids: Vec<String> = {
         let conn = match state.db.lock() {
             Ok(conn) => conn,
-            Err(_) => return Json(serde_json::json!({"error": "database unavailable"})),
+            Err(_) => {
+                return Json(serde_json::json!({"error": "database unavailable"})).into_response()
+            }
         };
         opencrab_db::queries::list_session_participants(&conn, &id).unwrap_or_default()
     };
@@ -250,6 +259,16 @@ pub async fn send_message(
                 }));
             }
             Err(e) => {
+                // #632: 存在しない participant はチョークポイント（run_agent_response）で
+                // 弾かれる。ターンは走らない。他 participant の結果を混ぜず 404 に写像する
+                // （でたらめな participant を含むセッションへの send を無効な要求として扱う）。
+                if let Some(nf) = e.downcast_ref::<AgentNotFound>() {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": nf.to_string()})),
+                    )
+                        .into_response();
+                }
                 tracing::error!(agent_id = %agent_id, error = %e, "SkillEngine failed");
                 responses.push(serde_json::json!({
                     "agent_id": agent_id,
@@ -266,4 +285,5 @@ pub async fn send_message(
         "session_id": id,
         "responses": responses,
     }))
+    .into_response()
 }

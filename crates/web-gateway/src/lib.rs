@@ -53,6 +53,6 @@ pub use gateway::{
     caller_type_label, web_session_id, WebEvent, WebGateway, WEB_SESSION_PREFIX, WEB_SESSION_THEME,
 };
 pub use http::routes;
-pub use respond::run_and_deliver_serialized;
+pub use respond::{run_and_deliver_serialized, WebTurnOutcome};
 pub use runner::WebAgentRunner;
 pub use sink::WebCompletionSink;
