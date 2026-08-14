@@ -23,6 +23,7 @@ pub mod actions;
 pub mod cli;
 pub mod config;
 pub mod event;
+pub mod fire_descriptor;
 pub mod identity;
 pub mod key_provisioning;
 pub mod manager;
@@ -41,6 +42,7 @@ pub use cli::{
     NostaroCli, MAX_VANITY_PREFIX_LEN,
 };
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
+pub use fire_descriptor::NostrFire;
 pub use event::{parse_watch_line, NostrEvent, DM_KINDS};
 pub use identity::NostrIdentityAdmin;
 pub use key_provisioning::NostrKeyProvisioning;

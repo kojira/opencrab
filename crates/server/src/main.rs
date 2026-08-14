@@ -258,6 +258,20 @@ async fn main() -> anyhow::Result<()> {
         timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
     };
 
+    // #628: transport の発火先 descriptor を**生存非依存で**登録する（ゲートウェイの起動有無・
+    // 資格情報の有無に関わらず常時。受理判定・ゲート理由表示・parse はゲートウェイ停止中でも
+    // 要る）。sink（生存で register/unregister）とは別の登録で、ここは起動ブロックの**外**に
+    // 置く（#627 で「Discord 有効ブロックの中に置く」設計が隔離環境で発火しない罠になった）。
+    // 各 descriptor の実装はその transport の crate にある（Discord を足す作業がこの合流点に
+    // 散らばらない）。
+    #[cfg(feature = "discord")]
+    state
+        .timed_fire_router
+        .register_descriptor(std::sync::Arc::new(opencrab_discord::DiscordFire));
+    state
+        .timed_fire_router
+        .register_descriptor(std::sync::Arc::new(opencrab_nostr::NostrFire));
+
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
     // 非依存層にあるため、通知先の解決（DB の webhook 設定 + TOML の既定）だけを持つ
     // この実装を `AppState` へ差し込む。Discord ゲートウェイの稼働有無とは独立に効く
