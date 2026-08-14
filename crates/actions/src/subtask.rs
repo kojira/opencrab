@@ -1895,6 +1895,11 @@ mod tests {
             fn definitions(&self) -> Vec<GatewayActionDef> {
                 vec![GatewayActionDef {
                     name: "nostr_generate_key".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Dispatchable,
+                        sub_engine: opencrab_gateway::SubEngineAccess::Allowed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "generate a nostr key".to_string(),
                     parameters: serde_json::json!({"type":"object"}),
                 }]
@@ -2020,6 +2025,11 @@ mod tests {
             fn definitions(&self) -> Vec<GatewayActionDef> {
                 vec![GatewayActionDef {
                     name: "long_running".to_string(),
+                    class: opencrab_gateway::ToolClass {
+                        dispatch: opencrab_gateway::DispatchMode::Inline,
+                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                        sharing: opencrab_gateway::ToolSharing::AgentBound,
+                    },
                     description: "never completes".to_string(),
                     parameters: serde_json::json!({"type":"object"}),
                 }]

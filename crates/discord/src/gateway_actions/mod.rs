@@ -204,6 +204,7 @@ impl GatewayActions for DiscordGatewayActions {
         vec![
             GatewayActionDef {
                 name: "discord_list_guilds".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Botが参加しているDiscordサーバー（guild）の一覧を取得する。返り値の各サーバーの `id` フィールド（数値文字列）を、他のアクションの `guild_id` パラメータとして使用すること。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -213,6 +214,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_list_channels".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "指定サーバーのテキストチャンネル一覧と、各チャンネルの現在のreadable/writable/whitelisted設定を取得する。チャンネルの `id` フィールドを discord_channel_config の channel_id として使用すること。guild_id は discord_list_guilds で取得した数値IDを指定。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -227,6 +229,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_channel_config".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Discordチャンネルの読み書き設定を変更する。readableをfalseにするとそのチャンネルのメッセージを無視し、writableをfalseにすると返信しない。whitelisted=trueにするとホワイトリストに登録され、そのチャンネルからのメッセージを優先処理する。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -261,6 +264,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_add_reaction".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::ConversationBound },
                 description: "Discordメッセージにリアクション（絵文字）を追加する。Unicode絵文字（例: ⚡）またはカスタム絵文字（name:id形式）を指定できる。テキストで返すほどでもない反応は、これでリアクションだけ付けて応答本文を NO_REPLY にしてよい。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -283,6 +287,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_create_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "指定したDiscordテキストチャンネルにwebhookを作成し、spawn_subtask.webhook.urlに渡せるURLを返す。Botには対象チャンネルのManage Webhooks権限が必要。返り値のurlは秘密トークンを含むため公開しないこと。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -301,6 +306,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "discord_create_channel".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "指定したDiscordサーバー（guild）に新しいテキストチャンネルを作成する。Botには対象サーバーのManage Channels権限が必要。guild_idは必須で、discord_list_guildsで取得した数値IDを指定すること（このレイヤーではデフォルトサーバーを解決できないため省略不可）。返り値のurlでチャンネルを開ける。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -340,6 +346,7 @@ impl GatewayActions for DiscordGatewayActions {
             // （`test_definitions_returns_expected_count` の negative assert が守る）。
             GatewayActionDef {
                 name: "discord_send_file".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Discordチャンネルにファイル（画像等）をアップロードして送信する。ファイルパスはワークスペース内のパスのみ指定可能（パストラバーサル防止）。25MBサイズ制限あり。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -366,6 +373,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "join_voice_channel".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "ボイスチャンネル（VC）に参加して音声対話を開始する。参加後、VC内の発話はユーザーごとに文字起こしされてこのチャンネルの会話として届き、返信は自動で読み上げられる。owner/trusted_userの依頼時のみ使用可。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -384,6 +392,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "leave_voice_channel".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "現在参加中のボイスチャンネルから退出する。owner/trusted_userの依頼時のみ使用可。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -409,6 +418,7 @@ impl GatewayActions for DiscordGatewayActions {
             // 抽象を生むので S5 では行わない。
             GatewayActionDef {
                 name: "ensure_subtask_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "使えるデフォルト subtask webhook が既にあればそれを redacted で返す（owner/trusted_user/co_agent）。無ければ owner かつ channel_id 指定時のみ webhook を新規作成して既定に登録する。rawトークンは返さない。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -445,6 +455,7 @@ impl GatewayActions for DiscordGatewayActions {
             },
             GatewayActionDef {
                 name: "ensure_webhook".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "使えるデフォルト webhook が既にあればそれを redacted で返す（既定 family='activity'、owner/trusted_user/co_agent）。無ければ owner かつ channel_id 指定時のみ webhook を新規作成して既定に登録する。rawトークンは返さない。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -913,6 +924,62 @@ mod tests {
                 + opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.len(),
             names.len(),
             "分類集合の合計が definitions() の数と一致しない"
+        );
+    }
+
+    /// **PR-2A 等価性ガード**: 各ツール定義が自ら名乗る分類（`GatewayActionDef.class`）が、
+    /// 現行の権威リスト（`DISCORD_DISPATCHABLE_ACTIONS` / `DISCORD_INLINE_ACTIONS` /
+    /// 拒否リスト `DISCORD_ACTIONS` / 許可リスト `SUB_ENGINE_ALLOWED_ACTIONS`）と一致する
+    /// ことを、定義を**実体で呼んで**機械検査する。
+    ///
+    /// これが「PR-2A は挙動を変えていない」の証明そのもの。消費側（`tool_policy` /
+    /// `SubEngineGatewayActions` / `default_non_dispatch_tools`）はまだ旧リストを権威に
+    /// している。PR-2B で消費側をこの属性へ切り替える**前に**、属性が旧リストと無矛盾で
+    /// あることをここで固定する。各 def ごとの双条件（⟺）なので、既存のドリフト検出
+    /// テスト（リストに死名が無い / 全 def が分類済み）と合わせて集合一致を証明する。
+    #[test]
+    fn discord_tool_class_matches_authoritative_lists() {
+        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
+        let (actions, _db) = make_test_actions();
+        let defs = actions.definitions();
+        assert!(!defs.is_empty());
+        let mut conv_bound = std::collections::BTreeSet::new();
+        for d in &defs {
+            let name = d.name.as_str();
+            assert_eq!(
+                d.class.dispatch == DispatchMode::Dispatchable,
+                opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&name),
+                "{name}: dispatch 属性が DISCORD_DISPATCHABLE_ACTIONS と食い違う"
+            );
+            assert_eq!(
+                d.class.dispatch == DispatchMode::Inline,
+                opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&name),
+                "{name}: dispatch 属性が DISCORD_INLINE_ACTIONS と食い違う"
+            );
+            assert_eq!(
+                d.class.sub_engine == SubEngineAccess::Blocked,
+                opencrab_actions::DISCORD_ACTIONS.contains(&name),
+                "{name}: sub_engine=Blocked が拒否リスト DISCORD_ACTIONS と食い違う"
+            );
+            assert_eq!(
+                d.class.sub_engine == SubEngineAccess::Allowed,
+                opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
+                "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
+            );
+            if d.class.sharing == ToolSharing::ConversationBound {
+                conv_bound.insert(d.name.clone());
+            }
+        }
+        // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
+        // （判定基準は `opencrab_gateway::ToolSharing` の doc）。Discord ゲートで会話固有の
+        // 一時ハンドルを必須に取るのは message_id を要する `discord_add_reaction` のみ。
+        // 全ゲート横断の ConversationBound は {discord_add_reaction, nostr_reply, send_ui} で、
+        // 残り 2 つは nostr / server 側の同名テストが覆う。
+        let expected: std::collections::BTreeSet<String> =
+            std::iter::once("discord_add_reaction".to_string()).collect();
+        assert_eq!(
+            conv_bound, expected,
+            "discord ゲートの ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
         );
     }
 

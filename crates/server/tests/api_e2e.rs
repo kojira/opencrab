@@ -3159,6 +3159,11 @@ async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask
             let mut defs = self.discord.definitions();
             defs.push(opencrab_gateway::GatewayActionDef {
                 name: "cancel_subtask".to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
                 description: "discord cancel (旧実装相当)".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",

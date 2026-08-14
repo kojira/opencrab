@@ -97,6 +97,7 @@ impl GatewayActions for NostrGatewayActions {
         vec![
             GatewayActionDef {
                 name: "nostr_post".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Nostr に新規ノート（kind:1）を投稿する。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -109,6 +110,7 @@ impl GatewayActions for NostrGatewayActions {
             },
             GatewayActionDef {
                 name: "nostr_reply".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::ConversationBound },
                 description: "Nostr の特定ノートに返信する。target は受信イベントの note_id（note1...）または hex id。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -128,6 +130,7 @@ impl GatewayActions for NostrGatewayActions {
             // の `dm`、`DM_KINDS` の受信破棄を戻せばよい（3 経路とも 1 か所ずつ）。
             GatewayActionDef {
                 name: "nostr_zap".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "Nostr で zap（Lightning 投げ銭）を送る。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -142,6 +145,7 @@ impl GatewayActions for NostrGatewayActions {
             },
             GatewayActionDef {
                 name: "nostr_upload".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "ワークスペース内のファイルを Blossom にアップロードして URL を得る。".to_string(),
                 parameters: json!({
                     "type": "object",
@@ -154,6 +158,7 @@ impl GatewayActions for NostrGatewayActions {
             },
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Dispatchable, sub_engine: opencrab_gateway::SubEngineAccess::Allowed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
                               npub1 以降・bech32 文字のみ。長さ上限は無いが、長いほど探索に時間が \
                               かかる＝3文字程度で即時、それ以上は徐々に長くなる）を指定できる。返るのは公開情報の \
@@ -169,6 +174,7 @@ impl GatewayActions for NostrGatewayActions {
             },
             GatewayActionDef {
                 name: "nostr_list_keys".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分が nostr_generate_key で生成した鍵の一覧（npub のみ）を返す。\
                               nostr_switch_identity で本鍵に採用する候補を確認するのに使う。\
                               返るのは公開情報の npub だけで、**秘密鍵(nsec)は一切返らない**。"
@@ -180,6 +186,7 @@ impl GatewayActions for NostrGatewayActions {
             },
             GatewayActionDef {
                 name: "nostr_switch_identity".to_string(),
+                class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::NotExposed, sharing: opencrab_gateway::ToolSharing::AgentBound },
                 description: "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの\
                               **本鍵（送信・受信のアイデンティティ）として採用**する。以後の投稿は\
                               その鍵で行われる。npub には generated_key で作った鍵の npub を渡す。\
@@ -348,6 +355,56 @@ mod tests {
         assert!(
             !names.contains(&"nostr_dm".to_string()),
             "nostr_dm は #514 で撤去したので定義に無いこと"
+        );
+    }
+
+    /// **PR-2A 等価性ガード**: 各ツール定義の分類（`GatewayActionDef.class`）が現行の
+    /// 権威リスト（`NOSTR_DISPATCHABLE_ACTIONS` / `NOSTR_DELIVERY_ACTIONS`＝inline /
+    /// 拒否リスト `DISCORD_ACTIONS` / 許可リスト `SUB_ENGINE_ALLOWED_ACTIONS`）と一致する
+    /// ことを、定義を実体で呼んで機械検査する。「挙動を変えていない」の証明（消費側は
+    /// PR-2B まで旧リストが権威のまま）。
+    #[test]
+    fn nostr_tool_class_matches_authoritative_lists() {
+        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
+        let a = NostrGatewayActions::new(NostaroCli::new());
+        let defs = a.definitions();
+        assert!(!defs.is_empty());
+        let mut conv_bound = std::collections::BTreeSet::new();
+        for d in &defs {
+            let name = d.name.as_str();
+            assert_eq!(
+                d.class.dispatch == DispatchMode::Dispatchable,
+                opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.contains(&name),
+                "{name}: dispatch 属性が NOSTR_DISPATCHABLE_ACTIONS と食い違う"
+            );
+            assert_eq!(
+                d.class.dispatch == DispatchMode::Inline,
+                opencrab_actions::NOSTR_DELIVERY_ACTIONS.contains(&name),
+                "{name}: dispatch 属性が NOSTR_DELIVERY_ACTIONS(inline) と食い違う"
+            );
+            assert_eq!(
+                d.class.sub_engine == SubEngineAccess::Blocked,
+                opencrab_actions::DISCORD_ACTIONS.contains(&name),
+                "{name}: sub_engine=Blocked が拒否リスト DISCORD_ACTIONS と食い違う"
+            );
+            assert_eq!(
+                d.class.sub_engine == SubEngineAccess::Allowed,
+                opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
+                "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
+            );
+            if d.class.sharing == ToolSharing::ConversationBound {
+                conv_bound.insert(d.name.clone());
+            }
+        }
+        // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
+        // （判定基準は `opencrab_gateway::ToolSharing` の doc）。Nostr ゲートで会話固有の
+        // 一時ハンドルを必須に取るのは受信投稿の note id（`target`）を要する `nostr_reply` のみ。
+        // 全ゲート横断の ConversationBound は {discord_add_reaction, nostr_reply, send_ui}。
+        let expected: std::collections::BTreeSet<String> =
+            std::iter::once("nostr_reply".to_string()).collect();
+        assert_eq!(
+            conv_bound, expected,
+            "nostr ゲートの ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
         );
     }
 

@@ -208,11 +208,87 @@ pub trait GatewayActions: Send + Sync {
     }
 }
 
+/// ツール定義が自ら名乗る分類。
+///
+/// 名前リストによる外部照合（`*_DISPATCHABLE_ACTIONS` / `DISCORD_ACTIONS` /
+/// `SUB_ENGINE_ALLOWED_ACTIONS` を消費側が引く方式）を廃し、定義自身に持たせる。
+/// これにより「新しいツールを足したのにリストへ載せ忘れる」ドリフトを、リストの
+/// メンテナンスではなく **構築サイトでの記述の強制** で防ぐ。
+///
+/// すべて必須（`Default` を持たせない）: 既定値があると新ツールで書き忘れが黙って
+/// 通るため。3 フィールドすべてを構築サイトで明示させることが、この型の目的そのもの。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolClass {
+    /// 非ブロック dispatch（RFC #152）の対象か否か。
+    pub dispatch: DispatchMode,
+    /// depth>=1 の sub-engine からの可視性・実行可否。
+    pub sub_engine: SubEngineAccess,
+    /// このハンドルが会話固有の一時値に縛られるか、エージェント全体で共有できるか。
+    pub sharing: ToolSharing,
+}
+
+/// 非ブロック dispatch（RFC #152 の「バックグラウンド実行」）の分類。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchMode {
+    /// そのターン内で inline 実行する（配送系 / 同ターン結果依存 / 短時間書き込み /
+    /// 純粋な読み取り / run 内共有状態）。現行の `*_INLINE_ACTIONS` に対応。
+    Inline,
+    /// 非ブロックで dispatch してよい（長時間 or 同ターンで結果を使わない書き込み）。
+    /// 現行の `*_DISPATCHABLE_ACTIONS` に対応。
+    Dispatchable,
+}
+
+/// depth>=1 の sub-engine（`spawn_subtask` で起動した子）から見たツールの扱い。
+///
+/// 現行は 2 つの互いに素なリスト（許可リスト `SUB_ENGINE_ALLOWED_ACTIONS` と拒否リスト
+/// `DISCORD_ACTIONS`）が扱っていた情報を、1 つの 3 値で無損失に統合する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubEngineAccess {
+    /// sub-engine に見せて実行も許す（許可リスト `SUB_ENGINE_ALLOWED_ACTIONS` のメンバー）。
+    Allowed,
+    /// depth>=1 で明示的に拒否する（多層防御）。拒否リスト `DISCORD_ACTIONS` のメンバー。
+    Blocked,
+    /// 既定。許可リストに載せない（許可リストにも拒否リストにも無い大多数）。
+    /// sub-engine は最外周の allow-list フィルタでこれを見ない。
+    NotExposed,
+}
+
+/// ツールのハンドルが束縛される範囲。
+///
+/// 判定基準:
+/// **`ConversationBound` = その会話に固有の一時ハンドル（特定のメッセージ ID、受信した
+/// 投稿 ID）を必須引数に取る、または対話中の live セッションに束縛される（応答を待つ）
+/// ツール。それ以外はすべて `AgentBound`。**
+///
+/// 2 つ目の条件（live セッション束縛）は必須引数だけを見ても分からない点に注意:
+/// `send_ui` の必須引数は `channel_id`（永続）と `components` だけだが、投稿後に
+/// ユーザーの応答（クリック等）をそのやりとりの中で待つため `ConversationBound`。
+/// 必須引数だけで判断すると `send_ui` 型を `AgentBound` と誤分類する。
+///
+/// 現時点で `ConversationBound` は次の 3 つだけ:
+/// - `discord_add_reaction` — 必須引数 `message_id`（その会話のメッセージ）。
+/// - `nostr_reply` — 必須引数 `target`（受信した投稿の note id）。
+/// - `send_ui` — 対話中の live セッションに束縛される（応答を待つ）。
+///
+/// この段階（PR-2A）ではまだ消費者が無い（挙動に影響しない）。後から共有の機構が
+/// この属性を読むので、形を今のうちに確定させる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolSharing {
+    /// 会話固有の一時ハンドルを必須引数に取る、または対話中の live セッションに束縛される
+    /// （応答を待つ）。実例: リアクションの `message_id` / Nostr 返信の投稿 id /
+    /// UI 送信（応答待ち）。
+    ConversationBound,
+    /// 会話に縛られず、エージェント全体で共有できる。
+    AgentBound,
+}
+
 /// ゲートウェイアクションの定義
 pub struct GatewayActionDef {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// ツールが自ら名乗る分類（dispatch / sub-engine / sharing）。必須（`Default` 無し）。
+    pub class: ToolClass,
 }
 
 /// ゲートウェイアクションの実行結果

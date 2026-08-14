@@ -70,6 +70,7 @@ const HEADER_FIELD_MAX_CHARS: usize = 300;
 pub fn request_peer_review_definition() -> GatewayActionDef {
     GatewayActionDef {
         name: "request_peer_review".to_string(),
+        class: opencrab_gateway::ToolClass { dispatch: opencrab_gateway::DispatchMode::Inline, sub_engine: opencrab_gateway::SubEngineAccess::Blocked, sharing: opencrab_gateway::ToolSharing::AgentBound },
         description: "自分の成果物（diff・実行結果・トレース等）を、同じチャンネルにいる別のBot（別モデル）にピアレビューしてもらうため、レビュー依頼をDiscordチャンネルへ投稿する。contentは要約せずRAWのまま part X/N で分割送信される。レビュアーは [Peer Review] で始まる返信（score 0.0-1.0 / gaps / summary）を返す想定。activeタスクがあればタスク台帳に [peer review requested] を自動記録する。".to_string(),
         parameters: json!({
             "type": "object",
