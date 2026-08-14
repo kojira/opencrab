@@ -99,16 +99,19 @@ fn current_session(
     let session_id = match ctx.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
-            return Err(err(
-                "このセッションからは定時実行を設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
-            ));
+            // remedy は登録済み transport から生成する（#628・手書きしない）。
+            return Err(err(format!(
+                "このセッションからは定時実行を設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——{}——で実行してください。",
+                state.timed_fire_router.fire_target_hint()
+            )));
         }
     };
     match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
         Some(_) => Ok(session_id.to_string()),
-        None => Err(err(
-            "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
-        )),
+        None => Err(err(format!(
+            "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
+            state.timed_fire_router.fire_target_hint()
+        ))),
     }
 }
 

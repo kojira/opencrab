@@ -143,9 +143,11 @@ pub(crate) fn create_schedule_core(
         .resolve_target(session_id, agent_id)
         .is_none()
     {
-        return Err(ScheduleOpError::BadRequest(
-            "このセッションには発火経路がありません（Nostr の自発投稿、または Discord チャンネルのセッションでのみ登録できます）。".to_string(),
-        ));
+        // remedy は登録済み transport から生成する（#628・手書きしない）。
+        return Err(ScheduleOpError::BadRequest(format!(
+            "このセッションには発火経路がありません（{} のセッションでのみ登録できます）。",
+            state.timed_fire_router.fire_target_hint()
+        )));
     }
     if message.trim().is_empty() {
         return Err(ScheduleOpError::BadRequest(

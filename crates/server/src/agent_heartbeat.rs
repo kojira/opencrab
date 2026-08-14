@@ -179,18 +179,22 @@ fn current_session_target(
         Some(s) if !s.is_empty() => s,
         _ => {
             // 理由だけでなく **remedy（次に何をすればよいか）** を書く（#456 の発端は「混乱」
-            // なので、拒否で詰まらせると混乱を別の形にすり替えるだけになる・M-b）。
-            return Err(err(
-                "このセッションからはハートビートを設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
-            ));
+            // なので、拒否で詰まらせると混乱を別の形にすり替えるだけになる・M-b）。remedy の
+            // 「どこで実行すればよいか」は登録済み transport から生成する（#628・手書きしない=足した
+            // transport が自動で載る）。
+            return Err(err(format!(
+                "このセッションからはハートビートを設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——{}——で実行してください。",
+                state.timed_fire_router.fire_target_hint()
+            )));
         }
     };
     match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
         Some(target) => Ok((session_id.to_string(), target)),
         // 理由（発火経路が無い種別）＋ remedy（どこで実行すればよいか）を 1 読で示す（M-b）。
-        None => Err(err(
-            "このセッションからはハートビートを設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
-        )),
+        None => Err(err(format!(
+            "このセッションからはハートビートを設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
+            state.timed_fire_router.fire_target_hint()
+        ))),
     }
 }
 
