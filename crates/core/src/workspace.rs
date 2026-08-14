@@ -419,8 +419,9 @@ impl LineReader {
     /// 次の 1 行を返す。EOF なら `None`。
     ///
     /// 2 相で走る。**相 A**（`text` が `max_chars` 未満）は窓を UTF-8 デコードして 1 文字ずつ
-    /// `text` に積む。窓末尾でマルチバイト文字が割れても、割れたバイトだけを次窓へ繰り越す
-    /// （`carry`）ので、バイト境界補正はこの 1 手だけ。**相 B**（`text` が満杯）は残りを返さない
+    /// `text` に積む。窓末尾でマルチバイト文字が割れたら割れたバイト（< 4）だけを次窓へ繰り越し
+    /// （`carry`）、不正シーケンスは U+FFFD 1 文字ぶんとして飛ばすので、`carry` は常に < 4 バイトに
+    /// 収まり不正 UTF-8 でも行全体を溜め込まない。**相 B**（`text` が満杯）は残りを返さない
     /// ので、もう memcpy も `from_utf8` もデコードもせず、**生バイトで文字先頭（`b & 0xC0 != 0x80`）
     /// を数えるだけ**で `\n` まで読み飛ばす。単一の巨大行（90MB base64 等）でも相 B が 1 パスで
     /// 済む。
@@ -489,23 +490,52 @@ impl LineReader {
                 }
             }
             self.reader.consume(consumed);
-            // `bytes` の妥当な UTF-8 プレフィックスだけを文字に割る。末尾に未完バイトが残れば
-            // 次窓の先頭バイトと繋がるので carry へ（`\n` は継続バイトになり得ないので、改行を
-            // 見つけた窓では未完バイトは残らない）。
-            let valid_len = match std::str::from_utf8(&bytes) {
-                Ok(_) => bytes.len(),
-                Err(e) => e.valid_up_to(),
-            };
-            let valid =
-                std::str::from_utf8(&bytes[..valid_len]).expect("valid_up_to is a char boundary");
-            for ch in valid.chars() {
-                if total_chars < self.max_chars {
-                    text.push(ch);
+            // `bytes` を妥当な UTF-8 プレフィックス＋（不正シーケンス｜末尾の未完バイト）へ分解して
+            // 進める。ポイントは [`std::str::Utf8Error::error_len`] で 2 種を分けること:
+            //   - `None`（末尾で入力が尽きた未完文字）→ その < 4 バイトだけ carry して次窓と繋ぐ
+            //   - `Some(len)`（確定的な不正シーケンス）→ U+FFFD 1 文字ぶん数えて `len` バイト飛ばし、
+            //     **残りを続けて処理する**。これをやらないと、先頭が不正バイト（`0xFF` や孤立継続
+            //     バイト）のとき `valid_up_to()` が恒久的に 0 になり、carry に 1 行全体が溜まって
+            //     しまう（#616 が消したはずの「行全体をメモリに載せる」状態の退行）。
+            let mut rest: &[u8] = &bytes;
+            loop {
+                match std::str::from_utf8(rest) {
+                    Ok(valid) => {
+                        for ch in valid.chars() {
+                            if total_chars < self.max_chars {
+                                text.push(ch);
+                            }
+                            total_chars += 1;
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        let vu = e.valid_up_to();
+                        let valid = std::str::from_utf8(&rest[..vu])
+                            .expect("valid_up_to is a char boundary");
+                        for ch in valid.chars() {
+                            if total_chars < self.max_chars {
+                                text.push(ch);
+                            }
+                            total_chars += 1;
+                        }
+                        match e.error_len() {
+                            // 末尾の未完文字（< 4 バイト）。次窓の先頭バイトと繋げる。
+                            None => {
+                                carry.extend_from_slice(&rest[vu..]);
+                                break;
+                            }
+                            // 確定的な不正シーケンス。置換文字 1 つとして数えて先へ進む。
+                            Some(len) => {
+                                if total_chars < self.max_chars {
+                                    text.push('\u{FFFD}');
+                                }
+                                total_chars += 1;
+                                rest = &rest[vu + len..];
+                            }
+                        }
+                    }
                 }
-                total_chars += 1;
-            }
-            if valid_len < bytes.len() {
-                carry.extend_from_slice(&bytes[valid_len..]);
             }
             if nl_found {
                 return Ok(Some(self.take_line(text, total_chars)));
@@ -762,5 +792,35 @@ mod tests {
             total - 512,
             "割れ文字が二重計上/欠落しない"
         );
+    }
+
+    /// #617（2 巡目）: 相 A が不正 UTF-8 の先頭バイトで詰まらない。`0xFF` 始まりで改行の無い数 MB の
+    /// 行を通しても `carry` が非有界に伸びず（＝相 B へ移行してメモリが窓 + max_chars で頭打ち）、
+    /// 各不正バイトは 1 文字（U+FFFD 相当）として数えられて返る。修正前はこの行全体が `carry` に
+    /// 溜まり、`text` 空・`overflow_chars` 0 で返っていた（＝この test は修正前なら落ちる）。
+    #[test]
+    fn line_reader_invalid_utf8_does_not_accumulate_carry() {
+        let (_dir, ws) = temp_workspace();
+        // 3 MiB の 0xFF（不正 UTF-8）を 1 行（改行なし）。生バイトなので std::fs で直接書く。
+        let n = 3 * 1024 * 1024;
+        std::fs::write(ws.root().join("bin.dat"), vec![0xFFu8; n]).unwrap();
+
+        let (mut reader, _t) = ws.line_reader("bin.dat", 1, 512).unwrap();
+        let l = reader.next_line().unwrap().unwrap();
+        assert_eq!(
+            l.text.chars().count(),
+            512,
+            "先頭 512 文字ぶんだけ text に載る"
+        );
+        assert!(
+            l.text.chars().all(|c| c == '\u{FFFD}'),
+            "不正バイトは置換文字として積まれる"
+        );
+        assert_eq!(
+            l.overflow_chars,
+            n - 512,
+            "各不正バイトが 1 文字として数えられる（carry に溜め込まない証拠）"
+        );
+        assert!(reader.next_line().unwrap().is_none());
     }
 }
