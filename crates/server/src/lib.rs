@@ -261,6 +261,12 @@ impl AppState {
 #[cfg(test)]
 pub(crate) fn test_app_state() -> AppState {
     let conn = opencrab_db::init_memory().unwrap();
+    // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する。これが無いと
+    // set/get_my_heartbeat・schedule ツールが発火先を解決できず（登録簿が空）拒否される。
+    let timed_fire_router = opencrab_actions::TimedFireRouter::new();
+    #[cfg(feature = "discord")]
+    timed_fire_router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
+    timed_fire_router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
     AppState {
         db: opencrab_db::Db::from_connection(conn),
         llm_router: SharedLlmRouter::new(LlmRouter::new()),
@@ -289,7 +295,7 @@ pub(crate) fn test_app_state() -> AppState {
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
-        timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
+        timed_fire_router: Arc::new(timed_fire_router),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),

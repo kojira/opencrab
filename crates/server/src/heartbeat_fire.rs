@@ -9,8 +9,7 @@
 //! **両者が「まったく同じ経路」を通る**ことが要件（テスト用の別経路を作ると本番と挙動が割れる）。
 //! `bin` の mod は lib から参照できないので、共有できる lib へ置き、両方がこの 1 つの関数を呼ぶ。
 
-use opencrab_actions::CallerIdentity;
-use opencrab_db::queries::SessionFireTarget as FireTarget;
+use opencrab_actions::{gateway_kinds, CallerIdentity, FireTarget};
 
 use crate::AppState;
 
@@ -22,6 +21,40 @@ use crate::AppState;
 /// まだ残っているかのように読み手を誤らせたため改名した（#472）。
 /// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
 pub const HEARTBEAT_NOSTR_CHANNEL_LABEL: &str = "（自律ハートビート）";
+
+/// web セッション（および特定の外部チャンネル名を持たない発火先）宛ハートビートの
+/// **表示用 channel_name**（中立ラベル・#628 条件 D）。
+///
+/// [`channel_label`] の `_` 分岐が使う。web の会話は Discord のような外部チャンネル名を
+/// 持たないので中立の呼称を充てる（transport 中立・#158 S2 と同方針）。
+pub const HEARTBEAT_WEB_CHANNEL_LABEL: &str = "（ダッシュボードの会話）";
+
+/// 発火先 → プロンプト内の会話呼称（表示用 channel_name）を解く小関数（#628 条件 D）。
+///
+/// **`channel_label` は `TransportFire` trait に置かない**: Discord は実行時に db から
+/// チャンネル名を引き、他は固定ラベルで、「静的 descriptor」の建前と矛盾するため。発火経路
+/// （このモジュール）側に `target → 表示名` の小関数として残す。
+/// - **Discord**: db のチャンネル設定名（無ければ channel_id）。
+/// - **Nostr**: 固定ラベル [`HEARTBEAT_NOSTR_CHANNEL_LABEL`]。
+/// - **その他（web 等）**: 中立ラベル [`HEARTBEAT_WEB_CHANNEL_LABEL`]（transport を足しても
+///   ここは触らず中立表示になる）。
+fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> String {
+    match target.kind {
+        gateway_kinds::DISCORD => {
+            let Ok(conn) = db.lock() else {
+                return target.channel_id.clone();
+            };
+            opencrab_db::queries::get_channel_config_for_agent(&conn, &target.channel_id, agent_id)
+                .ok()
+                .flatten()
+                .map(|r| r.channel_name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| target.channel_id.clone())
+        }
+        gateway_kinds::NOSTR => HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
+        _ => HEARTBEAT_WEB_CHANNEL_LABEL.to_string(),
+    }
+}
 
 /// ハートビート指示文を system プロンプト用の 1 文へ整形する（#501）。
 ///
@@ -97,46 +130,35 @@ pub async fn run_one_heartbeat(
     target: &FireTarget,
 ) -> Option<()> {
     let db = &state.db;
-    let is_discord = matches!(target, FireTarget::DiscordChannel { .. });
-    // 発火先セッションと、種別ごとの channel_id / guild_id / channel_name / 受け口の kind を解く（#508）。
-    let session_id = target.channel_session_id(agent_id);
-    let (kind, channel_id, guild_id, channel_name) = match target {
-        FireTarget::NostrBroadcast => (
-            opencrab_actions::gateway_kinds::NOSTR,
-            String::new(),
-            String::new(),
-            HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
-        ),
-        FireTarget::DiscordChannel {
-            guild_id,
-            channel_id,
-        } => {
-            let name = {
-                let conn = db.lock().ok()?;
-                opencrab_db::queries::get_channel_config_for_agent(&conn, channel_id, agent_id)
-                    .ok()
-                    .flatten()
-                    .map(|r| r.channel_name)
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| channel_id.clone())
-            };
-            (
-                opencrab_actions::gateway_kinds::DISCORD,
-                channel_id.clone(),
-                guild_id.clone(),
-                name,
-            )
-        }
+    // 発火先の descriptor を引く（session_id の組み直し・応答本文の自動配送有無・#628）。target は
+    // 登録済み descriptor が parse した値なので通常必ず在る。無ければ発火経路が消えている（登録漏れ）
+    // ので発火を諦める（fail-closed）。**transport の名前で分岐しない**——性質を descriptor に問う。
+    let Some(descriptor) = state.timed_fire_router.descriptor(target.kind) else {
+        tracing::warn!(
+            agent_id,
+            kind = target.kind,
+            "timed-fire: descriptor が無い（登録漏れ）。発火を skip"
+        );
+        return None;
     };
+    let kind = target.kind;
+    // 発火先セッション（`build_session_id` は `parse` の逆写像・#508 の round-trip を保つ）。
+    let session_id = descriptor.build_session_id(target, agent_id);
+    let channel_id = target.channel_id.clone();
+    let guild_id = target.guild_id.clone();
+    // プロンプト内の会話呼称（transport 別・db を引く Discord は発火経路側で解く・条件 D）。
+    let channel_name = channel_label(db, target, agent_id);
+    // 応答本文がその場に自動配送されるか（Discord・web=true / Nostr=false）。誘導を変える。
+    let posts_response_body = descriptor.posts_response_body();
 
-    // 渡すプロンプト（#584: channel → agent → default）→ 整形。応答本文が自動配送されるのは Discord
-    // だけ（Nostr はツール投稿）なので、誘導も transport で変える（`format_heartbeat_prompt`）。
+    // 渡すプロンプト（#584: channel → agent → default）→ 整形。応答本文の自動配送有無は transport の
+    // 性質（`posts_response_body`）で決まるので、誘導もそれで変える（`format_heartbeat_prompt`）。
     let (prompt, instructions_source) = {
         let conn = db.lock().ok()?;
         let resolved =
             opencrab_db::queries::resolve_heartbeat_instructions(&conn, agent_id, &channel_id);
         (
-            format_heartbeat_prompt(&channel_name, &resolved.text, is_discord),
+            format_heartbeat_prompt(&channel_name, &resolved.text, posts_response_body),
             resolved.source,
         )
     };

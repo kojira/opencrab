@@ -88,10 +88,14 @@ fn err(msg: impl Into<String>) -> GatewayActionResult {
     }
 }
 
-/// 現在のセッションが発火経路を持つかを確認する（`agent_heartbeat` と**同じ種別集合**）。
+/// 現在のセッションが発火経路を持つかを確認する（`agent_heartbeat` と**同じ登録簿を引く**・#628）。
 ///
-/// セッション文脈が無い / 発火経路の無い種別（`web-` 等）→ fail-closed で **remedy 付き**エラー。
-fn current_session(ctx: &GatewayCallContext) -> Result<String, GatewayActionResult> {
+/// セッション文脈が無い / 発火経路の無い種別（登録済み descriptor がどれも名乗らない）→
+/// fail-closed で **remedy 付き**エラー。
+fn current_session(
+    state: &AppState,
+    ctx: &GatewayCallContext,
+) -> Result<String, GatewayActionResult> {
     let session_id = match ctx.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -100,7 +104,7 @@ fn current_session(ctx: &GatewayCallContext) -> Result<String, GatewayActionResu
             ));
         }
     };
-    match opencrab_db::queries::resolve_session_fire_target(session_id, &ctx.agent_id) {
+    match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
         Some(_) => Ok(session_id.to_string()),
         None => Err(err(
             "このセッションからは定時実行を設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
@@ -161,7 +165,7 @@ pub(crate) fn set_my_schedule(
         return denied;
     }
 
-    let session_id = match current_session(ctx) {
+    let session_id = match current_session(state, ctx) {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -240,7 +244,7 @@ pub(crate) fn get_my_schedules(
         return denied;
     }
 
-    let session_id = match current_session(ctx) {
+    let session_id = match current_session(state, ctx) {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -283,7 +287,7 @@ pub(crate) fn update_my_schedule(
         return denied;
     }
 
-    let session_id = match current_session(ctx) {
+    let session_id = match current_session(state, ctx) {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -378,7 +382,7 @@ pub(crate) fn delete_my_schedule(
         return denied;
     }
 
-    let session_id = match current_session(ctx) {
+    let session_id = match current_session(state, ctx) {
         Ok(s) => s,
         Err(e) => return e,
     };
