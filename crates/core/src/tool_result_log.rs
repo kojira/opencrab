@@ -249,18 +249,24 @@ fn offload_to_workspace(
     let tmp_dir = root.join("tmp");
     let _ = std::fs::create_dir_all(&tmp_dir);
     // session_id / tool_call_id は外部（gateway・LLM プロバイダ）由来の文字列。
-    // パス区切りが混ざるとワークスペースの外へ書きうるので、英数字以外を潰す。
-    // 長さも縛る（[`OFFLOAD_COMPONENT_LIMIT`] の doc 参照）。
+    // パス区切り（`/`）や `..` が混ざるとワークスペースの外へ書きうるので、英数字以外を潰す
+    // （`/` も `.` も潰れるのでパス脱出は防げる）。長さも縛る（[`OFFLOAD_COMPONENT_LIMIT`]）。
+    //
+    // #635: 潰す文字も区切りも `-` に揃え、ファイル名に現れる区切りを含めて「全部ハイフン」に
+    // する。`_` と `-` が混在すると、UUID を含む id（例: `6f3fd055-711e-48da-8573-3bfedc778dd9`）が
+    // 「壊れた UUID」に見え、モデルがパスを『直そう』として実在しないパスを渡し、退避ファイルを
+    // 開けなくなる。全部 `-` なら UUID は元の見た目のまま残り、直す動機が消える。
     let sanitize_component = |s: &str| -> String {
         s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .take(OFFLOAD_COMPONENT_LIMIT)
             .collect()
     };
     // #624: 拡張子は中身に合わせる（生テキストは .txt、pretty JSON は .json）。ext は
     // [`OffloadFormat::extension`] 由来の固定文字列なので sanitize は不要。
+    // #635: component 間の区切りも `-` に揃える（「全部ハイフン」）。
     let filename = format!(
-        "{}_{}.{ext}",
+        "{}-{}.{ext}",
         sanitize_component(session_id),
         sanitize_component(tool_call_id)
     );
@@ -580,12 +586,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let big = format!(r#"{{"data":"{}"}}"#, "x ".repeat(TOOL_RESULT_TOKEN_LIMIT));
         let out = sanitize_tool_result_for_log("read_file", &big, "sess1", "tc9", Some(dir.path()));
-        assert!(out.contains("tmp/sess1_tc9.json"), "{out}");
+        assert!(out.contains("tmp/sess1-tc9.json"), "{out}");
         assert!(
             !out.contains("x x x"),
             "生データが DB 本文に混ざっている: {out}"
         );
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sess1_tc9.json")).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sess1-tc9.json")).unwrap();
         // stdout の無い JSON は pretty 化される（複数行になり head/grep が効く）。中身は等価。
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved).unwrap(),
@@ -610,11 +616,11 @@ mod tests {
         assert!(big.len() > OFFLOAD_FILE_BYTE_LIMIT);
 
         let saved = offload_to_workspace(&big, "txt", "sessT", "tcT", Some(dir.path())).unwrap();
-        assert_eq!(saved.rel_path, "tmp/sessT_tcT.txt");
+        assert_eq!(saved.rel_path, "tmp/sessT-tcT.txt");
         // 'あ' の手前（文字境界）＝ LIMIT-1 バイトまで保存（足した改行は数に含めない）。
         assert_eq!(saved.saved_prefix_bytes, Some(OFFLOAD_FILE_BYTE_LIMIT - 1));
 
-        let on_disk = std::fs::read(dir.path().join("tmp/sessT_tcT.txt")).unwrap();
+        let on_disk = std::fs::read(dir.path().join("tmp/sessT-tcT.txt")).unwrap();
         // 元本文 LIMIT-1 バイト + 完結用の改行 1 バイト。
         assert_eq!(on_disk.len(), OFFLOAD_FILE_BYTE_LIMIT);
         assert!(on_disk.len() < big.len(), "切り詰められていない");
@@ -638,8 +644,67 @@ mod tests {
             saved.saved_prefix_bytes, None,
             "上限以下は切り詰めない（None）"
         );
-        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sessU_tcU.txt")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sessU-tcU.txt")).unwrap();
         assert_eq!(on_disk, content, "上限以下は 1 バイトも変わらない");
+    }
+
+    /// #635: UUID を含む id はハイフンをそのまま残す（`_` に潰さない）。潰すと「壊れた UUID」に
+    /// 見え、モデルがパスを『直そう』として実在しないパスを渡し、退避ファイルを開けなくなる。
+    /// 区切りも `-` に揃えるので、ファイル名に `_` は 1 つも現れず、通知が案内するパスと実ファイル
+    /// のパスは完全一致する（通知をそのままコピーすれば開ける）。
+    #[test]
+    fn offload_keeps_uuid_hyphens_and_notice_path_matches_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session_id = "web-e2e-test-bot-repro631c";
+        let tool_call_id = "6f3fd055-711e-48da-8573-3bfedc778dd9";
+        let big = format!(r#"{{"data":"{}"}}"#, "x ".repeat(TOOL_RESULT_TOKEN_LIMIT));
+        let out = sanitize_tool_result_for_log(
+            "read_file",
+            &big,
+            session_id,
+            tool_call_id,
+            Some(dir.path()),
+        );
+
+        let expected = format!("tmp/{session_id}-{tool_call_id}.json");
+        // (1) `_` が 1 つも現れない。
+        assert!(!expected.contains('_'), "`_` が残っている: {expected}");
+        // (2) UUID 部分の見た目が原形のまま残る（`6f3fd055-711e-...` がそのまま読める）。
+        assert!(
+            expected.contains(tool_call_id),
+            "UUID が原形で残っていない: {expected}"
+        );
+        // (6) 通知に書かれたパスと、実際に作られたファイルのパスが完全一致する。
+        assert!(out.contains(&expected), "通知パスが一致しない: {out}");
+        assert!(
+            dir.path().join(&expected).exists(),
+            "通知が案内したパスにファイルが無い: {expected}"
+        );
+    }
+
+    /// #635: `/` や `..` を含む id でも、ワークスペース（`tmp/` 直下）の外へ出ない。`/` も `.` も
+    /// 英数字でないので `-` に潰れ、パス区切りにならない＝親ディレクトリへ抜けられない。
+    #[test]
+    fn offload_never_escapes_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let tmp = root.join("tmp");
+        for (sid, tid) in [
+            ("../../etc", "6f3fd055-711e-48da-8573-3bfedc778dd9"), // `..` で親へ抜けようとする
+            ("a/b/c", "tc/../../x"),                               // `/` と `..` の混在
+        ] {
+            let saved = offload_to_workspace("hello", "txt", sid, tid, Some(root)).unwrap();
+            // rel_path は "tmp/<name>" の 2 コンポーネントのみ＝階層が増えていない。
+            assert_eq!(
+                std::path::Path::new(&saved.rel_path).components().count(),
+                2,
+                "階層が増えた（脱出の兆候）: {}",
+                saved.rel_path
+            );
+            let full = root.join(&saved.rel_path);
+            assert!(full.starts_with(&tmp), "tmp の外へ出た: {}", saved.rel_path);
+            assert!(full.exists(), "実ファイルが無い: {}", saved.rel_path);
+        }
     }
 
     /// #568/#616: notice は「全文保存」と「切り詰め保存」を区別し、どちらも元サイズ
@@ -803,8 +868,8 @@ mod tests {
         assert!(out.len() < 1_400, "案内が肥大している: {} bytes", out.len());
 
         // 全文は退避され、そこを指している（#616: stdout の無い JSON は pretty 化）。
-        assert!(out.contains("tmp/sessA_tc1.json"), "{out}");
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sessA_tc1.json")).unwrap();
+        assert!(out.contains("tmp/sessA-tc1.json"), "{out}");
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sessA-tc1.json")).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved).unwrap(),
             serde_json::from_str::<serde_json::Value>(&big).unwrap()
@@ -836,7 +901,7 @@ mod tests {
             sanitize_tool_result_for_llm("execute_shell", &big, "sessB", "tc2", Some(dir.path()));
 
         // #624: 生テキスト（parse 失敗の verbatim）は .txt。
-        assert!(out.contains("tmp/sessB_tc2.txt"), "パスが無い: {out}");
+        assert!(out.contains("tmp/sessB-tc2.txt"), "パスが無い: {out}");
         assert!(
             out.contains(&format!("{} bytes", big.len())),
             "バイトサイズが無い: {out}"
@@ -945,7 +1010,7 @@ mod tests {
         assert!(out.contains("withheld"), "退避されていない: {out}");
         assert!(!out.contains("ああああ"), "生データが流れている");
         // 退避ファイルに全文が入っている（#624: 非 JSON は .txt）。
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sessR_tcR.txt")).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sessR-tcR.txt")).unwrap();
         assert_eq!(saved.len(), big.len());
     }
 
@@ -1110,7 +1175,7 @@ mod tests {
         // 文字境界＝全部 ASCII なので上限ちょうど。ほぼ全量（上限分）を保存する。
         assert_eq!(n, OFFLOAD_FILE_BYTE_LIMIT);
 
-        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sL_tL.txt")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sL-tL.txt")).unwrap();
         assert!(on_disk.ends_with('\n'), "改行で終わっていない");
         // 上限ぶん + 完結用の改行（本文末尾がちょうど改行なら足さないが、この本文は途中で切れる）。
         assert!(
@@ -1134,7 +1199,7 @@ mod tests {
             n, OFFLOAD_FILE_BYTE_LIMIT,
             "早い改行でデータが激減した（退行）"
         );
-        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sE_tE.txt")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sE-tE.txt")).unwrap();
         assert!(on_disk.ends_with('\n'), "改行で終わっていない");
         assert!(on_disk.len() > body.len() / 2, "ほぼ全量が保存されていない");
     }
@@ -1149,7 +1214,7 @@ mod tests {
         let n = saved.saved_prefix_bytes.expect("切り詰められている");
         // 全部 ASCII なので文字境界＝上限ちょうど。
         assert_eq!(n, OFFLOAD_FILE_BYTE_LIMIT);
-        let on_disk = std::fs::read(dir.path().join("tmp/sN_tN.txt")).unwrap();
+        let on_disk = std::fs::read(dir.path().join("tmp/sN-tN.txt")).unwrap();
         assert!(!on_disk.is_empty(), "空ファイル");
         // 上限ぶん + 足した改行 1 バイト。
         assert_eq!(on_disk.len(), OFFLOAD_FILE_BYTE_LIMIT + 1);
@@ -1178,7 +1243,7 @@ mod tests {
         let out = sanitize_tool_result_for_llm("execute_shell", &env, "sX", "tX", Some(dir.path()));
 
         // ファイルは stdout そのもの（実改行・ヘッダ無し）。#624: shell 生テキストは .txt。
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sX_tX.txt")).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sX-tX.txt")).unwrap();
         assert_eq!(saved, stdout_text);
         assert!(!saved.contains("\\n"), "\\n が 2 文字化している");
         assert_eq!(count_lines(&saved), 4_000);
@@ -1224,7 +1289,7 @@ mod tests {
             "退避 notice でない: {out}"
         );
         // 退避ファイル本文はキー名マスクされない（撤去の固定）。#624: 構造化 JSON は .json。
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sS_tS.json")).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sS-tS.json")).unwrap();
         assert!(
             !saved.contains("[redacted]"),
             "撤去したはずのキー名マスクが復活している: {saved:.120}"
@@ -1256,15 +1321,15 @@ mod tests {
             Some(dir_a.path()),
         );
         assert!(
-            dir_a.path().join("tmp/sA_tA.txt").exists(),
+            dir_a.path().join("tmp/sA-tA.txt").exists(),
             "shell が .txt でない"
         );
         assert!(
-            !dir_a.path().join("tmp/sA_tA.json").exists(),
+            !dir_a.path().join("tmp/sA-tA.json").exists(),
             ".json も作られた"
         );
         assert!(
-            out_a.contains("tmp/sA_tA.txt"),
+            out_a.contains("tmp/sA-tA.txt"),
             "notice のパスが .txt でない: {out_a}"
         );
 
@@ -1274,11 +1339,11 @@ mod tests {
         let out_b =
             sanitize_tool_result_for_llm("read_file", &json_env, "sB", "tB", Some(dir_b.path()));
         assert!(
-            dir_b.path().join("tmp/sB_tB.json").exists(),
+            dir_b.path().join("tmp/sB-tB.json").exists(),
             "JSON が .json でない"
         );
         assert!(
-            out_b.contains("tmp/sB_tB.json"),
+            out_b.contains("tmp/sB-tB.json"),
             "notice のパスが .json でない: {out_b}"
         );
 
@@ -1288,11 +1353,11 @@ mod tests {
         let out_c =
             sanitize_tool_result_for_llm("execute_shell", &raw, "sC", "tC", Some(dir_c.path()));
         assert!(
-            dir_c.path().join("tmp/sC_tC.txt").exists(),
+            dir_c.path().join("tmp/sC-tC.txt").exists(),
             "verbatim が .txt でない"
         );
         assert!(
-            out_c.contains("tmp/sC_tC.txt"),
+            out_c.contains("tmp/sC-tC.txt"),
             "notice のパスが .txt でない: {out_c}"
         );
     }
@@ -1308,14 +1373,14 @@ mod tests {
 
         // レシピの具体操作がパス入りで出る。
         assert!(
-            out.contains("grep -n <pattern> tmp/sR_tR.txt"),
+            out.contains("grep -n <pattern> tmp/sR-tR.txt"),
             "grep 導線が無い: {out}"
         );
         assert!(out.contains("ws_read"), "ws_read 導線が無い: {out}");
         assert!(out.contains("start_line"), "start_line が無い: {out}");
         // #624 レビュー: バイト頭打ちの head -c だけ（sed -n は落とした）。
         assert!(
-            out.contains("head -c 2000 tmp/sR_tR.txt"),
+            out.contains("head -c 2000 tmp/sR-tR.txt"),
             "head -c 導線が無い: {out}"
         );
         assert!(
