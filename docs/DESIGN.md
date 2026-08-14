@@ -513,11 +513,12 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 ### 12.1 起動方法
 
 ```bash
-# REST APIサーバー
+# REST APIサーバー（既定で Discord / Nostr / Web の 3 ゲートすべて有効）
 cargo run -p opencrab-server
 
-# Discord統合付きで起動
-cargo run --features discord -p opencrab-server
+# 一部の会話ゲートだけにしたいときは、既定 feature を外して欲しいものだけ opt-in する
+# （管理 REST API はどの構成でも残る）
+cargo run -p opencrab-server --no-default-features --features nostr
 
 # CLIクライアント
 cargo run -p opencrab-cli
@@ -542,4 +543,4 @@ dx serve --project dashboard
 2. Bot設定で **Message Content Intent** を有効化
 3. `DISCORD_TOKEN` を設定
 4. `config/default.toml` の `[gateway.discord]` で `enabled = true` と `agent_ids` を設定
-5. `--features discord` 付きでビルド・起動
+5. ビルド・起動（`discord` は既定 feature なので通常の `cargo run -p opencrab-server` で有効。Discord を外したいときだけ `--no-default-features` で opt-out する）

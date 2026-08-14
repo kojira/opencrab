@@ -69,18 +69,23 @@ async fn main() -> anyhow::Result<()> {
     // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
     // `std::env::vars()` を子へコピーする（crates/actions/src/tools/shell.rs）ので、ここで消せば
     // エージェントのシェルの環境に平文で出ない。config の `${}` 展開（hot-reload 経路が env を
-    // 読む）を経由せず、直接 std::env::var で読む。マスターキーは Nostr の資格情報鍵なので
-    // nostr feature の内側にある（PR-1B: nostr を外した構成ではこの経路自体が無い）。
+    // 読む）を経由せず、直接 std::env::var で読む。
+    //
+    // **env スクラブ（読み取り＋ remove_var）は feature 非依存で常に走らせる**（多層防御）。
+    // これは「Nostr 専用の処理」ではなく「秘密を env に残さない」ための処理で、`nostr` を外した
+    // ビルドでも `OPENCRAB_SECRET_MASTER_KEY` を env から消さないと、その秘密が起動する全シェルへ
+    // 平文継承される（PR-1B のレビュー指摘 / 退行防止）。**この remove_var を nostr feature の
+    // 内側へ戻さないこと。** 一方、値を `MasterKey` へ parse する部分だけは型が `opencrab_nostr`
+    // にあるので `nostr` feature の内側に置く（nostr-off では at-rest 暗号機構ごと不要）。
+    #[cfg_attr(not(feature = "nostr"), allow(unused_variables))]
+    let master_key_env = std::env::var("OPENCRAB_SECRET_MASTER_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    std::env::remove_var("OPENCRAB_SECRET_MASTER_KEY");
     #[cfg(feature = "nostr")]
-    let master_key_parsed: Option<anyhow::Result<opencrab_nostr::MasterKey>> = {
-        let master_key_env = std::env::var("OPENCRAB_SECRET_MASTER_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-        std::env::remove_var("OPENCRAB_SECRET_MASTER_KEY");
-        master_key_env
-            .as_deref()
-            .map(|b64| opencrab_core::secret_box::parse_master_key(b64).map(std::sync::Arc::new))
-    };
+    let master_key_parsed: Option<anyhow::Result<opencrab_nostr::MasterKey>> = master_key_env
+        .as_deref()
+        .map(|b64| opencrab_core::secret_box::parse_master_key(b64).map(std::sync::Arc::new));
 
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
