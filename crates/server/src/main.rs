@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(conn) => opencrab_db::queries::has_any_agent_nostr_config(&conn).unwrap_or(false),
         Err(_) => false,
     };
-    let nostr_master_key: Option<opencrab_nostr::MasterKey> = match master_key_parsed {
+    let mut nostr_master_key: Option<opencrab_nostr::MasterKey> = match master_key_parsed {
         Some(Ok(key)) => Some(key),
         Some(Err(e)) => {
             if nostr_configured {
@@ -110,8 +110,20 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
-    // Nostr サブシステムを起動してよいのは、マスターキーが在るときだけ（#620）。マスターキーが
-    // 無ければ（未設定 or 不正）Nostr は起動しない＝送信も受信も止まる（バナー済み）。
+    // #620: 形式は正しいが**中身が違う**マスターキー（別環境の貼り間違え等）を、既存の暗号文の
+    // 試し復号で捕まえる。ここで捕まえないと、移行は `enc:` を skip し provider の復号だけが
+    // 後で失敗して post/watch がエラー連発になり、起動時に何も見えない。移行の**前**に判定し、
+    // 不一致なら既存のバナー経路で大きく知らせて Nostr を起動しない。
+    if let Some(key) = nostr_master_key.clone() {
+        if let Some(reason) =
+            opencrab_server::nostr_secret_migration::master_key_mismatch_reason(&db, &key)
+        {
+            emit_master_key_banner(&reason);
+            nostr_master_key = None;
+        }
+    }
+    // Nostr サブシステムを起動してよいのは、（一致する）マスターキーが在るときだけ（#620）。
+    // 無ければ（未設定 / 不正形式 / 既存暗号文と不一致）Nostr は起動しない＝送信も受信も止まる。
     let start_nostr = nostr_master_key.is_some();
 
     // #620: 平文の at-rest 秘密を暗号化する移行（起動時 1 回・冪等・対象が無ければ no-op）。
@@ -198,7 +210,9 @@ async fn main() -> anyhow::Result<()> {
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
         // #620: DB 本鍵・生成鍵の at-rest 暗号/復号に使うマスターキー（runner の encrypt-on-write
-        // が使う）。start_nostr のときだけ Some。
+        // が使う）。**有効（形式が正しく既存暗号文とも一致）なマスターキーがあるときだけ Some**
+        // で、Nostr 未設定の構成でも env に有効なキーがあれば Some になる。未設定 / 不正形式 /
+        // 既存暗号文と不一致のときは None（暗号化を有効化していない＝従来挙動）。
         nostr_master_key: nostr_master_key.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,

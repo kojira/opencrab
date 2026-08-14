@@ -17,8 +17,43 @@ OpenCrab はエージェント毎に一意な config を使い、秘密鍵の共
 data/agents/<agent_id>/nostr/config.toml
 ```
 
-config.toml は既存スキーマ（`secret_key` / `relays` / `blossom_server` / ...）のまま。
-OpenCrab が起動時に DB の per-agent 設定からこのファイルを materialize する。
+config.toml は `relays` / `default_relays` / `blossom_server` を持つ。OpenCrab が起動時に
+DB の per-agent 設定からこのファイルを materialize する。**#620 以降、`secret_key` 行は書か
+ない**（下記「秘密鍵の at-rest 暗号化」）。
+
+## 秘密鍵の at-rest 暗号化と実行時注入（#620）
+
+秘密鍵をエージェントの読める範囲（config.toml・生成鍵ファイル・DB）に平文で置かず、
+暗号化して保管し、実行時にシステム側から env で渡す。
+
+- **保管**: DB の本鍵も生成鍵ファイルも `enc:v1:<base64>` の暗号文（XChaCha20-Poly1305）。
+  config.toml には鍵行を書かない。よって設定を確認する通常の操作で平文の鍵は目に入らない。
+- **注入**: OpenCrab は nostaro を spawn するとき **env `NOSTARO_SECRET_KEY`** に復号した鍵を
+  載せる。nostaro は env を config の `secret_key` より優先で読む（空/空白は未設定扱い）。
+  本鍵は本設定 config で、生成鍵（`from` 送信）は本設定 config を `--config` に使いつつ env で
+  生成鍵を渡す（鍵混同を避けるため送信種別ごとに別の鍵を env に載せる）。
+- **マスターキー**: 暗号/復号の鍵は環境変数 **`OPENCRAB_SECRET_MASTER_KEY`**（base64 32B）。
+  OpenCrab 起動直後に読んで即座に自プロセスの環境から消す（エージェントのシェルに継承させ
+  ない）。生成・バックアップ・紛失時の扱いは [README の `.env` 節](../README.md) を参照。
+  **マスターキーを失うと全 Nostr identity が復号不能**になる（DB とキーは二つで一組）。
+- **fail-closed**: Nostr が設定済みのエージェントが 1 つ以上ある構成でマスターキーが
+  欠落 / 不正形式 / 既存暗号文と不一致なら、区切り線バナー（`error`）を出して **Nostr を起動
+  しない**（送信も受信も止まる）。プロセス全体は止めない（Discord 等は動く）。Nostr 未設定の
+  構成はマスターキー無しでも通常起動する。
+- **移行**: 起動時に 1 回・冪等（`enc:` 済みはスキップ）。既存の平文 DB 本鍵・生成鍵ファイルを
+  暗号化し、平文の from-config を削除し、config.toml の `secret_key` 行を落とす。
+
+### デプロイ順序（重要）
+
+**nostaro バイナリの更新が先、OpenCrab の起動（移行）が後。** 逆順にすると、鍵行なし config を
+読んだ旧 nostaro が env を解さず「鍵が無い」で失敗し、Nostr の送受信が全停止する。OpenCrab を
+起動する前に `OPENCRAB_SECRET_MASTER_KEY` を設定しておくこと。
+
+### nostaro 側の改造（env 優先読み）
+
+`keys_from_config()` が env `NOSTARO_SECRET_KEY` を config の `secret_key` より優先で読む
+（空/空白のみは未設定扱いにして config へフォールバック）。config スキーマ自体は不変
+（`secret_key` は Option のまま。素の CLI 運用・`nostaro init` は変わらない）。
 
 ### 改造 1: `--config <path>` グローバルフラグ（汎用）
 

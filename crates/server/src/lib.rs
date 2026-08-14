@@ -89,8 +89,9 @@ pub struct AppState {
     pub workspace_base: String,
     /// #620: Nostr の at-rest 秘密（DB 本鍵・生成鍵ファイル）の暗号/復号に使うマスターキー。
     /// 起動時に env `OPENCRAB_SECRET_MASTER_KEY` から読んで即 `remove_var` し、ここへ保持する。
-    /// `None` は「Nostr 未設定でマスターキーも無い」構成（暗号化を有効化していない＝従来挙動）。
-    /// **本番で Nostr サブシステムを起動するときは必ず `Some`**（無ければ起動時にバナーで拒否）。
+    /// **有効（base64 32B かつ既存暗号文とも一致）なマスターキーがあるときだけ `Some`**。
+    /// `None` は未設定 / 不正形式 / 既存暗号文と不一致のいずれか（暗号化を有効化していない＝
+    /// 従来挙動）。Nostr サブシステムは `Some` のときだけ起動する（`None` ならバナーで拒否）。
     pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
