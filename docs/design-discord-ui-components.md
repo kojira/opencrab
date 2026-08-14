@@ -923,7 +923,7 @@ conn.execute_batch(
 
 | ファイル | 変更内容 | 影響度 |
 |----------|----------|--------|
-| `crates/gateway/src/adapters/discord.rs` | `interaction_create` ハンドラ追加、`PendingInteractionRegistry` を保持 | 中 |
+| `crates/discord/src/gateway.rs` | `interaction_create` ハンドラ追加、`PendingInteractionRegistry` を保持 | 中 |
 | `crates/discord/src/gateway_actions/mod.rs` | `send_ui` アクション定義追加 | 中 |
 | `crates/discord/src/gateway_actions/ui.rs` | ★新規: `send_ui` アクション実装 | 新規 |
 | `crates/discord/src/renderer.rs` | ★新規: `DiscordRenderer` 実装（`UiRenderer` trait） | 新規 |

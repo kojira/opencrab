@@ -278,7 +278,7 @@ pub async fn run_discord_loop<T: AgentRunner>(
     // 抜けてよいのはイベントループ側が畳まれたとき（送信先チャンネルが閉じたとき）だけ。
     //
     // **ただしこれは #284 の真因ではない**（#286 のレビューで判明）。現在の
-    // `DiscordGateway::recv`（`crates/gateway/src/adapters/discord.rs`）が `Err` を返すのは
+    // `crate::gateway::DiscordGateway::recv` が `Err` を返すのは
     // 受信チャンネルの全 Sender が drop されたときだけで、その `tx` は `DiscordGateway`
     // 構造体のフィールドとして保持されている。ゲートウェイが生きている限り `Err` は
     // 起きず、旧コードの `break` は**到達不能**だった。真因は別（イベントループの滞留が
