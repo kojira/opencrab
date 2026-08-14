@@ -590,59 +590,56 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // #603: 時刻発火の受け口の**起動時セルフチェック**。型で配線は強制した（マネージャは router
-    // 無しでは構築できない）が、ゲートウェイのループが実際に起動して受け口を登録するのは非同期
-    // （特に Nostr は spawn 後）。「有効な受信ゲートウェイ（per-agent の DB 設定・TOML 双方）が
-    // あるのに、受け口が 1 つも登録されていない」＝時刻発火がどこにも届かない状態を、猶予を置いて
-    // から ERROR で知らせる（#602 の黙った全 skip を、コンパイルに加えて運用でも二重に検知する）。
+    // #603 / #628 条件 A: 時刻発火の**起動時セルフチェック**を「descriptor 登録簿 ↔ sink 登録簿の
+    // 双方向照合」へ集約する。型で配線は強制した（マネージャは router 無しでは構築できない）が、
+    // ゲートウェイのループが実際に起動して受け口を登録するのは非同期（特に Nostr は spawn 後）。
+    // **手書きの kind 列挙を持たない**: 両登録簿の kind 集合を突き合わせ、(a) sink はあるが
+    // descriptor が無い＝発火先を parse できない配線バグ、(b) descriptor が「立ち上がるべき」
+    // （`should_be_running` が env を引く）なのに受け口が 0＝時刻発火がどこにも届かない、を ERROR で
+    // 知らせる（#602 の黙った全 skip を、コンパイルに加えて運用でも二重に検知する）。新 transport を
+    // 足しても、この照合はその descriptor と sink を自動で拾う（手書きリストの更新漏れが起きない）。
     {
         let check_state = state.clone();
-        // その transport に発火対象がいるはず、を有効設定（DB + TOML）から判定する。per-agent
-        // （DB）だけの体も拾う: #602 の本番対象はまさに TOML に無い per-agent だった。
+        // TOML 共有ゲートウェイが設定されている kind（db に無い設定を畳んで env へ渡す）。
+        // per-agent（DB）だけの体は各 descriptor が env.conn を引いて拾う（#602 の本番対象）。
+        let mut configured_shared_kinds: std::collections::HashSet<&'static str> =
+            std::collections::HashSet::new();
         #[cfg(feature = "discord")]
-        let discord_expected = {
-            let db_has = check_state
-                .db
-                .lock()
-                .ok()
-                .map(|conn| {
-                    !opencrab_db::queries::list_enabled_agent_discord_configs(&conn)
-                        .unwrap_or_default()
-                        .is_empty()
-                })
-                .unwrap_or(false);
-            !cfg.gateway.discord.agent_ids.is_empty() || db_has
-        };
-        #[cfg(not(feature = "discord"))]
-        let discord_expected = false;
-        let nostr_expected = check_state
-            .db
-            .lock()
-            .ok()
-            .map(|conn| {
-                !opencrab_db::queries::list_enabled_agent_nostr_configs(&conn)
-                    .unwrap_or_default()
-                    .is_empty()
-            })
-            .unwrap_or(false);
+        if !cfg.gateway.discord.agent_ids.is_empty() {
+            configured_shared_kinds.insert(opencrab_actions::gateway_kinds::DISCORD);
+        }
         tokio::spawn(async move {
             // ループの起動→受け口登録は非同期なので猶予を置く（Discord は同期登録だが Nostr は
             // spawn 後に登録するため）。
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            for (kind, expected) in [
-                (opencrab_actions::gateway_kinds::DISCORD, discord_expected),
-                (opencrab_actions::gateway_kinds::NOSTR, nostr_expected),
-            ] {
-                if !expected {
-                    continue;
-                }
-                if check_state.timed_fire_router.has_sink_for_kind(kind) {
-                    tracing::info!(kind, "timed-fire: 起動時セルフチェック OK（受け口あり）");
-                } else {
-                    tracing::error!(
-                        kind,
-                        "timed-fire: 有効な受信ゲートウェイがあるのに受け口が 0（時刻発火が届かない）。配線/起動を確認"
-                    );
+            let Ok(conn) = check_state.db.lock() else {
+                tracing::error!("timed-fire: 起動時セルフチェックで db lock 取得に失敗");
+                return;
+            };
+            let env = opencrab_actions::TransportFireEnv {
+                conn: &conn,
+                configured_shared_kinds: &configured_shared_kinds,
+            };
+            let issues = check_state.timed_fire_router.self_check(&env);
+            if issues.is_empty() {
+                tracing::info!(
+                    "timed-fire: 起動時セルフチェック OK（descriptor ↔ sink 双方向照合・受け口あり）"
+                );
+            }
+            for issue in issues {
+                match issue {
+                    opencrab_actions::SinkRegistrationIssue::SinkWithoutDescriptor { kind } => {
+                        tracing::error!(
+                            kind,
+                            "timed-fire: sink はあるが descriptor が無い（発火先を parse できない＝配線バグ）"
+                        );
+                    }
+                    opencrab_actions::SinkRegistrationIssue::ExpectedSinkMissing { kind } => {
+                        tracing::error!(
+                            kind,
+                            "timed-fire: 有効な受信ゲートウェイがあるのに受け口が 0（時刻発火が届かない）。配線/起動を確認"
+                        );
+                    }
                 }
             }
         });
