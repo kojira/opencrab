@@ -14,8 +14,12 @@ set -euo pipefail
 # クレートに依存し始めた瞬間に CI を赤にして、境界の逆流を入口で止める。
 
 # --- R4: core は gate/SDK クレートに依存しない ---
+# `--edges no-dev` は normal + build 依存を見て dev-only 依存だけを除外する。
+# `--edges normal` だと build 依存を見落とすため、core が gate/SDK を build-
+# dependency で引き込む異常を素通りさせてしまう。dev-only の `syn` 等は
+# no-dev でも除外されるので、この検査には現れない。
 FORBIDDEN='opencrab-gateway|opencrab-discord|opencrab-nostr|opencrab-web-gateway|serenity|serenity-voice-model|songbird'
-core_deps="$(cargo tree -p opencrab-core --edges normal --prefix none --no-dedupe \
+core_deps="$(cargo tree -p opencrab-core --edges no-dev --prefix none --no-dedupe \
   | sed -E 's/ v[0-9].*//' | sort -u)"
 if printf '%s\n' "$core_deps" | grep -qxE "$FORBIDDEN"; then
   echo "R4 FAIL: opencrab-core が gate/SDK クレートに依存している:"
