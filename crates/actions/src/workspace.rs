@@ -16,7 +16,10 @@ impl Action for WsReadAction {
         "ワークスペース内のファイルを読み取る。全文が inline 上限を超えると結果は退避される\
          （#284/#294）ので、大きなファイルは start_line / line_count で行範囲を指定して読む。\
          grep が返す行番号をそのまま start_line に渡せる。範囲を指定すれば退避されずに読め、\
-         has_more なら next_line を start_line に入れて続きを辿れる。"
+         has_more なら next_line を start_line に入れて続きを辿れる。1 行が長すぎると切られ\
+         末尾に ` …⟨+M文字⟩` が付く。継続は行単位なので、切られた行の続き（行内の残り）は\
+         再取得できない（標識がそれを示す）。1 行しか無いファイルは常に同じ先頭 512 文字＋標識が\
+         返り has_more=false になる。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -115,9 +118,17 @@ fn compute_ws_read(
 
     // 行範囲読み: 単一 open の逐次読みで `start_line` から 1 行ずつページに積む。各行は
     // WS_READ_MAX_LINE_CHARS 文字で切り（超過は ` …⟨+M文字⟩` の標識を付ける）、標識込みの累計
-    // content がトークン上限に達する直前で止める。二分探索もバイト境界補正も無い（#617）。
+    // がトークン上限に達する直前で止める。二分探索もバイト境界補正も無い（#617）。
+    //
+    // 予算は**行トークンの走行合計**で判定する。累積 content を毎行トークナイズし直すと、ページ
+    // 確定までに O(n²) のトークナイズが走る（149 行で ~740KB を tiktoken に通していた）。各 piece
+    // を 1 度だけ数えて足すと O(n) になる。部分文字列を別々に数えた和は必ず全体の真値以上（分割で
+    // トークンは減らない）で、`RANGE_CONTENT_TOKEN_CEILING` の −400 余白に収まるので、過小評価で
+    // 再退避が起きることはない（[`tokens_reach_limit`] の窓和と同じ安全側 / #576）。改行結合ぶんも
+    // 1 トークン上限として足す（`\n` は 1 トークンだが、跨ぐ結合で増えることはあっても減らない）。
     let (mut reader, total_bytes) = ws.line_reader(path, start_line, WS_READ_MAX_LINE_CHARS)?;
     let mut content = String::new();
+    let mut used_tokens = 0usize;
     let mut first_line: Option<usize> = None;
     let mut next_line: Option<usize> = None;
     let mut lines_taken = 0usize;
@@ -132,25 +143,28 @@ fn compute_ws_read(
         } else {
             line.text
         };
-        let candidate = if content.is_empty() {
-            piece
-        } else {
-            format!("{content}\n{piece}")
-        };
+        // この行を足したときの上限側トークン見積り（改行結合ぶん +1）。
+        let joiner = if content.is_empty() { 0 } else { 1 };
+        let piece_tokens = opencrab_core::tokens::estimate_tokens(&piece) + joiner;
         // 予算判定。ページに 1 行も無いうちは無条件で 1 行返す（最低 1 行保証: 単独で予算超過の
         // 行でも 512 文字に切って返し next_line を前進させる。ここを空返しにすると next_line が
         // start_line から進まず、同じ行を読み続ける暴走ページングになる / #567 の趣旨を行版で保つ）。
-        if !content.is_empty()
-            && opencrab_core::tokens::tokens_reach_limit(&candidate, RANGE_CONTENT_TOKEN_CEILING)
-        {
+        if !content.is_empty() && used_tokens + piece_tokens > RANGE_CONTENT_TOKEN_CEILING {
             next_line = Some(line.number); // この行は含めず、次回ここから読み直す
             break;
         }
-        content = candidate;
+        if content.is_empty() {
+            content = piece;
+        } else {
+            content.push('\n');
+            content.push_str(&piece);
+        }
+        used_tokens += piece_tokens;
         first_line.get_or_insert(line.number);
         lines_taken += 1;
     }
 
+    // 出力の estimated_tokens は確定したページ本文（有界）を 1 度だけ正確に数える（O(n) 1 回）。
     let estimated_tokens = opencrab_core::tokens::estimate_tokens(&content);
     let mut out = json!({
         "path": path,
@@ -717,6 +731,34 @@ mod tests {
         assert_eq!(d["has_more"].as_bool(), Some(false));
         assert!(d.get("start_line").is_none(), "全文読みは行メタを付けない");
         assert!(d.get("next_line").is_none());
+    }
+
+    /// 512 文字切り＋**標識付き**（overflow > 0）でも、返りページの推定トークンは
+    /// RANGE_CONTENT_TOKEN_CEILING(2,100) 未満に収まる（＝再退避しない）。overflow=0 の 512
+    /// ちょうどだけでなく、標識込みの最悪ケースも天井内であることを固定する。
+    #[tokio::test]
+    async fn test_ws_read_truncated_marked_line_under_ceiling() {
+        let (_dir, ctx) = test_context();
+        // 4 バイト文字を 1,000 文字。512 で切られ overflow=488 の標識が付く＝最悪密度＋標識。
+        let dense = "𠀀".repeat(1_000);
+        WsWriteAction
+            .execute(&json!({"path": "d.txt", "content": dense}), &ctx)
+            .await;
+
+        let r = WsReadAction
+            .execute(&json!({"path": "d.txt", "start_line": 1}), &ctx)
+            .await;
+        let d = r.data.unwrap();
+        let content = d["content"].as_str().unwrap();
+        assert!(
+            content.contains("…⟨+488文字⟩"),
+            "切られた標識が付く: {content:.64}"
+        );
+        assert!(
+            d["estimated_tokens"].as_u64().unwrap() < RANGE_CONTENT_TOKEN_CEILING as u64,
+            "標識込みでもページ天井(2100)未満: {}",
+            d["estimated_tokens"]
+        );
     }
 
     /// テスト 3: 大きなファイルでも行範囲指定なら返す本文は inline 上限を超えず、退避

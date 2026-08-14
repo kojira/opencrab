@@ -159,13 +159,13 @@ impl Workspace {
     /// Open `relative_path` **once** and return a [`LineReader`] positioned at `start_line`
     /// (1-based), together with the file size in bytes (`metadata().len()`, O(1)).
     ///
-    /// The reader wraps a [`std::io::BufReader`] with a [`RANGE_SCAN_BYTE_CAP`] window and never
-    /// materializes more than that window plus one line's first `max_line_chars` chars in memory —
-    /// so a single gigantic line (base64 / minified JSON, #616) is read safely. Reaching
-    /// `start_line` and finding line ends is done by counting `\n` with `memchr` only; nothing is
-    /// tokenized here. This replaces the old per-call `open`+`seek` window read: paging a huge
-    /// offloaded file (#564: measured 509MB) no longer re-opens the file ~2,800 times to walk one
-    /// page (#567) — the whole page is served from this single open.
+    /// Reading by line requires addressing content by line, and a `String`-returning read cannot
+    /// do that safely for a single gigantic line (base64 / minified JSON, #616) — it would load
+    /// the whole line. So this reader wraps a [`std::io::BufReader`] with a [`RANGE_SCAN_BYTE_CAP`]
+    /// window and never materializes more than that window plus one line's first `max_line_chars`
+    /// chars in memory. Reaching `start_line` and finding line ends is done by counting `\n` with
+    /// `memchr` only; nothing is tokenized here. The whole page is served from this single open, so
+    /// paging never re-opens the file per window (#567).
     pub fn line_reader(
         &self,
         relative_path: &str,
@@ -181,9 +181,11 @@ impl Workspace {
             .with_context(|| format!("Failed to stat file: {}", path.display()))?
             .len();
         let mut reader = std::io::BufReader::with_capacity(RANGE_SCAN_BYTE_CAP, file);
-        // Skip to `start_line` (1-based) by consuming `start_line - 1` newlines. Bounded memory:
-        // the skipped bytes are never copied, only the buffer is advanced. If EOF is hit first the
-        // reader is left at EOF and the first `next_line` returns `None` (empty page).
+        // Skip to `start_line` (1-based) by consuming `start_line - 1` newlines. Count **all** the
+        // newlines in each window at once (`memchr_iter`) so a dense window advances many lines per
+        // `fill_buf` — skipping to line 1,200,000 is ~2,800 window reads, not 1,200,000. Bounded
+        // memory: skipped bytes are never copied. EOF first ⇒ reader left at EOF, first `next_line`
+        // returns `None` (empty page).
         let mut to_skip = start_line.saturating_sub(1);
         while to_skip > 0 {
             let consumed = {
@@ -193,12 +195,20 @@ impl Workspace {
                 if buf.is_empty() {
                     break;
                 }
-                match memchr::memchr(b'\n', buf) {
-                    Some(pos) => {
-                        to_skip -= 1;
-                        pos + 1
+                let mut found = 0usize;
+                let mut through = 0usize; // consume through the last newline we counted
+                for pos in memchr::memchr_iter(b'\n', buf) {
+                    found += 1;
+                    through = pos + 1;
+                    if found == to_skip {
+                        break;
                     }
-                    None => buf.len(),
+                }
+                if found == 0 {
+                    buf.len() // no newline in this window; consume it all, skip none
+                } else {
+                    to_skip -= found;
+                    through
                 }
             };
             reader.consume(consumed);
@@ -395,19 +405,65 @@ pub struct LineReader {
     max_chars: usize,
 }
 
+/// UTF-8 の文字先頭バイト数（＝文字数）。継続バイト `0b10xxxxxx` を除いて数える。妥当な UTF-8
+/// なら文字数に一致し、デコードせずに済むので、返さない超過ぶんの計数に使う（[`LineReader`] 相 B）。
+///
+/// `bool → usize` の総和にしてあるのは、`filter().count()` と違い LLVM が SIMD 水平加算へ
+/// ベクトル化でき、90MB 級の単一行でも数十 ms 台で数え切れるため（scalar だと ~150MB/s）。
+#[inline]
+fn count_char_starts(bytes: &[u8]) -> usize {
+    bytes.iter().map(|&b| usize::from((b & 0xC0) != 0x80)).sum()
+}
+
 impl LineReader {
-    /// 次の 1 行を返す。EOF なら `None`。行頭 `max_chars` 文字だけを `text` に積み、残りは
-    /// `\n`（または EOF）まで読み飛ばして `overflow_chars` に数える。窓（[`RANGE_SCAN_BYTE_CAP`]）
-    /// を跨いでマルチバイト文字が割れても、割れたバイトだけを次窓へ繰り越す（`carry`）ので、
-    /// バイト境界補正はこの 1 手だけで済む。
+    /// 次の 1 行を返す。EOF なら `None`。
+    ///
+    /// 2 相で走る。**相 A**（`text` が `max_chars` 未満）は窓を UTF-8 デコードして 1 文字ずつ
+    /// `text` に積む。窓末尾でマルチバイト文字が割れても、割れたバイトだけを次窓へ繰り越す
+    /// （`carry`）ので、バイト境界補正はこの 1 手だけ。**相 B**（`text` が満杯）は残りを返さない
+    /// ので、もう memcpy も `from_utf8` もデコードもせず、**生バイトで文字先頭（`b & 0xC0 != 0x80`）
+    /// を数えるだけ**で `\n` まで読み飛ばす。単一の巨大行（90MB base64 等）でも相 B が 1 パスで
+    /// 済む。
     pub fn next_line(&mut self) -> Result<Option<TruncatedLine>> {
         use std::io::BufRead;
         let mut text = String::new();
         let mut total_chars = 0usize;
-        // 窓末尾で割れたマルチバイト文字の未完バイト（< 4 バイト）を次窓へ繰り越す。
+        // 窓末尾で割れたマルチバイト文字の未完バイト（< 4 バイト）を次窓へ繰り越す（相 A のみ）。
         let mut carry: Vec<u8> = Vec::new();
         let mut saw_any = false;
         loop {
+            // 相 B: `text` は満杯。残りは数えて読み飛ばすだけ。
+            if total_chars >= self.max_chars {
+                // 相 A から持ち越した割れ文字（先頭バイトは未計数）を 1 文字ぶん足して精算する。
+                // その継続バイトは次窓の先頭に来るが、下の「文字先頭カウント」は継続バイトを
+                // 数えないので、二重計上にならない。
+                if !carry.is_empty() {
+                    total_chars += 1;
+                    carry.clear();
+                }
+                let (consumed, nl_found, extra) = {
+                    let buf = self
+                        .reader
+                        .fill_buf()
+                        .context("Failed to read workspace file line")?;
+                    if buf.is_empty() {
+                        break; // EOF
+                    }
+                    saw_any = true;
+                    match memchr::memchr(b'\n', buf) {
+                        Some(pos) => (pos + 1, true, count_char_starts(&buf[..pos])),
+                        None => (buf.len(), false, count_char_starts(buf)),
+                    }
+                };
+                self.reader.consume(consumed);
+                total_chars += extra;
+                if nl_found {
+                    return Ok(Some(self.take_line(text, total_chars)));
+                }
+                continue;
+            }
+
+            // 相 A: 窓をデコードして `text` を埋める。
             let mut bytes = std::mem::take(&mut carry);
             let (consumed, nl_found);
             {
@@ -455,9 +511,13 @@ impl LineReader {
                 return Ok(Some(self.take_line(text, total_chars)));
             }
         }
-        // EOF。何も読めていなければ行は無い。末尾に改行の無い最終行は 1 行として返す。
+        // EOF。何も読めていなければ行は無い。末尾に改行の無い最終行は 1 行として返す。割れ文字が
+        // carry に残っていれば（不正な末尾）1 文字ぶん精算する。
         if !saw_any {
             return Ok(None);
+        }
+        if !carry.is_empty() {
+            total_chars += 1;
         }
         Ok(Some(self.take_line(text, total_chars)))
     }
@@ -657,5 +717,50 @@ mod tests {
         ws.write_file("f.txt", "a\nb\nc").unwrap();
         let (mut reader, _total) = ws.line_reader("f.txt", 100, 512).unwrap();
         assert!(reader.next_line().unwrap().is_none());
+    }
+
+    /// 32KiB 窓（[`RANGE_SCAN_BYTE_CAP`]）の境界に 4 バイト文字を跨がせ、割れたバイトが carry で
+    /// 次窓と正しく結合されることを**相 A（デコード経路）**で確かめる。max_chars を大きく取り、
+    /// 境界越えを `text` に含める。
+    #[test]
+    fn line_reader_multibyte_split_across_window_phase_a() {
+        let (_dir, ws) = temp_workspace();
+        // "a"×32766 + "𠀀"(4B: 先頭 2 バイトが窓1・残り 2 バイトが窓2) + "bc"。改行なしの 1 行。
+        let mut s = "a".repeat(RANGE_SCAN_BYTE_CAP - 2);
+        s.push('𠀀');
+        s.push_str("bc");
+        ws.write_file("split.txt", &s).unwrap();
+
+        let (mut reader, _t) = ws.line_reader("split.txt", 1, 100_000).unwrap();
+        let l = reader.next_line().unwrap().unwrap();
+        assert_eq!(l.overflow_chars, 0);
+        assert_eq!(l.text.chars().count(), (RANGE_SCAN_BYTE_CAP - 2) + 1 + 2);
+        assert!(
+            l.text.ends_with("𠀀bc"),
+            "窓境界で割れた 4 バイト文字が正しく復元される"
+        );
+    }
+
+    /// 同じ窓境界の割れ文字を、**相 B（高速カウント経路）**でも 1 度だけ数える（carry の持ち越し
+    /// +1 と、次窓の継続バイトを数えないことで二重計上も欠落もしない）。max_chars を小さく取り、
+    /// 割れ文字を超過ぶん（overflow）のカウント対象にする。
+    #[test]
+    fn line_reader_multibyte_split_across_window_fast_path() {
+        let (_dir, ws) = temp_workspace();
+        // "a"×32766 + "𠀀" + "a"×10。改行なしの 1 行。max_chars=512 なので 𠀀 は相 B で数える。
+        let mut s = "a".repeat(RANGE_SCAN_BYTE_CAP - 2);
+        s.push('𠀀');
+        s.push_str(&"a".repeat(10));
+        ws.write_file("split2.txt", &s).unwrap();
+
+        let (mut reader, _t) = ws.line_reader("split2.txt", 1, 512).unwrap();
+        let l = reader.next_line().unwrap().unwrap();
+        let total = (RANGE_SCAN_BYTE_CAP - 2) + 1 + 10;
+        assert_eq!(l.text.chars().count(), 512);
+        assert_eq!(
+            l.overflow_chars,
+            total - 512,
+            "割れ文字が二重計上/欠落しない"
+        );
     }
 }
