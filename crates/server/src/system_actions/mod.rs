@@ -231,6 +231,7 @@ impl SystemGatewayActions {
                     "required": ["action"]
                 }),
             },
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "configure_nostr".to_string(),
                 description:
@@ -325,6 +326,7 @@ impl SystemGatewayActions {
             // transport 非依存で全ターンに露出する。これにより「鍵を作るツールが鍵の
             // ある時しか出ない」循環依存（#141）を解消する。owner 限定にはしない
             // （nsec は返さず・送信もしないので Agent 呼び出しでも安全）。
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_generate_key".to_string(),
                 description: "新しい Nostr 鍵（keypair）を生成する。任意で vanity prefix（npub の \
@@ -345,6 +347,7 @@ impl SystemGatewayActions {
             // 一覧を返す（採用候補の確認）。transport 非依存で全ターンに露出する。
             // owner 限定にはしないが、bridge の `TRUSTED_ONLY_ACTIONS` により未信頼の
             // 会話ターン（caller=Agent）には出さない（`nostr_switch_identity` と同じ扱い）。
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_list_keys".to_string(),
                 description: "自分が nostr_generate_key で生成した鍵の一覧（npub のみ）を返す。\
@@ -361,6 +364,7 @@ impl SystemGatewayActions {
             // 委ねて自分宛のみを購読する / #271）。
             // transport 非依存で全ターンに露出する。bridge の `TRUSTED_ONLY_ACTIONS` に
             // より未信頼の会話ターン（caller=Agent）には出さない（乗っ取り防止 / #264）。
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_switch_identity".to_string(),
                 description: "自分が nostr_generate_key で生成した鍵を、この Nostr ゲートウェイの\
@@ -388,6 +392,7 @@ impl SystemGatewayActions {
             // 2 点だけで、Nostr 仕様の判断は nostaro に委ねる（非劣化）。`init`（鍵作成/上書き）・
             // `watch`（無制限受信）・`relay`（config.toml⇔DB desync で揮発）に加え、#514 で
             // `dm`（DM 送信）・`event`（任意 kind publish で DM を迂回できる）も拒否する。
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "nostr_run".to_string(),
                 description: "Nostr CLI（nostaro）を薄く passthrough 実行する。`subcommand` に \
@@ -694,6 +699,7 @@ impl SystemGatewayActions {
             // own ツールで読み書きする。引数に `agent_id` は**無い**。対象は常に
             // `ctx.agent_id`（呼び出し文脈）で、他エージェントを指す経路は作らない。
             // 実体と「自分のだけ」の保証・秘匿値の扱いは `crate::agent_nostr_relay` の doc。
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "get_my_nostr_relay".to_string(),
                 description: "自分（呼び出し元エージェント）の Nostr 受信 → Discord 転記の設定を読み出す。転記が有効か・転記先が設定済みか（転記先 URL は伏字で返す）を返す。他のエージェントの設定は読めない。".to_string(),
@@ -702,6 +708,7 @@ impl SystemGatewayActions {
                     "properties": {},
                 }),
             },
+            #[cfg(feature = "nostr")]
             GatewayActionDef {
                 name: "set_my_nostr_relay".to_string(),
                 description: "自分（呼び出し元エージェント）が Nostr で受け取った自分宛の受信（メンション/リプライ/DM）を Discord へ転記する設定を更新する。対象は常に自分で、他のエージェントの設定は変えられない。enabled で転記の有効/無効を、webhook_url で転記先の Discord webhook URL を設定する。URL が Discord webhook として不正なら拒否される（丸められない）ので、拒否されたらエラーの理由を見て正しい URL で指定し直すこと。".to_string(),
@@ -1062,6 +1069,7 @@ impl SystemGatewayActions {
     /// （config 非依存）で、生成した nsec は**サーバ内に 0600 で保存**し LLM には返さない
     /// （npub/pubkey のみ）。process.rs の防御マスク（tool_name==nostr_generate_key）と
     /// bridge の nsec redaction が多層で秘密漏洩を防ぐ。
+    #[cfg(feature = "nostr")]
     async fn nostr_generate_key(
         &self,
         args: &Value,
@@ -1106,6 +1114,7 @@ impl SystemGatewayActions {
     /// bootstrap 用の鍵一覧（鍵未設定でも実行可能）。生成鍵（`generated-keys/<npub>.nsec`）の
     /// **npub のみ**を返す。実体は `NostaroCli::list_generated_keys`（ファイル名だけを列挙し、
     /// nsec 本文は開かない）。鍵生成と同じく transport の稼働を必要としない。
+    #[cfg(feature = "nostr")]
     fn nostr_list_keys(ctx: &GatewayCallContext) -> GatewayActionResult {
         match opencrab_nostr::NostaroCli::list_generated_keys(&ctx.agent_id) {
             Ok(npubs) => GatewayActionResult {
@@ -1127,6 +1136,7 @@ impl SystemGatewayActions {
     ///
     /// 稼働の有無は capability の内側で判定する（稼働中はホットスワップ、未稼働は bootstrap
     /// 起動＝接続）。**秘密鍵(nsec)は扱わない**（npub 参照のみ・応答にも出さない）。
+    #[cfg(feature = "nostr")]
     async fn nostr_switch_identity(
         &self,
         args: &Value,
@@ -1172,6 +1182,7 @@ impl SystemGatewayActions {
     /// 未 materialize（鍵未採用）の明示エラー・nsec マスクは capability の内側
     /// （`NostaroCli::run_passthrough`）で行う。呼び出し側はここで subcommand と args を
     /// 取り出して渡すだけ。
+    #[cfg(feature = "nostr")]
     async fn nostr_run(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
         let Some(subcommand) = args
             .get("subcommand")
@@ -1662,6 +1673,7 @@ impl SystemGatewayActions {
         }
     }
 
+    #[cfg(feature = "nostr")]
     async fn configure_nostr(&self, args: &Value, ctx: &GatewayCallContext) -> GatewayActionResult {
         // 多層防御: bridge が owner を強制するが、ハンドラでも fail-closed で確認する。
         if !ctx.caller.is_owner_equivalent() {
@@ -2094,18 +2106,25 @@ impl GatewayActions for SystemGatewayActions {
         match name {
             "configure_llm_provider" => self.configure_llm_provider(args, ctx).await,
             "manage_allowed_commands" => self.manage_allowed_commands(args, ctx).await,
+            // PR-1B: Nostr の会話ゲートツール群は nostr feature の内側。外した構成では
+            // これらの arm も descriptor も消え、既定 `_ =>` の inner 委譲へ落ちる。
+            #[cfg(feature = "nostr")]
             "configure_nostr" => self.configure_nostr(args, ctx).await,
             "configure_self" => self.configure_self(args, ctx).await,
             "configure_mcp_server" => self.configure_mcp_server(args, ctx).await,
             // bootstrap 鍵生成（鍵未設定でも露出）。inner より先に own が処理する。
+            #[cfg(feature = "nostr")]
             "nostr_generate_key" => self.nostr_generate_key(args, ctx).await,
             // bootstrap 鍵一覧（鍵未設定でも露出）。生成鍵の npub のみ返す（nsec 非返却）。
+            #[cfg(feature = "nostr")]
             "nostr_list_keys" => Self::nostr_list_keys(ctx),
             // bootstrap identity 採用（鍵未設定でも露出）。未接続なら自分宛のみを購読する
             // 設定で自動接続する。inner より先に own が処理する（#264）。
+            #[cfg(feature = "nostr")]
             "nostr_switch_identity" => self.nostr_switch_identity(args, ctx).await,
             // 薄い nostaro passthrough（#268）。稼働中の Nostr transport の passthrough
             // capability へ委譲する。inner へは委譲しない（own が処理する）。
+            #[cfg(feature = "nostr")]
             "nostr_run" => self.nostr_run(args, ctx).await,
             // 記憶インデックスの全再構築（#175 S4）。inner へは委譲しない。
             "rebuild_memory_index" => self.rebuild_memory_index(ctx).await,
@@ -2140,9 +2159,11 @@ impl GatewayActions for SystemGatewayActions {
             }
             // エージェント自身の Nostr 転記設定（#252 段階 C）。対象は常に
             // `ctx.agent_id` で、引数から他エージェントを指す経路は無い。
+            #[cfg(feature = "nostr")]
             "get_my_nostr_relay" => {
                 crate::agent_nostr_relay::get_my_nostr_relay(&self.state, args, ctx)
             }
+            #[cfg(feature = "nostr")]
             "set_my_nostr_relay" => {
                 crate::agent_nostr_relay::set_my_nostr_relay(&self.state, args, ctx)
             }

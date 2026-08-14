@@ -13,13 +13,13 @@ OpenCrabは、自律的に思考・学習・行動するAIエージェントを�
 - **永続化**: SQLite (rusqlite, bundled)。外部DBサーバー不要で即座に動作
 - **全文検索**: SQLite FTS5。記憶検索にBM25スコアリングを使用
 - **LLMプロバイダー**: OpenAI, Anthropic, Google, OpenRouter, Ollama, llama.cpp の6種をサポート。クラウドとローカルの両方に対応
-- **ゲートウェイ**: REST API, CLI, Discord (feature flag), WebSocket (未実装) の4チャネル設計
+- **ゲートウェイ**: REST API（常設）と、3 つの**会話ゲート**（Discord / Nostr / Web ダッシュボード会話）を個別の feature flag で着脱。REST の管理 API 本体はどのゲートを外しても残る（§8）
 
 ### 1.3 設計哲学
 
 - **トレイトベースの抽象化**: LLMクライアント、アクション実行、ゲートウェイはすべてトレイトで定義。実装を差し替え可能
 - **クレート分離**: 機能ごとに独立したクレートに分割。循環依存なし
-- **Feature flagによるプラグイン**: Discord等の外部依存は`#[cfg(feature = "...")]`で条件付きコンパイル。不要な依存を排除
+- **Feature flagによるプラグイン**: 3 つの会話ゲート（`discord` / `nostr` / `web`）はそれぞれ独立した feature で、`#[cfg(feature = "...")]`により条件付きコンパイルされる。個別に外せ（`--no-default-features --features nostr` など）、外したゲートのクレート・SDK は依存ツリーから消える（CI の R5/R6 で回帰を止める → §2.5）。**外せるのは「会話ゲート」であって「HTTP サーバ（管理 API）」ではない**（§8）
 - **エージェント中心設計**: すべてのデータ（記憶、スキル、Soul、ワークスペース）はエージェントIDに紐づく
 
 ---
@@ -57,8 +57,9 @@ server ──→ core ──→ db
   ├──→ llm ──┘ (トレイト経由、直接依存なし)  llm ──→ llm-types
   ├──→ gateway
   ├──→ actions ──→ core, db, gateway
-  ├──→ discord (optional) ──→ gateway, db, core, actions
-  ├──→ nostr ──→ db, core, actions
+  ├──→ discord (optional / feature "discord") ──→ gateway, db, core, actions
+  ├──→ nostr   (optional / feature "nostr")   ──→ db, core, actions
+  ├──→ web-gateway (optional / feature "web")  ──→ gateway, db, core, actions
   ├──→ mcp
   ├──→ voice
   └──→ db
@@ -106,10 +107,10 @@ web（フロントエンド） ──→ (HTTP経由でserverと通信)
 
 - **R4: `opencrab-core` は gate/SDK クレートに依存しない**（`scripts/check-deps.sh`）
   `cargo tree -p opencrab-core --edges no-dev` の**依存ツリーの内容**を検査し、`opencrab-gateway` / `opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway` / `serenity` / `serenity-voice-model` / `songbird` が現れたら失敗させる。依存の**向きの逆転はコンパイル可否には現れない**（core が transport を巻き込んでもビルドは通る）ので、ビルドの成否ではなくツリーそのものを見る。`--edges no-dev` は normal に加え **build 依存も検査**し（build-dependency 経由の逆流を見落とさない）、dev-only 依存（テスト用の `syn` 等）は除外する。
-- **R5: SDK（`serenity` / `songbird`）は共有層（`opencrab-gateway` / `opencrab-actions`）に現れない**（`scripts/check-deps.sh`）
-  R4 と同じ `--edges no-dev` の依存ツリーを見て、`serenity` / `serenity-voice-model` / `songbird` が共有層の 2 クレートに漏れたら失敗させる。`gateway` がポート専用になり SDK を持たない（#1-A）性質を回帰させないための検査。
-- **R6: feature の組み合わせでビルドできる**（`scripts/check-deps.sh`）
-  `opencrab-gateway`（feature なし）と `opencrab-server` の discord 軸（`--no-default-features` / `--features discord` / 既定）をそれぞれ `cargo build` し、どの組み合わせでも壊れないことを確かめる。ビルドを含むので CI では build/test の後ろ（`check-deps.sh` の呼び出し位置）で走る。
+- **R5: SDK/ゲートは、外した構成の依存ツリーに現れない**（`scripts/check-deps.sh`）
+  2 段構え。(a) R4 と同じ `--edges no-dev` の依存ツリーで、`serenity` / `serenity-voice-model` / `songbird` が共有層（`opencrab-gateway` / `opencrab-actions`）へ漏れていないこと（`gateway` がポート専用で SDK を持たない #1-A の回帰止め）。(b) **`opencrab-server --no-default-features`（3 ゲート全外し）のツリーに、ゲート本体（`opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway`）と SDK（`serenity` / `songbird`）が 1 つも現れないこと**（PR-1B。会話ゲートを外すと本当に依存が消えることを固定）。
+- **R6: feature の全マトリクスでビルドできる**（`scripts/check-deps.sh`）
+  `opencrab-gateway`（feature なし）と、`opencrab-server` の **3 ゲート全マトリクス**（`--no-default-features` / 各ゲート単独 `--features discord|nostr|web` / 既定＝全部入り）をそれぞれ `cargo build` し、どの組み合わせでも壊れないことを確かめる。ビルドを含むので CI では build/test の後ろ（`check-deps.sh` の呼び出し位置）で走る。
 - **R7: 共有層（core の production コード）に gate 名が出ない**（`crates/core/tests/no_gate_identifiers.rs`）
   `syn` で `crates/core/src` を AST 走査し、**識別子と文字列リテラル**に `discord` / `serenity` / `songbird` / `nostr` が無いことを確かめる。テスト専用の項目（`#[cfg(test)]` / `#[cfg(all(test, ...))]` 等。ただし `any(test, ...)` はテスト以外でもコンパイルされるので対象に残す）は対象外。属性は **doc コメント（`#[doc = "..."]`）だけ**を対象外にし、それ以外の属性（`#[serde(rename = "...")]` / `#[error("...")]` 等）の文字列・識別子は検査する（本番の挙動・ワイヤ表現にゲート名が焼き込まれるため。serde を多用する `db` へ広げるとき効く）。名指しが 1 つ core に入ると、上位がそのゲートウェイを特別扱いし始める入口になる（design-plugin-architecture.md §4 が実際の事故として記録している）。`cargo expand` を使わないのは、nightly を要し、展開結果に doc コメントが残って偽陽性になるため。
   **限界（意図的）**: 検査が届くのは AST に現れるトークンに限る。`tracing::info!("...")` や `format!(...)` など**マクロ本体の文字列・識別子は `syn` が生トークンのまま保持するため検出できない**（core は tracing を多用するのでログ文言にゲート名を書いても落ちない）。マクロ内まで見るのは過剰なので、検査の形は変えず限界として明示する。
@@ -347,29 +348,36 @@ SkillEngine
 
 ### 7.3 実装済みゲートウェイ
 
-| ゲートウェイ | 実体 | 依存 | 説明 |
-|-------------|------|------|------|
-| **Discord** | `opencrab-discord` の `DiscordGateway` + `opencrab-discord` のイベントループ | `serenity` / `songbird`（`server` の `discord` feature 経由） | Bot接続、メッセージ受信/送信、2000文字自動分割 |
-| **REST** | `opencrab-server` の axum ハンドラ | なし | `opencrab-gateway` を経由しない |
-| **Nostr** | `opencrab-nostr` | - | - |
-| **Web** | `opencrab-web-gateway` | - | - |
+| ゲートウェイ | 実体 | feature | 依存 | 説明 |
+|-------------|------|---------|------|------|
+| **Discord** | `opencrab-discord` の `DiscordGateway` + イベントループ | `discord` | `serenity` / `songbird`（`opencrab-discord` 経由） | Bot接続、メッセージ受信/送信、2000文字自動分割 |
+| **Nostr** | `opencrab-nostr` の `NostrGatewayManager` + nostaro passthrough | `nostr` | `opencrab-nostr`（at-rest 暗号のマスターキーもこの feature に束ねる） | per-agent 鍵の受信/送信、`configure_nostr` / `nostr_run` 等の会話ツール |
+| **Web** | `opencrab-web-gateway` の `WebGateway`（SSE 配送 / per-session 直列化） | `web` | `opencrab-web-gateway` | ダッシュボードからの会話 + SSE 配送 |
+| **REST（管理 API）** | `opencrab-server` の axum ハンドラ | （常設・feature なし） | なし | エージェント/設定/ログ/一覧/ダッシュボード配信。`opencrab-gateway` を経由せず、**どの会話ゲートを外しても残る**（§8） |
 
-### 7.4 Discord統合のプラグイン分離
+3 つの会話ゲート（Discord / Nostr / Web）はそれぞれ独立した feature で、既定は `default = ["discord", "nostr", "web"]`（全部入り）。個別に外せる（例: `--no-default-features --features nostr`）。外したゲートのクレート本体・SDK は依存ツリーから消える（R5/R6・§2.5）。
 
-Discord固有のロジックは専用の`opencrab-discord`クレートに分離されている：
+**マスターキーを `nostr` feature に束ねる判断**: `AppState::nostr_master_key`（`opencrab_nostr::MasterKey`）と、その parse・at-rest 移行（`nostr_secret_migration.rs`）は Nostr の資格情報鍵を扱うので `nostr` feature の内側に置く。`nostr` を外すと `opencrab_nostr::MasterKey` 型自体が引けなくなるが、**これを避けるために `MasterKey` を共有層（core）へ移すことはしない**（秘密鍵の扱いに触るスコープ外の変更になり、境界も崩れる）。Nostr を使わない構成では at-rest 暗号のマスターキー機構ごと不要になる、が正しい帰結。
+
+### 7.4 会話ゲートのプラグイン分離
+
+各会話ゲート固有のロジックは、それぞれ専用クレート（`opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway`）に分離されている。以下は Discord を例にした構造で、Nostr / Web も同じ流儀（専用クレート ＋ `server` 側の `*AgentRunner` 実装 ＋ `server` の feature でのoptional有効化）を取る：
 
 - **`opencrab-discord`クレート**: メッセージループ、Discord管理アクション（サーバー/チャンネル一覧、チャンネル設定）、per-agent Botライフサイクル管理を提供
 - **`AgentRunner`トレイト**: `discord`クレートで定義。Discord固有の判定（trust / チャンネルポリシー）・per-agentゲートウェイを抽象化し、`server`が`AppState`に対して実装する。これにより`discord → server`の循環依存を回避。エージェント処理パイプライン（LLM呼び出し等）そのものは`actions`の`AgentRuntime`（全ゲートウェイ共通、実装は`server/src/agent_runtime_impl.rs`の1箇所）が持つ
 - **ターン転記（session_logs への記録）**: `AgentRunner`ではなく`actions`の`AgentRuntime`が持つ（`record_inbound_message` / `record_outbound_reply` / `record_interaction_response` — #158）。記録の種別（metadata の`source`）は列挙型`opencrab_actions::TranscriptSource`で受け、行の形は`server/src/transcript.rs`が所有する（transport の feature flag に依存しない）
 - **`DiscordGateway`（serenity/songbird 実装）**: serenity Botの接続・メッセージ受信・送信を担当。`opencrab-discord`の`gateway`モジュールが所有する（#1-A で`opencrab-gateway`から移設。共有層に SDK を残さない）。`opencrab-gateway`はポート（メッセージ型 / `GatewayActions`）だけを提供し、feature も SDK も持たない
-- **`server`の`discord` feature**: `opencrab-discord`をoptional依存として有効化する（`default = ["discord"]`）。SDK（serenity/songbird）は`opencrab-discord`が引き込むので、`server`が`serenity`へ直接依存する必要はない
+- **`server`の`discord` feature**: `opencrab-discord`をoptional依存として有効化する（`default = ["discord", "nostr", "web"]`）。SDK（serenity/songbird）は`opencrab-discord`が引き込むので、`server`が`serenity`へ直接依存する必要はない。Nostr / Web も同型で、`nostr = ["dep:opencrab-nostr"]` / `web = ["dep:opencrab-web-gateway"]`
 
-Discord のオン/オフは`server`の`discord` feature 軸で切る（`opencrab-gateway`側の feature ではない）:
+各会話ゲートのオン/オフは`server`の feature 軸で個別に切る（`opencrab-gateway`側の feature ではない）:
 
 ```
-cargo build                                          → 既定。discord 有効（opencrab-discord + serenity/songbird をコンパイル）
-cargo build -p opencrab-server --no-default-features → Discord関連コード・依存なし
+cargo build                                                    → 既定。3 ゲート全て有効
+cargo build -p opencrab-server --no-default-features           → 会話ゲート無し（管理 API だけの HTTP サーバは残る）
+cargo build -p opencrab-server --no-default-features --features nostr → Nostr だけ有効（Discord / Web は依存ツリーから消える）
 ```
+
+**「外せるのは会話ゲート」の意味**: `--no-default-features` で 3 ゲートを全て外しても、`create_router` が組む管理 API（`/api/agents`・設定・ログ・一覧・ダッシュボード配信 等）は残る。feature で外れるのは各ゲートの**会話ルート/ループ**だけ（Nostr の `/api/agents/{id}/nostr*`、Web の `.merge(opencrab_web_gateway::routes())`）で、HTTP サーバ本体は残る（§8.1。`--no-default-features` で起動しても `GET /api/agents` が 200 を返す）。
 
 ---
 
@@ -382,6 +390,8 @@ Axumベースの REST APIサーバー。`AppState`を全ハンドラで共有：
 - `db`: SQLiteコネクション（`Arc<Mutex<Connection>>`）
 - `llm_router`: マルチプロバイダーLLMルーター（`Arc<LlmRouter>`）
 - `workspace_base`: ワークスペースのベースパス
+
+**この HTTP サーバ（管理 API）は会話ゲートの feature に依存しない。** `--no-default-features`（Discord / Nostr / Web を全て外した構成）でもサーバは起動し、`GET /api/agents` をはじめ設定・ログ・一覧・ダッシュボード配信の API は応答する。feature で外れるのは会話ゲート由来のルート（Nostr の `/api/agents/{id}/nostr*`、Web の `.merge(opencrab_web_gateway::routes())`）だけで、サーバ本体は残る（§7.4）。`AppState` の一部フィールド（`nostr_master_key` / `web_gateway`）はゲートの feature でのみ存在するが、管理 API の到達性には影響しない。
 
 ### 8.2 メッセージ処理フロー（REST）
 
@@ -503,11 +513,12 @@ Dioxus (Rust製WebUIフレームワーク) + Tailwind CSSで構築。
 ### 12.1 起動方法
 
 ```bash
-# REST APIサーバー
+# REST APIサーバー（既定で Discord / Nostr / Web の 3 ゲートすべて有効）
 cargo run -p opencrab-server
 
-# Discord統合付きで起動
-cargo run --features discord -p opencrab-server
+# 一部の会話ゲートだけにしたいときは、既定 feature を外して欲しいものだけ opt-in する
+# （管理 REST API はどの構成でも残る）
+cargo run -p opencrab-server --no-default-features --features nostr
 
 # CLIクライアント
 cargo run -p opencrab-cli
@@ -532,4 +543,4 @@ dx serve --project dashboard
 2. Bot設定で **Message Content Intent** を有効化
 3. `DISCORD_TOKEN` を設定
 4. `config/default.toml` の `[gateway.discord]` で `enabled = true` と `agent_ids` を設定
-5. `--features discord` 付きでビルド・起動
+5. ビルド・起動（`discord` は既定 feature なので通常の `cargo run -p opencrab-server` で有効。Discord を外したいときだけ `--no-default-features` で opt-out する）

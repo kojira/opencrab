@@ -10,6 +10,7 @@ use tower_http::trace::TraceLayer;
 pub mod agent_heartbeat;
 pub mod agent_log;
 pub mod agent_management;
+#[cfg(feature = "nostr")]
 pub mod agent_nostr_relay;
 pub mod agent_runtime_impl;
 pub mod agent_schedule;
@@ -26,7 +27,9 @@ pub mod memory_condense;
 pub mod memory_declare;
 pub mod memory_maintenance;
 pub mod memory_organize;
+#[cfg(feature = "nostr")]
 pub mod nostr_runner_impl;
+#[cfg(feature = "nostr")]
 pub mod nostr_secret_migration;
 pub mod peer_review;
 pub mod process;
@@ -35,6 +38,7 @@ pub mod skill_consolidation;
 pub mod subtask_registries;
 pub mod subtask_spawn;
 pub mod system_actions;
+#[cfg(feature = "web")]
 pub mod web_runner_impl;
 pub mod webhook_targets;
 
@@ -43,6 +47,7 @@ mod agent_runner_impl;
 pub mod transcript;
 
 /// per-agent Nostr sub-gateway マネージャの共有ハンドル。
+#[cfg(feature = "nostr")]
 pub type SharedNostrManager = Arc<opencrab_nostr::NostrGatewayManager<AppState>>;
 
 /// per-agent MCP 接続マネージャの共有ハンドル。
@@ -92,6 +97,7 @@ pub struct AppState {
     /// **有効（base64 32B かつ既存暗号文とも一致）なマスターキーがあるときだけ `Some`**。
     /// `None` は未設定 / 不正形式 / 既存暗号文と不一致のいずれか（暗号化を有効化していない＝
     /// 従来挙動）。Nostr サブシステムは `Some` のときだけ起動する（`None` ならバナーで拒否）。
+    #[cfg(feature = "nostr")]
     pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
@@ -139,6 +145,7 @@ pub struct AppState {
     pub gateways: Arc<opencrab_actions::AgentGatewayRegistry>,
     /// web gateway ランタイム（#154）: SSE 配送 / per-session 直列化 / dispatch registry。
     /// 実体は独立クレート `opencrab-web-gateway`（#190）。
+    #[cfg(feature = "web")]
     pub web_gateway: Arc<opencrab_web_gateway::WebGateway>,
     /// 非ブロック dispatch（#152 S3a）の subtask registry 置き場（#169）。
     /// REST は session_id キー、heartbeat は agent_id キーで貸し借りし、
@@ -265,10 +272,16 @@ impl AppState {
 /// なお起動時の防御は [`opencrab_actions::TimedFireRouter::self_check`]（本番登録簿そのもので
 /// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
 /// 両方あって初めて塞がる。
+#[cfg_attr(
+    not(any(feature = "discord", feature = "nostr", feature = "web")),
+    allow(unused_variables)
+)]
 pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
     #[cfg(feature = "discord")]
     router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
+    #[cfg(feature = "nostr")]
     router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
+    #[cfg(feature = "web")]
     router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
 }
 
@@ -293,6 +306,7 @@ pub(crate) fn test_app_state() -> AppState {
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
         // #620: テストは暗号化を有効化しない（None＝平文フォールバック / 従来挙動）。
+        #[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
@@ -309,6 +323,7 @@ pub(crate) fn test_app_state() -> AppState {
         intake_wake: Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
@@ -326,7 +341,8 @@ pub(crate) fn test_app_state() -> AppState {
 }
 
 pub fn create_router(state: AppState) -> Router {
-    Router::new()
+    #[allow(unused_mut)]
+    let mut router = Router::new()
         .route("/health", get(health_check))
         .route("/api/health", get(api_health_check))
         // 外部イベント受信 webhook（#454）。source ごとの共有 secret で HMAC 検証し、
@@ -537,31 +553,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/agents/{id}/discord/stop",
             post(api::agents::stop_discord_gateway),
         )
-        // Nostr sub-gateway per-agent config
-        .route(
-            "/api/agents/{id}/nostr",
-            get(api::nostr::get_nostr_config)
-                .put(api::nostr::update_nostr_config)
-                .delete(api::nostr::delete_nostr_config),
-        )
-        .route(
-            "/api/agents/{id}/nostr/generate",
-            post(api::nostr::generate_nostr_key),
-        )
-        .route(
-            "/api/agents/{id}/nostr/start",
-            post(api::nostr::start_nostr_gateway),
-        )
-        .route(
-            "/api/agents/{id}/nostr/stop",
-            post(api::nostr::stop_nostr_gateway),
-        )
-        // Nostr 受信 → Discord 転記先の per-agent 設定（issue #252 段階 B）
-        .route(
-            "/api/agents/{id}/nostr-relay",
-            get(api::nostr_relay::get_nostr_relay_config)
-                .put(api::nostr_relay::update_nostr_relay_config),
-        )
         // MCP サーバ per-agent 設定
         .route(
             "/api/agents/{id}/mcp",
@@ -622,9 +613,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/schedules/{sid}",
             patch(api::schedules::update_schedule).delete(api::schedules::delete_schedule),
         )
-        // web gateway（#154）: ダッシュボードからの会話 + SSE 配送。
-        // ルート定義とハンドラは独立クレート側にあり、ここは取り付けるだけ（#190 S4）。
-        .merge(opencrab_web_gateway::routes::<AppState>())
         // 許可コマンド管理
         .route(
             "/api/agents/{id}/allowed-commands",
@@ -668,10 +656,64 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/system/log-level",
             get(api::system::get_log_level_handler).patch(api::system::patch_log_level_handler),
-        )
+        );
+
+    // Nostr sub-gateway の per-agent 設定 API と、Nostr 受信 → Discord 転記先設定
+    // （#252 段階 B）。これらは Nostr の**会話ゲート**を操作する API なので nostr feature
+    // の内側に置く。外せるのは会話ゲートであって、他の管理 API（設定・ログ・一覧・
+    // ダッシュボード配信）は feature を外しても残る。
+    #[cfg(feature = "nostr")]
+    {
+        router = router.merge(nostr_routes());
+    }
+
+    // web gateway（#154）: ダッシュボードからの会話 + SSE 配送。ルート定義とハンドラは
+    // 独立クレート側にあり、ここは取り付けるだけ（#190 S4）。web の**会話ゲート**なので
+    // web feature の内側。HTTP サーバ（管理 API）本体はこれを外しても残る。
+    #[cfg(feature = "web")]
+    {
+        router = router.merge(opencrab_web_gateway::routes::<AppState>());
+    }
+
+    router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Nostr sub-gateway の per-agent 設定ルート群（nostr feature 限定）。
+///
+/// `create_router` から nostr feature が有効なときだけ `.merge` される。会話ゲートを
+/// 外した構成（`--no-default-features`）ではこの 5 ルートは載らないが、それ以外の
+/// 管理 API は残る。
+#[cfg(feature = "nostr")]
+fn nostr_routes() -> Router<AppState> {
+    Router::new()
+        // Nostr sub-gateway per-agent config
+        .route(
+            "/api/agents/{id}/nostr",
+            get(api::nostr::get_nostr_config)
+                .put(api::nostr::update_nostr_config)
+                .delete(api::nostr::delete_nostr_config),
+        )
+        .route(
+            "/api/agents/{id}/nostr/generate",
+            post(api::nostr::generate_nostr_key),
+        )
+        .route(
+            "/api/agents/{id}/nostr/start",
+            post(api::nostr::start_nostr_gateway),
+        )
+        .route(
+            "/api/agents/{id}/nostr/stop",
+            post(api::nostr::stop_nostr_gateway),
+        )
+        // Nostr 受信 → Discord 転記先の per-agent 設定（issue #252 段階 B）
+        .route(
+            "/api/agents/{id}/nostr-relay",
+            get(api::nostr_relay::get_nostr_relay_config)
+                .put(api::nostr_relay::update_nostr_relay_config),
+        )
 }
 
 async fn health_check() -> &'static str {
@@ -689,7 +731,12 @@ async fn api_health_check() -> axum::Json<serde_json::Value> {
 /// 「本物がトレイトオブジェクトとして成立するか」をここで押さえられる。
 #[cfg(test)]
 mod gateway_registry_tests {
+    // これらの import はどのテストも discord / nostr のマネージャを組むために使う。
+    // 両 feature を外した構成（例 `--no-default-features` / web のみ）ではこのモジュールの
+    // テストが 1 つも残らないため、import も条件付きにして未使用警告を出さない。
+    #[cfg(any(feature = "discord", feature = "nostr"))]
     use super::*;
+    #[cfg(any(feature = "discord", feature = "nostr"))]
     use opencrab_actions::gateway_kinds;
 
     /// state を clone しても登録簿は**同じ 1 つ**を指す。
@@ -697,6 +744,7 @@ mod gateway_registry_tests {
     /// これが成り立たないと「共有ゲートウェイへ渡した clone からは専用ゲートウェイが
     /// 見えない」ことになり、内部可変にして後から登録する意味が無くなる（#40 の
     /// 二重処理防止が壊れる）。
+    #[cfg(feature = "nostr")]
     #[test]
     fn registry_is_shared_across_state_clones() {
         let state = test_app_state();
@@ -712,7 +760,7 @@ mod gateway_registry_tests {
     }
 
     /// 実物のマネージャを登録順どおりに載せられる（Discord → Nostr）。
-    #[cfg(feature = "discord")]
+    #[cfg(all(feature = "discord", feature = "nostr"))]
     #[test]
     fn real_managers_register_in_startup_order() {
         let state = test_app_state();
@@ -743,7 +791,7 @@ mod gateway_registry_tests {
     ///
     /// DB は空なので復元は 1 件も起動しない（＝実ネットワークに出ない）。ここで見たいのは
     /// 「どのマネージャが・どの位置で・何回走査に拾われるか」。
-    #[cfg(feature = "discord")]
+    #[cfg(all(feature = "discord", feature = "nostr"))]
     #[tokio::test]
     async fn startup_sweep_restores_each_manager_at_its_own_point() {
         let state = test_app_state();
@@ -776,7 +824,7 @@ mod gateway_registry_tests {
     }
 
     /// **Discord を落とした構成**では位置 1 の走査ごと消え、残る 1 回が Nostr を復元する。
-    #[cfg(not(feature = "discord"))]
+    #[cfg(all(not(feature = "discord"), feature = "nostr"))]
     #[tokio::test]
     async fn startup_sweep_restores_nostr_without_discord() {
         let state = test_app_state();
@@ -797,6 +845,7 @@ mod gateway_registry_tests {
     ///
     /// これはルーティング判定（専用ゲートウェイに任せるか、共有側が続けるか）なので、
     /// 未登録で true に倒すと二重処理、panic させると停止する。
+    #[cfg(feature = "nostr")]
     #[test]
     fn is_running_falls_back_to_false() {
         let state = test_app_state();
@@ -821,6 +870,7 @@ mod gateway_registry_tests {
     }
 
     /// トレイト経由で起動を呼べる。設定行が無ければ `Err`（panic しない）。
+    #[cfg(feature = "nostr")]
     #[tokio::test]
     async fn start_through_trait_errors_without_db_config() {
         let state = test_app_state();
@@ -948,6 +998,7 @@ mod gateway_registry_tests {
     /// 返していた（`POST /nostr/start` にはその判定が無く、素通りしていた）。判定を
     /// `start_agent_gateway` の単一チョークポイントへ置き直したので、どの呼び出し口
     /// からでも同じように弾かれる。
+    #[cfg(feature = "nostr")]
     #[tokio::test]
     async fn nostr_start_declines_without_secret_key() {
         let state = test_app_state();
@@ -1000,6 +1051,7 @@ mod gateway_registry_tests {
     /// （`enabled` を見ずに検査へ到達する）はそのままに、到達を確かめる対象を今も残っている
     /// 資格情報ガードへ移した。鍵の拒否は設定ファイルを書き出す**手前**なので、実プロセスも
     /// ファイルシステムも触らないという性質も変わらない。
+    #[cfg(feature = "nostr")]
     #[tokio::test]
     async fn nostr_start_does_not_look_at_the_enabled_flag() {
         let state = test_app_state();

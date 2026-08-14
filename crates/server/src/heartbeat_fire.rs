@@ -60,6 +60,9 @@ fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> S
                 .unwrap_or_else(|| target.channel_id.clone())
         }
         gateway_kinds::NOSTR => HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
+        // web は会話ゲート（PR-1B）。web feature を外した構成ではこの kind は発火先に
+        // ならないので明示分岐も落とし、中立ラベルへ倒れる（web を名乗る誤表示を避ける）。
+        #[cfg(feature = "web")]
         opencrab_web_gateway::WEB_TIMED_FIRE_KIND => HEARTBEAT_WEB_CHANNEL_LABEL.to_string(),
         _ => HEARTBEAT_NEUTRAL_CHANNEL_LABEL.to_string(),
     }

@@ -70,10 +70,19 @@ async fn main() -> anyhow::Result<()> {
     // `std::env::vars()` を子へコピーする（crates/actions/src/tools/shell.rs）ので、ここで消せば
     // エージェントのシェルの環境に平文で出ない。config の `${}` 展開（hot-reload 経路が env を
     // 読む）を経由せず、直接 std::env::var で読む。
+    //
+    // **env スクラブ（読み取り＋ remove_var）は feature 非依存で常に走らせる**（多層防御）。
+    // これは「Nostr 専用の処理」ではなく「秘密を env に残さない」ための処理で、`nostr` を外した
+    // ビルドでも `OPENCRAB_SECRET_MASTER_KEY` を env から消さないと、その秘密が起動する全シェルへ
+    // 平文継承される（PR-1B のレビュー指摘 / 退行防止）。**この remove_var を nostr feature の
+    // 内側へ戻さないこと。** 一方、値を `MasterKey` へ parse する部分だけは型が `opencrab_nostr`
+    // にあるので `nostr` feature の内側に置く（nostr-off では at-rest 暗号機構ごと不要）。
+    #[cfg_attr(not(feature = "nostr"), allow(unused_variables))]
     let master_key_env = std::env::var("OPENCRAB_SECRET_MASTER_KEY")
         .ok()
         .filter(|s| !s.trim().is_empty());
     std::env::remove_var("OPENCRAB_SECRET_MASTER_KEY");
+    #[cfg(feature = "nostr")]
     let master_key_parsed: Option<anyhow::Result<opencrab_nostr::MasterKey>> = master_key_env
         .as_deref()
         .map(|b64| opencrab_core::secret_box::parse_master_key(b64).map(std::sync::Arc::new));
@@ -85,10 +94,12 @@ async fn main() -> anyhow::Result<()> {
     // 決める（既存データから判定・新設定は足さない）。**プロセス全体は止めない**（Nostr を
     // 使っていない構成はマスターキー無しでも通常起動する）。マスターキーが在るときだけ Nostr
     // サブシステムを起動し、at-rest 移行を行う。
+    #[cfg(feature = "nostr")]
     let nostr_configured = match db.lock() {
         Ok(conn) => opencrab_db::queries::has_any_agent_nostr_config(&conn).unwrap_or(false),
         Err(_) => false,
     };
+    #[cfg(feature = "nostr")]
     let mut nostr_master_key: Option<opencrab_nostr::MasterKey> = match master_key_parsed {
         Some(Ok(key)) => Some(key),
         Some(Err(e)) => {
@@ -114,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     // 試し復号で捕まえる。ここで捕まえないと、移行は `enc:` を skip し provider の復号だけが
     // 後で失敗して post/watch がエラー連発になり、起動時に何も見えない。移行の**前**に判定し、
     // 不一致なら既存のバナー経路で大きく知らせて Nostr を起動しない。
+    #[cfg(feature = "nostr")]
     if let Some(key) = nostr_master_key.clone() {
         if let Some(reason) =
             opencrab_server::nostr_secret_migration::master_key_mismatch_reason(&db, &key)
@@ -124,9 +136,11 @@ async fn main() -> anyhow::Result<()> {
     }
     // Nostr サブシステムを起動してよいのは、（一致する）マスターキーが在るときだけ（#620）。
     // 無ければ（未設定 / 不正形式 / 既存暗号文と不一致）Nostr は起動しない＝送信も受信も止まる。
+    #[cfg(feature = "nostr")]
     let start_nostr = nostr_master_key.is_some();
 
     // #620: 平文の at-rest 秘密を暗号化する移行（起動時 1 回・冪等・対象が無ければ no-op）。
+    #[cfg(feature = "nostr")]
     if let Some(mk) = &nostr_master_key {
         let report = opencrab_server::nostr_secret_migration::migrate_nostr_secrets_at_rest(
             &db,
@@ -213,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         // が使う）。**有効（形式が正しく既存暗号文とも一致）なマスターキーがあるときだけ Some**
         // で、Nostr 未設定の構成でも env に有効なキーがあれば Some になる。未設定 / 不正形式 /
         // 既存暗号文と不一致のときは None（暗号化を有効化していない＝従来挙動）。
+        #[cfg(feature = "nostr")]
         nostr_master_key: nostr_master_key.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
@@ -230,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
         // 受信を持つ transport の登録簿（#191 段階2 PR2）。空で作り、各マネージャの
         // 生成箇所から後で `register` する（内部可変なので生成順を変えずに済む）。
         gateways: Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(opencrab_server::subtask_registries::SubtaskRegistries::new()),
         // #588 Stage 2: プロセス全体で 1 つの per-session 直列化ロック。heartbeat・scheduler・
@@ -272,14 +288,18 @@ async fn main() -> anyhow::Result<()> {
     // Discord / Nostr のように「ループ起動時に sink を登録」できないので、ここで共有受け口として
     // 1 度だけ登録する（web は外部接続を持たず常に立ち上がる＝隔離環境でもハートビートが届く）。
     // sink は自分で `tokio::spawn` して per-session 直列化込みの入口を回す（`WebTimedFireSink`）。
-    state.timed_fire_router.register_shared(
-        opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
-        std::sync::Arc::new(opencrab_web_gateway::WebTimedFireSink::new(state.clone())),
-    );
-    tracing::info!(
-        transport = opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
-        "timed-fire: 受け口を登録（web・生存非依存）"
-    );
+    // web は会話ゲートなので web feature の内側（PR-1B: web を外すと受け口は登録されない）。
+    #[cfg(feature = "web")]
+    {
+        state.timed_fire_router.register_shared(
+            opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
+            std::sync::Arc::new(opencrab_web_gateway::WebTimedFireSink::new(state.clone())),
+        );
+        tracing::info!(
+            transport = opencrab_web_gateway::WEB_TIMED_FIRE_KIND,
+            "timed-fire: 受け口を登録（web・生存非依存）"
+        );
+    }
 
     // サブタスク lifecycle 通知の実装を配線する（#175 S4）。`spawn_subtask` は gateway
     // 非依存層にあるため、通知先の解決（DB の webhook 設定 + TOML の既定）だけを持つ
@@ -611,6 +631,7 @@ async fn main() -> anyhow::Result<()> {
         let check_state = state.clone();
         // TOML 共有ゲートウェイが設定されている kind（db に無い設定を畳んで env へ渡す）。
         // per-agent（DB）だけの体は各 descriptor が env.conn を引いて拾う（#602 の本番対象）。
+        #[cfg_attr(not(feature = "discord"), allow(unused_mut))]
         let mut configured_shared_kinds: std::collections::HashSet<&'static str> =
             std::collections::HashSet::new();
         #[cfg(feature = "discord")]
@@ -679,6 +700,8 @@ async fn main() -> anyhow::Result<()> {
     //
     // #620: **マスターキーが在るときだけ**登録する。無ければ Nostr は起動しない（送信も受信も
     // 止まる）。Nostr 未設定の構成ではそもそもマスターキー不要なので、ここを飛ばして通常起動する。
+    // PR-1B: Nostr は会話ゲートなので nostr feature の内側。外した構成ではこのブロック自体が無い。
+    #[cfg(feature = "nostr")]
     if let Some(master_key) = nostr_master_key.clone() {
         // nostaro は**エージェントの workspace ルートを cwd にして**起動する（#299）。
         // `execute_shell` / `ws_*` と同じ `agent.workspace_path` を渡して基準を揃える
@@ -755,6 +778,7 @@ async fn main() -> anyhow::Result<()> {
 /// #620: マスターキー欠落/不正で Nostr を起動できないことを**起動ログに埋もれない形**で知らせる。
 /// 区切り線付きの複数行バナーを `error` レベルで出す。**送信も受信も止まる**ことを明記する
 /// （プロセスは止めない — Nostr を使っていない機能は動き続ける）。
+#[cfg(feature = "nostr")]
 fn emit_master_key_banner(reason: &str) {
     let line = "=".repeat(72);
     tracing::error!(

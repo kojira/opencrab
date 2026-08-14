@@ -99,8 +99,18 @@ pub async fn add_trusted_user(
     // （設定できたように見えて永久に誰とも一致しない行を作らせない）。入口 `configure_nostr`
     // / REST の owner_pubkey と同じ扱いで、新しい制約ではなく既存の入口正規化の網羅。
     // 他経路（discord / web / rest）の識別子は素通し（挙動を変えない）。
+    // PR-1B: 公開鍵の正規化は Nostr クレートの実装なので nostr feature の内側。nostr を
+    // 外した構成では `platform='nostr'` の信頼ユーザーは正規化できないため**受け付けず
+    // 400 で拒否**する（丸めず・素通しの平文保存もしない＝暗黙のフォールバックを作らない）。
     let user_id = if platform == opencrab_db::queries::TRUSTED_PLATFORM_NOSTR {
-        opencrab_nostr::normalize_pubkey(&req.user_id).ok_or(StatusCode::BAD_REQUEST)?
+        #[cfg(feature = "nostr")]
+        {
+            opencrab_nostr::normalize_pubkey(&req.user_id).ok_or(StatusCode::BAD_REQUEST)?
+        }
+        #[cfg(not(feature = "nostr"))]
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
     } else {
         req.user_id
     };
@@ -371,6 +381,7 @@ mod tests {
     ///
     /// 読み出し側は canonical hex / npub で exact-match するため、正規化せず素通しで
     /// 保存すると（この修正前の挙動）その信頼ユーザーが受信ターンで一致しない。
+    #[cfg(feature = "nostr")]
     #[tokio::test]
     async fn nostr_user_id_is_normalized_on_write_and_matches_the_speaker() {
         use opencrab_db::queries::TRUSTED_PLATFORM_NOSTR;

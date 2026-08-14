@@ -194,9 +194,13 @@ See [docs/nostaro-interface.md](docs/nostaro-interface.md) for how the key is us
 ### 5. Manual startup
 
 ```bash
-# Backend (with Discord support)
-cargo run -p opencrab-server --features discord
+# Backend (default: Discord / Nostr / Web conversation gates all enabled)
+cargo run -p opencrab-server
 # Listening on 0.0.0.0:8080
+#
+# To drop conversation gates you don't need, disable default features and opt in
+# to just the ones you want (the management REST API stays either way):
+#   cargo run -p opencrab-server --no-default-features --features nostr
 
 # Frontend dev server (separate terminal)
 cd web && ./dev.sh
