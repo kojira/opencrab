@@ -68,7 +68,10 @@ impl TransportFire for DiscordFire {
     /// 設定されている（`configured_shared_kinds` に自分の kind がある）か、per-agent の
     /// 有効な Discord 設定が db にある（#602 の本番対象はまさに TOML に無い per-agent）。
     fn should_be_running(&self, env: &TransportFireEnv) -> bool {
-        if env.configured_shared_kinds.contains(&gateway_kinds::DISCORD) {
+        if env
+            .configured_shared_kinds
+            .contains(&gateway_kinds::DISCORD)
+        {
             return true;
         }
         opencrab_db::queries::list_enabled_agent_discord_configs(env.conn)

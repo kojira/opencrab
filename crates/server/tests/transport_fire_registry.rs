@@ -36,9 +36,14 @@ fn every_descriptor_round_trips_through_the_registry() {
     assert!(!kinds.is_empty(), "descriptor が 1 つも登録されていない");
 
     for kind in kinds {
-        let d = router.descriptor(kind).expect("kind の descriptor が引けない");
+        let d = router
+            .descriptor(kind)
+            .expect("kind の descriptor が引けない");
         let sample = d.sample_target();
-        assert_eq!(sample.kind, kind, "sample_target の kind が自分と違う: {kind}");
+        assert_eq!(
+            sample.kind, kind,
+            "sample_target の kind が自分と違う: {kind}"
+        );
 
         // build → parse → sample（両方向・独立実装）。
         let sid = d.build_session_id(&sample, AGENT_UUID);
@@ -52,7 +57,10 @@ fn every_descriptor_round_trips_through_the_registry() {
         let resolved = router
             .resolve_target(&sid, AGENT_UUID)
             .unwrap_or_else(|| panic!("{kind}: resolve_target が解決できない: {sid}"));
-        assert_eq!(resolved, sample, "{kind}: resolve_target の結果が sample と違う");
+        assert_eq!(
+            resolved, sample,
+            "{kind}: resolve_target の結果が sample と違う"
+        );
     }
 }
 
@@ -71,7 +79,10 @@ fn no_two_descriptors_parse_the_same_session_id() {
             let db = router.descriptor(b).unwrap();
             let parsed = db.parse(&sid, AGENT_UUID).is_some();
             if a == b {
-                assert!(parsed, "{a} が自分の sample session_id を parse しない: {sid}");
+                assert!(
+                    parsed,
+                    "{a} が自分の sample session_id を parse しない: {sid}"
+                );
             } else {
                 assert!(
                     !parsed,

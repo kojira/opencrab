@@ -165,7 +165,9 @@ mod tests {
     /// conversation が空（`web-{agent}` だけ）・別 agent・別種別は None（fail-closed）。
     #[test]
     fn parse_fail_closed() {
-        assert!(WebFire.parse(&format!("web-{AGENT_UUID}"), AGENT_UUID).is_none());
+        assert!(WebFire
+            .parse(&format!("web-{AGENT_UUID}"), AGENT_UUID)
+            .is_none());
         assert!(WebFire
             .parse(&format!("web-{AGENT_UUID}-conv-1"), "other")
             .is_none());
@@ -226,7 +228,9 @@ mod tests {
         let runs = runner.runs();
         assert_eq!(runs.len(), 1, "発火ターンが 1 回走る");
         assert_eq!(runs[0].session_id, sid);
-        assert!(runs[0].system_prompt.contains("いまはハートビートの時間です"));
+        assert!(runs[0]
+            .system_prompt
+            .contains("いまはハートビートの時間です"));
         assert_eq!(runs[0].caller, CallerIdentity::Owner);
     }
 }

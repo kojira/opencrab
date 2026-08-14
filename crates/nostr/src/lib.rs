@@ -42,8 +42,8 @@ pub use cli::{
     NostaroCli, MAX_VANITY_PREFIX_LEN,
 };
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
-pub use fire_descriptor::NostrFire;
 pub use event::{parse_watch_line, NostrEvent, DM_KINDS};
+pub use fire_descriptor::NostrFire;
 pub use identity::NostrIdentityAdmin;
 pub use key_provisioning::NostrKeyProvisioning;
 pub use manager::NostrGatewayManager;
