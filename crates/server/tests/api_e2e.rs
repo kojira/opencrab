@@ -2998,7 +2998,8 @@ async fn test_rest_cancel_subtask_reaches_shared_registry() {
 // （旧実装でも緑になる）。そこで停止ターンだけはハンドラ step 9 と同一の `RunRequest`
 // （REST の sink + 共有 registry + transport gateway を inner）を組んで
 // `process::run_agent_response` を直接呼び、完了が **停止 sink 経由でだけ**起きることを
-// 観測する。実ネットワークには出ない（`serenity::http::Http::new` は接続しない）。
+// 観測する。実ネットワークには出ない（`DiscordGatewayActions::from_token` が内部で
+// 組む Http クライアントは接続しない）。
 // ================================================================================
 
 /// 「走行中 subtask を 1 本抱えた REST セッション」を作り、`inner` を transport gateway
@@ -3101,9 +3102,10 @@ struct CancelObservation {
 #[tokio::test]
 async fn test_rest_cancel_completes_session_with_discord_gateway_wired() {
     let obs = cancel_last_subtask_in_rest_run_with_inner(|db, workspace_base| {
-        Arc::new(opencrab_discord::DiscordGatewayActions::new(
-            // 接続しない（HTTP クライアントを組むだけ）。Discord API は一度も叩かない。
-            Arc::new(serenity::http::Http::new("dummy-token")),
+        // 接続しない（Http クライアントを組むだけ）。Discord API は一度も叩かない。
+        // serenity の型は discord クレート内（from_token）に閉じる。
+        Arc::new(opencrab_discord::DiscordGatewayActions::from_token(
+            "dummy-token",
             db,
             workspace_base,
             None,
@@ -3181,8 +3183,8 @@ async fn test_rest_cancel_completes_session_even_if_inner_defines_cancel_subtask
     let recorded = cancel_calls.clone();
     let obs = cancel_last_subtask_in_rest_run_with_inner(move |db, workspace_base| {
         Arc::new(CancelDefiningInner {
-            discord: opencrab_discord::DiscordGatewayActions::new(
-                Arc::new(serenity::http::Http::new("dummy-token")),
+            discord: opencrab_discord::DiscordGatewayActions::from_token(
+                "dummy-token",
                 db,
                 workspace_base,
                 None,

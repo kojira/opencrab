@@ -93,6 +93,26 @@ impl DiscordGatewayActions {
         }
     }
 
+    /// Bot トークンから組み立てる。serenity の `Http` の構築をこの中に閉じるので、
+    /// 呼び出し側は SDK（serenity）の型を持たなくてよい。`Http::new` は接続せず、
+    /// 実際に Discord API を叩くのは送信時なので、トークンから組むのは自然な使い方。
+    ///
+    /// 既に `Arc<Http>` を握っている経路（稼働中の [`crate::DiscordGateway`] から
+    /// `http()` を借りるなど）は [`DiscordGatewayActions::new`] を使う。
+    pub fn from_token(
+        token: &str,
+        db: opencrab_db::Db,
+        workspace_base: String,
+        default_subtask_webhook: Option<WebhookConfig>,
+    ) -> Self {
+        Self::new(
+            Arc::new(Http::new(token)),
+            db,
+            workspace_base,
+            default_subtask_webhook,
+        )
+    }
+
     /// エージェントのワークスペース root（ベーステンプレートの {agent_id} を展開）。
     fn agent_workspace_root(&self, agent_id: &str) -> anyhow::Result<PathBuf> {
         // 展開は core の型付きリゾルバに一本化（agent_id 検証込み — #48）。

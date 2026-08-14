@@ -28,4 +28,21 @@ if printf '%s\n' "$core_deps" | grep -qxE "$FORBIDDEN"; then
 fi
 echo "R4 OK"
 
-# --- R5（SDK が共有層に現れない）は段階 1 で有効化する ---
+# --- R5: SDK（serenity/songbird）は共有層に現れない ---
+# R4 と同じ `--edges no-dev`（normal + build、dev-only 除外）で揃える。
+SDK='serenity|serenity-voice-model|songbird'
+for p in opencrab-gateway opencrab-actions; do
+  deps="$(cargo tree -p "$p" --edges no-dev --prefix none --no-dedupe | sed -E 's/ v[0-9].*//' | sort -u)"
+  if printf '%s\n' "$deps" | grep -qxE "$SDK"; then
+    echo "R5 FAIL: $p に SDK が漏れている:"; printf '%s\n' "$deps" | grep -xE "$SDK"; exit 1
+  fi
+done
+echo "R5(gateway/actions) OK"
+
+# --- R6: feature の組み合わせでビルドできる ---
+# CI では build/test（--all-features）の後ろで走る（check-deps.sh の呼び出し位置）。
+cargo build -p opencrab-gateway
+cargo build -p opencrab-server --no-default-features
+cargo build -p opencrab-server --no-default-features --features discord
+cargo build -p opencrab-server
+echo "R6(discord axis) OK"

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = ["discord"]
-discord = ["dep:opencrab-discord", "dep:serenity"]
+discord = ["dep:opencrab-discord"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -36,7 +36,6 @@ dotenvy = { workspace = true }
 toml = { workspace = true }
 opencrab-discord = { workspace = true, optional = true }
 opencrab-voice = { workspace = true }
-serenity = { workspace = true, optional = true }
 notify = "6"
 notify-debouncer-mini = "0.4"
 # Nostr 受信 → Discord 転記（#252 段階 A）の非ブロック webhook POST。server は

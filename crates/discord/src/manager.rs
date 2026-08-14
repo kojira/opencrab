@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use opencrab_gateway::DiscordGateway;
+use crate::gateway::DiscordGateway;
 
 use crate::AgentRunner;
 use opencrab_actions::subtask::SubtaskRegistry;

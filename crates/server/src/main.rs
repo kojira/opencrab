@@ -389,7 +389,7 @@ async fn main() -> anyhow::Result<()> {
             if valid_agent_ids.is_empty() {
                 tracing::error!("No valid agents found for Discord gateway, not starting");
             } else {
-                let gateway = Arc::new(opencrab_gateway::DiscordGateway::new(&discord_cfg.token));
+                let gateway = Arc::new(opencrab_discord::DiscordGateway::new(&discord_cfg.token));
                 gateway.start().await?;
 
                 // auto-dispatch の登録簿。停止（`cancel_subtask`）は gateway 非依存層の実装が

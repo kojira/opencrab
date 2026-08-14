@@ -25,9 +25,9 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
+use crate::gateway::DiscordGateway;
 use opencrab_actions::SessionLocks;
 use opencrab_core::a2ui::UiRenderer;
-use opencrab_gateway::DiscordGateway;
 use opencrab_gateway::IncomingMessage;
 
 use crate::AgentRunner;
@@ -1506,7 +1506,7 @@ async fn process_timed_fire<T: AgentRunner>(
 /// PendingInteractionRegistryから該当するインタラクションを検索し、
 /// LoopEvent::InteractionResponseとしてイベントループに送信する。
 async fn handle_component_interaction(
-    data: opencrab_gateway::ComponentInteractionData,
+    data: crate::gateway::ComponentInteractionData,
     registry: &opencrab_core::a2ui::PendingInteractionRegistry,
     renderer_http: Arc<serenity::http::Http>,
     event_tx: mpsc::UnboundedSender<LoopEvent>,
@@ -1586,7 +1586,7 @@ async fn handle_component_interaction(
     };
 
     // Handle ModalSubmit: extract field values and merge into context
-    if data.interaction_kind == opencrab_gateway::InteractionKind::ModalSubmit {
+    if data.interaction_kind == crate::gateway::InteractionKind::ModalSubmit {
         // Remove from registry
         let _ = registry.remove(&interaction_id);
 
@@ -1619,7 +1619,7 @@ async fn handle_component_interaction(
     }
 
     // Handle SelectMenu: merge selected_values into context
-    if data.interaction_kind == opencrab_gateway::InteractionKind::SelectMenu {
+    if data.interaction_kind == crate::gateway::InteractionKind::SelectMenu {
         // Remove from registry
         let _ = registry.remove(&interaction_id);
 

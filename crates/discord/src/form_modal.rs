@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
+use crate::gateway::{A2uiFormModalResolver, A2uiFormModalSpec};
 use opencrab_core::a2ui::{A2uiComponentType, PendingInteractionRegistry};
-use opencrab_gateway::{A2uiFormModalResolver, A2uiFormModalSpec};
 use tracing::warn;
 
 use crate::renderer::DiscordRenderer;
