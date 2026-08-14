@@ -254,6 +254,24 @@ impl AppState {
     }
 }
 
+/// 本番の transport 発火先 descriptor を **1 箇所で**登録する（#628・生存非依存）。
+///
+/// **登録の源はこの関数だけ**にする（main.rs の起動配線 / `test_app_state` / scheduler の
+/// `test_router` / 登録簿を反復する generic テストが**すべてこれを呼ぶ**）。個々の register を
+/// 各所に散らすと、本番へ足してテスト側への追記を忘れる隙ができ、prefix 衝突が本番でだけ
+/// 顕在化しうる（#628 が直した密結合と同じ形になる）。重複を消せば、generic テストが**本当に
+/// 本番登録簿を反復する**。Discord は feature gate の内側（クレート自体が居ない構成がある）。
+///
+/// なお起動時の防御は [`opencrab_actions::TimedFireRouter::self_check`]（本番登録簿そのもので
+/// prefix 衝突・登録漏れを検出）が担う。この 1 本化は「登録関数への追加忘れ」を減らす方で、
+/// 両方あって初めて塞がる。
+pub fn register_production_descriptors(router: &opencrab_actions::TimedFireRouter) {
+    #[cfg(feature = "discord")]
+    router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
+    router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
+    router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
+}
+
 /// 最小構成の `AppState`（in-memory DB、LLM プロバイダ 0 件、gateway マネージャ無し）。
 ///
 /// crate 内のユニットテスト共用。`AppState` にフィールドが増えたときの追随箇所を
@@ -261,6 +279,11 @@ impl AppState {
 #[cfg(test)]
 pub(crate) fn test_app_state() -> AppState {
     let conn = opencrab_db::init_memory().unwrap();
+    // #628: 本番（main.rs）と同じ transport descriptor を生存非依存で登録する（源は 1 本化・
+    // `register_production_descriptors`）。これが無いと set/get_my_heartbeat・schedule ツールが
+    // 発火先を解決できず（登録簿が空）拒否される。
+    let timed_fire_router = opencrab_actions::TimedFireRouter::new();
+    register_production_descriptors(&timed_fire_router);
     AppState {
         db: opencrab_db::Db::from_connection(conn),
         llm_router: SharedLlmRouter::new(LlmRouter::new()),
@@ -289,7 +312,7 @@ pub(crate) fn test_app_state() -> AppState {
         web_gateway: Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: Arc::new(subtask_registries::SubtaskRegistries::new()),
         session_locks: Arc::new(opencrab_actions::SessionLocks::new()),
-        timed_fire_router: Arc::new(opencrab_actions::TimedFireRouter::new()),
+        timed_fire_router: Arc::new(timed_fire_router),
         progress_debounce: Arc::new(subtask_registries::ProgressDebounce::new()),
         subtask_notifiers: Arc::new(dashmap::DashMap::new()),
         subtask_lifecycle_notifier: Arc::new(std::sync::Mutex::new(None)),

@@ -3,6 +3,7 @@
 //! Provides Discord gateway actions, message processing loop, and per-agent bot management.
 //! All Discord-specific logic lives here, keeping the server crate Discord-free.
 
+pub mod fire_descriptor;
 pub mod form_modal;
 pub mod gateway_actions;
 pub mod manager;
@@ -12,6 +13,7 @@ pub mod renderer;
 mod typing_keepalive;
 pub mod voice_session;
 
+pub use fire_descriptor::DiscordFire;
 pub use gateway_actions::DiscordGatewayActions;
 // 通知先（webhook）の設定型は gateway 非依存層（`opencrab_actions::webhook_target`）が
 // 保持する（#157 S4）。Discord crate は re-export せず、他 crate が Discord crate 経由で

@@ -16,11 +16,12 @@
 //! 話しているセッション」**（`ctx.session_id`）に対して設定・照会する。エージェントは
 //! `enabled` と `interval_secs` だけを指定する（選ぶべきスコープが無い）。
 //!
-//! 発火先（Nostr broadcast / Discord channel）は `session_id` の接頭辞から導く（設計 §3.6）。
-//! 発火経路を持つのは **`nostr-` / `discord-` セッションだけ**なので、それ以外の種別
-//! （`web-` / `heartbeat-` / `agent-msg-` 等）で呼ばれたら**明示エラーで拒否**する
+//! 発火先は各 transport の `TransportFire` descriptor が `session_id` から名乗る（#628）。
+//! 発火経路を持つのは **登録済み transport のセッション（`nostr-` / `discord-` / `web-`）だけ**
+//! なので、それ以外の種別（`heartbeat-` / `agent-msg-` 等）で呼ばれたら**明示エラーで拒否**する
 //! （fail-closed）。「enabled にできたのに永遠に発火しない行」を作らせない（発端が UX
-//! なので「設定できたのに発火しない」は解決になっていない・設計 §13.1）。
+//! なので「設定できたのに発火しない」は解決になっていない・設計 §13.1）。**web も発火先**なので
+//! （#627）、隔離環境（Discord・Nostr 無効）でもダッシュボードの会話にハートビートを設定できる。
 //!
 //! # 「自分のだけ」をどう保証しているか
 //!
@@ -166,30 +167,35 @@ fn parse_interval_arg(
     }
 }
 
-/// 現在のセッションを発火先へ解決する（設計 §3.6 と**同じ種別集合**を db 層で共有）。
+/// 現在のセッションを発火先へ解決する（#628: transport 登録簿へ問い合わせる）。
 ///
-/// `ctx.session_id` が無い（セッション文脈なし）→ fail-closed エラー。`nostr-` / `discord-`
-/// 以外（発火経路が無い種別）→ fail-closed エラー。「設定できたのに永遠に発火しない行」を
-/// 作らせない（設計 §13.1）。
+/// `ctx.session_id` が無い（セッション文脈なし）→ fail-closed エラー。発火経路が無い種別
+/// （登録済み descriptor がどれも名乗らない）→ fail-closed エラー。発火（scheduler）と同じ
+/// 登録簿を引くので「設定できたのに永遠に発火しない行」を作らせない（設計 §13.1）。
 fn current_session_target(
+    state: &AppState,
     ctx: &GatewayCallContext,
-) -> Result<(String, opencrab_db::queries::SessionFireTarget), GatewayActionResult> {
+) -> Result<(String, opencrab_actions::FireTarget), GatewayActionResult> {
     let session_id = match ctx.session_id.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
             // 理由だけでなく **remedy（次に何をすればよいか）** を書く（#456 の発端は「混乱」
-            // なので、拒否で詰まらせると混乱を別の形にすり替えるだけになる・M-b）。
-            return Err(err(
-                "このセッションからはハートビートを設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
-            ));
+            // なので、拒否で詰まらせると混乱を別の形にすり替えるだけになる・M-b）。remedy の
+            // 「どこで実行すればよいか」は登録済み transport から生成する（#628・手書きしない=足した
+            // transport が自動で載る）。
+            return Err(err(format!(
+                "このセッションからはハートビートを設定・照会できません（セッション文脈がありません）。設定したい対象のセッション——{}——で実行してください。",
+                state.timed_fire_router.fire_target_hint()
+            )));
         }
     };
-    match opencrab_db::queries::resolve_session_fire_target(session_id, &ctx.agent_id) {
+    match state.timed_fire_router.resolve_target(session_id, &ctx.agent_id) {
         Some(target) => Ok((session_id.to_string(), target)),
         // 理由（発火経路が無い種別）＋ remedy（どこで実行すればよいか）を 1 読で示す（M-b）。
-        None => Err(err(
-            "このセッションからはハートビートを設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——Discord のチャンネル、または Nostr の自発投稿——で実行してください。",
-        )),
+        None => Err(err(format!(
+            "このセッションからはハートビートを設定・照会できません（このセッション種別には発火経路がありません）。設定したい対象のセッション——{}——で実行してください。",
+            state.timed_fire_router.fire_target_hint()
+        ))),
     }
 }
 
@@ -203,7 +209,7 @@ fn session_payload(
     conn: &rusqlite::Connection,
     agent_id: &str,
     session_id: &str,
-    target: &opencrab_db::queries::SessionFireTarget,
+    target: &opencrab_actions::FireTarget,
 ) -> serde_json::Value {
     let limits = state.heartbeat_limits;
     let row = opencrab_db::queries::get_session_heartbeat_config(conn, agent_id, session_id)
@@ -242,15 +248,21 @@ fn session_payload(
 
     // enabled なのに発火しない理由（本人に見せる・#394）。**whitelist は現行 HB 発火経路に
     // ゲートとして存在しないので理由に含めない**（含めると発火に影響しない嘘の理由になる・
-    // 設計 §5 N3 / §13.1 訂正）。実際の非発火ゲートは (a) 壊れた間隔・(b) `discord-` の live G。
+    // 設計 §5 N3 / §13.1 訂正）。実際の非発火ゲートは (a) 壊れた間隔・(b) G ゲート対象 transport
+    // （Discord）の live G。**「Discord か」ではなく「G ゲート対象か」を descriptor に問う**（#628）。
     let live_g = state.heartbeat_config_rx.borrow().enabled;
+    let g_gated = state
+        .timed_fire_router
+        .descriptor(target.kind)
+        .map(|d| d.is_g_gated())
+        .unwrap_or(false);
     let gated_reason: Option<String> = if enabled {
         if effective.is_none() {
             Some(
                 "設定された間隔が不正（0 以下）なため発火しません。有効な間隔（秒）を指定し直してください。"
                     .to_string(),
             )
-        } else if target.is_discord() && !live_g {
+        } else if g_gated && !live_g {
             Some(
                 "グローバルのハートビートが無効化（[agent] heartbeat_enabled=false）されているため、現在このセッションは発火しません（運用者設定）。"
                     .to_string(),
@@ -294,7 +306,7 @@ pub(crate) fn get_my_heartbeat(
         return denied;
     }
 
-    let (session_id, target) = match current_session_target(ctx) {
+    let (session_id, target) = match current_session_target(state, ctx) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -349,7 +361,7 @@ pub(crate) fn set_my_heartbeat(
         return err("enabled か interval_secs のどちらかが必要です");
     }
 
-    let (session_id, target) = match current_session_target(ctx) {
+    let (session_id, target) = match current_session_target(state, ctx) {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -451,13 +463,14 @@ pub(crate) fn set_my_heartbeat(
 ///
 /// scheduler の時刻発火と**同じ関数**（[`crate::heartbeat_fire::run_one_heartbeat`]）を呼ぶ。
 /// テスト用の別経路は作らない（別経路だとテストで通っても本番で挙動が割れる・#599）。発火先の
-/// 解決（session_id → `SessionFireTarget`）も設定ツールと同じ db 層の関数を使う。
+/// 解決（session_id → `FireTarget`）も設定ツールと同じ transport 登録簿を引く（#628）。
 ///
 /// # 対象セッション
 ///
 /// 引数 `session_id` を渡せばそのセッション、省略すれば**現在のセッション**を発火する。現在
 /// セッション以外を指定できるのはオーナー / co_agent 限定だから（テスト用途）。発火経路の無い
-/// 種別（`web-` 等）は fail-closed で拒否する。
+/// 種別（`heartbeat-` / `agent-msg-` 等・登録済み descriptor がどれも名乗らない）は fail-closed
+/// で拒否する。
 ///
 /// # `last_fired_at` は更新しない
 ///
@@ -487,19 +500,21 @@ pub(crate) fn run_my_heartbeat(
     }
 
     // 対象セッション: 明示 session_id 引数（テスト用）、無ければ現在のセッション。どちらも
-    // 発火経路の無い種別は fail-closed で拒否する（`resolve_session_fire_target` / db 層で共有）。
+    // 発火経路の無い種別は fail-closed で拒否する（transport 登録簿と同じ解決・#628）。
     let (session_id, target) = match args.get("session_id") {
         Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
-            match opencrab_db::queries::resolve_session_fire_target(s, &ctx.agent_id) {
+            match state.timed_fire_router.resolve_target(s, &ctx.agent_id) {
                 Some(t) => (s.to_string(), t),
                 None => {
+                    // remedy は登録済み transport から生成する（#628・web を足しても自動で載る）。
                     return err(format!(
-                        "session_id「{s}」には発火経路がありません（発火できるのは discord- / nostr- セッションだけです）。"
+                        "session_id「{s}」には発火経路がありません（発火できるのは {} のセッションです）。",
+                        state.timed_fire_router.fire_target_hint()
                     ));
                 }
             }
         }
-        Some(serde_json::Value::Null) | None => match current_session_target(ctx) {
+        Some(serde_json::Value::Null) | None => match current_session_target(state, ctx) {
             Ok(v) => v,
             Err(e) => return e,
         },
@@ -508,11 +523,8 @@ pub(crate) fn run_my_heartbeat(
 
     // 受け口の有無を先に確認する（UX: ゲートウェイ未稼働なら黙って spawn せず即エラーで返す）。
     // これは発火経路ではなく事前検証（読み取りのみ）。実際の発火は run_one_heartbeat が回す。
-    let kind = if target.is_discord() {
-        opencrab_actions::gateway_kinds::DISCORD
-    } else {
-        opencrab_actions::gateway_kinds::NOSTR
-    };
+    // 受け口の kind は発火先の transport（descriptor が名乗った kind）そのもの（#628）。
+    let kind = target.kind;
     if !state.timed_fire_router.has_sink_for_kind(kind) {
         return err(format!(
             "{kind} のゲートウェイが稼働していないため発火できません（受け口が未登録）。ゲートウェイの起動を確認してください。"

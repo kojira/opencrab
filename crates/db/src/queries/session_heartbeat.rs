@@ -11,91 +11,20 @@ use super::*;
 // ============================================
 //
 // agent スコープ（`agent_heartbeat_config`）と channel スコープ
-// （`discord_channel_config.heartbeat_*`）を畳んだ後継。発火先（Nostr broadcast /
-// Discord channel）は `session_id` 接頭辞から導くので列に持たない。
+// （`discord_channel_config.heartbeat_*`）を畳んだ後継。
 //
-// **この PR（PR1）では発火経路はまだこの表を読まない**（中央スケジューラへの切替は PR2）。
-// ここではスキーマ・移行・クエリ関数までを用意する。
-
-/// セッションの発火先（`session_id` 接頭辞から導く・設計 §3.6）。
-///
-/// 発火経路を持たないセッション種別（`web-`/`heartbeat-`/`agent-msg-` 等）や壊れた
-/// `session_id` は [`resolve_session_fire_target`] が `None` を返す = **fail-closed**。
-///
-/// **なぜ db クレートに置くか**: 中央スケジューラ（発火）と `set_my_heartbeat` /
-/// `get_my_heartbeat`（受理判定・ゲート理由表示）が **同じ種別集合**で判定しなければ
-/// 「設定できたのに永遠に発火しない行」ができる（設計 §13.1）。両者が別クレート
-/// （bin / lib）にあるため、共有できる db 層へ 1 つだけ置く（源を二重化しない）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionFireTarget {
-    /// `nostr-{agent}`: Nostr broadcast（G ゲート対象外）。
-    NostrBroadcast,
-    /// `discord-{agent}-{guild}-{channel}`: その channel（発火時 live G でゲート）。
-    DiscordChannel {
-        guild_id: String,
-        channel_id: String,
-    },
-}
-
-impl SessionFireTarget {
-    /// `discord-` セッションか（発火時に live G マスタゲートの対象になる種別か・設計 §5）。
-    pub fn is_discord(&self) -> bool {
-        matches!(self, SessionFireTarget::DiscordChannel { .. })
-    }
-
-    /// 発火先の「実会話」セッション ID（ハートビートが `[Channel conversation]` として
-    /// 読む、外で実際に交わされている会話の在処 / #404 / #508）。
-    ///
-    /// [`resolve_session_fire_target`] の逆写像。session_id → 発火先を解く parse と対で、
-    /// 発火先 → session_id を組む。`nostr-{agent}` / `discord-{agent}-{guild}-{channel}` の
-    /// 書式の源をここ 1 箇所へ集約する（§3.6 の「源を二重化しない」）。
-    ///
-    /// **3 つ目の gateway を足したらこの `match` が未対応で割れる** — 発火先を増やしたら
-    /// 実会話の在処も必ず決めさせる（型で強制する。以前の
-    /// `heartbeat_channel_session_id` は Discord 書式を文字列から組み直す関数で、Nostr
-    /// （guild/channel が空）では必ず `None` になり実会話が 1 行も入らなかった / #508）。
-    pub fn channel_session_id(&self, agent_id: &str) -> String {
-        match self {
-            SessionFireTarget::NostrBroadcast => format!("nostr-{agent_id}"),
-            SessionFireTarget::DiscordChannel {
-                guild_id,
-                channel_id,
-            } => format!("discord-{agent_id}-{guild_id}-{channel_id}"),
-        }
-    }
-}
-
-/// `session_id` を保存済み `agent_id` で剥がして発火先を導く（設計 §3.6・B4）。
-///
-/// **naive な `split('-')` は禁止**（`agent_id` は UUID でハイフンを含む。例
-/// `6b79ac3a-7f17-4618-a827-5bda992a3698`）。保存済み `agent_id` で接頭辞を剥がし、残りの
-/// guild/channel が数値（ハイフン無し）であることを確認する。合致しなければ `None`
-/// （fail-closed）。発火経路を持たない種別（`web-`/`heartbeat-`/`agent-msg-` 等）も `None`。
-pub fn resolve_session_fire_target(session_id: &str, agent_id: &str) -> Option<SessionFireTarget> {
-    if session_id == format!("nostr-{agent_id}") {
-        return Some(SessionFireTarget::NostrBroadcast);
-    }
-    let discord_prefix = format!("discord-{agent_id}-");
-    if let Some(rest) = session_id.strip_prefix(&discord_prefix) {
-        // rest = "{guild}-{channel}"。guild/channel は数値（ハイフン無し）なので rsplit_once 安全。
-        if let Some((guild, channel)) = rest.rsplit_once('-') {
-            let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-            if numeric(guild) && numeric(channel) {
-                return Some(SessionFireTarget::DiscordChannel {
-                    guild_id: guild.to_string(),
-                    channel_id: channel.to_string(),
-                });
-            }
-        }
-    }
-    None
-}
+// **発火先の知識（transport 名・ID 書式・parse/build）は db 層から撤去した**（#628）。
+// 各 transport が `opencrab_actions::TransportFire` descriptor で自分の性質と ID 書式を
+// 名乗り、中核は `TimedFireRouter` の登録簿へ問い合わせる。db に残るのは transport 中立な
+// 設定行・クエリ・純粋関数だけ（`session_id` はこの表では不透明な文字列として扱う）。
 
 /// セッション単位ハートビート設定 1 行（`session_heartbeat_config`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHeartbeatConfigRow {
     pub agent_id: String,
-    /// `nostr-{agent}` / `discord-{agent}-{guild}-{channel}`。
+    /// 発火先セッションの id。この表は不透明な文字列として扱い、書式は各 transport の
+    /// descriptor が名乗る（例: `nostr-{agent}` / `discord-{agent}-{guild}-{channel}` /
+    /// `web-{agent}-{conversation}`・#628）。
     pub session_id: String,
     pub enabled: bool,
     /// 生値。`None` = 未設定（運用者の既定に従う）。
@@ -275,83 +204,11 @@ mod tests {
 
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
 
-    #[test]
-    fn resolve_session_fire_target_nostr() {
-        assert_eq!(
-            resolve_session_fire_target(&format!("nostr-{AGENT_UUID}"), AGENT_UUID),
-            Some(SessionFireTarget::NostrBroadcast)
-        );
-    }
-
-    #[test]
-    fn resolve_session_fire_target_discord_strips_uuid_prefix() {
-        // agent_id が UUID（ハイフン入り）でも保存済み agent_id で剥がすので割れない。
-        let sid = format!("discord-{AGENT_UUID}-1001-2002");
-        let target = resolve_session_fire_target(&sid, AGENT_UUID);
-        assert_eq!(
-            target,
-            Some(SessionFireTarget::DiscordChannel {
-                guild_id: "1001".to_string(),
-                channel_id: "2002".to_string(),
-            })
-        );
-        assert!(target.unwrap().is_discord());
-    }
-
-    /// #508: `channel_session_id` は `resolve_session_fire_target` の逆写像。両方向を
-    /// 突き合わせて、発火先 → session_id → 発火先 が round-trip すること（parse と build が
-    /// 独立実装なので恒真にならない）。Nostr が空でなく `nostr-{agent}` を返すのが要点
-    /// （旧 `heartbeat_channel_session_id` は Nostr で必ず `None` を返していた）。
-    #[test]
-    fn channel_session_id_is_inverse_of_resolve() {
-        let nostr = SessionFireTarget::NostrBroadcast.channel_session_id(AGENT_UUID);
-        assert_eq!(nostr, format!("nostr-{AGENT_UUID}"));
-        assert_eq!(
-            resolve_session_fire_target(&nostr, AGENT_UUID),
-            Some(SessionFireTarget::NostrBroadcast)
-        );
-
-        let discord = SessionFireTarget::DiscordChannel {
-            guild_id: "1001".to_string(),
-            channel_id: "2002".to_string(),
-        }
-        .channel_session_id(AGENT_UUID);
-        assert_eq!(discord, format!("discord-{AGENT_UUID}-1001-2002"));
-        assert_eq!(
-            resolve_session_fire_target(&discord, AGENT_UUID),
-            Some(SessionFireTarget::DiscordChannel {
-                guild_id: "1001".to_string(),
-                channel_id: "2002".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_session_fire_target_fail_closed() {
-        // 発火経路を持たない種別 → None。
-        assert_eq!(
-            resolve_session_fire_target(&format!("web-{AGENT_UUID}"), AGENT_UUID),
-            None
-        );
-        assert_eq!(
-            resolve_session_fire_target(&format!("heartbeat-{AGENT_UUID}-2002"), AGENT_UUID),
-            None
-        );
-        assert_eq!(
-            resolve_session_fire_target(&format!("agent-msg-{AGENT_UUID}"), AGENT_UUID),
-            None
-        );
-        // 非数値 guild/channel → None（fail-closed）。
-        assert_eq!(
-            resolve_session_fire_target(&format!("discord-{AGENT_UUID}-guild-chan"), AGENT_UUID),
-            None
-        );
-        // 別 agent_id の session を渡しても剥がれない → None。
-        assert_eq!(
-            resolve_session_fire_target(&format!("discord-{AGENT_UUID}-1001-2002"), "other-agent"),
-            None
-        );
-    }
+    // 発火先の parse/build（旧 `resolve_session_fire_target` / `channel_session_id` / 旧 enum）は
+    // 各 transport の `TransportFire` descriptor へ移設した（#628）。それらの単体テスト（fail-closed /
+    // UUID 剥がし / round-trip）は各 descriptor crate に、登録簿一括の排他・round-trip は
+    // `crates/server/tests/transport_fire_registry.rs` にある（この表は session_id を不透明文字列
+    // としてしか扱わないので、ここでは発火先の解釈をテストしない）。
 
     #[test]
     fn resolve_session_interval_semantics_match_resolve_agent() {

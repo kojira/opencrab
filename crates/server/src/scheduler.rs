@@ -66,15 +66,14 @@ use opencrab_server::AppState;
 /// これで頭打ちしても判定は必ず `<= now` を再評価するので、遅れて拾うだけ。
 const MAX_SLEEP_SECS: u64 = 300;
 
-/// セッションの発火先（`session_id` 接頭辞から導く・設計 §3.6）。
+/// セッションの発火先（`session_id` から transport descriptor が解決する・#628）。
 ///
-/// **実体は db クレートへ移設した**（[`opencrab_db::queries::SessionFireTarget`] /
-/// [`resolve_fire_target`]）。理由: 発火（スケジューラ）と受理判定・ゲート理由表示
-/// （`set_my_heartbeat` / `get_my_heartbeat`・別クレート）が **同じ種別集合**で判定
-/// しなければ「設定できたのに永遠に発火しない行」ができる（設計 §13.1）。源を二重化
-/// しないため、両者が依存できる db 層の 1 関数に集約する。ここは別名で受けるだけ。
-use opencrab_db::queries::resolve_session_fire_target as resolve_fire_target;
-use opencrab_db::queries::SessionFireTarget as FireTarget;
+/// **発火先の知識は各 transport の `TransportFire` descriptor へ移した**（旧 db 層の
+/// `SessionFireTarget` enum を撤去）。scheduler は登録簿（[`opencrab_actions::TimedFireRouter`]）へ
+/// 問い合わせるだけで、transport の名前も ID 書式も知らない。発火（scheduler）と受理判定・
+/// ゲート理由表示（`set_my_heartbeat` / `get_my_heartbeat`）は同じ登録簿を引くので「設定できた
+/// のに永遠に発火しない行」ができない（設計 §13.1）。
+use opencrab_actions::FireTarget;
 
 /// in-flight / attempts のキー（設計 §3.1）。**session_id ではなく enum**で分ける。
 ///
@@ -137,6 +136,7 @@ fn later_of(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTi
 ///
 /// 期待集合を手書きしない（`list_enabled_*` をそのまま解決）。
 fn rebuild_entries(
+    router: &opencrab_actions::TimedFireRouter,
     conn: &rusqlite::Connection,
     live_g: bool,
     default_interval_secs: u64,
@@ -149,7 +149,7 @@ fn rebuild_entries(
     match opencrab_db::queries::list_enabled_session_heartbeat_configs(conn) {
         Ok(rows) => {
             for row in rows {
-                let Some(target) = resolve_fire_target(&row.session_id, &row.agent_id) else {
+                let Some(target) = router.resolve_target(&row.session_id, &row.agent_id) else {
                     // 未知/解釈不能な session_id → 発火しない（壊れた行で外部へ publish しない）。
                     tracing::warn!(
                         agent_id = %row.agent_id,
@@ -158,9 +158,14 @@ fn rebuild_entries(
                     );
                     continue;
                 };
-                // G ゲート: `discord-` は live G が false なら発火しない（§4.2 ランタイム G ゲート）。
-                // `nostr-` は G 非依存。**whitelist ゲートは掛けない**（設計 §5 N3・現行経路に無い）。
-                if matches!(target, FireTarget::DiscordChannel { .. }) && !live_g {
+                // G ゲート: G ゲート対象の transport（Discord）は live G が false なら発火しない
+                // （§4.2 ランタイム G ゲート）。対象外（Nostr / web）は G 非依存。**whitelist ゲートは
+                // 掛けない**（設計 §5 N3・現行経路に無い）。対象か否かは descriptor が名乗る（#628）。
+                let g_gated = router
+                    .descriptor(target.kind)
+                    .map(|d| d.is_g_gated())
+                    .unwrap_or(false);
+                if g_gated && !live_g {
                     continue;
                 }
                 // 壊れた interval（0 以下）は fail-closed で発火しない（§4.3 と同じ意味論）。
@@ -520,6 +525,7 @@ pub(crate) async fn run_scheduler(state: AppState, config_rx: watch::Receiver<He
             };
             let attempts_snapshot = attempts.lock().unwrap();
             rebuild_entries(
+                &state.timed_fire_router,
                 &conn,
                 live_g,
                 default_interval_secs,
@@ -702,48 +708,34 @@ mod tests {
 
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
 
-    #[test]
-    fn resolve_fire_target_nostr() {
-        assert_eq!(
-            resolve_fire_target(&format!("nostr-{AGENT_UUID}"), AGENT_UUID),
-            Some(FireTarget::NostrBroadcast)
-        );
+    /// テスト用の登録簿: **本番と同じ源**（`register_production_descriptors`）で descriptor を
+    /// 積む（#628）。本番へ transport を足せば scheduler テストの登録簿も自動で追随する
+    /// （各所での register の散らしを避ける・ブロッカー対応）。rebuild_entries は登録簿へ
+    /// 問い合わせて発火先を解決するので、ここは scheduler がその登録簿を正しく引くことを見る。
+    fn test_router() -> opencrab_actions::TimedFireRouter {
+        let router = opencrab_actions::TimedFireRouter::new();
+        opencrab_server::register_production_descriptors(&router);
+        router
     }
 
+    /// scheduler は登録簿経由で発火先を解決する（Discord は G ゲート対象・Nostr は非対象）。
     #[test]
-    fn resolve_fire_target_discord_strips_uuid_prefix() {
-        // agent_id が UUID（ハイフン入り）でも保存済み agent_id で剥がすので割れない。
-        let sid = format!("discord-{AGENT_UUID}-1001-2002");
-        assert_eq!(
-            resolve_fire_target(&sid, AGENT_UUID),
-            Some(FireTarget::DiscordChannel {
-                guild_id: "1001".to_string(),
-                channel_id: "2002".to_string(),
-            })
-        );
-    }
+    fn router_resolves_and_reports_g_gate() {
+        let router = test_router();
+        let nostr = router
+            .resolve_target(&format!("nostr-{AGENT_UUID}"), AGENT_UUID)
+            .expect("nostr が解決できない");
+        assert!(!router.descriptor(nostr.kind).unwrap().is_g_gated());
 
-    #[test]
-    fn resolve_fire_target_fail_closed_on_unknown_and_nonnumeric() {
-        // 発火経路を持たない種別 → None。
-        assert_eq!(
-            resolve_fire_target(&format!("web-{AGENT_UUID}"), AGENT_UUID),
-            None
-        );
-        assert_eq!(
-            resolve_fire_target(&format!("heartbeat-{AGENT_UUID}-2002"), AGENT_UUID),
-            None
-        );
-        // 非数値 guild/channel → None（fail-closed）。
-        assert_eq!(
-            resolve_fire_target(&format!("discord-{AGENT_UUID}-guild-chan"), AGENT_UUID),
-            None
-        );
-        // 別 agent_id の session を渡しても剥がれない → None。
-        assert_eq!(
-            resolve_fire_target(&format!("discord-{AGENT_UUID}-1001-2002"), "other-agent"),
-            None
-        );
+        let discord = router
+            .resolve_target(&format!("discord-{AGENT_UUID}-1001-2002"), AGENT_UUID)
+            .expect("discord が解決できない");
+        assert!(router.descriptor(discord.kind).unwrap().is_g_gated());
+
+        // 発火経路の無い種別は None（fail-closed）。
+        assert!(router
+            .resolve_target(&format!("web-{AGENT_UUID}"), AGENT_UUID)
+            .is_none());
     }
 
     #[test]
@@ -852,7 +844,7 @@ mod tests {
         let attempts = HashMap::new();
 
         // G = true: 3 セッションすべて。
-        let with_g = rebuild_entries(&conn, true, 1800, 300, &attempts);
+        let with_g = rebuild_entries(&test_router(), &conn, true, 1800, 300, &attempts);
         assert_eq!(
             session_ids(&with_g),
             [nostr_a.clone(), nostr_b.clone(), discord_c.clone()]
@@ -865,7 +857,7 @@ mod tests {
             .all(|e| e.next_fire_at.map(|t| t <= Utc::now()).unwrap_or(true)));
 
         // G = false: discord はゲートで消え、nostr 2 だけ残る（nostr は G 非依存）。
-        let without_g = rebuild_entries(&conn, false, 1800, 300, &attempts);
+        let without_g = rebuild_entries(&test_router(), &conn, false, 1800, 300, &attempts);
         assert_eq!(
             session_ids(&without_g),
             [nostr_a, nostr_b].into_iter().collect(),
@@ -898,7 +890,7 @@ mod tests {
             ),
         ];
         let conn = conn_with(&rows);
-        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let entries = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert_eq!(session_ids(&entries), [good].into_iter().collect());
     }
 
@@ -911,7 +903,12 @@ mod tests {
             session_id: session.to_string(),
             next_fire_at: next,
             kind: FireKind::Heartbeat {
-                target: FireTarget::NostrBroadcast,
+                target: FireTarget {
+                    kind: opencrab_actions::gateway_kinds::NOSTR,
+                    channel_id: String::new(),
+                    guild_id: String::new(),
+                    route: String::new(),
+                },
             },
         }
     }
@@ -987,7 +984,7 @@ mod tests {
         let sid = format!("nostr-{AGENT_UUID}");
         let conn = conn_with(&[row(AGENT_UUID, &sid, true, Some(600), Some(long_ago), None)]);
 
-        let before = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let before = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert_eq!(before.len(), 1);
         assert!(before[0]
             .next_fire_at
@@ -997,7 +994,7 @@ mod tests {
         let now_str = Utc::now().to_rfc3339();
         opencrab_db::queries::set_session_last_fired(&conn, AGENT_UUID, &sid, &now_str).unwrap();
 
-        let after = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let after = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert_eq!(after.len(), 1);
         assert!(
             after[0]
@@ -1014,12 +1011,12 @@ mod tests {
         let sid = format!("nostr-{AGENT_UUID}");
         let conn = conn_with(&[row(AGENT_UUID, &sid, true, Some(600), Some(past), None)]);
 
-        let due = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let due = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert!(due[0].next_fire_at.map(|t| t <= Utc::now()).unwrap_or(true));
 
         let mut attempts = HashMap::new();
         attempts.insert(hb_key(&sid), Utc::now());
-        let deferred = rebuild_entries(&conn, true, 1800, 300, &attempts);
+        let deferred = rebuild_entries(&test_router(), &conn, true, 1800, 300, &attempts);
         assert!(
             deferred[0]
                 .next_fire_at
@@ -1102,7 +1099,7 @@ mod tests {
             Some(anchor.to_rfc3339()),
             None,
         )]);
-        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let entries = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].next_fire_at,
@@ -1180,7 +1177,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let entries = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert_eq!(
             schedule_keys(&entries),
             [id_cron, id_every].into_iter().collect(),
@@ -1214,7 +1211,7 @@ mod tests {
         .unwrap();
 
         // G=false でも schedule は残る（HB の discord- は消えるが schedule は G 非依存）。
-        let entries = rebuild_entries(&conn, false, 1800, 300, &HashMap::new());
+        let entries = rebuild_entries(&test_router(), &conn, false, 1800, 300, &HashMap::new());
         assert_eq!(
             schedule_keys(&entries),
             [id].into_iter().collect(),
@@ -1234,7 +1231,7 @@ mod tests {
         )
         .unwrap();
 
-        let before = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let before = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         let sched_entries: Vec<_> = before
             .iter()
             .filter(|e| matches!(e.key, EntryKey::Schedule { .. }))
@@ -1263,7 +1260,7 @@ mod tests {
             &sched(AGENT_UUID, &sid, "totally not a cron", true, None, None),
         )
         .unwrap();
-        let entries = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let entries = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         assert!(
             schedule_keys(&entries).is_empty(),
             "解釈不能な式は発火集合に入らない（fail-closed）"
@@ -1287,7 +1284,7 @@ mod tests {
         opencrab_db::queries::set_agent_schedule_last_fired(&conn, id, &Utc::now().to_rfc3339())
             .unwrap();
 
-        let after = rebuild_entries(&conn, true, 1800, 300, &HashMap::new());
+        let after = rebuild_entries(&test_router(), &conn, true, 1800, 300, &HashMap::new());
         let e = after
             .iter()
             .find(|e| matches!(e.key, EntryKey::Schedule { .. }))

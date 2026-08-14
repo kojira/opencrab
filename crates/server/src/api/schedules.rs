@@ -17,9 +17,10 @@
 //! 不正なら **400**（実行時も fail-closed で発火対象外）。
 //!
 //! # 発火先の制約
-//! `session_id` は**そのエージェントの発火経路を持つセッション**（`nostr-{agent}` /
-//! `discord-{agent}-{guild}-{channel}`）に限る（[`resolve_session_fire_target`] が `Some`）。
-//! 「登録できたのに永遠に発火しない行」や他エージェントのセッションを作らせない。
+//! `session_id` は**そのエージェントの発火経路を持つセッション**（登録済み transport のセッション。
+//! 例: `nostr-{agent}` / `discord-{agent}-{guild}-{channel}` / `web-{agent}-{conversation}`）に限る
+//! （transport 登録簿の `resolve_target` が `Some`・#628）。列挙を固定せず、transport を足しても
+//! 腐らない中立表現にする。「登録できたのに永遠に発火しない行」や他エージェントのセッションを作らせない。
 
 use axum::{
     extract::{Path, State},
@@ -31,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use crate::schedule_cron::{schedule_next_fire_at, validate_schedule};
 use crate::AppState;
 use chrono::{DateTime, Utc};
-use opencrab_db::queries::{resolve_session_fire_target, AgentScheduleRow};
+use opencrab_db::queries::AgentScheduleRow;
 
 fn default_timezone() -> String {
     "Asia/Tokyo".to_string()
@@ -138,10 +139,16 @@ pub(crate) fn create_schedule_core(
             "スケジュール式または timezone が不正です（{e}）。cron は 5 フィールド（例: 0 7 * * *）、周期は @every 3h の形式、timezone は Asia/Tokyo のような IANA 名で指定してください。"
         ))
     })?;
-    if resolve_session_fire_target(session_id, agent_id).is_none() {
-        return Err(ScheduleOpError::BadRequest(
-            "このセッションには発火経路がありません（Nostr の自発投稿、または Discord チャンネルのセッションでのみ登録できます）。".to_string(),
-        ));
+    if state
+        .timed_fire_router
+        .resolve_target(session_id, agent_id)
+        .is_none()
+    {
+        // remedy は登録済み transport から生成する（#628・手書きしない）。
+        return Err(ScheduleOpError::BadRequest(format!(
+            "このセッションには発火経路がありません（{} のセッションでのみ登録できます）。",
+            state.timed_fire_router.fire_target_hint()
+        )));
     }
     if message.trim().is_empty() {
         return Err(ScheduleOpError::BadRequest(
@@ -477,7 +484,11 @@ pub async fn update_schedule(
 
     // 検証（不正は 400）。
     validate_schedule(&new_cron, &new_tz).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if resolve_session_fire_target(&new_session_id, &existing.agent_id).is_none() {
+    if state
+        .timed_fire_router
+        .resolve_target(&new_session_id, &existing.agent_id)
+        .is_none()
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     if new_message.trim().is_empty() {

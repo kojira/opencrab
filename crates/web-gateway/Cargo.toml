@@ -24,6 +24,8 @@ opencrab-actions.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# #628: WebFire::should_be_running のテストで TransportFireEnv（`&Connection` を持つ）を組むため。
+rusqlite = { workspace = true }
 # ルータへ実リクエストを流すため（`ServiceExt::oneshot`）。パスの一致・クエリ名・
 # レスポンス body を HTTP 経由で検査する（#195 レビュー対応）。
 tower = { workspace = true }
