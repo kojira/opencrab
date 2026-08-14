@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 
 use opencrab_actions::{
-    gateway_kinds, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
+    gateway_kinds, AgentRuntime, SettleKind, SubtaskCompletionSink, SubtaskRegistry, SubtaskSettled,
 };
 
 use crate::process;
@@ -132,7 +134,18 @@ pub async fn send_agent_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SendAgentMessageRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    // 0. 存在しないエージェントはターンを起こさない（#632）。`agents` 行が無いと
+    //    per-agent 設定が全部既定に落ちるのに動いてしまい、タイプミスに気づけない。
+    //    セッションも発話も記録する前に弾く（web `web/send` と同じ入口・同じ判定）。
+    if !state.agent_exists(&id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("agent not found: {id}")})),
+        )
+            .into_response();
+    }
+
     // 呼び出し元 ID は入口で 1 回だけ正規化し、以降すべて（認可・セッションキー・
     // speaker_id）で同じ値を使う。`is_owner_id` が trim して比較する一方でセッション
     // キーだけ生値を使うと、`" <id> "` が owner にはなれるのに別セッション・別
@@ -184,7 +197,8 @@ pub async fn send_agent_message(
             if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
                 return Json(
                     serde_json::json!({"error": format!("Failed to create session: {}", e)}),
-                );
+                )
+                .into_response();
             }
         }
     }
@@ -204,7 +218,8 @@ pub async fn send_agent_message(
         };
         let conn = state.db.lock().unwrap();
         if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            return Json(serde_json::json!({"error": format!("Failed to log message: {}", e)}));
+            return Json(serde_json::json!({"error": format!("Failed to log message: {}", e)}))
+                .into_response();
         }
     }
 
@@ -215,7 +230,8 @@ pub async fn send_agent_message(
             "caller_type": caller_type,
             "responses": [],
             "error": "No LLM providers available",
-        }));
+        }))
+        .into_response();
     }
 
     // 5. dispatch 用の共有 registry を確保する（#169）。
@@ -258,7 +274,8 @@ pub async fn send_agent_message(
             Err(e) => {
                 return Json(
                     serde_json::json!({"error": format!("Failed to build conversation: {}", e)}),
-                );
+                )
+                .into_response();
             }
         };
         process::prepend_runtime_context(&raw, "direct_message")
@@ -315,6 +332,7 @@ pub async fn send_agent_message(
                     "content": engine_result.response,
                 }],
             }))
+            .into_response()
         }
         Err(e) => {
             tracing::error!(agent_id = %id, error = %e, "Agent response failed");
@@ -329,6 +347,7 @@ pub async fn send_agent_message(
                     "content": format!("(Error: {})", e),
                 }],
             }))
+            .into_response()
         }
     }
 }

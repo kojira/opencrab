@@ -1390,6 +1390,10 @@ mod tests {
             true
         }
 
+        fn agent_exists(&self, _agent_id: &str) -> bool {
+            true
+        }
+
         fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
             self.session_locks.clone()
         }

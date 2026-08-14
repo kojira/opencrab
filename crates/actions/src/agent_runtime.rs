@@ -73,6 +73,18 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;
 
+    /// `agents` テーブルにこの `agent_id` の行が存在するか（#632）。
+    ///
+    /// エージェント別テーブル（`agent_allowed_commands` / `session_heartbeat_config` /
+    /// `trusted_users` など）には外部キー制約が無いため、存在しない `agent_id` を渡しても
+    /// セッション・ログ・per-agent 設定が「既定に落ちたまま」動いてしまう。タイプミス 1 つで
+    /// 「動くが設定が効かない」状態になり、それに気づけない（#632 の症状）。
+    ///
+    /// ターンを起こす HTTP 入口（`web/send` と REST `POST /api/agents/{id}/messages`）は、
+    /// セッションや発話を記録する**前に**これで存在を確認し、無ければ 404 で弾く。判定は
+    /// この 1 実装（`agents` 行の有無）に集約し、各ハンドラは同じ入口を呼ぶだけにする。
+    fn agent_exists(&self, agent_id: &str) -> bool;
+
     /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
     ///
     /// 時間トリガー（heartbeat）のターンと通常メッセージ処理のターンを**同一セッション上で

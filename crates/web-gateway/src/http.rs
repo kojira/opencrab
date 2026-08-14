@@ -19,7 +19,9 @@ use std::convert::Infallible;
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -90,9 +92,21 @@ pub async fn send_web_message<R: WebAgentRunner>(
     State(state): State<R>,
     Path(id): Path<String>,
     Json(req): Json<SendWebMessageRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
     let user_id = normalize_user_id(req.user_id.as_deref());
     let session_id = web_session_id(&id, &req.conversation_id);
+
+    // 0. 存在しないエージェントはターンを起こさない（#632）。`agents` 行が無いと
+    //    per-agent 設定（heartbeat_instructions / model / persona 等）が全部既定に落ちるのに
+    //    「動いてしまう」ため、タイプミスに気づけない。セッションも発話も記録する前に
+    //    弾き、404 を返す（REST `POST /api/agents/{id}/messages` と同じ入口・同じ判定）。
+    if !state.agent_exists(&id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("agent not found: {id}")})),
+        )
+            .into_response();
+    }
 
     // 1. 認可: 既存 REST（agents_messages）に倣い trusted_users から caller を導出する。
     let caller = state.resolve_caller(&id, &user_id);
@@ -100,12 +114,14 @@ pub async fn send_web_message<R: WebAgentRunner>(
 
     // 2. セッションを用意する（無ければ作成）。
     if let Err(e) = state.ensure_web_session(&session_id, &id) {
-        return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}));
+        return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}))
+            .into_response();
     }
 
     // 3. ユーザ発話を DB へ記録する（応答生成は DB から会話を再構築する）。
     if let Err(e) = state.record_user_message(&id, &session_id, &user_id, &req.content) {
-        return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}));
+        return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}))
+            .into_response();
     }
 
     // 4. LLM プロバイダの可用性チェック。
@@ -115,7 +131,8 @@ pub async fn send_web_message<R: WebAgentRunner>(
             "caller_type": caller_type,
             "response": null,
             "error": "No LLM providers available",
-        }));
+        }))
+        .into_response();
     }
 
     // 5. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
@@ -130,6 +147,7 @@ pub async fn send_web_message<R: WebAgentRunner>(
         "caller_type": caller_type,
         "response": response,
     }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,6 +408,54 @@ mod tests {
             assert_eq!(messages[0].session_id, web_session_id("a", "c1"));
             assert_eq!(messages[0].content, "hi");
         }
+    }
+
+    /// **存在しないエージェントはターンを起こさず 404 で弾く**（#632）。
+    ///
+    /// `agents` 行が無いと per-agent 設定が全部既定に落ちるのに「動いてしまう」ため、
+    /// タイプミスに気づけない。ガードは認可判定・セッション用意・発話記録の**手前**に
+    /// あり、何も走らず・何も記録されないことを固定する（session_logs に何も書かれない）。
+    #[tokio::test]
+    async fn unknown_agent_is_rejected_with_404_without_running() {
+        let runner = FakeRunner::new("走ってはいけない").without_agent();
+        let (status, body) = call(&runner, send_request("ghost", inbound("hi"))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "存在しないエージェントは 404 で弾く"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert_eq!(v["error"], "agent not found: ghost");
+
+        // ターンが走らない・セッションログに何も書かれない（ガードが記録の手前にある）。
+        assert!(
+            runner.runs().is_empty(),
+            "存在しないエージェントで実行された"
+        );
+        assert!(
+            runner.user_messages().is_empty(),
+            "存在しないエージェントでユーザ発話が記録された"
+        );
+        // 認可判定すら呼ばれない（弾くのが一番手前）。
+        assert!(
+            runner.caller_lookups().is_empty(),
+            "存在しないエージェントで認可判定が呼ばれた"
+        );
+    }
+
+    /// **存在するエージェントは従来どおり 200 でターンが走る**（#632 の回帰防止）。
+    ///
+    /// 上の 404 ガードが正常系まで巻き込んでいないことを、同じ形で対にして固定する。
+    #[tokio::test]
+    async fn existing_agent_runs_and_returns_200() {
+        let runner = FakeRunner::new("やあ");
+        let (status, body) = call(&runner, send_request("real", inbound("hi"))).await;
+        assert_eq!(status, StatusCode::OK, "存在するエージェントは 200 で走る");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert_eq!(v["response"], "やあ");
+        assert_eq!(v["session_id"], web_session_id("real", "c1"));
+        assert_eq!(runner.runs().len(), 1, "ターンが 1 回走る");
+        assert_eq!(runner.user_messages().len(), 1, "ユーザ発話が記録される");
     }
 
     /// LLM プロバイダ未設定のときのレスポンス形（docs/api.md の契約）。

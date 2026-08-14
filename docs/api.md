@@ -1200,6 +1200,8 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 `user_id` はハンドラ入口で 1 回だけ前後の空白を除去され（trim）、以降の権限判定・セッション ID・`speaker_id` すべてで同じ正規化済みの値が使われる。つまり `" 123 "` と `"123"` は同じセッション・同じ送信者として扱われる。
 
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、セッション作成・発話記録・ターン実行のいずれも行わず **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。行が無いと per-agent 設定（`heartbeat_instructions` / `model` / `persona` 等）が全部既定に落ちるのに「動いてしまう」ため、タイプミスに気づけないのを防ぐ。判定はエージェント行の有無のみで、**無効・停止中のエージェントの扱いは変えない**。`POST /api/agents/{id}/web/send` も同じ入口・同じ判定で 404 に揃えてある。
+
 **ツール実行は非ブロック（background subtask）**
 
 この経路は非ブロック dispatch を配線している。エージェントが返したツール呼び出しは、同一 assistant メッセージ分をまとめて 1 つの background subtask として dispatch され、**HTTP 応答はその完了を待たずに返る**。
@@ -1354,6 +1356,8 @@ Request:
 ### POST /api/agents/{id}/web/send
 
 **目的**: web UI からのメッセージを送信し、直接応答を得る（応答は同時に SSE へも配送される）
+
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、セッション作成・発話記録・ターン実行のいずれも行わず **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。判定はエージェント行の有無のみで、`POST /api/agents/{id}/messages` と同じ入口・同じ判定。
 
 **Request Body**
 

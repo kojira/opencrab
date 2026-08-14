@@ -55,6 +55,20 @@ impl AgentRuntime for AppState {
         !self.llm_router.get().provider_names().is_empty()
     }
 
+    /// `agents` 行の有無を返す（#632）。判定はこの 1 実装に集約する。
+    ///
+    /// ロック取得は他の読み取りメソッド（`context_budget_tokens` 等）に倣って `unwrap`
+    /// する。ロックが毒化している状況ではどのみち後続が panic するので、ここで握り潰して
+    /// 存在するエージェントを 404 に化けさせないほうがよい（panic → 500 が正しい）。
+    /// 行の取得自体が DB エラーになった場合のみ「存在しない」扱いにする（稀）。
+    fn agent_exists(&self, agent_id: &str) -> bool {
+        let conn = self.db.lock().unwrap();
+        matches!(
+            opencrab_db::queries::get_agent(&conn, agent_id),
+            Ok(Some(_))
+        )
+    }
+
     fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
         // #588 Stage 2: プロセス全体で 1 つの共有実体を返す（clone は Arc の参照カウント増加）。
         self.session_locks.clone()

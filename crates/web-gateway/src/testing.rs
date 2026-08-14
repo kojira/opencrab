@@ -84,6 +84,8 @@ pub struct FakeRunner {
     caller: CallerIdentity,
     /// `has_llm_providers` の返り値（false でプロバイダ未設定の分岐を試す）。
     has_llm_providers: bool,
+    /// `agent_exists` の返り値（false で存在しないエージェントの分岐を試す / #632）。
+    agent_exists: bool,
     /// `Some` なら `ensure_web_session` がこのメッセージで失敗する。
     ensure_session_error: Option<String>,
     /// `Some` なら `record_user_message` がこのメッセージで失敗する。
@@ -116,6 +118,7 @@ impl FakeRunner {
             response,
             caller: CallerIdentity::Agent,
             has_llm_providers: true,
+            agent_exists: true,
             ensure_session_error: None,
             record_user_message_error: None,
             runs: Arc::new(Mutex::new(Vec::new())),
@@ -155,6 +158,12 @@ impl FakeRunner {
     /// LLM プロバイダ未設定にする（ハンドラが実行せずにエラーを返す分岐）。
     pub fn without_llm_provider(mut self) -> Self {
         self.has_llm_providers = false;
+        self
+    }
+
+    /// `agents` 行が無い状態にする（ハンドラが 404 で弾く分岐 / #632）。
+    pub fn without_agent(mut self) -> Self {
+        self.agent_exists = false;
         self
     }
 
@@ -227,6 +236,10 @@ impl AgentRuntime for FakeRunner {
 
     fn has_llm_providers(&self) -> bool {
         self.has_llm_providers
+    }
+
+    fn agent_exists(&self, _agent_id: &str) -> bool {
+        self.agent_exists
     }
 
     fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {
