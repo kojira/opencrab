@@ -685,9 +685,20 @@ impl ActionExecutor for SharedExecutor {
     fn list_tools(&self) -> Vec<FunctionDefinition> {
         self.0.list_tools()
     }
+    fn inline_tool_names(&self) -> HashSet<String> {
+        self.0.inline_tool_names()
+    }
 }
 
-/// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツール名の集合。
+/// 既定で auto-dispatch **しない**（＝ inline 実行のまま）ツールのうち、**制御ツールと
+/// core アクションだけ**の集合。
+///
+/// gateway / MCP のツールは、依存の向き（gateway → actions）の都合でここから定義を舐め
+/// られない。それらの inline 判定は各ツール定義の属性（`GatewayActionDef.class.dispatch`）
+/// が権威になり、`BridgedExecutor` の `ActionExecutor::inline_tool_names` override が索引
+/// から `dispatch == Inline` を集めて**この集合と合わせて**返す。
+/// `SubtaskToolDispatcher::new` はその `executor.inline_tool_names()` を非同期化除外集合に
+/// 使う。
 ///
 /// # 分類基準（この 6 つのどれかに当てはまるツールは inline に残す）
 ///
@@ -733,23 +744,17 @@ impl ActionExecutor for SharedExecutor {
 /// できないため集合ではなく規則で扱う）。長時間の MCP ツールを background 化したい
 /// 運用者は `with_non_dispatch` で当該名を除いた集合を渡す。
 ///
-/// # ドリフト検出
+/// # 分類の強制
 ///
-/// core（[`crate::dispatcher::ActionDispatcher`]）と全 gateway（Discord / Nostr /
-/// server 内蔵の `SystemGatewayActions`）の `definitions()` の**全名**が「この集合に
-/// ある」か「明示的な dispatch 可リスト
-/// （[`crate::bridge::CORE_DISPATCHABLE_ACTIONS`] /
-/// [`crate::bridge::DISCORD_DISPATCHABLE_ACTIONS`] /
-/// [`crate::bridge::NOSTR_DISPATCHABLE_ACTIONS`] /
-/// [`crate::bridge::SERVER_DISPATCHABLE_ACTIONS`]）にある」かのどちらかであることを、
-/// fail-closed テストが検査する（core は `core_actions_are_classified_for_dispatch`、
-/// gateway は各 gateway 実装の crate 側 = `crates/discord` / `crates/nostr` /
-/// `crates/server`）。新ツールを追加すると、どちらにも入れない限りテストが落ちる
-/// （= 分類を強制する）。
+/// gateway / MCP のツールは `GatewayActionDef.class.dispatch` を**構築サイトで必ず**書く
+/// （`ToolClass` は `Default` を持たない）ので、「新ツールを足したのに分類し忘れる」ドリフト
+/// は型システムが防ぐ。core は `GatewayActionDef` を持たないため
+/// [`crate::bridge::CORE_INLINE_ACTIONS`] / [`crate::bridge::CORE_DISPATCHABLE_ACTIONS`] の
+/// 2 定数で分類し、`ActionDispatcher::new()` の全名がどちらか一方に属することを
+/// `core_actions_are_classified_for_dispatch`（本モジュール）が fail-closed で検査する。
 ///
 /// 呼び出し側は `SubtaskToolDispatcher::with_non_dispatch` で上書き/追加できる。
 /// 運用者向けの**分類基準**は `docs/DESIGN.md`「非ブロックツール実行」節。
-/// ツール名の一覧はこの定数群が唯一の権威で、doc 側には置かない（二重管理を避ける）。
 pub fn default_non_dispatch_tools() -> HashSet<String> {
     let mut set: HashSet<String> = ["spawn_subtask", "cancel_subtask", "report_progress"]
         .iter()
@@ -758,25 +763,6 @@ pub fn default_non_dispatch_tools() -> HashSet<String> {
     // core アクション（`ActionDispatcher::new()`）の inline 集合。以前はここが空で、
     // core 32 個が分類ガードの外＝全 dispatch だった（記憶想起が 4 通に割れる等）。
     for name in crate::bridge::CORE_INLINE_ACTIONS {
-        set.insert((*name).to_string());
-    }
-    // Discord gateway の inline 集合（配送系 / 同ターン結果依存 / run 内共有状態 /
-    // 純粋な読み取り）。depth ゲートの `DISCORD_ACTIONS` とは目的が違う別集合で、
-    // `DISCORD_ACTIONS ⊆ DISCORD_INLINE_ACTIONS` はテストで保証する。
-    for name in crate::bridge::DISCORD_INLINE_ACTIONS {
-        set.insert((*name).to_string());
-    }
-    // Nostr 配送系（#168）。background 化すると親ターンが「明示送信済み」フラグを
-    // 観測できず、暗黙返信と二重投稿になる。`nostr_generate_key` は含まない
-    // （長時間処理なので dispatch 対象に残す）。
-    for name in crate::bridge::NOSTR_DELIVERY_ACTIONS {
-        set.insert((*name).to_string());
-    }
-    // server 内蔵の設定ツール源（`SystemGatewayActions`）の inline 集合。transport
-    // 非依存で web / REST / heartbeat の全ターンに載るのに分類ガードの外にあり、
-    // 設定変更（run 内共有状態）と一覧（純粋な読み取り）が background 化されていた。
-    // `nostr_generate_key`（長時間の鍵探索）だけは dispatch 対象に残す。
-    for name in crate::bridge::SERVER_INLINE_ACTIONS {
         set.insert((*name).to_string());
     }
     set
@@ -848,6 +834,10 @@ impl SubtaskToolDispatcher {
         agent_id: impl Into<String>,
         parent_session_id: impl Into<String>,
     ) -> Self {
+        // 非同期化除外は executor の属性索引から引く（gateway / MCP の `dispatch == Inline`
+        // ＋ 制御ツール ＋ core inline）。`BridgedExecutor` が override し、それ以外の
+        // executor は既定（空）＋ `default_non_dispatch_tools` 相当を返す。
+        let non_dispatch = executor.inline_tool_names();
         Self {
             executor,
             registry,
@@ -855,7 +845,7 @@ impl SubtaskToolDispatcher {
             sink,
             agent_id: agent_id.into(),
             parent_session_id: parent_session_id.into(),
-            non_dispatch: default_non_dispatch_tools(),
+            non_dispatch,
             reply_target: None,
             caller: CallerIdentity::Agent,
             timeout: std::time::Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS),
@@ -1887,13 +1877,20 @@ mod tests {
             GatewayActionDef, GatewayActionResult, GatewayActions, GatewayCallContext,
         };
 
-        // `nostr_generate_key` を提供する mock 合成 gateway（server ツール源の代役）。
+        // `nostr_generate_key`（長時間 = Dispatchable）と、配送系の inline ツール数種を
+        // 提供する mock 合成 gateway（server ツール源の代役）。分類の権威は各定義の
+        // `class.dispatch` 属性なので、非同期化除外の検証には実属性を持つ定義が要る。
         // nsec は返さず npub/pubkey のみ返す（実装と同じく秘密は LLM へ出さない）。
         struct MockServerGateway;
         #[async_trait::async_trait]
         impl GatewayActions for MockServerGateway {
             fn definitions(&self) -> Vec<GatewayActionDef> {
-                vec![GatewayActionDef {
+                let inline = opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                };
+                let mut defs = vec![GatewayActionDef {
                     name: "nostr_generate_key".to_string(),
                     class: opencrab_gateway::ToolClass {
                         dispatch: opencrab_gateway::DispatchMode::Dispatchable,
@@ -1902,7 +1899,18 @@ mod tests {
                     },
                     description: "generate a nostr key".to_string(),
                     parameters: serde_json::json!({"type":"object"}),
-                }]
+                }];
+                // 配送系 inline（本番の gateway 定義と同じ属性）。索引に載って非同期化から
+                // 除外されることを end-to-end で確認するために定義に含める。
+                for name in ["discord_send_file", "send_ui", "nostr_reply", "nostr_post"] {
+                    defs.push(GatewayActionDef {
+                        name: name.to_string(),
+                        class: inline,
+                        description: format!("{name} delivery tool"),
+                        parameters: serde_json::json!({"type":"object"}),
+                    });
+                }
+                defs
             }
             async fn execute(
                 &self,
@@ -3373,147 +3381,112 @@ mod tests {
         assert!(dispatcher.should_dispatch("ws_write"));
     }
 
-    /// 分類集合の内部整合性（#152）。
+    /// core 分類集合の内部整合性（#152）。
     ///
-    /// - inline 集合と dispatch 可リストは互いに素（同じ名前が両方に属さない）。
-    /// - `DISCORD_ACTIONS`（depth ゲート）は inline 集合の部分集合。配送系を depth
-    ///   ゲートに入れておきながら dispatch してしまう食い違いを防ぐ。
+    /// gateway / MCP のツールは分類の権威が各定義の `class.dispatch` 属性へ移った（PR-2B）
+    /// ので、ここでは `GatewayActionDef` を持たない **core だけ**を見る:
+    /// - inline 集合（[`crate::bridge::CORE_INLINE_ACTIONS`]）と dispatch 可リスト
+    ///   （[`crate::bridge::CORE_DISPATCHABLE_ACTIONS`]）は互いに素。
     /// - inline 集合は重複を含まない（一覧の手編集で二重に足す事故の検出）。
     #[test]
     fn dispatch_classification_sets_are_consistent() {
         let non_dispatch = default_non_dispatch_tools();
-
         for name in crate::bridge::CORE_DISPATCHABLE_ACTIONS {
             assert!(
                 !non_dispatch.contains(*name),
                 "{name} が dispatch 可リストと inline 集合の両方に居る"
             );
         }
-        for name in crate::bridge::DISCORD_DISPATCHABLE_ACTIONS {
-            assert!(
-                !non_dispatch.contains(*name),
-                "{name} が dispatch 可リストと inline 集合の両方に居る"
-            );
-        }
-        for name in crate::bridge::NOSTR_DISPATCHABLE_ACTIONS {
-            assert!(
-                !non_dispatch.contains(*name),
-                "{name} が dispatch 可リストと inline 集合の両方に居る"
-            );
-        }
-        for name in crate::bridge::SERVER_DISPATCHABLE_ACTIONS {
-            assert!(
-                !non_dispatch.contains(*name),
-                "{name} が dispatch 可リストと inline 集合の両方に居る"
-            );
-        }
-        // `DISCORD_ACTIONS`（depth ゲート）は **inline 集合全体**の部分集合。
-        // `send_ui` のように実装が gateway 非依存層へ移った名前は
-        // `SERVER_INLINE_ACTIONS` 側に属するため、`DISCORD_INLINE_ACTIONS` 単体ではなく
-        // `default_non_dispatch_tools()` の和集合で判定する（不変条件は「depth ゲートに
-        // 載る名前は dispatch されない」であって、どの定数に属するかではない）。
-        for name in crate::bridge::DISCORD_ACTIONS {
-            assert!(
-                non_dispatch.contains(*name),
-                "{name} は depth ゲート（DISCORD_ACTIONS）にあるのに dispatch されてしまう"
-            );
-        }
-        let unique: HashSet<&&str> = crate::bridge::DISCORD_INLINE_ACTIONS.iter().collect();
-        assert_eq!(
-            unique.len(),
-            crate::bridge::DISCORD_INLINE_ACTIONS.len(),
-            "DISCORD_INLINE_ACTIONS に重複がある"
-        );
         let unique: HashSet<&&str> = crate::bridge::CORE_INLINE_ACTIONS.iter().collect();
         assert_eq!(
             unique.len(),
             crate::bridge::CORE_INLINE_ACTIONS.len(),
             "CORE_INLINE_ACTIONS に重複がある"
         );
-        let unique: HashSet<&&str> = crate::bridge::SERVER_INLINE_ACTIONS.iter().collect();
-        assert_eq!(
-            unique.len(),
-            crate::bridge::SERVER_INLINE_ACTIONS.len(),
-            "SERVER_INLINE_ACTIONS に重複がある"
-        );
     }
 
-    /// [P1 回帰] server 内蔵の設定ツール（transport 非依存で web/REST/heartbeat の
-    /// 全ターンに載る）は inline。分類ガードの外にあった頃は 5 個が background 化され、
-    /// 設定変更（LLM ルーターのホットスワップ等）と一覧取得が同ターンで返らなかった。
+    /// 非同期化除外の権威は各ツール定義の `class.dispatch` 属性であり、
+    /// `BridgedExecutor::inline_tool_names` が索引から `dispatch == Inline` を集める。
+    ///
+    /// `send_ui` のような配送系 inline ツールは inline_tool_names に載り（＝ dispatch
+    /// されない）、`nostr_generate_key` のような Dispatchable ツールは載らないことを、
+    /// mock gateway の実属性で end-to-end に確認する（`default_non_dispatch_tools()` は
+    /// 縮小され gateway ツールを含まなくなったので、この plumbing がその代替）。
     #[test]
-    fn server_config_tools_are_not_dispatched() {
-        let set = default_non_dispatch_tools();
-        for name in [
-            "configure_llm_provider",
-            "manage_allowed_commands",
-            "configure_nostr",
-            "configure_self",
-            "configure_mcp_server",
-            "cancel_subtask",
-        ] {
-            assert!(
-                set.contains(name),
-                "{name} は server の設定ツール（共有状態の書き込み / 純粋な読み取り）なので inline"
-            );
+    fn inline_tool_names_reads_gateway_dispatch_attribute() {
+        use crate::bridge::BridgedExecutor;
+        use crate::dispatcher::ActionDispatcher;
+        use crate::traits::ActionContext;
+        use opencrab_gateway::{
+            DispatchMode, GatewayActionDef, GatewayActionResult, GatewayActions,
+            GatewayCallContext, SubEngineAccess, ToolClass, ToolSharing,
+        };
+
+        struct MockGw;
+        #[async_trait::async_trait]
+        impl GatewayActions for MockGw {
+            fn definitions(&self) -> Vec<GatewayActionDef> {
+                let mk = |name: &str, dispatch: DispatchMode| GatewayActionDef {
+                    name: name.to_string(),
+                    class: ToolClass {
+                        dispatch,
+                        sub_engine: SubEngineAccess::NotExposed,
+                        sharing: ToolSharing::AgentBound,
+                    },
+                    description: name.to_string(),
+                    parameters: serde_json::json!({"type":"object"}),
+                };
+                vec![
+                    mk("send_ui", DispatchMode::Inline),
+                    mk("configure_llm_provider", DispatchMode::Inline),
+                    mk("nostr_generate_key", DispatchMode::Dispatchable),
+                ]
+            }
+            async fn execute(
+                &self,
+                _name: &str,
+                _args: &serde_json::Value,
+                _ctx: &GatewayCallContext,
+            ) -> GatewayActionResult {
+                GatewayActionResult {
+                    success: true,
+                    data: None,
+                    error: None,
+                }
+            }
         }
-        // 長時間の鍵探索だけは dispatch 対象に残す。
-        assert!(!set.contains("nostr_generate_key"));
-    }
 
-    /// [P1 回帰] 配送系 + ユーザー応答待ちの `send_ui` は dispatch しない。
-    /// background 化すると UI 投稿と本文返信の順序が入れ替わり、クリック resume と
-    /// subtask 決着 resume で返信が 2 通になる。
-    #[test]
-    fn send_ui_is_not_dispatched() {
-        assert!(default_non_dispatch_tools().contains("send_ui"));
-    }
-
-    /// [P1 回帰] 戻り値の URL を同ターンで使う `ensure_*webhook` は dispatch しない。
-    #[test]
-    fn same_turn_result_dependent_tools_are_not_dispatched() {
-        let set = default_non_dispatch_tools();
-        for name in [
-            "ensure_webhook",
-            "ensure_subtask_webhook",
-            "discord_create_webhook",
-            "discord_create_channel",
-            "nostr_upload",
-        ] {
-            assert!(
-                set.contains(name),
-                "{name} は同ターンで戻り値を使うため inline"
-            );
-        }
-    }
-
-    /// [P1 回帰] 純粋な読み取りは dispatch しない（質問 1 つが 2 ターンに割れる）。
-    #[test]
-    fn pure_read_tools_are_not_dispatched() {
-        let set = default_non_dispatch_tools();
-        for name in [
-            "list_webhooks",
-            "list_subtask_webhooks",
-            "list_allowed_commands",
-            "get_default_webhook",
-            "get_default_subtask_webhook",
-            "read_heartbeat_instructions",
-            "discord_list_channels",
-            "discord_list_guilds",
-        ] {
-            assert!(set.contains(name), "{name} は純粋な読み取りなので inline");
-        }
-    }
-
-    /// 長時間処理は dispatch 対象に**残る**（除外集合が広がりすぎた回帰の検出）。
-    #[test]
-    fn long_running_tools_stay_dispatchable() {
-        let set = default_non_dispatch_tools();
-        for name in ["nostr_generate_key", "rebuild_memory_index", "create_skill"] {
-            assert!(
-                !set.contains(name),
-                "{name} は長時間処理なので dispatch 対象に残す"
-            );
-        }
+        let conn = opencrab_db::init_memory().unwrap();
+        let db = opencrab_db::Db::from_connection(conn);
+        let dir = tempfile::TempDir::new().unwrap();
+        let ws = opencrab_core::workspace::Workspace::from_root(dir.path()).unwrap();
+        let ctx = ActionContext {
+            caller: CallerIdentity::Agent,
+            agent_id: "agent-x".to_string(),
+            agent_name: "X".to_string(),
+            session_id: Some("web-agent-x-c1".to_string()),
+            db: db.clone(),
+            workspace: Arc::new(ws),
+            last_metrics_id: Arc::new(Mutex::new(None)),
+            model_override: Arc::new(Mutex::new(None)),
+            current_purpose: Arc::new(Mutex::new("conversation".to_string())),
+            runtime_info: Arc::new(Mutex::new(crate::RuntimeInfo {
+                default_model: "mock:test".to_string(),
+                active_model: None,
+                available_providers: vec![],
+                gateway: "web".to_string(),
+            })),
+        };
+        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
+            .with_gateway_actions(Arc::new(MockGw));
+        let inline = executor.inline_tool_names();
+        // 配送系 / 設定系（Inline 属性）は非同期化しない。
+        assert!(inline.contains("send_ui"));
+        assert!(inline.contains("configure_llm_provider"));
+        // 制御ツール ＋ core inline は常に含まれる（default_non_dispatch_tools 由来）。
+        assert!(inline.contains("spawn_subtask"));
+        assert!(inline.contains("declare_done"));
+        // 長時間の鍵探索（Dispatchable 属性）は含まれない = dispatch 対象。
+        assert!(!inline.contains("nostr_generate_key"));
     }
 }

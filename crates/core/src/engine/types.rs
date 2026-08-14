@@ -44,6 +44,17 @@ pub trait ActionExecutor: Send + Sync {
 
     /// List available action (tool) definitions for LLM function calling.
     fn list_tools(&self) -> Vec<FunctionDefinition>;
+
+    /// 非同期化しないツール名（inline 実行のまま）。既定は空集合。
+    ///
+    /// 非ブロック dispatch（RFC #152）の対象外にするツール名を返す。分類の権威は
+    /// 各ツール定義の属性（`GatewayActionDef.class.dispatch`）で、それを読める実装
+    /// （`BridgedExecutor`）だけが override する。`opencrab-core` は `ToolClass` を
+    /// 知らないまま名前集合だけ受け取れるように、戻り値は `HashSet<String>` にする
+    /// （依存の向きを増やさない）。
+    fn inline_tool_names(&self) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

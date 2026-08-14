@@ -130,9 +130,10 @@ impl SystemGatewayActions {
 
     /// 本ツール源が直接提供するツール定義（A2UI 描画面がある構成の全量）。
     ///
-    /// 分類の網羅性検査（`server_tools_are_classified_for_dispatch`）はこの**全量**を
-    /// 見るので、`send_ui` も分類を強制される。
-    fn own_definitions() -> Vec<GatewayActionDef> {
+    /// 各定義は分類属性（`class.dispatch` / `class.sub_engine` / `class.sharing`）を
+    /// 名乗る（`ToolClass` に `Default` が無いため構築サイトで必須）。テストや
+    /// `agent_heartbeat` の分類検査がこの全量から属性を引くので `pub(crate)`。
+    pub(crate) fn own_definitions() -> Vec<GatewayActionDef> {
         let mut defs = Self::always_own_definitions();
         defs.push(opencrab_actions::send_ui_definition());
         defs

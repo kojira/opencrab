@@ -67,34 +67,8 @@ fn gateway_reject(msg: impl Into<String>) -> opencrab_gateway::GatewayActionResu
     }
 }
 
-/// sub-engine に許可する gateway アクションの許可リスト（#63 / RFC #152 S2）。
-///
-/// bridge の DISCORD_ACTIONS depth ゲートは `DiscordGatewayActions::definitions()` の
-/// **一部しか**ブロックしないため、素の DiscordGatewayActions を接続すると、ハンドラ側
-/// ゲートの無いアクション（discord_channel_config / discord_create_channel 等）が
-/// depth>=1 に開放されてしまう。deny-list に頼らず、ここで明示的に許可したアクション
-/// だけを sub-engine から到達可能にする（deny-by-default 最外周フィルタ）。
-///
-/// S2 で inner が合成 gateway（`SystemGatewayActions` = server ツール + transport の union）
-/// になったため、このフィルタは**合成後のアクション和集合**に対して最外周で強制される。
-/// server ツールは 1 つずつ triage して足す:
-/// - `nostr_generate_key`: 生成鍵の nsec は LLM に返さず（`crates/nostr/src/actions.rs:271`）
-///   サーバ内に 0600 保存。npub/pubkey のみ返る。bridge policy でも owner/trusted 限定でない
-///   （TRUSTED_ONLY_ACTIONS に無い）。中リスク → 許可。
-/// - それ以外の server ツール（configure_* / manage_allowed_commands 等）は既定で不許可。
-///   （加えて bridge の OWNER_ONLY_ACTIONS が二重に遮断する。）
-///
-/// spawn_subtask は意図的に含めない: ネスト spawn は従来も（gateway 未接続のため）
-/// 不可能だった現状維持。ネストを有効化する場合は bridge の MAX_DEPTH ゲートではなく
-/// この許可リストが実効ゲートである点に注意。
-///
-/// **#175 S4 以降はこの点がより重要**: `spawn_subtask` は Discord gateway ではなく
-/// 合成 gateway（`SystemGatewayActions`）の own ツールになったため、許可リストに
-/// 足すと sub-engine から**必ず**到達できてしまう（transport の有無に依存しない）。
-/// ガードは `sub_engine_cannot_see_spawn_subtask`（`crates/server/src/system_actions.rs`）。
-pub const SUB_ENGINE_ALLOWED_ACTIONS: &[&str] = &["report_progress", "nostr_generate_key"];
-
-/// sub-engine 専用の最小権限 gateway。許可リストのアクションだけを inner 実装へ委譲する。
+/// sub-engine 専用の最小権限 gateway。`sub_engine == Allowed` のアクションだけを
+/// inner 実装へ委譲する（#63 / RFC #152 S2）。
 ///
 /// `inner` は合成 gateway（`SystemGatewayActions`）へのハンドル（RFC #152 S2）。
 /// これにより sub-engine から server ツール（`nostr_generate_key` 等）へ到達できる。
@@ -120,7 +94,7 @@ impl GatewayActions for SubEngineGatewayActions {
         self.inner
             .definitions()
             .into_iter()
-            .filter(|d| SUB_ENGINE_ALLOWED_ACTIONS.contains(&d.name.as_str()))
+            .filter(|d| d.class.sub_engine == opencrab_gateway::SubEngineAccess::Allowed)
             .collect()
     }
 
@@ -130,319 +104,36 @@ impl GatewayActions for SubEngineGatewayActions {
         args: &serde_json::Value,
         ctx: &opencrab_gateway::GatewayCallContext,
     ) -> opencrab_gateway::GatewayActionResult {
-        if SUB_ENGINE_ALLOWED_ACTIONS.contains(&name) {
-            return self.inner.execute(name, args, ctx).await;
-        }
-        // 実在するが許可外 → 権限拒否（rejected: マーカー）。
-        // 未知の名前 → 通常の失敗（幻覚ツール名を Rejected に誤分類させない）。
-        if self.inner.definitions().iter().any(|d| d.name == name) {
-            gateway_reject(format!("action '{name}' is not available in sub-engines"))
-        } else {
-            opencrab_gateway::GatewayActionResult {
+        // definitions() を 1 回だけ取って使い回す（許可判定と存在判定の両方に使う）。
+        let defs = self.inner.definitions();
+        let def = defs.iter().find(|d| d.name == name);
+        match def {
+            // `sub_engine == Allowed` のツールだけ inner へ委譲する。
+            Some(d) if d.class.sub_engine == opencrab_gateway::SubEngineAccess::Allowed => {
+                self.inner.execute(name, args, ctx).await
+            }
+            // 実在するが許可外 → 権限拒否（rejected: マーカー）。
+            Some(_) => gateway_reject(format!("action '{name}' is not available in sub-engines")),
+            // 未知の名前 → 通常の失敗（幻覚ツール名を Rejected に誤分類させない）。
+            None => opencrab_gateway::GatewayActionResult {
                 success: false,
                 data: None,
                 error: Some(format!("Unknown gateway action: {name}")),
-            }
+            },
         }
     }
 }
 
-/// Discord 送信系アクション: depth >= 1 の sub-engine からは**定義の非表示と実行の拒否の両方**で
-/// ブロックする（定義から隠すだけでは、モデルが親コンテキストの記憶で名前を呼んだ場合に素通しになる）。
-///
-/// **この一覧は実在する名前だけを持つ。**
-/// 以前は 20 名のうち 13 名（`discord_send` / `discord_react` / `discord_edit_message` …）が
-/// 現行 gateway に存在しない死名で、depth ゲートも dispatch 除外も実質空振りしていた。
-/// ドリフト検出は `crates/discord` の `test_bridge_policy_names_are_live_gateway_actions`
-/// と `discord_tools_are_classified_for_dispatch` が担う。
-///
-/// ゲートは**名前ベース**なので、実装が gateway 非依存層へ移っても効き続ける
-/// （`TRUSTED_ONLY_ACTIONS` と同じ性質）。`send_ui` は #156 S3、`request_peer_review` は
-/// #157 S7 で `SystemGatewayActions` の own ツールになったが、深さ拒否の意図は
-/// 変わらないのでこの一覧に**残す**（実在性の検証は server 側の
-/// `send_ui_is_blocked_in_sub_engine` / `request_peer_review_is_blocked_in_sub_engine`
-/// が担う）。
-///
-/// なお sub-engine の実効ゲートはこの deny-list ではなく [`SUB_ENGINE_ALLOWED_ACTIONS`]
-/// （allow-list / 同じモジュール）。ここは多層防御。
-pub const DISCORD_ACTIONS: &[&str] = &[
-    "discord_send_file",
-    "discord_add_reaction",
-    "discord_list_channels",
-    "discord_list_guilds",
-    // A2UI 送信（ユーザーの応答待ちを伴う対話的配送）。sub-engine からは不可。
-    // 実装は gateway 非依存層（#156 S3）だが、名前ベースの拒否はそのまま効く。
-    "send_ui",
-    // ピアレビュー依頼（チャンネルへの配送）。sub-engine からは不可。実装は
-    // gateway 非依存層（#157 S7）だが、名前ベースの拒否はそのまま効く。
-    "request_peer_review",
-    // VC 参加/退出はサーバの他メンバーに聞こえる行為。sub-engine からは不可。
-    "join_voice_channel",
-    "leave_voice_channel",
-];
-
-/// Discord gateway のツールのうち **inline 実行のまま**にするもの
-/// （`default_non_dispatch_tools` の種）。
-///
-/// 分類基準（5 項目）の権威は [`crate::subtask::default_non_dispatch_tools`] の doc、
-/// 運用者向けの**分類基準**は `docs/DESIGN.md`「非ブロックツール実行」節。
-/// ツール名の一覧はこの定数群が唯一の権威で、doc 側には置かない（二重管理を避ける）。
-///
-/// 全要素が `DiscordGatewayActions::definitions()` に実在し、かつ
-/// [`DISCORD_DISPATCHABLE_ACTIONS`] と互いに素であることをテストで保証する。
-pub const DISCORD_INLINE_ACTIONS: &[&str] = &[
-    // (1) 制御系（`spawn_subtask` / `report_progress` は #175 S4、`cancel_subtask` は
-    //     #157 S2 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。Discord は
-    //     どれも定義しないのでここには無い）。
-    // (2) 配送系。
-    "discord_send_file",
-    "discord_add_reaction",
-    "join_voice_channel",
-    "leave_voice_channel",
-    // (2) 配送系 + ユーザーの応答待ち（pending interaction）だった `send_ui` は
-    //     #156 S3 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。分類の所属は
-    //     inline のまま変えていない。`request_peer_review`（配送系）も #157 S7 で
-    //     同じく server 側へ移設済み。
-    // (3) 同ターン結果依存: webhook URL / 作成物の ID をそのターンで使う。
-    //     `ensure_*` は既存デフォルトが無いとき `discord_create_webhook` を呼ぶ
-    //     （serenity 依存の transport 固有処理）ので #157 S5 でも Discord に残る。
-    "ensure_webhook",
-    "ensure_subtask_webhook",
-    "discord_create_webhook",
-    "discord_create_channel",
-    // (4) run 内共有状態: readable/writable は走行中ターンの配送可否を左右する。
-    "discord_channel_config",
-    // (5) 純粋な読み取り。
-    "discord_list_channels",
-    "discord_list_guilds",
-    // 許可コマンドの list/add/remove は #157 S1、`read_heartbeat_instructions` は
-    // #157 S3 で server 側（`SERVER_INLINE_ACTIONS`）へ移設済み。Discord は定義しない
-    // のでここには無い（どちらも分類の所属は inline のまま）。
-    // 通知先（webhook）の管理 6 種（`get/set_default_[subtask_]webhook` /
-    // `list_[subtask_]webhooks`）は #157 S5 で server 側（`SERVER_INLINE_ACTIONS`）へ
-    // 移設済み。分類の所属は inline のまま変えていない。
-];
-
-/// Discord gateway のツールのうち、**意図的に dispatch を許す**もの。
-///
-/// 「長時間かかる」か「同ターンで結果を使わない書き込み」だけを置く。ここに無く
-/// [`DISCORD_INLINE_ACTIONS`] にも無い名前が `definitions()` に現れたらテストが落ちる。
-pub const DISCORD_DISPATCHABLE_ACTIONS: &[&str] = &[
-    // `rebuild_memory_index`（#175 S4）と `update_memory_index_config`（#157 S1）は
-    // server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。Discord は定義しないので
-    // ここには無い（どちらも分類の所属は dispatchable のまま）。
-    // `update_heartbeat_instructions`（#157 S3）も server 側
-    // （`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。
-    // `create_skill`（#157 S6）も server 側（`SERVER_DISPATCHABLE_ACTIONS`）へ移設済み。
-    // その結果この集合は**空**になった（Discord に残るツールは配送系 / 同ターン結果依存 /
-    // run 内共有状態 / 純粋な読み取りのいずれかで、全部 inline）。空でも定数は残す:
-    // ドリフト検出テストが `DISCORD_INLINE_ACTIONS` との対で参照しており、Discord 固有の
-    // 長時間ツールが将来増えたときの受け皿になる。
-];
-
-/// Nostr の**配送系**アクション（#168）。「送る」こと自体が応答なので、非ブロック
-/// dispatch（RFC #152 S3a）の対象から外して inline 実行のままにする集合。
-///
-/// background 化すると run が返る時点でまだ送信されておらず、エージェントは**送信結果を
-/// 同ターンで確認できない**（送れたか・イベント id が何かを次のツール呼び出しに使えない）。
-/// Nostr の配送はエージェントがこれらのツールで自分から行う（機構は暗黙返信しない・#588）ので、
-/// 送信の成否がそのまま同ターンの判断材料になる。
-///
-/// 送信系以外の2つ:
-/// - `nostr_upload`: 送信ではないが、戻り値の URL を同じターンで投稿本文に使うのが通常の
-///   用法。background 化すると URL の代わりに `spawned` が返り、モデルが URL を載せられなくなる。
-/// - `nostr_switch_identity`: 送信ではないが「以後の全送信のアイデンティティを差し替える」。
-///   親ターンの送信と順序が入れ替わると別 identity で投稿しかねないため inline に留める。
-/// - `nostr_list_keys`: 送信ではない純粋な読み取り（生成鍵の npub 一覧）。戻り値の一覧を
-///   同じターンで `nostr_switch_identity` の引数に使うのが通常の用法なので、background 化
-///   して結果を次ターンへ回さず inline に留める。
-///
-/// 一方 `nostr_generate_key`（vanity 探索 = 長時間）は dispatch 対象に**残す**
-/// （これを background 化するのが S3a の主目的）。
-///
-/// この一覧は `crates/nostr` の `NostrGatewayActions::definitions()` と対応する
-/// （ドリフト検出テストが nostr crate 側にある）。`DISCORD_ACTIONS` と同様、
-/// gateway 名を下位層に置くのは既存の前例に倣う。
-pub const NOSTR_DELIVERY_ACTIONS: &[&str] = &[
-    "nostr_post",
-    "nostr_reply",
-    // #514: `nostr_dm` は撤去（DM 送信禁止）。定義に無いので配送系分類からも外す。
-    "nostr_zap",
-    "nostr_upload",
-    "nostr_switch_identity",
-    "nostr_list_keys",
-];
-
-/// Nostr gateway のツールのうち、**意図的に dispatch を許す**もの
-/// （[`NOSTR_DELIVERY_ACTIONS`] の補集合）。
-///
-/// `nostr_generate_key` は vanity 探索で分単位かかりうる長時間処理。これを background
-/// 化するのが RFC #152 S3a の主目的。ここにも [`NOSTR_DELIVERY_ACTIONS`] にも無い名前が
-/// `NostrGatewayActions::definitions()` に現れたら
-/// `nostr_tools_are_classified_for_dispatch`（`crates/nostr/src/actions.rs`）が落ちる。
-pub const NOSTR_DISPATCHABLE_ACTIONS: &[&str] = &["nostr_generate_key"];
-
-/// server 内蔵の設定ツール源（`crates/server/src/system_actions.rs` の
-/// `SystemGatewayActions`）のうち **inline 実行のまま**にするもの。
-///
-/// この gateway は Discord/Nostr と違い **transport 非依存**で、web / REST / heartbeat の
-/// 全ターンに載る（`crates/server/src/process.rs` の合成 executor）。分類ガードの外に
-/// 置いていた頃は 6 個中 5 個が background 化され、
-/// - `manage_allowed_commands(action="list")` / `configure_mcp_server(action="list")` は
-///   純粋な読み取り（基準5）なのに「一覧を教えて」が 2 ターン 2 メッセージに割れ、
-/// - `configure_llm_provider` は run 内共有状態（LLM ルーター）のホットスワップ（基準4）
-///   なのに走行中の run と非同期に差し替わり、doc が約束する「health_check → 失敗なら
-///   自動ロールバックして結果で通知」が同ターンで得られない、
-/// という壊れ方をしていた。
-///
-/// **fail-closed**: `SystemGatewayActions::own_definitions()` の全名がこの集合か
-/// [`SERVER_DISPATCHABLE_ACTIONS`] のどちらか一方に属することを
-/// `server_tools_are_classified_for_dispatch`（`crates/server/src/system_actions.rs`）が
-/// 検査する。新しい設定ツールを足したら分類を強制される。
-pub const SERVER_INLINE_ACTIONS: &[&str] = &[
-    // (4) run 内共有状態: LLM ルーターのホットスワップ。走行中の run が参照している
-    //     プロバイダを差し替えるうえ、適用後の health_check / 自動ロールバックの結果を
-    //     同ターンで返す契約になっている。
-    "configure_llm_provider",
-    // (5) 純粋な読み取り（action="list"）。add/remove も成否を同ターンで返す契約なので
-    //     inline。ここでも「許可した直後に同ターンで execute_shell」は**できない**
-    //     （ツール登録が run 冒頭でスナップショット / #202）ことに注意。
-    //     `add_allowed_command` / `remove_allowed_command` と同分類。
-    "manage_allowed_commands",
-    // (4) 設定の書き込み: 以後の Nostr 送信（relay / identity）に効く共有状態。
-    //     成否を同ターンで確認して次の操作へ進む。
-    "configure_nostr",
-    // (4) 設定の書き込み: 名前・system prompt 等、以後の run の前提を書き換える。
-    "configure_self",
-    // (5) 純粋な読み取り（action="list"）+ (3) 追加した直後に当該 MCP ツールを使う用法。
-    "configure_mcp_server",
-    // (1) 制御系: 走行中 subtask の停止。background 化しては意味を成さない。
-    "cancel_subtask",
-    // (1) 制御系: サブタスクの進捗報告（#175 S1）。それ自体が subtask ライフサイクルの
-    //     通知（デバウンス後にメインエンジンを呼び直す）なので background 化しない。
-    "report_progress",
-    // (1) 制御系: サブタスクの起動（#175 S4）。それ自体が「background 化する」ツール
-    //     （戻り値の subtask_id を同ターンで cancel / 追跡に使う）なので、さらに
-    //     dispatch で包むと二重の背景化になり意味を成さない。
-    "spawn_subtask",
-    // (5) 純粋な読み取り（#157 S1 で Discord から移設）。「許可コマンドを教えて」が
-    //     2 ターン 2 メッセージに割れないよう inline。
-    "list_allowed_commands",
-    // **移設前の分類を維持する**（#157 S1 で Discord から移設）。移設前は
-    //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
-    //     分類の妥当性そのものは移設の範囲外（変えるなら別 issue）。
-    //     なお「許可した直後に同ターンで execute_shell を使う」ことは**元から
-    //     できない**（ツール登録が run 冒頭で設定をスナップショットするため、
-    //     許可は次の run から効く / #202）。同ターン反映を根拠にはしない。
-    "add_allowed_command",
-    "remove_allowed_command",
-    // (5) 純粋な読み取り（#157 S3 で Discord から移設）。移設前は
-    //     `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
-    "read_heartbeat_instructions",
-    // エージェント自身の Nostr 受信 → Discord 転記先設定（#252 段階 C）。
-    // (5) 純粋な読み取り: 「今どこへ転記される？」が 2 ターンに割れないよう inline。
-    "get_my_nostr_relay",
-    // (3) 同ターン結果依存: URL の許可リスト検証に落ちると**拒否**される。拒否を同じ
-    //     ターンで受け取って正しい URL で呼び直せないと、エージェントは「設定した」と
-    //     思い込んだままターンが終わる（`set_my_heartbeat` と同じ理由 / #251）。
-    "set_my_nostr_relay",
-    // (5) 純粋な読み取り: 自分のハートビート設定（#247）。
-    "get_my_heartbeat",
-    // (3) 同ターン結果依存: 自分のハートビート設定の書き込み（#247）。
-    //     間隔には下限があり、下限より短い要求は**拒否**される。拒否を同じターンで
-    //     受け取って有効な値で呼び直せないと、エージェントは「設定した」と思い込んだまま
-    //     ターンが終わる。指示文の書き込み（`update_heartbeat_instructions` /
-    //     dispatchable）と分類が割れるのはこのため — あちらは長文の保存で、
-    //     値域の押し戻しを同ターンで受ける必要が無い。
-    "set_my_heartbeat",
-    // (3) 同ターン結果依存: 手動発火（#599）。発火先の解決に失敗（発火経路の無いセッション /
-    //     ゲートウェイ未稼働）したら**同ターンで拒否**を受けて対処できる必要がある。ハンドラ自体は
-    //     発火を spawn して即返るので長時間化しない（background 化する意味も無い）。
-    "run_my_heartbeat",
-    // 定時実行（#455）。ハートビートと同じ理由で inline:
-    // (5) 純粋な読み取り: `get_my_schedules`。
-    // (3) 同ターン結果依存: `set_my_schedule` は cron 式の不正を**同ターンで拒否**し、
-    //     直して呼び直せる必要がある（実行時に黙って発火しないのが最悪）。
-    // (3) 同ターン結果依存: `update_my_schedule` も cron 不正・id 不在（他人/他セッション/
-    //     存在しない）を**同ターンで拒否**し直して呼び直せる必要がある。`delete_my_schedule`
-    //     も id 不在を同ターンで返す（成否をその場で確認して次へ）。set と同じく inline。
-    "get_my_schedules",
-    "set_my_schedule",
-    "update_my_schedule",
-    "delete_my_schedule",
-    // 通知先（webhook）の管理（#157 S5 で Discord から移設）。**移設前の分類を維持する**:
-    // 6 個とも `DISCORD_INLINE_ACTIONS` に属していたので、所属を変えずにここへ移した。
-    //
-    // (3) 同ターン結果依存: 設定した直後に `get_default_*` / `list_*` で読み戻して
-    //     「どこに通知されるか」を同じターンで答える用法。
-    "set_default_webhook",
-    "set_default_subtask_webhook",
-    // (5) 純粋な読み取り。「今の通知先を教えて」が 2 ターン 2 メッセージに割れないよう inline。
-    "get_default_webhook",
-    "get_default_subtask_webhook",
-    "list_webhooks",
-    "list_subtask_webhooks",
-    // (2) 配送系 + ユーザーの応答待ち（#156 S3 で Discord から移設）。**移設前の分類を
-    //     維持する**: `DISCORD_INLINE_ACTIONS` に属していたので所属を変えずにここへ移した。
-    //     background 化すると (a) UI 投稿と本文返信の順序が入れ替わり、(b) エージェントは
-    //     インタラクション ID を扱えず、(c) クリック resume と subtask 決着 resume で
-    //     返信が 2 通になる（#152 の実害そのもの）。
-    "send_ui",
-    // (2) 配送系（#157 S7 で Discord から移設）。**移設前の分類を維持する**:
-    //     `DISCORD_INLINE_ACTIONS` に属していたので所属を変えずにここへ移した。
-    //     「送る」こと自体が応答なので background 化しない（ヘッダ + part X/N を
-    //     順に投稿する配送で、部分失敗の通数を同ターンで返す契約でもある）。
-    "request_peer_review",
-    // (5) 純粋な読み取り: 自分が生成した鍵の npub 一覧（bootstrap 用。`nostr_generate_key`
-    //     と対で、鍵未設定でも露出する）。戻り値の一覧を同ターンで `nostr_switch_identity`
-    //     の引数に使うので inline。nsec は返さない。
-    "nostr_list_keys",
-    // (4) 設定の書き込み: 生成鍵を本鍵に採用する（bootstrap 用。`nostr_generate_key` と
-    //     対で、鍵未設定でも露出する）。採用は以後の Nostr identity を差し替える run 内
-    //     共有状態の書き込みで、成否（起動できたか）を同ターンで確認して次へ進むので
-    //     inline。**採用時にそのまま接続する**（絞り込みは自動設定せず、自分宛のみを
-    //     購読する / 未設定エージェントの自己ブートストラップ #264・#271）。nsec は返さない。
-    "nostr_switch_identity",
-    // (3) 同ターン結果依存 + (2) 配送系: 薄い nostaro passthrough（#268）。post/event 等の
-    //     送信は「送る」こと自体が応答で、get/timeline/search 等の取得は戻り値（stdout）を
-    //     同じターンで使うのが通常の用法。background 化すると結果が次ターンへ回り、投稿系は
-    //     確認が、取得系は本文が同ターンで得られない。よって inline。
-    "nostr_run",
-];
-
-/// server 内蔵の設定ツール源のうち、**意図的に dispatch を許す**もの。
-///
-/// `nostr_generate_key` は vanity 探索で分単位かかりうる長時間処理（RFC #152 S3a の
-/// 主目的）。`SystemGatewayActions` は鍵未設定でもこれを露出する bootstrap ツールとして
-/// 自前で定義するため、Nostr gateway の [`NOSTR_DISPATCHABLE_ACTIONS`] とは別に
-/// この gateway でも分類する必要がある。
-pub const SERVER_DISPATCHABLE_ACTIONS: &[&str] = &[
-    "nostr_generate_key",
-    // 全メモリの再インデックス（長時間・同ターンで結果を使わない / #175 S4 で Discord
-    // から移設）。dispatch の主目的そのもの。
-    "rebuild_memory_index",
-    // 設定の書き込み（#157 S1 で Discord から移設）。同ターンで読み戻さない。
-    // Discord 側でも dispatchable だったので分類の所属は変えていない。
-    "update_memory_index_config",
-    // 指示文の書き込み（#157 S3 で Discord から移設）。同ターンで読み戻さない。
-    // Discord 側でも dispatchable だったので分類の所属は変えていない。
-    "update_heartbeat_instructions",
-    // スキルファイルの生成。結果は確認のみで同ターンでは使わない（#157 S6 で Discord から
-    // 移設）。移設前は `DISCORD_DISPATCHABLE_ACTIONS` に属していたので、所属を変えずに
-    // ここへ移した。core の `create_my_skill`（[`CORE_DISPATCHABLE_ACTIONS`]）と同分類。
-    "create_skill",
-];
-
 /// `ActionDispatcher::new()` が登録する **core アクション**のうち inline 実行のまま
 /// にするもの（`default_non_dispatch_tools` の種）。
 ///
-/// gateway 由来のツール（Discord / Nostr）だけを分類していた頃は、core アクション
-/// 32 個が**分類ガードの外**にあり全部 dispatch されていた。その結果
-/// - system prompt が指示する記憶想起フロー（`search_memory_index` →
-///   `retrieve_memory_nodes`）が 2 回の背景往復 = ユーザーへ 4 通、
-/// - `open_task` は戻り値の task_id を同ターンで使うのに `spawned` しか返らない、
-/// という壊れ方をしていた。分類基準（[`crate::subtask::default_non_dispatch_tools`]
-/// の doc）に沿って全名を明示する。
+/// **なぜ core だけ名前リストが残るか**: 分類の権威は各ツール定義の属性
+/// （`GatewayActionDef.class`）へ移した（PR-2B）。ただし core アクションは
+/// `actions` クレート自身の一次ツールで `GatewayActionDef` を持たない（属性を名乗る
+/// 構築サイトが無い）。基準は「**ゲート固有の名前かどうか**」で、Discord / Nostr /
+/// server の各 gateway 固有の名前は属性へ吸収して定数を消したが、core は「ゲート固有の
+/// 名前」ではないのでここへ残す。`BridgedExecutor` はこの 2 定数から `dispatch` を合成し、
+/// gateway / MCP の属性と 1 つの索引にまとめる。
 ///
 /// **fail-closed**: `ActionDispatcher::new()` の全アクション名がこの集合か
 /// [`CORE_DISPATCHABLE_ACTIONS`] のどちらか一方に属することを
@@ -535,8 +226,8 @@ pub const CORE_DISPATCHABLE_ACTIONS: &[&str] = &[
     "reflect_and_learn",
     // 要約の保存: 同ターンで読み戻さない。
     "summarize_and_save",
-    // スキル生成（`create_skill` と同分類。あちらは server 側の gateway ツール /
-    // [`SERVER_DISPATCHABLE_ACTIONS`]）。
+    // スキル生成（server 側の gateway ツール `create_skill` と同分類。あちらは
+    // 定義で `class.dispatch == Dispatchable` を名乗る）。
     "create_my_skill",
 ];
 
@@ -747,11 +438,14 @@ pub const TRUSTED_ONLY_ACTIONS: &[&str] = &[
 /// 隠したツールをモデルが名前指定で実行できる」食い違いがあった。
 /// 可視性と実行時強制は必ずこの関数を参照すること（discord 側ハンドラの
 /// typed gate は多層防御としてそのまま残る）。
+///
+/// **名前リストで決まる 3 つだけ**を持つ（`owner_only` / `trusted_only` /
+/// `depth_capped`）。sub-engine 遮断（旧 `blocked_in_subengine`）はツール定義の属性
+/// （`class.sub_engine == Blocked`）が権威になったため、`BridgedExecutor` が
+/// 名前 → `ToolClass` の索引から引く（この構造体には持たせない）。
 pub struct ToolPolicy {
     pub owner_only: bool,
     pub trusted_only: bool,
-    /// depth >= 1 の sub-engine からブロック（Discord 送信系）。
-    pub blocked_in_subengine: bool,
     /// depth >= MAX_DEPTH でブロック（ネスト上限）。
     pub depth_capped: bool,
 }
@@ -760,7 +454,6 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
     ToolPolicy {
         owner_only: OWNER_ONLY_ACTIONS.contains(&name),
         trusted_only: TRUSTED_ONLY_ACTIONS.contains(&name),
-        blocked_in_subengine: DISCORD_ACTIONS.contains(&name),
         depth_capped: name == "spawn_subtask",
     }
 }
@@ -829,11 +522,21 @@ pub struct BridgedExecutor {
     /// 既定 `None`（無制限 = 従来挙動）。対話ターン・heartbeat・subtask は `None` の
     /// ままで一切変わらない。sleep 整理ラン（`memory_organize`）だけが `Some` を渡す。
     tool_allowlist: Option<std::collections::HashSet<String>>,
+    /// 名前 → `ToolClass` の索引（分類の権威）。
+    ///
+    /// gateway / MCP の `definitions()` を舐めて `(name, class)` を入れ、core のツール
+    /// （`GatewayActionDef` を持たない）は [`CORE_INLINE_ACTIONS`] / [`CORE_DISPATCHABLE_ACTIONS`]
+    /// から `dispatch` を合成する（`sub_engine = NotExposed`、`sharing = AgentBound`。core は
+    /// 許可リストにも拒否リストにも属さないため一律 `NotExposed` で現行と等価）。gateway /
+    /// MCP を差し替えたら [`Self::rebuild_tool_class_index`] で作り直す。sub-engine 遮断
+    /// （`sub_engine == Blocked`）と非同期化除外（`dispatch == Inline`）をここから引く。
+    /// 索引に無い名前は「遮断しない」（属性を名乗る定義が無いツールは既定で通す）。
+    tool_class_index: std::collections::HashMap<String, opencrab_gateway::ToolClass>,
 }
 
 impl BridgedExecutor {
     pub fn new(dispatcher: ActionDispatcher, context: ActionContext) -> Self {
-        Self {
+        let mut this = Self {
             dispatcher,
             context,
             gateway_actions: None,
@@ -842,7 +545,54 @@ impl BridgedExecutor {
             tool_event_sink: None,
             reply_target: None,
             tool_allowlist: None,
+            tool_class_index: std::collections::HashMap::new(),
+        };
+        this.rebuild_tool_class_index();
+        this
+    }
+
+    /// 名前 → `ToolClass` 索引を作り直す（core 合成 + gateway + MCP）。
+    ///
+    /// gateway / MCP を差し替えたら必ず呼ぶ（`with_gateway_actions` / `with_mcp_actions`）。
+    /// 後入れ優先で挿入する: gateway / MCP の実定義が core 合成より優先されるが、名前空間は
+    /// 重ならない（core と gateway own と MCP プレフィックスは互いに素）ので実際の衝突は無い。
+    fn rebuild_tool_class_index(&mut self) {
+        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolClass, ToolSharing};
+        let mut index: std::collections::HashMap<String, ToolClass> =
+            std::collections::HashMap::new();
+        // core のツールは `GatewayActionDef` を持たないので合成する。core は許可リストにも
+        // 拒否リストにも 1 つも属さないため `sub_engine = NotExposed` で現行と等価。
+        let synth = |dispatch: DispatchMode| ToolClass {
+            dispatch,
+            sub_engine: SubEngineAccess::NotExposed,
+            sharing: ToolSharing::AgentBound,
+        };
+        for name in CORE_INLINE_ACTIONS {
+            index.insert((*name).to_string(), synth(DispatchMode::Inline));
         }
+        for name in CORE_DISPATCHABLE_ACTIONS {
+            index.insert((*name).to_string(), synth(DispatchMode::Dispatchable));
+        }
+        if let Some(ref gw) = self.gateway_actions {
+            for def in gw.definitions() {
+                index.insert(def.name, def.class);
+            }
+        }
+        if let Some(ref mcp) = self.mcp_actions {
+            for def in mcp.definitions() {
+                index.insert(def.name, def.class);
+            }
+        }
+        self.tool_class_index = index;
+    }
+
+    /// depth>=1 の sub-engine から遮断すべきか（`class.sub_engine == Blocked`）。
+    /// 索引に無い名前は `false`（属性を名乗る定義が無いツールは遮断しない）。
+    fn is_blocked_in_subengine(&self, name: &str) -> bool {
+        self.tool_class_index
+            .get(name)
+            .map(|c| c.sub_engine == opencrab_gateway::SubEngineAccess::Blocked)
+            .unwrap_or(false)
     }
 
     pub fn with_depth(mut self, depth: u32) -> Self {
@@ -852,12 +602,14 @@ impl BridgedExecutor {
 
     pub fn with_gateway_actions(mut self, actions: Arc<dyn GatewayActions>) -> Self {
         self.gateway_actions = Some(actions);
+        self.rebuild_tool_class_index();
         self
     }
 
     /// MCP ツール源を注入する（`mcp__<server>__<tool>` を提供する `GatewayActions`）。
     pub fn with_mcp_actions(mut self, actions: Arc<dyn GatewayActions>) -> Self {
         self.mcp_actions = Some(actions);
+        self.rebuild_tool_class_index();
         self
     }
 
@@ -952,7 +704,7 @@ impl BridgedExecutor {
         if policy.trusted_only && !self.caller_is_trusted() {
             return false;
         }
-        if self.depth >= 1 && policy.blocked_in_subengine {
+        if self.depth >= 1 && self.is_blocked_in_subengine(name) {
             return false;
         }
         if self.depth >= MAX_DEPTH && policy.depth_capped {
@@ -980,7 +732,7 @@ impl BridgedExecutor {
                 "action '{name}' requires a trusted caller (owner/co_agent/trusted_user)"
             ));
         }
-        if self.depth >= 1 && policy.blocked_in_subengine {
+        if self.depth >= 1 && self.is_blocked_in_subengine(name) {
             return reject(format!(
                 "action '{name}' is not available in sub-engines (depth {})",
                 self.depth
@@ -1191,6 +943,21 @@ impl ActionExecutor for BridgedExecutor {
 
         tools
     }
+
+    /// 非同期化しないツール名（inline 実行のまま）。
+    ///
+    /// 索引から `dispatch == Inline` の名前を集め、[`crate::subtask::default_non_dispatch_tools`]
+    /// （制御ツール ＋ core inline）と合わせて返す。gateway / MCP を注入していない executor
+    /// でも制御ツールと core は必ず inline に残る（`default_non_dispatch_tools` が保証）。
+    fn inline_tool_names(&self) -> std::collections::HashSet<String> {
+        let mut set = crate::subtask::default_non_dispatch_tools();
+        for (name, class) in &self.tool_class_index {
+            if class.dispatch == opencrab_gateway::DispatchMode::Inline {
+                set.insert(name.clone());
+            }
+        }
+        set
+    }
 }
 
 impl From<ActionsActionResult> for CoreActionResult {
@@ -1217,42 +984,43 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
-    /// **PR-2A 前提の検証**: 許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）と拒否リスト
-    /// （`DISCORD_ACTIONS`）は互いに素。互いに素だからこそ、両者を 1 つの 3 値
-    /// （`SubEngineAccess::{Allowed, Blocked, NotExposed}`）で無損失に統合できる。
-    #[test]
-    fn sub_engine_allow_and_deny_lists_are_disjoint() {
-        for a in SUB_ENGINE_ALLOWED_ACTIONS {
-            assert!(
-                !DISCORD_ACTIONS.contains(a),
-                "{a} が許可リストと拒否リストの両方に載っている（3 値統合の前提が崩れる）"
-            );
-        }
-    }
-
     // ---- RFC #152 S2: 合成 gateway 注入 + deny-by-default 最外周フィルタ ----
 
     /// server ツール（nostr_generate_key）と transport ツール（report_progress）と、
     /// 開放してはならないツール（send_ui）を同時に提供する、合成 gateway のフェイク。
     /// `SystemGatewayActions`（server ツール + inner の union）の到達性だけを模す。
+    ///
+    /// sub-engine の到達可否は各定義の `class.sub_engine` 属性で決まる（PR-2B）ので、
+    /// フェイクも実属性を再現する: `nostr_generate_key` / `report_progress` は
+    /// `Allowed`、`send_ui` は `Blocked`。
     struct FakeCompositeGateway;
 
     #[async_trait]
     impl GatewayActions for FakeCompositeGateway {
         fn definitions(&self) -> Vec<GatewayActionDef> {
-            ["nostr_generate_key", "report_progress", "send_ui"]
-                .iter()
-                .map(|n| GatewayActionDef {
-                    name: n.to_string(),
-                    class: opencrab_gateway::ToolClass {
-                        dispatch: opencrab_gateway::DispatchMode::Inline,
-                        sub_engine: opencrab_gateway::SubEngineAccess::NotExposed,
-                        sharing: opencrab_gateway::ToolSharing::AgentBound,
-                    },
-                    description: format!("{n} desc"),
-                    parameters: json!({"type": "object", "properties": {}}),
-                })
-                .collect()
+            [
+                (
+                    "nostr_generate_key",
+                    opencrab_gateway::SubEngineAccess::Allowed,
+                ),
+                (
+                    "report_progress",
+                    opencrab_gateway::SubEngineAccess::Allowed,
+                ),
+                ("send_ui", opencrab_gateway::SubEngineAccess::Blocked),
+            ]
+            .iter()
+            .map(|(n, sub_engine)| GatewayActionDef {
+                name: n.to_string(),
+                class: opencrab_gateway::ToolClass {
+                    dispatch: opencrab_gateway::DispatchMode::Inline,
+                    sub_engine: *sub_engine,
+                    sharing: opencrab_gateway::ToolSharing::AgentBound,
+                },
+                description: format!("{n} desc"),
+                parameters: json!({"type": "object", "properties": {}}),
+            })
+            .collect()
         }
         async fn execute(
             &self,
@@ -2979,7 +2747,8 @@ mod tests {
     /// 非対称を作らない）。逆に **Agent ターンから起動したサブ（caller=Agent・depth>=1）は
     /// 塞がったまま**でなければならない（`spawn_subtask` を挟んだ迂回の封鎖）。
     ///
-    /// これらは `blocked_in_subengine`（`DISCORD_ACTIONS`）ではないので、判定は caller のみ。
+    /// これらは sub-engine 遮断属性（`class.sub_engine == Blocked`）を持たないので、判定は
+    /// caller のみ。
     #[test]
     fn local_tools_gated_by_caller_only_regardless_of_depth() {
         // Owner: depth 0 でも depth>=1 でも使える（実在するサブ構成 = 親 Owner → サブ Owner）。
@@ -2994,7 +2763,7 @@ mod tests {
         let agent_depth1 = BridgedExecutor::new(ActionDispatcher::new(), actx2).with_depth(1);
         for name in LOCAL_OWNER_ONLY_TOOLS {
             assert!(
-                !tool_policy(name).blocked_in_subengine,
+                !owner_depth1.is_blocked_in_subengine(name),
                 "{name} に depth ゲートを足していないこと（#330）"
             );
             assert_eq!(

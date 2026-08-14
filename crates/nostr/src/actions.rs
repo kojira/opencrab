@@ -358,48 +358,26 @@ mod tests {
         );
     }
 
-    /// **PR-2A 等価性ガード**: 各ツール定義の分類（`GatewayActionDef.class`）が現行の
-    /// 権威リスト（`NOSTR_DISPATCHABLE_ACTIONS` / `NOSTR_DELIVERY_ACTIONS`＝inline /
-    /// 拒否リスト `DISCORD_ACTIONS` / 許可リスト `SUB_ENGINE_ALLOWED_ACTIONS`）と一致する
-    /// ことを、定義を実体で呼んで機械検査する。「挙動を変えていない」の証明（消費側は
-    /// PR-2B まで旧リストが権威のまま）。
+    /// **sharing 属性の固定**: `sharing` には権威リストが無いので、Nostr ゲートの
+    /// `ConversationBound` 集合をここで固定する（判定基準は `opencrab_gateway::ToolSharing`
+    /// の doc）。会話固有の一時ハンドル（受信投稿の note id = `target`）を必須に取る
+    /// `nostr_reply` のみ。全ゲート横断の `ConversationBound` は
+    /// {discord_add_reaction, nostr_reply, send_ui}。
+    ///
+    /// dispatch / sub_engine の値は各定義の構築サイトで必須指定される（`ToolClass` に
+    /// `Default` が無い）ので、値の正しさはコードレビューが担い、専用の照合テストは持たない
+    /// （PR-2B で gateway 固有の権威リストと等価性テストを削除した）。
     #[test]
-    fn nostr_tool_class_matches_authoritative_lists() {
-        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
+    fn nostr_tool_sharing_conversation_bound_set_is_fixed() {
+        use opencrab_gateway::ToolSharing;
         let a = NostrGatewayActions::new(NostaroCli::new());
         let defs = a.definitions();
         assert!(!defs.is_empty());
-        let mut conv_bound = std::collections::BTreeSet::new();
-        for d in &defs {
-            let name = d.name.as_str();
-            assert_eq!(
-                d.class.dispatch == DispatchMode::Dispatchable,
-                opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.contains(&name),
-                "{name}: dispatch 属性が NOSTR_DISPATCHABLE_ACTIONS と食い違う"
-            );
-            assert_eq!(
-                d.class.dispatch == DispatchMode::Inline,
-                opencrab_actions::NOSTR_DELIVERY_ACTIONS.contains(&name),
-                "{name}: dispatch 属性が NOSTR_DELIVERY_ACTIONS(inline) と食い違う"
-            );
-            assert_eq!(
-                d.class.sub_engine == SubEngineAccess::Blocked,
-                opencrab_actions::DISCORD_ACTIONS.contains(&name),
-                "{name}: sub_engine=Blocked が拒否リスト DISCORD_ACTIONS と食い違う"
-            );
-            assert_eq!(
-                d.class.sub_engine == SubEngineAccess::Allowed,
-                opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
-                "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
-            );
-            if d.class.sharing == ToolSharing::ConversationBound {
-                conv_bound.insert(d.name.clone());
-            }
-        }
-        // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
-        // （判定基準は `opencrab_gateway::ToolSharing` の doc）。Nostr ゲートで会話固有の
-        // 一時ハンドルを必須に取るのは受信投稿の note id（`target`）を要する `nostr_reply` のみ。
-        // 全ゲート横断の ConversationBound は {discord_add_reaction, nostr_reply, send_ui}。
+        let conv_bound: std::collections::BTreeSet<String> = defs
+            .iter()
+            .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
+            .map(|d| d.name.clone())
+            .collect();
         let expected: std::collections::BTreeSet<String> =
             std::iter::once("nostr_reply".to_string()).collect();
         assert_eq!(
@@ -548,96 +526,43 @@ mod tests {
         );
     }
 
-    /// #168: Nostr 配送系は **非ブロック dispatch の対象外**（inline 実行）であること。
+    /// #168: Nostr 配送系は **非ブロック dispatch の対象外**（`class.dispatch == Inline`）
+    /// であること。分類の権威は各定義の属性なので `definitions()` を実体で呼んで直接見る。
     ///
     /// 配送ツールは**戻り値（送信結果）を同ターンで使う**ので inline で走らせる。background 化
     /// すると run が返る時点でまだ送信されておらず、エージェントは同ターンで送信可否を確認できない。
-    /// 併せて、除外集合の名前が実在のアクションを指していること（ドリフト検出）と、
-    /// `nostr_generate_key` が dispatch 対象に残っていること（長時間処理の非ブロック化＝S3a の
-    /// 主目的、E2E `e2e_cancel_stops_subtask` の前提）も守る。
+    /// `nostr_generate_key`（長時間の鍵探索）だけは dispatch 対象に残す（S3a の主目的、
+    /// E2E `e2e_cancel_stops_subtask` の前提）。
     #[test]
-    fn test_nostr_delivery_actions_are_non_dispatch() {
-        let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
-            .definitions()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
-        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
-
-        for name in opencrab_actions::NOSTR_DELIVERY_ACTIONS {
-            assert!(
-                live.contains(&name.to_string()),
-                "{name} は除外集合にあるが nostr gateway definitions に無い（リネームで死名化）"
-            );
-            assert!(
-                non_dispatch.contains(*name),
-                "{name} は配送系なので dispatch 対象外でなければならない（戻り値を同ターンで使う）"
-            );
-        }
-
-        // 送信系（配送ツール）が漏れていないこと。
-        // #514: nostr_dm は撤去済みなのでここには含めない。
-        for name in ["nostr_post", "nostr_reply", "nostr_zap"] {
-            assert!(
-                non_dispatch.contains(name),
-                "{name} は送信系なので dispatch 対象外でなければならない"
+    fn nostr_delivery_actions_are_inline() {
+        use opencrab_gateway::DispatchMode;
+        let defs = NostrGatewayActions::new(NostaroCli::new()).definitions();
+        let class_of = |name: &str| {
+            defs.iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} が nostr definitions() に無い"))
+                .class
+        };
+        // 送信系（配送ツール）は inline。#514: nostr_dm は撤去済み。
+        for name in [
+            "nostr_post",
+            "nostr_reply",
+            "nostr_zap",
+            "nostr_upload",
+            "nostr_switch_identity",
+            "nostr_list_keys",
+        ] {
+            assert_eq!(
+                class_of(name).dispatch,
+                DispatchMode::Inline,
+                "{name} は配送系なので inline（戻り値を同ターンで使う）"
             );
         }
         // 長時間処理は dispatch 対象に残す。
-        assert!(
-            !non_dispatch.contains("nostr_generate_key"),
-            "nostr_generate_key は background 化する（S3a の主目的）"
-        );
-    }
-
-    /// **fail-closed な dispatch 分類ガード（#152 / #178）**。
-    ///
-    /// `test_nostr_delivery_actions_are_non_dispatch` は「定数 → 実装」の片方向なので、
-    /// **新しい配送系を実装したが定数へ入れ忘れた**ケースを検知できない（レビューで
-    /// 新しい配送ツールを足しても全テスト緑だった）。
-    ///
-    /// ここは実装（`definitions()`）を起点に走査し、全名が
-    /// 「[`opencrab_actions::NOSTR_DELIVERY_ACTIONS`]（= 除外集合）」か
-    /// 「[`opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS`]（= 意図的な dispatch 可）」の
-    /// どちらか**ちょうど一方**に属することを要求する。新アクションを追加すると、
-    /// 分類を明示するまでこのテストが落ちる。
-    ///
-    /// 判定基準は `opencrab_actions::default_non_dispatch_tools` の doc（5 項目）。
-    #[test]
-    fn nostr_tools_are_classified_for_dispatch() {
-        let live: Vec<String> = NostrGatewayActions::new(NostaroCli::new())
-            .definitions()
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
-        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
-
-        for name in &live {
-            let inline = non_dispatch.contains(name);
-            let dispatchable =
-                opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.contains(&name.as_str());
-            assert!(
-                inline ^ dispatchable,
-                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
-                 新しい Nostr アクションを追加したら NOSTR_DELIVERY_ACTIONS か \
-                 NOSTR_DISPATCHABLE_ACTIONS のどちらかへ入れること（配送系＝戻り値を同ターンで\
-                 使うもの・identity を書き換えるものは前者）"
-            );
-        }
-
-        // 逆方向: 定数側に死名が無いこと。
-        for name in opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS {
-            assert!(
-                live.contains(&name.to_string()),
-                "NOSTR_DISPATCHABLE_ACTIONS の {name} が definitions() に無い（死名）"
-            );
-        }
-        // 分類は definitions() を覆い尽くす。
         assert_eq!(
-            opencrab_actions::NOSTR_DELIVERY_ACTIONS.len()
-                + opencrab_actions::NOSTR_DISPATCHABLE_ACTIONS.len(),
-            live.len(),
-            "分類集合の合計が definitions() の数と一致しない（新アクションの分類漏れ）"
+            class_of("nostr_generate_key").dispatch,
+            DispatchMode::Dispatchable,
+            "nostr_generate_key は background 化する（S3a の主目的）"
         );
     }
 

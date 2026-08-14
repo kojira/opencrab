@@ -21,9 +21,9 @@
 //!   [`A2uiSurface::owner_id`]。未設定（空文字・空白のみ）なら**誰も操作できない**
 //!   （fail-closed, #174）ので、配線側が空文字を渡すと UI が誰にも応答しなくなる。
 //!   `owner_only` 引数は DB 列にだけ効く（移設前と同じ）。
-//! - **sub-engine からの遮断**: `send_ui` は `SUB_ENGINE_ALLOWED_ACTIONS`（許可リスト）
-//!   に無く、`DISCORD_ACTIONS`（深さ拒否リスト・名前ベース）に載る。多層防御は移設後も
-//!   名前で効く。
+//! - **sub-engine からの遮断**: `send_ui` の定義は `class.sub_engine == Blocked` を名乗る
+//!   ので、depth>=1 の sub-engine から可視性・実行の両方で遮断される（多層防御）。
+//!   `BridgedExecutor` が名前 → `ToolClass` 索引からこの属性を引く。
 //! - **本文を運ばない**: 受け口へ渡す [`UiResponseEvent`] には応答本文を再注入する
 //!   ための会話テキストを載せない（受け取り側が DB から読み直す）。
 

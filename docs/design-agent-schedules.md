@@ -105,8 +105,8 @@ HB と同一）。CRUD と検証・登録ロジックを共有する（`create_s
   拒否する（id を推測して他エージェント・他セッションの schedule を触れない）。`set` は
   `(session, cron, message)` キーの冪等作成なので既存行の cron/message を「変える」経路が無い——update が
   それを id 指定で埋める。
-- 分類: 4 つとも `SERVER_INLINE_ACTIONS`（同ターンで cron 不正・id 不在を返し、直して呼び直せる）+
-  `TRUSTED_ONLY_ACTIONS`（未信頼 Agent 会話ターンから自律実行を仕込ませない・止めさせない）。dashboard
+- 分類: 4 つとも定義で `class.dispatch == Inline` を名乗る（同ターンで cron 不正・id 不在を返し、直して
+  呼び直せる）+ `TRUSTED_ONLY_ACTIONS`（未信頼 Agent 会話ターンから自律実行を仕込ませない・止めさせない）。dashboard
   CRUD（PATCH/DELETE・owner 認証）とは検証・アンカー・所属の各ロジックを共有する。
 
 ## jitter — 採用しない

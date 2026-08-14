@@ -260,8 +260,9 @@ fn default_intake_id_field() -> String {
 /// 非ブロックツール実行（dispatch）の設定（RFC #152 S3a）。
 ///
 /// dispatch は「LLM のツール呼び出しを background subtask として実行し、そのターンには
-/// `{"status":"spawned"}` だけを返して完了後に別ターンで再注入する」挙動。除外集合
-/// （`opencrab_actions::default_non_dispatch_tools`）のツールは従来どおり inline 実行。
+/// `{"status":"spawned"}` だけを返して完了後に別ターンで再注入する」挙動。非同期化しない
+/// ツール（各定義の `class.dispatch == Inline` ＋ 制御ツール ＋ core inline。
+/// `executor.inline_tool_names()` が索引から集める）は従来どおり inline 実行。
 #[derive(Debug, Deserialize, Clone)]
 pub struct SubtaskConfig {
     /// 自動 dispatch の有効/無効（**kill switch**）。
