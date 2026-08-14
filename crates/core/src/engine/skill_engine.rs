@@ -1339,13 +1339,13 @@ mod tests {
             "退避の案内が無い: {tool_msg}"
         );
         assert!(
-            tool_msg.contains("tmp/sess1_tc_1.json"),
+            tool_msg.contains("tmp/sess1-tc-1.json"),
             "全文の在り処が案内されていない: {tool_msg}"
         );
         assert!(tool_msg.contains("lines"), "行数が無い: {tool_msg}");
         assert!(tool_msg.contains("tokens"), "トークン数が無い: {tool_msg}");
         // 全文はワークスペースに残り、エージェントが読める。
-        assert!(workspace.path().join("tmp/sess1_tc_1.json").exists());
+        assert!(workspace.path().join("tmp/sess1-tc-1.json").exists());
         // 同ターンで見えた本文と、DB へ渡る本文が一致する（次ターンで内容が変わらない）。
         assert_eq!(
             logged.lock().unwrap().as_slice(),
