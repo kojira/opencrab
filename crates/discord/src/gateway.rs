@@ -14,7 +14,7 @@ use serenity::all::{
 };
 use serenity::http::Http;
 
-use crate::message::{Channel, IncomingMessage, MessageSource, Sender};
+use opencrab_gateway::{Channel, IncomingMessage, MessageSource, Sender};
 
 /// A2UI Form 用モーダル応答（ボタン押下時に `CreateInteractionResponse::Modal` で返す）。
 #[derive(Clone)]
@@ -418,26 +418,26 @@ fn build_full_text(content: &str, attachments: &[AttachmentInfo]) -> String {
 fn build_message_content(
     content: &str,
     attachments: &[AttachmentInfo],
-) -> crate::message::MessageContent {
+) -> opencrab_gateway::MessageContent {
     let full_text = build_full_text(content, attachments);
-    let image_parts: Vec<crate::message::ContentPart> = attachments
+    let image_parts: Vec<opencrab_gateway::ContentPart> = attachments
         .iter()
         .filter(|a| a.is_image)
-        .map(|a| crate::message::ContentPart::Image {
+        .map(|a| opencrab_gateway::ContentPart::Image {
             url: a.url.clone(),
             alt: Some(a.filename.clone()),
         })
         .collect();
 
     if image_parts.is_empty() {
-        crate::message::MessageContent::text(&full_text)
+        opencrab_gateway::MessageContent::text(&full_text)
     } else {
         // 画像があれば注記も必ず出るので `full_text` は非空。以前あった
         // 「本文が空なら画像パートのみ」の分岐は到達不能になったので削除した
         // （#272: 画像は必ず本文アンカーを伴う、が不変条件）。
-        let mut parts = vec![crate::message::ContentPart::Text(full_text)];
+        let mut parts = vec![opencrab_gateway::ContentPart::Text(full_text)];
         parts.extend(image_parts);
-        crate::message::MessageContent::Multi(parts)
+        opencrab_gateway::MessageContent::Multi(parts)
     }
 }
 
@@ -691,30 +691,30 @@ mod tests {
         }
     }
 
-    fn text_of(content: &crate::message::MessageContent) -> String {
+    fn text_of(content: &opencrab_gateway::MessageContent) -> String {
         match content {
-            crate::message::MessageContent::Text(t) => t.clone(),
-            crate::message::MessageContent::Image { .. } => String::new(),
-            crate::message::MessageContent::Multi(parts) => parts
+            opencrab_gateway::MessageContent::Text(t) => t.clone(),
+            opencrab_gateway::MessageContent::Image { .. } => String::new(),
+            opencrab_gateway::MessageContent::Multi(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    crate::message::ContentPart::Text(t) => Some(t.clone()),
-                    crate::message::ContentPart::Image { .. } => None,
+                    opencrab_gateway::ContentPart::Text(t) => Some(t.clone()),
+                    opencrab_gateway::ContentPart::Image { .. } => None,
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
         }
     }
 
-    fn image_urls_of(content: &crate::message::MessageContent) -> Vec<String> {
+    fn image_urls_of(content: &opencrab_gateway::MessageContent) -> Vec<String> {
         match content {
-            crate::message::MessageContent::Text(_) => vec![],
-            crate::message::MessageContent::Image { url, .. } => vec![url.clone()],
-            crate::message::MessageContent::Multi(parts) => parts
+            opencrab_gateway::MessageContent::Text(_) => vec![],
+            opencrab_gateway::MessageContent::Image { url, .. } => vec![url.clone()],
+            opencrab_gateway::MessageContent::Multi(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    crate::message::ContentPart::Image { url, .. } => Some(url.clone()),
-                    crate::message::ContentPart::Text(_) => None,
+                    opencrab_gateway::ContentPart::Image { url, .. } => Some(url.clone()),
+                    opencrab_gateway::ContentPart::Text(_) => None,
                 })
                 .collect(),
         }
@@ -773,13 +773,13 @@ mod tests {
             ],
         );
         let parts = match &content {
-            crate::message::MessageContent::Multi(parts) => parts.clone(),
+            opencrab_gateway::MessageContent::Multi(parts) => parts.clone(),
             other => panic!("expected Multi, got {other:?}"),
         };
         assert_eq!(parts.len(), 3, "Text 1 + Image 2 のはず: {parts:?}");
         let text_parts = parts
             .iter()
-            .filter(|p| matches!(p, crate::message::ContentPart::Text(_)))
+            .filter(|p| matches!(p, opencrab_gateway::ContentPart::Text(_)))
             .count();
         assert_eq!(text_parts, 1);
         assert_eq!(
@@ -814,7 +814,7 @@ mod tests {
             "資料です\n[添付ファイル: report.pdf (application/pdf), 4096B]"
         );
         // 画像パートは出ない（Text のまま）
-        assert!(matches!(content, crate::message::MessageContent::Text(_)));
+        assert!(matches!(content, opencrab_gateway::MessageContent::Text(_)));
     }
 
     /// 回帰防止の本丸: **本文がある**ケースの書式は完全不変
@@ -936,7 +936,7 @@ mod tests {
     fn no_attachments_leaves_content_untouched() {
         let content = build_message_content("ただのテキスト", &[]);
         assert_eq!(text_of(&content), "ただのテキスト");
-        assert!(matches!(content, crate::message::MessageContent::Text(_)));
+        assert!(matches!(content, opencrab_gateway::MessageContent::Text(_)));
         assert_eq!(build_full_text("ただのテキスト", &[]), "ただのテキスト");
     }
 

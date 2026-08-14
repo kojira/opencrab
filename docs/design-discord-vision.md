@@ -36,7 +36,7 @@ pub struct Attachment {
 
 ### 1.2 現在どこで画像が落とされているか
 
-**Drop箇所1: `crates/gateway/src/adapters/discord.rs` の `EventHandler::message()`**
+**Drop箇所1: `crates/discord/src/gateway.rs` の `EventHandler::message()`**
 
 ```rust
 // 現在のコード（attachments を完全無視）
@@ -68,7 +68,7 @@ Discord Message
   └─ msg.content (String)
   └─ msg.attachments (Vec<Attachment>) ← 無視
         ↓
-MessageContent::Text(string)          [gateway/adapters/discord.rs]
+MessageContent::Text(string)          [discord/gateway.rs]
         ↓
 incoming.content.as_text() → String  [discord/message_loop.rs]
         ↓
@@ -147,7 +147,7 @@ Discord Attachment.url (CDN URL)
 ContentPart::ImageUrl { image_url: ImageUrl { url: cdn_url, detail: Some("auto") } }
 ```
 
-**変換ロジック（`gateway/adapters/discord.rs`）**:
+**変換ロジック（`discord/src/gateway.rs`）**:
 
 ```rust
 // 画像添付を ContentPart::Image に変換
@@ -381,7 +381,7 @@ MVP では許容し、将来的にプロキシキャッシュを検討する。
 
 | ファイル | 関数/箇所 | 変更内容 |
 |---------|----------|---------|
-| `crates/gateway/src/adapters/discord.rs` | `EventHandler::message()` | `msg.attachments` を読んで `MessageContent::Multi` を構築 |
+| `crates/discord/src/gateway.rs` | `EventHandler::message()` | `msg.attachments` を読んで `MessageContent::Multi` を構築 |
 | `crates/discord/src/message_loop.rs` | `run_discord_loop()` | `as_text()` スキップを廃止、Multi/Image も処理 |
 | `crates/discord/src/message_loop.rs` | ログ保存箇所 | `metadata_json` に `image_urls` を保存 |
 | `crates/core/src/engine.rs` | `ChatMessage` struct | `content_parts: Vec<ChatContentPart>` フィールド追加 |
@@ -392,7 +392,7 @@ MVP では許容し、将来的にプロキシキャッシュを検討する。
 
 ### 新規追加が必要なコード
 
-1. **`is_image_attachment()` ヘルパー** (`gateway/adapters/discord.rs`)
+1. **`is_image_attachment()` ヘルパー** (`discord/src/gateway.rs`)
    - MIME type チェック + 拡張子フォールバック
 
 2. **`extract_content()` ヘルパー** (`discord/message_loop.rs`)
@@ -411,7 +411,7 @@ MVP では許容し、将来的にプロキシキャッシュを検討する。
 
 ### Phase 1: ゲートウェイ層（最重要）
 
-**Step 1-1**: `crates/gateway/src/adapters/discord.rs` の修正
+**Step 1-1**: `crates/discord/src/gateway.rs` の修正
 - `msg.attachments` をイテレートして画像を `ContentPart::Image` に変換
 - `MessageContent::Multi` を構築してテキストと画像を組み合わせる
 - `is_image_attachment()` ヘルパー追加
@@ -514,10 +514,10 @@ Discord ではデフォルト最大 8MB（Nitro では 50MB）の添付が可能
 crates/
   gateway/
     src/
-      adapters/discord.rs     # serenity イベントハンドラ（Drop箇所1）
       message.rs              # IncomingMessage, MessageContent, ContentPart 型定義
   discord/
     src/
+      gateway.rs              # serenity イベントハンドラ（Drop箇所1）
       message_loop.rs         # メッセージループ（Drop箇所2）
       lib.rs                  # AgentRunner トレイト定義
   core/

@@ -34,7 +34,7 @@ opencrab/
 │   ├── core/       エージェントの「脳」。Soul, Identity, Memory, Skill, Workspace, SkillEngine
 │   ├── llm/        LLM抽象化層。マルチプロバイダー、ルーティング、メトリクス、コスト計算
 │   ├── llm-types/  LLM の型定義のみ（葉クレート。兄弟クレートが循環せず依存できるように分離）
-│   ├── gateway/    Gateway / GatewayActions トレイト ＋ アダプタ（REST, CLI, WebSocket(stub), Discord）
+│   ├── gateway/    Gateway ポート（メッセージ型 / GatewayActions トレイト）。ポート専用で具象 transport・SDK を含まない
 │   ├── actions/    アクション定義・実行、バックグラウンド実行のランタイム、分類ポリシー表
 │   ├── db/         SQLiteスキーマとクエリ関数
 │   ├── mcp/        外部ツール連携（MCP。子プロセスとして起動し張り替え・死活検出を持つ）
@@ -70,6 +70,8 @@ web（フロントエンド） ──→ (HTTP経由でserverと通信)
 
 `core`は`llm`や`actions`に直接依存しない。代わりに`LlmClient`トレイトと`ActionExecutor`トレイトを定義し、サーバー層で実装を結合する（依存性逆転）。
 
+`gateway`は**ポート専用**で、SDK（`serenity` / `songbird`）に依存しない（feature も持たない）。Discord の具象実装（`DiscordGateway` 等）は`discord`クレートが所有する。これにより`gateway`／`actions`（`actions → gateway`）の依存ツリーに SDK が漏れず、共有層は transport SDK を知らないまま保たれる（#1-A。CI の R5 で回帰を止める → §2.5）。
+
 `discord`クレートは`AgentRunner`トレイトを定義し、`server`が`AppState`に対してこれを実装することで循環依存を回避している。ゲートウェイ非依存な実行境界（応答生成・会話履歴・トークン予算・セッション管理・**ターン転記**）は`actions`クレートの`AgentRuntime`トレイトが持ち、`AgentRunner` / `NostrAgentRunner` / `WebAgentRunner`はいずれもそのスーパートレイトとして継承する（#156 / #158）。
 
 ### 2.3 データの流れ
@@ -100,10 +102,14 @@ web（フロントエンド） ──→ (HTTP経由でserverと通信)
 
 ### 2.5 境界を機械で守る検査（CI）
 
-§2.2 の依存の向きと §2.4 の分離方針は、レビューだけに頼ると少しずつ崩れる。名指しの依存や識別子が 1 つ入っても、ビルドは通ってしまうからだ。そこで CI に 2 つの検査を置き、「現状の性質」を固定する。どちらも**何かを直すためではなく、既に成立している境界を回帰させないため**のもの。
+§2.2 の依存の向きと §2.4 の分離方針は、レビューだけに頼ると少しずつ崩れる。名指しの依存や識別子が 1 つ入っても、ビルドは通ってしまうからだ。そこで CI に検査を置き、「現状の性質」を固定する。どれも**何かを直すためではなく、既に成立している境界を回帰させないため**のもの。
 
 - **R4: `opencrab-core` は gate/SDK クレートに依存しない**（`scripts/check-deps.sh`）
   `cargo tree -p opencrab-core --edges no-dev` の**依存ツリーの内容**を検査し、`opencrab-gateway` / `opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway` / `serenity` / `serenity-voice-model` / `songbird` が現れたら失敗させる。依存の**向きの逆転はコンパイル可否には現れない**（core が transport を巻き込んでもビルドは通る）ので、ビルドの成否ではなくツリーそのものを見る。`--edges no-dev` は normal に加え **build 依存も検査**し（build-dependency 経由の逆流を見落とさない）、dev-only 依存（テスト用の `syn` 等）は除外する。
+- **R5: SDK（`serenity` / `songbird`）は共有層（`opencrab-gateway` / `opencrab-actions`）に現れない**（`scripts/check-deps.sh`）
+  R4 と同じ `--edges no-dev` の依存ツリーを見て、`serenity` / `serenity-voice-model` / `songbird` が共有層の 2 クレートに漏れたら失敗させる。`gateway` がポート専用になり SDK を持たない（#1-A）性質を回帰させないための検査。
+- **R6: feature の組み合わせでビルドできる**（`scripts/check-deps.sh`）
+  `opencrab-gateway`（feature なし）と `opencrab-server` の discord 軸（`--no-default-features` / `--features discord` / 既定）をそれぞれ `cargo build` し、どの組み合わせでも壊れないことを確かめる。ビルドを含むので CI では build/test の後ろ（`check-deps.sh` の呼び出し位置）で走る。
 - **R7: 共有層（core の production コード）に gate 名が出ない**（`crates/core/tests/no_gate_identifiers.rs`）
   `syn` で `crates/core/src` を AST 走査し、**識別子と文字列リテラル**に `discord` / `serenity` / `songbird` / `nostr` が無いことを確かめる。テスト専用の項目（`#[cfg(test)]` / `#[cfg(all(test, ...))]` 等。ただし `any(test, ...)` はテスト以外でもコンパイルされるので対象に残す）は対象外。属性は **doc コメント（`#[doc = "..."]`）だけ**を対象外にし、それ以外の属性（`#[serde(rename = "...")]` / `#[error("...")]` 等）の文字列・識別子は検査する（本番の挙動・ワイヤ表現にゲート名が焼き込まれるため。serde を多用する `db` へ広げるとき効く）。名指しが 1 つ core に入ると、上位がそのゲートウェイを特別扱いし始める入口になる（design-plugin-architecture.md §4 が実際の事故として記録している）。`cargo expand` を使わないのは、nightly を要し、展開結果に doc コメントが残って偽陽性になるため。
   **限界（意図的）**: 検査が届くのは AST に現れるトークンに限る。`tracing::info!("...")` や `format!(...)` など**マクロ本体の文字列・識別子は `syn` が生トークンのまま保持するため検出できない**（core は tracing を多用するのでログ文言にゲート名を書いても落ちない）。マクロ内まで見るのは過剰なので、検査の形は変えず限界として明示する。
@@ -343,7 +349,7 @@ SkillEngine
 
 | ゲートウェイ | 実体 | 依存 | 説明 |
 |-------------|------|------|------|
-| **Discord** | `opencrab-gateway` の `DiscordGateway` + `opencrab-discord` のイベントループ | `serenity` / `songbird` (feature flag) | Bot接続、メッセージ受信/送信、2000文字自動分割 |
+| **Discord** | `opencrab-discord` の `DiscordGateway` + `opencrab-discord` のイベントループ | `serenity` / `songbird`（`server` の `discord` feature 経由） | Bot接続、メッセージ受信/送信、2000文字自動分割 |
 | **REST** | `opencrab-server` の axum ハンドラ | なし | `opencrab-gateway` を経由しない |
 | **Nostr** | `opencrab-nostr` | - | - |
 | **Web** | `opencrab-web-gateway` | - | - |
@@ -355,12 +361,14 @@ Discord固有のロジックは専用の`opencrab-discord`クレートに分離�
 - **`opencrab-discord`クレート**: メッセージループ、Discord管理アクション（サーバー/チャンネル一覧、チャンネル設定）、per-agent Botライフサイクル管理を提供
 - **`AgentRunner`トレイト**: `discord`クレートで定義。Discord固有の判定（trust / チャンネルポリシー）・per-agentゲートウェイを抽象化し、`server`が`AppState`に対して実装する。これにより`discord → server`の循環依存を回避。エージェント処理パイプライン（LLM呼び出し等）そのものは`actions`の`AgentRuntime`（全ゲートウェイ共通、実装は`server/src/agent_runtime_impl.rs`の1箇所）が持つ
 - **ターン転記（session_logs への記録）**: `AgentRunner`ではなく`actions`の`AgentRuntime`が持つ（`record_inbound_message` / `record_outbound_reply` / `record_interaction_response` — #158）。記録の種別（metadata の`source`）は列挙型`opencrab_actions::TranscriptSource`で受け、行の形は`server/src/transcript.rs`が所有する（transport の feature flag に依存しない）
-- **`opencrab-gateway`のDiscordアダプタ**: serenity Botの接続・メッセージ受信・送信を担当（feature flag `discord`で条件付きコンパイル）
-- **`server`の`discord` feature**: `opencrab-discord`をoptional依存として有効化。`serenity`への直接依存はない
+- **`DiscordGateway`（serenity/songbird 実装）**: serenity Botの接続・メッセージ受信・送信を担当。`opencrab-discord`の`gateway`モジュールが所有する（#1-A で`opencrab-gateway`から移設。共有層に SDK を残さない）。`opencrab-gateway`はポート（メッセージ型 / `GatewayActions`）だけを提供し、feature も SDK も持たない
+- **`server`の`discord` feature**: `opencrab-discord`をoptional依存として有効化する（`default = ["discord"]`）。SDK（serenity/songbird）は`opencrab-discord`が引き込むので、`server`が`serenity`へ直接依存する必要はない
+
+Discord のオン/オフは`server`の`discord` feature 軸で切る（`opencrab-gateway`側の feature ではない）:
 
 ```
-cargo build                    → Discord関連コード・依存なし
-cargo build --features discord → opencrab-discord + serenityコンパイル、Discord統合有効
+cargo build                                          → 既定。discord 有効（opencrab-discord + serenity/songbird をコンパイル）
+cargo build -p opencrab-server --no-default-features → Discord関連コード・依存なし
 ```
 
 ---

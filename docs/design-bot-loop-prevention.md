@@ -260,13 +260,13 @@ if tool_name == "send_noreact" || tool_name == "no_reply" {
 #### B. 会話履歴でのBot/Humanフラグ付与 — **不採用（2026-08-01 / #317）**
 
 > `Sender.is_bot` は削除した。無限ループを止めるのは「**自分自身の投稿か**」の判定
-> （`crates/gateway/src/adapters/discord.rs` の `is_own_message`、VC は
+> （`crates/discord/src/gateway.rs` の `is_own_message`、VC は
 > `crates/discord/src/voice_session.rs` の `should_transcribe`）であって、bot フラグでは
 > ない。bot を一律に別扱いすると §9 の「Botを完全無視する設計はNG」に反する。実際、
 > 他エージェントの投稿には👀が付かず、VC でも他エージェントの声が一切文字起こしされて
 > いなかった。以下は当時の案として残す。
 
-`crates/gateway/src/adapters/discord.rs` で `msg.author.bot` フラグを `Sender` に正しく設定する。
+`crates/discord/src/gateway.rs` で `msg.author.bot` フラグを `Sender` に正しく設定する。
 
 **現在（バグ）:**
 ```rust
@@ -363,7 +363,7 @@ send_noreactを使う時はtextを空にすること。
    - send_noreact/no_replyツールが呼ばれた時に`first_sent`フラグを立ててテキスト投稿をキャンセル
    - アーキテクチャ的なフェイルセーフ（§4.4-A参照）
 
-3. ~~**`crates/gateway/src/adapters/discord.rs`**（中優先度）~~ **不採用（2026-08-01 / #317）**
+3. ~~**`crates/discord/src/gateway.rs`**（中優先度）~~ **不採用（2026-08-01 / #317）**
    - ~~`msg.author.bot`を`Sender::bot()`で正しく設定~~ → `Sender.is_bot` ごと削除。
      判定は `is_own_message`（自分自身の投稿か）だけにした（§4.4-B参照）
 

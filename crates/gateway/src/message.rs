@@ -63,7 +63,7 @@ pub enum ContentPart {
 /// メッセージ送信者。
 ///
 /// **送信者が bot かどうかは持たない。** 無限ループを止めるのは「自分自身の投稿か」
-/// の判定（Discord なら `adapters::discord::is_own_message`）であって、bot フラグでは
+/// の判定（受信側の transport が自分の発言を除外する）であって、bot フラグでは
 /// ない。bot を別扱いすると**エージェント同士が会話できなくなる**。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sender {
@@ -150,8 +150,8 @@ mod tests {
 
     /// **送信者に「bot か人間か」の区別を持ち込まない。**
     ///
-    /// 無限ループを防ぐのは「自分自身の投稿か」の判定（`adapters/discord.rs` の
-    /// `is_own_message`）であって、bot フラグではない。bot を別扱いすると
+    /// 無限ループを防ぐのは「自分自身の投稿か」の判定（受信側の transport が自分の
+    /// 発言を除外する）であって、bot フラグではない。bot を別扱いすると
     /// **エージェント同士が会話できなくなる**（実際 👀 が付かず、VC の声も拾えなかった）。
     /// フィールドを 1 つ足すだけで「bot なら〜」の分岐が復活するので、形で塞ぐ。
     #[test]

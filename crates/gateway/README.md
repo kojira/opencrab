@@ -1,6 +1,6 @@
 # opencrab-gateway
 
-opencrab のゲートウェイ crate。Discord 接続の具象実装と、**gateway 共通のメッセージ型 / アクション抽象**を提供する。
+opencrab のゲートウェイ crate。**ポート専用**で、具象 transport（SDK に依存する実装）を含まない。提供するのは **gateway 共通のメッセージ型 / アクション抽象**（ポート）のみ。Discord の具象実装（`DiscordGateway`）は `opencrab-discord` へ移設した（SDK を共有層から切り離すため）。
 
 ## 現状（#215 以降）
 
@@ -26,25 +26,14 @@ WebSocket は全メソッド `todo!()`）のまま腐っていたので #215 で
 
 | 経路 | 実体 |
 |---|---|
-| Discord | `DiscordGateway`（この crate）＋ `opencrab-discord` のイベントループ |
+| Discord | `DiscordGateway`（`opencrab-discord`）＋ `opencrab-discord` のイベントループ |
 | REST | `opencrab-server` の axum ハンドラ（この crate を経由しない） |
 | Nostr | `opencrab-nostr` |
 | Web | `opencrab-web-gateway` |
 
 ## DiscordGateway
 
-serenity ベースの Discord Bot。`discord` feature（デフォルト有効）で提供される。
-trait 越しではなく**具象型として直接**使う。
-
-| メソッド | 説明 |
-|---|---|
-| `new` / `with_form_modal_resolver` | 構築（後者は A2UI Form のモーダル応答フックを注入） |
-| `start` / `shutdown` | Bot の起動・停止 |
-| `recv` | 受信メッセージを 1 件取り出す（`IncomingMessage`） |
-| `recv_interaction` | コンポーネントインタラクション（ボタン・モーダル）を取り出す |
-| `send_to_channel` | チャンネルへテキスト送信 |
-| `add_reaction` / `start_typing` | リアクション付与・タイピング表示 |
-| `http` / `voice` | serenity HTTP クライアント / songbird ハンドルの借用 |
+serenity/songbird ベースの Discord Bot 実装は **`opencrab-discord`（`gateway` モジュール）へ移設した**（SDK を共有層から切り離す #1-A）。`DiscordGateway` と関連型（`ComponentInteractionData` / `InteractionKind` / `A2uiFormModalSpec` / `A2uiFormModalResolver`）は `opencrab_discord::` から使う。
 
 ## GatewayActions trait
 
@@ -126,28 +115,15 @@ Discord の受信処理と音声セッションで実運用中。
 （discord 側）と system prompt 規約（server 側）の両方が参照する。文字列がズレると
 Silent Reply の例外判定が発火せずレビューが silent に死ぬので、必ず定数を使うこと。
 
-## Cargo features
-
-```toml
-[features]
-default = ["discord"]
-discord = ["serenity", "songbird"]
-```
-
-- `discord` — `DiscordGateway` と関連型（`ComponentInteractionData` / `InteractionKind` /
-  `A2uiFormModalSpec` / `A2uiFormModalResolver`）を有効化。serenity と songbird を
-  依存関係に追加する。無効にするとメッセージ型と `GatewayActions` 抽象だけが残る。
-
 ## 使い方
 
 ```toml
 # Cargo.toml
 [dependencies]
 opencrab-gateway = { workspace = true }
-
-# Discord を使わない場合（メッセージ型と GatewayActions のみ）
-opencrab-gateway = { workspace = true, default-features = false }
 ```
+
+feature は 1 つも持たない。この crate はメッセージ型と `GatewayActions` 抽象（ポート）だけを提供し、SDK（serenity / songbird）には依存しない。Discord の具象実装が要るときは `opencrab-discord` を使う。
 
 ## 関連ドキュメント
 

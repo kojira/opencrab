@@ -20,10 +20,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::gateway::DiscordGateway;
 use opencrab_actions::subtask::SubtaskRegistry;
 use opencrab_actions::{CallerIdentity, RunRequest, SessionLocks};
 use opencrab_core::EngineResult;
-use opencrab_gateway::{DiscordGateway, IncomingMessage, MessageContent, MessageSource, Sender};
+use opencrab_gateway::{IncomingMessage, MessageContent, MessageSource, Sender};
 
 use super::{
     consecutive_groups, create_event_channel, debounce_window_key, incoming_has_content,
@@ -986,7 +987,7 @@ async fn a_normal_reply_gets_no_no_reply_reaction() {
 /// 以前は `reaction_added` を「送信者が bot か」で初期化していたため、
 /// 他エージェントの投稿には 👀 が付かなかった（＝エージェント同士の会話で
 /// 「受け取った」が見えない）。無限ループを止めるのは**自分自身の投稿の除外**
-/// （`crates/gateway/src/adapters/discord.rs` の `is_own_message`）であって、
+/// （`crate::gateway` の `is_own_message`）であって、
 /// bot フラグではない。
 ///
 /// 観測は warn ログで行う。ここは本物の `DiscordGateway`（`test-token`）なので

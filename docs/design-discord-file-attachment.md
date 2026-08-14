@@ -39,10 +39,10 @@ async fn execute(&self, args: &serde_json::Value, _ctx: &ActionContext) -> Actio
 ```
 LLM → ActionResult(SideEffect::MessageSent) 
   → Engine → gateway.send_to_channel(channel_id, text)
-  → crates/gateway/src/adapters/discord.rs: ChannelId::say(http, text)
+  → crates/discord/src/gateway.rs: ChannelId::say(http, text)
 ```
 
-**`crates/gateway/src/adapters/discord.rs`** — `send_to_channel`:
+**`crates/discord/src/gateway.rs`** — `send_to_channel`:
 
 ```rust
 pub async fn send_to_channel(&self, channel_id: u64, text: &str) -> Result<()> {
@@ -273,7 +273,7 @@ pub fn new(
 |---|---|---|
 | `crates/discord/src/gateway_actions.rs` | `execute_send_file` 追加、`workspace_root` フィールド追加、`definitions()` / `execute()` 更新 | **主要変更** |
 | `crates/discord/src/manager.rs` | `DiscordGatewayActions::new()` 呼び出し箇所に `workspace_root` 引数を追加 | 軽微 |
-| `crates/gateway/src/adapters/discord.rs` | **変更なし** — テキスト送信は既存のまま | なし |
+| `crates/discord/src/gateway.rs` | **変更なし** — テキスト送信は既存のまま | なし |
 | `crates/actions/src/common.rs` | **変更なし** — `send_speech` は既存のまま | なし |
 | `crates/actions/src/dispatcher.rs` | **変更なし** | なし |
 | `Cargo.toml` (workspace) | serenity features に `"http"` が必要な場合のみ追加 | 要確認 |
@@ -430,13 +430,13 @@ assert_eq!(defs.len(), 13);
 crates/
 ├── discord/
 │   ├── src/
+│   │   ├── gateway.rs            ← 変更なし（テキスト送信は既存のまま）
 │   │   ├── gateway_actions.rs    ← 主要変更ファイル
 │   │   ├── manager.rs            ← new() 呼び出し更新
 │   │   └── message_loop.rs       ← 変更なし
 │   └── Cargo.toml                ← 変更なし
 ├── gateway/
 │   └── src/
-│       ├── adapters/discord.rs   ← 変更なし
 │       └── traits.rs             ← 変更なし
 └── actions/
     └── src/
