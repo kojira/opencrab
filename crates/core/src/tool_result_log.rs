@@ -133,10 +133,16 @@ fn exceeds_limit(s: &str) -> bool {
 /// - **(b) それ以外の JSON** → `to_string_pretty`（複数行になり `head`/`grep` が効く）。
 /// - **(c) parse 失敗** → 生バイトを verbatim（借用のまま）。
 ///
+/// #624: どの分岐だったかを [`OffloadFormat`] で一緒に返す。退避ファイルの拡張子を中身に
+/// 合わせるため（生テキストは `.txt`、pretty JSON は `.json`）。以前は常に `.json` 固定で、
+/// #616 で shell 本文を生テキストに変えたのに拡張子が `.json` のままだったので、`jq` を
+/// 試して失敗する誤誘導になっていた。
+///
 /// #620: 以前はここより手前で nsec キー名 redaction を通していたが撤去した（守るものが無い）。
-fn render_offload_body(result_json: &str) -> std::borrow::Cow<'_, str> {
+fn render_offload_body(result_json: &str) -> (std::borrow::Cow<'_, str>, OffloadFormat) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(result_json) else {
-        return std::borrow::Cow::Borrowed(result_json); // (c) 非 JSON はそのまま
+        // (c) 非 JSON はそのまま。JSON ではないので拡張子は .txt。
+        return (std::borrow::Cow::Borrowed(result_json), OffloadFormat::Text);
     };
     // (a) shell 形: data.stdout が string のときだけ。
     // 注意: `data.stdout` が string というだけで shell 扱いにしている。現状のツール群では
@@ -152,17 +158,45 @@ fn render_offload_body(result_json: &str) -> std::borrow::Cow<'_, str> {
         let exit_code = data.get("exit_code").and_then(|c| c.as_i64());
         // C3: 成功系（exit_code==0 かつ stderr 空）はヘッダ無しで stdout を verbatim。
         if exit_code == Some(0) && stderr.is_empty() {
-            return std::borrow::Cow::Owned(stdout.to_string());
+            return (
+                std::borrow::Cow::Owned(stdout.to_string()),
+                OffloadFormat::Text,
+            );
         }
         let code = exit_code.unwrap_or(-1);
-        return std::borrow::Cow::Owned(format!(
-            "exit_code={code}\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}"
-        ));
+        return (
+            std::borrow::Cow::Owned(format!(
+                "exit_code={code}\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}"
+            )),
+            OffloadFormat::Text,
+        );
     }
     // (b) それ以外の JSON は pretty。失敗したら原文（起こり得ないが安全側）。
     match serde_json::to_string_pretty(&value) {
-        Ok(pretty) => std::borrow::Cow::Owned(pretty),
-        Err(_) => std::borrow::Cow::Borrowed(result_json),
+        Ok(pretty) => (std::borrow::Cow::Owned(pretty), OffloadFormat::Json),
+        // pretty 化に失敗した原文は元々 valid JSON（from_str が通っている）なので .json。
+        Err(_) => (std::borrow::Cow::Borrowed(result_json), OffloadFormat::Json),
+    }
+}
+
+/// 退避本文の形式（#624）。退避ファイルの拡張子を中身に合わせるためだけに使う。
+///
+/// - [`OffloadFormat::Text`] → `.txt`: shell の生テキスト（分岐 a）と parse 失敗の verbatim
+///   （分岐 c）。どちらも JSON ではないので `jq` は効かず、`grep`/`sed`/`head` が効く。
+/// - [`OffloadFormat::Json`] → `.json`: pretty 化した構造化 JSON（分岐 b）。`jq` が通る。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OffloadFormat {
+    Text,
+    Json,
+}
+
+impl OffloadFormat {
+    /// 退避ファイルの拡張子（先頭ドット無し）。
+    fn extension(self) -> &'static str {
+        match self {
+            OffloadFormat::Text => "txt",
+            OffloadFormat::Json => "json",
+        }
     }
 }
 
@@ -206,6 +240,7 @@ struct OffloadResult {
 /// 変わらない（`saved_prefix_bytes = None`）。
 fn offload_to_workspace(
     body: &str,
+    ext: &str,
     session_id: &str,
     tool_call_id: &str,
     workspace_root: Option<&Path>,
@@ -222,8 +257,10 @@ fn offload_to_workspace(
             .take(OFFLOAD_COMPONENT_LIMIT)
             .collect()
     };
+    // #624: 拡張子は中身に合わせる（生テキストは .txt、pretty JSON は .json）。ext は
+    // [`OffloadFormat::extension`] 由来の固定文字列なので sanitize は不要。
     let filename = format!(
-        "{}_{}.json",
+        "{}_{}.{ext}",
         sanitize_component(session_id),
         sanitize_component(tool_call_id)
     );
@@ -285,11 +322,18 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// - 推定トークン数（上限の物差しと同じ単位。LLM が「全部読んだら予算をどれだけ
 ///   食うか」を自分で見積もれる）
 /// - 形式の手がかり（判別できたときのみ）
+/// - **具体的な読み方のレシピ**（[`read_recipe`]。#624）
 ///
-/// 「どう参照するか」は**指示しない**。先頭だけ読む / grep する / jq で加工する /
-/// そもそも読まずにパスを次のコマンドへ渡す、のどれが最適かはタスク次第で、
-/// 特定の手順を強制すると 979 件の一覧を「先頭 20 件だけ見て結論」のような誤りを
-/// 誘発する。選択肢だけ示して判断は LLM に委ねる。
+/// #624: 従来は「どう参照するかは指示しない（読む / grep / jq / パスを次コマンドへ渡す、
+/// のどれが最適かはタスク次第）」と選択肢だけ示して判断を委ねていた。だが実運用で、
+/// `execute_shell` の巨大結果が退避されると**エージェントが中身を 1 バイトも見ないまま
+/// 「結果を受け取り次第続行します」と言って沈黙する**（3 セッション連続）事例が出た。原因は
+/// 文面が「どう読むか」の具体を示さず「待つ」を選ばせること。#616（生テキスト退避）と
+/// #617（`ws_read` の行指定）で**実際に読めるようになった**ので、その手順を 1 つ明示する
+/// （`grep -n` で行番号 → `ws_read(start_line, line_count)`、または `sed -n`/`head`）。
+/// 「先頭 20 件だけ見て結論」を避けたい趣旨は残すため、レシピは**部分読み・検索**を勧める形で、
+/// 全体像が要るなら引数を絞って取り直す導線も併記する。読む手段が無い caller（ファイル読み
+/// ツールを持たない run）には、その再実行の導線だけが効く。
 ///
 /// 「同じツールを再実行するな」は残す（#284 のループ防止に効いている）。
 ///
@@ -303,6 +347,23 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// と名乗ると、エージェントがこの水増し値を「元の出力サイズ」として外へ再報告してしまう
 /// （#616 の実害そのもの: 実際に「全体 grep が約 761MB まで膨らんだ」と Discord に書かれた）。
 /// 全文保存側にも #568 の「規模＋保存量」の二段構えを広げて整合させる。
+/// 退避ファイルの**具体的な読み方**（#624）。ファイルを読める caller（`ws_read` /
+/// `execute_shell` を持つ owner 等価）に効く手順を 1 つ書く。読めない caller には、呼び出し側の
+/// 案内に残す「引数を絞って再実行する」導線が効く（レシピは害にならない：実行できないだけ）。
+///
+/// #616 で退避本文が**行のある生テキスト**になり、#617 で `ws_read` が**行指定**（`start_line`
+/// / `line_count`）になったので、`grep -n` の行番号をそのまま `ws_read` へ渡す導線が実際に
+/// 機能する。以前は退避本文が JSON 1 行で `grep` が全部返していた。
+fn read_recipe(rel: &str) -> String {
+    format!(
+        "To read it, run `grep -n <pattern> {rel}` to get matching line numbers, then call \
+         `ws_read` on that path with `start_line`/`line_count` (pass a grep line number as \
+         `start_line`) to read around a match; or run `sed -n '1,200p' {rel}` (or `head`) via \
+         execute_shell to read from the top. The saved body is line-oriented text whose line \
+         numbers line up with `ws_read`, so grep/sed/head work on it directly."
+    )
+}
+
 fn oversized_notice(orig_bytes: usize, body: &str, saved: Option<&OffloadResult>) -> String {
     // C2: 実際にファイルへ入る本文（全文 or 先頭だけ）を確定し、そこから数える。
     let saved_slice = match saved {
@@ -328,34 +389,39 @@ fn oversized_notice(orig_bytes: usize, body: &str, saved: Option<&OffloadResult>
         Some(OffloadResult {
             rel_path: rel,
             saved_prefix_bytes: None,
-        }) => format!(
-            "[Tool result withheld: the serialized result was {orig_bytes} bytes. Its saved \
-             form ({bytes} bytes, {lines} lines, ~{tokens} tokens{hint}) was written in full to \
-             `{rel}` (path relative to your workspace root). It exceeded the \
-             {TOOL_RESULT_TOKEN_LIMIT}-token inline limit, so none of its content is included \
-             here. It is up to you how to use it: read part of it, search it, transform it, or \
-             pass the path straight to the next command without reading it at all. If you cannot \
-             read that file (some runs have no file-reading tool), instead re-run with a narrower \
-             request (smaller id/time window, fewer rows, or estimate the size first) so the \
-             result fits under the limit. Do NOT re-run the same tool with the same arguments \
-             just to see the output again.]"
-        ),
+        }) => {
+            let recipe = read_recipe(rel);
+            format!(
+                "[Tool result withheld: the serialized result was {orig_bytes} bytes. Its saved \
+                 form ({bytes} bytes, {lines} lines, ~{tokens} tokens{hint}) was written in full \
+                 to `{rel}` (path relative to your workspace root). It exceeded the \
+                 {TOOL_RESULT_TOKEN_LIMIT}-token inline limit, so none of its content is included \
+                 here. {recipe} It is up to you how to use it: read part of it, search it, \
+                 transform it, or pass the path straight to the next command without reading it \
+                 at all. If you cannot read that file (some runs have no file-reading tool), \
+                 instead re-run with a narrower request (smaller id/time window, fewer rows, or \
+                 estimate the size first) so the result fits under the limit. Do NOT re-run the \
+                 same tool with the same arguments just to see the output again.]"
+            )
+        }
         // #568: 上限超過で**先頭だけ**保存した。元サイズと保存量を明記し、「不完全」であること・
         // 全文が要るなら引数を絞って再実行する導線を残す（discarded とは別の状態）。
         Some(OffloadResult {
             rel_path: rel,
             saved_prefix_bytes: Some(_),
-        }) => format!(
-            "[Tool result withheld: the serialized result was {orig_bytes} bytes. Only the \
-             first {bytes} bytes ({lines} lines, ~{tokens} tokens{hint}) were saved to `{rel}` \
-             (path relative to your workspace root) to cap the offload file size - the rest was \
-             discarded, so the saved file is incomplete (truncated); it ends on a complete line. \
-             You can read, search, or transform that prefix, but it is not the whole output. If \
-             you need \
-             the full result, re-run with a narrower request (smaller id/time window, fewer rows, \
-             or estimate the size first) so it fits. Do NOT re-run the same tool with the same \
-             arguments just to see the output again.]"
-        ),
+        }) => {
+            let recipe = read_recipe(rel);
+            format!(
+                "[Tool result withheld: the serialized result was {orig_bytes} bytes. Only the \
+                 first {bytes} bytes ({lines} lines, ~{tokens} tokens{hint}) were saved to \
+                 `{rel}` (path relative to your workspace root) to cap the offload file size - \
+                 the rest was discarded, so the saved file is incomplete (truncated); it ends on \
+                 a complete line. {recipe} Remember this is only the saved prefix, not the whole \
+                 output. If you need the full result, re-run with a narrower request (smaller \
+                 id/time window, fewer rows, or estimate the size first) so it fits. Do NOT \
+                 re-run the same tool with the same arguments just to see the output again.]"
+            )
+        }
         None => format!(
             "[Tool result withheld: the serialized result was {orig_bytes} bytes ({lines} \
              lines, ~{tokens} tokens{hint}). It exceeded the {TOOL_RESULT_TOKEN_LIMIT}-token \
@@ -387,16 +453,24 @@ fn sanitize_tool_result(
 
     // #616: 書き込む直前に 1 回だけ、部分読み・検索できる形へ整える。
     // 退避判定（[`exceeds_limit`]）はエンベロープ基準＝ producer の契約は不変。
-    let body = render_offload_body(result_json);
-    let saved = offload_to_workspace(body.as_ref(), session_id, tool_call_id, workspace_root);
+    // #624: 中身に合わせて拡張子を決める（生テキスト → .txt、pretty JSON → .json）。
+    let (body, fmt) = render_offload_body(result_json);
+    let saved = offload_to_workspace(
+        body.as_ref(),
+        fmt.extension(),
+        session_id,
+        tool_call_id,
+        workspace_root,
+    );
     // 元サイズ（規模のシグナル）はエンベロープ由来、bytes/lines/tokens は保存本文由来（C2）。
     oversized_notice(result_json.len(), body.as_ref(), saved.as_ref())
 }
 
 /// tool_result を永続化用の本文へ変換する（redaction → トークン上限/退避）。
 ///
-/// - `workspace_root` が `Some` なら、上限超過分は `<root>/tmp/{session}_{tool_call_id}.json`
-///   へ退避し、DB にはメタ情報（パス／バイト数／行数／推定トークン数）だけの案内を残す。
+/// - `workspace_root` が `Some` なら、上限超過分は `<root>/tmp/{session}_{tool_call_id}.{ext}`
+///   （`ext` は中身に合わせて `txt`/`json`。#624）へ退避し、DB にはメタ情報（パス／バイト数／
+///   行数／推定トークン数／読み方レシピ）だけの案内を残す。
 /// - `None`（退避先不明）や書き込み失敗時も**生データは残さない**。「保存できずに
 ///   捨てた」と分かるメタ情報だけを残す。session_logs の本文は次ターンで会話へ
 ///   再注入される＝ LLM が読むものなので、切り詰めた生データを置いても
@@ -523,12 +597,12 @@ mod tests {
         );
         assert!(big.len() > OFFLOAD_FILE_BYTE_LIMIT);
 
-        let saved = offload_to_workspace(&big, "sessT", "tcT", Some(dir.path())).unwrap();
-        assert_eq!(saved.rel_path, "tmp/sessT_tcT.json");
+        let saved = offload_to_workspace(&big, "txt", "sessT", "tcT", Some(dir.path())).unwrap();
+        assert_eq!(saved.rel_path, "tmp/sessT_tcT.txt");
         // 'あ' の手前（文字境界）＝ LIMIT-1 バイトまで保存（足した改行は数に含めない）。
         assert_eq!(saved.saved_prefix_bytes, Some(OFFLOAD_FILE_BYTE_LIMIT - 1));
 
-        let on_disk = std::fs::read(dir.path().join("tmp/sessT_tcT.json")).unwrap();
+        let on_disk = std::fs::read(dir.path().join("tmp/sessT_tcT.txt")).unwrap();
         // 元本文 LIMIT-1 バイト + 完結用の改行 1 バイト。
         assert_eq!(on_disk.len(), OFFLOAD_FILE_BYTE_LIMIT);
         assert!(on_disk.len() < big.len(), "切り詰められていない");
@@ -546,12 +620,13 @@ mod tests {
     fn offload_under_limit_saves_full_unchanged() {
         let dir = tempfile::TempDir::new().unwrap();
         let content = "hello ".repeat(1000); // ~6KB、上限以下
-        let saved = offload_to_workspace(&content, "sessU", "tcU", Some(dir.path())).unwrap();
+        let saved =
+            offload_to_workspace(&content, "txt", "sessU", "tcU", Some(dir.path())).unwrap();
         assert_eq!(
             saved.saved_prefix_bytes, None,
             "上限以下は切り詰めない（None）"
         );
-        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sessU_tcU.json")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sessU_tcU.txt")).unwrap();
         assert_eq!(on_disk, content, "上限以下は 1 バイトも変わらない");
     }
 
@@ -593,6 +668,16 @@ mod tests {
             !n_full.contains("Only the first"),
             "全文保存で切り詰め表現が出ている: {n_full}"
         );
+        // #624: 全文保存でも読み方のレシピ（grep -n → ws_read / sed -n）が入り、パスを指す。
+        assert!(
+            n_full.contains("grep -n <pattern> tmp/a.json"),
+            "全文保存にレシピが無い: {n_full}"
+        );
+        assert!(n_full.contains("ws_read"), "ws_read 導線が無い: {n_full}");
+        assert!(
+            n_full.contains("sed -n '1,200p' tmp/a.json"),
+            "sed 導線が無い: {n_full}"
+        );
 
         // 切り詰め保存（saved_prefix_bytes = Some）: 元サイズ・保存量・truncated を明記。
         let trunc = OffloadResult {
@@ -617,6 +702,21 @@ mod tests {
         assert!(
             n_trunc.contains("Do NOT re-run the same tool"),
             "ループ防止が無い: {n_trunc}"
+        );
+        // #624: 打ち切りケースにも同じ読み方レシピが入り、正しいパス（tmp/b.json）を指す。
+        assert!(
+            n_trunc.contains("grep -n <pattern> tmp/b.json"),
+            "打ち切りにレシピが無い: {n_trunc}"
+        );
+        assert!(n_trunc.contains("ws_read"), "ws_read 導線が無い: {n_trunc}");
+        assert!(
+            n_trunc.contains("sed -n '1,200p' tmp/b.json"),
+            "sed 導線が無い: {n_trunc}"
+        );
+        // 打ち切りは「先頭だけ」であることを明示（全体像の誤読を避ける）。
+        assert!(
+            n_trunc.contains("only the saved prefix"),
+            "先頭のみの明示が無い: {n_trunc}"
         );
     }
 
@@ -676,8 +776,10 @@ mod tests {
             "生データが流れている: {out}"
         );
         assert!(!out.contains("user0000"), "生データが流れている: {out}");
-        // 案内はメタ情報＋狭めて取り直す導線だけで、1KB 未満に収まる（76KB → 数百バイト）。
-        assert!(out.len() < 800, "案内が肥大している: {} bytes", out.len());
+        // 案内はメタ情報＋読み方レシピ＋狭めて取り直す導線だけで、なお小さい（76KB → 1KB 台）。
+        // #624: 読み方レシピ（grep -n → ws_read / sed -n）を足したぶん増えたが、生データを
+        // 載せないので依然として桁違いに小さい。上限（2,500 トークン ≒ 数 KB）を食い破らない。
+        assert!(out.len() < 1_200, "案内が肥大している: {} bytes", out.len());
 
         // 全文は退避され、そこを指している（#616: stdout の無い JSON は pretty 化）。
         assert!(out.contains("tmp/sessA_tc1.json"), "{out}");
@@ -712,7 +814,8 @@ mod tests {
         let out =
             sanitize_tool_result_for_llm("execute_shell", &big, "sessB", "tc2", Some(dir.path()));
 
-        assert!(out.contains("tmp/sessB_tc2.json"), "パスが無い: {out}");
+        // #624: 生テキスト（parse 失敗の verbatim）は .txt。
+        assert!(out.contains("tmp/sessB_tc2.txt"), "パスが無い: {out}");
         assert!(
             out.contains(&format!("{} bytes", big.len())),
             "バイトサイズが無い: {out}"
@@ -820,8 +923,8 @@ mod tests {
             sanitize_tool_result_for_llm("execute_shell", &big, "sessR", "tcR", Some(dir.path()));
         assert!(out.contains("withheld"), "退避されていない: {out}");
         assert!(!out.contains("ああああ"), "生データが流れている");
-        // 退避ファイルに全文が入っている。
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sessR_tcR.json")).unwrap();
+        // 退避ファイルに全文が入っている（#624: 非 JSON は .txt）。
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sessR_tcR.txt")).unwrap();
         assert_eq!(saved.len(), big.len());
     }
 
@@ -898,10 +1001,13 @@ mod tests {
             "error": null
         })
         .to_string();
-        let body = render_offload_body(&env);
+        let (body, fmt) = render_offload_body(&env);
         assert_eq!(body.as_ref(), stdout, "ヘッダ無しで stdout そのまま");
         assert!(!body.contains("\\n"), "\\n が 2 文字化している: {body}");
         assert!(!body.contains("exit_code="), "成功系にヘッダが付いた");
+        // #624: shell 生テキストは .txt。
+        assert_eq!(fmt, OffloadFormat::Text);
+        assert_eq!(fmt.extension(), "txt");
     }
 
     /// C3: 非ゼロ終了 or stderr 非空はヘッダが付く。stdout/stderr は生テキスト。
@@ -914,10 +1020,12 @@ mod tests {
             "error": null
         })
         .to_string();
-        let body = render_offload_body(&env);
+        let (body, fmt) = render_offload_body(&env);
         assert!(body.starts_with("exit_code=2\n"), "{body}");
         assert!(body.contains("--- stderr ---\nboom\n"), "{body}");
         assert!(body.contains("--- stdout ---\npartial\noutput"), "{body}");
+        // #624: ヘッダ付きでも shell 由来なので生テキスト＝ .txt。
+        assert_eq!(fmt, OffloadFormat::Text);
 
         // exit_code==0 でも stderr 非空ならヘッダ。
         let env2 = serde_json::json!({
@@ -926,19 +1034,23 @@ mod tests {
             "error": null
         })
         .to_string();
-        let body2 = render_offload_body(&env2);
+        let (body2, fmt2) = render_offload_body(&env2);
         assert!(body2.starts_with("exit_code=0\n"), "{body2}");
         assert!(body2.contains("--- stderr ---\nwarning"), "{body2}");
+        assert_eq!(fmt2, OffloadFormat::Text);
     }
 
     /// (b): stdout の無い JSON は pretty 化され、format_hint が "JSON object" を出す。
     #[test]
     fn render_structured_json_is_pretty() {
         let env = r#"{"success":true,"data":{"items":[1,2,3]},"error":null}"#;
-        let body = render_offload_body(env);
+        let (body, fmt) = render_offload_body(env);
         assert!(body.contains('\n'), "pretty 化されていない: {body}");
         assert!(body.contains("  "), "インデントが無い: {body}");
         assert_eq!(format_hint(&body), Some("looks like a JSON object"));
+        // #624: pretty JSON は .json（jq が通る）。
+        assert_eq!(fmt, OffloadFormat::Json);
+        assert_eq!(fmt.extension(), "json");
         // 中身は等価。
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&body).unwrap(),
@@ -947,12 +1059,15 @@ mod tests {
     }
 
     /// (c): parse 失敗は生バイト verbatim（借用のまま＝再割り当てしない）。
+    /// #624: JSON ではないので .txt（`jq` を誘導しない）。
     #[test]
     fn render_non_json_is_borrowed_verbatim() {
         let raw = "not json at all\nline2\n";
-        let body = render_offload_body(raw);
+        let (body, fmt) = render_offload_body(raw);
         assert_eq!(body.as_ref(), raw);
         assert!(matches!(body, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(fmt, OffloadFormat::Text);
+        assert_eq!(fmt.extension(), "txt");
     }
 
     /// #619 レビュー: 打ち切りは**文字境界**でほぼ全量を保存し、末尾を改行で終える。行境界で
@@ -969,12 +1084,12 @@ mod tests {
         }
         assert!(body.len() > OFFLOAD_FILE_BYTE_LIMIT);
 
-        let saved = offload_to_workspace(&body, "sL", "tL", Some(dir.path())).unwrap();
+        let saved = offload_to_workspace(&body, "txt", "sL", "tL", Some(dir.path())).unwrap();
         let n = saved.saved_prefix_bytes.expect("切り詰められている");
         // 文字境界＝全部 ASCII なので上限ちょうど。ほぼ全量（上限分）を保存する。
         assert_eq!(n, OFFLOAD_FILE_BYTE_LIMIT);
 
-        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sL_tL.json")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sL_tL.txt")).unwrap();
         assert!(on_disk.ends_with('\n'), "改行で終わっていない");
         // 上限ぶん + 完結用の改行（本文末尾がちょうど改行なら足さないが、この本文は途中で切れる）。
         assert!(
@@ -991,14 +1106,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         // 7 バイト目に改行が 1 つ、以降は改行ゼロで上限超。
         let body = format!("header\n{}", "a".repeat(OFFLOAD_FILE_BYTE_LIMIT + 500));
-        let saved = offload_to_workspace(&body, "sE", "tE", Some(dir.path())).unwrap();
+        let saved = offload_to_workspace(&body, "txt", "sE", "tE", Some(dir.path())).unwrap();
         let n = saved.saved_prefix_bytes.expect("切り詰められている");
         // 旧実装なら 7。新実装は上限ちょうど（全部 ASCII）。
         assert_eq!(
             n, OFFLOAD_FILE_BYTE_LIMIT,
             "早い改行でデータが激減した（退行）"
         );
-        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sE_tE.json")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.path().join("tmp/sE_tE.txt")).unwrap();
         assert!(on_disk.ends_with('\n'), "改行で終わっていない");
         assert!(on_disk.len() > body.len() / 2, "ほぼ全量が保存されていない");
     }
@@ -1009,11 +1124,11 @@ mod tests {
     fn offload_no_newline_saves_near_full_and_appends_newline() {
         let dir = tempfile::TempDir::new().unwrap();
         let body = "a".repeat(OFFLOAD_FILE_BYTE_LIMIT + 500); // 改行ゼロ
-        let saved = offload_to_workspace(&body, "sN", "tN", Some(dir.path())).unwrap();
+        let saved = offload_to_workspace(&body, "txt", "sN", "tN", Some(dir.path())).unwrap();
         let n = saved.saved_prefix_bytes.expect("切り詰められている");
         // 全部 ASCII なので文字境界＝上限ちょうど。
         assert_eq!(n, OFFLOAD_FILE_BYTE_LIMIT);
-        let on_disk = std::fs::read(dir.path().join("tmp/sN_tN.json")).unwrap();
+        let on_disk = std::fs::read(dir.path().join("tmp/sN_tN.txt")).unwrap();
         assert!(!on_disk.is_empty(), "空ファイル");
         // 上限ぶん + 足した改行 1 バイト。
         assert_eq!(on_disk.len(), OFFLOAD_FILE_BYTE_LIMIT + 1);
@@ -1041,8 +1156,8 @@ mod tests {
 
         let out = sanitize_tool_result_for_llm("execute_shell", &env, "sX", "tX", Some(dir.path()));
 
-        // ファイルは stdout そのもの（実改行・ヘッダ無し）。
-        let saved = std::fs::read_to_string(dir.path().join("tmp/sX_tX.json")).unwrap();
+        // ファイルは stdout そのもの（実改行・ヘッダ無し）。#624: shell 生テキストは .txt。
+        let saved = std::fs::read_to_string(dir.path().join("tmp/sX_tX.txt")).unwrap();
         assert_eq!(saved, stdout_text);
         assert!(!saved.contains("\\n"), "\\n が 2 文字化している");
         assert_eq!(count_lines(&saved), 4_000);
@@ -1087,11 +1202,107 @@ mod tests {
             out.contains("Tool result withheld"),
             "退避 notice でない: {out}"
         );
-        // 退避ファイル本文はキー名マスクされない（撤去の固定）。
+        // 退避ファイル本文はキー名マスクされない（撤去の固定）。#624: 構造化 JSON は .json。
         let saved = std::fs::read_to_string(dir.path().join("tmp/sS_tS.json")).unwrap();
         assert!(
             !saved.contains("[redacted]"),
             "撤去したはずのキー名マスクが復活している: {saved:.120}"
+        );
+    }
+
+    // ---- #624: 拡張子を中身に合わせる / 通知に読み方レシピを入れる ----
+
+    /// #624: 退避ファイルの拡張子は**中身**に合わせる。shell 生テキストと parse 失敗の
+    /// verbatim は `.txt`（JSON ではないので `jq` を誘導しない）、pretty JSON は `.json`。
+    /// sanitize の全経路で実ファイルが正しい拡張子で作られることを 1 か所で固定する。
+    #[test]
+    fn offload_extension_matches_content() {
+        let filler = "word ".repeat(TOOL_RESULT_TOKEN_LIMIT); // 確実に上限超
+
+        // (a) shell 生テキスト（data.stdout が string・成功系）→ .txt。
+        let dir_a = tempfile::TempDir::new().unwrap();
+        let shell_env = serde_json::json!({
+            "success": true,
+            "data": {"stdout": filler.clone(), "stderr": "", "exit_code": 0, "truncated": false},
+            "error": null
+        })
+        .to_string();
+        let out_a = sanitize_tool_result_for_llm(
+            "execute_shell",
+            &shell_env,
+            "sA",
+            "tA",
+            Some(dir_a.path()),
+        );
+        assert!(
+            dir_a.path().join("tmp/sA_tA.txt").exists(),
+            "shell が .txt でない"
+        );
+        assert!(
+            !dir_a.path().join("tmp/sA_tA.json").exists(),
+            ".json も作られた"
+        );
+        assert!(
+            out_a.contains("tmp/sA_tA.txt"),
+            "notice のパスが .txt でない: {out_a}"
+        );
+
+        // (b) 構造化 JSON（stdout string 無し）→ .json。
+        let dir_b = tempfile::TempDir::new().unwrap();
+        let json_env = format!(r#"{{"success":true,"data":{{"note":"{filler}"}},"error":null}}"#);
+        let out_b =
+            sanitize_tool_result_for_llm("read_file", &json_env, "sB", "tB", Some(dir_b.path()));
+        assert!(
+            dir_b.path().join("tmp/sB_tB.json").exists(),
+            "JSON が .json でない"
+        );
+        assert!(
+            out_b.contains("tmp/sB_tB.json"),
+            "notice のパスが .json でない: {out_b}"
+        );
+
+        // (c) parse 失敗の verbatim（非 JSON）→ .txt。
+        let dir_c = tempfile::TempDir::new().unwrap();
+        let raw = "line one\n".repeat(TOOL_RESULT_TOKEN_LIMIT); // 非 JSON・上限超
+        let out_c =
+            sanitize_tool_result_for_llm("execute_shell", &raw, "sC", "tC", Some(dir_c.path()));
+        assert!(
+            dir_c.path().join("tmp/sC_tC.txt").exists(),
+            "verbatim が .txt でない"
+        );
+        assert!(
+            out_c.contains("tmp/sC_tC.txt"),
+            "notice のパスが .txt でない: {out_c}"
+        );
+    }
+
+    /// #624: 上限超過の通知（全文保存）に**具体的な読み方レシピ**が入る。`grep -n` で行番号 →
+    /// `ws_read`、または `sed -n`/`head`。読む手段が無い caller 向けの再実行導線も残る。
+    #[test]
+    fn oversized_notice_carries_read_recipe() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let big = "row value\n".repeat(TOOL_RESULT_TOKEN_LIMIT); // 非 JSON・上限超 → .txt 全文保存
+        let out = sanitize_tool_result_for_llm("execute_shell", &big, "sR", "tR", Some(dir.path()));
+
+        // レシピの具体操作がパス入りで出る。
+        assert!(
+            out.contains("grep -n <pattern> tmp/sR_tR.txt"),
+            "grep 導線が無い: {out}"
+        );
+        assert!(out.contains("ws_read"), "ws_read 導線が無い: {out}");
+        assert!(out.contains("start_line"), "start_line が無い: {out}");
+        assert!(
+            out.contains("sed -n '1,200p' tmp/sR_tR.txt"),
+            "sed 導線が無い: {out}"
+        );
+        // 読む手段が無い caller 向けの再実行導線は残す。
+        assert!(
+            out.contains("If you cannot read that file"),
+            "非リーダー向け導線が無い: {out}"
+        );
+        assert!(
+            out.contains("Do NOT re-run the same tool"),
+            "ループ防止が無い: {out}"
         );
     }
 }
