@@ -28,12 +28,14 @@ pub fn prompt_preview(prompt: &str) -> String {
 
 /// 時刻起因でセッションのターンを 1 回回す要求（transport 中立）。
 pub struct TimedFireRequest {
-    /// 発火先＝実会話セッション（`nostr-{agent}` / `discord-{agent}-{guild}-{channel}`）。
+    /// 発火先＝実会話セッション。**登録済み transport のセッション**で、書式は各 transport の
+    /// [`TransportFire`] descriptor が名乗る（例: `nostr-{agent}` / `discord-{agent}-{guild}-{channel}`
+    /// / `web-{agent}-{conversation}`）。列挙を固定しない（transport を足しても腐らない）。
     pub session_id: String,
     pub agent_id: String,
-    /// transport 固有のチャンネル token（Discord は数値文字列、Nostr broadcast は空）。
+    /// transport 固有のチャンネル token（Discord は数値文字列、Nostr broadcast・web は空）。
     pub channel_id: String,
-    /// Discord のギルド ID（DM とギルドの判別に使う。Nostr は空）。transport 固有だが、
+    /// Discord のギルド ID（DM とギルドの判別に使う。Nostr・web は空）。transport 固有だが、
     /// 発火先セッションの一部（`discord-{agent}-{guild}-{channel}`）なので scheduler が持っている。
     pub guild_id: String,
     /// その回に渡すプロンプト。受け口は**system プロンプトへ足す**（会話ログに「発言」として残さない）。

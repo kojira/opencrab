@@ -17,9 +17,10 @@
 //! 不正なら **400**（実行時も fail-closed で発火対象外）。
 //!
 //! # 発火先の制約
-//! `session_id` は**そのエージェントの発火経路を持つセッション**（`nostr-{agent}` /
-//! `discord-{agent}-{guild}-{channel}`）に限る（transport 登録簿の `resolve_target` が `Some`・#628）。
-//! 「登録できたのに永遠に発火しない行」や他エージェントのセッションを作らせない。
+//! `session_id` は**そのエージェントの発火経路を持つセッション**（登録済み transport のセッション。
+//! 例: `nostr-{agent}` / `discord-{agent}-{guild}-{channel}` / `web-{agent}-{conversation}`）に限る
+//! （transport 登録簿の `resolve_target` が `Some`・#628）。列挙を固定せず、transport を足しても
+//! 腐らない中立表現にする。「登録できたのに永遠に発火しない行」や他エージェントのセッションを作らせない。
 
 use axum::{
     extract::{Path, State},

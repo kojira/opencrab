@@ -94,9 +94,10 @@ CREATE TABLE IF NOT EXISTS agent_heartbeat_config (
 ///
 /// agent スコープ（`agent_heartbeat_config`）と channel スコープ
 /// （`discord_channel_config.heartbeat_*`）の二本立てを **セッション単位の 1 テーブル**へ
-/// 畳んだ後継。`session_id` は `nostr-{agent}` / `discord-{agent}-{guild}-{channel}`。
-/// 発火先（Nostr broadcast / Discord channel）は `session_id` 接頭辞から導くので**列に
-/// 持たない**（Discord 前提の列を一般化テーブルへ持ち込まない）。
+/// 畳んだ後継。`session_id` は不透明な文字列（例: `nostr-{agent}` /
+/// `discord-{agent}-{guild}-{channel}` / `web-{agent}-{conversation}`・列挙は固定しない）。
+/// 発火先は各 transport の descriptor が `session_id` から導くので**列に持たない**（特定
+/// transport 前提の列を一般化テーブルへ持ち込まない・#628）。
 ///
 /// 既定は**無効**（`enabled INTEGER NOT NULL DEFAULT 0` / fail-closed・#240）。
 /// `interval_secs` は生値（`NULL` = 運用者既定）。`anchor_at`/`last_fired_at` は rfc3339 の

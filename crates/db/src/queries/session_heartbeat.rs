@@ -22,7 +22,9 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHeartbeatConfigRow {
     pub agent_id: String,
-    /// `nostr-{agent}` / `discord-{agent}-{guild}-{channel}`。
+    /// 発火先セッションの id。この表は不透明な文字列として扱い、書式は各 transport の
+    /// descriptor が名乗る（例: `nostr-{agent}` / `discord-{agent}-{guild}-{channel}` /
+    /// `web-{agent}-{conversation}`・#628）。
     pub session_id: String,
     pub enabled: bool,
     /// 生値。`None` = 未設定（運用者の既定に従う）。
