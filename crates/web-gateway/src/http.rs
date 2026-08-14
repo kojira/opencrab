@@ -136,6 +136,12 @@ pub async fn send_web_message<R: WebAgentRunner>(
             Json(serde_json::json!({"error": format!("agent not found: {id}")})),
         )
             .into_response(),
+        // 存在確認の DB エラーは 404 ではなく 500（実在するエージェントを 404 に化けさせない）。
+        WebTurnOutcome::Error(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
         WebTurnOutcome::Ran(response) => Json(serde_json::json!({
             "session_id": session_id,
             "caller_type": caller_type,
@@ -447,6 +453,33 @@ mod tests {
         assert_eq!(v["session_id"], web_session_id("real", "c1"));
         assert_eq!(runner.runs().len(), 1, "ターンが 1 回走る");
         assert_eq!(runner.user_messages().len(), 1, "ユーザ発話が記録される");
+    }
+
+    /// **存在確認の DB エラーは 404 ではなく 500**（#632 レビュー指摘）。
+    ///
+    /// 一過性の DB エラーで実在するエージェントを 404 に化けさせない。ターンも走らない。
+    #[tokio::test]
+    async fn db_error_during_existence_check_is_500_not_404() {
+        let runner = FakeRunner::new("走ってはいけない").failing_agent_exists("db is down");
+        let (status, body) = call(&runner, send_request("real", inbound("hi"))).await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB エラーは 500（404 ではない）"
+        );
+        assert_ne!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("db is down"),
+            "エラー本文に原因が出る: {body}"
+        );
+        assert!(
+            runner.runs().is_empty(),
+            "DB エラー時にターンが走ってはいけない"
+        );
     }
 
     /// LLM プロバイダ未設定のときのレスポンス形（docs/api.md の契約）。

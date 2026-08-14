@@ -58,15 +58,13 @@ impl AgentRuntime for AppState {
     /// `agents` 行の有無を返す（#632）。判定はこの 1 実装に集約する。
     ///
     /// ロック取得は他の読み取りメソッド（`context_budget_tokens` 等）に倣って `unwrap`
-    /// する。ロックが毒化している状況ではどのみち後続が panic するので、ここで握り潰して
-    /// 存在するエージェントを 404 に化けさせないほうがよい（panic → 500 が正しい）。
-    /// 行の取得自体が DB エラーになった場合のみ「存在しない」扱いにする（稀）。
-    fn agent_exists(&self, agent_id: &str) -> bool {
+    /// する（ロック毒化は panic → 500 が正しい）。**DB クエリのエラーは `Ok(false)` に
+    /// 潰さず `?` で伝播させる**: 潰すと一過性の DB エラーで実在するエージェントが 404 に
+    /// なってしまう。サーバ側チョークポイント（`process::run_agent_response` の
+    /// `get_agent(...)?`）と同じ方針で、404 とは別のエラーとして扱えるようにする。
+    fn agent_exists(&self, agent_id: &str) -> anyhow::Result<bool> {
         let conn = self.db.lock().unwrap();
-        matches!(
-            opencrab_db::queries::get_agent(&conn, agent_id),
-            Ok(Some(_))
-        )
+        Ok(opencrab_db::queries::get_agent(&conn, agent_id)?.is_some())
     }
 
     fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {

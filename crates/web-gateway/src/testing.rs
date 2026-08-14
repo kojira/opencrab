@@ -86,6 +86,9 @@ pub struct FakeRunner {
     has_llm_providers: bool,
     /// `agent_exists` の返り値（false で存在しないエージェントの分岐を試す / #632）。
     agent_exists: bool,
+    /// `Some` なら `agent_exists` がこのメッセージで `Err` を返す（DB エラーの分岐 / #632）。
+    /// `Err` は「存在しない（404）」ではなく内部エラーとして扱われることを固定するため。
+    agent_exists_error: Option<String>,
     /// `Some` なら `ensure_web_session` がこのメッセージで失敗する。
     ensure_session_error: Option<String>,
     /// `Some` なら `record_user_message` がこのメッセージで失敗する。
@@ -119,6 +122,7 @@ impl FakeRunner {
             caller: CallerIdentity::Agent,
             has_llm_providers: true,
             agent_exists: true,
+            agent_exists_error: None,
             ensure_session_error: None,
             record_user_message_error: None,
             runs: Arc::new(Mutex::new(Vec::new())),
@@ -164,6 +168,13 @@ impl FakeRunner {
     /// `agents` 行が無い状態にする（ハンドラが 404 で弾く分岐 / #632）。
     pub fn without_agent(mut self) -> Self {
         self.agent_exists = false;
+        self
+    }
+
+    /// 存在確認（`agent_exists`）を DB エラーで失敗させる（#632）。
+    /// `Err` は 404 ではなく内部エラーになることを固定するため。
+    pub fn failing_agent_exists(mut self, message: &str) -> Self {
+        self.agent_exists_error = Some(message.to_string());
         self
     }
 
@@ -238,8 +249,11 @@ impl AgentRuntime for FakeRunner {
         self.has_llm_providers
     }
 
-    fn agent_exists(&self, _agent_id: &str) -> bool {
-        self.agent_exists
+    fn agent_exists(&self, _agent_id: &str) -> anyhow::Result<bool> {
+        match &self.agent_exists_error {
+            Some(msg) => Err(anyhow!(msg.clone())),
+            None => Ok(self.agent_exists),
+        }
     }
 
     fn session_locks(&self) -> std::sync::Arc<opencrab_actions::SessionLocks> {

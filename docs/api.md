@@ -1359,7 +1359,7 @@ Request:
 
 **目的**: web UI からのメッセージを送信し、直接応答を得る（応答は同時に SSE へも配送される）
 
-**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、`POST /api/agents/{id}/messages` と同じ判定（エージェント行の有無のみ）に揃えてある。
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、`POST /api/agents/{id}/messages` と同じ判定（エージェント行の有無のみ）に揃えてある。（弾かれる前にセッション行やユーザー発話行は書かれることはあるが、ターンは走らない＝ LLM は呼ばれない。存在確認そのものが DB エラーで失敗した場合は 404 ではなく `500` を返す。）
 
 **Request Body**
 

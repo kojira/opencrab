@@ -25,9 +25,10 @@ use crate::sink::WebCompletionSink;
 
 /// web の公開ターン入口の結果（#632）。
 ///
-/// `AgentNotFound` は `agents` 行が無く**ターンを起こさなかった**ことを表し、HTTP
-/// ハンドラはこれを 404 に写像する。`Ran` は従来どおり配送した応答本文（NO_REPLY /
-/// 空 / 実行エラーのときは `None`）。
+/// - `Ran`: ターンを走らせて配送した応答本文（NO_REPLY / 空 / 実行エラーのときは `None`）。
+/// - `AgentNotFound`: `agents` 行が無く**ターンを起こさなかった**。HTTP ハンドラは 404 に写像する。
+/// - `Error`: 存在確認そのものが DB エラーで失敗した。**404 ではない**（一過性の障害で
+///   実在するエージェントを 404 に化けさせない）。HTTP ハンドラは 500 に写像する。
 ///
 /// `#[must_use]` は付けない: resume（[`crate::sink`]）と timed-fire（[`crate::fire`]）は
 /// 返り値を使わず discard するため（存在しないエージェントなら単に何もしないのが正しい）。
@@ -37,6 +38,8 @@ pub enum WebTurnOutcome {
     Ran(Option<String>),
     /// `agents` 行が無くターンを起こさなかった（#632）。
     AgentNotFound,
+    /// 存在確認が DB エラーで失敗した（#632）。404 ではなく内部エラー。
+    Error(String),
 }
 
 /// [`run_and_deliver`] を per-session ロックの下で実行する（**唯一の公開入口**）。
@@ -53,6 +56,10 @@ pub enum WebTurnOutcome {
 /// 応答配送）へ進まない。** production では下流の `run_agent_response` にもサーバ側の
 /// チョークポイントがあるが、ここで先に弾くことで DB へ応答を残さず・SSE へ流さず・
 /// resume/fire にも同じ判定を効かせられる（web-gateway クレート単体で完結する）。
+///
+/// 存在確認が DB エラーで失敗したときは [`WebTurnOutcome::Error`] を返す（**404 ではない**。
+/// 一過性の障害で実在するエージェントを 404 に化けさせないため）。サーバ側の
+/// `get_agent(...)?` が Err を伝播させるのと同じ方針。
 pub async fn run_and_deliver_serialized<R: WebAgentRunner>(
     runner: &R,
     agent_id: &str,
@@ -61,8 +68,13 @@ pub async fn run_and_deliver_serialized<R: WebAgentRunner>(
     system_prompt_suffix: Option<&str>,
     kind: &str,
 ) -> WebTurnOutcome {
-    if !runner.agent_exists(agent_id) {
-        return WebTurnOutcome::AgentNotFound;
+    match runner.agent_exists(agent_id) {
+        Ok(true) => {}
+        Ok(false) => return WebTurnOutcome::AgentNotFound,
+        Err(e) => {
+            tracing::error!(agent_id = %agent_id, error = format!("{e:#}"), "web run: 存在確認が DB エラーで失敗");
+            return WebTurnOutcome::Error(format!("failed to check agent existence: {e}"));
+        }
     }
     let fut = run_and_deliver(
         runner,
@@ -279,6 +291,33 @@ mod tests {
         );
         assert!(runner.runs().is_empty(), "ターンが走ってはいけない");
         assert!(runner.replies().is_empty(), "応答を転記してはいけない");
+    }
+
+    /// **存在確認の DB エラーは 404 ではなく `Error`**（#632 レビュー指摘）。
+    ///
+    /// 一過性の DB エラーで実在するエージェントを 404 に化けさせない。`AgentNotFound` に
+    /// 潰さず `Error` を返し、ターンも走らせない。
+    #[tokio::test]
+    async fn db_error_during_existence_check_is_not_agent_not_found() {
+        let runner = FakeRunner::new("走ってはいけない").failing_agent_exists("db is down");
+        let sid = web_session_id("real", "c1");
+        let out = run_and_deliver_serialized(
+            &runner,
+            "real",
+            &sid,
+            CallerIdentity::TrustedUser,
+            None,
+            "direct",
+        )
+        .await;
+        assert!(
+            matches!(&out, WebTurnOutcome::Error(e) if e.contains("db is down")),
+            "DB エラーは AgentNotFound ではなく Error: {out:?}"
+        );
+        assert!(
+            runner.runs().is_empty(),
+            "DB エラー時にターンが走ってはいけない"
+        );
     }
 
     /// system prompt の suffix（resume 時の完了マーカー）が渡る。

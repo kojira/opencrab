@@ -80,10 +80,15 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// セッション・ログ・per-agent 設定が「既定に落ちたまま」動いてしまう。タイプミス 1 つで
     /// 「動くが設定が効かない」状態になり、それに気づけない（#632 の症状）。
     ///
-    /// ターンを起こす HTTP 入口（`web/send` と REST `POST /api/agents/{id}/messages`）は、
-    /// セッションや発話を記録する**前に**これで存在を確認し、無ければ 404 で弾く。判定は
-    /// この 1 実装（`agents` 行の有無）に集約し、各ハンドラは同じ入口を呼ぶだけにする。
-    fn agent_exists(&self, agent_id: &str) -> bool;
+    /// web の公開ターン入口（`run_and_deliver_serialized`）がこれで存在を確認し、
+    /// `Ok(false)` なら 404 で弾く。判定はこの 1 実装（`agents` 行の有無）に集約する。
+    ///
+    /// **`Err` は「存在しない」ではない。** DB エラーを `Ok(false)` に潰すと、一過性の
+    /// 障害で**実在するエージェントが 404** になってしまう。実装は行の有無だけを
+    /// `Ok(bool)` で返し、DB クエリのエラーは `Err` で伝播させること（呼び出し側が
+    /// 404 とは別のエラーとして扱えるようにする）。これはサーバ側チョークポイント
+    /// （`process::run_agent_response` の `get_agent(...)?`）と同じ方針である。
+    fn agent_exists(&self, agent_id: &str) -> anyhow::Result<bool>;
 
     /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
     ///
