@@ -60,6 +60,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 http-body-util = "0.1"
 hyper = "1"
+# #620: 移行/マスターキー検証テストで MasterKey（Arc<Zeroizing<[u8;32]>>）を組むため。
+zeroize = "1"
 
 [lints]
 workspace = true

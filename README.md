@@ -151,6 +151,36 @@ per-agent bots both at boot (restored from the database) and when a config is sa
 from the dashboard. See
 [docs/discord.md](docs/discord.md) for details.
 
+`OPENCRAB_SECRET_MASTER_KEY` encrypts Nostr secret keys at rest (DB main keys and
+generated-key files) so they never sit in plaintext where an agent can read them. **It is
+required whenever any agent has Nostr configured** — if it is missing/invalid at boot the
+server still starts, but the Nostr subsystem does not (both sending and receiving stop,
+with a banner in the logs). Deployments that do not use Nostr can leave it unset and start
+normally.
+
+- **Generate it** (32 random bytes, base64):
+
+  ```bash
+  openssl rand -base64 32
+  # or: head -c 32 /dev/urandom | base64
+  ```
+
+  Put the result in `.env` as `OPENCRAB_SECRET_MASTER_KEY=...`. The server reads it once at
+  startup and immediately removes it from its own environment so it is not inherited by
+  agent shells.
+
+- **Back it up separately from the database.** After migration, the DB main keys and the
+  generated-key files are all ciphertext (`enc:v1:…`). The key and the ciphertext are two
+  halves: the DB alone is undecryptable, and the key alone has nothing to decrypt. Keep the
+  master key somewhere other than your DB backups (a secrets manager / password vault), or a
+  DB restore will be unrecoverable.
+
+- **If you lose it, the Nostr identities cannot be recovered** — you must generate new keys
+  and re-establish identities (rotate). Holding `data/agents` does not help; those files are
+  encrypted too.
+
+See [docs/nostaro-interface.md](docs/nostaro-interface.md) for how the key is used at runtime.
+
 ### 4. Development (recommended)
 
 ```bash

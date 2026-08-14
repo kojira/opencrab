@@ -265,9 +265,9 @@ impl GatewayActions for NostrGatewayActions {
                 let prefix = arg_str(args, "prefix").unwrap_or("");
                 match self.cli.vanity(prefix).await {
                     Ok(k) => {
-                        // 秘密鍵(nsec)は**LLM に返さない**。サーバ内に 0600 で保存し、
-                        // npub/pubkey のみ返す（鍵生成は送信ではないので配送系ではない）。
-                        match NostaroCli::save_generated_key(agent_id, &k) {
+                        // 秘密鍵(nsec)は**LLM に返さない**。サーバ内に暗号化して 0600 で
+                        // 保存し、npub/pubkey のみ返す（鍵生成は送信ではないので配送系ではない）。
+                        match self.cli.save_generated_key(agent_id, &k) {
                             Ok(_) => ok(json!({
                                 "npub": k.npub,
                                 "pubkey": k.pubkey,
@@ -392,15 +392,16 @@ mod tests {
 
         // 鍵を 2 本保存してから列挙する。
         for npub in ["npub1keyone", "npub1keytwo"] {
-            NostaroCli::save_generated_key(
-                agent,
-                &crate::cli::GeneratedKey {
-                    nsec: format!("nsec1verysecret-{npub}"),
-                    npub: npub.to_string(),
-                    pubkey: "deadbeef".to_string(),
-                },
-            )
-            .unwrap();
+            NostaroCli::new()
+                .save_generated_key(
+                    agent,
+                    &crate::cli::GeneratedKey {
+                        nsec: format!("nsec1verysecret-{npub}"),
+                        npub: npub.to_string(),
+                        pubkey: "deadbeef".to_string(),
+                    },
+                )
+                .unwrap();
         }
         let r = a.execute("nostr_list_keys", &json!({}), &ctx).await;
         assert!(r.success);

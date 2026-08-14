@@ -36,7 +36,10 @@ mod test_support;
 pub mod text_delivery;
 
 pub use actions::NostrGatewayActions;
-pub use cli::{validate_vanity_prefix, GeneratedKey, NostaroCli, MAX_VANITY_PREFIX_LEN};
+pub use cli::{
+    db_main_key_provider, validate_vanity_prefix, GeneratedKey, MainKeyProvider, MasterKey,
+    NostaroCli, MAX_VANITY_PREFIX_LEN,
+};
 pub use config::{config_from_row, NostrConfig, NostrFilter, DEFAULT_RELAYS};
 pub use event::{parse_watch_line, NostrEvent, DM_KINDS};
 pub use identity::NostrIdentityAdmin;

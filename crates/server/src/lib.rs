@@ -27,6 +27,7 @@ pub mod memory_declare;
 pub mod memory_maintenance;
 pub mod memory_organize;
 pub mod nostr_runner_impl;
+pub mod nostr_secret_migration;
 pub mod peer_review;
 pub mod process;
 pub mod schedule_cron;
@@ -86,6 +87,12 @@ pub struct AppState {
     /// プロバイダー設定変更を再起動なしで反映するために使う。
     pub voice_runtime: Arc<std::sync::Mutex<Option<Arc<dyn opencrab_voice::VoiceRuntime>>>>,
     pub workspace_base: String,
+    /// #620: Nostr の at-rest 秘密（DB 本鍵・生成鍵ファイル）の暗号/復号に使うマスターキー。
+    /// 起動時に env `OPENCRAB_SECRET_MASTER_KEY` から読んで即 `remove_var` し、ここへ保持する。
+    /// **有効（base64 32B かつ既存暗号文とも一致）なマスターキーがあるときだけ `Some`**。
+    /// `None` は未設定 / 不正形式 / 既存暗号文と不一致のいずれか（暗号化を有効化していない＝
+    /// 従来挙動）。Nostr サブシステムは `Some` のときだけ起動する（`None` ならバナーで拒否）。
+    pub nostr_master_key: Option<opencrab_nostr::MasterKey>,
     pub default_model: String,
     pub tools_config: Arc<RwLock<opencrab_actions::tools::ToolsConfig>>,
     /// コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0, デフォルト 0.5)。
@@ -262,6 +269,8 @@ pub(crate) fn test_app_state() -> AppState {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        // #620: テストは暗号化を有効化しない（None＝平文フォールバック / 従来挙動）。
+        nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(RwLock::new(opencrab_actions::tools::ToolsConfig::default())),
         compaction_ratio: 0.5,

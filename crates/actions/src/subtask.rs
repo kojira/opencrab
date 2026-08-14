@@ -3181,16 +3181,22 @@ mod tests {
         assert!(dir.path().join("tmp").read_dir().unwrap().count() > 0);
     }
 
-    /// [P1 回帰] dispatch 経路でも秘密鍵はマスクして永続化する。
+    /// #620: dispatch 経路の永続化は **nsec キー名マスクをしない**（`SECRET_KEYS` を撤去した）。
+    ///
+    /// キー名一致は実際の混入（別の文字列値の中に鍵が含まれる形）を検出できず、`nsec` を
+    /// JSON キーに持つ結果を返す producer も皆無だった（列挙で確認）。鍵は at-rest 暗号化と
+    /// 実行時 env 注入で「読める範囲の外」に置く方式へ移した。ここは合成の nsec-keyed 結果が
+    /// **マスクされず**そのまま永続化される（旧マスクが復活していないこと＝撤去の固定）ことと、
+    /// 永続化そのものは従来どおり動くことを見る。
     #[tokio::test]
-    async fn dispatch_redacts_secret_result_like_inline() {
-        struct SecretExecutor;
+    async fn dispatch_persists_result_without_key_name_masking() {
+        struct KeyLikeExecutor;
         #[async_trait::async_trait]
-        impl ActionExecutor for SecretExecutor {
+        impl ActionExecutor for KeyLikeExecutor {
             async fn execute(&self, _name: &str, _args: &serde_json::Value) -> ActionResult {
                 ActionResult {
                     success: true,
-                    data: serde_json::json!({"npub": "npub1ok", "nsec": "nsec1leaked"}),
+                    data: serde_json::json!({"npub": "npub1ok", "nsec": "nsec1synthetic"}),
                     error: None,
                 }
             }
@@ -3204,7 +3210,7 @@ mod tests {
         let registry: SubtaskRegistry = Arc::new(DashMap::new());
         let sink = Arc::new(RecordingSink::default());
         let parent = "web-agent-a-conv1";
-        let executor: Arc<dyn ActionExecutor> = Arc::new(SecretExecutor);
+        let executor: Arc<dyn ActionExecutor> = Arc::new(KeyLikeExecutor);
 
         let dispatcher = SubtaskToolDispatcher::new(
             executor,
@@ -3223,12 +3229,14 @@ mod tests {
         wait_until_settled(&registry).await;
 
         let body = completed_log_body(&db, parent);
+        // 撤去したはずのキー名マスクが効いていない（`[redacted]` を付けない）。
         assert!(
-            !body.contains("nsec1leaked"),
-            "秘密鍵が DB へ入ってはならない"
+            !body.contains("redacted"),
+            "撤去したはずのキー名マスクが復活している: {}",
+            &body[..body.len().min(300)]
         );
-        assert!(body.contains("redacted"));
-        assert!(body.contains("npub1ok"), "非秘密は保持する");
+        // 永続化そのものは従来どおり動く（結果が session_logs に載る）。
+        assert!(body.contains("npub1ok"), "結果が永続化されていない");
     }
 
     /// [P1 回帰] run 内共有状態を書く `select_llm` は dispatch しない（inline のまま）。

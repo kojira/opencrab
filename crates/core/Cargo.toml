@@ -22,6 +22,12 @@ memchr = { workspace = true }
 rusqlite = { workspace = true }
 opencrab-db = { workspace = true }
 opencrab-llm-types = { workspace = true }
+# at-rest 秘密（Nostr 本鍵・生成鍵）の暗号化保管層（#620）。XChaCha20-Poly1305 は
+# ワークスペースに既にある依存（transitive）。base64/zeroize/getrandom も同様。
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+zeroize = "1"
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

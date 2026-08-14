@@ -29,6 +29,7 @@ pub mod memory;
 pub mod memory_index;
 pub mod owner;
 pub mod runtime_context;
+pub mod secret_box;
 pub mod skill;
 pub mod soul;
 pub mod task_ledger;
