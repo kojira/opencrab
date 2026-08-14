@@ -1938,6 +1938,7 @@ dependencies = [
  "chrono",
  "dashmap 6.1.0",
  "iana-time-zone",
+ "memchr",
  "opencrab-db",
  "opencrab-llm-types",
  "rusqlite",

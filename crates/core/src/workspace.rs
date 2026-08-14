@@ -156,39 +156,62 @@ impl Workspace {
         Ok(content)
     }
 
-    /// Read up to `max_len` bytes starting at byte offset `start`, **without loading the whole
-    /// file** (seek + bounded read). Returns `(bytes, total_len)` where `total_len` is the file
-    /// size in bytes (from metadata, O(1)). `start` at or past EOF yields empty bytes.
+    /// Open `relative_path` **once** and return a [`LineReader`] positioned at `start_line`
+    /// (1-based), together with the file size in bytes (`metadata().len()`, O(1)).
     ///
-    /// The returned bytes may begin or end in the middle of a multi-byte UTF-8 character — the
-    /// caller is responsible for correcting to char boundaries. This lets `ws_read` page a huge
-    /// offloaded file (#564: measured 509MB) in bounded windows with O(window) IO per call, so
-    /// paging is O(n) overall rather than re-reading the whole file each page (#567).
-    pub fn read_file_range(
+    /// The reader wraps a [`std::io::BufReader`] with a [`RANGE_SCAN_BYTE_CAP`] window and never
+    /// materializes more than that window plus one line's first `max_line_chars` chars in memory —
+    /// so a single gigantic line (base64 / minified JSON, #616) is read safely. Reaching
+    /// `start_line` and finding line ends is done by counting `\n` with `memchr` only; nothing is
+    /// tokenized here. This replaces the old per-call `open`+`seek` window read: paging a huge
+    /// offloaded file (#564: measured 509MB) no longer re-opens the file ~2,800 times to walk one
+    /// page (#567) — the whole page is served from this single open.
+    pub fn line_reader(
         &self,
         relative_path: &str,
-        start: u64,
-        max_len: usize,
-    ) -> Result<(Vec<u8>, u64)> {
-        use std::io::{Read, Seek, SeekFrom};
+        start_line: usize,
+        max_line_chars: usize,
+    ) -> Result<(LineReader, u64)> {
+        use std::io::BufRead;
         let path = self.resolve_path(relative_path)?;
-        let mut f = std::fs::File::open(&path)
+        let file = std::fs::File::open(&path)
             .with_context(|| format!("Failed to open file: {}", path.display()))?;
-        let total = f
+        let total = file
             .metadata()
             .with_context(|| format!("Failed to stat file: {}", path.display()))?
             .len();
-        if start >= total {
-            return Ok((Vec::new(), total));
+        let mut reader = std::io::BufReader::with_capacity(RANGE_SCAN_BYTE_CAP, file);
+        // Skip to `start_line` (1-based) by consuming `start_line - 1` newlines. Bounded memory:
+        // the skipped bytes are never copied, only the buffer is advanced. If EOF is hit first the
+        // reader is left at EOF and the first `next_line` returns `None` (empty page).
+        let mut to_skip = start_line.saturating_sub(1);
+        while to_skip > 0 {
+            let consumed = {
+                let buf = reader
+                    .fill_buf()
+                    .with_context(|| format!("Failed to read file: {}", path.display()))?;
+                if buf.is_empty() {
+                    break;
+                }
+                match memchr::memchr(b'\n', buf) {
+                    Some(pos) => {
+                        to_skip -= 1;
+                        pos + 1
+                    }
+                    None => buf.len(),
+                }
+            };
+            reader.consume(consumed);
         }
-        f.seek(SeekFrom::Start(start))
-            .with_context(|| format!("Failed to seek file: {}", path.display()))?;
-        let to_read = (max_len as u64).min(total - start) as usize;
-        let mut buf = vec![0u8; to_read];
-        f.read_exact(&mut buf)
-            .with_context(|| format!("Failed to read file range: {}", path.display()))?;
-        tracing::debug!(path = %path.display(), start, len = to_read, "Read workspace file range");
-        Ok((buf, total))
+        tracing::debug!(path = %path.display(), start_line, "Opened workspace line reader");
+        Ok((
+            LineReader {
+                reader,
+                next_no: start_line,
+                max_chars: max_line_chars,
+            },
+            total,
+        ))
     }
 
     /// Write content to a file in the workspace.
@@ -344,6 +367,112 @@ impl Workspace {
     }
 }
 
+/// 逐次行読みで 1 度に埋める窓（＝`BufReader` の容量, 硬い上限）。行の走査・スキップは常に
+/// この窓ぶんずつ前進するので、1 回の IO・メモリは全ファイル長にも単一行の長さにも依らず
+/// この窓で頭打ちになる（#564 実測 509MB・単一行でも固まらない / #567）。値は 32 KiB。
+pub const RANGE_SCAN_BYTE_CAP: usize = 32_768;
+
+/// [`LineReader::next_line`] が返す 1 行。`text` は先頭 `max_chars` 文字までに切り詰めてあり、
+/// `overflow_chars` は切り捨てた文字数（切っていなければ 0）。単位は**文字数**（`char`）。
+#[derive(Debug, Clone)]
+pub struct TruncatedLine {
+    /// 1 始まりの行番号。
+    pub number: usize,
+    /// 行頭から高々 `max_chars` 文字（超過ぶんは含まない）。
+    pub text: String,
+    /// 切り捨てた文字数（`元の文字数 − max_chars`, 切っていなければ 0）。
+    pub overflow_chars: usize,
+}
+
+/// [`Workspace::line_reader`] が返す、単一 open の逐次行読み。`next_line` を呼ぶたびに次の 1 行を
+/// **行頭から `max_chars` 文字まで**読み、残りは `\n` まで読み飛ばして超過文字数だけ数える。
+/// トークン計算は一切しない（呼び出し側が組み上げたページにだけ掛ける / #617）。
+pub struct LineReader {
+    reader: std::io::BufReader<std::fs::File>,
+    /// 次に返す行の 1 始まり行番号。
+    next_no: usize,
+    /// 1 行あたりに読む最大文字数。
+    max_chars: usize,
+}
+
+impl LineReader {
+    /// 次の 1 行を返す。EOF なら `None`。行頭 `max_chars` 文字だけを `text` に積み、残りは
+    /// `\n`（または EOF）まで読み飛ばして `overflow_chars` に数える。窓（[`RANGE_SCAN_BYTE_CAP`]）
+    /// を跨いでマルチバイト文字が割れても、割れたバイトだけを次窓へ繰り越す（`carry`）ので、
+    /// バイト境界補正はこの 1 手だけで済む。
+    pub fn next_line(&mut self) -> Result<Option<TruncatedLine>> {
+        use std::io::BufRead;
+        let mut text = String::new();
+        let mut total_chars = 0usize;
+        // 窓末尾で割れたマルチバイト文字の未完バイト（< 4 バイト）を次窓へ繰り越す。
+        let mut carry: Vec<u8> = Vec::new();
+        let mut saw_any = false;
+        loop {
+            let mut bytes = std::mem::take(&mut carry);
+            let (consumed, nl_found);
+            {
+                let buf = self
+                    .reader
+                    .fill_buf()
+                    .context("Failed to read workspace file line")?;
+                if buf.is_empty() {
+                    break; // EOF
+                }
+                saw_any = true;
+                match memchr::memchr(b'\n', buf) {
+                    Some(pos) => {
+                        bytes.extend_from_slice(&buf[..pos]);
+                        consumed = pos + 1;
+                        nl_found = true;
+                    }
+                    None => {
+                        bytes.extend_from_slice(buf);
+                        consumed = buf.len();
+                        nl_found = false;
+                    }
+                }
+            }
+            self.reader.consume(consumed);
+            // `bytes` の妥当な UTF-8 プレフィックスだけを文字に割る。末尾に未完バイトが残れば
+            // 次窓の先頭バイトと繋がるので carry へ（`\n` は継続バイトになり得ないので、改行を
+            // 見つけた窓では未完バイトは残らない）。
+            let valid_len = match std::str::from_utf8(&bytes) {
+                Ok(_) => bytes.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            let valid =
+                std::str::from_utf8(&bytes[..valid_len]).expect("valid_up_to is a char boundary");
+            for ch in valid.chars() {
+                if total_chars < self.max_chars {
+                    text.push(ch);
+                }
+                total_chars += 1;
+            }
+            if valid_len < bytes.len() {
+                carry.extend_from_slice(&bytes[valid_len..]);
+            }
+            if nl_found {
+                return Ok(Some(self.take_line(text, total_chars)));
+            }
+        }
+        // EOF。何も読めていなければ行は無い。末尾に改行の無い最終行は 1 行として返す。
+        if !saw_any {
+            return Ok(None);
+        }
+        Ok(Some(self.take_line(text, total_chars)))
+    }
+
+    fn take_line(&mut self, text: String, total_chars: usize) -> TruncatedLine {
+        let number = self.next_no;
+        self.next_no += 1;
+        TruncatedLine {
+            number,
+            text,
+            overflow_chars: total_chars.saturating_sub(self.max_chars),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -479,5 +608,54 @@ mod tests {
         let (_dir, ws) = temp_workspace();
         ws.mkdir_sync("dir").unwrap();
         assert!(ws.delete_file("dir").is_err());
+    }
+
+    /// #617: `line_reader` は **1 回の open** で `next_line` を繰り返して全行を順に返す（毎行
+    /// open+seek し直す O(n²) ではない）。単一 open であることは、1 つの reader インスタンスから
+    /// 連続した行番号・本文が順に出てくることで観測できる。
+    #[test]
+    fn line_reader_reads_sequentially_from_single_open() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("multi.txt", "alpha\nbravo\ncharlie\ndelta")
+            .unwrap();
+
+        // start_line=2 から。open は 1 回だけ、以降は同じ reader を前進させる。
+        let (mut reader, total) = ws.line_reader("multi.txt", 2, 512).unwrap();
+        assert_eq!(total, "alpha\nbravo\ncharlie\ndelta".len() as u64);
+
+        let l2 = reader.next_line().unwrap().unwrap();
+        assert_eq!(
+            (l2.number, l2.text.as_str(), l2.overflow_chars),
+            (2, "bravo", 0)
+        );
+        let l3 = reader.next_line().unwrap().unwrap();
+        assert_eq!(l3.number, 3);
+        assert_eq!(l3.text, "charlie");
+        let l4 = reader.next_line().unwrap().unwrap();
+        assert_eq!((l4.number, l4.text.as_str()), (4, "delta")); // 末尾に改行なし
+        assert!(reader.next_line().unwrap().is_none(), "EOF");
+    }
+
+    /// 1 行あたりの文字数上限が効き、超過ぶんは `overflow_chars` に出る（バイトではなく文字数）。
+    /// マルチバイト（3 バイト/字）でも切りは文字境界で、割れた文字は出さない。
+    #[test]
+    fn line_reader_truncates_by_chars_not_bytes() {
+        let (_dir, ws) = temp_workspace();
+        // "あ"×10（30 バイト）を 1 行。max_chars=4 で 4 文字だけ、6 文字あふれる。
+        ws.write_file("jp.txt", &"あ".repeat(10)).unwrap();
+        let (mut reader, _total) = ws.line_reader("jp.txt", 1, 4).unwrap();
+        let l = reader.next_line().unwrap().unwrap();
+        assert_eq!(l.text, "ああああ", "文字境界で 4 文字だけ返す");
+        assert_eq!(l.text.chars().count(), 4);
+        assert_eq!(l.overflow_chars, 6, "切り捨ては文字数で数える");
+    }
+
+    /// start_line がファイル末尾を越えたら行は無い（空ページ）。
+    #[test]
+    fn line_reader_start_past_end_is_empty() {
+        let (_dir, ws) = temp_workspace();
+        ws.write_file("f.txt", "a\nb\nc").unwrap();
+        let (mut reader, _total) = ws.line_reader("f.txt", 100, 512).unwrap();
+        assert!(reader.next_line().unwrap().is_none());
     }
 }

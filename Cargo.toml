@@ -64,6 +64,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Tokenization (context budget accounting)
 tiktoken-rs = "0.9.1"
 
+# 行走査（ws_read の逐次読みで `\n` を数える / #617）
+memchr = "2"
+
 # Utils
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
