@@ -128,19 +128,24 @@ OpenCrab のツール（`nostr_*`）は既存 CLI を呼ぶだけ。改造不要
 ### identity 切替（`nostr_switch_identity`・owner/trusted 限定）
 
 `nostr_switch_identity(npub=...)` で、`nostr_generate_key` で生成した鍵をゲートウェイの
-**本鍵**に採用する。OpenCrab 側は DB の secret_key を差し替え、`config.toml` を新鍵で
-再生成（0600・アトミック）し、自己返信スキップ用の pubkey を `nostaro --config <p> pubkey`
-で取り直して更新する（**watch は鍵非依存なのでプロセス再起動は不要**）。owner/trusted の
-ターンでのみ実行される（外部ユーザーによるなりすまし乗っ取りを防ぐ）。nostaro 側の改造は不要。
+**本鍵**に採用する。#620 以降、`config.toml` に鍵行は書かない。OpenCrab 側は、新 pubkey を
+**生成鍵経由**（生成鍵を env `NOSTARO_SECRET_KEY` で注入して `pubkey` を引く・`cli.rs` の
+`pubkey_from`）で取り直して自己返信スキップ用に更新し、その後で DB の secret_key を新鍵の
+暗号文へ差し替える。本鍵プロバイダは DB を読むため、DB 更新の**前**に生成鍵経由で新 pubkey を
+取得・検証する（`config.toml` は鍵行なしで relays のみ再生成する）。**watch は鍵非依存なので
+プロセス再起動は不要**。owner/trusted のターンでのみ実行される（外部ユーザーによるなりすまし
+乗っ取りを防ぐ）。nostaro 側の改造は不要。
 
 ### マルチ identity 送信（`from` 指定）
 
 送信ツールの任意 `from`（npub）を指定すると、本鍵ではなく **`nostr_generate_key` で
-生成した鍵**で送信できる。OpenCrab 側は本設定 `config.toml` の relays/blossom を継承しつつ
-`secret_key` だけをその生成鍵に差し替えた一時 config（`generated-keys/<npub>.config.toml`,
-0600）を作り、`--config` をそちらに向けて上表と同じサブコマンドを呼ぶ。nostaro 側の改造は
-不要（`--config` の指すファイルの鍵で送信するだけ）。`from` に使えるのは、そのエージェントが
-生成した鍵（`generated-keys/<npub>.nsec` が存在するもの）に限る。
+生成した鍵**で送信できる。#620 以降、**一時 from-config（平文の鍵ファイル）は作らない**。
+OpenCrab 側は `--config` に**鍵行なしの本設定 `config.toml`**（relays/blossom を継承）を
+そのまま使い、生成鍵は env `NOSTARO_SECRET_KEY` で注入して上表と同じサブコマンドを呼ぶ。
+共有点（`command_with_config`）には鍵を差さず、本鍵経路と生成鍵経路で**別々の鍵**を env に
+載せる（鍵混同を防ぐ）。nostaro 側の改造は不要（env の鍵で送信するだけ）。`from` に使えるのは、
+そのエージェントが生成した鍵（`generated-keys/<npub>.nsec` が存在するもの）に限る。生成鍵
+ファイルは暗号文（`enc:v1:…`）で保管し、送信時にサーバ内で復号して env に載せる。
 
 ## 受信（`watch` の汎用改造が必要）
 
