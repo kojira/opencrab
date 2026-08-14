@@ -329,8 +329,9 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// `execute_shell` の巨大結果が退避されると**エージェントが中身を 1 バイトも見ないまま
 /// 「結果を受け取り次第続行します」と言って沈黙する**（3 セッション連続）事例が出た。原因は
 /// 文面が「どう読むか」の具体を示さず「待つ」を選ばせること。#616（生テキスト退避）と
-/// #617（`ws_read` の行指定）で**実際に読めるようになった**ので、その手順を 1 つ明示する
-/// （`grep -n` で行番号 → `ws_read(start_line, line_count)`、または `sed -n`/`head`）。
+/// #617（`ws_read` の行指定）で**実際に読めるようになった**ので、その手順を明示する
+/// （`grep -n` で行番号 → `ws_read(start_line, line_count)`、または `head -c` でバイト頭打ち。
+/// 詳細と「なぜ `sed -n` を並べないか」は [`read_recipe`] を参照）。
 /// 「先頭 20 件だけ見て結論」を避けたい趣旨は残すため、レシピは**部分読み・検索**を勧める形で、
 /// 全体像が要るなら引数を絞って取り直す導線も併記する。読む手段が無い caller（ファイル読み
 /// ツールを持たない run）には、その再実行の導線だけが効く。
@@ -348,19 +349,30 @@ fn format_hint(s: &str) -> Option<&'static str> {
 /// （#616 の実害そのもの: 実際に「全体 grep が約 761MB まで膨らんだ」と Discord に書かれた）。
 /// 全文保存側にも #568 の「規模＋保存量」の二段構えを広げて整合させる。
 /// 退避ファイルの**具体的な読み方**（#624）。ファイルを読める caller（`ws_read` /
-/// `execute_shell` を持つ owner 等価）に効く手順を 1 つ書く。読めない caller には、呼び出し側の
+/// `execute_shell` を持つ owner 等価）に効く手順を書く。読めない caller には、呼び出し側の
 /// 案内に残す「引数を絞って再実行する」導線が効く（レシピは害にならない：実行できないだけ）。
 ///
 /// #616 で退避本文が**行のある生テキスト**になり、#617 で `ws_read` が**行指定**（`start_line`
 /// / `line_count`）になったので、`grep -n` の行番号をそのまま `ws_read` へ渡す導線が実際に
 /// 機能する。以前は退避本文が JSON 1 行で `grep` が全部返していた。
+///
+/// #624 レビュー: **確実に inline 上限を守る導線だけ**を並べる。`sed -n '1,200p'` は落とした
+/// （200 行が高密度だと 2,500 トークンを超え、`execute_shell` 経由で**同じ退避・同じ通知が
+/// 跳ね返る**＝この PR が救おうとする場面そのもので自己ループする）。残す 2 つはどちらも
+/// 上限を構造的に守る:
+/// - `ws_read`（`start_line`/`line_count`）: `compute_ws_read` が返り値を必ず inline 上限未満に
+///   抑える。`start_line=1` で「上から読む」も表現でき、`sed` を落としても失われる導線は無い。
+/// - `head -c 2000 <path>`: **バイト**で頭打ちにするので、トークン数 ≤ バイト数より必ず上限内。
+///   `head -n`（行数）は 1 行が長いと超えるので**採らない**。`ws_read` を持たない caller
+///   （`ws_read` は `OWNER_ONLY_ACTIONS`）には `head -c` が唯一の安全な導線なので残す。
 fn read_recipe(rel: &str) -> String {
     format!(
         "To read it, run `grep -n <pattern> {rel}` to get matching line numbers, then call \
          `ws_read` on that path with `start_line`/`line_count` (pass a grep line number as \
-         `start_line`) to read around a match; or run `sed -n '1,200p' {rel}` (or `head`) via \
-         execute_shell to read from the top. The saved body is line-oriented text whose line \
-         numbers line up with `ws_read`, so grep/sed/head work on it directly."
+         `start_line`, or `start_line=1` to read from the top); `ws_read` always keeps its \
+         output under the inline limit. If you have no `ws_read` tool, run `head -c 2000 {rel}` \
+         via execute_shell to read a bounded prefix (the byte cap keeps it under the limit). \
+         The saved body is line-oriented text whose line numbers line up with `ws_read`."
     )
 }
 
@@ -668,15 +680,20 @@ mod tests {
             !n_full.contains("Only the first"),
             "全文保存で切り詰め表現が出ている: {n_full}"
         );
-        // #624: 全文保存でも読み方のレシピ（grep -n → ws_read / sed -n）が入り、パスを指す。
+        // #624: 全文保存でも読み方のレシピ（grep -n → ws_read / head -c）が入り、パスを指す。
         assert!(
             n_full.contains("grep -n <pattern> tmp/a.json"),
             "全文保存にレシピが無い: {n_full}"
         );
         assert!(n_full.contains("ws_read"), "ws_read 導線が無い: {n_full}");
         assert!(
-            n_full.contains("sed -n '1,200p' tmp/a.json"),
-            "sed 導線が無い: {n_full}"
+            n_full.contains("head -c 2000 tmp/a.json"),
+            "head -c 導線が無い: {n_full}"
+        );
+        // #624 レビュー: 上限を守らない sed -n は誘導しない（自己ループ防止）。
+        assert!(
+            !n_full.contains("sed "),
+            "上限を守らない sed が残っている: {n_full}"
         );
 
         // 切り詰め保存（saved_prefix_bytes = Some）: 元サイズ・保存量・truncated を明記。
@@ -710,8 +727,12 @@ mod tests {
         );
         assert!(n_trunc.contains("ws_read"), "ws_read 導線が無い: {n_trunc}");
         assert!(
-            n_trunc.contains("sed -n '1,200p' tmp/b.json"),
-            "sed 導線が無い: {n_trunc}"
+            n_trunc.contains("head -c 2000 tmp/b.json"),
+            "head -c 導線が無い: {n_trunc}"
+        );
+        assert!(
+            !n_trunc.contains("sed "),
+            "上限を守らない sed が残っている: {n_trunc}"
         );
         // 打ち切りは「先頭だけ」であることを明示（全体像の誤読を避ける）。
         assert!(
@@ -777,9 +798,9 @@ mod tests {
         );
         assert!(!out.contains("user0000"), "生データが流れている: {out}");
         // 案内はメタ情報＋読み方レシピ＋狭めて取り直す導線だけで、なお小さい（76KB → 1KB 台）。
-        // #624: 読み方レシピ（grep -n → ws_read / sed -n）を足したぶん増えたが、生データを
+        // #624: 読み方レシピ（grep -n → ws_read / head -c）を足したぶん増えたが、生データを
         // 載せないので依然として桁違いに小さい。上限（2,500 トークン ≒ 数 KB）を食い破らない。
-        assert!(out.len() < 1_200, "案内が肥大している: {} bytes", out.len());
+        assert!(out.len() < 1_400, "案内が肥大している: {} bytes", out.len());
 
         // 全文は退避され、そこを指している（#616: stdout の無い JSON は pretty 化）。
         assert!(out.contains("tmp/sessA_tc1.json"), "{out}");
@@ -1277,7 +1298,8 @@ mod tests {
     }
 
     /// #624: 上限超過の通知（全文保存）に**具体的な読み方レシピ**が入る。`grep -n` で行番号 →
-    /// `ws_read`、または `sed -n`/`head`。読む手段が無い caller 向けの再実行導線も残る。
+    /// `ws_read`、または `ws_read` を持たない caller 向けに `head -c`。読む手段が無い caller 向け
+    /// の再実行導線も残る。#624 レビュー: 上限を守らない `sed -n` は誘導しない（自己ループ防止）。
     #[test]
     fn oversized_notice_carries_read_recipe() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1291,9 +1313,14 @@ mod tests {
         );
         assert!(out.contains("ws_read"), "ws_read 導線が無い: {out}");
         assert!(out.contains("start_line"), "start_line が無い: {out}");
+        // #624 レビュー: バイト頭打ちの head -c だけ（sed -n は落とした）。
         assert!(
-            out.contains("sed -n '1,200p' tmp/sR_tR.txt"),
-            "sed 導線が無い: {out}"
+            out.contains("head -c 2000 tmp/sR_tR.txt"),
+            "head -c 導線が無い: {out}"
+        );
+        assert!(
+            !out.contains("sed "),
+            "上限を守らない sed が残っている: {out}"
         );
         // 読む手段が無い caller 向けの再実行導線は残す。
         assert!(
