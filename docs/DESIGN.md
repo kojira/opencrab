@@ -98,6 +98,15 @@ web（フロントエンド） ──→ (HTTP経由でserverと通信)
 
 分離の順序・判断基準・非目標は **[design-plugin-architecture.md](design-plugin-architecture.md)** を参照。新機能の実装やレビューの際は、まずこの基準に照らすこと。
 
+### 2.5 境界を機械で守る検査（CI）
+
+§2.2 の依存の向きと §2.4 の分離方針は、レビューだけに頼ると少しずつ崩れる。名指しの依存や識別子が 1 つ入っても、ビルドは通ってしまうからだ。そこで CI に 2 つの検査を置き、「現状の性質」を固定する。どちらも**何かを直すためではなく、既に成立している境界を回帰させないため**のもの。
+
+- **R4: `opencrab-core` は gate/SDK クレートに依存しない**（`scripts/check-deps.sh`）
+  `cargo tree -p opencrab-core --edges normal` の**依存ツリーの内容**を検査し、`opencrab-gateway` / `opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway` / `serenity` / `serenity-voice-model` / `songbird` が現れたら失敗させる。依存の**向きの逆転はコンパイル可否には現れない**（core が transport を巻き込んでもビルドは通る）ので、ビルドの成否ではなくツリーそのものを見る。
+- **R7: 共有層（core の production コード）に gate 名が出ない**（`crates/core/tests/no_gate_identifiers.rs`）
+  `syn` で `crates/core/src` を AST 走査し、**識別子と文字列リテラル**に `discord` / `serenity` / `songbird` / `nostr` が無いことを確かめる。`#[cfg(test)]` 配下のテストコードと、属性（`#[doc]` = doc コメント / `#[cfg]`）は対象から外す（doc コメントには Discord / Nostr が正当に多数出てくる）。名指しが 1 つ core に入ると、上位がそのゲートウェイを特別扱いし始める入口になる（design-plugin-architecture.md §4 が実際の事故として記録している）。`cargo expand` を使わないのは、nightly を要し、展開結果に doc コメントが残って偽陽性になるため。
+
 ---
 
 ## 3. エージェントモデル

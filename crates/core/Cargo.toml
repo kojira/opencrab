@@ -33,6 +33,11 @@ getrandom = "0.2"
 tempfile = { workspace = true }
 # test-util: ハートビートループの周期を仮想時間で検証する（`#[tokio::test(start_paused)]`）。
 tokio = { workspace = true, features = ["test-util"] }
+# no_gate_identifiers テスト（R7）: core の production コードを AST で走査し、
+# gate/SDK 固有の識別子・文字列リテラルが混ざっていないことを検査する。
+syn = { version = "2", features = ["full", "visit", "parsing"] }
+proc-macro2 = "1"
+quote = "1"
 
 [lints]
 workspace = true
