@@ -486,7 +486,7 @@ fn sanitize_tool_result(
 
 /// tool_result を永続化用の本文へ変換する（redaction → トークン上限/退避）。
 ///
-/// - `workspace_root` が `Some` なら、上限超過分は `<root>/tmp/{session}_{tool_call_id}.{ext}`
+/// - `workspace_root` が `Some` なら、上限超過分は `<root>/tmp/{session}-{tool_call_id}.{ext}`
 ///   （`ext` は中身に合わせて `txt`/`json`。#624）へ退避し、DB にはメタ情報（パス／バイト数／
 ///   行数／推定トークン数／読み方レシピ）だけの案内を残す。
 /// - `None`（退避先不明）や書き込み失敗時も**生データは残さない**。「保存できずに
@@ -666,19 +666,35 @@ mod tests {
             Some(dir.path()),
         );
 
-        let expected = format!("tmp/{session_id}-{tool_call_id}.json");
-        // (1) `_` が 1 つも現れない。
-        assert!(!expected.contains('_'), "`_` が残っている: {expected}");
-        // (2) UUID 部分の見た目が原形のまま残る（`6f3fd055-711e-...` がそのまま読める）。
+        // 検査対象は**実装が返す通知本文** out（テストが組んだ文字列ではない）。out から退避パス
+        // 部分（`tmp/…json`）を取り出して調べる。通知の散文には `ws_read` / `start_line` など
+        // `_` を含む語があるので、全文ではなくパス部分に絞る。
+        let start = out.find("tmp/").expect("通知に退避パスが無い");
+        let end =
+            start + out[start..].find(".json").expect("退避パスに .json が無い") + ".json".len();
+        let path_in_notice = &out[start..end];
+
+        // (1) 実装が組んだパスに `_` が 1 つも現れない（区切りもハイフンに揃っている）。
         assert!(
-            expected.contains(tool_call_id),
-            "UUID が原形で残っていない: {expected}"
+            !path_in_notice.contains('_'),
+            "退避パスに `_` が残っている: {path_in_notice}"
         );
-        // (6) 通知に書かれたパスと、実際に作られたファイルのパスが完全一致する。
-        assert!(out.contains(&expected), "通知パスが一致しない: {out}");
+        // (2) UUID が原形のまま**実装の出力に**現れる（潰れて `6f3fd055_711e_…` になっていない）。
         assert!(
-            dir.path().join(&expected).exists(),
-            "通知が案内したパスにファイルが無い: {expected}"
+            path_in_notice.contains(tool_call_id),
+            "UUID が原形で残っていない: {path_in_notice}"
+        );
+        assert!(
+            !out.contains("6f3fd055_711e"),
+            "UUID をアンダースコアへ潰した形が通知に混じっている: {out}"
+        );
+        // 期待値は直書き。検査対象（実装の出力）と完全一致することを見る。
+        let expected = format!("tmp/{session_id}-{tool_call_id}.json");
+        assert_eq!(path_in_notice, expected, "通知パスが期待と違う");
+        // (6) 通知が案内したパスをそのまま開ける（実ファイルが存在する）。
+        assert!(
+            dir.path().join(path_in_notice).exists(),
+            "通知が案内したパスにファイルが無い: {path_in_notice}"
         );
     }
 
