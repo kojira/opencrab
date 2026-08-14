@@ -22,12 +22,19 @@ use crate::AppState;
 /// 場所の呼称は transport 中立にする（#158 S2 と同方針）。
 pub const HEARTBEAT_NOSTR_CHANNEL_LABEL: &str = "（自律ハートビート）";
 
-/// web セッション（および特定の外部チャンネル名を持たない発火先）宛ハートビートの
-/// **表示用 channel_name**（中立ラベル・#628 条件 D）。
+/// web セッション宛ハートビートの**表示用 channel_name**（web 固有ラベル・#628 条件 D）。
 ///
-/// [`channel_label`] の `_` 分岐が使う。web の会話は Discord のような外部チャンネル名を
-/// 持たないので中立の呼称を充てる（transport 中立・#158 S2 と同方針）。
+/// [`channel_label`] の web 分岐が使う。web の会話は Discord のような外部チャンネル名を
+/// 持たないので、ダッシュボードの会話であることを示す呼称を充てる。
 pub const HEARTBEAT_WEB_CHANNEL_LABEL: &str = "（ダッシュボードの会話）";
+
+/// Discord / Nostr / web 以外の発火先宛ハートビートの**表示用 channel_name**（真に中立の
+/// ラベル・#628 条件 D）。
+///
+/// [`channel_label`] の `_` 分岐が使う。web 固有ラベルを流用すると 5 つ目の transport
+/// （例 Matrix）でも「ダッシュボードの会話」と出てしまうので、fallback は transport を名指し
+/// しない中立語にする（transport 中立・#158 S2 と同方針）。
+pub const HEARTBEAT_NEUTRAL_CHANNEL_LABEL: &str = "（この会話）";
 
 /// 発火先 → プロンプト内の会話呼称（表示用 channel_name）を解く小関数（#628 条件 D）。
 ///
@@ -36,8 +43,9 @@ pub const HEARTBEAT_WEB_CHANNEL_LABEL: &str = "（ダッシュボードの会話
 /// （このモジュール）側に `target → 表示名` の小関数として残す。
 /// - **Discord**: db のチャンネル設定名（無ければ channel_id）。
 /// - **Nostr**: 固定ラベル [`HEARTBEAT_NOSTR_CHANNEL_LABEL`]。
-/// - **その他（web 等）**: 中立ラベル [`HEARTBEAT_WEB_CHANNEL_LABEL`]（transport を足しても
-///   ここは触らず中立表示になる）。
+/// - **web**: web 固有ラベル [`HEARTBEAT_WEB_CHANNEL_LABEL`]（明示分岐）。
+/// - **その他**: 真に中立の [`HEARTBEAT_NEUTRAL_CHANNEL_LABEL`]（web 固有ラベルを流用しない。
+///   5 つ目の transport が来たら明示分岐を足すが、忘れても web を名乗る誤表示にはならない）。
 fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> String {
     match target.kind {
         gateway_kinds::DISCORD => {
@@ -52,7 +60,8 @@ fn channel_label(db: &opencrab_db::Db, target: &FireTarget, agent_id: &str) -> S
                 .unwrap_or_else(|| target.channel_id.clone())
         }
         gateway_kinds::NOSTR => HEARTBEAT_NOSTR_CHANNEL_LABEL.to_string(),
-        _ => HEARTBEAT_WEB_CHANNEL_LABEL.to_string(),
+        opencrab_web_gateway::WEB_TIMED_FIRE_KIND => HEARTBEAT_WEB_CHANNEL_LABEL.to_string(),
+        _ => HEARTBEAT_NEUTRAL_CHANNEL_LABEL.to_string(),
     }
 }
 
