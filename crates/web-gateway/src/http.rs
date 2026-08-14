@@ -19,7 +19,9 @@ use std::convert::Infallible;
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -27,7 +29,7 @@ use futures::Stream;
 use serde::Deserialize;
 
 use crate::gateway::{caller_type_label, web_session_id};
-use crate::respond::run_and_deliver_serialized;
+use crate::respond::{run_and_deliver_serialized, WebTurnOutcome};
 use crate::runner::WebAgentRunner;
 
 /// web gateway の HTTP ルート（`POST .../web/send` と `GET .../web/stream`）。
@@ -90,9 +92,12 @@ pub async fn send_web_message<R: WebAgentRunner>(
     State(state): State<R>,
     Path(id): Path<String>,
     Json(req): Json<SendWebMessageRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
     let user_id = normalize_user_id(req.user_id.as_deref());
     let session_id = web_session_id(&id, &req.conversation_id);
+
+    // 存在しないエージェントの弾き出し（#632）は `run_and_deliver_serialized`（web の
+    // 唯一の公開ターン入口）が担う。ここでは `AgentNotFound` を 404 に写像する（下の match）。
 
     // 1. 認可: 既存 REST（agents_messages）に倣い trusted_users から caller を導出する。
     let caller = state.resolve_caller(&id, &user_id);
@@ -100,12 +105,14 @@ pub async fn send_web_message<R: WebAgentRunner>(
 
     // 2. セッションを用意する（無ければ作成）。
     if let Err(e) = state.ensure_web_session(&session_id, &id) {
-        return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}));
+        return Json(serde_json::json!({"error": format!("Failed to create session: {e}")}))
+            .into_response();
     }
 
     // 3. ユーザ発話を DB へ記録する（応答生成は DB から会話を再構築する）。
     if let Err(e) = state.record_user_message(&id, &session_id, &user_id, &req.content) {
-        return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}));
+        return Json(serde_json::json!({"error": format!("Failed to log message: {e}")}))
+            .into_response();
     }
 
     // 4. LLM プロバイダの可用性チェック。
@@ -115,21 +122,33 @@ pub async fn send_web_message<R: WebAgentRunner>(
             "caller_type": caller_type,
             "response": null,
             "error": "No LLM providers available",
-        }));
+        }))
+        .into_response();
     }
 
     // 5. 実行して直接応答を返す（SSE へも push 済み）。per-session 直列化は
     //    `run_and_deliver_serialized` の内側に閉じている（呼び忘れが起こらない）。
     //    ランタイム（SSE チャンネル + ロック）は runner から引かれるため、inbound と
-    //    完了 sink が別のランタイムを掴む余地は無い。
-    let response =
-        run_and_deliver_serialized(&state, &id, &session_id, caller, None, "direct").await;
-
-    Json(serde_json::json!({
-        "session_id": session_id,
-        "caller_type": caller_type,
-        "response": response,
-    }))
+    //    完了 sink が別のランタイムを掴む余地は無い。存在確認もこの入口で 1 度だけ行われる。
+    match run_and_deliver_serialized(&state, &id, &session_id, caller, None, "direct").await {
+        WebTurnOutcome::AgentNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("agent not found: {id}")})),
+        )
+            .into_response(),
+        // 存在確認の DB エラーは 404 ではなく 500（実在するエージェントを 404 に化けさせない）。
+        WebTurnOutcome::Error(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+        WebTurnOutcome::Ran(response) => Json(serde_json::json!({
+            "session_id": session_id,
+            "caller_type": caller_type,
+            "response": response,
+        }))
+        .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,6 +409,77 @@ mod tests {
             assert_eq!(messages[0].session_id, web_session_id("a", "c1"));
             assert_eq!(messages[0].content, "hi");
         }
+    }
+
+    /// **存在しないエージェントはターンを起こさず 404 で弾く**（#632）。
+    ///
+    /// 存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、ハンドラは
+    /// その `AgentNotFound` を 404 に写像するだけ。**ターン（`run_agent_response`）は走らない**
+    /// ことを固定する（応答の転記も配送もされない）。
+    #[tokio::test]
+    async fn unknown_agent_is_rejected_with_404_without_running() {
+        let runner = FakeRunner::new("走ってはいけない").without_agent();
+        let (status, body) = call(&runner, send_request("ghost", inbound("hi"))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "存在しないエージェントは 404 で弾く"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert_eq!(v["error"], "agent not found: ghost");
+
+        // ターンが走らない（チョークポイントが run の手前で弾く）。
+        assert!(
+            runner.runs().is_empty(),
+            "存在しないエージェントで実行された"
+        );
+        // 応答の転記もされない。
+        assert!(
+            runner.replies().is_empty(),
+            "存在しないエージェントで応答が転記された"
+        );
+    }
+
+    /// **存在するエージェントは従来どおり 200 でターンが走る**（#632 の回帰防止）。
+    ///
+    /// 上の 404 ガードが正常系まで巻き込んでいないことを、同じ形で対にして固定する。
+    #[tokio::test]
+    async fn existing_agent_runs_and_returns_200() {
+        let runner = FakeRunner::new("やあ");
+        let (status, body) = call(&runner, send_request("real", inbound("hi"))).await;
+        assert_eq!(status, StatusCode::OK, "存在するエージェントは 200 で走る");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert_eq!(v["response"], "やあ");
+        assert_eq!(v["session_id"], web_session_id("real", "c1"));
+        assert_eq!(runner.runs().len(), 1, "ターンが 1 回走る");
+        assert_eq!(runner.user_messages().len(), 1, "ユーザ発話が記録される");
+    }
+
+    /// **存在確認の DB エラーは 404 ではなく 500**（#632 レビュー指摘）。
+    ///
+    /// 一過性の DB エラーで実在するエージェントを 404 に化けさせない。ターンも走らない。
+    #[tokio::test]
+    async fn db_error_during_existence_check_is_500_not_404() {
+        let runner = FakeRunner::new("走ってはいけない").failing_agent_exists("db is down");
+        let (status, body) = call(&runner, send_request("real", inbound("hi"))).await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB エラーは 500（404 ではない）"
+        );
+        assert_ne!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("JSON でない");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("db is down"),
+            "エラー本文に原因が出る: {body}"
+        );
+        assert!(
+            runner.runs().is_empty(),
+            "DB エラー時にターンが走ってはいけない"
+        );
     }
 
     /// LLM プロバイダ未設定のときのレスポンス形（docs/api.md の契約）。

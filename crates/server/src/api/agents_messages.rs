@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
@@ -11,6 +13,7 @@ use opencrab_actions::{
 };
 
 use crate::process;
+use crate::process::AgentNotFound;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -132,7 +135,11 @@ pub async fn send_agent_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SendAgentMessageRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    // 存在しないエージェントの弾き出し（#632）は `process::run_agent_response`（サーバ側の
+    // 単一チョークポイント）が担う。ここでは run が返す `AgentNotFound` を 404 に写像する
+    // （下の match）。入口ごとにチェックをコピーしない。
+
     // 呼び出し元 ID は入口で 1 回だけ正規化し、以降すべて（認可・セッションキー・
     // speaker_id）で同じ値を使う。`is_owner_id` が trim して比較する一方でセッション
     // キーだけ生値を使うと、`" <id> "` が owner にはなれるのに別セッション・別
@@ -184,7 +191,8 @@ pub async fn send_agent_message(
             if let Err(e) = opencrab_db::queries::insert_session(&conn, &session) {
                 return Json(
                     serde_json::json!({"error": format!("Failed to create session: {}", e)}),
-                );
+                )
+                .into_response();
             }
         }
     }
@@ -204,7 +212,8 @@ pub async fn send_agent_message(
         };
         let conn = state.db.lock().unwrap();
         if let Err(e) = opencrab_db::queries::insert_session_log(&conn, &log) {
-            return Json(serde_json::json!({"error": format!("Failed to log message: {}", e)}));
+            return Json(serde_json::json!({"error": format!("Failed to log message: {}", e)}))
+                .into_response();
         }
     }
 
@@ -215,7 +224,8 @@ pub async fn send_agent_message(
             "caller_type": caller_type,
             "responses": [],
             "error": "No LLM providers available",
-        }));
+        }))
+        .into_response();
     }
 
     // 5. dispatch 用の共有 registry を確保する（#169）。
@@ -258,7 +268,8 @@ pub async fn send_agent_message(
             Err(e) => {
                 return Json(
                     serde_json::json!({"error": format!("Failed to build conversation: {}", e)}),
-                );
+                )
+                .into_response();
             }
         };
         process::prepend_runtime_context(&raw, "direct_message")
@@ -315,8 +326,17 @@ pub async fn send_agent_message(
                     "content": engine_result.response,
                 }],
             }))
+            .into_response()
         }
         Err(e) => {
+            // #632: 存在しないエージェントはチョークポイントで弾かれる。404 に写像する。
+            if let Some(nf) = e.downcast_ref::<AgentNotFound>() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": nf.to_string()})),
+                )
+                    .into_response();
+            }
             tracing::error!(agent_id = %id, error = %e, "Agent response failed");
             // エラー時も同様: 走行中 subtask（エラー前に dispatch 済み）があれば
             // 完了扱いにしない。
@@ -329,6 +349,7 @@ pub async fn send_agent_message(
                     "content": format!("(Error: {})", e),
                 }],
             }))
+            .into_response()
         }
     }
 }

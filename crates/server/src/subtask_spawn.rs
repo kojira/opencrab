@@ -598,9 +598,38 @@ mod tests {
         }
     }
 
+    /// テストで使う親エージェント `agent-x` を `agents` 行として登録する（#632）。
+    ///
+    /// サブタスクは親と同じ `agent_id` で sub-run を回すため、`run_agent_response` の
+    /// 存在チョークポイント（#632）を通すには行が必要。以前は行を作らず既定に落ちて
+    /// 動いていた（＝ #632 の症状そのもの）ので、テスト側で実在させる。
+    fn insert_agent_x(state: &AppState) {
+        let conn = state.db.lock().unwrap();
+        opencrab_db::queries::upsert_agent(
+            &conn,
+            &opencrab_db::queries::AgentRow {
+                agent_id: "agent-x".to_string(),
+                name: "Agent X".to_string(),
+                job_title: None,
+                organization: None,
+                image_url: None,
+                persona_name: "Tester".to_string(),
+                personality: None,
+                instructions: String::new(),
+                heartbeat_instructions: String::new(),
+                model: None,
+                reasoning_effort: None,
+                web_search: None,
+                metadata_json: None,
+            },
+        )
+        .unwrap();
+    }
+
     /// `mock:test` を解決できる `AppState`（Discord を一切通さない = web / REST 相当）。
     fn state_with_stub_llm(reply: &str, hang: bool) -> AppState {
         let state = crate::test_app_state();
+        insert_agent_x(&state);
         let mut router = opencrab_llm::router::LlmRouter::new();
         router.add_provider(Arc::new(StubProvider {
             reply: reply.to_string(),
@@ -614,6 +643,7 @@ mod tests {
     /// まで遅延させる（#450）。
     fn state_with_gated_llm(reply: &str, gate: tokio::sync::watch::Receiver<bool>) -> AppState {
         let state = crate::test_app_state();
+        insert_agent_x(&state);
         let mut router = opencrab_llm::router::LlmRouter::new();
         router.add_provider(Arc::new(GatedStub {
             reply: reply.to_string(),
@@ -1016,6 +1046,7 @@ mod tests {
     /// shell を有効化した `AppState` に capturing stub を挿す。
     fn state_with_shell_and_capture(seen: Arc<Mutex<Vec<Vec<String>>>>) -> AppState {
         let state = crate::test_app_state();
+        insert_agent_x(&state);
         {
             let mut cfg = state.tools_config.write().unwrap();
             cfg.enabled = true;

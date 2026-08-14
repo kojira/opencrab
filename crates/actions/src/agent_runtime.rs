@@ -73,6 +73,23 @@ pub trait AgentRuntime: Send + Sync + Clone + 'static {
     /// LLM プロバイダが 1 つ以上使えるか（未設定なら実行せずに返す）。
     fn has_llm_providers(&self) -> bool;
 
+    /// `agents` テーブルにこの `agent_id` の行が存在するか（#632）。
+    ///
+    /// エージェント別テーブル（`agent_allowed_commands` / `session_heartbeat_config` /
+    /// `trusted_users` など）には外部キー制約が無いため、存在しない `agent_id` を渡しても
+    /// セッション・ログ・per-agent 設定が「既定に落ちたまま」動いてしまう。タイプミス 1 つで
+    /// 「動くが設定が効かない」状態になり、それに気づけない（#632 の症状）。
+    ///
+    /// web の公開ターン入口（`run_and_deliver_serialized`）がこれで存在を確認し、
+    /// `Ok(false)` なら 404 で弾く。判定はこの 1 実装（`agents` 行の有無）に集約する。
+    ///
+    /// **`Err` は「存在しない」ではない。** DB エラーを `Ok(false)` に潰すと、一過性の
+    /// 障害で**実在するエージェントが 404** になってしまう。実装は行の有無だけを
+    /// `Ok(bool)` で返し、DB クエリのエラーは `Err` で伝播させること（呼び出し側が
+    /// 404 とは別のエラーとして扱えるようにする）。これはサーバ側チョークポイント
+    /// （`process::run_agent_response` の `get_agent(...)?`）と同じ方針である。
+    fn agent_exists(&self, agent_id: &str) -> anyhow::Result<bool>;
+
     /// プロセス全体で 1 つの per-session 直列化ロック表（#588 Stage 2）。
     ///
     /// 時間トリガー（heartbeat）のターンと通常メッセージ処理のターンを**同一セッション上で

@@ -2517,6 +2517,146 @@ async fn test_web_send_dispatches_tool_as_background_subtask() {
     );
 }
 
+/// #632: 存在しない `agent_id` への `web/send` は**ターンを起こさず 404**。
+///
+/// `agents` 行が無いと per-agent 設定が全部既定に落ちるのに「動いてしまう」ため、
+/// タイプミスに気づけない。合成済み Router 越しに **LLM ターンが 1 度も回らない**ことを
+/// 固定する（存在確認は `run_and_deliver_serialized` チョークポイントが担う）。
+#[tokio::test]
+async fn test_web_send_unknown_agent_is_rejected_without_running() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let bogus = "does-not-exist-632";
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{bogus}/web/send"),
+        Some(serde_json::json!({
+            "conversation_id": "conv-x",
+            "content": "存在しないエージェントに投げる",
+            "user_id": "u1"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(resp["error"], format!("agent not found: {bogus}"));
+    // ターンが走らない = LLM が 1 度も呼ばれない。
+    assert!(
+        mock.system_prompts().is_empty(),
+        "存在しないエージェントで LLM ターンが走った"
+    );
+}
+
+/// #632 回帰: 存在するエージェントは `web/send` で従来どおり 200 でターンが走る。
+#[tokio::test]
+async fn test_web_send_existing_agent_runs() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "WebReal", "TestPersona").await;
+    mock.push_text_response("やあ");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/web/send"),
+        Some(serde_json::json!({
+            "conversation_id": "conv-ok",
+            "content": "hi",
+            "user_id": "u1"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "存在するエージェントは 200 で走る");
+    assert_eq!(resp["session_id"], format!("web-{agent_id}-conv-ok"));
+    assert!(resp["response"].is_string(), "応答本文が返る: {resp}");
+}
+
+/// #632: 存在しない `agent_id` への REST `POST /api/agents/{id}/messages` も同じ穴を
+/// 持っていた。サーバ側チョークポイント（`process::run_agent_response`）で弾き、404 に揃える。
+#[tokio::test]
+async fn test_rest_messages_unknown_agent_is_rejected_without_running() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let bogus = "does-not-exist-632-rest";
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{bogus}/messages"),
+        Some(serde_json::json!({ "content": "hi", "user_id": "u1" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(resp["error"], format!("agent not found: {bogus}"));
+    assert!(
+        mock.system_prompts().is_empty(),
+        "存在しないエージェントで LLM ターンが走った"
+    );
+}
+
+/// #632 回帰: 存在するエージェントは REST `POST /messages` で従来どおり 200 で走る。
+#[tokio::test]
+async fn test_rest_messages_existing_agent_runs() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let (agent_id, app) = create_test_agent_named(app, "RestReal", "TestPersona").await;
+    mock.push_text_response("やあ");
+
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        Some(serde_json::json!({ "content": "hi", "user_id": "u1" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "存在するエージェントは 200 で走る");
+    assert_eq!(resp["session_id"], format!("agent-msg-{agent_id}-u1"));
+    assert!(resp["responses"].is_array(), "応答配列が返る: {resp}");
+}
+
+/// #632（第 3 の入口）: `POST /api/sessions/{id}/messages` は存在しない participant で
+/// ターンを起こしていた（`create_session` が participant の存在を確認せず、`agent_sessions`
+/// に FK が無く、参加者ループが `run_agent_response` を呼ぶため）。サーバ側チョークポイントで
+/// 弾き、404 に揃える。**でたらめな participant の LLM ターンが走らない**ことを固定する。
+#[tokio::test]
+async fn test_session_messages_unknown_participant_is_rejected_without_running() {
+    let (app, _db, mock, _state) = create_test_app_with_state();
+    let bogus = "does-not-exist-632-participant";
+
+    // でたらめな participant でセッションを作る（create_session は存在確認しない）。
+    let (_, resp) = send_request(
+        app.clone(),
+        "POST",
+        "/api/sessions",
+        Some(serde_json::json!({
+            "theme": "t",
+            "participant_ids": [bogus]
+        })),
+    )
+    .await;
+    let session_id = resp["id"].as_str().unwrap().to_string();
+
+    // send（sender は participant ループの対象外なので bogus participant が走る対象になる）。
+    let (status, resp) = send_request(
+        app.clone(),
+        "POST",
+        &format!("/api/sessions/{session_id}/messages"),
+        Some(serde_json::json!({
+            "agent_id": "sender-not-a-participant",
+            "content": "hi"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(resp["error"], format!("agent not found: {bogus}"));
+    assert!(
+        mock.system_prompts().is_empty(),
+        "存在しない participant で LLM ターンが走った"
+    );
+}
+
 /// GET を 1 本流し、**body を読まずに** `(status, content-type)` を返す。
 ///
 /// `send_request` は body を読み切るので、終端しない SSE レスポンス（`web/stream`）には

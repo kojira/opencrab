@@ -1070,6 +1070,8 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 
 > メッセージ送信者（`agent_id`）以外の全参加者が自動的に応答する。LLM 呼び出しが発生する。
 
+**存在しない参加者は 404**（#632）: 参加者に `agents` 行の無い `agent_id` が含まれていると、その参加者のターンは走らず **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。セッションは `create_session` 時に参加者の存在を確認しない（`agent_sessions` に FK が無い）ため、でたらめな参加者 ID でセッションを作れてしまうが、実行はサーバ側チョークポイント（`process::run_agent_response`）で弾かれる。
+
 > **ツール実行は inline（同期）**: この経路は非ブロック dispatch を配線しない。エージェントが呼んだツールはすべて応答ターンの中で実行され、その結果を踏まえた最終応答が `responses[].content` に入る（`tool_calls_made` も実際の実行回数）。同じ「メッセージ送信」でも `POST /api/agents/{id}/messages` は意味論が異なる（後述）。
 
 **Request Body**
@@ -1199,6 +1201,8 @@ issue #499）、`process_interval_secs` ごとのポーリングは取りこぼ�
 セッション ID は `agent-msg-{agent_id}-{user_id}` の形式で自動生成・再利用される。会話履歴は保持される。
 
 `user_id` はハンドラ入口で 1 回だけ前後の空白を除去され（trim）、以降の権限判定・セッション ID・`speaker_id` すべてで同じ正規化済みの値が使われる。つまり `" 123 "` と `"123"` は同じセッション・同じ送信者として扱われる。
+
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。行が無いと per-agent 設定（`heartbeat_instructions` / `model` / `persona` 等）が全部既定に落ちるのに「動いてしまう」ため、タイプミスに気づけないのを防ぐ。存在確認はサーバ側ターン実行の単一チョークポイント（`process::run_agent_response`）で 1 度だけ行い、`POST /api/sessions/{id}/messages`・`POST /api/agents/{id}/web/send` を含む全経路に同じ判定が効く。判定はエージェント行の有無のみで、**無効・停止中のエージェントの扱いは変えない**。（弾かれる前にセッション行や送信メッセージのログが書かれることはあるが、ターンは走らない。）
 
 **ツール実行は非ブロック（background subtask）**
 
@@ -1354,6 +1358,8 @@ Request:
 ### POST /api/agents/{id}/web/send
 
 **目的**: web UI からのメッセージを送信し、直接応答を得る（応答は同時に SSE へも配送される）
+
+**存在しないエージェントは 404**（#632）: `agents` テーブルに `{id}` の行が無ければ、**ターンを起こさず** **`404 Not Found`**（`{"error": "agent not found: {id}"}`）を返す。存在確認は web の唯一の公開ターン入口 `run_and_deliver_serialized` が担い、`POST /api/agents/{id}/messages` と同じ判定（エージェント行の有無のみ）に揃えてある。（弾かれる前にセッション行やユーザー発話行は書かれることはあるが、ターンは走らない＝ LLM は呼ばれない。存在確認そのものが DB エラーで失敗した場合は 404 ではなく `500` を返す。）
 
 **Request Body**
 

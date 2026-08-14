@@ -23,6 +23,25 @@ use crate::gateway::{WebEvent, WEB_SESSION_THEME};
 use crate::runner::WebAgentRunner;
 use crate::sink::WebCompletionSink;
 
+/// web の公開ターン入口の結果（#632）。
+///
+/// - `Ran`: ターンを走らせて配送した応答本文（NO_REPLY / 空 / 実行エラーのときは `None`）。
+/// - `AgentNotFound`: `agents` 行が無く**ターンを起こさなかった**。HTTP ハンドラは 404 に写像する。
+/// - `Error`: 存在確認そのものが DB エラーで失敗した。**404 ではない**（一過性の障害で
+///   実在するエージェントを 404 に化けさせない）。HTTP ハンドラは 500 に写像する。
+///
+/// `#[must_use]` は付けない: resume（[`crate::sink`]）と timed-fire（[`crate::fire`]）は
+/// 返り値を使わず discard するため（存在しないエージェントなら単に何もしないのが正しい）。
+#[derive(Debug)]
+pub enum WebTurnOutcome {
+    /// ターンを走らせて応答を配送した（`None` は NO_REPLY / 空 / 実行エラー）。
+    Ran(Option<String>),
+    /// `agents` 行が無くターンを起こさなかった（#632）。
+    AgentNotFound,
+    /// 存在確認が DB エラーで失敗した（#632）。404 ではなく内部エラー。
+    Error(String),
+}
+
 /// [`run_and_deliver`] を per-session ロックの下で実行する（**唯一の公開入口**）。
 ///
 /// inbound（`POST /api/agents/{id}/web/send`）と resume（[`WebCompletionSink`]）が同じ
@@ -31,6 +50,16 @@ use crate::sink::WebCompletionSink;
 ///
 /// ロック取得を呼び出し側の責務にしていた頃は、sink 側の `run_serialized` を外しても
 /// テストが全緑だった（呼び忘れを検出できない構造だった）。
+///
+/// **#632: web の全ターンがこの 1 本に閉じている（#177）。ここで存在確認を 1 度だけ行い、
+/// 行が無ければ [`WebTurnOutcome::AgentNotFound`] を返して以降（会話構築・LLM 実行・
+/// 応答配送）へ進まない。** production では下流の `run_agent_response` にもサーバ側の
+/// チョークポイントがあるが、ここで先に弾くことで DB へ応答を残さず・SSE へ流さず・
+/// resume/fire にも同じ判定を効かせられる（web-gateway クレート単体で完結する）。
+///
+/// 存在確認が DB エラーで失敗したときは [`WebTurnOutcome::Error`] を返す（**404 ではない**。
+/// 一過性の障害で実在するエージェントを 404 に化けさせないため）。サーバ側の
+/// `get_agent(...)?` が Err を伝播させるのと同じ方針。
 pub async fn run_and_deliver_serialized<R: WebAgentRunner>(
     runner: &R,
     agent_id: &str,
@@ -38,7 +67,15 @@ pub async fn run_and_deliver_serialized<R: WebAgentRunner>(
     caller: CallerIdentity,
     system_prompt_suffix: Option<&str>,
     kind: &str,
-) -> Option<String> {
+) -> WebTurnOutcome {
+    match runner.agent_exists(agent_id) {
+        Ok(true) => {}
+        Ok(false) => return WebTurnOutcome::AgentNotFound,
+        Err(e) => {
+            tracing::error!(agent_id = %agent_id, error = format!("{e:#}"), "web run: 存在確認が DB エラーで失敗");
+            return WebTurnOutcome::Error(format!("failed to check agent existence: {e}"));
+        }
+    }
     let fut = run_and_deliver(
         runner,
         agent_id,
@@ -47,7 +84,7 @@ pub async fn run_and_deliver_serialized<R: WebAgentRunner>(
         system_prompt_suffix,
         kind,
     );
-    runner.web_gateway().run_serialized(session_id, fut).await
+    WebTurnOutcome::Ran(runner.web_gateway().run_serialized(session_id, fut).await)
 }
 
 /// 会話を DB から構築 → `run_agent_response`（非ブロック dispatch 付き）→ 応答を
@@ -161,7 +198,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(out.as_deref(), Some("こんにちは"));
+        assert!(
+            matches!(&out, WebTurnOutcome::Ran(Some(t)) if t == "こんにちは"),
+            "unexpected outcome: {out:?}"
+        );
         let payload = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
             .expect("SSE へ配送されない")
@@ -198,7 +238,10 @@ mod tests {
                 "direct",
             )
             .await;
-            assert!(out.is_none(), "{response:?} は配送しない");
+            assert!(
+                matches!(out, WebTurnOutcome::Ran(None)),
+                "{response:?} は配送しない"
+            );
             assert!(runner.replies().is_empty());
             assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv())
                 .await
@@ -216,13 +259,65 @@ mod tests {
         let out =
             run_and_deliver_serialized(&runner, "a", &sid, CallerIdentity::Agent, None, "direct")
                 .await;
-        assert!(out.is_none());
+        assert!(matches!(out, WebTurnOutcome::Ran(None)));
         let payload = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
             .expect("error イベントが流れない")
             .unwrap();
         assert!(payload.contains("\"kind\":\"error\""));
         assert!(payload.contains("boom"));
+    }
+
+    /// **存在しないエージェントはこの入口でターンを起こさない**（#632）。
+    ///
+    /// web の全ターンがこの 1 本を通るので、ここで弾けば resume / timed-fire を含めて
+    /// 閉じる。`AgentNotFound` を返し、`run_agent_response` へ進まない（配送も転記もしない）。
+    #[tokio::test]
+    async fn unknown_agent_is_not_run() {
+        let runner = FakeRunner::new("走ってはいけない").without_agent();
+        let sid = web_session_id("ghost", "c1");
+        let out = run_and_deliver_serialized(
+            &runner,
+            "ghost",
+            &sid,
+            CallerIdentity::TrustedUser,
+            None,
+            "direct",
+        )
+        .await;
+        assert!(
+            matches!(out, WebTurnOutcome::AgentNotFound),
+            "存在しないエージェントは AgentNotFound を返す: {out:?}"
+        );
+        assert!(runner.runs().is_empty(), "ターンが走ってはいけない");
+        assert!(runner.replies().is_empty(), "応答を転記してはいけない");
+    }
+
+    /// **存在確認の DB エラーは 404 ではなく `Error`**（#632 レビュー指摘）。
+    ///
+    /// 一過性の DB エラーで実在するエージェントを 404 に化けさせない。`AgentNotFound` に
+    /// 潰さず `Error` を返し、ターンも走らせない。
+    #[tokio::test]
+    async fn db_error_during_existence_check_is_not_agent_not_found() {
+        let runner = FakeRunner::new("走ってはいけない").failing_agent_exists("db is down");
+        let sid = web_session_id("real", "c1");
+        let out = run_and_deliver_serialized(
+            &runner,
+            "real",
+            &sid,
+            CallerIdentity::TrustedUser,
+            None,
+            "direct",
+        )
+        .await;
+        assert!(
+            matches!(&out, WebTurnOutcome::Error(e) if e.contains("db is down")),
+            "DB エラーは AgentNotFound ではなく Error: {out:?}"
+        );
+        assert!(
+            runner.runs().is_empty(),
+            "DB エラー時にターンが走ってはいけない"
+        );
     }
 
     /// system prompt の suffix（resume 時の完了マーカー）が渡る。
