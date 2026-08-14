@@ -13,7 +13,9 @@ pub mod llm_logs;
 pub mod mcp;
 pub mod memory;
 pub mod model_pricing;
+#[cfg(feature = "nostr")]
 pub mod nostr;
+#[cfg(feature = "nostr")]
 pub mod nostr_relay;
 pub mod providers;
 pub mod schedules;
@@ -76,6 +78,7 @@ mod tests {
     /// web gateway の `user_id` 正規化（`opencrab-web-gateway` 側）と owner 判定
     /// （ここ）の噛み合わせ。正規化はゲートウェイクレート、owner 判定は server に
     /// あり、境界を跨ぐのでテストは判定側に置く（#190 S4 で旧 `api/web.rs` から移設）。
+    #[cfg(feature = "web")]
     mod web_user_id {
         use super::is_owner_id;
         use opencrab_web_gateway::http::{normalize_user_id, DEFAULT_WEB_USER_ID};

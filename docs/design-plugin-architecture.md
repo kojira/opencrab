@@ -49,6 +49,7 @@
 ## 4. 現状との差分
 
 - **【解消済み #1-A】共有 gateway クレート（`opencrab-gateway`）に SDK（serenity/songbird）が残っていた問題は解消。** `DiscordGateway` の具象実装を `opencrab-discord` へ移し、`opencrab-gateway` はポート（メッセージ型 / `GatewayActions` トレイト）専用にした。これで共有層（`gateway` / それに依存する `actions`）の依存ツリーに SDK が漏れなくなった。回帰は CI の R5（`scripts/check-deps.sh`）が止める。
+- **【前進 PR-1B】3 つの会話ゲート（Discord / Nostr / Web）が `server` の個別 feature（`discord` / `nostr` / `web`）で着脱可能になった。** 既定は全部入り（`default = ["discord", "nostr", "web"]`）だが、`--no-default-features --features nostr` のように**個別に外せる**。外したゲートはクレート本体も SDK も依存ツリーから消える（R5 の (b)：`--no-default-features` のツリーに `opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway` / `serenity` / `songbird` が 1 つも現れないことを固定。R6 は 3 ゲート全マトリクスのビルド）。これは「ビルド時の切り替え（feature）」を**取り外し可能であることの担保**として使う段階で（§2 の表）、まだプロセス境界（§5 の 3）ではない。**外れるのは会話ゲートであって管理 API ではない**：`--no-default-features` でもサーバは起動し `GET /api/agents` は 200 を返す（feature で消えるのは各ゲートの会話ルート/ループだけ）。Nostr の at-rest 暗号マスターキー（`opencrab_nostr::MasterKey` と parse/移行）は Nostr の資格情報鍵なので `nostr` feature に束ねた。型解決のために `MasterKey` を共有層へ**移していない**（秘密鍵の扱いに触るスコープ外の変更になり、§6 の「状態/型を transport から引き剥がす」判断とは別物なので混同しない）。
 - ゲートウェイの抽象（トレイト）は**既に存在するが使われていない**。上位が各ゲートウェイを**名指しで保持**しているため、ゲートウェイを 1 つ足すと上位の状態に手が入る。
 - **型は下位層へ降りたが、インスタンスが transport ごとに独立している。** バックグラウンド実行の登録簿・完了通知・通知の抽象は `actions` にある（一連の移設で対応済み）が、**セッション単位の直列化ロックと登録簿の実体が transport 側にそれぞれ存在する**（Nostr のセッション runtime / web ゲートウェイ / 上位の状態）。同種の状態が独立に 3 つある状態。
 - transport のクレートに**汎用のツール群が残っている**（管理ツール群、通知の配送基盤）。この状態でプロセスを切ると状態が分裂するので、先に引き剥がす必要がある。

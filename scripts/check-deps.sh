@@ -39,10 +39,25 @@ for p in opencrab-gateway opencrab-actions; do
 done
 echo "R5(gateway/actions) OK"
 
-# --- R6: feature の組み合わせでビルドできる ---
+# --- R5 完成版: ゲートを外した構成でゲート/SDK が依存ツリーに出ない（PR-1B） ---
+# server から 3 つのゲート（discord / nostr / web）を全て外した構成では、ゲートクレート
+# 本体と各 SDK（serenity / songbird）が依存ツリーに 1 つも現れないことを固定する。R4/R5 と
+# 同じ `--edges no-dev`（normal + build、dev-only 除外）で揃える。
+GATES='serenity|serenity-voice-model|songbird|opencrab-discord|opencrab-nostr|opencrab-web-gateway'
+bare="$(cargo tree -p opencrab-server --no-default-features --edges no-dev --prefix none --no-dedupe \
+  | sed -E 's/ v[0-9].*//' | sort -u)"
+if printf '%s\n' "$bare" | grep -qxE "$GATES"; then
+  echo "R5 FAIL: server(no gates) にゲート/SDK が残っている:"; printf '%s\n' "$bare" | grep -xE "$GATES"; exit 1
+fi
+echo "R5(server no-default) OK"
+
+# --- R6: feature の組み合わせでビルドできる（PR-1B: 3 ゲートの全マトリクス） ---
 # CI では build/test（--all-features）の後ろで走る（check-deps.sh の呼び出し位置）。
+# 各ゲートを個別に付けた構成と、全部外した構成・既定（全部入り）がそれぞれビルドできること。
 cargo build -p opencrab-gateway
 cargo build -p opencrab-server --no-default-features
-cargo build -p opencrab-server --no-default-features --features discord
+for f in discord nostr web; do
+  cargo build -p opencrab-server --no-default-features --features "$f"
+done
 cargo build -p opencrab-server
-echo "R6(discord axis) OK"
+echo "R6(full matrix) OK"

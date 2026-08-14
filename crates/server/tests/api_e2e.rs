@@ -39,6 +39,7 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        #[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:test".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
@@ -57,6 +58,7 @@ fn create_test_state(compaction_ratio: f64) -> (AppState, opencrab_db::Db) {
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
@@ -1074,6 +1076,7 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
             .join("opencrab_test")
             .to_string_lossy()
             .to_string(),
+        #[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
@@ -1092,6 +1095,7 @@ fn create_test_app_with_state() -> (Router, opencrab_db::Db, Arc<MockLlmProvider
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
@@ -1991,6 +1995,7 @@ fn state_with_consolidation(
         voice_config: Arc::new(Default::default()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir().to_string_lossy().to_string(),
+        #[cfg(feature = "nostr")]
         nostr_master_key: None,
         default_model: "mock:gpt-4o".to_string(),
         tools_config: Arc::new(std::sync::RwLock::new(
@@ -2009,6 +2014,7 @@ fn state_with_consolidation(
         intake_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         mcp_manager: None,
         gateways: std::sync::Arc::new(opencrab_actions::AgentGatewayRegistry::new()),
+        #[cfg(feature = "web")]
         web_gateway: std::sync::Arc::new(opencrab_web_gateway::WebGateway::new()),
         subtask_registries: std::sync::Arc::new(
             opencrab_server::subtask_registries::SubtaskRegistries::new(),
@@ -2446,6 +2452,7 @@ async fn test_run_counts_subtask_starts_from_both_launch_paths() {
 /// （`depth == 0 && state.subtask_auto_dispatch` の分岐）で決まる。そこを潰しても
 /// 従来は REST のテスト 1 本しか落ちず、web / Discord / Nostr / heartbeat は全緑
 /// だった。web の配線をここで固定して、看板機能が無音で失われるのを防ぐ。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_send_dispatches_tool_as_background_subtask() {
     let (app, db, mock, state) = create_test_app_with_state();
@@ -2661,6 +2668,7 @@ async fn test_session_messages_unknown_participant_is_rejected_without_running()
 ///
 /// `send_request` は body を読み切るので、終端しない SSE レスポンス（`web/stream`）には
 /// 使えない。ハングを「失敗」として観測できるよう、ヘッダ取得にタイムアウトを掛ける。
+#[cfg(feature = "web")]
 async fn get_head(app: Router, uri: &str) -> (StatusCode, Option<String>) {
     let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
     let res = tokio::time::timeout(std::time::Duration::from_secs(5), app.oneshot(req))
@@ -2688,6 +2696,7 @@ async fn get_head(app: Router, uri: &str) -> (StatusCode, Option<String>) {
 /// を消す / 購読側のパス文字列を変える / クエリ名 `conversation` を変える。
 ///
 /// SSE の body は終端しないので読まない（**接続が確立してルートが解決されること**が主眼）。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_stream_route_is_mounted_on_the_server_router() {
     let app = create_test_app();
@@ -2740,6 +2749,7 @@ async fn test_web_stream_route_is_mounted_on_the_server_router() {
 ///
 /// resume は sink → `tokio::spawn` の非同期経路なので、待たずに読むと取りこぼす。
 /// 途中で流れる別 `kind`（inbound の `direct` など）は読み飛ばす。
+#[cfg(feature = "web")]
 async fn recv_web_event_of_kind(
     rx: &mut tokio::sync::broadcast::Receiver<String>,
     kind: &str,
@@ -2774,6 +2784,7 @@ async fn recv_web_event_of_kind(
 /// 2. resume ターンの LLM リクエストの system prompt に `[subtask_completed: subtask_id=`
 ///    が注入されている（会話への再注入）。
 /// 3. resume ターンの発話が親セッションの履歴へ残る（永続化）。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_subtask_completion_resumes_parent_conversation() {
     let (app, db, mock, state) = create_test_app_with_state();
@@ -2875,6 +2886,7 @@ async fn test_web_subtask_completion_resumes_parent_conversation() {
 ///
 /// 対比として同じ sink に `Completed` を投げ、そちらでは resume が走ることも確認する
 /// （sink 全体を no-op にしただけでも落ちるようにするため）。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_progress_settlement_does_not_resume() {
     use opencrab_actions::{SettleKind, SubtaskCompletionSink, SubtaskSettled};
