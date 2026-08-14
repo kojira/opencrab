@@ -98,6 +98,16 @@ web（フロントエンド） ──→ (HTTP経由でserverと通信)
 
 分離の順序・判断基準・非目標は **[design-plugin-architecture.md](design-plugin-architecture.md)** を参照。新機能の実装やレビューの際は、まずこの基準に照らすこと。
 
+### 2.5 境界を機械で守る検査（CI）
+
+§2.2 の依存の向きと §2.4 の分離方針は、レビューだけに頼ると少しずつ崩れる。名指しの依存や識別子が 1 つ入っても、ビルドは通ってしまうからだ。そこで CI に 2 つの検査を置き、「現状の性質」を固定する。どちらも**何かを直すためではなく、既に成立している境界を回帰させないため**のもの。
+
+- **R4: `opencrab-core` は gate/SDK クレートに依存しない**（`scripts/check-deps.sh`）
+  `cargo tree -p opencrab-core --edges no-dev` の**依存ツリーの内容**を検査し、`opencrab-gateway` / `opencrab-discord` / `opencrab-nostr` / `opencrab-web-gateway` / `serenity` / `serenity-voice-model` / `songbird` が現れたら失敗させる。依存の**向きの逆転はコンパイル可否には現れない**（core が transport を巻き込んでもビルドは通る）ので、ビルドの成否ではなくツリーそのものを見る。`--edges no-dev` は normal に加え **build 依存も検査**し（build-dependency 経由の逆流を見落とさない）、dev-only 依存（テスト用の `syn` 等）は除外する。
+- **R7: 共有層（core の production コード）に gate 名が出ない**（`crates/core/tests/no_gate_identifiers.rs`）
+  `syn` で `crates/core/src` を AST 走査し、**識別子と文字列リテラル**に `discord` / `serenity` / `songbird` / `nostr` が無いことを確かめる。テスト専用の項目（`#[cfg(test)]` / `#[cfg(all(test, ...))]` 等。ただし `any(test, ...)` はテスト以外でもコンパイルされるので対象に残す）は対象外。属性は **doc コメント（`#[doc = "..."]`）だけ**を対象外にし、それ以外の属性（`#[serde(rename = "...")]` / `#[error("...")]` 等）の文字列・識別子は検査する（本番の挙動・ワイヤ表現にゲート名が焼き込まれるため。serde を多用する `db` へ広げるとき効く）。名指しが 1 つ core に入ると、上位がそのゲートウェイを特別扱いし始める入口になる（design-plugin-architecture.md §4 が実際の事故として記録している）。`cargo expand` を使わないのは、nightly を要し、展開結果に doc コメントが残って偽陽性になるため。
+  **限界（意図的）**: 検査が届くのは AST に現れるトークンに限る。`tracing::info!("...")` や `format!(...)` など**マクロ本体の文字列・識別子は `syn` が生トークンのまま保持するため検出できない**（core は tracing を多用するのでログ文言にゲート名を書いても落ちない）。マクロ内まで見るのは過剰なので、検査の形は変えず限界として明示する。
+
 ---
 
 ## 3. エージェントモデル
