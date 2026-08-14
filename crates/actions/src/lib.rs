@@ -62,8 +62,7 @@ pub use timed_fire::{prompt_preview, TimedFireRequest, TimedFireRouter, TimedFir
 // **同一の上限と退避**を使う必要があり、core は actions に依存できないため。
 // 既存の呼び出し元互換のためここから re-export する。
 pub use opencrab_core::tool_result_log::{
-    contains_secret, redact_secrets_in_place, sanitize_tool_result_for_llm,
-    sanitize_tool_result_for_log, SECRET_KEYS, TOOL_RESULT_TOKEN_LIMIT,
+    sanitize_tool_result_for_llm, sanitize_tool_result_for_log, TOOL_RESULT_TOKEN_LIMIT,
 };
 pub use tools::{register_tools_from_config, ShellToolConfig, ToolsConfig};
 pub use traits::CallerIdentity;

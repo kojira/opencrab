@@ -12,14 +12,61 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use opencrab_core::secret_box;
 use opencrab_core::workspace::resolve_agent_workspace;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
+use zeroize::Zeroizing;
 
 use crate::config::NostrConfig;
 
 const DEFAULT_NOSTARO_PATH: &str = "nostaro";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+/// 実行時に本鍵/生成鍵を渡す環境変数（nostaro 側が config より最優先で読む・#620）。
+/// 鍵を config へ平文で書かず、spawn ごとにこの env で注入することで「設定を確認する
+/// 操作で平文の鍵が目に入らない」を構造で成立させる。
+const SECRET_KEY_ENV: &str = "NOSTARO_SECRET_KEY";
+
+/// agent_id → 復号済み本鍵（nsec）を返すプロバイダ（#620）。DB の暗号文とマスターキーを
+/// capture して主鍵を復号する。`base_command` の env 注入だけがこれを使う。
+/// **`command_with_config`（本鍵/生成鍵の共有点）には差さない**（鍵混同防止）。
+pub type MainKeyProvider = Arc<dyn Fn(&str) -> Result<Zeroizing<String>> + Send + Sync>;
+
+/// 生成鍵ファイル（`enc:v1:…`）の暗号/復号に使うマスターキー holder（#620）。
+pub type MasterKey = Arc<Zeroizing<[u8; secret_box::MASTER_KEY_LEN]>>;
+
+/// DB の（暗号化された）本鍵を復号して返す [`MainKeyProvider`] を作る（#620）。
+///
+/// `base_command` に注入され、spawn ごとに `agent_id` の本鍵を DB から引いて復号し env へ
+/// 載せる。暗号文（`enc:v1:…`）なら復号、平文（移行前）ならそのまま返す。マスターキーは
+/// closure に capture する（外へ出さない）。
+pub fn db_main_key_provider(db: opencrab_db::Db, master_key: MasterKey) -> MainKeyProvider {
+    Arc::new(move |agent_id: &str| {
+        let sk = {
+            let conn = db
+                .lock()
+                .map_err(|_| anyhow::anyhow!("DB ロック取得に失敗しました"))?;
+            opencrab_db::queries::get_agent_nostr_config(&conn, agent_id)
+                .ok()
+                .flatten()
+                .map(|r| r.secret_key)
+                .ok_or_else(|| anyhow::anyhow!("Nostr 設定が見つかりません"))?
+        };
+        if sk.trim().is_empty() {
+            anyhow::bail!("秘密鍵が未設定です");
+        }
+        if secret_box::is_encrypted(&sk) {
+            let bytes = secret_box::decrypt(&sk, &master_key)?;
+            Ok(Zeroizing::new(
+                String::from_utf8(bytes.to_vec()).context("復号した本鍵が UTF-8 ではありません")?,
+            ))
+        } else {
+            // 移行前の平文（次回移行で暗号化される）。
+            Ok(Zeroizing::new(sk))
+        }
+    })
+}
 /// nostaro を起動する作業ディレクトリ（= エージェントの workspace ルート）のテンプレート。
 /// `config/default.toml` の `agent.workspace_path` と同じ既定値で、実配線ではそこから
 /// [`NostaroCli::with_workspace_base`] で渡される（#299）。
@@ -65,7 +112,7 @@ pub fn validate_vanity_prefix(prefix: &str) -> Result<()> {
 }
 
 /// nostaro CLI ラッパー。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NostaroCli {
     binary_path: String,
     /// エージェント workspace のベーステンプレート（`{agent_id}` を含む）。nostaro を
@@ -77,6 +124,27 @@ pub struct NostaroCli {
     /// （HTTP ルートも LLM ツール経由も同じ 1 本のゲートを通る = 長時間 nostaro
     /// プロセスを並列に溢れさせない）。
     vanity_gate: Arc<Semaphore>,
+    /// #620: 本鍵の実行時注入。`base_command` が `agent_id` からこれで復号済み本鍵を得て
+    /// env へ載せる。`None` なら注入しない（テスト / 鍵不要コマンド）。本番では常に
+    /// `Some`（マスターキーが在るときだけ Nostr サブシステムを起動するため）。
+    main_key_provider: Option<MainKeyProvider>,
+    /// #620: 生成鍵ファイル（`enc:v1:…`）の暗号/復号に使うマスターキー。`None` は
+    /// テスト専用の平文フォールバック（本番では常に `Some`）。
+    master_key: Option<MasterKey>,
+}
+
+impl std::fmt::Debug for NostaroCli {
+    /// 鍵材料（provider / master_key）は**出さない**（Debug から秘密が漏れないように）。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostaroCli")
+            .field("binary_path", &self.binary_path)
+            .field("workspace_base", &self.workspace_base)
+            .field("timeout", &self.timeout)
+            .field("vanity_timeout", &self.vanity_timeout)
+            .field("has_main_key_provider", &self.main_key_provider.is_some())
+            .field("has_master_key", &self.master_key.is_some())
+            .finish()
+    }
 }
 
 impl Default for NostaroCli {
@@ -93,7 +161,48 @@ impl NostaroCli {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             vanity_timeout: Duration::from_secs(DEFAULT_VANITY_TIMEOUT_SECS),
             vanity_gate: Arc::new(Semaphore::new(1)),
+            main_key_provider: None,
+            master_key: None,
         }
+    }
+
+    /// 本鍵プロバイダ（agent_id → 復号済み本鍵）を注入する（#620）。`base_command` の
+    /// env 注入だけがこれを使う。
+    pub fn with_main_key_provider(mut self, provider: MainKeyProvider) -> Self {
+        self.main_key_provider = Some(provider);
+        self
+    }
+
+    /// 生成鍵ファイルの暗号/復号に使うマスターキーを注入する（#620）。
+    pub fn with_master_key(mut self, key: MasterKey) -> Self {
+        self.master_key = Some(key);
+        self
+    }
+
+    /// 平文を封筒化する（生成鍵ファイル保存 / DB 本鍵の暗号化で使う）。マスターキー未注入
+    /// （テスト）なら**平文のまま**返す（＝暗号化を有効化していない構成の従来挙動）。
+    pub fn encrypt_secret(&self, plaintext: &str) -> Result<String> {
+        match &self.master_key {
+            Some(mk) => secret_box::encrypt(plaintext.as_bytes(), mk),
+            None => Ok(plaintext.to_string()),
+        }
+    }
+
+    /// 封筒（`enc:v1:…`）を復号して文字列で返す。**未暗号（平文）はそのまま返す**
+    /// （移行前ファイル / テストの平文フォールバックに耐える）。封筒だがマスターキー未注入
+    /// のときだけエラー。
+    fn decrypt_secret(&self, material: &str) -> Result<Zeroizing<String>> {
+        let material = material.trim();
+        if !secret_box::is_encrypted(material) {
+            return Ok(Zeroizing::new(material.to_string()));
+        }
+        let mk = self
+            .master_key
+            .as_ref()
+            .context("マスターキー未設定のため暗号化された鍵を復号できません")?;
+        let bytes = secret_box::decrypt(material, mk)?;
+        let s = String::from_utf8(bytes.to_vec()).context("復号した鍵が UTF-8 ではありません")?;
+        Ok(Zeroizing::new(s))
     }
 
     pub fn with_binary_path(mut self, path: impl Into<String>) -> Self {
@@ -234,13 +343,23 @@ impl NostaroCli {
     }
 
     /// 共通の base command（`nostaro --config <per-agent> <subcommand>...`）。
+    ///
+    /// #620: **本鍵を env で注入する**（config へ平文で置かない）。config.toml はもう鍵行を
+    /// 持たず、実行時に provider が DB の暗号文を復号して `NOSTARO_SECRET_KEY` へ載せる。
+    /// provider 未注入（テスト / 鍵不要）なら env を付けず、nostaro は config へフォール
+    /// バックする（テストの平文 config はそのまま動く）。
     fn base_command(&self, agent_id: &str) -> Result<Command> {
         let config_path = Self::agent_config_path(agent_id)?;
-        // 親ディレクトリを用意（鍵 config の置き場所）。
+        // 親ディレクトリを用意（config の置き場所）。
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        Ok(self.command_with_config(agent_id, &config_path))
+        let mut cmd = self.command_with_config(agent_id, &config_path);
+        if let Some(provider) = &self.main_key_provider {
+            let nsec = provider(agent_id)?;
+            cmd.env(SECRET_KEY_ENV, nsec.as_str());
+        }
+        Ok(cmd)
     }
 
     /// 送信系の command を組む。`from` が None なら本鍵（config.toml）、Some(npub) なら
@@ -262,32 +381,34 @@ impl NostaroCli {
         if stem.is_empty() {
             anyhow::bail!("from の npub が不正です");
         }
-        let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
-        let nsec_path = dir.join(format!("{stem}.nsec"));
-        let nsec = std::fs::read_to_string(&nsec_path).map_err(|_| {
+        let nsec_path = Self::agent_nostr_dir(agent_id)?
+            .join("generated-keys")
+            .join(format!("{stem}.nsec"));
+        let material = std::fs::read_to_string(&nsec_path).map_err(|_| {
             anyhow::anyhow!(
                 "指定 npub の鍵が見つかりません（from に指定できるのは、このエージェントが \
                  nostr_generate_key で生成した鍵だけです）"
             )
         })?;
-        let nsec = nsec.trim();
-        // 本設定を読み、secret_key 行だけ差し替える（relays/blossom を継承）。
+        // #620: 生成鍵ファイルは暗号文（`enc:v1:…`）。復号して env で注入する。
+        let nsec = self.decrypt_secret(&material)?;
+        // `--config` は**鍵行なしの本設定**をそのまま使う（relays/blossom を継承）。平文
+        // from-config の生成はやめた。共有点 [`command_with_config`] には鍵を差さず、ここで
+        // 生成鍵だけを env に載せる（本鍵で送るべき投稿が生成鍵で／その逆で送られる鍵混同を防ぐ）。
+        // base_command は通さない（あれは本鍵を注入する）。cwd/config 絶対化の degrade 条件は
+        // base_command と同一（command_with_config を共有）。
         let main_path = Self::agent_config_path(agent_id)?;
-        let main_toml = std::fs::read_to_string(&main_path).map_err(|_| {
-            anyhow::anyhow!("本設定 (config.toml) がありません。先に Nostr を設定してください")
-        })?;
-        let from_toml = replace_secret_key_line(&main_toml, nsec);
-        let from_config = dir.join(format!("{stem}.config.toml"));
-        write_secret_file(&from_config, &from_toml)?;
-        // base_command と同じ入口を通す（config 絶対化 + cwd = workspace ルート、#299）。
-        // `from` の有無で `upload <相対パス>` 等の基準が変わらないようにする。degrade 条件も
-        // base_command と同一（両方成功 or 両方見送り）。
-        Ok(self.command_with_config(agent_id, &from_config))
+        if !main_path.exists() {
+            anyhow::bail!("本設定 (config.toml) がありません。先に Nostr を設定してください");
+        }
+        let mut cmd = self.command_with_config(agent_id, &main_path);
+        cmd.env(SECRET_KEY_ENV, nsec.as_str());
+        Ok(cmd)
     }
 
     /// generated key の nsec をサーバ内から読む（**サーバ側専用**。LLM には渡さない）。
     /// identity 乗り換え（本鍵採用）で使う。存在チェック＝「自分が生成した鍵のみ」を担保。
-    pub fn read_generated_key(agent_id: &str, npub: &str) -> Result<String> {
+    pub fn read_generated_key(&self, agent_id: &str, npub: &str) -> Result<String> {
         let stem = sanitize_key_stem(npub);
         if stem.is_empty() {
             anyhow::bail!("npub が不正です");
@@ -295,12 +416,13 @@ impl NostaroCli {
         let path = Self::agent_nostr_dir(agent_id)?
             .join("generated-keys")
             .join(format!("{stem}.nsec"));
-        let nsec = std::fs::read_to_string(&path).map_err(|_| {
+        let material = std::fs::read_to_string(&path).map_err(|_| {
             anyhow::anyhow!(
                 "指定 npub の生成鍵が見つかりません（このエージェントが生成した鍵のみ採用できます）"
             )
         })?;
-        Ok(nsec.trim().to_string())
+        // #620: 生成鍵ファイルは暗号文。復号して返す（サーバ内でのみ使い、LLM には渡さない）。
+        Ok(self.decrypt_secret(&material)?.trim().to_string())
     }
 
     /// このエージェントが生成した鍵（`generated-keys/<npub>.nsec`）の **npub 一覧**を返す。
@@ -537,6 +659,18 @@ impl NostaroCli {
         self.run(cmd).await
     }
 
+    /// **生成鍵**（`from` npub）の公開鍵（hex）を返す（#620・identity 切替）。
+    ///
+    /// identity 切替では DB の本鍵を新鍵へ更新する**前**に新 pubkey が要る。本鍵プロバイダは
+    /// DB を読むため `pubkey()` では旧鍵の pubkey が返る。ここは生成鍵を env で注入して
+    /// nostaro に引かせるので、**新鍵が実際に使えること（検証）と新 pubkey の取得**を DB
+    /// 更新前に同時に行える。
+    pub async fn pubkey_from(&self, agent_id: &str, from_npub: &str) -> Result<String> {
+        let mut cmd = self.generated_key_command(agent_id, from_npub)?;
+        cmd.arg("pubkey");
+        self.run(cmd).await
+    }
+
     /// `nostaro vanity --json [--prefix=<p>]` — 新規鍵を生成して返す。
     ///
     /// prefix は npub の `npub1` 以降に前置される bech32 文字列。空なら通常のランダム鍵。
@@ -565,13 +699,15 @@ impl NostaroCli {
         parse_generated_key(&out)
     }
 
-    /// per-agent の nostaro config.toml を DB 由来の秘密鍵/リレーから materialize する。
+    /// per-agent の nostaro config.toml を DB 由来のリレーから materialize する。
     ///
-    /// nsec を含むため**パーミッションを 0600** に落とす（他者に読ませない）。relays は
-    /// 送信（post/reply）が publish するリレー。受信は watch のフラグで別途明示する。
+    /// #620: **secret_key 行はもう書かない**（鍵は実行時に env で注入する）。config には
+    /// relays/default_relays/blossom だけを書く。エージェントがこの config を読んでも平文の
+    /// 鍵は目に入らない。relays は送信（post/reply）が publish するリレー。受信は watch の
+    /// フラグで別途明示する。partial read で誤ったリレーへ繋がせないよう、書き込みは従来どおり
+    /// アトミックにする（[`write_secret_file`]）。
     pub fn materialize_config(
         agent_id: &str,
-        secret_key: &str,
         relays: &[String],
         blossom_server: Option<&str>,
     ) -> Result<PathBuf> {
@@ -580,8 +716,8 @@ impl NostaroCli {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create nostr dir: {}", parent.display()))?;
         }
-        // TOML 文字列を壊す/追記させない文字（`"` `\` 改行）を除去する（値は
-        // nsec/URL 前提なので本来含まれない。防御的にサニタイズ）。
+        // TOML 文字列を壊す/追記させない文字（`"` `\` 改行）を除去する（値は URL 前提なので
+        // 本来含まれない。防御的にサニタイズ）。
         let esc = |s: &str| {
             s.chars()
                 .filter(|c| !matches!(c, '"' | '\\' | '\n' | '\r'))
@@ -592,20 +728,14 @@ impl NostaroCli {
             .map(|r| format!("\"{}\"", esc(r)))
             .collect::<Vec<_>>()
             .join(", ");
-        // nostaro 0.3.0 は `relays` と `default_relays` の**両方**を必須フィールドとして
-        // 要求する（どちらか一方だけだと `missing field ...` で config パースが失敗し、
-        // post/watch/pubkey など Nostr 全操作が止まる。#262）。opencrab は送信/受信リレーを
-        // 常にフラグで明示するため両者は同値でよい（config 側 default に依存しない）。
-        let mut toml = format!(
-            "secret_key = \"{}\"\nrelays = [{}]\ndefault_relays = [{}]\n",
-            esc(secret_key),
-            relay_list,
-            relay_list
-        );
+        // nostaro は `relays` と `default_relays` の**両方**を必須フィールドとして要求する
+        // （どちらか一方だけだと `missing field ...` で config パースが失敗し、post/watch/pubkey
+        // など Nostr 全操作が止まる。#262）。opencrab は送信/受信リレーを常にフラグで明示する
+        // ため両者は同値でよい。secret_key は Option なので省略しても parse できる（鍵は env）。
+        let mut toml = format!("relays = [{relay_list}]\ndefault_relays = [{relay_list}]\n");
         if let Some(b) = blossom_server.filter(|s| !s.is_empty()) {
             toml.push_str(&format!("blossom_server = \"{}\"\n", esc(b)));
         }
-        // nsec を含むので 0600 で書く（chmod 前の world-readable 窓を作らない）。
         write_secret_file(&path, &toml)?;
         Ok(path)
     }
@@ -615,7 +745,7 @@ impl NostaroCli {
     /// 保存先は per-agent の `data/agents/{id}/nostr/generated-keys/<npub>.nsec`。
     /// ファイル名は npub（無ければ pubkey）を bech32/hex 文字に限定して安全化する
     /// （パストラバーサル/インジェクション防止）。返り値は保存パス。
-    pub fn save_generated_key(agent_id: &str, key: &GeneratedKey) -> Result<PathBuf> {
+    pub fn save_generated_key(&self, agent_id: &str, key: &GeneratedKey) -> Result<PathBuf> {
         let dir = Self::agent_nostr_dir(agent_id)?.join("generated-keys");
         // 失敗経路でも鍵の**所在（保存先パス）をエラーに載せない**（#241）。成功経路は
         // 返り値の PathBuf をツール層（`nostr_generate_key`）が捨てて npub だけ返す＝所在を
@@ -639,9 +769,13 @@ impl NostaroCli {
             stem
         };
         let path = dir.join(format!("{stem}.nsec"));
+        // #620: 平文ではなく暗号文（`enc:v1:…`）で保存する（エージェントが `../nostr/
+        // generated-keys/*.nsec` を読んでも平文の鍵が目に入らない）。マスターキー未注入
+        // （テスト）は平文フォールバック。
+        let material = self.encrypt_secret(&key.nsec)?;
         // `write_secret_file` のエラーには path が Context として載るため、ここで握り、
         // 所在はログにだけ残して、返すエラーからは落とす（上と同じ理由 = #241）。
-        if let Err(e) = write_secret_file(&path, &key.nsec) {
+        if let Err(e) = write_secret_file(&path, &material) {
             tracing::warn!(path = %path.display(), error = %format!("{e:#}"), "generated key: 鍵ファイルの保存に失敗");
             anyhow::bail!("生成した鍵の保存に失敗しました");
         }
@@ -778,33 +912,6 @@ fn redact_nsec_tokens(s: &str) -> String {
     out
 }
 
-/// config TOML の `secret_key = "..."` 行だけを差し替える（relays/blossom 等は保つ）。
-/// 該当行が無ければ先頭に追加する。値は TOML を壊す文字を除去してから埋め込む。
-fn replace_secret_key_line(toml: &str, nsec: &str) -> String {
-    let esc: String = nsec
-        .chars()
-        .filter(|c| !matches!(c, '"' | '\\' | '\n' | '\r'))
-        .collect();
-    let mut replaced = false;
-    let mut out: Vec<String> = toml
-        .lines()
-        .map(|l| {
-            if l.trim_start().starts_with("secret_key") {
-                replaced = true;
-                format!("secret_key = \"{esc}\"")
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    if !replaced {
-        out.insert(0, format!("secret_key = \"{esc}\""));
-    }
-    let mut s = out.join("\n");
-    s.push('\n');
-    s
-}
-
 /// 一意な temp path 用のプロセス内カウンタ（同一 pid の並行書き込みでの temp 衝突防止）。
 static SECRET_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -930,13 +1037,7 @@ mod tests {
         let cli = NostaroCli::new();
         let agent = "agent-cfgabs-test";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-        NostaroCli::materialize_config(
-            agent,
-            "nsec1dummy",
-            &["wss://relay.test".to_string()],
-            None,
-        )
-        .unwrap();
+        NostaroCli::materialize_config(agent, &["wss://relay.test".to_string()], None).unwrap();
 
         let cmd = cli.base_command(agent).unwrap();
         let args: Vec<String> = cmd
@@ -1059,14 +1160,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let agent = "agent-degrade-from";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-        NostaroCli::materialize_config(agent, "nsec1main", &["wss://relay.test".to_string()], None)
-            .unwrap();
+        NostaroCli::materialize_config(agent, &["wss://relay.test".to_string()], None).unwrap();
         let key = GeneratedKey {
             nsec: "nsec1gen".into(),
             npub: "npub1degrade".into(),
             pubkey: "hex".into(),
         };
-        NostaroCli::save_generated_key(agent, &key).unwrap();
+        NostaroCli::new().save_generated_key(agent, &key).unwrap();
         let cli = NostaroCli::new().with_workspace_base(blocked_workspace_base(dir.path(), agent));
 
         let cmd = cli.generated_key_command(agent, "npub1degrade").unwrap();
@@ -1086,12 +1186,23 @@ mod tests {
             "from 経路で config だけ絶対化している: {}",
             config_arg.display()
         );
+        // #620: from 経路は**鍵行なしの本設定**を --config に使う（from-config は作らない）。
         assert_eq!(
             config_arg,
-            NostaroCli::agent_nostr_dir(agent)
-                .unwrap()
-                .join("generated-keys/npub1degrade.config.toml"),
-            "degrade 時の --config は従来どおりのパス"
+            NostaroCli::agent_config_path(agent).unwrap(),
+            "degrade 時の --config は本設定 config.toml のパス"
+        );
+        // 生成鍵は env で注入される。
+        let env_key = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(SECRET_KEY_ENV))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string());
+        assert_eq!(
+            env_key.as_deref(),
+            Some("nsec1gen"),
+            "生成鍵が env に載っていない"
         );
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
@@ -1127,7 +1238,9 @@ mod tests {
             npub: "npub1cat/../x".to_string(), // 異物入り → 英数字のみに安全化
             pubkey: "deadbeef".to_string(),
         };
-        let path = NostaroCli::save_generated_key("agent-gen-test", &key).unwrap();
+        let path = NostaroCli::new()
+            .save_generated_key("agent-gen-test", &key)
+            .unwrap();
         // ファイル名は英数字のみ（`/` や `.` は落ちる）。
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         assert_eq!(name, "npub1catx.nsec");
@@ -1163,7 +1276,9 @@ mod tests {
             npub: "npub1abc".to_string(),
             pubkey: "deadbeef".to_string(),
         };
-        let err = NostaroCli::save_generated_key(agent, &key).unwrap_err();
+        let err = NostaroCli::new()
+            .save_generated_key(agent, &key)
+            .unwrap_err();
         let msg = format!("{err:#}");
 
         // 所在（保存先ディレクトリ / agent id / `generated-keys` / データパス）が一切載らない。
@@ -1192,15 +1307,16 @@ mod tests {
 
         // 複数鍵を保存する。
         for npub in ["npub1alpha", "npub1bravo", "npub1charlie"] {
-            NostaroCli::save_generated_key(
-                agent,
-                &GeneratedKey {
-                    nsec: format!("nsec1secret-{npub}"),
-                    npub: npub.to_string(),
-                    pubkey: "deadbeef".to_string(),
-                },
-            )
-            .unwrap();
+            NostaroCli::new()
+                .save_generated_key(
+                    agent,
+                    &GeneratedKey {
+                        nsec: format!("nsec1secret-{npub}"),
+                        npub: npub.to_string(),
+                        pubkey: "deadbeef".to_string(),
+                    },
+                )
+                .unwrap();
         }
         // `from` 送信用の一時 config（`.config.toml`）が混ざっていても無視される。
         let dir = NostaroCli::agent_nostr_dir(agent)
@@ -1241,15 +1357,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // 正規の npub 鍵。
-        NostaroCli::save_generated_key(
-            agent,
-            &GeneratedKey {
-                nsec: "nsec1ok".to_string(),
-                npub: "npub1good".to_string(),
-                pubkey: "deadbeef".to_string(),
-            },
-        )
-        .unwrap();
+        NostaroCli::new()
+            .save_generated_key(
+                agent,
+                &GeneratedKey {
+                    nsec: "nsec1ok".to_string(),
+                    npub: "npub1good".to_string(),
+                    pubkey: "deadbeef".to_string(),
+                },
+            )
+            .unwrap();
         // `.nsec` 拡張子だが npub でない（hex fallback を模す）→ 除外。
         std::fs::write(dir.join("deadbeefhex.nsec"), "nsec1hex").unwrap();
         // `.nsec` 拡張子のディレクトリ → 通常ファイルでないので除外。
@@ -1266,30 +1383,14 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_secret_key_line() {
-        let main =
-            "secret_key = \"nsec1old\"\nrelays = [\"wss://a\"]\nblossom_server = \"https://b\"\n";
-        let out = replace_secret_key_line(main, "nsec1new");
-        assert!(out.contains("secret_key = \"nsec1new\""));
-        assert!(!out.contains("nsec1old"));
-        // relays/blossom は保持。
-        assert!(out.contains("relays = [\"wss://a\"]"));
-        assert!(out.contains("blossom_server = \"https://b\""));
-        // secret_key 行が無ければ先頭に追加。
-        let out2 = replace_secret_key_line("relays = [\"wss://a\"]\n", "nsec1x");
-        assert!(out2.starts_with("secret_key = \"nsec1x\""));
-        assert!(out2.contains("relays"));
-    }
-
-    #[test]
-    fn test_materialize_config_writes_default_relays() {
-        // nostaro 0.3.0 は `relays` と `default_relays` の両方を必須とする（#262）。
-        // materialize_config の出力に両フィールドが含まれ、同値であることを確認する。
+    fn test_materialize_config_writes_default_relays_without_secret_key() {
+        // nostaro は `relays` と `default_relays` の両方を必須とする（#262）。
+        // #620: **secret_key 行は書かない**（鍵は実行時に env で注入）。config を読んでも平文の
+        // 鍵が目に入らないことを確認する。
         let agent = "agent-materialize-test";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
         let path = NostaroCli::materialize_config(
             agent,
-            "nsec1abc",
             &[
                 "wss://x.kojira.io".to_string(),
                 "wss://relay.two".to_string(),
@@ -1298,7 +1399,15 @@ mod tests {
         )
         .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("secret_key = \"nsec1abc\""));
+        // secret_key 行が無い（平文の鍵が config に出ない）。
+        assert!(
+            !content.contains("secret_key"),
+            "config に secret_key が書かれている: {content}"
+        );
+        assert!(
+            !content.contains("nsec1"),
+            "config に nsec が出ている: {content}"
+        );
         // relays と default_relays の両方が同じリレー集合で書かれる。
         assert!(
             content.contains("relays = [\"wss://x.kojira.io\", \"wss://relay.two\"]"),
@@ -1376,20 +1485,21 @@ mod tests {
         assert!(!masked_mixed.contains("nsec1dummy"));
     }
 
+    /// #620: `from`（生成鍵）経路は**鍵行なしの本設定**を `--config` に使い、生成鍵は
+    /// env で注入する（平文 from-config は作らない）。本設定の relays を継承する。
     #[test]
-    fn test_from_command_uses_generated_key_config() {
+    fn test_from_command_uses_main_config_and_injects_generated_key() {
         let cli = NostaroCli::new();
         let agent = "agent-from-test";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-        // 本設定（relays を継承させる）と生成鍵を用意。
-        NostaroCli::materialize_config(agent, "nsec1main", &["wss://yabu.me".to_string()], None)
-            .unwrap();
+        // 本設定（relays を継承させる・鍵行なし）と生成鍵を用意。
+        NostaroCli::materialize_config(agent, &["wss://yabu.me".to_string()], None).unwrap();
         let key = GeneratedKey {
             nsec: "nsec1gen".into(),
             npub: "npub1genkey".into(),
             pubkey: "hex".into(),
         };
-        NostaroCli::save_generated_key(agent, &key).unwrap();
+        cli.save_generated_key(agent, &key).unwrap();
 
         let cmd = cli.generated_key_command(agent, "npub1genkey").unwrap();
         let args: Vec<String> = cmd
@@ -1397,20 +1507,37 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        // --config が from-config を指す。
-        assert!(args
-            .iter()
-            .any(|a| a.contains("generated-keys/npub1genkey.config.toml")));
-        // from-config は生成鍵 + 継承リレー。本鍵は含まない。
-        let from_cfg = NostaroCli::agent_nostr_dir(agent)
-            .unwrap()
-            .join("generated-keys/npub1genkey.config.toml");
-        let content = std::fs::read_to_string(&from_cfg).unwrap();
-        assert!(content.contains("secret_key = \"nsec1gen\""));
-        assert!(content.contains("wss://yabu.me"));
-        assert!(!content.contains("nsec1main"));
-        // [#299] `from` 経路も cwd はエージェント workspace（`upload <相対>` 等の基準が
-        // from の有無で変わらない）。config は絶対パス。
+        // --config は**本設定 config.toml**（from-config ではない）。
+        assert!(
+            args.iter()
+                .any(|a| a.ends_with(&format!("data/agents/{agent}/nostr/config.toml"))),
+            "--config が本設定を指していない: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains(".config.toml")),
+            "from-config (.config.toml) が使われている（平文経路が残っている）: {args:?}"
+        );
+        // from-config ファイルは作られない。
+        assert!(
+            !NostaroCli::agent_nostr_dir(agent)
+                .unwrap()
+                .join("generated-keys/npub1genkey.config.toml")
+                .exists(),
+            "平文 from-config が作られている"
+        );
+        // 生成鍵は env で注入される（本鍵ではなく生成鍵）。
+        let env_key = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(SECRET_KEY_ENV))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().to_string());
+        assert_eq!(
+            env_key.as_deref(),
+            Some("nsec1gen"),
+            "生成鍵が env に載っていない"
+        );
+        // [#299] `from` 経路も cwd はエージェント workspace。config は絶対パス。
         let cwd = cmd.as_std().get_current_dir().unwrap();
         assert!(
             cwd.ends_with(format!("data/agents/{agent}/workspace")),
@@ -1422,6 +1549,50 @@ mod tests {
         assert!(cli.generated_key_command(agent, "npub1missing").is_err());
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
         let _ = std::fs::remove_dir_all(cli.agent_workspace_dir(agent).unwrap());
+    }
+
+    /// #620 **鍵混同防止**: base_command（本鍵）と generated_key_command（生成鍵）が
+    /// **別々の鍵**を env に載せ、共有点 command_with_config には鍵が載らないこと。
+    #[test]
+    fn test_base_and_generated_inject_different_keys_no_confusion() {
+        let agent = "agent-keymix-test";
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
+        NostaroCli::materialize_config(agent, &["wss://yabu.me".to_string()], None).unwrap();
+        let cli = NostaroCli::new().with_main_key_provider(std::sync::Arc::new(|_id: &str| {
+            Ok(Zeroizing::new("nsec1MAINkey".to_string()))
+        }));
+        cli.save_generated_key(
+            agent,
+            &GeneratedKey {
+                nsec: "nsec1GENkey".into(),
+                npub: "npub1genmix".into(),
+                pubkey: "hex".into(),
+            },
+        )
+        .unwrap();
+
+        let env_of = |cmd: &Command| -> Option<String> {
+            cmd.as_std()
+                .get_envs()
+                .find(|(k, _)| *k == std::ffi::OsStr::new(SECRET_KEY_ENV))
+                .and_then(|(_, v)| v)
+                .map(|v| v.to_string_lossy().to_string())
+        };
+
+        // 本鍵経路（post/reply/pubkey/watch）は本鍵を注入。
+        let base = cli.base_command(agent).unwrap();
+        assert_eq!(env_of(&base).as_deref(), Some("nsec1MAINkey"));
+        // 生成鍵経路（from）は生成鍵を注入（本鍵ではない）。
+        let gen = cli.generated_key_command(agent, "npub1genmix").unwrap();
+        assert_eq!(env_of(&gen).as_deref(), Some("nsec1GENkey"));
+        // 共有点 command_with_config には鍵を差さない（provider があっても）。
+        let shared = cli.command_with_config(agent, &NostaroCli::agent_config_path(agent).unwrap());
+        assert_eq!(
+            env_of(&shared),
+            None,
+            "共有点に鍵が載っている（一律注入は鍵混同事故になる）"
+        );
+        let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
     }
 
     #[test]
@@ -1612,13 +1783,7 @@ mod tests {
     /// config.toml を materialize して「鍵採用済み」状態を作る。
     fn materialize_for(agent: &str) {
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-        NostaroCli::materialize_config(
-            agent,
-            "nsec1dummy",
-            &["wss://relay.test".to_string()],
-            None,
-        )
-        .unwrap();
+        NostaroCli::materialize_config(agent, &["wss://relay.test".to_string()], None).unwrap();
     }
 
     /// `init` / `watch` / `relay` / `dm` / `event` は materialize の有無に関わらず**拒否**

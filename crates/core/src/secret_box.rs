@@ -148,7 +148,10 @@ mod tests {
     #[test]
     fn decrypt_rejects_non_envelope_and_short_input() {
         let key = test_key();
-        assert!(decrypt("nsec1plaintext", &key).is_err(), "接頭辞無しを受理した");
+        assert!(
+            decrypt("nsec1plaintext", &key).is_err(),
+            "接頭辞無しを受理した"
+        );
         assert!(
             decrypt("enc:v1:AAAA", &key).is_err(),
             "nonce に満たない短い封筒を受理した"

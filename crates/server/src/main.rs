@@ -65,8 +65,66 @@ async fn main() -> anyhow::Result<()> {
     // 挙動（新キー優先 / 空 url は無効）は意図したものなので変えず、気づけるようにだけする。
     cfg.warn_if_legacy_webhook_masked();
 
+    // #620: Nostr の at-rest 暗号化マスターキーを **load_config 直後・全 tokio::spawn より前**に
+    // env から読み、**即 remove_var** する。以降 spawn される execute_shell は inherit_env=true で
+    // `std::env::vars()` を子へコピーする（crates/actions/src/tools/shell.rs）ので、ここで消せば
+    // エージェントのシェルの環境に平文で出ない。config の `${}` 展開（hot-reload 経路が env を
+    // 読む）を経由せず、直接 std::env::var で読む。
+    let master_key_env = std::env::var("OPENCRAB_SECRET_MASTER_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    std::env::remove_var("OPENCRAB_SECRET_MASTER_KEY");
+    let master_key_parsed: Option<anyhow::Result<opencrab_nostr::MasterKey>> = master_key_env
+        .as_deref()
+        .map(|b64| opencrab_core::secret_box::parse_master_key(b64).map(std::sync::Arc::new));
+
     // DB初期化（本番はコネクションプール）
     let db = opencrab_db::Db::open(&cfg.database.path)?;
+
+    // #620: マスターキーの要否は「Nostr が設定されているエージェントが 1 つ以上あるか」で
+    // 決める（既存データから判定・新設定は足さない）。**プロセス全体は止めない**（Nostr を
+    // 使っていない構成はマスターキー無しでも通常起動する）。マスターキーが在るときだけ Nostr
+    // サブシステムを起動し、at-rest 移行を行う。
+    let nostr_configured = match db.lock() {
+        Ok(conn) => opencrab_db::queries::has_any_agent_nostr_config(&conn).unwrap_or(false),
+        Err(_) => false,
+    };
+    let nostr_master_key: Option<opencrab_nostr::MasterKey> = match master_key_parsed {
+        Some(Ok(key)) => Some(key),
+        Some(Err(e)) => {
+            if nostr_configured {
+                emit_master_key_banner(&format!(
+                    "OPENCRAB_SECRET_MASTER_KEY が不正です（base64 32 バイトが必要）: {e}"
+                ));
+            } else {
+                tracing::warn!(error = %e, "OPENCRAB_SECRET_MASTER_KEY が不正ですが Nostr 未設定のため無視して起動します");
+            }
+            None
+        }
+        None => {
+            if nostr_configured {
+                emit_master_key_banner(
+                    "環境変数 OPENCRAB_SECRET_MASTER_KEY が未設定です（Nostr が設定済みのため必須）",
+                );
+            }
+            None
+        }
+    };
+    // Nostr サブシステムを起動してよいのは、マスターキーが在るときだけ（#620）。マスターキーが
+    // 無ければ（未設定 or 不正）Nostr は起動しない＝送信も受信も止まる（バナー済み）。
+    let start_nostr = nostr_master_key.is_some();
+
+    // #620: 平文の at-rest 秘密を暗号化する移行（起動時 1 回・冪等・対象が無ければ no-op）。
+    if let Some(mk) = &nostr_master_key {
+        let report = opencrab_server::nostr_secret_migration::migrate_nostr_secrets_at_rest(
+            &db,
+            mk,
+            std::path::Path::new("data/agents"),
+        );
+        if report.changed_anything() {
+            tracing::info!(?report, "#620: Nostr 秘密の at-rest 移行を実施した");
+        }
+    }
 
     // #553: 起動時リコンサイル。新プロセスの subtask registry（in-memory）は必ず空なので、
     // この時点で status='active' の subtask セッションは定義上すべて孤児（前プロセスと共に
@@ -139,6 +197,9 @@ async fn main() -> anyhow::Result<()> {
         voice_config: Arc::new(cfg.voice.clone()),
         voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: cfg.agent.workspace_path.clone(),
+        // #620: DB 本鍵・生成鍵の at-rest 暗号/復号に使うマスターキー（runner の encrypt-on-write
+        // が使う）。start_nostr のときだけ Some。
+        nostr_master_key: nostr_master_key.clone(),
         tools_config: Arc::new(std::sync::RwLock::new(tools_cfg)),
         default_model,
         compaction_ratio: cfg.llm.compaction_ratio,
@@ -570,13 +631,22 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Per-agent Nostr sub-gateway マネージャ（discord と同様に、state clone より前に
-    // 生成して配線する。nostr は重い依存が無いので feature ゲート無しの常時配線）。
-    {
+    // 生成して配線する）。
+    //
+    // #620: **マスターキーが在るときだけ**登録する。無ければ Nostr は起動しない（送信も受信も
+    // 止まる）。Nostr 未設定の構成ではそもそもマスターキー不要なので、ここを飛ばして通常起動する。
+    if let Some(master_key) = nostr_master_key.clone() {
         // nostaro は**エージェントの workspace ルートを cwd にして**起動する（#299）。
         // `execute_shell` / `ws_*` と同じ `agent.workspace_path` を渡して基準を揃える
         // （`nostr_run event --file <相対>` / `--out <相対>` がそれらと噛み合う）。
-        let cli =
-            opencrab_nostr::NostaroCli::new().with_workspace_base(state.workspace_base.clone());
+        //
+        // #620: 本鍵は config へ書かず、`base_command` が spawn ごとに **本鍵プロバイダ**で DB の
+        // 暗号文を復号して env 注入する。生成鍵ファイルの復号用に **マスターキー**も注入する。
+        let provider = opencrab_nostr::db_main_key_provider(state.db.clone(), master_key.clone());
+        let cli = opencrab_nostr::NostaroCli::new()
+            .with_workspace_base(state.workspace_base.clone())
+            .with_master_key(master_key)
+            .with_main_key_provider(provider);
         // #588 TimedFire / #603: 時刻発火の受け口レジストリは `new` の必須引数（Discord と同型・
         // per-agent→共有の解決はルータが行う）。忘れるとコンパイルエラーになる。
         let manager: opencrab_server::SharedNostrManager = Arc::new(
@@ -589,6 +659,11 @@ async fn main() -> anyhow::Result<()> {
         // 共通操作も transport 固有の操作（nostaro の鍵生成 = `key_provisioning`）も
         // この登録簿から引く（#191 段階2 PR3・PR4）。名指しフィールドは無い。
         state.gateways.register(manager);
+    } else {
+        tracing::info!(
+            start_nostr,
+            "Nostr サブシステムは起動しない（マスターキー未設定 / 不正）。Nostr 未設定の構成なら正常。"
+        );
     }
 
     // **2 つ目の復元位置**（ルータ構築の直前 / #191 段階2 PR5）。ここまでで未復元なのは
@@ -631,6 +706,23 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// #620: マスターキー欠落/不正で Nostr を起動できないことを**起動ログに埋もれない形**で知らせる。
+/// 区切り線付きの複数行バナーを `error` レベルで出す。**送信も受信も止まる**ことを明記する
+/// （プロセスは止めない — Nostr を使っていない機能は動き続ける）。
+fn emit_master_key_banner(reason: &str) {
+    let line = "=".repeat(72);
+    tracing::error!(
+        "\n{line}\n\
+         [#620] Nostr を起動できません: {reason}\n\
+         at-rest 暗号化のマスターキーが無い/不正なため、この構成では Nostr の秘密鍵を\n\
+         復号できません。よって **Nostr の送信も受信も停止** します（Discord など他の機能は\n\
+         そのまま動きます）。\n\
+         対処: base64 でエンコードした 32 バイトのマスターキーを環境変数\n\
+         OPENCRAB_SECRET_MASTER_KEY に設定して再起動してください。\n\
+         {line}"
+    );
 }
 
 // #588 TimedFire / #599: ハートビートの発火本体は `opencrab_server::heartbeat_fire::run_one_heartbeat`

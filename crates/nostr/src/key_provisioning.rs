@@ -62,7 +62,10 @@ impl GatewayKeyProvisioning for NostrKeyProvisioning {
     /// 戻り値の保存パスは**捨てる**（呼び出し側は保存できたかどうかしか要らず、
     /// パスを返すと秘密鍵の所在がツール結果経由で LLM へ渡る）。
     fn store_generated_key(&self, agent_id: &str, key: &ProvisionedKey) -> anyhow::Result<()> {
-        NostaroCli::save_generated_key(agent_id, &to_generated(key)).map(|_| ())
+        // #620: 暗号化して保存する（cli が持つマスターキーを使う）。
+        self.cli
+            .save_generated_key(agent_id, &to_generated(key))
+            .map(|_| ())
     }
 }
 

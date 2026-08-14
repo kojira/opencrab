@@ -204,6 +204,34 @@ pub fn resolve_agent_by_nostr_self_pubkey(conn: &Connection, self_pubkey: &str) 
     .ok()
 }
 
+/// Nostr が**設定されているエージェントが 1 つ以上**あるか（enabled は問わない・#620）。
+///
+/// 起動時にマスターキーの要否を「既存データ」から判定するために使う（設定項目は足さない）。
+/// 1 行でもあれば、その行の秘密鍵は暗号化して扱う必要がある＝マスターキーが要る。
+pub fn has_any_agent_nostr_config(conn: &Connection) -> Result<bool> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM agent_nostr_config", [], |row| {
+        row.get(0)
+    })?;
+    Ok(n > 0)
+}
+
+/// **全ての** agent_nostr_config 行（enabled を問わない・#620 の at-rest 移行で使う）。
+pub fn list_all_agent_nostr_configs(conn: &Connection) -> Result<Vec<AgentNostrConfigRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_id, secret_key, relays_json, filter_json, enabled FROM agent_nostr_config",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AgentNostrConfigRow {
+            agent_id: row.get(0)?,
+            secret_key: row.get(1)?,
+            relays_json: row.get(2)?,
+            filter_json: row.get(3)?,
+            enabled: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 pub fn list_enabled_agent_nostr_configs(conn: &Connection) -> Result<Vec<AgentNostrConfigRow>> {
     let mut stmt = conn.prepare(
         "SELECT agent_id, secret_key, relays_json, filter_json, enabled

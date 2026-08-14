@@ -9,6 +9,25 @@
 
 use crate::AppState;
 
+/// #620: DB へ Nostr 本鍵を書く前に at-rest 暗号化する（冪等）。
+///
+/// - 空 / 空白のみ、または既に暗号文（`enc:v1:…`）ならそのまま返す（二重暗号化しない・
+///   round-trip の upsert を壊さない）。
+/// - マスターキー未設定（`None`）なら**平文のまま**（暗号化を有効化していない構成の従来
+///   挙動）。本番で Nostr サブシステムが動くときは必ず `Some`。
+fn encrypt_at_rest(
+    master: &Option<opencrab_nostr::MasterKey>,
+    secret_key: &str,
+) -> anyhow::Result<String> {
+    if secret_key.trim().is_empty() || opencrab_core::secret_box::is_encrypted(secret_key) {
+        return Ok(secret_key.to_string());
+    }
+    match master {
+        Some(mk) => opencrab_core::secret_box::encrypt(secret_key.as_bytes(), mk),
+        None => Ok(secret_key.to_string()),
+    }
+}
+
 /// Nostr 受信ターンの呼び出し元を解決する（#319 / DB 接続だけに依存する本体）。
 ///
 /// トレイト実装からロックを剥がしただけの純粋な関数にしてある（`AppState` を組まずに
@@ -103,8 +122,11 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
     }
 
     fn set_nostr_secret_key(&self, agent_id: &str, secret_key: &str) -> anyhow::Result<()> {
+        // #620: DB へ書く前に at-rest 暗号化する（読みは暗号文のまま流し、復号は本鍵
+        // プロバイダ / spawn guard だけが行う）。冪等なので二重暗号化しない。
+        let secret_key = encrypt_at_rest(&self.nostr_master_key, secret_key)?;
         let conn = self.db.lock().unwrap();
-        opencrab_db::queries::set_agent_nostr_config_secret_key(&conn, agent_id, secret_key)?;
+        opencrab_db::queries::set_agent_nostr_config_secret_key(&conn, agent_id, &secret_key)?;
         Ok(())
     }
 
@@ -118,8 +140,11 @@ impl opencrab_nostr::NostrAgentRunner for AppState {
         &self,
         cfg: &opencrab_db::queries::AgentNostrConfigRow,
     ) -> anyhow::Result<()> {
+        // #620: secret_key を at-rest 暗号化してから書く（round-trip の暗号文は冪等で素通し）。
+        let mut row = cfg.clone();
+        row.secret_key = encrypt_at_rest(&self.nostr_master_key, &cfg.secret_key)?;
         let conn = self.db.lock().unwrap();
-        opencrab_db::queries::upsert_agent_nostr_config(&conn, cfg)?;
+        opencrab_db::queries::upsert_agent_nostr_config(&conn, &row)?;
         Ok(())
     }
 

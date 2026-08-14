@@ -10,10 +10,13 @@
 //! 2/3 は `session_logs` へ書き、後続ターンの `build_conversation_string` が会話へ
 //! 再注入する。したがって
 //!
-//! - 秘密フィールド（`nsec`）のマスク
 //! - トークン上限とワークスペースへの退避（超大結果で context 予算を吹き飛ばさない）
 //!
 //! は**全経路で同一**でなければならない。
+//!
+//! #620: かつてここにあった「秘密フィールド（`nsec` キー名）のマスク」は撤去した。キー名
+//! 一致は実際の混入（別の文字列値の中に鍵が含まれる形）を検出できず、`nsec` を JSON キーに
+//! 持つ結果を出す producer も皆無だった。鍵は at-rest 暗号化＋実行時 env 注入で扱う。
 //!
 //! #284: 従来は 2/3（永続化）だけに上限が効いており、1（LLM へ返す経路）は素通り
 //! だった。その結果 76KB の tool_result がそのままプロンプトへ積まれ、**同じターンの
@@ -103,93 +106,14 @@ fn exceeds_limit(s: &str) -> bool {
     crate::tokens::tokens_reach_limit(s, TOOL_RESULT_TOKEN_LIMIT)
 }
 
-/// 秘密として扱う JSON フィールド名の集合（**唯一の定義**）。
-///
-/// マスク（[`redact_secrets_in_place`]）・検出（[`contains_secret`]）・各 sink 前のゲートは
-/// すべてここを見る。秘密鍵の種類が増えたら**ここへ 1 行足すだけ**で、外部 sink・永続化・
-/// LLM 経路のすべてに同時に反映される。個別経路が自前でキー名を書く（＝分岐が増えるたびに
-/// 片方だけ弱くなる #519 の再発）余地を残さないための 1 源。
-///
-/// 過剰一般化はしない: 実在する秘密キーだけを列挙する（現状 `nsec` のみ）。
-pub const SECRET_KEYS: &[&str] = &["nsec"];
-
-fn is_secret_key(key: &str) -> bool {
-    SECRET_KEYS.contains(&key)
-}
-
-/// JSON Value を**再帰的に**辿り、秘密フィールド（[`SECRET_KEYS`]）の値を `[redacted]` に
-/// 潰す（in-place）。1 つでも潰したら `true`。
-///
-/// object・array の任意の深さを辿る。トップレベルだけを見る実装は、実際の tool 結果
-/// （`{"success":..,"data":{"nsec":..},..}` のように秘密が **`data` の中**へネストする、
-/// あるいは配列要素に入る）で素通りする（#519）。秘密のマスクはこの 1 実装に集約し、
-/// 外部 sink（bridge）も永続化（本モジュール）も同じここを通す。
-pub fn redact_secrets_in_place(value: &mut serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(obj) => {
-            let mut redacted = false;
-            for (key, child) in obj.iter_mut() {
-                if is_secret_key(key) {
-                    *child = serde_json::Value::String("[redacted]".to_string());
-                    redacted = true;
-                } else {
-                    redacted |= redact_secrets_in_place(child);
-                }
-            }
-            redacted
-        }
-        serde_json::Value::Array(arr) => {
-            let mut redacted = false;
-            for child in arr.iter_mut() {
-                redacted |= redact_secrets_in_place(child);
-            }
-            redacted
-        }
-        _ => false,
-    }
-}
-
-/// Value のどこか（ネスト・配列含む）に秘密フィールド（[`SECRET_KEYS`]）があるか。
-///
-/// 外部 sink へ渡す前のゲートに使う。無ければ clone せず借用のまま流せる（大半の結果）。
-/// 検出も [`redact_secrets_in_place`] と同じ [`SECRET_KEYS`] を見るので、判定基準が
-/// マスク基準とズレない。
-pub fn contains_secret(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(obj) => obj
-            .iter()
-            .any(|(key, child)| is_secret_key(key) || contains_secret(child)),
-        serde_json::Value::Array(arr) => arr.iter().any(contains_secret),
-        _ => false,
-    }
-}
-
-/// sanitize パイプライン用の秘密マスク（**内容ベース／ツール名に依存しない**）。
-///
-/// 従来は `nostr_generate_key` 決め打ちだったが、秘密を返す 3 つ目の経路が「また自前で
-/// ツール名を登録する」余地を残していた（#519 の構造問題 C）。いまは結果 JSON に秘密
-/// フィールドがあれば**ツール名に関わらず**潰す。マスク本体は共通の
-/// [`redact_secrets_in_place`]（1 源）。
-///
-/// 安価な前フィルタ: 秘密キー名の文字列すら含まなければ、秘密フィールドは存在し得ない
-/// ので parse を省き、借用のまま返す（大半の結果はここで素通り＝無駄な clone/再直列化を
-/// しない）。substring は一致したがキーとしては存在しない（値の中に `nsec` の語がある等）
-/// 場合も、何も潰さないなら元の文字列をそのまま返す。非 JSON はここでは触らない
-/// （オフロード案内文の再無害化などを壊さない）。
-fn redact_secrets_in_result(result_json: &str) -> std::borrow::Cow<'_, str> {
-    if !SECRET_KEYS.iter().any(|k| result_json.contains(k)) {
-        return std::borrow::Cow::Borrowed(result_json);
-    }
-    // parse できたら再帰マスク。何か潰したときだけ Owned を返す。substring は一致したが
-    // キーとしては無い（値の中に語がある等）／非 JSON の場合は原文を借用のまま返す
-    // （再直列化しない）。
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result_json) {
-        if redact_secrets_in_place(&mut v) {
-            return std::borrow::Cow::Owned(v.to_string());
-        }
-    }
-    std::borrow::Cow::Borrowed(result_json)
-}
+// #620: 「秘密として扱う JSON フィールド名の集合」（`SECRET_KEYS`）と、それを使う
+// マスク（`redact_secrets_in_place`）・検出（`contains_secret`）・sanitize 前段の
+// `redact_secrets_in_result` は**撤去した**。キー名一致は実際の混入（別の文字列値の中に
+// 鍵が含まれる形）を検出できず、`nsec` を JSON キーに持つ結果を tool_result / sink へ出す
+// producer も皆無だった（列挙で確認 / #620）。鍵は at-rest 暗号化＋実行時 env 注入で
+// 「エージェントの読める範囲の外」に置く方式へ移し、事後のキー名マスクには依存しない。
+// content ベースの `nsec` トークン伏せ（`crates/nostr/src/cli.rs` の `redact_nsec_tokens`）は
+// passthrough stdout の自由文向けに別途残している（役割が違う）。
 
 /// 退避ファイルへ書き込む**本文**を、後から部分読み・検索できる形に整える（#616）。
 ///
@@ -209,8 +133,7 @@ fn redact_secrets_in_result(result_json: &str) -> std::borrow::Cow<'_, str> {
 /// - **(b) それ以外の JSON** → `to_string_pretty`（複数行になり `head`/`grep` が効く）。
 /// - **(c) parse 失敗** → 生バイトを verbatim（借用のまま）。
 ///
-/// redaction（[`redact_secrets_in_result`]）を通した**後**に呼ぶこと。順序が逆だと (b) の
-/// pretty 出力に秘密が残る（redaction はエンベロープのキーを見るため）。
+/// #620: 以前はここより手前で nsec キー名 redaction を通していたが撤去した（守るものが無い）。
 fn render_offload_body(result_json: &str) -> std::borrow::Cow<'_, str> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(result_json) else {
         return std::borrow::Cow::Borrowed(result_json); // (c) 非 JSON はそのまま
@@ -444,11 +367,10 @@ fn oversized_notice(orig_bytes: usize, body: &str, saved: Option<&OffloadResult>
     }
 }
 
-/// 全経路共通の無害化本体（redaction → 上限判定 → 退避 → メタ情報のみの案内）。
+/// 全経路共通の無害化本体（上限判定 → 退避 → メタ情報のみの案内）。
 ///
-/// `tool_name` は呼び出し元の意図表示・将来の per-tool 方針のために残すが、redaction は
-/// **内容ベース**（[`redact_secrets_in_result`]）でツール名を見ない。秘密を返す経路が
-/// 増えても、ここでツール名を登録し直す必要はない（#519）。
+/// `tool_name` は呼び出し元の意図表示・将来の per-tool 方針のために残す。#620 で nsec キー名
+/// マスクは撤去したので、ここが行うのはサイズ上限と退避だけ。
 fn sanitize_tool_result(
     tool_name: &str,
     result_json: &str,
@@ -457,17 +379,15 @@ fn sanitize_tool_result(
     workspace_root: Option<&Path>,
 ) -> String {
     let _ = tool_name;
-    // 防御的マスク（defense-in-depth）。tool_result は後続ターンで会話へ再注入され、
-    // 永続化もされるため、万一 nsec が混ざっていれば（どのツールでも）ここで潰す。
-    let result_json = redact_secrets_in_result(result_json);
-
-    if !exceeds_limit(&result_json) {
-        return result_json.into_owned();
+    // #620: 旧来の nsec キー名マスク（`redact_secrets_in_result`）は撤去した（守るものが
+    // 無い / 鍵は at-rest 暗号化と env 注入で扱う）。ここはサイズ上限と退避だけを行う。
+    if !exceeds_limit(result_json) {
+        return result_json.to_string();
     }
 
-    // #616: 書き込む直前に 1 回だけ、部分読み・検索できる形へ整える（redaction の**後段**）。
-    // 退避判定（[`exceeds_limit`]）はエンベロープ基準のまま＝ producer の契約は不変。
-    let body = render_offload_body(&result_json);
+    // #616: 書き込む直前に 1 回だけ、部分読み・検索できる形へ整える。
+    // 退避判定（[`exceeds_limit`]）はエンベロープ基準＝ producer の契約は不変。
+    let body = render_offload_body(result_json);
     let saved = offload_to_workspace(body.as_ref(), session_id, tool_call_id, workspace_root);
     // 元サイズ（規模のシグナル）はエンベロープ由来、bytes/lines/tokens は保存本文由来（C2）。
     oversized_notice(result_json.len(), body.as_ref(), saved.as_ref())
@@ -541,42 +461,6 @@ pub fn sanitize_tool_result_for_llm(
 mod tests {
     use super::*;
 
-    /// #519: `data` の中へネストした `nsec` が、**ツール名に依存せず**潰れる。
-    /// 従来の永続化ゲートは `nostr_generate_key` 決め打ちで、別ツールが同じ形の秘密を
-    /// 返すと素通りしていた。内容ベースに揃えた回帰テスト。
-    #[test]
-    fn sanitize_redacts_nested_secret_for_any_tool() {
-        let wrapper =
-            r#"{"success":true,"data":{"npub":"npub1ok","nsec":"nsec1nestedleak"},"error":null}"#;
-        // わざと「秘密ツール」ではないツール名で呼ぶ。
-        let out = sanitize_tool_result_for_log("some_other_tool", wrapper, "sess", "tc-1", None);
-        assert!(
-            !out.contains("nsec1nestedleak"),
-            "ネスト nsec が漏れた: {out}"
-        );
-        assert!(out.contains("[redacted]"));
-        assert!(out.contains("npub1ok"), "非秘密は保持する");
-    }
-
-    /// #519: 配列の中にネストした `nsec` も潰れる。
-    #[test]
-    fn sanitize_redacts_secret_inside_array() {
-        let wrapper =
-            r#"{"success":true,"data":{"keys":[{"name":"a","nsec":"nsec1inarray"}]},"error":null}"#;
-        let out = sanitize_tool_result_for_llm("bulk_tool", wrapper, "sess", "tc-1", None);
-        assert!(!out.contains("nsec1inarray"), "配列内 nsec が漏れた: {out}");
-        assert!(out.contains("[redacted]"));
-    }
-
-    /// #519: トップレベルの `nsec` は従来どおり潰れる。
-    #[test]
-    fn sanitize_redacts_top_level_secret() {
-        let wrapper = r#"{"nsec":"nsec1toplevel","npub":"npub1y"}"#;
-        let out = sanitize_tool_result_for_log("any_tool", wrapper, "sess", "tc-1", None);
-        assert!(!out.contains("nsec1toplevel"), "{out}");
-        assert!(out.contains("[redacted]"));
-    }
-
     /// 秘密を含まない結果は**改変されない**（byte 一致）。前フィルタで parse すらしない。
     #[test]
     fn sanitize_leaves_secretless_result_byte_identical() {
@@ -585,66 +469,21 @@ mod tests {
         assert_eq!(out, json);
     }
 
-    /// `nsec` が**値**として現れる（キーではない）だけの結果は、再直列化せず原文のまま。
-    /// 無駄な clone/正規化（キー順の入れ替え等）をしない性質を固定する。
+    /// #620: `nsec` を値/キーに含む結果も**マスクされず原文のまま**流れる（キー名マスクは
+    /// 撤去した）。上限未満なので byte 一致で素通りすることを固定する（オフロード判定は不変）。
     #[test]
-    fn sanitize_does_not_reserialize_when_nsec_only_appears_as_value() {
+    fn sanitize_leaves_nsec_bearing_result_unmasked_now() {
         let json = r#"{"data":{"text":"the nsec format starts with nsec1"},"error":null}"#;
         let out = sanitize_tool_result_for_log("any_tool", json, "sess", "tc-1", None);
-        assert_eq!(out, json, "秘密キーが無いのに再直列化された: {out}");
-        // Cow が借用のままであることも直接確認（clone していない）。
-        assert!(matches!(
-            redact_secrets_in_result(json),
-            std::borrow::Cow::Borrowed(_)
-        ));
+        assert_eq!(out, json, "サイズ上限未満は原文のまま流れる");
     }
 
-    /// マスク本体: object/array を再帰的に辿り、潰したかどうかを返す。
-    #[test]
-    fn redact_secrets_in_place_is_recursive() {
-        let mut v = serde_json::json!({
-            "a": {"nsec": "nsec1x"},
-            "b": [{"nsec": "nsec1y"}, {"ok": 1}],
-            "c": "keep",
-        });
-        assert!(redact_secrets_in_place(&mut v));
-        assert_eq!(v["a"]["nsec"], "[redacted]");
-        assert_eq!(v["b"][0]["nsec"], "[redacted]");
-        assert_eq!(v["c"], "keep");
-        assert!(!v.to_string().contains("nsec1"));
-        // 秘密が無ければ false（改変なし）。
-        let mut clean = serde_json::json!({"npub": "npub1ok"});
-        assert!(!redact_secrets_in_place(&mut clean));
-    }
-
-    /// 検出: 検出基準がマスク基準（[`SECRET_KEYS`]）とズレない。
-    #[test]
-    fn contains_secret_matches_redaction_scope() {
-        assert!(contains_secret(&serde_json::json!({"data": {"nsec": "x"}})));
-        assert!(contains_secret(&serde_json::json!([{"nsec": "x"}])));
-        assert!(!contains_secret(
-            &serde_json::json!({"data": {"npub": "x"}})
-        ));
-        // 値に nsec の語があるだけでは検出しない（キー名で判定）。
-        assert!(!contains_secret(
-            &serde_json::json!({"text": "nsec1 is a prefix"})
-        ));
-    }
-
-    /// 秘密を持たないツールの結果はマスクされない（redaction は対象ツールのみ）。
+    /// 秘密を持たないツールの結果は改変されない。
     #[test]
     fn sanitize_leaves_small_results_untouched() {
         let json = r#"{"success":true,"data":{"ok":true},"error":null}"#;
         let out = sanitize_tool_result_for_log("read_file", json, "sess", "tc-1", None);
         assert_eq!(out, json);
-    }
-
-    /// dispatch 経路でも `nostr_generate_key` の秘密鍵はマスクされる。
-    #[test]
-    fn sanitize_redacts_secret_tool() {
-        let json = r#"{"success":true,"data":{"nsec":"nsec1secret"},"error":null}"#;
-        let out = sanitize_tool_result_for_log("nostr_generate_key", json, "sess", "tc-1", None);
-        assert!(!out.contains("nsec1secret"));
     }
 
     /// 上限超過はワークスペースへ退避し、DB 本文はメタ情報だけになる。
@@ -1038,12 +877,12 @@ mod tests {
         assert_eq!(llm, log);
     }
 
-    /// LLM 経路でも秘密フィールドはマスクされる。
+    /// #620: LLM 経路でも nsec キー名マスクは**しない**（撤去）。上限未満なので原文のまま。
     #[test]
-    fn llm_result_redacts_secret_tool() {
-        let json = r#"{"success":true,"data":{"nsec":"nsec1secret"},"error":null}"#;
+    fn llm_result_no_longer_key_masks() {
+        let json = r#"{"success":true,"data":{"nsec":"nsec1synthetic"},"error":null}"#;
         let out = sanitize_tool_result_for_llm("nostr_generate_key", json, "sess", "tc-1", None);
-        assert!(!out.contains("nsec1secret"));
+        assert_eq!(out, json, "上限未満は原文のまま（マスクしない）");
     }
 
     // ---- #616: 退避本文の整形（render_offload_body）と行境界打ち切り ----
@@ -1231,22 +1070,28 @@ mod tests {
         );
     }
 
-    /// 順序: redaction は render の**前段**なので、pretty 化後も秘密が残らない（nsec が
-    /// data 配下にネストした構造化 JSON を退避するケース）。
+    /// #620: nsec キー名マスクは撤去したので、退避（オフロード）でも notice には生データが
+    /// 1 バイトも入らない（#294 の性質は不変）が、退避ファイル本文はマスクされずそのまま
+    /// 書かれる（キー名マスクの復活が無いこと＝撤去の固定）。
     #[test]
-    fn nested_secret_stays_masked_after_render() {
+    fn offload_does_not_key_mask_saved_body() {
         let dir = tempfile::TempDir::new().unwrap();
         let filler = "z".repeat(TOOL_RESULT_TOKEN_LIMIT * 4);
         let env = format!(
-            r#"{{"success":true,"data":{{"nsec":"nsec1leak","note":"{filler}"}},"error":null}}"#
+            r#"{{"success":true,"data":{{"nsec":"nsec1synthetic","note":"{filler}"}},"error":null}}"#
         );
         let out = sanitize_tool_result_for_llm("any_tool", &env, "sS", "tS", Some(dir.path()));
-        assert!(!out.contains("nsec1leak"), "notice に秘密: {out}");
+        // notice（inline）には生データを載せない（#294 は不変）。
+        assert!(!out.contains("nsec1synthetic"), "notice に生データ: {out}");
+        assert!(
+            out.contains("Tool result withheld"),
+            "退避 notice でない: {out}"
+        );
+        // 退避ファイル本文はキー名マスクされない（撤去の固定）。
         let saved = std::fs::read_to_string(dir.path().join("tmp/sS_tS.json")).unwrap();
         assert!(
-            !saved.contains("nsec1leak"),
-            "退避ファイルに秘密が残った: {saved:.120}"
+            !saved.contains("[redacted]"),
+            "撤去したはずのキー名マスクが復活している: {saved:.120}"
         );
-        assert!(saved.contains("[redacted]"), "マスクが消えた");
     }
 }

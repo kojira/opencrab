@@ -1,8 +1,6 @@
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use opencrab_core::tool_result_log::{contains_secret, redact_secrets_in_place};
 use opencrab_core::{ActionExecutor, ActionResult as CoreActionResult, FunctionDefinition};
 use opencrab_gateway::GatewayActions;
 
@@ -20,12 +18,11 @@ pub enum ToolEventStatus {
 
 /// 1 ツール実行イベントの観測データ（webhook 等の sink へ渡す）。
 ///
-/// `args` / `result` の**秘密マスク**は、sink（外部）へ渡す前に bridge
-/// （`BridgedExecutor::execute_instrumented`）が済ませてある（`redact_for_sink` =
-/// core の `contains_secret` / `redact_secrets_in_place`）。#519 で `result` を、
-/// #526 で `args` を bridge へ集約した。整形（要約・サイズ分割）は従来どおり sink 側。
-/// マスクが 1 箇所（bridge）で必ず通るので、**新しい sink がマスクを忘れても秘密は出ない**
-/// （各 sink に任せると忘れた sink から漏れる — #519 が塞いだのと同じ穴）。
+/// #620: 旧来の「`nsec` キー名でマスクする」sink ゲート（SECRET_KEYS / #519・#526）は撤去した。
+/// キー名一致は実際の混入（別の文字列値の中に鍵が含まれる形）を検出できず、`nsec` を JSON の
+/// キーに持つ引数/結果を出す producer も皆無だった（列挙で確認）。鍵は at-rest 暗号化と実行時
+/// env 注入で「エージェントの読める範囲の外」に置く方式へ移し、事後マスクに依存しない。
+/// 整形（要約・サイズ分割）は従来どおり sink 側。
 pub struct ToolEvent<'a> {
     pub tool_name: &'a str,
     pub tool_call_id: &'a str,
@@ -768,24 +765,6 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
     }
 }
 
-/// 観測系（activity webhook 等の sink＝外部）へ渡す tool 結果を秘密マスクする。
-///
-/// 検出・マスクとも core の 1 実装（[`contains_secret`] / [`redact_secrets_in_place`]）に
-/// 集約し、永続化経路（`tool_result_log`）と**同じ再帰ロジック・同じ [`SECRET_KEYS`]**を
-/// 通す。旧実装はトップレベルの `nsec` しか見ず、`data` の中や配列にネストした秘密を
-/// 素通りさせていた（#519）。
-///
-/// 秘密が無ければ clone せず借用のまま返す（大半の結果でコピーを避ける）。
-fn redact_for_sink(data: &serde_json::Value) -> Cow<'_, serde_json::Value> {
-    if contains_secret(data) {
-        let mut cloned = data.clone();
-        redact_secrets_in_place(&mut cloned);
-        Cow::Owned(cloned)
-    } else {
-        Cow::Borrowed(data)
-    }
-}
-
 /// エラー文言から「権限拒否（実行されなかった）」を判定する。
 ///
 /// 優先: 構造的マーカー（`REJECTION_CODE_PREFIX`）。
@@ -1095,11 +1074,11 @@ impl BridgedExecutor {
         };
         let started_at = chrono::Utc::now().to_rfc3339();
         let session_id = self.context.session_id.as_deref();
-        // 引数も秘密（nsec 等）を含みうる。sink（activity webhook 等の観測系＝外部）へ
-        // 流す前に result と同じ集約マスクを通す（#526）。start/terminal で同じ args を
-        // 使うので 1 回だけ計算する。実行（`dispatch_inner`）には**生の args** を渡す
-        // （ツールは本物の引数で動く必要がある）。秘密が無ければ clone せず借用のまま。
-        let sink_args = redact_for_sink(args);
+        // #620: 旧来の「nsec キー名でマスクする」sink ゲート（SECRET_KEYS）は撤去した。
+        // キー名一致は実際の混入（値の中に鍵が含まれる形）を検出できず、そもそも `nsec` を
+        // キーに持つ JSON を tool 引数/結果へ出す producer は皆無だった（列挙で確認 / #620）。
+        // 鍵は at-rest 暗号化と実行時 env 注入で「読める範囲の外」に置く方式へ移した。
+        let sink_args = args;
         sink.on_event(&ToolEvent {
             tool_name: name,
             tool_call_id: call_id,
@@ -1109,7 +1088,7 @@ impl BridgedExecutor {
             status: ToolEventStatus::Started,
             started_at: &started_at,
             duration_ms: None,
-            args: &sink_args,
+            args: sink_args,
             result: None,
             error: None,
         });
@@ -1130,10 +1109,8 @@ impl BridgedExecutor {
         } else {
             ToolEventStatus::Failed
         };
-        // 秘密鍵（nsec 等）を含む結果は sink（activity webhook 等の観測系）へ生で流さない。
-        // 検出・マスクは core の再帰実装に集約（ネスト・配列も潰す #519）。含む場合だけ
-        // コピーを作り、無ければ借用のまま渡す（通常は clone を避ける）。
-        let sink_result = redact_for_sink(&result.data);
+        // #620: 結果側の nsec キー名マスク（SECRET_KEYS）も撤去（上と同じ理由）。
+        let sink_result = &result.data;
         sink.on_event(&ToolEvent {
             tool_name: name,
             tool_call_id: call_id,
@@ -1143,8 +1120,8 @@ impl BridgedExecutor {
             status,
             started_at: &started_at,
             duration_ms: Some(duration_ms),
-            args: &sink_args,
-            result: Some(&sink_result),
+            args: sink_args,
+            result: Some(sink_result),
             error: result.error.as_deref(),
         });
         result
@@ -1384,34 +1361,6 @@ mod tests {
         let r = sub.execute("report_progress", &json!({}), &ctx).await;
         assert!(r.success);
         assert_eq!(r.data.unwrap()["reached"], "report_progress");
-    }
-
-    #[test]
-    fn redact_for_sink_masks_nested_secret() {
-        // #519: 実際の tool 結果は秘密が `data` の中へネストする。トップレベルだけ見る
-        // 旧実装はここで素通りしていた。
-        let data = json!({
-            "success": true,
-            "data": {"nsec": "nsec1supersecret", "npub": "npub1abc", "pubkey": "hex"},
-        });
-        let red = redact_for_sink(&data);
-        assert_eq!(red["data"]["nsec"], "[redacted]");
-        // 非秘密フィールドは保持。
-        assert_eq!(red["data"]["npub"], "npub1abc");
-        assert_eq!(red["data"]["pubkey"], "hex");
-        // 秘密が残らない。
-        assert!(!red.to_string().contains("supersecret"));
-        // 秘密が sink へ渡る値には残らない（ネスト・配列も）。
-        let arr = json!({"data": {"keys": [{"nsec": "nsec1inarray"}]}});
-        assert!(!redact_for_sink(&arr).to_string().contains("nsec1inarray"));
-    }
-
-    #[test]
-    fn redact_for_sink_borrows_when_no_secret() {
-        // 秘密が無ければ clone しない（借用のまま）。
-        let plain = json!({"data": {"url": "https://x"}});
-        assert!(matches!(redact_for_sink(&plain), Cow::Borrowed(_)));
-        assert_eq!(*redact_for_sink(&plain), plain);
     }
 
     /// テスト用GatewayActionsモック
@@ -3578,10 +3527,10 @@ mod tests {
         assert!(r.success);
     }
 
-    // ---- #526: args も sink へ渡す前にマスクする（result と同じ集約経路） ----
+    // ---- #620: sink は args/result を**そのまま**受け取る（nsec キー名マスクは撤去） ----
 
     /// 各イベントが sink で実際に受け取った args / result を保存する sink。
-    /// bridge が渡した値そのものを観測するので、「sink まで生で届くか」を直接固定できる。
+    /// bridge が渡した値そのものを観測する。
     struct IoCapturingSink {
         #[allow(clippy::type_complexity)]
         seen: Mutex<Vec<(serde_json::Value, Option<serde_json::Value>)>>,
@@ -3595,77 +3544,11 @@ mod tests {
         }
     }
 
-    /// data に nsec を含む結果を返す gateway モック（result 側の回帰確認用）。
-    struct MockGatewaySecretResult;
-    #[async_trait]
-    impl GatewayActions for MockGatewaySecretResult {
-        fn definitions(&self) -> Vec<GatewayActionDef> {
-            vec![GatewayActionDef {
-                name: "make_key".to_string(),
-                description: "mk".to_string(),
-                parameters: json!({"type": "object", "properties": {}}),
-            }]
-        }
-        async fn execute(
-            &self,
-            _name: &str,
-            _args: &serde_json::Value,
-            _ctx: &opencrab_gateway::GatewayCallContext,
-        ) -> GatewayActionResult {
-            GatewayActionResult {
-                success: true,
-                data: Some(json!({"npub": "npub1ok", "nsec": "nsec1resultsecret"})),
-                error: None,
-            }
-        }
-    }
-
-    /// 本題（#526）: ネストした nsec を**引数**に持つ呼び出しは、start/terminal の
-    /// どちらのイベントでも sink へ生の nsec を渡さない。未知ツール名でも 2 イベントは
-    /// 発火するので、実ツールに依存せず args 経路だけを固定できる。
+    /// #620: args は sink へ**そのまま**（改変せず）渡る。キー名マスク（SECRET_KEYS）は
+    /// 撤去した。実際には `nsec` を JSON キーに持つ引数を出す producer は皆無なので、
+    /// この撤去で外部へ出る内容は実運用では変わらない（マスク痕跡 `[redacted]` は付かない）。
     #[tokio::test]
-    async fn test_sink_args_redact_nested_secret() {
-        let (_dir, ctx) = test_context();
-        let sink = Arc::new(IoCapturingSink {
-            seen: Mutex::new(Vec::new()),
-        });
-        let executor =
-            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
-        let args = json!({"data": {"nsec": "nsec1secretxyz", "npub": "npub1ok"}});
-        let _ = executor.execute("tool_with_secret_args", &args).await;
-        let seen = sink.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "start/terminal の 2 イベント");
-        for (a, _) in seen.iter() {
-            let s = a.to_string();
-            assert!(!s.contains("nsec1secretxyz"), "args に生 nsec が出た: {s}");
-            assert!(s.contains("[redacted]"), "マスク痕跡が無い: {s}");
-            assert!(s.contains("npub1ok"), "非秘密が落ちた: {s}");
-        }
-    }
-
-    /// 配列の中にネストした秘密も潰れる（result 側と同じ再帰マスク）。
-    #[tokio::test]
-    async fn test_sink_args_redact_secret_in_array() {
-        let (_dir, ctx) = test_context();
-        let sink = Arc::new(IoCapturingSink {
-            seen: Mutex::new(Vec::new()),
-        });
-        let executor =
-            BridgedExecutor::new(ActionDispatcher::new(), ctx).with_tool_event_sink(sink.clone());
-        let args = json!({"keys": [{"name": "a", "nsec": "nsec1inarray"}]});
-        let _ = executor.execute("tool_with_secret_args", &args).await;
-        let seen = sink.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
-        for (a, _) in seen.iter() {
-            let s = a.to_string();
-            assert!(!s.contains("nsec1inarray"), "配列内 nsec が漏れた: {s}");
-            assert!(s.contains("[redacted]"));
-        }
-    }
-
-    /// 秘密を含まない args は改変されない（借用のまま＝入力と等値）。
-    #[tokio::test]
-    async fn test_sink_args_without_secret_are_unchanged() {
+    async fn test_sink_receives_raw_args_unchanged() {
         let (_dir, ctx) = test_context();
         let sink = Arc::new(IoCapturingSink {
             seen: Mutex::new(Vec::new()),
@@ -3675,34 +3558,13 @@ mod tests {
         let args = json!({"command": "echo hi", "npub": "npub1ok"});
         let _ = executor.execute("tool_no_secret", &args).await;
         let seen = sink.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.len(), 2, "start/terminal の 2 イベント");
         for (a, _) in seen.iter() {
-            assert_eq!(*a, args, "秘密が無いのに args が改変された");
+            assert_eq!(*a, args, "args が改変された（sink は生で受け取るはず）");
+            assert!(
+                !a.to_string().contains("[redacted]"),
+                "撤去したはずのマスク痕跡が付いている"
+            );
         }
-    }
-
-    /// result 側の既存挙動が変わらないこと（#519 の回帰ガード）。data 内 nsec は
-    /// terminal イベントの result で `[redacted]` に潰れ、npub は残る。
-    #[tokio::test]
-    async fn test_sink_result_still_redacted() {
-        let (_dir, ctx) = test_context();
-        let sink = Arc::new(IoCapturingSink {
-            seen: Mutex::new(Vec::new()),
-        });
-        let executor = BridgedExecutor::new(ActionDispatcher::new(), ctx)
-            .with_gateway_actions(Arc::new(MockGatewaySecretResult))
-            .with_tool_event_sink(sink.clone());
-        let _ = executor.execute("make_key", &json!({})).await;
-        let seen = sink.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
-        // terminal（Completed）イベントに result が載る。
-        let terminal_result = seen[1].1.as_ref().expect("terminal に result が無い");
-        let s = terminal_result.to_string();
-        assert!(
-            !s.contains("nsec1resultsecret"),
-            "result に生 nsec が出た: {s}"
-        );
-        assert!(s.contains("[redacted]"));
-        assert!(s.contains("npub1ok"));
     }
 }

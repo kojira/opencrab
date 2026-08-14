@@ -895,35 +895,33 @@ struct LoopIdentityAdmin<R: NostrAgentRunner> {
 #[async_trait::async_trait]
 impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
     async fn adopt_generated_identity(&self, agent_id: &str, npub: &str) -> anyhow::Result<String> {
-        // 生成鍵（自分が作ったもの）の nsec をサーバ内から読む。存在チェックで
+        // 生成鍵（自分が作ったもの）の nsec をサーバ内で復号して読む。存在チェックで
         // 「自分が生成した鍵のみ採用可」を担保。秘密鍵は外へ出さない。
-        let nsec = NostaroCli::read_generated_key(agent_id, npub)?;
+        let nsec = self.cli.read_generated_key(agent_id, npub)?;
         // 既存設定（relays/filter を継承）。未設定なら採用しない。
         let row = self.runner.get_nostr_config(agent_id).ok_or_else(|| {
             anyhow::anyhow!("Nostr 未設定です。先に Nostr を設定してから本鍵を切り替えてください")
         })?;
         let config = crate::config_from_row(&row);
         let relays = config.effective_relays();
-        // ロールバック用に旧状態を控える。
-        let old_secret = row.secret_key.clone();
+        // ロールバック用に旧 pubkey を控える（#620: 本鍵はもう config に無いので、config
+        // ロールバックは不要になった。巻き戻すのは自己スキップセルだけ）。
         let old_pubkey = self.self_pubkey.read().unwrap().clone();
 
-        // 1) config.toml を新鍵で再生成（0600・アトミック）。send/pubkey はこれを読む。
-        NostaroCli::materialize_config(agent_id, &nsec, &relays, None)?;
+        // 1) config.toml を鍵行なしで再生成（relays 継承）。鍵は実行時に env で注入する。
+        NostaroCli::materialize_config(agent_id, &relays, None)?;
 
-        // 2) 新 pubkey を取得。**fail-closed**: 取れないと自己スキップが旧 pubkey のまま
-        //    になり、新 identity の自分の投稿を拾って自己返信無限ループ＋LLM 課金になる
-        //    （起動時ガードと同じ危険）。config を旧鍵へ巻き戻して中止する。
-        let new_pubkey = match self.cli.pubkey(agent_id).await {
+        // 2) 新 pubkey を**生成鍵経由**で取得する（#620）。本鍵プロバイダは DB を読むため、
+        //    DB 更新前の `pubkey()` は旧鍵の pubkey を返してしまう。`pubkey_from` は生成鍵を
+        //    env で注入して nostaro に引かせるので、DB 更新の**前**に新鍵の検証と新 pubkey の
+        //    取得を同時に行える。**fail-closed**: 取れないと自己スキップが旧 pubkey のままに
+        //    なり自己返信ループ＋LLM 課金になるので、DB を触らず中止する（config は鍵無しなので
+        //    巻き戻し不要）。
+        let new_pubkey = match self.cli.pubkey_from(agent_id, npub).await {
             Ok(pk) if !pk.trim().is_empty() => pk.trim().to_string(),
             _ => {
-                if let Err(re) =
-                    NostaroCli::materialize_config(agent_id, &old_secret, &relays, None)
-                {
-                    error!(agent_id, error = %re, "nostr: identity 切替のロールバック（config復元）に失敗");
-                }
                 anyhow::bail!(
-                    "新しい鍵の pubkey を取得できませんでした。自己返信ループ防止のため切替を中止しました（設定は元に戻しました）"
+                    "新しい鍵の pubkey を取得できませんでした。自己返信ループ防止のため切替を中止しました"
                 );
             }
         };
@@ -931,12 +929,9 @@ impl<R: NostrAgentRunner> NostrIdentityAdmin for LoopIdentityAdmin<R> {
         // 3) 自己スキップ用セルを更新（以後の自己スキップが新 identity 追従）。
         *self.self_pubkey.write().unwrap() = new_pubkey.clone();
 
-        // 4) DB を最後に更新。失敗したら config/セルを旧状態へ巻き戻す（DB=旧 / config=新
-        //    の不整合＝再起動で勝手に切替完了する事故を防ぐ）。
+        // 4) DB を最後に更新（runner が暗号化して保存する）。失敗したらセルを旧状態へ巻き戻す
+        //    （DB=旧 / セル=新 の不整合を残さない）。
         if let Err(e) = self.runner.set_nostr_secret_key(agent_id, &nsec) {
-            if let Err(re) = NostaroCli::materialize_config(agent_id, &old_secret, &relays, None) {
-                error!(agent_id, error = %re, "nostr: identity 切替のロールバック（config復元）に失敗");
-            }
             *self.self_pubkey.write().unwrap() = old_pubkey;
             return Err(e).context("DB の本鍵更新に失敗（設定を元に戻しました）");
         }
@@ -1001,8 +996,10 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
     config: NostrConfig,
     timed_fire_router: Arc<opencrab_actions::TimedFireRouter>,
 ) -> anyhow::Result<()> {
-    // 資格情報のガード（#191 段階2 PR3）。空 / 空白だけの nsec では nostaro が動かないので、
-    // materialize（0600 のファイル書き出し）や `pubkey` 取得より **手前**で拒否する。
+    // 資格情報のガード（#191 段階2 PR3）。DB の secret_key（#620 以降は暗号文 `enc:v1:…`）が
+    // 空 / 空白だけなら鍵未設定なので、materialize（config 書き出し）や `pubkey` 取得より
+    // **手前**で拒否する。暗号文は必ず非空（空鍵は暗号化しない）なので、この非空検査で足りる。
+    // 実際の鍵は本鍵プロバイダが DB から復号して env で注入する。
     if secret_key.trim().is_empty() {
         return Err(opencrab_actions::StartDeclined::err(
             opencrab_actions::gateway_kinds::NOSTR,
@@ -1024,8 +1021,8 @@ async fn spawn_agent_gateway<R: NostrAgentRunner>(
 
     stop_gateway(gateways, admins, &timed_fire_router, agent_id);
 
-    // nsec を含む config を 0600 で書き出す。
-    NostaroCli::materialize_config(agent_id, secret_key, &config.effective_relays(), None)?;
+    // #620: config は**鍵行なし**（relays のみ）。鍵は base_command が env で注入する。
+    NostaroCli::materialize_config(agent_id, &config.effective_relays(), None)?;
 
     // 自分の pubkey は自己返信ループ防止に必須。取得できなければ **起動しない**
     // （fail-closed: 自己フィルタ無しで走ると keyword フィルタ時に自分の返信を拾って
@@ -1173,9 +1170,9 @@ impl<R: NostrAgentRunner> opencrab_actions::GatewayIdentityProvisioning
             return admin.adopt_generated_identity(agent_id, npub).await;
         }
 
-        // 未稼働＝自己ブートストラップ。生成鍵（自分のもの）の nsec を読む。存在チェックで
-        // 「自分が生成した鍵のみ採用可」を担保。秘密鍵は外へ出さない・返さない。
-        let nsec = NostaroCli::read_generated_key(agent_id, npub)?;
+        // 未稼働＝自己ブートストラップ。生成鍵（自分のもの）の nsec を復号して読む。存在
+        // チェックで「自分が生成した鍵のみ採用可」を担保。秘密鍵は外へ出さない・返さない。
+        let nsec = self.cli.read_generated_key(agent_id, npub)?;
         let config = self.bootstrap_config(agent_id);
 
         // 1) agent_nostr_config を **enabled=false で先に書く**（順序ガード: 起動成功後に
@@ -2455,15 +2452,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
 
         // 自分の生成鍵を保存（read_generated_key の存在チェック＝「自分の鍵のみ」を満たす）。
-        NostaroCli::save_generated_key(
-            agent,
-            &crate::cli::GeneratedKey {
-                nsec: "nsec1bootstrapsecret".to_string(),
-                npub: npub.to_string(),
-                pubkey: "hexpub".to_string(),
-            },
-        )
-        .unwrap();
+        NostaroCli::new()
+            .save_generated_key(
+                agent,
+                &crate::cli::GeneratedKey {
+                    nsec: "nsec1bootstrapsecret".to_string(),
+                    npub: npub.to_string(),
+                    pubkey: "hexpub".to_string(),
+                },
+            )
+            .unwrap();
 
         let runner = SlowRunner::new(Duration::from_millis(1));
         let (_fake, cli) = fake_nostaro("selfpubkeyhex");
@@ -2538,15 +2536,16 @@ mod tests {
         let agent = "agent-bootstrap-271-operator";
         let npub = "npub1operatorset";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-        NostaroCli::save_generated_key(
-            agent,
-            &crate::cli::GeneratedKey {
-                nsec: "nsec1operatorsecret".to_string(),
-                npub: npub.to_string(),
-                pubkey: "hexpub".to_string(),
-            },
-        )
-        .unwrap();
+        NostaroCli::new()
+            .save_generated_key(
+                agent,
+                &crate::cli::GeneratedKey {
+                    nsec: "nsec1operatorsecret".to_string(),
+                    npub: npub.to_string(),
+                    pubkey: "hexpub".to_string(),
+                },
+            )
+            .unwrap();
 
         // 未稼働だが設定行はある（運用者がダッシュボードで絞り込みだけ入れた状態）。
         let existing = AgentNostrConfigRow {
@@ -2601,15 +2600,16 @@ mod tests {
         let agent = "agent-bootstrap-fail-264";
         let npub = "npub1failboot";
         let _ = std::fs::remove_dir_all(NostaroCli::agent_nostr_dir(agent).unwrap());
-        NostaroCli::save_generated_key(
-            agent,
-            &crate::cli::GeneratedKey {
-                nsec: "nsec1failsecret".to_string(),
-                npub: npub.to_string(),
-                pubkey: "x".to_string(),
-            },
-        )
-        .unwrap();
+        NostaroCli::new()
+            .save_generated_key(
+                agent,
+                &crate::cli::GeneratedKey {
+                    nsec: "nsec1failsecret".to_string(),
+                    npub: npub.to_string(),
+                    pubkey: "x".to_string(),
+                },
+            )
+            .unwrap();
 
         let runner = SlowRunner::new(Duration::from_millis(1));
         // pubkey を返さない fake → 起動が pubkey ガード（fail-closed）で失敗する。
@@ -2673,15 +2673,16 @@ mod tests {
         assert!(mgr.is_running(agent));
 
         // 新しい生成鍵を保存して採用。
-        NostaroCli::save_generated_key(
-            agent,
-            &crate::cli::GeneratedKey {
-                nsec: "nsec1newhot".to_string(),
-                npub: npub_new.to_string(),
-                pubkey: "y".to_string(),
-            },
-        )
-        .unwrap();
+        NostaroCli::new()
+            .save_generated_key(
+                agent,
+                &crate::cli::GeneratedKey {
+                    nsec: "nsec1newhot".to_string(),
+                    npub: npub_new.to_string(),
+                    pubkey: "y".to_string(),
+                },
+            )
+            .unwrap();
 
         let adopted = mgr
             .identity_provisioner()

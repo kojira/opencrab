@@ -1911,17 +1911,17 @@ mod curated_long_term_injection_tests {
 #[cfg(test)]
 mod tool_result_progress_line_tests {
     // 実況（progress line）は永続化と同じ無害化（`sanitize_tool_result_for_log`）を通す。
-    // redaction 本体は inline / dispatch 両経路で共有するため actions/core 側にある。
+    // #620: 旧来の nsec キー名マスク（SECRET_KEYS）は撤去したので、ここは上限/退避だけを行う。
     use super::tool_result_progress_line;
 
-    /// #397: subtask の実況は webhook で系の外へ出る。永続化側と同じ無害化を
-    /// **プレビューを切る前に**通し、nsec の生値が通知口へ流れないようにする。
+    /// 実況行がツール名・成否・中身を含み、失敗は failed と出ること。
     ///
-    /// プレビューは先頭 500 文字なので、無害化を外すと nsec がそのまま含まれて落ちる。
+    /// #620: nsec キー名マスクは撤去した。`nostr_generate_key` は実際には nsec を返さない
+    /// （npub のみ / `crates/nostr/src/actions.rs`）ので、実運用の実況に nsec は元から
+    /// 現れない。よってここでは通常の結果で行の体裁だけを固定する。
     #[test]
-    fn test_tool_result_progress_line_masks_nsec() {
-        let wrapper =
-            r#"{"success":true,"data":{"nsec":"nsec1supersecret","npub":"npub1abc"},"error":null}"#;
+    fn test_tool_result_progress_line_shape() {
+        let wrapper = r#"{"success":true,"data":{"npub":"npub1abc"},"error":null}"#;
         let line = tool_result_progress_line(
             "nostr_generate_key",
             wrapper,
@@ -1929,12 +1929,15 @@ mod tool_result_progress_line_tests {
             "session-1",
             "tool-call-1",
         );
-        assert!(!line.contains("nsec1supersecret"), "nsec leaked: {line}");
-        assert!(line.contains("[redacted]"), "マスク痕が残ること: {line}");
-        // 実況として要る情報（ツール名・成否・秘密でない中身）は落とさない。
+        // 実況として要る情報（ツール名・成否・中身）は落とさない。
         assert!(line.contains("nostr_generate_key"));
         assert!(line.contains("completed"));
         assert!(line.contains("npub1abc"));
+        // 撤去したはずのキー名マスクが復活していない。
+        assert!(
+            !line.contains("[redacted]"),
+            "撤去したマスクが効いている: {line}"
+        );
 
         let failed = tool_result_progress_line("read_file", r#"{"error":"nope"}"#, true, "s", "t");
         assert!(failed.contains("failed"), "失敗は failed と出る: {failed}");
