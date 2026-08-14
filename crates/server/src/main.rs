@@ -262,18 +262,11 @@ async fn main() -> anyhow::Result<()> {
     // 資格情報の有無に関わらず常時。受理判定・ゲート理由表示・parse はゲートウェイ停止中でも
     // 要る）。sink（生存で register/unregister）とは別の登録で、ここは起動ブロックの**外**に
     // 置く（#627 で「Discord 有効ブロックの中に置く」設計が隔離環境で発火しない罠になった）。
-    // 各 descriptor の実装はその transport の crate にある（Discord を足す作業がこの合流点に
-    // 散らばらない）。
-    #[cfg(feature = "discord")]
-    state
-        .timed_fire_router
-        .register_descriptor(std::sync::Arc::new(opencrab_discord::DiscordFire));
-    state
-        .timed_fire_router
-        .register_descriptor(std::sync::Arc::new(opencrab_nostr::NostrFire));
-    state
-        .timed_fire_router
-        .register_descriptor(std::sync::Arc::new(opencrab_web_gateway::WebFire));
+    // 各 descriptor の実装はその transport の crate にあり、登録の源は 1 本化した
+    // `register_production_descriptors` だけ（main.rs / test_app_state / scheduler の test_router /
+    // 登録簿を反復する generic テストがすべてこれを呼ぶ）。散らすと本番へ足してテスト側への追記を
+    // 忘れる隙ができ、prefix 衝突が本番でだけ顕在化しうる（#628 のブロッカー対応）。
+    opencrab_server::register_production_descriptors(&state.timed_fire_router);
 
     // #627 / #628 段階7: web の受け口（sink）も生存非依存で登録する。web には常駐ループが無く、
     // Discord / Nostr のように「ループ起動時に sink を登録」できないので、ここで共有受け口として
@@ -639,21 +632,31 @@ async fn main() -> anyhow::Result<()> {
             let issues = check_state.timed_fire_router.self_check(&env);
             if issues.is_empty() {
                 tracing::info!(
-                    "timed-fire: 起動時セルフチェック OK（descriptor ↔ sink 双方向照合・受け口あり）"
+                    "timed-fire: 起動時セルフチェック OK（descriptor ↔ sink 双方向照合・prefix 排他・受け口あり）"
                 );
             }
             for issue in issues {
                 match issue {
-                    opencrab_actions::SinkRegistrationIssue::SinkWithoutDescriptor { kind } => {
+                    opencrab_actions::TimedFireSelfCheckIssue::SinkWithoutDescriptor { kind } => {
                         tracing::error!(
                             kind,
                             "timed-fire: sink はあるが descriptor が無い（発火先を parse できない＝配線バグ）"
                         );
                     }
-                    opencrab_actions::SinkRegistrationIssue::ExpectedSinkMissing { kind } => {
+                    opencrab_actions::TimedFireSelfCheckIssue::ExpectedSinkMissing { kind } => {
                         tracing::error!(
                             kind,
                             "timed-fire: 有効な受信ゲートウェイがあるのに受け口が 0（時刻発火が届かない）。配線/起動を確認"
+                        );
+                    }
+                    opencrab_actions::TimedFireSelfCheckIssue::PrefixCollision {
+                        owner,
+                        shadowed_by,
+                    } => {
+                        tracing::error!(
+                            owner,
+                            shadowed_by,
+                            "timed-fire: prefix 排他違反（2 つの transport が同じ session_id を parse する）。first-match で発火先が横取りされる。descriptor の parse 書式を分離せよ"
                         );
                     }
                 }

@@ -708,16 +708,13 @@ mod tests {
 
     const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
 
-    /// テスト用の登録簿: 本番と同じ descriptor（Discord / Nostr）を登録する（#628）。
-    ///
-    /// rebuild_entries は登録簿へ問い合わせて発火先を解決するので、本番の main.rs と同じ
-    /// descriptor を積む（発火先の解決ロジックそのものは各 descriptor crate + パリティテストが
-    /// 検査するので、ここは scheduler がその登録簿を正しく引くことだけを見る）。
+    /// テスト用の登録簿: **本番と同じ源**（`register_production_descriptors`）で descriptor を
+    /// 積む（#628）。本番へ transport を足せば scheduler テストの登録簿も自動で追随する
+    /// （各所での register の散らしを避ける・ブロッカー対応）。rebuild_entries は登録簿へ
+    /// 問い合わせて発火先を解決するので、ここは scheduler がその登録簿を正しく引くことを見る。
     fn test_router() -> opencrab_actions::TimedFireRouter {
         let router = opencrab_actions::TimedFireRouter::new();
-        #[cfg(feature = "discord")]
-        router.register_descriptor(std::sync::Arc::new(opencrab_discord::DiscordFire));
-        router.register_descriptor(std::sync::Arc::new(opencrab_nostr::NostrFire));
+        opencrab_server::register_production_descriptors(&router);
         router
     }
 

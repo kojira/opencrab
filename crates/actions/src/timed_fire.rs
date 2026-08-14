@@ -306,44 +306,77 @@ impl TimedFireRouter {
         hints.join("、")
     }
 
-    /// 起動時セルフチェック（#628 条件 A）: descriptor 登録簿 ↔ sink 登録簿の**双方向照合**。
+    /// 起動時セルフチェック（#628 条件 A・B）: **本番登録簿そのもの**で不整合を検出する。
     ///
-    /// 手書きの kind リストを持たず、両登録簿の kind 集合を突き合わせる。返すのは検出した
-    /// 不整合（呼び出し側が ERROR ログにする）。
+    /// 手書きの kind リストを持たず、登録簿を反復して返すのは検出した不整合（呼び出し側が
+    /// ERROR ログにする）。**手で積んだテスト用登録簿に依存しない**ので、本番の登録に足して
+    /// テスト側への追記を忘れても、起動時にここで拾える。
     ///
     /// - **sink はあるが descriptor が無い** → 常に不整合（parse できない＝発火先を解決できない）。
     /// - **descriptor が `should_be_running(env)` なのに sink が無い** → 不整合（受信ゲートウェイが
     ///   立ち上がるべきなのに時刻発火が届かない＝配線 / 起動失敗）。隔離環境で `should_be_running`
     ///   が false の transport は sink 不在でも不整合にしない。
-    pub fn self_check(&self, env: &TransportFireEnv) -> Vec<SinkRegistrationIssue> {
-        let descriptor_kinds = self.descriptor_kinds();
+    /// - **prefix 排他違反（条件 B）** → ある descriptor A の `build_session_id(sample)` を別の
+    ///   descriptor B(≠A) が parse したら、first-match（[`resolve_target`](Self::resolve_target)）で
+    ///   片方が全セッションを横取りしうる。**本番登録簿そのもので**衝突を起動時に検出する
+    ///   （手書き registry を反復する generic テストの取りこぼしをここで塞ぐ）。
+    pub fn self_check(&self, env: &TransportFireEnv) -> Vec<TimedFireSelfCheckIssue> {
+        // descriptor 側の検査は 1 度のロックで済ませる（sink 登録簿は別 Mutex なので先に取る）。
         let sink_kinds = self.sink_kinds();
+        let descriptors = self.descriptors.lock().unwrap();
+        let descriptor_kinds: HashSet<&'static str> =
+            descriptors.iter().map(|d| d.kind()).collect();
         let mut issues = Vec::new();
 
         // sink → descriptor: descriptor の無い sink は parse 不能（必ず不整合）。
         for kind in &sink_kinds {
             if !descriptor_kinds.contains(kind) {
-                issues.push(SinkRegistrationIssue::SinkWithoutDescriptor { kind });
+                issues.push(TimedFireSelfCheckIssue::SinkWithoutDescriptor { kind });
             }
         }
         // descriptor → sink: 立ち上がるべき transport に sink が無い（配線 / 起動失敗）。
-        for descriptor in self.descriptors.lock().unwrap().iter() {
+        for descriptor in descriptors.iter() {
             let kind = descriptor.kind();
             if descriptor.should_be_running(env) && !sink_kinds.contains(kind) {
-                issues.push(SinkRegistrationIssue::ExpectedSinkMissing { kind });
+                issues.push(TimedFireSelfCheckIssue::ExpectedSinkMissing { kind });
+            }
+        }
+        // prefix 排他（条件 B）: 本番登録簿の全ペアで、A の sample session_id を B が parse しないか。
+        // probe の agent_id は parse/build に相対で効く任意の固定値でよい（発火先の解決は
+        // agent_id 相対なので、同じ値で build/parse すれば書式の衝突だけを見られる）。
+        for a in descriptors.iter() {
+            let sid = a.build_session_id(&a.sample_target(), SELF_CHECK_PROBE_AGENT);
+            for b in descriptors.iter() {
+                if a.kind() != b.kind() && b.parse(&sid, SELF_CHECK_PROBE_AGENT).is_some() {
+                    issues.push(TimedFireSelfCheckIssue::PrefixCollision {
+                        owner: a.kind(),
+                        shadowed_by: b.kind(),
+                    });
+                }
             }
         }
         issues
     }
 }
 
-/// 起動時セルフチェック（[`TimedFireRouter::self_check`]）が見つけた登録の不整合（#628 条件 A）。
+/// [`TimedFireRouter::self_check`] の prefix 排他検査（条件 B）で build/parse に使う固定の probe
+/// agent_id。発火先の解決は agent_id 相対なので、同じ値で build して parse すれば書式の衝突だけを
+/// 検査できる（実在の agent である必要はない）。
+const SELF_CHECK_PROBE_AGENT: &str = "00000000-0000-0000-0000-000000000000";
+
+/// 起動時セルフチェック（[`TimedFireRouter::self_check`]）が見つけた不整合（#628 条件 A・B）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SinkRegistrationIssue {
+pub enum TimedFireSelfCheckIssue {
     /// sink はあるが descriptor が無い（発火先を parse できない＝必ずバグ）。
     SinkWithoutDescriptor { kind: &'static str },
     /// descriptor が「立ち上がるべき」なのに sink が無い（受信ゲートウェイ未起動＝発火が届かない）。
     ExpectedSinkMissing { kind: &'static str },
+    /// prefix 排他違反（条件 B）: `owner` の sample session_id を `shadowed_by` も parse する。
+    /// first-match で登録順により片方が全セッションを横取りしうる（発火先の誤配送）。
+    PrefixCollision {
+        owner: &'static str,
+        shadowed_by: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -549,7 +582,7 @@ mod tests {
         }));
         assert_eq!(
             router.self_check(&env),
-            vec![SinkRegistrationIssue::ExpectedSinkMissing { kind: "discord" }]
+            vec![TimedFireSelfCheckIssue::ExpectedSinkMissing { kind: "discord" }]
         );
 
         // sink を足すと解消。
@@ -560,7 +593,7 @@ mod tests {
         router.register_shared("ghost", Arc::new(CountingSink(counter)));
         assert_eq!(
             router.self_check(&env),
-            vec![SinkRegistrationIssue::SinkWithoutDescriptor { kind: "ghost" }]
+            vec![TimedFireSelfCheckIssue::SinkWithoutDescriptor { kind: "ghost" }]
         );
     }
 
@@ -575,6 +608,55 @@ mod tests {
         };
         let router = TimedFireRouter::new();
         router.register_descriptor(dummy("discord", "discord")); // should_run=false
+        assert!(router.self_check(&env).is_empty());
+    }
+
+    /// 条件 B（起動時防御）: prefix が衝突する descriptor を**本番と同じ登録簿に**積んだら、
+    /// self_check が起動時に PrefixCollision を上げる。手書き registry を反復する generic テスト
+    /// への追記を忘れても、本番登録簿そのものでここが拾う（レビュー指摘のブロッカー対応）。
+    #[test]
+    fn self_check_detects_prefix_collision() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let configured: HashSet<&'static str> = HashSet::new();
+        let env = TransportFireEnv {
+            conn: &conn,
+            configured_shared_kinds: &configured,
+        };
+        let router = TimedFireRouter::new();
+        // 別 kind だが同じ書式（prefix）を parse する 2 つ = first-match で横取りが起きる。
+        router.register_descriptor(dummy("first", "shared"));
+        router.register_descriptor(dummy("second", "shared"));
+
+        let issues = router.self_check(&env);
+        // 両方向で衝突が上がる（A の sample を B が、B の sample を A が parse）。
+        assert!(
+            issues.contains(&TimedFireSelfCheckIssue::PrefixCollision {
+                owner: "first",
+                shadowed_by: "second",
+            }),
+            "first→second の衝突が検出されない: {issues:?}"
+        );
+        assert!(
+            issues.contains(&TimedFireSelfCheckIssue::PrefixCollision {
+                owner: "second",
+                shadowed_by: "first",
+            }),
+            "second→first の衝突が検出されない: {issues:?}"
+        );
+    }
+
+    /// 衝突しない登録簿（別 prefix）では PrefixCollision を上げない（偽陽性を出さない）。
+    #[test]
+    fn self_check_no_collision_for_disjoint_prefixes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let configured: HashSet<&'static str> = HashSet::new();
+        let env = TransportFireEnv {
+            conn: &conn,
+            configured_shared_kinds: &configured,
+        };
+        let router = TimedFireRouter::new();
+        router.register_descriptor(dummy("alpha", "alpha"));
+        router.register_descriptor(dummy("beta", "beta"));
         assert!(router.self_check(&env).is_empty());
     }
 }

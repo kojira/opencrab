@@ -1,29 +1,26 @@
 //! #628 条件 B・C: 登録簿を反復する generic な transport 検査。
 //!
-//! 本番（main.rs）と同じ descriptor を登録した [`TimedFireRouter`] を組み、**登録簿を反復して**
-//! 次を検査する。新しい transport を登録すれば実装者がテスト行を足さなくても自動で検査対象に
-//! なる（descriptor が `sample_target` を返せる形にしてあるのがその要）。
+//! **本番と同じ源**（`register_production_descriptors`）で登録した [`TimedFireRouter`] を組み、
+//! **登録簿を反復して**次を検査する。手で積んだ登録簿ではないので、本番へ transport を足せば
+//! ここも自動で追随する（新しい transport は実装者がテスト行を足さなくても検査対象になる・
+//! descriptor が `sample_target` を返せる形にしてあるのがその要）。
 //!
 //! - **条件 C（round-trip）**: どの descriptor も `build_session_id(sample) → parse → sample` が
 //!   戻り、登録簿の `resolve_target` が同じ発火先へ解決する（build と parse が独立実装なので
 //!   恒真にならない）。
 //! - **条件 B（prefix 排他）**: どの 2 descriptor も同じ session_id を parse しない。first-match の
-//!   `resolve_target` が登録順に依存して片方を黙って影に入れることを防ぐ。
-
-use std::sync::Arc;
+//!   `resolve_target` が登録順に依存して片方を黙って影に入れることを防ぐ。**起動時にも本番登録簿
+//!   そのもので同じ検査が走る**（[`opencrab_actions::TimedFireRouter::self_check`] の PrefixCollision）。
 
 use opencrab_actions::TimedFireRouter;
 
 const AGENT_UUID: &str = "6b79ac3a-7f17-4618-a827-5bda992a3698";
 
-/// 本番と同じ transport descriptor を登録した登録簿（新 transport はここへ足すと下の
-/// generic テストが自動で拾う）。
+/// 本番と同じ源（`register_production_descriptors`）で登録した登録簿。新 transport を本番へ
+/// 足せば、この generic テストが自動で反復する（手書き registry への追記漏れが起きない）。
 fn registry() -> TimedFireRouter {
     let router = TimedFireRouter::new();
-    #[cfg(feature = "discord")]
-    router.register_descriptor(Arc::new(opencrab_discord::DiscordFire));
-    router.register_descriptor(Arc::new(opencrab_nostr::NostrFire));
-    router.register_descriptor(Arc::new(opencrab_web_gateway::WebFire));
+    opencrab_server::register_production_descriptors(&router);
     router
 }
 
@@ -91,4 +88,26 @@ fn no_two_descriptors_parse_the_same_session_id() {
             }
         }
     }
+}
+
+/// 条件 B（起動時経路）: 本番登録簿を `self_check` に通しても PrefixCollision は出ない
+/// （実在 3 transport は書式が分離している）。起動時に prefix 衝突を検出する経路自体が本番
+/// descriptor に対して誤検出しないことを固定する（`self_check` は手書き registry に依存しない）。
+#[test]
+fn production_registry_has_no_prefix_collision_via_self_check() {
+    let router = registry();
+    let conn = opencrab_db::init_memory().unwrap();
+    let configured = std::collections::HashSet::new();
+    let env = opencrab_actions::TransportFireEnv {
+        conn: &conn,
+        configured_shared_kinds: &configured,
+    };
+    let issues = router.self_check(&env);
+    assert!(
+        !issues.iter().any(|i| matches!(
+            i,
+            opencrab_actions::TimedFireSelfCheckIssue::PrefixCollision { .. }
+        )),
+        "本番 transport が prefix 衝突している: {issues:?}"
+    );
 }
