@@ -30,11 +30,13 @@ pub const REST_SESSION_PREFIX: &str = "agent-msg-";
 /// 完了本文は `settle_completed` が親セッションログへ永続化済み（RFC §1.3）なので、
 /// 取得は `GET /api/sessions/{id}/logs` で足りる。ここで LLM を回して結果を再注入
 /// （web の `WebCompletionSink` 相当）はしない:
-/// - REST には per-session の直列化が無い（web は `run_and_deliver_serialized`、Discord は
-///   `SessionLocks::spawn_serialized` を持つ）。resume を走らせると同一セッションへの
-///   並行 POST と競合し、同じ会話から二重に応答する（RFC §6 の不変条件違反）。
-/// - 完了本文は次の POST の `build_conversation_string` で自然に文脈へ載る
-///   （heartbeat の「次 tick 拾い」と同じ方式）。
+/// - REST は request/response で live push 先を持たない。完了本文は次の POST の
+///   `build_conversation_string` で自然に文脈へ載る（heartbeat の「次 tick 拾い」と同じ方式）。
+///
+/// （かつてここには「REST には per-session の直列化が無いので resume を走らせると並行 POST
+/// と競合する」と書いていた。#640 で REST も `send_agent_message` / `send_message` が共有の
+/// `session_locks.run_serialized` を通るようになり、その前提は解消した。resume をしないのは
+/// 直列化の欠如が理由ではなく、上記のとおり push 先を持たないためである。）
 ///
 /// sink の役目は `sessions.status` の整合だけ: 走行中 subtask がある間はハンドラが
 /// `completed` にしないため、最後の subtask が決着した時点でここが完了させる
@@ -296,7 +298,18 @@ pub async fn send_agent_message(
     if let Some(ga) = gateway_actions {
         run_req = run_req.with_gateway_actions(ga);
     }
-    let result = process::run_agent_response(&state, run_req).await;
+    // 同一セッションへの並行 POST を直列化する（#640）。web / Nostr / Discord / scheduler は
+    // 既にこの共有ロック（`state.session_locks` は `AppState` 全体で 1 つ）を通っており、REST
+    // だけが `run_agent_response` を直呼びしていた。これは判断ではなく配線漏れで、`State(state)`
+    // を受けているのに `session_locks` を一度も参照していなかった。
+    //
+    // 粒度は **session_id 単位であって global ではない**。同一 session_id への run だけが直列化
+    // され、別セッション・別エージェント・別会話は従来どおり並行に走る。global にすると無関係な
+    // セッションを巻き込み、「ユーザーの投稿への反応を待たせない」土台を壊す。粒度を広げないこと。
+    let result = state
+        .session_locks
+        .run_serialized(&session_id, process::run_agent_response(&state, run_req))
+        .await;
 
     // 10. Handle result.
     match result {
