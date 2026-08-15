@@ -215,7 +215,9 @@ SkillEngine
 
 共通アクション群（core）だけは `GatewayActionDef` を持たない一次ツールなので、例外的に `crates/actions/src/bridge.rs` の定数（`CORE_INLINE_ACTIONS` / `CORE_DISPATCHABLE_ACTIONS` の対）で分類し、`ActionDispatcher` の全名がどちらかに属することを fail-closed 検査（`core_actions_are_classified_for_dispatch`）が守る。
 
-**ツール名の一覧はこのドキュメントには置かない**（各定義の属性と core の 2 定数が唯一の権威。ここに書くのは上の分類基準だけ。一覧を二重管理すると必ず実装と乖離するため）。
+制御ツール（`spawn_subtask` / `cancel_subtask` / `report_progress`）だけは 3 つ目の源として `default_non_dispatch_tools()`（`crates/actions/src/subtask.rs`）に直接ハードコードされ、常に inline に残る（それ自体が subtask ライフサイクルを操作するため）。
+
+**ツール名の一覧はこのドキュメントには置かない**（各定義の属性・core の 2 定数・制御ツールのハードコードが権威。ここに書くのは上の分類基準だけ。一覧を二重管理すると必ず実装と乖離するため）。
 
 分類の対象外が 2 つある。どちらも**既定の振る舞い**に落ちる:
 

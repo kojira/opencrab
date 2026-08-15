@@ -588,6 +588,16 @@ impl BridgedExecutor {
 
     /// depth>=1 の sub-engine から遮断すべきか（`class.sub_engine == Blocked`）。
     /// 索引に無い名前は `false`（属性を名乗る定義が無いツールは遮断しない）。
+    ///
+    /// **多層防御の層が移ったことの記録（消さないこと）**:
+    /// - **本番では事実上不活性**。depth>=1 では `gateway_actions` が常に
+    ///   [`SubEngineGatewayActions`]（`Allowed` だけに事前フィルタする外周）なので、索引に
+    ///   `Blocked` が入らず、この二層目は必ず `false` を返す。実効ゲートは外周フィルタが担う。
+    ///   挙動は旧実装と完全に等価（旧 `DISCORD_ACTIONS` の名前ベース深さ拒否も、外周の許可
+    ///   リストの上に乗る冗長な層だった）。
+    /// - **将来 depth>=1 で生の gateway を直付けする経路を足すと、この層が復活する**
+    ///   （外周フィルタを通らないツールに対して `Blocked` 属性が実効ゲートになる）。だから
+    ///   「使われていないから消す」判断はしないこと。多層防御の意図は残す。
     fn is_blocked_in_subengine(&self, name: &str) -> bool {
         self.tool_class_index
             .get(name)

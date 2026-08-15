@@ -216,25 +216,34 @@ fn server_gateway_action_table_matches_own_definitions() {
     );
 }
 
-/// **sub-engine 許可集合 + sharing 属性の固定**（不変条件）。
+/// **分類属性の集合を固定する**（不変条件）。
 ///
 /// 分類の権威は各ツール定義の属性（`GatewayActionDef.class`）へ移った（PR-2B）ので、
-/// gateway 固有の権威リストは削除した。ここでは権威リストに依存しない不変条件だけを
-/// `own_definitions()` の属性から直接固定する:
+/// gateway 固有の権威リストは削除した。ここでは権威リストに依存しない不変条件を
+/// `own_definitions()` の属性から直接固定する（3 軸とも「値を書き間違えたら落ちる」状態に
+/// する）:
+/// - **Dispatchable 集合 == {nostr_generate_key, rebuild_memory_index,
+///   update_memory_index_config, update_heartbeat_instructions, create_skill}**（長時間 or
+///   同ターンで読み戻さない書き込み。他は全部 `Inline`。`nostr_generate_key` は nostr
+///   feature 時のみ push されるので期待値も同じ feature 条件で組む / PR-1B）。
 /// - **Allowed 集合 == {report_progress, nostr_generate_key}**（sub-engine から到達可能な
-///   ツールが増えていないことの固定。`nostr_generate_key` は nostr feature 時のみ push
-///   されるので期待値も同じ feature 条件で組む / PR-1B）。
+///   ツールが増えていないことの固定。`nostr_generate_key` は nostr feature 時のみ push / PR-1B）。
 /// - **ConversationBound == {send_ui}**（server own で live セッションに束縛される唯一の
 ///   ツール。全ゲート横断では {discord_add_reaction, nostr_reply, send_ui} で残り 2 つは
 ///   discord / nostr 側の同名テストが覆う）。
 ///
-/// dispatch / Blocked の値は各定義の構築サイトで必須指定される（`ToolClass` に `Default`
-/// が無い）ので、値の正しさはコードレビューが担い、専用の照合テストは持たない。
+/// `sub_engine == Blocked`（配送系の深さ拒否）は `send_ui_is_blocked_in_sub_engine` 等が
+/// 挙動で覆うのでここでは固定しない。
 #[test]
 fn server_tool_class_invariants_are_fixed() {
-    use opencrab_gateway::{SubEngineAccess, ToolSharing};
+    use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
     let defs = SystemGatewayActions::own_definitions();
     assert!(!defs.is_empty());
+    let dispatchable: std::collections::BTreeSet<String> = defs
+        .iter()
+        .filter(|d| d.class.dispatch == DispatchMode::Dispatchable)
+        .map(|d| d.name.clone())
+        .collect();
     let allowed: std::collections::BTreeSet<String> = defs
         .iter()
         .filter(|d| d.class.sub_engine == SubEngineAccess::Allowed)
@@ -245,6 +254,24 @@ fn server_tool_class_invariants_are_fixed() {
         .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
         .map(|d| d.name.clone())
         .collect();
+
+    // Dispatchable（長時間 / 同ターンで読み戻さない書き込み）。`nostr_generate_key` のみ
+    // nostr feature に依存する（PR-1B）ので期待値も同じ cfg で組む。
+    let mut expected_dispatch: std::collections::BTreeSet<String> = [
+        "rebuild_memory_index",
+        "update_memory_index_config",
+        "update_heartbeat_instructions",
+        "create_skill",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    #[cfg(feature = "nostr")]
+    expected_dispatch.insert("nostr_generate_key".to_string());
+    assert_eq!(
+        dispatchable, expected_dispatch,
+        "server own の Dispatchable 集合がずれている（dispatch 属性の Inline/Dispatchable 取り違え）"
+    );
 
     let expected_conv: std::collections::BTreeSet<String> =
         std::iter::once("send_ui".to_string()).collect();

@@ -358,21 +358,34 @@ mod tests {
         );
     }
 
-    /// **sharing 属性の固定**: `sharing` には権威リストが無いので、Nostr ゲートの
-    /// `ConversationBound` 集合をここで固定する（判定基準は `opencrab_gateway::ToolSharing`
-    /// の doc）。会話固有の一時ハンドル（受信投稿の note id = `target`）を必須に取る
-    /// `nostr_reply` のみ。全ゲート横断の `ConversationBound` は
-    /// {discord_add_reaction, nostr_reply, send_ui}。
+    /// **分類属性の集合を固定する**（権威リストが消えた `dispatch` と `sharing` を「値を
+    /// 書き間違えたら落ちる」状態にする）。権威リストが無いので `definitions()` の属性から
+    /// 集合を直接固定する。
     ///
-    /// dispatch / sub_engine の値は各定義の構築サイトで必須指定される（`ToolClass` に
-    /// `Default` が無い）ので、値の正しさはコードレビューが担い、専用の照合テストは持たない
-    /// （PR-2B で gateway 固有の権威リストと等価性テストを削除した）。
+    /// - **`Dispatchable` 集合 == {nostr_generate_key}**: vanity 探索は長時間なので
+    ///   background 化する。他は全部配送系 / 同ターン結果依存で `Inline`。
+    /// - **`ConversationBound` 集合 == {nostr_reply}**: 会話固有の一時ハンドル（受信投稿の
+    ///   note id = `target`）を必須に取る唯一のツール。全ゲート横断では
+    ///   {discord_add_reaction, nostr_reply, send_ui}。
     #[test]
-    fn nostr_tool_sharing_conversation_bound_set_is_fixed() {
-        use opencrab_gateway::ToolSharing;
+    fn nostr_tool_class_sets_are_fixed() {
+        use opencrab_gateway::{DispatchMode, ToolSharing};
         let a = NostrGatewayActions::new(NostaroCli::new());
         let defs = a.definitions();
         assert!(!defs.is_empty());
+
+        let dispatchable: std::collections::BTreeSet<String> = defs
+            .iter()
+            .filter(|d| d.class.dispatch == DispatchMode::Dispatchable)
+            .map(|d| d.name.clone())
+            .collect();
+        let expected_dispatch: std::collections::BTreeSet<String> =
+            std::iter::once("nostr_generate_key".to_string()).collect();
+        assert_eq!(
+            dispatchable, expected_dispatch,
+            "nostr ゲートの Dispatchable 集合がずれている（dispatch 属性の Inline/Dispatchable 取り違え）"
+        );
+
         let conv_bound: std::collections::BTreeSet<String> = defs
             .iter()
             .filter(|d| d.class.sharing == ToolSharing::ConversationBound)

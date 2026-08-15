@@ -663,22 +663,36 @@ mod tests {
     // `send_ui_without_session_fails_closed` / `crates/server/src/peer_review.rs` の
     // `error_messages_are_byte_stable` にある。
 
-    /// **sharing 属性の固定**: `sharing` には権威リストが無いので、Discord ゲートの
-    /// `ConversationBound` 集合をここで固定する（判定基準は `opencrab_gateway::ToolSharing`
-    /// の doc）。会話固有の一時ハンドル（message_id）を必須に取る `discord_add_reaction`
-    /// のみ。全ゲート横断の `ConversationBound` は
-    /// {discord_add_reaction, nostr_reply, send_ui} で、残り 2 つは nostr / server 側の
-    /// 同名テストが覆う。
+    /// **分類属性の集合を固定する**（`dispatch` / `sub_engine` は既に他テスト・他ゲートが
+    /// 覆うが、権威リストが消えた `dispatch` と `sharing` を「値を書き間違えたら落ちる」
+    /// 状態にする）。権威リストが無いので `definitions()` の属性から集合を直接固定する。
     ///
-    /// dispatch / sub_engine の値は各定義の構築サイトで必須指定される（`ToolClass` に
-    /// `Default` が無い）ので、値の正しさはコードレビューが担い、専用の照合テストは持たない
-    /// （PR-2B で gateway 固有の権威リストと等価性テストを削除した）。
+    /// - **`Dispatchable` 集合 == 空**: Discord に残るツールは配送系 / 同ターン結果依存 /
+    ///   run 内共有状態 / 純粋な読み取りのいずれかで全部 `Inline`。長時間ツールは無い。
+    /// - **`ConversationBound` 集合 == {discord_add_reaction}**: 会話固有の一時ハンドル
+    ///   （message_id）を必須に取る唯一のツール。全ゲート横断では
+    ///   {discord_add_reaction, nostr_reply, send_ui} で残り 2 つは nostr / server 側が覆う。
+    ///
+    /// `sub_engine == Blocked`（配送系の深さ拒否）は `crates/server` の
+    /// `send_ui_is_blocked_in_sub_engine` 等が挙動で覆うのでここでは固定しない。
     #[test]
-    fn discord_tool_sharing_conversation_bound_set_is_fixed() {
-        use opencrab_gateway::ToolSharing;
+    fn discord_tool_class_sets_are_fixed() {
+        use opencrab_gateway::{DispatchMode, ToolSharing};
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
         assert!(!defs.is_empty());
+
+        let dispatchable: std::collections::BTreeSet<String> = defs
+            .iter()
+            .filter(|d| d.class.dispatch == DispatchMode::Dispatchable)
+            .map(|d| d.name.clone())
+            .collect();
+        assert_eq!(
+            dispatchable,
+            std::collections::BTreeSet::new(),
+            "discord ゲートの Dispatchable 集合がずれている（dispatch 属性の Inline/Dispatchable 取り違え）"
+        );
+
         let conv_bound: std::collections::BTreeSet<String> = defs
             .iter()
             .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
