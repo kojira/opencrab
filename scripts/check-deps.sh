@@ -51,13 +51,29 @@ if printf '%s\n' "$bare" | grep -qxE "$GATES"; then
 fi
 echo "R5(server no-default) OK"
 
-# --- R6: feature の組み合わせでビルドできる（PR-1B: 3 ゲートの全マトリクス） ---
+# --- R6: feature の組み合わせでビルド＋（外した構成は）テストできる（PR-1B: 3 ゲートの全マトリクス） ---
 # CI では build/test（--all-features）の後ろで走る（check-deps.sh の呼び出し位置）。
 # 各ゲートを個別に付けた構成と、全部外した構成・既定（全部入り）がそれぞれビルドできること。
+#
+# #654: 「ビルドは通るがテストが落ちる」を CI が捕まえられるよう、**全ゲートを外した構成
+# （--no-default-features）ではテストまで回す**。ゲートの feature 化（#651）でツール定義や
+# ルート・発火経路が feature 依存になったのに、それを前提にしたテストが feature 非依存のまま
+# 残ると、外した構成のテストを誰も実行せず割れ窓化する（通常の CI テストは --all-features のみ）。
+#
+# 範囲の判断: 「外した構成でテストを回す経路が 1 つも無い」状態を無くすのが目的なので、
+# **全ゲート off（バレ）1 本**に絞る。単一 feature（nostr/web/discord のみ）や全部入りまで
+# テストを回すと、compile 単位が 4〜5 通り増えて CI が重くなる割に、feature 依存の取りこぼしは
+# 「全部 off」で最もよく露出する（定義・ルート・発火経路がまるごと消えるため）。全部入りは既定の
+# CI テストが既に覆う。単一 feature 構成のテストは今回ローカルで緑を確認済み（必要なら別途 issue で
+# マトリクス拡張）。追加コストは opencrab-server の no-default テストバイナリのビルド＋実行（実測
+# 約 10 秒台の実行 + そのビルド）で、既存の R6 no-default ビルドと成果物を概ね共有する。
+#
+# `-p opencrab-server` を必ず付ける: ワークスペース root で --no-default-features を付けても
+# feature 統合で server の既定は落ちない（段階 1 の E2E で判明済み）。
 cargo build -p opencrab-gateway
-cargo build -p opencrab-server --no-default-features
+cargo test -p opencrab-server --no-default-features
 for f in discord nostr web; do
   cargo build -p opencrab-server --no-default-features --features "$f"
 done
 cargo build -p opencrab-server
-echo "R6(full matrix) OK"
+echo "R6(full matrix + no-default tests) OK"

@@ -30,6 +30,9 @@ fn own_definition_shape() {
 /// nostr watch loop / keys are configured. If someone moves it back into the
 /// key-gated inner NostrGatewayActions bundle, own_definitions loses it and
 /// this test fails — that is the "露出が二度と消えない" guard.
+// #654: nostr ツール定義は #651 で nostr feature 依存になった。feature off では定義自体が
+// 存在せず「常時露出」が空論になるので、同じ cfg で囲む（#630 の外した構成でのテスト経路）。
+#[cfg(feature = "nostr")]
 #[test]
 fn nostr_generate_key_is_always_exposed() {
     let defs = SystemGatewayActions::own_definitions();
@@ -54,6 +57,8 @@ fn nostr_generate_key_is_always_exposed() {
 /// agent can inspect its generated keys before adopting one, even when no
 /// nostr gateway is running / no key is configured. It must not require args
 /// and must not leak nsec (it only returns npubs).
+// #654: nostr 定義は nostr feature 依存（#651）。off では定義が無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[test]
 fn nostr_list_keys_is_always_exposed() {
     let defs = SystemGatewayActions::own_definitions();
@@ -70,6 +75,8 @@ fn nostr_list_keys_is_always_exposed() {
 /// #264: nostr_switch_identity must be a *own* (bootstrap) definition so an
 /// unconfigured agent can adopt a generated key and self-connect on any turn
 /// (not only when a nostr watch loop is already running). It requires `npub`.
+// #654: nostr 定義は nostr feature 依存（#651）。off では定義が無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[test]
 fn nostr_switch_identity_is_always_exposed() {
     let defs = SystemGatewayActions::own_definitions();
@@ -87,6 +94,9 @@ fn nostr_switch_identity_is_always_exposed() {
 /// definitions() dedups own vs inner by name: when the inner gateway also
 /// defines nostr_generate_key (nostr watch loop running), the merged tool
 /// list must still contain exactly one entry (providers reject duplicates).
+// #654: nostr_generate_key の定義は nostr feature 依存（#651）。off では 0 件になり
+// 「重複せず 1 件」の不変条件が空論になるので、同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[test]
 fn definitions_dedup_keeps_single_nostr_generate_key() {
     // own_definitions is the source that definitions() starts from; assert it
@@ -146,6 +156,12 @@ fn cancel_subtask_is_exposed_in_own_definitions() {
 /// `definitions()` のドリフトを見るだけで、README の行は見ない）。つまりこの表の
 /// transport 行は今も無検査で腐りうる。埋めるなら transport 側にも同型のテストを
 /// 足すこと。
+// #654: README の gateway アクション表「all turns」行は nostr ツール（nostr_generate_key /
+// nostr_list_keys / nostr_switch_identity / nostr_run / get/set_my_nostr_relay …）を載せている。
+// own_definitions() の feature 依存部分は nostr のみ（#651）なので、README（全部入りの正典）と
+// own の突き合わせが成立するのは nostr feature 時だけ。off では documented ⊄ registered になる
+// ので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[test]
 fn server_gateway_action_table_matches_own_definitions() {
     let readme_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
@@ -257,6 +273,8 @@ fn server_tool_class_invariants_are_fixed() {
 
     // Dispatchable（長時間 / 同ターンで読み戻さない書き込み）。`nostr_generate_key` のみ
     // nostr feature に依存する（PR-1B）ので期待値も同じ cfg で組む。
+    // #654: nostr off では下の insert が cfg で消え mut が不要になる。
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
     let mut expected_dispatch: std::collections::BTreeSet<String> = [
         "rebuild_memory_index",
         "update_memory_index_config",
@@ -283,6 +301,8 @@ fn server_tool_class_invariants_are_fixed() {
     // 【段階1(#651) の feature 化との相互作用】`nostr_generate_key` の def は
     // `#[cfg(feature = "nostr")]` に囲まれている（PR-1B）。よって `own_definitions()` から
     // 集めた Allowed 集合は nostr 構成の有無で縮む。期待値も **同じ feature 条件**で組む。
+    // #654: nostr off では下の insert が cfg で消え mut が不要になる。
+    #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
     let mut expected: std::collections::BTreeSet<String> =
         std::iter::once("report_progress".to_string()).collect();
     #[cfg(feature = "nostr")]
@@ -489,6 +509,9 @@ fn sub_engine_cannot_see_spawn_subtask() {
     );
     // 許可された制御ツールは見える（許可リストが空振りしていないことの対）。
     assert!(names.contains(&"report_progress".to_string()));
+    // #654: nostr_generate_key の定義は nostr feature 依存（#651）。off では露出しないので
+    // 期待値も同じ cfg で組む（sub-engine 許可リストの対照そのものは report_progress で担保）。
+    #[cfg(feature = "nostr")]
     assert!(names.contains(&"nostr_generate_key".to_string()));
 }
 
@@ -3524,6 +3547,8 @@ fn heartbeat_state() -> AppState {
 }
 
 /// live G（global heartbeat kill-switch）を固定した state。`discord-` のゲート理由の検証用。
+// #654: 使うのは discord_ctx を立てる G ゲート検証（discord feature 依存・#651）だけなので同じ cfg で囲む。
+#[cfg(feature = "discord")]
 fn heartbeat_state_with_g(g: bool) -> AppState {
     let mut state = heartbeat_state();
     state.heartbeat_config_rx =
@@ -3543,6 +3568,9 @@ fn nostr_ctx() -> GatewayCallContext {
 }
 
 /// 現在セッションを Discord チャンネル（`discord-{agent}-{guild}-{channel}`）にした ctx。
+// #654: discord セッションの発火経路（DiscordFire）は discord feature 時のみ登録される（#651）。
+// この ctx を使う test は同じ cfg で囲まれているので helper も揃える。
+#[cfg(feature = "discord")]
 fn discord_ctx() -> GatewayCallContext {
     let mut c = GatewayCallContext::new(GatewayCaller::TrustedUser, "agent-x");
     c.session_id = Some("discord-agent-x-100-200".to_string());
@@ -3622,6 +3650,9 @@ fn get_my_heartbeat_description_explains_next_fire_at_and_gating() {
 
 /// **既定は無効**（#240）。設定したことが無いセッションは無効で返る。応答に廃止フィールド
 /// （scope/channel_id）が無く、`next_fire_at` フィールドが存在する（#439-4）。
+// #654: nostr セッションの発火経路（NostrFire descriptor）は nostr feature 時のみ登録される
+// （#651）。off では fail-closed になり、検証対象の発火計算そのものが存在しないので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn get_my_heartbeat_defaults_to_disabled() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
@@ -3653,6 +3684,8 @@ async fn get_my_heartbeat_defaults_to_disabled() {
 
 /// 有効化 + 間隔設定が DB に載り、`next_fire_at` が算出されて未来を指す（#439-4）。
 /// nostr は G 非依存なので gated にならない。有効化で anchor=now・last_fired=NULL（§4.4）。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_enables_and_computes_next_fire_at() {
     let state = heartbeat_state();
@@ -3778,6 +3811,10 @@ async fn heartbeat_tools_reject_removed_scope_args() {
 /// 発火経路の無いセッション（session_id なし / web-）は fail-closed（設計 §13.1）。
 /// 「設定できたのに永遠に発火しない行」を作らせない。**エラーには理由だけでなく remedy
 /// （どこで実行すればよいか）を書く**（#456 の発端は混乱・M-b）。詰まらせて終わらない。
+// #654: この test は remedy 文言が Discord と Nostr の両方を含むこと（fire_target_hint が両
+// descriptor を畳む）を検証する。両 descriptor は各 feature 時のみ登録される（#651）ので、両方の
+// feature が揃うときだけ意味を持つ。off では hint が空になり検証が成立しないので同じ cfg で囲む。
+#[cfg(all(feature = "discord", feature = "nostr"))]
 #[tokio::test]
 async fn heartbeat_tools_fail_closed_without_fireable_session() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
@@ -3815,6 +3852,9 @@ async fn heartbeat_tools_fail_closed_without_fireable_session() {
 
 /// `discord-` セッションは G=false のとき「enabled なのに発火しない」理由を本人へ見せる
 /// （#394 / #4）。**whitelist は理由に含めない**（現行発火経路にゲートとして無い・§5 N3）。
+// #654: discord セッションの発火経路（DiscordFire descriptor）は discord feature 時のみ登録される
+// （#651）。off では discord_ctx が fail-closed になり G ゲート理由を検証できないので同じ cfg で囲む。
+#[cfg(feature = "discord")]
 #[tokio::test]
 async fn get_my_heartbeat_shows_discord_gated_when_global_g_is_false() {
     let state = heartbeat_state_with_g(false);
@@ -3839,6 +3879,8 @@ async fn get_my_heartbeat_shows_discord_gated_when_global_g_is_false() {
 }
 
 /// G=true なら `discord-` セッションは gated でない。
+// #654: discord セッションの発火経路は discord feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "discord")]
 #[tokio::test]
 async fn discord_not_gated_when_global_g_is_true() {
     let state = heartbeat_state_with_g(true);
@@ -3857,6 +3899,8 @@ async fn discord_not_gated_when_global_g_is_true() {
 
 /// 壊れた間隔（0 以下）で enabled の行は、実効 null・next_fire_at null・gated（理由=間隔）。
 /// set 経路は <=0 を拒否するので DB へ直接書いて経路を作る（保険ゲートの可視化）。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn get_my_heartbeat_gates_on_broken_interval() {
     let state = heartbeat_state();
@@ -3892,6 +3936,8 @@ async fn get_my_heartbeat_gates_on_broken_interval() {
 }
 
 /// 明示の無効化は anchor/last_fired を触らない（位相保存・再有効化まで保つ）。next_fire_at は null。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_disable_keeps_phase() {
     let state = heartbeat_state();
@@ -3919,6 +3965,8 @@ async fn set_my_heartbeat_disable_keeps_phase() {
 
 /// #605: 間隔変更は anchor を now へ張り直さない（起点を据え置く）。以前は毎回 now へ
 /// リセットしていたため、調整のたびに次回発火が先送りされて発火しなかった。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_interval_change_preserves_anchor() {
     let state = heartbeat_state();
@@ -3951,6 +3999,8 @@ async fn set_my_heartbeat_interval_change_preserves_anchor() {
 
 /// #605 の本丸: 設定変更で `last_fired_at`（発火した事実）を消さない。消すと next_fire が
 /// anchor 基準へ戻り、調整のたびに位相が先送りされて発火しなくなる。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_preserves_last_fired_across_config_change() {
     let state = heartbeat_state();
@@ -3996,6 +4046,8 @@ async fn set_my_heartbeat_preserves_last_fired_across_config_change() {
 
 /// #605 対称ケース: 間隔の**延長**でも last_fired を保ち、next_fire = last_fired+（延ばした）interval。
 /// 短縮ケース（preserves_last_fired_across_config_change）と経路は同一だが、対称性のため延長方向も明示する。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_preserves_last_fired_when_interval_extended() {
     let state = heartbeat_state();
@@ -4046,6 +4098,8 @@ async fn set_my_heartbeat_preserves_last_fired_when_interval_extended() {
 
 /// #605: 発火済みセッションの**再有効化**でも last_fired を保つ（→ next_fire = last_fired+interval。
 /// 過ぎていれば即発火する）。以前は再有効化で last_fired=NULL・anchor=now になり先送りされた。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_reenable_after_fire_preserves_last_fired() {
     let state = heartbeat_state();
@@ -4087,6 +4141,8 @@ async fn set_my_heartbeat_reenable_after_fire_preserves_last_fired() {
 
 /// #605: 初回有効化は従来どおり anchor=now を打ち、next_fire = now+interval（enable 直後の
 /// 即発火は避ける）。last_fired はまだ無い。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_first_enable_sets_anchor_to_now() {
     let state = heartbeat_state();
@@ -4124,6 +4180,8 @@ async fn set_my_heartbeat_first_enable_sets_anchor_to_now() {
 
 /// #605 の目玉を直接 assert: `last_fired + interval < now` なら next_fire は**過去**（＝即発火）。
 /// 既存テストは last_fired が -30/-120 秒で next_fire が常に未来だったため、この核心を守っていなかった。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_next_fire_is_in_the_past_when_overdue() {
     let state = heartbeat_state();
@@ -4163,6 +4221,8 @@ async fn set_my_heartbeat_next_fire_is_in_the_past_when_overdue() {
 
 /// #605 doc の 2 ケース目: **未発火 + 古い anchor + 間隔短縮**でも next_fire は過去＝即発火。
 /// anchor を据え置く（now へ張り直さない）ので `anchor+新interval` が過ぎれば直ちに発火する。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_never_fired_old_anchor_shorten_fires_immediately() {
     let state = heartbeat_state();
@@ -4217,6 +4277,8 @@ async fn set_my_heartbeat_never_fired_old_anchor_shorten_fires_immediately() {
 }
 
 /// #437: set 後に中央スケジューラを起こす（即時反映）。notify の permit を消費できる。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_wakes_scheduler() {
     let state = heartbeat_state();
@@ -4255,6 +4317,8 @@ async fn agent_heartbeat_tools_reject_untrusted_agent() {
 }
 
 /// Owner は許可（自分の設定を自分で触るのが目的）。
+// #654: nostr セッションの発火経路は nostr feature 時のみ登録される（#651）。off は fail-closed。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn set_my_heartbeat_allows_owner() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
@@ -4268,6 +4332,9 @@ async fn set_my_heartbeat_allows_owner() {
 
 /// #627: web セッション（`web-{agent}-{conversation}`）でもハートビートを設定できる
 /// （隔離環境——Discord・Nostr 無効——でダッシュボードの会話に設定できるのが要件）。
+// #654: web セッションの発火経路（WebFire descriptor）は web feature 時のみ登録される（#651）。
+// off では web-{agent}-{conv} が fail-closed になり「web で設定できる」検証が成立しないので同じ cfg で囲む。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn set_my_heartbeat_allows_web_session() {
     let actions = SystemGatewayActions::new(heartbeat_state(), None, None, None);
@@ -4957,12 +5024,16 @@ async fn own_handles_request_peer_review_even_if_the_transport_redefines_it() {
 
 /// `nostr_run` の委譲先を検証する fake passthrough capability。
 /// 呼ばれた (agent_id, subcommand, args) を記録し、固定文字列 or エラーを返す。
+// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無く、この検証群と
+// その helper は意味を持たないので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[derive(Default)]
 struct RecordingPassthrough {
     calls: std::sync::Mutex<Vec<(String, String, Vec<String>)>>,
     fail: bool,
 }
 
+#[cfg(feature = "nostr")]
 #[async_trait]
 impl opencrab_actions::GatewayNostrPassthrough for RecordingPassthrough {
     async fn run(
@@ -4984,10 +5055,12 @@ impl opencrab_actions::GatewayNostrPassthrough for RecordingPassthrough {
 }
 
 /// NOSTR 種別で `nostr_passthrough` capability だけを提供する fake gateway。
+#[cfg(feature = "nostr")]
 struct FakeNostrGateway {
     passthrough: Arc<RecordingPassthrough>,
 }
 
+#[cfg(feature = "nostr")]
 #[async_trait]
 impl opencrab_actions::AgentGatewayLifecycle for FakeNostrGateway {
     fn kind(&self) -> &'static str {
@@ -5007,6 +5080,7 @@ impl opencrab_actions::AgentGatewayLifecycle for FakeNostrGateway {
     }
 }
 
+#[cfg(feature = "nostr")]
 fn register_fake_nostr(state: &AppState, fail: bool) -> Arc<RecordingPassthrough> {
     let passthrough = Arc::new(RecordingPassthrough {
         fail,
@@ -5020,6 +5094,8 @@ fn register_fake_nostr(state: &AppState, fail: bool) -> Arc<RecordingPassthrough
 
 /// `nostr_run` は own（全ターンで露出）で、caller による制限を持たない（#303）。
 /// 分類は inline（同ターンで結果を使う / 送信は送ること自体が応答）。
+// #654: nostr_run 定義は nostr feature 依存（#651）。off では own に無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[test]
 fn nostr_run_is_own_unrestricted_and_inline() {
     let names: Vec<String> = SystemGatewayActions::own_definitions()
@@ -5063,6 +5139,8 @@ fn nostr_run_is_own_unrestricted_and_inline() {
 ///
 /// needle は表現をそのまま拾うので、description を言い換えるときは needle も一緒に直す
 /// （守りたいのは文字列ではなく「グローバルの取り方が書いてある」ことの方）。
+// #654: nostr_run 定義は nostr feature 依存（#651）。off では description が無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[test]
 fn nostr_run_description_documents_the_global_timeline() {
     let defs = SystemGatewayActions::own_definitions();
@@ -5111,6 +5189,8 @@ fn nostr_run_is_available_to_agent_caller() {
 ///
 /// caller は **`Agent`**（Nostr 受信ターン相当）で回す（#303）。ハンドラ内に後日
 /// typed な caller gate を足されたらここで落ちる。
+// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn nostr_run_delegates_to_capability() {
     let state = crate::test_app_state();
@@ -5152,6 +5232,8 @@ async fn nostr_run_delegates_to_capability() {
 }
 
 /// Nostr 未構成（capability 未登録）なら明示エラー（inner へ黙って落とさない）。
+// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn nostr_run_errors_when_nostr_not_configured() {
     let state = crate::test_app_state();
@@ -5165,6 +5247,8 @@ async fn nostr_run_errors_when_nostr_not_configured() {
 }
 
 /// subcommand 欠落・args 非文字列は capability を呼ばず即エラー。
+// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn nostr_run_validates_args() {
     let state = crate::test_app_state();
@@ -5194,6 +5278,8 @@ async fn nostr_run_validates_args() {
 
 /// capability のエラー（未 materialize / init/watch/relay/dm/event 拒否 / nostaro 失敗）はそのまま
 /// `nostr_run 失敗:` として伝播する（マスク済みメッセージ）。
+// #654: nostr_run は nostr feature 依存（#651）。off ではツールが無いので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn nostr_run_propagates_capability_error() {
     let state = crate::test_app_state();
