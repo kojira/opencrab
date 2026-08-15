@@ -719,6 +719,11 @@ mod tests {
     }
 
     /// scheduler は登録簿経由で発火先を解決する（Discord は G ゲート対象・Nostr は非対象）。
+    // #654: cfg が要る本当の理由は nostr と discord の 2 つの `.expect()`。NostrFire / DiscordFire
+    // descriptor は各 feature 時のみ登録される（#651）ので、両方が揃わないと nostr/discord の
+    // resolve_target が None を返し `.expect()` が落ちる。web=None は feature 由来ではない
+    // （`web-{UUID}` は会話セグメントが無く WebFire の parse が全構成で成立しないため常に None）。
+    #[cfg(all(feature = "nostr", feature = "discord"))]
     #[test]
     fn router_resolves_and_reports_g_gate() {
         let router = test_router();
@@ -756,9 +761,15 @@ mod tests {
     // ---- rebuild / 発火集合の不変条件（設計 §4.2 / §5・#5） ----
 
     use chrono::Duration;
-    use opencrab_db::queries::{AgentScheduleRow, SessionHeartbeatConfigRow};
+    use opencrab_db::queries::AgentScheduleRow;
+    // #654: SessionHeartbeatConfigRow は heartbeat 発火集合テスト（router 解決に依存＝nostr feature
+    // が要る・#651）専用の helper でしか使わないので、その cfg に合わせて import も囲む。
+    #[cfg(feature = "nostr")]
+    use opencrab_db::queries::SessionHeartbeatConfigRow;
     use std::collections::HashMap;
 
+    // #654: 2 エージェント目は heartbeat 発火集合テスト（nostr feature 依存・#651）専用。
+    #[cfg(feature = "nostr")]
     const AGENT_B: &str = "c56f19e0-1111-2222-3333-444455556666";
 
     fn hb_key(session: &str) -> EntryKey {
@@ -767,6 +778,8 @@ mod tests {
         }
     }
 
+    // #654: heartbeat 発火集合テスト（nostr feature 依存・上記 import 参照）専用の helper。
+    #[cfg(feature = "nostr")]
     fn row(
         agent: &str,
         session: &str,
@@ -785,6 +798,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nostr")]
     fn conn_with(rows: &[SessionHeartbeatConfigRow]) -> rusqlite::Connection {
         let conn = opencrab_db::init_memory().unwrap();
         for r in rows {
@@ -793,12 +807,16 @@ mod tests {
         conn
     }
 
+    #[cfg(feature = "nostr")]
     fn session_ids(entries: &[Entry]) -> std::collections::BTreeSet<String> {
         entries.iter().map(|e| e.session_id.clone()).collect()
     }
 
     /// 本番の発火集合（Nostr 2 + Discord 1）を模した fixture で、**live G が
     /// `discord-` だけをゲートし `nostr-` は非依存**であることを固定する（不変条件 #5）。
+    // #654: nostr 2 + discord 1 の発火集合を検証する。NostrFire / DiscordFire descriptor は各 feature
+    // 時のみ登録される（#651）ので両 feature が要る。off では router が空で発火集合が常に空になる。
+    #[cfg(all(feature = "nostr", feature = "discord"))]
     #[test]
     fn firing_set_gates_discord_by_live_g_only() {
         let past = (Utc::now() - Duration::hours(12)).to_rfc3339();
@@ -866,6 +884,9 @@ mod tests {
     }
 
     /// 壊れた session_id / interval は fail-closed で発火集合に入らない。
+    // #654: heartbeat rebuild は発火先を router で解決する。NostrFire descriptor は nostr feature 時
+    // のみ登録される（#651）ので、正常な nostr 行が発火集合に載ることを見るこの test は同じ cfg が要る。
+    #[cfg(feature = "nostr")]
     #[test]
     fn rebuild_skips_malformed_and_broken_interval() {
         let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
@@ -978,6 +999,9 @@ mod tests {
 
     // ---- missed-run 圧縮 / アンカーの向き（§8 / §4.4 / §3.7 N-a） ----
 
+    // #654: heartbeat rebuild は router で発火先を解決する。NostrFire は nostr feature 時のみ登録
+    // される（#651）。off では発火集合が空になり before[0] が取れないので同じ cfg で囲む。
+    #[cfg(feature = "nostr")]
     #[test]
     fn missed_run_compresses_to_one_and_success_pushes_forward() {
         let long_ago = (Utc::now() - Duration::days(3)).to_rfc3339();
@@ -1005,6 +1029,9 @@ mod tests {
         );
     }
 
+    // #654: heartbeat rebuild は router で発火先を解決する。NostrFire は nostr feature 時のみ登録
+    // される（#651）。off では発火集合が空になり due[0] が取れないので同じ cfg で囲む。
+    #[cfg(feature = "nostr")]
     #[test]
     fn last_attempt_backoff_defers_next_fire_without_touching_last_fired() {
         let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
@@ -1085,6 +1112,9 @@ mod tests {
 
     // ---- #438 回帰: 固定グリッドをやめ設定 interval どおりに発火する ----
 
+    // #654: heartbeat rebuild は router で発火先を解決する。NostrFire は nostr feature 時のみ登録
+    // される（#651）。off では発火集合が空になり entries.len()==1 が成立しないので同じ cfg で囲む。
+    #[cfg(feature = "nostr")]
     #[test]
     fn next_fire_honors_exact_interval_without_grid_rounding() {
         let anchor = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")

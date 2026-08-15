@@ -2529,6 +2529,9 @@ async fn test_web_send_dispatches_tool_as_background_subtask() {
 /// `agents` 行が無いと per-agent 設定が全部既定に落ちるのに「動いてしまう」ため、
 /// タイプミスに気づけない。合成済み Router 越しに **LLM ターンが 1 度も回らない**ことを
 /// 固定する（存在確認は `run_and_deliver_serialized` チョークポイントが担う）。
+// #654: `/web/send` ルートは web feature 時のみマウントされる（#651）。off ではルート不在で
+// 404/契約が変わり検証が成立しないので同じ cfg で囲む。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_send_unknown_agent_is_rejected_without_running() {
     let (app, _db, mock, _state) = create_test_app_with_state();
@@ -2556,6 +2559,8 @@ async fn test_web_send_unknown_agent_is_rejected_without_running() {
 }
 
 /// #632 回帰: 存在するエージェントは `web/send` で従来どおり 200 でターンが走る。
+// #654: `/web/send` ルートは web feature 時のみマウントされる（#651）。off はルート不在なので同じ cfg で囲む。
+#[cfg(feature = "web")]
 #[tokio::test]
 async fn test_web_send_existing_agent_runs() {
     let (app, _db, mock, _state) = create_test_app_with_state();
@@ -3334,6 +3339,9 @@ async fn test_rest_sink_completes_session_after_last_subtask_settles() {
 /// アイデンティティそのもので、漏れれば第三者がそのエージェントとして投稿できる。
 /// マスクの**戻り値**ではなく **API の応答ボディ全体**に平文が含まれないことを見る
 /// （経路が違えば別のフィールドから漏れうるため）。
+// #654: `/api/agents/{id}/nostr` ルートは nostr feature 時のみマウントされる（#651）。off では
+// ルート不在で保存/取得の契約が成立しないので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn test_get_nostr_config_never_returns_raw_secret_key() {
     let app = create_test_app();
@@ -3383,6 +3391,8 @@ async fn test_get_nostr_config_never_returns_raw_secret_key() {
 ///
 /// `send_request` は JSON として解釈できないボディをバイト列の配列にして返すため、
 /// エラー文言をそのまま `contains` できない。
+// #654: この helper を使うのは nostr feature 依存の鍵払い出し e2e（#651）だけなので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 fn plain_body(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Array(bytes) => {
@@ -3406,6 +3416,9 @@ fn plain_body(value: &serde_json::Value) -> String {
 /// と**文言が変わっていない**ことを固定する。
 ///
 /// 判定の位置も仕様: prefix の書式検証（400）より後、鍵の生成より手前。
+// #654: `/api/agents/{id}/nostr/generate` ルートは nostr feature 時のみマウントされる（#651）。
+// off ではルート不在で 503 契約が成立しないので同じ cfg で囲む。
+#[cfg(feature = "nostr")]
 #[tokio::test]
 async fn test_generate_nostr_key_fails_without_key_provisioning() {
     let app = create_test_app();

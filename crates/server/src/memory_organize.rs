@@ -1431,19 +1431,27 @@ mod tests {
         let state = crate::test_app_state();
 
         // 眠っている間に外へ手が出る／状態を書き換えるツール（全スロットにまたがる）。
-        let forbidden = [
+        // #654: nostr_run / configure_nostr の定義は nostr feature 依存（#651）。off では定義が
+        // 無く「許可リスト無しでは届くはず」の対照が空論になるので、期待値も同じ cfg で組む
+        // （feature off でも他の外向きツールは全経路で塞がることを引き続き固定する）。
+        // nostr off では下の push が cfg で消え mut が不要になる（隠れる退行は無い）。
+        #[cfg_attr(not(feature = "nostr"), allow(unused_mut))]
+        let mut forbidden = vec![
             "execute_shell",          // dispatcher（config 駆動）
             "ws_write",               // dispatcher core
             "ws_delete",              // dispatcher core
             "update_instructions",    // dispatcher core（owner 専用の指示書書き換え）
-            "nostr_run",              // gateway own（外向き投稿）
             "spawn_subtask",          // gateway own
             "configure_llm_provider", // gateway own
-            "configure_nostr",        // gateway own
             "configure_self",         // gateway own
             "configure_mcp_server",   // gateway own
             "mcp__ext__send",         // MCP スロット
         ];
+        #[cfg(feature = "nostr")]
+        {
+            forbidden.push("nostr_run"); // gateway own（外向き投稿）
+            forbidden.push("configure_nostr"); // gateway own
+        }
         // 整理に要る読み取り・タグ・終了宣言。
         let allowed = [
             "browse_memory_index",
@@ -1457,7 +1465,7 @@ mod tests {
         ];
 
         // 経路1: 許可リスト定数そのものの内容。
-        for f in forbidden {
+        for f in forbidden.iter().copied() {
             assert!(
                 !ORGANIZE_ALLOWED_TOOLS.contains(&f),
                 "許可リストに外向きツール {f} が入っている"
@@ -1477,7 +1485,7 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        for f in forbidden {
+        for f in forbidden.iter().copied() {
             assert!(
                 base.contains(&f.to_string()),
                 "許可リスト無しでは {f} が届くはず（許可リストが効いている証跡の対照）: {base:?}"
@@ -1489,7 +1497,7 @@ mod tests {
 
         // 経路2: list_tools（可視性）。許可外は 1 つも出ない。
         let visible: Vec<String> = executor.list_tools().into_iter().map(|t| t.name).collect();
-        for f in forbidden {
+        for f in forbidden.iter().copied() {
             assert!(
                 !visible.contains(&f.to_string()),
                 "整理ランの list_tools に外向きツール {f} が出ている: {visible:?}"
@@ -1503,7 +1511,7 @@ mod tests {
         }
 
         // 経路3: dispatch（実行）。許可外は構造的拒否で、実装へは届かない。
-        for f in forbidden {
+        for f in forbidden.iter().copied() {
             let r = executor.execute(f, &serde_json::json!({})).await;
             assert!(!r.success, "整理ランで {f} の実行が成功してはならない");
             let err = r.error.unwrap_or_default();
