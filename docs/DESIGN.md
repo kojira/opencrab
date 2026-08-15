@@ -211,9 +211,13 @@ SkillEngine
 4. **純粋な読み取りで即答すべきもの** — 背景化すると「1 つの質問が 2 ターン 2 メッセージ」になり体験が悪化する。
 5. **制御系** — バックグラウンド実行そのものを制御するもの（生成・停止・進捗報告）。
 
-分類は各ゲートウェイ／アクション群ごとにコードで列挙し、**未分類のツールがあると検査が失敗する**（新しいツールを追加したら必ずどちらかに分類する）。この検査は**コードが静的に公開しているツール名**を供給する全ての源に対して存在する — 共通アクション群、Discord、Nostr、そしてサーバ内蔵の設定ツール群（web／REST／定期実行の全ターンに載るもの）の 4 つ。いずれも「実装が公開しているツール名」を起点に走査するため、定数への入れ忘れも検知できる。
+分類の権威は**各ツール定義が自ら名乗る属性**（`GatewayActionDef.class.dispatch` = `Inline` / `Dispatchable`）である。この属性は必須で既定値を持たない（`ToolClass` に `Default` を実装しない）ため、**新しいゲートウェイツールを足すと分類の記述を強制される**（構築サイトで書かない限りコンパイルが通らない）。消費側（`BridgedExecutor`）は gateway／MCP の定義を舐めて名前→分類の索引を作り、`inline_tool_names()` で `Inline` の名前を集める。
 
-**ツール名の一覧はこのドキュメントには置かない**。唯一の権威は `crates/actions/src/bridge.rs` の定数（inline 集合と dispatch 可集合の対）で、ここに書くのは上の分類基準だけとする（一覧を二重管理すると必ず実装と乖離するため）。
+共通アクション群（core）だけは `GatewayActionDef` を持たない一次ツールなので、例外的に `crates/actions/src/bridge.rs` の定数（`CORE_INLINE_ACTIONS` / `CORE_DISPATCHABLE_ACTIONS` の対）で分類し、`ActionDispatcher` の全名がどちらかに属することを fail-closed 検査（`core_actions_are_classified_for_dispatch`）が守る。
+
+制御ツール（`spawn_subtask` / `cancel_subtask` / `report_progress`）だけは 3 つ目の源として `default_non_dispatch_tools()`（`crates/actions/src/subtask.rs`）に直接ハードコードされ、常に inline に残る（それ自体が subtask ライフサイクルを操作するため）。
+
+**ツール名の一覧はこのドキュメントには置かない**（各定義の属性・core の 2 定数・制御ツールのハードコードが権威。ここに書くのは上の分類基準だけ。一覧を二重管理すると必ず実装と乖離するため）。
 
 分類の対象外が 2 つある。どちらも**既定の振る舞い**に落ちる:
 

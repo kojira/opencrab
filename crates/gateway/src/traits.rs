@@ -210,10 +210,11 @@ pub trait GatewayActions: Send + Sync {
 
 /// ツール定義が自ら名乗る分類。
 ///
-/// 名前リストによる外部照合（`*_DISPATCHABLE_ACTIONS` / `DISCORD_ACTIONS` /
-/// `SUB_ENGINE_ALLOWED_ACTIONS` を消費側が引く方式）を廃し、定義自身に持たせる。
-/// これにより「新しいツールを足したのにリストへ載せ忘れる」ドリフトを、リストの
-/// メンテナンスではなく **構築サイトでの記述の強制** で防ぐ。
+/// かつては消費側が名前リスト（gateway 固有の `*_INLINE_ACTIONS` / `*_DISPATCHABLE_ACTIONS`
+/// / 拒否リスト・許可リスト）を引いて分類を外部照合していたが、それらを廃し、定義自身に
+/// 持たせた（PR-2A で属性を追加、PR-2B で消費側を属性へ切り替え、gateway 固有の定数を削除）。
+/// これにより「新しいツールを足したのにリストへ載せ忘れる」ドリフトを、リストのメンテナンス
+/// ではなく **構築サイトでの記述の強制** で防ぐ。
 ///
 /// すべて必須（`Default` を持たせない）: 既定値があると新ツールで書き忘れが黙って
 /// 通るため。3 フィールドすべてを構築サイトで明示させることが、この型の目的そのもの。
@@ -231,24 +232,25 @@ pub struct ToolClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchMode {
     /// そのターン内で inline 実行する（配送系 / 同ターン結果依存 / 短時間書き込み /
-    /// 純粋な読み取り / run 内共有状態）。現行の `*_INLINE_ACTIONS` に対応。
+    /// 純粋な読み取り / run 内共有状態）。
     Inline,
     /// 非ブロックで dispatch してよい（長時間 or 同ターンで結果を使わない書き込み）。
-    /// 現行の `*_DISPATCHABLE_ACTIONS` に対応。
     Dispatchable,
 }
 
 /// depth>=1 の sub-engine（`spawn_subtask` で起動した子）から見たツールの扱い。
 ///
-/// 現行は 2 つの互いに素なリスト（許可リスト `SUB_ENGINE_ALLOWED_ACTIONS` と拒否リスト
-/// `DISCORD_ACTIONS`）が扱っていた情報を、1 つの 3 値で無損失に統合する。
+/// かつて 2 つの互いに素なリスト（sub-engine 許可リストと深さ拒否リスト）が扱っていた
+/// 情報を、1 つの 3 値で無損失に統合する。`SubEngineGatewayActions`（最外周フィルタ）と
+/// `BridgedExecutor`（depth ゲート）がこの属性を引く。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubEngineAccess {
-    /// sub-engine に見せて実行も許す（許可リスト `SUB_ENGINE_ALLOWED_ACTIONS` のメンバー）。
+    /// sub-engine に見せて実行も許す。現状は `report_progress` / `nostr_generate_key` のみ。
     Allowed,
-    /// depth>=1 で明示的に拒否する（多層防御）。拒否リスト `DISCORD_ACTIONS` のメンバー。
+    /// depth>=1 で明示的に拒否する（多層防御）。配送系（`send_ui` / `request_peer_review` /
+    /// discord 送信・VC 参加退出など）。
     Blocked,
-    /// 既定。許可リストに載せない（許可リストにも拒否リストにも無い大多数）。
+    /// 既定。許可リストに載せない（許可・拒否のどちらでもない大多数）。
     /// sub-engine は最外周の allow-list フィルタでこれを見ない。
     NotExposed,
 }

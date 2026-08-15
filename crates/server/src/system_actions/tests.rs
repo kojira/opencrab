@@ -216,127 +216,73 @@ fn server_gateway_action_table_matches_own_definitions() {
     );
 }
 
-/// **fail-closed な dispatch 分類ガード（#152）**。
+/// **分類属性の集合を固定する**（不変条件）。
 ///
-/// `own_definitions()` の全名が「非ブロック dispatch の除外集合（inline）」か
-/// 「意図的な dispatch 可リスト」のどちらか**ちょうど一方**に属することを要求する。
+/// 分類の権威は各ツール定義の属性（`GatewayActionDef.class`）へ移った（PR-2B）ので、
+/// gateway 固有の権威リストは削除した。ここでは権威リストに依存しない不変条件を
+/// `own_definitions()` の属性から直接固定する（3 軸とも「値を書き間違えたら落ちる」状態に
+/// する）:
+/// - **Dispatchable 集合 == {nostr_generate_key, rebuild_memory_index,
+///   update_memory_index_config, update_heartbeat_instructions, create_skill}**（長時間 or
+///   同ターンで読み戻さない書き込み。他は全部 `Inline`。`nostr_generate_key` は nostr
+///   feature 時のみ push されるので期待値も同じ feature 条件で組む / PR-1B）。
+/// - **Allowed 集合 == {report_progress, nostr_generate_key}**（sub-engine から到達可能な
+///   ツールが増えていないことの固定。`nostr_generate_key` は nostr feature 時のみ push / PR-1B）。
+/// - **ConversationBound == {send_ui}**（server own で live セッションに束縛される唯一の
+///   ツール。全ゲート横断では {discord_add_reaction, nostr_reply, send_ui} で残り 2 つは
+///   discord / nostr 側の同名テストが覆う）。
 ///
-/// この gateway は transport 非依存で web / REST / heartbeat の全ターンに載る
-/// （`crates/server/src/process.rs` の合成 executor）のに、Discord / Nostr / core と
-/// 違って分類ガードが無く、6 個中 5 個（`configure_llm_provider` /
-/// `manage_allowed_commands` / `configure_nostr` / `configure_self` /
-/// `configure_mcp_server`）が黙って background 化されていた。実装
-/// （`own_definitions()`）を起点に走査するので、新しい設定ツールを足すと分類を
-/// 明示するまでテストが落ちる。判定基準は
-/// `opencrab_actions::default_non_dispatch_tools` の doc。
+/// `sub_engine == Blocked`（配送系の深さ拒否）は `send_ui_is_blocked_in_sub_engine` 等が
+/// 挙動で覆うのでここでは固定しない。
 #[test]
-fn server_tools_are_classified_for_dispatch() {
-    let names: Vec<String> = SystemGatewayActions::own_definitions()
-        .into_iter()
-        .map(|d| d.name)
-        .collect();
-    assert!(!names.is_empty(), "own_definitions が空");
-    let non_dispatch = opencrab_actions::default_non_dispatch_tools();
-
-    for name in &names {
-        let inline = non_dispatch.contains(name);
-        let dispatchable = opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&name.as_str());
-        assert!(
-            inline ^ dispatchable,
-            "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
-                 新しいツールを追加したら opencrab_actions::SERVER_INLINE_ACTIONS か \
-                 SERVER_DISPATCHABLE_ACTIONS のどちらかへ入れること（判定基準は \
-                 default_non_dispatch_tools の doc / docs/DESIGN.md §4.4）"
-        );
-    }
-
-    // 逆方向: 定数側に死名が無いこと。
-    for name in opencrab_actions::SERVER_INLINE_ACTIONS {
-        assert!(
-            names.contains(&(*name).to_string()),
-            "SERVER_INLINE_ACTIONS の {name} が own_definitions() に無い（死名）"
-        );
-    }
-    for name in opencrab_actions::SERVER_DISPATCHABLE_ACTIONS {
-        assert!(
-            names.contains(&(*name).to_string()),
-            "SERVER_DISPATCHABLE_ACTIONS の {name} が own_definitions() に無い（死名）"
-        );
-    }
-    // 分類は own_definitions() を覆い尽くす。
-    assert_eq!(
-        opencrab_actions::SERVER_INLINE_ACTIONS.len()
-            + opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.len(),
-        names.len(),
-        "分類集合の合計が own_definitions() の数と一致しない（分類漏れ）"
-    );
-}
-
-/// **PR-2A 等価性ガード**: `own_definitions()`（35 の own リテラル + `request_peer_review`
-/// + `send_ui`）の各ツールが名乗る分類が、現行の権威リストと一致することを機械検査する。
-///
-/// `own_definitions()` は許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）の両メンバー
-/// （`report_progress` / `nostr_generate_key`）と拒否リスト（`DISCORD_ACTIONS`）のうち
-/// server-own の 2 つ（`send_ui` / `request_peer_review`）を実際に含む。前者は集合==リストを
-/// この 1 テスト内で固定できる。discord のツール由来の Blocked は discord 側の等価性テストが
-/// 覆う。これが「PR-2A は挙動を変えていない」の証明（消費側は PR-2B まで旧リストが権威）。
-#[test]
-fn server_tool_class_matches_authoritative_lists() {
+fn server_tool_class_invariants_are_fixed() {
     use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
     let defs = SystemGatewayActions::own_definitions();
     assert!(!defs.is_empty());
-    let mut allowed = std::collections::BTreeSet::new();
-    let mut conv_bound = std::collections::BTreeSet::new();
-    for d in &defs {
-        let name = d.name.as_str();
-        assert_eq!(
-            d.class.dispatch == DispatchMode::Dispatchable,
-            opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&name),
-            "{name}: dispatch 属性が SERVER_DISPATCHABLE_ACTIONS と食い違う"
-        );
-        assert_eq!(
-            d.class.dispatch == DispatchMode::Inline,
-            opencrab_actions::SERVER_INLINE_ACTIONS.contains(&name),
-            "{name}: dispatch 属性が SERVER_INLINE_ACTIONS と食い違う"
-        );
-        assert_eq!(
-            d.class.sub_engine == SubEngineAccess::Blocked,
-            opencrab_actions::DISCORD_ACTIONS.contains(&name),
-            "{name}: sub_engine=Blocked が拒否リスト DISCORD_ACTIONS と食い違う"
-        );
-        let is_allowed = d.class.sub_engine == SubEngineAccess::Allowed;
-        assert_eq!(
-            is_allowed,
-            opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
-            "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
-        );
-        if is_allowed {
-            allowed.insert(d.name.clone());
-        }
-        if d.class.sharing == ToolSharing::ConversationBound {
-            conv_bound.insert(d.name.clone());
-        }
-    }
-    // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
-    // （判定基準は `opencrab_gateway::ToolSharing` の doc）。server own の中で会話固有の
-    // live セッションに束縛されるのは応答を待つ `send_ui` のみ（必須引数だけでは判別できず
-    // doc の 2 つ目の条件で決まる）。全ゲート横断の ConversationBound は
-    // {discord_add_reaction, nostr_reply, send_ui} で、残り 2 つは discord / nostr 側が覆う。
-    // `send_ui` は feature に依らず own_definitions() が常に push する（構成非依存）。
+    let dispatchable: std::collections::BTreeSet<String> = defs
+        .iter()
+        .filter(|d| d.class.dispatch == DispatchMode::Dispatchable)
+        .map(|d| d.name.clone())
+        .collect();
+    let allowed: std::collections::BTreeSet<String> = defs
+        .iter()
+        .filter(|d| d.class.sub_engine == SubEngineAccess::Allowed)
+        .map(|d| d.name.clone())
+        .collect();
+    let conv_bound: std::collections::BTreeSet<String> = defs
+        .iter()
+        .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
+        .map(|d| d.name.clone())
+        .collect();
+
+    // Dispatchable（長時間 / 同ターンで読み戻さない書き込み）。`nostr_generate_key` のみ
+    // nostr feature に依存する（PR-1B）ので期待値も同じ cfg で組む。
+    let mut expected_dispatch: std::collections::BTreeSet<String> = [
+        "rebuild_memory_index",
+        "update_memory_index_config",
+        "update_heartbeat_instructions",
+        "create_skill",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    #[cfg(feature = "nostr")]
+    expected_dispatch.insert("nostr_generate_key".to_string());
+    assert_eq!(
+        dispatchable, expected_dispatch,
+        "server own の Dispatchable 集合がずれている（dispatch 属性の Inline/Dispatchable 取り違え）"
+    );
+
     let expected_conv: std::collections::BTreeSet<String> =
         std::iter::once("send_ui".to_string()).collect();
     assert_eq!(
         conv_bound, expected_conv,
         "server own の ConversationBound 集合がずれている（sharing 属性の付け忘れ/誤り）"
     );
-    // own_definitions が名乗る Allowed 集合 == 期待値（集合一致を 1 テスト内で固定）。
-    //
+
     // 【段階1(#651) の feature 化との相互作用】`nostr_generate_key` の def は
-    // `#[cfg(feature = "nostr")]` に囲まれている（PR-1B）。一方、権威リスト
-    // `SUB_ENGINE_ALLOWED_ACTIONS`（actions crate・feature 無し）は常に両名を持つ。
-    // よって `own_definitions()` から集めた Allowed 集合は nostr 構成の有無で縮む。
-    // 期待値も **同じ feature 条件**で組んで比較する（`--no-default-features` で
-    // 落ちないように）。上の per-def 双条件（⟺）は名前ごとの照合なので構成に影響されない。
+    // `#[cfg(feature = "nostr")]` に囲まれている（PR-1B）。よって `own_definitions()` から
+    // 集めた Allowed 集合は nostr 構成の有無で縮む。期待値も **同じ feature 条件**で組む。
     let mut expected: std::collections::BTreeSet<String> =
         std::iter::once("report_progress".to_string()).collect();
     #[cfg(feature = "nostr")]
@@ -347,49 +293,61 @@ fn server_tool_class_matches_authoritative_lists() {
     );
 }
 
-/// [P1 回帰] 設定変更ツールは inline（同ターンで結果を返す）。長時間の鍵探索だけが
-/// background。分類定数を経由せず `default_non_dispatch_tools()` の実効値を見る。
+/// [P1 回帰] 設定変更ツールは inline（同ターンで結果を返す）。長時間の鍵探索・記憶
+/// インデックス設定の書き込みだけが background。分類の権威は各定義の属性なので
+/// `own_definitions()` の `class.dispatch` を直接見る。
 #[test]
 fn config_tools_are_inline_and_key_generation_is_dispatched() {
-    let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+    use opencrab_gateway::DispatchMode;
+    let defs = SystemGatewayActions::own_definitions();
+    let class_of = |name: &str| {
+        defs.iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} が own_definitions() に無い"))
+            .class
+    };
     for name in [
         "configure_llm_provider",
         "manage_allowed_commands",
-        "configure_nostr",
         "configure_self",
         "configure_mcp_server",
         "cancel_subtask",
         // #157 S1 で Discord から移設。分類の所属（inline）は移設前と同じ。
-        // 純粋な読み取り（一覧の即答）+ 同ターン結果依存（許可した直後に
-        // execute_shell を使う）。Discord 側にあった同趣旨の固定の引き継ぎ。
         "list_allowed_commands",
         "add_allowed_command",
         "remove_allowed_command",
+        // #157 S3 で Discord から移設（読み出し = inline）。
+        "read_heartbeat_instructions",
     ] {
-        assert!(
-            non_dispatch.contains(name),
+        assert_eq!(
+            class_of(name).dispatch,
+            DispatchMode::Inline,
             "{name} は background 化してはならない（設定の共有状態書き込み / 一覧の即答）"
         );
     }
-    assert!(
-        !non_dispatch.contains("nostr_generate_key"),
+    // `configure_nostr` の def は nostr feature 時のみ push される（PR-1B）。
+    #[cfg(feature = "nostr")]
+    assert_eq!(
+        class_of("configure_nostr").dispatch,
+        DispatchMode::Inline,
+        "configure_nostr は background 化してはならない（設定の共有状態書き込み）"
+    );
+    // 長時間 / 同ターンで読み戻さない書き込みは dispatch 対象に残す。
+    for name in [
+        "update_memory_index_config",
+        "update_heartbeat_instructions",
+    ] {
+        assert_eq!(
+            class_of(name).dispatch,
+            DispatchMode::Dispatchable,
+            "{name} は dispatch 対象に残す（同ターンで読み戻さない書き込み）"
+        );
+    }
+    #[cfg(feature = "nostr")]
+    assert_eq!(
+        class_of("nostr_generate_key").dispatch,
+        DispatchMode::Dispatchable,
         "nostr_generate_key は長時間の vanity 探索なので dispatch 対象に残す"
-    );
-    // #157 S1 で Discord から移設。dispatchable の所属も移設前と同じ
-    // （設定の書き込みで同ターンに読み戻さない）。
-    assert!(
-        !non_dispatch.contains("update_memory_index_config"),
-        "update_memory_index_config は移設前と同じく dispatch 対象に残す"
-    );
-    // #157 S3 で Discord から移設。分類の所属も移設前と同じ
-    // （読み出し = inline / 書き込み = dispatchable）。
-    assert!(
-        non_dispatch.contains("read_heartbeat_instructions"),
-        "read_heartbeat_instructions は移設前と同じく inline（一覧の即答）"
-    );
-    assert!(
-        !non_dispatch.contains("update_heartbeat_instructions"),
-        "update_heartbeat_instructions は移設前と同じく dispatch 対象に残す"
     );
 }
 
@@ -513,10 +471,11 @@ fn rebuild_memory_index_is_exposed_in_own_definitions() {
 
 /// **サブタスクのネスト禁止**（壊すと重大）。
 ///
-/// sub-engine の実効ゲートは bridge の MAX_DEPTH ではなく
-/// `SUB_ENGINE_ALLOWED_ACTIONS` の許可リスト。`spawn_subtask` が server-neutral 層へ
-/// 移った今、許可リストへうっかり足すとサブタスクが無限にネストできてしまう。
-/// 合成 gateway（own + inner）を許可リストで包んだ結果を直接固定する。
+/// sub-engine の実効ゲートは bridge の MAX_DEPTH ではなく、各ツール定義の
+/// `class.sub_engine == Allowed` 属性（`SubEngineGatewayActions` が最外周で絞る）。
+/// `spawn_subtask` が server-neutral 層へ移った今、うっかり `Allowed` を名乗らせると
+/// サブタスクが無限にネストできてしまう。合成 gateway（own + inner）を
+/// `SubEngineGatewayActions` で包んだ結果を直接固定する。
 #[test]
 fn sub_engine_cannot_see_spawn_subtask() {
     let state = crate::test_app_state();
@@ -2739,14 +2698,22 @@ async fn create_skill_missing_arguments_keep_original_messages() {
     assert_eq!(r.error.as_deref(), Some("description is required"));
 }
 
-/// 分類の所属を移設で変えない（Discord でも dispatchable だった）。
+/// 分類の所属を移設で変えない（Discord でも dispatchable だった）。分類の権威は
+/// `own_definitions()` の `class.dispatch` 属性なので、それを直接見る。
 #[test]
 fn create_skill_stays_dispatchable() {
-    assert!(
-        !opencrab_actions::default_non_dispatch_tools().contains("create_skill"),
+    use opencrab_gateway::DispatchMode;
+    let defs = SystemGatewayActions::own_definitions();
+    let class = defs
+        .iter()
+        .find(|d| d.name == "create_skill")
+        .expect("create_skill が own_definitions() に無い")
+        .class;
+    assert_eq!(
+        class.dispatch,
+        DispatchMode::Dispatchable,
         "create_skill は移設前と同じく dispatch 対象に残す（結果を同ターンで使わない）"
     );
-    assert!(opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&"create_skill"));
 }
 
 // ================================================================================
@@ -4413,8 +4380,8 @@ impl GatewayActions for A2uiProvidingInner {
     }
 }
 
-/// 分類の網羅性検査が見る**全量**（`own_definitions`）に `send_ui` が 1 件だけある。
-/// 消すと `SERVER_INLINE_ACTIONS` の死名検出と分類ガードが空振りする。
+/// `own_definitions()` に `send_ui` が 1 件だけある（transport 非依存で全ターンに露出）。
+/// 消すと `send_ui` の分類・sub-engine 遮断の属性検査が空振りする。
 #[test]
 fn send_ui_is_exposed_in_own_definitions() {
     let defs = SystemGatewayActions::own_definitions();
@@ -4519,8 +4486,8 @@ async fn send_ui_is_hidden_and_refused_without_a_surface() {
 
 /// **sub-engine からの遮断**（移設前は Discord 側テストが固定していた不変条件）。
 ///
-/// 許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）に無いので、合成 gateway が
-/// `send_ui` を露出していても depth >= 1 では一覧に出ず、名前指定でも
+/// `send_ui` の定義は `class.sub_engine == Blocked`（`Allowed` ではない）を名乗るので、
+/// 合成 gateway が `send_ui` を露出していても depth >= 1 では一覧に出ず、名前指定でも
 /// 権限拒否（`rejected:` マーカー）になる。
 #[tokio::test]
 async fn send_ui_is_blocked_in_sub_engine() {
@@ -4582,19 +4549,28 @@ async fn send_ui_is_blocked_in_sub_engine() {
         "分類が「そんなツールは無い」へ退行している: {err}"
     );
 
-    // 多層防御: 名前ベースの depth 拒否リストにも残っている。
-    assert!(opencrab_actions::DISCORD_ACTIONS.contains(&"send_ui"));
-    assert!(opencrab_actions::tool_policy("send_ui").blocked_in_subengine);
+    // 多層防御: 定義自身が `class.sub_engine == Blocked` を名乗る（分類の権威は属性）。
+    let send_ui_class = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .find(|d| d.name == "send_ui")
+        .expect("send_ui が own_definitions() に無い")
+        .class;
+    assert_eq!(
+        send_ui_class.sub_engine,
+        opencrab_gateway::SubEngineAccess::Blocked,
+        "send_ui は sub-engine 拒否属性を名乗るべき"
+    );
 }
 
-/// `send_ui` は inline（配送系 + ユーザー応答待ち）。分類の所属は移設前と同じ。
+/// `send_ui` は inline（配送系 + ユーザー応答待ち）。分類の権威は定義の `class.dispatch`。
 #[test]
 fn send_ui_stays_inline_after_the_move() {
-    assert!(opencrab_actions::default_non_dispatch_tools().contains("send_ui"));
-    assert!(opencrab_actions::SERVER_INLINE_ACTIONS.contains(&"send_ui"));
-    assert!(!opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&"send_ui"));
-    assert!(!opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&"send_ui"));
-    assert!(!opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&"send_ui"));
+    let class = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .find(|d| d.name == "send_ui")
+        .expect("send_ui が own_definitions() に無い")
+        .class;
+    assert_eq!(class.dispatch, opencrab_gateway::DispatchMode::Inline);
 }
 
 // ---- #157 S7: ピアレビュー依頼（request_peer_review）の gateway 非依存化 ----
@@ -4701,8 +4677,8 @@ impl GatewayActions for DeliveryProvidingInner {
     }
 }
 
-/// 分類の網羅性検査が見る**全量**（`own_definitions`）に `request_peer_review` が
-/// 1 件だけある。消すと `SERVER_INLINE_ACTIONS` の死名検出と分類ガードが空振りする。
+/// `own_definitions()` に `request_peer_review` が 1 件だけある（transport 非依存で
+/// 全ターンに露出）。消すと分類・sub-engine 遮断の属性検査が空振りする。
 #[test]
 fn request_peer_review_is_exposed_in_own_definitions() {
     let defs = SystemGatewayActions::own_definitions();
@@ -4850,8 +4826,8 @@ async fn request_peer_review_is_refused_without_a_delivery() {
 
 /// **sub-engine からの遮断**（移設前は Discord 側テストが固定していた不変条件）。
 ///
-/// 許可リスト（`SUB_ENGINE_ALLOWED_ACTIONS`）に無いので、合成 gateway が
-/// `request_peer_review` を露出していても depth >= 1 では一覧に出ず、名前指定でも
+/// `request_peer_review` の定義は `class.sub_engine == Blocked`（`Allowed` ではない）を
+/// 名乗るので、合成 gateway が露出していても depth >= 1 では一覧に出ず、名前指定でも
 /// 権限拒否（`rejected:` マーカー）になる。
 #[tokio::test]
 async fn request_peer_review_is_blocked_in_sub_engine() {
@@ -4906,19 +4882,28 @@ async fn request_peer_review_is_blocked_in_sub_engine() {
         "分類が「そんなツールは無い」へ退行している: {err}"
     );
 
-    // 多層防御: 名前ベースの depth 拒否リストにも残っている。
-    assert!(opencrab_actions::DISCORD_ACTIONS.contains(&"request_peer_review"));
-    assert!(opencrab_actions::tool_policy("request_peer_review").blocked_in_subengine);
+    // 多層防御: 定義自身が `class.sub_engine == Blocked` を名乗る（分類の権威は属性）。
+    let class = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .find(|d| d.name == "request_peer_review")
+        .expect("request_peer_review が own_definitions() に無い")
+        .class;
+    assert_eq!(
+        class.sub_engine,
+        opencrab_gateway::SubEngineAccess::Blocked,
+        "request_peer_review は sub-engine 拒否属性を名乗るべき"
+    );
 }
 
-/// `request_peer_review` は inline（配送系）。分類の所属は移設前と同じ。
+/// `request_peer_review` は inline（配送系）。分類の権威は定義の `class.dispatch`。
 #[test]
 fn request_peer_review_stays_inline_after_the_move() {
-    assert!(opencrab_actions::default_non_dispatch_tools().contains("request_peer_review"));
-    assert!(opencrab_actions::SERVER_INLINE_ACTIONS.contains(&"request_peer_review"));
-    assert!(!opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&"request_peer_review"));
-    assert!(!opencrab_actions::SERVER_DISPATCHABLE_ACTIONS.contains(&"request_peer_review"));
-    assert!(!opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&"request_peer_review"));
+    let class = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .find(|d| d.name == "request_peer_review")
+        .expect("request_peer_review が own_definitions() に無い")
+        .class;
+    assert_eq!(class.dispatch, opencrab_gateway::DispatchMode::Inline);
 }
 
 /// **negative assert（#157 S7）**: transport（Discord）が `request_peer_review` を
@@ -5051,9 +5036,15 @@ fn nostr_run_is_own_unrestricted_and_inline() {
         "nostr_run に trusted ゲートを付けない"
     );
     assert!(!policy.owner_only, "nostr_run に owner ゲートを付けない");
-    // 分類は inline（dispatch 対象外）。
-    assert!(
-        opencrab_actions::default_non_dispatch_tools().contains("nostr_run"),
+    // 分類は inline（dispatch 対象外）。権威は定義の `class.dispatch` 属性。
+    let class = SystemGatewayActions::own_definitions()
+        .into_iter()
+        .find(|d| d.name == "nostr_run")
+        .expect("nostr_run が own_definitions() に無い")
+        .class;
+    assert_eq!(
+        class.dispatch,
+        opencrab_gateway::DispatchMode::Inline,
         "nostr_run は inline（同ターン結果依存 / 配送系）"
     );
 }

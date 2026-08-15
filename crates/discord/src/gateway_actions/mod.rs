@@ -663,318 +663,41 @@ mod tests {
     // `send_ui_without_session_fails_closed` / `crates/server/src/peer_review.rs` の
     // `error_messages_are_byte_stable` にある。
 
-    // ---- #45: bridge ポリシー表と gateway 定義のドリフト検出 ----
-
-    /// bridge のポリシー表（owner-only / trusted-only / discord depth ゲート）が
-    /// 指す gateway 側の名前が実在すること。表が死に名を指したまま実アクションが
-    /// ゲート漏れする事故を検出する。
-    #[test]
-    fn test_bridge_policy_names_are_live_gateway_actions() {
-        let (actions, _db) = make_test_actions();
-        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
-
-        // owner-only な `update_heartbeat_instructions` と trusted-only な
-        // `read_heartbeat_instructions` は #157 S3 で server 側へ移設済み。実在性の検証は
-        // `crates/server/src/system_actions.rs` の
-        // `heartbeat_instruction_tools_are_exposed_in_own_definitions` が担う。
-        // trusted-only（gateway 側。execute_skill は防御的エントリで実装なし）
-        for n in opencrab_actions::TRUSTED_ONLY_ACTIONS {
-            if *n == "execute_skill" {
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "execute_skill は未実装のはず"
-                );
-            } else if *n == "read_heartbeat_instructions" {
-                // 移設済み（#157 S3）。Discord が再定義すると合成 gateway の dedup で
-                // own 側に食われるので、無いことを固定する。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "read_heartbeat_instructions は server 側の実装だけであるべき"
-                );
-            } else if *n == "create_skill" {
-                // 移設済み（#157 S6）。同じ理由で Discord には無い。実在性の検証は
-                // `crates/server/src/system_actions.rs` の
-                // `create_skill_is_exposed_in_own_definitions` が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "create_skill は server 側の実装だけであるべき"
-                );
-            } else if *n == "get_my_nostr_relay" || *n == "set_my_nostr_relay" {
-                // #252 段階 C で server 側の own ツールとして実装。Discord は再定義
-                // しない（合成 gateway の dedup で own 側に食われる）。実在性の検証は
-                // `crates/server/src/agent_nostr_relay.rs` の
-                // `tools_are_own_only_in_definitions` が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は server 側の実装だけであるべき"
-                );
-            } else if *n == "get_my_heartbeat" || *n == "set_my_heartbeat" {
-                // エージェント自身のハートビート設定（#247）。最初から server 側
-                // （`SystemGatewayActions`）の own ツールで Discord には無い。実在性の
-                // 検証は `crates/server/src/system_actions.rs` の
-                // `agent_heartbeat_tools_are_exposed_in_own_definitions` が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は server 側の実装だけであるべき"
-                );
-            } else if *n == "get_my_schedules"
-                || *n == "set_my_schedule"
-                || *n == "update_my_schedule"
-                || *n == "delete_my_schedule"
-            {
-                // エージェント自身の定時実行スケジュール（#455）と、その更新・削除（#477）。server 側
-                // （`SystemGatewayActions` / `crates/server/src/agent_schedule.rs`）の own
-                // ツールで Discord には無い（heartbeat と同じ扱い）。実在性は server 側の
-                // README 完全性テスト（`server_gateway_action_table_matches_own_definitions`）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は server 側の実装だけであるべき"
-                );
-            } else if *n == "create_my_skill"
-                || *n == "learn_from_experience"
-                || *n == "learn_from_peer"
-                || *n == "reflect_and_learn"
-            {
-                // #351: スキル生成（core 版）と自律学習系。これらは Discord gateway では
-                // なく **core dispatcher** のアクション（`CORE_DISPATCHABLE_ACTIONS`）で、
-                // Discord の definitions には出ない。実在性の検証は
-                // `crates/actions/src/subtask.rs` の
-                // `core_actions_are_classified_for_dispatch`（CORE_DISPATCHABLE_ACTIONS が
-                // ActionDispatcher に実在することを確認）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は core dispatcher のアクションで Discord gateway には無いはず"
-                );
-            } else if *n == "set_default_webhook"
-                || *n == "set_default_subtask_webhook"
-                || *n == "get_default_webhook"
-                || *n == "get_default_subtask_webhook"
-                || *n == "list_webhooks"
-                || *n == "list_subtask_webhooks"
-                || *n == "update_memory_index_config"
-                || *n == "list_allowed_commands"
-            {
-                // #356: caller=Agent 素通しだった 9 個のうち、これら 8 個は
-                // `SystemGatewayActions`（server 側 own ツール）の実装で Discord から移設
-                // 済み（webhook 6 個 = #157 S5、`update_memory_index_config` /
-                // `list_allowed_commands` = #157 S1）。Discord が再定義すると合成 gateway の
-                // dedup で own 側に食われるので、Discord definitions には出ない。実在性の
-                // 検証は `crates/server/src/system_actions.rs` の
-                // `webhook_target_tools_are_exposed_in_own_definitions` /
-                // `generic_management_tools_are_exposed_in_own_definitions` が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は server 側 own ツールの実装だけであるべき"
-                );
-            } else if *n == "get_system_info" {
-                // #356: 素通しだった 9 個のうち `get_system_info` は core inline アクション
-                // （`CORE_INLINE_ACTIONS`）で Discord gateway には無い。実在性の検証は
-                // `crates/actions/src/subtask.rs` の
-                // `core_actions_are_classified_for_dispatch`（CORE_INLINE_ACTIONS が
-                // ActionDispatcher に実在することを確認）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は core inline アクションで Discord gateway には無いはず"
-                );
-            } else if *n == "tag_topic" || *n == "untag_topic" || *n == "merge_tags" {
-                // #359: タグ操作 3 個は core inline アクション（`CORE_INLINE_ACTIONS` /
-                // `crates/actions/src/memory_access.rs`）で Discord gateway には無い。
-                // caller=Agent 遮断は bridge の `TRUSTED_ONLY_ACTIONS` が効かせる。実在性の
-                // 検証は `crates/actions/src/subtask.rs` の
-                // `core_actions_are_classified_for_dispatch`（CORE_INLINE_ACTIONS が
-                // ActionDispatcher に実在することを確認）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は core inline アクションで Discord gateway には無いはず"
-                );
-            } else if *n == "survey_my_history"
-                || *n == "read_my_history"
-                || *n == "record_memory_unit"
-                || *n == "retract_memory_unit"
-                || *n == "plan_next_memory_window"
-            {
-                // #379 / #394: 記憶の単位（宣言）道具は core inline アクション
-                // （`CORE_INLINE_ACTIONS` / `crates/actions/src/memory_units.rs`）で Discord
-                // gateway には無い。caller=Agent 遮断は bridge の `TRUSTED_ONLY_ACTIONS` が
-                // 効かせる。実在性の検証は `crates/actions/src/subtask.rs` の
-                // `core_actions_are_classified_for_dispatch`（CORE_INLINE_ACTIONS が
-                // ActionDispatcher に実在することを確認）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は core inline アクションで Discord gateway には無いはず"
-                );
-            } else if *n == "record_memory_core"
-                || *n == "update_memory_core"
-                || *n == "retract_memory_core"
-            {
-                // #411: 記憶の凝縮道具は core inline アクション（`CORE_INLINE_ACTIONS` /
-                // `crates/actions/src/memory_units.rs`）で Discord gateway には無い。記憶の
-                // 単位（宣言）道具（上）と同じ扱い。caller=Agent 遮断は bridge の
-                // `TRUSTED_ONLY_ACTIONS` が効かせる。実在性の検証は
-                // `crates/actions/src/subtask.rs` の
-                // `core_actions_are_classified_for_dispatch`（CORE_INLINE_ACTIONS が
-                // ActionDispatcher に実在することを確認）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "{n} は core inline アクションで Discord gateway には無いはず"
-                );
-            } else if n.starts_with("nostr_") {
-                // nostr_switch_identity / nostr_list_keys は Nostr ゲートウェイ側の
-                // アクション（この Discord gateway の definitions には出ない）。
-                // ここでは検証対象外。
-                continue;
-            } else {
-                assert!(names.contains(&n.to_string()), "{n} が definitions に無い");
-            }
-        }
-        // DISCORD_ACTIONS は**全要素が実在**しなければならない（死名は depth ゲートも
-        // dispatch 除外も空振りさせる）。以前は 20 名のうち 13 名が死名だった。
-        for n in opencrab_actions::DISCORD_ACTIONS {
-            if *n == "send_ui" {
-                // #156 S3 で gateway 非依存層へ移設済み。深さ拒否は**名前ベース**なので
-                // 実装がどこにあっても効くため一覧には残す（`TRUSTED_ONLY_ACTIONS` の
-                // `create_skill` と同じ扱い）。Discord が再定義すると合成 gateway の
-                // dedup で own 側に食われるので、無いことを固定する。実在性の検証は
-                // `send_ui_is_exposed_in_own_definitions`
-                // （`crates/server/src/system_actions.rs`）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "send_ui は gateway 非依存層の実装だけであるべき"
-                );
-                continue;
-            }
-            if *n == "request_peer_review" {
-                // #157 S7 で gateway 非依存層へ移設済み。send_ui と同じ扱い（深さ拒否は
-                // 名前ベースなので一覧には残す）。実在性の検証は
-                // `request_peer_review_is_exposed_in_own_definitions`
-                // （`crates/server/src/system_actions.rs`）が担う。
-                assert!(
-                    !names.contains(&n.to_string()),
-                    "request_peer_review は gateway 非依存層の実装だけであるべき"
-                );
-                continue;
-            }
-            assert!(
-                names.contains(&n.to_string()),
-                "DISCORD_ACTIONS の {n} が definitions() に無い（死名）"
-            );
-        }
-        assert_eq!(
-            opencrab_actions::DISCORD_ACTIONS.to_vec(),
-            vec![
-                "discord_send_file",
-                "discord_add_reaction",
-                "discord_list_channels",
-                "discord_list_guilds",
-                "send_ui",
-                "request_peer_review",
-                "join_voice_channel",
-                "leave_voice_channel",
-            ]
-        );
-    }
-
-    /// **fail-closed な dispatch 分類ガード（#152）**。
+    /// **分類属性の集合を固定する**（`dispatch` / `sub_engine` は既に他テスト・他ゲートが
+    /// 覆うが、権威リストが消えた `dispatch` と `sharing` を「値を書き間違えたら落ちる」
+    /// 状態にする）。権威リストが無いので `definitions()` の属性から集合を直接固定する。
     ///
-    /// `definitions()` の全名が「非ブロック dispatch の除外集合（inline）」か
-    /// 「意図的な dispatch 可リスト」のどちらか**ちょうど一方**に属することを要求する。
+    /// - **`Dispatchable` 集合 == 空**: Discord に残るツールは配送系 / 同ターン結果依存 /
+    ///   run 内共有状態 / 純粋な読み取りのいずれかで全部 `Inline`。長時間ツールは無い。
+    /// - **`ConversationBound` 集合 == {discord_add_reaction}**: 会話固有の一時ハンドル
+    ///   （message_id）を必須に取る唯一のツール。全ゲート横断では
+    ///   {discord_add_reaction, nostr_reply, send_ui} で残り 2 つは nostr / server 側が覆う。
     ///
-    /// 定数 → 実装の片方向だけを見るテストでは、「新しい配送系ツールを実装したが定数へ
-    /// 入れ忘れた」を検知できない（`send_ui` が dispatch されていた実際の事故がこれ）。
-    /// ここは実装（`definitions()`）を起点に走査するので、新ツールを追加すると分類を
-    /// 明示するまでテストが落ちる。判定基準は
-    /// `opencrab_actions::default_non_dispatch_tools` の doc（5 項目）。
+    /// `sub_engine == Blocked`（配送系の深さ拒否）は `crates/server` の
+    /// `send_ui_is_blocked_in_sub_engine` 等が挙動で覆うのでここでは固定しない。
     #[test]
-    fn discord_tools_are_classified_for_dispatch() {
-        let (actions, _db) = make_test_actions();
-        let names: Vec<String> = actions.definitions().into_iter().map(|d| d.name).collect();
-        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
-
-        for name in &names {
-            let inline = non_dispatch.contains(name);
-            let dispatchable =
-                opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&name.as_str());
-            assert!(
-                inline ^ dispatchable,
-                "{name} の dispatch 分類が未定義（inline={inline}, dispatchable={dispatchable}）。\
-                 新しいツールを追加したら opencrab_actions::DISCORD_INLINE_ACTIONS か \
-                 DISCORD_DISPATCHABLE_ACTIONS のどちらかへ入れること（判定基準は \
-                 default_non_dispatch_tools の doc）"
-            );
-        }
-
-        // 逆方向: 定数側に死名が無いこと。
-        for name in opencrab_actions::DISCORD_INLINE_ACTIONS {
-            assert!(
-                names.contains(&name.to_string()),
-                "DISCORD_INLINE_ACTIONS の {name} が definitions() に無い（死名）"
-            );
-        }
-        // #157 S6 で `create_skill` が server 側へ移り、この集合は**空**になった（Discord に
-        // 残るツールは全部 inline）。空でもこのループは死名検出として意味を持つ。
-        for name in opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS {
-            assert!(
-                names.contains(&name.to_string()),
-                "DISCORD_DISPATCHABLE_ACTIONS の {name} が definitions() に無い（死名）"
-            );
-        }
-        // 分類は definitions() を覆い尽くす。
-        assert_eq!(
-            opencrab_actions::DISCORD_INLINE_ACTIONS.len()
-                + opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.len(),
-            names.len(),
-            "分類集合の合計が definitions() の数と一致しない"
-        );
-    }
-
-    /// **PR-2A 等価性ガード**: 各ツール定義が自ら名乗る分類（`GatewayActionDef.class`）が、
-    /// 現行の権威リスト（`DISCORD_DISPATCHABLE_ACTIONS` / `DISCORD_INLINE_ACTIONS` /
-    /// 拒否リスト `DISCORD_ACTIONS` / 許可リスト `SUB_ENGINE_ALLOWED_ACTIONS`）と一致する
-    /// ことを、定義を**実体で呼んで**機械検査する。
-    ///
-    /// これが「PR-2A は挙動を変えていない」の証明そのもの。消費側（`tool_policy` /
-    /// `SubEngineGatewayActions` / `default_non_dispatch_tools`）はまだ旧リストを権威に
-    /// している。PR-2B で消費側をこの属性へ切り替える**前に**、属性が旧リストと無矛盾で
-    /// あることをここで固定する。各 def ごとの双条件（⟺）なので、既存のドリフト検出
-    /// テスト（リストに死名が無い / 全 def が分類済み）と合わせて集合一致を証明する。
-    #[test]
-    fn discord_tool_class_matches_authoritative_lists() {
-        use opencrab_gateway::{DispatchMode, SubEngineAccess, ToolSharing};
+    fn discord_tool_class_sets_are_fixed() {
+        use opencrab_gateway::{DispatchMode, ToolSharing};
         let (actions, _db) = make_test_actions();
         let defs = actions.definitions();
         assert!(!defs.is_empty());
-        let mut conv_bound = std::collections::BTreeSet::new();
-        for d in &defs {
-            let name = d.name.as_str();
-            assert_eq!(
-                d.class.dispatch == DispatchMode::Dispatchable,
-                opencrab_actions::DISCORD_DISPATCHABLE_ACTIONS.contains(&name),
-                "{name}: dispatch 属性が DISCORD_DISPATCHABLE_ACTIONS と食い違う"
-            );
-            assert_eq!(
-                d.class.dispatch == DispatchMode::Inline,
-                opencrab_actions::DISCORD_INLINE_ACTIONS.contains(&name),
-                "{name}: dispatch 属性が DISCORD_INLINE_ACTIONS と食い違う"
-            );
-            assert_eq!(
-                d.class.sub_engine == SubEngineAccess::Blocked,
-                opencrab_actions::DISCORD_ACTIONS.contains(&name),
-                "{name}: sub_engine=Blocked が拒否リスト DISCORD_ACTIONS と食い違う"
-            );
-            assert_eq!(
-                d.class.sub_engine == SubEngineAccess::Allowed,
-                opencrab_actions::SUB_ENGINE_ALLOWED_ACTIONS.contains(&name),
-                "{name}: sub_engine=Allowed が許可リスト SUB_ENGINE_ALLOWED_ACTIONS と食い違う"
-            );
-            if d.class.sharing == ToolSharing::ConversationBound {
-                conv_bound.insert(d.name.clone());
-            }
-        }
-        // sharing には権威リストが無いので、ConversationBound の集合をここで固定する
-        // （判定基準は `opencrab_gateway::ToolSharing` の doc）。Discord ゲートで会話固有の
-        // 一時ハンドルを必須に取るのは message_id を要する `discord_add_reaction` のみ。
-        // 全ゲート横断の ConversationBound は {discord_add_reaction, nostr_reply, send_ui} で、
-        // 残り 2 つは nostr / server 側の同名テストが覆う。
+
+        let dispatchable: std::collections::BTreeSet<String> = defs
+            .iter()
+            .filter(|d| d.class.dispatch == DispatchMode::Dispatchable)
+            .map(|d| d.name.clone())
+            .collect();
+        assert_eq!(
+            dispatchable,
+            std::collections::BTreeSet::new(),
+            "discord ゲートの Dispatchable 集合がずれている（dispatch 属性の Inline/Dispatchable 取り違え）"
+        );
+
+        let conv_bound: std::collections::BTreeSet<String> = defs
+            .iter()
+            .filter(|d| d.class.sharing == ToolSharing::ConversationBound)
+            .map(|d| d.name.clone())
+            .collect();
         let expected: std::collections::BTreeSet<String> =
             std::iter::once("discord_add_reaction".to_string()).collect();
         assert_eq!(
@@ -983,17 +706,26 @@ mod tests {
         );
     }
 
-    /// 配送系・同ターン結果依存・純粋な読み取りが dispatch されていない（#152 の実害）。
+    /// 配送系・同ターン結果依存・純粋な読み取りが inline（`class.dispatch == Inline`）で
+    /// あること（#152 の実害）。分類の権威は各定義の属性なので、`definitions()` を実体で
+    /// 呼んで属性を直接見る。
     ///
     /// 特に `send_ui` は「UI を送信しユーザーの応答を待機する」配送系で、background 化
     /// すると (a) UI 投稿と本文返信の順序が入れ替わり、(b) エージェントはインタラクション
-    /// ID を扱えず、(c) クリック resume と subtask 決着 resume で返信が 2 通になる。
+    /// ID を扱えず、(c) クリック resume と subtask 決着 resume で返信が 2 通になる
+    /// （send_ui は #156 S3 で server 側へ移設したのでここでは検証しない）。
     #[test]
     fn delivery_and_read_tools_are_inline() {
-        let non_dispatch = opencrab_actions::default_non_dispatch_tools();
+        use opencrab_gateway::DispatchMode;
+        let (actions, _db) = make_test_actions();
+        let defs = actions.definitions();
+        let class_of = |name: &str| {
+            defs.iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} が definitions() に無い"))
+                .class
+        };
         for name in [
-            // 配送系（`send_ui` は #156 S3、`request_peer_review` は #157 S7 で server 側へ
-            // 移設。同趣旨の inline 固定は `crates/server/src/system_actions.rs` にある）
             "discord_send_file",
             "discord_add_reaction",
             // 同ターンで戻り値（URL / ID）を使う
@@ -1001,15 +733,14 @@ mod tests {
             "ensure_subtask_webhook",
             "discord_create_webhook",
             "discord_create_channel",
-            // 純粋な読み取り: `list_allowed_commands` は #157 S1、
-            // `read_heartbeat_instructions` は #157 S3、通知先の管理 6 種
-            // （`get/set_default_[subtask_]webhook` / `list_[subtask_]webhooks`）は
-            // #157 S5 で server 側へ移設。同趣旨の inline 固定は
-            // `crates/server/src/system_actions.rs` にある。
+            // 純粋な読み取り
+            "discord_list_channels",
+            "discord_list_guilds",
         ] {
-            assert!(
-                non_dispatch.contains(name),
-                "{name} が dispatch されてしまう（inline に残すべき）"
+            assert_eq!(
+                class_of(name).dispatch,
+                DispatchMode::Inline,
+                "{name} は inline に残すべき（dispatch 属性が Inline でない）"
             );
         }
     }

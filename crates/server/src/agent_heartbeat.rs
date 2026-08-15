@@ -580,14 +580,21 @@ mod tests {
     }
 
     /// bridge の分類と一致すること: `run_my_heartbeat` は owner_only かつ inline。
+    /// inline 分類の権威は定義の `class.dispatch` 属性なので、`own_definitions()` を直接見る。
     #[test]
     fn run_my_heartbeat_is_owner_only_and_inline() {
         assert!(
             opencrab_actions::OWNER_ONLY_ACTIONS.contains(&"run_my_heartbeat"),
             "owner_only ゲートに入っていない（外部ユーザーから手動発火できてしまう）"
         );
-        assert!(
-            opencrab_actions::default_non_dispatch_tools().contains("run_my_heartbeat"),
+        let class = crate::system_actions::SystemGatewayActions::own_definitions()
+            .into_iter()
+            .find(|d| d.name == "run_my_heartbeat")
+            .expect("run_my_heartbeat が own_definitions() に無い")
+            .class;
+        assert_eq!(
+            class.dispatch,
+            opencrab_gateway::DispatchMode::Inline,
             "inline 分類に入っていない（発火の spawn を background 化する意味は無い）"
         );
     }
