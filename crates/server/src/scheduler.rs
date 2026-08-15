@@ -719,8 +719,10 @@ mod tests {
     }
 
     /// scheduler は登録簿経由で発火先を解決する（Discord は G ゲート対象・Nostr は非対象）。
-    // #654: NostrFire / DiscordFire descriptor は各 feature 時のみ登録される（#651）。この test は
-    // nostr・discord の両解決と web=None を要求するので、両 feature が揃うときだけ意味を持つ。
+    // #654: cfg が要る本当の理由は nostr と discord の 2 つの `.expect()`。NostrFire / DiscordFire
+    // descriptor は各 feature 時のみ登録される（#651）ので、両方が揃わないと nostr/discord の
+    // resolve_target が None を返し `.expect()` が落ちる。web=None は feature 由来ではない
+    // （`web-{UUID}` は会話セグメントが無く WebFire の parse が全構成で成立しないため常に None）。
     #[cfg(all(feature = "nostr", feature = "discord"))]
     #[test]
     fn router_resolves_and_reports_g_gate() {
