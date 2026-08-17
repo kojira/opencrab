@@ -1070,6 +1070,16 @@ pub async fn run_agent_response(
         stage = "run",
         "turn: ターン実行 開始（入）"
     );
+    // #665: 「終了」ログを**構造的に必ず**出す Drop ガード。以降の setup 段には workspace 解決などの
+    // `?` early-return が挟まる。末尾 1 箇所だと `?` や panic で抜けたとき終了ログが出ず、「入って止まった」と
+    // 「エラーで抜けた」が区別できない。スコープ離脱で必ず 1 行出す。`outcome` は正常経路で結果に応じて
+    // 上書きし、既定は "aborted"（終了ログ到達前の `?`/panic で抜けた）。純可視化・制御フローには影響しない。
+    let mut turn_end = TurnEndLog {
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: turn_id.clone(),
+        outcome: "aborted",
+    };
 
     // Build workspace path for this agent.
     let ws_path =
@@ -1495,18 +1505,41 @@ pub async fn run_agent_response(
         }
     }
 
-    // #665: ターン実行の出。これが出ていて上位（gateway の配送・記録）の行が続かなければ、詰まりは
-    // run_agent_response より外（返信送信・転記）側にある、という切り分けができる。
-    tracing::debug!(
-        agent_id = %agent_id,
-        session_id = %session_id,
-        turn_id = %turn_id,
-        ok = result.is_ok(),
-        stage = "run",
-        "turn: ターン実行 終了（出）"
-    );
+    // #665: engine まで到達した正常経路では結果に応じて outcome を上書きする。実際の「終了」ログは
+    // `turn_end` の Drop が出す（正常/エラー/早期 return いずれの経路でも 1 行出る）。これが出ていて
+    // 上位（gateway の配送・記録）の行が続かなければ、詰まりは run_agent_response より外（返信送信・
+    // 転記）側にある、という切り分けができる。
+    turn_end.outcome = if result.is_ok() { "ok" } else { "engine_error" };
 
     result
+}
+
+/// #665: ターン実行の「終了」ログを**構造的に必ず**出すための Drop ガード。
+///
+/// [`run_agent_response`] は末尾に到達する前に setup 段の `?`（workspace 解決など）で early-return
+/// し得る。「終了」を関数末尾 1 箇所で出すと、その `?` や panic で抜けたときログが出ず、「入って
+/// 止まった」と「エラーで抜けた」が区別できない（この計装の目的が壊れる）。スコープ離脱で必ず 1 行
+/// 出すことで、最後の 1 行が常に真を語る。**純可視化・制御フローには一切影響しない**（Drop は
+/// 戻り値を変えない）。`outcome` は正常経路で `ok` / `engine_error` に上書きし、既定は `aborted`
+/// （終了到達前の `?`/panic）。
+struct TurnEndLog {
+    agent_id: String,
+    session_id: String,
+    turn_id: String,
+    outcome: &'static str,
+}
+
+impl Drop for TurnEndLog {
+    fn drop(&mut self) {
+        tracing::debug!(
+            agent_id = %self.agent_id,
+            session_id = %self.session_id,
+            turn_id = %self.turn_id,
+            outcome = self.outcome,
+            stage = "run",
+            "turn: ターン実行 終了（出）"
+        );
+    }
 }
 
 /// ループ再起動 v1（#52）の判定と準備。
