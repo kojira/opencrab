@@ -54,8 +54,8 @@ pub use subtask_notify::{
 };
 pub use subtask_registries::SubtaskRegistries;
 pub use timed_fire::{
-    prompt_preview, FireTarget, TimedFireRequest, TimedFireRouter, TimedFireSelfCheckIssue,
-    TimedFireSink, TransportFire, TransportFireEnv,
+    new_turn_id, prompt_preview, FireTarget, TimedFireRequest, TimedFireRouter,
+    TimedFireSelfCheckIssue, TimedFireSink, TransportFire, TransportFireEnv,
 };
 // tool_result の無害化は core 側（`opencrab_core::tool_result_log`）に一本化した
 // （#284）。LLM へ返す経路（`SkillEngine`）と DB 永続化経路（server / dispatch）で

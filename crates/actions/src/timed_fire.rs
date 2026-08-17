@@ -26,6 +26,17 @@ pub fn prompt_preview(prompt: &str) -> String {
     }
 }
 
+/// 1 ターンを追う相関 ID（診断ログ用・#665）。
+///
+/// ターンのライフサイクル（文脈構築 → LLM 呼び出し → ツール往復 → 応答）を横断する debug ログに
+/// 載せ、llm_logs の行や複数の LLM イテレーションを 1 本のターンへ束ねて読むための短い識別子。
+/// **制御には一切使わない**（純粋に可視化のためのラベル）。uuid の先頭 8 桁で十分に一意で、
+/// grep しやすい短さに保つ。session_id が実質の相関キー（ターンはセッション単位で直列化される）で、
+/// これはその上に載る「run 内で LLM/ツール往復を束ねる」補助キー。
+pub fn new_turn_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
 /// 時刻起因でセッションのターンを 1 回回す要求（transport 中立）。
 pub struct TimedFireRequest {
     /// 発火先＝実会話セッション。**登録済み transport のセッション**で、書式は各 transport の

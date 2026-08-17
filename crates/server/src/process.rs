@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use tracing::Instrument;
+
 use opencrab_core::LlmCallLog;
 use opencrab_llm::pricing::PricingRegistry;
 
@@ -1030,6 +1032,21 @@ pub async fn run_agent_response(
     let gateway = req.gateway.as_str();
     let depth = req.depth;
 
+    // #665: この run を貫く相関 ID と span。全 gateway（Discord/Nostr/web/時刻発火）がこの
+    // 単一チョークポイントを通るので、ここで採番すればターン内の LLM/ツール往復（engine 内の debug）が
+    // 同じ turn_id で束ねられ、llm_logs の行とも突き合わせられる。span は下の engine 実行 future に
+    // `.instrument` して engine 側の各 debug 行へ agent_id / session_id / turn_id を継承させる（純可視化・
+    // 制御には使わない）。run_agent_response 自身の行は await を跨ぐ span enter を避けて明示フィールドで出す。
+    let turn_id = opencrab_actions::new_turn_id();
+    let turn_span = tracing::info_span!(
+        "turn",
+        agent_id = %agent_id,
+        session_id = %session_id,
+        transport = %gateway,
+        depth,
+        turn_id = %turn_id,
+    );
+
     // #632: 存在しないエージェントではターンを起こさない（サーバ側の単一チョークポイント）。
     // 以降の workspace 作成・LLM 実行・ツール実行の手前で弾く。行が無いと per-agent 設定が
     // 全部既定に落ちるのに動いてしまい、タイプミスに気づけない。
@@ -1042,6 +1059,17 @@ pub async fn run_agent_response(
             .into());
         }
     }
+
+    // #665: ターン実行の入り。ここから下の文脈準備 → engine 実行までを 1 本のターンとして追う。
+    tracing::debug!(
+        agent_id = %agent_id,
+        session_id = %session_id,
+        transport = %gateway,
+        depth,
+        turn_id = %turn_id,
+        stage = "run",
+        "turn: ターン実行 開始（入）"
+    );
 
     // Build workspace path for this agent.
     let ws_path =
@@ -1370,6 +1398,16 @@ pub async fn run_agent_response(
     let mut conversation_override: Option<String> = None;
     let mut restarts_this_call: i64 = 0;
     let result = loop {
+        // #665: engine（LLM ループ本体）へ入る。文脈構築はここまでに終わっており、この後は LLM 呼び出しと
+        // ツール往復。engine 内の debug 行は下の `.instrument(turn_span)` で turn_id 等を継承する。
+        tracing::debug!(
+            agent_id = %agent_id,
+            session_id = %session_id,
+            turn_id = %turn_id,
+            restart = restarts_this_call,
+            stage = "engine",
+            "turn: エンジン実行 開始（入）"
+        );
         let result = engine
             .run_with_model_override(
                 system_prompt,
@@ -1378,7 +1416,30 @@ pub async fn run_agent_response(
                 Some(model_override.clone()),
                 &merged_image_urls,
             )
+            .instrument(turn_span.clone())
             .await;
+        // #665: engine から戻った。入と対で出す。結果種別（成否・iterations・tool_calls・打ち切り）を載せ、
+        // 宙吊りが engine の中か外かをこの行の有無で切り分けられるようにする。
+        match &result {
+            Ok(r) => tracing::debug!(
+                agent_id = %agent_id,
+                session_id = %session_id,
+                turn_id = %turn_id,
+                iterations = r.iterations,
+                tool_calls = r.tool_calls_made,
+                stopped_by_limit = r.stopped_by_limit,
+                stage = "engine",
+                "turn: エンジン実行 完了（出）"
+            ),
+            Err(e) => tracing::debug!(
+                agent_id = %agent_id,
+                session_id = %session_id,
+                turn_id = %turn_id,
+                error = %e,
+                stage = "engine",
+                "turn: エンジン実行 失敗（出）"
+            ),
+        }
 
         // harness 剪定メトリクス: XML <function_calls> フォールバックの発火を agent_logs に
         // 記録する（context='harness.xml_fallback'）。「最後に発火したのはいつか・どのモデルか」を
@@ -1433,6 +1494,17 @@ pub async fn run_agent_response(
             record_used_skills(state, agent_id, session_id, &engine_result.response);
         }
     }
+
+    // #665: ターン実行の出。これが出ていて上位（gateway の配送・記録）の行が続かなければ、詰まりは
+    // run_agent_response より外（返信送信・転記）側にある、という切り分けができる。
+    tracing::debug!(
+        agent_id = %agent_id,
+        session_id = %session_id,
+        turn_id = %turn_id,
+        ok = result.is_ok(),
+        stage = "run",
+        "turn: ターン実行 終了（出）"
+    );
 
     result
 }

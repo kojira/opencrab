@@ -541,6 +541,15 @@ pub async fn run_discord_loop<T: AgentRunner>(
 
         for key in expired_keys {
             if let Some((messages, _)) = debounce_buffers.remove(&key) {
+                // #665: デバウンス窓が満了し、溜めていた受信の処理へ進む段。ここより前は「受信を溜めて
+                // いる」正常状態で、ここが「ターン処理へ入る」入口。session_id はまだ無い（agent 毎に
+                // process_incoming_message 内で決まる）ので相関はチャンネルキーで出す。
+                debug!(
+                    channel = %key,
+                    messages = messages.len(),
+                    stage = "debounce_flush",
+                    "turn: デバウンス満了 → 受信処理開始"
+                );
                 // #543 / #556: 全メッセージを**個別に**記録する（送信者の帰属を保つ）。run は
                 // **到着順のまま「連続した同一 trust_level」で切ったグループ**ごとに 1 回だけ、
                 // そのグループ内の**内容のある最後のメッセージ**が起こす。run は DB から会話全体を
@@ -815,6 +824,9 @@ async fn process_incoming_message<T: AgentRunner>(
         // ネットワーク越しの飾り（リアクション・typing）より、発言を残すことが先。
         // 二重回答を防ぐ不変条件（履歴構築 → 推論 → 応答ログがロック内で不可分）は
         // 壊れない。記録の方が先に確定するので、ロック内で組み立てる履歴には必ず載る。
+        // #665: 受信をセッションログへ記録する段（#284 P0-1: 副作用の最初）。session_id が確定した
+        // この地点から Discord ターンを session_id で追える。
+        debug!(agent_id = %agent_id, session_id = %session_id, stage = "record_inbound", "turn: 受信記録 開始（入）");
         record_discord_inbound(
             &state,
             agent_id,
@@ -824,6 +836,7 @@ async fn process_incoming_message<T: AgentRunner>(
             &text,
             &image_urls,
         );
+        debug!(agent_id = %agent_id, session_id = %session_id, stage = "record_inbound", "turn: 受信記録 完了（出）");
 
         // 処理対象として確定したので 👀 を付ける（DM whitelist / channel whitelist 通過後）。
         // 失敗は非致命的。複数エージェントが同一投稿を処理しても一度だけ付与する。
@@ -990,6 +1003,9 @@ async fn process_incoming_message<T: AgentRunner>(
         let reply_send_seq_spawn = reply_send_seq.clone();
         let subtask_starts_spawn = subtask_starts.clone();
 
+        // #665: ターン本体を session 直列キューへ投入する（結果は待たない・#223）。この後、直列ロックの
+        // 取得は共通の `SessionLocks::run_serialized`（session_lock 段）で計装される。
+        debug!(agent_id = %agent_id, session_id = %session_id, stage = "enqueue_turn", "turn: ターンを直列キューへ投入");
         session_locks.spawn_serialized(session_id.clone(), async move {
             // ターンの寿命に typing keepalive を束ねる（#429）。名前付きで保持し、
             // ブロック終端まで生かす。drop = keepalive 停止。
@@ -1022,6 +1038,9 @@ async fn process_incoming_message<T: AgentRunner>(
             // 会話履歴の構築（直前の応答が確定した後に行うことで二重回答を防ぐ）。
             // 失敗しても early-return せず、末尾のロック回収を必ず通す。
             let budget = state_spawn.context_budget_tokens(&agent_id_spawn);
+            // #665: 会話履歴の構築（直列ロック取得後・run_agent_response の手前）。ここで詰まると
+            // LLM リクエスト前の宙吊りになる。入と、既存の ok/failed 行を出として stage で束ねる。
+            debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "context_build", "turn: 文脈構築 開始（入）");
             let conversation = match state_spawn.build_conversation_string(
                 &session_id_spawn,
                 &agent_id_spawn,
@@ -1035,7 +1054,8 @@ async fn process_incoming_message<T: AgentRunner>(
                         session_id = %session_id_spawn,
                         agent_id = %agent_id_spawn,
                         conversation_len = raw.len(),
-                        "build_conversation_string ok"
+                        stage = "context_build",
+                        "turn: 文脈構築 完了（出）"
                     );
                     Some(prepend_runtime_context_discord(
                         &raw,
@@ -1104,6 +1124,9 @@ async fn process_incoming_message<T: AgentRunner>(
                     subtask_starts_spawn.load(std::sync::atomic::Ordering::SeqCst) > 0;
                 let eos_qualifies = end_of_speech_qualifies(&result, posted, started_subtask);
 
+                // #665: run から戻り、最終応答の処理・配送（記録／NO_REPLY 可視化）へ入る段。反復途中の
+                // 配送は on_response_text の detach spawn（別途 warn ログあり）で、ここは最終応答の後始末。
+                debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "reply", "turn: 応答処理・配送 開始（入）");
                 handle_agent_response(
                     result,
                     &agent_id_spawn,
@@ -1115,6 +1138,7 @@ async fn process_incoming_message<T: AgentRunner>(
                     &discord_message_id_spawn,
                 )
                 .await;
+                debug!(agent_id = %agent_id_spawn, session_id = %session_id_spawn, stage = "reply", "turn: 応答処理・配送 完了（出）");
 
                 // #431: 自然終了かつ発話ありなら、そのターンで自分が最後に投稿した
                 // メッセージに SPOKE_EMOJI を付ける。ストリーミング送信（detach spawn）が
@@ -1251,6 +1275,9 @@ async fn process_subtask_completed<T: AgentRunner>(
         task_description,
         exit_reason
     );
+    // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
+    // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
+    debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
     let conversation_raw = match state.build_conversation_string(
         &session_id,
         &agent_id,
@@ -1262,6 +1289,7 @@ async fn process_subtask_completed<T: AgentRunner>(
             return;
         }
     };
+    debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = conversation_raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
@@ -1404,6 +1432,9 @@ async fn process_timed_fire<T: AgentRunner>(
         discord_context_line(&guild_id, &channel_id_str),
         prompt
     );
+    // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
+    // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
+    debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
     let conversation_raw = match state.build_conversation_string(
         &session_id,
         &agent_id,
@@ -1415,6 +1446,7 @@ async fn process_timed_fire<T: AgentRunner>(
             return;
         }
     };
+    debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = conversation_raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
@@ -1799,6 +1831,9 @@ async fn process_interaction_response<T: AgentRunner>(
         interaction_id, response.surface_id,
         response.action_name, response.component_id, context_str, response.responder_id,
     );
+    // #665: 文脈構築（直列ロック取得後・run_agent_response 手前）。ここで詰まると LLM リクエスト前の
+    // 宙吊りになる。入と出で挟む（時刻発火・subtask 完了 resume・interaction 応答の各ターン入口で共通）。
+    debug!(agent_id = %agent_id, session_id = %session_id, stage = "context_build", "turn: 文脈構築 開始（入）");
     let conversation_raw = match state.build_conversation_string(
         &session_id,
         &agent_id,
@@ -1810,6 +1845,7 @@ async fn process_interaction_response<T: AgentRunner>(
             return;
         }
     };
+    debug!(agent_id = %agent_id, session_id = %session_id, conversation_len = conversation_raw.len(), stage = "context_build", "turn: 文脈構築 完了（出）");
     let conversation =
         prepend_runtime_context_discord(&conversation_raw, "Discord conversation", "");
 
