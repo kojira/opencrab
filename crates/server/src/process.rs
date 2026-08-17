@@ -1287,6 +1287,10 @@ pub async fn run_agent_response(
         max_iterations,
     );
 
+    // #676: 出力トークン上限を config から注入する（旧ハードコード 4096 を廃止）。
+    // 値は load_config が起動時に 1 以上へ検証済み。u32 へ丸める。
+    engine.set_max_output_tokens(state.llm_config.max_output_tokens as u32);
+
     // #284: LLM へ返す tool_result のサイズ上限と退避先。engine 側で上限を効かせ、
     // 全文はワークスペースへ残す（エージェントが read_file で続きを読める）。
     // 退避先は inline のログ callback / dispatch 経路と**同じ root**を使う。

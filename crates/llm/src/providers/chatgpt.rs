@@ -835,6 +835,11 @@ impl ChatGptProvider {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut id = String::new();
         let mut usage = Usage::default();
+        // #676: Responses API が出力上限で応答を打ち切ったか。status=="incomplete" かつ
+        // incomplete_details.reason=="max_output_tokens" のとき真。合成する finish_reason を
+        // Length に倒し、エンジンがターンを失敗させられるようにする（切り捨てを黙って
+        // 最終回答にしない）。
+        let mut truncated_by_max_tokens = false;
         let mut dbg_data_line_count: usize = 0;
         let mut dbg_delta_event_count: usize = 0;
         let mut current_event = String::new();
@@ -875,9 +880,18 @@ impl ChatGptProvider {
                         tool_calls.push(call);
                     }
                 }
-                "response.completed" | "response.done" => {
+                "response.completed" | "response.done" | "response.incomplete" => {
                     if let Some(rid) = parsed["response"]["id"].as_str() {
                         id = rid.to_string();
+                    }
+                    // #676: 出力上限による打ち切りを拾う。incomplete イベントだけでなく、
+                    // completed に status/incomplete_details が載る実装差にも耐えるよう、
+                    // イベント名でなく response 本体の status/reason で判定する。
+                    if parsed["response"]["status"].as_str() == Some("incomplete")
+                        && parsed["response"]["incomplete_details"]["reason"].as_str()
+                            == Some("max_output_tokens")
+                    {
+                        truncated_by_max_tokens = true;
                     }
                     if let Some(output) = parsed["response"]["output"].as_array() {
                         for item in output {
@@ -932,7 +946,12 @@ impl ChatGptProvider {
         } else {
             Some(MessageContent::Text(content))
         };
-        let finish_reason = if tool_calls.is_empty() {
+        // #676: 出力上限による打ち切りは tool_calls / content の有無より優先して Length に
+        // する。切り捨てられた応答は tool_call JSON も本文も途中で切れており、最終回答にも
+        // ツール往復の一手にもしてはならない（エンジンがこの Length を見てターンを失敗させる）。
+        let finish_reason = if truncated_by_max_tokens {
+            FinishReason::Length
+        } else if tool_calls.is_empty() {
             FinishReason::Stop
         } else {
             FinishReason::ToolCalls
@@ -1707,6 +1726,51 @@ mod tests {
         assert_eq!(resp.usage.cache_read_input_tokens, 80);
         // OpenAI はキャッシュ書き込みを別課金しないため常に 0。
         assert_eq!(resp.usage.cache_creation_input_tokens, 0);
+    }
+
+    /// #676: Responses API が出力上限で応答を打ち切ったとき（status=="incomplete" かつ
+    /// incomplete_details.reason=="max_output_tokens"）、finish_reason=Length にする。
+    /// 前置きテキストが出ていても Stop に倒さない（エンジンがこの Length を見て切り捨てを
+    /// 失敗させる）。
+    #[test]
+    fn test_parse_response_incomplete_max_output_tokens_is_length() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"これから報告を書\"}\n",
+            "\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp-inc\",",
+            "\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},",
+            "\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":4096,",
+            "\"total_tokens\":4106}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Length));
+        assert_eq!(resp.usage.completion_tokens, 4096);
+    }
+
+    /// #676 回帰防止: status=="completed"（打ち切りなし）は従来どおり Stop のまま。
+    #[test]
+    fn test_parse_response_completed_status_stays_stop() {
+        let provider = ChatGptProvider::new();
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"完了\"}\n",
+            "\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-ok\",",
+            "\"status\":\"completed\",\"output\":[],",
+            "\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n",
+            "\n",
+        );
+        let resp = provider
+            .parse_response(sse, "gpt-5.5")
+            .expect("parse failed");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
     }
 
     /// #502: input_tokens_details / cached_tokens が欠落しても panic せず 0 に倒れること。

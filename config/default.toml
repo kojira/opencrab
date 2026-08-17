@@ -42,6 +42,13 @@ default_provider = "codex"
 # 5.5 に戻す場合は "gpt-5.5"、変種は "gpt-5.6-terra" / "gpt-5.6-luna" を指定。
 default_model = "gpt-5.6"
 
+# 各 LLM リクエストの出力トークン上限（#676）。この値で頭打ちになった応答は
+# finish_reason=Length で戻り、エンジンがターンを失敗させる（切り捨てを黙って最終回答
+# にしない = fail loud）。max_tokens を送るプロバイダ（openai 形式 / anthropic /
+# openrouter 等）に効き、送らない chatgpt/codex/cursor/acp には効かない。0 以下は起動時
+# エラー。非ストリーミング経路で HTTP タイムアウトに当たらない上限の目安として 16384。
+max_output_tokens = 16384
+
 # 用途別モデル設定（オプション）
 [llm.models]
 thinking = { provider = "hermit", model = "claude-sonnet-4-6" }

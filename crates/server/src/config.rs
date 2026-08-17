@@ -845,6 +845,13 @@ pub struct LlmConfig {
     /// 会話コンパクション比率: context_window のうち会話履歴に使う割合 (0.0-1.0)。
     #[serde(default = "default_compaction_ratio")]
     pub compaction_ratio: f64,
+    /// 各 LLM リクエストに載せる出力トークン上限（#676）。この値で頭打ちになった応答は
+    /// finish_reason=Length で戻り、エンジンが**ターンを失敗**させる（切り捨てを最終回答
+    /// として扱わない）。既定 16384。max_tokens を送るプロバイダ（openai 形式 / anthropic /
+    /// openrouter など）に効き、送らない chatgpt/codex/cursor/acp には効かない。0 以下は
+    /// `load_config` が起動時に弾く（i64 で受けて負値も同じメッセージで拒否する）。
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: i64,
 }
 
 impl Default for LlmConfig {
@@ -856,12 +863,17 @@ impl Default for LlmConfig {
             fallback: FallbackConfig::default(),
             aliases: HashMap::new(),
             compaction_ratio: default_compaction_ratio(),
+            max_output_tokens: default_max_output_tokens(),
         }
     }
 }
 
 fn default_compaction_ratio() -> f64 {
     0.5
+}
+
+fn default_max_output_tokens() -> i64 {
+    16384
 }
 
 fn default_provider() -> String {
@@ -1026,6 +1038,18 @@ pub fn load_config(path: &str) -> Result<AppConfig> {
     // dispatch の kill switch は環境変数で上書きできる（`.env` だけで切り戻せるように）。
     if let Some(v) = auto_dispatch_from_env() {
         config.subtask.auto_dispatch = v;
+    }
+
+    // #676: 出力トークン上限は 1 以上でなければ起動を止める（#663 の流儀 = 黙って
+    // 落とさず fail loudly）。各 LLM リクエストの max_tokens に載るので、0 以下だと
+    // プロバイダ側で 400 になるか無制限に振れる。i64 で受けているので負値もここで拾う。
+    if config.llm.max_output_tokens <= 0 {
+        anyhow::bail!(
+            "[llm] max_output_tokens must be >= 1 (got {}). It caps every LLM \
+             request's output tokens; a non-positive value cannot be sent to any \
+             provider. Set a positive integer (default 16384).",
+            config.llm.max_output_tokens,
+        );
     }
 
     Ok(config)
@@ -1647,6 +1671,55 @@ mod tests {
         .unwrap();
         let cfg = load_config(path.to_str().unwrap()).unwrap();
         assert_eq!(cfg.gateway.discord.owner_discord_id, "123456789012345678");
+    }
+
+    /// #676: `[llm] max_output_tokens` は省略時 16384、明示すればその値になる。
+    #[test]
+    fn load_config_max_output_tokens_default_and_explicit() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+
+        // 省略 → 既定 16384。
+        let p1 = dir.path().join("default.toml");
+        std::fs::write(&p1, "[llm]\ndefault_provider = \"openai\"\n").unwrap();
+        assert_eq!(
+            load_config(p1.to_str().unwrap())
+                .unwrap()
+                .llm
+                .max_output_tokens,
+            16384
+        );
+
+        // 明示 → その値。
+        let p2 = dir.path().join("explicit.toml");
+        std::fs::write(&p2, "[llm]\nmax_output_tokens = 32768\n").unwrap();
+        assert_eq!(
+            load_config(p2.to_str().unwrap())
+                .unwrap()
+                .llm
+                .max_output_tokens,
+            32768
+        );
+    }
+
+    /// #676: `max_output_tokens` が 0 以下なら起動を止める（#663 の流儀 / fail loud）。
+    /// 0 と負値の両方を i64 で受けて同じメッセージで弾く。
+    #[test]
+    fn load_config_rejects_non_positive_max_output_tokens() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+
+        for val in ["0", "-1"] {
+            let path = dir.path().join(format!("bad_{val}.toml"));
+            std::fs::write(&path, format!("[llm]\nmax_output_tokens = {val}\n")).unwrap();
+            let err = load_config(path.to_str().unwrap())
+                .expect_err("max_output_tokens <= 0 は起動を止めねばならない");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("max_output_tokens"),
+                "エラー文言が原因キーを含んでいない: {msg}"
+            );
+        }
     }
 
     /// リポジトリに追跡されている設定ファイルは、owner を実 ID の直書きではなく
