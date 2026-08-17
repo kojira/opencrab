@@ -1295,6 +1295,12 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if !pconfig.binary_path.is_empty() {
                     p = p.with_binary_path(&pconfig.binary_path);
                 }
+                // サンドボックスを config から配線（codex と同じ形。cursor の値は
+                // "enabled" | "disabled"）。空なら既定の最安全側（enabled）を維持。
+                // 読取専用モード（--plan）は常時有効で、これはその上の多層防御層。
+                if !pconfig.sandbox.is_empty() {
+                    p = p.with_sandbox(&pconfig.sandbox);
+                }
                 if !pconfig.working_dir.is_empty() {
                     p = p.with_working_dir(&pconfig.working_dir);
                 }
