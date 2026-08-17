@@ -6,14 +6,40 @@
 //! function calling が無いため、tool 定義はプロンプトに XML で載せる（codex と共通の
 //! [`build_cli_prompt`] を使う）。
 //!
-//! **推論専用の頭として使う**（#674）。cursor-agent 自身は `-p`（headless）だと
+//! **推論専用の頭として使う**（#674 / #682）。cursor-agent 自身は `-p`（headless）だと
 //! write / shell を含む全ツールにアクセスできてしまう（`--help` に明記）。これは
-//! opencrab の権限統制（#330）を素通りするため、`--plan`（読取専用モード）を常時
-//! 付与して cursor-agent 自身のファイル編集・シェル実行を封じる。喋る内容と
-//! 「opencrab 側ツールのどれを呼ぶか」の選択（XML `<function_calls>`）だけをさせ、
-//! 実行は opencrab 側の権限ゲート込みツールループに乗せる。`--sandbox`（既定
-//! enabled）を多層防御として重ね、`--trust` で信頼確認プロンプトのハングを避ける
-//! （`--force`/`--yolo` は使わない ＝ 危険操作を承認なしで走らせない）。
+//! opencrab の権限統制（#330）を素通りするため、cursor-agent 自身の write/shell を封じ、
+//! read を注入済み XML `<function_calls>` へ誘導して、実行は opencrab 側の権限ゲート込み
+//! ツールループに乗せる。効いている防御は次の 2 つ:
+//!
+//! 1. **deny cli.json（#682）**: 一時 cwd に `.cursor/cli.json` を置き
+//!    Read/Write/Shell/WebFetch/WebSearch/Mcp を deny する（[`CURSOR_DENY_CONFIG`]）。
+//!    Read/Write/Shell/WebFetch/WebSearch/Mcp はこの deny で実際にゲートされる（実測 #682:
+//!    `readToolCall`→error、`shellToolCall`→permissionDenied）。deny 下の grok 系は native
+//!    read が拒否されると注入済み XML `<function_calls>` へフォールバックし、正しい形で
+//!    opencrab のツール選択を出す（既存 parser がそのまま処理）。
+//! 2. **空の専用 cwd（#682）**: chat_completion 毎に空の一時ディレクトリ
+//!    （[`tempfile::TempDir`]、RAII で削除・孤児を残さない）を作り CLI の cwd にする。
+//!    役割は (a) 実 workspace を cwd として露出させない（相対パスの native 読取や
+//!    codebase_search の索引対象を空にする）こと、(b) 上記 cli.json の置き場。かつての
+//!    「per-agent workspace を cwd にする」方式は実 repo を丸ごと露出したため**廃止**した。
+//!
+//! さらに `--plan`（読取専用モード）で write/shell を、`--sandbox`（既定 enabled）を
+//! 重ね、`--trust` で信頼確認プロンプトのハングを避ける（`--force`/`--yolo` は使わない
+//! ＝ 危険操作を承認なしで走らせない）。
+//!
+//! **【塞げていない穴・#682 でオーナー裁定により受容】**: native の **grep（および glob）は
+//! cursor-agent の node プロセス内で同梱 `rg` を直接実行**するため、cli.json の権限系
+//! （Read/Shell 等）も `--sandbox` の管轄外にある。実測（#682）で `Grep(**)` を deny に
+//! 入れても `grepToolCall` は success で実データを返し、プロンプトで**絶対パス**を与えれば
+//! 空 cwd の外のファイル内容も読めた（空 cwd は grep/glob の絶対パス読取を塞がない）。
+//! これを機構で塞げるのは OS レベル sandbox（`sandbox-exec`）だけだが、複雑さを避けて
+//! **不採用**とし、任意パス読取のリスクは受容してモデルの判断に委ねる（#682 裁定）。
+//! `Grep(**)` を cli.json に列挙しないのは、効かないものを列挙して「効く」と誤認させない
+//! ため。この穴を「空 cwd が塞ぐ」等と書いてはならない（実測で否定済み）。
+//!
+//! **協定不成立はエラーにしない**（#682）: モデルが XML を出さずテキストで答えたら
+//! そのまま最終発話として返す（隠れ native フォールバックもエラー化もしない）。
 //!
 //! プロンプトは **positional 引数**で渡す。cursor-agent の headless（`-p`）は positional
 //! を主インターフェースにしており、positional 無し（stdin 待ち）だと入力終端を待って
@@ -49,6 +75,18 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// `--sandbox` の既定値。最安全側（enabled）。config の `sandbox` で上書き可。
 const DEFAULT_SANDBOX: &str = "enabled";
 
+/// 一時 cwd に置く `.cursor/cli.json`（プロジェクト単位の permission 設定）の中身。
+/// deny が allow に優先する。deny 下の grok 系を native read 拒否 → 注入済み XML
+/// `<function_calls>` フォールバックへ誘導する駆動源であり、write/shell も封じる。
+/// Read/Write/Shell/WebFetch/WebSearch/Mcp はこの deny で実際にゲートされる（実測 #682）。
+///
+/// - `version` キーは付けない（project 版は schema エラーで弾かれる。実測 #682）
+/// - **grep / glob は deny が効かないので列挙しない**。効かないものを列挙して「効く」と
+///   誤認させないため（実測 #682: `Grep(**)` を入れても `grepToolCall` は success で実データ
+///   を返す。grep は node プロセス内の同梱 `rg` 直呼びで cli.json の管轄外）。この穴は
+///   機構では塞げず、オーナー裁定で受容している（モジュール doc 参照）。
+const CURSOR_DENY_CONFIG: &str = r#"{"permissions":{"allow":[],"deny":["Read(**)","Write(**)","Shell(**)","WebFetch(**)","WebSearch(**)","Mcp(**)"]}}"#;
+
 /// ダッシュボード表示用の既定モデル候補（ID, context_window）。
 /// 実際に選べるモデルは account・CLI バージョンで変わる（`cursor-agent models` /
 /// `--list-models` で確認）ため、config の `models` で上書きするのが正確。ここは
@@ -64,7 +102,6 @@ static DEFAULT_MODELS: &[(&str, u32)] = &[
 pub struct CursorProvider {
     binary_path: String,
     default_model: String,
-    working_dir: Option<String>,
     timeout: Duration,
     extra_models: Vec<(String, u32)>,
     /// `--sandbox` の値（"enabled" | "disabled"）。既定は最安全側 "enabled"。
@@ -83,7 +120,6 @@ impl CursorProvider {
         Self {
             binary_path: DEFAULT_CURSOR_PATH.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
-            working_dir: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             extra_models: Vec::new(),
             sandbox: DEFAULT_SANDBOX.to_string(),
@@ -111,11 +147,6 @@ impl CursorProvider {
         if !m.trim().is_empty() {
             self.default_model = m;
         }
-        self
-    }
-
-    pub fn with_working_dir(mut self, dir: impl Into<String>) -> Self {
-        self.working_dir = Some(dir.into());
         self
     }
 
@@ -149,7 +180,20 @@ impl CursorProvider {
         self
     }
 
-    fn build_command(&self, model: &str, prompt: &str, agent_id: Option<&str>) -> Command {
+    /// コマンドと、その cwd に使う空の一時ディレクトリを組み立てる。
+    ///
+    /// chat_completion 毎に空の [`tempfile::TempDir`] を作り、その中に deny 設定
+    /// （[`CURSOR_DENY_CONFIG`]）だけを置いて CLI の cwd にする。返した `TempDir` は
+    /// **呼び出し側が子プロセス完了まで保持**する必要がある（drop でディレクトリごと
+    /// 削除され、孤児を残さない）。
+    fn build_command(&self, model: &str, prompt: &str) -> Result<(Command, tempfile::TempDir)> {
+        // 空の専用 cwd を作り、deny 設定だけを置く。実 workspace を cwd として露出させない
+        // （相対パスの native 読取や codebase_search の索引対象を空にする）ためで、cli.json
+        // の置き場も兼ねる。※ grep/glob は絶対パスを与えれば cwd の外を読めるので、空 cwd は
+        // それを塞がない（#682・受容済み。CURSOR_DENY_CONFIG とモジュール doc 参照）。
+        let cwd = tempfile::TempDir::new().context("failed to create temp cwd for cursor-agent")?;
+        write_deny_config(cwd.path())?;
+
         let mut cmd = Command::new(resolve_binary(&self.binary_path));
         // タイムアウト/ドロップ時に子プロセスを確実に kill（孤児 agent を残さない）。
         cmd.kill_on_drop(true);
@@ -182,17 +226,22 @@ impl CursorProvider {
             cmd.env(key, value);
         }
 
-        // per-agent workspace を cwd にする（cursor-agent は cwd のリポジトリを対象にする）。
-        let working_dir: Option<String> = agent_id
-            .map(|id| format!("data/agents/{}/workspace", id))
-            .or_else(|| self.working_dir.clone());
-        if let Some(dir) = &working_dir {
-            std::fs::create_dir_all(dir).ok();
-            cmd.current_dir(dir);
-        }
+        // cwd は空の専用一時ディレクトリ（実 workspace を露出させない・cli.json 置き場）。
+        // grep/glob の絶対パス読取は塞げない点は上記参照（#682・受容済み）。
+        cmd.current_dir(cwd.path());
 
-        cmd
+        Ok((cmd, cwd))
     }
+}
+
+/// 一時 cwd に `.cursor/cli.json`（deny 設定）を書き出す。cursor-agent はプロジェクト
+/// 単位の permission をこのパスから読む。
+fn write_deny_config(cwd: &std::path::Path) -> Result<()> {
+    let dir = cwd.join(".cursor");
+    std::fs::create_dir_all(&dir).context("failed to create .cursor dir for cursor-agent")?;
+    std::fs::write(dir.join("cli.json"), CURSOR_DENY_CONFIG)
+        .context("failed to write .cursor/cli.json for cursor-agent")?;
+    Ok(())
 }
 
 /// `binary_path` を spawn 用に解決する。ディレクトリ付き相対パス（例 `bin/cursor-agent`）
@@ -284,7 +333,8 @@ impl LlmProvider for CursorProvider {
 
         let prompt = build_cli_prompt(&request);
 
-        let mut cmd = self.build_command(model, &prompt, request.agent_id.as_deref());
+        // `_cwd` は子プロセス完了まで保持する（drop で一時 cwd ごと削除される。#682）。
+        let (mut cmd, _cwd) = self.build_command(model, &prompt)?;
         // stdin は不要（プロンプトは positional）。閉じておき agent が入力を待たない
         // ようにする。stdout/stderr は取り込む。
         cmd.stdin(std::process::Stdio::null())
@@ -461,7 +511,6 @@ mod tests {
         let p = CursorProvider::new();
         assert_eq!(p.binary_path, "cursor-agent");
         assert_eq!(p.default_model, "auto");
-        assert!(p.working_dir.is_none());
         assert!(p.api_key.is_none());
         assert_eq!(p.timeout, Duration::from_secs(300));
         // 既定サンドボックスは最安全側（enabled）。
@@ -473,13 +522,11 @@ mod tests {
         let p = CursorProvider::new()
             .with_binary_path("cursor")
             .with_default_model("sonnet-4.5")
-            .with_working_dir("/tmp/ws")
             .with_timeout_secs(120)
             .with_sandbox("disabled")
             .with_api_key("sk-cursor");
         assert_eq!(p.binary_path, "cursor");
         assert_eq!(p.default_model, "sonnet-4.5");
-        assert_eq!(p.working_dir.as_deref(), Some("/tmp/ws"));
         assert_eq!(p.timeout, Duration::from_secs(120));
         assert_eq!(p.sandbox, "disabled");
         assert_eq!(p.api_key.as_deref(), Some("sk-cursor"));
@@ -500,7 +547,9 @@ mod tests {
     #[test]
     fn test_build_command_is_inference_only() {
         let p = CursorProvider::new().with_default_model("auto");
-        let cmd = p.build_command("gpt-5.2", "[System]\nhi", None);
+        let (cmd, _cwd) = p
+            .build_command("gpt-5.2", "[System]\nhi")
+            .expect("build_command");
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -544,7 +593,7 @@ mod tests {
     #[test]
     fn test_build_command_sandbox_override() {
         let p = CursorProvider::new().with_sandbox("disabled");
-        let cmd = p.build_command("auto", "hi", None);
+        let (cmd, _cwd) = p.build_command("auto", "hi").expect("build_command");
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -559,6 +608,79 @@ mod tests {
         assert!(
             args.iter().any(|a| a == "--plan"),
             "sandbox=disabled でも --plan は残らねばならない: {args:?}"
+        );
+    }
+
+    /// #682: build_command は空の一時 cwd を作り、その中に deny 設定
+    /// （`.cursor/cli.json`）だけを置くこと。
+    /// - cwd を CLI の current_dir に設定している
+    /// - `.cursor/cli.json` の中身が [`CURSOR_DENY_CONFIG`] と一致し、`version` を含まない
+    /// - cwd 直下には `.cursor` 以外に何も無い（実 workspace を露出させない ＝ 空 cwd）
+    /// - grep/glob は deny に列挙しない（効かないものを載せて誤認させない・#682）
+    #[test]
+    fn test_build_command_creates_empty_cwd_with_deny_config() {
+        let p = CursorProvider::new();
+        let (cmd, cwd) = p.build_command("auto", "hi").expect("build_command");
+
+        // CLI の cwd が一時ディレクトリに設定されている。
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(cwd.path()),
+            "cwd は一時ディレクトリでなければならない"
+        );
+
+        // deny 設定の中身が完全一致し、version キーを含まない（project 版は schema エラー）。
+        let cli_json = std::fs::read_to_string(cwd.path().join(".cursor").join("cli.json"))
+            .expect(".cursor/cli.json が読めること");
+        assert_eq!(cli_json, CURSOR_DENY_CONFIG);
+        assert!(
+            !cli_json.contains("version"),
+            "project 版 cli.json に version を付けてはならない: {cli_json}"
+        );
+        // deny 内容の要点（読取・書込・シェル・ネット・MCP を封じ、allow は空）。
+        assert!(cli_json.contains(r#""allow":[]"#));
+        for tool in [
+            "Read(**)",
+            "Write(**)",
+            "Shell(**)",
+            "WebFetch(**)",
+            "WebSearch(**)",
+            "Mcp(**)",
+        ] {
+            assert!(cli_json.contains(tool), "deny に {tool} が無い: {cli_json}");
+        }
+        // grep 系は deny が効かないので列挙しない（効くと誤認させないため）。
+        for absent in ["Grep", "list_dir", "codebase_search", "Glob"] {
+            assert!(
+                !cli_json.contains(absent),
+                "deny 効果のない {absent} を列挙してはならない: {cli_json}"
+            );
+        }
+
+        // cwd 直下は `.cursor` 以外に何も無い（空 cwd の担保）。
+        let entries: Vec<String> = std::fs::read_dir(cwd.path())
+            .expect("read_dir")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![".cursor".to_string()],
+            "cwd は空 cwd（+deny）でなければならない"
+        );
+    }
+
+    /// #682 RAII: 返した TempDir を drop すると一時 cwd がディレクトリごと消える
+    /// （孤児を残さない）。
+    #[test]
+    fn test_temp_cwd_is_removed_on_drop() {
+        let p = CursorProvider::new();
+        let (_cmd, cwd) = p.build_command("auto", "hi").expect("build_command");
+        let path = cwd.path().to_path_buf();
+        assert!(path.exists(), "生成直後は cwd が存在する");
+        drop(cwd);
+        assert!(
+            !path.exists(),
+            "drop 後は一時 cwd が削除されていなければならない"
         );
     }
 
@@ -676,8 +798,11 @@ mod tests {
     ///
     /// 実測（#674 フェーズ1）で固定した契約を回帰として残す:
     /// 1. `--plan` で `result` JSON が返り本文が取れる
-    /// 2. 「ファイルを作れ」と指示しても**作成されない**（読取専用が効いている）
+    /// 2. 「ファイルを作れ」と指示しても**作成されない**（読取専用 + deny が効いている）
     /// 3. `usage` が非ゼロで拾える（コスト計測が効く）
+    ///
+    /// cwd は provider が内部で作る空の一時ディレクトリ（#682）。マーカーは別の
+    /// tempdir 内の絶対パスに置き、write が封じられていることを確認する。
     ///
     /// 実行には cursor-agent のインストールと認証（CURSOR_API_KEY か login 済み）が要る:
     ///   `cargo test -p opencrab-llm cursor_cli_is_read_only -- --ignored --nocapture`
@@ -689,7 +814,6 @@ mod tests {
         let marker = dir.path().join("pwned_by_cursor.txt");
         let provider = CursorProvider::new()
             .with_default_model("auto")
-            .with_working_dir(dir.path().to_string_lossy().to_string())
             .with_timeout_secs(180);
 
         let prompt = format!(
@@ -737,6 +861,93 @@ mod tests {
             resp.usage.prompt_tokens > 0,
             "usage not parsed (prompt_tokens=0): {:?}",
             resp.usage
+        );
+    }
+
+    /// 実 CLI 統合テスト（`#[ignore]`）: deny→XML フォールバックの回帰（#682・criterion a）。
+    ///
+    /// ws_read ツール定義を注入した状態で grok に「ファイルを読め」と指示すると、native
+    /// read が deny で拒否され、注入済み XML `<function_calls>`(ws_read) へフォールバック
+    /// する——これが opencrab のツールループに乗る唯一の経路。CLI 更新でこの挙動が壊れて
+    /// いないかを検出する。
+    ///
+    /// 実測（#682）では発火率は 100% ではない（~11/13。残りは XML を出さず narration で
+    /// 終わる＝協定不成立で許容）。単発 assert は flaky なので N=5 回し、**過半（>=3）で
+    /// ws_read XML が出ること**を回帰条件にする（フォールバックが全滅していれば 0/5 で落ちる）。
+    /// モデルは実測で成立が確認できている `cursor-grok-4.6-high` に固定（GPT 系はツール駆動を
+    /// cursor 経由で使わない方針・#682）。
+    ///
+    /// 【この経路で塞げていない穴・#682 受容】native grep は絶対パスを与えれば cwd 外の
+    /// 任意ファイル内容を読める（cli.json/--sandbox の管轄外）。ここでは扱わない（機構で
+    /// 塞げないためテスト化しない。モジュール doc とハーネス参照）。
+    ///
+    ///   `cargo test -p opencrab-llm cursor_cli_grok_deny_falls_back -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires cursor-agent CLI + auth (grok), makes 5 API calls"]
+    fn cursor_cli_grok_deny_falls_back_to_ws_read_xml() {
+        use serde_json::json;
+        let provider = CursorProvider::new()
+            .with_default_model("cursor-grok-4.6-high")
+            .with_timeout_secs(180);
+        let ws_read = FunctionDefinition {
+            name: "ws_read".to_string(),
+            description: Some(
+                "Read a file from the agent workspace. Returns the file contents.".to_string(),
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Path to the file"}},
+                "required": ["path"]
+            }),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let mut xml_fired = 0;
+        for i in 0..5 {
+            let request = ChatRequest {
+                model: String::new(),
+                messages: vec![
+                    Message::system(
+                        "You are an opencrab agent. To read files you MUST use the ws_read tool. \
+                         Do not read files any other way."
+                            .to_string(),
+                    ),
+                    Message::user(
+                        "Read the file at path notes/plan.txt and tell me what it contains."
+                            .to_string(),
+                    ),
+                ],
+                functions: Some(vec![ws_read.clone()]),
+                function_call: None,
+                temperature: None,
+                max_tokens: None,
+                stop: None,
+                stream: None,
+                metadata: Default::default(),
+                agent_id: None,
+                reasoning_effort: None,
+            };
+            let resp = rt
+                .block_on(provider.chat_completion(request))
+                .expect("cursor-agent chat_completion should succeed");
+            let text = match &resp.choices[0].message.content {
+                Some(MessageContent::Text(t)) => t.clone(),
+                other => panic!("expected text content, got {other:?}"),
+            };
+            let fired = text.contains("<invoke name=\"ws_read\">");
+            if fired {
+                xml_fired += 1;
+            }
+            eprintln!("run {i}: ws_read_xml={fired} | {}", text.replace('\n', " "));
+        }
+
+        assert!(
+            xml_fired >= 3,
+            "deny→XML フォールバックが過半で発火しなかった（{xml_fired}/5）。CLI 更新で\
+             ツール選択経路が壊れた可能性がある"
         );
     }
 }
