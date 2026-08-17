@@ -1896,6 +1896,179 @@ mod tests {
             "縮退ログに原因の inline ツール名が載る: {logs}"
         );
     }
+
+    /// [#671] 制御系 inline ツール（declare_done: ターン終了宣言）が接頭辞に来ても、
+    /// エンジンのループ終了条件と矛盾しないことを固定する。declare_done を inline 実行し、
+    /// 後続の execute_shell を背景 subtask 化して同ターンで spawned を返す。ターンの終了は
+    /// 従来どおり「LLM が次イテレーションでツールを呼ばない」ことで駆動され、declare_done の
+    /// `{done:true}` 結果はループを早期に切らない（engine は tool_result の done を見ない）。
+    #[tokio::test]
+    async fn test_control_inline_prefix_dispatches_suffix_and_loop_ends_on_llm() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc(
+                    "tc-1",
+                    "declare_done",
+                    serde_json::json!({"reason": "十分議論した"}),
+                ),
+                tc(
+                    "tc-2",
+                    "execute_shell",
+                    serde_json::json!({"cmd": "claude ..."}),
+                ),
+            ]),
+            // 次イテレーションでツールを呼ばない → ここでループ終了（declare_done ではなく）。
+            text_response("終わります"),
+        ]);
+
+        // executor は inline 実行だけを記録（declare_done のみ来るべき）。
+        struct SpyExecutor {
+            called: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for SpyExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.called.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"done": true}),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(llm),
+            Box::new(SpyExecutor {
+                called: called.clone(),
+            }),
+            10,
+        );
+        // declare_done を inline（should_dispatch=false）扱いに。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&["declare_done"]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        engine.add_on_tool_result(move |_id, name, json, _err| {
+            seen_clone.lock().unwrap().push(format!("{name}:{json}"));
+        });
+
+        let result = engine.run("system", "go", "test-model").await.unwrap();
+
+        // declare_done だけ inline 実行、execute_shell は inline 実行されない。
+        assert_eq!(called.lock().unwrap().as_slice(), &["declare_done"]);
+        // execute_shell（接尾辞）が 1 本の subtask として dispatch される。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["execute_shell"]
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].starts_with("declare_done:"));
+        assert!(
+            seen[0].contains("\"done\":true"),
+            "接頭辞は declare_done の inline 実行結果"
+        );
+        assert!(seen[1].starts_with("execute_shell:"));
+        assert!(
+            seen[1].contains("\"status\":\"spawned\""),
+            "接尾辞は spawned マーカー（同ターン返却）"
+        );
+
+        // ループは declare_done では切れず、LLM が次イテレーションでツールを呼ばず終了する。
+        assert_eq!(
+            result.iterations, 2,
+            "ターンは 2 イテレーションで正常終了する"
+        );
+        assert_eq!(result.response, "終わります");
+    }
+
+    /// [#671 挙動変化] 未許可ツールが接頭辞・dispatch 可ツールが接尾辞に来るバッチ
+    /// （例: typo や権限落ちの 1 ツール）。**旧実装**は「1 つでも `is_action_allowed &&
+    /// should_dispatch` を満たさない → 全体 inline」で execute_shell も inline に落ちていた。
+    /// **新実装**は未許可ツールに permission denied を返した後、接尾辞を背景 subtask 化する
+    /// （1 ツールの権限落ちが非ブロック性を壊さない）。denied の扱い自体は不変。
+    #[tokio::test]
+    async fn test_unauthorized_prefix_still_dispatches_suffix() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc("tc-1", "not_a_real_tool", serde_json::json!({})),
+                tc("tc-2", "execute_shell", serde_json::json!({"cmd": "x"})),
+            ]),
+            text_response("done"),
+        ]);
+        // executor は inline 実行のみ記録（未許可は executor に届かず denied になるべき）。
+        struct SpyExecutor {
+            called: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for SpyExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.called.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(llm),
+            Box::new(SpyExecutor {
+                called: called.clone(),
+            }),
+            10,
+        );
+        // execute_shell のみ許可（not_a_real_tool は未許可 → is_action_allowed=false）。
+        engine.set_allowed_actions(["execute_shell".to_string()]);
+        // control 集合は空。execute_shell は dispatch 可。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&[]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let seen: Arc<Mutex<Vec<(String, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        engine.add_on_tool_result(move |_id, name, json, err| {
+            seen_clone.lock().unwrap().push((name, json, err));
+        });
+
+        engine.run("system", "go", "test-model").await.unwrap();
+
+        // 未許可ツールは executor に届かない（denied の扱い不変）。
+        assert!(
+            called.lock().unwrap().is_empty(),
+            "未許可ツールは inline executor に渡らない"
+        );
+        // 接尾辞 execute_shell は inline に落ちず、背景 subtask として dispatch される（挙動変化）。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["execute_shell"],
+            "未許可ツールが接頭辞にあっても dispatch 可接尾辞は subtask 化される"
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        // 接頭辞: permission denied（err=true・not authorized 文言）。従来どおり。
+        assert_eq!(seen[0].0, "not_a_real_tool");
+        assert!(seen[0].2, "未許可ツールは err=true で通知される");
+        assert!(seen[0].1.contains("is not authorized"));
+        // 接尾辞: spawned マーカー（同ターン・err=false）。
+        assert_eq!(seen[1].0, "execute_shell");
+        assert!(!seen[1].2);
+        assert!(seen[1].1.contains("\"status\":\"spawned\""));
+    }
 }
 
 /// 走行中ターンへの新着ユーザー発言の注入（#289）。
