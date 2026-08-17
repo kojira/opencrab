@@ -14,6 +14,8 @@ export interface ModelPricingFormInitial {
   input_price_per_1m?: number;
   output_price_per_1m?: number;
   context_window?: number | null;
+  /** #676: 出力トークン上限（任意）。max_tokens を送るプロバイダのモデルにだけ必要。 */
+  max_output_tokens?: number | null;
 }
 
 /**
@@ -48,6 +50,9 @@ export default function ModelPricingForm({
   const [outputPrice, setOutputPrice] = useState(
     initial?.output_price_per_1m != null ? String(initial.output_price_per_1m) : '',
   );
+  const [maxOutputTokens, setMaxOutputTokens] = useState(
+    initial?.max_output_tokens != null ? String(initial.max_output_tokens) : '',
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +77,16 @@ export default function ModelPricingForm({
       setError('単価は 0 以上の数値で入力してください');
       return;
     }
+    // #676: max_output_tokens は任意。空欄なら null（未登録）。入れるなら正の整数のみ。
+    let mot: number | null = null;
+    if (maxOutputTokens.trim() !== '') {
+      const v = Number(maxOutputTokens);
+      if (!Number.isFinite(v) || !Number.isInteger(v) || v <= 0) {
+        setError('max_output_tokens は空欄か、正の整数トークン数で入力してください');
+        return;
+      }
+      mot = v;
+    }
     setSaving(true);
     try {
       await putModelPricing({
@@ -80,6 +95,7 @@ export default function ModelPricingForm({
         input_price_per_1m: inp,
         output_price_per_1m: out,
         context_window: cw,
+        max_output_tokens: mot,
       });
       onSaved({
         provider: p,
@@ -87,6 +103,7 @@ export default function ModelPricingForm({
         input_price_per_1m: inp,
         output_price_per_1m: out,
         context_window: cw,
+        max_output_tokens: mot,
       });
     } catch (e) {
       setError(String(e));
@@ -137,6 +154,25 @@ export default function ModelPricingForm({
             文脈予算 = context_window × compaction_ratio（既定 0.5）。小さすぎると注入が
             切り詰められます。値は
             <strong>モデル提供元の公式ドキュメント</strong>を見てください（集約サイトの数字は
+            当てになりません）。
+          </p>
+        </div>
+        <div className="sm:col-span-2">
+          <label className="mb-1 block text-xs font-medium text-on-surface-variant">
+            max_output_tokens（出力トークン上限・任意）
+          </label>
+          <input
+            value={maxOutputTokens}
+            onChange={(e) => setMaxOutputTokens(e.target.value)}
+            inputMode="numeric"
+            placeholder="例: 128000（空欄可）"
+            className={inputCls}
+          />
+          <p className="mt-1 text-xs text-on-surface-variant">
+            エンジンが各リクエストの出力上限に使います。<strong>max_tokens を送るプロバイダ</strong>
+            （openai 形式 / anthropic 等）のモデルでは<strong>必須</strong>——未登録だと使用時に
+            エラーで止まります。送らないプロバイダ（chatgpt / codex / cursor / acp）は空欄で構いません。
+            値は<strong>モデル提供元の公式ドキュメント</strong>を見てください（集約サイトの数字は
             当てになりません）。
           </p>
         </div>

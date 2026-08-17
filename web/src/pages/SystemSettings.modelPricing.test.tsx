@@ -25,6 +25,7 @@ describe('ModelPricingSection list', () => {
           input_price_per_1m: 5,
           output_price_per_1m: 30,
           context_window: 1050000,
+          max_output_tokens: null,
         },
       ],
     });
@@ -58,6 +59,7 @@ describe('ModelPricingSection list', () => {
           input_price_per_1m: 5,
           output_price_per_1m: 30,
           context_window: 1050000,
+          max_output_tokens: null,
         },
         {
           provider: 'chatgpt',
@@ -65,6 +67,7 @@ describe('ModelPricingSection list', () => {
           input_price_per_1m: 5,
           output_price_per_1m: 30,
           context_window: 400000,
+          max_output_tokens: null,
         },
       ],
       compaction_ratio: 0.5,
@@ -90,6 +93,7 @@ describe('ModelPricingSection list', () => {
           input_price_per_1m: 5,
           output_price_per_1m: 30,
           context_window: 1050000,
+          max_output_tokens: null,
         },
       ],
     });
@@ -112,6 +116,7 @@ describe('ModelPricingSection list', () => {
           input_price_per_1m: 0,
           output_price_per_1m: 0,
           context_window: null,
+          max_output_tokens: null,
         },
       ],
     });

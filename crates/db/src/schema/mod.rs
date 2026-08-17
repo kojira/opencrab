@@ -1762,6 +1762,49 @@ const MIGRATIONS: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 42,
+        description:
+            "model_pricing に max_output_tokens 列を足し、在庫の in-use モデルへ実能力値をバックフィルする（#676）",
+        // **#676: 出力トークン上限をモデル毎に持たせる。**
+        //
+        // エンジンは使用モデルの `max_output_tokens` を各リクエストの max_tokens に使い、
+        // 未登録（NULL / 0 以下）なら使用時に fail loud で止める（グローバルな任意定数を
+        // 既定に置かない方針）。deploy 直後に在庫の in-use モデルが全ターン fail loud に
+        // なる（＝ハード切替）のを避けるため、公式値を確認できたモデルを同じ migration で
+        // バックフィルする。
+        //
+        // ## 冪等性
+        //   - 列追加は `column_exists` でガード（新規 DB は SCHEMA_SQL 側で既に持つので no-op、
+        //     既存 DB でのみ ALTER が走る）。
+        //   - バックフィルは `WHERE model = ? AND max_output_tokens IS NULL` で、既に値が
+        //     入っている行や対象モデルが無い DB では自然に no-op。値の上書きはしない。
+        //
+        // ## バックフィル値と出典（公式で確認できたモデルのみ）
+        //   - claude-opus-5 = 128000 … Anthropic 公式 models overview の Max output（128k）。
+        //     provider は問わず model 名で一致させる（在庫は hermit:claude-opus-5、rename 済み）。
+        //   ※ gpt-5.6 系は OpenAI 一次ドキュメントが per-tier の max output を公表しておらず、
+        //     推測で backfill しない方針のため本 migration では触らない（NULL のまま。使用時に
+        //     fail loud。値が確定したら別 migration か登録フォームから入れる）。
+        //
+        // ## 切り戻し（古いバイナリへ戻すとき）
+        //   列を消す必要は無い（古いバイナリは列を読まない）。版番号だけ戻せばよい:
+        //     BEGIN; PRAGMA user_version = 41; COMMIT;
+        up: |conn| {
+            if !column_exists(conn, "model_pricing", "max_output_tokens")? {
+                conn.execute_batch(
+                    "ALTER TABLE model_pricing ADD COLUMN max_output_tokens INTEGER",
+                )?;
+            }
+            // 公式で確認できたモデルのみバックフィル。model 名で一致（在庫は 1 行 1 モデル名）。
+            conn.execute(
+                "UPDATE model_pricing SET max_output_tokens = 128000 \
+                 WHERE model = 'claude-opus-5' AND max_output_tokens IS NULL",
+                [],
+            )?;
+            Ok(())
+        },
+    },
 ];
 
 /// このバイナリが知る最新スキーマバージョン。

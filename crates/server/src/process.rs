@@ -422,7 +422,8 @@ fn peer_reviewers_section(conn: &rusqlite::Connection, agent_id: &str) -> String
 // する（doc に理由を明記した `subtask_registries` と同じ手）。
 pub use opencrab_core::context_budget::{
     check_agent_model_change, compute_context_budget, ensure_model_context_window_registered,
-    model_context_window_missing_message, normalize_model_spec, split_llm_model_spec,
+    model_context_window_missing_message, normalize_model_spec, resolve_model_max_output_tokens,
+    split_llm_model_spec,
 };
 pub use opencrab_core::conversation::build_conversation_string;
 // `format_single_log` は `format_live_inbound`（本番経路）が使うので常時取り込む。
@@ -1286,6 +1287,28 @@ pub async fn run_agent_response(
         Box::new(opencrab_actions::SharedExecutor(executor.clone())),
         max_iterations,
     );
+
+    // #676（案Y）: 送るプロバイダのモデルは、出力上限（max_output_tokens）を model_pricing から
+    // 実能力値で解決して engine に渡す。未登録（NULL / 0 以下 / 行なし）なら fail loud で
+    // ターンを止める（グローバルな任意定数を既定に置かない）。「送るか」はプロバイダの能力宣言
+    // （router 経由・core で名前突き合わせしない）。送らないプロバイダ（chatgpt/codex/cursor/acp）
+    // は解決も要求もせず、engine は上限未指定のまま＝プロバイダ内部既定に委ねる（切り捨ては
+    // 方針3の incomplete→Length→bail が担う）。解決は effective_model（ターン単位）で行う——
+    // context_window 予算計算と同じ流儀・同じ粒度（select_llm の per-iteration 上書きは追わない）。
+    if state
+        .llm_router
+        .get()
+        .sends_max_output_tokens(&effective_model)
+    {
+        let max_out = {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|e| anyhow::anyhow!("db lock failed: {e}"))?;
+            resolve_model_max_output_tokens(&conn, &effective_model).map_err(anyhow::Error::msg)?
+        };
+        engine.set_max_output_tokens(max_out);
+    }
 
     // #284: LLM へ返す tool_result のサイズ上限と退避先。engine 側で上限を効かせ、
     // 全文はワークスペースへ残す（エージェントが read_file で続きを読める）。

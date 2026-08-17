@@ -8,7 +8,9 @@ use super::types::{
     LlmClient, ToolDispatcher,
 };
 use super::xml_parser::{parse_xml_tool_calls, strip_function_calls_xml};
-use opencrab_llm_types::{ContentPart, ImageUrl, Message, MessageContent, Role, ToolCall};
+use opencrab_llm_types::{
+    ContentPart, FinishReason, ImageUrl, Message, MessageContent, Role, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // SkillEngine
@@ -66,6 +68,13 @@ pub struct SkillEngine {
     /// イテレーションで LLM を呼ぶ直前に引き、新着があれば user メッセージとして
     /// 足す。None なら従来どおりターン開始時の履歴だけで回る。
     live_inbound: Option<Arc<dyn LiveInboundSource>>,
+    /// 各 ChatRequest に載せる出力トークン上限（#676）。使用モデルの実能力値を
+    /// `model_pricing` から解決して process 側で注入する（[`Self::set_max_output_tokens`]）。
+    /// `None` は「上限未指定」＝プロバイダの既定に委ねる（テスト / sub-engine 用）。
+    /// 本番経路は必ず Some を入れる（未登録なら process 側がターンを fail loud で止め、
+    /// engine まで来ない）。この値で頭打ちになった応答は finish_reason=Length で戻り、
+    /// run ループがターンを失敗させる。
+    max_output_tokens: Option<u32>,
 }
 
 /// LLM へ返す tool_result の退避先設定（#284）。
@@ -97,7 +106,15 @@ impl SkillEngine {
             tool_dispatcher: None,
             tool_result_offload: None,
             live_inbound: None,
+            max_output_tokens: None,
         }
+    }
+
+    /// 各 ChatRequest に載せる出力トークン上限を設定する（#676）。使用モデルの実能力値を
+    /// `model_pricing` から解決して渡す。process 側が未登録を fail loud で弾くため、
+    /// 本番ではここに来る前にターンが止まる。
+    pub fn set_max_output_tokens(&mut self, max_output_tokens: u32) {
+        self.max_output_tokens = Some(max_output_tokens);
     }
 
     /// 走行中の新着ユーザー発言の取得口を注入する（#289）。
@@ -392,7 +409,7 @@ impl SkillEngine {
                 },
                 function_call: None,
                 temperature: Some(0.7),
-                max_tokens: Some(4096),
+                max_tokens: self.max_output_tokens,
                 stop: None,
                 stream: None,
                 metadata: {
@@ -445,6 +462,41 @@ impl SkillEngine {
             }
 
             let response = llm_result?;
+
+            // #676: 出力トークン上限に達して切り捨てられた応答は、最終回答としても
+            // ツール往復の一手としても扱わない（fail loud）。tool_calls / content を
+            // 抽出する**前**に見るのが要点——実バグは「ツール呼び出し JSON が途中で
+            // 切れてパース不能 → tool_calls 空 → 最終応答扱い」で成果物が黙って消える
+            // 形だったので、切り捨てられた本文と切り捨てられた tool_call をここ 1 点で
+            // 同時に捕まえる。検知はプロバイダが finish_reason=Length を返す経路
+            // （openai 形式 / anthropic / chatgpt など）でのみ効く。継続生成などの
+            // 自動リカバリは入れない（#676 方針）。
+            if response
+                .choices
+                .first()
+                .and_then(|c| c.finish_reason.as_ref())
+                == Some(&FinishReason::Length)
+            {
+                let completion_tokens = response.usage.completion_tokens;
+                tracing::error!(
+                    iteration = iterations,
+                    max_output_tokens = ?self.max_output_tokens,
+                    completion_tokens,
+                    model = %model,
+                    stage = "output_truncated",
+                    "turn: LLM 応答が出力トークン上限で切り捨てられた（ターン失敗）"
+                );
+                anyhow::bail!(
+                    "LLM 応答が出力トークン上限（model={}, max_output_tokens={:?}, \
+                     completion_tokens={}）に達して切り捨てられました。切り捨てられた応答は\
+                     最終回答として扱いません（fail loud / 継続生成は #676 方針によりしない）。\
+                     上限を上げるには model_pricing にそのモデルの max_output_tokens を\
+                     登録し直してください。",
+                    model,
+                    self.max_output_tokens,
+                    completion_tokens,
+                );
+            }
 
             // 応答本文とツールコールをローカルに抽出（正準モデルは choices[0] を持つ）。
             let mut content: Option<String> = response.first_text().map(|s| s.to_string());
@@ -866,6 +918,107 @@ mod tests {
         assert_eq!(result.iterations, 1);
         assert_eq!(result.tool_calls_made, 0);
         assert!(!result.stopped_by_limit);
+    }
+
+    /// 出力上限で切り捨てられた応答（finish_reason=Length）を表す。`text` は切り捨て
+    /// 前にモデルが吐いた前置き。**これは chatgpt の parse_response が incomplete 応答に
+    /// 対して返す形と同じ**（server 側の end-to-end テストが本物の parse_response を通す）。
+    fn length_truncated_response(text: Option<&str>) -> ChatResponse {
+        ChatResponse {
+            id: String::new(),
+            model: String::new(),
+            choices: vec![Choice {
+                index: 0,
+                message: Message {
+                    role: Role::Assistant,
+                    content: text.map(|s| MessageContent::Text(s.to_string())),
+                    name: None,
+                    function_call: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                finish_reason: Some(FinishReason::Length),
+            }],
+            usage: Usage {
+                completion_tokens: 4096,
+                ..Usage::default()
+            },
+            created: 0,
+        }
+    }
+
+    /// #676: finish_reason=Length（出力上限で切り捨て）はターンを失敗させる（fail loud）。
+    /// 前置きテキストがあっても最終回答にしない。
+    #[tokio::test]
+    async fn test_output_limit_truncation_fails_the_turn() {
+        let llm = MockLlm::new(vec![length_truncated_response(Some(
+            "これから報告を書きます",
+        ))]);
+        let engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+
+        let err = engine
+            .run("system", "調査して報告して", "hermit:claude-opus-5")
+            .await
+            .expect_err("出力上限で切り捨てられたターンは Err にならねばならない");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("切り捨て"),
+            "エラー文言が切り捨てを明示していない: {msg}"
+        );
+        assert!(
+            msg.contains("max_output_tokens"),
+            "エラー文言が上限（登録先）を含んでいない: {msg}"
+        );
+    }
+
+    /// #676: finish_reason=Stop の正常応答は従来どおり最終回答として返る（回帰防止）。
+    #[tokio::test]
+    async fn test_stop_finish_reason_is_returned_normally() {
+        let llm = MockLlm::new(vec![ChatResponse::text("完了しました")]);
+        let engine = SkillEngine::new(Box::new(llm), Box::new(MockExecutor::new()), 10);
+        let result = engine.run("system", "hi", "test-model").await.unwrap();
+        assert_eq!(result.response, "完了しました");
+    }
+
+    /// #676: set_max_output_tokens で設定した値が実際に ChatRequest.max_tokens へ載る。
+    /// 未設定なら None（プロバイダ既定に委ねる）。
+    #[tokio::test]
+    async fn test_max_output_tokens_reaches_the_request() {
+        use std::sync::Mutex;
+
+        struct RecordingLlm {
+            seen: Arc<Mutex<Option<Option<u32>>>>,
+        }
+        #[async_trait]
+        impl LlmClient for RecordingLlm {
+            async fn chat(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
+                *self.seen.lock().unwrap() = Some(request.max_tokens);
+                Ok(ChatResponse::text("ok"))
+            }
+        }
+
+        // set した場合。
+        let seen = Arc::new(Mutex::new(None));
+        let mut engine = SkillEngine::new(
+            Box::new(RecordingLlm { seen: seen.clone() }),
+            Box::new(MockExecutor::new()),
+            10,
+        );
+        engine.set_max_output_tokens(128_000);
+        engine.run("system", "hi", "test-model").await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(Some(128_000)));
+
+        // 未設定なら None（上限未指定）。
+        let seen2 = Arc::new(Mutex::new(None));
+        let engine2 = SkillEngine::new(
+            Box::new(RecordingLlm {
+                seen: seen2.clone(),
+            }),
+            Box::new(MockExecutor::new()),
+            10,
+        );
+        engine2.run("system", "hi", "test-model").await.unwrap();
+        assert_eq!(*seen2.lock().unwrap(), Some(None));
     }
 
     #[tokio::test]

@@ -42,6 +42,10 @@ fn register(state: &AppState, provider: &str, model: &str, window: i32) {
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
             context_window: Some(window),
+            // #676: テストの router は空でプロバイダ能力が既定（送る＝登録必須）に倒れるため、
+            // 「完全登録」を表すには max_output_tokens も入れる（context_window だけでは gate を
+            // 通らない）。gate の条件分岐そのものは context_budget の単体テストで担保する。
+            max_output_tokens: Some(8192),
         },
     )
     .unwrap();

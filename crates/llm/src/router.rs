@@ -132,6 +132,23 @@ impl LlmRouter {
         }
     }
 
+    /// #676: この `model`（alias / `provider:model`）を捌くプロバイダが `max_tokens`
+    /// を backend へ送るか。出力上限のモデル登録を要求すべきか（＝送るなら要求）の判断に使う。
+    ///
+    /// 解決先のプロバイダ自身の能力宣言（[`LlmProvider::sends_max_output_tokens`]）を返す。
+    /// core 側で provider 名や type 文字列を突き合わせない（条件1）。解決失敗 / 未登録
+    /// プロバイダは **`true`（送る＝登録必須側）** に倒す（新規や未知が黙って素通りしない）。
+    pub fn sends_max_output_tokens(&self, model_or_alias: &str) -> bool {
+        match self.resolve_model(model_or_alias) {
+            Ok((provider_name, _)) => self
+                .providers
+                .get(&provider_name)
+                .map(|p| p.sends_max_output_tokens())
+                .unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+
     fn parse_provider_model(&self, s: &str) -> Result<(String, String)> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {

@@ -483,6 +483,12 @@ mod tests {
         fn name(&self) -> &str {
             "mock"
         }
+        // #676: この stub は max_tokens を無視するので「送らない」を宣言し、出力上限の
+        // モデル登録（fail loud）の対象外にする。subtask 生成の検証に集中させる（上限の
+        // 解決/ゲートは context_budget / skill_engine の専用テストで担保）。
+        fn sends_max_output_tokens(&self) -> bool {
+            false
+        }
         async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
             Ok(vec![])
         }
@@ -518,6 +524,10 @@ mod tests {
     impl opencrab_llm::traits::LlmProvider for CapturingStub {
         fn name(&self) -> &str {
             "mock"
+        }
+        // #676: stub は max_tokens を無視するので「送らない」を宣言（上記 StubProvider と同じ理由）。
+        fn sends_max_output_tokens(&self) -> bool {
+            false
         }
         async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
             Ok(vec![])
@@ -565,6 +575,10 @@ mod tests {
     impl opencrab_llm::traits::LlmProvider for GatedStub {
         fn name(&self) -> &str {
             "mock"
+        }
+        // #676: stub は max_tokens を無視するので「送らない」を宣言（上記 StubProvider と同じ理由）。
+        fn sends_max_output_tokens(&self) -> bool {
+            false
         }
         async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
             Ok(vec![])

@@ -74,6 +74,21 @@ pub trait LlmProvider: Send + Sync {
         false
     }
 
+    /// Whether this provider forwards `ChatRequest.max_tokens`（出力トークン上限）to its
+    /// backend（#676）。
+    ///
+    /// 出力上限をモデル毎に `model_pricing` へ登録して各リクエストに載せる方針だが、
+    /// 上限を**送れない**プロバイダ（例: chatgpt の Responses API は max_output_tokens が
+    /// 400。codex / cursor / acp も CLI/ACP で送り口が無い）に登録を強制するのは、実
+    /// リクエストの cap を果たさない形式主義になる。そこで「送るか」をプロバイダ自身の
+    /// 能力宣言にする。
+    ///
+    /// **既定は `true`（送る＝登録必須側）**。新しいプロバイダが黙って登録を素通りしない
+    /// ように、送れないプロバイダだけがこれを `false` に override して opt-out する。
+    fn sends_max_output_tokens(&self) -> bool {
+        true
+    }
+
     /// Check if the provider's API endpoint is reachable.
     async fn health_check(&self) -> Result<bool> {
         Ok(true)
