@@ -90,12 +90,15 @@ models = ["gpt-5.6", "gpt-5.5", "o4-mini", "o3", "codex-mini"]
 # reasoning_effort = "medium"
 # binary_path = "/usr/local/bin/codex"
 
-# Cursor CLI（ローカル。headless agent）。コマンド名はインストールでゆれる
-# （cursor-agent / agent / cursor）ため binary_path で設定可能。既定 cursor-agent。
+# Cursor CLI（ローカル。headless agent）。「推論専用の頭」として使う（#674）:
+# 読取専用モード（--plan）を常時付与し cursor-agent 自身の write/shell を封じる。
+# コマンド名はインストールでゆれる（cursor-agent / agent / cursor）ため binary_path で
+# 設定可能。既定 cursor-agent。
 [llm.providers.cursor]
-default_model = "gpt-5"
+default_model = "auto"                   # account 非依存。旧既定 gpt-5 は現行 CLI で無効
 timeout_secs = 300
-models = ["gpt-5", "sonnet-4.5", "opus-4.1", "auto"]
+models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
+# sandbox = "enabled"                    # "enabled" | "disabled"。省略時 enabled（最安全）
 # binary_path = "cursor-agent"
 # 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
 # api_key = "${CURSOR_API_KEY}"
