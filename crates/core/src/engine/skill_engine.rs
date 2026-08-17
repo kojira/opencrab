@@ -522,65 +522,84 @@ impl SkillEngine {
                     }
                 }
 
-                // 自動 dispatch（RFC #152 S3a・非ブロック）のバッチ判定。
+                // 自動 dispatch（RFC #152 S3a・非ブロック）のバッチ分割判定（#671）。
                 //
                 // **バッチ単位**で決める（tool_call 単位ではない）。同一 assistant
                 // メッセージのツールは LLM が並べた順に依存し得る
                 // （`write_file` → `execute_shell("cargo build")` / `add_allowed_command`
-                // → `execute_shell`）ため、
+                // → `execute_shell`）。1 ツールの「dispatch 可」は
+                // `is_action_allowed && should_dispatch`、それ以外（配送系・制御系・
+                // 共有状態を書くツールなど非 dispatch 可、および未許可ツール）は「inline」。
+                //
+                // 分割規則:
                 //  - 全部 dispatch 可 → **1 本の subtask** にまとめて逐次実行（順序保持・
                 //    完了通知も 1 回 = 親の resume も 1 回）。
-                //  - 1 つでも dispatch 不可（配送系・制御系・共有状態を書くツール）や
-                //    未許可ツールが混ざる → **バッチ全体を inline 実行**（従来経路）。
-                //    混在バッチを分割すると inline と background の相対順序が保証できない。
-                let dispatch_whole_batch = match &self.tool_dispatcher {
-                    Some(d) => tool_calls.iter().all(|tc| {
-                        self.is_action_allowed(&tc.function.name)
-                            && d.should_dispatch(&tc.function.name)
-                    }),
-                    None => false,
-                };
-
-                if dispatch_whole_batch {
-                    let dispatcher = self.tool_dispatcher.as_ref().expect("checked above");
-                    let calls: Vec<super::types::DispatchCall> = tool_calls
-                        .iter()
-                        .map(|tc| super::types::DispatchCall {
-                            tool_name: tc.function.name.clone(),
-                            args: tc.arguments_json(),
-                            tool_call_id: tc.id.clone(),
-                        })
-                        .collect();
-                    total_tool_calls += calls.len();
-                    let outcome = dispatcher.dispatch_batch(&calls);
-                    tracing::debug!(
-                        tools = calls.len(),
-                        subtask_id = %outcome.subtask_id,
-                        "tool batch auto-dispatched as a single background subtask"
-                    );
-                    for tool_call in &tool_calls {
-                        let spawned = serde_json::json!({
-                            "status": "spawned",
-                            "subtask_id": outcome.subtask_id,
-                            "tool": tool_call.function.name,
-                            "label": outcome.label,
-                        });
-                        let result_json = serde_json::to_string(&spawned)
-                            .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
-                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
-                        for cb in &self.on_tool_result {
-                            cb(
-                                tool_call.id.clone(),
-                                tool_call.function.name.clone(),
-                                result_json.clone(),
-                                false,
-                            );
+                //  - **先頭に inline 接頭辞、続く接尾辞が全部 dispatch 可** → 接頭辞を同期
+                //    実行し、残りの接尾辞全体を 1 本の subtask として dispatch（#671）。
+                //    接頭辞の完了後に接尾辞を dispatch し、接尾辞内は逐次実行のため
+                //    バッチ内順序は保たれる。
+                //  - **dispatch 可の後ろに inline ツールが来る** → 分割すると inline と
+                //    background の相対順序が保証できないため**バッチ全体を inline 実行**
+                //    （従来経路）。どのツールが縮退の原因かを debug ログに明示する。
+                //  - dispatcher 未設定・全部 inline → 従来どおり全体 inline。
+                //
+                // `dispatch_start` は inline 接頭辞と dispatch 接尾辞の境界:
+                //   Some(k) → inline [0,k) を同期実行、dispatch [k,len) を subtask 化
+                //             （k==0 は全体 dispatch）。
+                //   None    → 全体 inline。
+                let dispatch_start: Option<usize> = match &self.tool_dispatcher {
+                    Some(d) => {
+                        let dispatchable: Vec<bool> = tool_calls
+                            .iter()
+                            .map(|tc| {
+                                self.is_action_allowed(&tc.function.name)
+                                    && d.should_dispatch(&tc.function.name)
+                            })
+                            .collect();
+                        match dispatchable.iter().position(|&ok| ok) {
+                            // dispatch 可が 1 つも無い（全部 inline）→ 全体 inline。
+                            // 元から非ブロック要素が無いので縮退ログも出さない。
+                            None => None,
+                            Some(first) => {
+                                if dispatchable[first..].iter().all(|&ok| ok) {
+                                    // inline 接頭辞 [0,first) ＋ dispatch 可接尾辞 [first,len)。
+                                    Some(first)
+                                } else {
+                                    // dispatch 可の後ろに inline ツール → 分割不可、全体 inline
+                                    // に縮退。縮退原因（first より後ろの inline ツール）を明示。
+                                    // 相関 ID（agent_id / session_id / turn_id）は #665 の span
+                                    // から継承する。
+                                    let forced: Vec<&str> = tool_calls
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(i, _)| *i > first && !dispatchable[*i])
+                                        .map(|(_, tc)| tc.function.name.as_str())
+                                        .collect();
+                                    tracing::debug!(
+                                        iteration = iterations,
+                                        stage = "batch_split",
+                                        tools = tool_calls.len(),
+                                        inline_tools = %forced.join(","),
+                                        "turn: 混在バッチが全体 inline に縮退（dispatch 可の後ろに inline ツール）"
+                                    );
+                                    None
+                                }
+                            }
                         }
                     }
-                    continue;
-                }
+                    None => None,
+                };
 
-                for tool_call in &tool_calls {
+                // inline 接頭辞と dispatch 接尾辞に分ける。dispatch_start==None は全体 inline
+                // （接尾辞は空）。境界の順で実行するため接頭辞を先に走らせ、その後で接尾辞を
+                // 1 本の subtask に dispatch する。
+                let (inline_calls, dispatch_calls): (&[ToolCall], &[ToolCall]) =
+                    match dispatch_start {
+                        Some(k) => (&tool_calls[..k], &tool_calls[k..]),
+                        None => (&tool_calls[..], &tool_calls[..0]),
+                    };
+
+                for tool_call in inline_calls {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
 
@@ -617,8 +636,8 @@ impl SkillEngine {
                     // Value for the executor boundary (empty object on malformed).
                     let args = tool_call.arguments_json();
 
-                    // ここに来るのは「バッチ全体を inline 実行する」経路のみ
-                    // （dispatch 判定はバッチ単位でループ前に済んでいる）。
+                    // ここを通るのは inline 実行対象（全体 inline、または混在バッチの
+                    // inline 接頭辞）のみ。分割判定はバッチ単位でループ前に済んでいる（#671）。
                     let result = self
                         .executor
                         .execute_with_id(tool_name, &args, &tool_call.id)
@@ -653,6 +672,50 @@ impl SkillEngine {
                             result_json.clone(),
                             !result.success,
                         );
+                    }
+                }
+
+                // dispatch 接尾辞（あれば）を 1 本の subtask にまとめて起動する。
+                // inline 接頭辞の同期実行が終わった**後**にここへ来るため、順序保証は保たれる。
+                // 各 tool_call には同じ subtask_id を持つ spawned マーカーを同ターンで返す。
+                if !dispatch_calls.is_empty() {
+                    let dispatcher = self
+                        .tool_dispatcher
+                        .as_ref()
+                        .expect("dispatch_start is Some");
+                    let calls: Vec<super::types::DispatchCall> = dispatch_calls
+                        .iter()
+                        .map(|tc| super::types::DispatchCall {
+                            tool_name: tc.function.name.clone(),
+                            args: tc.arguments_json(),
+                            tool_call_id: tc.id.clone(),
+                        })
+                        .collect();
+                    total_tool_calls += calls.len();
+                    let outcome = dispatcher.dispatch_batch(&calls);
+                    tracing::debug!(
+                        tools = calls.len(),
+                        subtask_id = %outcome.subtask_id,
+                        "tool batch auto-dispatched as a single background subtask"
+                    );
+                    for tool_call in dispatch_calls {
+                        let spawned = serde_json::json!({
+                            "status": "spawned",
+                            "subtask_id": outcome.subtask_id,
+                            "tool": tool_call.function.name,
+                            "label": outcome.label,
+                        });
+                        let result_json = serde_json::to_string(&spawned)
+                            .unwrap_or_else(|_| r#"{"status":"spawned"}"#.to_string());
+                        messages.push(Message::tool(tool_call.id.clone(), result_json.clone()));
+                        for cb in &self.on_tool_result {
+                            cb(
+                                tool_call.id.clone(),
+                                tool_call.function.name.clone(),
+                                result_json.clone(),
+                                false,
+                            );
+                        }
                     }
                 }
 
@@ -1572,6 +1635,439 @@ mod tests {
             &["write_file", "discord_send"],
             "inline 実行は LLM が並べた順序を守る"
         );
+    }
+
+    /// [#671 回帰] inline 接頭辞 ＋ dispatch 可接尾辞の混在バッチは、接頭辞を同期実行して
+    /// から接尾辞を **1 本の subtask** として dispatch する。実行順は「接頭辞 inline →
+    /// 接尾辞 dispatch」で固定し、接尾辞は spawned マーカーを同ターンで返す。
+    /// （実事故: `[record_task_progress(inline), execute_shell(31 分)]` が全体 inline に
+    /// 落ちてロックを占有した縮退の再発防止。）
+    #[tokio::test]
+    async fn test_inline_prefix_then_dispatch_suffix_split() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::{Arc, Mutex};
+
+        // record_task_progress(inline 分類) → execute_shell(dispatch 可) の順。
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc(
+                    "tc-1",
+                    "record_task_progress",
+                    serde_json::json!({"note": "start"}),
+                ),
+                tc(
+                    "tc-2",
+                    "execute_shell",
+                    serde_json::json!({"cmd": "claude ..."}),
+                ),
+            ]),
+            text_response("開始しました"),
+        ]);
+
+        // executor（inline 実行）と dispatcher（subtask 化）を同一タイムラインへ記録し、
+        // 「接頭辞 inline が接尾辞 dispatch より先に完了する」を固定する。
+        let timeline: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct TimelineExecutor {
+            tl: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for TimelineExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.tl.lock().unwrap().push(format!("inline:{name}"));
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+
+        struct TimelineDispatcher {
+            control: std::collections::HashSet<String>,
+            tl: Arc<Mutex<Vec<String>>>,
+            dispatched: Mutex<Vec<String>>,
+            batches: AtomicUsize,
+        }
+        impl crate::ToolDispatcher for TimelineDispatcher {
+            fn should_dispatch(&self, name: &str) -> bool {
+                !self.control.contains(name)
+            }
+            fn dispatch_batch(&self, calls: &[crate::DispatchCall]) -> crate::DispatchOutcome {
+                self.batches.fetch_add(1, AtomicOrdering::SeqCst);
+                let names: Vec<String> = calls.iter().map(|c| c.tool_name.clone()).collect();
+                self.tl
+                    .lock()
+                    .unwrap()
+                    .push(format!("dispatch:{}", names.join("+")));
+                self.dispatched.lock().unwrap().push(names.join(","));
+                crate::DispatchOutcome {
+                    subtask_id: format!("sub-for-{}", names.join("+")),
+                    label: names.join(", "),
+                }
+            }
+        }
+
+        let executor = TimelineExecutor {
+            tl: timeline.clone(),
+        };
+        let mut engine = SkillEngine::new(Box::new(llm), Box::new(executor), 10);
+        let dispatcher = Arc::new(TimelineDispatcher {
+            control: ["record_task_progress"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            tl: timeline.clone(),
+            dispatched: Mutex::new(Vec::new()),
+            batches: AtomicUsize::new(0),
+        });
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        engine.add_on_tool_result(move |_id, name, json, _err| {
+            seen_clone.lock().unwrap().push(format!("{name}:{json}"));
+        });
+
+        let result = engine.run("system", "go", "test-model").await.unwrap();
+
+        // 接頭辞 inline → 接尾辞 dispatch の順で実行される（順序保証）。
+        assert_eq!(
+            timeline.lock().unwrap().as_slice(),
+            &[
+                "inline:record_task_progress".to_string(),
+                "dispatch:execute_shell".to_string()
+            ],
+            "inline 接頭辞は接尾辞 dispatch より先に完了する"
+        );
+        // dispatch は接尾辞（execute_shell）だけを 1 本にまとめる。
+        assert_eq!(dispatcher.batches.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["execute_shell"]
+        );
+
+        // tool_result: 接頭辞は inline 実結果、接尾辞は spawned マーカー（同ターン返却）。
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].starts_with("record_task_progress:"));
+        assert!(
+            !seen[0].contains("\"status\":\"spawned\""),
+            "接頭辞は inline 実行結果であって spawned マーカーではない"
+        );
+        assert!(seen[1].starts_with("execute_shell:"));
+        assert!(
+            seen[1].contains("\"status\":\"spawned\""),
+            "接尾辞は spawned マーカー（同ターン返却）"
+        );
+        assert!(seen[1].contains("\"subtask_id\":\"sub-for-execute_shell\""));
+
+        assert_eq!(result.tool_calls_made, 2);
+        assert_eq!(result.response, "開始しました");
+    }
+
+    /// [#671 回帰] dispatch 可ツールの**後ろに** inline ツールが来る混在バッチは分割できず
+    /// （inline と background の相対順序が保証できない）、従来どおり全体 inline に縮退する。
+    /// このとき縮退原因のツール名を含む debug ログ（stage="batch_split"）を出す。
+    ///
+    /// 縮退ログの捕捉はスレッドローカル subscriber に依存するため、cargo の並列テストと
+    /// 干渉しないよう、専用の current-thread ランタイムを `with_default` の内側で回す
+    /// （`#[tokio::test]` だと subscriber の有効スレッドと polling スレッドがずれ得る）。
+    #[test]
+    fn test_dispatchable_then_inline_stays_whole_inline_and_logs() {
+        use std::sync::{Arc, Mutex};
+
+        // execute_shell(dispatch 可) → record_task_progress(inline) の順。
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc("tc-1", "execute_shell", serde_json::json!({"cmd": "x"})),
+                tc(
+                    "tc-2",
+                    "record_task_progress",
+                    serde_json::json!({"note": "done"}),
+                ),
+            ]),
+            text_response("done"),
+        ]);
+        struct OrderExecutor {
+            order: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for OrderExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.order.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+
+        // 縮退 debug ログを捕捉する。cargo の並列テストが触る tracing のグローバル
+        // MAX_LEVEL と干渉しないよう、fmt を使わず**常時 enabled** の最小 Subscriber で
+        // イベントのフィールドを直接拾う（`enabled` が常に true、`max_level_hint` は
+        // 既定=TRACE なのでレベル早期棄却の影響を受けない）。
+        struct FieldGrabber {
+            out: String,
+        }
+        impl tracing::field::Visit for FieldGrabber {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.out.push_str(&format!("{}={:?};", field.name(), value));
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.out.push_str(&format!("{}={};", field.name(), value));
+            }
+        }
+        struct CaptureSubscriber {
+            events: Arc<Mutex<Vec<String>>>,
+        }
+        impl tracing::Subscriber for CaptureSubscriber {
+            fn enabled(&self, _md: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut grabber = FieldGrabber { out: String::new() };
+                event.record(&mut grabber);
+                self.events.lock().unwrap().push(grabber.out);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CaptureSubscriber {
+            events: events.clone(),
+        };
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(llm),
+            Box::new(OrderExecutor {
+                order: order.clone(),
+            }),
+            10,
+        );
+        // record_task_progress を inline（should_dispatch=false）扱いに。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&["record_task_progress"]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        // subscriber を有効化したまま、同一スレッドで run を完走させる。
+        tracing::subscriber::with_default(subscriber, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                engine.run("system", "go", "test-model").await.unwrap();
+            });
+        });
+
+        // dispatch は起きず、全体 inline を LLM 順で実行する。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().len(),
+            0,
+            "dispatch 可の後ろに inline が来る混在バッチは dispatch せず全体 inline"
+        );
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            &["execute_shell", "record_task_progress"],
+            "全体 inline は LLM が並べた順序を守る"
+        );
+
+        // 縮退ログが出ており、stage=batch_split と原因ツール名（record_task_progress）を含む。
+        let logs = events.lock().unwrap().join("\n");
+        assert!(
+            logs.contains("batch_split"),
+            "縮退 debug ログ（stage=batch_split）が出る: {logs}"
+        );
+        assert!(
+            logs.contains("record_task_progress"),
+            "縮退ログに原因の inline ツール名が載る: {logs}"
+        );
+    }
+
+    /// [#671] 制御系 inline ツール（declare_done: ターン終了宣言）が接頭辞に来ても、
+    /// エンジンのループ終了条件と矛盾しないことを固定する。declare_done を inline 実行し、
+    /// 後続の execute_shell を背景 subtask 化して同ターンで spawned を返す。ターンの終了は
+    /// 従来どおり「LLM が次イテレーションでツールを呼ばない」ことで駆動され、declare_done の
+    /// `{done:true}` 結果はループを早期に切らない（engine は tool_result の done を見ない）。
+    #[tokio::test]
+    async fn test_control_inline_prefix_dispatches_suffix_and_loop_ends_on_llm() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc(
+                    "tc-1",
+                    "declare_done",
+                    serde_json::json!({"reason": "十分議論した"}),
+                ),
+                tc(
+                    "tc-2",
+                    "execute_shell",
+                    serde_json::json!({"cmd": "claude ..."}),
+                ),
+            ]),
+            // 次イテレーションでツールを呼ばない → ここでループ終了（declare_done ではなく）。
+            text_response("終わります"),
+        ]);
+
+        // executor は inline 実行だけを記録（declare_done のみ来るべき）。
+        struct SpyExecutor {
+            called: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for SpyExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.called.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!({"done": true}),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(llm),
+            Box::new(SpyExecutor {
+                called: called.clone(),
+            }),
+            10,
+        );
+        // declare_done を inline（should_dispatch=false）扱いに。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&["declare_done"]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        engine.add_on_tool_result(move |_id, name, json, _err| {
+            seen_clone.lock().unwrap().push(format!("{name}:{json}"));
+        });
+
+        let result = engine.run("system", "go", "test-model").await.unwrap();
+
+        // declare_done だけ inline 実行、execute_shell は inline 実行されない。
+        assert_eq!(called.lock().unwrap().as_slice(), &["declare_done"]);
+        // execute_shell（接尾辞）が 1 本の subtask として dispatch される。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["execute_shell"]
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].starts_with("declare_done:"));
+        assert!(
+            seen[0].contains("\"done\":true"),
+            "接頭辞は declare_done の inline 実行結果"
+        );
+        assert!(seen[1].starts_with("execute_shell:"));
+        assert!(
+            seen[1].contains("\"status\":\"spawned\""),
+            "接尾辞は spawned マーカー（同ターン返却）"
+        );
+
+        // ループは declare_done では切れず、LLM が次イテレーションでツールを呼ばず終了する。
+        assert_eq!(
+            result.iterations, 2,
+            "ターンは 2 イテレーションで正常終了する"
+        );
+        assert_eq!(result.response, "終わります");
+    }
+
+    /// [#671 挙動変化] 未許可ツールが接頭辞・dispatch 可ツールが接尾辞に来るバッチ
+    /// （例: typo や権限落ちの 1 ツール）。**旧実装**は「1 つでも `is_action_allowed &&
+    /// should_dispatch` を満たさない → 全体 inline」で execute_shell も inline に落ちていた。
+    /// **新実装**は未許可ツールに permission denied を返した後、接尾辞を背景 subtask 化する
+    /// （1 ツールの権限落ちが非ブロック性を壊さない）。denied の扱い自体は不変。
+    #[tokio::test]
+    async fn test_unauthorized_prefix_still_dispatches_suffix() {
+        use std::sync::{Arc, Mutex};
+
+        let llm = MockLlm::new(vec![
+            tool_call_response(vec![
+                tc("tc-1", "not_a_real_tool", serde_json::json!({})),
+                tc("tc-2", "execute_shell", serde_json::json!({"cmd": "x"})),
+            ]),
+            text_response("done"),
+        ]);
+        // executor は inline 実行のみ記録（未許可は executor に届かず denied になるべき）。
+        struct SpyExecutor {
+            called: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ActionExecutor for SpyExecutor {
+            async fn execute(&self, name: &str, _args: &Value) -> ActionResult {
+                self.called.lock().unwrap().push(name.to_string());
+                ActionResult {
+                    success: true,
+                    data: serde_json::json!(null),
+                    error: None,
+                }
+            }
+            fn list_tools(&self) -> Vec<FunctionDefinition> {
+                vec![]
+            }
+        }
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = SkillEngine::new(
+            Box::new(llm),
+            Box::new(SpyExecutor {
+                called: called.clone(),
+            }),
+            10,
+        );
+        // execute_shell のみ許可（not_a_real_tool は未許可 → is_action_allowed=false）。
+        engine.set_allowed_actions(["execute_shell".to_string()]);
+        // control 集合は空。execute_shell は dispatch 可。
+        let dispatcher = Arc::new(RecordingDispatcher::new(&[]));
+        engine.set_tool_dispatcher(dispatcher.clone());
+
+        let seen: Arc<Mutex<Vec<(String, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        engine.add_on_tool_result(move |_id, name, json, err| {
+            seen_clone.lock().unwrap().push((name, json, err));
+        });
+
+        engine.run("system", "go", "test-model").await.unwrap();
+
+        // 未許可ツールは executor に届かない（denied の扱い不変）。
+        assert!(
+            called.lock().unwrap().is_empty(),
+            "未許可ツールは inline executor に渡らない"
+        );
+        // 接尾辞 execute_shell は inline に落ちず、背景 subtask として dispatch される（挙動変化）。
+        assert_eq!(
+            dispatcher.dispatched.lock().unwrap().as_slice(),
+            &["execute_shell"],
+            "未許可ツールが接頭辞にあっても dispatch 可接尾辞は subtask 化される"
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        // 接頭辞: permission denied（err=true・not authorized 文言）。従来どおり。
+        assert_eq!(seen[0].0, "not_a_real_tool");
+        assert!(seen[0].2, "未許可ツールは err=true で通知される");
+        assert!(seen[0].1.contains("is not authorized"));
+        // 接尾辞: spawned マーカー（同ターン・err=false）。
+        assert_eq!(seen[1].0, "execute_shell");
+        assert!(!seen[1].2);
+        assert!(seen[1].1.contains("\"status\":\"spawned\""));
     }
 }
 
