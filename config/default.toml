@@ -120,9 +120,18 @@ models = ["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "o4-mini", "o3"
 # working_dir = ""                        # Codex の作業ディレクトリ
 
 # Cursor CLI設定（headless agent, ローカル）
-# cursor-agent は「推論専用の頭」として使う（#674）。読取専用モード（--plan）を常時
-# 付与し、cursor-agent 自身の write/shell を封じる。実行は opencrab 側の権限ゲート込み
-# ツールループに乗る。
+# cursor-agent は「推論専用の頭」として使う（#674 / #682）。cursor-agent 自身の write/shell を
+# 封じ、read を注入済み XML <function_calls> へ誘導して、実行は opencrab 側の権限ゲート込み
+# ツールループに乗せる。効く防御:
+#   1. deny cli.json（#682）: 毎回生成する空の一時 cwd に .cursor/cli.json を置き
+#      Read/Write/Shell/WebFetch/WebSearch/Mcp を deny（これらは実測でゲートされる）。
+#   2. 空の専用 cwd（#682）: 実 workspace を cwd として露出させない＋cli.json の置き場。
+# 加えて --plan（読取専用）・--sandbox・--trust を重ねる。
+# 【塞げていない穴・#682 でオーナー裁定により受容】native grep/glob は node プロセス内で
+# 同梱 rg を直接実行するため cli.json/--sandbox の管轄外で、絶対パスを与えれば cwd の外の
+# 任意ファイル内容を読める（空 cwd はこれを塞がない・実測 #682）。機構で塞げるのは OS
+# sandbox のみだが複雑さを避け不採用。任意パス読取リスクは受容しモデルの判断に委ねる。
+# ツール駆動は grok 系のみ想定（GPT 系は cursor 経由では使わない方針）。
 [llm.providers.cursor]
 default_model = "auto"                    # account 非依存。旧既定 gpt-5 は現行 CLI で無効
 timeout_secs = 300
@@ -133,7 +142,7 @@ models = ["auto", "gpt-5.2", "claude-opus-5", "claude-sonnet-5"]
 # sandbox = "enabled"
 # コマンド名はインストールでゆれる（cursor-agent / agent / cursor）。既定は cursor-agent。
 # binary_path = "cursor-agent"
-# working_dir = ""                        # Cursor の作業ディレクトリ
+# working_dir はサポートしない（#682）。cwd は毎回空の一時ディレクトリを内部生成する。
 # 認証は CURSOR_API_KEY か `cursor-agent login` 済みのアンビエント認証。
 # api_key = "${CURSOR_API_KEY}"
 

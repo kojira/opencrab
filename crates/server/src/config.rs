@@ -1301,9 +1301,9 @@ pub fn build_llm_router(config: &LlmConfig) -> Result<LlmRouter> {
                 if !pconfig.sandbox.is_empty() {
                     p = p.with_sandbox(&pconfig.sandbox);
                 }
-                if !pconfig.working_dir.is_empty() {
-                    p = p.with_working_dir(&pconfig.working_dir);
-                }
+                // working_dir は配線しない（#682）。cursor は chat_completion 毎に空の
+                // 一時 cwd を内部生成するため、外から cwd を指定させない（実データを
+                // 持ち込むと native 読取が権限ゲートを迂回する）。
                 if pconfig.timeout_secs > 0 {
                     p = p.with_timeout_secs(pconfig.timeout_secs);
                 }
