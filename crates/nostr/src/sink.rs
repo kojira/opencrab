@@ -131,11 +131,26 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
         let (base_prompt, agent_name) = self.runner.build_agent_context(agent_id, &caller);
         let system_prompt = format!("{base_prompt}\n\n{prompt_suffix}");
 
+        // #665: 会話履歴の構築（DB からターンの文脈を組む）。この後 run_agent_response（engine）へ渡す。
+        // ここが重い/詰まると LLM リクエスト前で止まる（llm_logs に行が出ない宙吊りの前段）。入と出を出す。
         let budget = self.runner.context_budget_tokens(agent_id);
+        debug!(
+            agent_id,
+            session_id,
+            stage = "context_build",
+            "turn: 文脈構築 開始（入）"
+        );
         let conversation = self
             .runner
             .build_conversation_string(session_id, agent_id, budget)
             .unwrap_or_default();
+        debug!(
+            agent_id,
+            session_id,
+            conversation_len = conversation.len(),
+            stage = "context_build",
+            "turn: 文脈構築 完了（出）"
+        );
 
         // Nostr の配送は**エージェントがツール（nostr_post / nostr_reply 等）で自分から行う**。
         // 機構は代わりに送らない（#588・オーナー指示「エージェントの送信に任せればいい」）。ここで
@@ -200,6 +215,14 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                         anchor = crate::event::outbound_reply_anchor(reply_target)
                     )
                 };
+                // #665: 応答をセッションへ転記する（Nostr は外界配送せずここに残す）。ターン末尾の
+                // DB 書き込み段。入と出で挟み、転記で詰まる形（DB ロック待ち等）も切り分けられるようにする。
+                debug!(
+                    agent_id,
+                    session_id,
+                    stage = "record_reply",
+                    "turn: 応答転記 開始（入）"
+                );
                 self.runner.record_outbound_reply(
                     opencrab_actions::TranscriptSource::Nostr,
                     &opencrab_actions::OutboundReplyRecord {
@@ -209,6 +232,12 @@ impl<R: NostrAgentRunner> NostrResponder<R> {
                         text: &recorded,
                         context: None,
                     },
+                );
+                debug!(
+                    agent_id,
+                    session_id,
+                    stage = "record_reply",
+                    "turn: 応答転記 完了（出）"
                 );
                 Some(reply)
             }

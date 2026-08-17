@@ -490,8 +490,23 @@ impl SessionQueues {
                     }
                 },
             };
+            // #665: キューから job を取り出した（この session の次のターンが動き出す）。相関キーは
+            // session_id（ターンはこの consumer で FIFO 直列化される）。turn_id は run_agent_response で採番。
+            debug!(
+                agent_id,
+                session_id,
+                stage = "nostr_consumer",
+                "turn: consumer job 取り出し"
+            );
             // 流量制限は **ここ**（ループ外）で取る。受信ループ側で取ると、session ロック
             // 待ちで何もしていないタスクが permit を占有してループ全体が止まる。
+            // #665: permit 取得は宙吊り候補（全 permit を他ターンが握ると後続はここで待つ）。入と出を出す。
+            debug!(
+                agent_id,
+                session_id,
+                stage = "nostr_consumer",
+                "turn: 応答 permit 取得待ち（入）"
+            );
             let Ok(_permit) = permits.clone().acquire_owned().await else {
                 self.queues.lock().unwrap().remove(&session_id);
                 warn!(
@@ -500,7 +515,27 @@ impl SessionQueues {
                 );
                 return;
             };
+            debug!(
+                agent_id,
+                session_id,
+                stage = "nostr_consumer",
+                "turn: 応答 permit 取得（出）"
+            );
+            // #665: ターン job 本体の実行。この後の `job.await`（＝respond_serialized→run→engine）が
+            // 返らなければ、後続 job はキューで待ち続け「ターン開始」ログすら出ない（実観測の宙吊り像）。
+            debug!(
+                agent_id,
+                session_id,
+                stage = "nostr_consumer",
+                "turn: ターン job 実行開始（入）"
+            );
             job.await;
+            debug!(
+                agent_id,
+                session_id,
+                stage = "nostr_consumer",
+                "turn: ターン job 完了（出）"
+            );
         }
     }
 
@@ -580,6 +615,15 @@ impl<R: NostrAgentRunner + Clone> opencrab_actions::TimedFireSink for NostrTimed
                 )
                 .await;
         });
+        // #665: 時刻発火をこの Nostr ループのキューへ投入する（fire-and-forget）。発火側の「発火
+        // （trigger → gateway loop）」ログとこの行が session_id で繋がる。この後 consumer が job を
+        // 取り出すまでの間に詰まると「ターン開始（Nostr loop 受信）」が出ないまま沈黙する（実観測像）。
+        debug!(
+            agent_id = %req.agent_id,
+            session_id = %req.session_id,
+            stage = "nostr_sink",
+            "turn: 時刻発火を Nostr キューへ投入"
+        );
         self.queues
             .enqueue(&req.agent_id, &req.session_id, &self.permits, job);
     }

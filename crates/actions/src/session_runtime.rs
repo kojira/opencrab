@@ -104,11 +104,29 @@ impl SessionLocks {
         F: Future<Output = T>,
     {
         let lock = self.lock_for(session_id);
+        // #665: セッション直列ロックの取得を挟む。前ターンが LLM/ツールで固着していると後続ターンは
+        // ここで待ち続ける（宙吊りの典型）。「入」だけだと「取得待ちで止まった」と「取得して進んだ」が
+        // 区別できないので入と出の両方を出す。相関キーは session_id（ターンはこのロックで直列化される）。
+        tracing::debug!(
+            session_id,
+            stage = "session_lock",
+            "turn: セッション直列ロック 取得待ち（入）"
+        );
         let guard = lock.lock().await;
+        tracing::debug!(
+            session_id,
+            stage = "session_lock",
+            "turn: セッション直列ロック 取得（出）"
+        );
         let out = fut.await;
         drop(guard);
         drop(lock);
         self.release_lock_if_idle(session_id);
+        tracing::debug!(
+            session_id,
+            stage = "session_lock",
+            "turn: セッション直列区間 終了・ロック解放"
+        );
         out
     }
 

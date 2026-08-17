@@ -371,7 +371,16 @@ impl SkillEngine {
                 .and_then(|o| o.lock().ok().and_then(|m| m.clone()))
                 .unwrap_or_else(|| default_model.to_string());
 
-            tracing::debug!(iteration = iterations, model = %model, "SkillEngine LLM call");
+            // #665: LLM 呼び出しの入り。この後の `self.llm.chat(...).await` が返らなければここが
+            // 最後の行になる（宙吊りの典型＝推論に入って戻らない／プロキシ未到達）。agent_id / session_id /
+            // turn_id は run_agent_response が張った span から継承する。
+            tracing::debug!(
+                iteration = iterations,
+                model = %model,
+                messages = messages.len(),
+                stage = "llm_call",
+                "turn: LLM リクエスト 開始（入）"
+            );
 
             let request = ChatRequest {
                 model: model.clone(),
@@ -404,6 +413,15 @@ impl SkillEngine {
             let call_start = std::time::Instant::now();
             let llm_result = self.llm.chat(request).await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
+            // #665: LLM 呼び出しの出。入と対で出す（入だけだと「入って止まった」と「戻った」が
+            // 区別できない）。成否と latency を載せ、この後のツール往復／最終応答へ進む。
+            tracing::debug!(
+                iteration = iterations,
+                latency_ms,
+                ok = llm_result.is_ok(),
+                stage = "llm_call",
+                "turn: LLM リクエスト 完了（出）"
+            );
 
             if let Some(cb) = &self.log_callback {
                 match &llm_result {
@@ -566,10 +584,14 @@ impl SkillEngine {
                     total_tool_calls += 1;
                     let tool_name = &tool_call.function.name;
 
+                    // #665: inline ツール実行の入り。この後の `execute_with_id(...).await` が返らなければ
+                    // ここが最後の行になる（シェル・MCP・返信送信など外部待ちのツールで固着した形）。
                     tracing::debug!(
+                        iteration = iterations,
                         tool = %tool_name,
                         id = %tool_call.id,
-                        "Executing tool call"
+                        stage = "tool_call",
+                        "turn: ツール実行 開始（入）"
                     );
 
                     // Check if the action is declared by active skills.
@@ -601,6 +623,16 @@ impl SkillEngine {
                         .executor
                         .execute_with_id(tool_name, &args, &tool_call.id)
                         .await;
+                    // #665: inline ツール実行の出。入と対。success を載せ、この後 tool_result を積んで
+                    // 次イテレーションへ回る。
+                    tracing::debug!(
+                        iteration = iterations,
+                        tool = %tool_name,
+                        id = %tool_call.id,
+                        success = result.success,
+                        stage = "tool_call",
+                        "turn: ツール実行 完了（出）"
+                    );
 
                     let result_json = serde_json::to_string(&result).unwrap_or_else(|_| {
                         r#"{"error": "Failed to serialize result"}"#.to_string()
